@@ -20,7 +20,9 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from _thread import LockType
+from collections import deque
+from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,9 @@ from time import perf_counter
 from typing import Literal, TypeAlias
 
 import av
+import numpy as np
+from jaxtyping import UInt8
+from turbojpeg import TJCS_GRAY, TJSAMP_420, TJSAMP_422, TJSAMP_444, TJSAMP_GRAY, TJCS_YCbCr, TurboJPEG
 
 from dataforge.timing import SequenceTimer
 
@@ -79,10 +84,10 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
             clip.unlink(missing_ok=True)
 
 
-FrameKind: TypeAlias = Literal["png", "jpeg", "gray8", "rgb24"]
+FrameKind: TypeAlias = Literal["png", "jpeg", "gray8", "rgb24", "yuv420p", "yuv422p", "yuv444p"]
 """How one element of an encoder frame iterable is laid out."""
 
-RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
+RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24", "yuv420p": "yuv420p", "yuv422p": "yuv422p", "yuv444p": "yuv444p"}
 """ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
 
 IMAGE_DECODERS: dict[FrameKind, str] = {"png": "png", "jpeg": "mjpeg"}
@@ -120,6 +125,9 @@ class FrameSource:
     height: int | None = None
     """Frame height in pixels; required for the raw kinds, which carry no header."""
 
+    full_range: bool = False
+    """JPEG colour planes require explicit full-to-limited range conversion."""
+
     def __post_init__(self) -> None:
         if self.kind in IMAGE_DECODERS:
             return
@@ -144,6 +152,74 @@ class FrameSource:
             "-i",
             "pipe:0",
         ]
+
+
+_JPEG_DECODER: TurboJPEG | None = None
+_JPEG_LOCK: LockType = threading.Lock()
+
+
+def _jpeg_decoder() -> TurboJPEG:
+    """Initialize once across camera jobs; native handles remain per decode call."""
+    global _JPEG_DECODER
+    with _JPEG_LOCK:
+        if _JPEG_DECODER is None:
+            _JPEG_DECODER = TurboJPEG()
+        return _JPEG_DECODER
+
+
+def jpeg_frame_source(image: bytes) -> FrameSource:
+    """Describe the JPEG's native chroma layout, refusing unsupported colour spaces."""
+    header = _jpeg_decoder().decode_header(image)
+    width: int = header[0]
+    height: int = header[1]
+    sampling: int = header[2]
+    colorspace: int = header[3]
+    kinds: dict[int, FrameKind] = {TJSAMP_GRAY: "gray8", TJSAMP_420: "yuv420p", TJSAMP_422: "yuv422p", TJSAMP_444: "yuv444p"}
+    if sampling not in kinds or colorspace not in (TJCS_GRAY, TJCS_YCbCr):
+        raise ValueError(f"unsupported JPEG sampling/colorspace {sampling}/{colorspace}")
+    return FrameSource(kinds[sampling], width, height, full_range=sampling != TJSAMP_GRAY)
+
+
+def decode_jpeg_frames(images: Iterable[bytes], *, source: FrameSource, workers: int = 8) -> Generator[bytes, None, None]:
+    """Decode JPEGs to packed native planes with bounded, ordered look-ahead.
+
+    At most twice the worker count is queued. Crop TurboJPEG's MCU padding and
+    row strides before serializing each plane, including odd-sized images.
+    Eight workers per camera means at most 24 decoders across parallel_clips.
+    """
+    if workers < 1:
+        raise ValueError("JPEG decode workers must be positive")
+    decoder: TurboJPEG = _jpeg_decoder()
+    assert source.width is not None and source.height is not None
+    width: int = source.width
+    height: int = source.height
+    divisors: dict[FrameKind, tuple[int, int]] = {"gray8": (1, 1), "yuv420p": (2, 2), "yuv422p": (2, 1), "yuv444p": (1, 1)}
+    if source.kind not in divisors:
+        raise ValueError(f"not a JPEG planar source: {source.kind}")
+    dx, dy = divisors[source.kind]
+    sizes: list[tuple[int, int]] = [(height, width)]
+    if source.kind != "gray8":
+        sizes.extend([((height + dy - 1) // dy, (width + dx - 1) // dx)] * 2)
+
+    def decode(image: bytes) -> bytes:
+        if jpeg_frame_source(image) != source:
+            raise ValueError("JPEG layout changed within stream")
+        planes: list[UInt8[np.ndarray, "h w"]] = decoder.decode_to_yuv_planes(image)
+        return b"".join(plane[:h, :w].tobytes() for plane, (h, w) in zip(planes, sizes, strict=True))
+
+    pending: deque[Future[bytes]] = deque()
+    iterator: Iterator[bytes] = iter(images)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for _ in range(workers * 2):
+            image: bytes | None = next(iterator, None)
+            if image is None:
+                break
+            pending.append(executor.submit(decode, image))
+        while pending:
+            yield pending.popleft().result()
+            image = next(iterator, None)
+            if image is not None:
+                pending.append(executor.submit(decode, image))
 
 
 def resolve_ffmpeg() -> Path:
@@ -247,6 +323,7 @@ def encode_frames_to_mp4(
     cq: int = 32,
     rotate_cw_quarter_turns: int = 0,
     ffmpeg: Path | None = None,
+    filter_threads: int | None = None,
 ) -> int:
     """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
 
@@ -265,7 +342,7 @@ def encode_frames_to_mp4(
     pipes are finite, so writing a large frame while stderr sits full deadlocks.
 
     Args:
-        frames: One encoded PNG/JPEG (``kind="png"``/``"jpeg"``) or one raw plane per frame.
+        frames: One encoded PNG/JPEG (``kind="png"``/``"jpeg"``) or all packed raw planes for one frame.
         output: mp4 to write; its parent directory must exist.
         source: Layout of the ``frames`` elements.
         fps: Nominal frame rate stamped into the container. Real per-sample
@@ -278,6 +355,7 @@ def encode_frames_to_mp4(
             and height, and a caller that also logs a calibration for these
             pixels must roll it the same way (``basalt.rotate_camera_cw``).
         ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
+        filter_threads: CPU filter workers; cap when camera jobs also decode in parallel.
 
     Returns:
         Number of frames fed into the encoder.
@@ -287,6 +365,8 @@ def encode_frames_to_mp4(
     """
     if rotate_cw_quarter_turns not in TRANSPOSE_FILTERS:
         raise ValueError(f"{rotate_cw_quarter_turns} is not a clockwise quarter turn count; it must be one of {sorted(TRANSPOSE_FILTERS)}")
+    if filter_threads is not None and filter_threads < 1:
+        raise ValueError("filter_threads must be positive")
     binary: Path = resolve_ffmpeg() if ffmpeg is None else ffmpeg
     require_av1_nvenc(binary)
     command: list[str] = [
@@ -295,9 +375,16 @@ def encode_frames_to_mp4(
         "-loglevel",
         "error",
         "-y",
+        *(["-filter_threads", str(filter_threads)] if filter_threads is not None else []),
         *source.input_args(fps=fps),
         "-vf",
-        ",".join([*TRANSPOSE_FILTERS[rotate_cw_quarter_turns], EVEN_DIMENSION_AND_PIXEL_FORMAT]),
+        ",".join(
+            [
+                *TRANSPOSE_FILTERS[rotate_cw_quarter_turns],
+                *(["scale=in_range=full:out_range=limited"] if source.full_range else []),
+                EVEN_DIMENSION_AND_PIXEL_FORMAT,
+            ]
+        ),
         *_nvenc_args(gop=gop, cq=cq),
         str(output),
     ]

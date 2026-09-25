@@ -1,6 +1,7 @@
 """Driver-run HOT3D integration and golden checks on the two staged captures."""
 
 import os
+from itertools import islice
 from pathlib import Path
 
 import av
@@ -17,7 +18,8 @@ from dataforge.datasets.hot3d_source import DEVICES, URL_LIST_DATE, Device, Hot3
 from dataforge.datasets.hot3d_vrs import read_scene
 from dataforge.datasets.show3d_hands import read_hand_profile
 from dataforge.datasets.show3d_source import read_json
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, decode_jpeg_frames, encode_frames_to_mp4, jpeg_frame_source
+from dataforge.vrs import VrsImageReader
 
 
 @pytest.fixture(params=[("aria", "P0001_4bf4e21a"), ("quest3", "P0002_5a9cfa51")])
@@ -126,14 +128,17 @@ def test_nvenc_native_color_gray_rotation_and_no_b_frames(hot3d_source: tuple[De
             if len(images) == 3:
                 break
         clip = tmp_path / f"{index}.mp4"
+        jpegs = [record.image for record in islice(VrsImageReader(source / "recording.vrs", model.stream_id).images(), 3)]
+        frame_source = jpeg_frame_source(jpegs[0])
         count = encode_frames_to_mp4(
-            (image.tobytes() for image in images),
+            decode_jpeg_frames(jpegs, source=frame_source),
             clip,
-            source=FrameSource("rgb24" if model.stream_id == "214-1" else "gray8", width=model.width, height=model.height),
+            source=frame_source,
             fps=30,
             cq=AV1_CQ,
             gop=AV1_GOP,
             rotate_cw_quarter_turns=1,
+            filter_threads=1,
             ffmpeg=nvenc_ffmpeg,
         )
         assert count == 3

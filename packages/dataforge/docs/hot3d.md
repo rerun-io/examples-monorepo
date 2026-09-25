@@ -148,7 +148,16 @@ objects because the viewer's pinhole cannot project them through a fisheye lens.
 
 - **base:** native-rate videos encoded through the shared AV1 NVENC writer
   (CQ 36, GOP 60, no B-frames, RGB retained), GT rig poses and Aria IMUs.
-  `parallel_clips` runs camera jobs with a separate VRS provider per job and
+  Every HOT3D camera stream stores JPEG. `dataforge.vrs.VrsImageReader` reads the raw
+  JPEG block of each image record straight from the VRS container (no projectaria-tools
+  decode, no pyvrs: it has no linux-aarch64 wheel); each record's DataLayout
+  `capture_timestamp_ns` must equal the projectaria-tools stamp of the same index, and the
+  record count must equal the stream's. `video_encoding.decode_jpeg_frames` decodes them with
+  TurboJPEG to the JPEG's own planes (gray, or YUV 4:2:0 for RGB) on 8 threads per camera;
+  ffmpeg rotates them, maps the JPEG's full-range YUV to limited range and encodes.
+  Gray streams are byte-identical to the old RGB/gray path; RGB skips the old
+  YUV→RGB→YUV round trip (chroma within 19 levels, mean 0.6).
+  `parallel_clips` runs camera jobs with a separate reader per job and
   yields clips for logging in camera order. Frame counts are checked.
   Quest's missing headset poses get NaN transforms, never nearest-neighbour
   interpolation, head clamping or carry-forward.
@@ -280,16 +289,18 @@ dataforge = the convert record's `total_s` for all six layers.
 
 | recording | capture s | simplecv s | simplecv s/capture-min | dataforge s | dataforge s/capture-min | dataforge transcode s | output (simplecv / dataforge) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| hot3d-aria__P0001_4bf4e21a | 60.9 | 9.4 | 9.3 | 17.9 | 17.7 | 12.9 | 86 / 163 MB |
-| hot3d-quest3__P0002_5a9cfa51 | 121.6 | 12.1 | 6.0 | 17.4 | 8.6 | 14.3 | 140 / 191 MB |
+| hot3d-aria__P0001_4bf4e21a | 60.9 | 9.4 | 9.3 | 8.4 | 8.3 | 3.6 | 86 / 165 MB |
+| hot3d-quest3__P0002_5a9cfa51 | 121.6 | 12.1 | 6.0 | 7.3 | 3.6 | 4.3 | 140 / 191 MB |
 
-**Soft gate: dataforge is slower** (1.9× on Aria, 1.4× on Quest 3). The transcode stage is the cause:
-dataforge decodes each JPEG frame through projectaria-tools to an RGB/gray array (Aria RGB alone:
-7.3 s for 1827 frames; one Quest camera: 5.5 s for 3650 frames), pipes raw frames to ffmpeg and
-rotates them there. simplecv decodes the JPEGs straight to YUV planes with TurboJPEG on 8 threads
-and hands them to NVENC unrotated (Aria RGB: 2.7 s decode + encode). dataforge also writes more:
-hand meshes (0.8–1.2 s), projections (1.0–2.1 s), IMU, objects. The lever is the decode path
-(TurboJPEG from the raw VRS records, several decode threads per camera), not the layer writers.
+**Soft gate: met** after the TurboJPEG decode path (dataforge rows above; all six layers,
+prod env, pablo-dl-server, 2026-09-25). Before it, dataforge took 17.9 s (17.7 s/capture-min,
+transcode 12.9 s) on Aria and 17.4 s (8.6, transcode 14.3 s) on Quest 3: every JPEG went through
+projectaria-tools to an RGB/gray array (Aria RGB alone: 7.3 s for 1827 frames; one Quest camera:
+5.5 s for 3650 frames) before ffmpeg rotated it. Now the raw JPEG blocks come straight from the
+VRS records and TurboJPEG decodes them to planes on 8 threads per camera (Aria RGB 275 → 1,724
+frames/s; Quest camera 630 → 4,700 frames/s, CPU only). ffmpeg still rotates: rotating the planes in
+NumPy measured slower (0.21 vs 0.17 s per 100 RGB frames). dataforge also writes more than simplecv:
+hand meshes (0.7–1.5 s), projections (1.0–2.1 s), IMU, objects.
 
 ### Sample conversions (2026-09-25, prod env, converter `1+fb2576abcf9d`)
 

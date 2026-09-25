@@ -1,9 +1,9 @@
 """HOT3D layer writers; raw VRS and sidecars are read-only."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import partial
-from itertools import islice
+from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,7 +12,6 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
-from projectaria_tools.core import data_provider
 from projectaria_tools.core.calibration import CameraCalibration
 
 from dataforge import aria, hands, paths, schema, writing
@@ -33,7 +32,8 @@ from dataforge.logging_toolkit import (
     time_column,
 )
 from dataforge.timing import SequenceTimer
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, parallel_clips
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, decode_jpeg_frames, encode_frames_to_mp4, jpeg_frame_source, parallel_clips
+from dataforge.vrs import VrsImageReader
 
 
 def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer) -> None:
@@ -45,16 +45,36 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
     work_root.mkdir(parents=True, exist_ok=True)
 
     def encode(camera: CameraStream, clip: Path) -> None:
-        provider: data_provider.VrsDataProvider = aria.open_vrs(scene.source / "recording.vrs")
         model: CameraModel = camera.model
+        reader: VrsImageReader = VrsImageReader(scene.source / "recording.vrs", model.stream_id)
+
+        def images() -> Iterator[bytes]:
+            # Every record must carry the projectaria-tools stamp of the same index (the
+            # record <-> video-sample proof); a preview decodes only its prefix.
+            seen: int = 0
+            for record in reader.images():
+                if seen < len(camera.times_ns):
+                    if record.capture_timestamp_ns != camera.times_ns[seen]:
+                        raise ValueError(f"{scene.source}/{model.stream_id}: capture timestamp mismatch at frame {seen}")
+                    yield record.image
+                seen += 1
+            if seen != camera.source_count:
+                raise ValueError(f"{scene.source}/{model.stream_id}: {seen} image records, expected {camera.source_count}")
+
+        encoded_images: Iterator[bytes] = images()
+        first: bytes = next(encoded_images)
+        source: FrameSource = jpeg_frame_source(first)
+        if (source.width, source.height) != (model.width, model.height):
+            raise ValueError(f"{scene.source}/{model.stream_id}: JPEG dimensions disagree with calibration")
         count: int = encode_frames_to_mp4(
-            (image.tobytes() for _, image in islice(aria.iter_frames(provider, model.stream_id), len(camera.times_ns))),
+            decode_jpeg_frames(chain([first], encoded_images), source=source),
             clip,
-            source=FrameSource("rgb24" if model.stream_id == "214-1" else "gray8", width=model.width, height=model.height),
+            source=source,
             fps=30,
             gop=AV1_GOP,
             cq=AV1_CQ,
             rotate_cw_quarter_turns=1,
+            filter_threads=1,
         )
         if count != len(camera.times_ns):
             raise ValueError(f"{scene.source}/{model.stream_id}: encoded {count}, expected {len(camera.times_ns)}")
