@@ -113,11 +113,11 @@ def test_writer_failure_propagates_after_saving_progress(tmp_path: Path, monkeyp
     for session_id in ["a", "b"]:
         SessionBuilder(home / "projects/one" / f"{session_id}.jsonl").add("user", message={"content": session_id})
 
-    def fail_second(session: ClaudeSession, out: Path) -> Path:
+    def fail_second(session: ClaudeSession, out: Path, *, host: str | None = None) -> Path:
         """Simulate a recording boundary failure after the first saved session."""
         if session.session_id == "b":
             raise ValueError("writer failure")
-        return write_session_rrd(session, out)
+        return write_session_rrd(session, out, host=host)
 
     monkeypatch.setattr(convert_all, "write_session_rrd", fail_second)
     with pytest.raises(ValueError, match="writer failure"):
@@ -178,3 +178,15 @@ def test_missing_recording_retries_completed_entry(tmp_path: Path, capsys: pytes
     main(config)
     assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
     assert read_entities(recording)["/turns"]["TextLog:text"].to_pylist() == [["prompt"]]
+
+
+def test_appledouble_sidecars_are_not_sessions(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A macOS copy leaves `._<session>.jsonl` resource forks beside real transcripts; they are neither converted nor failures."""
+    home: Path = tmp_path / ".claude"
+    builder: SessionBuilder = SessionBuilder(home / "projects" / "p" / "real.jsonl")
+    builder.add("user", message={"content": "hello"})
+    (home / "projects" / "p" / "._real.jsonl").write_bytes(b"\x00\x05\x16\x07 not json")
+    from agent_traces.apis.convert_all import Config, main
+
+    main(Config(home=home, out=tmp_path / "out"))
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out

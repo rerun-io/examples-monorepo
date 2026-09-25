@@ -108,12 +108,13 @@ def tool_path(name: str) -> str:
     return f"mcp/{parts[1]}/{parts[2]}" if len(parts) == 3 and parts[0] == "mcp" else name
 
 
-def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
+def write_session_rrd(session: ClaudeSession, out: Path, *, host: str | None = None) -> Path:
     """Save one session, including its subagents, to an RRD file.
 
     Args:
         session: Typed records from the parser.
         out: Destination recording path.
+        host: Machine the session ran on; defaults to this machine's hostname.
 
     Returns:
         The output path after the recording has been flushed and closed.
@@ -348,7 +349,8 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
                 rr.AnyValues(
                     session_id=session.session_id,
                     profile=session.profile,
-                    host=socket.gethostname(),
+                    agent="claude",
+                    host=host if host is not None else socket.gethostname(),
                     cwd=session.cwd,
                     git_branch=session.git_branch,
                     cli_versions=",".join(sorted(session.cli_versions)),

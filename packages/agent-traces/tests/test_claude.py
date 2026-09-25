@@ -286,3 +286,15 @@ def test_session_sources_include_sorted_recursive_outputs(session_builder: Sessi
         root / "tool-results/z.txt",
     ]
     assert list(parse_session(session_builder.path).subagents) == ["a", "z"]
+
+
+def test_marker_prose_that_is_not_a_path_is_left_alone(session_builder: SessionBuilder) -> None:
+    """A tool result whose text says "saved to" followed by a paragraph must not be treated as a file reference."""
+    prose: str = "Output saved to " + "x" * 5000
+    session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "1", "content": prose}]})
+    session: ClaudeSession = parse_session(session_builder.path)
+    message: Message | None = session.main[0].record.message
+    assert message is not None
+    block: Block = message.content[0]
+    assert isinstance(block, ToolResultBlock) and block.content == prose
+    assert session.n_inlined_outputs == 0
