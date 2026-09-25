@@ -120,8 +120,8 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
     props: dict[str, object] = recording_properties(read_back(target), "hand_pose")
     assert props["version"] == HAND_POSE_VERSION
     assert recording_properties(read_back(target), "capture") == {}
-    for side in HAND_SIDES:
-        poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
+    for hand_index, side in enumerate(HAND_SIDES):
+        poses: list[HandPose] = [frame.hand_poses[str(hand_index)] for frame in frames]
         for suffix, component, expected in (
             ("joint_angles", "joint_angles", sum(p.joint_angles is not None for p in poses)),
             ("wrist", "Transform3D:translation", sum(p.wrist_translation is not None for p in poses)),
@@ -130,10 +130,10 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
             rows: list[rrc.Chunk] = [
                 c
                 for c in chunks
-                if str(c.entity_path) == f"{schema.hands_path(side.name)}/{suffix}" and component in c.to_record_batch().schema.names
+                if str(c.entity_path) == f"{schema.hands_path(side)}/{suffix}" and component in c.to_record_batch().schema.names
             ]
             assert sum(c.num_rows for c in rows) == expected
-        assert props[f"coverage_{side.name}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
+        assert props[f"coverage_{side}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
     for path, component, confidence_component, dimensions in (
         (schema.coco133_xyz_path(), "Points3D:positions", "simplecv.KeypointConfidence3D:confidences", 3),
         (schema.coco133_uv_path(1, 0), "Points2D:positions", "simplecv.KeypointConfidence2D:confidences", 2),
@@ -151,8 +151,8 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
         assert np.isfinite(confidence).all()
         for index, frame in enumerate(frames):
             assert keypoint_rows[index]["frame_index"] == frame.index
-            for hand_index, side in enumerate(HAND_SIDES):
-                pose: HandPose = frame.hand_poses[side.key]
+            for hand_index, _side in enumerate(HAND_SIDES):
+                pose: HandPose = frame.hand_poses[str(hand_index)]
                 offset: int = 91 + 21 * hand_index
                 # Source fingertip 0 maps to COCO thumb4, independent of interpolation.
                 placed: bool = pose.trusted  # Hub README default threshold
@@ -225,7 +225,7 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
                     errors.extend(np.linalg.norm(projected[valid] - shipped[valid], axis=1).tolist())
             assert len(errors) > 100
             median: float = float(np.median(errors))
-            print(f"{side.name}/{camera.camera.source_name}: {len(errors)} points, median error {median:.6f} px")
+            print(f"{side}/{camera.camera.source_name}: {len(errors)} points, median error {median:.6f} px")
             assert median < 0.5
 
 

@@ -1,4 +1,4 @@
-"""Shared hand measurements; positions are metres or shipped image pixels.
+"""Shared hand measurements; positions are metres or image pixels.
 
 Two adapters, one policy. ``coco133_from_hands`` uses simplecv's ``assembly21_to_coco133``
 mapping: COCO thumb-base slots 92/113 are wrist–thumb CMC midpoints (palm is unused), and
@@ -68,7 +68,7 @@ def confidence_rule(
     coordinate becomes NaN and its confidence 0.0.
 
     Args:
-        positions: Float32[ndarray, "t 133 d"], metres (d=3) or shipped pixels (d=2).
+        positions: Float32[ndarray, "t 133 d"], metres (d=3) or pixels (d=2).
         confidence: Float32[ndarray, "t 133"] or None.
 
     Returns:
@@ -128,6 +128,33 @@ def log_keypoints2d(
 ) -> None:
     """Write shipped Float32[t,133,2] pixels and Float32[t,133] confidence (or None), without colours."""
     path: str = schema.coco133_uv_path(rig, cam)
+    positions, scores = confidence_rule(positions, confidence)
+    rr.log(
+        path,
+        Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),
+        static=True,
+        recording=recording,
+    )
+    rr.send_columns(
+        path,
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+        columns=Points2DWithConfidence.columns(positions=positions.reshape(-1, 2), confidences=scores.reshape(-1)).partition([133] * len(positions)),
+        recording=recording,
+    )
+
+
+def log_projected_keypoints2d(
+    recording: rr.RecordingStream,
+    rig: int,
+    cam: int,
+    *,
+    times_ns: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"],
+    positions: Float32[ndarray, "t 133 2"],
+    confidence: Float32[ndarray, "t 133"],
+) -> None:
+    """Write derived Float32[t,133,2] pixels with Float32[t,133] source confidence; clear missing slots."""
+    path: str = schema.coco133_uv_projected_path(rig, cam)
     positions, scores = confidence_rule(positions, confidence)
     rr.log(
         path,

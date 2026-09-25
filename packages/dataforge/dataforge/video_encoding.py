@@ -196,14 +196,18 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
-def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int) -> int:
+def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int, crop: tuple[int, int, int, int] | None = None) -> int:
     """Decode a file to gray and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
+    Optional crop is (width, height, x, y), applied before grayscale conversion.
     """
     if frames <= 0:
         raise ValueError("frames must be positive")
+    if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
+        raise ValueError("crop requires positive dimensions and nonnegative offsets")
+    crop_filter: str = "" if crop is None else "crop=" + ":".join(str(value) for value in crop) + ","
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     command: list[str] = [
@@ -220,7 +224,7 @@ def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: in
         "0:v:0",
         "-an",
         "-vf",
-        f"format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}",
+        f"{crop_filter}format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}",
         "-fps_mode",
         "passthrough",
         *_nvenc_args(gop=gop, cq=cq),
