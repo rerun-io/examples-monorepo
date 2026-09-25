@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,6 +56,16 @@ def converter_version() -> str:
     return f"{CONVERT_SCHEMA_VERSION}+{commit}"
 
 
+def file_stamps(targets: dict[str, Path]) -> dict[str, tuple[int, int]]:
+    """``(mtime_ns, size)`` of each existing layer file; a changed stamp means this run wrote it."""
+    stamps: dict[str, tuple[int, int]] = {}
+    for layer, path in targets.items():
+        if path.is_file():
+            stat: os.stat_result = path.stat()
+            stamps[layer] = (stat.st_mtime_ns, stat.st_size)
+    return stamps
+
+
 def main(config: Config) -> None:
     """Convert every selected sequence serially, surviving individual failures.
 
@@ -69,12 +80,10 @@ def main(config: Config) -> None:
     print(f"converting {len(selected)} sequence(s)")
     failed: list[str] = []
     source_version: str = converter_version()
+    root: Path = paths.output_root()
     for identity, source in selected:
-        root: Path = paths.output_root()
         targets: dict[str, Path] = {layer: paths.rrd_path(root, layer=layer, identity=identity) for layer in dataset.layers}
-        before: dict[str, tuple[int, int]] = {
-            layer: (path.stat().st_mtime_ns, path.stat().st_size) for layer, path in targets.items() if path.is_file()
-        }
+        before: dict[str, tuple[int, int]] = file_stamps(targets)
         failure: str | None = None
         capture_s: float | None = None
         with sequence_timer() as timer:
@@ -82,10 +91,7 @@ def main(config: Config) -> None:
                 target: Path = dataset.convert(identity, source, force=config.force)
                 if not target.is_file():
                     raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
-                if any(
-                    path.is_file() and before.get(layer) != (path.stat().st_mtime_ns, path.stat().st_size)
-                    for layer, path in targets.items()
-                ):
+                if any(before.get(layer) != stamp for layer, stamp in file_stamps(targets).items()):
                     capture_s = capture_span(target)
             except BeartypeException:
                 raise
@@ -94,25 +100,21 @@ def main(config: Config) -> None:
                 print(f"FAILED {identity.sequence_key}: {failure}")
                 failed.append(identity.sequence_key)
         elapsed: float = timer.total_s
-        written: dict[str, int] = {
-            layer: path.stat().st_size
-            for layer, path in targets.items()
-            if path.is_file() and before.get(layer) != (path.stat().st_mtime_ns, path.stat().st_size)
-        }
+        written: dict[str, int] = {layer: stamp[1] for layer, stamp in file_stamps(targets).items() if before.get(layer) != stamp}
         append_record(
             root / "timing/convert.jsonl",
             ConvertRecord(
-                dataset_config.name,
-                identity.recording_id,
-                source_version,
-                timer.started_at,
-                timer.stage_s,
-                elapsed,
-                capture_s,
-                written,
-                gethostname(),
-                not written and failure is None,
-                failure,
+                dataset=dataset_config.name,
+                recording_id=identity.recording_id,
+                converter_version=source_version,
+                started_at=timer.started_at,
+                stage_s=timer.stage_s,
+                total_s=elapsed,
+                capture_s=capture_s,
+                layer_bytes=written,
+                host=gethostname(),
+                skipped=not written and failure is None,
+                error=failure,
             ),
         )
     if failed:

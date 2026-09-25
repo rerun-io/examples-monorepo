@@ -6,7 +6,7 @@ import pytest
 import rerun as rr
 
 from dataforge import writing
-from dataforge.apis.compare_layers import compare_layers
+from dataforge.apis.compare_layers import compare_layers, component_rows, main
 
 
 def test_comparison_handles_batches_and_rejects_changed_values(tmp_path: Path) -> None:
@@ -47,8 +47,6 @@ def test_reports_all_differences_and_supports_extra_ignores(tmp_path: Path, caps
 
 
 def test_start_time_is_ignored(tmp_path: Path) -> None:
-    from dataforge.apis.compare_layers import component_rows
-
     for name in ("a", "b"):
         with writing.atomic_recording(tmp_path / f"{name}.rrd", recording_id="test"):
             pass
@@ -58,8 +56,6 @@ def test_start_time_is_ignored(tmp_path: Path) -> None:
 
 
 def test_reports_missing_extra_tracks_row_counts_and_clock_values(tmp_path: Path, capsys) -> None:
-    from dataforge.apis.compare_layers import main
-
     for name, count in (("a", 2), ("b", 3)):
         with writing.atomic_recording(tmp_path / f"{name}.rrd", recording_id="test", send_properties=False) as recording:
             for entity, clock in ((f"/{name}", "frame_index"), ("/clock", f"clock_{name}"), ("/rows", "frame_index")):

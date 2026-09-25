@@ -1,8 +1,16 @@
 """Timing persistence at the public JSONL boundary."""
 
+import subprocess
 from pathlib import Path
 
-from dataforge.timing import ConvertRecord, SequenceTimer, append_record, load_convert_records
+import pytest
+import rerun as rr
+
+from dataforge import paths, timing, writing
+from dataforge.apis import convert
+from dataforge.datasets.robocap import RobocapConfig, RobocapDataset
+from dataforge.identity import SequenceIdentity
+from dataforge.timing import ConvertRecord, SequenceTimer, append_record, load_convert_records, stage
 
 
 def test_round_trip_and_accumulated_stages(tmp_path: Path) -> None:
@@ -21,14 +29,6 @@ def test_round_trip_and_accumulated_stages(tmp_path: Path) -> None:
 
 
 def test_convert_records_written_and_skipped_sequences(tmp_path: Path, monkeypatch) -> None:
-    import rerun as rr
-
-    from dataforge import paths, writing
-    from dataforge.apis import convert
-    from dataforge.datasets.robocap import RobocapConfig, RobocapDataset
-    from dataforge.identity import SequenceIdentity
-    from dataforge.timing import stage
-
     identity = SequenceIdentity("robocap", ("a",))
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
     monkeypatch.setattr(RobocapDataset, "discover", lambda self: [(identity, tmp_path)])
@@ -47,6 +47,7 @@ def test_convert_records_written_and_skipped_sequences(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(RobocapDataset, "convert", fake_convert)
     convert.main(convert.Config(dataset=RobocapConfig()))
+
     def unexpected_read(path):
         raise AssertionError("skipped conversion must not read base")
 
@@ -62,12 +63,6 @@ def test_convert_records_written_and_skipped_sequences(tmp_path: Path, monkeypat
 
 
 def test_failed_conversion_has_a_timing_record(tmp_path: Path, monkeypatch) -> None:
-    import pytest
-
-    from dataforge.apis import convert
-    from dataforge.datasets.robocap import RobocapConfig, RobocapDataset
-    from dataforge.identity import SequenceIdentity
-
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
     monkeypatch.setattr(RobocapDataset, "discover", lambda self: [(SequenceIdentity("robocap", ("bad",)), tmp_path)])
 
@@ -84,10 +79,6 @@ def test_failed_conversion_has_a_timing_record(tmp_path: Path, monkeypatch) -> N
 
 
 def test_converter_version_fallback(monkeypatch) -> None:
-    import subprocess
-
-    from dataforge.apis import convert
-
     for error in (FileNotFoundError("git"), subprocess.CalledProcessError(128, "git")):
         def fail(*_args, error=error, **_kwargs):
             raise error
@@ -97,8 +88,6 @@ def test_converter_version_fallback(monkeypatch) -> None:
 
 
 def test_record_adds_to_active_timer() -> None:
-    from dataforge import timing
-
     timing.record("transcode", 9.0)
     with timing.sequence_timer() as timer:
         timing.record("transcode", 2.0)

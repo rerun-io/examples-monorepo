@@ -106,12 +106,12 @@ def main(config: Config) -> None:
     append_record(
         output_root / "timing/register.jsonl",
         RegisterRecord(
-            name,
-            timer.started_at,
-            {key: value for key, value in timer.stage_s.items() if key != "blueprint"},
-            timer.stage_s["blueprint"],
-            len(paths_by_layer[paths.BASE_LAYER]),
-            timer.total_s,
-            gethostname(),
+            dataset=name,
+            started_at=timer.started_at,
+            layer_s={key: value for key, value in timer.stage_s.items() if key != "blueprint"},
+            blueprint_s=timer.stage_s["blueprint"],
+            segment_count=len(paths_by_layer[paths.BASE_LAYER]),
+            total_s=timer.total_s,
+            host=gethostname(),
         ),
     )

@@ -17,7 +17,7 @@ from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPos
 from dataforge.datasets.show3d_hands import HandFrame
 from dataforge.datasets.show3d_mesh_source import MESH_REPO
 from dataforge.datasets.show3d_object_source import ObjectFrame
-from dataforge.datasets.show3d_source import OBJECT_POSE_VERSION, FrameClock
+from dataforge.datasets.show3d_source import DEFAULT_CONFIDENCE, OBJECT_POSE_VERSION, FrameClock
 from dataforge.identity import SequenceIdentity
 
 
@@ -92,13 +92,13 @@ def write_object_pose_layer(
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         transforms: Float64[ndarray, "n 4 4"] = np.full((len(frames), 4, 4), np.nan, dtype=np.float64)
         for index, frame in enumerate(frames):
-            transform = frame.world_T_object
+            transform: Float64[ndarray, "4 4"] | None = frame.world_T_object
             if transform is not None:
                 transforms[index] = transform
-                transforms[index, :3, 3] *= 0.001
-        # SHOW3D ships pose rows for every positive confidence, even below mesh visibility's 0.5.
-        objects.log_object_pose(recording, alias, clock.times_ns, clock.frame_indices, transforms,
-                                np.asarray([frame.confidence for frame in frames], dtype=np.float64), trust_threshold=0.0)
+        transforms[:, :3, 3] *= 0.001  # millimetres to metres
+        # SHOW3D ships pose rows for every positive confidence, even below mesh visibility's DEFAULT_CONFIDENCE.
+        confidence: Float64[ndarray, "n"] = np.asarray([frame.confidence for frame in frames], dtype=np.float64)
+        objects.log_object_pose(recording, alias, clock.times_ns, clock.frame_indices, transforms, confidence, trust_threshold=0.0)
         recording.send_property(
             "object_pose",
             rr.AnyValues(
@@ -124,8 +124,10 @@ def write_object_mesh_layer(
     value behind the alpha is one click away in the viewer and one column away in a query.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
-        objects.log_object_mesh(recording, alias, clock.times_ns, clock.frame_indices, rr.Asset3D(path=mesh),
-                                np.asarray([frame.confidence for frame in frames], dtype=np.float64), trust_threshold=0.5)
+        confidence: Float64[ndarray, "n"] = np.asarray([frame.confidence for frame in frames], dtype=np.float64)
+        objects.log_object_mesh(
+            recording, alias, clock.times_ns, clock.frame_indices, rr.Asset3D(path=mesh), confidence, trust_threshold=DEFAULT_CONFIDENCE
+        )
         recording.send_property(
             "object_mesh", rr.AnyValues(mesh_id=pa.array([mesh_id], type=pa.int64()), mesh_source=pa.array([MESH_REPO], type=pa.string()))
         )

@@ -18,6 +18,30 @@ from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConf
 from dataforge import schema
 
 
+def confidence_rule(
+    positions: Float32[ndarray, "t 133 d"], confidence: Float32[ndarray, "t 133"] | None
+) -> tuple[Float32[ndarray, "t 133 d"], Float32[ndarray, "t 133"]]:
+    """Apply the port-wide keypoint rule to dense COCO rows.
+
+    A present joint keeps its shipped confidence, or 1.0 when the source ships none
+    (explicit None). A joint with any non-finite coordinate is missing: every
+    coordinate becomes NaN and its confidence 0.0.
+
+    Args:
+        positions: Float32[ndarray, "t 133 d"], metres (d=3) or shipped pixels (d=2).
+        confidence: Float32[ndarray, "t 133"] or None.
+
+    Returns:
+        The masked positions and the Float32[ndarray, "t 133"] confidence.
+    """
+    if confidence is not None and confidence.shape != positions.shape[:2]:
+        raise ValueError("confidence must match the keypoint rows")
+    valid: Bool[ndarray, "t 133"] = np.isfinite(positions).all(axis=-1)
+    masked: Float32[ndarray, "t 133 d"] = np.where(valid[..., None], positions, np.float32(np.nan))
+    scores: Float32[ndarray, "t 133"] = np.where(valid, np.float32(1.0) if confidence is None else confidence, np.float32(0.0))
+    return masked, scores
+
+
 def log_keypoints3d(
     recording: rr.RecordingStream,
     indexes: list[rr.TimeColumn],
@@ -32,12 +56,9 @@ def log_keypoints3d(
         positions: Float32[ndarray, "t 133 3"], metres; missing slots contain NaN.
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
     """
-    if confidence is not None and confidence.shape != positions.shape[:2]:
-        raise ValueError("confidence must match the keypoint rows")
-    valid: Bool[ndarray, "t 133"] = np.isfinite(positions).all(axis=-1)
-    xyz: Float32[ndarray, "t 133 3"] = np.where(valid[..., None], positions, np.float32(np.nan))
-    scores: Float32[ndarray, "t 133"] = np.where(valid, np.float32(1.0) if confidence is None else confidence, np.float32(0.0))
-    flat_conf: Float32[ndarray, "n"] = scores.reshape(-1)
+    ruled: tuple[Float32[ndarray, "t 133 3"], Float32[ndarray, "t 133"]] = confidence_rule(positions, confidence)
+    xyz: Float32[ndarray, "t 133 3"] = ruled[0]
+    flat_conf: Float32[ndarray, "n"] = ruled[1].reshape(-1)
     colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(flat_conf[None, :, None])[0]
     rr.log(
         schema.coco133_xyz_path(),
@@ -61,11 +82,9 @@ def log_keypoints2d(
     confidence: Float32[ndarray, "t 133"] | None,
 ) -> None:
     """Write shipped Float32[t,133,2] pixels with Float32[t,133] confidence or explicit None."""
-    if confidence is not None and confidence.shape != positions.shape[:2]:
-        raise ValueError("confidence must match the keypoint rows")
-    valid: Bool[ndarray, "t 133"] = np.isfinite(positions).all(axis=-1)
-    uv: Float32[ndarray, "t 133 2"] = np.where(valid[..., None], positions, np.float32(np.nan))
-    scores: Float32[ndarray, "t 133"] = np.where(valid, np.float32(1.0) if confidence is None else confidence, np.float32(0.0))
+    ruled: tuple[Float32[ndarray, "t 133 2"], Float32[ndarray, "t 133"]] = confidence_rule(positions, confidence)
+    uv: Float32[ndarray, "t 133 2"] = ruled[0]
+    scores: Float32[ndarray, "t 133"] = ruled[1]
     rr.log(
         path,
         Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),

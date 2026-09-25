@@ -31,10 +31,7 @@ def log_object_pose(
     if np.any(valid):
         rr.send_columns(
             schema.objects_path(alias),
-            indexes=[
-                time_column(times_ns[valid]),
-                frame_index_column(frame_indices[valid]),
-            ],
+            indexes=[time_column(times_ns[valid]), frame_index_column(frame_indices[valid])],
             columns=rr.Transform3D.columns(
                 translation=transforms[valid, :3, 3], quaternion=Rotation.from_matrix(transforms[valid, :3, :3]).as_quat()
             ),
@@ -42,10 +39,7 @@ def log_object_pose(
         )
     rr.send_columns(
         schema.object_confidence_path(alias),
-        indexes=[
-            time_column(times_ns),
-            frame_index_column(frame_indices),
-        ],
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
         columns=rr.Scalars.columns(scalars=confidence),
         recording=recording,
     )
@@ -65,25 +59,20 @@ def log_object_mesh(
     path: str = schema.object_mesh_path(alias)
     rr.log(path, asset, static=True, recording=recording)
     trusted: Bool[ndarray, "t"] = confidence > trust_threshold
-    changes: Int64[ndarray, "k"] = np.flatnonzero(np.r_[True, trusted[1:] != trusted[:-1]]) if len(trusted) else np.array([], dtype=np.int64)
-    albedo: Float32[ndarray, "k 4"] = np.ones((len(changes), 4), dtype=np.float32)
-    albedo[:, 3] = trusted[changes]
-    if len(changes):
+    if len(trusted):
+        # Rows only where visibility changes; latest-at carries them.
+        changes: Int64[ndarray, "k"] = np.flatnonzero(np.r_[True, trusted[1:] != trusted[:-1]])
+        albedo: Float32[ndarray, "k 4"] = np.ones((len(changes), 4), dtype=np.float32)
+        albedo[:, 3] = trusted[changes]
         rr.send_columns(
             path,
-            indexes=[
-                time_column(times_ns[changes]),
-                frame_index_column(frame_indices[changes]),
-            ],
+            indexes=[time_column(times_ns[changes]), frame_index_column(frame_indices[changes])],
             columns=rr.Asset3D.columns(albedo_factor=albedo),
             recording=recording,
         )
     rr.send_columns(
         path,
-        indexes=[
-            time_column(times_ns),
-            frame_index_column(frame_indices),
-        ],
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
         columns=rr.Scalars.columns(scalars=confidence),
         recording=recording,
     )

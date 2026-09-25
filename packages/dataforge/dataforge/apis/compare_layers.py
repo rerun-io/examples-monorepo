@@ -16,6 +16,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import rerun.chunk as rrc
 import tyro
+from jaxtyping import Float
+from numpy import ndarray
 
 ColumnKey: TypeAlias = tuple[str, str, tuple[str, ...]]
 
@@ -75,7 +77,7 @@ def max_float_difference(left: pa.Array, right: pa.Array) -> float | None:
         return max(differences, default=None)
     if pa.types.is_floating(left.type):
         with np.errstate(invalid="ignore"):
-            deltas = np.abs(left.to_numpy(zero_copy_only=False) - right.to_numpy(zero_copy_only=False))
+            deltas: Float[ndarray, "n"] = np.abs(left.to_numpy(zero_copy_only=False) - right.to_numpy(zero_copy_only=False))
         return float(np.nanmax(deltas)) if np.any(~np.isnan(deltas)) else None
     return None
 

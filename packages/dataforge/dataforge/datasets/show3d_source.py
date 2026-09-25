@@ -270,8 +270,6 @@ class FrameClock:
         return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
 
 
-
-
 T = TypeVar("T")
 RowT = TypeVar("RowT")
 

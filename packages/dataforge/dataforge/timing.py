@@ -6,10 +6,9 @@ The context-local timer lets converters add stages without changing their API.
 
 import fcntl
 import json
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +84,10 @@ class SequenceTimer:
         """Elapsed wall seconds."""
         return perf_counter() - self.start
 
+    def add(self, name: str, seconds: float) -> None:
+        """Accumulate seconds onto a named stage."""
+        self.stage_s[name] = self.stage_s.get(name, 0.0) + seconds
+
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
         """Measure a stage even when it raises."""
@@ -92,7 +95,7 @@ class SequenceTimer:
         try:
             yield
         finally:
-            self.stage_s[name] = self.stage_s.get(name, 0.0) + perf_counter() - start
+            self.add(name, perf_counter() - start)
 
 
 _ACTIVE: ContextVar[SequenceTimer | None] = ContextVar("dataforge_timer", default=None)
@@ -102,7 +105,7 @@ _ACTIVE: ContextVar[SequenceTimer | None] = ContextVar("dataforge_timer", defaul
 def sequence_timer() -> Iterator[SequenceTimer]:
     """Start an isolated timer for one convert call."""
     timer: SequenceTimer = SequenceTimer()
-    token = _ACTIVE.set(timer)
+    token: Token[SequenceTimer | None] = _ACTIVE.set(timer)
     try:
         yield timer
     finally:
@@ -124,20 +127,15 @@ def record(name: str, seconds: float) -> None:
     """Add measured wall seconds to the active timer; no-op without a timer."""
     timer: SequenceTimer | None = _ACTIVE.get()
     if timer is not None:
-        timer.stage_s[name] = timer.stage_s.get(name, 0.0) + seconds
+        timer.add(name, seconds)
 
 
 def append_record(path: Path, record: ConvertRecord | RegisterRecord) -> None:
     """Append a complete JSON line under a process lock, creating directories."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload: bytes = (to_json(record) + "\n").encode()
-    with path.open("ab", buffering=0) as output:
-        fcntl.flock(output, fcntl.LOCK_EX)
-        view: memoryview = memoryview(payload)
-        while view:
-            written: int = os.write(output.fileno(), view)
-            view = view[written:]
-        fcntl.flock(output, fcntl.LOCK_UN)
+    with path.open("a", encoding="utf-8") as output:
+        fcntl.flock(output, fcntl.LOCK_EX)  # held until close() has flushed the line
+        output.write(to_json(record) + "\n")
 
 
 def load_convert_records(path: Path) -> list[ConvertRecord]:

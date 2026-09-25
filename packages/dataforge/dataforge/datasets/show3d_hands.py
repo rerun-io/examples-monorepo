@@ -187,8 +187,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                     offset: int = 91 + hand_index * 21
                     conf[frame_index, offset : offset + 21] = np.float32(pose.confidence)
                     conf[frame_index, 9 + hand_index] = np.float32(pose.confidence)
-                    if not np.isfinite(xyz[frame_index, offset + 1]).all():
-                        conf[frame_index, offset + 1] = np.float32(0.0)
+        # The shared writer zeroes the confidence of every non-finite slot (e.g. an undefined thumb-base midpoint).
         hands.log_keypoints3d(recording, clock.indexes(slice(None)), xyz, conf)
         for camera in HEADSET_CAMERAS:
             uv: Float32[ndarray, "n 133 2"] = np.full((n_frames, 133, 2), np.nan, dtype=np.float32)
@@ -208,7 +207,6 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                     offset = 91 + hand_index * 21
                     uv_conf[frame_index, offset : offset + 21] = np.float32(frame.hand_poses[side.key].confidence)
                     uv_conf[frame_index, 9 + hand_index] = np.float32(frame.hand_poses[side.key].confidence)
-                uv_conf[frame_index, ~np.isfinite(uv[frame_index]).all(axis=1)] = np.float32(0.0)
             path: str = schema.coco133_uv_path(camera.rig, camera.cam)
             hands.log_keypoints2d(recording, path, clock.indexes(slice(None)), uv, uv_conf)
         coverage: dict[str, pa.Array] = {}

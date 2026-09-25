@@ -195,10 +195,7 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
     started: float = perf_counter()
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures: list[Future[int]] = []
-            for source, clip in zip(scene.cameras, clips, strict=True):
-                future: Future[int] = executor.submit(encode, source, clip)
-                futures.append(future)
+            futures: list[Future[int]] = [executor.submit(encode, source, clip) for source, clip in zip(scene.cameras, clips, strict=True)]
             for source, clip, future in zip(scene.cameras, clips, futures, strict=True):
                 future.result()
                 camera: Show3dCamera = source.camera
