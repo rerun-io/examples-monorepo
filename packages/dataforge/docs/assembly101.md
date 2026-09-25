@@ -144,21 +144,70 @@ one exo video, with calibration/hand/coarse/fine availability fields.
 | Actions not preserved as overlapping intervals | Union views and display every active coarse/fine segment |
 | Fixed video subdirectory | The pinned mirror layout is explicit beneath an overridable root; no speculative layout search |
 
-Driver parity captures are `9011-c03f` (2021-02-01 16:02:39) and `9013-a28`
-(2021-02-02 13:49:23), at matching `k/60` times. The required 1e-4 m parity
-comparison and Viewer screenshots are pending driver execution. The local unit
-suite is not evidence of pixel parity. The golden test checks median ≤0.1 stored
-pixel on all 12 cameras over every 97th frame of 9011-c03f, using its 9012-c07c
-calibration session. It excludes derived thumb-base midpoints because perspective
-projection and midpoint construction do not commute.
+The golden test checks median ≤0.1 stored pixel on all 12 cameras over every 97th frame of
+9011-c03f, using its 9012-c07c calibration session. It excludes derived thumb-base midpoints because
+perspective projection and midpoint construction do not commute.
+
+## Parity with simplecv
+
+Measured 2026-09-25 on pablo-dl-server. The reference is simplecv's own rrds
+(`/mnt/nas/datasets/exoego-forge-catalog-rig/assembly101/all/<seq>.rrd`). A fresh run of
+`tools/batch_raw_to_rrd.py assembly101` from simplecv `main` @ 34ee7f4c (prod env, local layout) gives the
+same values. dataforge ran `dataforge-convert assembly101` @ bef78372 in its prod env. Rows match by
+frame k = round(video_time · 60): simplecv's `video_time` comes from the mirror's CFR PTS, dataforge's from
+`frame_index / 60`, and both are k/60. The full report, with every difference mapped to an audit defect,
+is `/tmp/fleet-artifacts/exoego-migration/runs/assembly101-parity.md`.
+
+| sequence | coco133_xyz rows sc / df | max joint distance | present conf sc / df | missing conf sc / df | exo cameras | ego cameras (world, per serial) | exo 2D sc reprojected vs df shipped | ego 2D, per serial |
+|---|---|---|---|---|---|---|---|---|
+| 9011-c03f (843 headset) | 13,818 / 13,820 | **0.0 m** | 1.0 / shipped | NaN / 0.0 | ≤ 1e-7 m, 0° | ≤ 8.1e-8 m, 4.2e-6° | median 1.96–6.40 px | 3e-5 px (84355350) … 1.48 px |
+| 9013-a28 (211 headset) | 13,936 / 13,936 | **0.0 m** | 1.0 / shipped | NaN / 0.0 | ≤ 1e-7 m, 0° | ≤ 3.5e-7 m, 1.1e-5° | median 3.09–4.60 px | 6.1–17.2 px |
+
+The 3D keypoints are bit-identical. The differences, each mapped in the report: simplecv's fabricated
+confidence (1.0 present, NaN missing); its trim to the shortest video (2 rows on 9011-c03f); one exo K for
+every sequence and no exo lens model; one ego lens record for all four cameras (it matches only serial
+84355350, where the reprojection agrees with the shipped 2D to 3e-5 px); its reprojected 2D, which also
+turns off-image points into NaN with confidence 1.0; no `frame_index`; no actions. One ordering
+difference is not in the audit: on the 211 headset simplecv names the cameras through a fixed alias table
+(e1 = 21176875 … e4 = 21179183) and uses e1 as the rig reference, while dataforge sorts serials and uses the
+smallest. The `rig_08` track and camera slots differ by that permutation; every world-from-camera pose agrees.
 
 ## Timing
 
-Left for the driver. Read `timing/convert.jsonl` with
-`dataforge.timing.load_records(path, ConvertRecord)` and `timing/register.jsonl`
-with `load_records(path, RegisterRecord)`. Record host, commit, sequence IDs,
-output bytes, capture seconds and seconds per capture-minute. Conversion records
-`fetch`, `write:base`, `write:hand_pose`, `write:actions`, and nested `remux` stages;
-no transcode stage runs. Compare prod conversion with simplecv preprocessing plus
-conversion on the same two captures, separating skipped runs. Pixel evidence,
-the benchmark report and the soft timing gate must precede full-corpus approval.
+Read `<output_root>/timing/convert.jsonl` with `dataforge.timing.load_records(path, ConvertRecord)` and
+`timing/register.jsonl` with `load_records(path, RegisterRecord)`. Conversion records `fetch`, `remux`,
+`write:base`, `write:hand_pose` and `write:actions`; `remux` is nested in base. No transcode stage runs.
+Capture length is the longest stream / 60.
+
+**Baseline vs dataforge**, 2026-09-25, pablo-dl-server, prod envs, one process per sequence (dataforge: one
+process for both), inputs on local NVMe. simplecv has no preprocessing step for Assembly101: its loaders
+read the 720p mirror directly (the mirror was built outside the repo), so the baseline is its conversion
+alone. simplecv time = its batch timer ("Total time taken"), dataforge time = `total_s`; neither includes
+Pixi or interpreter start-up (about 2.7 s for simplecv).
+
+| sequence | capture | simplecv | dataforge | simplecv s / capture-min | dataforge s / capture-min |
+|---|---|---|---|---|---|
+| 9011-c03f | 230.4 s | 6.30 s | 7.58 s | 1.64 | **1.97** |
+| 9013-a28 | 232.3 s | 6.31 s | 6.25 s | 1.63 | **1.61** |
+
+Soft gate: dataforge is 20 % slower on 9011-c03f and equal on 9013-a28. Most of the gap on 9011-c03f is
+`fetch` (1.68 s against 0.27 s on 9013-a28): the first sequence of each process pays a one-time load, the
+cause of which was not measured further. The rest of the cost is the shipped 2D: `write:hand_pose` (5.3 s of
+the total) decodes the 283 MB `landmarks2D` member and writes 12 shipped 2D tracks, which simplecv never
+opens. It reprojects the 3D instead, which is cheaper and wrong by 2–17 px.
+
+**assembly101-sample** (the 8 sample sequences, one process, same host, local raw root; 96 s wall for all
+eight including start-up):
+
+| sequence | capture | fetch | remux | write:base | write:hand_pose | write:actions | total | MB base / hand_pose / KB actions | s / capture-min |
+|---|---|---|---|---|---|---|---|---|---|
+| 9012-a17 | 358.9 s | 2.02 | 0.67 | 1.03 | 8.64 | 0.02 | 11.71 | 964 / 123 / 20 | **1.96** |
+| 9031-c12d | 453.2 s | 0.89 | 0.67 | 0.97 | 10.39 | 0.00 | 12.25 | 1118 / 150 / 18 | **1.62** |
+| 9033-b04d | 570.5 s | 0.81 | 0.92 | 1.25 | 13.47 | 0.00 | 15.53 | 1233 / 193 / 18 | **1.63** |
+| 9042-a02 | 318.2 s | 0.39 | 0.50 | 0.73 | 7.43 | 0.00 | 8.55 | 829 / 108 / 12 | **1.61** |
+| 9045-b05d | 630.5 s | 1.14 | 0.89 | 1.32 | 14.63 | 0.00 | 17.09 | 1534 / 216 / 22 | **1.63** |
+| 9053-c08b | 360.4 s | 0.66 | 0.53 | 0.77 | 8.37 | 0.00 | 9.80 | 914 / 122 / 16 | **1.63** |
+| 9064-a20 | 260.1 s | 0.31 | 0.31 | 0.54 | 6.01 | 0.00 | 6.86 | 595 / 89 / 15 | **1.58** |
+| 9085-c01c | 436.0 s | 0.78 | 0.61 | 0.90 | 10.18 | 0.00 | 11.86 | 1057 / 148 / 21 | **1.63** |
+
+Registration time is added when `assembly101-sample` is registered.
