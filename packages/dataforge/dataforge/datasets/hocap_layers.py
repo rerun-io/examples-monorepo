@@ -1,4 +1,4 @@
-"""HO-Cap base and hand-pose writers using the shared hand and video writers."""
+"""HO-Cap layer writers using the shared hand, object, mesh and video writers."""
 
 from functools import partial
 from pathlib import Path
@@ -11,8 +11,10 @@ import rerun as rr
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.ops.mano.mano_np import MANOLayerNP
 
-from dataforge import hands, schema, writing
+from dataforge import hands, meshes, objects, schema, writing
+from dataforge.datasets.hocap_mesh import textured_glb
 from dataforge.datasets.hocap_source import (
     CLOCK_SOURCE,
     EGO_RIG,
@@ -22,6 +24,7 @@ from dataforge.datasets.hocap_source import (
     HandLabels,
     HocapCamera,
     SequenceData,
+    pose_matrices,
     posed_rows,
     present_rows,
     read_labels,
@@ -38,6 +41,9 @@ from dataforge.logging_toolkit import (
 )
 from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, parallel_clips
+
+MANO_BATCH: int = 64
+"""Frames per MANO forward pass; bounds the vertex buffer of one call."""
 
 
 def write_base(
@@ -147,3 +153,49 @@ def write_hands(recording: rr.RecordingStream, scene: SequenceData, archive: Zip
             recording=recording,
         )
 
+
+def write_hand_meshes(recording: rr.RecordingStream, scene: SequenceData) -> None:
+    """Evaluate the shipped PCA parameters in small batches; clear missing rows."""
+    for side, mano in zip(MANO_SIDES, scene.mano, strict=True):
+        if side not in scene.meta.mano_sides:
+            continue
+        model: MANOLayerNP = MANOLayerNP(side=side, betas=scene.betas, use_pca=True)
+        path: str = schema.hand_mesh_path(side)
+        rr.log(path, rr.Mesh3D.from_fields(triangle_indices=model.f, albedo_factor=hands.HAND_ALBEDO[side]), static=True, recording=recording)
+        for start in range(0, scene.count, MANO_BATCH):
+            batch: slice = slice(start, start + MANO_BATCH)
+            parameters: Float32[ndarray, "n 51"] = mano[batch]
+            valid: Bool[ndarray, "n"] = present_rows(parameters)
+            vertices: Float32[ndarray, "k v 3"] = np.empty((0, model.num_verts, 3), dtype=np.float32)
+            if np.any(valid):
+                result: tuple[Float32[ndarray, "k v 3"], Float32[ndarray, "k 21 3"]] = model(parameters[valid, :48], parameters[valid, 48:])
+                vertices = result[0]
+            meshes.log_mesh_batch(
+                recording, path, times_ns=scene.times_ns[batch], frame_indices=scene.frame_indices[batch], vertices=vertices, trusted=valid.tolist()
+            )
+
+
+def write_object_poses(recording: rr.RecordingStream, scene: SequenceData) -> None:
+    """Write shipped object transforms; confidence is 1.0 on valid rows and 0.0 on missing ones."""
+    for alias, poses in zip(scene.meta.object_ids, scene.objects, strict=True):
+        transforms: Float64[ndarray, "n 4 4"] = pose_matrices(poses)
+        confidence: Float32[ndarray, "n"] = posed_rows(poses).astype(np.float32)
+        objects.log_object_pose(
+            recording, alias, times_ns=scene.times_ns, frame_indices=scene.frame_indices, transforms=transforms, confidence=confidence
+        )
+
+
+def write_object_meshes(recording: rr.RecordingStream, scene: SequenceData, archive: ZipFile) -> None:
+    """Write textured meshes, transparent on missing pose rows; the mesh layer never duplicates object transforms."""
+    for alias, poses in zip(scene.meta.object_ids, scene.objects, strict=True):
+        posed: Bool[ndarray, "n"] = posed_rows(poses)
+        objects.log_object_mesh(
+            recording,
+            alias,
+            times_ns=scene.times_ns,
+            frame_indices=scene.frame_indices,
+            asset=rr.Asset3D(contents=textured_glb(archive, alias), media_type="model/gltf-binary"),
+            confidence=posed.astype(np.float32),
+            posed=posed,
+            trust_threshold=0.0,
+        )
