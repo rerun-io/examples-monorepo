@@ -2,7 +2,7 @@
 
 import csv
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias, TypeVar
@@ -57,10 +57,9 @@ class HandPair:
         result: Float32[ndarray, "2 21 d"] = np.full((2, 21, dimensions), np.nan, dtype=np.float32)
         for index, value in enumerate((self.left, self.right)):
             if value is not None:
-                points: Float32[ndarray, "21 d"] = np.asarray(value, dtype=np.float32)
-                if points.shape != (21, dimensions):
-                    raise ValueError(f"expected 21 x {dimensions} hand coordinates, got {points.shape}")
-                result[index] = points
+                if value.shape != (21, dimensions):
+                    raise ValueError(f"expected 21 x {dimensions} hand coordinates, got {value.shape}")
+                result[index] = value
         return result
 
 
@@ -88,6 +87,28 @@ def read_confidence(path: Path) -> dict[int, Float32[ndarray, "2"]]:
     return {int(key): np.array([row.left, row.right], dtype=np.float32) for key, row in rows.items()}
 
 
+def frame_batches(rows: Mapping[str, object], frame_limit: int | None) -> Iterator[list[str]]:
+    """Numeric frame keys below the limit, in 256-frame batches."""
+    keys: list[str] = sorted(rows, key=int)
+    if frame_limit is not None:
+        keys = [key for key in keys if int(key) < frame_limit]
+    for start in range(0, len(keys), 256):
+        yield keys[start : start + 256]
+
+
+def coco_rows(
+    keys: list[str], pairs: list[dict[str, list[list[float | int]]]], confidence: dict[int, Float32[ndarray, "2"]], dimensions: int, scale: float
+) -> HandRows:
+    """Decode one batch of shipped hand pairs into dense COCO rows under the keypoint rule."""
+    positions: Float32[ndarray, "n 133 d"] = np.empty((len(keys), 133, dimensions), dtype=np.float32)
+    scores: Float32[ndarray, "n 133"] = np.empty((len(keys), 133), dtype=np.float32)
+    for index, (key, raw) in enumerate(zip(keys, pairs, strict=True)):
+        pair: HandPair = from_dict(HandPair, raw)
+        positions[index], scores[index] = coco133_from_hands(pair.array(dimensions) * np.float32(scale), confidence[int(key)])
+    positions, scores = confidence_rule(positions, scores)
+    return np.array(keys, dtype=np.int64), positions, scores
+
+
 def read_hand_rows(
     path: Path,
     confidence: dict[int, Float32[ndarray, "2"]],
@@ -99,19 +120,8 @@ def read_hand_rows(
     """Read 3D once; sort numeric keys and release consumed source frames in batches."""
     with path.open() as handle:
         rows: dict[str, dict[str, list[list[float | int]]]] = json.load(handle)
-    keys: list[str] = sorted(rows, key=int)
-    if frame_limit is not None:
-        keys = [key for key in keys if int(key) < frame_limit]
-    for start in range(0, len(keys), 256):
-        selected: list[str] = keys[start : start + 256]
-        frames: Int64[ndarray, "n"] = np.array(selected, dtype=np.int64)
-        positions: Float32[ndarray, "n 133 d"] = np.empty((len(selected), 133, dimensions), dtype=np.float32)
-        scores: Float32[ndarray, "n 133"] = np.empty((len(selected), 133), dtype=np.float32)
-        for index, key in enumerate(selected):
-            pair: HandPair = from_dict(HandPair, rows.pop(key))
-            positions[index], scores[index] = coco133_from_hands(pair.array(dimensions) * np.float32(scale), confidence[int(key)])
-        positions, scores = confidence_rule(positions, scores)
-        yield frames, positions, scores
+    for keys in frame_batches(rows, frame_limit):
+        yield coco_rows(keys, [rows.pop(key) for key in keys], confidence, dimensions, scale)
 
 
 def read_pixels(
@@ -120,22 +130,11 @@ def read_pixels(
     """Read the large 2D member once; keep only one 256-frame camera batch in addition to it."""
     with path.open() as handle:
         rows: dict[str, dict[str, dict[str, list[list[float | int]]]]] = json.load(handle)
-    keys: list[str] = sorted(rows, key=int)
-    if frame_limit is not None:
-        keys = [key for key in keys if int(key) < frame_limit]
-    for start in range(0, len(keys), 256):
-        selected: list[str] = keys[start : start + 256]
-        frames: Int64[ndarray, "n"] = np.array(selected, dtype=np.int64)
+    for keys in frame_batches(rows, frame_limit):
         for camera in camera_keys:
-            positions: Float32[ndarray, "n 133 2"] = np.empty((len(selected), 133, 2), dtype=np.float32)
-            scores: Float32[ndarray, "n 133"] = np.empty((len(selected), 133), dtype=np.float32)
             scale: float = 2.0 / 3.0 if camera.startswith("C") else 1.0
-            for index, key in enumerate(selected):
-                pair: HandPair = from_dict(HandPair, rows[key].pop(camera))
-                positions[index], scores[index] = coco133_from_hands(pair.array(2) * np.float32(scale), confidence[int(key)])
-            positions, scores = confidence_rule(positions, scores)
-            yield camera, (frames, positions, scores)
-        for key in selected:
+            yield camera, coco_rows(keys, [rows[key].pop(camera) for key in keys], confidence, 2, scale)
+        for key in keys:
             del rows[key]
 
 

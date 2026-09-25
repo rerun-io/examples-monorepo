@@ -63,10 +63,10 @@ def camera_sources(root: Path, sequence: str) -> list[CameraSource]:
     """Sort exo by fixed hardware serial, then ego numerically, never by glob order."""
     folder: Path = root / "videos/av1-720-new" / sequence
     sources: list[CameraSource] = []
-    for serial in EXO_SERIALS:
+    for rig, serial in enumerate(EXO_SERIALS):
         path: Path = folder / f"{serial}_rgb_low.mp4"
         if path.is_file():
-            sources.append(CameraSource(path, serial, EXO_SERIALS.index(serial), 0))
+            sources.append(CameraSource(path, serial, rig, 0))
     ego: list[Path] = sorted(folder.glob("HMC_*_mono10bit_low.mp4"), key=lambda path: int(path.name.split("_")[1]))
     sources.extend(CameraSource(path, path.name.split("_")[1], EGO_RIG, index) for index, path in enumerate(ego))
     return sources
@@ -223,16 +223,12 @@ def write_base(
                 recording=recording,
             )
         frames: Int64[ndarray, "n"] = np.arange(count, dtype=np.int64)
-        with timer.stage("remux"):
-            if frame_limit is None:
-                log_video_stream(
-                    recording, camera.path, schema.video_path(camera.rig, camera.cam), times_ns=frame_times(frames), frame_indices=frames
-                )
-            else:
-                with TemporaryDirectory(prefix="assembly101-") as folder:
-                    clip: Path = Path(folder) / "prefix.mp4"
-                    remux_prefix(camera.path, clip, count)
-                    log_video_stream(recording, clip, schema.video_path(camera.rig, camera.cam), times_ns=frame_times(frames), frame_indices=frames)
+        with timer.stage("remux"), TemporaryDirectory(prefix="assembly101-") as folder:
+            video: Path = camera.path
+            if frame_limit is not None:
+                video = Path(folder) / "prefix.mp4"
+                remux_prefix(camera.path, video, count)
+            log_video_stream(recording, video, schema.video_path(camera.rig, camera.cam), times_ns=frame_times(frames), frame_indices=frames)
     timer.capture_s = max(longest, int(scene.frames[-1]) + 1 if len(scene.frames) else 0) / FRAME_RATE
     exo_source: str = next(
         (scene.calibration.sources[camera.key] for camera in scene.cameras if camera.rig != EGO_RIG and camera.key in scene.calibration.sources),

@@ -49,7 +49,6 @@ Actions: TypeAlias = dict[str, list[Segment]]
 
 def read_actions(root: Path, sequences: set[str]) -> dict[str, Actions]:
     """Scan each official CSV once for the selected sequences; absent annotations are allowed."""
-    result: dict[str, Actions] = {sequence: {"coarse": [], "fine": []} for sequence in sequences}
     unique: dict[str, set[Segment]] = {sequence: set() for sequence in sequences}
     for split in ("train", "validation", "test"):
         path: Path = root / "fine-grained-annotations" / f"{split}.csv"
@@ -61,17 +60,16 @@ def read_actions(root: Path, sequences: set[str]) -> dict[str, Actions]:
                 if sequence in sequences:
                     row: FineRow = from_dict(FineRow, raw)
                     unique[sequence].add(Segment(row.start_frame, row.end_frame, row.action_cls))
+    result: dict[str, Actions] = {}
     for sequence in sorted(sequences):
-        result[sequence]["fine"] = sorted(unique[sequence])
+        coarse: list[Segment] = []
         for part in ("assembly", "disassembly"):
             path = root / "coarse-annotations/coarse_labels" / f"{part}_{sequence}.txt"
             if not path.is_file():
                 continue
             with path.open(newline="") as handle:
-                for fields in csv.reader(handle, delimiter="\t"):
-                    if fields:
-                        result[sequence]["coarse"].append(Segment(int(fields[0]), int(fields[1]), f"{part}: {fields[2]}"))
-        result[sequence]["coarse"].sort()
+                coarse.extend(Segment(int(fields[0]), int(fields[1]), f"{part}: {fields[2]}") for fields in csv.reader(handle, delimiter="\t") if fields)
+        result[sequence] = {"coarse": sorted(coarse), "fine": sorted(unique[sequence])}
     return result
 
 
