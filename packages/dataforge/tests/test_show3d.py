@@ -27,6 +27,7 @@ from dataforge.datasets.show3d_object_source import ObjectFrame
 from dataforge.datasets.show3d_objects import ObjectSanity, write_object_pose_layer
 from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, FrameClock, FrameInfo, IndexRow, RecordingInfo, Show3dCamera
 from dataforge.identity import SequenceIdentity
+from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
 
 
@@ -115,6 +116,7 @@ def test_real_scene_base(tmp_path: Path, subject: str, scene: str, count: int) -
         index=index_row(subject_id=subject, scene_id=scene),
         work_dir=tmp_path,
         frame_limit=count,
+        timer=SequenceTimer(),
         hf_revision="test-sha",
     )
     videos: dict[str, int] = {}
@@ -199,6 +201,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
         target,
         index=index_row(subject_id="subject", scene_id="toy_pick-up_abcd", split="test"),
         work_dir=tmp_path / "work",
+        timer=SequenceTimer(),
         hf_revision="test-sha",
     )
     chunks: list[rrc.Chunk] = read_chunks(target)
@@ -254,7 +257,7 @@ def test_table_fields_name_columns_the_layer_writers_produce(tmp_path: Path, tin
     """
     identity: SequenceIdentity = SequenceIdentity("show3d", ("subject", "toy_pick-up_abcd"))
     index: IndexRow = index_row(subject_id="subject", scene_id="toy_pick-up_abcd")
-    write_base_layer(identity, tiny_scene, tmp_path / "base.rrd", index=index, work_dir=tmp_path / "work", hf_revision="test-sha")
+    write_base_layer(identity, tiny_scene, tmp_path / "base.rrd", index=index, work_dir=tmp_path / "work", timer=SequenceTimer(), hf_revision="test-sha")
     caption: Caption = from_dict(
         Caption,
         dict(
@@ -409,8 +412,9 @@ def test_camera_logging_overlaps_remaining_encodes(tmp_path: Path, tiny_scene: P
     monkeypatch.setattr(show3d_layers, "log_video_stream", log_video)
     monkeypatch.setattr(show3d_layers, "perf_counter", lambda: clock[0])
     scene = show3d_layers.read_scene(tiny_scene, scene_key="synthetic")
-    with timing.sequence_timer() as timer, writing.atomic_recording(tmp_path / "base.rrd", recording_id="test") as recording:
-        show3d_layers.log_cameras(recording, scene, tmp_path / "clips")
+    timer = timing.SequenceTimer()
+    with writing.atomic_recording(tmp_path / "base.rrd", recording_id="test") as recording:
+        show3d_layers.log_cameras(recording, scene, tmp_path / "clips", timer)
     assert logged == ["headset0.mp4", "headset1.mp4"]
     assert list((tmp_path / "clips").iterdir()) == []
     assert timer.stage_s["transcode"] == 0.0

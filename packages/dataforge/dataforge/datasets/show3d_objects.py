@@ -96,9 +96,8 @@ def write_object_pose_layer(
             if transform is not None:
                 transforms[index] = transform
         transforms[:, :3, 3] *= 0.001  # millimetres to metres
-        # SHOW3D ships pose rows for every positive confidence, even below mesh visibility's DEFAULT_CONFIDENCE.
         confidence: Float64[ndarray, "n"] = np.asarray([frame.confidence for frame in frames], dtype=np.float64)
-        objects.log_object_pose(recording, alias, clock.times_ns, clock.frame_indices, transforms, confidence, trust_threshold=0.0)
+        objects.log_object_pose(recording, alias, times_ns=clock.times_ns, frame_indices=clock.frame_indices, transforms=transforms, confidence=confidence)
         recording.send_property(
             "object_pose",
             rr.AnyValues(
@@ -126,7 +125,8 @@ def write_object_mesh_layer(
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         confidence: Float64[ndarray, "n"] = np.asarray([frame.confidence for frame in frames], dtype=np.float64)
         objects.log_object_mesh(
-            recording, alias, clock.times_ns, clock.frame_indices, rr.Asset3D(path=mesh), confidence, trust_threshold=DEFAULT_CONFIDENCE
+            recording, alias, times_ns=clock.times_ns, frame_indices=clock.frame_indices, asset=rr.Asset3D(path=mesh), confidence=confidence,
+            posed=np.array([frame.posed for frame in frames], dtype=bool), trust_threshold=DEFAULT_CONFIDENCE
         )
         recording.send_property(
             "object_mesh", rr.AnyValues(mesh_id=pa.array([mesh_id], type=pa.int64()), mesh_source=pa.array([MESH_REPO], type=pa.string()))

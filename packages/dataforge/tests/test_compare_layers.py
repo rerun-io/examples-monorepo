@@ -9,7 +9,7 @@ from dataforge import writing
 from dataforge.apis.compare_layers import compare_layers, component_rows, main
 
 
-def test_comparison_handles_batches_and_rejects_changed_values(tmp_path: Path) -> None:
+def test_comparison_handles_batches_and_rejects_changed_values(tmp_path: Path, capsys) -> None:
     for name, batched, values in [("a", True, [1.0, 2.0]), ("b", False, [1.0, 2.0]), ("c", True, [1.0, 3.0])]:
         with writing.atomic_recording(tmp_path / f"{name}.rrd", recording_id="test", send_properties=False) as recording:
             if batched:
@@ -24,9 +24,11 @@ def test_comparison_handles_batches_and_rejects_changed_values(tmp_path: Path) -
                         columns=rr.Scalars.columns(scalars=[value]),
                         recording=recording,
                     )
-    compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd")
-    with pytest.raises(AssertionError, match="/value"):
-        compare_layers(tmp_path / "a.rrd", tmp_path / "c.rrd")
+    assert compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd").mismatches == []
+    assert "/value" in compare_layers(tmp_path / "a.rrd", tmp_path / "c.rrd").mismatches[0]
+    assert capsys.readouterr().out == ""
+    main(tmp_path / "a.rrd", tmp_path / "b.rrd", atol=0.0)
+    assert capsys.readouterr().out == f"equal: {tmp_path / 'a.rrd'} == {tmp_path / 'b.rrd'} (1 component tracks, atol=0.0)\n"
 
 
 def test_reports_all_differences_and_supports_extra_ignores(tmp_path: Path, capsys) -> None:
@@ -35,15 +37,15 @@ def test_reports_all_differences_and_supports_extra_ignores(tmp_path: Path, caps
             for entity in ("/first", "/second"):
                 rr.send_columns(entity, indexes=[rr.TimeColumn("frame_index", sequence=[0, 1])],
                                 columns=rr.Scalars.columns(scalars=values), recording=recording)
-    with pytest.raises(AssertionError, match="2 mismatch"):
-        compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd")
+    with pytest.raises(SystemExit, match=r"2 mismatch\(es\)"):
+        main(tmp_path / "a.rrd", tmp_path / "b.rrd")
     output = capsys.readouterr().out
     assert "/first" in output and "/second" in output
     assert "row 1" in output and "frame_index" in output
     assert "max abs float difference=3.0" in output
     assert "equal:" not in output
-    compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd",
-                   ignore=[("/first", "Scalars:scalars"), ("/second", "Scalars:scalars")])
+    assert compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd",
+                   ignore=[("/first", "Scalars:scalars"), ("/second", "Scalars:scalars")]).mismatches == []
 
 
 def test_start_time_is_ignored(tmp_path: Path) -> None:
@@ -52,7 +54,7 @@ def test_start_time_is_ignored(tmp_path: Path) -> None:
             pass
     key = ("/__properties", "RecordingInfo:start_time", ())
     assert not component_rows(tmp_path / "a.rrd")[key].equals(component_rows(tmp_path / "b.rrd")[key])
-    compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd")
+    assert compare_layers(tmp_path / "a.rrd", tmp_path / "b.rrd").mismatches == []
 
 
 def test_reports_missing_extra_tracks_row_counts_and_clock_values(tmp_path: Path, capsys) -> None:

@@ -1,7 +1,7 @@
 """Shared hand measurements; positions are metres or shipped image pixels.
 
-Readers retain simplecv's ``assembly21_to_coco133`` mapping: COCO thumb-base
-slots 92/113 are midpoints, and wrist slots 9/10 copy hand wrists 91/112.
+The two-hand adapter uses simplecv's ``assembly21_to_coco133`` mapping: COCO thumb-base
+slots 92/113 are wrist–thumb CMC midpoints (palm is unused), and wrist slots 9/10 copy hand wrists 91/112.
 These derived slots carry the source hand confidence, as SHOW3D does. Class 0
 uses the root COCO-133 AnnotationContext. No writer projects 3D into 2D.
 """
@@ -9,13 +9,39 @@ uses the root COCO-133 AnnotationContext. No writer projects 3D into 2D.
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Float32, Float64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
-from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.skeleton.coco_133 import COCO_133_IDS
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 
 from dataforge import schema
+from dataforge.logging_toolkit import frame_index_column, time_column
+
+HAND_OF_SLOT: Int64[ndarray, "133"] = np.full(133, -1, dtype=np.int64)
+"""Owning hand index, or -1 for uncovered COCO slots."""
+HAND_OF_SLOT[9] = HAND_OF_SLOT[91:112] = 0
+HAND_OF_SLOT[10] = HAND_OF_SLOT[112:133] = 1
+
+
+def coco133_from_hands(
+    landmarks_lr: Float32[ndarray, "2 21 d"], confidence_lr: Float32[ndarray, "2"]
+) -> tuple[Float32[ndarray, "133 d"], Float32[ndarray, "133"]]:
+    """Map Float32[2,21,d] Assembly hands and Float32[2] confidences to COCO.
+
+    d is 2 (shipped pixels) or 3 (metres); absent hands contain NaN.
+    Writers apply confidence_rule to clear confidence on non-finite slots.
+    """
+    dimensions: int = landmarks_lr.shape[-1]
+    if dimensions not in (2, 3):
+        raise ValueError("hand landmarks must have 2 or 3 coordinates")
+    padded: Float32[ndarray, "2 21 3"] = np.zeros((2, 21, 3), dtype=np.float32)
+    padded[:, :, :dimensions] = landmarks_lr
+    positions: Float32[ndarray, "133 d"] = assembly21_to_coco133(padded)[:, :dimensions]
+    confidence: Float32[ndarray, "133"] = np.zeros(133, dtype=np.float32)
+    covered: Bool[ndarray, "133"] = HAND_OF_SLOT >= 0
+    confidence[covered] = confidence_lr[HAND_OF_SLOT[covered]]
+    return positions, confidence
 
 
 def confidence_rule(
@@ -44,21 +70,23 @@ def confidence_rule(
 
 def log_keypoints3d(
     recording: rr.RecordingStream,
-    indexes: list[rr.TimeColumn],
+    *,
+    times_ns: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"],
     positions: Float32[ndarray, "t 133 3"],
     confidence: Float32[ndarray, "t 133"] | None,
 ) -> None:
-    """Write dense COCO rows; explicit None means the source ships no confidence.
+    """Write dense COCO rows with confidence colours; None means no shipped confidence.
 
     Args:
         recording: Destination stream.
-        indexes: Source timelines.
+        times_ns: Int64[ndarray, "t"] video times in nanoseconds.
+        frame_indices: Int64[ndarray, "t"] source indices.
         positions: Float32[ndarray, "t 133 3"], metres; missing slots contain NaN.
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
     """
-    ruled: tuple[Float32[ndarray, "t 133 3"], Float32[ndarray, "t 133"]] = confidence_rule(positions, confidence)
-    xyz: Float32[ndarray, "t 133 3"] = ruled[0]
-    flat_conf: Float32[ndarray, "n"] = ruled[1].reshape(-1)
+    positions, scores = confidence_rule(positions, confidence)
+    flat_conf: Float32[ndarray, "n"] = scores.reshape(-1)
     colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(flat_conf[None, :, None])[0]
     rr.log(
         schema.coco133_xyz_path(),
@@ -68,23 +96,25 @@ def log_keypoints3d(
     )
     rr.send_columns(
         schema.coco133_xyz_path(),
-        indexes=indexes,
-        columns=Points3DWithConfidence.columns(positions=xyz.reshape(-1, 3), confidences=flat_conf, colors=colors).partition([133] * len(positions)),
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+        columns=Points3DWithConfidence.columns(positions=positions.reshape(-1, 3), confidences=flat_conf, colors=colors).partition([133] * len(positions)),
         recording=recording,
     )
 
 
 def log_keypoints2d(
     recording: rr.RecordingStream,
-    path: str,
-    indexes: list[rr.TimeColumn],
+    rig: int,
+    cam: int,
+    *,
+    times_ns: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"],
     positions: Float32[ndarray, "t 133 2"],
     confidence: Float32[ndarray, "t 133"] | None,
 ) -> None:
-    """Write shipped Float32[t,133,2] pixels with Float32[t,133] confidence or explicit None."""
-    ruled: tuple[Float32[ndarray, "t 133 2"], Float32[ndarray, "t 133"]] = confidence_rule(positions, confidence)
-    uv: Float32[ndarray, "t 133 2"] = ruled[0]
-    scores: Float32[ndarray, "t 133"] = ruled[1]
+    """Write shipped Float32[t,133,2] pixels and Float32[t,133] confidence (or None), without colours."""
+    path: str = schema.coco133_uv_path(rig, cam)
+    positions, scores = confidence_rule(positions, confidence)
     rr.log(
         path,
         Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),
@@ -93,57 +123,32 @@ def log_keypoints2d(
     )
     rr.send_columns(
         path,
-        indexes=indexes,
-        columns=Points2DWithConfidence.columns(positions=uv.reshape(-1, 2), confidences=scores.reshape(-1)).partition([133] * len(positions)),
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+        columns=Points2DWithConfidence.columns(positions=positions.reshape(-1, 2), confidences=scores.reshape(-1)).partition([133] * len(positions)),
         recording=recording,
     )
 
 
-def log_hand_confidence(recording: rr.RecordingStream, side: str, indexes: list[rr.TimeColumn], confidence: list[float]) -> None:
-    """Preserve the source's per-hand scalar on every frame."""
-    rr.send_columns(schema.hand_confidence_path(side), indexes=indexes, columns=rr.Scalars.columns(scalars=confidence), recording=recording)
+def log_hand_confidence(
+    recording: rr.RecordingStream, side: str, *, times_ns: Int64[ndarray, "t"], frame_indices: Int64[ndarray, "t"], confidence: Float64[ndarray, "t"]
+) -> None:
+    """Preserve Float64[ndarray, "t"] per-hand confidence on both Int64[t] clocks."""
+    rr.send_columns(
+        schema.hand_confidence_path(side),
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+        columns=rr.Scalars.columns(scalars=confidence),
+        recording=recording,
+    )
 
 
-def log_joint_angles(recording: rr.RecordingStream, side: str, indexes: list[rr.TimeColumn], angles: Float32[ndarray, "t j"]) -> None:
+def log_joint_angles(
+    recording: rr.RecordingStream, side: str, *, times_ns: Int64[ndarray, "t"], frame_indices: Int64[ndarray, "t"], angles: Float32[ndarray, "t j"]
+) -> None:
     """Write shipped Float32[ndarray, 't j'] joint parameters on their sparse clock."""
     if len(angles):
         rr.send_columns(
             schema.hand_joint_angles_path(side),
-            indexes=indexes,
-            columns=rr.AnyValues.columns(joint_angles=pa.array(angles.tolist(), type=pa.list_(pa.float32(), angles.shape[1]))),
+            indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+            columns=rr.AnyValues.columns(joint_angles=pa.FixedSizeListArray.from_arrays(pa.array(angles.reshape(-1)), angles.shape[1])),
             recording=recording,
         )
-
-
-def log_wrist(
-    recording: rr.RecordingStream,
-    side: str,
-    indexes: list[rr.TimeColumn],
-    translations: Float32[ndarray, "t 3"],
-    quaternions: Float64[ndarray, "t 4"],
-) -> None:
-    """Write Float32[t,3] metre translations and Float64[t,4] xyzw quaternions on a sparse clock."""
-    if len(translations):
-        rr.send_columns(
-            schema.hand_wrist_path(side),
-            indexes=indexes,
-            columns=rr.Transform3D.columns(translation=translations, quaternion=quaternions),
-            recording=recording,
-        )
-
-
-def annotation_context() -> rr.AnnotationContext:
-    """Root classes every layer relies on: the COCO-133 skeleton (class 0) and the §13 box labels (100-103)."""
-    return rr.AnnotationContext(
-        [
-            rr.ClassDescription(
-                info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
-                keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
-                keypoint_connections=COCO_133_LINKS,
-            ),
-            *(
-                rr.ClassDescription(info=rr.AnnotationInfo(id=int(layer), label=COCO133_ROI_LABELS[layer], color=COCO133_ROI_COLORS[layer]))
-                for layer in Coco133RoiLayer
-            ),
-        ]
-    )

@@ -12,7 +12,6 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import serde
-from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.umetrack_temp.generic_hand_model_numpy import (
     LEFT_HAND_INDEX,
     NUM_JOINTS_PER_HAND,
@@ -23,7 +22,7 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import (
     wrist_for_hand,
 )
 
-from dataforge import hands, meshes, schema, writing
+from dataforge import hands, logging_toolkit, meshes, schema, writing
 from dataforge.datasets.show3d_source import (
     DEFAULT_CONFIDENCE,
     HAND_POSE_VERSION,
@@ -180,21 +179,15 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                     landmarks_lr[hand_index] = pose.landmarks_3d_mm * np.float32(0.001)
             # Checked UmeTrack LANDMARK against Assembly-Hands HAND_ID2NAME: tips 0–4,
             # wrist 5, thumb 6–7, finger joints 8–19, palm 20 have the same order.
-            xyz[frame_index] = assembly21_to_coco133(landmarks_lr)[:, :3]
-            for hand_index, side in enumerate(HAND_SIDES):
-                pose = frame.hand_poses[side.key]
-                if pose.landmarks_3d_mm is not None and pose.trusted:
-                    offset: int = 91 + hand_index * 21
-                    conf[frame_index, offset : offset + 21] = np.float32(pose.confidence)
-                    conf[frame_index, 9 + hand_index] = np.float32(pose.confidence)
+            confidence_lr: Float32[ndarray, "2"] = np.array([frame.hand_poses[side.key].confidence for side in HAND_SIDES], dtype=np.float32)
+            xyz[frame_index], conf[frame_index] = hands.coco133_from_hands(landmarks_lr, confidence_lr)
         # The shared writer zeroes the confidence of every non-finite slot (e.g. an undefined thumb-base midpoint).
-        hands.log_keypoints3d(recording, clock.indexes(slice(None)), xyz, conf)
+        hands.log_keypoints3d(recording, times_ns=clock.times_ns, frame_indices=clock.frame_indices, positions=xyz, confidence=conf)
         for camera in HEADSET_CAMERAS:
             uv: Float32[ndarray, "n 133 2"] = np.full((n_frames, 133, 2), np.nan, dtype=np.float32)
             uv_conf: Float32[ndarray, "n 133"] = np.zeros((n_frames, 133), dtype=np.float32)
             for frame_index, frame in enumerate(selected):
-                pixels_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
-                pixels_lr[:, :, 2] = np.float32(0.0)
+                pixels_lr: Float32[ndarray, "2 21 2"] = np.full((2, 21, 2), np.nan, dtype=np.float32)
                 for hand_index, side in enumerate(HAND_SIDES):
                     pose = frame.hand_poses[side.key]
                     pixels: list[list[float] | None] | None = (pose.landmarks_2d or {}).get(camera.source_name)
@@ -202,28 +195,33 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                         pixels_lr[hand_index, :, :2] = np.asarray(
                             [point if point is not None else [np.nan, np.nan] for point in pixels], dtype=np.float32
                         )
-                uv[frame_index] = assembly21_to_coco133(pixels_lr)[:, :2]
-                for hand_index, side in enumerate(HAND_SIDES):
-                    offset = 91 + hand_index * 21
-                    uv_conf[frame_index, offset : offset + 21] = np.float32(frame.hand_poses[side.key].confidence)
-                    uv_conf[frame_index, 9 + hand_index] = np.float32(frame.hand_poses[side.key].confidence)
-            path: str = schema.coco133_uv_path(camera.rig, camera.cam)
-            hands.log_keypoints2d(recording, path, clock.indexes(slice(None)), uv, uv_conf)
+                confidence_lr = np.array([frame.hand_poses[side.key].confidence for side in HAND_SIDES], dtype=np.float32)
+                uv[frame_index], uv_conf[frame_index] = hands.coco133_from_hands(pixels_lr, confidence_lr)
+            hands.log_keypoints2d(
+                recording, camera.rig, camera.cam, times_ns=clock.times_ns, frame_indices=clock.frame_indices, positions=uv, confidence=uv_conf
+            )
         coverage: dict[str, pa.Array] = {}
         for side in HAND_SIDES:
             poses: list[HandPose] = [frame.hand_poses[side.key] for frame in selected]
             confidence: list[float] = [pose.confidence for pose in poses]
-            hands.log_hand_confidence(recording, side.name, clock.indexes(slice(None)), confidence)
+            hands.log_hand_confidence(
+                recording, side.name, times_ns=clock.times_ns, frame_indices=clock.frame_indices,
+                confidence=np.asarray(confidence, dtype=np.float64),
+            )
             coverage[f"coverage_{side.name}_high_conf"] = pa.array([high_confidence_coverage(confidence)], type=pa.float64())
             positions, values = sparse_rows(poses, lambda pose: pose.joint_angles)
             angles: Float32[ndarray, "n 22"] = np.asarray(values, dtype=np.float32).reshape(-1, NUM_JOINTS_PER_HAND)
-            hands.log_joint_angles(recording, side.name, clock.indexes(positions), angles)
+            hands.log_joint_angles(recording, side.name, times_ns=clock.times_ns[positions], frame_indices=clock.frame_indices[positions], angles=angles)
             positions, values = sparse_rows(poses, lambda pose: pose.wrist_rotation)
             rotations: Float64[ndarray, "n 4"] = Rotation.from_matrix(np.asarray(values, dtype=np.float64).reshape(-1, 3, 3)).as_quat()
             translations: Float32[ndarray, "n 3"] = np.asarray(
                 [poses[i].wrist_translation for i in positions], dtype=np.float32
             ).reshape(-1, 3) * np.float32(0.001)
-            hands.log_wrist(recording, side.name, clock.indexes(positions), translations, rotations)
+            if positions:
+                logging_toolkit.log_pose_track(
+                    recording, schema.hand_wrist_path(side.name), times_ns=clock.times_ns[positions],
+                    frame_indices=clock.frame_indices[positions], translations_xyz=translations, quaternions_xyzw=rotations,
+                )
         recording.send_property("hand_pose", rr.AnyValues(version=pa.array([HAND_POSE_VERSION], type=pa.string()), **coverage))
 
 
@@ -260,4 +258,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
                     wrists[:, :3, 3] = np.asarray([pose.wrist_translation for pose in batch_poses], dtype=np.float32)
                     wrists[:, 3, 3] = 1.0
                     vertices = skin_mesh(model, angles, wrist_for_hand(wrists, side.model_index)) * np.float32(0.001)
-                meshes.log_mesh_batch(recording, path, clock.indexes(slice(start, stop)), vertices, trusted[start:stop])
+                meshes.log_mesh_batch(
+                    recording, path, times_ns=clock.times_ns[start:stop], frame_indices=clock.frame_indices[start:stop],
+                    vertices=vertices, trusted=trusted[start:stop],
+                )

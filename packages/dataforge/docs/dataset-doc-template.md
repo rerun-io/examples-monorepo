@@ -34,8 +34,8 @@ evidence. An unexplained difference blocks the port.
 ## Timing
 
 Read `<output_root>/timing/convert.jsonl` with
-`dataforge.timing.load_convert_records`; registration times are in
-`timing/register.jsonl`. Report host, converter version, selected sequences,
+`dataforge.timing.load_records(path, ConvertRecord)`; read registration times
+in `timing/register.jsonl` with `load_records(path, RegisterRecord)`. Report host, converter version, selected sequences,
 output bytes, capture seconds, and elapsed seconds per capture-minute. Separate
 skipped runs. Compare with simplecv preprocessing plus conversion in the prod
 environment on the same sequences. Stages can overlap; total is elapsed wall time.

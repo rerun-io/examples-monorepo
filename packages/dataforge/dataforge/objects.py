@@ -10,32 +10,31 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import schema
-from dataforge.logging_toolkit import frame_index_column, time_column
+from dataforge.logging_toolkit import frame_index_column, log_pose_track, time_column
 
 
 def log_object_pose(
     recording: rr.RecordingStream,
     alias: str,
+    *,
     times_ns: Int64[ndarray, "t"],
     frame_indices: Int64[ndarray, "t"],
     transforms: Float64[ndarray, "t 4 4"],
     confidence: Float32[ndarray, "t"] | Float64[ndarray, "t"],
-    *,
-    trust_threshold: float,
 ) -> None:
-    """Write trusted Float64[t,4,4] world transforms (metres), and all Float32/Float64[t] confidences.
+    """Write finite Float64[t,4,4] poses and dense Float32/Float64[t] confidence.
 
-    Missing transforms are NaN. Trust is strictly above the supplied threshold.
+    Missing poses have non-finite transforms; confidence never suppresses a pose.
     """
-    valid: Bool[ndarray, "t"] = np.isfinite(transforms).all(axis=(1, 2)) & (confidence > trust_threshold)
-    if np.any(valid):
-        rr.send_columns(
+    posed: Bool[ndarray, "t"] = np.isfinite(transforms).all(axis=(1, 2))
+    if np.any(posed):
+        log_pose_track(
+            recording,
             schema.objects_path(alias),
-            indexes=[time_column(times_ns[valid]), frame_index_column(frame_indices[valid])],
-            columns=rr.Transform3D.columns(
-                translation=transforms[valid, :3, 3], quaternion=Rotation.from_matrix(transforms[valid, :3, :3]).as_quat()
-            ),
-            recording=recording,
+            times_ns=times_ns[posed],
+            frame_indices=frame_indices[posed],
+            translations_xyz=transforms[posed, :3, 3],
+            quaternions_xyzw=Rotation.from_matrix(transforms[posed, :3, :3]).as_quat(),
         )
     rr.send_columns(
         schema.object_confidence_path(alias),
@@ -48,17 +47,18 @@ def log_object_pose(
 def log_object_mesh(
     recording: rr.RecordingStream,
     alias: str,
+    *,
     times_ns: Int64[ndarray, "t"],
     frame_indices: Int64[ndarray, "t"],
     asset: rr.Asset3D,
     confidence: Float32[ndarray, "t"] | Float64[ndarray, "t"],
-    *,
+    posed: Bool[ndarray, "t"],
     trust_threshold: float,
 ) -> None:
-    """Log static geometry and alpha transitions from Float32/Float64[t] source confidence."""
+    """Log geometry visible where Bool[t] posed and Float32/Float64[t] confidence exceeds the threshold."""
     path: str = schema.object_mesh_path(alias)
     rr.log(path, asset, static=True, recording=recording)
-    trusted: Bool[ndarray, "t"] = confidence > trust_threshold
+    trusted: Bool[ndarray, "t"] = posed & (confidence > trust_threshold)
     if len(trusted):
         # Rows only where visibility changes; latest-at carries them.
         changes: Int64[ndarray, "k"] = np.flatnonzero(np.r_[True, trusted[1:] != trusted[:-1]])

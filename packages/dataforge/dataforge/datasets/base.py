@@ -23,6 +23,7 @@ import rerun.blueprint as rrb
 
 from dataforge import paths
 from dataforge.identity import SequenceIdentity
+from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
 
 
@@ -66,6 +67,16 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
+        self.timer: SequenceTimer = SequenceTimer()
+        """Stage clock of the sequence being converted.
+
+        dataforge-convert installs a fresh one before every sequence; converters
+        time stages with self.timer.stage(name) and report self.timer.capture_s.
+        """
+
+    def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
+        """Layer destinations for one sequence."""
+        return {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
 
     @abstractmethod
     def download(self) -> None:

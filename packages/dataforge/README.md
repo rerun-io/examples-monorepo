@@ -437,8 +437,11 @@ port. Apply these rules:
 - Shared output helpers live in `dataforge.hands`, `dataforge.objects`, and
   `dataforge.meshes`; skinning and source format adapters stay dataset-specific.
 - Conversion and registration append typed timing records under `timing/`.
-  Converters instrument optional work with `dataforge.timing.stage("fetch")`
-  and `stage("write:<layer>")`; nested stages overlap and must not be summed.
+  Converters time work with `self.timer.stage("fetch")`
+  and `self.timer.stage("write:<layer>")`; nested stages overlap and must not be summed.
+  Report the base `video_time` span in seconds through `self.timer.capture_s`.
+  Read either JSONL file with `dataforge.timing.load_records(path, ConvertRecord)`
+  or `load_records(path, RegisterRecord)`.
 - Register review subsets with `--catalog-name <dataset>-sample --sequences
   <recording_id ...>`. File identities stay unchanged.
 - Compare layer data with `python tools/dev/compare_layers.py <a.rrd> <b.rrd>`

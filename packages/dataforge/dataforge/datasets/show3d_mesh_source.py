@@ -1,7 +1,6 @@
 """HOT3D name matching and asset preparation.
 
-Rerun 0.38.1 rejects glTF files requiring KHR_texture_transform
-(checked with native Viewer pixels on 2026-09-25).
+GLBs pass through dataforge.objects.strip_texture_transform (see there).
 """
 
 from dataclasses import dataclass

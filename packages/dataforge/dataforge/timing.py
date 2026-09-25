@@ -1,22 +1,20 @@
 """Per-sequence wall times and append-only benchmark records.
 
 Stages may overlap (base writing includes transcode); never sum them for totals.
-The context-local timer lets converters add stages without changing their API.
+Each dataset owns an explicit SequenceTimer; the CLI replaces it per sequence.
+Converters report stages and the base frame-clock capture span on that timer.
 """
 
 import fcntl
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from typing import TypeVar
 
-import pyarrow as pa
-import pyarrow.compute as pc
-import rerun.chunk as rrc
 from serde import SerdeError, serde
 from serde.json import from_json, to_json
 
@@ -78,6 +76,8 @@ class SequenceTimer:
         self.started_at: str = datetime.now(UTC).isoformat()
         self.start: float = perf_counter()
         self.stage_s: dict[str, float] = {}
+        self.capture_s: float | None = None
+        """Capture length the converter reports: base video_time span in seconds; None when not reported."""
 
     @property
     def total_s(self) -> float:
@@ -98,38 +98,6 @@ class SequenceTimer:
             self.add(name, perf_counter() - start)
 
 
-_ACTIVE: ContextVar[SequenceTimer | None] = ContextVar("dataforge_timer", default=None)
-
-
-@contextmanager
-def sequence_timer() -> Iterator[SequenceTimer]:
-    """Start an isolated timer for one convert call."""
-    timer: SequenceTimer = SequenceTimer()
-    token: Token[SequenceTimer | None] = _ACTIVE.set(timer)
-    try:
-        yield timer
-    finally:
-        _ACTIVE.reset(token)
-
-
-@contextmanager
-def stage(name: str) -> Iterator[None]:
-    """Instrument an optional stage; direct library callers need no timer."""
-    timer: SequenceTimer | None = _ACTIVE.get()
-    if timer is None:
-        yield
-    else:
-        with timer.stage(name):
-            yield
-
-
-def record(name: str, seconds: float) -> None:
-    """Add measured wall seconds to the active timer; no-op without a timer."""
-    timer: SequenceTimer | None = _ACTIVE.get()
-    if timer is not None:
-        timer.add(name, seconds)
-
-
 def append_record(path: Path, record: ConvertRecord | RegisterRecord) -> None:
     """Append a complete JSON line under a process lock, creating directories."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,25 +106,15 @@ def append_record(path: Path, record: ConvertRecord | RegisterRecord) -> None:
         output.write(to_json(record) + "\n")
 
 
-def load_convert_records(path: Path) -> list[ConvertRecord]:
+RecordT = TypeVar("RecordT", ConvertRecord, RegisterRecord)
+
+
+def load_records(path: Path, cls: type[RecordT]) -> list[RecordT]:  # noqa: UP047 — pyserde/beartype use the runtime TypeVar.
     """Read typed records; report the file and line of a malformed record."""
-    records: list[ConvertRecord] = []
+    records: list[RecordT] = []
     for number, line in enumerate(path.read_text().splitlines(), 1):
         try:
-            records.append(from_json(ConvertRecord, line))
+            records.append(from_json(cls, line))
         except (SerdeError, json.JSONDecodeError) as error:
             raise ValueError(f"{path}:{number}: {error}") from error
     return records
-
-
-def capture_span(path: Path) -> float | None:
-    """Read the base recording's video_time bounds without decoding video."""
-    bounds: list[int] = []
-    reader: rrc.RrdReader = rrc.RrdReader(path)
-    for chunk in reader.stream():
-        if "video_time" in chunk.timeline_names:
-            values: pa.Array = chunk.to_record_batch().column("video_time").cast("int64")
-            limits = pc.call_function("min_max", [values]).as_py()
-            if limits["min"] is not None:
-                bounds.extend((limits["min"], limits["max"]))
-    return (max(bounds) - min(bounds)) / 1e9 if bounds else None

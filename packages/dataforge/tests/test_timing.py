@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 import rerun as rr
 
-from dataforge import paths, timing, writing
+from dataforge import paths, writing
 from dataforge.apis import convert
 from dataforge.datasets.robocap import RobocapConfig, RobocapDataset
 from dataforge.identity import SequenceIdentity
-from dataforge.timing import ConvertRecord, SequenceTimer, append_record, load_convert_records, stage
+from dataforge.timing import ConvertRecord, RegisterRecord, SequenceTimer, append_record, load_records
 
 
 def test_round_trip_and_accumulated_stages(tmp_path: Path) -> None:
@@ -23,7 +23,7 @@ def test_round_trip_and_accumulated_stages(tmp_path: Path) -> None:
     path = tmp_path / "timing/convert.jsonl"
     append_record(path, record)
     append_record(path, record)
-    assert load_convert_records(path) == [record, record]
+    assert load_records(path, ConvertRecord) == [record, record]
     assert set(record.stage_s) == {"fetch"}
     assert record.total_s >= record.stage_s["fetch"] >= 0.0
 
@@ -36,24 +36,21 @@ def test_convert_records_written_and_skipped_sequences(tmp_path: Path, monkeypat
     def fake_convert(self, identity, source, *, force):
         target = paths.rrd_path(tmp_path, layer="base", identity=identity)
         if not writing.should_skip(target, force=force):
-            with stage("write:base"), writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
+            with self.timer.stage("write:base"), writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
                 rr.send_columns(
                     "/value",
                     indexes=[rr.TimeColumn("video_time", duration=[2.0, 5.0])],
                     columns=rr.Scalars.columns(scalars=[0.0, 1.0]),
                     recording=recording,
                 )
+            self.timer.capture_s = 3.0
         return target
 
     monkeypatch.setattr(RobocapDataset, "convert", fake_convert)
     convert.main(convert.Config(dataset=RobocapConfig()))
 
-    def unexpected_read(path):
-        raise AssertionError("skipped conversion must not read base")
-
-    monkeypatch.setattr(convert, "capture_span", unexpected_read)
     convert.main(convert.Config(dataset=RobocapConfig()))
-    first, second = load_convert_records(tmp_path / "timing/convert.jsonl")
+    first, second = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)
     assert first.capture_s == 3.0
     assert second.capture_s is None
     assert first.layer_bytes["base"] > 0
@@ -72,7 +69,7 @@ def test_failed_conversion_has_a_timing_record(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(RobocapDataset, "convert", fail)
     with pytest.raises(SystemExit, match="1 of 1"):
         convert.main(convert.Config(dataset=RobocapConfig()))
-    record = load_convert_records(tmp_path / "timing/convert.jsonl")[0]
+    record = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)[0]
     assert record.error == "ValueError: broken source"
     assert not record.skipped
     assert record.capture_s is None
@@ -87,9 +84,27 @@ def test_converter_version_fallback(monkeypatch) -> None:
         assert convert.converter_version() == "1"
 
 
-def test_record_adds_to_active_timer() -> None:
-    timing.record("transcode", 9.0)
-    with timing.sequence_timer() as timer:
-        timing.record("transcode", 2.0)
-        timing.record("transcode", 3.0)
-    assert timer.stage_s == {"transcode": 5.0}
+
+def test_register_record_round_trip(tmp_path: Path) -> None:
+    record = RegisterRecord("sample", "2026-09-25T00:00:00+00:00", {"base": 1.0}, 2.0, 3, 4.0, "host")
+    path = tmp_path / "register.jsonl"
+    append_record(path, record)
+    assert load_records(path, RegisterRecord) == [record]
+
+
+def test_converter_without_capture_report(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
+    identity = SequenceIdentity("robocap", ("unreported",))
+    monkeypatch.setattr(RobocapDataset, "discover", lambda self: [(identity, tmp_path)])
+
+    def fake_convert(self, identity, source, *, force):
+        target = self.targets(identity)["base"]
+        with writing.atomic_recording(target, recording_id=identity.recording_id):
+            pass
+        return target
+
+    monkeypatch.setattr(RobocapDataset, "convert", fake_convert)
+    convert.main(convert.Config(dataset=RobocapConfig()))
+    record = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)[0]
+    assert not record.skipped
+    assert record.capture_s is None

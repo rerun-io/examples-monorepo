@@ -14,7 +14,7 @@ from dataforge import paths
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.timing import ConvertRecord, append_record, capture_span, sequence_timer
+from dataforge.timing import ConvertRecord, SequenceTimer, append_record
 from dataforge.writing import CONVERT_SCHEMA_VERSION
 
 
@@ -66,6 +66,41 @@ def file_stamps(targets: dict[str, Path]) -> dict[str, tuple[int, int]]:
     return stamps
 
 
+def convert_one(
+    dataset: DataforgeDataset, identity: SequenceIdentity, source: object, *, force: bool, version: str
+) -> ConvertRecord:
+    """Convert one sequence and return its timing record, including an individual failure."""
+    dataset.timer = SequenceTimer()
+    timer: SequenceTimer = dataset.timer
+    targets: dict[str, Path] = dataset.targets(identity)
+    before: dict[str, tuple[int, int]] = file_stamps(targets)
+    failure: str | None = None
+    try:
+        target: Path = dataset.convert(identity, source, force=force)
+        elapsed: float = timer.total_s
+        if not target.is_file():
+            raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
+    except BeartypeException:
+        raise
+    except Exception as error:
+        elapsed = timer.total_s
+        failure = f"{type(error).__name__}: {error}"
+    written: dict[str, int] = {layer: stamp[1] for layer, stamp in file_stamps(targets).items() if before.get(layer) != stamp}
+    return ConvertRecord(
+        dataset=dataset.config.name,
+        recording_id=identity.recording_id,
+        converter_version=version,
+        started_at=timer.started_at,
+        stage_s=timer.stage_s,
+        total_s=elapsed,
+        capture_s=timer.capture_s,
+        layer_bytes=written,
+        host=gethostname(),
+        skipped=not written and failure is None,
+        error=failure,
+    )
+
+
 def main(config: Config) -> None:
     """Convert every selected sequence serially, surviving individual failures.
 
@@ -82,40 +117,10 @@ def main(config: Config) -> None:
     source_version: str = converter_version()
     root: Path = paths.output_root()
     for identity, source in selected:
-        targets: dict[str, Path] = {layer: paths.rrd_path(root, layer=layer, identity=identity) for layer in dataset.layers}
-        before: dict[str, tuple[int, int]] = file_stamps(targets)
-        failure: str | None = None
-        capture_s: float | None = None
-        with sequence_timer() as timer:
-            try:
-                target: Path = dataset.convert(identity, source, force=config.force)
-                if not target.is_file():
-                    raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
-                if any(before.get(layer) != stamp for layer, stamp in file_stamps(targets).items()):
-                    capture_s = capture_span(target)
-            except BeartypeException:
-                raise
-            except Exception as error:
-                failure = f"{type(error).__name__}: {error}"
-                print(f"FAILED {identity.sequence_key}: {failure}")
-                failed.append(identity.sequence_key)
-        elapsed: float = timer.total_s
-        written: dict[str, int] = {layer: stamp[1] for layer, stamp in file_stamps(targets).items() if before.get(layer) != stamp}
-        append_record(
-            root / "timing/convert.jsonl",
-            ConvertRecord(
-                dataset=dataset_config.name,
-                recording_id=identity.recording_id,
-                converter_version=source_version,
-                started_at=timer.started_at,
-                stage_s=timer.stage_s,
-                total_s=elapsed,
-                capture_s=capture_s,
-                layer_bytes=written,
-                host=gethostname(),
-                skipped=not written and failure is None,
-                error=failure,
-            ),
-        )
+        record: ConvertRecord = convert_one(dataset, identity, source, force=config.force, version=source_version)
+        append_record(root / "timing/convert.jsonl", record)
+        if record.error is not None:
+            print(f"FAILED {identity.sequence_key}: {record.error}")
+            failed.append(identity.sequence_key)
     if failed:
         raise SystemExit(f"{len(failed)} of {len(selected)} sequence(s) failed: {', '.join(failed)}")

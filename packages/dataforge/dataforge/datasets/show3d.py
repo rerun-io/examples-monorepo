@@ -45,7 +45,6 @@ from dataforge.datasets.show3d_source import (
     read_json,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.timing import stage
 from dataforge.writing import TableField, TableFields
 
 REPO_ID: str = "facebook/show3d-dataset"
@@ -196,7 +195,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.commit_sha)
 
     def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
-        targets: dict[str, Path] = {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
+        targets: dict[str, Path] = self.targets(identity)
         alias: str = source.object_alias
         mesh: str | None = mesh_name(alias)
         wants: dict[str, bool] = {
@@ -221,7 +220,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             files.update([*metadata_files(key), object_pose_file(key)])
         if wants[paths.OBJECT_POSE_LAYER]:
             files.update(calibration_file(key, camera) for camera in HEADSET_CAMERAS)
-        with stage("fetch"):
+        with self.timer.stage("fetch"):
             self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
@@ -230,12 +229,13 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             work: Path = self.config.root / "work" / identity.recording_id
             work.mkdir(parents=True, exist_ok=True)
             try:
-                with stage("write:base"):
+                with self.timer.stage("write:base"):
                     scene = write_base_layer(
                         identity,
                         scene_dir,
                         targets[paths.BASE_LAYER],
                         index=source,
+                        timer=self.timer,
                         work_dir=work,
                         hf_revision=self.commit_sha,
                         default_blueprint=self.default_blueprint(),
@@ -243,23 +243,23 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             finally:
                 archives.remove_tree(work)
             written.append(paths.BASE_LAYER)
-        clock: FrameClock | None = None
+        clock: FrameClock | None = scene
         hand_frames: list[HandFrame] = []
         profile: HandProfileDoc | None = None
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
-            clock = scene if scene is not None else read_frame_clock(scene_dir, key)
+            clock = clock if clock is not None else read_frame_clock(scene_dir, key)
             hand_frames = read_hand_frames(self.config.root / hand_pose_file(key), clock) if source.has_hand_pose else []
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER]:
             profile = read_hand_profile(self.config.root / hand_profile_file(source.subject_id))
         if wants[paths.HAND_POSE_LAYER]:
             assert clock is not None and profile is not None
-            with stage("write:hand_pose"):
+            with self.timer.stage("write:hand_pose"):
                 write_hand_pose_layer(identity, clock, hand_frames, profile.text, targets[paths.HAND_POSE_LAYER])
             written.append(paths.HAND_POSE_LAYER)
         caption: Caption | None = read_json(self.config.root / caption_file(key), Caption) if wants[paths.CAPTIONS_LAYER] else None
         if wants[paths.CAPTIONS_LAYER]:
             assert caption is not None
-            with stage("write:captions"):
+            with self.timer.stage("write:captions"):
                 write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
             written.append(paths.CAPTIONS_LAYER)
         object_track: ObjectTrack | None = None
@@ -274,7 +274,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             metrics: ObjectSanity = object_sanity(
                 frames, list((scene.headsets if scene is not None else read_headset_calibrations(scene_dir, clock)).values()), hand_frames
             )
-            with stage("write:object_pose"):
+            with self.timer.stage("write:object_pose"):
                 write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER], clock_offset_s=object_track.clock_offset_s)
             written.append(paths.OBJECT_POSE_LAYER)
         if wants[paths.OBJECT_MESH_LAYER]:
@@ -282,7 +282,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             if any(frame.posed for frame in object_track.frames):
                 asset: MeshAsset = stripped_mesh(self.config.root, alias)
                 assert clock is not None
-                with stage("write:object_mesh"):
+                with self.timer.stage("write:object_mesh"):
                     write_object_mesh_layer(identity, alias, clock, object_track.frames, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
                 written.append(paths.OBJECT_MESH_LAYER)
             else:
@@ -290,9 +290,11 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                 print(f"{identity.sequence_key}: no object_mesh: the object track has no posed frame")
         if wants[paths.HAND_MESH_LAYER]:
             assert clock is not None and profile is not None
-            with stage("write:hand_mesh"):
+            with self.timer.stage("write:hand_mesh"):
                 write_hand_mesh_layer(identity, clock, hand_frames, profile.model, targets[paths.HAND_MESH_LAYER])
             written.append(paths.HAND_MESH_LAYER)
+        if clock is not None:  # a captions-only rebuild reads no frame clock and reports no capture length
+            self.timer.capture_s = float(clock.times_ns[-1] - clock.times_ns[0]) / 1e9
         if wants[paths.BASE_LAYER] and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()

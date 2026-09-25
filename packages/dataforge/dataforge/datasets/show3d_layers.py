@@ -32,10 +32,9 @@ from dataforge.datasets.show3d_source import (
     read_headset_calibrations,
     read_json,
 )
-from dataforge.hands import annotation_context
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import log_camera_node, log_pose_track, log_rig_node, log_video_stream
-from dataforge.timing import record
+from dataforge.logging_toolkit import annotation_context, log_camera_node, log_pose_track, log_rig_node, log_video_stream
+from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import transcode_mp4_gray
 
 VIDEO_CQ: int = 36
@@ -177,27 +176,24 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
 
 
 
-def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> None:
+def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path, timer: SequenceTimer) -> None:
     """Encode at most three clips at once, then log and remove them in order."""
     work_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = [work_dir / f"{camera.camera.source_name}.mp4" for camera in scene.cameras]
-    completed: list[float] = []
 
-    def encode(source: SceneCamera, clip: Path) -> int:
-        try:
-            return transcode_mp4_gray(
-                source.video, clip, gop=VIDEO_GOP, cq=VIDEO_CQ, fps=int(scene.info.fps), frames=len(scene.frames),
-            )
-        finally:
-            # Capture completion before result() releases the logging thread.
-            completed.append(perf_counter())
+    def encode(source: SceneCamera, clip: Path) -> float:
+        transcode_mp4_gray(
+            source.video, clip, gop=VIDEO_GOP, cq=VIDEO_CQ, fps=int(scene.info.fps), frames=len(scene.frames),
+        )
+        return perf_counter()
 
     started: float = perf_counter()
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures: list[Future[int]] = [executor.submit(encode, source, clip) for source, clip in zip(scene.cameras, clips, strict=True)]
+            futures: list[Future[float]] = [executor.submit(encode, source, clip) for source, clip in zip(scene.cameras, clips, strict=True)]
+            finished: list[float] = []
             for source, clip, future in zip(scene.cameras, clips, futures, strict=True):
-                future.result()
+                finished.append(future.result())
                 camera: Show3dCamera = source.camera
                 log_camera_node(
                     recording,
@@ -241,9 +237,8 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
                         ).partition(lengths),
                         recording=recording,
                     )
+            timer.add("transcode", max(finished) - started)
     finally:
-        if completed:
-            record("transcode", max(completed) - started)
         for clip in clips:
             clip.unlink(missing_ok=True)
 
@@ -307,6 +302,7 @@ def write_base_layer(
     scene_dir: Path,
     target: Path,
     *,
+    timer: SequenceTimer,
     index: IndexRow,
     work_dir: Path,
     hf_revision: str,
@@ -320,7 +316,7 @@ def write_base_layer(
         rr.log("/", annotation_context(), static=True, recording=recording)
         log_rig_node(recording, 0, reference=None, num_cameras=sum(camera.camera.rig == 0 for camera in scene.cameras), name="back_rig", kind="exo")
         log_rig_node(recording, 1, reference="cam_00", num_cameras=2, name="quest3", kind="ego")
-        log_cameras(recording, scene, work_dir)
+        log_cameras(recording, scene, work_dir, timer)
         log_headset(recording, scene)
         log_frames(recording, scene)
         writing.send_capture_properties(

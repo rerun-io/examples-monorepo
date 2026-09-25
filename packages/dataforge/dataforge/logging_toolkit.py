@@ -24,6 +24,8 @@ import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import log_pinhole
 from simplecv.rig import CameraKind, PeerSensorKind
 
@@ -601,3 +603,20 @@ def log_magnetometer(
                 recording=recording,
             )
     _log_sensor_node(recording, schema.mag_path(rig, mag), name=name, kind="mag", unit=unit)
+
+
+def annotation_context() -> rr.AnnotationContext:
+    """Root classes every layer relies on: the COCO-133 skeleton (class 0) and the §13 box labels (100-103)."""
+    return rr.AnnotationContext(
+        [
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
+                keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
+                keypoint_connections=COCO_133_LINKS,
+            ),
+            *(
+                rr.ClassDescription(info=rr.AnnotationInfo(id=int(layer), label=COCO133_ROI_LABELS[layer], color=COCO133_ROI_COLORS[layer]))
+                for layer in Coco133RoiLayer
+            ),
+        ]
+    )

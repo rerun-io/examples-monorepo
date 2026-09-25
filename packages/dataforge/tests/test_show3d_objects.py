@@ -336,6 +336,7 @@ def test_convert_rebuilds_each_mesh_and_object_layer_without_video(
     assert capsys.readouterr().out.splitlines()[-1] == (
         f"done {key}: hand_pose, captions, object_pose, object_mesh, hand_mesh"
     )
+    assert dataset.timer.capture_s == {"SPI102": 9.749999999, "LYA722": 16.683333332}[build.identity.parts[0]]
     assert "commit_sha" not in dataset.__dict__
     targets: list[Path] = [output / layer / f"{build.identity.recording_id}.rrd" for layer in dataset.layers]
     for layer in ("object_pose", "object_mesh", "hand_mesh"):
