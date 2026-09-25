@@ -17,7 +17,7 @@ from agent_traces import claude
 from agent_traces import codex_records as cr
 from agent_traces import events as ev
 from agent_traces.codex_tools import CompletedTool, RawCall, tool_events
-from agent_traces.sources import Discovery, SessionSource
+from agent_traces.sources import DamagedLine, Discovery, SessionSource, skip_damaged
 from agent_traces.timestamps import parse_timestamp_ns
 
 Decoded: TypeAlias = cr.SessionMeta | cr.Context | cr.ResponseItem | cr.TokenRecord | cr.Event
@@ -48,12 +48,22 @@ class SourceRecord:
     """Only native input fields, never command output."""
 
 
-def iter_rollout(path: Path) -> Generator[SourceRecord]:
-    """Decode one line at a time; diagnostics never include source content."""
+def iter_rollout(path: Path) -> Generator[SourceRecord | DamagedLine]:
+    """Decode one line at a time; diagnostics never include source content.
+
+    A line after the header that is not valid JSON yields a `DamagedLine`; a damaged header still fails,
+    because the rollout cannot be identified without it.
+    """
     with path.open("rb") as stream:
         for index, line in enumerate(stream):
             try:
                 raw: object = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                raw = DamagedLine(path, index + 1)
+            if isinstance(raw, DamagedLine) and index > 0:
+                yield raw
+                continue
+            try:
                 if not isinstance(raw, dict):
                     raise SerdeError("expected an object")
                 if index == 0 and "type" not in raw and "id" in raw and "timestamp" in raw:
@@ -66,7 +76,7 @@ def iter_rollout(path: Path) -> Generator[SourceRecord]:
                 timestamp: int = parse_timestamp_ns(envelope.timestamp)
             except (SkipRollout, NotCodex):
                 raise
-            except (orjson.JSONDecodeError, SerdeError, ValueError) as error:
+            except (SerdeError, ValueError) as error:
                 raise ValueError(f"line={index + 1} invalid rollout structure ({type(error).__name__})") from None
             native: object = envelope.payload.get("item") if envelope.type == "event_msg" else None
             item_json: str = ""
@@ -147,6 +157,8 @@ class RolloutFacts:
     """Native completions establish supported history."""
     skipped: dict[str, int] = field(default_factory=dict)
     """Unmodeled payloads only."""
+    damaged: dict[str, int] = field(default_factory=dict)
+    """Damaged-line count from collection; emission clears `skipped`, then merges this back."""
     failure: str = ""
     """Decode failure after valid metadata, retained for parent ownership."""
     exclusion: str = ""
@@ -155,9 +167,9 @@ class RolloutFacts:
 
 def collect(path: Path) -> RolloutFacts:
     """Read the header once, check its version once, then collect typed facts."""
-    records: Iterator[SourceRecord] = iter_rollout(path)
-    first: SourceRecord | None = next(records, None)
-    if first is None or not isinstance(first.payload, cr.SessionMeta):
+    records: Iterator[SourceRecord | DamagedLine] = iter_rollout(path)
+    first: SourceRecord | DamagedLine | None = next(records, None)
+    if not isinstance(first, SourceRecord) or not isinstance(first.payload, cr.SessionMeta):
         raise ValueError("missing session_meta")
     facts: RolloutFacts = RolloutFacts(path.resolve(), first.payload)
     try:
@@ -170,6 +182,9 @@ def collect(path: Path) -> RolloutFacts:
     effort: str = ""
     try:
         for source in records:
+            if isinstance(source, DamagedLine):
+                skip_damaged(source, facts.damaged)
+                continue
             payload: Decoded | None = source.payload
             if isinstance(payload, (cr.Context, cr.Event)):
                 turn_id = payload.turn_id or turn_id
@@ -219,6 +234,7 @@ def emit(facts: RolloutFacts) -> list[ev.TimedRecord]:
     if not facts.completed_items:
         raise SkipRollout("no-item_completed")
     facts.skipped.clear()
+    facts.skipped.update(facts.damaged)
     events: list[ev.TimedRecord] = []
     seen_responses: set[str] = set()
     seen_legacy: set[tuple[str, ev.Usage]] = set()
@@ -376,10 +392,10 @@ def rollout_header(path: Path) -> cr.SessionMeta:
     """Read only the first line, closing the stream before returning its identity."""
     records = iter_rollout(path)
     try:
-        first: SourceRecord | None = next(records, None)
+        first: SourceRecord | DamagedLine | None = next(records, None)
     finally:
         records.close()
-    if first is None or not isinstance(first.payload, cr.SessionMeta):
+    if not isinstance(first, SourceRecord) or not isinstance(first.payload, cr.SessionMeta):
         raise ValueError("missing session_meta")
     return first.payload
 

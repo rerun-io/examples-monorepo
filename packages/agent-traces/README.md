@@ -73,6 +73,6 @@ If one session appears on two computers, the copy registered first is kept and t
 - Codex rollouts from CLI versions older than 0.150 are skipped. `convert-all` prints the count per version.
 - Codex rollouts do not record how long each command ran, so Codex tool rows have no elapsed time.
 - Codex subagent rollouts go into their parent's recording. When the parent is skipped or fails, its subagents are skipped too, and the summary says why.
-- A transcript with a corrupt line fails as a whole. `convert-all` reports it and continues with the next session.
+- A line that is not valid JSON, usually left by an interrupted write, is skipped with a warning that names the file and line. The recording counts it as `damaged-line` in its skipped records. A line that is valid JSON but not a known record shape still fails the session, and `convert-all` reports it and continues.
 - If `convert-all` reports an unsupported manifest version, delete that `manifest.json`. The next run converts every session in that profile again.
 - Costs are not computed. The Claude CLI's own session total is kept as a property when the transcript has one.
