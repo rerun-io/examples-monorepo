@@ -11,7 +11,7 @@ import rerun.blueprint as rrb
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
-from dataforge.datasets.umetrack_layers import HandKeypoints, hand_keypoints, write_base, write_hands, write_projections
+from dataforge.datasets.umetrack_layers import HandKeypoints, hand_keypoints, write_base, write_hands, write_meshes, write_projections
 from dataforge.datasets.umetrack_source import SequenceData, read_sequence
 from dataforge.identity import SequenceIdentity
 
@@ -39,7 +39,7 @@ class UmetrackConfig(DataforgeDatasetConfig):
 class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
     """One catalog dataset for real and synthetic captures."""
 
-    layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.PROJECTIONS_LAYER)
+    layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.HAND_MESH_LAYER, paths.PROJECTIONS_LAYER)
 
     def discover(self) -> list[tuple[SequenceIdentity, Path]]:
         sources: dict[str, Path] = {
@@ -107,6 +107,7 @@ class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             paths.BASE_LAYER: lambda recording: write_base(recording, scene, identity, self.timer, work_root),
             paths.HAND_POSE_LAYER: lambda recording: write_hands(recording, scene, keypoints),
+            paths.HAND_MESH_LAYER: lambda recording: write_meshes(recording, scene),
             paths.PROJECTIONS_LAYER: lambda recording: write_projections(recording, scene, keypoints),
         }
         for layer in pending:

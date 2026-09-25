@@ -1,4 +1,4 @@
-"""UmeTrack sensors, hand parameters and lens-model projections."""
+"""UmeTrack sensors, hand parameters, skinned meshes and lens-model projections."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,7 +19,7 @@ from dataforge import hands, logging_toolkit, schema, writing
 from dataforge.datasets.umetrack_source import FISHEYE62, Camera, SequenceData
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
-from dataforge.umetrack_hands import HAND_SIDES
+from dataforge.umetrack_hands import HAND_SIDES, log_hand_meshes
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4_gray
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
@@ -189,6 +189,22 @@ def write_hands(recording: rr.RecordingStream, scene: SequenceData, keypoints: H
     hands.log_keypoints3d(
         recording, times_ns=scene.times_ns, frame_indices=scene.frame_indices, positions=keypoints.positions, confidence=keypoints.confidence
     )
+
+
+def write_meshes(recording: rr.RecordingStream, scene: SequenceData) -> None:
+    """Skin confidence-positive hands with SHOW3D's mesh writer; every absent row is cleared."""
+    for hand_index, side in enumerate(HAND_SIDES):
+        log_hand_meshes(
+            recording,
+            side,
+            hand_index,
+            scene.labels.hand_model,
+            scene.labels.joint_angles[:, hand_index],
+            scene.labels.wrist_transforms[:, hand_index],
+            scene.labels.hand_confidences[:, hand_index] > 0,
+            times_ns=scene.times_ns,
+            frame_indices=scene.frame_indices,
+        )
 
 
 def project_fisheye62(xyz_cam: Float64[ndarray, "n 3"], camera: Fisheye62Parameters) -> Float64[ndarray, "n 2"]:

@@ -24,18 +24,19 @@
 | JSON `hand_confidences` | One row per frame | hand_pose | `/world/gt/hands/<side>/confidence`, Scalars including zeros; also per-keypoint confidence |
 | `raw_data_{real,synthetic}_manifest.txt` | No clock | — | Verify-only inventory; URL/dir/out entries, no checksums or sizes supplied |
 | Derived COCO-133 through each camera’s lens model | Hand-pose clock | projections | `<pinhole>/coco133_uv_projected`, Points2DWithConfidence |
-| Profile rest geometry, weights, topology, joint limits, hand scale | Static | hand_pose | Preserved in full profile; geometry and weights drive FK |
+| Profile rest geometry, weights, topology, joint limits, hand scale | Static | hand_pose / hand_mesh | Preserved in full profile; geometry and weights drive FK and meshes |
 
 There are no shipped 2D points, landmarks, depth, segmentation, IMU, or object tracks. No `coco133_uv` is created.
 
 ## Layers and entities
 
-`base`, `hand_pose`, and `projections` share the recording id. The base owns the root annotation context and `/world` ViewCoordinates. Annotation layers do not inject RecordingInfo properties.
+`base`, `hand_pose`, `hand_mesh`, and `projections` share the recording id. The base owns the root annotation context and `/world` ViewCoordinates. Annotation layers do not inject RecordingInfo properties.
 
 | Layer | Contents |
 | --- | --- |
 | base | Video, camera calibration, and rig poses |
 | hand_pose | World COCO keypoints, confidence, and source hand parameters |
+| hand_mesh | Skinned world-space hand meshes |
 | projections | Derived `coco133_uv_projected` per camera, through its full FishEye62 model |
 
 The projections layer uses the same `video_time` and `frame_index` as hand_pose and the same world COCO positions, computed once per conversion. Its properties are `property:projections:derived_from = "coco133_xyz"` and `property:projections:camera_model = "FishEye62"`. Each present projection keeps the 3D joint’s confidence. Missing inputs, untracked rig frames, z ≤ 0, rays at or beyond the first radial derivative zero (or π/2 if none), and out-of-image pixels become NaN with confidence 0. No coordinates are clamped.
@@ -44,7 +45,7 @@ The projections layer uses the same `video_time` and `frame_index` as hand_pose 
 
 The shared UmeTrack model computes 21 landmarks from the profile, angles and wrist, in one call per present hand. `hands.coco133_from_hands` maps them to `/world/gt/coco133_xyz` as Points3DWithConfidence, in metres. Confidence is the shipped per-hand value. Missing hands and uncovered COCO slots are NaN with confidence 0. The Assembly-Hands mapping supplies wrist copies (body slots 9/10 and hand roots), a thumb-base midpoint, and hand slots 91–132; palm landmark 20 is not a COCO slot. These keypoints are derived FK, not shipped landmark observations.
 
-Joint angles and wrist rows are sparse and only logged at confidence > 0. Confidence Scalars remain dense. The profile TextDocument preserves the original `hand_model` object's text, including whitespace.
+Joint angles and wrist rows are sparse and only logged at confidence > 0. Confidence Scalars remain dense. The profile TextDocument preserves the original `hand_model` object's text, including whitespace. Mesh topology and albedo are static; world vertices are in metres. Every confidence-zero mesh frame has an empty vertex row so latest-at cannot display a stale mesh. SHOW3D and UmeTrack share handedness and the batched mesh-writing core.
 
 ### World axes
 
@@ -61,7 +62,7 @@ Log `WORLD_UP_VIEW_COORDINATES["+y"]` (RUB) at `/world`. Capture properties `wor
 
 Pinholes use shipped fx/fy/cx/cy over the distorted source image. The canonical `Fisheye62Parameters` path logs typed `DistortionModel` and the `DistortionCoefficients` component with all eight values; **the viewer does not apply this distortion**. Synthetic cameras ship `p3/p4` instead of `k5/k6`. UmeTrack_data issue #4 reads them as the fifth and sixth radial terms, but they do not fit the images: with `p3/p4` as `k5/k6` (values such as 56.7 and −70.6) the projected hands miss the rendered hands by hundreds of pixels, while `k5 = k6 = 0` puts them on the hands in all four cameras (checked on `synthetic/separate_hand/testing/user_19/recording_02` frame 224 and `synthetic/hand_hand/training/user_03/recording_11` frame 150; evidence `umetrack-synthetic-lens-p3p4-vs-k0-{a,b}.png`). So the typed synthetic lens has `k5 = k6 = 0`, and `p3/p4` stay only as source data. One small AnyValues group keeps the original coefficient names and `source_camera_angle_deg`. A camera must supply exactly one complete pair, `k5/k6` or `p3/p4`.
 
-Camera panes show only their video and derived lens-model projections. They exclude 3D hands because Rerun 0.38.1’s distortion-free Pinhole would misplace that content on the fisheye image. Each camera uses its own full FishEye62 calibration. The default blueprint retains the 3D orbital view and four ego panes; table cards use the same pane contents for cam0 beside the hands.
+Camera panes show only their video and derived lens-model projections. They exclude 3D hands and meshes because Rerun 0.38.1’s distortion-free Pinhole would misplace that content on the fisheye image. Each camera uses its own full FishEye62 calibration. The default blueprint retains the 3D orbital view and four ego panes; table cards use the same pane contents for cam0 beside the hands.
 
 Real and synthetic projections were checked against the video pixels (see the lane evidence). Synthetic projections use `k5 = k6 = 0`, as explained above.
 
@@ -73,7 +74,7 @@ Real and synthetic projections were checked against the video pixels (see the la
 | Indexed camera names, grayscale kind | Source cameras have no names and neutral chroma; old TL/BL/BR/TR names were guesses, kind was rgb |
 | Rig dropout is NaN | All four source matrices are zero; simplecv carried the previous pose (real iteration frame 430) |
 | Missing keypoints are NaN | Confidence zero exactly matches zero wrist; simplecv carried 42 finite hand points at frame 430 |
-| Joint angles, wrists, profile, camera roll, tracking flag, per-hand confidence retained | These shipped fields were previously omitted |
+| Joint angles, wrists, profile, meshes, camera roll, tracking flag, per-hand confidence retained | These shipped fields were previously omitted |
 | Synthetic p3/p4 retained as source data, not projected | Old camera construction dropped them too; pixel checks show that the images follow k5 = k6 = 0, not issue #4's reading |
 | RUB at `/world` | Measured +Y up and +X forward resolve contradictory BUL/RUB loader conventions |
 | Derived UV has a separate name | We write `coco133_uv_projected` through each camera’s own calibration and full FishEye62 model. Simplecv wrote derived UV under the shipped name `coco133_uv`, which remains reserved for source 2D |
@@ -105,6 +106,6 @@ Measured on pablo-dl-server (RTX 5090, NVENC) on 2026-09-25, in the prod environ
 | real/hand_hand/training/user_03/recording_05 | 14.86 s (431 frames, 29 fps) | 2.64 s (transcode 2.43) | 4.03 s + 0.18 s | 10.7 | 17.0 |
 | synthetic/separate_hand/testing/user_19/recording_02 | 14.93 s (448 frames, 30 fps) | 2.80 s (transcode 2.45) | 4.98 s + 0.17 s | 11.3 | 20.7 |
 
-dataforge times come from its own timers (`convert.jsonl`: fetch, hands, transcode, write per layer). The four crops encode in parallel, and the base write includes the transcode. simplecv times are its own timers: `split_umetrack_video.py` encodes the four crops one after the other at preset p7, and `batch_raw_to_rrd.py` then remuxes the split files. Neither figure includes Python and pixi startup, which is about 2.7 s per process on both sides. Output sizes for the real recording: base 5.6 MB, hand_pose 0.51 MB, projections 0.41 MB. dataforge is faster per capture-minute, so the soft speed gate passes. Registration time is added when the sample is registered.
+dataforge times come from its own timers (`convert.jsonl`: fetch, hands, transcode, write per layer). The four crops encode in parallel, and the base write includes the transcode. simplecv times are its own timers: `split_umetrack_video.py` encodes the four crops one after the other at preset p7, and `batch_raw_to_rrd.py` then remuxes the split files. Neither figure includes Python and pixi startup, which is about 2.7 s per process on both sides. Output sizes for the real recording: base 5.6 MB, hand_pose 0.51 MB, hand_mesh 8.2 MB, projections 0.41 MB. dataforge is faster per capture-minute, so the soft speed gate passes. Registration time is added when the sample is registered.
 
 The eight sample recordings convert at 8.6–15.8 s per capture-minute. The one exception is `synthetic/hand_hand/testing/user_09/recording_01` (68 frames, 2.3 s) at 33.6 s/min, where fixed per-recording costs dominate.
