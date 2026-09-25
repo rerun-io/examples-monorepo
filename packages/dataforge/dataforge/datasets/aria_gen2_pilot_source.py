@@ -10,8 +10,9 @@ from numpy import ndarray
 from projectaria_tools.core.calibration import CameraCalibration, CameraModelType, DeviceCalibration, device_calibration_from_json_string
 from scipy.spatial.transform import Rotation
 
-from dataforge import hands
-from dataforge.vrs_hevc import VrsHevcReader
+from dataforge import aria, hands
+from dataforge.datasets.hot3d_vrs import nearest_framesets
+from dataforge.vrs_hevc import VrsFile, VrsHevcReader
 
 CAMERAS: tuple[tuple[str, str, int], ...] = (
     ("214-1", "camera-rgb", 10),
@@ -21,8 +22,12 @@ CAMERAS: tuple[tuple[str, str, int], ...] = (
     ("1201-4", "slam-side-right", 30),
 )
 """Native stream IDs, factory labels and nominal container rates."""
+IMUS: tuple[tuple[aria.AriaStreamId, str], ...] = (("1202-1", "imu-left"), ("1202-2", "imu-right"))
+"""Gen2 IMU stream IDs and factory labels; Gen1's ``aria.STREAM_LABELS`` has these two swapped."""
 SEQUENCES: tuple[str, ...] = ("clean_0", "cook_0", "eat_0", "eat_1", "eat_2", "eat_3", "play_0", "play_1", "play_2", "play_3", "walk_0", "walk_1")
 """Release v1.0 sequence names."""
+QUATERNION_NORM_TOLERANCE: float = 1e-5
+"""MPS prints six decimals: wrist quaternions sit up to 1.2e-6 off unit norm, trajectory ones ~1e-9."""
 
 
 def numeric_columns(path: Path, columns: list[str]) -> Float64[ndarray, "n c"]:
@@ -37,8 +42,9 @@ def numeric_columns(path: Path, columns: list[str]) -> Float64[ndarray, "n c"]:
 
 
 def poses_from_columns(values: Float64[ndarray, "n 7"]) -> Float64[ndarray, "n 4 4"]:
-    """Translation and xyzw quaternion to SE(3); invalid inputs remain missing."""
-    valid: Bool[ndarray, "n"] = np.isfinite(values).all(axis=1) & (np.linalg.norm(values[:, 3:], axis=1) > 1e-12)
+    """Translation and xyzw quaternion to SE(3); a non-finite or non-unit row is missing (NaN), never renormalised into a pose."""
+    valid: Bool[ndarray, "n"] = np.isfinite(values).all(axis=1)
+    valid[valid] = np.abs(np.linalg.norm(values[valid, 3:], axis=1) - 1.0) <= QUATERNION_NORM_TOLERANCE
     result: Float64[ndarray, "n 4 4"] = np.full((len(values), 4, 4), np.nan)
     result[valid] = np.eye(4)
     result[valid, :3, :3] = Rotation.from_quat(values[valid, 3:]).as_matrix() if valid.any() else np.empty((0, 3, 3))
@@ -53,7 +59,7 @@ class Trajectory:
     times_ns: Int64[ndarray, "n"]
     """Device microseconds converted to nanoseconds."""
     poses: Float64[ndarray, "n 4 4"]
-    """World-from-device matrices; invalid rows become NaN."""
+    """World-from-device matrices; rows ``poses_from_columns`` rejected are NaN."""
     quality: Float64[ndarray, "n"]
     """Shipped quality, including 0.0 and 0.5."""
 
@@ -62,13 +68,6 @@ class Trajectory:
             raise ValueError("trajectory columns differ in length")
         if not len(self.times_ns) or np.any(np.diff(self.times_ns) <= 0):
             raise ValueError("trajectory timestamps must be nonempty and strictly increasing")
-        finite: Bool[ndarray, "n"] = np.isfinite(self.poses).all(axis=(1, 2))
-        valid: Bool[ndarray, "n"] = finite.copy()
-        rotation: Float64[ndarray, "m 3 3"] = self.poses[finite, :3, :3]
-        valid[finite] &= np.isclose(np.linalg.det(rotation), 1.0, atol=1e-6)
-        valid[finite] &= np.isclose(rotation @ np.swapaxes(rotation, 1, 2), np.eye(3), atol=1e-6).all(axis=(1, 2))
-        valid &= np.isclose(self.poses[:, 3], [0.0, 0.0, 0.0, 1.0], atol=1e-6).all(axis=1)
-        self.poses[~valid] = np.nan
 
     def at(self, times_ns: Int64[ndarray, "m"]) -> Float64[ndarray, "m 4 4"]:
         """Slerp/lerp inside valid <=2 ms brackets; never extrapolate or clamp."""
@@ -125,43 +124,55 @@ class HandSamples:
     """Shipped per-hand confidence (including -1 for missing)."""
     device_poses: Float64[ndarray, "n 4 4"]
     """Interpolated world-from-device at the hand timestamp."""
+    frame_indices: Int64[ndarray, "n"]
+    """Nearest camera-rgb frame per row, for the ``frame_index`` timeline."""
 
 
-def read_hands(path: Path, trajectory: Trajectory, stop_ns: int | None = None) -> HandSamples:
+def hand_columns(side: str) -> dict[str, list[str]]:
+    """One side's MPS column groups, in the order ``read_hands`` splits them."""
+    return {
+        "confidence": [f"{side}_tracking_confidence"],
+        "landmarks": [f"t{axis}_{side}_landmark_{joint}_device" for joint in range(21) for axis in "xyz"],
+        "wrist": [f"{kind}{axis}_{side}_device_wrist" for kind, axes in (("t", "xyz"), ("q", "xyzw")) for axis in axes],
+        "normals": [f"n{axis}_{side}_{part}_device" for part in ("palm", "wrist") for axis in "xyz"],
+    }
+
+
+def read_hands(path: Path, trajectory: Trajectory, frame_clock: Int64[ndarray, "f"], stop_ns: int | None = None) -> HandSamples:
     """Read every native MPS row and transform device landmarks at its own time."""
-    columns: list[str] = ["tracking_timestamp_us"]
-    for side in ("left", "right"):
-        columns += [f"{side}_tracking_confidence"]
-        columns += [f"t{axis}_{side}_landmark_{joint}_device" for joint in range(21) for axis in "xyz"]
-        columns += [f"{kind}{axis}_{side}_device_wrist" for kind, axes in (("t", "xyz"), ("q", "xyzw")) for axis in axes]
-        columns += [f"n{axis}_{side}_{part}_device" for part in ("palm", "wrist") for axis in "xyz"]
-    values: Float64[ndarray, "n 155"] = numeric_columns(path, columns)
-    times: Int64[ndarray, "n"] = values[:, 0].astype(np.int64) * 1000
+    groups: list[tuple[str, str, list[str]]] = [("", "time", ["tracking_timestamp_us"])]
+    groups += [(side, name, names) for side in ("left", "right") for name, names in hand_columns(side).items()]
+    values: Float64[ndarray, "n c"] = numeric_columns(path, [name for _, _, names in groups for name in names])
+    # The layout is written once, above; each group's slice follows from the lengths.
+    ends: list[int] = np.cumsum([len(names) for _, _, names in groups]).tolist()
+    column: dict[tuple[str, str], Float64[ndarray, "n g"]] = {
+        (side, name): values[:, end - len(names) : end] for (side, name, names), end in zip(groups, ends, strict=True)
+    }
+    times: Int64[ndarray, "n"] = column[("", "time")][:, 0].astype(np.int64) * 1000
     if np.any(np.diff(times) <= 0):
         raise ValueError(f"{path}: hand timestamps must increase")
     keep: Bool[ndarray, "n"] = np.ones(len(times), dtype=np.bool_) if stop_ns is None else times <= stop_ns
-    values, times = values[keep], times[keep]
+    times = times[keep]
+    column = {key: value[keep] for key, value in column.items()}
     poses: Float64[ndarray, "n 4 4"] = trajectory.at(times)
     valid_pose: Bool[ndarray, "n"] = np.isfinite(poses).all(axis=(1, 2))
     landmarks: Float32[ndarray, "n 2 21 3"] = np.full((len(times), 2, 21, 3), np.nan, dtype=np.float32)
     wrists: Float64[ndarray, "n 2 4 4"] = np.full((len(times), 2, 4, 4), np.nan)
     normals: Float64[ndarray, "n 2 2 3"] = np.full((len(times), 2, 2, 3), np.nan)
-    scores: Float64[ndarray, "n 2"] = np.stack([values[:, 1], values[:, 78]], axis=1)
-    for side in range(2):
-        offset = 1 + 77 * side
-        present = valid_pose & (scores[:, side] != -1.0)
-        points = values[:, offset + 1 : offset + 64].reshape(-1, 21, 3)
-        landmarks[present, side] = (np.einsum("nij,nkj->nki", poses[present, :3, :3], points[present]) + poses[present, None, :3, 3]).astype(
-            np.float32
-        )
-        wrists[present, side] = poses[present] @ poses_from_columns(values[present, offset + 64 : offset + 71])
-        normals[present, side] = np.einsum("nij,nkj->nki", poses[present, :3, :3], values[present, offset + 71 : offset + 77].reshape(-1, 2, 3))
+    scores: Float64[ndarray, "n 2"] = np.stack([column[(side, "confidence")][:, 0] for side in ("left", "right")], axis=1)
+    for index, side in enumerate(("left", "right")):
+        present: Bool[ndarray, "n"] = valid_pose & (scores[:, index] != -1.0)
+        rotation: Float64[ndarray, "p 3 3"] = poses[present, :3, :3]
+        points: Float64[ndarray, "p 21 3"] = column[(side, "landmarks")][present].reshape(-1, 21, 3)
+        landmarks[present, index] = (np.einsum("nij,nkj->nki", rotation, points) + poses[present, None, :3, 3]).astype(np.float32)
+        wrists[present, index] = poses[present] @ poses_from_columns(column[(side, "wrist")][present])
+        normals[present, index] = np.einsum("nij,nkj->nki", rotation, column[(side, "normals")][present].reshape(-1, 2, 3))
     positions: Float32[ndarray, "n 133 3"] = np.full((len(times), 133, 3), np.nan, dtype=np.float32)
     confidence: Float32[ndarray, "n 133"] = np.zeros((len(times), 133), dtype=np.float32)
     for index in range(len(times)):
         positions[index], confidence[index] = hands.coco133_from_hands(landmarks[index], scores[index].astype(np.float32))
     positions, confidence = hands.confidence_rule(positions, confidence)
-    return HandSamples(times, positions, confidence, wrists, normals, scores, poses)
+    return HandSamples(times, positions, confidence, wrists, normals, scores, poses, nearest_framesets(frame_clock, times))
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +199,8 @@ class Scene:
 
     source: Path
     """Read-only directory."""
+    vrs: VrsFile
+    """``video.vrs``, its description and record offsets read once."""
     calibration: DeviceCalibration
     """Factory device frame shared by MPS and sensors."""
     cameras: list[Camera]
@@ -204,8 +217,8 @@ def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
     """Open factory calibration and each clock independently; never decode VRS images."""
     if frame_limit is not None and frame_limit < 1:
         raise ValueError("frame_limit must be positive")
-    first: VrsHevcReader = VrsHevcReader(source / "video.vrs", CAMERAS[0][0])
-    factory: DeviceCalibration | None = device_calibration_from_json_string(first.description.file_tags["calib_json"])
+    vrs: VrsFile = VrsFile(source / "video.vrs")
+    factory: DeviceCalibration | None = device_calibration_from_json_string(vrs.file_tags["calib_json"])
     if factory is None:
         raise ValueError(f"{source}: missing factory calibration")
     cameras: list[Camera] = []
@@ -213,7 +226,7 @@ def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
         calibration: CameraCalibration | None = factory.get_camera_calib(label)
         if calibration is None or calibration.get_model_name() != CameraModelType.FISHEYE624:
             raise ValueError(f"{source}/{label}: missing FISHEYE624 factory calibration")
-        reader: VrsHevcReader = first if stream_id == CAMERAS[0][0] else VrsHevcReader(source / "video.vrs", stream_id)
+        reader: VrsHevcReader = vrs.hevc(stream_id)
         width, height = reader.image_size()
         factory_width, factory_height = (int(value) for value in calibration.get_image_size())
         if (factory_width, factory_height) != (width, height):
@@ -229,5 +242,5 @@ def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
         cameras.append(Camera(stream_id, label, fps, calibration, times[:frame_limit], len(times)))
     stop: int | None = max(int(camera.times_ns[-1]) for camera in cameras) if frame_limit is not None else None
     trajectory: Trajectory = read_trajectory(source / "mps/slam/closed_loop_trajectory.csv")
-    hand_samples: HandSamples = read_hands(source / "mps/hand_tracking/hand_tracking_results.csv", trajectory, stop)
-    return Scene(source, factory, cameras, trajectory, hand_samples, stop)
+    hand_samples: HandSamples = read_hands(source / "mps/hand_tracking/hand_tracking_results.csv", trajectory, cameras[0].times_ns, stop)
+    return Scene(source, vrs, factory, cameras, trajectory, hand_samples, stop)

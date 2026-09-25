@@ -18,8 +18,8 @@ export DATAFORGE_OUTPUT_ROOT=/home/pablo/exoego-data/aria_gen2_pilot/iter
 ```
 
 The converter reads only `<seq>/video.vrs` and `<seq>/mps/`. Raw roots are
-read-only: the converter refuses an output or work root beneath the raw root,
-the source directory, `/mnt/nas` or `/volume1`, and writes no cache there.
+read-only: the converter refuses an output or work root beneath the raw root
+or the source directory, and writes no cache there.
 It never reads `_simplecv/` (simplecv's preprocessing output).
 
 Catalog dataset `aria_gen2_pilot` (sample `aria_gen2_pilot-sample`); recording
@@ -75,10 +75,14 @@ cameras 29.997–30.000 Hz, each on its own clock; `imu-left` ~800–803 Hz,
 `AnnotationContext`. One moving ego rig `/world/rig_00` ("Aria Gen2 device"): its
 `Transform3D` is `world_T_device` for every closed-loop row. MPS starts ~0.8 s
 after the first RGB frame in 8 of 10 sequences. Before the first row, after the
-last row, across any gap over 2 ms, and at each camera timestamp without a
-bracketing pose, the rig logs a NaN transform, which hides its frustums. The
-pose is missing there and is never held or clamped. A non-finite or
-non-orthonormal pose row is missing too. `quality_score` (1.0 / 0.5 / 0.0) is
+last row and across any gap over 2 ms (1 ns after each run's last row), the rig
+logs a NaN transform: the pose is marked missing. Rerun 0.38.1 still draws
+the rig's frustums at such times (seen on clean_0 at 1200.2 s, before tracking
+starts at 1200.76 s), so the viewer does not yet hide them. The
+pose is missing there and is never held or clamped. A row with a non-finite
+value or a quaternion more than 1e-5 off unit norm is missing too, never
+renormalised (shipped trajectory quaternions sit ~1e-9 off; hand wrists, printed
+with six decimals, up to 1.2e-6). `quality_score` (1.0 / 0.5 / 0.0) is
 logged as a scalar at `/world/rig_00/quality`; the pose stays as shipped.
 
 Cameras `cam_00` = `camera-rgb`, `cam_01` = `slam-front-left`, `cam_02` =
@@ -94,8 +98,10 @@ projectaria-tools' VRS provider rescales by about 0.635 and gives 0.14–0.16 px
 more. Video is the VRS H.265 access units, piped unchanged into ffmpeg (software
 `hevc` decode), then AV1 NVENC at CQ 36, GOP 60, no B-frames. RGB keeps colour;
 SLAM gray becomes yuv420p with neutral chroma. Sample times are the VRS capture
-stamps. IMU: raw `gyroscope` (rad/s) and `accelerometer` (m/s²) samples, NaN
-where the record's valid flag is false. Each IMU has its factory `T_device_imu`.
+stamps. IMU: raw `gyroscope` (rad/s) and `accelerometer` (m/s²) samples read
+through projectaria-tools (`aria.read_imu`, the package's one IMU reader); a
+record whose accel or gyro valid flag is false is dropped from both channels
+(none in the ten local sequences). Each IMU has its factory `T_device_imu`.
 
 **hand_pose.** Every MPS hand row at 30 Hz. The 21 device-frame landmarks go to
 world with `world_T_device` at the row's own timestamp: SE(3) interpolation
@@ -141,7 +147,7 @@ this port (audit `/tmp/fleet-artifacts/exoego-audit/synthesis.md` §3):
 | Hands at 30 Hz: every MPS row | simplecv keeps one row per RGB frame (`aria_gen2_pilot.py:180-211`) | (1) 30 → 10 Hz downsample |
 | SLAM cameras and rig pose on their own clocks | simplecv samples every camera pose at RGB stamps (`aria_gen2_pilot_ego.py:103-123`) | (1), (3) RGB-as-canonical clock |
 | No clamp at the clip head: before MPS starts, pose and hands are missing | simplecv clamps both searches (`aria_gen2_pilot.py:200-205`, `hot3d_utils.py:451-452`): 8–9 RGB frames get the first sample held backwards up to 866 ms | (2) head clamp |
-| Singular / non-finite pose → missing, never held | simplecv reuses the previous pose, starting from identity (`aria_gen2_pilot_ego.py:150-175`); no such row exists in the shipped data, so a unit test fabricates one | (2) held pose |
+| Singular / non-finite pose → missing, never held | simplecv reuses the previous pose, starting from identity (`aria_gen2_pilot_ego.py:150-175`); no such row exists in the shipped data, so a unit test writes one into a CSV | (2) held pose |
 | Hand-row pose interpolated at the hand's own time | simplecv takes the nearest-previous trajectory row (`hot3d_utils.py:451`) | raw parity 0.64–0.80 mm, see below |
 | Present hands with confidence 0.0 kept (positions, confidence 0.0) | simplecv drops `conf <= 0` (`aria_gen2_pilot.py:175-178`) | binding brief: present joint = shipped confidence |
 | Full FISHEYE624 (thin prism) from the VRS factory calibration, rescaled to the stream | simplecv uses the first online-calibration line and drops s0–s3 (`preprocess_aria_gen2_pilot.py:204`, `aria_gen2_pilot_ego.py:143-147`) | fisheye exception |

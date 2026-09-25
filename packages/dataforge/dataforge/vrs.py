@@ -41,7 +41,7 @@ class RecordHeader(NamedTuple):
     uncompressed_size: int
 
 
-_RECORD_HEADER: struct.Struct = struct.Struct("<IIiIdHBBI")
+RECORD_HEADER: struct.Struct = struct.Struct("<IIiIdHBBI")
 
 
 @serde
@@ -76,7 +76,7 @@ class ImageRecord:
     """Encoded image block, without the record header or DataLayout."""
 
 
-def _read_exact(stream: io.BufferedReader | io.BytesIO, size: int) -> bytes:
+def read_exact(stream: io.BufferedReader | io.BytesIO, size: int) -> bytes:
     data: bytes = stream.read(size)
     if len(data) != size:
         raise ValueError(f"truncated VRS: expected {size} bytes, got {len(data)}")
@@ -84,13 +84,13 @@ def _read_exact(stream: io.BufferedReader | io.BytesIO, size: int) -> bytes:
 
 
 def _read_tags(stream: io.BufferedReader | io.BytesIO) -> dict[str, str]:
-    count: int = struct.unpack("<I", _read_exact(stream, 4))[0]
+    count: int = struct.unpack("<I", read_exact(stream, 4))[0]
     tags: dict[str, str] = {}
     for _ in range(count):
         pair: list[str] = []
         for _ in range(2):
-            size: int = struct.unpack("<I", _read_exact(stream, 4))[0]
-            pair.append(_read_exact(stream, size).decode("utf-8"))
+            size: int = struct.unpack("<I", read_exact(stream, 4))[0]
+            pair.append(read_exact(stream, size).decode("utf-8"))
         tags[pair[0]] = pair[1]
     return tags
 
@@ -98,8 +98,8 @@ def _read_tags(stream: io.BufferedReader | io.BytesIO) -> dict[str, str]:
 def read_record_header(stream: io.BufferedReader, offset: int, file_size: int, path: Path) -> RecordHeader:
     """Seek to one record and check that it lies inside the file."""
     stream.seek(offset)
-    record: RecordHeader = RecordHeader(*_RECORD_HEADER.unpack(_read_exact(stream, _RECORD_HEADER.size)))
-    if record.record_size < _RECORD_HEADER.size or offset + record.record_size > file_size:
+    record: RecordHeader = RecordHeader(*RECORD_HEADER.unpack(read_exact(stream, RECORD_HEADER.size)))
+    if record.record_size < RECORD_HEADER.size or offset + record.record_size > file_size:
         raise ValueError(f"{path}: invalid VRS record size {record.record_size} at {offset}")
     return record
 
@@ -130,21 +130,18 @@ class StreamDescription:
     """File-level tags that follow every stream entry."""
 
 
-def read_description(path: Path, stream_id: str, *, headers: tuple[bytes, ...]) -> StreamDescription:
-    """Validate the file header and read one stream's description tags.
+def read_descriptions(path: Path, *, headers: tuple[bytes, ...]) -> dict[str, StreamDescription]:
+    """Validate the file header and read every stream's description tags in one pass.
 
     ``headers`` lists the accepted file-format magics (``cordVRS2``; Gen2 Aria
     also writes ``cordVRS1`` with a version-2 description).
     """
-    record_formats: dict[int, str] = {}
-    layout_docs: dict[int, str] = {}
-    configuration_docs: dict[int, str] = {}
     with path.open("rb") as stream:
-        header: bytes = _read_exact(stream, FILE_HEADER_SIZE)
+        header: bytes = read_exact(stream, FILE_HEADER_SIZE)
         if header[:8] != b"VisionRe" or header[72:80] not in headers:
             raise ValueError(f"{path}: unsupported VRS file header")
         header_size, record_header_size = struct.unpack_from("<II", header, 16)
-        if header_size != FILE_HEADER_SIZE or record_header_size != _RECORD_HEADER.size:
+        if header_size != FILE_HEADER_SIZE or record_header_size != RECORD_HEADER.size:
             raise ValueError(f"{path}: unsupported VRS header sizes {header_size}/{record_header_size}")
         description_offset: int = struct.unpack_from("<q", header, 32)[0]
         first_record: int = struct.unpack_from("<q", header, 40)[0]
@@ -152,24 +149,24 @@ def read_description(path: Path, stream_id: str, *, headers: tuple[bytes, ...]) 
         if not FILE_HEADER_SIZE <= description_offset < file_size or not FILE_HEADER_SIZE <= first_record <= file_size:
             raise ValueError(f"{path}: invalid VRS record offsets")
         stream.seek(description_offset)
-        record: RecordHeader = RecordHeader(*_RECORD_HEADER.unpack(_read_exact(stream, _RECORD_HEADER.size)))
+        record: RecordHeader = RecordHeader(*RECORD_HEADER.unpack(read_exact(stream, RECORD_HEADER.size)))
         if (
             record.recordable_type_id != DESCRIPTION_TYPE_ID
             or record.format_version != DESCRIPTION_FORMAT_VERSION
             or record.compression != UNCOMPRESSED
-            or not _RECORD_HEADER.size <= record.record_size <= file_size - description_offset
+            or not RECORD_HEADER.size <= record.record_size <= file_size - description_offset
         ):
             raise ValueError(f"{path}: unsupported VRS description record")
-        description: io.BytesIO = io.BytesIO(_read_exact(stream, record.record_size - _RECORD_HEADER.size))
-    stream_count: int = struct.unpack("<I", _read_exact(description, 4))[0]
-    found: bool = False
+        description: io.BytesIO = io.BytesIO(read_exact(stream, record.record_size - RECORD_HEADER.size))
+    stream_count: int = struct.unpack("<I", read_exact(description, 4))[0]
+    formats: dict[str, tuple[dict[int, str], dict[int, str], dict[int, str]]] = {}
     for _ in range(stream_count):
-        type_id, instance_id = struct.unpack("<iH", _read_exact(description, 6))
+        type_id, instance_id = struct.unpack("<iH", read_exact(description, 6))
         _read_tags(description)  # User tags precede the internal record-format tags.
         tags: dict[str, str] = _read_tags(description)
-        if f"{type_id}-{instance_id}" != stream_id:
-            continue
-        found = True
+        record_formats: dict[int, str] = {}
+        layout_docs: dict[int, str] = {}
+        configuration_docs: dict[int, str] = {}
         for key, value in tags.items():
             if key.startswith("RF:Data:"):
                 version: int = int(key.removeprefix("RF:Data:"))
@@ -178,12 +175,19 @@ def read_description(path: Path, stream_id: str, *, headers: tuple[bytes, ...]) 
             elif key.startswith("RF:Configuration:"):
                 configuration: int = int(key.removeprefix("RF:Configuration:"))
                 configuration_docs[configuration] = tags.get(f"DL:Configuration:{configuration}:0", "")
+        formats[f"{type_id}-{instance_id}"] = (record_formats, layout_docs, configuration_docs)
     file_tags: dict[str, str] = _read_tags(description)
     if description.read(1):
         raise ValueError(f"{path}: trailing VRS description bytes")
-    if not found:
+    return {stream_id: StreamDescription(first_record, file_size, *docs, file_tags) for stream_id, docs in formats.items()}
+
+
+def read_description(path: Path, stream_id: str, *, headers: tuple[bytes, ...]) -> StreamDescription:
+    """One stream's description; see ``read_descriptions``."""
+    descriptions: dict[str, StreamDescription] = read_descriptions(path, headers=headers)
+    if stream_id not in descriptions:
         raise ValueError(f"{path}: stream {stream_id} absent from description")
-    return StreamDescription(first_record, file_size, record_formats, layout_docs, configuration_docs, file_tags)
+    return descriptions[stream_id]
 
 
 def census_images(images: Iterator[ImageRecord], times_ns: Int64[ndarray, "n"], source_count: int, *, preview: bool, where: str) -> Iterator[bytes]:
@@ -241,7 +245,7 @@ class VrsImageReader:
                 if record.format_version not in self._layouts:
                     raise ValueError(f"{self.path}/{self.stream_id}: missing data format version {record.format_version}")
                 layout_size, timestamp_offset = self._layouts[record.format_version]
-                payload: bytes = _read_exact(stream, record.record_size - _RECORD_HEADER.size)
+                payload: bytes = read_exact(stream, record.record_size - RECORD_HEADER.size)
                 if len(payload) < layout_size + 4:
                     raise ValueError(f"{self.path}/{self.stream_id}: truncated image payload")
                 timestamp: int = struct.unpack_from("<q", payload, timestamp_offset)[0]

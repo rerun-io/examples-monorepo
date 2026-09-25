@@ -86,8 +86,12 @@ FrameKind: TypeAlias = Literal["hevc", "png", "jpeg", "gray8", "rgb24", "yuv420p
 RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24", "yuv420p": "yuv420p", "yuv422p": "yuv422p", "yuv444p": "yuv444p"}
 """ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
 
-IMAGE_DECODERS: dict[FrameKind, str] = {"png": "png", "jpeg": "mjpeg"}
-"""ffmpeg input decoder for each encoded-image frame kind."""
+ENCODED_INPUTS: dict[FrameKind, tuple[str, ...]] = {
+    "png": ("-f", "image2pipe", "-framerate", "{fps}", "-c:v", "png"),
+    "jpeg": ("-f", "image2pipe", "-framerate", "{fps}", "-c:v", "mjpeg"),
+    "hevc": ("-f", "hevc", "-r", "{fps}"),
+}
+"""ffmpeg input options for each self-describing frame kind (encoded images, a raw Annex-B stream)."""
 
 TRANSPOSE_FILTERS: dict[int, tuple[str, ...]] = {
     0: (),
@@ -115,7 +119,7 @@ class FrameSource:
     """How the caller's frame iterable is laid out for ffmpeg's stdin."""
 
     kind: FrameKind
-    """``"png"`` / ``"jpeg"`` feed encoded image bytes through ``image2pipe``; the raw kinds feed ``rawvideo`` planes."""
+    """``"png"`` / ``"jpeg"`` feed encoded image bytes through ``image2pipe``, ``"hevc"`` an Annex-B stream; the raw kinds feed ``rawvideo`` planes."""
     width: int | None = None
     """Frame width in pixels; required for the raw kinds, which carry no header."""
     height: int | None = None
@@ -125,7 +129,7 @@ class FrameSource:
     """JPEG colour planes require explicit full-to-limited range conversion."""
 
     def __post_init__(self) -> None:
-        if self.kind in IMAGE_DECODERS or self.kind == "hevc":
+        if self.kind in ENCODED_INPUTS:
             return
         if self.width is None:
             raise ValueError(f"a {self.kind} source needs an explicit width: rawvideo frames carry no header")
@@ -134,10 +138,8 @@ class FrameSource:
 
     def input_args(self, *, fps: int) -> list[str]:
         """ffmpeg input-side arguments that describe this layout on ``pipe:0``."""
-        if self.kind == "hevc":
-            return ["-f", "hevc", "-r", str(fps), "-i", "pipe:0"]
-        if self.kind in IMAGE_DECODERS:
-            return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", IMAGE_DECODERS[self.kind], "-i", "pipe:0"]
+        if self.kind in ENCODED_INPUTS:
+            return [*(arg.format(fps=fps) for arg in ENCODED_INPUTS[self.kind]), "-i", "pipe:0"]
         return [
             "-f",
             "rawvideo",

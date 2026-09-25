@@ -19,7 +19,6 @@ from dataforge.datasets.hot3d_layers import project_keypoints
 from dataforge.datasets.hot3d_vrs import nearest_framesets
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, resolve_ffmpeg
 from dataforge.vrs import census_images
-from dataforge.vrs_hevc import VrsHevcReader
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +58,7 @@ def pilot_nvenc() -> Path:
 
 def preview_access_units(scene: Scene, camera: Camera) -> Iterator[bytes]:
     return census_images(
-        VrsHevcReader(scene.source / "video.vrs", camera.stream_id).images(), camera.times_ns, camera.source_count, preview=True, where=camera.stream_id
+        scene.vrs.hevc(camera.stream_id).images(), camera.times_ns, camera.source_count, preview=True, where=camera.stream_id
     )
 
 

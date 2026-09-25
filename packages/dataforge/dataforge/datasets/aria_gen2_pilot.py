@@ -70,9 +70,13 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
 
     layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.PROJECTIONS_LAYER)
 
-    def discover(self) -> list[tuple[SequenceIdentity, Path]]:
+    def manifest(self) -> Manifest:
+        """The release inventory beside the sequences."""
+        return read_json(self.config.root / "AriaGen2PilotDataset_download_urls.json", Manifest)
+
+    def discover(self, manifest: Manifest | None = None) -> list[tuple[SequenceIdentity, Path]]:
         """Find all complete release sequences without traversing _simplecv."""
-        manifest: Manifest = read_json(self.config.root / "AriaGen2PilotDataset_download_urls.json", Manifest)
+        manifest = self.manifest() if manifest is None else manifest
         selected: tuple[str, ...] = SEQUENCES if self.config.sequences is None else self.config.sequences
         unknown: set[str] = set(selected) - set(SEQUENCES)
         if unknown:
@@ -91,15 +95,17 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
                     raise FileNotFoundError(f"{name}: missing {missing[0]}")
                 print(f"skip {name}: missing {missing[0]}")
                 continue
-            if name not in manifest.sequences or required[0].stat().st_size != manifest.sequences[name].main_vrs.file_size_bytes:
+            if name not in manifest.sequences:
+                raise ValueError(f"{name}: absent from the release manifest")
+            if required[0].stat().st_size != manifest.sequences[name].main_vrs.file_size_bytes:
                 raise ValueError(f"{required[0]}: size differs from release manifest")
             found.append((SequenceIdentity(self.config.name, (name,)), source))
         return found
 
     def download(self) -> None:
         """Verify local VRS size and SHA-1; never fetch, extract or modify raw data."""
-        manifest: Manifest = read_json(self.config.root / "AriaGen2PilotDataset_download_urls.json", Manifest)
-        found: list[tuple[SequenceIdentity, Path]] = self.discover()
+        manifest: Manifest = self.manifest()
+        found: list[tuple[SequenceIdentity, Path]] = self.discover(manifest)
         for _, source in found:
             with (source / "video.vrs").open("rb") as stream:
                 digest: str = hashlib.file_digest(stream, "sha1").hexdigest()
@@ -118,10 +124,10 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write atomic local layers and never follow raw symlinks for output."""
         targets: dict[str, Path] = self.targets(identity)
-        forbidden: tuple[Path, ...] = (self.config.root.resolve(), source.resolve(), Path("/mnt/nas"), Path("/volume1"))
+        forbidden: tuple[Path, ...] = (self.config.root.resolve(), source.resolve())
         for target in [*targets.values(), paths.output_root() / "work"]:
             if any(target.resolve().is_relative_to(root) for root in forbidden):
-                raise ValueError(f"refusing raw-root or NAS output: {target}")
+                raise ValueError(f"refusing output under the raw data: {target}")
         pending: list[str] = [layer for layer, target in targets.items() if not writing.should_skip(target, force=force)]
         if pending:
             with self.timer.stage("fetch"):

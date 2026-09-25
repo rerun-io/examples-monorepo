@@ -6,40 +6,23 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from conftest import vrs_file, vrs_record
 
 from dataforge.vrs import VrsImageReader
 
 
 def synthetic_vrs(*, compression: int = 0, image_format: str = "jpg", timestamp_offset: int = 4) -> bytes:
-    def string(value: str) -> bytes:
-        encoded = value.encode()
-        return struct.pack("<I", len(encoded)) + encoded
-
-    def tags(values: dict[str, str]) -> bytes:
-        return struct.pack("<I", len(values)) + b"".join(string(k) + string(v) for k, v in values.items())
-
-    def record(payload: bytes, *, stream: int = 214, compressed: int = 0) -> bytes:
-        return struct.pack("<IIiIdHBBI", 32 + len(payload), 0, stream, 2, 0.0, 1, 3, compressed, 0) + payload
-
     layout = json.dumps({"data_layout": [{"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": timestamp_offset}]})
-    description = (
-        struct.pack("<IiH", 1, 214, 1)
-        + tags({"device": "test"})
-        + tags({"RF:Data:2": f"data_layout/size=12+image/{image_format}", "DL:Data:2:0": layout})
-        + tags({})
-    )
-    desc_record = record(description, stream=2)
-    header = bytearray(80)
-    struct.pack_into("<IIQIIqqq", header, 0, 0x69736956, 0x65526E6F, 0, 80, 32, 0, 80, 80 + len(desc_record))
-    header[72:80] = b"cordVRS2"
-    return (
-        bytes(header)
-        + desc_record
-        + record(b"ignored", stream=1202, compressed=2)
-        + b"".join(
-            record(b"pad!" + struct.pack("<q", stamp) + b"\xff\xd8test\xff\xd9", compressed=compression if stamp == 200 else 0)
-            for stamp in (100, 200)
-        )
+    return vrs_file(
+        {214: {"RF:Data:2": f"data_layout/size=12+image/{image_format}", "DL:Data:2:0": layout}},
+        [
+            vrs_record(b"ignored", type_id=1202, compression=2),
+            *(
+                vrs_record(b"pad!" + struct.pack("<q", stamp) + b"\xff\xd8test\xff\xd9", type_id=214, compression=compression if stamp == 200 else 0)
+                for stamp in (100, 200)
+            ),
+        ],
+        user_tags={"device": "test"},
     )
 
 

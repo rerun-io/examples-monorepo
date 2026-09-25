@@ -11,7 +11,7 @@ from numpy import ndarray
 from projectaria_tools.core.calibration import ImuCalibration
 
 from dataforge import aria, hands, paths, schema, writing
-from dataforge.datasets.aria_gen2_pilot_source import Scene
+from dataforge.datasets.aria_gen2_pilot_source import IMUS, Scene
 from dataforge.datasets.hot3d_layers import project_keypoints
 from dataforge.datasets.hot3d_vrs import nearest_framesets
 from dataforge.identity import SequenceIdentity
@@ -29,25 +29,21 @@ from dataforge.logging_toolkit import (
 from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4
 from dataforge.vrs import census_images
-from dataforge.vrs_hevc import VrsHevcReader, VrsImuReader
 
 
 def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
     """All native trajectory/IMU rows, plus explicit missing-pose boundaries."""
     track = scene.trajectory
     keep: Bool[ndarray, "n"] = np.ones(len(track.times_ns), dtype=np.bool_) if scene.stop_ns is None else track.times_ns <= scene.stop_ns
-    # A rig with no transform would appear at world origin. Explicit invalid rows
-    # hide it before tracking, in large gaps and after the last measured pose.
-    missing: list[int] = [min(int(camera.times_ns[0]) for camera in scene.cameras)]
-    missing += (track.times_ns[:-1][np.diff(track.times_ns) > 2_000_000] + 1).tolist()
-    missing.append(int(track.times_ns[-1]) + 1)
-    camera_times: Int64[ndarray, "c"] = np.unique(np.concatenate([camera.times_ns for camera in scene.cameras]))
-    missing += camera_times[~np.isfinite(track.at(camera_times)).all(axis=(1, 2))].tolist()
-    extra: Int64[ndarray, "e"] = np.asarray(missing, dtype=np.int64)
-    extra = extra[~np.isfinite(track.at(extra)).all(axis=(1, 2))]
+    # A rig with no transform would sit at the world origin. It is visible on each run of
+    # rows <= 2 ms apart and hidden elsewhere: a NaN row at the first camera stamp (when
+    # tracking starts later) and 1 ns after every run's last row.
+    run_ends: Int64[ndarray, "r"] = np.flatnonzero(np.append(np.diff(track.times_ns) > 2_000_000, True))
+    hide: Int64[ndarray, "h"] = np.append(min(int(camera.times_ns[0]) for camera in scene.cameras), track.times_ns[run_ends] + 1)
+    hide = hide[~np.isfinite(track.at(hide)).all(axis=(1, 2))]
     if scene.stop_ns is not None:
-        extra = extra[extra <= scene.stop_ns]
-    times: Int64[ndarray, "t"] = np.union1d(track.times_ns[keep], extra)
+        hide = hide[hide <= scene.stop_ns]
+    times: Int64[ndarray, "t"] = np.union1d(track.times_ns[keep], hide)
     log_dense_pose_track(
         recording,
         schema.rig_path(0),
@@ -61,8 +57,12 @@ def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
         columns=rr.Scalars.columns(scalars=track.quality[keep]),
         recording=recording,
     )
-    for index, label in enumerate(("imu-left", "imu-right")):
-        imu_times, accel, gyro = VrsImuReader(scene.source / "video.vrs", f"1202-{index + 1}").samples(scene.stop_ns)
+    provider = aria.open_vrs(scene.source / "video.vrs")
+    for index, (stream_id, label) in enumerate(IMUS):
+        gyro, accel = aria.read_imu(provider, stream_id)
+        if scene.stop_ns is not None:
+            kept: Bool[ndarray, "s"] = gyro.times_ns <= scene.stop_ns
+            gyro, accel = ImuChannel(gyro.times_ns[kept], gyro.values_xyz[kept]), ImuChannel(accel.times_ns[kept], accel.values_xyz[kept])
         imu: ImuCalibration | None = scene.calibration.get_imu_calib(label)
         if imu is None:
             raise ValueError(f"{scene.source}: missing {label} factory calibration")
@@ -72,8 +72,8 @@ def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
             0,
             index,
             name=label,
-            gyro=ImuChannel(imu_times, gyro),
-            accel=ImuChannel(imu_times, accel),
+            gyro=gyro,
+            accel=accel,
             rig_T_imu=rr.Transform3D(translation=transform[:3, 3], mat3x3=transform[:3, :3]),
         )
 
@@ -82,7 +82,7 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
     """Pipe native HEVC to shared AV1 NVENC, then remap MP4 samples to VRS times."""
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
     rr.log("/", annotation_context(), static=True, recording=recording)
-    log_rig_node(recording, 0, reference=None, num_cameras=5, name="Aria Gen2 device", kind="ego")
+    log_rig_node(recording, 0, reference=None, num_cameras=len(scene.cameras), name="Aria Gen2 device", kind="ego")
     work_root: Path = paths.output_root() / "work"
     work_root.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix="aria-gen2-", dir=work_root) as work:
@@ -92,7 +92,7 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
             with timer.stage("transcode"):
                 encode_frames_to_mp4(
                     census_images(
-                        VrsHevcReader(scene.source / "video.vrs", camera.stream_id).images(),
+                        scene.vrs.hevc(camera.stream_id).images(),
                         camera.times_ns,
                         camera.source_count,
                         preview=scene.stop_ns is not None,
@@ -132,7 +132,7 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
         recording,
         identity,
         num_frames=len(scene.cameras[0].times_ns),
-        num_cameras=5,
+        num_cameras=len(scene.cameras),
         source_revision="AriaGen2PilotDataset v1.0",
         dataset_version="v1.0",
         source_num_frames=scene.cameras[0].source_count,
@@ -153,7 +153,7 @@ def write_hands(recording: rr.RecordingStream, scene: Scene) -> None:
     batch = scene.hands
     if not len(batch.times_ns):
         return
-    frames: Int64[ndarray, "n"] = nearest_framesets(scene.cameras[0].times_ns, batch.times_ns)
+    frames: Int64[ndarray, "n"] = batch.frame_indices
     hands.log_keypoints3d(recording, times_ns=batch.times_ns, frame_indices=frames, positions=batch.positions, confidence=batch.confidence)
     for index, side in enumerate(("left", "right")):
         hands.log_hand_confidence(recording, side, times_ns=batch.times_ns, frame_indices=frames, confidence=batch.scores[:, index])
@@ -177,7 +177,6 @@ def write_projections(recording: rr.RecordingStream, scene: Scene) -> None:
     batch = scene.hands
     if not len(batch.times_ns):
         return
-    frames: Int64[ndarray, "n"] = nearest_framesets(scene.cameras[0].times_ns, batch.times_ns)
     for index, camera in enumerate(scene.cameras):
         pixels: Float64[ndarray, "n 133 2"] = project_keypoints(camera.calibration, batch.device_poses, batch.positions)
         hands.log_keypoints2d(
@@ -186,7 +185,7 @@ def write_projections(recording: rr.RecordingStream, scene: Scene) -> None:
             index,
             path=schema.coco133_uv_projected_path(0, index),
             times_ns=batch.times_ns,
-            frame_indices=frames,
+            frame_indices=batch.frame_indices,
             positions=pixels.astype(np.float32),
             confidence=batch.confidence,
         )
