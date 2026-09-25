@@ -2,9 +2,10 @@
 
 import base64
 import binascii
+import hashlib
 import mimetypes
 import re
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TypeAlias
@@ -47,7 +48,7 @@ class SourceRecord:
     """Only native input fields, never command output."""
 
 
-def iter_rollout(path: Path) -> Iterator[SourceRecord]:
+def iter_rollout(path: Path) -> Generator[SourceRecord]:
     """Decode one line at a time; diagnostics never include source content."""
     with path.open("rb") as stream:
         for index, line in enumerate(stream):
@@ -135,7 +136,9 @@ class RolloutFacts:
     outputs: dict[str, tuple[str, int]] = field(default_factory=dict)
     """Output JSON and envelope timestamp by raw call ID."""
     images: dict[str, Path] = field(default_factory=dict)
-    """Existing local image paths, shared with the source inventory."""
+    """Local image paths discovered in the body."""
+    extra_inputs: dict[str, str] = field(default_factory=dict)
+    """Hashes captured from the first read of each local image."""
     total: cr.TokenUsage = field(default_factory=cr.TokenUsage)
     """Last thread usage total."""
     has_usage_records: bool = False
@@ -183,8 +186,7 @@ def collect(path: Path) -> RolloutFacts:
                     image: Path = Path(local)
                     if not image.is_absolute():
                         image = Path(facts.meta.cwd) / image
-                    if image.is_file():
-                        facts.images[local] = image.resolve()
+                    facts.images[local] = image.resolve()
             elif isinstance(payload, cr.ResponseItem):
                 if payload.type == "reasoning":
                     owner: str = payload.internal_chat_message_metadata_passthrough.turn_id if payload.internal_chat_message_metadata_passthrough else turn_id
@@ -260,9 +262,15 @@ def emit(facts: RolloutFacts) -> list[ev.TimedRecord]:
                 for local in payload.local_images:
                     image_path: Path | None = facts.images.get(local)
                     if image_path is not None:
+                        try:
+                            blob = image_path.read_bytes()
+                        except FileNotFoundError:
+                            facts.extra_inputs.setdefault(str(image_path), "missing")
+                            continue
+                        facts.extra_inputs.setdefault(str(image_path), hashlib.sha256(blob).hexdigest())
                         events.append(
                             ev.TimedRecord(
-                                ev.Image(image_path.read_bytes(), mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"),
+                                ev.Image(blob, mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"),
                                 source.timestamp_ns,
                                 source.file_index,
                                 turn_id=turn_id,
@@ -319,21 +327,10 @@ def emit(facts: RolloutFacts) -> list[ev.TimedRecord]:
     return events
 
 
-def parse_file(path: Path, images: dict[str, Path]) -> ev.Session:
-    """Parse a standalone transcript with explicitly inventoried images."""
-    facts: RolloutFacts = collect(path)
-    facts.images = images
-    return session_from_facts(facts)
-
-
 def session_from_facts(facts: RolloutFacts) -> ev.Session:
     """Build a session without re-reading or re-checking its rollout."""
     events: list[ev.TimedRecord] = emit(facts)
-    # Replayed histories may carry later session metadata. Preserve the existing
-    # emitted identity; discovery still uses the first-line owner metadata.
-    meta: cr.SessionMeta = next(
-        (entry.source.payload for entry in reversed(facts.records) if isinstance(entry.source.payload, cr.SessionMeta)), facts.meta
-    )
+    meta: cr.SessionMeta = facts.meta
     home: Path = rollout_home(facts.path)
     return ev.Session(
         meta.thread_id,
@@ -343,6 +340,7 @@ def session_from_facts(facts: RolloutFacts) -> ev.Session:
         {},
         dict(facts.skipped),
         agent="codex",
+        extra_inputs=facts.extra_inputs,
         cwd=meta.cwd,
         git_branch=meta.git.branch if meta.git else "",
         cli_versions={meta.cli_version},
@@ -374,20 +372,29 @@ def rollout_home(path: Path) -> Path:
     return next((parent.parent for parent in path.parents if parent.name in {"sessions", "archived_sessions"}), path.parent)
 
 
-def discover_rollouts(home: Path, result: Discovery) -> dict[Path, RolloutFacts]:
-    """Index metadata once, retaining excluded parents for child ownership."""
-    index: dict[Path, RolloutFacts] = {}
+def rollout_header(path: Path) -> cr.SessionMeta:
+    """Read only the first line, closing the stream before returning its identity."""
+    records = iter_rollout(path)
+    try:
+        first: SourceRecord | None = next(records, None)
+    finally:
+        records.close()
+    if first is None or not isinstance(first.payload, cr.SessionMeta):
+        raise ValueError("missing session_meta")
+    return first.payload
+
+
+def discover_rollouts(home: Path, result: Discovery) -> dict[Path, cr.SessionMeta]:
+    """Index headers only, retaining excluded parents for child ownership."""
+    index: dict[Path, cr.SessionMeta] = {}
     for directory in ("sessions", "archived_sessions"):
         for candidate in sorted((home / directory).rglob("*.jsonl")):
             if candidate.name.startswith("._"):
                 continue
             path: Path = candidate.resolve()
             try:
-                index[path] = collect(path)
-                if index[path].failure:
-                    result.failed[path] = index[path].failure
-                if index[path].exclusion:
-                    result.skipped[path] = index[path].exclusion
+                index[path] = rollout_header(path)
+                check_version(index[path])
             except NotCodex:
                 result.sessions.append(claude.session_source(path))
             except SkipRollout as error:
@@ -398,62 +405,53 @@ def discover_rollouts(home: Path, result: Discovery) -> dict[Path, RolloutFacts]
 
 
 def discover(home: Path) -> Discovery:
-    """Inventory recording owners, keeping excluded descendants out of orphan recordings."""
+    """Inventory recording owners without decoding or retaining rollout bodies."""
     result: Discovery = Discovery()
-    index: dict[Path, RolloutFacts] = discover_rollouts(home, result)
-    thread_ids: set[str] = {facts.meta.thread_id for facts in index.values()}
-    for path, facts in index.items():
-        if facts.meta.parent_thread_id in thread_ids:
+    index: dict[Path, cr.SessionMeta] = discover_rollouts(home, result)
+    thread_ids: set[str] = {meta.thread_id for meta in index.values()}
+    for path, meta in index.items():
+        if meta.parent_thread_id in thread_ids:
             continue
         descendants: list[Path] = rollout_tree(path, index)[1:]
         folded: tuple[Path, ...] = tuple(child for child in descendants if child not in result.skipped and child not in result.failed)
         if path not in result.skipped and path not in result.failed:
-            try:
-                result.sessions.append(rollout_source(path, index, folded))
-                continue
-            except SkipRollout as error:
-                result.skipped[path] = str(error)
-            except (ValueError, SerdeError, OSError) as error:
-                result.failed[path] = str(error)
-        reason: str = "parent-failed" if path in result.failed else "parent-skipped"
-        result.skipped.update(dict.fromkeys(folded, reason))
+            result.sessions.append(rollout_source(path, index, folded))
+        else:
+            reason: str = "parent-failed" if path in result.failed else "parent-skipped"
+            result.skipped.update(dict.fromkeys(folded, reason))
     return result
 
 
-def rollout_tree(path: Path, index: dict[Path, RolloutFacts]) -> list[Path]:
+def rollout_tree(path: Path, index: dict[Path, cr.SessionMeta]) -> list[Path]:
     """Find recursive children by parent ID, guarding against cycles."""
     paths: list[Path] = [path]
     seen: set[str] = set()
     for current in paths:
-        meta: cr.SessionMeta = index[current].meta
-        thread_id: str = meta.thread_id
+        thread_id: str = index[current].thread_id
         if thread_id in seen:
             continue
         seen.add(thread_id)
         for candidate, child in index.items():
-            if child.meta.parent_thread_id == thread_id and candidate not in paths:
+            if child.parent_thread_id == thread_id and candidate not in paths:
                 paths.append(candidate)
     return paths
 
 
 def session_source(path: Path) -> SessionSource:
-    """Build a single rollout inventory using the provider-owned home index."""
+    """Build a single rollout inventory using the provider-owned header index."""
     main: Path = path.expanduser().resolve()
     result: Discovery = Discovery()
-    index: dict[Path, RolloutFacts] = discover_rollouts(rollout_home(main), result)
+    index: dict[Path, cr.SessionMeta] = discover_rollouts(rollout_home(main), result)
     if main not in index:
-        index[main] = collect(main)
+        index[main] = rollout_header(main)
     return rollout_source(main, index, ())
 
 
-def rollout_source(path: Path, index: dict[Path, RolloutFacts], folded: tuple[Path, ...]) -> SessionSource:
-    """Inventory the rollout tree and the local images its parser can read."""
-    if index[path].exclusion:
-        raise SkipRollout(index[path].exclusion)
-    paths: list[Path] = rollout_tree(path, index)
-    inventory: dict[Path, RolloutFacts] = {source: index[source] for source in paths}
-    inputs: tuple[Path, ...] = (*paths, *sorted({image for facts in inventory.values() for image in facts.images.values()}))
-    return SessionSource(index[path].meta.thread_id, path, inputs, lambda: parse_rollout_inventory(path, inventory), folded)
+def rollout_source(path: Path, index: dict[Path, cr.SessionMeta], folded: tuple[Path, ...]) -> SessionSource:
+    """Capture transcript paths only; local images are discovered during parsing."""
+    check_version(index[path])
+    inputs: tuple[Path, ...] = tuple(rollout_tree(path, index))
+    return SessionSource(index[path].thread_id, path, inputs, lambda: parse_rollout_inventory(inputs), folded)
 
 
 def parse_rollout(path: Path) -> ev.Session:
@@ -461,20 +459,20 @@ def parse_rollout(path: Path) -> ev.Session:
     return session_source(path).parse()
 
 
-def parse_rollout_inventory(path: Path, inventory: dict[Path, RolloutFacts]) -> ev.Session:
-    """Parse inventoried transcripts without discovering files again."""
-    parent: ev.Session = session_from_facts(inventory[path])
+def parse_rollout_inventory(inputs: tuple[Path, ...]) -> ev.Session:
+    """Collect and emit one tree, releasing each rollout's facts after emission."""
+    parent: ev.Session = session_from_facts(collect(inputs[0]))
     children: dict[str, list[ev.TimedRecord]] = {}
-    for child_path, facts in inventory.items():
-        if child_path == path:
-            continue
+    for child_path in inputs[1:]:
         try:
-            child: ev.Session = session_from_facts(facts)
+            child: ev.Session = session_from_facts(collect(child_path))
         except SkipRollout as error:
             reason: str = str(error)
             parent.skipped[reason] = parent.skipped.get(reason, 0) + 1
             continue
         children[child.session_id] = child.main
+        for image, digest in child.extra_inputs.items():
+            parent.extra_inputs.setdefault(image, digest)
         parent.models.update(child.models)
         parent.cli_versions.update(child.cli_versions)
         for reason, count in child.skipped.items():

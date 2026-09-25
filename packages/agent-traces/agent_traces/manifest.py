@@ -4,6 +4,7 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import orjson
 from serde import SerdeError, serde
@@ -11,7 +12,7 @@ from serde.json import from_json, to_json
 
 from agent_traces.writing import atomic_write
 
-CONVERSION_REVISION: int = 1  # Bump when the recording layout or content changes.
+CONVERSION_REVISION: int = 2  # Bump when the recording layout or content changes.
 
 
 def fingerprint(inputs: tuple[Path, ...]) -> str:
@@ -26,6 +27,22 @@ def fingerprint(inputs: tuple[Path, ...]) -> str:
             while block := stream.read(1024 * 1024):
                 digest.update(block)
     return digest.hexdigest()
+
+
+def input_digest(path: Path) -> str:
+    """Hash a known extra input before parsing, including an absent-file marker."""
+    try:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except FileNotFoundError:
+        return "missing"
+
+
+def fingerprint_with_extras(transcript_hash: str, extras: dict[str, str]) -> str:
+    """Combine the pre-parse transcript hash with hashes of consumed extra inputs."""
+    if not extras:
+        return transcript_hash
+    return hashlib.sha256(transcript_hash.encode() + orjson.dumps(sorted(extras.items()))).hexdigest()
 
 
 @serde(deny_unknown_fields=True)
@@ -47,6 +64,8 @@ class ManifestEntry:
     """Conversion content revision, independent of the manifest schema."""
     n_rows: int
     """Temporal rows in the saved recording, excluding properties."""
+    extra_inputs: tuple[str, ...] = ()
+    """Local image paths observed during parsing, checked on the next run."""
 
 
 @serde(deny_unknown_fields=True)
@@ -54,19 +73,10 @@ class ManifestEntry:
 class Manifest:
     """Completed conversions for one profile."""
 
-    version: int = 2
+    version: Literal[2] = 2
     """Manifest schema version."""
     sessions: dict[str, ManifestEntry] = field(default_factory=dict)
     """Completed entries keyed by session id."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class _ManifestVersion:
-    """Read the schema before decoding version-specific entries."""
-
-    version: int
-    """Required schema version."""
 
 
 def load_manifest(path: Path) -> Manifest:
@@ -85,9 +95,6 @@ def load_manifest(path: Path) -> Manifest:
         return Manifest()
     try:
         content: bytes = path.read_bytes()
-        version: int = from_json(_ManifestVersion, content).version
-        if version != 2:
-            raise ValueError(f"{path}: unsupported manifest version {version}; delete it to convert everything again")
         return from_json(Manifest, content)
     except (SerdeError, orjson.JSONDecodeError) as error:
         raise ValueError(f"{path}: {error}; delete it to convert everything again") from error

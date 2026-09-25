@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from urllib.parse import unquote, urlparse
 
 import orjson
 from serde import SerdeError, serde
@@ -64,7 +65,11 @@ def matching_call(completed: CompletedTool, calls: list[RawCall], outputs: dict[
         name: str = response.name.removeprefix("functions.")
         matches: bool = False
         if isinstance(item, cr.CommandExecution) and item.command and name in {"exec", "exec_command", "shell", "shell_command"}:
-            matches = names_command(raw, item)
+            matches = (
+                any(arguments.cmd == item.command[-1] and (not arguments.has_workdir or same_directory(arguments.workdir, item.cwd))
+                    for arguments in script_commands(raw))
+                if name == "exec" else names_command(raw, item)
+            )
         elif isinstance(item, cr.McpToolCall):
             matches = name in {f"mcp__{item.server}__{item.tool}", f"mcp/{item.server}/{item.tool}"} and cr.arguments_equal(raw, item.arguments)
         elif isinstance(item, cr.FileChange):
@@ -77,19 +82,20 @@ def matching_call(completed: CompletedTool, calls: list[RawCall], outputs: dict[
 
 
 def names_command(raw: str, item: cr.CommandExecution) -> bool:
-    """Recognize shell arguments or a literal command inside an exec script."""
+    """Recognize JSON shell arguments for native shell calls."""
     try:
         arguments: ShellArguments = from_json(ShellArguments, raw)
     except (SerdeError, orjson.JSONDecodeError):
-        # Scripts may use double, single, or template quotes. Compare entire
-        # literals, never a short command substring inside an unrelated word.
-        for token in re.findall(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`", raw, re.DOTALL):
-            if token[1:-1] == item.command[-1] or token == orjson.dumps(item.command[-1]).decode():
-                return True
-        return raw == item.command[-1]
+        return False
     command: str | list[str] = arguments.cmd or arguments.command
     directory: str = arguments.workdir or arguments.cwd
-    return command in (item.command[-1], item.command) and not (directory and item.cwd and directory != item.cwd)
+    return command in (item.command[-1], item.command) and not (directory and item.cwd and not same_directory(directory, item.cwd))
+
+
+def same_directory(requested: str, native_cwd: str) -> bool:
+    """Compare a call's plain path with the item's cwd, which Codex records as a file:// URI."""
+    native: str = unquote(urlparse(native_cwd).path) if native_cwd.startswith("file://") else native_cwd
+    return bool(requested) and requested.rstrip("/") == native.rstrip("/")
 
 
 @serde
@@ -105,6 +111,89 @@ class ShellArguments:
     """Explicit execution directory."""
     cwd: str = ""
     """Alternative execution directory."""
+    has_workdir: bool = False
+    """A script explicitly supplied workdir, including an empty string."""
+
+
+def script_commands(script: str) -> list[ShellArguments]:
+    """Extract flat literal arguments from tools.exec_command calls, never quoted code.
+
+    This deliberately supports only a small JavaScript grammar. Expressions,
+    spreads, duplicate keys, interpolations and regex literals stay unmatched.
+    """
+    tokens: list[str] = [
+        token for token in re.findall(
+            r'''//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|[\w$]+|[^\s]''',
+            script,
+        ) if not token.startswith(("//", "/*"))
+    ]
+    # A slash outside strings/comments may start a regex; don't scan its contents.
+    if any(token in {"/", '"', "'", "`"} for token in tokens):
+        return []
+    commands: list[ShellArguments] = []
+    for start in range(len(tokens) - 5):
+        if tokens[start:start + 5] != ["tools", ".", "exec_command", "(", "{"] or (start and tokens[start - 1] == "."):
+            continue
+        index: int = start + 5
+        fields: dict[str, str | None] = {}
+        while index + 2 < len(tokens):
+            key: str = tokens[index]
+            if key.startswith(('"', "'")):
+                key = script_literal(key) or ""
+            if not re.fullmatch(r"[A-Za-z_$][\w$]*", key) or key in fields or tokens[index + 1] != ":":
+                break
+            value: str = tokens[index + 2]
+            fields[key] = script_literal(value)
+            if fields[key] is None and not re.fullmatch(r"(?:\d+|true|false|null)", value):
+                break
+            index += 3
+            if tokens[index:index + 2] == [",", "}"]:
+                index += 1
+            if tokens[index:index + 2] == ["}", ")"]:
+                command: str | None = fields.get("cmd")
+                directory: str | None = fields.get("workdir")
+                if command is not None and ("workdir" not in fields or directory is not None):
+                    commands.append(ShellArguments(cmd=command, workdir=directory or "", has_workdir="workdir" in fields))
+                break
+            if index >= len(tokens) or tokens[index] != ",":
+                break
+            index += 1
+    return commands
+
+
+def script_literal(token: str) -> str | None:
+    """Decode supported JavaScript string escapes without evaluating any code."""
+    if len(token) < 2 or token[0] not in {'"', "'", "`"} or token[-1] != token[0]:
+        return None
+    body: str = token[1:-1]
+    if token[0] == "`" and "${" in body:
+        return None
+    escapes: dict[str, str] = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+    parts: list[str] = []
+    index: int = 0
+    while index < len(body):
+        char: str = body[index]
+        index += 1
+        if char == "\\":
+            if index == len(body):
+                return None
+            char = body[index]
+            index += 1
+            if char in {"x", "u"}:
+                width: int = 2 if char == "x" else 4
+                digits: str = body[index:index + width]
+                if len(digits) != width or not re.fullmatch(r"[0-9a-fA-F]+", digits):
+                    return None
+                char = chr(int(digits, 16))
+                index += width
+            elif char in escapes:
+                if char == "0" and index < len(body) and body[index].isdigit():
+                    return None
+                char = escapes[char]
+            elif char not in {'"', "'", "`", "\\", "/"}:
+                return None
+        parts.append(char)
+    return "".join(parts)
 
 
 def tool_events(completed: CompletedTool, calls: list[RawCall], outputs: dict[str, tuple[str, int]]) -> list[ev.TimedRecord]:
@@ -164,4 +253,3 @@ def tool_events(completed: CompletedTool, calls: list[RawCall], outputs: dict[st
             effort=completed.effort,
         ),
     ]
-

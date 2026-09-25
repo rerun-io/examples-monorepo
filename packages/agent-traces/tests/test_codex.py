@@ -507,7 +507,7 @@ def test_commands_agree_on_transcript_provider(tmp_path: Path) -> None:
 
 def test_later_exact_call_wins(rollout_builder: RolloutBuilder) -> None:
     """Search every exact key before considering an earlier text match."""
-    from agent_traces.codex import parse_file
+    from agent_traces.codex import parse_rollout
     from agent_traces.events import ToolCall
 
     rollout_builder.meta()
@@ -517,7 +517,7 @@ def test_later_exact_call_wins(rollout_builder: RolloutBuilder) -> None:
     rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={"type": "CommandExecution", "id": "exact", "command": ["bash", "-lc", "ls"]})
     for call_id in ("heuristic", "exact"):
         rollout_builder.add("response_item", type="function_call_output", call_id=call_id, output="ok")
-    calls: list[ToolCall] = [r.payload for r in parse_file(rollout_builder.path, {}).main if isinstance(r.payload, ToolCall)]
+    calls: list[ToolCall] = [r.payload for r in parse_rollout(rollout_builder.path).main if isinstance(r.payload, ToolCall)]
     assert [c.call_id for c in calls] == ["exact"]
 
 
@@ -526,7 +526,7 @@ def test_command_correlation(rollout_builder: RolloutBuilder, mode: str) -> None
     """Family, containment and unique command identity govern non-exact joins."""
     import math
 
-    from agent_traces.codex import parse_file
+    from agent_traces.codex import parse_rollout
     from agent_traces.events import Session, ToolCall, ToolResult
 
     rollout_builder.meta()
@@ -538,19 +538,19 @@ def test_command_correlation(rollout_builder: RolloutBuilder, mode: str) -> None
         script = 'text(await tools.exec_command({cmd:"ls"}));'
     rollout_builder.add("response_item", type="custom_tool_call", name="exec", call_id="first", input=script)
     if mode in {"ambiguous", "reverse", "directory"}:
-        rollout_builder.add("response_item", type="function_call", name="exec_command", call_id="second", arguments='{"cmd":"pwd"}' if mode == "reverse" else '{"cmd":"ls","workdir":"/b"}')
+        rollout_builder.add("response_item", type="function_call", name="exec_command", call_id="second", arguments='{"cmd":"pwd"}' if mode == "reverse" else '{"cmd":"ls","workdir":"/a"}' if mode == "ambiguous" else '{"cmd":"ls","workdir":"/b"}')
     if mode == "outside":
         rollout_builder.add("response_item", type="custom_tool_call_output", call_id="first", output="ok")
     commands: list[str] = ["ls", "pwd"] if mode == "two" else ["ls", "ls"] if mode == "repeat" else ["pwd", "ls"] if mode == "reverse" else ["ls"]
     for i, command in enumerate(commands):
-        rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={"type": "CommandExecution", "id": f"native-{i}", "command": ["bash", "-lc", command], "cwd": "/a" if mode == "directory" else ""})
+        rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={"type": "CommandExecution", "id": f"native-{i}", "command": ["bash", "-lc", command], "cwd": "/a"})
     if mode not in {"missing", "outside"}:
         rollout_builder.add("response_item", type="custom_tool_call_output", call_id="first", output="ok")
     if mode == "mcp":
         rollout_builder.add("response_item", type="function_call_output", call_id="misleading", output="ok")
     if mode in {"ambiguous", "reverse", "directory"}:
         rollout_builder.add("response_item", type="function_call_output", call_id="second", output="ok")
-    session: Session = parse_file(rollout_builder.path, {})
+    session: Session = parse_rollout(rollout_builder.path)
     calls: list[ToolCall] = [r.payload for r in session.main if isinstance(r.payload, ToolCall)]
     results: list[ToolResult] = [r.payload for r in session.main if isinstance(r.payload, ToolResult)]
     expected: list[str] = ["native-0"] if mode in {"ambiguous", "missing", "outside"} else ["second", "first"] if mode == "reverse" else ["first"] * len(commands)
@@ -581,24 +581,21 @@ def test_command_input_and_full_output_once(rollout_builder: RolloutBuilder, tmp
     assert output in strings
 
 
-def test_inventory_checks_version_once(rollout_builder: RolloutBuilder, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inventory and repeated emission share one collected, version-checked rollout."""
+def test_discovery_reads_only_headers(rollout_builder: RolloutBuilder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inventory must not decode bodies, even when they are supported."""
     from agent_traces import codex
-    from agent_traces import codex_records as cr
 
     rollout_builder.meta()
     rollout_builder.item("Reasoning")
-    versions: list[str] = []
-    original = codex.check_version
+    original = codex.orjson.loads
 
-    def checked(meta: cr.SessionMeta) -> None:
-        versions.append(meta.cli_version)
-        original(meta)
+    def header_only(data: bytes) -> object:
+        assert b'"session_meta"' in data, "discovery decoded a body"
+        return original(data)
 
-    monkeypatch.setattr(codex, "check_version", checked)
-    source = codex.session_source(rollout_builder.path)
-    assert source.parse().main == source.parse().main
-    assert versions == ["0.153.4"]
+    monkeypatch.setattr(codex.orjson, "loads", header_only)
+    discovery = codex.discover(rollout_builder.path.parents[4])
+    assert [source.session_id for source in discovery.sessions] == ["thread"]
 
 
 def test_consumed_records_are_not_skipped(rollout_builder: RolloutBuilder) -> None:
@@ -632,14 +629,156 @@ def test_new_tag_uses_one_definition(rollout_builder: RolloutBuilder, monkeypatc
     assert [r.payload.name for r in session.main if isinstance(r.payload, ToolCall)] == ["future"]
 
 
-def test_replayed_metadata_keeps_existing_emitted_identity(rollout_builder: RolloutBuilder) -> None:
-    """A replayed header affects emission while the first header owns inventory."""
+def test_replayed_metadata_preserves_every_child(rollout_builder: RolloutBuilder, tmp_path: Path) -> None:
+    """First headers own identities; replayed parent headers cannot replace children."""
     from agent_traces.codex import session_source
+    from agent_traces.events import AssistantText
+    from agent_traces.rerun_log import write_session_rrd
 
-    rollout_builder.meta("owner")
+    rollout_builder.meta("owner", cwd="/owner")
     rollout_builder.meta("replayed", cwd="/replayed")
     rollout_builder.item("Reasoning")
+    for name in ("one", "two", "three"):
+        child = RolloutBuilder(tmp_path / ".codex-alt/archived_sessions" / f"{name}.jsonl")
+        child.meta(name, parent_thread_id="owner")
+        child.meta("owner")
+        child.item("AgentMessage", content=[{"type": "text", "text": name}])
     source = session_source(rollout_builder.path)
-    assert source.session_id == "owner"
-    assert source.parse().session_id == "replayed"
-    assert source.parse().cwd == "/replayed"
+    session = source.parse()
+    assert source.session_id == session.session_id == "owner"
+    assert session.cwd == "/owner"
+    assert set(session.subagents) == {"one", "two", "three"}
+    for name, events in session.subagents.items():
+        assert [r.payload.text for r in events if isinstance(r.payload, AssistantText)] == [name]
+    entities = read_entities(write_session_rrd(session, tmp_path / "children.rrd").path)
+    assert {path.split("/")[2] for path in entities if path.startswith("/agents/")} == {"one", "two", "three"}
+
+
+@pytest.mark.parametrize(
+    ("script", "command", "cwd", "joined"),
+    [
+        ('text(await tools.exec_command({cmd:"ls",workdir:"/b"}));', "ls", "/a", False),
+        ('text(await tools.exec_command({cmd:"ls",workdir:"/a"}));', "ls", "", False),
+        ('text("ls"); text(await tools.exec_command({cmd:"pwd"}));', "ls", "/a", False),
+        ('text(await tools.exec_command({cmd:`echo ${name}`,workdir:"/a"}));', "echo ${name}", "/a", False),
+        ('text("tools.exec_command({cmd:\\"ls\\"})");', "ls", "/a", False),
+        ('// tools.exec_command({cmd:"ls"})\ntext("done");', "ls", "/a", False),
+        ('/* tools.exec_command({cmd:"ls"}) */ text("done");', "ls", "/a", False),
+        ('tools.exec_command({cmd:"ls" + suffix});', "ls", "/a", False),
+        ('tools.exec_command({cmd:"ls", workdir:directory});', "ls", "/a", False),
+        ('tools.exec_command({cmd:"ls", ...options});', "ls", "/a", False),
+        ('tools.exec_command({cmd:"ls", cmd:"pwd"});', "ls", "/a", False),
+        ('tools.exec_command({cmd:"ls", workdir:""});', "ls", "/a", False),
+        ('tools.exec_command({cmd:"ls", workdir:"/a", max_output_tokens:100});', "ls", "/a", True),
+        ("tools.exec_command({'cmd':'ls', 'workdir':'/a'});", "ls", "/a", True),
+        ('tools.exec_command({cmd:`ls`, workdir:"/a"});', "ls", "/a", True),
+        ('tools.exec_command({cmd:"ls", workdir:"/a",});', "ls", "/a", True),
+        ('tools.exec_command({cmd:"echo \\"hi\\""});', 'echo "hi"', "/a", True),
+        # Codex records the native cwd as a file:// URI while scripts pass a plain path.
+        ('tools.exec_command({cmd:"ls", workdir:"/a"});', "ls", "file:///a", True),
+        ('tools.exec_command({cmd:"ls", workdir:"/a b/"});', "ls", "file:///a%20b", True),
+        ('tools.exec_command({cmd:"ls", workdir:"/b"});', "ls", "file:///a", False),
+    ],
+)
+def test_exec_script_requires_literal_command_arguments(
+    rollout_builder: RolloutBuilder, script: str, command: str, cwd: str, joined: bool,
+) -> None:
+    """Only a literal cmd and compatible workdir from a real call qualify."""
+    from agent_traces.codex import parse_rollout
+    from agent_traces.events import ToolCall
+
+    rollout_builder.meta()
+    rollout_builder.add("event_msg", type="task_started", turn_id="turn")
+    rollout_builder.add("response_item", type="custom_tool_call", name="exec", call_id="raw", input=script)
+    rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={
+        "type": "CommandExecution", "id": "native", "command": ["bash", "-lc", command], "cwd": cwd,
+    })
+    rollout_builder.add("response_item", type="custom_tool_call_output", call_id="raw", output="ok")
+    calls = [r.payload for r in parse_rollout(rollout_builder.path).main if isinstance(r.payload, ToolCall)]
+    assert [call.call_id for call in calls] == ["raw" if joined else "native"]
+
+
+def test_unchanged_batch_decodes_no_bodies(
+    rollout_builder: RolloutBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unchanged batch can hash transcripts, but must not decode their bodies."""
+    from agent_traces import codex
+    from agent_traces.apis.convert_all import Config, main
+
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    config = Config(home=tmp_path / ".codex-alt", out=tmp_path / "out")
+    main(config)
+    capsys.readouterr()
+    original = codex.orjson.loads
+
+    def no_bodies(data: bytes) -> object:
+        assert b'"event_msg"' not in data, "unchanged conversion decoded a body"
+        return original(data)
+
+    monkeypatch.setattr(codex.orjson, "loads", no_bodies)
+    main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out
+
+
+def test_old_version_rejected_before_body_decode(rollout_builder: RolloutBuilder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Version rejection happens before any unsupported body reaches the decoder."""
+    from agent_traces import codex
+
+    rollout_builder.meta(version="0.149.9")
+    rollout_builder.item("Reasoning")
+    original = codex.orjson.loads
+
+    def no_bodies(data: bytes) -> object:
+        assert b'"event_msg"' not in data, "old rollout body was decoded"
+        return original(data)
+
+    monkeypatch.setattr(codex.orjson, "loads", no_bodies)
+    with pytest.raises(codex.SkipRollout, match="codex-cli-0.149.9"):
+        codex.parse_rollout(rollout_builder.path)
+
+
+def test_single_conversion_decodes_only_its_tree(
+    rollout_builder: RolloutBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single-file conversion discovers neighbors by header but parses only its tree."""
+    from agent_traces import codex
+    from agent_traces.apis.convert import Config, main
+
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    child = RolloutBuilder(tmp_path / ".codex-alt/archived_sessions/child.jsonl")
+    child.meta("child", parent_thread_id="thread")
+    child.item("Reasoning")
+    unrelated = RolloutBuilder(tmp_path / ".codex-alt/sessions/unrelated.jsonl")
+    unrelated.meta("unrelated")
+    unrelated.item("AgentMessage", content=[{"type": "text", "text": "DO-NOT-DECODE"}])
+    original = codex.orjson.loads
+
+    def selected_only(data: bytes) -> object:
+        assert b"DO-NOT-DECODE" not in data, "unrelated body was decoded"
+        return original(data)
+
+    monkeypatch.setattr(codex.orjson, "loads", selected_only)
+    out = tmp_path / "single.rrd"
+    main(Config(session=rollout_builder.path, out=out))
+    entities = read_entities(out)
+    assert "/conversation/thinking" in entities
+    assert "/agents/child/conversation/thinking" in entities
+
+
+@pytest.mark.parametrize(("workdir", "joined"), [("/a", True), ("/b", False)])
+def test_shell_call_workdir_matches_file_uri_cwd(rollout_builder: RolloutBuilder, workdir: str, joined: bool) -> None:
+    """A JSON shell call's plain workdir is compared with the native file:// cwd as a path."""
+    from agent_traces.codex import parse_rollout
+    from agent_traces.events import ToolCall
+
+    rollout_builder.meta()
+    rollout_builder.add("event_msg", type="task_started", turn_id="turn")
+    rollout_builder.add("response_item", type="function_call", name="exec_command", call_id="raw", arguments=f'{{"cmd":"ls","workdir":"{workdir}"}}')
+    rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={
+        "type": "CommandExecution", "id": "native", "command": ["bash", "-lc", "ls"], "cwd": "file:///a",
+    })
+    rollout_builder.add("response_item", type="function_call_output", call_id="raw", output="ok")
+    calls = [r.payload for r in parse_rollout(rollout_builder.path).main if isinstance(r.payload, ToolCall)]
+    assert [call.call_id for call in calls] == ["raw" if joined else "native"]

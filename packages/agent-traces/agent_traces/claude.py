@@ -168,7 +168,7 @@ def parse_session_inventory(source_path: Path, paths: dict[str, Path], tool_resu
     cli_versions: set[str] = set()
     models: set[str] = set()
     title: str = ""
-    total_cost_usd: float = float("nan")
+    total_cost_usd: float | None = None
     transcripts: dict[str, list[ev.TimedRecord]] = {}
     for agent_id, path in paths.items():
         rows: list[tuple[_SourceRecord, int]] = []
@@ -186,7 +186,7 @@ def parse_session_inventory(source_path: Path, paths: dict[str, Path], tool_resu
                 if record.type in {"custom-title", "ai-title"}:
                     title = record.customTitle or record.aiTitle or record.content or ""
                 if record.type == "cost-state":
-                    total_cost_usd = float(record.totalCostUSD) if record.totalCostUSD is not None else float("nan")
+                    total_cost_usd = float(record.totalCostUSD) if record.totalCostUSD is not None else None
             kind: str = record.type
             keep: bool = kind in {"user", "assistant", "system", "pr-link"}
             if kind == "attachment" and record.attachment is not None:

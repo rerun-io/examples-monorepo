@@ -3,7 +3,7 @@ name = "agent-traces"
 version = "0.1.0"
 description = "Convert one Claude Code session into one Rerun recording"
 requires-python = ">=3.12"
-dependencies = ["rerun-sdk", "pyserde", "orjson", "tyro"]
+dependencies = ["rerun-sdk", "pyserde", "orjson", "tyro", "numpy", "pyarrow"]
 
 [build-system]
 requires = ["hatchling"]

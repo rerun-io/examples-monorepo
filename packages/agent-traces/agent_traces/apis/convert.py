@@ -8,7 +8,7 @@ import orjson
 
 from agent_traces.codex import SkipRollout
 from agent_traces.events import Session
-from agent_traces.manifest import fingerprint
+from agent_traces.manifest import fingerprint, fingerprint_with_extras
 from agent_traces.rerun_log import WrittenRecording, write_session_rrd
 from agent_traces.sources import SessionSource, provider_for
 
@@ -35,7 +35,9 @@ def main(config: Config) -> None:
     """
     try:
         source: SessionSource = provider_for(config.session.expanduser()).session_source(config.session)
-        session: Session = replace(source.parse(), source_sha256=fingerprint(source.inputs))
+        transcript_hash: str = fingerprint(source.inputs)
+        session: Session = source.parse()
+        session = replace(session, source_sha256=fingerprint_with_extras(transcript_hash, session.extra_inputs))
     except SkipRollout as error:
         print(f"skipped reason={error}")
         return

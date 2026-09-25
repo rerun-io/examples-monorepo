@@ -12,7 +12,7 @@ import orjson
 from agent_traces import manifest as manifest_contract
 from agent_traces.codex import SkipRollout
 from agent_traces.events import Session
-from agent_traces.manifest import Manifest, ManifestEntry, fingerprint, load_manifest, save_manifest
+from agent_traces.manifest import Manifest, ManifestEntry, fingerprint, fingerprint_with_extras, input_digest, load_manifest, save_manifest
 from agent_traces.rerun_log import WrittenRecording, write_session_rrd
 from agent_traces.sources import Discovery, provider_for
 
@@ -73,8 +73,11 @@ def main(config: Config) -> None:
             continue
         started: float = perf_counter()
         try:
-            source_hash: str = fingerprint(source.inputs)
+            transcript_hash: str = fingerprint(source.inputs)
             entry: ManifestEntry | None = manifest.sessions.get(session_id)
+            source_hash: str = fingerprint_with_extras(
+                transcript_hash, {image: input_digest(Path(image)) for image in entry.extra_inputs} if entry is not None else {},
+            )
             if (
                 entry is not None
                 and entry.source_sha256 == source_hash
@@ -99,11 +102,12 @@ def main(config: Config) -> None:
             reasons.update(["parent-failed"] * len(source.folded))
             print(f"FAILED {path}: {error} session_id={session_id} rows=0 seconds={perf_counter() - started:.3f}")
             continue
+        source_hash = fingerprint_with_extras(transcript_hash, session.extra_inputs)
         session = replace(session, profile=profile, source_sha256=source_hash)
         written: WrittenRecording = write_session_rrd(session, out / f"{session_id}.rrd", host=host)
         n_rows: int = sum(written.entity_rows.values())
         manifest.sessions[session_id] = ManifestEntry(
-            source_path=str(path), source_sha256=source_hash, rrd=written.path.name,
+            source_path=str(path), source_sha256=source_hash, rrd=written.path.name, extra_inputs=tuple(sorted(session.extra_inputs)),
             converted_at=datetime.now(UTC).isoformat(), n_rows=n_rows, host=host, revision=manifest_contract.CONVERSION_REVISION,
         )
         save_manifest(manifest, manifest_path)
@@ -111,5 +115,6 @@ def main(config: Config) -> None:
         skipped += len(source.folded)
         reasons.update(["folded-subagent"] * len(source.folded))
         print(f"converted {session_id} rows={n_rows} seconds={perf_counter() - started:.3f}")
+        del session  # Release this recording tree before parsing the next one.
     print(f"skip_reasons={orjson.dumps(dict(sorted(reasons.items()))).decode()}")
     print(f"converted={converted} skipped={skipped} failed={failed} out={out}")

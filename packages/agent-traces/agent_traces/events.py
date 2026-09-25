@@ -198,7 +198,9 @@ class Session:
     total_cost_usd: float | None = None
     """Reported cost, absent for Codex."""
     source_sha256: str = ""
-    """Main transcript hash."""
+    """Fingerprint of transcript inputs and consumed extra inputs."""
+    extra_inputs: dict[str, str] = field(default_factory=dict)
+    """Resolved local image paths and hashes of the bytes consumed (or missing)."""
     provider: str = ""
     """Model provider."""
     originator: str = ""

@@ -129080,6 +129080,8 @@ packages:
   - pyserde
   - orjson
   - tyro
+  - numpy
+  - pyarrow
   requires_python: '>=3.12'
 - pypi: ./packages/arkitscenes-download
   name: arkitscenes-download

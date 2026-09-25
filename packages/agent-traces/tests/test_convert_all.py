@@ -281,3 +281,140 @@ def test_claude_transcript_in_codex_home(tmp_path: Path) -> None:
     batch = read_entities(tmp_path / "batch/codex/a.rrd")["/__properties/session"]
     for name in ("agent", "session_id", "source_sha256"):
         assert single[name].to_pylist() == batch[name].to_pylist()
+
+
+@pytest.mark.parametrize("target", ["main", "child", "image"])
+def test_changes_during_conversion_cannot_certify_newer_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], png_bytes: bytes, target: str,
+) -> None:
+    """A change after an input read must cause a later run to rebuild the RRD."""
+    from agent_traces.apis import convert_all
+    from agent_traces.events import Session
+    from agent_traces.rerun_log import WrittenRecording, write_session_rrd
+    from tests.conftest import RolloutBuilder
+
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("AgentMessage", content=[{"type": "text", "text": "before"}])
+    child = RolloutBuilder(home / "sessions/child.jsonl")
+    child.meta("child", parent_thread_id="main")
+    child.item("AgentMessage", content=[{"type": "text", "text": "before"}])
+    image = tmp_path / "local.png"
+    image.write_bytes(png_bytes)
+    parent.add("event_msg", type="user_message", local_images=[str(image)])
+    config = convert_all.Config(home=home, out=tmp_path / "out")
+
+    def change_after_read(session: Session, out: Path, *, host: str | None = None) -> WrittenRecording:
+        if target == "image":
+            image.write_bytes(png_bytes + b"after")
+        else:
+            builder = parent if target == "main" else child
+            builder.item("AgentMessage", content=[{"type": "text", "text": "after"}])
+        return write_session_rrd(session, out, host=host)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(convert_all, "write_session_rrd", change_after_read)
+        convert_all.main(config)
+    capsys.readouterr()
+    convert_all.main(config)
+    assert "converted=1 skipped=1 failed=0" in capsys.readouterr().out
+    entities = read_entities(tmp_path / "out/codex/main.rrd")
+    if target != "image":
+        prefix = "/agents/child" if target == "child" else ""
+        assert entities[prefix + "/conversation/assistant"]["TextLog:text"].to_pylist() == [["before"], ["after"]]
+    else:
+        assert entities["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"after")]]
+    convert_all.main(config)
+    assert "converted=0 skipped=2 failed=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("target", ["main", "child"])
+@pytest.mark.parametrize("single", [False, True])
+def test_transcript_append_during_parse_keeps_preparse_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, single: bool,
+) -> None:
+    """An append at the decode boundary must not advance the certified input hash."""
+    from agent_traces.apis import convert, convert_all
+    from agent_traces.manifest import fingerprint, load_manifest
+    from tests.conftest import RolloutBuilder
+
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("AgentMessage", content=[{"type": "text", "text": "main-before"}])
+    child = RolloutBuilder(home / "sessions/child.jsonl")
+    child.meta("child", parent_thread_id="main")
+    child.item("AgentMessage", content=[{"type": "text", "text": "child-before"}])
+    inputs = (parent.path, child.path)
+    expected = fingerprint(inputs)
+    builder = parent if target == "main" else child
+    import orjson
+
+    original = orjson.loads
+    changed = False
+
+    def append_during_decode(data: bytes) -> object:
+        nonlocal changed
+        decoded = original(data)
+        if not changed and (target + "-before").encode() in data:
+            changed = True
+            builder.item("AgentMessage", content=[{"type": "text", "text": "after"}])
+        return decoded
+
+    config = convert_all.Config(home=home, out=tmp_path / "out")
+    with monkeypatch.context() as patch:
+        patch.setattr(orjson, "loads", append_during_decode)
+        if single:
+            convert.main(convert.Config(session=parent.path, out=tmp_path / "single.rrd"))
+        else:
+            convert_all.main(config)
+    saved = tmp_path / "single.rrd" if single else tmp_path / "out/codex/main.rrd"
+    props = read_entities(saved)["/__properties/session"]
+    assert changed
+    assert props["source_sha256"].to_pylist() == [[expected]]
+    assert fingerprint(inputs) != expected
+    if not single:
+        assert load_manifest(saved.parent / "manifest.json").sessions["main"].source_sha256 == expected
+        convert_all.main(config)
+        assert load_manifest(saved.parent / "manifest.json").sessions["main"].source_sha256 == fingerprint(inputs)
+        prefix = "/agents/child" if target == "child" else ""
+        assert read_entities(saved)[prefix + "/conversation/assistant"]["TextLog:text"].to_pylist()[-1] == ["after"]
+
+
+def test_image_replacement_at_read_boundary_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], png_bytes: bytes,
+) -> None:
+    """Newly discovered images are hashed from consumed bytes, never a later read."""
+    from agent_traces.apis.convert_all import Config, main
+    from agent_traces.manifest import load_manifest
+    from tests.conftest import RolloutBuilder
+
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("Reasoning")
+    image = tmp_path / "image.png"
+    image.write_bytes(png_bytes)
+    parent.add("event_msg", type="user_message", local_images=[str(image)])
+    config = Config(home=home, out=tmp_path / "out")
+    original = Path.read_bytes
+
+    def read_then_replace(path: Path) -> bytes:
+        data = original(path)
+        if path == image:
+            path.write_bytes(png_bytes + b"newer")
+        return data
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", read_then_replace)
+        main(config)
+    capsys.readouterr()
+    saved = tmp_path / "out/codex/main.rrd"
+    assert load_manifest(saved.parent / "manifest.json").sessions["main"].extra_inputs == (str(image),)
+    assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes)]]
+    main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"newer")]]
+    main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out

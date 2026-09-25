@@ -419,3 +419,26 @@ def test_empty_string_properties_survive_a_fresh_process(session_builder: Sessio
     props: pa.Table = read_entities(out)["/__properties/session"]
     for key in ("title", "source_sha256"):
         assert props[key].to_pylist() == [[""]]
+
+
+@pytest.mark.parametrize("provider,cost", [("claude", None), ("codex", None), ("claude", 1.25)])
+def test_reported_cost_or_null(tmp_path: Path, provider: str, cost: float | None) -> None:
+    """Both providers write null for an absent cost; reported finite cost survives."""
+    from agent_traces.claude import parse_session
+    from agent_traces.codex import parse_rollout
+    from tests.conftest import RolloutBuilder, SessionBuilder
+
+    if provider == "claude":
+        builder = SessionBuilder(tmp_path / ".claude/projects/p/a.jsonl")
+        builder.add("user", message={"content": "hello"})
+        if cost is not None:
+            builder.add("cost-state", totalCostUSD=cost)
+        session = parse_session(builder.path)
+    else:
+        rollout = RolloutBuilder(tmp_path / ".codex/sessions/a.jsonl")
+        rollout.meta()
+        rollout.item("Reasoning")
+        session = parse_rollout(rollout.path)
+    assert session.total_cost_usd == cost
+    entities = read_entities(write_session_rrd(session, tmp_path / "cost.rrd").path)
+    assert entities["/__properties/session"]["total_cost_usd"].to_pylist() == [[cost]]
