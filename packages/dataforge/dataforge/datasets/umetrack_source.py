@@ -15,6 +15,8 @@ from serde.json import from_json
 from simplecv.camera_parameters import KannalaBrandtDistortion
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy
 
+FISHEYE62 = "FishEye62"
+
 
 @serde
 @dataclass(frozen=True, slots=True)
@@ -57,7 +59,7 @@ class Camera:
     """Synthetic sixth radial coefficient, as named in the source."""
 
     def __post_init__(self) -> None:
-        if self.DistortionModel != "FishEye62" or min(self.ImageSizeX, self.ImageSizeY) <= 0:
+        if self.DistortionModel != FISHEYE62 or min(self.ImageSizeX, self.ImageSizeY) <= 0:
             raise ValueError("expected positive-size FishEye62 camera")
 
         real: bool = self.k5 is not None and self.k6 is not None and self.p3 is None and self.p4 is None
@@ -74,7 +76,14 @@ class Camera:
         two synthetic recordings). p3/p4 stay source data at the pinhole.
         """
         return KannalaBrandtDistortion(
-            k1=self.k1, k2=self.k2, k3=self.k3, k4=self.k4, k5=self.k5 or 0.0, k6=self.k6 or 0.0, p1=self.p1, p2=self.p2
+            k1=self.k1,
+            k2=self.k2,
+            k3=self.k3,
+            k4=self.k4,
+            k5=0.0 if self.k5 is None else self.k5,
+            k6=0.0 if self.k6 is None else self.k6,
+            p1=self.p1,
+            p2=self.p2,
         )
 
 

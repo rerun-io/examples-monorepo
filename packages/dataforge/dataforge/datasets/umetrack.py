@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
 
-import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 
@@ -84,14 +83,14 @@ class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
             raise ValueError("UmeTrack manifests contain no selected assets")
 
     def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
-        """Return potential layer paths; projections may be absent without hand GT. Keep previews separate."""
+        """Return layer paths, keeping previews separate."""
         root: Path = paths.output_root()
         if self.config.frame_limit is not None:
             root = root / f"preview-first{self.config.frame_limit}"
         return {layer: paths.rrd_path(root, layer=layer, identity=identity) for layer in self.layers}
 
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
-        """Publish available layers atomically and time fetch, transcode and writes."""
+        """Publish available layers atomically and time fetch, hands, transcode and writes."""
         targets: dict[str, Path] = self.targets(identity)
         work_root: Path = paths.output_root() / "work"
         for target in [*targets.values(), work_root]:
@@ -102,11 +101,8 @@ class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
             return targets[paths.BASE_LAYER]
         with self.timer.stage("fetch"):
             scene: SequenceData = read_sequence(source, self.config.frame_limit)
-        if not np.any(scene.labels.hand_confidences > 0):
-            pending = [layer for layer in pending if layer != paths.PROJECTIONS_LAYER]
-        keypoints: HandKeypoints | None = (
-            hand_keypoints(scene) if any(layer in pending for layer in (paths.HAND_POSE_LAYER, paths.PROJECTIONS_LAYER)) else None
-        )
+        with self.timer.stage("hands"):
+            keypoints: HandKeypoints = hand_keypoints(scene)
         self.timer.capture_s = scene.count / scene.fps
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             paths.BASE_LAYER: lambda recording: write_base(recording, scene, identity, self.timer, work_root),
@@ -157,4 +153,4 @@ def hand_eye() -> rrb.EyeControls3D:
 
 def pane_contents(camera: int) -> list[str]:
     """Show only this camera's video and lens-model projections; exclude 3D hands and meshes."""
-    return [f"+ {schema.video_path(0, camera)}", f"+ {schema.coco133_uv_projected_path(0, camera)}", "- /world/gt/**"]
+    return [f"+ {schema.video_path(0, camera)}", f"+ {schema.coco133_uv_projected_path(0, camera)}"]

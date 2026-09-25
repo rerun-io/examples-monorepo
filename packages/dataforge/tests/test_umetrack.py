@@ -17,7 +17,7 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import SingleHandPose, land
 from dataforge import paths, schema, writing
 from dataforge.apis.compare_layers import component_rows
 from dataforge.datasets.umetrack import UmetrackConfig
-from dataforge.datasets.umetrack_layers import write_geometry, write_hands, write_projections
+from dataforge.datasets.umetrack_layers import hand_keypoints, write_geometry, write_hands, write_projections
 from dataforge.datasets.umetrack_source import SequenceData, read_sequence
 from dataforge.identity import SequenceIdentity
 
@@ -137,7 +137,7 @@ def umetrack_model_document() -> dict:
 def test_hand_layers_clear_missing_rows_and_preserve_parameters(tiny_umetrack: Path, tmp_path: Path) -> None:
     scene = read_sequence(tiny_umetrack)
     with writing.atomic_recording(tmp_path / "hand_pose.rrd", recording_id="test", send_properties=False) as recording:
-        write_hands(recording, scene)
+        write_hands(recording, scene, hand_keypoints(scene))
     store = read_back(tmp_path / "hand_pose.rrd")
     xyz = column_rows(store, "/world/gt/coco133_xyz:Points3D:positions").column(1).to_pylist()
     assert np.isfinite(xyz[0][91:112]).all()
@@ -250,7 +250,7 @@ def test_reference_landmarks_rig_and_frame_430_dropout(tmp_path: Path) -> None:
     ours = tmp_path / "ours.rrd"
     with writing.atomic_recording(ours, recording_id=identity.recording_id) as recording:
         write_geometry(recording, scene, identity)
-        write_hands(recording, scene)
+        write_hands(recording, scene, hand_keypoints(scene))
     store = read_back(ours)
     ref = read_back(reference)
     points = column_rows(store, "/world/gt/coco133_xyz:Points3D:positions")
@@ -341,7 +341,7 @@ def test_preview_slices_labels_but_measures_full_record(tiny_umetrack: Path, tmp
     target: Path = tmp_path / "preview.rrd"
     with writing.atomic_recording(target, recording_id=identity.recording_id) as recording:
         write_geometry(recording, scene, identity)
-        write_hands(recording, scene)
+        write_hands(recording, scene, hand_keypoints(scene))
     capture = recording_properties(read_back(target), "capture")
     assert capture["source_num_frames"] == 3
     assert capture["num_frames"] == 1
@@ -362,12 +362,12 @@ def test_projections_use_world_hands_camera_pose_and_both_clocks(tiny_umetrack: 
     scene = read_sequence(tiny_umetrack)
     target = tmp_path / "projections.rrd"
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
-        write_projections(recording, scene)
+        write_projections(recording, scene, hand_keypoints(scene))
     store = read_back(target)
     assert recording_properties(store, "projections") == {"derived_from": "coco133_xyz", "camera_model": "FishEye62"}
     hand_target = tmp_path / "hands.rrd"
     with writing.atomic_recording(hand_target, recording_id="test", send_properties=False) as recording:
-        write_hands(recording, scene)
+        write_hands(recording, scene, hand_keypoints(scene))
     xyz = np.array(column_rows(read_back(hand_target), f"{schema.coco133_xyz_path()}:Points3D:positions").column(1).to_pylist())
     columns = component_rows(target)
     assert {entity for entity, component, _ in columns if component == "Points2D:positions"} == {
@@ -388,7 +388,7 @@ def test_projections_use_world_hands_camera_pose_and_both_clocks(tiny_umetrack: 
             np.testing.assert_allclose(pixels[frame, 112], [8 + (20 + camera) * math.copysign(theta_d, x), 8], atol=1e-6, rtol=0)
 
 
-def test_no_hand_gt_skips_projections(tiny_umetrack: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_hand_gt_writes_empty_projections(tiny_umetrack: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     document = json.loads(tiny_umetrack.read_text())
     document["hand_confidences"] = np.zeros((3, 2)).tolist()
     document["wrist_transforms"] = np.zeros((3, 2, 4, 4)).tolist()
@@ -397,11 +397,18 @@ def test_no_hand_gt_skips_projections(tiny_umetrack: Path, tmp_path: Path, monke
     dataset = UmetrackConfig(root=tmp_path / "raw").setup()
     identity = SequenceIdentity("umetrack", ("real", "hand_hand", "training", "user_03", "recording_05"))
     targets = dataset.targets(identity)
-    assert "projections" in targets  # Declared potential layers; absent files are optional.
     # Existing layers avoid video encoding; only the missing projection is pending.
     for layer, target in targets.items():
         if layer != "projections":
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"existing")
     dataset.convert(identity, tiny_umetrack, force=False)
-    assert not targets["projections"].exists()
+    assert targets["projections"].is_file()
+    store = read_back(targets["projections"])
+    for camera in range(4):
+        path = schema.coco133_uv_projected_path(0, camera)
+        pixels = column_rows(store, f"{path}:Points2D:positions").column(1).to_pylist()
+        confidence = column_rows(store, f"{path}:simplecv.KeypointConfidence2D:confidences").column(1).to_pylist()
+        assert np.asarray(pixels).shape == (3, 133, 2)
+        assert np.isnan(pixels).all()
+        np.testing.assert_array_equal(confidence, np.zeros((3, 133)))

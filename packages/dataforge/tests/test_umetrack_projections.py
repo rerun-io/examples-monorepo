@@ -49,8 +49,8 @@ def test_projection_matches_scalar_and_camera_reference() -> None:
         220.0 * (xr + 2 * lens.p2 * xr * yr + lens.p1 * (rho2 + 2 * xr * xr)) + 318.0,
         225.0 * (yr + 2 * lens.p1 * xr * yr + lens.p2 * (rho2 + 2 * yr * yr)) + 240.0,
     ]
-    pixels, valid = project_fisheye62(point, camera)
-    assert valid.tolist() == [True]
+    pixels = project_fisheye62(point, camera)
+    assert np.isfinite(pixels).all(axis=1).tolist() == [True]
     np.testing.assert_allclose(pixels[0], expected, atol=1e-6, rtol=0)
     # The legacy wrapper returns float32 pixels; compare at its storage precision.
     np.testing.assert_allclose(
@@ -68,8 +68,8 @@ def test_invalid_projections_and_writer_confidence(tmp_path: Path) -> None:
     )
     # theta_max = sqrt(1/3); the folded ray maps BACK into the image and must still be rejected.
     points = np.array([[0, 0, 1], [0, 0, -1], [1, 0, 0], [math.sin(1.0), 0, math.cos(1.0)], [0.4, 0, 1], [np.nan, 0, 1]], dtype=np.float64)
-    pixels, valid = project_fisheye62(points, camera)
-    assert valid.tolist() == [True, False, False, False, False, False]
+    pixels = project_fisheye62(points, camera)
+    assert np.isfinite(pixels).all(axis=1).tolist() == [True, False, False, False, False, False]
     np.testing.assert_array_equal(pixels[0], [50, 50])
     assert np.isnan(pixels[1:]).all()
     positions = np.full((1, 133, 2), np.nan, dtype=np.float32)

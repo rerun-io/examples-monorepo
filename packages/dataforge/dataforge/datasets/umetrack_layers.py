@@ -16,7 +16,7 @@ from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsi
 from simplecv.umetrack_temp.generic_hand_model_numpy import skin_landmarks, wrist_for_hand
 
 from dataforge import hands, logging_toolkit, schema, writing
-from dataforge.datasets.umetrack_source import Camera, SequenceData
+from dataforge.datasets.umetrack_source import FISHEYE62, Camera, SequenceData
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.umetrack_hands import HAND_SIDES
@@ -55,7 +55,7 @@ def write_geometry(recording: rr.RecordingStream, scene: SequenceData, identity:
     for index, camera in enumerate(rig_cameras(scene)):
         source: Camera = scene.labels.cameras[index]
         logging_toolkit.log_camera_node(
-            recording, 0, index, camera, name=camera.name, kind="grayscale", image_plane_distance=0.05, camera_model="FishEye62"
+            recording, 0, index, camera, name=camera.name, kind="grayscale", image_plane_distance=0.05, camera_model=FISHEYE62
         )
         coefficients: dict[str, float | None] = dict(
             k1=source.k1,
@@ -165,11 +165,9 @@ def hand_keypoints(scene: SequenceData) -> HandKeypoints:
     return HandKeypoints(*hands.confidence_rule(xyz, conf))
 
 
-def write_hands(recording: rr.RecordingStream, scene: SequenceData, keypoints: HandKeypoints | None = None) -> None:
-    """Skin only confidence-positive landmarks and publish sparse source parameters."""
+def write_hands(recording: rr.RecordingStream, scene: SequenceData, keypoints: HandKeypoints) -> None:
+    """Publish shared hand keypoints and sparse source parameters."""
     rr.log(schema.hand_profile_path(), rr.TextDocument(scene.profile_text, media_type="application/json"), static=True, recording=recording)
-    if keypoints is None:
-        keypoints = hand_keypoints(scene)
     confidence: Float32[ndarray, "n 2"] = scene.labels.hand_confidences
     for hand_index, side in enumerate(HAND_SIDES):
         valid: Bool[ndarray, "n"] = confidence[:, hand_index] > 0
@@ -193,10 +191,8 @@ def write_hands(recording: rr.RecordingStream, scene: SequenceData, keypoints: H
     )
 
 
-def project_fisheye62(
-    xyz_cam: Float64[ndarray, "n 3"], camera: Fisheye62Parameters
-) -> tuple[Float64[ndarray, "n 2"], Bool[ndarray, "n"]]:
-    """Project Float64[n,3] camera metres to Float64[n,2] pixels and a Bool[n] validity mask.
+def project_fisheye62(xyz_cam: Float64[ndarray, "n 3"], camera: Fisheye62Parameters) -> Float64[ndarray, "n 2"]:
+    """Project Float64[n,3] camera metres to Float64[n,2] pixels.
 
     The first radial derivative root bounds the monotonic field of view. Call once
     per camera with all frames flattened, so its bound is computed only once.
@@ -223,23 +219,20 @@ def project_fisheye62(
     valid &= np.isfinite(pixels).all(axis=1) & (pixels[:, 0] >= 0) & (pixels[:, 0] < intrinsics.width)
     valid &= (pixels[:, 1] >= 0) & (pixels[:, 1] < intrinsics.height)
     pixels[~valid] = np.nan
-    return pixels, valid
+    return pixels
 
 
-def write_projections(recording: rr.RecordingStream, scene: SequenceData, keypoints: HandKeypoints | None = None) -> None:
+def write_projections(recording: rr.RecordingStream, scene: SequenceData, keypoints: HandKeypoints) -> None:
     """Write lens-model projections on the hand-pose clock, clearing untracked frames."""
-    if keypoints is None:
-        keypoints = hand_keypoints(scene)
-    recording.send_property("projections", rr.AnyValues(derived_from="coco133_xyz", camera_model="FishEye62"))
+    recording.send_property("projections", rr.AnyValues(derived_from="coco133_xyz", camera_model=FISHEYE62))
     for index, camera in enumerate(rig_cameras(scene)):
         world_T_cam: Float64[ndarray, "n 4 4"] = scene.world_T_rig @ scene.rig_T_cam[index]
         # Invert the rigid pose: R transpose times (world point minus camera origin).
         xyz_cam: Float64[ndarray, "n 133 3"] = np.einsum(
             "nji,nkj->nki", world_T_cam[:, :3, :3], keypoints.positions - world_T_cam[:, None, :3, 3]
         )
-        xyz_cam[~scene.tracked] = np.nan
-        projected: tuple[Float64[ndarray, "p 2"], Bool[ndarray, "p"]] = project_fisheye62(xyz_cam.reshape(-1, 3), camera)
-        pixels: Float32[ndarray, "n 133 2"] = projected[0].reshape(scene.count, 133, 2).astype(np.float32)
+        projected: Float64[ndarray, "p 2"] = project_fisheye62(xyz_cam.reshape(-1, 3), camera)
+        pixels: Float32[ndarray, "n 133 2"] = projected.reshape(scene.count, 133, 2).astype(np.float32)
         hands.log_keypoints2d(
             recording,
             0,
