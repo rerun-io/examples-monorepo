@@ -144,6 +144,11 @@ def coco133_uv_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/coco133_uv"
 
 
+def coco133_uv_projected_path(rig: int, cam: int) -> str:
+    """Derived COCO-133 keypoints projected through the full camera lens model."""
+    return f"{pinhole_path(rig, cam)}/coco133_uv_projected"
+
+
 def instruction_path() -> str:
     """§12: static task instruction document."""
     return "/task/instruction"
@@ -187,3 +192,8 @@ def hand_joint_angles_path(side: str) -> str:
 def hand_wrist_path(side: str) -> str:
     """World-from-wrist pose."""
     return f"{hands_path(side)}/wrist"
+
+
+def quality_flag_path(rig: int, cam: int, name: str) -> str:
+    """A shipped per-camera quality flag under the shared GT namespace."""
+    return f"/world/gt/quality/rig_{_index(rig, 'rig')}/cam_{_index(cam, 'cam')}/{name}"

@@ -6,6 +6,7 @@ a converter never materializes a decoded frame tree on disk. Two properties are
 load-bearing for the Rerun side and are enforced rather than documented — the ban
 on B-frames (``rr.VideoStream`` rejects reordered samples) and the sample-count
 check against the finished container.
+Datasets that ship JPEGs decoded on the CPU (HOT3D) feed planes from ``dataforge.jpeg``.
 
 This module knows nothing about Rerun: it turns frames into an mp4 and counts
 what landed. ``dataforge.logging_toolkit`` remuxes that mp4 into a recording, and
@@ -79,10 +80,10 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
             clip.unlink(missing_ok=True)
 
 
-FrameKind: TypeAlias = Literal["png", "jpeg", "gray8", "rgb24"]
+FrameKind: TypeAlias = Literal["png", "jpeg", "gray8", "rgb24", "yuv420p", "yuv422p", "yuv444p"]
 """How one element of an encoder frame iterable is laid out."""
 
-RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
+RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24", "yuv420p": "yuv420p", "yuv422p": "yuv422p", "yuv444p": "yuv444p"}
 """ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
 
 IMAGE_DECODERS: dict[FrameKind, str] = {"png": "png", "jpeg": "mjpeg"}
@@ -119,6 +120,9 @@ class FrameSource:
     """Frame width in pixels; required for the raw kinds, which carry no header."""
     height: int | None = None
     """Frame height in pixels; required for the raw kinds, which carry no header."""
+
+    full_range: bool = False
+    """JPEG colour planes require explicit full-to-limited range conversion."""
 
     def __post_init__(self) -> None:
         if self.kind in IMAGE_DECODERS:
@@ -247,6 +251,7 @@ def encode_frames_to_mp4(
     cq: int = 32,
     rotate_cw_quarter_turns: int = 0,
     ffmpeg: Path | None = None,
+    filter_threads: int | None = None,
 ) -> int:
     """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
 
@@ -265,7 +270,7 @@ def encode_frames_to_mp4(
     pipes are finite, so writing a large frame while stderr sits full deadlocks.
 
     Args:
-        frames: One encoded PNG/JPEG (``kind="png"``/``"jpeg"``) or one raw plane per frame.
+        frames: One encoded PNG/JPEG (``kind="png"``/``"jpeg"``) or all packed raw planes for one frame.
         output: mp4 to write; its parent directory must exist.
         source: Layout of the ``frames`` elements.
         fps: Nominal frame rate stamped into the container. Real per-sample
@@ -278,6 +283,7 @@ def encode_frames_to_mp4(
             and height, and a caller that also logs a calibration for these
             pixels must roll it the same way (``basalt.rotate_camera_cw``).
         ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
+        filter_threads: CPU filter workers; cap when camera jobs also decode in parallel.
 
     Returns:
         Number of frames fed into the encoder.
@@ -287,6 +293,8 @@ def encode_frames_to_mp4(
     """
     if rotate_cw_quarter_turns not in TRANSPOSE_FILTERS:
         raise ValueError(f"{rotate_cw_quarter_turns} is not a clockwise quarter turn count; it must be one of {sorted(TRANSPOSE_FILTERS)}")
+    if filter_threads is not None and filter_threads < 1:
+        raise ValueError("filter_threads must be positive")
     binary: Path = resolve_ffmpeg() if ffmpeg is None else ffmpeg
     require_av1_nvenc(binary)
     command: list[str] = [
@@ -295,9 +303,16 @@ def encode_frames_to_mp4(
         "-loglevel",
         "error",
         "-y",
+        *(["-filter_threads", str(filter_threads)] if filter_threads is not None else []),
         *source.input_args(fps=fps),
         "-vf",
-        ",".join([*TRANSPOSE_FILTERS[rotate_cw_quarter_turns], EVEN_DIMENSION_AND_PIXEL_FORMAT]),
+        ",".join(
+            [
+                *TRANSPOSE_FILTERS[rotate_cw_quarter_turns],
+                *(["scale=in_range=full:out_range=limited"] if source.full_range else []),
+                EVEN_DIMENSION_AND_PIXEL_FORMAT,
+            ]
+        ),
         *_nvenc_args(gop=gop, cq=cq),
         str(output),
     ]

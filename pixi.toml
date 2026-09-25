@@ -3172,11 +3172,16 @@ ffmpeg = ">=9.0.1"
 # 2.x caps pillow < 12; the conda solve would otherwise pin pillow 12 and make the
 # PyPI side unsatisfiable. Nothing here uses pillow directly.
 pillow = ">=11,<12"
+# libturbojpeg for PyTurboJPEG (pypi), which dlopens it from the env.
+libjpeg-turbo = ">=3.0.0,<4"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
 # VRS reader for the LaMAria Aria Gen1 sequences; ships linux-aarch64 wheels.
 projectaria-tools = ">=2.2"
+# Decodes the JPEG bytes of VRS image records straight to YUV planes (HOT3D);
+# loads the conda libjpeg-turbo's libturbojpeg.
+PyTurboJPEG = ">=2.0.0,<3"
 
 [feature.dataforge.pypi-options.dependency-overrides]
 # projectaria-tools pins rerun-sdk==0.33.0 for its own notebook tutorials; dataforge

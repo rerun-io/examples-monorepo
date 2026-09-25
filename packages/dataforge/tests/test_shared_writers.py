@@ -125,3 +125,26 @@ def test_hand_parameters_keep_arrow_types_and_both_clocks(tmp_path: Path) -> Non
     for batch in batches:
         assert batch.column("video_time").cast(pa.int64()).to_pylist() == [123456789]
         assert batch.column("frame_index").to_pylist() == [7]
+
+
+@pytest.mark.parametrize("writer", ["dense_float32", "dense_float64"])
+def test_dense_pose_invalidates_missing_row(tmp_path: Path, writer: str) -> None:
+    from dataforge.logging_toolkit import log_dense_pose_track
+
+    transforms = np.tile(np.eye(4, dtype=np.float32 if writer == "dense_float32" else np.float64), (3, 1, 1))
+    transforms[1] = np.nan
+    transforms[2, :3, 3] = [1.0, 2.0, 3.0]
+    times = np.array([10, 20, 30], dtype=np.int64)
+    frames = np.arange(3, dtype=np.int64)
+    target = tmp_path / "dense.rrd"
+    with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
+        log_dense_pose_track(recording, "/pose", times_ns=times, frame_indices=frames, transforms=transforms)
+    batches = [chunk.to_record_batch() for chunk in read_chunks(target)]
+    poses = next(batch for batch in batches if "Transform3D:translation" in batch.schema.names)
+    assert poses.column("frame_index").to_pylist() == [0, 1, 2]
+    positions = poses.column("Transform3D:translation").to_pylist()
+    rotations = poses.column("Transform3D:quaternion").to_pylist()
+    assert np.isnan(positions[1]).all()
+    assert np.isnan(rotations[1]).all()
+    np.testing.assert_array_equal(positions[2], [[1.0, 2.0, 3.0]])
+    np.testing.assert_array_equal(rotations[2], [[0.0, 0.0, 0.0, 1.0]])
