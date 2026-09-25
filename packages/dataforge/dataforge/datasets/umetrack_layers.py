@@ -240,6 +240,13 @@ def write_projections(recording: rr.RecordingStream, scene: SequenceData, keypoi
         xyz_cam[~scene.tracked] = np.nan
         projected: tuple[Float64[ndarray, "p 2"], Bool[ndarray, "p"]] = project_fisheye62(xyz_cam.reshape(-1, 3), camera)
         pixels: Float32[ndarray, "n 133 2"] = projected[0].reshape(scene.count, 133, 2).astype(np.float32)
-        hands.log_projected_keypoints2d(
-            recording, 0, index, times_ns=scene.times_ns, frame_indices=scene.frame_indices, positions=pixels, confidence=keypoints.confidence
+        hands.log_keypoints2d(
+            recording,
+            0,
+            index,
+            path=schema.coco133_uv_projected_path(0, index),
+            times_ns=scene.times_ns,
+            frame_indices=scene.frame_indices,
+            positions=pixels,
+            confidence=keypoints.confidence,
         )

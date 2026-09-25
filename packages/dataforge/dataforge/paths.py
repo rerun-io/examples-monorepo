@@ -38,7 +38,7 @@ HAND_MESH_LAYER: str = "hand_mesh"
 """Derived skinned world-frame hand geometry."""
 
 PROJECTIONS_LAYER: str = "projections"
-"""Derived 2D from 3D keypoints through each camera's lens model."""
+"""Derived 2D: 3D keypoints projected through each camera's full lens model."""
 
 LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""

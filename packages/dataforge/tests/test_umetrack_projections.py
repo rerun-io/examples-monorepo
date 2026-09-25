@@ -78,8 +78,15 @@ def test_invalid_projections_and_writer_confidence(tmp_path: Path) -> None:
     times = np.array([123], dtype=np.int64)
     frames = np.array([7], dtype=np.int64)
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
-        hands.log_projected_keypoints2d(
-            recording, 0, 2, times_ns=times, frame_indices=frames, positions=positions, confidence=np.full((1, 133), 0.75, dtype=np.float32)
+        hands.log_keypoints2d(
+            recording,
+            0,
+            2,
+            path=schema.coco133_uv_projected_path(0, 2),
+            times_ns=times,
+            frame_indices=frames,
+            positions=positions,
+            confidence=np.full((1, 133), 0.75, dtype=np.float32),
         )
     chunks = read_chunks(target)
     chunk = next(c for c in chunks if not c.is_static)
