@@ -17,6 +17,10 @@ from dataforge.datasets.epfl_source import FITS, PoseRow, array_cell, parse_pose
 KEY = "train/YH2007/2023_10_30_10_05_27"
 POSE_ROOT: Path = Path(os.environ.get("DATAFORGE_EPFL_POSE_ROOT", "/mnt/nas/datasets/epfl-smart-kitchen"))
 VIDEO_ROOT: Path = Path(os.environ.get("DATAFORGE_EPFL_VIDEO_ROOT", "/home/pablo/exoego-data/epfl/raw"))
+PARITY_ROOT: Path = Path(os.environ.get("DATAFORGE_EPFL_PARITY_ROOT", "/home/pablo/exoego-data/epfl/simplecv_root"))
+SMPL_ROOT: Path = Path(
+    os.environ.get("DATAFORGE_SMPL_MODEL_ROOT", "/home/pablo/0Dev/work/rerun-projects/examples-monorepo/packages/lamp/data/body_models")
+)
 
 
 def require(path: Path) -> Path:
@@ -28,7 +32,7 @@ def require(path: Path) -> Path:
 
 @pytest.mark.integration
 def test_real_session_all_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = EpflConfig(root=POSE_ROOT, video_root=VIDEO_ROOT, sequences=(KEY,), frame_limit=60)
+    config = EpflConfig(root=POSE_ROOT, video_root=VIDEO_ROOT, sequences=(KEY,), frame_limit=60, smpl_model_root=SMPL_ROOT)
     pose = POSE_ROOT / "Public_release_pose" / KEY
     video = VIDEO_ROOT / "Public_release_videos" / KEY
     for model in ("mano", "smpl"):
@@ -41,12 +45,17 @@ def test_real_session_all_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         require(video / "meta_data" / name)
     for name in ("actions_annotations.xlsx", "activity_annotations.json"):
         require(pose / "annotations" / name)
+    require(config.smpl_model_root / "smpl/SMPL_NEUTRAL.pkl")
+    import simplecv
+
+    for side in ("LEFT", "RIGHT"):
+        require(Path(simplecv.__file__).parent / "data" / f"MANO_{side}.pkl")
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
     dataset = config.setup()
     identity, source = dataset.discover()[0]
     dataset.convert(identity, source, force=True)
     targets = dataset.targets(identity)
-    assert set(targets) == {"base", "hand_pose", "body_pose", "actions", "projections"}
+    assert set(targets) == {"base", "hand_pose", "body_pose", "hand_mesh", "body_mesh", "actions", "projections"}
     for path in targets.values():
         assert path.stat().st_size > 0
     base = read_chunks(targets["base"])
@@ -140,3 +149,36 @@ def test_simplecv_parity_on_matching_source_rows() -> None:
         f"empty-residual differences={empty_residual_joints}, shipped-zero-confidence differences={zero_confidence_joints}, "
         f"unexplained=0, max position error={max_position_error:.9g} m, max confidence error={max_confidence_error:.9g}"
     )
+
+
+@pytest.mark.golden
+def test_mano_fk_matches_shipped_joints_band() -> None:
+    import simplecv
+
+    from dataforge.datasets.epfl_mesh import MeshWriter, corrected_translation
+    from dataforge.datasets.epfl_source import pose_batches
+
+    root = PARITY_ROOT / "Public_release_pose" / KEY / "pose_3d"
+    for model in ("mano", "smpl"):
+        require(root / f"pose3d_{model}.csv")
+    for side in ("LEFT", "RIGHT"):
+        require(Path(simplecv.__file__).parent / "data" / f"MANO_{side}.pkl")
+    require(SMPL_ROOT / "smpl/SMPL_NEUTRAL.pkl")
+    rows = next(pose_batches(root, 60, total=67_890))
+    writer = MeshWriter(SMPL_ROOT)
+    distances = []
+    for spec in FITS:
+        if spec.name == "body":
+            continue
+        for row in rows:
+            fit = getattr(row, spec.name)
+            if not fit.accepted:
+                continue
+            model = writer.hand_model(spec.name, fit.parameters.shapes)
+            pose = fit.parameters.poses[None].copy()
+            pose[:, :3] = fit.parameters.Rh
+            joints = model(pose, corrected_translation([fit], model.root_trans.reshape(3)))[1][0]
+            distances.extend(np.linalg.norm(joints - row.positions[spec.coco], axis=1).tolist())
+    assert distances
+    assert np.median(distances) <= 0.003
+    assert max(distances) <= 0.01

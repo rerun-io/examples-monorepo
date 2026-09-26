@@ -16,6 +16,7 @@ from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.epfl_actions import read_actions
 from dataforge.datasets.epfl_layers import start_parameters, write_actions, write_base, write_hand_pose, write_pose, write_projections
+from dataforge.datasets.epfl_mesh import MeshWriter
 from dataforge.datasets.epfl_source import (
     CAMERA_NAMES,
     EGO_RIG,
@@ -66,6 +67,8 @@ class EpflConfig(DataforgeDatasetConfig):
     """Split/subject/session selections."""
     frame_limit: int | None = None
     """Keep the first N frames in a separate preview tree."""
+    smpl_model_root: Path = field(default_factory=lambda: paths.raw_root() / "body_models")
+    """Official neutral SMPL model root, containing smpl/SMPL_NEUTRAL.pkl."""
 
     def __post_init__(self) -> None:
         if self.frame_limit is not None and self.frame_limit <= 0:
@@ -85,7 +88,7 @@ class EpflConfig(DataforgeDatasetConfig):
 class EpflDataset(DataforgeDataset[EpflConfig, str]):
     """Session discovery and atomic multi-layer conversion with one pose CSV pass."""
 
-    layers = ("base", "hand_pose", "body_pose", "projections", "actions")
+    layers = ("base", "hand_pose", "body_pose", "hand_mesh", "body_mesh", "projections", "actions")
 
     def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
         root = paths.output_root()
@@ -133,6 +136,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
             for raw in (Path("/mnt/nas"), self.config.root, self.config.video_root or self.config.root):
                 if target.resolve().is_relative_to(raw.resolve()):
                     raise ValueError(f"EPFL conversion output must be local and outside raw roots: {target}")
+        writer: MeshWriter | None = MeshWriter(self.config.smpl_model_root) if any(layer in pending for layer in ("hand_mesh", "body_mesh")) else None
         pose = self.config.pose_root / source
         video = self.config.videos_root / source
         with self.timer.stage("fetch"):
@@ -162,7 +166,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
         pose_layers: list[str] = [layer for layer in pending if layer not in ("base", "actions")]
         if not pose_layers:
             return targets["base"]
-        layer_specs: dict[str, tuple[FitSpec, ...]] = {"hand_pose": FITS[:2], "body_pose": FITS[2:]}
+        layer_specs: dict[str, tuple[FitSpec, ...]] = {"hand_pose": FITS[:2], "body_pose": FITS[2:], "hand_mesh": FITS[:2], "body_mesh": FITS[2:]}
         with ExitStack() as stack:
             recordings: dict[str, rr.RecordingStream] = {
                 layer: stack.enter_context(writing.atomic_recording(targets[layer], recording_id=identity.recording_id, send_properties=False))
@@ -173,6 +177,10 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 if layer in ("hand_pose", "body_pose"):
                     start_parameters(recording, layer_specs[layer])
                     layer_writers[layer] = partial(write_hand_pose if layer == "hand_pose" else write_pose, recording, specs=layer_specs[layer])
+                elif layer in ("hand_mesh", "body_mesh"):
+                    assert writer is not None
+                    writer.start(recording, layer_specs[layer])
+                    layer_writers[layer] = partial(writer.write, recording, specs=layer_specs[layer])
                 else:
                     layer_writers[layer] = partial(write_projections, recording, cameras)
             batches = iter(pose_batches(pose / "pose_3d", len(times), total=source_count))

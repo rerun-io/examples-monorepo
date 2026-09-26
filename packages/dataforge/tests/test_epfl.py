@@ -170,27 +170,53 @@ def test_blueprint_and_discovery_missing_assets(tmp_path: Path, capsys: pytest.C
         EpflConfig(frame_limit=0)
 
 
-def test_actions_and_projection_rrds(tmp_path: Path) -> None:
+def test_rejected_meshes_actions_and_projection_rrds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from conftest import read_chunks
 
     from dataforge import writing
     from dataforge.datasets.epfl_actions import Segment
     from dataforge.datasets.epfl_layers import write_actions, write_projections
-    from dataforge.datasets.epfl_source import EXO_CAMERAS, ExoCamera, parse_pose_row
+    from dataforge.datasets.epfl_mesh import MeshWriter
+    from dataforge.datasets.epfl_source import EXO_CAMERAS, FITS, ExoCamera, parse_pose_row
 
     mano, smpl = pose_cells()
+    mano["l2_dist_left"] = mano["l2_dist_right"] = smpl["l2_dist"] = ""
     row = parse_pose_row(mano, smpl)
     times = np.array([29300000000], dtype=np.int64)
     frames = np.array([0], dtype=np.int64)
     camera = ExoCamera(np.eye(3), np.zeros(8), np.eye(4))
+    # Rejected rows never evaluate a model; only the asset-path checks need fixtures.
+    import simplecv
+
+    monkeypatch.setattr(simplecv, "__file__", str(tmp_path / "__init__.py"))
+    (tmp_path / "data").mkdir()
+    for side in ("LEFT", "RIGHT"):
+        (tmp_path / "data" / f"MANO_{side}.pkl").touch()
+    (tmp_path / "smpl").mkdir()
+    (tmp_path / "smpl/SMPL_NEUTRAL.pkl").touch()
     target = tmp_path / "derived.rrd"
     with writing.atomic_recording(target, recording_id="derived", send_properties=False) as recording:
+        MeshWriter(tmp_path).write(recording, [row], times, frames, specs=FITS[:2])
         write_actions(recording, {"fine": [Segment(0, 1, "Grab")]}, times)
         write_projections(recording, {name: camera for name in EXO_CAMERAS}, [row], times, frames)
     chunks = read_chunks(target)
+    vertex_batches = [c.to_record_batch() for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names]
+    assert len(vertex_batches) == 2
+    assert all(b.column("Mesh3D:vertex_positions").to_pylist() == [[]] for b in vertex_batches)
     action = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/task/actions/fine")
     assert action.column("TextDocument:text").to_pylist() == [["Grab"]]
     assert len({str(c.entity_path) for c in chunks if str(c.entity_path).endswith("/coco133_uv_projected")}) == 9
+
+
+def test_missing_smpl_fails_before_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataforge.datasets.epfl import EpflConfig
+    from dataforge.identity import SequenceIdentity
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = EpflConfig(root=tmp_path / "raw", smpl_model_root=tmp_path / "absent").setup()
+    with pytest.raises(FileNotFoundError, match="official neutral SMPL"):
+        dataset.convert(SequenceIdentity("epfl", ("train", "subject", "session")), "train/subject/session", force=True)
+    assert not (tmp_path / "out").exists()
 
 
 def test_scene_centre_is_the_exo_camera_centroid() -> None:
@@ -277,6 +303,23 @@ def test_readers_check_full_count_but_allow_prefix(tmp_path: Path) -> None:
         list(pose_batches(tmp_path, 1))
     with pytest.raises(ValueError, match="expected count"):
         list(pose_batches(tmp_path, 3))
+
+
+def test_missing_mano_fails_before_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import simplecv
+
+    from dataforge.datasets.epfl import EpflConfig
+    from dataforge.identity import SequenceIdentity
+
+    model_root = tmp_path / "models"
+    (model_root / "smpl").mkdir(parents=True)
+    (model_root / "smpl/SMPL_NEUTRAL.npz").touch()
+    monkeypatch.setattr(simplecv, "__file__", str(tmp_path / "__init__.py"))
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = EpflConfig(root=tmp_path / "raw", smpl_model_root=model_root).setup()
+    with pytest.raises(FileNotFoundError, match=str(tmp_path / "data/MANO_LEFT.pkl")):
+        dataset.convert(SequenceIdentity("epfl", ("train", "subject", "session")), "train/subject/session", force=True)
+    assert not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize("unsupported", ["shared_strings", "extra_sheet", "formula", "boolean"])

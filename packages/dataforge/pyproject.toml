@@ -57,11 +57,6 @@ ignore_names = [
     "raw_budget_gb",
     "revision",
     "keywords",
-    # epfl FitParameters fields logged through getattr in log_parameters; the mesh
-    # layers (exoego/2-epfl-b) read them by name.
-    "Rh",
-    "Th",
-    "shapes",
     # http.server hooks the test's local download server overrides.
     "protocol_version",
     "do_HEAD",
