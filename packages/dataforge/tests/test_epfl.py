@@ -219,20 +219,6 @@ def test_missing_smpl_fails_before_output(tmp_path: Path, monkeypatch: pytest.Mo
     assert not (tmp_path / "out").exists()
 
 
-def test_scene_centre_is_the_exo_camera_centroid() -> None:
-    from dataforge.datasets.epfl import scene_centre
-    from dataforge.datasets.epfl_source import ExoCamera
-
-    def camera(centre: tuple[float, float, float]) -> ExoCamera:
-        world2cam = np.eye(4)
-        world2cam[:3, 3] = -np.asarray(centre)
-        return ExoCamera(K=np.eye(3), dist=np.zeros(8), word2cam=world2cam)
-
-    cameras = {"a": camera((1.0, 0.0, 0.5)), "b": camera((3.0, 2.0, 0.3))}
-    x, y = scene_centre(cameras)
-    assert (x, y) == pytest.approx((2.0, 1.0))
-
-
 def test_action_end_at_clock_length_keeps_last_frame_active() -> None:
     from dataforge.datasets.epfl_actions import Segment, action_rows
 

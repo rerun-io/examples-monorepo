@@ -23,7 +23,6 @@ from dataforge.datasets.epfl_source import (
     EXO_CAMERAS,
     EXO_RIGS,
     FITS,
-    ExoCamera,
     FitSpec,
     PoseRow,
     pose_batches,
@@ -32,16 +31,13 @@ from dataforge.datasets.epfl_source import (
 )
 from dataforge.identity import SequenceIdentity
 
-CORPUS_SCENE_CENTRE: tuple[float, float] = (2.56, -0.02)
-"""Mean over the 51 released sessions of the nine exo-camera centroids (x, y), metres.
-
-The world frame moves between sessions (per-session centroid std 0.86 m in x and 0.87 m
-in y), so converted recordings embed their own centre; this is the catalog default."""
-BODY_MID_Z: float = -0.7
-"""World z of the body's mid-height: the world origin sits near head height (nose z ≈ 0,
-ankles z ≈ -1.39 in the shipped SMPL keypoints)."""
-FLOOR_Z: float = -1.4
-"""World z of the floor, at the shipped ankle keypoints; the grid draws there, not at the head."""
+KITCHEN_UP: tuple[float, float, float] = (-0.03, -0.81, -0.58)
+"""World up in output0's camera frame. The world frame moves between sessions, but the nine
+cameras keep one layout in output0's frame (measured on the sample), so the kitchen 3D view uses it."""
+KITCHEN_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((0.63, -0.53, -1.19), (0.0, -0.25, 1.31), KITCHEN_UP)
+"""Tightest oblique eye with all nine exo cameras and the walking area (a standing person) in a 2:1 card, in output0's frame."""
+KITCHEN_GRID: rrb.LineGrid3D = rrb.LineGrid3D(visible=True, plane=rr.components.Plane3D(normal=KITCHEN_UP, distance=-1.82))
+"""The floor (shipped ankle height) in output0's frame."""
 BODY_MESH_STRIDE: int = 3
 """body_mesh keeps every third 30 Hz frame (10 Hz): a display layer, by decision (2026-09-25).
 
@@ -49,12 +45,6 @@ Full-rate SMPL vertices cost 82 KB per frame (4.3 GB for a 29-min session, 4x it
 Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. The SMPL
 parameters (body_pose) and the keypoints (hand_pose) stay at full rate."""
 
-
-def scene_centre(cameras: dict[str, ExoCamera]) -> tuple[float, float]:
-    """World (x, y) centroid of the session's static exo camera centres."""
-    centres = [-camera.word2cam[:3, :3].T @ camera.word2cam[:3, 3] for camera in cameras.values()]
-    x, y, _ = np.mean(centres, axis=0)
-    return float(x), float(y)
 
 
 @dataclass
@@ -161,7 +151,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 writing.atomic_recording(
                     targets[layer],
                     recording_id=identity.recording_id,
-                    default_blueprint=self.default_blueprint(scene_centre(cameras)) if layer == "base" else None,
+                    default_blueprint=self.default_blueprint() if layer == "base" else None,
                     send_properties=layer == "base",
                 ) as recording,
             ):
@@ -207,21 +197,15 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 start = stop
         return targets["base"]
 
-    def default_blueprint(self, centre: tuple[float, float] = CORPUS_SCENE_CENTRE) -> rrb.Blueprint:
-        """Exo/ego layout with the 3D eye orbiting the kitchen at body mid-height.
-
-        Args:
-            centre: World (x, y) the eye orbits; convert passes the session's exo-camera
-                centroid, the catalog default uses the corpus mean.
-        """
-        target = (centre[0], centre[1], BODY_MID_Z)
+    def default_blueprint(self) -> rrb.Blueprint:
+        """Exo/ego layout; the 3D eye auto-fits each session, whose world frame moves (centroid std ~0.9 m)."""
         return blueprints.exoego_blueprint(
             rrb.Spatial3DView(
                 name="Kitchen",
-                origin="/world",
+                origin=schema.cam_path(0, 0),
                 contents=["+ /world/**", *(f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in EXO_RIGS)],
-                eye_controls=blueprints.eye_controls_from_pose((target[0] - 3.0, target[1] - 3.0, target[2] + 3.5), target, (0.0, 0.0, 1.0)),
-                line_grid=rrb.LineGrid3D(visible=True, plane=rr.components.Plane3D.XY.with_distance(FLOOR_Z)),
+                eye_controls=KITCHEN_EYE,
+                line_grid=KITCHEN_GRID,
             ),
             ego_panes=[
                 blueprints.camera_view(
@@ -243,18 +227,18 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Card: the kitchen in 3D (videos excluded so a card decodes one stream) beside exo camera output0."""
-        target = (CORPUS_SCENE_CENTRE[0], CORPUS_SCENE_CENTRE[1], BODY_MID_Z)
         return rrb.Blueprint(
             rrb.Horizontal(
                 rrb.Spatial3DView(
                     name="Kitchen",
-                    origin="/world",
+                    origin=schema.cam_path(0, 0),
                     contents=[
                         "+ /world/**",
                         *(f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in EXO_RIGS),
                         *(f"- {schema.video_path(rig, 0)}" for rig in (*EXO_RIGS, EGO_RIG)),
                     ],
-                    eye_controls=blueprints.eye_controls_from_pose((target[0] - 3.0, target[1] - 3.0, target[2] + 3.5), target, (0.0, 0.0, 1.0)),
+                    eye_controls=KITCHEN_EYE,
+                    line_grid=KITCHEN_GRID,
                 ),
                 blueprints.camera_view(
                     "output0",
