@@ -133,7 +133,9 @@ class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
     def table_blueprint(self) -> rrb.Blueprint:
         return rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Hands", origin="/world", contents=["+ /world/gt/**"], eye_controls=hand_eye()),
+                rrb.Spatial3DView(
+                    name="Hands", origin="/world", contents=["+ /world/**", *(f"- {schema.video_path(0, camera)}" for camera in range(4))], eye_controls=hand_eye()
+                ),
                 blueprints.camera_view("cam_00", 0, 0, contents=pane_contents(0)),
             ),
             collapse_panels=True,
@@ -148,8 +150,8 @@ class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
 
 
 def hand_eye() -> rrb.EyeControls3D:
-    """Orbital view of hands below a +Y-up headset."""
-    return blueprints.eye_controls_from_pose((1.2, 0.9, 1.2), (0.3, 0.0, 0.0), (0.0, 1.0, 0.0))
+    """Orbital view 0.7 m from the hands below the +Y-up headset, which barely moves within a recording."""
+    return blueprints.eye_controls_from_pose((0.39, 0.52, 0.49), (0.0, 0.2, 0.0), (0.0, 1.0, 0.0))
 
 
 def pane_contents(camera: int) -> list[str]:
