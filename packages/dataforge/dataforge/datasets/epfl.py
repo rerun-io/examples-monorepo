@@ -16,13 +16,13 @@ from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.epfl_actions import read_actions
 from dataforge.datasets.epfl_layers import start_parameters, write_actions, write_base, write_hand_pose, write_pose, write_projections
+from dataforge.datasets.epfl_mesh import MeshWriter
 from dataforge.datasets.epfl_source import (
     CAMERA_NAMES,
     EGO_RIG,
     EXO_CAMERAS,
     EXO_RIGS,
     FITS,
-    ExoCamera,
     FitSpec,
     PoseRow,
     pose_batches,
@@ -31,23 +31,20 @@ from dataforge.datasets.epfl_source import (
 )
 from dataforge.identity import SequenceIdentity
 
-CORPUS_SCENE_CENTRE: tuple[float, float] = (2.56, -0.02)
-"""Mean over the 51 released sessions of the nine exo-camera centroids (x, y), metres.
+KITCHEN_UP: tuple[float, float, float] = (-0.03, -0.81, -0.58)
+"""World up in output0's camera frame. The world frame moves between sessions, but the nine
+cameras keep one layout in output0's frame (measured on the sample), so the kitchen 3D view uses it."""
+KITCHEN_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((0.63, -0.53, -1.19), (0.0, -0.25, 1.31), KITCHEN_UP)
+"""Tightest oblique eye with all nine exo cameras and the walking area (a standing person) in a 2:1 card, in output0's frame."""
+KITCHEN_GRID: rrb.LineGrid3D = rrb.LineGrid3D(visible=True, plane=rr.components.Plane3D(normal=KITCHEN_UP, distance=-1.82))
+"""The floor (shipped ankle height) in output0's frame."""
+BODY_MESH_STRIDE: int = 3
+"""body_mesh keeps every third 30 Hz frame (10 Hz): a display layer, by decision (2026-09-25).
 
-The world frame moves between sessions (per-session centroid std 0.86 m in x and 0.87 m
-in y), so converted recordings embed their own centre; this is the catalog default."""
-BODY_MID_Z: float = -0.7
-"""World z of the body's mid-height: the world origin sits near head height (nose z ≈ 0,
-ankles z ≈ -1.39 in the shipped SMPL keypoints)."""
-FLOOR_Z: float = -1.4
-"""World z of the floor, at the shipped ankle keypoints; the grid draws there, not at the head."""
+Full-rate SMPL vertices cost 82 KB per frame (4.3 GB for a 29-min session, 4x its videos), and
+Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. The SMPL
+parameters (body_pose) and the keypoints (hand_pose) stay at full rate."""
 
-
-def scene_centre(cameras: dict[str, ExoCamera]) -> tuple[float, float]:
-    """World (x, y) centroid of the session's static exo camera centres."""
-    centres = [-camera.word2cam[:3, :3].T @ camera.word2cam[:3, 3] for camera in cameras.values()]
-    x, y, _ = np.mean(centres, axis=0)
-    return float(x), float(y)
 
 
 @dataclass
@@ -66,6 +63,8 @@ class EpflConfig(DataforgeDatasetConfig):
     """Split/subject/session selections."""
     frame_limit: int | None = None
     """Keep the first N frames in a separate preview tree."""
+    smpl_model_root: Path = field(default_factory=lambda: paths.raw_root() / "body_models")
+    """Official neutral SMPL model root, containing smpl/SMPL_NEUTRAL.pkl."""
 
     def __post_init__(self) -> None:
         if self.frame_limit is not None and self.frame_limit <= 0:
@@ -85,7 +84,7 @@ class EpflConfig(DataforgeDatasetConfig):
 class EpflDataset(DataforgeDataset[EpflConfig, str]):
     """Session discovery and atomic multi-layer conversion with one pose CSV pass."""
 
-    layers = ("base", "hand_pose", "body_pose", "projections", "actions")
+    layers = ("base", "hand_pose", "body_pose", "hand_mesh", "body_mesh", "projections", "actions")
 
     def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
         root = paths.output_root()
@@ -133,6 +132,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
             for raw in (Path("/mnt/nas"), self.config.root, self.config.video_root or self.config.root):
                 if target.resolve().is_relative_to(raw.resolve()):
                     raise ValueError(f"EPFL conversion output must be local and outside raw roots: {target}")
+        writer: MeshWriter | None = MeshWriter(self.config.smpl_model_root) if any(layer in pending for layer in ("hand_mesh", "body_mesh")) else None
         pose = self.config.pose_root / source
         video = self.config.videos_root / source
         with self.timer.stage("fetch"):
@@ -151,7 +151,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 writing.atomic_recording(
                     targets[layer],
                     recording_id=identity.recording_id,
-                    default_blueprint=self.default_blueprint(scene_centre(cameras)) if layer == "base" else None,
+                    default_blueprint=self.default_blueprint() if layer == "base" else None,
                     send_properties=layer == "base",
                 ) as recording,
             ):
@@ -162,7 +162,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
         pose_layers: list[str] = [layer for layer in pending if layer not in ("base", "actions")]
         if not pose_layers:
             return targets["base"]
-        layer_specs: dict[str, tuple[FitSpec, ...]] = {"hand_pose": FITS[:2], "body_pose": FITS[2:]}
+        layer_specs: dict[str, tuple[FitSpec, ...]] = {"hand_pose": FITS[:2], "body_pose": FITS[2:], "hand_mesh": FITS[:2], "body_mesh": FITS[2:]}
         with ExitStack() as stack:
             recordings: dict[str, rr.RecordingStream] = {
                 layer: stack.enter_context(writing.atomic_recording(targets[layer], recording_id=identity.recording_id, send_properties=False))
@@ -173,6 +173,10 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 if layer in ("hand_pose", "body_pose"):
                     start_parameters(recording, layer_specs[layer])
                     layer_writers[layer] = partial(write_hand_pose if layer == "hand_pose" else write_pose, recording, specs=layer_specs[layer])
+                elif layer in ("hand_mesh", "body_mesh"):
+                    assert writer is not None
+                    writer.start(recording, layer_specs[layer])
+                    layer_writers[layer] = partial(writer.write, recording, specs=layer_specs[layer])
                 else:
                     layer_writers[layer] = partial(write_projections, recording, cameras)
             batches = iter(pose_batches(pose / "pose_3d", len(times), total=source_count))
@@ -185,40 +189,64 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 stop: int = start + len(rows)
                 for layer, write in layer_writers.items():
                     with self.timer.stage(f"write:{layer}"):
-                        write(rows, times[start:stop], frames[start:stop])
+                        if layer == "body_mesh":
+                            keep: Int64[np.ndarray, "k"] = np.flatnonzero(frames[start:stop] % BODY_MESH_STRIDE == 0)
+                            write([rows[i] for i in keep], times[start:stop][keep], frames[start:stop][keep])
+                        else:
+                            write(rows, times[start:stop], frames[start:stop])
                 start = stop
         return targets["base"]
 
-    def default_blueprint(self, centre: tuple[float, float] = CORPUS_SCENE_CENTRE) -> rrb.Blueprint:
-        """Exo/ego layout with the 3D eye orbiting the kitchen at body mid-height.
-
-        Args:
-            centre: World (x, y) the eye orbits; convert passes the session's exo-camera
-                centroid, the catalog default uses the corpus mean.
-        """
-        target = (centre[0], centre[1], BODY_MID_Z)
+    def default_blueprint(self) -> rrb.Blueprint:
+        """Exo/ego layout; the 3D eye auto-fits each session, whose world frame moves (centroid std ~0.9 m)."""
         return blueprints.exoego_blueprint(
             rrb.Spatial3DView(
                 name="Kitchen",
-                origin="/world",
+                origin=schema.cam_path(0, 0),
                 contents=["+ /world/**", *(f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in EXO_RIGS)],
-                eye_controls=blueprints.eye_controls_from_pose((target[0] - 3.0, target[1] - 3.0, target[2] + 3.5), target, (0.0, 0.0, 1.0)),
-                line_grid=rrb.LineGrid3D(visible=True, plane=rr.components.Plane3D.XY.with_distance(FLOOR_Z)),
+                eye_controls=KITCHEN_EYE,
+                line_grid=KITCHEN_GRID,
             ),
             ego_panes=[
                 blueprints.camera_view(
                     "HoloLens (shipped pose drift)", EGO_RIG, 0, contents=["+ /world/gt/**", f"+ {schema.pinhole_path(EGO_RIG, 0)}/**"]
                 )
             ],
+            # Exo panes also draw the meshes, through Rerun's pinhole despite the lens model: off by 1-4 px
+            # mid-image, up to ~30 px at the edges (decision, 2026-09-25). The skeleton stays lens-projected.
             exo_panes=[
-                blueprints.camera_view(name, rig, 0, contents=[f"+ {schema.video_path(rig, 0)}", f"+ {schema.coco133_uv_projected_path(rig, 0)}"])
+                blueprints.camera_view(
+                    name,
+                    rig,
+                    0,
+                    contents=[f"+ {schema.video_path(rig, 0)}", f"+ {schema.coco133_uv_projected_path(rig, 0)}", *(f"+ {spec.mesh_path}" for spec in FITS)],
+                )
                 for rig, name in enumerate(EXO_CAMERAS)
             ],
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
+        """Card: the kitchen in 3D (videos excluded so a card decodes one stream) beside exo camera output0."""
         return rrb.Blueprint(
-            blueprints.camera_view("output0", 0, 0, contents=[f"+ {schema.video_path(0, 0)}", f"+ {schema.coco133_uv_projected_path(0, 0)}"]),
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name="Kitchen",
+                    origin=schema.cam_path(0, 0),
+                    contents=[
+                        "+ /world/**",
+                        *(f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in EXO_RIGS),
+                        *(f"- {schema.video_path(rig, 0)}" for rig in (*EXO_RIGS, EGO_RIG)),
+                    ],
+                    eye_controls=KITCHEN_EYE,
+                    line_grid=KITCHEN_GRID,
+                ),
+                blueprints.camera_view(
+                    "output0",
+                    0,
+                    0,
+                    contents=[f"+ {schema.video_path(0, 0)}", f"+ {schema.coco133_uv_projected_path(0, 0)}", *(f"+ {spec.mesh_path}" for spec in FITS)],
+                ),
+            ),
             collapse_panels=True,
         )
 
