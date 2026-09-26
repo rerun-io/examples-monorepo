@@ -6,10 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-import numpy as np
 import rerun.blueprint as rrb
-from jaxtyping import Float64
-from numpy import ndarray
 from serde import serde
 
 from dataforge import blueprints, paths, schema, writing
@@ -48,6 +45,11 @@ class Manifest:
     sequences: dict[str, SequenceFiles]
     """Integrity metadata keyed by sequence name."""
 
+
+RIG_FORWARD: tuple[float, float, float] = (0.34, -0.27, 0.9)
+"""Headset forward in the rig frame: camera-rgb's optical axis (measured from its shipped pose)."""
+RIG_UP: tuple[float, float, float] = (0.05, -0.95, -0.3)
+"""Headset up in the rig frame: minus camera-rgb's image y axis."""
 
 @dataclass
 class AriaGen2PilotConfig(DataforgeDatasetConfig):
@@ -141,7 +143,7 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
                     writing.atomic_recording(
                         targets[layer],
                         recording_id=identity.recording_id,
-                        default_blueprint=self.scene_blueprint(scene) if layer == paths.BASE_LAYER else None,
+                        default_blueprint=self.default_blueprint() if layer == paths.BASE_LAYER else None,
                         send_properties=layer == paths.BASE_LAYER,
                     ) as recording,
                 ):
@@ -153,34 +155,15 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
                         write_projections(recording, scene)
         return targets[paths.BASE_LAYER]
 
-    def scene_blueprint(self, scene: Scene) -> rrb.Blueprint:
-        """Fit the orbital eye to the measured scene instead of a fixed world point."""
-        points: Float64[ndarray, "n 3"] = scene.trajectory.poses[:, :3, 3]
-        points = points[np.isfinite(points).all(axis=1)]
-        if not len(points):
-            return self.default_blueprint()
-        # 5-95th percentile bounds keep one SLAM excursion from pushing the eye away; the
-        # target sits 0.3 m below head height, where the hands are.
-        low: Float64[ndarray, "3"] = np.percentile(points, 5.0, axis=0)
-        high: Float64[ndarray, "3"] = np.percentile(points, 95.0, axis=0)
-        target: Float64[ndarray, "3"] = (low + high) / 2.0 - np.array([0.0, 0.0, 0.3])
-        direction: Float64[ndarray, "3"] = np.array([1.0, -1.5, 1.0]) / np.linalg.norm([1.0, -1.5, 1.0])
-        eye: Float64[ndarray, "3"] = target + direction * max(1.0, 1.1 * float(np.linalg.norm(high - low)))
-        return self._blueprint(
-            blueprints.eye_controls_from_pose(
-                (float(eye[0]), float(eye[1]), float(eye[2])),
-                (float(target[0]), float(target[1]), float(target[2])),
-                (0.0, 0.0, 1.0),
-            )
-        )
-
     def default_blueprint(self) -> rrb.Blueprint:
-        """Catalog scenes auto-fit their own bounds, with orbital controls."""
-        return self._blueprint(rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, eye_up=(0.0, 0.0, 1.0), spin_speed=0.0))
-
-    def _blueprint(self, eye: rrb.EyeControls3D) -> rrb.Blueprint:
+        """The 3D view follows the headset, so walking sequences keep it and the hands in shot."""
         return blueprints.exoego_blueprint(
-            rrb.Spatial3DView(name="Aria Gen2 world", origin="/world", contents=["/world/**"], eye_controls=eye),
+            rrb.Spatial3DView(
+                name="Aria Gen2 (follows the headset)",
+                origin=schema.rig_path(0),
+                contents=["/world/**"],
+                eye_controls=blueprints.headset_eye_controls(RIG_FORWARD, RIG_UP),
+            ),
             ego_panes=[
                 blueprints.camera_view(label, 0, index, contents=[schema.video_path(0, index), schema.coco133_uv_projected_path(0, index)])
                 for index, (_, label, _) in enumerate(CAMERAS)
@@ -189,14 +172,14 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
-        """Card: the 3D scene (auto-fit, videos excluded so a card decodes one stream) beside the RGB camera."""
+        """Card: the 3D scene following the headset (videos excluded so a card decodes one stream) beside RGB."""
         return rrb.Blueprint(
             rrb.Horizontal(
                 rrb.Spatial3DView(
                     name="Scene",
-                    origin="/world",
+                    origin=schema.rig_path(0),
                     contents=["+ /world/**", *(f"- {schema.video_path(0, index)}" for index in range(len(CAMERAS)))],
-                    eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, eye_up=(0.0, 0.0, 1.0), spin_speed=0.0),
+                    eye_controls=blueprints.headset_eye_controls(RIG_FORWARD, RIG_UP),
                 ),
                 blueprints.camera_view("RGB", 0, 0, contents=[schema.video_path(0, 0), schema.coco133_uv_projected_path(0, 0)]),
             ),
