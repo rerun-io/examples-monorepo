@@ -143,7 +143,20 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
-        return rrb.Blueprint(blueprints.camera_view("Ego", 0, 0, contents=[schema.pinhole_path(0, 0) + "/**"]), collapse_panels=True)
+        """Card: the 3D scene (auto-fit, videos excluded so a card decodes one stream) beside the first camera."""
+        spec: DeviceSpec = DEVICES[self.device]
+        return rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name="Scene",
+                    origin="/world",
+                    contents=["+ /world/**", *(f"- {schema.video_path(0, index)}" for index in range(len(spec.camera_streams)))],
+                    eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, eye_up=spec.up, spin_speed=0.0),
+                ),
+                blueprints.camera_view(spec.camera_streams[0][1], 0, 0, contents=[schema.video_path(0, 0), schema.coco133_uv_projected_path(0, 0)]),
+            ),
+            collapse_panels=True,
+        )
 
     def table_fields(self) -> writing.TableFields:
         fields: tuple[writing.TableField, ...] = (
