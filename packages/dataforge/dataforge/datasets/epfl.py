@@ -42,6 +42,12 @@ BODY_MID_Z: float = -0.7
 ankles z ≈ -1.39 in the shipped SMPL keypoints)."""
 FLOOR_Z: float = -1.4
 """World z of the floor, at the shipped ankle keypoints; the grid draws there, not at the head."""
+BODY_MESH_STRIDE: int = 3
+"""body_mesh keeps every third 30 Hz frame (10 Hz): a display layer, by decision (2026-09-25).
+
+Full-rate SMPL vertices cost 82 KB per frame (4.3 GB for a 29-min session, 4x its videos), and
+Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. The SMPL
+parameters (body_pose) and the keypoints (hand_pose) stay at full rate."""
 
 
 def scene_centre(cameras: dict[str, ExoCamera]) -> tuple[float, float]:
@@ -193,7 +199,11 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 stop: int = start + len(rows)
                 for layer, write in layer_writers.items():
                     with self.timer.stage(f"write:{layer}"):
-                        write(rows, times[start:stop], frames[start:stop])
+                        if layer == "body_mesh":
+                            keep: Int64[np.ndarray, "k"] = np.flatnonzero(frames[start:stop] % BODY_MESH_STRIDE == 0)
+                            write([rows[i] for i in keep], times[start:stop][keep], frames[start:stop][keep])
+                        else:
+                            write(rows, times[start:stop], frames[start:stop])
                 start = stop
         return targets["base"]
 

@@ -48,7 +48,9 @@ MANO meshes use simplecv `MANOLayerNP(use_pca=False)` with the shipped 45 finger
 
 Each parameter entity has one static `AnyValues` with `use_pca=False`, `root="Rh"`, `translation_pivot="origin"`, and `source="pose3d_mano.csv"` or `"pose3d_smpl.csv"`. SMPL also records `gender="neutral (assumed)"`.
 
-The SMPL root defaults to `paths.raw_root() / "body_models"`; pass `--smpl-model-root` to use another location. It must contain the official neutral SMPL model. Missing models fail clearly; no substitute or download is attempted. Mesh computation currently uses CPU simplecv layers. Full-rate body meshes cost about 82 KB per frame (5.6 GB per 38-min session); the eight-session sample carries `body_mesh` for `test/YH2003` only, see Timing.
+The SMPL root defaults to `paths.raw_root() / "body_models"`; pass `--smpl-model-root` to use another location. It must contain the official neutral SMPL model. Missing models fail clearly; no substitute or download is attempted. Mesh computation currently uses CPU simplecv layers.
+
+**`body_mesh` is 10 Hz** (every third frame, `BODY_MESH_STRIDE`): a display layer, by decision (2026-09-25). Full-rate SMPL vertices cost 82 KB per frame, four times the session's videos, and Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. `body_pose` (SMPL parameters) and the keypoints stay at 30 Hz; `hand_mesh` stays at full rate.
 
 `projections` applies OpenCV's complete rational Brown–Conrady model to all nine exo cameras. It writes only `<pinhole>/coco133_uv_projected`, with derived-source properties. Missing, behind-camera and offscreen points are NaN/0; visible points keep the 3D confidence. These cameras qualify for the agreed fisheye exception because Rerun's Pinhole cannot express their distortion. No shipped `coco133_uv` is invented. Exo panes include video plus derived pixels and exclude 3D geometry. HoloLens is a zero-distortion pinhole and includes world geometry. All nine exo panes are accessible through tabs; the table card decodes one stream and exposes subject, split, activity, frames.
 

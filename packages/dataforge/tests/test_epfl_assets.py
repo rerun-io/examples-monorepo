@@ -64,6 +64,11 @@ def test_real_session_all_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     joints = [chunk for chunk in read_chunks(targets["hand_pose"]) if str(chunk.entity_path) == "/world/gt/coco133_xyz" and not chunk.is_static]
     assert sum(chunk.num_rows for chunk in joints) == 60
     assert not any(str(chunk.entity_path) == "/world/gt/coco133_xyz" for chunk in read_chunks(targets["body_pose"]))
+    # body_mesh is 10 Hz (BODY_MESH_STRIDE = 3): 20 of the 60 frames; hand_mesh stays at full rate.
+    body = [chunk for chunk in read_chunks(targets["body_mesh"]) if str(chunk.entity_path) == "/world/gt/body/mesh" and not chunk.is_static]
+    assert sum(chunk.num_rows for chunk in body) == 20
+    left = [chunk for chunk in read_chunks(targets["hand_mesh"]) if str(chunk.entity_path) == "/world/gt/hands/left/mesh" and not chunk.is_static]
+    assert sum(chunk.num_rows for chunk in left) == 60
 
 
 @pytest.mark.golden
