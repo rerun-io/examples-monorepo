@@ -33,9 +33,10 @@ since device boot). Every camera and IMU keeps its own VRS `capture_timestamp_ns
 (the VRS record timestamp is the same value). MPS rows carry
 `tracking_timestamp_us`, logged as `× 1000` ns. MPS hand rows are the SLAM camera
 stamps floored to the microsecond, up to 999 ns before the matching frame; the
-shipped value is kept. `frame_index` is the second timeline: the native camera
-index for video, and the nearest RGB frame for poses, hands and projections
-(ties go to the earlier frame). No IMU sample gets a frame index.
+shipped value is kept. `frame_index` is the second timeline: the nearest `slam-front-left` (cam_01, 30 Hz) frame for every camera
+video, rig pose, quality, hand and projection row (ties go to the earlier
+frame). RGB therefore lands on about every third index; native sample order
+and `video_time` retain each camera's own clock. No IMU sample gets a frame index.
 `property:capture:clock_source` states these rules.
 
 Native rates (measured on all 10 staged sequences): RGB 10.001 Hz; the four SLAM
@@ -76,10 +77,13 @@ cameras 29.997–30.000 Hz, each on its own clock; `imu-left` ~800–803 Hz,
 `Transform3D` is `world_T_device` for every closed-loop row. MPS starts ~0.8 s
 after the first RGB frame in 8 of 10 sequences. Before the first row, after the
 last row and across any gap over 2 ms (1 ns after each run's last row), the rig
-logs a NaN transform: the pose is marked missing. Rerun 0.38.1 still draws
-the rig's frustums at such times (seen on clean_0 at 1200.2 s, before tracking
-starts at 1200.76 s), so the viewer does not yet hide them. The
-pose is missing there and is never held or clamped. A row with a non-finite
+logs NaN translation and NaN `mat3x3`, which hide the rig subtree while
+leaving the 2D panes intact. The first hide marker uses the earliest logged
+camera or kept IMU stamp; later markers occur 1 ns after each run ends.
+Markers are kept only where `Trajectory.at` returns a missing pose.
+Rerun 0.38.1 treats a NaN quaternion as an invalid transform and falls back
+to identity (drawing at the parent origin), so dense tracks use rotation
+matrices instead. The pose is never held or clamped. A row with a non-finite
 value or a quaternion more than 1e-5 off unit norm is missing too, never
 renormalised (shipped trajectory quaternions sit ~1e-9 off; hand wrists, printed
 with six decimals, up to 1.2e-6). `quality_score` (1.0 / 0.5 / 0.0) is

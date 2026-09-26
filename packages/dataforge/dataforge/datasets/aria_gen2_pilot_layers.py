@@ -33,13 +33,25 @@ from dataforge.vrs import census_images
 
 def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
     """All native trajectory/IMU rows, plus explicit missing-pose boundaries."""
+    provider = aria.open_vrs(scene.source / "video.vrs")
+    imu_channels: list[tuple[ImuChannel, ImuChannel]] = []
+    first_stamp: int = min(int(camera.times_ns[0]) for camera in scene.cameras)
+    for stream_id, _ in IMUS:
+        gyro, accel = aria.read_imu(provider, stream_id)
+        if scene.stop_ns is not None:
+            kept: Bool[ndarray, "s"] = gyro.times_ns <= scene.stop_ns
+            gyro, accel = ImuChannel(gyro.times_ns[kept], gyro.values_xyz[kept]), ImuChannel(accel.times_ns[kept], accel.values_xyz[kept])
+        imu_channels.append((gyro, accel))
+        for channel in (gyro, accel):
+            if len(channel.times_ns):
+                first_stamp = min(first_stamp, int(channel.times_ns[0]))
     track = scene.trajectory
     keep: Bool[ndarray, "n"] = np.ones(len(track.times_ns), dtype=np.bool_) if scene.stop_ns is None else track.times_ns <= scene.stop_ns
     # A rig with no transform would sit at the world origin. It is visible on each run of
-    # rows <= 2 ms apart and hidden elsewhere: a NaN row at the first camera stamp (when
+    # rows <= 2 ms apart and hidden elsewhere: a NaN row at the first logged sensor stamp (when
     # tracking starts later) and 1 ns after every run's last row.
     run_ends: Int64[ndarray, "r"] = np.flatnonzero(np.append(np.diff(track.times_ns) > 2_000_000, True))
-    hide: Int64[ndarray, "h"] = np.append(min(int(camera.times_ns[0]) for camera in scene.cameras), track.times_ns[run_ends] + 1)
+    hide: Int64[ndarray, "h"] = np.append(first_stamp, track.times_ns[run_ends] + 1)
     hide = hide[~np.isfinite(track.at(hide)).all(axis=(1, 2))]
     if scene.stop_ns is not None:
         hide = hide[hide <= scene.stop_ns]
@@ -48,21 +60,16 @@ def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
         recording,
         schema.rig_path(0),
         times_ns=times,
-        frame_indices=nearest_framesets(scene.cameras[0].times_ns, times),
+        frame_indices=nearest_framesets(scene.frame_clock, times),
         transforms=track.at(times),
     )
     rr.send_columns(
         schema.rig_path(0) + "/quality",
-        indexes=[time_column(track.times_ns[keep]), frame_index_column(nearest_framesets(scene.cameras[0].times_ns, track.times_ns[keep]))],
+        indexes=[time_column(track.times_ns[keep]), frame_index_column(nearest_framesets(scene.frame_clock, track.times_ns[keep]))],
         columns=rr.Scalars.columns(scalars=track.quality[keep]),
         recording=recording,
     )
-    provider = aria.open_vrs(scene.source / "video.vrs")
-    for index, (stream_id, label) in enumerate(IMUS):
-        gyro, accel = aria.read_imu(provider, stream_id)
-        if scene.stop_ns is not None:
-            kept: Bool[ndarray, "s"] = gyro.times_ns <= scene.stop_ns
-            gyro, accel = ImuChannel(gyro.times_ns[kept], gyro.values_xyz[kept]), ImuChannel(accel.times_ns[kept], accel.values_xyz[kept])
+    for index, ((_, label), (gyro, accel)) in enumerate(zip(IMUS, imu_channels, strict=True)):
         imu: ImuCalibration | None = scene.calibration.get_imu_calib(label)
         if imu is None:
             raise ValueError(f"{scene.source}: missing {label} factory calibration")
@@ -124,7 +131,7 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
                 recording=recording,
             )
             log_video_stream(
-                recording, clip, schema.video_path(0, index), times_ns=camera.times_ns, frame_indices=np.arange(len(camera.times_ns), dtype=np.int64)
+                recording, clip, schema.video_path(0, index), times_ns=camera.times_ns, frame_indices=nearest_framesets(scene.frame_clock, camera.times_ns)
             )
             clip.unlink()
     write_motion(recording, scene)
@@ -142,7 +149,7 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
                 for camera in scene.cameras
             ]
         ),
-        clock_source="Unshifted VRS capture_timestamp_ns per camera/IMU; MPS tracking_timestamp_us * 1000, device boot origin",
+        clock_source="Unshifted VRS capture_timestamp_ns per camera/IMU; MPS tracking_timestamp_us * 1000, device boot origin; frame_index: nearest slam-front-left stamp, ties earlier",
         calibration_source="VRS factory FISHEYE624 including thin prism",
     )
     recording.send_property("episode", rr.AnyValues(sequence=scene.source.name))

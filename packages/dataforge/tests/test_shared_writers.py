@@ -66,6 +66,7 @@ def test_object_pose_is_sparse_but_confidence_is_dense(tmp_path: Path) -> None:
     target = tmp_path / "pose.rrd"
     transforms = np.tile(np.eye(4, dtype=np.float64), (4, 1, 1))
     transforms[2, :3, 3] = [1.0, 2.0, 3.0]
+    transforms[2, :3, :3] = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
     transforms[3] = np.nan
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
         objects.log_object_pose(
@@ -134,6 +135,7 @@ def test_dense_pose_invalidates_missing_row(tmp_path: Path, writer: str) -> None
     transforms = np.tile(np.eye(4, dtype=np.float32 if writer == "dense_float32" else np.float64), (3, 1, 1))
     transforms[1] = np.nan
     transforms[2, :3, 3] = [1.0, 2.0, 3.0]
+    transforms[2, :3, :3] = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
     times = np.array([10, 20, 30], dtype=np.int64)
     frames = np.arange(3, dtype=np.int64)
     target = tmp_path / "dense.rrd"
@@ -143,8 +145,9 @@ def test_dense_pose_invalidates_missing_row(tmp_path: Path, writer: str) -> None
     poses = next(batch for batch in batches if "Transform3D:translation" in batch.schema.names)
     assert poses.column("frame_index").to_pylist() == [0, 1, 2]
     positions = poses.column("Transform3D:translation").to_pylist()
-    rotations = poses.column("Transform3D:quaternion").to_pylist()
+    assert "Transform3D:quaternion" not in poses.schema.names
+    rotations = poses.column("Transform3D:mat3x3").to_pylist()
     assert np.isnan(positions[1]).all()
     assert np.isnan(rotations[1]).all()
     np.testing.assert_array_equal(positions[2], [[1.0, 2.0, 3.0]])
-    np.testing.assert_array_equal(rotations[2], [[0.0, 0.0, 0.0, 1.0]])
+    np.testing.assert_array_equal(np.asarray(rotations)[[0, 2], 0].reshape(-1, 3, 3).transpose(0, 2, 1), transforms[[0, 2], :3, :3])

@@ -22,6 +22,8 @@ CAMERAS: tuple[tuple[str, str, int], ...] = (
     ("1201-4", "slam-side-right", 30),
 )
 """Native stream IDs, factory labels and nominal container rates."""
+FRAME_CLOCK_CAMERA: int = 1
+"""slam-front-left supplies the shared frame_index clock."""
 IMUS: tuple[tuple[aria.AriaStreamId, str], ...] = (("1202-1", "imu-left"), ("1202-2", "imu-right"))
 """Gen2 IMU stream IDs and factory labels; Gen1's ``aria.STREAM_LABELS`` has these two swapped."""
 SEQUENCES: tuple[str, ...] = ("clean_0", "cook_0", "eat_0", "eat_1", "eat_2", "eat_3", "play_0", "play_1", "play_2", "play_3", "walk_0", "walk_1")
@@ -36,7 +38,15 @@ def numeric_columns(path: Path, columns: list[str]) -> Float64[ndarray, "n c"]:
         header: list[str] = next(csv.reader(stream))
         try:
             selected: list[int] = [header.index(name) for name in columns]
-            return np.loadtxt(stream, delimiter=",", usecols=selected, ndmin=2, dtype=np.float64)
+            values: Float64[ndarray, "n c"] = np.loadtxt(stream, delimiter=",", usecols=selected, ndmin=2, dtype=np.float64)
+            for index, name in enumerate(columns):
+                if name == "tracking_timestamp_us":
+                    stamps: Float64[ndarray, "n"] = values[:, index]
+                    if not np.isfinite(stamps).all() or np.any(stamps != np.floor(stamps)):
+                        raise ValueError("tracking_timestamp_us must contain finite integers")
+                elif name.endswith("_tracking_confidence") and not np.isfinite(values[:, index]).all():
+                    raise ValueError(f"{name} must be finite")
+            return values
         except ValueError as error:
             raise ValueError(f"{path}: {error}") from error
 
@@ -125,11 +135,11 @@ class HandSamples:
     device_poses: Float64[ndarray, "n 4 4"]
     """Interpolated world-from-device at the hand timestamp."""
     frame_indices: Int64[ndarray, "n"]
-    """Nearest camera-rgb frame per row, for the ``frame_index`` timeline."""
+    """Nearest slam-front-left frame per row, for the ``frame_index`` timeline."""
 
 
 def hand_columns(side: str) -> dict[str, list[str]]:
-    """One side's MPS column groups, in the order ``read_hands`` splits them."""
+    """One side's named MPS columns."""
     return {
         "confidence": [f"{side}_tracking_confidence"],
         "landmarks": [f"t{axis}_{side}_landmark_{joint}_device" for joint in range(21) for axis in "xyz"],
@@ -138,35 +148,51 @@ def hand_columns(side: str) -> dict[str, list[str]]:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class HandColumns:
+    """One side's numeric MPS columns, before world transformation."""
+
+    confidence: Float64[ndarray, "n"]
+    """Shipped tracking confidence, including -1 for an absent hand."""
+    landmarks: Float64[ndarray, "n 21 3"]
+    """Device-frame landmark positions in metres."""
+    wrist: Float64[ndarray, "n 7"]
+    """Device-from-wrist translation and xyzw quaternion."""
+    normals: Float64[ndarray, "n 2 3"]
+    """Device-frame palm and wrist normals."""
+
+
 def read_hands(path: Path, trajectory: Trajectory, frame_clock: Int64[ndarray, "f"], stop_ns: int | None = None) -> HandSamples:
     """Read every native MPS row and transform device landmarks at its own time."""
-    groups: list[tuple[str, str, list[str]]] = [("", "time", ["tracking_timestamp_us"])]
-    groups += [(side, name, names) for side in ("left", "right") for name, names in hand_columns(side).items()]
-    values: Float64[ndarray, "n c"] = numeric_columns(path, [name for _, _, names in groups for name in names])
-    # The layout is written once, above; each group's slice follows from the lengths.
-    ends: list[int] = np.cumsum([len(names) for _, _, names in groups]).tolist()
-    column: dict[tuple[str, str], Float64[ndarray, "n g"]] = {
-        (side, name): values[:, end - len(names) : end] for (side, name, names), end in zip(groups, ends, strict=True)
-    }
-    times: Int64[ndarray, "n"] = column[("", "time")][:, 0].astype(np.int64) * 1000
+    names: list[str] = ["tracking_timestamp_us", *[name for side in ("left", "right") for group in hand_columns(side).values() for name in group]]
+    table: Float64[ndarray, "n c"] = numeric_columns(path, names)
+    position: dict[str, int] = {name: index for index, name in enumerate(names)}
+    times: Int64[ndarray, "n"] = table[:, 0].astype(np.int64) * 1000
     if np.any(np.diff(times) <= 0):
         raise ValueError(f"{path}: hand timestamps must increase")
     keep: Bool[ndarray, "n"] = np.ones(len(times), dtype=np.bool_) if stop_ns is None else times <= stop_ns
-    times = times[keep]
-    column = {key: value[keep] for key, value in column.items()}
+    times, table = times[keep], table[keep]
     poses: Float64[ndarray, "n 4 4"] = trajectory.at(times)
     valid_pose: Bool[ndarray, "n"] = np.isfinite(poses).all(axis=(1, 2))
     landmarks: Float32[ndarray, "n 2 21 3"] = np.full((len(times), 2, 21, 3), np.nan, dtype=np.float32)
     wrists: Float64[ndarray, "n 2 4 4"] = np.full((len(times), 2, 4, 4), np.nan)
     normals: Float64[ndarray, "n 2 2 3"] = np.full((len(times), 2, 2, 3), np.nan)
-    scores: Float64[ndarray, "n 2"] = np.stack([column[(side, "confidence")][:, 0] for side in ("left", "right")], axis=1)
+    scores: Float64[ndarray, "n 2"] = np.empty((len(times), 2))
     for index, side in enumerate(("left", "right")):
+        group: dict[str, list[str]] = hand_columns(side)
+        columns: HandColumns = HandColumns(
+            confidence=table[:, position[group["confidence"][0]]],
+            landmarks=table[:, [position[name] for name in group["landmarks"]]].reshape(-1, 21, 3),
+            wrist=table[:, [position[name] for name in group["wrist"]]],
+            normals=table[:, [position[name] for name in group["normals"]]].reshape(-1, 2, 3),
+        )
+        scores[:, index] = columns.confidence
         present: Bool[ndarray, "n"] = valid_pose & (scores[:, index] != -1.0)
         rotation: Float64[ndarray, "p 3 3"] = poses[present, :3, :3]
-        points: Float64[ndarray, "p 21 3"] = column[(side, "landmarks")][present].reshape(-1, 21, 3)
+        points: Float64[ndarray, "p 21 3"] = columns.landmarks[present]
         landmarks[present, index] = (np.einsum("nij,nkj->nki", rotation, points) + poses[present, None, :3, 3]).astype(np.float32)
-        wrists[present, index] = poses[present] @ poses_from_columns(column[(side, "wrist")][present])
-        normals[present, index] = np.einsum("nij,nkj->nki", rotation, column[(side, "normals")][present].reshape(-1, 2, 3))
+        wrists[present, index] = poses[present] @ poses_from_columns(columns.wrist[present])
+        normals[present, index] = np.einsum("nij,nkj->nki", rotation, columns.normals[present])
     positions: Float32[ndarray, "n 133 3"] = np.full((len(times), 133, 3), np.nan, dtype=np.float32)
     confidence: Float32[ndarray, "n 133"] = np.zeros((len(times), 133), dtype=np.float32)
     for index in range(len(times)):
@@ -212,6 +238,11 @@ class Scene:
     stop_ns: int | None
     """Preview cutoff, or full sequence."""
 
+    @property
+    def frame_clock(self) -> Int64[ndarray, "n"]:
+        """Reference timestamps for every frame_index row."""
+        return self.cameras[FRAME_CLOCK_CAMERA].times_ns
+
 
 def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
     """Open factory calibration and each clock independently; never decode VRS images."""
@@ -242,5 +273,5 @@ def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
         cameras.append(Camera(stream_id, label, fps, calibration, times[:frame_limit], len(times)))
     stop: int | None = max(int(camera.times_ns[-1]) for camera in cameras) if frame_limit is not None else None
     trajectory: Trajectory = read_trajectory(source / "mps/slam/closed_loop_trajectory.csv")
-    hand_samples: HandSamples = read_hands(source / "mps/hand_tracking/hand_tracking_results.csv", trajectory, cameras[0].times_ns, stop)
+    hand_samples: HandSamples = read_hands(source / "mps/hand_tracking/hand_tracking_results.csv", trajectory, cameras[FRAME_CLOCK_CAMERA].times_ns, stop)
     return Scene(source, vrs, factory, cameras, trajectory, hand_samples, stop)
