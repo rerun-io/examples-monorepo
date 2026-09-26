@@ -11,7 +11,7 @@ import rerun.blueprint as rrb
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
-from dataforge.datasets.hocap_layers import write_base, write_hands
+from dataforge.datasets.hocap_layers import write_base, write_hand_meshes, write_hands, write_object_meshes, write_object_poses
 from dataforge.datasets.hocap_source import EGO_RIG, EXO_RIGS, FRAME_RATE, SequenceData, read_sequence
 from dataforge.identity import SequenceIdentity
 
@@ -43,9 +43,9 @@ class Archive:
 
 
 class HocapDataset(DataforgeDataset[HocapConfig, str]):
-    """Base and hand-pose layers sharing one source frame clock and recording identity."""
+    """Five layers sharing one source frame clock and recording identity."""
 
-    layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER)
+    layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.HAND_MESH_LAYER, paths.OBJECT_POSE_LAYER, paths.OBJECT_MESH_LAYER)
 
     def __init__(self, config: HocapConfig) -> None:
         super().__init__(config)
@@ -128,6 +128,9 @@ class HocapDataset(DataforgeDataset[HocapConfig, str]):
                 "labels",
                 lambda recording: write_hands(recording, scene, self.archive("labels").handle, source, members=self.archive("labels").members),
             ),
+            paths.HAND_MESH_LAYER: (None, lambda recording: write_hand_meshes(recording, scene)),
+            paths.OBJECT_POSE_LAYER: (None, lambda recording: write_object_poses(recording, scene)),
+            paths.OBJECT_MESH_LAYER: ("models", lambda recording: write_object_meshes(recording, scene, self.archive("models").handle)),
         }
         with self.timer.stage("fetch"):
             for name in sorted({name for layer in pending if (name := layers[layer][0]) is not None}):
@@ -182,8 +185,11 @@ class HocapDataset(DataforgeDataset[HocapConfig, str]):
 
 
 def table_eye() -> rrb.EyeControls3D:
-    """Orbital eye over the tag-1 table, shared by the default and table layouts."""
-    return blueprints.eye_controls_from_pose((1.3, -1.3, 1.1), (0.0, 0.0, 0.1), (0.0, 0.0, 1.0))
+    """Tightest oblique eye with all eight cameras and the table in a 2:1 card; default and table layouts.
+
+    Solved from the shipped calibration, which puts the cameras at the same tag-1 positions in every session.
+    """
+    return blueprints.eye_controls_from_pose((-0.03, -0.91, 1.07), (-0.03, 0.04, 0.52), (0.0, 0.0, 1.0))
 
 
 def world_contents() -> list[str]:

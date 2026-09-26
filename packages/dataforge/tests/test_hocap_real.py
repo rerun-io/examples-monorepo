@@ -45,7 +45,7 @@ def test_real_sequence_all_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     identity, source = dataset.discover()[0]
     dataset.convert(identity, source, force=True)
     targets = dataset.targets(identity)
-    assert set(targets) == {"base", "hand_pose"}
+    assert set(targets) == {"base", "hand_pose", "hand_mesh", "object_pose", "object_mesh"}
     for layer, target in targets.items():
         chunks = read_chunks(target)
         assert chunks, layer
@@ -65,6 +65,10 @@ def test_real_sequence_all_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         assert sum(c.num_rows for c in video) == 30
     hands = read_chunks(targets["hand_pose"])
     assert not any(f"rig_{EGO_RIG:02}" in chunk.entity_path for chunk in hands)
+    assert any(chunk.entity_path == schema.hand_mesh_path("left") for chunk in read_chunks(targets["hand_mesh"]))
+    assert any(chunk.entity_path == schema.hand_mesh_path("right") for chunk in read_chunks(targets["hand_mesh"]))
+    object_meshes = read_chunks(targets["object_mesh"])
+    assert sum("Asset3D:blob" in chunk.to_record_batch().schema.names for chunk in object_meshes) == 4
     stamps = {layer: target.stat().st_mtime_ns for layer, target in targets.items()}
     dataset.convert(identity, source, force=False)
     assert stamps == {layer: target.stat().st_mtime_ns for layer, target in targets.items()}

@@ -1,19 +1,24 @@
 """HOCap archive discovery and source-to-recording contracts."""
 
 import io
+import json
+import struct
 from pathlib import Path
 from zipfile import ZipFile
 
 import numpy as np
 import pytest
+import rerun as rr
 import yaml
 from conftest import blueprint_views, read_chunks
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
+from PIL import Image
 
-from dataforge import writing
+from dataforge import objects, writing
 from dataforge.datasets.hocap import HocapConfig, HocapDataset
 from dataforge.datasets.hocap_layers import write_base, write_hands
+from dataforge.datasets.hocap_mesh import textured_glb
 from dataforge.datasets.hocap_source import (
     EGO_RIG,
     EXO_RIGS,
@@ -179,6 +184,60 @@ def test_missing_camera_labels_remain_missing_but_world_joints_use_another_camer
     mano = next(c.to_record_batch() for c in chunks if c.entity_path == "/world/gt/hands/right/mano" and not c.is_static)
     assert len(mano.column("pca_coefficients").to_pylist()[0][0]) == 45
     assert np.isnan(mano.column("pca_coefficients").to_pylist()[1]).all()
+
+
+def test_textured_obj_preserves_uv_seams(tmp_path: Path) -> None:
+
+    texture = io.BytesIO()
+    Image.fromarray(np.full((2, 2, 3), [255, 0, 0], dtype=np.uint8)).save(texture, format="PNG")
+    with ZipFile(tmp_path / "models.zip", "w") as archive:
+        archive.writestr(
+            "models/a/textured_mesh.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 2\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1/3/1 2/2/1 3/1/1\n"
+        )
+        archive.writestr("models/a/textured_mesh.mtl", "map_Kd textured_mesh_0.png\n")
+        archive.writestr("models/a/textured_mesh_0.png", texture.getvalue())
+        glb = textured_glb(archive, "a")
+    assert struct.unpack_from("<4sII", glb) == (b"glTF", 2, len(glb))
+    size, kind = struct.unpack_from("<I4s", glb, 12)
+    assert kind == b"JSON" and size % 4 == 0
+    doc = json.loads(glb[20 : 20 + size])
+    bin_size, kind = struct.unpack_from("<I4s", glb, 20 + size)
+    binary = glb[28 + size :]
+    assert kind == b"BIN\0" and bin_size == len(binary) and bin_size % 4 == 0
+    arrays = []
+    for accessor in doc["accessors"]:
+        view = doc["bufferViews"][accessor["bufferView"]]
+        assert view["byteOffset"] % 4 == 0
+        dtype = "<u4" if accessor["componentType"] == 5125 else "<f4"
+        arrays.append(np.frombuffer(binary[view["byteOffset"] : view["byteOffset"] + view["byteLength"]], dtype=dtype))
+    vertices, normals, uv, indices = arrays
+    vertices, normals, uv = vertices.reshape(-1, 3), normals.reshape(-1, 3), uv.reshape(-1, 2)
+    assert len(vertices) == 5
+    np.testing.assert_array_equal(vertices[:2], [[0, 0, 0], [0, 0, 0]])
+    np.testing.assert_array_equal(uv[:2], [[0, 1], [0, 0]])
+    np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0)
+    assert len(indices) == 6 and indices.max() < len(vertices)
+    assert doc["accessors"][0]["min"] == [0, 0, 0]
+    assert doc["accessors"][0]["max"] == [1, 1, 0]
+    view = doc["bufferViews"][doc["images"][0]["bufferView"]]
+    assert binary[view["byteOffset"] : view["byteOffset"] + view["byteLength"]] == texture.getvalue()
+    assert doc["materials"][0]["pbrMetallicRoughness"]["metallicFactor"] == 0.0
+    with writing.atomic_recording(tmp_path / "mesh.rrd", recording_id="test", send_properties=False) as recording:
+        objects.log_object_mesh(
+            recording,
+            "a",
+            times_ns=np.array([0], dtype=np.int64),
+            frame_indices=np.array([0], dtype=np.int64),
+            asset=rr.Asset3D(contents=glb, media_type="model/gltf-binary"),
+            confidence=np.ones(1, dtype=np.float32),
+            posed=np.ones(1, dtype=bool),
+            trust_threshold=0.0,
+        )
+    batches = [c.to_record_batch() for c in read_chunks(tmp_path / "mesh.rrd")]
+    asset = next(b for b in batches if "Asset3D:blob" in b.schema.names)
+    assert bytes(asset.column("Asset3D:blob").to_pylist()[0][0]) == glb
+    assert asset.column("Asset3D:media_type").to_pylist() == [["model/gltf-binary"]]
+    assert any("Scalars:scalars" in b.schema.names for b in batches)
 
 
 def test_converter_refuses_output_under_raw_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
