@@ -61,7 +61,7 @@ cameras 29.997–30.000 Hz, each on its own clock; `imu-left` ~800–803 Hz,
 | `mps/slam/closed_loop_trajectory.csv` | 1 kHz or ~802 Hz | base | `/world/rig_00` transform (every row), `/world/rig_00/quality` (`quality_score`) |
 | `mps/slam/closed_loop_trajectory.csv` velocity, gravity, ECEF, `utc_timestamp_ns`, `graph_uid` columns | same | — | not ingested: gravity is constant (0, 0, −9.81) = Z-up world; one graph per file |
 | `mps/slam/open_loop_trajectory.csv` | ~800 Hz | — | not ingested: closed loop is the product |
-| `mps/slam/online_calibration.jsonl` | 30 Hz | — | not ingested: static factory calibration chosen (differs ≤ 0.75 mm, 0.05°, 0.14 px); time-varying calibration is a later layer |
+| `mps/slam/online_calibration.jsonl` | 30 Hz | — | not ingested: static factory calibration chosen (line 0 differs by 0.55–1.19 mm, 0.05–0.11°, principal point 0.8–1.2 px on the SLAM cameras; camera-rgb equal); time-varying calibration is a later layer |
 | `mps/hand_tracking/hand_tracking_results.csv` landmarks + confidence | 30 Hz | hand_pose | `/world/gt/coco133_xyz`, `/world/gt/hands/<side>/confidence` |
 | `mps/hand_tracking/hand_tracking_results.csv` wrist pose, palm/wrist normals | 30 Hz | hand_pose | `/world/gt/hands/<side>/wrist`, `/world/gt/hands/<side>/{palm_normal,wrist_normal}` |
 | `mps/hand_tracking/summary.json` | static | — | not ingested: aggregate statistics of the CSV |
@@ -152,7 +152,7 @@ this port (audit `/tmp/fleet-artifacts/exoego-audit/synthesis.md` §3):
 | SLAM cameras and rig pose on their own clocks | simplecv samples every camera pose at RGB stamps (`aria_gen2_pilot_ego.py:103-123`) | (1), (3) RGB-as-canonical clock |
 | No clamp at the clip head: before MPS starts, pose and hands are missing | simplecv clamps both searches (`aria_gen2_pilot.py:200-205`, `hot3d_utils.py:451-452`): 8–9 RGB frames get the first sample held backwards up to 866 ms | (2) head clamp |
 | Singular / non-finite pose → missing, never held | simplecv reuses the previous pose, starting from identity (`aria_gen2_pilot_ego.py:150-175`); no such row exists in the shipped data, so a unit test writes one into a CSV | (2) held pose |
-| Hand-row pose interpolated at the hand's own time | simplecv takes the nearest-previous trajectory row (`hot3d_utils.py:451`) | raw parity 0.64–0.80 mm, see below |
+| Hand-row pose interpolated at the hand's own time | simplecv takes the nearest trajectory row (`hot3d_utils.py:441-461`) | raw parity 0.64–0.80 mm, see below |
 | Present hands with confidence 0.0 kept (positions, confidence 0.0) | simplecv drops `conf <= 0` (`aria_gen2_pilot.py:175-178`) | binding brief: present joint = shipped confidence |
 | Full FISHEYE624 (thin prism) from the VRS factory calibration, rescaled to the stream | simplecv uses the first online-calibration line and drops s0–s3 (`preprocess_aria_gen2_pilot.py:204`, `aria_gen2_pilot_ego.py:143-147`) | fisheye exception |
 | Projections through the full lens at `coco133_uv_projected`; no `coco133_uv` | simplecv writes reprojected 2D at `coco133_uv` | binding brief: `coco133_uv` is shipped-only |
@@ -160,40 +160,91 @@ this port (audit `/tmp/fleet-artifacts/exoego-audit/synthesis.md` §3):
 | IMU ingested | simplecv extracts only the 5 image streams (`preprocess_aria_gen2_pilot.py:51`) | (4) |
 | RGB colour kept at CQ 36 | simplecv's docstring calls RGB "monochrome Rext" (`preprocess_aria_gen2_pilot.py:3-6`); RGB is 4:2:0 Main Still Picture | transcode rule |
 
-**Parity** (`tests/test_aria_gen2_pilot_real.py::test_simplecv_parity_after_documented_pose_correction`,
-golden). For each of simplecv's rows at RGB stamps, the test takes the hand row
-simplecv picked and skips simplecv's clamped head rows and its `conf <= 0` hands.
-cook_0: 3,341 rows, 3,280 compared, raw max difference 0.803 mm. clean_0: 3,302
-rows, 3,022 compared, raw max 0.640 mm. The whole raw difference is simplecv's
-nearest-previous pose: after applying the SE(3) correction
-`ours_pose @ inv(simplecv_pose)` to simplecv's points, the max error is 3.1e-7 m
-(cook_0) and 4.3e-7 m (clean_0), inside the 1e-4 m gate. The missing mask is
-identical row by row. Projections vs projectaria-tools' own `project` on every
-third hand row, all joints, all 5 cameras: ≤ 1e-6 px (golden).
+## Parity
 
-Pixel evidence (headless viewer 0.38.1, all three layers streamed into one recording,
-default blueprint; the hand projections sit on the hands):
+Checked 2026-09-25 on cook_0 and clean_0, rrd against rrd: simplecv's own
+recordings (`exoego-forge-catalog-rig/aria-gen2/`, and a fresh simplecv run on
+local copies, which gives identical numbers) against this converter's prod-env
+output at 6f45e78e. Full report with every difference mapped to an audit defect:
+`/tmp/fleet-artifacts/exoego-migration/runs/aria_gen2_pilot-parity.md`.
 
-- cook_0, t = 2085.5 s, default layout: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-cook_0-mid-default.png
-- cook_0 camera-rgb, full size: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-cook_0-mid-camera-rgb.png
-- cook_0 slam-front-right, full size: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-cook_0-mid-slam-front-right.png
-- clean_0, t = 1364.9 s, default layout: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-clean_0-mid-default.png
-- clean_0 slam-front-right, full size: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-clean_0-mid-slam-front-right.png
+- **`coco133_xyz`.** simplecv's keypoint rows sit on the real RGB stamps (within
+  1 ns once its rebase is undone). Each is compared with the hand row simplecv
+  picked (nearest to the RGB stamp). cook_0: 3,280 rows compared, raw max
+  0.803 mm; clean_0: 3,022 rows, raw max 0.640 mm. The whole raw difference is
+  simplecv's nearest-row pose: after the SE(3) correction
+  `ours_pose @ inv(simplecv_pose)` the max error is 3.1e-7 m (cook_0) and
+  3.8e-7 m (clean_0), inside the 1e-4 m gate. Present confidences are equal.
+  No joint is finite in simplecv only. The joints finite in dataforge only
+  (242 and 572) all belong to hands with shipped confidence 0.0, which simplecv
+  drops. The same check runs as the golden test
+  `tests/test_aria_gen2_pilot_real.py::test_simplecv_parity_after_documented_pose_correction`.
+- **Camera poses.** simplecv's rig rows sit on a 10 Hz CFR grid that drifts up
+  to 20.0 ms (cook_0) / 23.3 ms (clean_0) from the real RGB stamps, so they are
+  matched by RGB frame index. In world coordinates `camera-rgb` agrees to
+  3.9e-7 m and 7e-6°. The SLAM cameras differ by a constant 0.55–1.19 mm and
+  0.05–0.11°; this equals the difference between simplecv's calibration (MPS
+  online calibration line 0) and the VRS factory calibration used here, camera by
+  camera. The 9 RGB frames before MPS starts have a held pose in simplecv and a
+  NaN pose here.
+- **Projections** vs projectaria-tools' own `project` on every third hand row,
+  all joints, all 5 cameras: ≤ 1e-6 px (golden).
+
+Pixel evidence (headless viewer 0.38.1, the three layer files of one sample
+recording streamed into one recording, prod-env output at 6f45e78e). The hand
+projections sit on the hands in the RGB and SLAM panes:
+
+- play_0, t = 5197.662 s, default layout: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-play_0-sample-default.png
+- play_0 camera-rgb pane: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-play_0-sample-camera-rgb.png
+- play_0 slam-front-left pane: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-play_0-sample-slam-front-left.png
+- eat_2, t = 2815.018 s, default layout: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-eat_2-sample-default.png
+- eat_2 camera-rgb pane: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-eat_2-sample-camera-rgb.png
+- eat_2 slam-front-left pane: https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-eat_2-sample-slam-front-left.png
+- clean_0 before MPS starts (1200.2 s) and after the last pose (1530.12 s), rig hidden:
+  https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-clean_0-fix2-before-tracking.png,
+  https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/aria_gen2_pilot-clean_0-fix2-after-tracking.png
 
 ## Timing
 
-Iteration conversions, 2026-09-25 on pablo-dl-server, **dev env** (beartype on),
-converter `1+8a04cfb42688` plus this branch's uncommitted changes, all three layers,
-`--force`, read from local disk (cook_0 over NFS), under the shared GPU lock.
-From `<output_root>/timing/convert.jsonl`:
+Baseline, 2026-09-25 on pablo-dl-server. Both sides ran in their prod envs on
+local copies of the same raw files, one at a time under the shared GPU lock.
+simplecv = `preprocess_aria_gen2_pilot.py` (VRS → AV1 mp4) + `batch_raw_to_rrd.py
+aria-gen2`, wall time including two pixi start-ups. dataforge = the convert
+record's `total_s` for all three layers (`convert.jsonl`, converter
+`1+6f45e78e8e91`, `--force`).
 
-| sequence | capture | fetch | transcode | write:base | write:hand_pose | write:projections | total | s per capture-minute | bytes base / hand_pose / projections |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| cook_0 | 334.2 s | 14.3 s | 22.6 s | 51.3 s | 0.5 s | 5.4 s | 71.5 s | 12.8 | 273.3 MB / 8.6 MB / 13.6 MB |
-| clean_0 | 330.3 s | 16.2 s | 28.8 s | 34.2 s | 0.1 s | 4.7 s | 55.2 s | 10.0 | 307.5 MB / 7.9 MB / 11.8 MB |
+| recording | capture s | simplecv preprocess + convert s | simplecv s/capture-min | dataforge s | dataforge s/capture-min | dataforge transcode s | dataforge write:projections s | output (simplecv / dataforge) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| aria_gen2_pilot__cook_0 | 334.2 | 24.1 + 4.6 = 28.7 | 5.16 | 34.1 | 6.12 | 22.5 | 5.4 | 164 / 303 MB |
+| aria_gen2_pilot__clean_0 | 330.3 | 30.5 + 4.5 = 35.0 | 6.35 | 40.0 | 7.26 | 30.0 | 4.7 | 162 / 334 MB |
 
-The first run (same code apart from the 3D eye) took 47.1 s (cook_0) and 50.7 s
-(clean_0); the difference is host load. Transcode overlaps write:base (the stage
-timers nest), so the stages sum to more than the total. The simplecv baseline
-(preprocess + conversion, prod env, same sequences) and the prod-env timing are
-still to be measured for the benchmark report.
+**Soft gate: missed by 14–19 %.** The video work is equal: dataforge's
+transcode (five streams, CQ 36) takes 22.5 s and 30.0 s, simplecv's preprocess
+23.4 s and 29.7 s by its own log (SLAM at CQ 40). The gap (5.4 s and 5.0 s) is
+the derived `projections` layer: 30 Hz × 5 cameras × 133 joints through
+projectaria-tools' per-point `CameraCalibration.project` (5.4 s and 4.7 s).
+simplecv reprojects at 10 Hz with its own Kannala-Brandt code and without
+thin-prism terms. Without that layer dataforge is on par (28.7 s vs 28.7 s,
+35.3 s vs 35.0 s). dataforge's other base work (every 1 kHz trajectory row, two
+~800 Hz IMUs, hands at 30 Hz) takes 3.9 s inside `write:base`, about what
+simplecv's whole convert step takes. The lever is a vectorised FISHEYE624
+projection (checked against `project` to 1e-6 px); not done in this stage.
+
+Earlier dev-env runs (beartype on) took 50–72 s for the same sequences.
+The stage timers nest (transcode runs inside `write:base`), so the stages sum
+to more than the total. Registration time is added by the orchestrator.
+
+Sample conversions (prod env, same converter, GPU lock):
+
+| recording | capture s | transcode s | write:base s | write:projections s | total s | s/capture-min | bytes base / hand_pose / projections |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| aria_gen2_pilot__eat_1 | 324.3 | 23.2 | 26.6 | 4.5 | 34.8 | 6.43 | 277.1 / 8.3 / 10.7 MB |
+| aria_gen2_pilot__eat_2 | 344.3 | 25.4 | 29.3 | 5.6 | 38.2 | 6.65 | 292.0 / 9.6 / 14.1 MB |
+| aria_gen2_pilot__eat_3 | 336.6 | 23.9 | 27.3 | 4.4 | 35.5 | 6.32 | 299.0 / 8.2 / 10.5 MB |
+| aria_gen2_pilot__play_0 | 341.3 | 26.9 | 30.8 | 2.3 | 36.7 | 6.45 | 307.0 / 4.8 / 5.7 MB |
+| aria_gen2_pilot__play_1 | 340.0 | 28.2 | 31.5 | 3.6 | 39.1 | 6.90 | 311.6 / 6.9 / 8.5 MB |
+| aria_gen2_pilot__play_3 | 342.4 | 27.9 | 31.5 | 2.9 | 38.2 | 6.70 | 321.1 / 5.9 / 6.5 MB |
+| aria_gen2_pilot__walk_0 | 299.5 | 23.0 | 26.1 | 2.2 | 33.4 | 6.69 | 308.7 / 4.7 / 5.1 MB |
+| aria_gen2_pilot__walk_1 | 300.7 | 23.5 | 26.6 | 3.1 | 34.6 | 6.90 | 334.8 / 6.1 / 6.7 MB |
+
+Every layer file reads back (one recording per file, chunks and rows > 0).
