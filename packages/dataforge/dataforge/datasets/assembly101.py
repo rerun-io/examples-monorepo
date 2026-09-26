@@ -153,7 +153,7 @@ class Assembly101Dataset(DataforgeDataset[Assembly101Config, str]):
                 rrb.Spatial3DView(
                     name="Scene",
                     origin="/world",
-                    contents=[*world_contents(), *[f"- {schema.pinhole_path(rig, cam)}/**" for rig, cam in camera_slots()]],
+                    contents=[*world_contents(), *[f"- {schema.video_path(rig, cam)}" for rig, cam in camera_slots()]],
                     eye_controls=table_eye(),
                 ),
                 blueprints.camera_view("C10095", 0, 0, contents=pane_contents(0, 0)),
@@ -190,4 +190,8 @@ def pane_contents(rig: int, cam: int) -> list[str]:
 
 
 def table_eye() -> rrb.EyeControls3D:
-    return blueprints.eye_controls_from_pose((1.5, 1.3, 1.5), (0.0, 0.1, 0.0), (0.0, 1.0, 0.0))
+    """Tightest oblique eye with the exo cameras and the table in a 2:1 card (+Y up).
+
+    Solved from the shipped extrinsics, which put the fixed cameras within ~0.1 m of the same place every day.
+    """
+    return blueprints.eye_controls_from_pose((1.17, 1.57, -0.62), (0.29, 0.6, 0.13), (0.0, 1.0, 0.0))
