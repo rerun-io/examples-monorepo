@@ -189,7 +189,19 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
-        return rrb.Blueprint(blueprints.camera_view("RGB", 0, 0, contents=[schema.video_path(0, 0)]), collapse_panels=True)
+        """Card: the 3D scene (auto-fit, videos excluded so a card decodes one stream) beside the RGB camera."""
+        return rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name="Scene",
+                    origin="/world",
+                    contents=["+ /world/**", *(f"- {schema.video_path(0, index)}" for index in range(len(CAMERAS)))],
+                    eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, eye_up=(0.0, 0.0, 1.0), spin_speed=0.0),
+                ),
+                blueprints.camera_view("RGB", 0, 0, contents=[schema.video_path(0, 0), schema.coco133_uv_projected_path(0, 0)]),
+            ),
+            collapse_panels=True,
+        )
 
     def table_fields(self) -> writing.TableFields:
         fields: tuple[writing.TableField, ...] = (
