@@ -23,7 +23,6 @@ import rerun as rr
 import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
@@ -430,12 +429,22 @@ def log_dense_pose_track(
     frame_indices: Int64[ndarray, "n"],
     transforms: Float32[ndarray, "n 4 4"] | Float64[ndarray, "n 4 4"],
 ) -> None:
-    """One row per stamp; missing poses get NaN quaternions so latest-at does not hold them."""
+    """Write dense poses with NaN translation and mat3x3 on missing rows.
+
+    Rerun 0.38.1 treats a NaN quaternion as an invalid transform and falls back
+    to identity (draws at the parent origin); a NaN mat3x3 hides the subtree.
+    """
+    if len(frame_indices) != len(times_ns):
+        raise ValueError("pose frame_indices and times_ns must have the same length")
     valid: Bool[ndarray, "n"] = np.isfinite(transforms).all(axis=(1, 2))
-    quaternions: Float64[ndarray, "n 4"] = np.full((len(transforms), 4), np.nan)
-    if np.any(valid):
-        quaternions[valid] = Rotation.from_matrix(transforms[valid, :3, :3]).as_quat()
-    log_pose_track(recording, path, times_ns=times_ns, frame_indices=frame_indices, translations_xyz=transforms[:, :3, 3], quaternions_xyzw=quaternions)
+    translations: Float64[ndarray, "n 3"] = np.where(valid[:, None], transforms[:, :3, 3], np.nan).astype(np.float64)
+    rotations: Float64[ndarray, "n 3 3"] = np.where(valid[:, None, None], transforms[:, :3, :3], np.nan).astype(np.float64)
+    rr.send_columns(
+        path,
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+        columns=rr.Transform3D.columns(translation=translations, mat3x3=rotations),
+        recording=recording,
+    )
 
 
 def log_pose_track(
@@ -453,9 +462,10 @@ def log_pose_track(
     entity, go through here so the quaternion layout stays one decision: Rerun
     wants the scalar **last**, whatever order the source file wrote.
 
-    To hide an entity on a missing row, pass dense rows with NaN translation
-    and quaternion. Rerun treats a quaternion that fails normalisation as an
-    invalid transform, so latest-at does not carry the previous pose.
+    To hide an entity on a missing row, use ``log_dense_pose_track`` with NaN
+    translation and mat3x3. Rerun 0.38.1 treats a NaN quaternion as an invalid
+    transform and falls back to identity (draws at the parent origin); a NaN
+    mat3x3 hides the subtree.
 
     Args:
         recording: Destination recording stream.

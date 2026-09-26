@@ -12,6 +12,7 @@ same loopback server; and three modules read the published LaMAria calibration.
 from __future__ import annotations
 
 import json
+import struct
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -44,6 +45,33 @@ NOISE_CEILING: int = 96
 
 FIXTURES: Path = Path(__file__).parent / "fixtures"
 """Checked-in binaries and real upstream files; ``fixtures/README.md`` says where each came from."""
+
+
+def vrs_tags(values: dict[str, str]) -> bytes:
+    """A VRS tag map: count, then length-prefixed key/value strings."""
+    return struct.pack("<I", len(values)) + b"".join(struct.pack("<I", len(text.encode())) + text.encode() for pair in values.items() for text in pair)
+
+
+def vrs_record(payload: bytes, *, type_id: int, record_type: int = 3, compression: int = 0, timestamp: float = 0.0) -> bytes:
+    """One VRS record (instance 1, format version 2); ``compression=2`` really zstd-compresses the payload."""
+    size: int = len(payload)
+    if compression == 2:
+        payload = pa.compress(payload, codec="zstd", asbytes=True)
+    return struct.pack("<IIiIdHBBI", 32 + len(payload), 0, type_id, 2, timestamp, 1, record_type, compression, size if compression else 0) + payload
+
+
+def vrs_file(streams: dict[int, dict[str, str]], records: list[bytes], *, user_tags: dict[str, str] | None = None) -> bytes:
+    """A ``cordVRS2`` file: header, one description record for ``streams`` (type id → record-format tags), then ``records``."""
+    description: bytes = struct.pack("<I", len(streams)) + b"".join(
+        struct.pack("<iH", type_id, 1) + vrs_tags(user_tags or {}) + vrs_tags(tags) for type_id, tags in streams.items()
+    )
+    description_record: bytes = vrs_record(description + vrs_tags({}), type_id=2)
+    header = bytearray(80)
+    header[:8] = b"VisionRe"
+    header[72:80] = b"cordVRS2"
+    struct.pack_into("<II", header, 16, 80, 32)
+    struct.pack_into("<qq", header, 32, 80, 80 + len(description_record))
+    return bytes(header) + description_record + b"".join(records)
 
 
 def calibration_fixture(device: str) -> Path:

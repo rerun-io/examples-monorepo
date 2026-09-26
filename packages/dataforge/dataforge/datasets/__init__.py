@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tyro
 
+from dataforge.datasets.aria_gen2_pilot import AriaGen2PilotConfig
 from dataforge.datasets.base import DataforgeDatasetConfig
 from dataforge.datasets.hocap import HocapConfig
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
@@ -15,7 +16,7 @@ from dataforge.datasets.show3d import Show3dConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), WildcapConfig())
+    config.command: config for config in (AriaGen2PilotConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
