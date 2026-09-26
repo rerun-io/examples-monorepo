@@ -228,8 +228,15 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                     "HoloLens (shipped pose drift)", EGO_RIG, 0, contents=["+ /world/gt/**", f"+ {schema.pinhole_path(EGO_RIG, 0)}/**"]
                 )
             ],
+            # Exo panes also draw the meshes, through Rerun's pinhole despite the lens model: off by 1-4 px
+            # mid-image, up to ~30 px at the edges (decision, 2026-09-25). The skeleton stays lens-projected.
             exo_panes=[
-                blueprints.camera_view(name, rig, 0, contents=[f"+ {schema.video_path(rig, 0)}", f"+ {schema.coco133_uv_projected_path(rig, 0)}"])
+                blueprints.camera_view(
+                    name,
+                    rig,
+                    0,
+                    contents=[f"+ {schema.video_path(rig, 0)}", f"+ {schema.coco133_uv_projected_path(rig, 0)}", *(f"+ {spec.mesh_path}" for spec in FITS)],
+                )
                 for rig, name in enumerate(EXO_CAMERAS)
             ],
         )
