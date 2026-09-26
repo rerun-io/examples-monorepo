@@ -2,6 +2,7 @@
 
 import json
 import struct
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -10,7 +11,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import schema
-from dataforge.logging_toolkit import frame_index_column, log_pose_track, time_column
+from dataforge.logging_toolkit import frame_index_column, log_dense_pose_track, log_pose_track, time_column
 
 
 def log_object_pose(
@@ -21,13 +22,17 @@ def log_object_pose(
     frame_indices: Int64[ndarray, "t"],
     transforms: Float64[ndarray, "t 4 4"],
     confidence: Float32[ndarray, "t"] | Float64[ndarray, "t"],
+    missing: Literal["skip", "invalidate"] = "skip",
 ) -> None:
     """Write finite Float64[t,4,4] poses and dense Float32/Float64[t] confidence.
 
     Missing poses have non-finite transforms; confidence never suppresses a pose.
+    The default skips missing poses unchanged; "invalidate" writes dense NaN poses.
     """
     posed: Bool[ndarray, "t"] = np.isfinite(transforms).all(axis=(1, 2))
-    if np.any(posed):
+    if missing == "invalidate":
+        log_dense_pose_track(recording, schema.objects_path(alias), times_ns=times_ns, frame_indices=frame_indices, transforms=transforms)
+    elif np.any(posed):
         log_pose_track(
             recording,
             schema.objects_path(alias),

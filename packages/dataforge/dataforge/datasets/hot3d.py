@@ -1,4 +1,4 @@
-"""Two HOT3D catalog datasets sharing one raw reader and three layer writers."""
+"""Two HOT3D catalog datasets sharing one raw reader and six layer writers."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,7 +56,10 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
     layers: tuple[str, ...] = (
         paths.BASE_LAYER,
         paths.HAND_POSE_LAYER,
+        paths.HAND_MESH_LAYER,
         paths.PROJECTIONS_LAYER,
+        paths.OBJECT_POSE_LAYER,
+        paths.OBJECT_MESH_LAYER,
     )
 
     def __init__(self, config: Hot3dConfig) -> None:
@@ -103,7 +106,7 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
             with self.timer.stage("fetch"):
                 scene = read_scene(source, self.device, self.config.frame_limit)
             self.timer.capture_s = (int(scene.cameras[0].times_ns[-1]) - int(scene.cameras[0].times_ns[0])) / 1e9
-            writer: LayerWriter = LayerWriter(scene, identity, self.timer)
+            writer: LayerWriter = LayerWriter(scene, identity, self.timer, self.config.root / "assets")
             for layer in pending:
                 with (
                     self.timer.stage(f"write:{layer}"),
@@ -122,10 +125,10 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
         cameras: list[str] = [name for _, name in spec.camera_streams]
         return blueprints.exoego_blueprint(
             rrb.Spatial3DView(
-                name="HOT3D world",
-                origin="/world",
+                name="HOT3D (follows the headset)",
+                origin=schema.rig_path(0),
                 contents=["/world/**"],
-                eye_controls=blueprints.eye_controls_from_pose((1.5, -1.5, 1.5), spec.eye_target, spec.up),
+                eye_controls=blueprints.headset_eye_controls(spec.rig_forward, spec.rig_up),
             ),
             ego_panes=[
                 blueprints.camera_view(
@@ -140,7 +143,20 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
-        return rrb.Blueprint(blueprints.camera_view("Ego", 0, 0, contents=[schema.pinhole_path(0, 0) + "/**"]), collapse_panels=True)
+        """Card: the 3D scene following the headset (videos excluded so a card decodes one stream) beside camera 0."""
+        spec: DeviceSpec = DEVICES[self.device]
+        return rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name="Scene",
+                    origin=schema.rig_path(0),
+                    contents=["+ /world/**", *(f"- {schema.video_path(0, index)}" for index in range(len(spec.camera_streams)))],
+                    eye_controls=blueprints.headset_eye_controls(spec.rig_forward, spec.rig_up),
+                ),
+                blueprints.camera_view(spec.camera_streams[0][1], 0, 0, contents=[schema.video_path(0, 0), schema.coco133_uv_projected_path(0, 0)]),
+            ),
+            collapse_panels=True,
+        )
 
     def table_fields(self) -> writing.TableFields:
         fields: tuple[writing.TableField, ...] = (

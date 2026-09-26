@@ -130,6 +130,8 @@ def follow_eye_controls(
     back_m: float = FOLLOW_BACK_M,
     up_m: float = FOLLOW_UP_M,
     ahead_m: float = FOLLOW_AHEAD_M,
+    aim_down_m: float = 0.0,
+    side_m: float = 0.0,
 ) -> rrb.EyeControls3D:
     """A chase camera derived from the device's own forward and up.
 
@@ -145,17 +147,41 @@ def follow_eye_controls(
         back_m: Distance behind the device, along ``forward``.
         up_m: Distance above it, along ``up``.
         ahead_m: Distance in front of it that the eye aims at.
+        aim_down_m: How far below the device the aim point sits (hands, for a headset).
+        side_m: Offset to the device's right, for a three-quarter view.
 
     Returns:
         The eye the Follow view of both blueprints uses.
     """
-    position: tuple[float, float, float] = (
-        -back_m * forward[0] + up_m * up[0],
-        -back_m * forward[1] + up_m * up[1],
-        -back_m * forward[2] + up_m * up[2],
+    right: tuple[float, float, float] = (
+        forward[1] * up[2] - forward[2] * up[1],
+        forward[2] * up[0] - forward[0] * up[2],
+        forward[0] * up[1] - forward[1] * up[0],
     )
-    look_target: tuple[float, float, float] = (ahead_m * forward[0], ahead_m * forward[1], ahead_m * forward[2])
+    position: tuple[float, float, float] = (
+        -back_m * forward[0] + up_m * up[0] + side_m * right[0],
+        -back_m * forward[1] + up_m * up[1] + side_m * right[1],
+        -back_m * forward[2] + up_m * up[2] + side_m * right[2],
+    )
+    look_target: tuple[float, float, float] = (
+        ahead_m * forward[0] - aim_down_m * up[0],
+        ahead_m * forward[1] - aim_down_m * up[1],
+        ahead_m * forward[2] - aim_down_m * up[2],
+    )
     return eye_controls_from_pose(position, look_target, up)
+
+
+def headset_eye_controls(forward: tuple[float, float, float], up: tuple[float, float, float]) -> rrb.EyeControls3D:
+    """Three-quarter over-the-shoulder eye for a 3D view whose origin is a moving headset rig.
+
+    It rides the headset and aims below it at the hands, so a card or a scene view keeps the
+    headset cameras and the hands in shot however far the wearer walks.
+
+    Args:
+        forward: Where the headset looks, in the rig frame (a camera's optical axis); unit length.
+        up: The headset's up, in the rig frame (minus that camera's image y axis); unit length.
+    """
+    return follow_eye_controls(forward, up, back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15)
 
 
 def rig_blueprint(

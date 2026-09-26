@@ -34,10 +34,10 @@ class DeviceSpec:
     """VRS stream IDs and display names in camera order."""
     view_coordinates: rr.components.ViewCoordinates
     """Source world axes."""
-    up: tuple[float, float, float]
-    """Viewer up vector."""
-    eye_target: tuple[float, float, float]
-    """Viewer orbit target."""
+    rig_forward: tuple[float, float, float]
+    """Headset forward in the rig frame: camera 0's optical axis (measured from its shipped pose)."""
+    rig_up: tuple[float, float, float]
+    """Headset up in the rig frame: minus camera 0's image y axis (the RGB image is shown rotated)."""
     clock_source: str
     """Capture property describing native clock provenance."""
     has_imu: bool
@@ -51,8 +51,8 @@ DEVICES: dict[Device, DeviceSpec] = {
         "Aria",
         (("214-1", "RGB"), ("1201-1", "SLAM left"), ("1201-2", "SLAM right")),
         rr.ViewCoordinates.RIGHT_HAND_Z_UP,
-        (0.0, 0.0, 1.0),
-        (0.0, 0.0, 0.8),
+        (0.1, -0.62, 0.78),
+        (-0.99, -0.09, 0.06),
         "Aria VRS DEVICE_TIME unshifted; labels joined by timecode to shipped devicetime_ns (usually capture minus 1 ns)",
         True,
         True,
@@ -61,8 +61,8 @@ DEVICES: dict[Device, DeviceSpec] = {
         "Quest",
         (("1201-1", "Left"), ("1201-2", "Right")),
         rr.ViewCoordinates.RIGHT_HAND_Y_UP,
-        (0.0, 1.0, 0.0),
-        (0.0, 0.8, 0.0),
+        (0.96, -0.28, 0.08),
+        (0.28, 0.96, 0.0),
         "Quest 3 VRS capture timestamps, 30 Hz grid as shipped; unshifted",
         False,
         False,
@@ -446,3 +446,13 @@ def read_labels(source: Hot3dSource, device: Device, primary: Int64[ndarray, "n"
         read_poses(source.path / "dynamic_objects.csv", clock),
     )
 
+
+@serde
+@dataclass(frozen=True, slots=True)
+class AssetInfo:
+    """Native HOT3D instance identity; geometry is assets/<instance_id>.glb."""
+
+    instance_id: str
+    """ID used by dynamic_objects.csv."""
+    instance_name: str
+    """Human source name."""

@@ -132,7 +132,7 @@ def test_fk_missing_hand_is_nan_and_right_hand_is_mirrored() -> None:
     import numpy as np
     from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy
 
-    from dataforge.datasets.hot3d_hands import evaluate_hands
+    from dataforge.datasets.hot3d_hands import evaluate_hands, mesh_vertices
     from dataforge.datasets.hot3d_source import UmeFrame, UmePose, Wrist
 
     # A rigid synthetic model: every landmark/vertex belongs to the root frame.
@@ -165,6 +165,9 @@ def test_fk_missing_hand_is_nan_and_right_hand_is_mirrored() -> None:
     assert np.isnan(result.positions[1]).all()
     assert (result.scores[:, 1] == 0.0).all()
     assert np.isnan(result.angles[:, 1]).all()
+    for side, expected in [(0, [1.01, 2.02, 3.03]), (1, [0.99, 2.02, 3.03])]:
+        vertices = mesh_vertices(model, result.angles[side, :1], result.wrists[side, :1], side)
+        np.testing.assert_allclose(vertices[0, 0], expected, atol=1e-6)
 
 
 @pytest.mark.parametrize("reader_name", ["read_hands", "read_mano", "read_masks", "read_poses"])

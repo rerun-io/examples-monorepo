@@ -127,7 +127,7 @@ def test_hand_parameters_keep_arrow_types_and_both_clocks(tmp_path: Path) -> Non
         assert batch.column("frame_index").to_pylist() == [7]
 
 
-@pytest.mark.parametrize("writer", ["dense_float32", "dense_float64"])
+@pytest.mark.parametrize("writer", ["dense_float32", "dense_float64", "object_invalidate"])
 def test_dense_pose_invalidates_missing_row(tmp_path: Path, writer: str) -> None:
     from dataforge.logging_toolkit import log_dense_pose_track
 
@@ -138,7 +138,13 @@ def test_dense_pose_invalidates_missing_row(tmp_path: Path, writer: str) -> None
     frames = np.arange(3, dtype=np.int64)
     target = tmp_path / "dense.rrd"
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
-        log_dense_pose_track(recording, "/pose", times_ns=times, frame_indices=frames, transforms=transforms)
+        if writer == "object_invalidate":
+            objects.log_object_pose(
+                recording, "toy", times_ns=times, frame_indices=frames, transforms=transforms,
+                confidence=np.array([1.0, 0.0, 1.0], dtype=np.float32), missing="invalidate",
+            )
+        else:
+            log_dense_pose_track(recording, "/pose", times_ns=times, frame_indices=frames, transforms=transforms)
     batches = [chunk.to_record_batch() for chunk in read_chunks(target)]
     poses = next(batch for batch in batches if "Transform3D:translation" in batch.schema.names)
     assert poses.column("frame_index").to_pylist() == [0, 1, 2]
