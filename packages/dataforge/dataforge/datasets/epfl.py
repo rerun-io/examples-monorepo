@@ -242,8 +242,27 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
+        """Card: the kitchen in 3D (videos excluded so a card decodes one stream) beside exo camera output0."""
+        target = (CORPUS_SCENE_CENTRE[0], CORPUS_SCENE_CENTRE[1], BODY_MID_Z)
         return rrb.Blueprint(
-            blueprints.camera_view("output0", 0, 0, contents=[f"+ {schema.video_path(0, 0)}", f"+ {schema.coco133_uv_projected_path(0, 0)}"]),
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name="Kitchen",
+                    origin="/world",
+                    contents=[
+                        "+ /world/**",
+                        *(f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in EXO_RIGS),
+                        *(f"- {schema.video_path(rig, 0)}" for rig in (*EXO_RIGS, EGO_RIG)),
+                    ],
+                    eye_controls=blueprints.eye_controls_from_pose((target[0] - 3.0, target[1] - 3.0, target[2] + 3.5), target, (0.0, 0.0, 1.0)),
+                ),
+                blueprints.camera_view(
+                    "output0",
+                    0,
+                    0,
+                    contents=[f"+ {schema.video_path(0, 0)}", f"+ {schema.coco133_uv_projected_path(0, 0)}", *(f"+ {spec.mesh_path}" for spec in FITS)],
+                ),
+            ),
             collapse_panels=True,
         )
 

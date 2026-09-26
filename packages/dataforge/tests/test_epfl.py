@@ -161,7 +161,7 @@ def test_blueprint_and_discovery_missing_assets(tmp_path: Path, capsys: pytest.C
     config = EpflConfig(root=tmp_path)
     dataset = config.setup()
     assert len(blueprint_views(dataset.default_blueprint())) == 11
-    assert len(blueprint_views(dataset.table_blueprint())) == 1
+    assert len(blueprint_views(dataset.table_blueprint())) == 2  # card: 3D kitchen + exo camera output0
     session = tmp_path / "Public_release_pose/train/person/session"
     session.mkdir(parents=True)
     assert dataset.discover() == []
