@@ -88,7 +88,7 @@ Iteration sessions, prod environments, pablo-dl-server, 2026-09-25, both convert
 
 dataforge stages (s, first / second session): `fetch:poses` 12.6 / 14.3, `write:body_mesh` 12.1 / 14.2, `write:projections` 11.4 / 12.2, `write:hand_mesh` 7.0 / 7.6, `write:base` 2.4 / 2.5 (`write:video` 0.5), `write:hand_pose` 1.3 / 1.5, `write:body_pose` 0.2 / 0.3. Output 8.5 GB per session: body_mesh 5.58, hand_mesh 1.26, base 1.07–1.12, projections 0.38, hand_pose 0.12, body_pose 0.03 GB. simplecv writes one 2.95–2.99 GB rrd per session (videos, keypoints, pinhole 2D, MANO meshes; no body mesh).
 
-Sample conversion (8 sessions, prod env, poses read sequentially from the NAS, 2026-09-25). Only `test/YH2003` has `body_mesh`: at full rate the SMPL mesh costs 82 KB per frame (≈ 46 GB for the eight sessions), beyond the lane's 40 GB of local disk, so the other seven carry the six other layers until Pablo decides the mesh rate or storage.
+Sample conversion (8 sessions, prod env, poses read sequentially from the NAS, 2026-09-25). This run wrote `body_mesh` for `test/YH2003` only, at the old full rate. After the 10 Hz decision, `body_mesh` was re-converted for all eight: 3.6–8.1 s and 1.44–2.86 GB each, about 50 MB per capture-minute (`test/YH2003`: 4.32 → 1.44 GB).
 
 | session | capture | total | s / capture-min | fetch:poses | write:projections | write:hand_mesh | write:body_mesh | output |
 |---|---|---|---|---|---|---|---|---|
