@@ -185,8 +185,11 @@ class HocapDataset(DataforgeDataset[HocapConfig, str]):
 
 
 def table_eye() -> rrb.EyeControls3D:
-    """Orbital eye over the tag-1 table, shared by the default and table layouts."""
-    return blueprints.eye_controls_from_pose((1.3, -1.3, 1.1), (0.0, 0.0, 0.1), (0.0, 0.0, 1.0))
+    """Tightest oblique eye with all eight cameras and the table in a 2:1 card; default and table layouts.
+
+    Solved from the shipped calibration, which puts the cameras at the same tag-1 positions in every session.
+    """
+    return blueprints.eye_controls_from_pose((-0.03, -0.91, 1.07), (-0.03, 0.04, 0.52), (0.0, 0.0, 1.0))
 
 
 def world_contents() -> list[str]:
