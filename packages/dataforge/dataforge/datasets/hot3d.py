@@ -125,10 +125,10 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
         cameras: list[str] = [name for _, name in spec.camera_streams]
         return blueprints.exoego_blueprint(
             rrb.Spatial3DView(
-                name="HOT3D world",
-                origin="/world",
+                name="HOT3D (follows the headset)",
+                origin=schema.rig_path(0),
                 contents=["/world/**"],
-                eye_controls=blueprints.eye_controls_from_pose((1.5, -1.5, 1.5), spec.eye_target, spec.up),
+                eye_controls=blueprints.headset_eye_controls(spec.rig_forward, spec.rig_up),
             ),
             ego_panes=[
                 blueprints.camera_view(
@@ -143,15 +143,15 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
-        """Card: the 3D scene (auto-fit, videos excluded so a card decodes one stream) beside the first camera."""
+        """Card: the 3D scene following the headset (videos excluded so a card decodes one stream) beside camera 0."""
         spec: DeviceSpec = DEVICES[self.device]
         return rrb.Blueprint(
             rrb.Horizontal(
                 rrb.Spatial3DView(
                     name="Scene",
-                    origin="/world",
+                    origin=schema.rig_path(0),
                     contents=["+ /world/**", *(f"- {schema.video_path(0, index)}" for index in range(len(spec.camera_streams)))],
-                    eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, eye_up=spec.up, spin_speed=0.0),
+                    eye_controls=blueprints.headset_eye_controls(spec.rig_forward, spec.rig_up),
                 ),
                 blueprints.camera_view(spec.camera_streams[0][1], 0, 0, contents=[schema.video_path(0, 0), schema.coco133_uv_projected_path(0, 0)]),
             ),
