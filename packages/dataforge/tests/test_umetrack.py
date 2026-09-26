@@ -7,6 +7,7 @@ from pathlib import Path
 import av
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from conftest import column_rows, read_back, recording_properties
 from jaxtyping import Float64
@@ -15,9 +16,9 @@ from scipy.spatial.transform import Rotation
 from simplecv.umetrack_temp.generic_hand_model_numpy import SingleHandPose, landmarks_from_hand_pose, skin_landmarks, wrist_for_hand
 
 from dataforge import paths, schema, writing
-from dataforge.apis.compare_layers import component_rows
+from dataforge.apis.compare_layers import ColumnKey, component_rows
 from dataforge.datasets.umetrack import UmetrackConfig
-from dataforge.datasets.umetrack_layers import hand_keypoints, write_geometry, write_hands, write_projections
+from dataforge.datasets.umetrack_layers import hand_keypoints, write_geometry, write_hands, write_meshes, write_projections
 from dataforge.datasets.umetrack_source import SequenceData, read_sequence
 from dataforge.identity import SequenceIdentity
 
@@ -138,6 +139,8 @@ def test_hand_layers_clear_missing_rows_and_preserve_parameters(tiny_umetrack: P
     scene = read_sequence(tiny_umetrack)
     with writing.atomic_recording(tmp_path / "hand_pose.rrd", recording_id="test", send_properties=False) as recording:
         write_hands(recording, scene, hand_keypoints(scene))
+    with writing.atomic_recording(tmp_path / "hand_mesh.rrd", recording_id="test", send_properties=False) as recording:
+        write_meshes(recording, scene)
     store = read_back(tmp_path / "hand_pose.rrd")
     xyz = column_rows(store, "/world/gt/coco133_xyz:Points3D:positions").column(1).to_pylist()
     assert np.isfinite(xyz[0][91:112]).all()
@@ -153,6 +156,9 @@ def test_hand_layers_clear_missing_rows_and_preserve_parameters(tiny_umetrack: P
     assert confidence == [[1.0], [0.0], [0.0]]
     angles = column_rows(store, "/world/gt/hands/left/joint_angles:joint_angles")
     assert angles.num_rows == 1
+    vertices = column_rows(read_back(tmp_path / "hand_mesh.rrd"), "/world/gt/hands/left/mesh:Mesh3D:vertex_positions").column(1).to_pylist()
+    assert len(vertices[0]) == 3
+    assert vertices[1:] == [[], []]
 
 
 def test_geometry_roundtrip_and_raw_write_guard(tiny_umetrack: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,6 +241,17 @@ def test_real_and_synthetic_all_layers(key: str, tmp_path: Path, monkeypatch: py
     assert xyz.num_rows == 60
     if key.startswith("synthetic"):
         assert np.isnan(np.asarray(xyz.column(1).to_pylist())[:, 91:112]).all()
+    # ChunkStore's table reader omits components whose cells are all empty.
+    mesh: dict[ColumnKey, pa.Table] = component_rows(targets["hand_mesh"])
+    for hand_index, side in enumerate(("left", "right")):
+        vertices: pa.Table = mesh[(f"/world/gt/hands/{side}/mesh", "Mesh3D:vertex_positions", ("frame_index", schema.TIMELINE))]
+        assert vertices.num_rows == 60
+        assert vertices[schema.TIMELINE].cast("int64").to_pylist() == scene.times_ns.tolist()
+        assert vertices["frame_index"].to_pylist() == scene.frame_indices.tolist()
+        assert pc.call_function("list_value_length", [vertices["Mesh3D:vertex_positions"]]).to_pylist() == [
+            len(scene.labels.hand_model.mesh_vertices) if confidence > 0 else 0
+            for confidence in scene.labels.hand_confidences[:, hand_index]
+        ]
 
 
 @pytest.mark.golden
@@ -342,6 +359,7 @@ def test_preview_slices_labels_but_measures_full_record(tiny_umetrack: Path, tmp
     with writing.atomic_recording(target, recording_id=identity.recording_id) as recording:
         write_geometry(recording, scene, identity)
         write_hands(recording, scene, hand_keypoints(scene))
+        write_meshes(recording, scene)
     capture = recording_properties(read_back(target), "capture")
     assert capture["source_num_frames"] == 3
     assert capture["num_frames"] == 1
