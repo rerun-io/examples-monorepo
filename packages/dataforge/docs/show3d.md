@@ -261,7 +261,7 @@ includes only headset0 video.
 | `joint_angles` | Hand `/joint_angles`: 22 float32 values per available row |
 | Wrist rotation and translation | Hand `/wrist`: world-from-wrist Transform3D, translation in metres |
 | Confidence | Hand `/confidence`: Scalars on every frame, including zero |
-| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points, absent hands, and hands at confidence ≤ 0 become NaN with zero confidence |
+| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null camera entries mean all 21 hand points are unavailable, and these, null points, absent hands, and hands at confidence ≤ 0 become NaN with zero confidence |
 | Subject profile JSON | `/world/gt/hands/profile`: verbatim static TextDocument with `application/json` media type |
 | Caption JSON (all ten strings) | `captions`: static Markdown TextDocument at `/task/instruction`; overall caption first, other fields as a definition list |
 
