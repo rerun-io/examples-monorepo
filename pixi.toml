@@ -2453,16 +2453,12 @@ python = "3.12.*"
 # pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
 rust = "1.98.*"
 tyro = ">=0.9.1,<0.10"
-# dataforge's projectaria-tools drags moviepy in, and every moviepy 2.x caps
-# pillow < 12; without this the conda solve pins pillow 12 and the PyPI side is
-# unsatisfiable. Same pin as [feature.dataforge.dependencies].
-pillow = ">=11,<12"
 
 [feature.slam-rs.pypi-dependencies]
 slam-rs = { path = "packages/slam-rs", editable = true }
 
 # Catalog result-layer publishing imports dataforge; dataforge is a linux-only
-# member (projectaria-tools has no macOS 13 wheel), so the osx lane leaves it out.
+# member, so the osx lane leaves it out.
 [feature.slam-rs.target.linux-64.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
 
@@ -2470,9 +2466,9 @@ dataforge = { path = "packages/dataforge", editable = true }
 dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.slam-rs.pypi-options.dependency-overrides]
-# dataforge pulls projectaria-tools, which pins rerun-sdk==0.33.0 for its own
-# notebook tutorials; the workspace lane is rerun-sdk 0.38.1. Same override as
-# [feature.dataforge.pypi-options.dependency-overrides].
+# rerun-prerelease asks for rerun-sdk[dataloader], whose PyPI torchvision does not
+# load against the CPU lane's conda pytorch-cpu ("operator torchvision::nms does not
+# exist"); nothing here uses the dataloader, so the catalog extra alone is kept.
 rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-demo]
@@ -3168,21 +3164,17 @@ pytorch-cpu = ">=2.8.0"
 # 9.x builds link the env's libjxl; the 8.1 build-number pin other features carry
 # does not apply (9.0's build numbers restarted below it and would exclude it).
 ffmpeg = ">=9.0.1"
-# projectaria-tools drags moviepy in for its tutorial notebooks, and every moviepy
-# 2.x caps pillow < 12; the conda solve would otherwise pin pillow 12 and make the
-# PyPI side unsatisfiable. Nothing here uses pillow directly.
-pillow = ">=11,<12"
+# libturbojpeg for PyTurboJPEG (pypi), which dlopens it from the env.
+libjpeg-turbo = ">=3.0.0,<4"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
-# VRS reader for the LaMAria Aria Gen1 sequences; ships linux-aarch64 wheels.
-projectaria-tools = ">=2.2"
-
-[feature.dataforge.pypi-options.dependency-overrides]
-# projectaria-tools pins rerun-sdk==0.33.0 for its own notebook tutorials; dataforge
-# only uses its VRS reader, and the workspace lane is rerun-sdk 0.38.1 (AGENTS.md
-# "Testing Rerun builds"). Same version + extras as [feature.common.pypi-dependencies].
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+# Decodes the JPEG bytes of VRS image records straight to YUV planes (HOT3D);
+# loads the conda libjpeg-turbo's libturbojpeg.
+PyTurboJPEG = ">=2.0.0,<3"
+# SMPL skinning for the EPFL body_mesh layer, through simplecv's SmplxLayerTorch
+# (same pin as [feature.simplecv] and [feature.lamp]).
+smplx = ">=0.1.28"
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"

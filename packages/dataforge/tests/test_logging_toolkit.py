@@ -31,6 +31,7 @@ from dataforge.logging_toolkit import (
     ImuChannel,
     VideoChunkKind,
     classify_video_chunk,
+    log_camera_source,
     log_imu,
     log_magnetometer,
     log_trail_segments,
@@ -270,6 +271,32 @@ def test_empty_magnetometer_logs_only_the_static_node(tmp_path: Path) -> None:
     assert any(f"{schema.mag_path(RIG, MAG)}:Transform3D:" in column for column in columns)
     assert not any(schema.field_path(RIG, MAG) in column for column in columns)
     assert not any(schema.heading_path(RIG, MAG) in column for column in columns)
+
+
+# ── the camera-source contract ────────────────────────────────────────────
+
+
+def test_camera_source_writes_given_keys_and_leaves_absent_ones_off_even_after_another_camera_typed_them(tmp_path: Path) -> None:
+    """An encoded camera states cq/gop; a remuxed one in the same process must not get null cq/gop columns."""
+    target: Path = tmp_path / "source.rrd"
+    with rr.RecordingStream("dataforge", recording_id="source") as recording:
+        recording.save(target)
+        encoded_entry = log_camera_source(
+            recording, 0, 0, name="camera-rgb", source_width=1408, source_height=1408, stream_id="214-1", video_codec="av1", cq=38, gop=30
+        )
+        remuxed_entry = log_camera_source(
+            recording, 1, 0, name="C10095", source_width=1920, source_height=1080, stored_width=456, stored_height=256, video_codec="av1"
+        )
+    # The source_resolution id is the stream id when there is one, the camera name otherwise; the size is the source's.
+    assert (encoded_entry, remuxed_entry) == ("214-1:1408x1408", "C10095:1920x1080")
+    rows: dict[str, list[object]] = read_back(target).reader(index=None).to_arrow_table().to_pylist()[0]
+    encoded, remuxed = schema.cam_path(0, 0), schema.cam_path(1, 0)
+    assert {key.removeprefix(f"{encoded}:"): value[0] for key, value in rows.items() if key.startswith(f"{encoded}:")} == dict(
+        source_width=1408, source_height=1408, stream_id="214-1", video_codec="av1", cq=38, gop=30
+    )
+    assert {key.removeprefix(f"{remuxed}:"): value[0] for key, value in rows.items() if key.startswith(f"{remuxed}:")} == dict(
+        source_width=1920, source_height=1080, stored_width=456, stored_height=256, video_codec="av1"
+    )
 
 
 # ── the motion trail ──────────────────────────────────────────────────────

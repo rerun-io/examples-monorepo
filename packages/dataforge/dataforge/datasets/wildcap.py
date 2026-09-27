@@ -241,13 +241,13 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
         ) as recording:
             num_frames: int = 0
             for rig, video_path in enumerate(exo):
-                log_rig_node(recording, rig, reference="cam_00", num_cameras=1, name=video_path.stem, kind="exo")
+                log_rig_node(recording, rig, reference=schema.CAM0_REFERENCE, num_cameras=1, name=video_path.stem, kind="exo")
                 rr.log(schema.cam_path(rig, 0), rr.AnyValues(name=video_path.stem), static=True, recording=recording)
                 # Raw PTS is the only clock the raw tree has (see the module docstring), so no shift.
                 num_frames = max(num_frames, log_video_stream(recording, video_path, schema.video_path(rig, 0)))
             if ego:
                 ego_rig: int = len(exo)
-                log_rig_node(recording, ego_rig, reference="cam_00", num_cameras=len(ego), name=EGO_RIG_NAME, kind="ego")
+                log_rig_node(recording, ego_rig, reference=schema.CAM0_REFERENCE, num_cameras=len(ego), name=EGO_RIG_NAME, kind="ego")
                 for cam, video_path in enumerate(ego):
                     rr.log(schema.cam_path(ego_rig, cam), rr.AnyValues(name=video_path.stem), static=True, recording=recording)
                     num_frames = max(num_frames, log_video_stream(recording, video_path, schema.video_path(ego_rig, cam)))

@@ -33,6 +33,13 @@ directory and the other an entity path component.
 """
 
 
+CAM0_REFERENCE: str = "cam_00"
+"""Rig-node ``reference`` of a rig whose frame is its first camera's frame (``log_rig_node``).
+
+An inertially-referenced rig names its ``imu_MM`` instead; a static rig with no sensor at its origin omits it.
+"""
+
+
 def _index(value: int, kind: str) -> str:
     if value < 0:
         raise ValueError(f"{kind} index must be non-negative, got {value}")
@@ -144,9 +151,19 @@ def coco133_uv_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/coco133_uv"
 
 
+def coco133_uv_projected_path(rig: int, cam: int) -> str:
+    """Derived COCO-133 keypoints projected through the full camera lens model."""
+    return f"{pinhole_path(rig, cam)}/coco133_uv_projected"
+
+
 def instruction_path() -> str:
     """§12: static task instruction document."""
     return "/task/instruction"
+
+
+def actions_path(level: str) -> str:
+    """§12: action labels active at each boundary, one text track per annotation granularity."""
+    return f"/task/actions/{level}"
 
 
 def objects_path(alias: str) -> str:
@@ -174,6 +191,11 @@ def hand_confidence_path(side: str) -> str:
     return f"{hands_path(side)}/confidence"
 
 
+def hand_mano_path(side: str) -> str:
+    """Shipped MANO parameters, logged as data."""
+    return f"{hands_path(side)}/mano"
+
+
 def hand_joint_angles_path(side: str) -> str:
     """UmeTrack joint angles."""
     return f"{hands_path(side)}/joint_angles"
@@ -182,3 +204,18 @@ def hand_joint_angles_path(side: str) -> str:
 def hand_wrist_path(side: str) -> str:
     """World-from-wrist pose."""
     return f"{hands_path(side)}/wrist"
+
+
+def body_path(model: str) -> str:
+    """A fitted body model (``smpl``) or its skinned ``mesh`` in the world frame."""
+    return f"/world/gt/body/{model}"
+
+
+def rig_quality_path(rig: int) -> str:
+    """``/world/rig_NN/quality`` — the source's per-pose tracking quality of the rig trajectory."""
+    return f"{rig_path(rig)}/quality"
+
+
+def quality_flag_path(rig: int, cam: int, name: str) -> str:
+    """A shipped per-camera quality flag under the shared GT namespace."""
+    return f"/world/gt/quality/rig_{_index(rig, 'rig')}/cam_{_index(cam, 'cam')}/{name}"

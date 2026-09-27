@@ -10,7 +10,7 @@ import pyarrow as pa
 import pytest
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from conftest import SHOW3D_RAW, Show3dSceneInputs, blueprint_views, index_row, read_back, read_chunks, recording_properties
+from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, raw_asset, read_back, read_chunks, recording_properties
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from serde import from_dict
@@ -22,7 +22,7 @@ from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset, base_files
 from dataforge.datasets.show3d_calibration import pinhole
 from dataforge.datasets.show3d_captions import Caption, write_captions_layer
-from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, high_confidence_coverage, read_hand_frames, write_hand_pose_layer
+from dataforge.datasets.show3d_hands import HandFrame, HandPose, high_confidence_coverage, read_hand_frames, write_hand_pose_layer
 from dataforge.datasets.show3d_layers import Scene
 from dataforge.datasets.show3d_source import (
     CAPTIONS_VERSION,
@@ -36,7 +36,9 @@ from dataforge.datasets.show3d_source import (
     hand_pose_file,
     hand_profile_file,
 )
+from dataforge.hands import HAND_SIDES
 from dataforge.identity import SequenceIdentity
+from dataforge.writing import blueprint_views
 
 
 def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
@@ -120,8 +122,8 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
     props: dict[str, object] = recording_properties(read_back(target), "hand_pose")
     assert props["version"] == HAND_POSE_VERSION
     assert recording_properties(read_back(target), "capture") == {}
-    for side in HAND_SIDES:
-        poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
+    for hand in HAND_SIDES:
+        poses: list[HandPose] = [frame.hand_poses[hand.key] for frame in frames]
         for suffix, component, expected in (
             ("joint_angles", "joint_angles", sum(p.joint_angles is not None for p in poses)),
             ("wrist", "Transform3D:translation", sum(p.wrist_translation is not None for p in poses)),
@@ -130,10 +132,10 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
             rows: list[rrc.Chunk] = [
                 c
                 for c in chunks
-                if str(c.entity_path) == f"{schema.hands_path(side.name)}/{suffix}" and component in c.to_record_batch().schema.names
+                if str(c.entity_path) == f"{schema.hands_path(hand.name)}/{suffix}" and component in c.to_record_batch().schema.names
             ]
             assert sum(c.num_rows for c in rows) == expected
-        assert props[f"coverage_{side.name}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
+        assert props[f"coverage_{hand.name}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
     for path, component, confidence_component, dimensions in (
         (schema.coco133_xyz_path(), "Points3D:positions", "simplecv.KeypointConfidence3D:confidences", 3),
         (schema.coco133_uv_path(1, 0), "Points2D:positions", "simplecv.KeypointConfidence2D:confidences", 2),
@@ -151,8 +153,8 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
         assert np.isfinite(confidence).all()
         for index, frame in enumerate(frames):
             assert keypoint_rows[index]["frame_index"] == frame.index
-            for hand_index, side in enumerate(HAND_SIDES):
-                pose: HandPose = frame.hand_poses[side.key]
+            for hand_index, hand in enumerate(HAND_SIDES):
+                pose: HandPose = frame.hand_poses[hand.key]
                 offset: int = 91 + 21 * hand_index
                 # Source fingertip 0 maps to COCO thumb4, independent of interpolation.
                 placed: bool = pose.trusted  # Hub README default threshold
@@ -194,7 +196,7 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
     transforms: dict[int, Float64[ndarray, "4 4"]] = {
         pose.index: pose.T_WorldFromCamera for pose in scene.poses if pose.T_WorldFromCamera is not None
     }
-    for hand_index, side in enumerate(HAND_SIDES):
+    for hand_index, hand in enumerate(HAND_SIDES):
         offset: int = 91 + 21 * hand_index
         world: dict[int, Float64[ndarray, "21 3"]] = {
             row["frame_index"]: np.array(row["Points3D:positions"])[offset : offset + 21]
@@ -225,7 +227,7 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
                     errors.extend(np.linalg.norm(projected[valid] - shipped[valid], axis=1).tolist())
             assert len(errors) > 100
             median: float = float(np.median(errors))
-            print(f"{side.name}/{camera.camera.source_name}: {len(errors)} points, median error {median:.6f} px")
+            print(f"{hand.name}/{camera.camera.source_name}: {len(errors)} points, median error {median:.6f} px")
             assert median < 0.5
 
 
@@ -235,8 +237,7 @@ def test_convert_rebuilds_each_annotation_without_videos_or_fetch(
 ) -> None:
     raw: Path = SHOW3D_RAW
     key: str = "SPI102/keyboard_toss-away_83ef"
-    if not (raw / hand_pose_file(key)).is_file():
-        pytest.skip(f"SHOW3D keyboard sidecars absent: {raw}")
+    raw_asset("SHOW3D keyboard sidecar", raw / hand_pose_file(key))
     root: Path = tmp_path / "raw"
     for relative in (
         f"scenes/{key}",

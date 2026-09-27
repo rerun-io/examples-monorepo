@@ -17,7 +17,7 @@ right the moment a pose or ground-truth layer stacks onto the same segment.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import rerun as rr
 import rerun.blueprint as rrb
@@ -130,6 +130,8 @@ def follow_eye_controls(
     back_m: float = FOLLOW_BACK_M,
     up_m: float = FOLLOW_UP_M,
     ahead_m: float = FOLLOW_AHEAD_M,
+    aim_down_m: float = 0.0,
+    side_m: float = 0.0,
 ) -> rrb.EyeControls3D:
     """A chase camera derived from the device's own forward and up.
 
@@ -145,17 +147,73 @@ def follow_eye_controls(
         back_m: Distance behind the device, along ``forward``.
         up_m: Distance above it, along ``up``.
         ahead_m: Distance in front of it that the eye aims at.
+        aim_down_m: How far below the device the aim point sits (hands, for a headset).
+        side_m: Offset to the device's right, for a three-quarter view.
 
     Returns:
         The eye the Follow view of both blueprints uses.
     """
-    position: tuple[float, float, float] = (
-        -back_m * forward[0] + up_m * up[0],
-        -back_m * forward[1] + up_m * up[1],
-        -back_m * forward[2] + up_m * up[2],
+    right: tuple[float, float, float] = (
+        forward[1] * up[2] - forward[2] * up[1],
+        forward[2] * up[0] - forward[0] * up[2],
+        forward[0] * up[1] - forward[1] * up[0],
     )
-    look_target: tuple[float, float, float] = (ahead_m * forward[0], ahead_m * forward[1], ahead_m * forward[2])
+    position: tuple[float, float, float] = (
+        -back_m * forward[0] + up_m * up[0] + side_m * right[0],
+        -back_m * forward[1] + up_m * up[1] + side_m * right[1],
+        -back_m * forward[2] + up_m * up[2] + side_m * right[2],
+    )
+    look_target: tuple[float, float, float] = (
+        ahead_m * forward[0] - aim_down_m * up[0],
+        ahead_m * forward[1] - aim_down_m * up[1],
+        ahead_m * forward[2] - aim_down_m * up[2],
+    )
     return eye_controls_from_pose(position, look_target, up)
+
+
+def headset_eye_controls(forward: tuple[float, float, float], up: tuple[float, float, float]) -> rrb.EyeControls3D:
+    """Three-quarter over-the-shoulder eye for a 3D view whose origin rides a moving headset.
+
+    It rides the headset and aims below it at the hands, so a card or a scene view keeps the
+    headset cameras and the hands in shot however far the wearer walks.
+
+    Args:
+        forward: Where the headset looks, in the view origin's frame (a camera's optical axis); unit length.
+        up: The headset's up, in the view origin's frame (the camera's shown image up); unit length.
+    """
+    return follow_eye_controls(forward, up, back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15)
+
+
+def video_exclusions(slots: Iterable[tuple[int, int]]) -> list[str]:
+    """Content rules that drop each ``(rig, cam)`` video, and anything beneath it, from a view.
+
+    A segment-table card excludes every video but the one its pane decodes: excluded, not
+    hidden, because a hidden entity is still decoded.
+
+    Args:
+        slots: ``(rig, cam)`` of each camera whose video is dropped.
+
+    Returns:
+        One ``- <video path>/**`` rule per slot, in slot order.
+    """
+    return [f"- {schema.video_path(rig, cam)}/**" for rig, cam in slots]
+
+
+def exoego_table_blueprint(scene: rrb.Spatial3DView, pane: rrb.Spatial2DView) -> rrb.Blueprint:
+    """The segment-table preview card of an exo/ego dataset: the scene beside one camera pane.
+
+    Every visible table row renders its card at once, so a card decodes exactly one stream:
+    ``pane``'s. ``scene`` must drop every video through ``video_exclusions``. A card gives each
+    view the same width, so the container carries no shares.
+
+    Args:
+        scene: The 3D view, with every video excluded.
+        pane: The one camera pane the card decodes.
+
+    Returns:
+        The blueprint registered with ``segment_table=True``.
+    """
+    return rrb.Blueprint(rrb.Horizontal(scene, pane), collapse_panels=True)
 
 
 def rig_blueprint(
@@ -329,13 +387,12 @@ def table_blueprint(
     Returns:
         The blueprint registered with ``segment_table=True``.
     """
-    video_exclusions: list[str] = [f"- {schema.video_path(rig, index)}/**" for index in range(num_cameras)]
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
                 name="Follow",
                 origin=schema.rig_path(rig),
-                contents=["/**", *video_exclusions, f"- {schema.trail_path(run_source)}/**"],
+                contents=["/**", *video_exclusions((rig, index) for index in range(num_cameras)), f"- {schema.trail_path(run_source)}/**"],
                 line_grid=False,  # rig-rooted, same reason as rig_blueprint's Follow view
                 eye_controls=eye_controls,
             ),

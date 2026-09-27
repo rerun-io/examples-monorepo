@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 import rerun.blueprint as rrb
+from conftest import eye_vector
 
 from dataforge import blueprints, schema
 
@@ -69,3 +70,24 @@ def test_ego_only_rig_has_no_exo_strip() -> None:
     scene, column = children(blueprints.exoego_blueprint(world, ego_panes=ego, exo_panes=[]).root_container, rrb.Horizontal)
     assert scene is world
     assert children(column, rrb.Vertical) == ego
+
+
+def test_video_exclusions_drop_each_slot_in_order() -> None:
+    slots: list[tuple[int, int]] = [(0, 0), (8, 1)]
+    assert blueprints.video_exclusions(slots) == [f"- {schema.video_path(0, 0)}/**", f"- {schema.video_path(8, 1)}/**"]
+
+
+def test_table_card_puts_the_scene_beside_its_one_pane() -> None:
+    world: rrb.Spatial3DView = world_view()
+    (pane,) = panes(0, 1)
+    card: rrb.Blueprint = blueprints.exoego_table_blueprint(world, pane)
+    assert children(card.root_container, rrb.Horizontal) == [world, pane]
+    assert card.collapse_panels
+
+
+def test_headset_eye_sits_behind_above_and_right_and_aims_below_ahead() -> None:
+    """With forward +z and up -y (a camera frame), right is +x: 0.4 m back, 0.45 m up, 0.15 m right; aim 0.5 m ahead, 0.4 m down."""
+    eye: rrb.EyeControls3D = blueprints.headset_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0))
+    assert eye_vector(eye.position) == pytest.approx([0.15, -0.45, -0.4], abs=1e-6)
+    assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.4, 0.5], abs=1e-6)
+    assert eye_vector(eye.eye_up) == pytest.approx([0.0, -1.0, 0.0], abs=1e-6)

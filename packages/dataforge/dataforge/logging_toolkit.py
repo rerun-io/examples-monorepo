@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -24,6 +24,8 @@ import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import log_pinhole
 from simplecv.rig import CameraKind, PeerSensorKind
 
@@ -152,7 +154,7 @@ def log_rig_node(
         recording: Destination recording stream.
         rig: Rig index; the node is ``schema.rig_path(rig)``.
         reference: Id of the sensor child whose frame the rig frame coincides
-            with — usually ``"cam_00"``, but an inertially-referenced rig names
+            with — usually ``schema.CAM0_REFERENCE`` (``"cam_00"``), but an inertially-referenced rig names
             its ``imu_MM`` instead. ``None`` omits the key: a static world-anchored
             rig with no sensor at its origin (exoego:v2 §4).
         num_cameras: Number of cameras actually logged under this rig.
@@ -419,6 +421,101 @@ def log_camera_node(
     )
 
 
+def log_camera_source(
+    recording: rr.RecordingStream,
+    rig: int,
+    cam: int,
+    *,
+    name: str,
+    source_width: int,
+    source_height: int,
+    video_codec: str,
+    cq: int | None = None,
+    gop: int | None = None,
+    stored_width: int | None = None,
+    stored_height: int | None = None,
+    stream_id: str | None = None,
+    source_num_frames: int | None = None,
+) -> str:
+    """Tag one ``/world/rig_NN/cam_MM`` node with where its video came from and how it was stored.
+
+    Every dataforge base layer writes this one key set, so a consumer reads the
+    same keys whatever the dataset, and passes the returned entries, one per
+    camera in logging order, as the capture property ``source_resolution``.
+    The optional keys are named for the reason ``log_camera_node`` gives; a
+    ``None`` leaves the key off the node.
+
+    Args:
+        recording: Destination recording stream.
+        rig: Rig index owning the camera.
+        cam: Camera index within the rig.
+        name: The camera's name, as ``log_camera_node`` logs it; the
+            ``source_resolution`` id of a camera without a ``stream_id``.
+        source_width: Width of the source camera image in pixels, the grid its
+            calibration and shipped 2D labels describe (before any rotation
+            ``image_rotation_cw_deg`` states; one tile of a tiled source).
+        source_height: Height of the source camera image in pixels.
+        video_codec: Codec of the logged video stream (``"av1"``).
+        cq: Constant-quality level of dataforge's encode; ``None`` when the
+            logged stream is the source's own bitstream, remuxed unchanged.
+        gop: Keyframe interval of dataforge's encode; ``None`` as for ``cq``.
+        stored_width: Width of the logged video when the source ships it
+            rescaled from ``source_width``; ``None`` when it keeps the source grid.
+        stored_height: Height of the logged video, under the same rule.
+        stream_id: The source's own stream id (an Aria VRS ``"214-1"``).
+        source_num_frames: Frames in this camera's source stream, for a dataset
+            whose cameras do not share one count (the capture property
+            ``source_num_frames`` covers the shared case).
+
+    Returns:
+        The camera's ``source_resolution`` entry, ``"<id>:<W>x<H>"`` with the source
+        size and the id its ``stream_id`` when it has one, its ``name`` otherwise.
+    """
+    # None-valued keys are dropped here rather than through AnyValues' drop_untyped_nones:
+    # that flag depends on a process-global registry, so a key typed by one camera would
+    # arrive as a null on the next one instead of being absent.
+    values: dict[str, int | str | None] = dict(
+        source_width=source_width,
+        source_height=source_height,
+        stored_width=stored_width,
+        stored_height=stored_height,
+        stream_id=stream_id,
+        source_num_frames=source_num_frames,
+        video_codec=video_codec,
+        cq=cq,
+        gop=gop,
+    )
+    present: dict[str, Any] = {key: value for key, value in values.items() if value is not None}
+    rr.log(schema.cam_path(rig, cam), rr.AnyValues(**present), static=True, recording=recording)
+    return f"{stream_id or name}:{source_width}x{source_height}"
+
+
+def log_dense_pose_track(
+    recording: rr.RecordingStream,
+    path: str,
+    *,
+    times_ns: Int64[ndarray, "n"],
+    frame_indices: Int64[ndarray, "n"],
+    transforms: Float32[ndarray, "n 4 4"] | Float64[ndarray, "n 4 4"],
+) -> None:
+    """Write dense poses with NaN translation and mat3x3 on missing rows.
+
+    Rerun 0.38.1 treats a NaN quaternion as an invalid transform and falls back
+    to identity (draws at the parent origin); a NaN mat3x3 hides the subtree.
+    """
+    if len(frame_indices) != len(times_ns):
+        raise ValueError("pose frame_indices and times_ns must have the same length")
+    valid: Bool[ndarray, "n"] = np.isfinite(transforms).all(axis=(1, 2))
+    translations: Float64[ndarray, "n 3"] = np.where(valid[:, None], transforms[:, :3, 3], np.nan).astype(np.float64)
+    rotations: Float64[ndarray, "n 3 3"] = np.where(valid[:, None, None], transforms[:, :3, :3], np.nan).astype(np.float64)
+    rr.send_columns(
+        path,
+        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
+        columns=rr.Transform3D.columns(translation=translations, mat3x3=rotations),
+        recording=recording,
+    )
+
+
 def log_pose_track(
     recording: rr.RecordingStream,
     entity_path: str,
@@ -433,6 +530,11 @@ def log_pose_track(
     The rig node's ``world_T_rig``, and every other track that animates an
     entity, go through here so the quaternion layout stays one decision: Rerun
     wants the scalar **last**, whatever order the source file wrote.
+
+    To hide an entity on a missing row, use ``log_dense_pose_track`` with NaN
+    translation and mat3x3. Rerun 0.38.1 treats a NaN quaternion as an invalid
+    transform and falls back to identity (draws at the parent origin); a NaN
+    mat3x3 hides the subtree.
 
     Args:
         recording: Destination recording stream.
@@ -601,3 +703,20 @@ def log_magnetometer(
                 recording=recording,
             )
     _log_sensor_node(recording, schema.mag_path(rig, mag), name=name, kind="mag", unit=unit)
+
+
+def annotation_context() -> rr.AnnotationContext:
+    """Root classes every layer relies on: the COCO-133 skeleton (class 0) and the §13 box labels (100-103)."""
+    return rr.AnnotationContext(
+        [
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
+                keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
+                keypoint_connections=COCO_133_LINKS,
+            ),
+            *(
+                rr.ClassDescription(info=rr.AnnotationInfo(id=int(layer), label=COCO133_ROI_LABELS[layer], color=COCO133_ROI_COLORS[layer]))
+                for layer in Coco133RoiLayer
+            ),
+        ]
+    )

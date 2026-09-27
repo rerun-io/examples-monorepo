@@ -15,7 +15,7 @@ from conftest import PublishedCamera, read_calibration_json  # pyrefly: ignore[m
 from jaxtyping import Float64
 from numpy import ndarray
 
-from dataforge import aria
+from dataforge.datasets import lamaria_source
 
 pytestmark = pytest.mark.golden
 
@@ -93,7 +93,7 @@ def test_rotate_uv_cw90_lands_the_principal_point_on_the_rotated_one() -> None:
     published: dict[str, PublishedCamera] = read_calibration_json(reference_file("R_01_easy.calibration.json"))
     cx, cy = published["cam0"].params[2:4]
 
-    rotated_uv_px: Float64[ndarray, "n_points 2"] = aria.rotate_uv_cw90(
+    rotated_uv_px: Float64[ndarray, "n_points 2"] = lamaria_source.rotate_uv_cw90(
         np.array([[cx, cy], [0.0, 0.0]], dtype=np.float64), native_height_px=SLAM_NATIVE_HEIGHT_PX
     )
 
@@ -107,7 +107,7 @@ def test_rotate_uv_cw90_lands_the_principal_point_on_the_rotated_one() -> None:
 
 
 def test_read_pseudo_gt_keeps_every_row_in_file_order() -> None:
-    pgt: aria.PseudoGt = aria.read_pseudo_gt(reference_file("R_01_easy.pseudo_gt.txt"))
+    pgt: lamaria_source.PseudoGt = lamaria_source.read_pseudo_gt(reference_file("R_01_easy.pseudo_gt.txt"))
     # The fixture is R_01_easy's first three rows and its last two.
     assert pgt.times_ns.tolist() == [1389350666375, 1389400666375, 1389450666375, 1534150666375, 1534200666375]
     assert pgt.world_T_cam0.shape == (5, 4, 4)
@@ -123,11 +123,11 @@ def test_read_pseudo_gt_keeps_every_row_in_file_order() -> None:
 
 
 def test_read_control_points_translates_measurements_to_the_custom_origin() -> None:
-    points: dict[str, aria.ControlPoint] = {
-        point.name: point for point in aria.read_control_points(reference_file("R_11_5cp.control_points.json")).points
+    points: dict[str, lamaria_source.ControlPoint] = {
+        point.name: point for point in lamaria_source.read_control_points(reference_file("R_11_5cp.control_points.json")).points
     }
     assert sorted(points) == ["OB1878", "OB1881"]
-    surveyed: aria.ControlPoint = points["OB1878"]
+    surveyed: lamaria_source.ControlPoint = points["OB1878"]
     assert surveyed.has_height
     # LV95/LN02 minus CUSTOM_ORIGIN_XYZ, so the scene sits near the origin.
     assert surveyed.position_xyz_m == pytest.approx([351.07500000018626, 348.1920000030659, 44.89299999999997], abs=1e-6)
@@ -135,10 +135,10 @@ def test_read_control_points_translates_measurements_to_the_custom_origin() -> N
 
 
 def test_read_control_points_marks_an_unknown_height() -> None:
-    points: dict[str, aria.ControlPoint] = {
-        point.name: point for point in aria.read_control_points(reference_file("R_11_5cp.control_points.json")).points
+    points: dict[str, lamaria_source.ControlPoint] = {
+        point.name: point for point in lamaria_source.read_control_points(reference_file("R_11_5cp.control_points.json")).points
     }
-    unlevelled: aria.ControlPoint = points["OB1881"]
+    unlevelled: lamaria_source.ControlPoint = points["OB1881"]
     assert not unlevelled.has_height
     assert unlevelled.position_xyz_m[:2] == pytest.approx([347.59700000006706, 337.6929999976419], abs=1e-6)
     assert unlevelled.position_xyz_m[2] == 0.0, "an unknown height is drawn at the origin's level, not guessed"
@@ -146,11 +146,11 @@ def test_read_control_points_marks_an_unknown_height() -> None:
 
 
 def test_read_control_points_reads_detections_per_stream() -> None:
-    control_points: aria.ControlPointSet = aria.read_control_points(reference_file("R_11_5cp.control_points.json"))
+    control_points: lamaria_source.ControlPointSet = lamaria_source.read_control_points(reference_file("R_11_5cp.control_points.json"))
     # The stream is read off the image name's own prefix; the file's per-camera
     # timestamp map, which is keyed by stream *label*, is not read at all.
     assert [detection.stream_id for detection in control_points.detections] == ["1201-1", "1201-1", "1201-2"]
-    first: aria.ControlPointDetection = control_points.detections[0]
+    first: lamaria_source.ControlPointDetection = control_points.detections[0]
     assert first.control_point == "OB1881"
     assert first.timestamp_ns == 928783591225
     assert first.uv_px == pytest.approx([439.0790695728934, 105.161001582523], abs=1e-12)

@@ -18,9 +18,7 @@ from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.show3d_captions import Caption, write_captions_layer
 from dataforge.datasets.show3d_hands import (
     HandFrame,
-    HandProfileDoc,
     read_hand_frames,
-    read_hand_profile,
     write_hand_mesh_layer,
     write_hand_pose_layer,
 )
@@ -42,12 +40,17 @@ from dataforge.datasets.show3d_source import (
     object_pose_file,
     read_frame_clock,
     read_headset_calibrations,
-    read_json,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.records import read_json
+from dataforge.umetrack_hands import HandProfileDoc, read_hand_profile
 from dataforge.writing import TableField, TableFields
 
 REPO_ID: str = "facebook/show3d-dataset"
+SCENE_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0))
+"""The full layout's eye on the back rig frame."""
+CARD_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((1.25, 0.6, 1.0), (0.2, -0.15, 0.05), (0.0, 1.0, 0.0))
+"""The table card's eye: closer than ``SCENE_EYE``, so the hands and object read at card size with every frustum in frame."""
 
 
 def world_contents() -> list[str]:
@@ -71,7 +74,7 @@ def preview_world_contents() -> list[str]:
     video is **excluded**, not hidden (a hidden entity is still decoded), which leaves every
     Pinhole frustum with an empty image plane.
     """
-    return [*world_contents(), *(f"- {schema.video_path(camera.rig, camera.cam)}/**" for camera in CAMERAS)]
+    return [*world_contents(), *blueprints.video_exclusions((camera.rig, camera.cam) for camera in CAMERAS)]
 
 
 def pane_contents(camera: Show3dCamera) -> list[str]:
@@ -195,7 +198,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.commit_sha)
 
     def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
-        targets: dict[str, Path] = {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
+        targets: dict[str, Path] = self.targets(identity)
         alias: str = source.object_alias
         mesh: str | None = mesh_name(alias)
         wants: dict[str, bool] = {
@@ -220,7 +223,8 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             files.update([*metadata_files(key), object_pose_file(key)])
         if wants[paths.OBJECT_POSE_LAYER]:
             files.update(calibration_file(key, camera) for camera in HEADSET_CAMERAS)
-        self.fetch_missing(sorted(files))
+        with self.timer.stage("fetch"):
+            self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
         scene: Scene | None = None
@@ -228,34 +232,38 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             work: Path = self.config.root / "work" / identity.recording_id
             work.mkdir(parents=True, exist_ok=True)
             try:
-                scene = write_base_layer(
-                    identity,
-                    scene_dir,
-                    targets[paths.BASE_LAYER],
-                    index=source,
-                    work_dir=work,
-                    hf_revision=self.commit_sha,
-                    default_blueprint=self.default_blueprint(),
-                )
+                with self.timer.stage("write:base"):
+                    scene = write_base_layer(
+                        identity,
+                        scene_dir,
+                        targets[paths.BASE_LAYER],
+                        index=source,
+                        timer=self.timer,
+                        work_dir=work,
+                        hf_revision=self.commit_sha,
+                        default_blueprint=self.default_blueprint(),
+                    )
             finally:
                 archives.remove_tree(work)
             written.append(paths.BASE_LAYER)
-        clock: FrameClock | None = None
+        clock: FrameClock | None = scene
         hand_frames: list[HandFrame] = []
         profile: HandProfileDoc | None = None
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
-            clock = scene if scene is not None else read_frame_clock(scene_dir, key)
+            clock = clock if clock is not None else read_frame_clock(scene_dir, key)
             hand_frames = read_hand_frames(self.config.root / hand_pose_file(key), clock) if source.has_hand_pose else []
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER]:
             profile = read_hand_profile(self.config.root / hand_profile_file(source.subject_id))
         if wants[paths.HAND_POSE_LAYER]:
             assert clock is not None and profile is not None
-            write_hand_pose_layer(identity, clock, hand_frames, profile.text, targets[paths.HAND_POSE_LAYER])
+            with self.timer.stage("write:hand_pose"):
+                write_hand_pose_layer(identity, clock, hand_frames, profile.text, targets[paths.HAND_POSE_LAYER])
             written.append(paths.HAND_POSE_LAYER)
         caption: Caption | None = read_json(self.config.root / caption_file(key), Caption) if wants[paths.CAPTIONS_LAYER] else None
         if wants[paths.CAPTIONS_LAYER]:
             assert caption is not None
-            write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
+            with self.timer.stage("write:captions"):
+                write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
             written.append(paths.CAPTIONS_LAYER)
         object_track: ObjectTrack | None = None
         if wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
@@ -269,22 +277,27 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             metrics: ObjectSanity = object_sanity(
                 frames, list((scene.headsets if scene is not None else read_headset_calibrations(scene_dir, clock)).values()), hand_frames
             )
-            write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER], clock_offset_s=object_track.clock_offset_s)
+            with self.timer.stage("write:object_pose"):
+                write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER], clock_offset_s=object_track.clock_offset_s)
             written.append(paths.OBJECT_POSE_LAYER)
         if wants[paths.OBJECT_MESH_LAYER]:
             assert object_track is not None
             if any(frame.posed for frame in object_track.frames):
                 asset: MeshAsset = stripped_mesh(self.config.root, alias)
                 assert clock is not None
-                write_object_mesh_layer(identity, alias, clock, object_track.frames, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
+                with self.timer.stage("write:object_mesh"):
+                    write_object_mesh_layer(identity, alias, clock, object_track.frames, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
                 written.append(paths.OBJECT_MESH_LAYER)
             else:
                 # A mesh with no pose row would sit at the world origin; the track carries no posed frame.
                 print(f"{identity.sequence_key}: no object_mesh: the object track has no posed frame")
         if wants[paths.HAND_MESH_LAYER]:
             assert clock is not None and profile is not None
-            write_hand_mesh_layer(identity, clock, hand_frames, profile.model, targets[paths.HAND_MESH_LAYER])
+            with self.timer.stage("write:hand_mesh"):
+                write_hand_mesh_layer(identity, clock, hand_frames, profile.model, targets[paths.HAND_MESH_LAYER])
             written.append(paths.HAND_MESH_LAYER)
+        if clock is not None:  # a captions-only rebuild reads no frame clock and reports no capture length
+            self.timer.capture_s = float(clock.times_ns[-1] - clock.times_ns[0]) / 1e9
         if wants[paths.BASE_LAYER] and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()
@@ -303,7 +316,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                 name="Back rig frame",
                 origin="/world",
                 contents=world_contents(),
-                eye_controls=blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0)),
+                eye_controls=SCENE_EYE,
             ),
             ego_panes=[panes[camera] for camera in HEADSET_CAMERAS],
             exo_panes=[pane for camera, pane in panes.items() if camera not in HEADSET_CAMERAS],
@@ -329,23 +342,11 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         return TableFields(cards=(action, obj, caption, subject, split), table=(action, obj, subject, split, *coverage, caption))
 
     def table_blueprint(self) -> rrb.Blueprint:
-        """The scene without any video beside the one decoded headset stream with its projected overlays.
-
-        A card gives each preview view the same width, so the container carries no shares.
-        """
+        """The scene without any video beside the one decoded headset stream with its projected overlays."""
         headset: Show3dCamera = HEADSET_CAMERAS[0]
-        return rrb.Blueprint(
-            rrb.Horizontal(
-                rrb.Spatial3DView(
-                    name="Scene",
-                    origin="/world",
-                    contents=preview_world_contents(),
-                    # Closer than the full layout's eye, so the hands and object read at card size with every frustum in frame.
-                    eye_controls=blueprints.eye_controls_from_pose((1.25, 0.6, 1.0), (0.2, -0.15, 0.05), (0.0, 1.0, 0.0)),
-                ),
-                blueprints.camera_view(headset.source_name, headset.rig, headset.cam, contents=pane_contents(headset)),
-            ),
-            collapse_panels=True,
+        return blueprints.exoego_table_blueprint(
+            rrb.Spatial3DView(name="Scene", origin="/world", contents=preview_world_contents(), eye_controls=CARD_EYE),
+            blueprints.camera_view(headset.source_name, headset.rig, headset.cam, contents=pane_contents(headset)),
         )
 
 
