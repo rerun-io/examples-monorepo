@@ -11,7 +11,7 @@ from serde import serde
 from simplecv.camera_parameters import Extrinsics, PinholeParameters
 from simplecv.camera_parameters import Intrinsics as CameraIntrinsics
 
-PoseSource: TypeAlias = Literal["mocap", "vio", "endpoint_interpolation", "legacy_unspecified"]
+PoseSource: TypeAlias = Literal["mocap", "vio", "endpoint_interpolation", "legacy_unspecified", "smooth_mocap_interpolation"]
 
 
 ROTATION_ATOL: float = 1e-5
@@ -48,7 +48,7 @@ class HeadsetPose:
     timestamp: float
     """Source seconds."""
     T_WorldFromCamera: Float64[ndarray, "4 4"] | None
-    """Camera-to-back-rig transform in mm; absent transforms produce no pose row."""
+    """Camera-to-back-rig transform in mm; absent transforms produce a NaN pose row."""
     is_synthesized: bool
     """Legacy interpolation flag, independent of validity."""
     pose_source: PoseSource | None = None
@@ -105,6 +105,8 @@ class HeadsetCalibration(Intrinsics):
     """Optional new contract version."""
 
     def __post_init__(self) -> None:
+        if self.pose_contract_version not in (None, 1):
+            raise ValueError(f"unsupported pose_contract_version: {self.pose_contract_version}")
         for key, pose in self.T_WorldFromCamera_by_index.items():
             if key != str(pose.index):
                 raise ValueError(f"headset pose key {key} disagrees with index {pose.index}")

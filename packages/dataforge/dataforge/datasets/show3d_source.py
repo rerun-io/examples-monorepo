@@ -87,12 +87,14 @@ def calibration_file(key: str, camera: Show3dCamera) -> str:
     return f"scenes/{key}/camera_calibration/{camera.source_name}.json"
 
 
-DEFAULT_CONFIDENCE: float = 0.5
-"""The Hub's default confidence threshold for hands and objects: "cuts most solver failures without throwing
-away usable data" (hand_pose/README.md, object_pose/README.md); ``> 0`` is "low-quality frames you usually
-want to drop". Landmarks and meshes are shown only above it; every shipped confidence value is kept."""
-HAND_POSE_VERSION: str = "v2"
-"""Released hand annotation version."""
+HAND_TRUST: float = 0.0
+"""Pablo's SHOW3D rule: show hand landmarks and meshes above zero confidence."""
+OBJECT_TRUST: float = 0.5
+"""Object README default: show meshes only above 0.5 confidence."""
+HAND_POSE_VERSION: str = "v3"
+"""Output hand layer version: landmarks and meshes use confidence > 0."""
+HAND_SOURCE_VERSION: str = "v2"
+"""Upstream hand annotation directory, independent of our layer version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
 OBJECT_POSE_VERSION: str = "v1"
@@ -101,7 +103,7 @@ OBJECT_POSE_VERSION: str = "v1"
 
 def hand_pose_file(key: str) -> str:
     """Repository-relative hand measurements."""
-    return f"hand_pose/{HAND_POSE_VERSION}/scenes/{key}/hand_pose.json"
+    return f"hand_pose/{HAND_SOURCE_VERSION}/scenes/{key}/hand_pose.json"
 
 
 def object_pose_file(key: str) -> str:

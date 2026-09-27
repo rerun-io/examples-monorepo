@@ -417,3 +417,95 @@ def test_camera_logging_overlaps_remaining_encodes(tmp_path: Path, tiny_scene: P
     assert logged == ["headset0.mp4", "headset1.mp4"]
     assert list((tmp_path / "clips").iterdir()) == []
     assert timer.stage_s["transcode"] == 0.0
+
+
+def test_new_headset_contract_and_dense_dropouts(tmp_path, tiny_scene):
+    from dataforge import writing
+    from dataforge.datasets.show3d_layers import log_headset, read_scene
+    path = tiny_scene / 'camera_calibration/headset0.json'
+    payload = json.loads(path.read_text())
+    payload['T_WorldFromCamera_by_index']['1'].update(pose_source='smooth_mocap_interpolation', is_pose_valid=False)
+    payload['T_WorldFromCamera_by_index']['2'].pop('T_WorldFromCamera')
+    path.write_text(json.dumps(payload))
+    scene = read_scene(tiny_scene, scene_key='synthetic')
+    target = tmp_path / 'poses.rrd'
+    with writing.atomic_recording(target, recording_id='test') as recording:
+        log_headset(recording, scene)
+    batches = [c.to_record_batch() for c in read_chunks(target) if str(c.entity_path) == '/world/rig_01']
+    pose = next(b for b in batches if 'Transform3D:translation' in b.schema.names)
+    translations = np.array(pose.column('Transform3D:translation').to_pylist())[:, 0]
+    assert np.isnan(translations[1:3]).all()
+    np.testing.assert_allclose(translations[[0, 3]], [[0, 0, 0], [0, .03, 0]])
+    matrices = np.array(pose.column('Transform3D:mat3x3').to_pylist())
+    assert np.isnan(matrices[1:3]).all()
+    values = {name: b.column(name).to_pylist() for b in batches for name in ('pose_source', 'is_pose_valid', 'is_synthesized') if name in b.schema.names}
+    assert values['pose_source'] == [['mocap'], ['smooth_mocap_interpolation'], ['mocap'], ['mocap']]
+    assert values['is_pose_valid'] == [[True], [False], [True], [True]]
+    assert values['is_synthesized'] == [[False], [False], [True], [False]]
+    payload['pose_contract_version'] = 2
+    with pytest.raises((ValueError, SerdeError), match='pose_contract_version.*2'):
+        from_dict(HeadsetCalibration, payload)
+
+
+@pytest.mark.parametrize(('objects', 'hands', 'split'), [(True, True, 'train'), (False, True, 'train'), (False, False, 'test')])
+def test_prefetch_and_convert_share_file_plan(tmp_path, monkeypatch, objects, hands, split):
+    from dataforge.datasets.show3d import Show3dDataset
+    source = index_row(subject_id='S', scene_id='keyboard_action_abcd', has_object_pose=objects, has_hand_pose=hands, has_caption=True, split=split)
+    dataset = Show3dDataset(Show3dConfig(root=tmp_path))
+    identity = SequenceIdentity('show3d', ('S', source.scene_id))
+    monkeypatch.setenv('DATAFORGE_OUTPUT_ROOT', str(tmp_path / 'rrds'))
+    expected = dataset.planned_files(identity, source, force=True)
+    fetched = []
+    def fetch(files):
+        fetched.append(files)
+    monkeypatch.setattr(dataset, 'fetch_missing', fetch)
+    dataset.prefetch(identity, source, force=True)
+    # Stop at the scene boundary, after observing conversion's actual fetch.
+    with pytest.raises(ValueError, match='missing metadata'):
+        dataset.convert(identity, source, force=True)
+    assert fetched == [expected, expected]
+    assert any(p.startswith('hand_pose/v2/') for p in expected) == hands
+    assert any(p.startswith('object_pose/') for p in expected) == objects
+    assert any(p.startswith('captions/') for p in expected)
+
+
+def test_test_split_converts_only_base_and_captions(tmp_path, tiny_scene, monkeypatch):
+    """Exercise the full layer flow with synthetic sidecars and a CPU AV1 encoder."""
+    import shutil
+    from fractions import Fraction
+
+    from dataforge.datasets import show3d_layers
+    from dataforge.datasets.show3d import Show3dDataset
+    from dataforge.datasets.show3d_source import caption_file
+    root = tmp_path / 'raw'
+    identity = SequenceIdentity('show3d', ('S', 'none_wave_abcd'))
+    scene_dir = root / 'scenes' / identity.sequence_key
+    shutil.copytree(tiny_scene, scene_dir)
+    caption = root / caption_file(identity.sequence_key)
+    caption.parent.mkdir(parents=True)
+    caption.write_text(json.dumps(dict(object_alias='none', action_hint='wave', hand='both', interaction_description='Wave', start_state='Rest', end_state='Rest', intent='Greet', scene_description='Room', additional_observations='', overall_caption='Wave both hands.')))
+    (scene_dir / 'blur_info/config.json').write_text('{}')
+    monkeypatch.setenv('DATAFORGE_OUTPUT_ROOT', str(tmp_path / 'output'))
+    def encode(source, target, **_kwargs):
+        with av.open(str(source)) as original, av.open(str(target), 'w') as output:
+            stream = output.add_stream('libaom-av1', rate=60, width=256, height=160, pix_fmt='yuv420p', options={'cpu-used': '8', 'lag-in-frames': '0'})
+            count = 0
+            for frame in original.decode(video=0):
+                frame.pts = count
+                frame.time_base = Fraction(1, 60)
+                for packet in stream.encode(frame):
+                    output.mux(packet)
+                count += 1
+            for packet in stream.encode():
+                output.mux(packet)
+        return count
+    monkeypatch.setattr(show3d_layers, 'transcode_mp4_gray', encode)
+    source = index_row(subject_id='S', scene_id='none_wave_abcd', split='test', has_hand_pose=False, has_object_pose=False, has_caption=True, **{f'has_rig{i}': False for i in range(8)})
+    dataset = Show3dDataset(Show3dConfig(root=root))
+    target = dataset.convert(identity, source, force=False)
+    assert {path.parent.name for path in (tmp_path / 'output').glob('*/*.rrd')} == {'base', 'captions'}
+    assert recording_properties(read_back(target), 'episode')['split'] == 'test'
+    assert recording_properties(read_back(dataset.targets(identity)['captions']), 'captions')['overall_caption'] == 'Wave both hands.'
+    assert not list(scene_dir.glob('*.mp4'))
+    videos = [chunk for chunk in read_chunks(target) if 'VideoStream:sample' in chunk.to_record_batch().schema.names]
+    assert sum(chunk.num_rows for chunk in videos) == 8

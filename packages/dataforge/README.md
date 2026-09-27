@@ -303,11 +303,11 @@ The default layout is the shared exo/ego layout (see *Blueprints*): 3D with the
 instruction under it, both headset views in the right column, and the eight back-rig
 cameras along the bottom, face boxes hidden; table cards decode headset0 only.
 
-Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
+Video uses ffmpeg NVDEC → AV1 NVENC with CPU grayscale decode as fallback at 60 fps, GOP 60,
 no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
 [measured table](docs/show3d.md#video-measurement-and-encoder-decision).
 Each recording records the Hub commit it was built from as
-`property:capture:hf_revision`; the corpus run pins one with `--revision`.
+`property:capture:hf_revision`; the config defaults to a pinned commit and `--revision` accepts only a full SHA.
 
 ### Environment variables
 

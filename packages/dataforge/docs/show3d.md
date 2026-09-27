@@ -83,13 +83,30 @@ AZH822: `none_clap-hands_a702`, `none_finger-tapping_36f9`,
 rows. Once fetched, each scene's recording/frame metadata takes precedence
 over the index census. A fetched scene without metadata fails with a scene-specific error.
 
-Each recording records the Hub commit it was built from as
-`property:capture:hf_revision`; the corpus run pins one with `--revision`.
-Without an explicit revision, the default branch resolves once per run to a
-cached commit SHA. Every SHOW3D Hub fetch uses that SHA. HOT3D BOP downloads resolve their own repository SHA.
+Pins are module constants and config defaults:
+
+| Repository | Commit |
+| --- | --- |
+| `facebook/show3d-dataset` | `903e6bc94faa91ae209b5f4efe32ec9033b7e80f` |
+| `bop-benchmark/hot3d` | `30fe9674782f32e1e5edba98476b6ff4300132c5` |
+| `collabora/monado-slam-datasets` (MSD) | `74c07d42d980c55775dd0edc06e58c486b848be1` |
+
+Every shared HF entry point requires a full 40-character lowercase commit SHA.
+`--revision` is a deliberate override; move a pin with a one-line PR that says
+what changed upstream. Base recordings retain `property:capture:hf_revision`.
+The hand source remains `hand_pose/v2`; the output hand layer is version `v3`.
+
+At this pin, all 448 test rows have captions and no hand or object labels.
+They produce base and captions only, with `property:episode:split = test`.
+Discovery skips seven zero-frame train rows, yielding 1,682 train + 448 test scenes.
+The optional `viz.mp4` overlays are never fetched.
 
 Conversion plans the union of missing layers' inputs, then fetches absent files
-with one fetch round (serial per-file downloads). Index camera and annotation flags select the
+with up to 16 parallel downloads. One background thread fetches the next scene
+while the current scene converts; only one extra scene is staged. Conversion
+waits for that fetch inside its own `fetch` timer and records fetch failures
+against that scene before continuing. Prefetch uses the same plan and force flag
+as conversion. Index camera and annotation flags select the
 files; scene metadata validates the census at the read boundary. `--force`
 rebuilds layers but never downloads raw files that are already present.
 Only a call that writes base removes source MP4s after all requested layers publish successfully unless
@@ -113,8 +130,10 @@ Rig calibrations have one static `T_WorldFromCamera`. Headset calibrations have
 `T_WorldFromCamera_by_index`, keyed by decimal string index. Legacy entries
 have `index`, `agt_frame_id`, `timestamp`, `T_WorldFromCamera`, and
 `is_synthesized`. New entries also carry `pose_source` and `is_pose_valid`,
-with optional top-level `pose_contract_version`. Missing transforms produce
-no transform row. Synthesized and validity flags are preserved independently;
+with optional top-level `pose_contract_version` (only absent or `1` is accepted).
+`pose_source` includes `smooth_mocap_interpolation`. A missing transform or
+`is_pose_valid = false` writes a NaN transform on `rig_01`, hiding the headset
+and cameras for that frame and preventing latest-at from holding a stale pose. Synthesized and validity flags are preserved independently;
 optional provenance columns are emitted only where supplied. Unknown JSON
 fields are allowed at these third-party boundaries.
 
@@ -151,12 +170,24 @@ at least 40 dB on both scenes, at 0.60–0.69 times source size. GOP is 60 and
 B-frames are disabled. The raw report is
 `data/show3d-video-measurements.json` (ignored by git).
 
-The converter decodes each source in ffmpeg (`format=gray`) and encodes AV1 NVENC in the same
-process; against the earlier PyAV-pipe prototype this is MD5-identical output at 2.2 times the
-speed, and three concurrent camera encodes add another 1.6–1.7 times. A full 10-camera conversion of
-these scenes takes 8–10 s wall through `dataforge-convert` on the RTX 5090. Logging and deletion of
-each completed clip overlap the remaining encodes, and every sidecar is validated before the first
-encode.
+SHOW3D uses NVDEC → AV1 NVENC, keeping frames on the GPU without a CPU
+grayscale filter: released sources have even dimensions and neutral chroma.
+Six camera jobs run per scene. A CUDA decode failure falls back to the existing
+CPU grayscale path; crops always use that path. Frame-count checks apply to both.
+The encoder capability check is cached per ffmpeg binary.
+
+Every dataforge NVENC process holds one machine-wide flock slot beneath
+`/tmp/dataforge-nvenc`. `DATAFORGE_NVENC_SLOTS` is a positive integer (default
+6; use 8 only on a dedicated machine). Use the same value across simultaneous
+jobs. A blocked job polls every 0.2 s and prints once after 60 s. Session-limit
+errors release the slot and retry after 2, 4, 8, 16 and 32 seconds; they never
+trigger CPU-decode fallback. Slots are released on success and failure.
+
+## Timing
+
+Driver to fill: GPU/CPU frame counts and luma PSNR on two real scenes;
+10-scene `convert.jsonl` stage timings; total wall time and output size.
+The implementation's offline tests do not establish a new throughput result.
 
 The comparison is a plain Python CLI; no dedicated Pixi task is added:
 
@@ -213,11 +244,11 @@ includes only headset0 video.
 | Source | Layer / destination |
 | --- | --- |
 | COCO-133 names and connections | `hand_pose`: static `/` AnnotationContext, one class, ID 0, "Coco Wholebody" |
-| `landmarks_3d_mm` | `/world/gt/coco133_xyz`: dense 133-point Points3DWithConfidence rows in metres, class 0, static COCO keypoint IDs, per-point confidence colours; placed only where the hand's confidence is > 0.5 (the Hub README default) |
+| `landmarks_3d_mm` | `/world/gt/coco133_xyz`: dense 133-point Points3DWithConfidence rows in metres, class 0, static COCO keypoint IDs, per-point confidence colours; placed only where the hand's confidence is > 0 (the SHOW3D ingestion rule) |
 | `joint_angles` | Hand `/joint_angles`: 22 float32 values per available row |
 | Wrist rotation and translation | Hand `/wrist`: world-from-wrist Transform3D, translation in metres |
 | Confidence | Hand `/confidence`: Scalars on every frame, including zero |
-| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points, absent hands, and hands at confidence ≤ 0.5 become NaN with zero confidence |
+| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points, absent hands, and hands at confidence ≤ 0 become NaN with zero confidence |
 | Subject profile JSON | `/world/gt/hands/profile`: verbatim static TextDocument with `application/json` media type |
 | Caption JSON (all ten strings) | `captions`: static Markdown TextDocument at `/task/instruction`; overall caption first, other fields as a definition list |
 
@@ -226,12 +257,10 @@ written by base, so every layer resolves its classes without another one loaded.
 UmeTrack landmarks use the Assembly-Hands index order and are
 mapped into COCO-133, including body wrists and interpolated thumb bases. Other
 body and face points remain NaN with zero confidence. Each placed hand carries
-its shipped confidence; an absent hand, or one at confidence ≤ 0.5, has NaN positions
-and zero confidence in the COCO stack. The Hub README sets `confidence > 0.5` as the
-default threshold and calls `> 0` "low-quality frames you usually want to drop"; at 0.04
-the shipped landmarks float over empty floor (`bbq_pouring-out_5d8a`, frame 138). The
-per-hand `/confidence` stream keeps the shipped value on every frame, so nothing is lost
-for a consumer who wants a different cut.
+its shipped confidence; an absent hand, or one at confidence ≤ 0, has NaN positions
+and zero confidence in the COCO stack. Hands are shown above zero confidence,
+as requested for this ingestion. Confidence colouring and per-hand Scalars
+retain shipped values; consumers can apply their own threshold.
 `landmarks_3d_mm_local` is not logged.
 
 A rectified pinhole pane shows the viewer projection of `coco133_xyz` and hides
@@ -249,8 +278,10 @@ partial pyserde schema; profiles decode the full typed UmeTrack model, with
 unknown envelope fields allowed. Profiles are stored without reserializing them.
 
 Annotation layers use `send_properties=False` and write only their own property
-groups. `hand_pose` holds string `version=v2` and float64
-`coverage_left_high_conf` / `coverage_right_high_conf` (confidence > 0.5).
+groups. `hand_pose` holds string `version=v3` and float64
+`coverage_left` / `coverage_right` (confidence > 0), used for the table's hand
+coverage columns. `coverage_left_high_conf` / `coverage_right_high_conf`
+(confidence > 0.5) remain census properties only.
 `captions` holds string `version=v1`, `hand` and `overall_caption`. The index facts a
 catalog user filters on (`subject_id`, `split`, `object_alias`, `action`) are the
 `episode` group in base: they describe the source, not a layer. The alias is the
@@ -268,7 +299,7 @@ finite-point error below 0.5 px. The mesh goldens also compare skinned landmarks
 | --- | --- | --- |
 | `object_pose/v1/.../object_pose.json` | `object_pose`: `/world/gt/objects/<alias>` Transform3D, translation in metres | Both clocks, only confidence > 0; `/confidence` Scalars on every frame |
 | HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D + temporal `albedo_factor` and `Scalars` on `/mesh` | Static blob; alpha 1 where confidence > 0.5 (the Hub README default), alpha 0 otherwise (invisible instead of held at the last pose or shown while shaky), rows only where visibility changes; the shipped confidence repeated as Scalars on every frame; int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
-| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0.5 (the Hub README default), an empty vertex row otherwise; no properties |
+| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0 (the SHOW3D ingestion rule), an empty vertex row otherwise; no properties |
 
 Object records use a partial pyserde schema. Confidence-zero records can have
 empty `R` and `t` lists; positive confidence requires finite 3×3 proper rotation
@@ -279,9 +310,7 @@ remain in the confidence signal; all posed rows remain in the transform signal.
 The object pose stream is sparse, so the viewer's latest-at would keep the static mesh
 at its last pose through every unposed frame (about a quarter of frames per scene; 67% in
 `LWA828/bbq_pouring-out_5d8a`). The `object_mesh` layer therefore logs a temporal
-`Asset3D.albedo_factor` on the `/mesh` entity: opaque white where confidence > 0.5 (the same
-Hub default the hands use; the object README says 0.5 "cuts most failures without throwing
-away usable data"), fully transparent elsewhere. Rows exist only where visibility changes;
+`Asset3D.albedo_factor` on the `/mesh` entity: opaque white where confidence > 0.5 (the object README default), fully transparent elsewhere. Rows exist only where visibility changes;
 latest-at carries them, and the static blob plus a temporal colour on one entity is ordinary
 Rerun. `Clear` cannot serve here (a cleared parent drops the static mesh at the rig origin)
 and a scale of 0 warns and still draws. The parent pose stream stays exactly as shipped. The
@@ -307,13 +336,9 @@ Left is blue, right is peach. A trusted wrist without joint angles is an input e
 not a silently dropped row. The source ships a wrist and joint angles on many frames
 it marks with confidence 0 (the tracker lost the hand; in `LWA828/bbq_pouring-out_5d8a`
 the right hand carries a wrist on 377 of its 503 confidence-0 frames). `hand_pose`
-keeps those rows verbatim. Low-confidence frames are worse than absent ones: at
-confidence 0.04 (`bbq_pouring-out_5d8a`, frame 138) the shipped left-hand landmarks
-float over empty floor in both headset images. The Hub README says to use
-`confidence > 0.5` by default and calls `> 0` "low-quality frames you usually want to
-drop", so landmarks are placed and the derived mesh is skinned only above 0.5; the mesh writes
-an empty vertex row on every other frame, so latest-at never holds a stale mesh where no
-hand is. `hand_pose` remains the only AnnotationContext owner.
+keeps those rows verbatim. Landmarks and derived meshes are shown at confidence > 0. The mesh writes an
+empty vertex row on every other frame, so latest-at never holds a stale hand.
+Triangles accompany every vertex batch. Objects keep their separate 0.5 threshold.
 The existing `/world/**` blueprint filter includes both object and hand meshes.
 
 ### Object-frame verification

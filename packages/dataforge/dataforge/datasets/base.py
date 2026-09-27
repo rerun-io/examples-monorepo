@@ -178,6 +178,9 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         """Identities of every convertible sequence found on disk."""
         return [identity for identity, _ in self.discover()]
 
+    def prefetch(self, identity: SequenceIdentity, source: SourceT, *, force: bool = False) -> None:
+        """Optionally fetch raw inputs convert will need; must not write any layer."""
+
     @abstractmethod
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:
         """Write the base (and derived) layer rrds of one sequence; return the base path."""

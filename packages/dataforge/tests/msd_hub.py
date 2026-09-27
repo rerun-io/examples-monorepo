@@ -27,7 +27,7 @@ from dataforge.datasets import msd
 from dataforge.datasets.msd import MSD_DEVICES, REPO_ID, MsdConfig, MsdDevice, MsdDeviceChoice
 
 REVISION_SHA: str = "0123456789abcdef0123456789abcdef01234567"
-"""Fake resolved repo revision every test's ``repo_revision`` stub returns."""
+"""Pinned fake repository revision for the synthetic Hub."""
 
 SEQUENCE: str = "MIO09_short_1_updown"
 """Sequence stem of every synthetic archive below; also its top directory inside the zip."""
@@ -198,7 +198,7 @@ def build_hub(
     calibration_file.parent.mkdir(parents=True, exist_ok=True)
     calibration_file.write_bytes(calibration_fixture(device).read_bytes())
 
-    # Pinned: every listing and fetch must ask for the sha repo_revision resolves.
+    # Pinned: every listing and fetch must ask for the configured full SHA.
     store: HubStore = HubStore({REPO_ID: REVISION_SHA})
     store.add_tree(REPO_ID, remote)
     store.add(REPO_ID, f"{collection_path}/README.md", b"# collection\n")
@@ -207,7 +207,7 @@ def build_hub(
     store.install(monkeypatch, msd, transports)
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
 
-    config: MsdConfig = MsdConfig(device=device, root=root, raw_budget_gb=raw_budget_gb, keep_raw=keep_raw)
+    config: MsdConfig = MsdConfig(device=device, root=root, revision=REVISION_SHA, raw_budget_gb=raw_budget_gb, keep_raw=keep_raw)
     return FakeHub(
         remote=remote,
         root=root,
