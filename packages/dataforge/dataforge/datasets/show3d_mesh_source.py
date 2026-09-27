@@ -15,6 +15,7 @@ from dataforge.datasets.show3d_source import OBJECTS
 from dataforge.objects import strip_texture_transform
 from dataforge.records import read_json
 
+MESH_REVISION: str = "30fe9674782f32e1e5edba98476b6ff4300132c5"
 MESH_REPO: str = "bop-benchmark/hot3d"
 
 
@@ -61,12 +62,9 @@ def stripped_mesh(raw_root: Path, alias: str) -> MeshAsset:
 def download_meshes(raw_root: Path) -> None:
     """Fetch the BOP census and all mapped assets; strip each mesh once."""
     root: Path = raw_root / "assets/hot3d_bop"
-    revision: str | None = transports.repo_revision(MESH_REPO, None)
-    if revision is None:
-        raise RuntimeError(f"{MESH_REPO}: no commit SHA")
     info: str = "object_models/models_info.json"
     if transports.local_verify(root, required=[info]):
-        transports.hf_fetch_files(MESH_REPO, [info], local_dir=root, revision=revision)
+        transports.hf_fetch_files(MESH_REPO, [info], local_dir=root, revision=MESH_REVISION)
     ids: dict[str, int] = mesh_ids(root)
     (root / "stripped").mkdir(parents=True, exist_ok=True)
     for mesh_id in sorted(set(ids.values())):
@@ -75,7 +73,7 @@ def download_meshes(raw_root: Path) -> None:
         target: Path = root / f"stripped/obj_{mesh_id:06d}.glb"
         if not target.is_file():
             if not raw.is_file():
-                transports.hf_fetch_files(MESH_REPO, [name], local_dir=root, revision=revision)
+                transports.hf_fetch_files(MESH_REPO, [name], local_dir=root, revision=MESH_REVISION)
             temporary: Path = target.with_suffix(".glb.tmp")
             temporary.write_bytes(strip_texture_transform(raw.read_bytes()))
             temporary.replace(target)

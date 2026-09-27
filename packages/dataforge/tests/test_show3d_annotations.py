@@ -398,10 +398,10 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     pixels[5] = [10.0, 20.0]
     pixels[6] = [50.0, 60.0]
     pixels[1] = None
-    left: HandPose = HandPose(0.6, None, None, None, landmarks, {"headset0": pixels})
+    left: HandPose = HandPose(0.3, None, None, None, landmarks, {"headset0": pixels})
     right: HandPose = HandPose(1.0, None, None, None, landmarks, {"headset1": pixels})
     absent: HandPose = HandPose(0.75, None, None, None, None, None)
-    low: HandPose = HandPose(0.5, None, None, None, landmarks, {"headset0": pixels})  # at the threshold: shipped but not placed
+    low: HandPose = HandPose(0.0, None, None, None, landmarks, {"headset0": pixels})  # at the threshold: shipped but not placed
     frames: list[HandFrame] = [
         HandFrame(0, 20, 1.0, [], {"0": left, "1": right}),
         HandFrame(1, 21, 2.0, [], {"0": low, "1": right}),
@@ -444,9 +444,9 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             np.testing.assert_allclose(points[0, 95], [1.0, 2.0, 3.0])
             np.testing.assert_allclose(points[0, [9, 91]], [[2.0, 4.0, 6.0]] * 2)
             np.testing.assert_allclose(points[0, 92], [3.0, 5.0, 7.0])
-            assert confidence[0, 91:112] == pytest.approx(0.6)
-            assert confidence[0, 9] == pytest.approx(0.6)
-            assert np.isnan(points[1, 91:112]).all()  # confidence 0.5 is not above the README default
+            assert confidence[0, 91:112] == pytest.approx(0.3)
+            assert confidence[0, 9] == pytest.approx(0.3)
+            assert np.isnan(points[1, 91:112]).all()  # confidence zero is hidden
             assert (confidence[1, 91:112] == 0.0).all()
             assert (confidence[:, 112:133] == 1.0).all()
             assert (confidence[:, 10] == 1.0).all()
@@ -459,6 +459,12 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             np.testing.assert_allclose(points[0, offset + 1], [30.0, 40.0])
             assert np.isnan(points[0, offset + 8]).all()  # Null index fingertip.
             assert confidence[0, offset + 8] == 0.0
-            assert confidence[0, offset + 4] == pytest.approx(0.6 if offset == 91 else 1.0)
+            assert confidence[0, offset + 4] == pytest.approx(0.3 if offset == 91 else 1.0)
             assert (confidence[~np.isfinite(points).all(axis=2)] == 0.0).all()
     assert not any(str(chunk.entity_path).endswith(("/landmarks", "/uv")) for chunk in chunks)
+
+    props = recording_properties(read_back(target), "hand_pose")
+    assert props["version"] == "v3"
+    assert props["coverage_left"] == 0.5
+    assert props["coverage_left_high_conf"] == 0.0
+    assert props["coverage_right"] == props["coverage_right_high_conf"] == 1.0

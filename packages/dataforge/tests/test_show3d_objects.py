@@ -143,8 +143,8 @@ def mesh_vertex_counts(chunks: Sequence[rrc.Chunk]) -> dict[int, int]:
 
 
 @pytest.mark.integration
-def test_hand_mesh_skins_only_above_default_confidence_and_clears_other_frames(show3d_scene_inputs: Show3dSceneInputs, tmp_path: Path) -> None:
-    """Wrists ship at confidence 0 and below the README default 0.5; the derived mesh draws neither, and other frames hold nothing."""
+def test_hand_mesh_skins_positive_confidence_and_clears_other_frames(show3d_scene_inputs: Show3dSceneInputs, tmp_path: Path) -> None:
+    """Positive-confidence wrists are skinned; zero-confidence and absent wrists leave no mesh."""
     inputs: Show3dSceneInputs = show3d_scene_inputs
     good: HandPose = next(
         f.hand_poses["1"]
@@ -160,11 +160,12 @@ def test_hand_mesh_skins_only_above_default_confidence_and_clears_other_frames(s
         for f, pose in zip(base, [good, low, lost, absent], strict=True)
     ]
     target: Path = tmp_path / "hand_mesh.rrd"
-    write_hand_mesh_layer(inputs.identity, inputs.scene, hands, inputs.profile.model, target)
+    clock: FrameClock = FrameClock(inputs.scene.info, base, inputs.scene.times_ns[:4], inputs.scene.frame_indices[:4])
+    write_hand_mesh_layer(inputs.identity, clock, hands, inputs.profile.model, target)
     chunks: list[rrc.Chunk] = read_chunks(target)
     right: dict[int, int] = mesh_vertex_counts([c for c in chunks if str(c.entity_path) == schema.hand_mesh_path("right") and not c.is_static])
     left: dict[int, int] = mesh_vertex_counts([c for c in chunks if str(c.entity_path) == schema.hand_mesh_path("left") and not c.is_static])
-    assert right == {base[0].index: len(inputs.profile.model.mesh_vertices), base[1].index: 0, base[2].index: 0, base[3].index: 0}
+    assert right == {base[0].index: len(inputs.profile.model.mesh_vertices), base[1].index: len(inputs.profile.model.mesh_vertices), base[2].index: 0, base[3].index: 0}
     assert left == {f.index: 0 for f in base}
 
 
@@ -431,12 +432,8 @@ def test_mesh_download_matches_names_and_strips_once(tmp_path: Path, monkeypatch
     glb: bytes = struct.pack("<4sIII4s", b"glTF", 2, 20 + len(payload), len(payload), b"JSON") + payload
     fetched: list[list[str]] = []
 
-    def revision(repo_id: str, revision: str | None) -> str:
-        assert repo_id == MESH_REPO
-        return "bop-test-sha"
-
     def fetch(repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str) -> Path:
-        assert repo_id == MESH_REPO and revision == "bop-test-sha"
+        assert repo_id == MESH_REPO and revision == "30fe9674782f32e1e5edba98476b6ff4300132c5"
         fetched.append(list(paths))
         for name in paths:
             path: Path = local_dir / name
@@ -444,7 +441,6 @@ def test_mesh_download_matches_names_and_strips_once(tmp_path: Path, monkeypatch
             path.write_bytes(json.dumps(census).encode() if name.endswith(".json") else glb)
         return local_dir
 
-    monkeypatch.setattr(transports, "repo_revision", revision)
     monkeypatch.setattr(transports, "hf_fetch_files", fetch)
     download_meshes(tmp_path)
     assert fetched[0] == ["object_models/models_info.json"]
@@ -537,3 +533,35 @@ def test_convert_pending_unmapped_object_pose_prints_notice(
     ]
     assert paths.rrd_path(paths.output_root(), layer="object_pose", identity=identity).is_file()
     assert not paths.rrd_path(paths.output_root(), layer="object_mesh", identity=identity).exists()
+
+
+def test_synthetic_hand_mesh_keeps_point_three_and_clears_zero(tmp_path):
+    from test_umetrack import umetrack_model_document
+    model = from_dict(HandModelNumpy, umetrack_model_document())
+    clock = FrameClock(RecordingInfo(0, 2, 60.0, {}), [FrameInfo(i, i, float(i), []) for i in range(2)], np.array([0, 1], dtype=np.int64), np.array([0, 1], dtype=np.int64))
+    absent = HandPose(0.0, None, None, None, None, None)
+    frames = [HandFrame(i, i, float(i), [], {'0': HandPose(conf, np.zeros(22, dtype=np.float32), np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32), None, None), '1': absent}) for i, conf in enumerate([0.3, 0.0])]
+    target = tmp_path / 'mesh.rrd'
+    write_hand_mesh_layer(SequenceIdentity('show3d', ('S', 'none_wave_abcd')), clock, frames, model, target)
+    chunks = [c for c in read_chunks(target) if str(c.entity_path) == schema.hand_mesh_path('left') and not c.is_static]
+    assert mesh_vertex_counts(chunks) == {0: 3, 1: 0}
+    batch = chunks[0].to_record_batch()
+    np.testing.assert_allclose(batch.column('Mesh3D:vertex_positions')[0].as_py(), [[0, 0, 0], [.01, 0, 0], [0, .01, 0]])
+    assert 'Mesh3D:triangle_indices' in batch.schema.names
+    assert not ObjectFrame(0, 0, 0.0, [], np.eye(3).tolist(), [[0.0], [0.0], [0.0]], .3).trusted
+
+
+def test_object_mesh_keeps_half_confidence_threshold(tmp_path):
+    mesh = tmp_path / 'object.glb'
+    payload = b'{"asset":{"version":"2.0"}}'
+    payload += b' ' * (-len(payload) % 4)
+    mesh.write_bytes(struct.pack('<4sIII4s', b'glTF', 2, 20 + len(payload), len(payload), b'JSON') + payload)
+    frames = [ObjectFrame(i, i, float(i), [], np.eye(3).tolist(), [[0.0], [0.0], [1000.0]], confidence) for i, confidence in enumerate([.3, .6])]
+    clock = FrameClock(RecordingInfo(0, 2, 60.0, {}), [FrameInfo(i, i, float(i), []) for i in range(2)], np.array([0, 1], dtype=np.int64), np.array([0, 1], dtype=np.int64))
+    target = tmp_path / 'objects.rrd'
+    write_object_mesh_layer(SequenceIdentity('show3d', ('S', 'keyboard_wave_abcd')), 'keyboard', clock, frames, 1, mesh, target)
+    batches = [c.to_record_batch() for c in read_chunks(target) if str(c.entity_path) == schema.object_mesh_path('keyboard') and not c.is_static]
+    alpha = next(b.column('Asset3D:albedo_factor').to_pylist() for b in batches if 'Asset3D:albedo_factor' in b.schema.names)
+    assert [row[0] & 255 for row in alpha] == [0, 255]
+    confidence = next(b.column('Scalars:scalars').to_pylist() for b in batches if 'Scalars:scalars' in b.schema.names)
+    np.testing.assert_allclose(confidence, [[.3], [.6]])

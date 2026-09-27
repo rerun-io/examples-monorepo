@@ -85,9 +85,9 @@ from dataforge.datasets.msd_layers import (
     write_gt_layer,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.transports import repo_revision
 from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 
+REVISION: str = "74c07d42d980c55775dd0edc06e58c486b848be1"
 REPO_ID: str = "collabora/monado-slam-datasets"
 """HuggingFace dataset repo holding every MSD device."""
 REPO_ROOT: str = "M_monado_datasets"
@@ -206,10 +206,8 @@ class MsdConfig(DataforgeDatasetConfig):
     raw_budget_gb: float = 50.0
     """Cap on what ``root`` may hold. A sequence whose archives alone exceed it is
     processed anyway with a warning; leftovers that would breach it are an error."""
-    revision: str | None = None
-    """Repo branch, tag or commit to resolve; ``None`` takes the default branch.
-    Only an input: what every hub call and every rrd records is the *sha* it
-    resolves to (see ``MsdDataset.commit_sha``)."""
+    revision: str = REVISION
+    """Pinned Hub commit; a deliberate override must be a full lowercase commit SHA."""
 
     @property
     def name(self) -> str:
@@ -217,7 +215,7 @@ class MsdConfig(DataforgeDatasetConfig):
         return f"{self.command}-{self.device}"
 
 
-def list_collection_files(repo_id: str, collection_path: str, revision: str | None = None) -> list[tuple[str, int]]:
+def list_collection_files(repo_id: str, collection_path: str, revision: str = REVISION) -> list[tuple[str, int]]:
     """List one remote collection directory as ``(repo-relative path, size in bytes)``.
 
     The whole HF listing surface of this dataset, isolated so tests can replace
@@ -226,11 +224,12 @@ def list_collection_files(repo_id: str, collection_path: str, revision: str | No
     Args:
         repo_id: Hub dataset repo, normally ``REPO_ID``.
         collection_path: Repo-relative directory to list (not recursive).
-        revision: Branch, tag or commit; ``None`` takes the default branch.
+        revision: Full pinned commit SHA.
 
     Returns:
         One entry per *file* directly inside the directory; subdirectories are dropped.
     """
+    transports.require_commit_sha(revision)
     entries = HfApi().list_repo_tree(repo_id, path_in_repo=collection_path, repo_type="dataset", revision=revision)
     return [(entry.path, entry.size) for entry in entries if isinstance(entry, RepoFile)]
 
@@ -350,29 +349,8 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
 
     @functools.cached_property
     def commit_sha(self) -> str:
-        """The one repo commit this whole run reads, resolved once per dataset instance.
-
-        ``config.revision`` is only the *input*: a branch name moves, so listing
-        a collection on ``main``, fetching an archive on ``main`` an hour later
-        and stamping a third answer into the rrd could describe three different
-        trees. Resolving the branch to a sha up front and passing that sha to
-        every hub call makes the whole conversion one commit, and makes the
-        recorded ``hf_revision`` the sha the bytes actually came from.
-
-        Lazily, and deliberately not inside a recording: a batch run asks the hub
-        once instead of once per sequence, and ``convert`` warms it before it
-        encodes anything, so a transient network failure cannot land on a
-        finished encode.
-
-        Raises:
-            RuntimeError: The hub named no sha for ``config.revision``, so there
-                is nothing to pin the conversion to.
-        """
-        resolved: str | None = repo_revision(REPO_ID, self.config.revision)
-        if resolved is None:
-            named: str = self.config.revision or "the default branch"
-            raise RuntimeError(f"{REPO_ID} resolved no commit sha for {named}; a conversion has to name the tree it read")
-        return resolved
+        """Validate the pinned commit used by every fetch and recording in this run."""
+        return transports.require_commit_sha(self.config.revision)
 
     def fetch_calibration(self) -> Path:
         """Fetch the device's ``calibration.json`` into ``root`` and return where it landed.
@@ -544,11 +522,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         if len(locations.archives) > 1:
             resolve_seven_zip()
         self.enforce_raw_budget(source, locations.archives)
-        # Both hub lookups happen before the archives are pulled and long before a
-        # frame is encoded: neither a bad calibration nor a transient revision
-        # lookup may throw away a multi-gigabyte download and an hour of encoding.
-        # (The calibration fetch resolves the sha on its own; this only makes the
-        # ordering explicit for a scratch dir that already holds the file.)
+        # Validate the pin before fetching calibration or encoding any frames.
         _ = self.commit_sha
         cameras: tuple[CalibratedCamera, ...] = self.calibration()
         self.warn_on_follow_frame(cameras)

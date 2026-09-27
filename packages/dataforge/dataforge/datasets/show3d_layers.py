@@ -12,7 +12,6 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde.json import to_json
 from simplecv.data.skeleton.coco133_layers import COCO133_ROI_LABELS, Coco133RoiLayer
 
@@ -31,7 +30,7 @@ from dataforge.datasets.show3d_source import (
     read_headset_calibrations,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_pose_track, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_dense_pose_track, log_rig_node, log_video_stream
 from dataforge.records import read_json
 from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4_gray
@@ -166,18 +165,18 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
 
 
 def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path, timer: SequenceTimer) -> list[str]:
-    """Encode at most three clips at once, then log and remove them in order; return their ``source_resolution`` entries."""
+    """Encode at most six clips at once, then log and remove them in order; return their ``source_resolution`` entries."""
     work_dir.mkdir(parents=True, exist_ok=True)
     resolutions: list[str] = []
     clips: list[Path] = [work_dir / f"{camera.camera.source_name}.mp4" for camera in scene.cameras]
 
     def encode(source: SceneCamera, clip: Path) -> None:
         transcode_mp4_gray(
-            source.video, clip, gop=AV1_GOP, cq=AV1_CQ, fps=int(scene.info.fps), frames=len(scene.frames),
+            source.video, clip, gop=AV1_GOP, cq=AV1_CQ, fps=int(scene.info.fps), frames=len(scene.frames), decode="cuda",
         )
 
     jobs = [(clip, partial(encode, source, clip)) for source, clip in zip(scene.cameras, clips, strict=True)]
-    with parallel_clips(jobs, timer) as encoded:
+    with parallel_clips(jobs, timer, workers=6) as encoded:
         for source, clip in zip(scene.cameras, encoded, strict=True):
             camera: Show3dCamera = source.camera
             log_camera_node(
@@ -256,19 +255,15 @@ def log_headset(recording: rr.RecordingStream, scene: Scene) -> None:
                 columns=rr.AnyValues.columns(**{key: pa.array([value for _, value in rows], type=dtype)}),
                 recording=recording,
             )
-    posed: list[tuple[int, Float64[ndarray, "4 4"]]] = [
-        (int(offset), pose.T_WorldFromCamera) for pose, offset in zip(scene.poses, scene.offsets, strict=True) if pose.T_WorldFromCamera is not None
-    ]
-    if posed:
-        posed_positions: list[int] = [position for position, _ in posed]
-        transforms: Float64[ndarray, "n 4 4"] = np.stack([transform for _, transform in posed])
-        log_pose_track(
-            recording,
-            schema.rig_path(1),
-            times_ns=scene.times_ns[posed_positions],
-            frame_indices=scene.frame_indices[posed_positions],
-            translations_xyz=transforms[:, :3, 3] * 0.001,
-            quaternions_xyzw=Rotation.from_matrix(transforms[:, :3, :3]).as_quat(),
+    if scene.poses:
+        transforms: Float64[ndarray, "n 4 4"] = np.full((len(scene.poses), 4, 4), np.nan, dtype=np.float64)
+        for index, pose in enumerate(scene.poses):
+            if pose.is_pose_valid is not False and pose.T_WorldFromCamera is not None:
+                transforms[index] = pose.T_WorldFromCamera
+        transforms[:, :3, 3] *= 0.001
+        log_dense_pose_track(
+            recording, schema.rig_path(1), times_ns=scene.times_ns[scene.offsets],
+            frame_indices=scene.frame_indices[scene.offsets], transforms=transforms,
         )
 
 
@@ -312,7 +307,7 @@ def write_base_layer(
             recording,
             identity,
             hf_revision=hf_revision,
-            num_frames=len(scene.frames),
+            num_frames=len(scene.frames), decode="cuda",
             num_cameras=len(scene.cameras),
             source_resolution=pa.array(resolutions),
             num_synthesized_headset_poses=pa.array([sum(pose.is_synthesized for pose in scene.poses)], type=pa.int64()),

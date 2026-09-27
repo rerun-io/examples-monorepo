@@ -19,8 +19,8 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import (
 
 from dataforge import hands, logging_toolkit, paths, schema, writing
 from dataforge.datasets.show3d_source import (
-    DEFAULT_CONFIDENCE,
     HAND_POSE_VERSION,
+    HAND_TRUST,
     HEADSET_CAMERAS,
     FrameClock,
     FrameInfo,
@@ -52,8 +52,8 @@ class HandPose:
 
     @property
     def trusted(self) -> bool:
-        """Above the Hub's default threshold; the one place that rule lives."""
-        return self.confidence > DEFAULT_CONFIDENCE
+        """Above zero confidence, as requested for SHOW3D hands."""
+        return self.confidence > HAND_TRUST
 
     def __post_init__(self) -> None:
         if not isfinite(self.confidence):
@@ -147,6 +147,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 recording, side.name, times_ns=clock.times_ns, frame_indices=clock.frame_indices,
                 confidence=np.asarray(confidence, dtype=np.float64),
             )
+            coverage[f"coverage_{side.name}"] = pa.array([sum(value > HAND_TRUST for value in confidence) / len(confidence)], type=pa.float64())
             coverage[f"coverage_{side.name}_high_conf"] = pa.array([high_confidence_coverage(confidence)], type=pa.float64())
             positions, values = sparse_rows(poses, lambda pose: pose.joint_angles)
             angles: Float32[ndarray, "n 22"] = np.asarray(values, dtype=np.float32).reshape(-1, NUM_JOINTS_PER_HAND)
@@ -170,7 +171,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
     The source ships a wrist and joint angles for many frames it marks with confidence 0
     (the tracker lost the hand) and for low-confidence frames whose landmarks float far
     from any hand. Those rows are kept verbatim in ``hand_pose``; this derived layer skins
-    only frames with a wrist and confidence > ``DEFAULT_CONFIDENCE``, and writes an empty
+    only frames with a wrist and confidence > ``HAND_TRUST``, and writes an empty
     vertex row on every other frame so the viewer's latest-at never holds a stale mesh.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
