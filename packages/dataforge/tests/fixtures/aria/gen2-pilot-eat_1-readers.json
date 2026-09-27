@@ -1,0 +1,59 @@
+{
+ "recording": "Aria Gen2 Pilot eat_1/video.vrs",
+ "made_with": "projectaria-tools 2.3.0 create_vrs_data_provider: get_timestamps_ns(DEVICE_TIME) per camera, get_imu_data_by_index per IMU record",
+ "hash": "sha256 of the little-endian array bytes: int64 clocks, uint8 valid flags, float32 accel/gyro, int64 per-frame hashes",
+ "hevc_streams": {
+  "214-1": {
+   "count": 3243,
+   "first_ns": 2896888528954,
+   "last_ns": 3221069282579,
+   "sha256": "d58773e6f121cb0830620bd381695986855b20342b6b9cc9ed30768826ead073"
+  },
+  "1201-1": {
+   "count": 9731,
+   "first_ns": 2896895297232,
+   "last_ns": 3221228596577,
+   "sha256": "d5fc3b93a8817a9972d9c8452bc6baf12eaed20dd8864ea21017033247407d69"
+  },
+  "1201-2": {
+   "count": 9731,
+   "first_ns": 2896895295482,
+   "last_ns": 3221228596337,
+   "sha256": "cc61e041bccfa7023b97b0dbf416832bf35f514e0ce0690c9cbd45dc8760769f"
+  },
+  "1201-3": {
+   "count": 9731,
+   "first_ns": 2896895295773,
+   "last_ns": 3221228596649,
+   "sha256": "8d49e7b078a1e5bb8ac53666df0e2414170326d2313280f32b623438bc0aceea"
+  },
+  "1201-4": {
+   "count": 9731,
+   "first_ns": 2896895295525,
+   "last_ns": 3221228599077,
+   "sha256": "0c8c6edcdc43765cf881facefc686c8d5d5f7ef73b03bcfc20f9e1bfbbc1f244"
+  }
+ },
+ "imu_streams": {
+  "1202-1": {
+   "count": 259617,
+   "sha256": {
+    "capture_timestamp_ns": "906488017114eb01bba7b088a97210c64ee314d7d0862936bb980f01a1660166",
+    "accel_valid": "15f8c8f088f4219f90bfc33efef6cf3632cf2a626e19e7909decbd18036a51bf",
+    "gyro_valid": "15f8c8f088f4219f90bfc33efef6cf3632cf2a626e19e7909decbd18036a51bf",
+    "accel_msec2": "97465a1b16d09725d445dc7d2e65705db41d69b74e44e042c406e7d392e974d5",
+    "gyro_radsec": "b8a1b81cfac48aa83036197f822c7e9d39d83ccd498b416f28b10f25626bc286"
+   }
+  },
+  "1202-2": {
+   "count": 260003,
+   "sha256": {
+    "capture_timestamp_ns": "2622ea4acc21137a7da4bf8eb9554f83cbbd5084b41a385eede2c3621ffc7a3a",
+    "accel_valid": "12a6d89c3c2ebc5837caa46b086d6c776f7b0044abe22c85be6a5dc80b77e4e1",
+    "gyro_valid": "12a6d89c3c2ebc5837caa46b086d6c776f7b0044abe22c85be6a5dc80b77e4e1",
+    "accel_msec2": "e2c0d3ea4ab25cdc50e39535827caf1bccea07dd31cef54c5960e2d9b022f723",
+    "gyro_radsec": "7f3e5b83a903fd95c187518815bddfc0ea90a1cd28cecbe8ca5ae507d92e4b82"
+   }
+  }
+ }
+}
