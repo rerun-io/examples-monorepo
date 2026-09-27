@@ -1,0 +1,47 @@
+{
+ "recording": "HOT3D Aria P0015_179e1b84/recording.vrs",
+ "made_with": "projectaria-tools 2.3.0 create_vrs_data_provider: get_timestamps_ns(DEVICE_TIME) per camera, get_imu_data_by_index per IMU record",
+ "hash": "sha256 of the little-endian array bytes: int64 clocks, uint8 valid flags, float32 accel/gyro, int64 per-frame hashes",
+ "jpeg_streams": {
+  "214-1": {
+   "count": 1014,
+   "first_ns": 126157119306975,
+   "last_ns": 126190885818100,
+   "sha256": "11f8163b39350b5d3dfcd048626539ce01c0851e240cb26af36aec0615e09e88"
+  },
+  "1201-1": {
+   "count": 1014,
+   "first_ns": 126157119401025,
+   "last_ns": 126190885913025,
+   "sha256": "884285ca18df694c6b07eb5377e7530a73e2d706f62c0cd5412b9dab7770c7a5"
+  },
+  "1201-2": {
+   "count": 1014,
+   "first_ns": 126157119401037,
+   "last_ns": 126190885913037,
+   "sha256": "2462ed733ce32e0d69cd15590eb0ce874e05dabdf504b8a5b652072cd3adcc78"
+  }
+ },
+ "imu_streams": {
+  "1202-1": {
+   "count": 34544,
+   "sha256": {
+    "capture_timestamp_ns": "fe33ff1f4fb24cdf843a63616dfecfb4e65a83921c845985bec0cfafc2f7be9a",
+    "accel_valid": "1b2b3433dd204b0e5823b8e589c00f483a6a095844d7fbe578e7df86ea515d1f",
+    "gyro_valid": "1b2b3433dd204b0e5823b8e589c00f483a6a095844d7fbe578e7df86ea515d1f",
+    "accel_msec2": "a29fe482f57fc9a1ece42b745c5ab05e33be56f9deb0a630171de8b2a26edee7",
+    "gyro_radsec": "5a220ba9212041b965a81cbeee66623852fce44051908e98d2d50ff15d29e976"
+   }
+  },
+  "1202-2": {
+   "count": 27519,
+   "sha256": {
+    "capture_timestamp_ns": "8bc217e8ed173b21aeda7875a2946b8675974c6b6f2fe8dbb32f49d46417ebf1",
+    "accel_valid": "a0b6a00db4e92ec381940f5ac605ceb6451ff884a6a9e9d45e1eaf4577995b41",
+    "gyro_valid": "a0b6a00db4e92ec381940f5ac605ceb6451ff884a6a9e9d45e1eaf4577995b41",
+    "accel_msec2": "ea5f4f0258c91de7bdba6991974a8a6bc12709f5671350400193ea71bba9db7c",
+    "gyro_radsec": "4adfa4d27a1474a9c9c350d93171755511dd7f8c16c5f9f82027abc409953cb1"
+   }
+  }
+ }
+}
