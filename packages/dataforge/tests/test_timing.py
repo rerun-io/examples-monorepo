@@ -110,68 +110,102 @@ def test_converter_without_capture_report(tmp_path: Path, monkeypatch) -> None:
     assert record.capture_s is None
 
 
-def test_one_scene_prefetch_overlaps_and_failure_is_recorded(tmp_path, monkeypatch):
+def test_one_scene_prefetch_overlaps_and_failure_is_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from threading import Event
+
     started = Event()
     first_done = Event()
     prefetched = Event()
-    identities = [SequenceIdentity('robocap', (name,)) for name in ('a', 'b', 'c')]
-    monkeypatch.setenv('DATAFORGE_OUTPUT_ROOT', str(tmp_path))
-    monkeypatch.setattr(RobocapDataset, 'discover', lambda self: [(i, tmp_path) for i in identities])
-    def prefetch(self, identity, source, *, force):
+    identities = [SequenceIdentity("robocap", (name,)) for name in ("a", "b", "c")]
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
+    monkeypatch.setattr(RobocapDataset, "discover", lambda self: [(i, tmp_path) for i in identities])
+
+    def prefetch(self: RobocapDataset, identity: SequenceIdentity, source: Path, *, force: bool) -> None:
         assert force
         if identity == identities[1]:
             started.set()
             assert first_done.wait(3)
-            raise OSError('prefetch failed')
+            raise OSError("prefetch failed")
         assert identity == identities[2]
         prefetched.set()
-    def write(self, identity, source, *, force):
+
+    def write(self: RobocapDataset, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         if identity == identities[0]:
-            assert started.wait(3), 'next fetch did not overlap conversion'
+            assert started.wait(3), "next fetch did not overlap conversion"
             first_done.set()
         else:
             assert identity == identities[2]
-            assert prefetched.is_set(), 'conversion did not await fetch'
-        target = self.targets(identity)['base']
+            assert prefetched.is_set(), "conversion did not await fetch"
+        target = self.targets(identity)["base"]
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b'converted')
+        target.write_bytes(b"converted")
         return target
-    monkeypatch.setattr(RobocapDataset, 'prefetch', prefetch, raising=False)
-    monkeypatch.setattr(RobocapDataset, 'convert', write)
-    with pytest.raises(SystemExit, match='1 of 3'):
+
+    monkeypatch.setattr(RobocapDataset, "prefetch", prefetch, raising=False)
+    monkeypatch.setattr(RobocapDataset, "convert", write)
+    with pytest.raises(SystemExit, match="1 of 3"):
         convert.main(convert.Config(dataset=RobocapConfig(), force=True))
-    records = load_records(tmp_path / 'timing/convert.jsonl', ConvertRecord)
-    assert [r.error for r in records] == [None, 'OSError: prefetch failed', None]
-    assert 'fetch' in records[1].stage_s
+    records = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)
+    assert [r.error for r in records] == [None, "OSError: prefetch failed", None]
 
 
-def test_conversion_waits_for_prefetch_completion(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed", [False, True])
+def test_conversion_waits_for_prefetch_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool) -> None:
     from concurrent.futures import Future, ThreadPoolExecutor
     from threading import Event
+
     entered = Event()
     called = Event()
-    monkeypatch.setenv('DATAFORGE_OUTPUT_ROOT', str(tmp_path))
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
     dataset = RobocapConfig().setup()
-    identity = SequenceIdentity('robocap', ('a',))
+    identity = SequenceIdentity("robocap", ("a",))
     pending = Future()
-    def write(self, identity, source, *, force):
+
+    def write(self: RobocapDataset, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         called.set()
-        target = self.targets(identity)['base']
+        target = self.targets(identity)["base"]
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b'done')
+        target.write_bytes(b"done")
         return target
-    monkeypatch.setattr(RobocapDataset, 'convert', write)
-    def run():
+
+    monkeypatch.setattr(RobocapDataset, "convert", write)
+
+    def run() -> ConvertRecord:
         entered.set()
-        return convert.convert_one(dataset, identity, tmp_path, force=False, version='test', prefetched=pending)
+        return convert.convert_one(dataset, identity, tmp_path, force=False, version="test", prefetched=pending)
+
     with ThreadPoolExecutor(max_workers=1) as pool:
         result = pool.submit(run)
         try:
             assert entered.wait(2)
-            assert not called.wait(.1)
+            assert not called.wait(0.1)
         finally:
-            pending.set_result(None)
+            if failed:
+                pending.set_exception(OSError("fetch failed"))
+            else:
+                pending.set_result(None)
         record = result.result(timeout=3)
-    assert called.is_set()
-    assert record.error is None and 'fetch' in record.stage_s
+    assert called.is_set() is not failed
+    assert record.error == ("OSError: fetch failed" if failed else None)
+    assert "fetch" in record.stage_s
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_finished_prefetch_has_no_fetch_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool) -> None:
+    from concurrent.futures import Future
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig())
+    identity: SequenceIdentity = SequenceIdentity("robocap", ("ready",))
+    pending: Future[None] = Future()
+    target: Path = dataset.targets(identity)["base"]
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"existing")
+    monkeypatch.setattr(RobocapDataset, "convert", lambda self, identity, source, *, force: target)
+    if failed:
+        pending.set_exception(OSError("fetch failed"))
+    else:
+        pending.set_result(None)
+    record: ConvertRecord = convert.convert_one(dataset, identity, tmp_path, force=False, version="test", prefetched=pending)
+    assert "fetch" not in record.stage_s
+    assert record.error == ("OSError: fetch failed" if failed else None)

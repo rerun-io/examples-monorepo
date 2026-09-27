@@ -178,8 +178,11 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         """Identities of every convertible sequence found on disk."""
         return [identity for identity, _ in self.discover()]
 
-    def prefetch(self, identity: SequenceIdentity, source: SourceT, *, force: bool = False) -> None:
-        """Optionally fetch raw inputs convert will need; must not write any layer."""
+    def prefetch(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> None:
+        """Optionally fetch raw inputs on a background thread.
+
+        Must not touch self.timer, recordings, or print per-sequence progress.
+        """
 
     @abstractmethod
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:

@@ -221,8 +221,8 @@ NVENC_SLOT_DIR: Path = Path("/tmp/dataforge-nvenc")
 
 
 @contextlib.contextmanager
-def nvenc_slot() -> Iterator[None]:
-    """Hold one machine-wide NVENC slot for the lifetime of an ffmpeg process."""
+def nvenc_slot() -> Iterator[int]:
+    """Yield a locked fd for ffmpeg to inherit; release explicitly after the child exits."""
     value: str = os.environ.get("DATAFORGE_NVENC_SLOTS", "6")
     try:
         slots: int = int(value)
@@ -241,7 +241,7 @@ def nvenc_slot() -> Iterator[None]:
                 except BlockingIOError:
                     continue
                 try:
-                    yield
+                    yield slot.fileno()
                 finally:
                     fcntl.flock(slot, fcntl.LOCK_UN)
                 return
@@ -253,19 +253,19 @@ def nvenc_slot() -> Iterator[None]:
 
 def nvenc_session_failure(stderr: str) -> bool:
     """Driver session-limit messages that need an encode retry, never a decode fallback."""
-    return any(message in stderr for message in ("OpenEncodeSessionEx failed", "incompatible client key", "No capable devices found"))
+    return any(message in stderr for message in ("OpenEncodeSessionEx failed", "incompatible client key"))
 
 
-def run_nvenc(run: Callable[[], subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
+def run_nvenc(run: Callable[[int], subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
     """Run an encoder in a shared slot; on a session-limit failure release it, back off 2-32 s and retry."""
     for delay in (2.0, 4.0, 8.0, 16.0, 32.0):
-        with nvenc_slot():
-            result: subprocess.CompletedProcess[str] = run()
+        with nvenc_slot() as fd:
+            result: subprocess.CompletedProcess[str] = run(fd)
         if result.returncode == 0 or not nvenc_session_failure(result.stderr):
             return result
         time.sleep(delay)
-    with nvenc_slot():
-        return run()
+    with nvenc_slot() as fd:
+        return run(fd)
 
 
 def _nvenc_args(*, gop: int, cq: int) -> list[str]:
@@ -314,7 +314,7 @@ def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: in
             "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq),
             "-frames:v", str(frames), str(output),
         ]
-        return run_nvenc(functools.partial(subprocess.run, command, capture_output=True, text=True, check=False))
+        return run_nvenc(lambda fd: subprocess.run(command, pass_fds=(fd,), capture_output=True, text=True, check=False))
 
     cuda: bool = decode == "cuda" and crop is None
     result: subprocess.CompletedProcess[str] = run(cuda=cuda)
@@ -408,8 +408,8 @@ def encode_frames_to_mp4(
     complaints: list[bytes] = []
     fed: int = 0
     # One slot, no retry: a pipe consumes its frames once, so a session refused by an outside process fails the sequence.
-    with nvenc_slot():
-        process: subprocess.Popen[bytes] = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    with nvenc_slot() as fd:
+        process: subprocess.Popen[bytes] = subprocess.Popen(command, pass_fds=(fd,), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         assert process.stdin is not None and process.stderr is not None
         drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
         drain.start()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from functools import cached_property
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -116,6 +115,9 @@ class Show3dConfig(DataforgeDatasetConfig):
     revision: str = REVISION
     """Pinned Hub commit; a deliberate override must be a full lowercase commit SHA."""
 
+    def __post_init__(self) -> None:
+        transports.require_commit_sha(self.revision)
+
 
 class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
     """Publish each missing layer, then remove only the scene videos."""
@@ -130,17 +132,12 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
     )
     """SHOW3D publication and loading order."""
 
-    @cached_property
-    def commit_sha(self) -> str:
-        """Validate the pinned commit used by every fetch and recording in this run."""
-        return transports.require_commit_sha(self.config.revision)
-
     def download(self) -> None:
         transports.hf_fetch(
             REPO_ID,
             allow_patterns=["dataset_index_train.parquet", "dataset_index_test.parquet", "hand_pose/hand_profiles/*/profile_umetrack.json"],
             local_dir=self.config.root,
-            revision=self.commit_sha,
+            revision=self.config.revision,
         )
         download_meshes(self.config.root)
         sources: list[tuple[SequenceIdentity, IndexRow]] = self.discover()
@@ -193,7 +190,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         """Fetch absent raw inputs once; force applies only to published layers."""
         missing: list[str] = [name for name in files if not (self.config.root / name).is_file()]
         if missing:
-            transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.commit_sha)
+            transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.config.revision)
 
     def wanted_layers(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> dict[str, bool]:
         """Layers selected by availability and existing outputs."""
@@ -208,9 +205,8 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             paths.HAND_MESH_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_MESH_LAYER], force=force),
         }
 
-    def planned_files(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> list[str]:
+    def planned_files(self, identity: SequenceIdentity, source: IndexRow, *, wants: dict[str, bool]) -> list[str]:
         """Sorted union of raw inputs for the selected layers."""
-        wants: dict[str, bool] = self.wanted_layers(identity, source, force=force)
         key: str = identity.sequence_key
         files: set[str] = set(base_files(source, key) if wants[paths.BASE_LAYER] else [])
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or (wants[paths.OBJECT_POSE_LAYER] and source.has_hand_pose):
@@ -223,9 +219,10 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             files.update(calibration_file(key, camera) for camera in HEADSET_CAMERAS)
         return sorted(files)
 
-    def prefetch(self, identity: SequenceIdentity, source: IndexRow, *, force: bool = False) -> None:
-        """Fetch only the next scene's missing inputs, without writing layers."""
-        self.fetch_missing(self.planned_files(identity, source, force=force))
+    def prefetch(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> None:
+        """Fetch on a background thread; must not touch self.timer, recordings, or print per-sequence progress."""
+        wants: dict[str, bool] = self.wanted_layers(identity, source, force=force)
+        self.fetch_missing(self.planned_files(identity, source, wants=wants))
 
     def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
         targets: dict[str, Path] = self.targets(identity)
@@ -238,7 +235,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             return targets[paths.BASE_LAYER]
         key: str = identity.sequence_key
         with self.timer.stage("fetch"):
-            self.fetch_missing(self.planned_files(identity, source, force=force))
+            self.fetch_missing(self.planned_files(identity, source, wants=wants))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
         scene: Scene | None = None
@@ -254,7 +251,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                         index=source,
                         timer=self.timer,
                         work_dir=work,
-                        hf_revision=self.commit_sha,
+                        hf_revision=self.config.revision,
                         default_blueprint=self.default_blueprint(),
                     )
             finally:

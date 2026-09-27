@@ -169,10 +169,8 @@ def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
 def test_unpinned_revision_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a sha there is no tree to name, so the conversion has nothing honest to record."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="no-such-branch"))
-
     with pytest.raises(ValueError, match="no-such-branch"):
-        dataset.discover()
+        replace(hub.config, revision="no-such-branch")
 
 
 
