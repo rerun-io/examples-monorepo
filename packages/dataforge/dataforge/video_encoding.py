@@ -257,14 +257,15 @@ def nvenc_session_failure(stderr: str) -> bool:
 
 
 def run_nvenc(run: Callable[[], subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
-    """Run an encoder with a shared slot; release it before each session-limit backoff."""
-    for attempt in range(6):
+    """Run an encoder in a shared slot; on a session-limit failure release it, back off 2-32 s and retry."""
+    for delay in (2.0, 4.0, 8.0, 16.0, 32.0):
         with nvenc_slot():
             result: subprocess.CompletedProcess[str] = run()
-        if result.returncode == 0 or not nvenc_session_failure(result.stderr) or attempt == 5:
+        if result.returncode == 0 or not nvenc_session_failure(result.stderr):
             return result
-        time.sleep(float(2 ** (attempt + 1)))
-    raise AssertionError("unreachable")
+        time.sleep(delay)
+    with nvenc_slot():
+        return run()
 
 
 def _nvenc_args(*, gop: int, cq: int) -> list[str]:
@@ -402,63 +403,32 @@ def encode_frames_to_mp4(
             ]
         ),
         *_nvenc_args(gop=gop, cq=cq),
-        "-progress", "pipe:1",
         str(output),
     ]
+    complaints: list[bytes] = []
     fed: int = 0
-    remaining: Iterator[bytes | memoryview] = iter(frames)
-    replaying: bool = True
-    # Session allocation happens before the first encoded frame. Retain just
-    # that startup prefix for one-shot iterators, spilling above 8 MiB to disk.
-    # Once ffmpeg reports a frame, discard it and stream without a cache.
-    with tempfile.SpooledTemporaryFile(max_size=8 << 20, dir=str(output.parent)) as replay:
-        def encode() -> subprocess.CompletedProcess[str]:
-            nonlocal fed, replaying
-            if not replaying:
-                raise RuntimeError(f"{output}: cannot reopen an NVENC session after encoding frames")
-            complaints: list[bytes] = []
-            opened: threading.Event = threading.Event()
-            process: subprocess.Popen[bytes] = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            assert process.stdin is not None and process.stderr is not None and process.stdout is not None
-
-            def progress() -> None:
-                assert process.stdout is not None
-                for line in process.stdout:
-                    if line.startswith(b"frame=") and int(line.partition(b"=")[2]) > 0:
-                        opened.set()
-
-            drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
-            monitor: threading.Thread = threading.Thread(target=progress, daemon=True)
-            drain.start()
-            monitor.start()
-            try:
-                replay.seek(0)
-                shutil.copyfileobj(replay, process.stdin)
-                replay.seek(0, os.SEEK_END)
-                for frame in remaining:
-                    if replaying and opened.is_set():
-                        replay.seek(0)
-                        replay.truncate()
-                        replaying = False
-                    if replaying:
-                        replay.write(frame)
-                    fed += 1
-                    process.stdin.write(frame)
-            except BrokenPipeError:
-                pass  # Keep the consumed prefix; a session retry resumes the iterator.
-            finally:
-                with contextlib.suppress(BrokenPipeError):
-                    process.stdin.close()
-                returncode: int = process.wait()
-                drain.join()
-                monitor.join()
-                process.stderr.close()
-                process.stdout.close()
-            return subprocess.CompletedProcess(command, returncode, "", b"".join(complaints).decode(errors="replace").strip())
-
-        result: subprocess.CompletedProcess[str] = run_nvenc(encode)
-    if result.returncode:
-        raise RuntimeError(f"ffmpeg exited {result.returncode} while encoding {output.name} after {fed} frames:\n{result.stderr[-4000:]}")
+    # One slot, no retry: a pipe consumes its frames once, so a session refused by an outside process fails the sequence.
+    with nvenc_slot():
+        process: subprocess.Popen[bytes] = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        assert process.stdin is not None and process.stderr is not None
+        drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
+        drain.start()
+        try:
+            for frame in frames:
+                process.stdin.write(frame)
+                fed += 1
+        except BrokenPipeError:
+            pass  # ffmpeg already died; its stderr below says why
+        finally:
+            # Closing flushes, so an encoder that already died would raise here and
+            # mask the RuntimeError below that carries its stderr.
+            with contextlib.suppress(BrokenPipeError):
+                process.stdin.close()
+            returncode: int = process.wait()
+            drain.join()
+    if returncode != 0:
+        stderr_text: str = b"".join(complaints).decode(errors="replace").strip()
+        raise RuntimeError(f"ffmpeg exited {returncode} while encoding {output.name} after {fed} frames:\n{stderr_text}")
 
     written: int = mp4_frame_count(output)
     if written != fed:

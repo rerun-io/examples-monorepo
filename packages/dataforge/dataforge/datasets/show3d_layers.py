@@ -307,7 +307,7 @@ def write_base_layer(
             recording,
             identity,
             hf_revision=hf_revision,
-            num_frames=len(scene.frames), decode="cuda",
+            num_frames=len(scene.frames),
             num_cameras=len(scene.cameras),
             source_resolution=pa.array(resolutions),
             num_synthesized_headset_poses=pa.array([sum(pose.is_synthesized for pose in scene.poses)], type=pa.int64()),
