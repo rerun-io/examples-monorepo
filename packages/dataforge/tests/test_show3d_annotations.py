@@ -59,8 +59,24 @@ def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
     pose["landmarks_2d"] = {"headset0": [None] + [[3.0, 4.0]] * (NUM_LANDMARKS_PER_HAND - 1)}
     frame = from_dict(HandFrame, dict(index=0, agt_frame_id=20, timestamp=1.0, missing_cameras=[], hand_poses={"0": pose, "1": pose}))
     assert frame.hand_poses["0"].landmarks_2d is not None
+    assert frame.hand_poses["0"].landmarks_2d["headset0"] is not None
     assert frame.hand_poses["0"].landmarks_2d["headset0"][0] is None
     assert frame.hand_poses["0"].landmarks_2d["headset0"][1] == [3.0, 4.0]
+
+
+def test_hand_schema_preserves_null_camera_landmarks() -> None:
+    pose: HandPose = from_dict(
+        HandPose,
+        dict(
+            confidence=1.0,
+            joint_angles=None,
+            wrist_rotation=None,
+            wrist_translation=None,
+            landmarks_3d_mm=None,
+            landmarks_2d={"headset1": None},
+        ),
+    )
+    assert pose.landmarks_2d == {"headset1": None}
 
 
 def test_caption_layer_carries_the_searchable_fields(tmp_path: Path) -> None:
@@ -385,7 +401,8 @@ def test_fetch_missing_preserves_retained_raw_files(tmp_path: Path, monkeypatch:
     assert retained.read_text() == "keep"
 
 
-def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_path: Path) -> None:
+@pytest.mark.parametrize("null_camera", [False, True], ids=["absent-camera", "null-camera"])
+def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_path: Path, null_camera: bool) -> None:
     clock: FrameClock = FrameClock(
         RecordingInfo(20, 2, 60.0, {}),
         [FrameInfo(0, 20, 1.0, []), FrameInfo(1, 21, 2.0, [])],
@@ -400,7 +417,7 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     pixels[5] = [10.0, 20.0]
     pixels[6] = [50.0, 60.0]
     pixels[1] = None
-    left: HandPose = HandPose(0.3, None, None, None, landmarks, {"headset0": pixels})
+    left: HandPose = HandPose(0.3, None, None, None, landmarks, {"headset0": pixels, "headset1": None} if null_camera else {"headset0": pixels})
     right: HandPose = HandPose(1.0, None, None, None, landmarks, {"headset1": pixels})
     absent: HandPose = HandPose(0.75, None, None, None, None, None)
     low: HandPose = HandPose(0.0, None, None, None, landmarks, {"headset0": pixels})  # at the threshold: shipped but not placed
@@ -456,6 +473,11 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             assert len(colors) == 133
             assert colors[116] == 0x00FF00FF  # 1.0 confidence: green RGBA.
         else:
+            if path == schema.coco133_uv_path(1, 1):
+                assert np.isnan(points[:, 91:112]).all()
+                assert (confidence[:, 91:112] == 0.0).all()
+                assert np.isnan(points[:, 9]).all()
+                assert (confidence[:, 9] == 0.0).all()
             offset: int = 91 if path == schema.coco133_uv_path(1, 0) else 112
             np.testing.assert_allclose(points[0, offset + 4], [30.0, 40.0])
             np.testing.assert_allclose(points[0, offset + 1], [30.0, 40.0])

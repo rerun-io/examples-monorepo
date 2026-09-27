@@ -47,8 +47,8 @@ class HandPose:
     """World wrist position in millimetres."""
     landmarks_3d_mm: Float32[ndarray, "21 3"] | None
     """World landmarks in millimetres."""
-    landmarks_2d: dict[str, list[list[float] | None]] | None
-    """Headset pixels, with null entries outside the image."""
+    landmarks_2d: dict[str, list[list[float] | None] | None] | None
+    """Headset pixels, with null cameras for missing landmarks and null points outside the image."""
 
     @property
     def trusted(self) -> bool:
@@ -61,8 +61,10 @@ class HandPose:
         if (self.wrist_rotation is None) != (self.wrist_translation is None):
             raise ValueError("wrist rotation and translation must be present together")
         for camera, landmarks in (self.landmarks_2d or {}).items():
-            if camera not in {c.source_name for c in HEADSET_CAMERAS} or len(landmarks) != NUM_LANDMARKS_PER_HAND:
+            if camera not in {c.source_name for c in HEADSET_CAMERAS} or (landmarks is not None and len(landmarks) != NUM_LANDMARKS_PER_HAND):
                 raise ValueError("UV landmarks require a headset camera and 21 entries")
+            if landmarks is None:
+                continue
             if any(point is not None and (len(point) != 2 or not all(isfinite(value) for value in point)) for point in landmarks):
                 raise ValueError("UV landmarks must be finite pixel pairs or null")
 
