@@ -1,0 +1,20 @@
+{
+ "recording": "HOT3D Quest 3 P0003_01e416d3/recording.vrs",
+ "made_with": "projectaria-tools 2.3.0 create_vrs_data_provider: get_timestamps_ns(DEVICE_TIME) per camera, get_imu_data_by_index per IMU record",
+ "hash": "sha256 of the little-endian array bytes: int64 clocks, uint8 valid flags, float32 accel/gyro, int64 per-frame hashes",
+ "jpeg_streams": {
+  "1201-1": {
+   "count": 3732,
+   "first_ns": 46881766666666,
+   "last_ns": 47006166666666,
+   "sha256": "f18c483b75494b59de84d72a98f1fe0a23eaca8a825cc8c2ba53a8133ad2a3d9"
+  },
+  "1201-2": {
+   "count": 3732,
+   "first_ns": 46881766666666,
+   "last_ns": 47006166666666,
+   "sha256": "f18c483b75494b59de84d72a98f1fe0a23eaca8a825cc8c2ba53a8133ad2a3d9"
+  }
+ },
+ "imu_streams": {}
+}
