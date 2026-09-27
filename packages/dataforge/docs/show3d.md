@@ -1,5 +1,8 @@
 # SHOW3D observations and layer mapping
 
+This observations document predates [dataset-doc-template.md](dataset-doc-template.md)
+and keeps its own structure.
+
 ## The dataset and its papers
 
 SHOW3D is a hand-object interaction dataset from Meta Reality Labs and Yale:
@@ -194,10 +197,11 @@ blueprints retain all eight rig panes.
 | Pinhole intrinsics | Camera `/pinhole`, frustum length 0.05 m |
 | MP4 | Camera `/pinhole/video`, AV1 `VideoStream` on both clocks |
 | Calibration text | Static `source_calibration_json`: full rig JSON; headset intrinsics only (poses and flags have their own tracks) |
+| Camera source | Static shared camera-source keys: `source_width`, `source_height`, `video_codec`, `cq`, `gop` |
 | Frame metadata | `/frames`: `source_frame_id`, `source_timestamp_s`, `missing_cameras` (typed strings, including empty lists) |
 | Headset provenance | Temporal `is_synthesized`, optional `pose_source` and `is_pose_valid` on `rig_01` |
 | Blur xyxy pixels | Camera `/pinhole/boxes/face`, partitioned `Boxes2D` with class id 103 (`face`) and static `source="blur_info"`; empty rows retained when supplied (schema §13: named for what the box encloses, not why it was drawn) |
-| BASE census | Group `capture` (`schema=dataforge:v1`, plus `convert` group): int64 `num_frames`, `num_cameras`, `num_synthesized_headset_poses`, `source_start_frame_id`; float64 `source_start_time_s` |
+| BASE census | Group `capture` (`schema=dataforge:v1`, plus `convert` group): int64 `num_frames`, `num_cameras`, `num_synthesized_headset_poses`, `source_start_frame_id`; float64 `source_start_time_s`; string list `source_resolution` |
 
 The default blueprint has the prototype's 3D eye, headset L/R panes, and a
 2-column × 4-row rig grid, with an instruction text pane below the ego pair. Blur boxes are excluded by default. Headset views
@@ -363,10 +367,13 @@ Conversion prints the missing mapping only while building `object_pose`, and
 emits no `object_mesh` layer. The index token `none` denotes no object.
 A mapped alias without object poses also produces no mesh layer.
 
-Rerun 0.37 rejects `KHR_texture_transform`. Download strips that name from
+Rerun rejects glTF files that require `KHR_texture_transform`; see
+[`strip_texture_transform`](../dataforge/objects.py) for the version and dated
+verification evidence, and the [driver pixels](https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/foundation-glb-texture-transform-0381.png).
+Download therefore strips `KHR_texture_transform` from
 `extensionsUsed`/`extensionsRequired` and from material texture infos once,
 writing `stripped/obj_XXXXXX.glb` atomically and deleting the raw GLB.
-UV transforms are discarded so Rerun 0.37 loads the asset. This chunk-preserving rewrite
+The shared helper is `dataforge.objects.strip_texture_transform`. This chunk-preserving rewrite
 updates JSON padding and GLB length while preserving binary chunks and other
 extensions. Node scale 0.001 stays intact: the GLB scene graph already makes
 the geometry metres, so the converter adds no second scale.

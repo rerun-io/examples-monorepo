@@ -12,6 +12,7 @@ pixi tasks run with ``cwd = packages/dataforge``):
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from dataforge.identity import SequenceIdentity
@@ -33,9 +34,19 @@ CAPTIONS_LAYER: str = "captions"
 OBJECT_POSE_LAYER: str = "object_pose"
 """Tracked rigid object poses and geometric census."""
 OBJECT_MESH_LAYER: str = "object_mesh"
-"""Static object-frame HOT3D geometry."""
+"""Static object-frame geometry of the tracked objects."""
 HAND_MESH_LAYER: str = "hand_mesh"
 """Derived skinned world-frame hand geometry."""
+BODY_POSE_LAYER: str = "body_pose"
+"""Shipped body-model fits and their joints."""
+BODY_MESH_LAYER: str = "body_mesh"
+"""Derived skinned world-frame body geometry."""
+
+ACTIONS_LAYER: str = "actions"
+"""Action labels active at each boundary, one track per annotation granularity."""
+
+PROJECTIONS_LAYER: str = "projections"
+"""Derived 2D: 3D keypoints projected through each camera's full lens model."""
 
 LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""
@@ -46,14 +57,49 @@ def output_root() -> Path:
     return Path(os.environ.get("DATAFORGE_OUTPUT_ROOT", "data/dataforge/rrd"))
 
 
+def work_root() -> Path:
+    """Scratch space for intermediate clips, beside the rrd tree so it shares its disk."""
+    return output_root() / "work"
+
+
 def raw_root() -> Path:
     """Root of raw dataset downloads; override with ``DATAFORGE_RAW_ROOT``."""
     return Path(os.environ.get("DATAFORGE_RAW_ROOT", "data/raw"))
 
 
+NAS_ROOT: Path = Path("/mnt/nas")
+"""Shared network storage: raw corpora may live there, conversion output and scratch never do."""
+
+
 def rrd_path(root: Path, *, layer: str, identity: SequenceIdentity) -> Path:
     """Layer-major rrd location: ``<root>/<layer>/<recording_id>.rrd``."""
     return root / layer / f"{identity.recording_id}.rrd"
+
+
+def layer_targets(identity: SequenceIdentity, layers: Sequence[str], *, frame_limit: int | None) -> dict[str, Path]:
+    """Destinations of ``layers`` for one sequence, in ``layers`` order.
+
+    A conversion limited to the first ``frame_limit`` frames lands in its own tree,
+    ``output_root()/preview-first<N>/``, so a preview never overwrites or skips a
+    full conversion. This is the one place ``frame_limit`` is validated.
+    """
+    if frame_limit is not None and frame_limit < 1:
+        raise ValueError(f"frame_limit must be positive, got {frame_limit}")
+    root: Path = output_root() if frame_limit is None else output_root() / f"preview-first{frame_limit}"
+    return {layer: rrd_path(root, layer=layer, identity=identity) for layer in layers}
+
+
+def require_outside(destinations: Iterable[Path], *, roots: Iterable[Path]) -> None:
+    """Refuse a write whose destination resolves beneath a protected root (raw inputs, the NAS).
+
+    Both sides are resolved, so a symlinked output or work directory that points
+    into a raw tree is caught. Each dataset passes its own protected roots.
+    """
+    protected: list[Path] = [root.resolve() for root in roots]
+    for destination in destinations:
+        for root in protected:
+            if destination.resolve().is_relative_to(root):
+                raise ValueError(f"refusing to write beneath protected input {root}: {destination}")
 
 
 def blueprint_path(root: Path, name: str, *, stamp: str, segment_table: bool = False) -> Path:

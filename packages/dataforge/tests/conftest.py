@@ -1,4 +1,4 @@
-"""What the dataforge test modules share: the GPU-encoder gate, rrd read-back, synthetic frames, a loopback archive, and the published calibration reader.
+"""What the dataforge test modules share: the GPU-encoder gate, the raw-asset skip, the raw-root guard check, the projectaria reader oracle, rrd read-back, synthetic frames and archives, a loopback archive, and the published calibration reader.
 
 Each piece is here because two or more modules need exactly it: the read-back
 helpers go through the *public* reader (``RrdReader`` → ``ChunkStore`` → a
@@ -11,39 +11,74 @@ same loopback server; and three modules read the published LaMAria calibration.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import struct
+import subprocess
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple
+from zipfile import ZipFile
 
 import cv2
 import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from jaxtyping import UInt8
 from numpy import ndarray
 from serde import field, from_dict, serde
 
 from dataforge import schema
-from dataforge.aria import PublishedTransform
-from dataforge.datasets.show3d_hands import HandFrame, HandProfileDoc, read_hand_frames, read_hand_profile
+from dataforge.datasets.lamaria_source import PublishedTransform
+from dataforge.datasets.show3d_hands import HandFrame, read_hand_frames
 from dataforge.datasets.show3d_layers import Scene, read_scene
 from dataforge.datasets.show3d_source import CAMERAS, FrameClock, IndexRow, hand_pose_file, hand_profile_file, read_frame_clock
 from dataforge.identity import SequenceIdentity
+from dataforge.umetrack_hands import HandProfileDoc, read_hand_profile
 from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
+from dataforge.vrs import ImuRecords, VrsFile
 
 NOISE_CEILING: int = 96
 """Upper bound of the per-pixel noise, low enough that gradient + noise cannot wrap."""
 
 FIXTURES: Path = Path(__file__).parent / "fixtures"
 """Checked-in binaries and real upstream files; ``fixtures/README.md`` says where each came from."""
+
+
+def vrs_tags(values: dict[str, str]) -> bytes:
+    """A VRS tag map: count, then length-prefixed key/value strings."""
+    return struct.pack("<I", len(values)) + b"".join(struct.pack("<I", len(text.encode())) + text.encode() for pair in values.items() for text in pair)
+
+
+def vrs_record(payload: bytes, *, type_id: int, record_type: int = 3, compression: int = 0, timestamp: float = 0.0, format_version: int = 2) -> bytes:
+    """One VRS record of instance 1; ``compression`` 1 or 2 really lz4- or zstd-compresses the payload."""
+    size: int = len(payload)
+    if compression in (1, 2):  # VRS writes lz4 or zstd frames of the whole payload.
+        payload = pa.Codec({1: "lz4", 2: "zstd"}[compression]).compress(payload, asbytes=True)
+    return struct.pack("<IIiIdHBBI", 32 + len(payload), 0, type_id, format_version, timestamp, 1, record_type, compression, size if compression else 0) + payload
+
+
+def vrs_file(
+    streams: dict[int, dict[str, str]], records: list[bytes], *, user_tags: dict[str, str] | None = None, file_tags: dict[str, str] | None = None
+) -> bytes:
+    """A ``cordVRS2`` file: header, one description record for ``streams`` (type id → record-format tags) and ``file_tags``, then ``records``."""
+    description: bytes = struct.pack("<I", len(streams)) + b"".join(
+        struct.pack("<iH", type_id, 1) + vrs_tags(user_tags or {}) + vrs_tags(tags) for type_id, tags in streams.items()
+    )
+    description_record: bytes = vrs_record(description + vrs_tags(file_tags or {}), type_id=2)
+    header = bytearray(80)
+    header[:8] = b"VisionRe"
+    header[72:80] = b"cordVRS2"
+    struct.pack_into("<II", header, 16, 80, 32)
+    struct.pack_into("<qq", header, 32, 80, 80 + len(description_record))
+    return bytes(header) + description_record + b"".join(records)
 
 
 def calibration_fixture(device: str) -> Path:
@@ -68,12 +103,25 @@ def calibration_fixture(device: str) -> Path:
 
 @pytest.fixture(scope="session")
 def nvenc_ffmpeg() -> Path:
-    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
-    ffmpeg: Path = resolve_ffmpeg()
+    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU.
+
+    A listed encoder is not enough: one real frame is encoded, so a missing
+    driver or AV1-capable device skips here instead of failing mid-test.
+    """
     try:
+        ffmpeg: Path = resolve_ffmpeg()
         require_av1_nvenc(ffmpeg)
-    except RuntimeError as error:
+    except (FileNotFoundError, RuntimeError) as error:
         pytest.skip(f"no av1_nvenc: {error}")
+    probe: subprocess.CompletedProcess[str] = subprocess.run(
+        [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", "color=size=256x256:rate=1", "-frames:v", "1", "-c:v", "av1_nvenc", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if probe.returncode:
+        pytest.skip(f"AV1 NVENC unavailable: {probe.stderr.strip()}")
     return ffmpeg
 
 
@@ -138,19 +186,91 @@ def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatc
     return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
 
 
-def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
-    """Every view in a blueprint, depth-first, whatever containers nest them."""
-    found: list[rrb.View] = []
+def zip_bytes(members: Mapping[str, bytes]) -> bytes:
+    """A zip archive holding ``members`` (name → bytes), the shape the HOCap and HOT3D sources ship."""
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
 
-    def walk(node: rrb.View | rrb.Container) -> None:
-        if isinstance(node, rrb.View):
-            found.append(node)
-            return
-        for child in node.contents or ():
-            walk(child)
 
-    walk(blueprint.root_container)
-    return found
+def assert_raw_root_guarded(command: str, source: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``convert`` refuses an output root beneath the raw root before it reads ``source``.
+
+    Every dataset that guards its raw tree (``paths.require_outside``) calls this
+    from its own test module with a source of the type its ``convert`` accepts;
+    the guard runs first, so the source only has to have that type.
+    """
+    from dataforge.datasets import dataset_defaults
+
+    raw: Path = tmp_path / "raw"
+    raw.mkdir(exist_ok=True)
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(raw / "converted"))
+    dataset = replace(dataset_defaults[command], root=raw).setup()  # pyrefly: ignore[unexpected-keyword]
+    with pytest.raises(ValueError, match="refusing to write beneath protected input"):
+        dataset.convert(SequenceIdentity(dataset.config.name, ("subject", "sequence")), source, force=True)
+    assert not list(raw.rglob("*.rrd"))
+
+
+def assert_readers_match_projectaria(vrs: VrsFile, fixture: str) -> None:
+    """``dataforge.vrs``'s readers on ``vrs`` against what projectaria-tools read from the same recording.
+
+    ``fixtures/aria/<fixture>-readers.json`` holds, per stream, the SDK's frame clocks,
+    IMU records (clock, valid flags, accel, gyro) and, where dumped, decoded-frame
+    hashes, as sha256 digests; see ``fixtures/README.md``. Every JPEG and HEVC clock
+    is checked twice, by the DataLayout-only walk and by the full image walk.
+    """
+    from dataforge import aria
+    from dataforge.vrs import VrsImageReader
+    from dataforge.vrs_hevc import VrsHevcReader
+
+    def digest(values: ndarray) -> str:
+        return hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+
+    def clock(times_ns: ndarray) -> dict[str, object]:
+        return {"count": int(times_ns.size), "first_ns": int(times_ns[0]), "last_ns": int(times_ns[-1]), "sha256": digest(times_ns.astype(np.int64))}
+
+    expected = json.loads((FIXTURES / "aria" / f"{fixture}-readers.json").read_text())
+    readers: dict[str, type[VrsImageReader] | type[VrsHevcReader]] = {"jpeg_streams": VrsImageReader, "hevc_streams": VrsHevcReader}
+    for kind, reader_type in readers.items():
+        for stream_id, sdk_clock in expected.get(kind, {}).items():
+            reader = reader_type(vrs, stream_id)
+            assert clock(reader.capture_timestamps()) == sdk_clock, f"{stream_id} DataLayout walk"
+            assert clock(np.array([record.capture_timestamp_ns for record in reader.images()], dtype=np.int64)) == sdk_clock, f"{stream_id} image walk"
+    for stream_id, sdk_imu in expected["imu_streams"].items():
+        records: ImuRecords = vrs.imu(stream_id)
+        assert records.capture_timestamp_ns.size == sdk_imu["count"], stream_id
+        assert {
+            "capture_timestamp_ns": digest(records.capture_timestamp_ns),
+            "accel_valid": digest(records.accel_valid.astype(np.uint8)),
+            "gyro_valid": digest(records.gyro_valid.astype(np.uint8)),
+            "accel_msec2": digest(records.accel_msec2),
+            "gyro_radsec": digest(records.gyro_radsec),
+        } == sdk_imu["sha256"], stream_id
+    for stream_id, sdk_frames in expected.get("decoded_frames", {}).items():
+        hashes = np.array(
+            [
+                int.from_bytes(hashlib.blake2b(image.tobytes() + str(image.shape).encode(), digest_size=8).digest(), "little", signed=True)
+                for _, image in aria.iter_frames(vrs, stream_id)
+            ],
+            dtype=np.int64,
+        )
+        assert {"count": int(hashes.size), "sha256": digest(hashes)} == sdk_frames, f"{stream_id} decoded frames"
+
+
+def raw_asset(what: str, path: Path) -> Path:
+    """Return ``path`` when it is a readable file; otherwise skip, naming ``what`` and the exact file.
+
+    Opening the file, rather than checking that it exists, also catches a NAS file
+    this user may not read.
+    """
+    try:
+        with path.open("rb") as stream:
+            stream.read(1)
+    except OSError as error:
+        pytest.skip(f"{what} absent or unreadable: {path} ({type(error).__name__})")
+    return path
 
 
 def column_rows(store: rrc.ChunkStore, column: str) -> pa.Table:
@@ -359,14 +479,11 @@ def show3d_scene_inputs(request: pytest.FixtureRequest) -> Show3dSceneInputs:
         *(scene_dir / f"metadata/{name}.json" for name in ("recording_info", "frame_info")),
     ]
     for path in required:
-        if not path.is_file():
-            pytest.skip(f"SHOW3D scene asset absent: {path}")
+        raw_asset("SHOW3D scene asset", path)
     clock: FrameClock = read_frame_clock(scene_dir, key)
     for camera in clock.info.resolution:
         for relative in (f"camera_calibration/{camera}.json", f"blur_info/{camera}.mp4.json"):
-            path: Path = scene_dir / relative
-            if not path.is_file():
-                pytest.skip(f"SHOW3D scene asset absent: {path}")
+            raw_asset("SHOW3D scene asset", scene_dir / relative)
     scene: Scene = read_scene(scene_dir, scene_key=key)
     return Show3dSceneInputs(
         identity, scene,

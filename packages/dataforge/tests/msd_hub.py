@@ -2,7 +2,7 @@
 
 Not a test module: it builds one device's remote tree on disk — a sequence zip of
 noisy PNG frames plus the csv streams, and the device's **real** calibration — and
-wires the HF listing/fetch/revision stubs onto it, so a convert exercises the real
+serves it from the shared fake Hub (``hub_fake.HubStore``), so a convert exercises the real
 archive reader, the real AV1 encoder and the real writers with only the transport
 faked. ``test_msd`` drives the verbs against it; ``test_msd_layers`` reads back
 what the layers wrote.
@@ -11,20 +11,20 @@ what the layers wrote.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pytest
 from conftest import calibration_fixture, png_frame
+from hub_fake import HubStore
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import transports
 from dataforge.datasets import msd
-from dataforge.datasets.msd import MSD_DEVICES, MsdConfig, MsdDevice, MsdDeviceChoice
+from dataforge.datasets.msd import MSD_DEVICES, REPO_ID, MsdConfig, MsdDevice, MsdDeviceChoice
 
 REVISION_SHA: str = "0123456789abcdef0123456789abcdef01234567"
 """Fake resolved repo revision every test's ``repo_revision`` stub returns."""
@@ -138,23 +138,30 @@ def sequence_tree(root: Path, *, num_cameras: int, num_frames: int, with_magneto
 
 @dataclass(frozen=True, slots=True)
 class FakeHub:
-    """One device's remote tree on disk, plus the scratch root a convert works in."""
+    """One device's remote tree on disk and in the Hub store, plus the scratch root a convert works in."""
 
     remote: Path
-    """Mirror of the repo, so ``allow_patterns`` glob against real files."""
+    """The repo's files on disk, as the store serves them."""
     root: Path
     """``MsdConfig.root``: where the fake fetch copies archives to."""
     config: MsdConfig
     """Config already pointed at ``root`` for this device."""
     clocks: StreamClocks
     """What the synthetic tree wrote, so an assertion reads it back rather than recomputes it."""
-    fetched: list[tuple[str, ...]]
-    """``allow_patterns`` of every ``hf_fetch`` call, in order."""
-    revisions: list[str | None]
-    """The ``revision`` every listing and fetch asked the hub for, in order."""
+    store: HubStore
+    """The Hub every listing and fetch went to."""
     archives: list[Path]
     """The sequence's archive volume(s), as they land under ``root``."""
 
+    @property
+    def fetched(self) -> list[tuple[str, ...]]:
+        """``allow_patterns`` of every ``hf_fetch`` call, in order."""
+        return [call.paths for call in self.store.calls if call.kind == "snapshot"]
+
+    @property
+    def revisions(self) -> list[str | None]:
+        """The ``revision`` every listing and fetch asked the hub for, in order."""
+        return [call.revision for call in self.store.calls if call.kind in ("list", "snapshot")]
 
 
 def build_hub(
@@ -167,7 +174,7 @@ def build_hub(
     raw_budget_gb: float = 50.0,
     keep_raw: bool = False,
 ) -> FakeHub:
-    """Build one synthetic sequence and wire the HF listing/fetch/revision stubs to it."""
+    """Build one synthetic sequence and serve it from a fake Hub pinned at ``REVISION_SHA``."""
     profile: MsdDevice = MSD_DEVICES[device]
     collection: str = profile.collections[0]
     collection_path: str = f"M_monado_datasets/{profile.hf_dir}/{collection}"
@@ -191,30 +198,13 @@ def build_hub(
     calibration_file.parent.mkdir(parents=True, exist_ok=True)
     calibration_file.write_bytes(calibration_fixture(device).read_bytes())
 
-    size: int = archive_bytes if archive_bytes is not None else (archive_dir / f"{SEQUENCE}.zip").stat().st_size
-    listing: list[tuple[str, int]] = [(f"{collection_path}/{SEQUENCE}.zip", size), (f"{collection_path}/README.md", 12)]
-    fetched: list[tuple[str, ...]] = []
-    revisions: list[str | None] = []
-
-    def fake_fetch(
-        repo_id: str, *, allow_patterns: Sequence[str], local_dir: Path, repo_type: str = "dataset", revision: str | None = None
-    ) -> Path:
-        fetched.append(tuple(allow_patterns))
-        revisions.append(revision)
-        for pattern in allow_patterns:
-            for match in sorted(remote.glob(pattern)):
-                destination: Path = Path(local_dir) / match.relative_to(remote)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(match, destination)
-        return Path(local_dir)
-
-    def fake_listing(repo_id: str, path: str, revision: str | None = None) -> list[tuple[str, int]]:
-        revisions.append(revision)
-        return listing if path == collection_path else []
-
-    monkeypatch.setattr(msd, "list_collection_files", fake_listing)
-    monkeypatch.setattr(transports, "hf_fetch", fake_fetch)
-    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
+    # Pinned: every listing and fetch must ask for the sha repo_revision resolves.
+    store: HubStore = HubStore({REPO_ID: REVISION_SHA})
+    store.add_tree(REPO_ID, remote)
+    store.add(REPO_ID, f"{collection_path}/README.md", b"# collection\n")
+    if archive_bytes is not None:
+        store.sizes[REPO_ID, f"{collection_path}/{SEQUENCE}.zip"] = archive_bytes
+    store.install(monkeypatch, msd, transports)
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
 
     config: MsdConfig = MsdConfig(device=device, root=root, raw_budget_gb=raw_budget_gb, keep_raw=keep_raw)
@@ -223,8 +213,7 @@ def build_hub(
         root=root,
         config=config,
         clocks=clocks,
-        fetched=fetched,
-        revisions=revisions,
+        store=store,
         archives=[root / f"{collection_path}/{SEQUENCE}.zip"],
     )
 

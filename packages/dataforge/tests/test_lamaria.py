@@ -26,7 +26,6 @@ import serde.json
 from conftest import (  # pyrefly: ignore[missing-import]
     PublishedCamera,
     ServedRequest,
-    blueprint_views,
     column_rows,
     eye_vector,
     read_back,
@@ -40,7 +39,7 @@ from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
 from dataforge import aria, blueprints, paths, schema
-from dataforge.datasets import dataset_defaults, lamaria
+from dataforge.datasets import dataset_defaults, lamaria, lamaria_source
 from dataforge.datasets.lamaria import (
     DEFAULT_SEQUENCES,
     LamariaConfig,
@@ -52,6 +51,7 @@ from dataforge.datasets.lamaria import (
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
 from dataforge.world_up import MEASURED_UP_WINDOW_NS, MeasuredUp, measured_world_up
+from dataforge.writing import blueprint_views
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
@@ -443,18 +443,6 @@ def test_the_table_card_decodes_only_the_slam_left_stream() -> None:
     assert pane.origin == schema.pinhole_path(0, 0)
 
 
-def test_both_blueprints_serialize_to_a_non_empty_rbl(tmp_path: Path) -> None:
-    dataset: LamariaDataset = LamariaDataset(LamariaConfig())
-    default_path: Path = tmp_path / "lamaria.rbl"
-    table_path: Path = tmp_path / "lamaria-table.rbl"
-
-    dataset.default_blueprint().save("lamaria", str(default_path))
-    dataset.table_blueprint().save("lamaria", str(table_path))
-
-    assert default_path.stat().st_size > 0
-    assert table_path.stat().st_size > 0
-
-
 # ── convert, against the VRS seam ─────────────────────────────────────────
 
 FRAME_WIDTH: int = 192
@@ -531,7 +519,7 @@ def synthetic_streams(_: Path) -> lamaria.SequenceStreams:
         aria.RGB_STREAM_ID: published_rig_T_cam("cam1"),
     }
     cameras: list[lamaria.CameraStream] = []
-    for stream_id in aria.CAMERA_STREAM_IDS:
+    for stream_id in lamaria_source.CAMERA_STREAM_IDS:
         rgb: bool = stream_id == aria.RGB_STREAM_ID
         count: int = RGB_FRAMES if rgb else SLAM_FRAMES
         period_ns: int = SLAM_PERIOD_NS * 2 if rgb else SLAM_PERIOD_NS
@@ -651,8 +639,8 @@ def control_points_body(*, levelled_xyz_m: tuple[float, float, float] = LEVELLED
                 "detection": (DETECTION_UV_PX + offset).tolist(),
             }
             timestamps[label][str(timestamp_ns)] = image_name
-    published_levelled: list[float] = (aria.CUSTOM_ORIGIN_XYZ + np.asarray(levelled_xyz_m)).tolist()
-    published_unlevelled: list[float] = (aria.CUSTOM_ORIGIN_XYZ[:2] + np.asarray(UNLEVELLED_POINT_XY_M)).tolist()
+    published_levelled: list[float] = (lamaria_source.CUSTOM_ORIGIN_XYZ + np.asarray(levelled_xyz_m)).tolist()
+    published_unlevelled: list[float] = (lamaria_source.CUSTOM_ORIGIN_XYZ[:2] + np.asarray(UNLEVELLED_POINT_XY_M)).tolist()
     return json.dumps(
         {
             "timestamps": timestamps,
@@ -1010,7 +998,7 @@ def test_the_rig_pose_is_the_published_camera_pose_seen_from_the_rig() -> None:
     which is minus the rotated ``T_b_s`` translation of cam0.
     """
     rig_T_cam0: Float64[ndarray, "4 4"] = published_rig_T_cam("cam0")
-    identity_pose: aria.PseudoGt = aria.PseudoGt(
+    identity_pose: lamaria_source.PseudoGt = lamaria_source.PseudoGt(
         times_ns=np.array([DEVICE_T0_NS], dtype=np.int64), world_T_cam0=np.eye(4, dtype=np.float64).reshape(1, 4, 4)
     )
 
@@ -1033,7 +1021,7 @@ def test_a_constant_rotation_leaves_the_path_length_the_camera_walked() -> None:
     world_T_cam0[:, :3, 3] = np.column_stack([0.25 * np.arange(4.0), np.zeros(4), np.zeros(4)])
 
     trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(
-        aria.PseudoGt(times_ns=DEVICE_T0_NS + np.arange(4, dtype=np.int64) * SLAM_PERIOD_NS, world_T_cam0=world_T_cam0),
+        lamaria_source.PseudoGt(times_ns=DEVICE_T0_NS + np.arange(4, dtype=np.int64) * SLAM_PERIOD_NS, world_T_cam0=world_T_cam0),
         rig_T_cam0=rig_T_cam0,
     )
 
@@ -1044,7 +1032,7 @@ def test_a_constant_rotation_leaves_the_path_length_the_camera_walked() -> None:
 @pytest.mark.integration
 def test_an_empty_pseudo_gt_yields_an_empty_trajectory() -> None:
     """A sequence with control points but no pGT still gets a gt layer, without poses."""
-    empty: aria.PseudoGt = aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4)))
+    empty: lamaria_source.PseudoGt = lamaria_source.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4)))
 
     trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(empty, rig_T_cam0=published_rig_T_cam("cam0"))
 
@@ -1279,7 +1267,7 @@ def test_the_control_point_detections_sit_under_the_camera_that_saw_them(convert
         detections: pa.Table = column_rows(store, f"{schema.cp_uv_path(0, cam)}:Points2D:positions")
         assert detections.num_rows == rows
         times_ns: list[int] = detections.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
-        assert times_ns == [DEVICE_T0_NS + frame * SLAM_PERIOD_NS for frame in DETECTION_FRAMES[aria.CAMERA_STREAM_IDS[cam]]]
+        assert times_ns == [DEVICE_T0_NS + frame * SLAM_PERIOD_NS for frame in DETECTION_FRAMES[lamaria_source.CAMERA_STREAM_IDS[cam]]]
         # The published detection is in native pixels; the logged one has to follow
         # the frames it is drawn on, which the base layer turns clockwise.
         uv_px: Float64[ndarray, "2"] = np.asarray(detections.column(1).to_pylist()[0][0], dtype=np.float64)

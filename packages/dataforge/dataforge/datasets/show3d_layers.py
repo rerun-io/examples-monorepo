@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +14,7 @@ from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde.json import to_json
-from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
+from simplecv.data.skeleton.coco133_layers import COCO133_ROI_LABELS, Coco133RoiLayer
 
 from dataforge import schema, writing
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose, HeadsetRig, Intrinsics, RigCalibration, headset_rig, pinhole
@@ -30,22 +29,13 @@ from dataforge.datasets.show3d_source import (
     Show3dCamera,
     read_frame_clock,
     read_headset_calibrations,
-    read_json,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import log_camera_node, log_pose_track, log_rig_node, log_video_stream
-from dataforge.video_encoding import transcode_mp4_gray
+from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_pose_track, log_rig_node, log_video_stream
+from dataforge.records import read_json
+from dataforge.timing import SequenceTimer
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4_gray
 
-VIDEO_CQ: int = 36
-"""Selected on RTX 5090: CQ36 is the smallest tested output above 40 dB median.
-
-Keyboard / birdhouse (MB, dB, seconds): builtin 53.8/44.61/9.9,
-117.5/44.77/15.0; CQ28 93.2/45.58/9.6, 188.7/45.43/12.1;
-CQ32 60.1/44.19/9.5, 128.0/44.03/12.1; CQ36 37.2/43.05/9.5,
-87.6/42.58/12.0. Source: 62.4 / 127.4 MB; 20 frames per camera.
-"""
-VIDEO_GOP: int = 60
-"""One second at the release's nominal 60 fps, shared with the measurement tool."""
 VIDEO_CODEC: str = "av1"
 """AV1 NVENC with no B-frames."""
 
@@ -175,64 +165,71 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
 
 
 
-def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> None:
-    """Encode at most three clips at once, then log and remove them in order."""
+def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path, timer: SequenceTimer) -> list[str]:
+    """Encode at most three clips at once, then log and remove them in order; return their ``source_resolution`` entries."""
     work_dir.mkdir(parents=True, exist_ok=True)
+    resolutions: list[str] = []
     clips: list[Path] = [work_dir / f"{camera.camera.source_name}.mp4" for camera in scene.cameras]
-    try:
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures: list[Future[int]] = [
-                executor.submit(transcode_mp4_gray, camera.video, clip, gop=VIDEO_GOP, cq=VIDEO_CQ, fps=int(scene.info.fps), frames=len(scene.frames))
-                for camera, clip in zip(scene.cameras, clips, strict=True)
-            ]
-            for source, clip, future in zip(scene.cameras, clips, futures, strict=True):
-                future.result()
-                camera: Show3dCamera = source.camera
-                log_camera_node(
+
+    def encode(source: SceneCamera, clip: Path) -> None:
+        transcode_mp4_gray(
+            source.video, clip, gop=AV1_GOP, cq=AV1_CQ, fps=int(scene.info.fps), frames=len(scene.frames),
+        )
+
+    jobs = [(clip, partial(encode, source, clip)) for source, clip in zip(scene.cameras, clips, strict=True)]
+    with parallel_clips(jobs, timer) as encoded:
+        for source, clip in zip(scene.cameras, encoded, strict=True):
+            camera: Show3dCamera = source.camera
+            log_camera_node(
+                recording,
+                camera.rig,
+                camera.cam,
+                pinhole(camera.source_name, source.calibration, source.rig_T_cam),
+                name=camera.source_name,
+                kind="grayscale",
+                image_plane_distance=0.05,
+            )
+            resolutions.append(
+                log_camera_source(
                     recording,
                     camera.rig,
                     camera.cam,
-                    pinhole(camera.source_name, source.calibration, source.rig_T_cam),
                     name=camera.source_name,
-                    kind="grayscale",
-                    image_plane_distance=0.05,
+                    source_width=source.calibration.ImageSizeX,
+                    source_height=source.calibration.ImageSizeY,
+                    video_codec=VIDEO_CODEC,
+                    cq=AV1_CQ,
+                    gop=AV1_GOP,
                 )
-                rr.log(
-                    schema.cam_path(camera.rig, camera.cam),
-                    rr.AnyValues(
-                        source_calibration_json=source.calibration_json,
-                        video_codec=VIDEO_CODEC,
-                        gop=pa.array([VIDEO_GOP], type=pa.int64()),
-                        cq=pa.array([VIDEO_CQ], type=pa.int64()),
-                    ),
-                    static=True,
+            )
+            rr.log(
+                schema.cam_path(camera.rig, camera.cam),
+                rr.AnyValues(source_calibration_json=source.calibration_json),
+                static=True,
+                recording=recording,
+            )
+            log_video_stream(
+                recording, clip, schema.video_path(camera.rig, camera.cam), times_ns=scene.times_ns, frame_indices=scene.frame_indices
+            )
+            if source.box_indices.size:
+                # §13: shipped face boxes, named for what they enclose; why Meta drew them is metadata.
+                face_path: str = schema.boxes_path(camera.rig, camera.cam, COCO133_ROI_LABELS[Coco133RoiLayer.FACE])
+                rr.log(face_path, rr.AnyValues(source="blur_info"), static=True, recording=recording)
+                lengths: list[int] = [len(source.blur.blur_boxes[str(index)]) for index in source.box_indices]
+                boxes: Float32[ndarray, "n 4"] = np.asarray(
+                    [box for index in source.box_indices for box in source.blur.blur_boxes[str(index)]], dtype=np.float32
+                ).reshape(-1, 4)
+                rr.send_columns(
+                    face_path,
+                    indexes=scene.indexes(source.box_positions),
+                    columns=rr.Boxes2D.columns(
+                        centers=(boxes[:, :2] + boxes[:, 2:]) / 2.0,
+                        half_sizes=(boxes[:, 2:] - boxes[:, :2]) / 2.0,
+                        class_ids=np.full(len(boxes), int(Coco133RoiLayer.FACE), dtype=np.uint16),
+                    ).partition(lengths),
                     recording=recording,
                 )
-                log_video_stream(
-                    recording, clip, schema.video_path(camera.rig, camera.cam), times_ns=scene.times_ns, frame_indices=scene.frame_indices
-                )
-                clip.unlink()
-                if source.box_indices.size:
-                    # §13: shipped face boxes, named for what they enclose; why Meta drew them is metadata.
-                    face_path: str = schema.boxes_path(camera.rig, camera.cam, COCO133_ROI_LABELS[Coco133RoiLayer.FACE])
-                    rr.log(face_path, rr.AnyValues(source="blur_info"), static=True, recording=recording)
-                    lengths: list[int] = [len(source.blur.blur_boxes[str(index)]) for index in source.box_indices]
-                    boxes: Float32[ndarray, "n 4"] = np.asarray(
-                        [box for index in source.box_indices for box in source.blur.blur_boxes[str(index)]], dtype=np.float32
-                    ).reshape(-1, 4)
-                    rr.send_columns(
-                        face_path,
-                        indexes=scene.indexes(source.box_positions),
-                        columns=rr.Boxes2D.columns(
-                            centers=(boxes[:, :2] + boxes[:, 2:]) / 2.0,
-                            half_sizes=(boxes[:, 2:] - boxes[:, :2]) / 2.0,
-                            class_ids=np.full(len(boxes), int(Coco133RoiLayer.FACE), dtype=np.uint16),
-                        ).partition(lengths),
-                        recording=recording,
-                    )
-    finally:
-        for clip in clips:
-            clip.unlink(missing_ok=True)
+    return resolutions
 
 
 def log_headset(recording: rr.RecordingStream, scene: Scene) -> None:
@@ -289,28 +286,12 @@ def log_frames(recording: rr.RecordingStream, scene: Scene) -> None:
     )
 
 
-def annotation_context() -> rr.AnnotationContext:
-    """Root classes every layer relies on: the COCO-133 skeleton (class 0) and the §13 box labels (100-103)."""
-    return rr.AnnotationContext(
-        [
-            rr.ClassDescription(
-                info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
-                keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
-                keypoint_connections=COCO_133_LINKS,
-            ),
-            *(
-                rr.ClassDescription(info=rr.AnnotationInfo(id=int(layer), label=COCO133_ROI_LABELS[layer], color=COCO133_ROI_COLORS[layer]))
-                for layer in Coco133RoiLayer
-            ),
-        ]
-    )
-
-
 def write_base_layer(
     identity: SequenceIdentity,
     scene_dir: Path,
     target: Path,
     *,
+    timer: SequenceTimer,
     index: IndexRow,
     work_dir: Path,
     hf_revision: str,
@@ -323,8 +304,8 @@ def write_base_layer(
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
         rr.log("/", annotation_context(), static=True, recording=recording)
         log_rig_node(recording, 0, reference=None, num_cameras=sum(camera.camera.rig == 0 for camera in scene.cameras), name="back_rig", kind="exo")
-        log_rig_node(recording, 1, reference="cam_00", num_cameras=2, name="quest3", kind="ego")
-        log_cameras(recording, scene, work_dir)
+        log_rig_node(recording, 1, reference=schema.CAM0_REFERENCE, num_cameras=2, name="quest3", kind="ego")
+        resolutions: list[str] = log_cameras(recording, scene, work_dir, timer)
         log_headset(recording, scene)
         log_frames(recording, scene)
         writing.send_capture_properties(
@@ -333,6 +314,7 @@ def write_base_layer(
             hf_revision=hf_revision,
             num_frames=len(scene.frames),
             num_cameras=len(scene.cameras),
+            source_resolution=pa.array(resolutions),
             num_synthesized_headset_poses=pa.array([sum(pose.is_synthesized for pose in scene.poses)], type=pa.int64()),
             source_start_time_s=pa.array([scene.frames[0].timestamp], type=pa.float64()),
             source_start_frame_id=pa.array([scene.frames[0].agt_frame_id], type=pa.int64()),

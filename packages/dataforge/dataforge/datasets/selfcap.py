@@ -453,8 +453,8 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 CameraPlan(rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", calibration=calibration, name=device, kind="rgb")
             )
             panes.append(CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo"))
-        # reference="cam_00": a single-camera rig's frame is its camera's frame by construction.
-        rigs.append(RigPlan(rig=rig, reference="cam_00", name=device, kind="exo", cameras=tuple(exo_cameras)))
+        # reference=schema.CAM0_REFERENCE: a single-camera rig's frame is its camera's frame by construction.
+        rigs.append(RigPlan(rig=rig, reference=schema.CAM0_REFERENCE, name=device, kind="exo", cameras=tuple(exo_cameras)))
 
     ego_dir: Path = episode_dir / "ego"
     ego_calibration: dict[str, CameraCalibration] = read_calibration(ego_dir / "calibration.json")
@@ -480,9 +480,9 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
             )
         )
         panes.append(CameraPane(name=f"ego {stream}", rig=ego_rig, cam=cam, kind="ego"))
-    # reference="cam_00": the OAK's rgb camera stands in for the rig frame while the
+    # reference=schema.CAM0_REFERENCE: the OAK's rgb camera stands in for the rig frame while the
     # stereo extrinsics stay unlogged (see read_calibration's TODO on their units).
-    rigs.append(RigPlan(rig=ego_rig, reference="cam_00", name="oak", kind="ego", cameras=tuple(ego_cameras)))
+    rigs.append(RigPlan(rig=ego_rig, reference=schema.CAM0_REFERENCE, name="oak", kind="ego", cameras=tuple(ego_cameras)))
 
     quest_dir: Path = episode_dir / "quest"
     quest_calibration: dict[str, CameraCalibration] = read_calibration(quest_dir / "calibration.json")
@@ -503,8 +503,8 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
             )
         )
         panes.append(CameraPane(name=f"quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
-    # reference="cam_00": the head_pose track logged on the rig node *is* the left-eye pose.
-    rigs.append(RigPlan(rig=quest_rig, reference="cam_00", name="quest", kind="quest", cameras=tuple(quest_cameras)))
+    # reference=schema.CAM0_REFERENCE: the head_pose track logged on the rig node *is* the left-eye pose.
+    rigs.append(RigPlan(rig=quest_rig, reference=schema.CAM0_REFERENCE, name="quest", kind="quest", cameras=tuple(quest_cameras)))
 
     return EpisodePlan(episode_dir=episode_dir, rigs=tuple(rigs), ego_rig=ego_rig, quest_rig=quest_rig, panes=tuple(panes))
 

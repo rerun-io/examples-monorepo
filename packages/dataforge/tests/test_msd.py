@@ -20,16 +20,18 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from conftest import blueprint_views, calibration_fixture, column_rows, eye_vector, read_back, recording_properties
+from conftest import calibration_fixture, column_rows, eye_vector, read_back, recording_properties
+from hub_fake import HubStore
 from jaxtyping import Float64
 from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub
 from numpy import ndarray
 
-from dataforge import blueprints, paths, schema
+from dataforge import blueprints, paths, schema, transports
 from dataforge.basalt import FollowFrame, follow_frame, load_calibration
 from dataforge.datasets import msd, msd_layers
 from dataforge.datasets.msd import (
     MSD_DEVICES,
+    REPO_ID,
     MsdConfig,
     MsdDataset,
     MsdDevice,
@@ -39,6 +41,7 @@ from dataforge.datasets.msd import (
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
+from dataforge.writing import blueprint_views
 
 
 def test_every_device_is_one_catalog_dataset_named_after_it() -> None:
@@ -69,8 +72,11 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
             ("M_monado_datasets/MI_valve_index/MIP_playing/MIPB_beat_saber/MIPB08_long.z01", 1),
         ],
     }
-    monkeypatch.setattr(msd, "list_collection_files", lambda repo_id, path, revision=None: listing.get(path, []))
-    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
+    store: HubStore = HubStore({REPO_ID: REVISION_SHA})
+    for files in listing.values():
+        for path, size in files:
+            store.add(REPO_ID, path, bytes(size))
+    store.install(monkeypatch, msd, transports)
 
     discovered: list[tuple[SequenceIdentity, MsdSource]] = MsdDataset(MsdConfig(device="index")).discover()
     keys: list[str] = [identity.sequence_key for identity, _ in discovered]
@@ -86,17 +92,11 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
 
 
 def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.MonkeyPatch) -> None:
-    asked: list[str] = []
-
-    def listing(repo_id: str, path: str, revision: str | None = None) -> list[tuple[str, int]]:
-        asked.append(path)
-        return []
-
-    monkeypatch.setattr(msd, "list_collection_files", listing)
-    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
+    store: HubStore = HubStore({REPO_ID: REVISION_SHA})
+    store.install(monkeypatch, msd, transports)
     dataset: MsdDataset = MsdDataset(MsdConfig(device="g2"))
     assert dataset.discover() == []
-    assert asked == ["M_monado_datasets/MG_reverb_g2/MGO_others"]
+    assert [call.paths for call in store.calls if call.kind == "list"] == [("M_monado_datasets/MG_reverb_g2/MGO_others",)]
 
 
 
@@ -162,7 +162,6 @@ def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
     recording reports.
     """
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
     dataset: MsdDataset = MsdDataset(replace(hub.config, revision="main"))
     identity, source = dataset.discover()[0]
 

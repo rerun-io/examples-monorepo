@@ -1,11 +1,30 @@
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import serve  # pyrefly: ignore[missing-import]
+from conftest import serve, zip_bytes  # pyrefly: ignore[missing-import]
+from hub_fake import HubStore
 
 from dataforge import transports
-from dataforge.transports import StaleLocalFile, gdrive_fetch, hf_fetch, http_fetch, http_index, local_verify, parse_apache_index
+from dataforge.transports import (
+    FetchReport,
+    FileIntegrity,
+    HfFileInfo,
+    IntegrityError,
+    StaleLocalFile,
+    content_digest,
+    hf_fetch,
+    hf_fetch_verified,
+    hf_lfs_files,
+    http_fetch,
+    http_index,
+    local_verify,
+    matches_file,
+    parse_apache_index,
+    publish_verified,
+    verify_file,
+)
 
 
 def test_local_verify_reports_missing_globs(tmp_path: Path) -> None:
@@ -23,11 +42,6 @@ def test_local_verify_ok_when_all_present(tmp_path: Path) -> None:
 def test_local_verify_missing_root(tmp_path: Path) -> None:
     missing: list[str] = local_verify(tmp_path / "nope", required=("a.txt",))
     assert missing == ["a.txt"]
-
-
-def test_unbuilt_transports_raise() -> None:
-    with pytest.raises(NotImplementedError):
-        gdrive_fetch()
 
 
 @pytest.fixture
@@ -210,3 +224,144 @@ def test_http_index_gives_up_on_a_page_the_archive_does_not_have(monkeypatch: py
     with serve({}) as archive, pytest.raises(RuntimeError, match="2 attempts"):
         http_index(f"{archive.base_url}/gone/", attempts=2)
     assert [entry.method for entry in archive.served] == ["GET", "GET"], "a 404 is retried, not treated as an empty directory"
+
+
+# ── file integrity ────────────────────────────────────────────────────────
+
+
+def test_content_digest_knows_each_algorithm(tmp_path: Path) -> None:
+    path: Path = tmp_path / "hello.txt"
+    path.write_bytes(b"hello\n")
+    assert content_digest(path, "sha256") == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+    assert content_digest(path, "sha1") == "f572d396fae9206628714fb2ce00f72e94f2258f"
+    assert content_digest(path, "git-sha1") == "ce013625030ba8dba906f756967f9e9ca394464a"  # git hash-object
+
+
+def test_verify_file_checks_size_before_the_hash(tmp_path: Path) -> None:
+    path: Path = tmp_path / "hello.txt"
+    path.write_bytes(b"hello\n")
+    verify_file(path, FileIntegrity(6, None, None))
+    verify_file(path, FileIntegrity(6, "git-sha1", "ce013625030ba8dba906f756967f9e9ca394464a"))
+    with pytest.raises(IntegrityError, match="holds 6 bytes, the source lists 7"):
+        verify_file(path, FileIntegrity(7, "sha1", "0" * 40))
+    with pytest.raises(IntegrityError, match="sha1 f572d396"):
+        verify_file(path, FileIntegrity(6, "sha1", "0" * 40))
+    assert not matches_file(path, FileIntegrity(6, "sha1", "0" * 40))
+    assert not matches_file(tmp_path / "absent", FileIntegrity(6, None, None))
+    assert not matches_file(tmp_path, FileIntegrity(6, None, None))
+    with pytest.raises(ValueError, match="needs its algorithm"):
+        FileIntegrity(6, None, "0" * 40)
+
+
+def test_publish_verified_renames_only_verified_bytes(tmp_path: Path) -> None:
+    staged: Path = tmp_path / "staging/a.bin"
+    staged.parent.mkdir()
+    staged.write_bytes(b"new")
+    dest: Path = tmp_path / "out/a.bin"
+    with pytest.raises(IntegrityError):
+        publish_verified(staged, dest, FileIntegrity(3, "sha256", "0" * 64))
+    assert staged.read_bytes() == b"new" and not dest.exists(), "a rejected copy is left for the caller's policy"
+    publish_verified(staged, dest, FileIntegrity(3, None, None))
+    assert dest.read_bytes() == b"new" and not staged.exists()
+
+    staged.write_bytes(b"newer")
+    publish_verified(staged, dest, FileIntegrity(5, None, None), set_aside_replaced=True)
+    assert dest.read_bytes() == b"newer" and (tmp_path / "out/a.bin.stale-0").read_bytes() == b"new"
+
+
+def test_publish_verified_restores_the_set_aside_file_when_the_rename_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    staged: Path = tmp_path / "staging/a.bin"
+    staged.parent.mkdir()
+    staged.write_bytes(b"new")
+    dest: Path = tmp_path / "a.bin"
+    dest.write_bytes(b"old")
+
+    def refuse(source: Path, target: Path) -> None:
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr("dataforge.transports.os.replace", refuse)
+    with pytest.raises(OSError, match="cross-device"):
+        publish_verified(staged, dest, FileIntegrity(3, None, None), set_aside_replaced=True)
+    assert dest.read_bytes() == b"old" and staged.read_bytes() == b"new"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["a.bin", "staging"]
+
+
+def test_fetch_report_summary_counts_files_and_bytes() -> None:
+    report: FetchReport = FetchReport(started_s=0.0)
+    report.count(True, 2_000_000_000)
+    report.count(True, 500_000_000)
+    for _ in range(3):
+        report.count(False, 1)
+    assert (report.fetched, report.fetched_bytes) == (2, 2_500_000_000)
+    assert report.summary().startswith("fetched 2 file(s), 2.50 GB in ")
+    assert report.summary().endswith("; 3 already complete")
+
+
+HUB_REPO: str = "org/archives"
+HUB_REVISION: str = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture
+def hub(monkeypatch: pytest.MonkeyPatch) -> HubStore:
+    """Two LFS zip archives at a pinned revision, served to ``transports``."""
+    store = HubStore({HUB_REPO: HUB_REVISION})
+    store.add(HUB_REPO, "calibration.zip", zip_bytes({"calibration/x": b"intrinsics"}), lfs=True)
+    store.add(HUB_REPO, "models.zip", zip_bytes({"models/x": b"mesh"}), lfs=True)
+    store.install(monkeypatch, transports)
+    return store
+
+
+def listed(name: str) -> HfFileInfo:
+    """The archive's pinned listing entry, through the real lookup."""
+    return hf_lfs_files(HUB_REPO, [name], revision=HUB_REVISION)[0]
+
+
+def test_hf_lfs_files_keeps_the_requested_order_and_names_a_missing_file(hub: HubStore) -> None:
+    infos = hf_lfs_files(HUB_REPO, ["models.zip", "calibration.zip"], revision=HUB_REVISION)
+    assert [info.path for info in infos] == ["models.zip", "calibration.zip"]
+    assert infos[0].integrity == FileIntegrity(len(hub.files[HUB_REPO, "models.zip"]), "sha256", hashlib.sha256(hub.files[HUB_REPO, "models.zip"]).hexdigest())
+    with pytest.raises(FileNotFoundError, match="subject_9.zip"):
+        hf_lfs_files(HUB_REPO, ["models.zip", "subject_9.zip"], revision=HUB_REVISION)
+
+
+def test_a_same_size_corrupt_file_is_refetched_and_kept_aside(tmp_path: Path, hub: HubStore) -> None:
+    good = hub.files[HUB_REPO, "models.zip"]
+    (tmp_path / "models.zip").write_bytes(bytes(len(good)))
+    assert hf_fetch_verified(HUB_REPO, listed("models.zip"), local_dir=tmp_path, revision=HUB_REVISION)
+    assert (tmp_path / "models.zip").read_bytes() == good
+    assert (tmp_path / "models.zip.stale-0").read_bytes() == bytes(len(good))
+    assert hub.fetched == ["models.zip"] and hub.forced == []  # staged beside, never downloaded onto the stale file
+
+
+def test_a_failed_replacement_leaves_the_old_file_in_place(tmp_path: Path, hub: HubStore) -> None:
+    (tmp_path / "models.zip").write_bytes(b"old")
+    hub.served[HUB_REPO, "models.zip"] = hub.files[HUB_REPO, "models.zip"][:-1]
+    with pytest.raises(ValueError, match="kept as"):
+        hf_fetch_verified(HUB_REPO, listed("models.zip"), local_dir=tmp_path, revision=HUB_REVISION)
+    assert (tmp_path / "models.zip").read_bytes() == b"old"
+
+
+def test_every_hash_mismatch_is_kept_and_a_rerun_refetches(tmp_path: Path, hub: HubStore) -> None:
+    good = hub.files[HUB_REPO, "models.zip"]
+    remote = listed("models.zip")
+    hub.served[HUB_REPO, "models.zip"] = bytes(len(good))
+    for _ in range(2):
+        with pytest.raises(ValueError, match="sha256"):
+            hf_fetch_verified(HUB_REPO, remote, local_dir=tmp_path, revision=HUB_REVISION)
+    staging = tmp_path / transports.STAGING_DIR
+    assert sorted(path.name for path in staging.iterdir()) == ["models.zip.sha256-mismatch-0", "models.zip.sha256-mismatch-1"]
+    assert not (tmp_path / "models.zip").exists()
+    hub.served[HUB_REPO, "models.zip"] = good
+    assert hf_fetch_verified(HUB_REPO, remote, local_dir=tmp_path, revision=HUB_REVISION)
+    assert (tmp_path / "models.zip").read_bytes() == good
+
+
+def test_a_verified_staged_file_is_published_without_refetching(tmp_path: Path, hub: HubStore) -> None:
+    # An interrupt after the Hub finished but before the rename leaves a complete staged file.
+    staged = tmp_path / transports.STAGING_DIR / "models.zip"
+    staged.parent.mkdir()
+    staged.write_bytes(hub.files[HUB_REPO, "models.zip"])
+    assert hf_fetch_verified(HUB_REPO, listed("models.zip"), local_dir=tmp_path, revision=HUB_REVISION)
+    assert hub.fetched == []
+    assert (tmp_path / "models.zip").read_bytes() == hub.files[HUB_REPO, "models.zip"]
+    assert not hf_fetch_verified(HUB_REPO, listed("models.zip"), local_dir=tmp_path, revision=HUB_REVISION)

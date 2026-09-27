@@ -1,5 +1,6 @@
 import pytest
 
+from dataforge import schema
 from dataforge.schema import (
     EXOEGO_SCHEMA_VERSION,
     TIMELINE,
@@ -74,3 +75,14 @@ def test_magnetometer_is_a_peer_sensor_of_the_imu() -> None:
     assert mag_path(2, 0).rsplit("/", 1)[0] == rig_path(2)
     with pytest.raises(ValueError, match="non-negative"):
         mag_path(0, -1)
+
+
+def test_ground_truth_body_hand_and_quality_paths_sit_under_world_gt_or_their_rig() -> None:
+    """Shipped fits and flags are ground truth (``/world/gt``); a rig's own tracking quality stays on that rig."""
+    assert schema.hand_mano_path("left") == "/world/gt/hands/left/mano"
+    assert schema.body_path("smpl") == "/world/gt/body/smpl"
+    assert schema.body_path("mesh") == "/world/gt/body/mesh"
+    assert schema.rig_quality_path(0) == "/world/rig_00/quality"
+    assert schema.quality_flag_path(0, 2, "occluded") == "/world/gt/quality/rig_00/cam_02/occluded"
+    with pytest.raises(ValueError, match="non-negative"):
+        schema.quality_flag_path(0, -1, "occluded")

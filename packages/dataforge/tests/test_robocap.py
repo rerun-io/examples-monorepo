@@ -33,6 +33,7 @@ from dataforge.datasets.robocap import (  # noqa: E402
 )
 from dataforge.identity import SequenceIdentity  # noqa: E402
 from dataforge.logging_toolkit import ImuChannel  # noqa: E402
+from dataforge.writing import blueprint_views
 
 DEVICE: str = "f408193e6447b3b0"
 """Device id used by every fake session directory in these tests."""
@@ -101,21 +102,6 @@ def test_blueprints_serialize_with_canonical_camera_order(tmp_path: Path) -> Non
     assert table_path.stat().st_size > 0
     assert schema.trail_path("basalt") == "/world/runs/basalt/trail"
 
-
-
-def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
-    """Every view in a blueprint, depth-first, whatever containers nest them."""
-    found: list[rrb.View] = []
-
-    def walk(node: rrb.View | rrb.Container) -> None:
-        if isinstance(node, rrb.View):
-            found.append(node)
-            return
-        for child in node.contents or ():
-            walk(child)
-
-    walk(blueprint.root_container)
-    return found
 
 
 def test_robocaps_follow_view_dims_its_basalt_path_like_every_rig_layout() -> None:
