@@ -464,7 +464,7 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     assert not any(str(chunk.entity_path).endswith(("/landmarks", "/uv")) for chunk in chunks)
 
     props = recording_properties(read_back(target), "hand_pose")
-    assert props["version"] == "v3"
+    assert props["version"] == HAND_POSE_VERSION
     assert props["coverage_left"] == 0.5
     assert props["coverage_left_high_conf"] == 0.0
     assert props["coverage_right"] == props["coverage_right_high_conf"] == 1.0

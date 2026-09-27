@@ -101,32 +101,27 @@ def test_encoder_check_cached(monkeypatch):
     video.require_av1_nvenc.cache_clear()
 
 
-def test_pipe_session_retry_replays_one_shot_frames(tmp_path, monkeypatch):
+def test_pipe_encoder_holds_a_slot_and_does_not_retry(tmp_path, monkeypatch):
     script = tmp_path / 'ffmpeg'
-    script.write_text('''#!/usr/bin/env python3
-import pathlib, sys
+    script.write_text("""#!/usr/bin/env python3
+import sys
 if '-encoders' in sys.argv:
     print('av1_nvenc')
 else:
-    output = pathlib.Path(sys.argv[-1])
-    marker = output.with_suffix('.attempt')
-    if not marker.exists():
-        marker.touch()
-        sys.stdin.buffer.read(1)
-        print('OpenEncodeSessionEx failed', file=sys.stderr)
-        sys.exit(1)
-    output.write_bytes(sys.stdin.buffer.read())
-''')
+    sys.stdin.buffer.read()
+    print('OpenEncodeSessionEx failed', file=sys.stderr)
+    sys.exit(1)
+""")
     script.chmod(0o700)
     monkeypatch.setattr(video, 'NVENC_SLOT_DIR', tmp_path / 'slots')
+    monkeypatch.setenv('DATAFORGE_NVENC_SLOTS', '1')
     waits = []
     monkeypatch.setattr(video.time, 'sleep', waits.append)
-    monkeypatch.setattr(video, 'mp4_frame_count', lambda path: 2)
-    output = tmp_path / 'clip.mp4'
-    payload = [b'a' * 100000, b'b' * 100000]
-    assert video.encode_frames_to_mp4(iter(payload), output, source=video.FrameSource('png'), fps=30, ffmpeg=script) == 2
-    assert output.read_bytes() == b''.join(payload)
-    assert waits == [2.0]
+    with pytest.raises(RuntimeError, match='OpenEncodeSessionEx failed'):
+        video.encode_frames_to_mp4(iter([b'a', b'b']), tmp_path / 'clip.mp4', source=video.FrameSource('png'), fps=30, ffmpeg=script)
+    assert waits == []
+    with video.nvenc_slot():  # released after the failure
+        pass
 
 
 @pytest.mark.integration

@@ -94,7 +94,6 @@ Pins are module constants and config defaults:
 Every shared HF entry point requires a full 40-character lowercase commit SHA.
 `--revision` is a deliberate override; move a pin with a one-line PR that says
 what changed upstream. Base recordings retain `property:capture:hf_revision`.
-The hand source remains `hand_pose/v2`; the output hand layer is version `v3`.
 
 At this pin, all 448 test rows have captions and no hand or object labels.
 They produce base and captions only, with `property:episode:split = test`.
@@ -179,9 +178,11 @@ The encoder capability check is cached per ffmpeg binary.
 Every dataforge NVENC process holds one machine-wide flock slot beneath
 `/tmp/dataforge-nvenc`. `DATAFORGE_NVENC_SLOTS` is a positive integer (default
 6; use 8 only on a dedicated machine). Use the same value across simultaneous
-jobs. A blocked job polls every 0.2 s and prints once after 60 s. Session-limit
-errors release the slot and retry after 2, 4, 8, 16 and 32 seconds; they never
-trigger CPU-decode fallback. Slots are released on success and failure.
+jobs. A blocked job polls every 0.2 s and prints once after 60 s. A file
+transcode that hits the driver's session limit (another program holds the
+encoders) releases its slot and retries after 2, 4, 8, 16 and 32 seconds; it
+never falls back to CPU decode. Pipe encoders consume their frames once, so they
+hold a slot but do not retry. Slots are released on success and failure.
 
 ## Timing
 
@@ -278,7 +279,7 @@ partial pyserde schema; profiles decode the full typed UmeTrack model, with
 unknown envelope fields allowed. Profiles are stored without reserializing them.
 
 Annotation layers use `send_properties=False` and write only their own property
-groups. `hand_pose` holds string `version=v3` and float64
+groups. `hand_pose` holds string `version=v2` (the Hub's hand release) and float64
 `coverage_left` / `coverage_right` (confidence > 0), used for the table's hand
 coverage columns. `coverage_left_high_conf` / `coverage_right_high_conf`
 (confidence > 0.5) remain census properties only.

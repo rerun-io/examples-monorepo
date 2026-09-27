@@ -91,10 +91,8 @@ HAND_TRUST: float = 0.0
 """Pablo's SHOW3D rule: show hand landmarks and meshes above zero confidence."""
 OBJECT_TRUST: float = 0.5
 """Object README default: show meshes only above 0.5 confidence."""
-HAND_POSE_VERSION: str = "v3"
-"""Output hand layer version: landmarks and meshes use confidence > 0."""
-HAND_SOURCE_VERSION: str = "v2"
-"""Upstream hand annotation directory, independent of our layer version."""
+HAND_POSE_VERSION: str = "v2"
+"""Released hand annotation version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
 OBJECT_POSE_VERSION: str = "v1"
@@ -103,7 +101,7 @@ OBJECT_POSE_VERSION: str = "v1"
 
 def hand_pose_file(key: str) -> str:
     """Repository-relative hand measurements."""
-    return f"hand_pose/{HAND_SOURCE_VERSION}/scenes/{key}/hand_pose.json"
+    return f"hand_pose/{HAND_POSE_VERSION}/scenes/{key}/hand_pose.json"
 
 
 def object_pose_file(key: str) -> str:
