@@ -88,7 +88,7 @@ def calibration_file(key: str, camera: Show3dCamera) -> str:
 
 
 HAND_TRUST: float = 0.0
-"""Pablo's SHOW3D rule: show hand landmarks and meshes above zero confidence."""
+"""SHOW3D rule as of 2026-09-26: show hand landmarks and meshes above zero confidence."""
 OBJECT_TRUST: float = 0.5
 """Object README default: show meshes only above 0.5 confidence."""
 HAND_POSE_VERSION: str = "v2"

@@ -156,7 +156,8 @@ source start timestamp and frame ID to reverse the time shift.
 On 2026-09-19, the RTX 5090 host measured 20 evenly spaced frames per camera
 (200 samples per scene). Values below are video-only RRD MB / median grayscale
 PSNR dB / wall seconds. The builtin column is Mp4Reader's own AV1 transcode; the CQ columns are the
-shipped file-input path (`transcode_mp4_gray`, one scene = ten cameras, three at a time). Source
+file-input path (`transcode_mp4_gray`) measured on 2026-09-19 with CPU decode,
+three cameras at a time (ten cameras per scene). Source
 sizes are decimal MB.
 
 | Scene | Frames | Source MB | Builtin AV1 | CQ 28 | CQ 32 | CQ 36 |
@@ -186,9 +187,20 @@ hold a slot but do not retry. Slots are released on success and failure.
 
 ## Timing
 
-Driver to fill: GPU/CPU frame counts and luma PSNR on two real scenes;
-10-scene `convert.jsonl` stage timings; total wall time and output size.
-The implementation's offline tests do not establish a new throughput result.
+Measured 2026-09-26 on pablo-dl-server (RTX 5090), prod environment,
+`exoego/show3d-v2`: 12 scenes (10 train, including 5 object scenes, and 2 test),
+30–40 s captures, 10 cameras. Mean conversion time was 10.3 s/scene, down from
+about 40 s (about 24 s sequential fetch and 11–14 s CPU-decode transcode).
+
+The first scene fetched in about 5–6 s with 16 parallel downloads. Later scenes
+recorded 0.0 s fetch because the next scene was prefetched. Transcode took about
+8 s/scene with 6 NVDEC → NVENC jobs; peak concurrent NVENC sessions was 6.
+
+GPU versus CPU decode on 20 cameras (2 scenes) gave identical frame counts and
+luma PSNR versus source within 0.019 dB. Re-conversion is layer-identical,
+including video bytes.
+
+Full corpus: see the PR
 
 The comparison is a plain Python CLI; no dedicated Pixi task is added:
 
@@ -279,7 +291,8 @@ partial pyserde schema; profiles decode the full typed UmeTrack model, with
 unknown envelope fields allowed. Profiles are stored without reserializing them.
 
 Annotation layers use `send_properties=False` and write only their own property
-groups. `hand_pose` holds string `version=v2` (the Hub's hand release) and float64
+groups. `hand_pose` holds string `version=v2` (the Hub's hand release), float64
+`trust_threshold=0.0` (the strict hand visibility threshold), and float64
 `coverage_left` / `coverage_right` (confidence > 0), used for the table's hand
 coverage columns. `coverage_left_high_conf` / `coverage_right_high_conf`
 (confidence > 0.5) remain census properties only.

@@ -120,7 +120,10 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
         if not chunk.is_static:
             assert set(chunk.timeline_names) == {"video_time", "frame_index"}
     props: dict[str, object] = recording_properties(read_back(target), "hand_pose")
-    assert props["version"] == HAND_POSE_VERSION
+    assert props["version"] == HAND_POSE_VERSION == "v2"
+    assert props["trust_threshold"] == 0.0
+    property_table: pa.Table = read_back(target).reader(index=None, contents="/__properties/**").to_arrow_table()
+    assert property_table.schema.field("property:hand_pose:trust_threshold").type.value_type == pa.float64()
     assert recording_properties(read_back(target), "capture") == {}
     for hand in HAND_SIDES:
         poses: list[HandPose] = [frame.hand_poses[hand.key] for frame in frames]
@@ -370,7 +373,6 @@ def test_fetch_missing_preserves_retained_raw_files(tmp_path: Path, monkeypatch:
     retained: Path = tmp_path / "retained.json"
     retained.write_text("keep")
     dataset: Show3dDataset = Show3dDataset(Show3dConfig(root=tmp_path))
-    dataset.__dict__["commit_sha"] = "test-sha"
     calls: list[list[str]] = []
 
     def fetch(repo_id: str, paths: list[str], *, local_dir: Path, revision: str) -> Path:
@@ -464,7 +466,10 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     assert not any(str(chunk.entity_path).endswith(("/landmarks", "/uv")) for chunk in chunks)
 
     props = recording_properties(read_back(target), "hand_pose")
-    assert props["version"] == HAND_POSE_VERSION
+    assert props["version"] == HAND_POSE_VERSION == "v2"
+    assert props["trust_threshold"] == 0.0
+    property_table: pa.Table = read_back(target).reader(index=None, contents="/__properties/**").to_arrow_table()
+    assert property_table.schema.field("property:hand_pose:trust_threshold").type.value_type == pa.float64()
     assert props["coverage_left"] == 0.5
     assert props["coverage_left_high_conf"] == 0.0
     assert props["coverage_right"] == props["coverage_right_high_conf"] == 1.0

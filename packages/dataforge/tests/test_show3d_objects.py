@@ -535,33 +535,56 @@ def test_convert_pending_unmapped_object_pose_prints_notice(
     assert not paths.rrd_path(paths.output_root(), layer="object_mesh", identity=identity).exists()
 
 
-def test_synthetic_hand_mesh_keeps_point_three_and_clears_zero(tmp_path):
+def test_synthetic_hand_mesh_keeps_point_three_and_clears_zero(tmp_path: Path) -> None:
     from test_umetrack import umetrack_model_document
+
     model = from_dict(HandModelNumpy, umetrack_model_document())
-    clock = FrameClock(RecordingInfo(0, 2, 60.0, {}), [FrameInfo(i, i, float(i), []) for i in range(2)], np.array([0, 1], dtype=np.int64), np.array([0, 1], dtype=np.int64))
+    clock = FrameClock(
+        RecordingInfo(0, 2, 60.0, {}),
+        [FrameInfo(i, i, float(i), []) for i in range(2)],
+        np.array([0, 1], dtype=np.int64),
+        np.array([0, 1], dtype=np.int64),
+    )
     absent = HandPose(0.0, None, None, None, None, None)
-    frames = [HandFrame(i, i, float(i), [], {'0': HandPose(conf, np.zeros(22, dtype=np.float32), np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32), None, None), '1': absent}) for i, conf in enumerate([0.3, 0.0])]
-    target = tmp_path / 'mesh.rrd'
-    write_hand_mesh_layer(SequenceIdentity('show3d', ('S', 'none_wave_abcd')), clock, frames, model, target)
-    chunks = [c for c in read_chunks(target) if str(c.entity_path) == schema.hand_mesh_path('left') and not c.is_static]
+    frames = [
+        HandFrame(
+            i,
+            i,
+            float(i),
+            [],
+            {
+                "0": HandPose(conf, np.zeros(22, dtype=np.float32), np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32), None, None),
+                "1": absent,
+            },
+        )
+        for i, conf in enumerate([0.3, 0.0])
+    ]
+    target = tmp_path / "mesh.rrd"
+    write_hand_mesh_layer(SequenceIdentity("show3d", ("S", "none_wave_abcd")), clock, frames, model, target)
+    chunks = [c for c in read_chunks(target) if str(c.entity_path) == schema.hand_mesh_path("left") and not c.is_static]
     assert mesh_vertex_counts(chunks) == {0: 3, 1: 0}
     batch = chunks[0].to_record_batch()
-    np.testing.assert_allclose(batch.column('Mesh3D:vertex_positions')[0].as_py(), [[0, 0, 0], [.01, 0, 0], [0, .01, 0]])
-    assert 'Mesh3D:triangle_indices' in batch.schema.names
-    assert not ObjectFrame(0, 0, 0.0, [], np.eye(3).tolist(), [[0.0], [0.0], [0.0]], .3).trusted
+    np.testing.assert_allclose(batch.column("Mesh3D:vertex_positions")[0].as_py(), [[0, 0, 0], [0.01, 0, 0], [0, 0.01, 0]])
+    assert "Mesh3D:triangle_indices" in batch.schema.names
+    assert not ObjectFrame(0, 0, 0.0, [], np.eye(3).tolist(), [[0.0], [0.0], [0.0]], 0.3).trusted
 
 
-def test_object_mesh_keeps_half_confidence_threshold(tmp_path):
-    mesh = tmp_path / 'object.glb'
+def test_object_mesh_keeps_half_confidence_threshold(tmp_path: Path) -> None:
+    mesh = tmp_path / "object.glb"
     payload = b'{"asset":{"version":"2.0"}}'
-    payload += b' ' * (-len(payload) % 4)
-    mesh.write_bytes(struct.pack('<4sIII4s', b'glTF', 2, 20 + len(payload), len(payload), b'JSON') + payload)
-    frames = [ObjectFrame(i, i, float(i), [], np.eye(3).tolist(), [[0.0], [0.0], [1000.0]], confidence) for i, confidence in enumerate([.3, .6])]
-    clock = FrameClock(RecordingInfo(0, 2, 60.0, {}), [FrameInfo(i, i, float(i), []) for i in range(2)], np.array([0, 1], dtype=np.int64), np.array([0, 1], dtype=np.int64))
-    target = tmp_path / 'objects.rrd'
-    write_object_mesh_layer(SequenceIdentity('show3d', ('S', 'keyboard_wave_abcd')), 'keyboard', clock, frames, 1, mesh, target)
-    batches = [c.to_record_batch() for c in read_chunks(target) if str(c.entity_path) == schema.object_mesh_path('keyboard') and not c.is_static]
-    alpha = next(b.column('Asset3D:albedo_factor').to_pylist() for b in batches if 'Asset3D:albedo_factor' in b.schema.names)
+    payload += b" " * (-len(payload) % 4)
+    mesh.write_bytes(struct.pack("<4sIII4s", b"glTF", 2, 20 + len(payload), len(payload), b"JSON") + payload)
+    frames = [ObjectFrame(i, i, float(i), [], np.eye(3).tolist(), [[0.0], [0.0], [1000.0]], confidence) for i, confidence in enumerate([0.3, 0.6])]
+    clock = FrameClock(
+        RecordingInfo(0, 2, 60.0, {}),
+        [FrameInfo(i, i, float(i), []) for i in range(2)],
+        np.array([0, 1], dtype=np.int64),
+        np.array([0, 1], dtype=np.int64),
+    )
+    target = tmp_path / "objects.rrd"
+    write_object_mesh_layer(SequenceIdentity("show3d", ("S", "keyboard_wave_abcd")), "keyboard", clock, frames, 1, mesh, target)
+    batches = [c.to_record_batch() for c in read_chunks(target) if str(c.entity_path) == schema.object_mesh_path("keyboard") and not c.is_static]
+    alpha = next(b.column("Asset3D:albedo_factor").to_pylist() for b in batches if "Asset3D:albedo_factor" in b.schema.names)
     assert [row[0] & 255 for row in alpha] == [0, 255]
-    confidence = next(b.column('Scalars:scalars').to_pylist() for b in batches if 'Scalars:scalars' in b.schema.names)
-    np.testing.assert_allclose(confidence, [[.3], [.6]])
+    confidence = next(b.column("Scalars:scalars").to_pylist() for b in batches if "Scalars:scalars" in b.schema.names)
+    np.testing.assert_allclose(confidence, [[0.3], [0.6]])

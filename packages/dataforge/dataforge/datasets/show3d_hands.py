@@ -97,9 +97,9 @@ def read_hand_frames(hand_path: Path, clock: FrameClock) -> list[HandFrame]:
     return selected
 
 
-def high_confidence_coverage(confidence: list[float]) -> float:
-    """Fraction of scene frames whose confidence is strictly greater than 0.5."""
-    return sum(value > 0.5 for value in confidence) / len(confidence)
+def high_confidence_coverage(confidence: list[float], *, threshold: float = 0.5) -> float:
+    """Fraction of scene frames whose confidence is strictly greater than the threshold."""
+    return sum(value > threshold for value in confidence) / len(confidence)
 
 
 def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selected: list[HandFrame], profile_text: str, target: Path) -> None:
@@ -147,7 +147,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 recording, side.name, times_ns=clock.times_ns, frame_indices=clock.frame_indices,
                 confidence=np.asarray(confidence, dtype=np.float64),
             )
-            coverage[f"coverage_{side.name}"] = pa.array([sum(value > HAND_TRUST for value in confidence) / len(confidence)], type=pa.float64())
+            coverage[f"coverage_{side.name}"] = pa.array([high_confidence_coverage(confidence, threshold=HAND_TRUST)], type=pa.float64())
             coverage[f"coverage_{side.name}_high_conf"] = pa.array([high_confidence_coverage(confidence)], type=pa.float64())
             positions, values = sparse_rows(poses, lambda pose: pose.joint_angles)
             angles: Float32[ndarray, "n 22"] = np.asarray(values, dtype=np.float32).reshape(-1, NUM_JOINTS_PER_HAND)
@@ -162,7 +162,14 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                     recording, schema.hand_wrist_path(side.name), times_ns=clock.times_ns[positions],
                     frame_indices=clock.frame_indices[positions], translations_xyz=translations, quaternions_xyzw=rotations,
                 )
-        recording.send_property(paths.HAND_POSE_LAYER, rr.AnyValues(version=pa.array([HAND_POSE_VERSION], type=pa.string()), **coverage))
+        recording.send_property(
+            paths.HAND_POSE_LAYER,
+            rr.AnyValues(
+                version=pa.array([HAND_POSE_VERSION], type=pa.string()),
+                trust_threshold=pa.array([HAND_TRUST], type=pa.float64()),
+                **coverage,
+            ),
+        )
 
 
 def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames: list[HandFrame], model: HandModelNumpy, target: Path) -> None:

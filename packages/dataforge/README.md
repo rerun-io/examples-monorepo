@@ -316,6 +316,7 @@ Each recording records the Hub commit it was built from as
 | `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds, blueprints and sidecars go; set it for convert **and** register |
 | `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to; the exoego datasets default `--root` to `$DATAFORGE_RAW_ROOT/<dataset command>` (both HOT3D devices share `hot3d`), with source subfolders such as UmeTrack's `raw_data/` inside |
 | `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang. Check yours with `ffmpeg -hide_banner -encoders \| grep av1_nvenc` |
+| `DATAFORGE_NVENC_SLOTS` | `6` | Positive integer limiting machine-wide concurrent dataforge NVENC sessions. Use the same value across simultaneous jobs. |
 
 Paths in `--root`/`--sequence` and the defaults above are relative to
 `packages/dataforge/` (the tasks run there).
