@@ -3225,6 +3225,35 @@ cwd = "packages/dataforge"
 description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep running to register/view)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# handtrack
+# ═══════════════════════════════════════════════════════════════════════════
+# MEgATrack's hand tracker (DetNet-F, KeyNet-F, the LM pose fit, the tracker), trained on
+# UmeTrack + SHOW3D streamed from the local Rerun catalog. linux-64 only: NVDEC decode
+# through torchcodec, like zipdepth-catalog. Explicit platforms — see AGENTS.md.
+[feature.handtrack]
+platforms = ["linux-64"]
+
+[feature.handtrack.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+einops = ">=0.8.0,<0.9"
+# simplecv's catalog video helpers decode the segment's AV1 packets on NVDEC.
+av = ">=18"
+torchcodec = "*"
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+# torch.cuda.utilization() backend for the data-vs-GPU training instrumentation.
+nvidia-ml-py = "*"
+
+[feature.handtrack.pypi-dependencies]
+handtrack = { path = "packages/handtrack", editable = true }
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.handtrack.activation.env]
+PACKAGE_DIR = "packages/handtrack"
+PYREFLY_TARGET = "handtrack"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -3603,6 +3632,19 @@ dataforge-dev = { features = [
     "dataforge",
     "dev",
 ], solve-group = "dataforge", no-default-feature = true }
+handtrack = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "handtrack",
+], solve-group = "handtrack", no-default-feature = true }
+handtrack-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "handtrack",
+    "dev",
+], solve-group = "handtrack", no-default-feature = true }
 dpvo = { features = [
     "common",
     "cuda",
