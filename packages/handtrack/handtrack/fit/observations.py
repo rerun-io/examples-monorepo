@@ -39,6 +39,14 @@ class ViewObservation:
     def __post_init__(self) -> None:
         if len(self.camera.names) != 1:
             raise ValueError(f"a view holds one camera, got {len(self.camera.names)}: {self.camera.names}")
+        for name, finite in (
+            ("keypoints_px", torch.isfinite(self.keypoints_px).all(dim=-1)),
+            ("d_rel_mm", torch.isfinite(self.d_rel_mm)),
+        ):
+            invalid: Bool[Tensor, "21"] = (self.weights > 0) & ~finite
+            if bool(invalid.any()):
+                keypoint: int = int(torch.nonzero(invalid)[0, 0])
+                raise ValueError(f"{name} is non-finite at observed keypoint {keypoint}")
 
 
 @dataclass(frozen=True, slots=True)

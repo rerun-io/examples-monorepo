@@ -10,6 +10,7 @@ Offline protocol (§5.1): calibrate on the first 100 frames of a sequence, then 
 ``scaled_hand_model(generic_hand_model(), ϕ)`` and ϕ.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -19,7 +20,7 @@ from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 from torch import Tensor
 
 from handtrack.fit.observations import HandObservation
-from handtrack.fit.pose_fit import DEFAULT_CONFIG, FitConfig, FitResult, fit_pose
+from handtrack.fit.pose_fit import DEFAULT_CONFIG, FitConfig, FitResult, Termination, fit_pose
 from handtrack.fit.solver import (
     DAMPING_GROWTH,
     FIT_JOINTS,
@@ -37,6 +38,7 @@ from handtrack.fit.solver import (
     normal_equations,
     orthonormalize,
     poses_from_theta,
+    predicted_reduction,
     retract,
     stack_views,
     theta_from_poses,
@@ -80,7 +82,9 @@ class ScaleCalibration:
     iterations: int
     """LM iterations run."""
     converged: bool
-    """The stopping rule fired before the iteration limit."""
+    """True only when the convergence tolerance was reached."""
+    termination: Termination = "iterations"
+    """Why the solve stopped; non-finite energy returns NaN phi and converged=False."""
 
 
 def scaled_hand_model(model: HandModelTorch, scale: float) -> HandModelTorch:
@@ -130,14 +134,20 @@ def calibrate_scale(
         model=model, views=stack_views(blocks), prior=no_prior(n), phi=1.0, dist_weight=0.0, temporal_weight=0.0, temporal_translation_unit_m=1.0
     )
     limits: Float32[Tensor, "20 2"] = fit_limits(model, config.initial_fit.joint_limit_margin_rad)
+    theta = replace(theta, angles=theta.angles.clamp(limits[:, 0], limits[:, 1]))
     free: Int64[Tensor, "27"] = torch.arange(PARAMETERS)
     residual, jacobian = linearize(problem, theta, free)
     energy: float = float((residual * residual).sum())
     damping: float = config.initial_damping
     growth: float = DAMPING_GROWTH
     converged: bool = False
+    termination: Termination = "iterations"
     iterations: int = 0
+    if not math.isfinite(energy):
+        termination = "non_finite"
     for _ in range(config.iterations):
+        if termination == "non_finite":
+            break
         iterations += 1
         hessian, gradient, mask = normal_equations(theta, residual, jacobian, free, limits)
         pose_block: Float64[Tensor, "n 26 26"] = hessian[:, :POSE_PARAMETERS, :POSE_PARAMETERS]
@@ -151,10 +161,13 @@ def calibrate_scale(
         scale_step: float = (-float(gradient[:, POSE_PARAMETERS].sum()) + float((coupling * solved[..., 1]).sum())) / schur
         pose_step: Float64[Tensor, "n 26"] = -(solved[..., 1] + solved[..., 0] * scale_step)
         step: Float64[Tensor, "n 27"] = torch.cat([pose_step, torch.full((n, 1), scale_step, dtype=torch.float64)], dim=-1)
-        predicted: float = -float(2.0 * (step * gradient).sum() + torch.einsum("nk,nkl,nl->", step, hessian, step))
         candidate: Theta = retract(theta, step.to(torch.float32), limits)
+        predicted: float = float(predicted_reduction(theta, candidate, free, step, hessian, gradient).sum())
         new_residual, new_jacobian = linearize(problem, candidate, free)
         new_energy: float = float((new_residual * new_residual).sum())
+        if not math.isfinite(new_energy):
+            termination = "non_finite"
+            break
         reduction: float = energy - new_energy
         if reduction > 0:
             ratio: float = reduction / max(predicted, 1e-30)
@@ -165,20 +178,27 @@ def calibrate_scale(
         else:
             damping *= growth
             growth *= DAMPING_GROWTH
-            converged = damping > MAX_DAMPING
         if converged:
+            termination = "tolerance"
+            break
+        if damping > MAX_DAMPING:
+            termination = "damping"
             break
     if not bool(torch.isfinite(theta.scale).all()):
         raise ValueError("the scale calibration diverged")
-    theta = replace(theta, rotation=orthonormalize(theta.rotation))
+    if termination != "non_finite":
+        theta = replace(theta, rotation=orthonormalize(theta.rotation))
     e_2d: Float32[Tensor, "n"] = energy_terms(problem, theta)[0]
+    if not bool(torch.isfinite(e_2d).all()):
+        termination = "non_finite"
     carried: Float32[Tensor, "n 2"] = torch.stack([pose.joint_angles[FIT_JOINTS:] for pose in poses])
     return ScaleCalibration(
-        phi=float(theta.scale[0]),
+        phi=math.nan if termination == "non_finite" else float(theta.scale[0]),
         poses=tuple(poses_from_theta(theta, carried)),
         used=tuple(used),
         e_2d=float(e_2d.sum()),
         blocks=n,
         iterations=iterations,
-        converged=converged,
+        converged=converged and termination != "non_finite",
+        termination=termination,
     )
