@@ -4,9 +4,6 @@ import math
 from collections.abc import Iterator
 
 import pytest
-
-pytest.importorskip("torch", reason="model tests need the handtrack environment")
-
 import torch
 from jaxtyping import Bool, Float32
 from torch import Tensor, nn
@@ -37,7 +34,7 @@ def test_detnet_table_and_pooled_equivalence() -> None:
     assert output.center.shape == (1, 2, 2)
     assert output.radius.shape == output.presence_logit.shape == (1, 2)
     with torch.no_grad():
-        assert model.backbone(frame).shape == (1, 160, 4, 5)
+        assert model.backbone(model.pool(frame)).shape == (1, 160, 4, 5)
         pooled: DetNetOutput = model.forward_pooled(torch.nn.functional.avg_pool2d(frame, 4))
     torch.testing.assert_close(output.center, pooled.center, rtol=0, atol=0)
     torch.testing.assert_close(output.radius, pooled.radius, rtol=0, atol=0)
