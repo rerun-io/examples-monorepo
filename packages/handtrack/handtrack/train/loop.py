@@ -79,6 +79,13 @@ class LoopSettings:
     """Enable bfloat16 autocast in production (models have Float32 dev contracts)."""
     presence_weight: float = 1.0
     """Chosen multiplier for the added KeyNet presence BCE."""
+    detnet_circle_weight: float = 100.0
+    """Multiplier for DetNet's circle MSE in normalized units (cx/640, cy/480, r/640). The paper's L = MSE + 100 BCE (circle
+    weight 1) leaves the circle 0.4 % of the loss at these units: after 150 k steps it stalls near 50 px while presence trains.
+    Chosen with detnet_presence_weight from a seven-variant probe on one decode (2026-09-28): at 2 k steps from scratch,
+    centre RMS 103 px at (1, 100) vs 74 px at (100, 10); warm-started from the (1, 100) run, 51 px and still falling."""
+    detnet_presence_weight: float = 10.0
+    """Multiplier for DetNet's presence BCE (the paper's 100 with circle weight 1)."""
     resume_next_epoch: bool = True
     """On resume from a mid-epoch last.pt, skip the rest of that epoch instead of replaying its consumed batches: start
     the next epoch with the global step, optimisers, best scores and history kept. Replay assumes a deterministic source;
@@ -92,8 +99,8 @@ class LoopSettings:
     def __post_init__(self) -> None:
         if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or self.validate_every < 0:
             raise ValueError('Cadences must be positive (validate_every may be zero)')
-        if self.presence_weight < 0:
-            raise ValueError('presence_weight must be nonnegative')
+        if min(self.presence_weight, self.detnet_circle_weight, self.detnet_presence_weight) < 0:
+            raise ValueError('Loss weights must be nonnegative')
         if self.heatmap_warmup_epochs < 0:
             raise ValueError('heatmap_warmup_epochs must be nonnegative')
         if self.bf16 and os.environ.get('PIXI_DEV_MODE') == '1':
@@ -223,7 +230,8 @@ class Trainer:
         return KeyNetOutput(output.heatmaps.float(), output.distance.float(), output.presence_logit.float())
 
     def detnet_objective(self, batch: DetNetBatch, output: DetNetOutput) -> DetNetLoss:
-        return detnet_loss(output, batch.circle.to(self.device), batch.presence.to(self.device), batch.presence_mask.to(self.device), batch.circle_mask.to(self.device))
+        return detnet_loss(output, batch.circle.to(self.device), batch.presence.to(self.device), batch.presence_mask.to(self.device), batch.circle_mask.to(self.device),
+                           circle_weight=self.cadence.detnet_circle_weight, presence_weight=self.cadence.detnet_presence_weight)
 
     def keynet_objective(self, batch: KeyNetBatch, output: KeyNetOutput) -> KeyNetLoss:
         reduction: HeatmapReduction = 'mean' if self.state.epoch < self.cadence.heatmap_warmup_epochs else self.cadence.heatmap_reduction
