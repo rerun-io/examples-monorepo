@@ -89,7 +89,7 @@ def plots() -> list[rrb.TimeSeriesView]:
             axis_y=rrb.ScalarAxis(range=(0.0, 1.05)),
         ),
         rrb.TimeSeriesView(
-            name="Tracked · DetNet presence",
+            name="Tracked (thick step) · DetNet presence (thin)",
             origin=rerun_layers.SERIES_ROOT,
             contents=[f"+ {rerun_layers.SERIES_ROOT}/tracked/**", f"+ {rerun_layers.SERIES_ROOT}/detnet_presence/**"],
             plot_legend=rrb.PlotLegend(visible=True),

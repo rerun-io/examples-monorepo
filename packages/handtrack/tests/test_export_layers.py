@@ -80,3 +80,35 @@ def test_export_writes_layers_and_a_standalone_clip(tmp_path: Path) -> None:
     assert reader.blueprints()
     entities: set[str] = {str(chunk.entity_path) for chunk in reader.stream(store=reader.recordings()[0]).to_chunks()}
     assert {schema.video_path(0, 1), schema.hand_mesh_path("left"), rerun_layers.pred_mesh_path("left"), rerun_layers.error_path("right")} <= entities
+
+
+@pytest.mark.parametrize("source_layers,destination_layers", [(None, ["base"]), (["base"], None), (["base"], ["hand_pose"])])
+def test_export_rejects_missing_base_before_any_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_layers: list[str] | None, destination_layers: list[str] | None) -> None:
+    from unittest.mock import MagicMock
+
+    from fake_track import fake_detnet, synthetic_truth
+
+    truth = synthetic_truth(3)
+    save_track(fake_detnet(truth), tmp_path / "detnet")
+
+    def entry(layers: list[str] | None) -> MagicMock:
+        result = MagicMock(spec=DatasetEntry)
+        result.segment_table.return_value.to_arrow_table.return_value = pa.table({
+            "rerun_segment_id": [truth.segment] if layers is not None else [],
+            "rerun_layer_names": [layers] if layers is not None else [],
+            "property:episode:domain": [["real"]] if layers is not None else [],
+        })
+        return result
+
+    source = entry(source_layers)
+    destination = entry(destination_layers)
+    client = MagicMock()
+    client.get_dataset.side_effect = [source, destination, destination]
+    monkeypatch.setattr(export_layers, "CatalogClient", lambda url: client)
+    config = export_layers.Config(detnet_dir=tmp_path / "detnet", layers_root=tmp_path / "layers", register=True, register_url="rerun+http://destination:9999")
+    with pytest.raises(ValueError, match="segment|base"):
+        export_layers.main(config)
+    assert not config.layers_root.exists()
+    source.register.assert_not_called()
+    destination.register.assert_not_called()
+    destination.register_blueprint.assert_not_called()

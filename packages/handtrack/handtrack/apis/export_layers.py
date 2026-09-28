@@ -112,7 +112,7 @@ def write_layer_files(config: Config, entry: DatasetEntry, infos: dict[str, Segm
         detnet_target: Path = layer_path(config.layers_root, DETNET_LAYER, segment)
         if segment in detections and not writing.should_skip(detnet_target, force=config.force):
             with writing.atomic_recording(detnet_target, recording_id=segment, send_properties=False) as recording:
-                rerun_layers.write_detnet_layer(recording, load_track(detections[segment]))
+                rerun_layers.write_detnet_layer(recording, load_track(detections[segment]), read_ground_truth(entry, infos[segment]))
         print(f"{segment}: layers in {perf_counter() - started:.1f} s")
 
 
@@ -134,10 +134,22 @@ def export_clip(segment_table: pa.Table, segment: str, handtrack_rrd: Path, targ
         rr.send_chunks(LazyChunkStream.merge(*streams), recording=recording)
 
 
+def validate_base_segments(table: pa.Table, segments: list[str], dataset: str) -> None:
+    """Reject inputs without base video before writing or registering derived layers."""
+    bases: set[str] = {
+        segment for segment, layers in zip(table["rerun_segment_id"].to_pylist(), table["rerun_layer_names"].to_pylist(), strict=True)
+        if "base" in (layers or [])
+    }
+    missing: list[str] = sorted(set(segments) - bases)
+    if missing:
+        raise ValueError(f"{dataset} has no base segment for: {missing}")
+
+
 def register_layers(config: Config, segments: list[str]) -> None:
     """Register the layer files of ``segments`` under their layer names, replacing an earlier registration of the same layer."""
     url: str = config.register_url or config.catalog_url
     entry: DatasetEntry = CatalogClient(url).get_dataset(config.dataset)
+    validate_base_segments(entry.segment_table().to_arrow_table(), segments, config.dataset)
     for layer in (HANDTRACK_LAYER, DETNET_LAYER):
         candidates: list[Path] = [layer_path(config.layers_root, layer, segment) for segment in segments]
         files: list[Path] = [path for path in candidates if path.is_file()]
@@ -170,9 +182,11 @@ def main(config: Config) -> None:
     entry: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     segment_table: pa.Table = entry.segment_table().to_arrow_table()
     infos: dict[str, SegmentInfo] = {info.segment_id: info for info in catalog.segment_infos(config.dataset, segment_table)}
-    unknown_tracks: list[str] = sorted(set(tracks) - infos.keys())
-    if unknown_tracks:
-        raise ValueError(f"{config.dataset} has no segment for these tracks: {unknown_tracks}")
+    selected: list[str] = sorted(set(tracks) | set(detections))
+    validate_base_segments(segment_table, selected, config.dataset)
+    if config.register and config.register_url and config.register_url != config.catalog_url:
+        destination: DatasetEntry = CatalogClient(config.register_url).get_dataset(config.dataset)
+        validate_base_segments(destination.segment_table().to_arrow_table(), selected, config.dataset)
     write_layer_files(config, entry, infos, tracks, detections)
     for clip in config.clips:
         started: float = perf_counter()
