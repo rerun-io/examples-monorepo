@@ -8,15 +8,19 @@ a 5° margin) by projected steps with an active set, and ``initial_pose`` for ha
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from itertools import permutations, product
 
 import torch
 from jaxtyping import Bool, Float32, Float64, Int64
-from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
+from simplecv.umetrack_temp.generic_hand_model_torch import LANDMARK, HandModelTorch
 from torch import Tensor
 
 from handtrack.fit.observations import MAX_VIEWS, HandObservation
 from handtrack.fit.solver import (
+    DAMPING_GROWTH,
     FIT_JOINTS,
+    MAX_DAMPING,
+    MIN_DAMPING_FACTOR,
     PARAMETERS,
     POSE_PARAMETERS,
     Prior,
@@ -25,12 +29,13 @@ from handtrack.fit.solver import (
     Views,
     energy_terms,
     fit_limits,
-    free_mask,
     linearize,
     local_landmarks,
     marquardt_scaling,
     no_prior,
+    normal_equations,
     orthonormalize,
+    poses_from_theta,
     repeat_views,
     retract,
     select,
@@ -43,8 +48,31 @@ from handtrack.hand.pose import HandPose
 
 JOINT_LIMIT_MARGIN_RAD: float = math.radians(5.0)
 """UmeTrack's ground truth exceeds the model's ``joint_limits`` by up to exactly 5° (7% of joint angles on a testing recording)."""
-PALM: tuple[int, ...] = (5, 8, 11, 14, 17, 20)
+PALM: tuple[int, ...] = (
+    LANDMARK.WRIST_JOINT,
+    LANDMARK.INDEX_PROXIMAL_FRAME,
+    LANDMARK.MIDDLE_PROXIMAL_FRAME,
+    LANDMARK.RING_PROXIMAL_FRAME,
+    LANDMARK.PINKY_PROXIMAL_FRAME,
+    LANDMARK.PALM_CENTER,
+)
 """Wrist, the four finger MCPs and the palm centre: fixed in the wrist frame (the palm centre moves < 3 mm)."""
+_PALM_MASK: Float32[Tensor, "21"] = torch.zeros(21).index_fill(0, torch.tensor([int(i) for i in PALM]), 1.0)
+"""1 at the ``PALM`` keypoints: multiply a per-keypoint weight by it to keep only the palm."""
+MIN_ALIGN_POINTS: int = 3
+"""Keypoints a view needs before its palm is aligned rigidly (Kabsch needs three)."""
+
+
+def _cube_rotations() -> Float32[Tensor, "24 3 3"]:
+    """The 24 rotations that map the cube onto itself: the signed permutation matrices with determinant +1."""
+    signed: list[Float32[Tensor, "3 3"]] = [
+        torch.eye(3)[list(order)] * torch.tensor(signs)[:, None] for order in permutations(range(3)) for signs in product((1.0, -1.0), repeat=3)
+    ]
+    return torch.stack([matrix for matrix in signed if torch.linalg.det(matrix) > 0])
+
+
+_CUBE_ROTATIONS: Float32[Tensor, "24 3 3"] = _cube_rotations()
+"""``initial_pose`` tries the first ``rotation_hypotheses`` of them, in this order."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +139,8 @@ class FitResult:
 
 @dataclass(frozen=True, slots=True)
 class _Solved:
+    """One batched LM solve: the final θ, its weighted energy, the iterations run and whether the stopping rule fired."""
+
     theta: Theta
     energy: Float32[Tensor, "b"]
     iterations: Int64[Tensor, "b"]
@@ -129,28 +159,22 @@ def _problem(model: HandModelTorch, phi: float, views: Views, prior: Prior, conf
     )
 
 
-def _levenberg_marquardt(
-    problem: Problem, theta: Theta, free: Int64[Tensor, "k"], iterations: int, relative_tolerance: float, config: FitConfig
-) -> _Solved:
+def _levenberg_marquardt(problem: Problem, theta: Theta, free: Int64[Tensor, "k"], config: FitConfig) -> _Solved:
     """Batched LM, one damping per hand: Marquardt scaling, Nielsen's damping update, projected steps with an active set.
 
-    Each iteration is one batched linearisation, at the candidate; a rejected candidate keeps the previous one.
+    At most ``config.max_iterations``, stopping at ``config.relative_tolerance``. Each iteration is one batched linearisation,
+    at the candidate; a rejected candidate keeps the previous one.
     """
     limits: Float32[Tensor, "20 2"] = fit_limits(problem.model, config.joint_limit_margin_rad)
     b: int = theta.translation.shape[0]
     residual, jacobian = linearize(problem, theta, free)
     energy: Float32[Tensor, "b"] = (residual * residual).sum(-1)
     damping: Float64[Tensor, "b"] = torch.full((b,), config.initial_damping, dtype=torch.float64)
-    growth: Float64[Tensor, "b"] = torch.full((b,), 2.0, dtype=torch.float64)
+    growth: Float64[Tensor, "b"] = torch.full((b,), DAMPING_GROWTH, dtype=torch.float64)
     done: Bool[Tensor, "b"] = torch.zeros(b, dtype=torch.bool)
     count: Int64[Tensor, "b"] = torch.zeros(b, dtype=torch.int64)
-    for _ in range(iterations):
-        j64: Float64[Tensor, "b m k"] = jacobian.to(torch.float64)
-        hessian: Float64[Tensor, "b k k"] = j64.transpose(1, 2) @ j64
-        gradient: Float64[Tensor, "b k"] = torch.einsum("bmk,bm->bk", j64, residual.to(torch.float64))
-        mask: Float64[Tensor, "b k"] = free_mask(theta, gradient, free, limits)
-        hessian = hessian * mask[:, :, None] * mask[:, None, :]
-        gradient = gradient * mask
+    for _ in range(config.max_iterations):
+        hessian, gradient, mask = normal_equations(theta, residual, jacobian, free, limits)
         scaling: Float64[Tensor, "b k"] = marquardt_scaling(torch.diagonal(hessian, dim1=1, dim2=2), mask)
         system: Float64[Tensor, "b k k"] = hessian + torch.diag_embed(damping[:, None] * scaling + (1.0 - mask))
         step: Float64[Tensor, "b k"] = -torch.linalg.solve(system, gradient)
@@ -163,15 +187,15 @@ def _levenberg_marquardt(
         reduction: Float32[Tensor, "b"] = energy - new_energy
         accept: Bool[Tensor, "b"] = (reduction > 0) & ~done
         ratio: Float64[Tensor, "b"] = reduction.to(torch.float64) / predicted.clamp(min=1e-30)
-        small: Bool[Tensor, "b"] = reduction <= relative_tolerance * energy + config.absolute_tolerance
+        small: Bool[Tensor, "b"] = reduction <= config.relative_tolerance * energy + config.absolute_tolerance
         count = count + (~done).to(torch.int64)
         theta = select(accept, candidate, theta)
         residual = torch.where(accept[:, None], new_residual, residual)
         jacobian = torch.where(accept[:, None, None], new_jacobian, jacobian)
         energy = torch.where(accept, new_energy, energy)
-        damping = torch.where(accept, damping * torch.clamp(1.0 - (2.0 * ratio - 1.0) ** 3, min=1.0 / 3.0), damping * growth)
-        growth = torch.where(accept, torch.full_like(growth, 2.0), growth * 2.0)
-        done = done | (accept & small) | (damping > 1e10)
+        damping = torch.where(accept, damping * torch.clamp(1.0 - (2.0 * ratio - 1.0) ** 3, min=MIN_DAMPING_FACTOR), damping * growth)
+        growth = torch.where(accept, torch.full_like(growth, DAMPING_GROWTH), growth * DAMPING_GROWTH)
+        done = done | (accept & small) | (damping > MAX_DAMPING)
         if bool(done.all()):
             break
     return _Solved(theta=theta, energy=energy, iterations=count, converged=done)
@@ -183,7 +207,7 @@ def _results(problem: Problem, solved: _Solved, carried: Float32[Tensor, "b 2"])
     energy: Float32[Tensor, "b"] = e_2d + problem.dist_weight * e_dist + problem.temporal_weight * e_temporal
     return [
         FitResult(
-            pose=HandPose(theta.rotation[i], theta.translation[i], torch.cat([theta.angles[i], carried[i]])),
+            pose=pose,
             e_2d=float(e_2d[i]),
             e_dist=float(e_dist[i]),
             e_temporal=float(e_temporal[i]),
@@ -191,7 +215,7 @@ def _results(problem: Problem, solved: _Solved, carried: Float32[Tensor, "b 2"])
             iterations=int(solved.iterations[i]),
             converged=bool(solved.converged[i]),
         )
-        for i in range(theta.translation.shape[0])
+        for i, pose in enumerate(poses_from_theta(theta, carried))
     ]
 
 
@@ -221,9 +245,7 @@ def fit_pose(
         start: Theta = theta_from_poses(poses)
         prior: Prior = Prior(rotation=start.rotation, translation=start.translation, angles=start.angles, present=torch.ones(len(warm)))
         problem: Problem = _problem(model, phi, stack_views([hands[i] for i in warm]), prior, config)
-        solved: _Solved = _levenberg_marquardt(
-            problem, start, torch.arange(POSE_PARAMETERS), config.max_iterations, config.relative_tolerance, config
-        )
+        solved: _Solved = _levenberg_marquardt(problem, start, torch.arange(POSE_PARAMETERS), config)
         carried: Float32[Tensor, "b 2"] = torch.stack([pose.joint_angles[FIT_JOINTS:] for pose in poses])
         results.update(zip(warm, _results(problem, solved, carried), strict=True))
     if cold:
@@ -268,19 +290,6 @@ def _kabsch(
     return rotation, target_mean - torch.einsum("bij,bj->bi", rotation, source_mean)
 
 
-def _cube_rotations() -> Float32[Tensor, "24 3 3"]:
-    """The 24 rotations that map the cube onto itself: signed permutation matrices with determinant +1."""
-    candidates: list[Float32[Tensor, "3 3"]] = []
-    for order in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
-        for signs in ((1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1), (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1)):
-            matrix: Float32[Tensor, "3 3"] = torch.zeros(3, 3)
-            for row, (column, sign) in enumerate(zip(order, signs, strict=True)):
-                matrix[row, column] = float(sign)
-            if torch.linalg.det(matrix) > 0:
-                candidates.append(matrix)
-    return torch.stack(candidates)
-
-
 def _wrist_hypotheses(
     model: HandModelTorch, phi: float, views: Views, neutral: Float32[Tensor, "20"], hypotheses: int
 ) -> tuple[Theta, Bool[Tensor, "b h"]]:
@@ -297,18 +306,22 @@ def _wrist_hypotheses(
         b, MAX_VIEWS, 21, 3
     )
     rays: Float32[Tensor, "b 2 21 3"] = torch.nan_to_num(unprojected) * observed[..., None]
-    palm: Float32[Tensor, "b 2 21"] = torch.zeros_like(observed)
-    palm[..., list(PALM)] = observed[..., list(PALM)]
-    enough_palm: Bool[Tensor, "b 2 1"] = palm.sum(-1, keepdim=True) >= 3
+    palm: Float32[Tensor, "b 2 21"] = observed * _PALM_MASK
+    enough_palm: Bool[Tensor, "b 2 1"] = palm.sum(-1, keepdim=True) >= MIN_ALIGN_POINTS
     used: Float32[Tensor, "b 2 21"] = torch.where(enough_palm, palm, observed)
     count: Float32[Tensor, "b 2"] = used.sum(-1)
-    valid: Bool[Tensor, "b 2"] = count >= 3
+    valid: Bool[Tensor, "b 2"] = count >= MIN_ALIGN_POINTS
     total: Float32[Tensor, "b 2 1"] = count[..., None].clamp(min=1.0)
+
+    def centred(points: Float32[Tensor, "b 2 21 3"]) -> Float32[Tensor, "b 2 21 3"]:
+        """``points`` minus their mean over the ``used`` keypoints of each view."""
+        return points - (used[..., None] * points).sum(2, keepdim=True) / total[..., None]
+
     offsets: Float32[Tensor, "b 2 21 1"] = (phi * views.d_rel_mm / 1000.0)[..., None]
-    a: Float32[Tensor, "b 2 21 3"] = rays - (used[..., None] * rays).sum(2, keepdim=True) / total[..., None]
-    c: Float32[Tensor, "b 2 21 3"] = offsets * rays - (used[..., None] * offsets * rays).sum(2, keepdim=True) / total[..., None]
+    a: Float32[Tensor, "b 2 21 3"] = centred(rays)
+    c: Float32[Tensor, "b 2 21 3"] = centred(offsets * rays)
     model_points: Float32[Tensor, "b 2 21 3"] = local[:, None].expand(b, MAX_VIEWS, 21, 3)
-    model_centred: Float32[Tensor, "b 2 21 3"] = model_points - (used[..., None] * model_points).sum(2, keepdim=True) / total[..., None]
+    model_centred: Float32[Tensor, "b 2 21 3"] = centred(model_points)
     spread: Float32[Tensor, "b 2"] = (used * (model_centred * model_centred).sum(-1)).sum(-1)
     qa: Float32[Tensor, "b 2"] = (used * (a * a).sum(-1)).sum(-1).clamp(min=1e-12)
     qb: Float32[Tensor, "b 2"] = (used * (a * c).sum(-1)).sum(-1)
@@ -327,7 +340,7 @@ def _wrist_hypotheses(
     anchor_cam: Float32[Tensor, "b 3"] = (used[rows, best_view][..., None] * points_cam[rows, best_view]).sum(1) / total[rows, best_view]
     anchor: Float32[Tensor, "b 3"] = torch.einsum("bij,bj->bi", world_from_cam[rows, best_view], anchor_cam) + cam_origin[rows, best_view]
     model_anchor: Float32[Tensor, "b 3"] = (used[rows, best_view][..., None] * local).sum(1) / total[rows, best_view]
-    grid: Float32[Tensor, "g 3 3"] = _cube_rotations()[:hypotheses]
+    grid: Float32[Tensor, "g 3 3"] = _CUBE_ROTATIONS[:hypotheses]
     grid_translation: Float32[Tensor, "b g 3"] = anchor[:, None] - torch.einsum("gij,bj->bgi", grid, model_anchor)
     rotation: Float32[Tensor, "b h 3 3"] = torch.cat([aligned_rotation, grid.expand(b, -1, 3, 3)], dim=1)
     translation: Float32[Tensor, "b h 3"] = torch.cat([aligned_translation, grid_translation], dim=1)
@@ -363,13 +376,12 @@ def initial_pose(model: HandModelTorch, phi: float, hands: Sequence[HandObservat
     neutral: Float32[Tensor, "20"] = 0.5 * (limits[:, 0] + limits[:, 1])
     hypotheses, usable = _wrist_hypotheses(model, phi, views, neutral, config.rotation_hypotheses)
     h: int = usable.shape[1]
-    observed: Float32[Tensor, "b 2 21"] = (views.weights > 0).to(torch.float32)
-    palm_only: Float32[Tensor, "b 2 21"] = torch.zeros_like(views.weights)
-    palm_only[..., list(PALM)] = views.weights[..., list(PALM)]
-    enough_palm: Bool[Tensor, "b 1 1"] = (observed[..., list(PALM)].sum(-1) >= 3).any(-1)[:, None, None]
+    stage: FitConfig = replace(config, max_iterations=config.init_iterations, relative_tolerance=config.init_relative_tolerance)
+    palm_only: Float32[Tensor, "b 2 21"] = views.weights * _PALM_MASK
+    enough_palm: Bool[Tensor, "b 1 1"] = ((palm_only > 0).sum(-1) >= MIN_ALIGN_POINTS).any(-1)[:, None, None]
     rigid_views: Views = replace(repeat_views(views, h), weights=torch.where(enough_palm, palm_only, views.weights).repeat_interleave(h, dim=0))
     rigid_problem: Problem = _problem(model, phi, rigid_views, no_prior(b * h), config)
-    rigid: _Solved = _levenberg_marquardt(rigid_problem, hypotheses, torch.arange(6), config.init_iterations, config.init_relative_tolerance, config)
+    rigid: _Solved = _levenberg_marquardt(rigid_problem, hypotheses, torch.arange(6), stage)
     rigid_energy: Float32[Tensor, "b h"] = torch.where(usable, rigid.energy.reshape(b, h), torch.full((b, h), torch.inf))
     order: Int64[Tensor, "b h"] = rigid_energy.argsort(dim=-1)
     rotations: Float32[Tensor, "b h 3 3"] = rigid.theta.rotation.reshape(b, h, 3, 3)
@@ -390,9 +402,7 @@ def initial_pose(model: HandModelTorch, phi: float, hands: Sequence[HandObservat
     wrists: Theta = take(rigid.theta, (rows[:, None] * h + chosen).repeat_interleave(finger_starts.shape[0], dim=1).reshape(-1))
     start: Theta = replace(wrists, angles=finger_starts.repeat(b * k, 1))
     full_problem: Problem = _problem(model, phi, repeat_views(views, n), no_prior(b * n), config)
-    full: _Solved = _levenberg_marquardt(
-        full_problem, start, torch.arange(POSE_PARAMETERS), config.init_iterations, config.init_relative_tolerance, config
-    )
+    full: _Solved = _levenberg_marquardt(full_problem, start, torch.arange(POSE_PARAMETERS), stage)
     winner: Int64[Tensor, "b"] = rows * n + full.energy.reshape(b, n).argmin(-1)
     solved: _Solved = _Solved(
         theta=take(full.theta, winner), energy=full.energy[winner], iterations=full.iterations[winner], converged=full.converged[winner]

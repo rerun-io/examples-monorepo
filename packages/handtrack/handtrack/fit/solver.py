@@ -19,13 +19,19 @@ from dataclasses import dataclass, replace
 
 import torch
 from jaxtyping import Bool, Float32, Float64, Int64
-from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
+from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch, hat
 from torch import Tensor
 
-from handtrack.fit.observations import DIST_REFERENCE, MAX_VIEWS, HandObservation
+from handtrack.fit.observations import DIST_REFERENCE, MAX_VIEWS, HandObservation, ViewObservation
 from handtrack.geometry.camera import CameraRig, project, transform_points
 from handtrack.hand.pose import HandPose, Side, landmarks
 
+DAMPING_GROWTH: float = 2.0
+"""Nielsen's ν: λ grows by it after a rejected step, and it doubles on each rejection in a row."""
+MIN_DAMPING_FACTOR: float = 1.0 / 3.0
+"""λ shrinks by max(1/3, 1 − (2ρ − 1)³) after an accepted step with gain ratio ρ."""
+MAX_DAMPING: float = 1e10
+"""λ beyond which a solve gives up (its steps have shrunk to nothing)."""
 FIT_JOINTS: int = 20
 """Joint angles 0-19 are fitted; the skinning ignores 20-21."""
 ANGLE_OFFSET: int = 6
@@ -48,9 +54,13 @@ class Views:
     cameras: CameraRig
     """b·2 cameras, hand-major."""
     cam_from_world: Float32[Tensor, "b 2 4 4"]
+    """cam_from_rig · rig_from_world per view."""
     keypoints_px: Float32[Tensor, "b 2 21 2"]
+    """In each camera's own image pixels; 0 where the weight is 0."""
     weights: Float32[Tensor, "b 2 21"]
+    """0 where a keypoint is not observed, and throughout a padded view."""
     d_rel_mm: Float32[Tensor, "b 2 21"]
+    """Millimetres of the generic hand; 0 where the weight is 0."""
     mirror: Float32[Tensor, "b"]
     """+1 for a left hand, -1 for a right hand: the sign of the wrist frame's x axis."""
 
@@ -60,16 +70,18 @@ class Theta:
     """θ for a batch of hands, plus the factor on the model's rest geometry (1 outside the calibration)."""
 
     rotation: Float32[Tensor, "b 3 3"]
+    """World from wrist."""
     translation: Float32[Tensor, "b 3"]
     """Metres."""
     angles: Float32[Tensor, "b 20"]
     """Joint angles 0-19, radians."""
     scale: Float32[Tensor, "b"]
+    """The factor on the model's rest geometry."""
 
 
 @dataclass(frozen=True, slots=True)
 class Prior:
-    """θ(t−1) per hand; ``present`` is 0 where there is none."""
+    """θ(t−1) per hand, in ``Theta``'s units; ``present`` is 0 where there is none."""
 
     rotation: Float32[Tensor, "b 3 3"]
     translation: Float32[Tensor, "b 3"]
@@ -95,21 +107,11 @@ class Problem:
 
 
 def stack_views(hands: Sequence[HandObservation]) -> Views:
-    padded = [
+    padded: list[tuple[ViewObservation, ...]] = [
         hand.views + (replace(hand.views[0], weights=torch.zeros_like(hand.views[0].weights)),) * (MAX_VIEWS - len(hand.views)) for hand in hands
     ]
-    flat = [view for views in padded for view in views]
-    if len({view.camera.fisheye62 is None for view in flat}) != 1:
-        raise ValueError("one fit batch mixes pinhole and Fisheye62 cameras")
-    fisheye: list[Float32[Tensor, "1 8"]] = [view.camera.fisheye62 for view in flat if view.camera.fisheye62 is not None]
-    cameras: CameraRig = CameraRig(
-        names=tuple(name for view in flat for name in view.camera.names),
-        image_size=torch.cat([view.camera.image_size for view in flat]),
-        cam_from_rig=torch.cat([view.camera.cam_from_rig for view in flat]),
-        focal=torch.cat([view.camera.focal for view in flat]),
-        principal=torch.cat([view.camera.principal for view in flat]),
-        fisheye62=torch.cat(fisheye) if fisheye else None,
-    )
+    flat: list[ViewObservation] = [view for views in padded for view in views]
+    cameras: CameraRig = CameraRig.cat([view.camera for view in flat])
     world_from_rig: Float32[Tensor, "n 4 4"] = torch.stack([view.world_from_rig for view in flat])
     rig_from_world: Float32[Tensor, "n 4 4"] = torch.zeros_like(world_from_rig)
     rig_from_world[:, :3, :3] = world_from_rig[:, :3, :3].transpose(-1, -2)
@@ -133,18 +135,10 @@ def stack_views(hands: Sequence[HandObservation]) -> Views:
 
 def repeat_views(views: Views, n: int) -> Views:
     """Each hand's views ``n`` times in a row, one copy per hypothesis."""
-    cameras: CameraRig = views.cameras
     b: int = views.mirror.shape[0]
     index: Int64[Tensor, "q"] = (torch.arange(b).repeat_interleave(n)[:, None] * MAX_VIEWS + torch.arange(MAX_VIEWS)).reshape(-1)
     return Views(
-        cameras=CameraRig(
-            names=tuple(cameras.names[i] for i in index.tolist()),
-            image_size=cameras.image_size[index],
-            cam_from_rig=cameras.cam_from_rig[index],
-            focal=cameras.focal[index],
-            principal=cameras.principal[index],
-            fisheye62=None if cameras.fisheye62 is None else cameras.fisheye62[index],
-        ),
+        cameras=views.cameras.select(index.tolist()),
         cam_from_world=views.cam_from_world.repeat_interleave(n, dim=0),
         keypoints_px=views.keypoints_px.repeat_interleave(n, dim=0),
         weights=views.weights.repeat_interleave(n, dim=0),
@@ -153,13 +147,19 @@ def repeat_views(views: Views, n: int) -> Views:
     )
 
 
-def theta_from_poses(poses: Sequence[HandPose], scale: float = 1.0) -> Theta:
+def theta_from_poses(poses: Sequence[HandPose]) -> Theta:
+    """Unbatched poses stacked into θ at scale 1."""
     return Theta(
         rotation=torch.stack([pose.rotation for pose in poses]),
         translation=torch.stack([pose.translation for pose in poses]),
         angles=torch.stack([pose.joint_angles[:FIT_JOINTS] for pose in poses]),
-        scale=torch.full((len(poses),), scale),
+        scale=torch.ones(len(poses)),
     )
+
+
+def poses_from_theta(theta: Theta, carried: Float32[Tensor, "b 2"]) -> list[HandPose]:
+    """The inverse of ``theta_from_poses``: one unbatched pose per hand, joint angles 20-21 restored from ``carried``."""
+    return [HandPose(theta.rotation[i], theta.translation[i], torch.cat([theta.angles[i], carried[i]])) for i in range(carried.shape[0])]
 
 
 def take(theta: Theta, index: Int64[Tensor, "q"]) -> Theta:
@@ -180,25 +180,15 @@ def no_prior(b: int) -> Prior:
     return Prior(rotation=torch.eye(3).expand(b, 3, 3), translation=torch.zeros((b, 3)), angles=torch.zeros((b, FIT_JOINTS)), present=torch.zeros(b))
 
 
-def _hat(v: Float32[Tensor, "*batch 3"]) -> Float32[Tensor, "*batch 3 3"]:
-    zero: Float32[Tensor, "*batch"] = torch.zeros_like(v[..., 0])
-    rows: list[Float32[Tensor, "*batch 3"]] = [
-        torch.stack([zero, -v[..., 2], v[..., 1]], dim=-1),
-        torch.stack([v[..., 2], zero, -v[..., 0]], dim=-1),
-        torch.stack([-v[..., 1], v[..., 0], zero], dim=-1),
-    ]
-    return torch.stack(rows, dim=-2)
-
-
 def _so3_exp(v: Float32[Tensor, "b 3"]) -> Float32[Tensor, "b 3 3"]:
-    """Rodrigues' formula with its small-angle series."""
+    """Rodrigues' formula with its small-angle series (simplecv's ``so3_exp_map`` clamps the angle instead: not bit-identical)."""
     angle_sq: Float32[Tensor, "b"] = (v * v).sum(-1)
     angle: Float32[Tensor, "b"] = angle_sq.sqrt()
     small: Bool[Tensor, "b"] = angle < 1e-4
     safe: Float32[Tensor, "b"] = torch.where(small, torch.ones_like(angle), angle)
     a: Float32[Tensor, "b"] = torch.where(small, 1.0 - angle_sq / 6.0, torch.sin(safe) / safe)
     c: Float32[Tensor, "b"] = torch.where(small, 0.5 - angle_sq / 24.0, (1.0 - torch.cos(safe)) / (safe * safe))
-    k: Float32[Tensor, "b 3 3"] = _hat(v)
+    k: Float32[Tensor, "b 3 3"] = hat(v)
     return torch.eye(3, dtype=v.dtype, device=v.device) + a[:, None, None] * k + c[:, None, None] * (k @ k)
 
 
@@ -211,7 +201,8 @@ def orthonormalize(rotation: Float32[Tensor, "b 3 3"]) -> Float32[Tensor, "b 3 3
 
 def local_landmarks(model: HandModelTorch, angles: Float32[Tensor, "f b 20"], mirror: Float32[Tensor, "b"]) -> Float32[Tensor, "f b 21 3"]:
     """Landmarks in the wrist frame, metres, with the right hand's x axis mirrored (as ``HandPose.world_from_wrist_mm``)."""
-    f, b = angles.shape[0], angles.shape[1]
+    f: int = angles.shape[0]
+    b: int = angles.shape[1]
     identity: HandPose = HandPose(
         rotation=torch.eye(3, dtype=angles.dtype, device=angles.device).expand(f, b, 3, 3),
         translation=torch.zeros((f, b, 3), dtype=angles.dtype, device=angles.device),
@@ -225,26 +216,22 @@ def local_landmarks(model: HandModelTorch, angles: Float32[Tensor, "f b 20"], mi
 def residuals(problem: Problem, theta: Theta, delta: Float32[Tensor, "f b 27"]) -> Float32[Tensor, "f b m"]:
     """The weighted residual vector [E_2D | E_dist | E_temporal] at θ ⊕ δ for f perturbations δ.
 
-    The rotation enters to first order, R·(I + [δω]×), which has the same derivative at δ = 0 as R·exp([δω]×).
+    The rotation enters to first order, R·(I + [δω]×), which has the same derivative at δ = 0 as R·exp([δω]×). δ[0] must
+    leave the joint angles unperturbed (``linearize`` and ``energy_terms`` do): its skinned hand serves every other
+    perturbation that moves no joint angle, so only the ones that do are skinned besides it.
     """
     views: Views = problem.views
-    f, b = delta.shape[0], delta.shape[1]
-    rotation: Float32[Tensor, "f b 3 3"] = theta.rotation + theta.rotation @ _hat(delta[..., 0:3])
+    f: int = delta.shape[0]
+    b: int = delta.shape[1]
+    rotation: Float32[Tensor, "f b 3 3"] = theta.rotation + theta.rotation @ hat(delta[..., 0:3].reshape(-1, 3)).reshape(f, b, 3, 3)
     translation: Float32[Tensor, "f b 3"] = theta.translation + delta[..., 3:6]
     angles: Float32[Tensor, "f b 20"] = theta.angles + delta[..., ANGLE_OFFSET:POSE_PARAMETERS]
     scale: Float32[Tensor, "f b"] = theta.scale + delta[..., SCALE_PARAMETER]
-    # Skin only the perturbations that move a joint angle, plus one that does not: the others share its hand.
-    moving: Bool[Tensor, "f"] = delta[..., ANGLE_OFFSET:POSE_PARAMETERS].abs().amax(dim=(1, 2)) > 0
-    skinned: Float32[Tensor, "f b 21 3"]
-    if bool(moving.all()):
-        skinned = local_landmarks(problem.model, angles, views.mirror)
-    else:
-        rest: int = int((~moving).nonzero()[0, 0])
-        needed: Bool[Tensor, "f"] = moving.clone()
-        needed[rest] = True
-        computed: Float32[Tensor, "n b 21 3"] = local_landmarks(problem.model, angles[needed], views.mirror)
-        skinned = computed[int(needed[:rest].sum())].expand(f, b, 21, 3).clone()
-        skinned[needed] = computed
+    skin: Bool[Tensor, "f"] = delta[..., ANGLE_OFFSET:POSE_PARAMETERS].abs().amax(dim=(1, 2)) > 0
+    skin[0] = True
+    computed: Float32[Tensor, "n b 21 3"] = local_landmarks(problem.model, angles[skin], views.mirror)
+    skinned: Float32[Tensor, "f b 21 3"] = computed[0].expand(f, b, 21, 3).clone()
+    skinned[skin] = computed
     local: Float32[Tensor, "f b 21 3"] = skinned * scale[..., None, None]
     points_world: Float32[Tensor, "f b 21 3"] = torch.einsum("fbij,fbnj->fbni", rotation, local) + translation[:, :, None, :]
     points_cam: Float32[Tensor, "f b 2 21 3"] = transform_points(
@@ -254,10 +241,10 @@ def residuals(problem: Problem, theta: Theta, delta: Float32[Tensor, "f b 27"]) 
     two_d: Float32[Tensor, "f b 2 21 2"] = views.weights.sqrt()[..., None] * (pixels - views.keypoints_px)
     distance_mm: Float32[Tensor, "f b 2 21"] = points_cam.norm(dim=-1) * 1000.0
     reference: int = DIST_REFERENCE
-    measured: Float32[Tensor, "f b 2 21"] = distance_mm - distance_mm[..., reference : reference + 1]
-    predicted: Float32[Tensor, "b 2 21"] = problem.phi * (views.d_rel_mm - views.d_rel_mm[..., reference : reference + 1])
+    model_mm: Float32[Tensor, "f b 2 21"] = distance_mm - distance_mm[..., reference : reference + 1]
+    observed_mm: Float32[Tensor, "b 2 21"] = problem.phi * (views.d_rel_mm - views.d_rel_mm[..., reference : reference + 1])
     dist_weight: Float32[Tensor, "b 2 21"] = problem.dist_weight * views.weights * views.weights[..., reference : reference + 1]
-    dist: Float32[Tensor, "f b 2 21"] = dist_weight.sqrt() * (measured - predicted)
+    dist: Float32[Tensor, "f b 2 21"] = dist_weight.sqrt() * (model_mm - observed_mm)
     prior: Prior = problem.prior
     temporal: Float32[Tensor, "f b 32"] = (
         torch.cat(
@@ -327,6 +314,17 @@ def free_mask(theta: Theta, gradient: Float64[Tensor, "b k"], free: Int64[Tensor
     at_upper: Bool[Tensor, "b k"] = (angles >= limits[joint, 1] - 1e-6) & (gradient < 0)
     held: Bool[Tensor, "b k"] = is_angle.expand(b, -1) & (at_lower | at_upper)
     return (~held).to(torch.float64)
+
+
+def normal_equations(
+    theta: Theta, residual: Float32[Tensor, "b m"], jacobian: Float32[Tensor, "b m k"], free: Int64[Tensor, "k"], limits: Float32[Tensor, "20 2"]
+) -> tuple[Float64[Tensor, "b k k"], Float64[Tensor, "b k"], Float64[Tensor, "b k"]]:
+    """JᵀJ and Jᵀr in float64 with the rows and columns of held joint angles zeroed, and the ``free_mask`` that held them."""
+    j64: Float64[Tensor, "b m k"] = jacobian.to(torch.float64)
+    hessian: Float64[Tensor, "b k k"] = j64.transpose(1, 2) @ j64
+    gradient: Float64[Tensor, "b k"] = torch.einsum("bmk,bm->bk", j64, residual.to(torch.float64))
+    mask: Float64[Tensor, "b k"] = free_mask(theta, gradient, free, limits)
+    return hessian * mask[:, :, None] * mask[:, None, :], gradient * mask, mask
 
 
 def marquardt_scaling(diagonal: Float64[Tensor, "b k"], mask: Float64[Tensor, "b k"]) -> Float64[Tensor, "b k"]:

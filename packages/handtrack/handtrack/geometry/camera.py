@@ -5,6 +5,7 @@ position of keypoints outside the image, and the pose fit needs a smooth residua
 for the z > 0 test.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -45,6 +46,32 @@ class CameraRig:
             focal=self.focal.to(device),
             principal=self.principal.to(device),
             fisheye62=None if self.fisheye62 is None else self.fisheye62.to(device),
+        )
+
+    @staticmethod
+    def cat(rigs: Sequence["CameraRig"]) -> "CameraRig":
+        """The cameras of ``rigs``, in order, as one rig; all pinhole or all Fisheye62."""
+        if len({rig.fisheye62 is None for rig in rigs}) != 1:
+            raise ValueError("one rig cannot mix pinhole and Fisheye62 cameras")
+        return CameraRig(
+            names=tuple(name for rig in rigs for name in rig.names),
+            image_size=torch.cat([rig.image_size for rig in rigs]),
+            cam_from_rig=torch.cat([rig.cam_from_rig for rig in rigs]),
+            focal=torch.cat([rig.focal for rig in rigs]),
+            principal=torch.cat([rig.principal for rig in rigs]),
+            fisheye62=None if rigs[0].fisheye62 is None else torch.cat([rig.fisheye62 for rig in rigs if rig.fisheye62 is not None]),
+        )
+
+    def select(self, index: Sequence[int]) -> "CameraRig":
+        """The cameras at ``index``, in that order (a camera may repeat): one camera as a one-camera rig, or a gather."""
+        rows: list[int] = list(index)
+        return CameraRig(
+            names=tuple(self.names[i] for i in rows),
+            image_size=self.image_size[rows],
+            cam_from_rig=self.cam_from_rig[rows],
+            focal=self.focal[rows],
+            principal=self.principal[rows],
+            fisheye62=None if self.fisheye62 is None else self.fisheye62[rows],
         )
 
 
