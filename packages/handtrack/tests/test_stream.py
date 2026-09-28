@@ -9,6 +9,7 @@ from handtrack.data.batches import CropKind
 from handtrack.data.catalog import UMETRACK, HandTimeline, SegmentInfo
 from handtrack.data.stream import (
     CatalogStream,
+    DecoderOpener,
     DetNetSamples,
     ImageHands,
     KeyNetAugment,
@@ -163,7 +164,7 @@ class _GrayDecoder:
         return _Frames(torch.full((len(indices), 3, 480, 640), 128, dtype=torch.uint8))
 
 
-def _stream(segments: dict[str, tuple[SegmentInfo, SegmentData]], opener) -> CatalogStream:  # noqa: ANN001 - test double
+def _stream(segments: dict[str, tuple[SegmentInfo, SegmentData]], opener: DecoderOpener) -> CatalogStream:
     return CatalogStream(
         StreamConfig(datasets=(UMETRACK,), nets="detnet", producers=1, fetchers=1, detnet_buffer=64, detnet_batch_size=2, min_fill=0.0, device="cpu"),
         segments=tuple(info for info, _ in segments.values()),
