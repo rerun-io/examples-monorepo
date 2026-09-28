@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 from dataforge.umetrack_hands import HandProfile
 from jaxtyping import Float32
+from serde import Untagged
 from serde.json import from_json
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch, hand_model_numpy_to_tensor, skin_landmarks, skin_mesh
@@ -73,8 +74,8 @@ def hand_model_from_profile(text: str) -> HandModelTorch:
 
     SHOW3D wraps the model in a ``hand_model`` envelope; UmeTrack stores the bare model.
     """
-    model: HandModelNumpy = from_json(HandProfile, text).hand_model if '"hand_model"' in text[:64] else from_json(HandModelNumpy, text)
-    return hand_model_numpy_to_tensor(model)
+    document: HandProfile | HandModelNumpy = from_json(Untagged(HandProfile | HandModelNumpy), text)
+    return hand_model_numpy_to_tensor(document.hand_model if isinstance(document, HandProfile) else document)
 
 
 GENERIC_HAND_MODEL: Path = Path(__file__).resolve().parents[1] / "assets" / "generic_hand_model.json"

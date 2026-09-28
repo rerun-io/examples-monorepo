@@ -39,5 +39,6 @@ def test_landmarks_and_mesh_match_simplecv_numpy_skinning_for_both_hands() -> No
 
 def test_profile_reader_accepts_bare_and_enveloped_models() -> None:
     bare: str = GENERIC_HAND_MODEL.read_text()
-    for text in (bare, '{"hand_model":' + bare + "}"):
+    enveloped: tuple[str, ...] = ('{"hand_model":' + bare + "}", '\n\n   {' + " " * 80 + '"hand_model":' + bare + "}", '{"meta": {"name": "subject"}, "hand_model":' + bare + "}")
+    for text in (bare, *enveloped):
         torch.testing.assert_close(hand_model_from_profile(text).landmark_rest_positions, generic_hand_model().landmark_rest_positions)
