@@ -2,94 +2,73 @@
 
 import math
 
+import numpy as np
 import torch
 from jaxtyping import Float32
-from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
+from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch, hat
 from torch import Tensor
 
+from handtrack.data.catalog import rotation_from_quaternion_xyzw
 from handtrack.fit.observations import HandObservation, ViewObservation, observe
 from handtrack.fit.pose_fit import FitConfig, FitResult, fit_pose
 from handtrack.fit.scale import ScaleCalibration, calibrate_scale, scaled_hand_model
 from handtrack.geometry.camera import CameraRig
 from handtrack.hand.pose import HandPose, Side, generic_hand_model, landmarks
+from handtrack.labels.validity import MIN_VISIBLE_KEYPOINTS
 
 # cam_01 and cam_02 of umetrack__real__hand_hand__testing__user_05__recording_00 (the headset's stereo pair), read once from
 # the catalog: cam_from_rig, focal, principal point and Fisheye62 [k1..k6, p1, p2]; images are 636 x 480.
-CAM_FROM_RIG: Float32[Tensor, "2 4 4"] = torch.tensor(
-    [
+STEREO_RIG: CameraRig = CameraRig(
+    names=("/world/rig_00/cam_01", "/world/rig_00/cam_02"),
+    image_size=torch.tensor([[636.0, 480.0], [636.0, 480.0]]),
+    cam_from_rig=torch.tensor(
         [
-            [0.85990775, 0.23873949, 0.45117828, 0.04033583],
-            [0.39771041, 0.24070908, -0.88537300, -0.04256802],
-            [-0.31997615, 0.94077766, 0.11203847, -0.04375378],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-        [
-            [0.58039391, 0.18884633, 0.79213631, 0.07179161],
-            [0.80814075, -0.01381412, -0.58882707, -0.09532028],
-            [-0.10025504, 0.98190951, -0.16063198, -0.07004973],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-    ]
-)
-FOCAL: Float32[Tensor, "2 2"] = torch.tensor([[239.01797485, 238.59420776], [239.02806091, 238.89305115]])
-PRINCIPAL: Float32[Tensor, "2 2"] = torch.tensor([[317.98364258, 238.97972107], [317.16986084, 241.11093140]])
-FISHEYE62: Float32[Tensor, "2 8"] = torch.tensor(
-    [
-        [-0.01455796, 0.07030687, -0.02130805, -0.02876545, 0.01763760, -0.00291994, 0.00298817, -0.00106629],
-        [-0.00967496, 0.06433038, -0.02089349, -0.02452153, 0.01465230, -0.00233214, 0.00238000, -0.00047555],
-    ]
-)
-RIG_QUATERNION_XYZW: tuple[float, float, float, float] = (0.80783969, 0.45242691, 0.36953306, -0.07842361)
-RIG_TRANSLATION: tuple[float, float, float] = (-0.05733913, 0.40517554, -0.04792304)
-MIN_INSIDE: int = 17
-
-
-def _rotation_from_quaternion(q: Float32[Tensor, "4"]) -> Float32[Tensor, "3 3"]:
-    x, y, z, w = (q / q.norm()).tolist()
-    return torch.tensor(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            [
+                [0.85990775, 0.23873949, 0.45117828, 0.04033583],
+                [0.39771041, 0.24070908, -0.88537300, -0.04256802],
+                [-0.31997615, 0.94077766, 0.11203847, -0.04375378],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            [
+                [0.58039391, 0.18884633, 0.79213631, 0.07179161],
+                [0.80814075, -0.01381412, -0.58882707, -0.09532028],
+                [-0.10025504, 0.98190951, -0.16063198, -0.07004973],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
         ]
-    )
-
-
-def _world_from_rig() -> Float32[Tensor, "4 4"]:
-    transform: Float32[Tensor, "4 4"] = torch.eye(4)
-    transform[:3, :3] = _rotation_from_quaternion(torch.tensor(RIG_QUATERNION_XYZW))
-    transform[:3, 3] = torch.tensor(RIG_TRANSLATION)
-    return transform
-
-
-def _camera(index: int) -> CameraRig:
-    return CameraRig(
-        names=(f"/world/rig_00/cam_0{index + 1}",),
-        image_size=torch.tensor([[636.0, 480.0]]),
-        cam_from_rig=CAM_FROM_RIG[index : index + 1],
-        focal=FOCAL[index : index + 1],
-        principal=PRINCIPAL[index : index + 1],
-        fisheye62=FISHEYE62[index : index + 1],
-    )
+    ),
+    focal=torch.tensor([[239.01797485, 238.59420776], [239.02806091, 238.89305115]]),
+    principal=torch.tensor([[317.98364258, 238.97972107], [317.16986084, 241.11093140]]),
+    fisheye62=torch.tensor(
+        [
+            [-0.01455796, 0.07030687, -0.02130805, -0.02876545, 0.01763760, -0.00291994, 0.00298817, -0.00106629],
+            [-0.00967496, 0.06433038, -0.02089349, -0.02452153, 0.01465230, -0.00233214, 0.00238000, -0.00047555],
+        ]
+    ),
+)
+WORLD_FROM_RIG: Float32[Tensor, "4 4"] = torch.eye(4)
+WORLD_FROM_RIG[:3, :3] = torch.from_numpy(rotation_from_quaternion_xyzw(np.array([0.80783969, 0.45242691, 0.36953306, -0.07842361], dtype=np.float32)))
+WORLD_FROM_RIG[:3, 3] = torch.tensor([-0.05733913, 0.40517554, -0.04792304])
+NO_TEMPORAL: FitConfig = FitConfig(temporal_weight=0.0)
 
 
 def _views(cameras: tuple[int, ...]) -> tuple[tuple[CameraRig, Float32[Tensor, "4 4"]], ...]:
-    return tuple((_camera(index), _world_from_rig()) for index in cameras)
+    return tuple((STEREO_RIG.select([index]), WORLD_FROM_RIG) for index in cameras)
 
 
 def _stereo_region() -> tuple[Float32[Tensor, "3"], Float32[Tensor, "3"]]:
     """The midpoint of the two camera centres and the mean optical axis, in the world frame."""
-    world_from_rig: Float32[Tensor, "4 4"] = _world_from_rig()
-    centres_rig: Float32[Tensor, "2 3"] = -torch.einsum("cji,cj->ci", CAM_FROM_RIG[:, :3, :3], CAM_FROM_RIG[:, :3, 3])
-    axes_rig: Float32[Tensor, "2 3"] = CAM_FROM_RIG[:, 2, :3]
-    origin: Float32[Tensor, "3"] = world_from_rig[:3, :3] @ centres_rig.mean(0) + world_from_rig[:3, 3]
-    axis: Float32[Tensor, "3"] = world_from_rig[:3, :3] @ axes_rig.mean(0)
+    cam_from_rig: Float32[Tensor, "2 4 4"] = STEREO_RIG.cam_from_rig
+    centres_rig: Float32[Tensor, "2 3"] = -torch.einsum("cji,cj->ci", cam_from_rig[:, :3, :3], cam_from_rig[:, :3, 3])
+    axes_rig: Float32[Tensor, "2 3"] = cam_from_rig[:, 2, :3]
+    origin: Float32[Tensor, "3"] = WORLD_FROM_RIG[:3, :3] @ centres_rig.mean(0) + WORLD_FROM_RIG[:3, 3]
+    axis: Float32[Tensor, "3"] = WORLD_FROM_RIG[:3, :3] @ axes_rig.mean(0)
     return origin, axis / axis.norm()
 
 
 def _random_pose(model: HandModelTorch, side: Side, generator: torch.Generator, distance_m: tuple[float, float] = (0.3, 0.6)) -> HandPose:
     """A pose with uniform random wrist rotation, joint angles inside the limits, and the palm centre 30-60 cm from the stereo pair."""
-    rotation: Float32[Tensor, "3 3"] = _rotation_from_quaternion(torch.randn(4, generator=generator))
+    rotation: Float32[Tensor, "3 3"] = torch.from_numpy(rotation_from_quaternion_xyzw(torch.randn(4, generator=generator).numpy()))
     limits: Float32[Tensor, "22 2"] = model.joint_limits
     fraction: Float32[Tensor, "22"] = 0.1 + 0.8 * torch.rand(22, generator=generator)
     joint_angles: Float32[Tensor, "22"] = limits[:, 0] + fraction * (limits[:, 1] - limits[:, 0])
@@ -109,7 +88,7 @@ def _visible_scene(model: HandModelTorch, side: Side, generator: torch.Generator
     for _ in range(1000):
         pose: HandPose = _random_pose(model, side, generator)
         observation: HandObservation = observe(model, pose, side, 1.0, _views(cameras))
-        if all(int(view.weights.sum()) >= MIN_INSIDE for view in observation.views):
+        if all(int(view.weights.sum()) >= MIN_VISIBLE_KEYPOINTS for view in observation.views):
             return pose, observation
     raise AssertionError("no visible pose in 1000 draws")
 
@@ -117,8 +96,7 @@ def _visible_scene(model: HandModelTorch, side: Side, generator: torch.Generator
 def _perturbed(pose: HandPose, generator: torch.Generator, angle_rad: float, translation_m: float, joint_rad: float) -> HandPose:
     axis: Float32[Tensor, "3"] = torch.randn(3, generator=generator)
     axis = axis / axis.norm() * angle_rad
-    k: Float32[Tensor, "3 3"] = torch.tensor([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
-    rotation: Float32[Tensor, "3 3"] = torch.linalg.matrix_exp(k) @ pose.rotation
+    rotation: Float32[Tensor, "3 3"] = torch.linalg.matrix_exp(hat(axis[None])[0]) @ pose.rotation
     shift: Float32[Tensor, "3"] = torch.randn(3, generator=generator)
     joint_angles: Float32[Tensor, "22"] = pose.joint_angles + joint_rad * (2 * torch.rand(22, generator=generator) - 1)
     joint_angles[20:] = pose.joint_angles[20:]
@@ -127,9 +105,6 @@ def _perturbed(pose: HandPose, generator: torch.Generator, angle_rad: float, tra
 
 def _landmark_error_mm(model: HandModelTorch, fitted: HandPose, truth: HandPose, side: Side) -> float:
     return float((landmarks(model, fitted, side) - landmarks(model, truth, side)).norm(dim=-1).mean()) * 1000.0
-
-
-NO_TEMPORAL: FitConfig = FitConfig(temporal_weight=0.0)
 
 
 def test_exact_stereo_keypoints_recover_the_pose_from_a_perturbed_start() -> None:
@@ -159,7 +134,7 @@ def _noisy(observation: HandObservation, generator: torch.Generator, sigma_px: f
 
 
 def test_noisy_stereo_keypoints_fit_to_the_noise_floor() -> None:
-    """1.5 px of noise: the fit ends below the energy of the true pose, and the mean landmark error stays under 6 mm (measured: 4.3 mm)."""
+    """1.5 px of noise: the fit ends below the energy of the true pose, and the mean landmark error stays under 6 mm (measured: 3.9 mm)."""
     model: HandModelTorch = generic_hand_model()
     generator: torch.Generator = torch.Generator().manual_seed(2)
     errors_mm: list[float] = []
@@ -237,7 +212,7 @@ def test_scaled_model_is_the_hand_enlarged_about_its_wrist() -> None:
 
 
 def test_calibration_recovers_the_hand_scale_from_noisy_stereo_keypoints() -> None:
-    """A subject 8% larger than the generic hand, seen in stereo with 1.5 px of noise: ϕ = 1.08 ± 0.01 (measured 1.0887).
+    """A subject 8% larger than the generic hand, seen in stereo with 1.5 px of noise: ϕ = 1.08 ± 0.01 (measured 1.0864).
 
     The starting poses are the truth perturbed, as the tracker's first pass at ϕ = 1 would give them.
     """

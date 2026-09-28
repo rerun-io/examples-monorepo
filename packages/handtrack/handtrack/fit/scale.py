@@ -14,25 +14,29 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import torch
-from jaxtyping import Bool, Float32, Float64
+from jaxtyping import Float32, Float64, Int64
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 from torch import Tensor
 
 from handtrack.fit.observations import HandObservation
-from handtrack.fit.pose_fit import DEFAULT_CONFIG, FitConfig, fit_pose
+from handtrack.fit.pose_fit import DEFAULT_CONFIG, FitConfig, FitResult, fit_pose
 from handtrack.fit.solver import (
+    DAMPING_GROWTH,
     FIT_JOINTS,
+    MAX_DAMPING,
+    MIN_DAMPING_FACTOR,
     PARAMETERS,
     POSE_PARAMETERS,
     Problem,
     Theta,
     energy_terms,
     fit_limits,
-    free_mask,
     linearize,
     marquardt_scaling,
     no_prior,
+    normal_equations,
     orthonormalize,
+    poses_from_theta,
     retract,
     stack_views,
     theta_from_poses,
@@ -49,6 +53,7 @@ class CalibrationConfig:
     relative_tolerance: float = 1e-5
     """Stop when an accepted step lowers Σ E_2D by less than this fraction of it."""
     initial_damping: float = 1e-3
+    """λ at the first iteration, relative to diag(JᵀJ) (Marquardt scaling) of each θ_t block."""
     min_view_keypoints: int = 10
     """A view counts towards stereo when at least this many of its keypoints have weight > 0."""
     initial_fit: FitConfig = DEFAULT_CONFIG
@@ -73,7 +78,9 @@ class ScaleCalibration:
     blocks: int
     """Number of stereo observations (hand, frame) in the solve."""
     iterations: int
+    """LM iterations run."""
     converged: bool
+    """The stopping rule fired before the iteration limit."""
 
 
 def scaled_hand_model(model: HandModelTorch, scale: float) -> HandModelTorch:
@@ -113,7 +120,7 @@ def calibrate_scale(
     starts: list[HandPose | None] = [None if initial is None else initial[i] for i in used]
     missing: list[int] = [j for j, pose in enumerate(starts) if pose is None]
     if missing:
-        fitted = fit_pose(model, 1.0, [blocks[j] for j in missing], [None] * len(missing), config.initial_fit)
+        fitted: list[FitResult] = fit_pose(model, 1.0, [blocks[j] for j in missing], [None] * len(missing), config.initial_fit)
         for j, result in zip(missing, fitted, strict=True):
             starts[j] = result.pose
     poses: list[HandPose] = [pose for pose in starts if pose is not None]
@@ -123,21 +130,16 @@ def calibrate_scale(
         model=model, views=stack_views(blocks), prior=no_prior(n), phi=1.0, dist_weight=0.0, temporal_weight=0.0, temporal_translation_unit_m=1.0
     )
     limits: Float32[Tensor, "20 2"] = fit_limits(model, config.initial_fit.joint_limit_margin_rad)
-    free = torch.arange(PARAMETERS)
+    free: Int64[Tensor, "27"] = torch.arange(PARAMETERS)
     residual, jacobian = linearize(problem, theta, free)
     energy: float = float((residual * residual).sum())
     damping: float = config.initial_damping
-    growth: float = 2.0
+    growth: float = DAMPING_GROWTH
     converged: bool = False
     iterations: int = 0
     for _ in range(config.iterations):
         iterations += 1
-        j64: Float64[Tensor, "n m 27"] = jacobian.to(torch.float64)
-        hessian: Float64[Tensor, "n 27 27"] = j64.transpose(1, 2) @ j64
-        gradient: Float64[Tensor, "n 27"] = torch.einsum("nmk,nm->nk", j64, residual.to(torch.float64))
-        mask: Float64[Tensor, "n 27"] = free_mask(theta, gradient, free, limits)
-        hessian = hessian * mask[:, :, None] * mask[:, None, :]
-        gradient = gradient * mask
+        hessian, gradient, mask = normal_equations(theta, residual, jacobian, free, limits)
         pose_block: Float64[Tensor, "n 26 26"] = hessian[:, :POSE_PARAMETERS, :POSE_PARAMETERS]
         coupling: Float64[Tensor, "n 26"] = hessian[:, :POSE_PARAMETERS, POSE_PARAMETERS]
         pose_mask: Float64[Tensor, "n 26"] = mask[:, :POSE_PARAMETERS]
@@ -156,27 +158,24 @@ def calibrate_scale(
         reduction: float = energy - new_energy
         if reduction > 0:
             ratio: float = reduction / max(predicted, 1e-30)
+            converged = reduction <= config.relative_tolerance * energy
             theta, residual, jacobian, energy = candidate, new_residual, new_jacobian, new_energy
-            damping *= max(1.0 / 3.0, 1.0 - (2.0 * ratio - 1.0) ** 3)
-            growth = 2.0
-            if reduction <= config.relative_tolerance * (energy + reduction):
-                converged = True
-                break
+            damping *= max(MIN_DAMPING_FACTOR, 1.0 - (2.0 * ratio - 1.0) ** 3)
+            growth = DAMPING_GROWTH
         else:
             damping *= growth
-            growth *= 2.0
-            if damping > 1e10:
-                converged = True
-                break
-    rotation: Float32[Tensor, "n 3 3"] = orthonormalize(theta.rotation)
-    e_2d: Float32[Tensor, "n"] = energy_terms(problem, replace(theta, rotation=rotation))[0]
-    carried: Float32[Tensor, "n 2"] = torch.stack([pose.joint_angles[FIT_JOINTS:] for pose in poses])
-    stereo_ok: Bool[Tensor, ""] = torch.isfinite(theta.scale).all()
-    if not bool(stereo_ok):
+            growth *= DAMPING_GROWTH
+            converged = damping > MAX_DAMPING
+        if converged:
+            break
+    if not bool(torch.isfinite(theta.scale).all()):
         raise ValueError("the scale calibration diverged")
+    theta = replace(theta, rotation=orthonormalize(theta.rotation))
+    e_2d: Float32[Tensor, "n"] = energy_terms(problem, theta)[0]
+    carried: Float32[Tensor, "n 2"] = torch.stack([pose.joint_angles[FIT_JOINTS:] for pose in poses])
     return ScaleCalibration(
         phi=float(theta.scale[0]),
-        poses=tuple(HandPose(rotation[i], theta.translation[i], torch.cat([theta.angles[i], carried[i]])) for i in range(n)),
+        poses=tuple(poses_from_theta(theta, carried)),
         used=tuple(used),
         e_2d=float(e_2d.sum()),
         blocks=n,
