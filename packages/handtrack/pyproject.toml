@@ -35,14 +35,22 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.vulture]
 paths = ["handtrack", "tests"]
 ignore_names = [
+    # Validation metadata the trainer (next PR) reads from the evaluation stream.
+    "detnet_validation", "keynet_validation", "distance_mm", "SHOW3D_SAMPLE",
+    # Serialized logs and Tyro/source-facing fields consumed outside this package (W3 trainer).
+    "datasets", "segment_ids", "gpu_memory_bytes", "gpu_peak_memory_bytes",
+    "CropKind", "POSITIVE", "DRIFT", "EDGE", "OTHER_HAND", "BACKGROUND",
+    "dataset", "kind", "mesh_vertices", "forward", "cpu_threads",
+    # The catalog stream (A2): report fields written through asdict/JSON, segment metadata, stream API used by trainers.
+    "detnet_images_per_s", "keynet_crops_per_s", "decoded_images_per_s", "main_wait_fraction", "nvdec_percent", "gpu_percent",
+    "gpu_memory_used_mib", "torch_peak_allocated_mib", "query_s_per_segment", "label_s_per_segment", "decode_s_per_segment",
+    "keynet_kind_share", "process_memory_mib", "torch_peak_reserved_mib", "interaction", "num_frames", "images_considered", "images_missing", "images_invalid", "exc",
+    "detnet_ready",
     # Tyro-facing entry points and config fields.
     "main",
     "rr_config",
     # pytest's module-level skip marker.
     "pytestmark",
-    # PyTorch dispatch and the model tests' autouse fixture.
-    "forward",
-    "cpu_threads",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
 sort_by_size = true
