@@ -91,3 +91,23 @@ def test_detection_recall_uses_native_visibility_not_umetrack_padding() -> None:
     assert result.total.ground_truth == 0
     assert result.total.true_positive == 0
     assert result.total.recall is None
+
+
+def test_tracking_unknown_gaps_censor_events_and_absence() -> None:
+    visible = torch.tensor([True, False, True, False, False, True])
+    tracked = torch.tensor([False, True, True, True, False, True])
+    observed = torch.tensor([True, False, True, True, True, True])
+    metrics = tracking_metrics(visible, tracked, observed)
+    assert metrics.acquire_frames == (None, 0)
+    assert metrics.drop_frames == (1,)
+    assert metrics.tracked_without_hand == 1
+    assert metrics.visible_tracked_fraction == 2 / 3
+
+
+def test_drop_delay_cannot_cross_an_unknown_gap() -> None:
+    metrics = tracking_metrics(
+        torch.tensor([True, False, False, False]),
+        torch.tensor([True, True, False, False]),
+        torch.tensor([True, True, False, True]),
+    )
+    assert metrics.drop_frames == (None,)

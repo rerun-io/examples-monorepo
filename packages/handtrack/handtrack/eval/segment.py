@@ -8,7 +8,8 @@ Protocol (our choices where the paper is silent):
   coverage instead). MKA uses only triples of consecutive such frames (``eval.metrics.pipeline_metrics``).
 - **Visible hand** (tracking statistics): a ground-truth hand present in at least one camera, i.e. >= 17 of its 21
   keypoints in front and inside that image (DetNet's present rule). ``tracked_absent`` counts tracked frames where no
-  ground-truth keypoint is inside any image (or the hand is unlabelled).
+  ground-truth keypoint is inside any image, including known confidence-zero absence. Unknown label/headset rows
+  are excluded from absence counts and censor tracking events.
 - **DetNet precision/recall (§5.4), per camera, both hands pooled, net frame:** with tracking, every box the pipeline put
   in a camera (DetNet's or the tracked projection) is a positive prediction; DetNet alone, DetNet's box where its presence
   exceeds 0.5. A prediction on a partly visible hand (1-16 keypoints inside) counts as a false positive, as the rule reads.
@@ -120,6 +121,8 @@ class SegmentMetrics:
     track_sha256: str
     """sha256 of the ``SegmentTrack`` npz these scores were computed from."""
     timings_s: dict[str, float]
+    run_identity_sha256: str = ""
+    """Digest of the immutable run identity."""
     calibration_blocks: int = 0
     """Unknown hand: the stereo (hand, frame) observations ϕ was solved on."""
     calibration_note: str = "profile"
@@ -141,6 +144,8 @@ class DetNetAloneMetrics:
     per_camera_crop: list[DetectionScore]
     """The diagnostic variant: containment in the x1.2 crop box."""
     track_sha256: str
+    run_identity_sha256: str = ""
+    """Digest of the immutable run identity."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +161,8 @@ class GroundTruth:
     inside: Int64[Tensor, "f c 2"]
     """Keypoints in front and inside the native camera image, for ground-truth hands (0 otherwise)."""
     image_valid: Bool[Tensor, "f c"]
+    observation_valid: Bool[Tensor, "f 2"] | None = None
+    """Known visibility or absence; invalid labels/headset rows are unknown."""
 
     @staticmethod
     def from_labels(labels: SegmentLabels, frames: int) -> "GroundTruth":
@@ -168,6 +175,7 @@ class GroundTruth:
             in_front=labels.projection.in_front[:frames] & valid[:, None, :, None],
             inside=torch.where(valid[:, None, :], labels.projection.visible[:frames], 0),
             image_valid=labels.image_valid[:frames],
+            observation_valid=labels.image_valid[:frames].any(dim=1)[:, None] & (has_pose | ~labels.labelled[:frames, 0]),
         )
 
 
@@ -212,9 +220,10 @@ def score_track(
     scored: Bool[Tensor, "f 2"] = truth.valid & tracked
     visible: Bool[Tensor, "f 2"] = (truth.inside >= MIN_VISIBLE_KEYPOINTS).any(dim=1)
     anywhere: Bool[Tensor, "f 2"] = (truth.inside > 0).any(dim=1)
+    observed: Bool[Tensor, "f 2"] = torch.ones_like(tracked) if truth.observation_valid is None else truth.observation_valid
     hands: list[HandScore] = []
     for side, name in enumerate(("left", "right")):
-        stats: TrackingMetrics = tracking_metrics(visible[:, side], tracked[:, side])
+        stats: TrackingMetrics = tracking_metrics(visible[:, side], tracked[:, side], observed[:, side])
         hands.append(
             HandScore(
                 side=name,
@@ -228,7 +237,7 @@ def score_track(
                     acquire_frames=list(stats.acquire_frames),
                     drop_frames=list(stats.drop_frames),
                     tracked_without_hand=stats.tracked_without_hand,
-                    tracked_absent=int((tracked[:, side] & ~anywhere[:, side]).sum()),
+                    tracked_absent=int((observed[:, side] & tracked[:, side] & ~anywhere[:, side]).sum()),
                 ),
             )
         )

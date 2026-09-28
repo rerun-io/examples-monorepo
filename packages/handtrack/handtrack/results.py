@@ -12,15 +12,17 @@ The DetNet-alone run (``kind = "detnet_alone"``) uses the same record: DetNet ra
 are set where it reported a hand (presence > 0.5), and the tracker fields are empty.
 """
 
-from dataclasses import dataclass, fields
+import hashlib
+from dataclasses import dataclass, fields, replace
 from enum import IntEnum
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
+from zipfile import BadZipFile
 
 import numpy as np
 from jaxtyping import Bool, Float32, Int8, Int64
 from numpy import ndarray
-from serde import serde
+from serde import SerdeError, from_dict, serde, to_dict
 from serde.json import from_json, to_json
 
 HandMode: TypeAlias = Literal["known", "unknown"]
@@ -61,8 +63,13 @@ class TrackMetadata:
     kind: TrackKind = "tracker"
     detector: DetectorSource = "detnet"
     keypoints: KeypointSource = "keynet"
+    run_identity_sha256: str = ""
+    """Digest of the immutable run identity."""
+    track_sha256: str = ""
+    """Digest of the NPZ beside this metadata."""
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class SegmentTrack:
     """One segment's tracker output."""
@@ -96,6 +103,15 @@ class SegmentTrack:
     fit_energy: Float32[ndarray, "f 2"]
     """The fit's final energy (pixels²), NaN when untracked."""
 
+    def __post_init__(self) -> None:
+        frames: int = len(self.video_time_ns)
+        for item in fields(self):
+            if item.name == "meta":
+                continue
+            value = getattr(self, item.name)
+            if not isinstance(value, cast(type, item.type)) or value.shape[0] != frames:
+                raise ValueError(f"Invalid {item.name}: expected {item.type} with {frames} frames")
+
 
 ARRAY_KEYS: tuple[str, ...] = tuple(field.name for field in fields(SegmentTrack) if field.name != "meta")
 """The npz keys, one per array field."""
@@ -111,12 +127,19 @@ def save_track(track: SegmentTrack, directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     npz, sidecar = track_paths(directory, track.meta.segment)
     np.savez(npz, **{name: getattr(track, name) for name in ARRAY_KEYS})
-    sidecar.write_text(to_json(track.meta))
+    sidecar.write_text(to_json(replace(track.meta, track_sha256=hashlib.sha256(npz.read_bytes()).hexdigest())))
     return npz
 
 
 def load_track(npz: Path) -> SegmentTrack:
     """Read a ``SegmentTrack`` written by ``save_track``."""
-    meta: TrackMetadata = from_json(TrackMetadata, npz.with_suffix(".json").read_text())
-    with np.load(npz) as arrays:
-        return SegmentTrack(meta, **{name: arrays[name] for name in ARRAY_KEYS})
+    try:
+        meta: TrackMetadata = from_json(TrackMetadata, npz.with_suffix(".json").read_text())
+        with np.load(npz, allow_pickle=False) as arrays:
+            # Check the original arrays before serde can convert their dtype.
+            for item in fields(SegmentTrack):
+                if item.name != "meta" and not isinstance(arrays[item.name], cast(type, item.type)):
+                    raise ValueError(f"Invalid {item.name}: expected {item.type}")
+            return from_dict(SegmentTrack, {"meta": to_dict(meta), **{name: arrays[name] for name in ARRAY_KEYS}}, reuse_instances=True)
+    except (SerdeError, ValueError, KeyError, OSError, BadZipFile, EOFError) as error:
+        raise ValueError(f"Invalid track {npz}: {error}") from error

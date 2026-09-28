@@ -1,8 +1,10 @@
 """Run the pipeline over a whole split, restartably, and aggregate the per-segment scores into tables.
 
 A segment is skipped when every output it should have exists and verifies: each ``<segment>.metrics.json`` parses and
-its ``track_sha256`` equals the sha256 of the npz beside it. Anything else is recomputed. ``--run.shard``/``--run.shards``
-split the segments over parallel processes; the tables always cover every selected segment and list the missing ones.
+its ``track_sha256`` equals the sha256 of the npz beside it and its metadata sidecar, with the same immutable
+run identity in both JSON records. Anything else is recomputed. ``--run.shard``/``--run.shards``
+split the segments over parallel processes. Only ``--aggregate-only`` publishes tables, after shards finish;
+the tables cover every selected segment and list the missing ones.
 
 Tables (``<run>/summary.md`` and ``summary.json``): per hand mode and group (all, ``separate_hand``, ``hand_hand``) the
 pooled MKPE, MKA and MKA GT, tracking coverage, acquisition and drop delays and DetNet P/R with tracking per camera; and
@@ -10,6 +12,7 @@ DetNet-alone P/R per camera per group (also alone in ``<run>/detnet_metrics.json
 only the DetNet-alone pass runs.
 """
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -24,6 +27,7 @@ from handtrack.apis.run_pipeline import (
     Networks,
     RunConfig,
     RunRecord,
+    ensure_run_identity,
     file_sha256,
     format_number,
     load_networks,
@@ -41,7 +45,8 @@ from handtrack.eval.segment import (
     combine_detections,
     combine_positions,
 )
-from handtrack.results import track_paths
+from handtrack.results import TrackMetadata, track_paths
+from handtrack.train.checkpoint import atomic_write
 
 GROUPS: tuple[str, ...] = ("all", "separate_hand", "hand_hand")
 
@@ -106,23 +111,36 @@ class RunSummary:
     detnet_alone: list[DetNetSummary]
 
 
-def _verified[MetricsT: (SegmentMetrics, DetNetAloneMetrics)](directory: Path, segment: str, kind: type[MetricsT]) -> MetricsT | None:
+def _verified[MetricsT: (SegmentMetrics, DetNetAloneMetrics)](directory: Path, segment: str, kind: type[MetricsT], expected_identity: str | None = None) -> MetricsT | None:
     """The segment's scores if they parse and match the npz on disk, else None."""
     path: Path = metrics_path(directory, segment)
-    npz: Path = track_paths(directory, segment)[0]
-    if not path.exists() or not npz.exists():
+    npz, sidecar = track_paths(directory, segment)
+    identity_path: Path = directory.parent / "identity.json"
+    if not all(item.exists() for item in (path, npz, sidecar, identity_path)):
         return None
     try:
         metrics: MetricsT = from_json(kind, path.read_text())
+        meta: TrackMetadata = from_json(TrackMetadata, sidecar.read_text())
+        identity: str = hashlib.sha256(to_json(from_json(RunRecord, identity_path.read_text())).encode()).hexdigest()
     except (SerdeError, ValueError):
         return None
-    return metrics if metrics.track_sha256 == file_sha256(npz) else None
+    valid: bool = (
+        metrics.track_sha256 == meta.track_sha256 == file_sha256(npz)
+        and metrics.run_identity_sha256 == meta.run_identity_sha256 == identity
+        and (expected_identity is None or identity == expected_identity)
+        and metrics.segment == meta.segment == segment
+        and ((kind is DetNetAloneMetrics and meta.kind == "detnet_alone")
+             or (kind is SegmentMetrics and meta.kind == "tracker" and meta.hand_mode == directory.name))
+    )
+    return metrics if valid else None
 
 
-def _complete(config: RunConfig, segment: str) -> bool:
+def _complete(config: RunConfig, segment: str, identity: str | None = None) -> bool:
+    if identity is None:
+        identity = ensure_run_identity(config)
     root: Path = config.output_root / config.name
-    tracked: bool = all(_verified(root / mode, segment, SegmentMetrics) is not None for mode in config.hand_modes)
-    alone: bool = not (config.detnet_alone and config.detector == "detnet") or _verified(root / DETNET_DIR, segment, DetNetAloneMetrics) is not None
+    tracked: bool = all(_verified(root / mode, segment, SegmentMetrics, identity) is not None for mode in config.hand_modes)
+    alone: bool = not (config.detnet_alone and config.detector == "detnet") or _verified(root / DETNET_DIR, segment, DetNetAloneMetrics, identity) is not None
     return tracked and alone
 
 
@@ -162,6 +180,7 @@ def _in_group(interaction: str, group: str) -> bool:
 
 
 def summarize(config: RunConfig, segments: tuple[SegmentInfo, ...]) -> RunSummary:
+    ensure_run_identity(config)
     root: Path = config.output_root / config.name
     missing: list[str] = []
     groups: list[GroupSummary] = []
@@ -228,6 +247,7 @@ def markdown(summary: RunSummary) -> str:
 
 def main(config: EvaluateConfig) -> None:
     run: RunConfig = config.run
+    identity: str = ensure_run_identity(run)
     torch.set_num_threads(run.cpu_threads)
     device: torch.device = torch.device(run.device)
     entry: DatasetEntry = rr.catalog.CatalogClient(run.catalog_url).get_dataset(UMETRACK)
@@ -236,9 +256,10 @@ def main(config: EvaluateConfig) -> None:
     everything: tuple[SegmentInfo, ...] = select_segments(replace(run, shard=0, shards=1), entry)
     if not config.aggregate_only:
         networks: Networks = load_networks(run, device)
+        ensure_run_identity(run, networks)
         (root / f"config.shard{run.shard}.json").write_text(to_json(RunRecord.from_config(run, networks)))
         for info in select_segments(run, entry):
-            if _complete(run, info.segment_id):
+            if _complete(run, info.segment_id, identity):
                 print(f"skip {info.segment_id} (verified)", flush=True)
                 continue
             for metrics in run_segment(run, entry, info, networks, device):
@@ -246,9 +267,10 @@ def main(config: EvaluateConfig) -> None:
                     f"{metrics.segment} {metrics.hand_mode}: MKPE {format_number(metrics.position.mkpe_mm)} mm, {metrics.timings_s['total']:.1f} s",
                     flush=True,
                 )
+        return
     summary: RunSummary = summarize(run, everything)
-    (root / "summary.json").write_text(to_json(summary))
-    (root / "summary.md").write_text(markdown(summary))
+    atomic_write(root / "summary.json", to_json(summary).encode())
+    atomic_write(root / "summary.md", markdown(summary).encode())
     if summary.detnet_alone:
-        (root / "detnet_metrics.json").write_text(to_json(summary.detnet_alone))
+        atomic_write(root / "detnet_metrics.json", to_json(summary.detnet_alone).encode())
     print(markdown(summary))

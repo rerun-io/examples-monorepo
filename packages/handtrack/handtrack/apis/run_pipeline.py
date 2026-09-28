@@ -15,8 +15,11 @@ segment again with the generic model × ϕ.
 
 import hashlib
 import math
+import os
+import tempfile
 import time
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -25,8 +28,8 @@ import rerun as rr
 import torch
 from beartype.roar import BeartypeException
 from rerun.catalog import DatasetEntry
-from serde import serde
-from serde.json import to_json
+from serde import SerdeError, serde
+from serde.json import from_json, to_json
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 
 from handtrack.data.catalog import CATALOG_URL, UMETRACK, SegmentInfo, list_segments, select_split
@@ -112,6 +115,7 @@ class Networks:
 
 def load_networks(config: RunConfig, device: torch.device) -> Networks:
     """Load the current checkpoints once per run (or build random nets); fp32, eval mode."""
+    torch.manual_seed(config.seed)
     detnet: DetNetF | None = None
     keynet: KeyNetF | None = None
     detnet_sha256: str = "oracle"
@@ -211,7 +215,7 @@ def calibrate_unknown_hand(
     return HandModelChoice(scaled_hand_model(generic, phi), phi, calibration.blocks, note)
 
 
-def _write_detnet_alone(root: Path, data: SegmentData, info: SegmentInfo, networks: Networks, run: TrackerRun, frames: int) -> None:
+def _write_detnet_alone(root: Path, data: SegmentData, info: SegmentInfo, networks: Networks, run: TrackerRun, frames: int, identity: str) -> None:
     """The DetNet-alone record and its §5.4 scores, when ``run`` carries a DetNet-alone pass."""
     if run.detnet_alone is None:
         return
@@ -224,6 +228,7 @@ def _write_detnet_alone(root: Path, data: SegmentData, info: SegmentInfo, networ
         timings_s={"decode": run.timings_s["decode"], "detnet_alone": run.timings_s["detnet_alone"]},
         dataset=info.dataset,
         kind="detnet_alone",
+        run_identity_sha256=identity,
     )
     track: SegmentTrack = detnet_alone_track(data, run.detnet_alone, meta)
     npz: Path = save_track(track, root / DETNET_DIR)
@@ -237,12 +242,14 @@ def _write_detnet_alone(root: Path, data: SegmentData, info: SegmentInfo, networ
         per_camera=scores[0],
         per_camera_crop=scores[1],
         track_sha256=file_sha256(npz),
+        run_identity_sha256=identity,
     )
     metrics_path(root / DETNET_DIR, info.segment_id).write_text(to_json(metrics))
 
 
 def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, networks: Networks, device: torch.device) -> list[SegmentMetrics]:
     """Track one segment in every configured hand mode, write the records and scores, return the scores."""
+    identity: str = ensure_run_identity(config, networks)
     start: float = time.perf_counter()
     data: SegmentData = read_segment(entry, info)
     read_s: float = time.perf_counter() - start
@@ -253,7 +260,7 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
     root: Path = config.output_root / config.name
     scores: list[SegmentMetrics] = []
     if not config.hand_modes and detnet is not None and config.detnet_alone:
-        _write_detnet_alone(root, data, info, networks, run_tracker(data, None, frames, device, detnet), frames)
+        _write_detnet_alone(root, data, info, networks, run_tracker(data, None, frames, device, detnet), frames, identity)
     for index, mode in enumerate(config.hand_modes):
         mode_start: float = time.perf_counter()
         calibration_s: float = 0.0
@@ -279,6 +286,7 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
             dataset=info.dataset,
             detector=config.detector,
             keypoints=config.keypoints,
+            run_identity_sha256=identity,
         )
         track: SegmentTrack = segment_track(data, run, meta)
         directory: Path = root / mode
@@ -302,13 +310,14 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
             keynet_views=int(np.isfinite(track.presence).sum()),
             detnet_runs=int((track.detnet_camera >= 0).sum()),
             track_sha256=file_sha256(npz),
+            run_identity_sha256=identity,
             timings_s=timings,
             calibration_blocks=choice.calibration_blocks,
             calibration_note=choice.calibration_note,
         )
         metrics_path(directory, info.segment_id).write_text(to_json(metrics))
         scores.append(metrics)
-        _write_detnet_alone(root, data, info, networks, run, frames)
+        _write_detnet_alone(root, data, info, networks, run, frames, identity)
     return scores
 
 
@@ -336,6 +345,7 @@ def summary_lines(metrics: SegmentMetrics) -> list[str]:
 
 
 def main(config: RunConfig) -> None:
+    ensure_run_identity(config)
     torch.set_num_threads(config.cpu_threads)
     device: torch.device = torch.device(config.device)
     entry: DatasetEntry = rr.catalog.CatalogClient(config.catalog_url).get_dataset(UMETRACK)
@@ -351,7 +361,7 @@ def main(config: RunConfig) -> None:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class RunRecord:
-    """``<run>/config.json``: what a run was started with."""
+    """Run settings, also persisted immutably as ``<run>/identity.json``."""
 
     name: str
     segments: list[str]
@@ -374,6 +384,15 @@ class RunRecord:
     min_keypoint_confidence: float
     tracker: TrackerConfig
     """All tracker thresholds and nested fit settings used for this run."""
+
+    seed: int = 0
+    """Network initialization and oracle noise seed."""
+    split: str = "test"
+    """Selection split, or explicit segment selection."""
+    catalog_url: str = CATALOG_URL
+    """Source catalog."""
+    device: str = "cuda"
+    """Compute device."""
 
     @staticmethod
     def from_config(config: RunConfig, networks: Networks) -> "RunRecord":
@@ -398,4 +417,49 @@ class RunRecord:
             presence_threshold=config.tracker.presence_threshold,
             min_keypoint_confidence=config.tracker.min_keypoint_confidence,
             tracker=config.tracker,
+            seed=config.seed,
+            split="explicit" if config.segments else "test",
+            catalog_url=config.catalog_url,
+            device=config.device,
         )
+
+
+def ensure_run_identity(config: RunConfig, networks: Networks | None = None) -> str:
+    """Publish an immutable identity; concurrent shards verify the first writer's complete record."""
+    if networks is None:
+        detnet_sha256: str = "oracle"
+        keynet_sha256: str = "oracle"
+        if config.detector == "detnet":
+            detnet_sha256 = "random" if config.random_weights else file_sha256(config.checkpoints / "detnet.weights.pt")
+        if config.keypoints != "oracle":
+            keynet_sha256 = "random" if config.random_weights else file_sha256(config.checkpoints / "keynet.weights.pt")
+        networks = Networks(None, None, detnet_sha256, keynet_sha256)
+    record: RunRecord = RunRecord.from_config(config, networks)
+    payload: bytes = to_json(record).encode()
+    path: Path = config.output_root / config.name / "identity.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        created: tuple[int, str] = tempfile.mkstemp(prefix=".identity.", dir=path.parent)
+        temporary: Path = Path(created[1])
+        try:
+            with os.fdopen(created[0], "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            with suppress(FileExistsError):
+                os.link(temporary, path)
+            directory: int = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+    try:
+        existing: RunRecord = from_json(RunRecord, path.read_text())
+    except (SerdeError, ValueError) as error:
+        raise ValueError(f"Invalid run identity {path}: {error}") from error
+    differing: list[str] = [item.name for item in fields(record) if getattr(existing, item.name) != getattr(record, item.name)]
+    if differing:
+        raise ValueError(f"Run identity differs at {path}: {', '.join(differing)}; use a new run directory")
+    return hashlib.sha256(to_json(existing).encode()).hexdigest()
