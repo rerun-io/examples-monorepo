@@ -9,6 +9,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from itertools import permutations, product
+from typing import Literal, TypeAlias
 
 import torch
 from jaxtyping import Bool, Float32, Float64, Int64
@@ -36,6 +37,7 @@ from handtrack.fit.solver import (
     normal_equations,
     orthonormalize,
     poses_from_theta,
+    predicted_reduction,
     repeat_views,
     retract,
     select,
@@ -116,6 +118,8 @@ class FitConfig:
 
 DEFAULT_CONFIG: FitConfig = FitConfig()
 
+Termination: TypeAlias = Literal["tolerance", "iterations", "damping", "no_evidence", "non_finite"]
+
 
 @dataclass(frozen=True, slots=True)
 class FitResult:
@@ -134,7 +138,9 @@ class FitResult:
     iterations: int
     """LM iterations of the final solve."""
     converged: bool
-    """The stopping rule fired before the iteration limit."""
+    """True only when the convergence tolerance was reached."""
+    termination: Termination = "iterations"
+    """Why the solve stopped; acquisition without evidence returns a neutral pose and NaN energy."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +151,7 @@ class _Solved:
     energy: Float32[Tensor, "b"]
     iterations: Int64[Tensor, "b"]
     converged: Bool[Tensor, "b"]
+    termination: list[Termination]
 
 
 def _problem(model: HandModelTorch, phi: float, views: Views, prior: Prior, config: FitConfig) -> Problem:
@@ -166,26 +173,36 @@ def _levenberg_marquardt(problem: Problem, theta: Theta, free: Int64[Tensor, "k"
     at the candidate; a rejected candidate keeps the previous one.
     """
     limits: Float32[Tensor, "20 2"] = fit_limits(problem.model, config.joint_limit_margin_rad)
+    theta = replace(theta, angles=theta.angles.clamp(limits[:, 0], limits[:, 1]))
     b: int = theta.translation.shape[0]
     residual, jacobian = linearize(problem, theta, free)
     energy: Float32[Tensor, "b"] = (residual * residual).sum(-1)
     damping: Float64[Tensor, "b"] = torch.full((b,), config.initial_damping, dtype=torch.float64)
     growth: Float64[Tensor, "b"] = torch.full((b,), DAMPING_GROWTH, dtype=torch.float64)
-    done: Bool[Tensor, "b"] = torch.zeros(b, dtype=torch.bool)
+    non_finite: Bool[Tensor, "b"] = ~torch.isfinite(energy)
+    done: Bool[Tensor, "b"] = non_finite.clone()
+    converged: Bool[Tensor, "b"] = torch.zeros(b, dtype=torch.bool)
     count: Int64[Tensor, "b"] = torch.zeros(b, dtype=torch.int64)
     for _ in range(config.max_iterations):
+        if bool(done.all()):
+            break
+        # Failed rows must not poison the independent solves of the remaining hands.
+        residual = torch.where(done[:, None], 0.0, residual)
+        jacobian = torch.where(done[:, None, None], 0.0, jacobian)
         hessian, gradient, mask = normal_equations(theta, residual, jacobian, free, limits)
         scaling: Float64[Tensor, "b k"] = marquardt_scaling(torch.diagonal(hessian, dim1=1, dim2=2), mask)
         system: Float64[Tensor, "b k k"] = hessian + torch.diag_embed(damping[:, None] * scaling + (1.0 - mask))
         step: Float64[Tensor, "b k"] = -torch.linalg.solve(system, gradient)
-        predicted: Float64[Tensor, "b"] = -(2.0 * (step * gradient).sum(-1) + torch.einsum("bk,bkl,bl->b", step, hessian, step))
         full_step: Float32[Tensor, "b 27"] = torch.zeros((b, PARAMETERS), dtype=torch.float32)
         full_step[:, free] = step.to(torch.float32)
         candidate: Theta = retract(theta, full_step, limits)
+        predicted: Float64[Tensor, "b"] = predicted_reduction(theta, candidate, free, step, hessian, gradient)
         new_residual, new_jacobian = linearize(problem, candidate, free)
         new_energy: Float32[Tensor, "b"] = (new_residual * new_residual).sum(-1)
         reduction: Float32[Tensor, "b"] = energy - new_energy
-        accept: Bool[Tensor, "b"] = (reduction > 0) & ~done
+        failed: Bool[Tensor, "b"] = ~torch.isfinite(new_energy) & ~done
+        non_finite = non_finite | failed
+        accept: Bool[Tensor, "b"] = (reduction > 0) & ~done & ~failed
         ratio: Float64[Tensor, "b"] = reduction.to(torch.float64) / predicted.clamp(min=1e-30)
         small: Bool[Tensor, "b"] = reduction <= config.relative_tolerance * energy + config.absolute_tolerance
         count = count + (~done).to(torch.int64)
@@ -195,14 +212,21 @@ def _levenberg_marquardt(problem: Problem, theta: Theta, free: Int64[Tensor, "k"
         energy = torch.where(accept, new_energy, energy)
         damping = torch.where(accept, damping * torch.clamp(1.0 - (2.0 * ratio - 1.0) ** 3, min=MIN_DAMPING_FACTOR), damping * growth)
         growth = torch.where(accept, torch.full_like(growth, DAMPING_GROWTH), growth * DAMPING_GROWTH)
-        done = done | (accept & small) | (damping > MAX_DAMPING)
+        converged = converged | (accept & small)
+        done = done | converged | non_finite | (damping > MAX_DAMPING)
         if bool(done.all()):
             break
-    return _Solved(theta=theta, energy=energy, iterations=count, converged=done)
+    termination: list[Termination] = [
+        "non_finite" if non_finite[i] else "tolerance" if converged[i] else "damping" if done[i] else "iterations" for i in range(b)
+    ]
+    return _Solved(theta=theta, energy=energy, iterations=count, converged=converged, termination=termination)
 
 
 def _results(problem: Problem, solved: _Solved, carried: Float32[Tensor, "b 2"]) -> list[FitResult]:
-    theta: Theta = replace(solved.theta, rotation=orthonormalize(solved.theta.rotation))
+    rotation: Float32[Tensor, "b 3 3"] = solved.theta.rotation.clone()
+    finite_rotation: Bool[Tensor, "b"] = torch.isfinite(rotation).all(dim=(1, 2))
+    rotation[finite_rotation] = orthonormalize(rotation[finite_rotation])
+    theta: Theta = replace(solved.theta, rotation=rotation)
     e_2d, e_dist, e_temporal = energy_terms(problem, theta)
     energy: Float32[Tensor, "b"] = e_2d + problem.dist_weight * e_dist + problem.temporal_weight * e_temporal
     return [
@@ -213,7 +237,8 @@ def _results(problem: Problem, solved: _Solved, carried: Float32[Tensor, "b 2"])
             e_temporal=float(e_temporal[i]),
             energy=float(energy[i]),
             iterations=int(solved.iterations[i]),
-            converged=bool(solved.converged[i]),
+            converged=bool(solved.converged[i]) and bool(torch.isfinite(energy[i])),
+            termination=solved.termination[i] if torch.isfinite(energy[i]) else "non_finite",
         )
         for i, pose in enumerate(poses_from_theta(theta, carried))
     ]
@@ -368,6 +393,9 @@ def initial_pose(model: HandModelTorch, phi: float, hands: Sequence[HandObservat
     2. A rigid LM (6 DoF) of each hypothesis on the palm keypoints, which do not move with the fingers.
     3. The full LM (26 DoF, fingers from the neutral pose) from the best palm fits, keeping the lowest energy.
 
+    A hand with no usable hypothesis is not refined: it returns a neutral pose, NaN energies, and
+    ``converged=False, termination="no_evidence"``. The tracker treats it as not acquired.
+
     The neutral pose is midway between the joint limits (UmeTrack's ``neutral_joint_angles`` with ``lower_factor=0.5``).
     """
     b: int = len(hands)
@@ -375,6 +403,26 @@ def initial_pose(model: HandModelTorch, phi: float, hands: Sequence[HandObservat
     limits: Float32[Tensor, "20 2"] = model.joint_limits[:FIT_JOINTS]
     neutral: Float32[Tensor, "20"] = 0.5 * (limits[:, 0] + limits[:, 1])
     hypotheses, usable = _wrist_hypotheses(model, phi, views, neutral, config.rotation_hypotheses)
+    has_evidence: Bool[Tensor, "b"] = usable.any(dim=1)
+    if not bool(has_evidence.all()):
+        valid: list[int] = torch.nonzero(has_evidence).flatten().tolist()
+        acquired: list[FitResult] = initial_pose(model, phi, [hands[i] for i in valid], config) if valid else []
+        by_hand: dict[int, FitResult] = dict(zip(valid, acquired, strict=True))
+        return [
+            by_hand[i]
+            if i in by_hand
+            else FitResult(
+                pose=HandPose(torch.eye(3), torch.zeros(3), torch.cat([neutral, torch.zeros(2)])),
+                e_2d=math.nan,
+                e_dist=math.nan,
+                e_temporal=math.nan,
+                energy=math.nan,
+                iterations=0,
+                converged=False,
+                termination="no_evidence",
+            )
+            for i in range(b)
+        ]
     h: int = usable.shape[1]
     stage: FitConfig = replace(config, max_iterations=config.init_iterations, relative_tolerance=config.init_relative_tolerance)
     palm_only: Float32[Tensor, "b 2 21"] = views.weights * _PALM_MASK
@@ -403,9 +451,13 @@ def initial_pose(model: HandModelTorch, phi: float, hands: Sequence[HandObservat
     start: Theta = replace(wrists, angles=finger_starts.repeat(b * k, 1))
     full_problem: Problem = _problem(model, phi, repeat_views(views, n), no_prior(b * n), config)
     full: _Solved = _levenberg_marquardt(full_problem, start, torch.arange(POSE_PARAMETERS), stage)
-    winner: Int64[Tensor, "b"] = rows * n + full.energy.reshape(b, n).argmin(-1)
+    winner: Int64[Tensor, "b"] = rows * n + torch.where(torch.isfinite(full.energy), full.energy, torch.inf).reshape(b, n).argmin(-1)
     solved: _Solved = _Solved(
-        theta=take(full.theta, winner), energy=full.energy[winner], iterations=full.iterations[winner], converged=full.converged[winner]
+        theta=take(full.theta, winner),
+        energy=full.energy[winner],
+        iterations=full.iterations[winner],
+        converged=full.converged[winner],
+        termination=[full.termination[i] for i in winner.tolist()],
     )
     problem: Problem = _problem(model, phi, views, no_prior(b), config)
     return _results(problem, solved, torch.zeros((b, 2)))

@@ -331,3 +331,18 @@ def marquardt_scaling(diagonal: Float64[Tensor, "b k"], mask: Float64[Tensor, "b
     """D of (JᵀJ + λD)δ = −Jᵀr: diag(JᵀJ), floored so an unobserved parameter stays damped, and 1 for held parameters."""
     floor: Float64[Tensor, "b 1"] = 1e-9 * diagonal.amax(-1, keepdim=True).clamp(min=1e-12)
     return diagonal.clamp(min=floor) * mask + (1.0 - mask)
+
+
+def predicted_reduction(
+    theta: Theta,
+    candidate: Theta,
+    free: Int64[Tensor, "k"],
+    step: Float64[Tensor, "b k"],
+    hessian: Float64[Tensor, "b k k"],
+    gradient: Float64[Tensor, "b k"],
+) -> Float64[Tensor, "b"]:
+    """Quadratic energy decrease for the applied step, including projection onto the joint limits."""
+    is_angle: Bool[Tensor, "k"] = (free >= ANGLE_OFFSET) & (free < POSE_PARAMETERS)
+    effective: Float64[Tensor, "b k"] = step.clone()
+    effective[:, is_angle] = (candidate.angles - theta.angles)[:, free[is_angle] - ANGLE_OFFSET].to(torch.float64)
+    return -(2.0 * (effective * gradient).sum(-1) + torch.einsum("bk,bkl,bl->b", effective, hessian, effective))
