@@ -27,8 +27,7 @@ from torch import Tensor
 
 from handtrack.data.segment_labels import SegmentLabels
 from handtrack.eval.metrics import Counts, DetectionMetrics, PipelineMetrics, TrackingMetrics, detection_metrics, pipeline_metrics, tracking_metrics
-from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH, Letterbox
-from handtrack.labels.circles import enclosing_circles
+from handtrack.geometry.letterbox import Letterbox
 from handtrack.labels.crops import BOX_ENLARGE
 from handtrack.labels.validity import MIN_VISIBLE_KEYPOINTS
 from handtrack.pipeline import net_circles
@@ -155,7 +154,7 @@ class GroundTruth:
     in_front: Bool[Tensor, "f c 2 21"]
     """In front of the camera and a ground-truth hand."""
     inside: Int64[Tensor, "f c 2"]
-    """Keypoints in front and inside the image, for ground-truth hands (0 otherwise)."""
+    """Keypoints in front and inside the native camera image, for ground-truth hands (0 otherwise)."""
     image_valid: Bool[Tensor, "f c"]
 
     @staticmethod
@@ -179,40 +178,6 @@ def position_score(predicted: Float32[Tensor, "f h 21 3"], target: Float32[Tenso
     return PositionScore(metrics.mkpe_mm, metrics.mka_mm, metrics.mka_gt_mm, int(scored.sum()) * 21, triples * 21)
 
 
-def detection_metrics_in_box(
-    boxes: Float32[Tensor, "n 4"],
-    probability: Float32[Tensor, "n"],
-    points: Float32[Tensor, "n 21 2"],
-    in_front: Bool[Tensor, "n 21"],
-    camera: Int64[Tensor, "n"],
-    hand: Int64[Tensor, "n"],
-    containment_scale: float,
-) -> DetectionMetrics:
-    """``eval.metrics.detection_metrics`` with its containment test against the box scaled by ``containment_scale`` about its centre.
-
-    Every other criterion is the same (presence > 0.5, width within 20% of the enclosing-circle diameter, at least
-    ``MIN_VISIBLE_KEYPOINTS`` keypoints inside the net frame); at ``containment_scale = 1`` this is exactly ``detection_metrics``.
-    """
-    circles: Float32[Tensor, "n 3"] = torch.from_numpy(enclosing_circles(points.detach().cpu().numpy(), in_front.cpu().numpy())).to(points.device)
-    inside: Bool[Tensor, "n 21"] = in_front & (points >= 0).all(-1) & (points[..., 0] < NET_WIDTH) & (points[..., 1] < NET_HEIGHT)
-    eligible: Bool[Tensor, "n"] = inside.sum(-1) >= MIN_VISIBLE_KEYPOINTS
-    width: Float32[Tensor, "n"] = boxes[:, 2] - boxes[:, 0]
-    diameter: Float32[Tensor, "n"] = 2 * circles[:, 2]
-    centre: Float32[Tensor, "n 2"] = (boxes[:, :2] + boxes[:, 2:]) * 0.5
-    half: Float32[Tensor, "n 2"] = (boxes[:, 2:] - boxes[:, :2]) * (0.5 * containment_scale)
-    low: Float32[Tensor, "n 2"] = centre - half
-    high: Float32[Tensor, "n 2"] = centre + half
-    contains: Bool[Tensor, "n"] = (((points >= low[:, None]) & (points <= high[:, None])).all(-1) | ~in_front).all(-1)
-    positive: Bool[Tensor, "n"] = probability > 0.5
-    tp: Bool[Tensor, "n"] = positive & eligible & contains & (diameter > 0) & ((width - diameter).abs() <= diameter * 0.2)
-    tp &= torch.isfinite(boxes).all(-1) & torch.isclose(width, boxes[:, 3] - boxes[:, 1])
-    groups: dict[tuple[int, int], Counts] = {}
-    for key in {(int(c), int(h)) for c, h in zip(camera.tolist(), hand.tolist(), strict=True)}:
-        select: Bool[Tensor, "n"] = (camera == key[0]) & (hand == key[1])
-        groups[key] = Counts(int(tp[select].sum()), int(positive[select].sum()), int(eligible[select].sum()))
-    return DetectionMetrics(Counts(int(tp.sum()), int(positive.sum()), int(eligible.sum())), groups)
-
-
 def detection_scores(
     truth: GroundTruth, circle: Float32[Tensor, "f c 2 3"], probability: Float32[Tensor, "f c 2"], cameras: int, containment_scale: float = 1.0
 ) -> list[DetectionScore]:
@@ -225,10 +190,9 @@ def detection_scores(
     camera: Int64[Tensor, "n"] = torch.arange(cameras)[None, :, None].expand_as(probability)[keep]
     hand: Int64[Tensor, "n"] = torch.arange(2)[None, None, :].expand_as(probability)[keep]
     points: Float32[Tensor, "n 21 2"] = torch.nan_to_num(truth.net_xy[keep], nan=0.0)
-    metrics: DetectionMetrics = (
-        detection_metrics(boxes, probability[keep], points, truth.in_front[keep], camera, hand)
-        if containment_scale == 1.0
-        else detection_metrics_in_box(boxes, probability[keep], points, truth.in_front[keep], camera, hand, containment_scale)
+    eligible: Bool[Tensor, "n"] = truth.inside[keep] >= MIN_VISIBLE_KEYPOINTS
+    metrics: DetectionMetrics = detection_metrics(
+        boxes, probability[keep], points, truth.in_front[keep], camera, hand, eligible, containment_scale=containment_scale
     )
     scores: list[DetectionScore] = []
     for index in range(cameras):

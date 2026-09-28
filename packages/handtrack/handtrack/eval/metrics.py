@@ -50,6 +50,7 @@ def detection_metrics(
     boxes: Float32[Tensor, 'n 4'], probability: Float32[Tensor, 'n'],
     points: Float32[Tensor, 'n 21 2'], in_front: Bool[Tensor, 'n 21'],
     camera: Int64[Tensor, 'n'], hand: Int64[Tensor, 'n'], eligible: Bool[Tensor, 'n'],
+    containment_scale: float = 1.0,
 ) -> DetectionMetrics:
     """Apply §5.4 to unexpanded square boxes in 640x480 pixels.
 
@@ -58,14 +59,19 @@ def detection_metrics(
     labels; letterbox padding must not add points to the recall denominator.
     TP also requires probability >0.5, width within 20% of the smallest
     enclosing-circle diameter, and all in-front points inside the predicted
-    closed square. Nonfinite predictions cannot be TP. Behind-camera points
+    closed square scaled about its centre by containment_scale (1.0 is §5.4).
+    The width test always uses the unscaled box. Nonfinite predictions cannot be TP. Behind-camera points
     have no image position and are excluded from the circle and containment
     tests: §5.4 projected keypoints are the in-front ones.
     """
     circles: Float32[Tensor, "n 3"] = torch.from_numpy(enclosing_circles(points.detach().cpu().numpy(), in_front.cpu().numpy())).to(points.device)
     width: Float32[Tensor, "n"] = boxes[:, 2] - boxes[:, 0]
     diameter: Float32[Tensor, "n"] = 2 * circles[:, 2]
-    contains: Bool[Tensor, "n"] = (((points >= boxes[:, None, :2]) & (points <= boxes[:, None, 2:])).all(-1) | ~in_front).all(-1)
+    # Expand from the original bounds so scale 1 preserves the closed-box boundary exactly.
+    margin: Float32[Tensor, "n 2"] = (boxes[:, 2:] - boxes[:, :2]) * (0.5 * (containment_scale - 1.0))
+    low: Float32[Tensor, "n 2"] = boxes[:, :2] - margin
+    high: Float32[Tensor, "n 2"] = boxes[:, 2:] + margin
+    contains: Bool[Tensor, "n"] = (((points >= low[:, None]) & (points <= high[:, None])).all(-1) | ~in_front).all(-1)
     positive: Bool[Tensor, "n"] = probability > 0.5
     tp: Bool[Tensor, "n"] = positive & eligible & contains & (diameter > 0) & ((width - diameter).abs() <= diameter * 0.2)
     tp &= torch.isfinite(boxes).all(-1) & torch.isclose(width, boxes[:, 3] - boxes[:, 1])
