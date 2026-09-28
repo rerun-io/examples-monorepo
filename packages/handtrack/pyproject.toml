@@ -35,6 +35,8 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.vulture]
 paths = ["handtrack", "tests"]
 ignore_names = [
+    # Tracker: serialized record fields (metrics JSON, SegmentTrack npz keys read by the Rerun layers).
+    "gt_frames", "tracked_frames", "keypoints_2d",
     # Serialized logs and Tyro/source-facing fields consumed outside this package (W3 trainer).
     "datasets", "segment_ids", "gpu_memory_bytes", "gpu_peak_memory_bytes",
     "CropKind", "POSITIVE", "DRIFT", "EDGE", "OTHER_HAND", "BACKGROUND",
