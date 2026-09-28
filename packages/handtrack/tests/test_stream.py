@@ -207,3 +207,50 @@ def test_machinery_failures_stay_fatal() -> None:
         with pytest.raises(RuntimeError, match=r"a catalog producer failed \(dataforge-umetrack good-segment\)"):
             stream.next_detnet_batch()
     assert is_fatal(torch.OutOfMemoryError("x")) and not is_fatal(RuntimeError("Invalid data")) and not is_fatal(ValueError("bad labels"))
+
+
+@pytest.mark.parametrize('evaluation', [False, True])
+def test_cancel_interrupts_producer_wait(evaluation: bool) -> None:
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    info, data = _fake_segment('waiting', 1)
+
+    def reader(info: SegmentInfo) -> SegmentData:
+        entered.set()
+        release.wait(5.0)
+        return data
+
+    stream = CatalogStream(StreamConfig(device='cpu', validation=evaluation, producers=1, fetchers=1, detnet_buffer=4),
+                           segments=(info,), read_segment=reader, open_decoder=lambda *args: _GrayDecoder())
+    batches = []
+
+    def consume() -> None:
+        stream.start_epoch(0)
+        batches.append(stream.next_detnet_batch())
+        returned.set()
+
+    worker = threading.Thread(target=consume, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2.0)
+        stream.cancel()
+        assert returned.wait(1.0), 'cancel must return before the catalog read completes'
+        assert batches == [None]
+    finally:
+        release.set()
+        worker.join(3.0)
+        stream.close()
+
+
+def test_evaluation_retains_native_hand_eligibility() -> None:
+    info, data = _fake_segment('native', 1)
+    with CatalogStream(StreamConfig(device='cpu', validation=True, producers=1, fetchers=1),
+                       segments=(info,), read_segment=lambda info: data, open_decoder=lambda *args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        batch = stream.next_detnet_batch()
+        assert batch is not None
+        metadata = stream.detnet_validation()
+        assert metadata.eligible.tolist() == [[True, False], [True, False]]
