@@ -10,8 +10,7 @@ DetNet-alone P/R per camera per group (also alone in ``<run>/detnet_metrics.json
 only the DetNet-alone pass runs.
 """
 
-import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import rerun as rr
@@ -26,13 +25,22 @@ from handtrack.apis.run_pipeline import (
     RunConfig,
     RunRecord,
     file_sha256,
+    format_number,
     load_networks,
     metrics_path,
     run_segment,
     select_segments,
 )
 from handtrack.data.catalog import UMETRACK, SegmentInfo
-from handtrack.eval.segment import DetectionScore, DetNetAloneMetrics, PositionScore, SegmentMetrics, combine_detections, combine_positions
+from handtrack.eval.segment import (
+    DetectionScore,
+    DetNetAloneMetrics,
+    HandScore,
+    PositionScore,
+    SegmentMetrics,
+    combine_detections,
+    combine_positions,
+)
 from handtrack.results import track_paths
 
 GROUPS: tuple[str, ...] = ("all", "separate_hand", "hand_hand")
@@ -123,7 +131,7 @@ def _mean(values: list[int]) -> float | None:
 
 
 def group_summary(mode: str, group: str, metrics: list[SegmentMetrics]) -> GroupSummary:
-    hands = [hand for m in metrics for hand in m.hands]
+    hands: list[HandScore] = [hand for m in metrics for hand in m.hands]
     visible: int = sum(hand.tracking.visible_frames for hand in hands)
     visible_tracked: int = sum(hand.tracking.visible_tracked_frames for hand in hands)
     acquire: list[int | None] = [delay for hand in hands for delay in hand.tracking.acquire_frames]
@@ -185,12 +193,8 @@ def summarize(config: RunConfig, segments: tuple[SegmentInfo, ...]) -> RunSummar
     return RunSummary(name=config.name, selected=len(segments), missing=missing, groups=groups, detnet_alone=alone)
 
 
-def _number(value: float | None, digits: int = 1) -> str:
-    return "–" if value is None else f"{value:.{digits}f}"
-
-
 def _pr(scores: list[DetectionScore]) -> str:
-    return " · ".join(f"{_number(score.precision, 3)} / {_number(score.recall, 3)}" for score in scores)
+    return " · ".join(f"{format_number(score.precision, 3)} / {format_number(score.recall, 3)}" for score in scores)
 
 
 def markdown(summary: RunSummary) -> str:
@@ -203,9 +207,9 @@ def markdown(summary: RunSummary) -> str:
     ]
     for g in summary.groups:
         lines.append(
-            f"| {g.hand_mode} | {g.group} | {g.segments} | {_number(g.position.mkpe_mm)} | {_number(g.position.mka_mm, 2)} | {_number(g.position.mka_gt_mm, 2)}"
-            f" | {_number(g.visible_tracked_fraction, 3)} ({g.visible_tracked_frames}/{g.visible_frames})"
-            f" | {_number(g.mean_acquire_frames, 2)}, {g.never_acquired}/{g.appearances} | {_number(g.mean_drop_frames, 2)}, {g.not_dropped}/{g.disappearances}"
+            f"| {g.hand_mode} | {g.group} | {g.segments} | {format_number(g.position.mkpe_mm)} | {format_number(g.position.mka_mm, 2)} | {format_number(g.position.mka_gt_mm, 2)}"
+            f" | {format_number(g.visible_tracked_fraction, 3)} ({g.visible_tracked_frames}/{g.visible_frames})"
+            f" | {format_number(g.mean_acquire_frames, 2)}, {g.never_acquired}/{g.appearances} | {format_number(g.mean_drop_frames, 2)}, {g.not_dropped}/{g.disappearances}"
             f" | {g.tracked_without_hand} | {_pr(g.detnet_with_tracking)} | {_pr(g.detnet_with_tracking_crop)} |"
         )
     if summary.detnet_alone:
@@ -229,7 +233,7 @@ def main(config: EvaluateConfig) -> None:
     entry: DatasetEntry = rr.catalog.CatalogClient(run.catalog_url).get_dataset(UMETRACK)
     root: Path = run.output_root / run.name
     root.mkdir(parents=True, exist_ok=True)
-    everything: tuple[SegmentInfo, ...] = select_segments(dataclasses.replace(run, shard=0, shards=1), entry)
+    everything: tuple[SegmentInfo, ...] = select_segments(replace(run, shard=0, shards=1), entry)
     if not config.aggregate_only:
         networks: Networks = load_networks(run, device)
         (root / f"config.shard{run.shard}.json").write_text(to_json(RunRecord.from_config(run, networks)))
@@ -239,7 +243,7 @@ def main(config: EvaluateConfig) -> None:
                 continue
             for metrics in run_segment(run, entry, info, networks, device):
                 print(
-                    f"{metrics.segment} {metrics.hand_mode}: MKPE {_number(metrics.position.mkpe_mm)} mm, {metrics.timings_s['total']:.1f} s",
+                    f"{metrics.segment} {metrics.hand_mode}: MKPE {format_number(metrics.position.mkpe_mm)} mm, {metrics.timings_s['total']:.1f} s",
                     flush=True,
                 )
     summary: RunSummary = summarize(run, everything)

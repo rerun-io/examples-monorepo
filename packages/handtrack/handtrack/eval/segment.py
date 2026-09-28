@@ -27,7 +27,7 @@ from torch import Tensor
 
 from handtrack.data.segment_labels import SegmentLabels
 from handtrack.eval.metrics import Counts, DetectionMetrics, PipelineMetrics, TrackingMetrics, detection_metrics, pipeline_metrics, tracking_metrics
-from handtrack.geometry.letterbox import Letterbox
+from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH, Letterbox
 from handtrack.labels.circles import enclosing_circles
 from handtrack.labels.crops import BOX_ENLARGE
 from handtrack.labels.validity import MIN_VISIBLE_KEYPOINTS
@@ -190,12 +190,12 @@ def detection_metrics_in_box(
 ) -> DetectionMetrics:
     """``eval.metrics.detection_metrics`` with its containment test against the box scaled by ``containment_scale`` about its centre.
 
-    Every other criterion is the same (presence > 0.5, width within 20% of the enclosing-circle diameter, > 16 keypoints
-    inside the 640x480 frame); at ``containment_scale = 1`` this is exactly ``detection_metrics``.
+    Every other criterion is the same (presence > 0.5, width within 20% of the enclosing-circle diameter, at least
+    ``MIN_VISIBLE_KEYPOINTS`` keypoints inside the net frame); at ``containment_scale = 1`` this is exactly ``detection_metrics``.
     """
     circles: Float32[Tensor, "n 3"] = torch.from_numpy(enclosing_circles(points.detach().cpu().numpy(), in_front.cpu().numpy())).to(points.device)
-    inside: Bool[Tensor, "n 21"] = in_front & (points >= 0).all(-1) & (points[..., 0] < 640) & (points[..., 1] < 480)
-    eligible: Bool[Tensor, "n"] = inside.sum(-1) > 16
+    inside: Bool[Tensor, "n 21"] = in_front & (points >= 0).all(-1) & (points[..., 0] < NET_WIDTH) & (points[..., 1] < NET_HEIGHT)
+    eligible: Bool[Tensor, "n"] = inside.sum(-1) >= MIN_VISIBLE_KEYPOINTS
     width: Float32[Tensor, "n"] = boxes[:, 2] - boxes[:, 0]
     diameter: Float32[Tensor, "n"] = 2 * circles[:, 2]
     centre: Float32[Tensor, "n 2"] = (boxes[:, :2] + boxes[:, 2:]) * 0.5

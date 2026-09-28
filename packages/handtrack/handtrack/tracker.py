@@ -211,18 +211,6 @@ class _Projection:
     """Smallest enclosing circle of the in-front keypoints in the net frame; NaN without one."""
 
 
-def camera_of(rig: CameraRig, camera: int) -> CameraRig:
-    """One camera of a rig as a one-camera rig (the fit's view)."""
-    return CameraRig(
-        names=rig.names[camera : camera + 1],
-        image_size=rig.image_size[camera : camera + 1],
-        cam_from_rig=rig.cam_from_rig[camera : camera + 1],
-        focal=rig.focal[camera : camera + 1],
-        principal=rig.principal[camera : camera + 1],
-        fisheye62=None if rig.fisheye62 is None else rig.fisheye62[camera : camera + 1],
-    )
-
-
 def _crop_map(circle: Float32[Tensor, "3"], side: Side) -> Float32[Tensor, "3 3"]:
     floored: Float32[Tensor, "1 3"] = torch.cat([circle[:2], circle[2:].clamp_min(MIN_BOX_RADIUS)])[None]
     return crop_from_net(crop_boxes(floored), torch.tensor([side == Side.RIGHT]))[0]
@@ -257,7 +245,8 @@ class Tracker:
         """
         self.rig: CameraRig = rig
         self.letterboxes: tuple[Letterbox, ...] = letterboxes
-        self.cameras: tuple[CameraRig, ...] = tuple(camera_of(rig, camera) for camera in range(len(rig.names)))
+        self.cameras: tuple[CameraRig, ...] = tuple(rig.select([camera]) for camera in range(len(rig.names)))
+        """Each camera as a one-camera rig (the fit's view)."""
         self.model: HandModelTorch = model
         self.phi: float = phi
         self.detector: Detector = detector
