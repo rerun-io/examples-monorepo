@@ -42,12 +42,8 @@ class Letterbox:
             raise ValueError('Image shape does not match letterbox source dimensions')
         rotated: UInt8[Tensor, '*b h w'] = torch.rot90(image, -1, (-2, -1)) if self.quarter_turn_cw else image
         width: int = round(rotated.shape[-1] * self.scale)
-        resized: UInt8[Tensor, '*b 480 w']
-        if self.scale != 1.0:
-            # Flatten arbitrary leading dimensions for interpolate, then restore them.
-            resized = F.interpolate(rotated.reshape(-1, 1, *rotated.shape[-2:]).float(), size=(NET_HEIGHT, width), mode='area').round().to(torch.uint8).reshape(*image.shape[:-2], NET_HEIGHT, width)
-        else:
-            resized = rotated
+        # Flatten arbitrary leading dimensions for interpolate, then restore them.
+        resized: UInt8[Tensor, '*b 480 w'] = rotated if self.scale == 1.0 else F.interpolate(rotated.reshape(-1, 1, *rotated.shape[-2:]).float(), size=(NET_HEIGHT, width), mode='area').round().to(torch.uint8).reshape(*image.shape[:-2], NET_HEIGHT, width)
         return F.pad(resized, (int(self.pad_x), NET_WIDTH - width - int(self.pad_x)))
 
 

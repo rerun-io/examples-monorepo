@@ -2,7 +2,17 @@ import torch
 from jaxtyping import Bool, Float32, Int64, UInt8
 from torch import Tensor
 
-from handtrack.labels.crops import CropJitter, apply_affine, crop_boxes, crop_from_net, cut_crops
+from handtrack.labels.crops import (
+    CropJitter,
+    apply_affine,
+    boundary_occlusion,
+    count_inside_crop,
+    crop_boxes,
+    crop_from_net,
+    cut_crops,
+    sample_jitter,
+    scale_intensity,
+)
 
 
 def test_box_edges_mirror_and_inverse() -> None:
@@ -39,15 +49,11 @@ def test_cut_crops_samples_selected_frames_and_zero_padding() -> None:
 
 
 def test_inside_crop_excludes_behind_nonfinite_and_upper_edges() -> None:
-    from handtrack.labels.crops import count_inside_crop
-
     points: Float32[Tensor, '1 6 2'] = torch.tensor([[[0.0, 0.0], [95.99, 95.99], [96.0, 1.0], [-0.1, 1.0], [1.0, 1.0], [float('nan'), 0.0]]])
     assert count_inside_crop(points, torch.tensor([[True, True, True, True, False, True]])).tolist() == [2]
 
 
 def test_seeded_jitter_bounds_and_neutral_draws() -> None:
-    from handtrack.labels.crops import sample_jitter
-
     jitter: CropJitter = sample_jitter(100, torch.Generator().manual_seed(7), 'cpu', 0.3, (0.8, 1.2), 0.1)
     repeated: CropJitter = sample_jitter(100, torch.Generator().manual_seed(7), 'cpu', 0.3, (0.8, 1.2), 0.1)
     torch.testing.assert_close(jitter.rotation, repeated.rotation)
@@ -61,8 +67,6 @@ def test_seeded_jitter_bounds_and_neutral_draws() -> None:
 
 
 def test_boundary_rectangles_and_probability() -> None:
-    from handtrack.labels.crops import boundary_occlusion
-
     assert not boundary_occlusion(10, torch.Generator(), 'cpu', 0.0, 0.3).any()
     masks: Bool[Tensor, '100 96 96'] = boundary_occlusion(100, torch.Generator().manual_seed(18), 'cpu', 1.0, 0.3)
     assert masks.flatten(1).any(dim=1).all()
@@ -77,8 +81,6 @@ def test_boundary_rectangles_and_probability() -> None:
 
 
 def test_intensity_is_one_factor_per_image_and_clamped() -> None:
-    from handtrack.labels.crops import scale_intensity
-
     images: Float32[Tensor, '8 1 3 3'] = torch.full((8, 1, 3, 3), 0.5)
     output: Float32[Tensor, '8 1 3 3'] = scale_intensity(images, torch.Generator().manual_seed(3), 0.5, 1.5)
     assert output.min() >= 0.25 and output.max() <= 0.75

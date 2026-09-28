@@ -8,6 +8,7 @@ from einops import rearrange
 from jaxtyping import Bool, Float32, Int64, UInt8
 from torch import Tensor
 
+from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH
 from handtrack.labels.circles import square_boxes
 
 CROP_SIZE: int = 96
@@ -67,7 +68,7 @@ def cut_crops(frames: UInt8[Tensor, 'f 480 640'], frame_index: Int64[Tensor, 'b'
     axis: Float32[Tensor, '96'] = torch.arange(CROP_SIZE, device=frames.device, dtype=torch.float32)
     grid: Float32[Tensor, '96 96 2'] = torch.stack(torch.meshgrid(axis, axis, indexing='xy'), dim=-1)
     pixels: Float32[Tensor, 'b n 2'] = apply_affine(torch.linalg.inv(crop_from_net), rearrange(grid, 'h w xy -> (h w) xy')[None].expand(frame_index.numel(), -1, -1))
-    normalized: Float32[Tensor, 'b n 2'] = (pixels + 0.5) * pixels.new_tensor([2.0 / 640, 2.0 / 480]) - 1.0
+    normalized: Float32[Tensor, 'b n 2'] = (pixels + 0.5) * pixels.new_tensor([2.0 / NET_WIDTH, 2.0 / NET_HEIGHT]) - 1.0
     return F.grid_sample(frames[frame_index, None].float() / 255.0, rearrange(normalized, 'b (h w) xy -> b h w xy', h=CROP_SIZE, w=CROP_SIZE), mode='bilinear', padding_mode='zeros', align_corners=False)
 
 
@@ -108,7 +109,7 @@ def boundary_occlusion(n: int, generator: torch.Generator, device: torch.device 
     axis: Int64[Tensor, '96'] = torch.arange(CROP_SIZE, device=device)
     x: Int64[Tensor, '1 1 96'] = axis[None, None, :]
     y: Int64[Tensor, '1 96 1'] = axis[None, :, None]
-    along: Bool[Tensor, 'b 96 96'] = torch.where(border < 2, (y >= low) & (y < high), (x >= low) & (x < high)).expand(n, CROP_SIZE, CROP_SIZE)
+    along: Bool[Tensor, 'b 96 96'] = torch.where(border < 2, (y >= low) & (y < high), (x >= low) & (x < high))
     inward: Bool[Tensor, 'b 96 96'] = ((border == 0) & (x < depth)) | ((border == 1) & (x >= CROP_SIZE - depth)) | ((border == 2) & (y < depth)) | ((border == 3) & (y >= CROP_SIZE - depth))
     return (draws[:, 0, None, None] < probability) & along & inward
 
