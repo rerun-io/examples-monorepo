@@ -139,6 +139,26 @@ def test_keynet_loss_masks_weights_and_detached_logging() -> None:
     assert output.presence_logit.grad is not None and torch.count_nonzero(output.presence_logit.grad[~presence_mask]) == 0
 
 
+def test_keynet_loss_pixel_sum_sums_pixels_and_averages_keypoints() -> None:
+    output: KeyNetOutput = KeyNetOutput(torch.zeros(3, 21, 18, 18), torch.zeros(3, 21, 18), torch.zeros(3))
+    heatmaps: Float32[Tensor, "b 21 18 18"] = torch.ones(3, 21, 18, 18)
+    distance: Float32[Tensor, "b 21 18"] = torch.full((3, 21, 18), 2.0)
+    heatmaps[1] = 3.0
+    distance[1] = 4.0
+    heatmaps[2] = float("nan")
+    distance[2] = float("nan")
+    positive: Bool[Tensor, "b"] = torch.tensor([True, True, False])
+    presence_mask: Bool[Tensor, "b"] = torch.tensor([True, False, True])
+    loss: KeyNetLoss = keynet_loss(output, heatmaps, distance, torch.zeros(3), positive, presence_mask, 2.0, heatmap_reduction="pixel_sum")
+    # Per keypoint: 324 heatmap pixels of squared error 1 or 9, 18 bins of 4 or 16; averaged over 2 x 21 keypoints.
+    assert loss.heatmap.item() == pytest.approx(324 * 5.0)
+    assert loss.distance.item() == pytest.approx(18 * 10.0)
+    assert loss.presence.item() == pytest.approx(math.log(2))
+    assert loss.total.item() == pytest.approx(324 * 5.0 + 0.05 * 18 * 10.0 + 2.0 * math.log(2))
+    empty: Bool[Tensor, "b"] = torch.zeros(3, dtype=torch.bool)
+    assert keynet_loss(output, heatmaps, distance, torch.zeros(3), empty, empty, 1.0, heatmap_reduction="pixel_sum").total.item() == 0.0
+
+
 def test_keynet_perfect_and_empty_losses() -> None:
     output: KeyNetOutput = KeyNetOutput(
         torch.zeros(2, 21, 18, 18, requires_grad=True), torch.zeros(2, 21, 18, requires_grad=True), torch.full((2,), -1000.0, requires_grad=True)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip('torch', reason='requires handtrack environment')
+import tyro
 from serde.json import from_json, to_json
 
 from handtrack.apis.train import Config, StreamSettings, build_source
@@ -20,6 +21,12 @@ def test_config_roundtrip_and_factory_arguments(tmp_path: Path) -> None:
         build_source(config.stream, 'holdout', config.nets)
     with pytest.raises(ValueError, match='unknown datasets'):
         build_source(StreamSettings(datasets=('hot3d',)), config.stream.train_split, config.nets)
+
+
+def test_cli_sets_the_heatmap_reduction() -> None:
+    config = tyro.cli(Config, args=['--loop.heatmap-reduction', 'pixel_sum', '--loop.heatmap-warmup-epochs', '1', '--loop.presence-weight', '4.5'])
+    assert (config.loop.heatmap_reduction, config.loop.heatmap_warmup_epochs, config.loop.presence_weight) == ('pixel_sum', 1, 4.5)
+    assert from_json(Config, to_json(config)) == config
 
 
 def test_production_cpu_bf16(tmp_path: Path) -> None:

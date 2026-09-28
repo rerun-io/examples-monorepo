@@ -21,7 +21,7 @@ from handtrack.data.batches import DetNetBatch, KeyNetBatch
 from handtrack.eval.metrics import Counts, DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics, presence_counts
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.models.detnet import Detections, DetNetF, DetNetLoss, DetNetOutput, decode_detections, detnet_loss
-from handtrack.models.keynet import KeyNetF, KeyNetLoss, KeyNetOutput, keynet_loss
+from handtrack.models.keynet import HeatmapReduction, KeyNetF, KeyNetLoss, KeyNetOutput, keynet_loss
 from handtrack.train.checkpoint import MetricRecord, TrainingState, export_weights, load_checkpoint, save_checkpoint
 from handtrack.train.source import BatchSource, DetNetValidation, DetNetValidationSource, KeyNetValidation, KeyNetValidationSource
 
@@ -67,12 +67,18 @@ class LoopSettings:
     """On resume from a mid-epoch last.pt, skip the rest of that epoch instead of replaying its consumed batches: start
     the next epoch with the global step, optimisers, best scores and history kept. Replay assumes a deterministic source;
     ``CatalogStream`` pools depend on producer timing, so resumes from it should set this."""
+    heatmap_reduction: HeatmapReduction = 'mean'
+    """KeyNet heatmap MSE over pixels: 'mean' averages every value, 'pixel_sum' sums each keypoint's pixels."""
+    heatmap_warmup_epochs: int = 0
+    """Epochs that use 'mean' before heatmap_reduction applies: 'pixel_sum' from initialisation drives the output ReLU dead."""
 
     def __post_init__(self) -> None:
         if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or self.validate_every < 0:
             raise ValueError('Cadences must be positive (validate_every may be zero)')
         if self.presence_weight < 0:
             raise ValueError('presence_weight must be nonnegative')
+        if self.heatmap_warmup_epochs < 0:
+            raise ValueError('heatmap_warmup_epochs must be nonnegative')
         if self.bf16 and os.environ.get('PIXI_DEV_MODE') == '1':
             raise ValueError('bf16 needs the prod environment: existing model internals enforce Float32 in dev')
 
@@ -176,8 +182,9 @@ class Trainer:
         return detnet_loss(output, batch.circle.to(self.device), batch.presence.to(self.device), batch.presence_mask.to(self.device), batch.circle_mask.to(self.device))
 
     def keynet_objective(self, batch: KeyNetBatch, output: KeyNetOutput) -> KeyNetLoss:
+        reduction: HeatmapReduction = 'mean' if self.state.epoch < self.cadence.heatmap_warmup_epochs else self.cadence.heatmap_reduction
         return keynet_loss(output, batch.heatmaps.to(self.device), batch.distance.to(self.device), batch.presence.to(self.device), batch.positive.to(self.device),
-                           batch.presence_mask.to(self.device), self.cadence.presence_weight)
+                           batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction)
 
     def train_batch(self, batch: DetNetBatch | KeyNetBatch) -> None:
         """Apply one SGD step and retain detached scalar loss terms."""
