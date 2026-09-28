@@ -9,11 +9,15 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+import pytest
 import torch
 from jaxtyping import Bool, Float32, Int64, UInt8
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 from torch import Tensor
 
+import handtrack.tracker as tracker_module
+from handtrack.fit.observations import HandObservation
+from handtrack.fit.pose_fit import FitConfig, FitResult
 from handtrack.geometry.camera import CameraRig, in_front, inside_image, project, world_to_cameras
 from handtrack.geometry.letterbox import Letterbox, letterbox_for
 from handtrack.hand.pose import HandPose, Side, generic_hand_model, landmarks
@@ -313,3 +317,34 @@ def test_crop_refinement_recuts_an_off_centre_acquisition_crop() -> None:
     refined_crop: torch.Tensor = keynet.calls[1][1].crop_from_net[0]
     first_crop: torch.Tensor = keynet.calls[0][1].crop_from_net[0]
     assert not torch.allclose(refined_crop, first_crop), "the second pass cuts a new crop around the fitted pose"
+
+
+@pytest.mark.parametrize("config", [TrackerConfig(min_keypoint_confidence=2.0), TrackerConfig(fit=FitConfig(init_iterations=0))])
+def test_unconverged_acquisition_is_not_tracked(config: TrackerConfig) -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT), (1, 1, Side.LEFT)})
+    keynet: FakeKeyNet = FakeKeyNet(scene)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet, config), 2)
+    assert not any(bool(result.tracked.any()) for result in results)
+    assert all(result.poses == (None, None) for result in results)
+    assert all(bool(torch.isnan(result.fit_energy).all()) for result in results)
+    assert all(bool((request.keypoint_input == 0).all()) for _, request in keynet.calls)
+
+
+def test_stationary_acquires_and_finite_unconverged_tracking_keeps_its_pose(monkeypatch: pytest.MonkeyPatch) -> None:
+    scene: Scene = _scene()
+
+    def fitted(
+        model: HandModelTorch, phi: float, hands: list[HandObservation], previous: list[HandPose | None], config: FitConfig,
+    ) -> list[FitResult]:
+        return [
+            FitResult(scene.poses[hand.side], 0.0, 0.0, 0.0, 0.0, 1, prior is None, "stationary" if prior is None else "iterations")
+            for hand, prior in zip(hands, previous, strict=True)
+        ]
+
+    monkeypatch.setattr(tracker_module, "fit_pose", fitted)
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+    keynet: FakeKeyNet = FakeKeyNet(scene)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet), 2)
+    assert [result.tracked.tolist() for result in results] == [[True, False], [True, False]]
+    assert _views(keynet, 1, Side.LEFT) == [0, 1]

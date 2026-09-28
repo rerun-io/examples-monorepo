@@ -10,7 +10,7 @@ Per hand the state is θ(t−1) and θ(t−2) (none while untracked). On each fr
 - **Untracked hands:** DetNet runs on ONE camera per frame, cycling through the cameras each time it runs, and only
   while at least one hand is untracked (a hand dropped on this frame is looked for from the next frame on). A hand
   with presence > 0.5 gets its box there and KeyNet with the zero keypoint input, then the fit from the neutral
-  initialiser.
+  initialiser; a fit with ``converged=False`` does not acquire the hand.
 - **Track end (our addition):** KeyNet presence below 0.5 in every view of a hand drops the track and clears its history;
   views below 0.5 stay out of the fit. A DetNet detection that KeyNet rejects is not tracked. A fit that puts the wrist
   out of reach (farther than ``max_reach_m`` from the headset) or is not finite also ends the track.
@@ -364,7 +364,8 @@ class Tracker:
             results = [result for _, result in chosen]
         for hand, result in zip(hands, results, strict=True):
             reach: float = float((result.pose.translation - world_from_rig[:3, 3]).norm())
-            if not _finite(result.pose) or reach > self.config.max_reach_m:
+            acquiring: bool = self.history[hand.side].previous is None
+            if (acquiring and not result.converged) or not _finite(result.pose) or reach > self.config.max_reach_m:
                 self._drop(hand.side)
                 continue
             history: _History = self.history[hand.side]

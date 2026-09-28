@@ -372,6 +372,8 @@ class RunRecord:
     extrapolate: bool
     presence_threshold: float
     min_keypoint_confidence: float
+    tracker: TrackerConfig
+    """All tracker thresholds and nested fit settings used for this run."""
 
     @staticmethod
     def from_config(config: RunConfig, networks: Networks) -> "RunRecord":
@@ -395,4 +397,5 @@ class RunRecord:
             extrapolate=config.tracker.extrapolate,
             presence_threshold=config.tracker.presence_threshold,
             min_keypoint_confidence=config.tracker.min_keypoint_confidence,
+            tracker=config.tracker,
         )

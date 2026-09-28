@@ -1,17 +1,23 @@
 """The per-segment record round-trips, boxes survive the camera/net-frame maps, and segment scores pool exactly."""
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import torch
 from jaxtyping import Float32
+from serde.json import from_json, to_json
 from torch import Tensor
 
+from handtrack.apis.run_pipeline import Networks, RunConfig, RunRecord
 from handtrack.eval.metrics import DetectionMetrics, detection_metrics
-from handtrack.eval.segment import DetectionScore, PositionScore, combine_detections, combine_positions, detection_metrics_in_box, position_score
+from handtrack.eval.segment import DetectionScore, GroundTruth, PositionScore, combine_detections, combine_positions, detection_scores, position_score
+from handtrack.fit.pose_fit import FitConfig
 from handtrack.geometry.letterbox import letterbox_for
 from handtrack.pipeline import camera_boxes, net_circles
 from handtrack.results import ARRAY_KEYS, SegmentTrack, TrackMetadata, load_track, save_track
+from handtrack.tracker import TrackerConfig
 
 
 def _track(frames: int) -> SegmentTrack:
@@ -91,12 +97,41 @@ def test_crop_containment_variant_is_the_rule_at_scale_one_and_forgives_a_small_
     probability: Float32[Tensor, "n"] = torch.rand(n, generator=generator)
     camera: torch.Tensor = torch.randint(0, 4, (n,), generator=generator)
     hand: torch.Tensor = torch.randint(0, 2, (n,), generator=generator)
-    rule: DetectionMetrics = detection_metrics(boxes, probability, points, in_front, camera, hand)
-    assert detection_metrics_in_box(boxes, probability, points, in_front, camera, hand, 1.0) == rule
+    eligible: torch.Tensor = in_front.sum(-1) >= 17
+    rule: DetectionMetrics = detection_metrics(boxes, probability, points, in_front, camera, hand, eligible)
+    assert detection_metrics(boxes, probability, points, in_front, camera, hand, eligible, containment_scale=1.0) == rule
     # One hand: 21 keypoints on a circle of radius 50 around (300, 200); the tight box is shifted 2 px right.
     angles: Float32[Tensor, "21"] = torch.linspace(0.0, 2 * torch.pi, 22)[:21]
     ring: Float32[Tensor, "1 21 2"] = (torch.tensor([300.0, 200.0]) + 50.0 * torch.stack([angles.cos(), angles.sin()], dim=-1))[None]
     shifted: Float32[Tensor, "1 4"] = torch.tensor([[252.0, 150.0, 352.0, 250.0]])
-    args = (shifted, torch.tensor([0.9]), ring, torch.ones((1, 21), dtype=torch.bool), torch.tensor([0]), torch.tensor([0]))
+    args = (shifted, torch.tensor([0.9]), ring, torch.ones((1, 21), dtype=torch.bool), torch.tensor([0]), torch.tensor([0]), torch.tensor([True]))
     assert detection_metrics(*args).total.true_positive == 0
-    assert detection_metrics_in_box(*args, 1.2).total.true_positive == 1
+    assert detection_metrics(*args, containment_scale=1.2).total.true_positive == 1
+
+
+def test_segment_detection_uses_native_visibility_for_both_containment_scales() -> None:
+    # Both hands fit in the net frame; only the second has 17 native-image points.
+    points: Float32[Tensor, "1 1 2 21 2"] = torch.full((1, 1, 2, 21, 2), 100.0)
+    points[..., 0, 0] = 90.0
+    points[..., 1, 0] = 110.0
+    truth: GroundTruth = GroundTruth(
+        landmarks=torch.zeros((1, 2, 21, 3)), valid=torch.ones((1, 2), dtype=torch.bool),
+        net_xy=points, in_front=torch.ones((1, 1, 2, 21), dtype=torch.bool),
+        inside=torch.tensor([[[16, 17]]]), image_valid=torch.ones((1, 1), dtype=torch.bool),
+    )
+    circle: Float32[Tensor, "1 1 2 3"] = torch.tensor([[[[100.0, 100.0, 10.0], [100.0, 100.0, 10.0]]]])
+    for scale in (1.0, 1.2):
+        assert detection_scores(truth, circle, torch.ones((1, 1, 2)), 1, scale) == [DetectionScore(0, 1, 2, 1, 0.5, 1.0)]
+
+
+def test_run_record_preserves_the_whole_tracker_config(tmp_path: Path) -> None:
+    tracker: TrackerConfig = TrackerConfig(
+        detnet_threshold=0.7, presence_threshold=0.6, max_views=1, extrapolate=False,
+        refine_shift=0.3, max_reach_m=0.8, min_keypoint_confidence=0.1,
+        fit=FitConfig(max_iterations=7, init_iterations=23, dist_weight=0.08, rotation_hypotheses=4),
+    )
+    record: RunRecord = RunRecord.from_config(RunConfig(tracker=tracker), Networks(None, None, "oracle", "oracle"))
+    path: Path = tmp_path / "config.json"
+    path.write_text(to_json(record))
+    assert json.loads(path.read_text())["tracker"] == asdict(tracker)
+    assert from_json(RunRecord, path.read_text()).tracker == tracker
