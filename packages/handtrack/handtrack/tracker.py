@@ -149,6 +149,10 @@ class TrackerConfig:
     """A keypoint whose heatmap peak is below this gets weight 0 in the fit (our choice): an empty heatmap decodes to the crop corner."""
     fit: FitConfig = field(default_factory=FitConfig)
 
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_views <= MAX_VIEWS:
+            raise ValueError(f"max_views must be between 1 and {MAX_VIEWS}, got {self.max_views}")
+
 
 DEFAULT_TRACKER_CONFIG: TrackerConfig = TrackerConfig()
 

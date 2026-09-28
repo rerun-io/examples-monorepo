@@ -1,16 +1,17 @@
 """The per-segment record round-trips, boxes survive the camera/net-frame maps, and segment scores pool exactly."""
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import Float32
 from serde.json import from_json, to_json
 from torch import Tensor
 
-from handtrack.apis.run_pipeline import Networks, RunConfig, RunRecord
+from handtrack.apis.run_pipeline import Networks, RunConfig, RunRecord, file_sha256
 from handtrack.eval.metrics import DetectionMetrics, detection_metrics
 from handtrack.eval.segment import DetectionScore, GroundTruth, PositionScore, combine_detections, combine_positions, detection_scores, position_score
 from handtrack.fit.pose_fit import FitConfig
@@ -51,7 +52,7 @@ def _track(frames: int) -> SegmentTrack:
 def test_segment_track_round_trips(tmp_path: Path) -> None:
     track: SegmentTrack = _track(5)
     loaded: SegmentTrack = load_track(save_track(track, tmp_path))
-    assert loaded.meta == track.meta
+    assert loaded.meta == replace(track.meta, track_sha256=file_sha256(tmp_path / f"{track.meta.segment}.npz"))
     for key in ARRAY_KEYS:
         np.testing.assert_array_equal(getattr(loaded, key), getattr(track, key))
         assert getattr(loaded, key).dtype == getattr(track, key).dtype
@@ -135,3 +136,54 @@ def test_run_record_preserves_the_whole_tracker_config(tmp_path: Path) -> None:
     path.write_text(to_json(record))
     assert json.loads(path.read_text())["tracker"] == asdict(tracker)
     assert from_json(RunRecord, path.read_text()).tracker == tracker
+
+
+@pytest.mark.parametrize("key, value", [
+    ("tracked", np.zeros((5, 2), dtype=np.float32)),
+    ("tracked", np.zeros((1, 2), dtype=np.bool_)),
+    ("box", np.zeros((5, 3, 2, 4), dtype=np.float32)),
+    ("landmarks", np.zeros((5, 2, 20, 3), dtype=np.float32)),
+    ("translation", np.zeros((5, 1, 3), dtype=np.float32)),
+    ("frame_index", np.zeros(5, dtype=np.int32)),
+])
+def test_load_track_rejects_malformed_arrays_with_source(tmp_path: Path, key: str, value: np.ndarray) -> None:
+    path = save_track(_track(5), tmp_path)
+    with np.load(path) as source:
+        arrays = dict(source)
+    arrays[key] = value
+    np.savez(path, **arrays)
+    with pytest.raises(ValueError, match=path.name):
+        load_track(path)
+
+
+def test_segment_scoring_excludes_unknown_rows_but_counts_confidence_zero() -> None:
+    from test_segment_labels import FRAMES, _rig, _timeline
+
+    from handtrack.data.segment_labels import segment_labels
+    from handtrack.eval.segment import score_track
+
+    timeline = _timeline()
+    timeline.headset_valid[1] = False
+    timeline.confidence[3, 0] = torch.nan
+    timeline.confidence[4, 0] = 0.0
+    camera = _rig()
+    rig = replace(camera, names=tuple(f"cam{i}" for i in range(4)),
+                  image_size=camera.image_size.repeat(4, 1), cam_from_rig=camera.cam_from_rig.repeat(4, 1, 1),
+                  focal=camera.focal.repeat(4, 1), principal=camera.principal.repeat(4, 1))
+    letterboxes = (letterbox_for(640, 480),) * 4
+    labels = segment_labels(timeline, rig, letterboxes, np.arange(FRAMES, dtype=np.int64), show3d=False)
+    track = replace(_track(FRAMES), tracked=np.ones((FRAMES, 2), dtype=np.bool_))
+    hands = score_track(track, labels, letterboxes)[1]
+    assert hands[0].tracking.acquire_frames == [0, 0]
+    assert hands[0].tracking.drop_frames == []
+    assert hands[0].tracking.tracked_without_hand == 1
+    assert hands[0].tracking.tracked_absent == 1
+    assert hands[1].tracking.tracked_without_hand == 4
+    assert hands[1].tracking.tracked_absent == 4
+
+
+def test_load_track_names_a_truncated_archive(tmp_path: Path) -> None:
+    path: Path = save_track(_track(2), tmp_path)
+    path.write_bytes(path.read_bytes()[:100])
+    with pytest.raises(ValueError, match=path.name):
+        load_track(path)

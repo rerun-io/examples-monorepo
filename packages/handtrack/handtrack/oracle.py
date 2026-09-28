@@ -22,7 +22,7 @@ from handtrack.labels.crops import apply_affine, count_inside_crop, crop_boxes, 
 from handtrack.labels.keypoint_input import relative_distances
 from handtrack.labels.validity import HandLabel
 from handtrack.models.detnet import Detections
-from handtrack.tracker import CropRequest, KeypointEstimate, KeypointEstimator
+from handtrack.tracker import MIN_BOX_RADIUS, CropRequest, KeypointEstimate, KeypointEstimator
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +99,8 @@ class KeyNetOnTruthBoxes:
     def __call__(self, images: UInt8[Tensor, "c 480 640"], frame: int, request: CropRequest) -> KeypointEstimate:
         circle: Float32[Tensor, "n 3"] = self.truth.circles[frame, request.camera, request.side]
         usable: Bool[Tensor, "n"] = torch.isfinite(circle).all(dim=-1)
-        truth_map: Float32[Tensor, "n 3 3"] = crop_from_net(crop_boxes(torch.nan_to_num(circle, nan=100.0).clamp_min(8.0)), request.side == 1)
+        safe: Float32[Tensor, "n 3"] = torch.nan_to_num(circle, nan=100.0)
+        floored: Float32[Tensor, "n 3"] = torch.cat([safe[:, :2], safe[:, 2:].clamp_min(MIN_BOX_RADIUS)], dim=-1)
+        truth_map: Float32[Tensor, "n 3 3"] = crop_from_net(crop_boxes(floored), request.side == 1)
         crop_map: Float32[Tensor, "n 3 3"] = torch.where(usable[:, None, None], truth_map, request.crop_from_net)
         return self.keynet(images, frame, CropRequest(request.camera, request.side, crop_map, torch.zeros_like(request.keypoint_input)))

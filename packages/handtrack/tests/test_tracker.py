@@ -348,3 +348,9 @@ def test_stationary_acquires_and_finite_unconverged_tracking_keeps_its_pose(monk
     results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet), 2)
     assert [result.tracked.tolist() for result in results] == [[True, False], [True, False]]
     assert _views(keynet, 1, Side.LEFT) == [0, 1]
+
+
+@pytest.mark.parametrize("max_views", [-1, 0, 3])
+def test_tracker_rejects_unsupported_view_counts(max_views: int) -> None:
+    with pytest.raises(ValueError, match="max_views"):
+        TrackerConfig(max_views=max_views)

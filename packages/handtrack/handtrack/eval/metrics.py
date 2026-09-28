@@ -177,7 +177,7 @@ class TrackingMetrics:
     """Total frames tracked while GT is invisible, including before first appearance."""
 
 
-def tracking_metrics(visible: Bool[Tensor, 't'], tracked: Bool[Tensor, 't']) -> TrackingMetrics:
+def tracking_metrics(visible: Bool[Tensor, 't'], tracked: Bool[Tensor, 't'], observation_valid: Bool[Tensor, 't'] | None = None) -> TrackingMetrics:
     """Score one hand in one contiguous sequence (equal-length boolean arrays).
 
     Appearance starts at each False→True visibility transition, including
@@ -185,20 +185,28 @@ def tracking_metrics(visible: Bool[Tensor, 't'], tracked: Bool[Tensor, 't']) -> 
     first tracked frame in that visible run. Disappearance starts at each
     True→False transition; drop delay is the offset to the first untracked
     frame in that invisible run (zero if already dropped). Initial invisible
-    frames are not a disappearance. Unobserved events are None, not successes.
+    frames are not a disappearance. Unknown rows end each observation interval:
+    pending events become None, and the first row after a gap starts no event.
+    Unknown rows do not count as absence. Unobserved events are None, not successes.
     """
     if visible.shape != tracked.shape:
         raise ValueError('Visibility and tracking lengths differ')
-    v: list[bool] = visible.tolist()
+    observed: Bool[Tensor, "t"] = torch.ones_like(visible) if observation_valid is None else observation_valid
+    if observed.shape != visible.shape:
+        raise ValueError("Observation validity and visibility lengths differ")
+    visible = visible & observed
+    v: list[int] = torch.where(observed, visible.to(torch.int64), -1).tolist()
     tr: list[bool] = tracked.tolist()
     acquire: list[int | None] = []
     drop: list[int | None] = []
     for value, run in groupby(range(len(v)), key=v.__getitem__):
         frames: list[int] = list(run)
         start: int = frames[0]
-        if value:
+        if value == -1 or (start > 0 and v[start - 1] == -1):
+            continue
+        if value == 1:
             acquire.append(next((i - start for i in frames if tr[i]), None))
         elif start:
             drop.append(next((i - start for i in frames if not tr[i]), None))
     count: int = int(visible.sum())
-    return TrackingMetrics(int((visible & tracked).sum()) / count if count else None, tuple(acquire), tuple(drop), int((~visible & tracked).sum()))
+    return TrackingMetrics(int((visible & tracked).sum()) / count if count else None, tuple(acquire), tuple(drop), int((observed & ~visible & tracked).sum()))
