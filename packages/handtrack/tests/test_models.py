@@ -73,7 +73,7 @@ def test_detnet_loss_masks_reduction_and_presence_weight() -> None:
     circle_mask: Bool[Tensor, "b 2"] = torch.tensor([[True, True], [True, False], [False, False]])
     presence_mask: Bool[Tensor, "b 2"] = torch.tensor([[True, True], [False, True], [False, False]])
     presence: Float32[Tensor, "b 2"] = torch.zeros(3, 2)
-    loss: DetNetLoss = detnet_loss(output, circle, presence, presence_mask, circle_mask)
+    loss: DetNetLoss = detnet_loss(output, circle, presence, presence_mask, circle_mask, circle_weight=1.0, presence_weight=100.0)
     # Left mean = (1 + 9)/2, right mean = 4; two BCE terms = 2*log(2).
     assert loss.circle.item() == pytest.approx(9.0)
     assert loss.presence.item() == pytest.approx(2 * math.log(2))
@@ -81,10 +81,20 @@ def test_detnet_loss_masks_reduction_and_presence_weight() -> None:
     assert not loss.circle.requires_grad and not loss.presence.requires_grad
     circle[~circle_mask] = 1234.0
     presence[~presence_mask] = float("nan")
-    torch.testing.assert_close(loss.total, detnet_loss(output, circle, presence, presence_mask, circle_mask).total)
+    torch.testing.assert_close(loss.total, detnet_loss(output, circle, presence, presence_mask, circle_mask, circle_weight=1.0, presence_weight=100.0).total)
     loss.total.backward()
     assert output.presence_logit.grad is not None
     assert torch.count_nonzero(output.presence_logit.grad[~presence_mask]) == 0
+
+
+def test_detnet_loss_weights_scale_their_own_terms() -> None:
+    output: DetNetOutput = DetNetOutput(torch.zeros(1, 2, 2), torch.zeros(1, 2), torch.zeros(1, 2))
+    mask: Bool[Tensor, "b 2"] = torch.ones(1, 2, dtype=torch.bool)
+    loss: DetNetLoss = detnet_loss(output, torch.ones(1, 2, 3), torch.zeros(1, 2), mask, mask, circle_weight=7.0, presence_weight=0.5)
+    # Each hand's circle mean is 1 and its BCE log(2).
+    assert loss.circle.item() == pytest.approx(2.0)
+    assert loss.presence.item() == pytest.approx(2 * math.log(2))
+    assert loss.total.item() == pytest.approx(7.0 * 2.0 + 0.5 * 2 * math.log(2))
 
 
 def test_detnet_perfect_and_empty_losses() -> None:
@@ -93,7 +103,7 @@ def test_detnet_perfect_and_empty_losses() -> None:
     )
     for enabled in (True, False):
         mask: Bool[Tensor, "b 2"] = torch.full((2, 2), enabled)
-        loss: DetNetLoss = detnet_loss(output, torch.zeros(2, 2, 3), torch.zeros(2, 2), mask, mask)
+        loss: DetNetLoss = detnet_loss(output, torch.zeros(2, 2, 3), torch.zeros(2, 2), mask, mask, circle_weight=1.0, presence_weight=100.0)
         assert loss.total.item() == loss.circle.item() == loss.presence.item() == 0.0
         loss.total.backward()
     assert output.center.grad is not None and torch.isfinite(output.center.grad).all()
@@ -176,7 +186,7 @@ def test_training_backward_reaches_both_network_inputs() -> None:
     frame: Float32[Tensor, "b 1 480 640"] = torch.rand(2, 1, 480, 640, requires_grad=True)
     det_output: DetNetOutput = detnet(frame)
     mask: Bool[Tensor, "b 2"] = torch.ones(2, 2, dtype=torch.bool)
-    detnet_loss(det_output, torch.rand(2, 2, 3), torch.ones(2, 2), mask, mask).total.backward()
+    detnet_loss(det_output, torch.rand(2, 2, 3), torch.ones(2, 2), mask, mask, circle_weight=1.0, presence_weight=100.0).total.backward()
     assert frame.grad is not None and torch.isfinite(frame.grad).all() and frame.grad.abs().sum() > 0
     keynet: KeyNetF = KeyNetF().train()
     crop: Float32[Tensor, "b 1 96 96"] = torch.rand(2, 1, 96, 96, requires_grad=True)

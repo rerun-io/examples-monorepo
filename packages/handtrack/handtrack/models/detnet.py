@@ -32,7 +32,7 @@ class DetNetLoss:
     """Training objective and detached, unweighted terms for logging."""
 
     total: Float32[Tensor, ""]
-    """Circle loss plus 100 times presence loss, with gradients."""
+    """circle_weight times the circle loss plus presence_weight times the presence loss, with gradients."""
     circle: Float32[Tensor, ""]
     """Detached sum of per-hand mean circle errors."""
     presence: Float32[Tensor, ""]
@@ -108,8 +108,11 @@ def detnet_loss(
     presence_target: Float32[Tensor, "b 2"],
     presence_mask: Bool[Tensor, "b 2"],
     circle_mask: Bool[Tensor, "b 2"],
+    *,
+    circle_weight: float,
+    presence_weight: float,
 ) -> DetNetLoss:
-    """Sum the two hands' mean circle errors plus 100 times their mean BCE.
+    """Sum the two hands' mean circle errors and mean BCEs, weighted.
 
     For each hand separately, circle MSE averages its three coordinates and
     the batch samples selected by circle_mask. Presence BCE averages that
@@ -123,6 +126,8 @@ def detnet_loss(
         presence_target: Float32[Tensor, 'b 2'], binary presence labels.
         presence_mask: Bool[Tensor, 'b 2'], excludes partly visible hands.
         circle_mask: Bool[Tensor, 'b 2'], excludes absent or partly visible hands.
+        circle_weight: Multiplier for the summed circle MSE.
+        presence_weight: Multiplier for the summed presence BCE.
 
     Returns:
         Differentiable total with detached, unweighted logging terms.
@@ -138,7 +143,7 @@ def detnet_loss(
         presence_terms.append(F.binary_cross_entropy_with_logits(logits, targets, reduction="sum") / max(logits.numel(), 1))
     circle: Float32[Tensor, ""] = torch.stack(circle_terms).sum()
     presence: Float32[Tensor, ""] = torch.stack(presence_terms).sum()
-    return DetNetLoss(circle + 100.0 * presence, circle.detach(), presence.detach())
+    return DetNetLoss(circle_weight * circle + presence_weight * presence, circle.detach(), presence.detach())
 
 
 def decode_detections(output: DetNetOutput, threshold: float = 0.5) -> Detections:
