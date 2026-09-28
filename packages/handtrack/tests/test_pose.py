@@ -42,3 +42,18 @@ def test_profile_reader_accepts_bare_and_enveloped_models() -> None:
     bare: str = GENERIC_HAND_MODEL.read_text()
     for text in (bare, '{"hand_model":' + bare + "}"):
         torch.testing.assert_close(hand_model_from_profile(text).landmark_rest_positions, generic_hand_model().landmark_rest_positions)
+
+
+def test_mesh_vertices_match_simplecv_numpy_skinning() -> None:
+    from simplecv.umetrack_temp.generic_hand_model_numpy import skin_mesh as skin_mesh_numpy
+
+    from handtrack.hand.pose import mesh_vertices
+
+    model: HandModelTorch = generic_hand_model()
+    numpy_model: HandModelNumpy = from_json(HandModelNumpy, GENERIC_HAND_MODEL.read_text())
+    pose: HandPose = HandPose(_rotation_z(-0.3), torch.tensor([0.0, 0.05, 0.4]), torch.linspace(0.0, 0.5, 22))
+    wrist: np.ndarray = np.eye(4, dtype=np.float32)
+    wrist[:3, :3] = pose.rotation.numpy()
+    wrist[:3, 3] = pose.translation.numpy() * 1000.0
+    expected: np.ndarray = skin_mesh_numpy(numpy_model, pose.joint_angles.numpy(), wrist_for_hand(wrist, int(Side.RIGHT))) / 1000.0
+    np.testing.assert_allclose(mesh_vertices(model, pose, Side.RIGHT).numpy(), expected, atol=1e-6)
