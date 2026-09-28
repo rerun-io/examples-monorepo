@@ -64,3 +64,13 @@ def test_distance_round_trip_and_clamped_endpoints() -> None:
     assert error < 0.1 * 2 * DISTANCE_RANGE_MM / 17
     torch.testing.assert_close(decode_distance(render_distance(torch.tensor([[-1000.0, 1000.0]]))), torch.tensor([[-DISTANCE_RANGE_MM, DISTANCE_RANGE_MM]]))
     assert torch.isfinite(decode_distance(torch.zeros(1, 1, 18))).all()
+
+
+def test_separable_heatmaps_match_full_gaussian_and_peak_values() -> None:
+    points: Float32[Tensor, '4 21 2'] = torch.rand(4, 21, 2, generator=torch.Generator().manual_seed(47)) * 96
+    axis: Float32[Tensor, '18'] = torch.arange(18, dtype=torch.float32)
+    grid: Float32[Tensor, '18 18 2'] = torch.stack(torch.meshgrid(axis, axis, indexing='xy'), dim=-1)
+    delta: Float32[Tensor, '4 21 18 18 2'] = grid - crop_to_heatmap(points)[:, :, None, None, :]
+    expected: Float32[Tensor, '4 21 18 18'] = torch.exp(-delta.square().sum(dim=-1) / 2.0)
+    torch.testing.assert_close(render_heatmaps(points), expected, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(decode_heatmaps(expected)[1], expected.flatten(-2).amax(dim=-1), atol=1e-6, rtol=0.0)

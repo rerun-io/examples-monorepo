@@ -41,6 +41,6 @@ def show3d_hands(
     Label flags describe available hand labels even on invalid images; callers
     must apply image_valid before using them for supervision.
     """
-    labelled: Bool[Tensor, 'f c 2'] = ((confidence > SHOW3D_CONFIDENCE_THRESHOLD) & has_pose)[:, None, :].expand_as(inside)
+    labelled: Bool[Tensor, 'f c 2'] = ((confidence > SHOW3D_CONFIDENCE_THRESHOLD) & has_pose)[:, None, :].repeat(1, inside.shape[1], 1)
     absent: Bool[Tensor, 'f c 2'] = has_pose[:, None, :] & (inside == 0)
     return headset_valid[:, None] & (labelled | absent).all(dim=-1), labelled

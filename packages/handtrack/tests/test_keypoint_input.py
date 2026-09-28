@@ -64,3 +64,12 @@ def test_labels_flow_from_source_pixels_to_keynet_features() -> None:
     torch.testing.assert_close(keypoint_input(decoded, decode_distance(render_distance(distances))), keypoint_input(crop, distances), atol=1e-5, rtol=1e-5)
     recovered: Float32[Tensor, '1 21 2'] = letterbox_for(1024, 1280).from_net(apply_affine(torch.linalg.inv(affine), decoded))
     torch.testing.assert_close(recovered, source, atol=1e-4, rtol=1e-5)
+
+
+def test_input_noise_preserves_reference_rng_order() -> None:
+    vectors: Float32[Tensor, '7 63'] = torch.linspace(-1.0, 1.0, 7 * 63).reshape(7, 63)
+    generator: torch.Generator = torch.Generator().manual_seed(31)
+    reference_generator: torch.Generator = torch.Generator().manual_seed(31)
+    noise: Float32[Tensor, '7 21 3'] = torch.randn((7, 21, 3), generator=reference_generator) * torch.tensor([0.02, 0.02, 0.1])
+    torch.testing.assert_close(add_input_noise(vectors, generator, 0.02, 0.1), vectors + noise.reshape(7, 63), atol=1e-6, rtol=0.0)
+    assert torch.equal(generator.get_state(), reference_generator.get_state())
