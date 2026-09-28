@@ -1,0 +1,53 @@
+[project]
+name = "handtrack"
+version = "0.1.0"
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+description = "MEgATrack hand tracking: DetNet-F, KeyNet-F, the LM pose fit and the tracker, trained on catalog-streamed UmeTrack and SHOW3D"
+requires-python = ">=3.12"
+dependencies = [
+    # catalog-common + rerun-prerelease + cuda + simplecv: numpy, scipy, jaxtyping,
+    # rerun-sdk[catalog,dataloader], pyserde, opencv, torch (CUDA), torchcodec, tyro
+    "simplecv",
+    # the hand-profile reader, the entity-path schema and the hand-mesh writer
+    "dataforge",
+]
+
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI
+# namesake); the root manifest installs the same paths editable.
+[tool.uv.sources]
+simplecv = { path = "../simplecv", editable = true }
+dataforge = { path = "../dataforge", editable = true }
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["handtrack"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040", "SIM901"]
+
+[tool.vulture]
+paths = ["handtrack", "tests"]
+ignore_names = [
+    # Tyro-facing entry points and config fields.
+    "main",
+    "rr_config",
+    # pytest's module-level skip marker.
+    "pytestmark",
+]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
+sort_by_size = true
+min_confidence = 60
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e handtrack-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e handtrack-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
