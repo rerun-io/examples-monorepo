@@ -1,6 +1,7 @@
 """Train real networks with one CPU source; checkpoints are the observable seam."""
 import signal
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import torch
 
 from handtrack.data.batches import DetNetBatch, KeyNetBatch
 from handtrack.models.detnet import DetNetF
+from handtrack.models.keynet import KeyNetLoss, KeyNetOutput
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 from handtrack.train.source import DetNetValidation, KeyNetValidation
 
@@ -109,6 +111,31 @@ def test_fixed_batch_overfit(tmp_path: Path, nets: Nets) -> None:
             first = {name: terms['total'] for name, terms in trainer.losses.items()}
     for name, initial in first.items():
         assert trainer.losses[name]['total'] < initial * 0.9
+
+
+def test_heatmap_reduction_reaches_the_keynet_objective(tmp_path: Path) -> None:
+    source = FakeSource()
+    output = KeyNetOutput(torch.full((2, 21, 18, 18), 0.5), torch.full((2, 21, 18), 0.5), torch.zeros(2))
+    losses: dict[str, KeyNetLoss] = {}
+    for reduction in ('mean', 'pixel_sum'):
+        trainer = Trainer('keynet', OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1, heatmap_reduction=reduction), tmp_path, 'cpu')
+        losses[reduction] = trainer.keynet_objective(source.key, output)
+    assert LoopSettings().heatmap_reduction == 'mean'
+    assert losses['mean'].heatmap.item() == pytest.approx(0.25)
+    assert losses['pixel_sum'].heatmap.item() == pytest.approx(0.25 * 18 * 18)
+    assert losses['pixel_sum'].distance.item() == pytest.approx(0.25 * 18)
+
+
+def test_heatmap_warmup_uses_mean_for_its_epochs(tmp_path: Path) -> None:
+    source = FakeSource()
+    output = KeyNetOutput(torch.full((2, 21, 18, 18), 0.5), torch.full((2, 21, 18), 0.5), torch.zeros(2))
+    cadence = LoopSettings(epochs=3, heatmap_reduction='pixel_sum', heatmap_warmup_epochs=1)
+    trainer = Trainer('keynet', OptimiserSettings(0.001), OptimiserSettings(0.025), cadence, tmp_path, 'cpu')
+    assert trainer.keynet_objective(source.key, output).heatmap.item() == pytest.approx(0.25)
+    trainer.state = replace(trainer.state, epoch=1)
+    assert trainer.keynet_objective(source.key, output).heatmap.item() == pytest.approx(0.25 * 18 * 18)
+    with pytest.raises(ValueError, match='heatmap_warmup_epochs'):
+        LoopSettings(heatmap_warmup_epochs=-1)
 
 
 def test_mid_epoch_joint_resume_preserves_updates(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ literal: its convolutions grow 6 to 8 and 16 to 18 pixels.
 """
 
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 import torch
 from einops import rearrange
@@ -14,6 +15,10 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from handtrack.models.blocks import inverted_residual_stack
+
+HeatmapReduction: TypeAlias = Literal["mean", "pixel_sum"]
+"""How the heatmap MSEs reduce (the paper does not say): ``mean`` averages every heatmap value; ``pixel_sum`` sums
+each keypoint's 18x18 pixels (and 18 distance bins) and averages over keypoints and positive crops."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +40,9 @@ class KeyNetLoss:
     total: Float32[Tensor, ""]
     """Heatmap MSE + 0.05 distance MSE + presence_weight BCE, with gradients."""
     heatmap: Float32[Tensor, ""]
-    """Detached 2D heatmap MSE over positive crops."""
+    """Detached 2D heatmap MSE over positive crops, in the loss's ``HeatmapReduction``."""
     distance: Float32[Tensor, ""]
-    """Detached 1D heatmap MSE over positive crops."""
+    """Detached 1D heatmap MSE over positive crops, in the loss's ``HeatmapReduction``."""
     presence: Float32[Tensor, ""]
     """Detached presence BCE over crops with valid presence labels."""
 
@@ -117,11 +122,14 @@ def keynet_loss(
     positive: Bool[Tensor, "b"],
     presence_mask: Bool[Tensor, "b"],
     presence_weight: float,
+    heatmap_reduction: HeatmapReduction = "mean",
 ) -> KeyNetLoss:
     """Average each term over its valid samples, with zero for empty selections.
 
-    Each heatmap MSE averages all landmarks and bins per positive crop, then
-    averages the positive crops. BCE averages only presence_mask crops.
+    With ``mean`` each heatmap MSE averages all landmarks and bins per positive
+    crop, then averages the positive crops; ``pixel_sum`` sums the pixels (bins)
+    of each landmark instead, so it is 324 (18) times ``mean``. BCE averages
+    only presence_mask crops.
     Masked targets are removed before arithmetic, so NaN placeholders are safe.
     Empty selections contribute differentiable zero; logging terms are unweighted.
 
@@ -133,6 +141,7 @@ def keynet_loss(
         positive: Bool[Tensor, 'b'], crops with valid heatmap targets.
         presence_mask: Bool[Tensor, 'b'], crops with valid presence labels.
         presence_weight: Multiplier for presence BCE.
+        heatmap_reduction: Reduction of both heatmap MSEs over pixels.
 
     Returns:
         Total MSE(2D) + 0.05 MSE(1D) + presence_weight BCE, and detached terms.
@@ -140,8 +149,10 @@ def keynet_loss(
     heatmap_errors: Float32[Tensor, "valid 21 18 18"] = output.heatmaps[positive] - heatmaps[positive]
     distance_errors: Float32[Tensor, "valid 21 18"] = output.distance[positive] - distance[positive]
     logits: Float32[Tensor, "valid"] = output.presence_logit[presence_mask]
-    heatmap_loss: Float32[Tensor, ""] = heatmap_errors.square().sum() / max(heatmap_errors.numel(), 1)
-    distance_loss: Float32[Tensor, ""] = distance_errors.square().sum() / max(distance_errors.numel(), 1)
+    keypoints: int = heatmap_errors.shape[0] * heatmap_errors.shape[1]
+    pixel_sum: bool = heatmap_reduction == "pixel_sum"
+    heatmap_loss: Float32[Tensor, ""] = heatmap_errors.square().sum() / max(keypoints if pixel_sum else heatmap_errors.numel(), 1)
+    distance_loss: Float32[Tensor, ""] = distance_errors.square().sum() / max(keypoints if pixel_sum else distance_errors.numel(), 1)
     presence_loss: Float32[Tensor, ""] = F.binary_cross_entropy_with_logits(logits, presence_target[presence_mask], reduction="sum") / max(
         logits.numel(), 1
     )
