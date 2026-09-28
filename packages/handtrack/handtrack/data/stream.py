@@ -13,12 +13,14 @@ Producers hand chunks to the main thread through a bounded queue; the main threa
 network) and draws uniform random batches without replacement. All CUDA work runs on the default stream, so the pools
 need no cross-stream bookkeeping; producers synchronise before they publish a chunk.
 
-A side that is not consumed cannot block the other: a full pool takes new samples by overwriting random old ones (counted
-in ``StreamStats.overwritten``), so memory stays bounded and the queue always drains. Producer exceptions are re-raised in
-the main thread by the next call.
+Pools never overwrite samples. In joint mode the trainer must check both readiness methods and consume whichever side
+is ready, adapting its requested ratio when the other pool applies backpressure. Only enabled pools are built.
+Producer exceptions are re-raised in the main thread by the next call.
 """
 
 import dataclasses
+import hashlib
+import heapq
 import math
 import queue
 import random
@@ -47,6 +49,7 @@ from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch
 from handtrack.data.catalog import (
     CATALOG_URL,
     TIMELINE,
+    CatalogDataError,
     DatasetLayout,
     DatasetName,
     HandTimeline,
@@ -251,12 +254,9 @@ def select_samples[SampleT: (DetNetSamples, KeyNetSamples)](samples: SampleT, in
     return type(samples)(**{f.name: getattr(samples, f.name)[index] for f in dataclasses.fields(samples)})
 
 
-def concat_samples[SampleT: (DetNetSamples, KeyNetSamples)](parts: list[SampleT]) -> SampleT:
-    return type(parts[0])(**{f.name: torch.cat([getattr(part, f.name) for part in parts]) for f in dataclasses.fields(parts[0])})
-
 
 class SamplePool[SampleT: (DetNetSamples, KeyNetSamples)]:
-    """A fixed-capacity GPU shuffle buffer: uniform random draws without replacement; a full pool overwrites random slots."""
+    """A fixed-capacity GPU shuffle buffer: uniform random draws without replacement; full pools require backpressure."""
 
     def __init__(self, storage: SampleT, generator: torch.Generator) -> None:
         self.storage: SampleT = storage
@@ -272,18 +272,13 @@ class SamplePool[SampleT: (DetNetSamples, KeyNetSamples)]:
             getattr(self.storage, f.name)[slots] = getattr(samples, f.name)
 
     def add(self, samples: SampleT) -> None:
-        """Append into the free slots; what does not fit overwrites random slots."""
+        """Append samples; callers must provide enough free space."""
         incoming: int = sample_count(samples)
-        free: int = min(incoming, self.capacity - self.count)
-        if free > 0:
-            for f in dataclasses.fields(self.storage):
-                getattr(self.storage, f.name)[self.count : self.count + free] = getattr(samples, f.name)[:free]
-            self.count += free
-        rest: int = incoming - free
-        if rest > 0:
-            slots: Int64[Tensor, "m"] = torch.randint(0, self.capacity, (rest,), generator=self._generator, device=self._device)
-            self._write(slots, select_samples(samples, torch.arange(free, incoming, device=self._device)))
-            self.overwritten += rest
+        if incoming > self.capacity - self.count:
+            raise ValueError("sample pool is full")
+        for f in dataclasses.fields(self.storage):
+            getattr(self.storage, f.name)[self.count : self.count + incoming] = getattr(samples, f.name)
+        self.count += incoming
 
     def draw(self, n: int) -> SampleT:
         """n samples chosen uniformly without replacement; the pool shrinks by n (the tail fills the holes)."""
@@ -442,39 +437,65 @@ def keynet_samples(
     drift: Float32[Tensor, "n"] = side * uniform(generator, n, augment.drift_shift_range, device)
     drifted: Float32[Tensor, "n 2"] = centre + drift[:, None] * torch.stack([angle.cos(), angle.sin()], dim=-1)
     overlap: Float32[Tensor, "n"] = side * (uniform(generator, n, augment.edge_overlap_range, device) - 0.5)
-    low: Float32[Tensor, "n 2"] = (overlap - 0.5)[:, None].expand(-1, 2)
-    high: Float32[Tensor, "n 2"] = torch.stack([NET_WIDTH - 0.5 - overlap, NET_HEIGHT - 0.5 - overlap], dim=-1)
-    at_edge: Float32[Tensor, "n 2"] = torch.maximum(torch.minimum(centre, high), low)
+    edge: Int64[Tensor, "n"] = torch.randint(4, (n,), generator=generator, device=device)
+    extent: Float32[Tensor, "2"] = torch.tensor([NET_WIDTH, NET_HEIGHT], dtype=torch.float32, device=device)
+    at_edge: Float32[Tensor, "n 2"] = torch.maximum(torch.minimum(centre, extent - 0.5 - side[:, None] / 2), side[:, None] / 2 - 0.5)
+    axis: Int64[Tensor, "n"] = edge // 2
+    perpendicular: Float32[Tensor, "n"] = torch.where(edge % 2 == 0, overlap - 0.5, extent[axis] - 0.5 - overlap)
+    at_edge[torch.arange(n, device=device), axis] = perpendicular
     background_side: Float32[Tensor, "n"] = uniform(generator, n, augment.background_side_range, device)
     background_centre: Float32[Tensor, "n 2"] = torch.rand((n, 2), generator=generator, device=device) * torch.tensor([NET_WIDTH, NET_HEIGHT], device=device) - 0.5
     centre = torch.where(is_kind[CropKind.DRIFT][:, None], drifted, torch.where(is_kind[CropKind.EDGE][:, None], at_edge, centre))
     centre = torch.where(is_kind[CropKind.BACKGROUND][:, None], background_centre, centre)
     side = torch.where(is_kind[CropKind.BACKGROUND], background_side, side)
     jitter: CropJitter = sample_jitter(n, generator, device, augment.max_rotation, augment.scale_range, augment.max_shift)
-    affine: Float32[Tensor, "n 3 3"] = crop_from_net(box_at(centre, side), mirror, jitter)
+    # EDGE placement already draws its exact overlap; jitter must not move it off the edge.
+    cut_jitter: CropJitter = CropJitter(
+        torch.where(is_kind[CropKind.EDGE], 0.0, jitter.rotation),
+        torch.where(is_kind[CropKind.EDGE], 1.0, jitter.scale),
+        torch.where(is_kind[CropKind.EDGE][:, None], 0.0, jitter.shift),
+    )
+    affine: Float32[Tensor, "n 3 3"] = crop_from_net(box_at(centre, side), mirror, cut_jitter)
     # Ground truth in the crop, and DetNet's rule on the keypoints inside it.
     truth_xy: Float32[Tensor, "n 21 2"] = apply_affine(affine, truth.net_xy.reshape(-1, 21, 2)[slot])
     truth_front: Bool[Tensor, "n 21"] = truth.in_front.reshape(-1, 21)[slot] & truth.valid.reshape(-1, 1)[slot]
     crop_label: Int64[Tensor, "n"] = classify_visibility(count_inside_crop(truth_xy, truth_front))
     positive: Bool[Tensor, "n"] = is_kind[CropKind.POSITIVE]
     keep: Bool[Tensor, "n"] = torch.where(positive, crop_label == int(HandLabel.PRESENT), crop_label == int(HandLabel.ABSENT))
-    # The keypoint input's frame: the crop itself for a positive; for a negative, the box its prior would give (a DRIFT's is its
-    # own hand's box). Then the input's source: the extrapolated (or stale) prior, noisy, or all zeros.
-    reference_circle: Float32[Tensor, "n 3"] = finite_circles(torch.where(is_kind[CropKind.DRIFT][:, None], own_circle, prior_circle))
-    reference: Float32[Tensor, "n 3 3"] = torch.where(positive[:, None, None], affine, crop_from_net(crop_boxes(reference_circle), mirror, jitter))
+    # Choose history first. Its own projection defines a negative's reference box.
     source_draw: Float32[Tensor, "n"] = torch.rand(n, generator=generator, device=device)
-    extrapolated_valid: Bool[Tensor, "n"] = extrapolated.valid.reshape(-1)[slot]
-    stale_valid: Bool[Tensor, "n"] = stale.valid.reshape(-1)[slot]
     zero: Bool[Tensor, "n"] = source_draw < augment.zero_input_probability
-    use_stale: Bool[Tensor, "n"] = ~zero & (source_draw < augment.zero_input_probability + augment.stale_input_probability) & stale_valid
-    use_extrapolated: Bool[Tensor, "n"] = ~zero & ~use_stale & extrapolated_valid
-    source_xy: Float32[Tensor, "n 21 2"] = torch.where(use_stale[:, None, None], stale.net_xy.reshape(-1, 21, 2)[slot], prior_xy[slot])
-    source_cam: Float32[Tensor, "n 21 3"] = torch.where(use_stale[:, None, None], stale.points_cam.reshape(-1, 21, 3)[slot], extrapolated.points_cam.reshape(-1, 21, 3)[slot])
+    use_stale: Bool[Tensor, "n"] = ~zero & (source_draw < augment.zero_input_probability + augment.stale_input_probability)
+    source_xy: Float32[Tensor, "n 21 2"] = torch.empty((n, 21, 2), device=device)
+    source_cam: Float32[Tensor, "n 21 3"] = torch.empty((n, 21, 3), device=device)
+    reference_circle: Float32[Tensor, "n 3"] = torch.empty((n, 3), device=device)
+    source_usable: Bool[Tensor, "n"] = torch.zeros(n, dtype=torch.bool, device=device)
+    for history, chosen in ((extrapolated, ~use_stale), (stale, use_stale)):
+        history_xy: Float32[Tensor, "s 21 2"] = history.net_xy.reshape(-1, 21, 2)
+        history_cam: Float32[Tensor, "s 21 3"] = history.points_cam.reshape(-1, 21, 3)
+        history_circle: Float32[Tensor, "s 3"] = bounding_circles(history_xy, history.in_front.reshape(-1, 21))
+        usable: Bool[Tensor, "s"] = (history.valid.reshape(-1) & torch.isfinite(history_circle).all(dim=-1)
+                                      & torch.isfinite(history_xy).all(dim=(-1, -2)) & torch.isfinite(history_cam).all(dim=(-1, -2)))
+        selected: Int64[Tensor, "n"] = slot.clone()
+        donors: Int64[Tensor, "d"] = (present & usable).nonzero()[:, 0]
+        needs_prior: Bool[Tensor, "n"] = ~positive & ~usable[slot]
+        if donors.numel():
+            donor_rows: Int64[Tensor, "n"] = donors[torch.randint(len(donors), (n,), generator=generator, device=device)]
+            selected = torch.where(needs_prior, donor_rows, selected)
+        source_xy[chosen] = history_xy[selected][chosen]
+        source_cam[chosen] = history_cam[selected][chosen]
+        reference_circle[chosen] = history_circle[selected][chosen]
+        source_usable[chosen] = usable[selected][chosen]
+    # If this entire batch has no usable positive history, omit unsupported negatives rather than encode their label as zero.
+    keep &= positive | source_usable
+    reference: Float32[Tensor, "n 3 3"] = torch.where(
+        positive[:, None, None], affine, crop_from_net(crop_boxes(finite_circles(reference_circle)), mirror, jitter)
+    )
     phi_n: Float32[Tensor, "n"] = torch.full((n,), phi, dtype=torch.float32, device=device)
     noisy: Float32[Tensor, "n 63"] = add_input_noise(
         keypoint_input(apply_affine(reference, source_xy), relative_distances(source_cam, phi_n)), generator, augment.uv_noise_std, augment.d_noise_std
     )
-    keypoints: Float32[Tensor, "n 63"] = torch.where((use_stale | use_extrapolated)[:, None], noisy, torch.zeros_like(noisy))
+    keypoints: Float32[Tensor, "n 63"] = torch.where((~zero & source_usable)[:, None], noisy, torch.zeros_like(noisy))
     truth_d: Float32[Tensor, "n 21"] = relative_distances(truth.points_cam.reshape(-1, 21, 3)[slot], phi_n)
     kept: Int64[Tensor, "q"] = keep.nonzero()[:, 0]
     kept_positive: Bool[Tensor, "q"] = positive[kept]
@@ -501,6 +522,7 @@ class StreamStats:
     """Counters since the stream was built (the rate tool reads them)."""
 
     segments: int = 0
+    """Completed segments, including failed segments with a retained partial prefix (also counted as skipped)."""
     images_considered: int = 0
     """(kept frame, camera) pairs of the 5 fps pool."""
     images_missing: int = 0
@@ -591,7 +613,13 @@ def open_nvdec_decoder(video: CatalogVideo, fps: int, device: torch.device) -> F
 
 def is_fatal(error: BaseException) -> bool:
     """Failures of the stream machinery or of our own code (type violations, CUDA, memory): never retried or skipped."""
-    return not isinstance(error, Exception) or isinstance(error, BeartypeException | torch.OutOfMemoryError | torch.AcceleratorError | MemoryError | _Stale)
+    if isinstance(error, BeartypeException | torch.OutOfMemoryError | torch.AcceleratorError | MemoryError | _Stale):
+        return True
+    if isinstance(error, AssertionError | TypeError | IndexError | KeyError | AttributeError | NameError):
+        return True
+    if isinstance(error, SegmentFailure | CatalogDataError | OSError | pa.ArrowException):
+        return False
+    return not type(error).__module__.startswith(("datafusion.", "rerun.catalog.", "rerun_bindings"))
 
 
 def evaluation_augment(augment: KeyNetAugment) -> KeyNetAugment:
@@ -664,8 +692,9 @@ class CatalogStream:
         self._keynet_pool: SamplePool[KeyNetSamples] | None = (
             SamplePool(empty_keynet_samples(config.keynet_buffer, self.device), self._generator) if self._keynet_on and training else None
         )
-        self._collected: list[_Chunk] = []
-        """Evaluation mode: every chunk of the one build pass."""
+        self._pending: _Chunk | None = None
+        self._evaluation_heaps: list[list[tuple[int, tuple[int, int, int, int], int]]] = [[], []]
+        """Per-network priority heaps, bounded by validation_samples."""
         self._evaluation: tuple[DetNetSamples | None, KeyNetSamples | None] | None = None
         self._cursor: list[int] = [0, 0]
         self._last_detnet: DetNetSamples | None = None
@@ -703,9 +732,6 @@ class CatalogStream:
             self._cursor = [0, 0]
             return
         self._begin_pass(epoch)
-        for pool in (self._detnet_pool, self._keynet_pool):
-            if pool is not None:
-                pool.clear()
 
     def _begin_pass(self, epoch: int) -> None:
         order: list[SegmentInfo] = list(self.segments)
@@ -713,12 +739,16 @@ class CatalogStream:
         if self.config.max_segments is not None:
             order = order[: self.config.max_segments]
         with self._cond:
+            # Clear the previous pass before workers can claim any new work.
+            self._discard()
+            for pool in (self._detnet_pool, self._keynet_pool):
+                if pool is not None:
+                    pool.clear()
             self._generation += 1
             self._epoch_segments = order
             self._next = 0
             self._done = 0
             self._cond.notify_all()
-        self._discard()
 
     def _build_evaluation(self) -> None:
         """One pass over a fixed seeded subset of the segments, kept in a deterministic order."""
@@ -729,33 +759,64 @@ class CatalogStream:
             if produced:
                 break
             self._drain(0.5)
+        self._raise_if_failed()
         if self._stop.is_set():
-            self._collected.clear()
+            self._evaluation = None
+            self._evaluation_heaps = [[], []]
             return
-        chunks: list[_Chunk] = sorted(self._collected, key=lambda chunk: chunk.order)
-        self._collected = []
-        order: torch.Generator = torch.Generator().manual_seed(self.config.seed)
+        if self._evaluation is None:
+            self._evaluation = (None, None)
         self._evaluation = (
-            self._evaluation_subset([chunk.detnet for chunk in chunks if chunk.detnet is not None], order),
-            self._evaluation_subset([chunk.keynet for chunk in chunks if chunk.keynet is not None], order),
+            self._finish_evaluation(self._evaluation[0], 0),
+            self._finish_evaluation(self._evaluation[1], 1),
         )
 
-    def _evaluation_subset[SampleT: (DetNetSamples, KeyNetSamples)](self, parts: list[SampleT], order: torch.Generator) -> SampleT | None:
-        """A seeded ``validation_samples``-sized subset of the pass's samples; None when the pass produced none."""
-        if not parts:
+    def _finish_evaluation[SampleT: (DetNetSamples, KeyNetSamples)](self, samples: SampleT | None, side: int) -> SampleT | None:
+        if samples is None:
             return None
-        joined: SampleT = concat_samples(parts)
-        chosen: Int64[Tensor, "m"] = torch.randperm(sample_count(joined), generator=order)[: self.config.validation_samples].to(self.device)
-        return select_samples(joined, chosen)
+        count: int = len(self._evaluation_heaps[side])
+        # Views avoid allocating another full validation set at the end of the pass.
+        return type(samples)(**{f.name: getattr(samples, f.name)[:count] for f in dataclasses.fields(samples)})
+
+    def _retain_evaluation[SampleT: (DetNetSamples, KeyNetSamples)](
+        self, samples: SampleT | None, storage: SampleT | None, chunk: _Chunk, side: int
+    ) -> SampleT | None:
+        if samples is None or self.config.validation_samples <= 0:
+            return storage
+        if storage is None:
+            storage = type(samples)(**{
+                f.name: getattr(samples, f.name).new_empty((self.config.validation_samples, *getattr(samples, f.name).shape[1:]))
+                for f in dataclasses.fields(samples)
+            })
+        heap: list[tuple[int, tuple[int, int, int, int], int]] = self._evaluation_heaps[side]
+        info: SegmentInfo = self._epoch_segments[chunk.order[0]] if self._epoch_segments else self.segments[0]
+        for row in range(sample_count(samples)):
+            identity: tuple[int, int, int, int] = (*chunk.order, row)
+            # Sample ordinal within a deterministic camera chunk includes KeyNet's candidate/hand slot.
+            key: bytes = f"{self.config.seed}:{info.dataset}:{info.segment_id}:{identity[1:]}:{side}".encode()
+            priority: int = int.from_bytes(hashlib.blake2b(key, digest_size=16).digest(), 'big')
+            if len(heap) < self.config.validation_samples:
+                slot: int = len(heap)
+                heapq.heappush(heap, (-priority, identity, slot))
+            elif (-priority, identity) > heap[0][:2]:
+                slot = heap[0][2]
+                heapq.heapreplace(heap, (-priority, identity, slot))
+            else:
+                continue
+            for f in dataclasses.fields(samples):
+                getattr(storage, f.name)[slot] = getattr(samples, f.name)[row]
+        return storage
 
     def _next_evaluation[SampleT: (DetNetSamples, KeyNetSamples)](self, samples: SampleT | None, slot: int, batch: int) -> SampleT | None:
         start: int = self._cursor[slot]
         if samples is None or start >= sample_count(samples):
             return None
         self._cursor[slot] = start + batch
-        return select_samples(samples, torch.arange(start, min(start + batch, sample_count(samples)), device=self.device))
+        slots: list[int] = [entry[2] for entry in sorted(self._evaluation_heaps[slot], reverse=True)]
+        return select_samples(samples, torch.tensor(slots[start : start + batch], dtype=torch.int64, device=self.device))
 
     def next_detnet_batch(self) -> DetNetBatch | None:
+        self._raise_if_failed()
         if self._stop.is_set():
             return None
         self._check("DetNet", self._detnet_on)
@@ -780,6 +841,7 @@ class CatalogStream:
         )
 
     def next_keynet_batch(self) -> KeyNetBatch | None:
+        self._raise_if_failed()
         if self._stop.is_set():
             return None
         self._check("KeyNet", self._keynet_on)
@@ -812,12 +874,24 @@ class CatalogStream:
         )
 
     def detnet_ready(self) -> bool:
+        self._raise_if_failed()
+        if self._stop.is_set():
+            return False
         self._check("DetNet", self._detnet_on)
-        return self._evaluation is not None or self._ready(self._require(self._detnet_pool), self.config.detnet_batch_size)
+        if self._evaluation is not None:
+            samples = self._evaluation[0]
+            return samples is not None and self._cursor[0] < sample_count(samples)
+        return self._ready(self._require(self._detnet_pool), self.config.detnet_batch_size)
 
     def keynet_ready(self) -> bool:
+        self._raise_if_failed()
+        if self._stop.is_set():
+            return False
         self._check("KeyNet", self._keynet_on)
-        return self._evaluation is not None or self._ready(self._require(self._keynet_pool), self.config.keynet_batch_size)
+        if self._evaluation is not None:
+            samples = self._evaluation[1]
+            return samples is not None and self._cursor[1] < sample_count(samples)
+        return self._ready(self._require(self._keynet_pool), self.config.keynet_batch_size)
 
     def detnet_validation(self) -> DetNetValidation:
         """Exact GT of the last DetNet batch (net-frame keypoints, in-front flags, camera ids); does not advance."""
@@ -839,6 +913,8 @@ class CatalogStream:
     def cancel(self) -> None:
         """Request stop without joining producers; next_* returns None."""
         self._stop.set()
+        with self._cond:
+            self._cond.notify_all()
 
     def close(self) -> None:
         self.cancel()
@@ -850,6 +926,9 @@ class CatalogStream:
                 self._discard()
                 thread.join(timeout=0.2)
         self._discard()
+        alive: list[str] = [thread.name for thread in self._threads if thread.is_alive()]
+        if alive:
+            print(f"[catalog stream] close deadline: workers still alive: {', '.join(alive)}", file=sys.stderr, flush=True)
 
     def __enter__(self) -> "CatalogStream":
         return self
@@ -879,36 +958,50 @@ class CatalogStream:
             return self._done >= len(self._epoch_segments)
 
     def _threshold(self, capacity: int, batch: int) -> int:
-        return max(batch, int(self.config.min_fill * capacity))
+        return min(capacity, max(batch, int(self.config.min_fill * capacity)))
 
     def _insert(self, chunk: _Chunk) -> None:
         if self.config.validation:
-            self._collected.append(chunk)
+            detnet_storage, keynet_storage = self._evaluation or (None, None)
+            self._evaluation = (
+                self._retain_evaluation(chunk.detnet, detnet_storage, chunk, 0),
+                self._retain_evaluation(chunk.keynet, keynet_storage, chunk, 1),
+            )
             return
-        if chunk.detnet is not None and self._detnet_pool is not None:
-            self._detnet_pool.add(chunk.detnet)
-        if chunk.keynet is not None and self._keynet_pool is not None:
-            self._keynet_pool.add(chunk.keynet)
+        detnet: DetNetSamples | None = chunk.detnet
+        keynet: KeyNetSamples | None = chunk.keynet
+        if detnet is not None and self._detnet_pool is not None:
+            count: int = min(sample_count(detnet), self._detnet_pool.capacity - self._detnet_pool.count)
+            self._detnet_pool.add(select_samples(detnet, torch.arange(count, device=self.device)))
+            detnet = select_samples(detnet, torch.arange(count, sample_count(detnet), device=self.device)) if count < sample_count(detnet) else None
+        if keynet is not None and self._keynet_pool is not None:
+            count = min(sample_count(keynet), self._keynet_pool.capacity - self._keynet_pool.count)
+            self._keynet_pool.add(select_samples(keynet, torch.arange(count, device=self.device)))
+            keynet = select_samples(keynet, torch.arange(count, sample_count(keynet), device=self.device)) if count < sample_count(keynet) else None
+        self._pending = _Chunk(chunk.generation, chunk.order, detnet, keynet) if detnet is not None or keynet is not None else None
 
     def _drain(self, timeout: float | None) -> None:
-        """Move every queued chunk of this epoch into the pools; with a timeout, wait that long for the first one."""
+        """Drain until a pool applies backpressure; retain at most one partially inserted chunk."""
+        self._raise_if_failed()
         if self._stop.is_set():
             return
-        self._raise_if_failed()
-        try:
-            chunk: _Chunk = self._queue.get(timeout=min(timeout, 0.1)) if timeout is not None else self._queue.get_nowait()
-        except queue.Empty:
-            return
         while not self._stop.is_set():
-            if chunk.generation == self._generation:
-                self._insert(chunk)
             try:
-                chunk = self._queue.get_nowait()
+                chunk: _Chunk = self._pending if self._pending is not None else (
+                    self._queue.get(timeout=min(timeout, 0.1)) if timeout is not None else self._queue.get_nowait()
+                )
             except queue.Empty:
                 return
+            self._pending = None
+            if chunk.generation == self._generation:
+                self._insert(chunk)
+            if self._pending is not None:
+                return
+            timeout = None
 
     def _discard(self) -> None:
         """Empty the chunk queue and the work queue (their contents are stale after an epoch change or a close)."""
+        self._pending = None
         for pending in (self._queue, self._work):
             while True:
                 try:
@@ -919,26 +1012,28 @@ class CatalogStream:
     def _ready(self, pool: SamplePool[DetNetSamples] | SamplePool[KeyNetSamples], batch: int) -> bool:
         produced: bool = self._epoch_produced()
         self._drain(None)
-        return pool.count >= (batch if produced else self._threshold(pool.capacity, batch))
+        return pool.count > 0 and (produced or self._pending is not None or pool.count >= self._threshold(pool.capacity, batch))
 
     def _next_samples[SampleT: (DetNetSamples, KeyNetSamples)](self, pool: SamplePool[SampleT], batch: int) -> SampleT | None:
         while not self._stop.is_set():
             # Read "produced" before draining: a producer queues its last chunk before it counts the segment done.
             produced: bool = self._epoch_produced()
             self._drain(None)
-            if pool.count >= (batch if produced else self._threshold(pool.capacity, batch)):
-                return pool.draw(batch)
-            if produced:
+            if pool.count > 0 and (produced or self._pending is not None or pool.count >= self._threshold(pool.capacity, batch)):
+                return pool.draw(min(batch, pool.count))
+            if produced and self._pending is None and self._queue.empty():
                 return None
             start: float = time.perf_counter()
             self._drain(0.5)
             self.stats.wait_s += time.perf_counter() - start
+        self._raise_if_failed()
         return None
 
     # ---- fetchers and producers
 
     def _fail(self, error: BaseException, info: SegmentInfo | None) -> None:
         with self._cond:
+            self._stop.set()
             if self._error is None:
                 self._error = error
                 self._error_segment = "no segment" if info is None else f"{info.dataset} {info.segment_id}"
@@ -964,6 +1059,8 @@ class CatalogStream:
 
     def _record_failure(self, info: SegmentInfo, stage: str, attempt: int, error: BaseException) -> None:
         cause: BaseException | None = error.__cause__ if isinstance(error, SegmentFailure) else None
+        while cause is not None and cause.__cause__ is not None:
+            cause = cause.__cause__
         line: str = f"{info.dataset} {info.segment_id} {stage}{' ' + str(error) if cause is not None else ''} attempt {attempt}: {cause or error!r}"
         print(f"[catalog stream] {line}", file=sys.stderr, flush=True)
         with self._cond:
@@ -982,6 +1079,7 @@ class CatalogStream:
             if len(self._skipped) > limit:
                 failures: str = "\n".join(self.stats.failures[-10:])
                 self._error = self._error or RuntimeError(f"{len(self._skipped)} segments failed twice (limit {limit}); last failures:\n{failures}")
+                self._stop.set()
             self._cond.notify_all()
 
     def _fetch(self, worker: int) -> None:
@@ -1060,6 +1158,8 @@ class CatalogStream:
                 if self._stale(work.generation):
                     continue
                 decoded: bool = False
+                self._local.committed = set()
+                self._local.considered = set()
                 for attempt in (1, 2):
                     try:
                         if attempt == 2:
@@ -1076,6 +1176,9 @@ class CatalogStream:
                 if self._stale(work.generation):
                     continue
                 if not decoded:
+                    if self._local.committed:
+                        with self._cond:
+                            self.stats.segments += 1
                     self._skip(work.info, work.generation)
                     continue
                 with self._cond:
@@ -1112,10 +1215,12 @@ class CatalogStream:
             matched: Bool[ndarray, "k"] = video.t_ns[position] == work.times
             valid: Bool[ndarray, "k"] = work.labels.image_valid[:, camera].numpy()
             keep: Int64[ndarray, "m"] = np.flatnonzero(matched & valid)
-            with self._cond:
-                self.stats.images_considered += len(work.times)
-                self.stats.images_missing += int((~matched).sum())
-                self.stats.images_invalid += int((matched & ~valid).sum())
+            if camera not in self._local.considered:
+                with self._cond:
+                    self.stats.images_considered += len(work.times)
+                    self.stats.images_missing += int((~matched).sum())
+                    self.stats.images_invalid += int((matched & ~valid).sum())
+                self._local.considered.add(camera)
             if len(keep) == 0:
                 continue
             try:
@@ -1141,12 +1246,28 @@ class CatalogStream:
     ) -> None:
         """Decode one camera's kept images in chunks and queue their DetNet and KeyNet samples."""
         layout: DatasetLayout = layout_for(work.info.dataset)
-        decoder: FrameDecoder = self._open_decoder(video, work.info.fps, self.device)
+        decoder: FrameDecoder | None = None
         letterbox: Letterbox = work.letterboxes[camera]
         chunk: int = max(1, DECODE_CHUNK_PIXELS // (letterbox.source_width * letterbox.source_height))
         for begin in range(0, len(keep), chunk):
             chunk_rows: Int64[ndarray, "m"] = keep[begin : begin + chunk]
-            frames: UInt8[Tensor, "m h w"] = decoder.get_frames_at(position[chunk_rows].tolist()).data[:, 0]
+            identity: tuple[int, int] = (camera, int(chunk_rows[0]))
+            if identity in self._local.committed:
+                continue
+            if decoder is None:
+                try:
+                    decoder = self._open_decoder(video, work.info.fps, self.device)
+                except RuntimeError as error:
+                    if isinstance(error, torch.OutOfMemoryError | torch.AcceleratorError):
+                        raise
+                    raise SegmentFailure("decoder creation") from error
+            try:
+                decoded_frames: FrameBatchLike = decoder.get_frames_at(position[chunk_rows].tolist())
+            except RuntimeError as error:
+                if isinstance(error, torch.OutOfMemoryError | torch.AcceleratorError):
+                    raise
+                raise SegmentFailure("decoder frames") from error
+            frames: UInt8[Tensor, "m h w"] = decoded_frames.data[:, 0]
             net: UInt8[Tensor, "m 480 640"] = letterbox.apply(frames)
             del frames
             index: Int64[Tensor, "m"] = torch.from_numpy(chunk_rows).to(self.device)
@@ -1174,13 +1295,14 @@ class CatalogStream:
                 torch.cuda.current_stream(self.device).synchronize()
             # Read the device before taking the lock: a host sync under ``_cond`` would stall the trainer thread too.
             counts: list[int] = [] if keynet is None else torch.bincount(keynet.kind, minlength=len(CropKind)).tolist()
+            self._put(_Chunk(work.generation, (work.position, camera, int(chunk_rows[0])), detnet, keynet))
+            self._local.committed.add(identity)
             with self._cond:
                 self.stats.images_decoded += len(chunk_rows)
                 self.stats.detnet_samples += 0 if detnet is None else sample_count(detnet)
                 if keynet is not None:
                     self.stats.keynet_samples += sample_count(keynet)
                     self.stats.keynet_kinds = [a + b for a, b in zip(self.stats.keynet_kinds, counts, strict=True)]
-            self._put(_Chunk(work.generation, (work.position, camera, int(chunk_rows[0])), detnet, keynet))
 
 
 def projection_to(projection: HandProjection, device: torch.device) -> HandProjection:

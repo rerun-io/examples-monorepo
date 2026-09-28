@@ -146,7 +146,8 @@ def test_read_rig_from_statics() -> None:
         read_rig(_statics(fisheye=True, relation=1), info)
 
 
-def test_hand_timeline_umetrack_masks() -> None:
+@pytest.mark.parametrize("missing_confidence", [False, True])
+def test_hand_timeline_umetrack_masks(missing_confidence: bool) -> None:
     info: SegmentInfo = SegmentInfo(UMETRACK, "s", "real", "separate_hand", "training", "user_00", 3, 30)
     frames: int = 3
     quaternion: list[float] = [0.0, 0.0, 0.0, 1.0]
@@ -163,6 +164,8 @@ def test_hand_timeline_umetrack_masks() -> None:
         columns[f"{base}/joint_angles:joint_angles"] = pa.array([[[0.1] * 22] if present else []] * frames, type=pa.list_(pa.list_(pa.float32(), 22)))
         columns[f"{base}/wrist:Transform3D:quaternion"] = pa.array([[quaternion] if present else None] * frames, type=four)
         columns[f"{base}/wrist:Transform3D:translation"] = pa.array([[[0.0, 0.0, 0.3]] if present else None] * frames, type=three)
+    if missing_confidence:
+        columns["/world/gt/hands/left/confidence:Scalars:scalars"] = pa.array([None] * frames, type=pa.list_(pa.float64()))
     timeline = hand_timeline(pa.table(columns), _statics(fisheye=True), info)
     assert timeline.headset_valid.tolist() == [True, False, False]
     assert torch.isnan(timeline.world_from_rig[1:]).all()
@@ -170,3 +173,26 @@ def test_hand_timeline_umetrack_masks() -> None:
     assert timeline.confidence[:, 1].eq(0).all()
     assert torch.isnan(timeline.poses[1].translation).all()
     assert timeline.hand_scale == pytest.approx(1.0)
+    if missing_confidence:
+        from handtrack.data.segment_labels import segment_labels
+        rig, letterboxes = read_rig(_statics(fisheye=True), info)
+        assert torch.isnan(timeline.confidence[:, 0]).all()
+        labels = segment_labels(timeline, rig, letterboxes, np.arange(frames, dtype=np.int64), False)
+        assert not labels.image_valid.any()
+
+
+@pytest.mark.parametrize('dataset', [UMETRACK, SHOW3D])
+@pytest.mark.parametrize('property_name', ['episode:split', 'episode:user'])
+@pytest.mark.parametrize('value', ['missing', None, [], [None], [''], ['   ']])
+def test_partition_properties_are_required(dataset: str, property_name: str, value: object) -> None:
+    table = _segment_table()
+    if dataset == SHOW3D:
+        table = table.rename_columns(['property:episode:subject_id' if name == 'property:episode:user' else name for name in table.column_names])
+        table = table.set_column(table.column_names.index('property:episode:split'), 'property:episode:split', pa.array([['train']] * table.num_rows))
+        property_name = property_name.replace('episode:user', 'episode:subject_id')
+    name = f'property:{property_name}'
+    table = table.drop([name])
+    if value != 'missing':
+        table = table.append_column(name, pa.array([value] * table.num_rows, type=pa.list_(pa.string())))
+    with pytest.raises(ValueError, match=f'{dataset} .*{property_name}'):
+        segment_infos(dataset, table)

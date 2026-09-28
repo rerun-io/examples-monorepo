@@ -102,17 +102,28 @@ class SegmentInfo:
     fps: int
 
 
+class CatalogDataError(ValueError):
+    """Invalid catalog data detected at a reader boundary."""
+
+
 def segment_infos(dataset: str, table: pa.Table) -> tuple[SegmentInfo, ...]:
     """Parse a ``segment_table()``; SHOW3D keeps only scenes with a ``hand_pose`` layer (the others have no hand labels)."""
     show3d: bool = is_show3d(dataset)
-    columns: dict[str, list[list[str | int] | None]] = {name: table[name].to_pylist() for name in table.column_names if name.startswith("property:")}
+    columns: dict[str, list[list[str | int | None] | None]] = {name: table[name].to_pylist() for name in table.column_names if name.startswith("property:")}
     ids: list[str] = [str(segment) for segment in table["rerun_segment_id"].to_pylist()]
     layers: list[list[str] | None] = table["rerun_layer_names"].to_pylist()
 
     def prop(key: str, row: int, default: str | int) -> str | int:
-        column: list[list[str | int] | None] | None = columns.get(f"property:{key}")
-        values: list[str | int] | None = None if column is None else column[row]
-        return values[0] if values else default
+        column: list[list[str | int | None] | None] | None = columns.get(f"property:{key}")
+        values: list[str | int | None] | None = None if column is None else column[row]
+        if key in ("episode:split", "episode:user", "episode:subject_id"):
+            value: str | int | None = values[0] if values else None
+            if not isinstance(value, str) or not value.strip():
+                raise CatalogDataError(f"{dataset} {ids[row]}: missing or empty {key}")
+            if key == "episode:split" and value not in (("train", "test") if show3d else ("training", "testing")):
+                raise CatalogDataError(f"{dataset} {ids[row]}: invalid {key}: {value!r}")
+            return value
+        return values[0] if values and values[0] is not None else default
 
     infos: list[SegmentInfo] = []
     for row, segment in enumerate(ids):
@@ -134,7 +145,7 @@ def segment_infos(dataset: str, table: pa.Table) -> tuple[SegmentInfo, ...]:
             continue
         domain: str = str(prop("episode:domain", row, ""))
         if domain not in ("real", "synthetic"):
-            raise ValueError(f"{dataset} {segment}: unexpected domain {domain!r}")
+            raise CatalogDataError(f"{dataset} {segment}: unexpected domain {domain!r}")
         infos.append(
             SegmentInfo(
                 dataset=dataset,
@@ -166,7 +177,7 @@ def select_split(segments: Sequence[SegmentInfo], split: SplitName) -> tuple[Seg
     for info in segments:
         if info.domain == "show3d":
             if split == "test":
-                raise ValueError("SHOW3D's test scenes carry no hand labels; use split 'val' (the held-out subjects) for a SHOW3D score")
+                raise CatalogDataError("SHOW3D's test scenes carry no hand labels; use split 'val' (the held-out subjects) for a SHOW3D score")
             held_out: bool = info.subject in SHOW3D_HELDOUT_SUBJECTS
             if info.split == "train" and held_out == (split == "val"):
                 selected.append(info)
@@ -260,10 +271,10 @@ def read_statics(dataset: DatasetEntry, info: SegmentInfo) -> pa.Table:
 
 def _static_value(statics: pa.Table, column: str, where: str) -> object:
     if column not in statics.column_names or statics.num_rows == 0 or not statics[column][0].is_valid:
-        raise ValueError(f"{where}: static column {column} is missing")
+        raise CatalogDataError(f"{where}: static column {column} is missing")
     values: list[object] = statics[column][0].as_py()
     if not values:
-        raise ValueError(f"{where}: static column {column} is empty")
+        raise CatalogDataError(f"{where}: static column {column} is empty")
     return values[0]
 
 
@@ -271,21 +282,21 @@ def static_floats(statics: pa.Table, column: str, where: str) -> list[float]:
     """A static list-valued component (a mat3x3, a translation, a resolution, distortion coefficients)."""
     value: object = _static_value(statics, column, where)
     if not isinstance(value, list) or not all(isinstance(v, int | float) for v in value):
-        raise ValueError(f"{where}: static column {column} is not a list of numbers")
+        raise CatalogDataError(f"{where}: static column {column} is not a list of numbers")
     return [float(v) for v in value]
 
 
 def static_number(statics: pa.Table, column: str, where: str) -> float:
     value: object = _static_value(statics, column, where)
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError(f"{where}: static column {column} is not a number")
+        raise CatalogDataError(f"{where}: static column {column} is not a number")
     return float(value)
 
 
 def static_text(statics: pa.Table, column: str, where: str) -> str:
     value: object = _static_value(statics, column, where)
     if not isinstance(value, str):
-        raise ValueError(f"{where}: static column {column} is not text")
+        raise CatalogDataError(f"{where}: static column {column} is not text")
     return value
 
 
@@ -300,7 +311,7 @@ def read_rig(statics: pa.Table, info: SegmentInfo) -> tuple[CameraRig, tuple[Let
     distortion: list[list[float] | None] = []
     for camera in layout.cameras:
         if static_number(statics, f"{camera}:Transform3D:relation", where) != 2:
-            raise ValueError(f"{where}: {camera} extrinsic is not ChildFromParent (cam_from_rig)")
+            raise CatalogDataError(f"{where}: {camera} extrinsic is not ChildFromParent (cam_from_rig)")
         transform: Float32[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
         transform[:3, :3] = column_major_3x3(np.asarray(static_floats(statics, f"{camera}:Transform3D:mat3x3", where), dtype=np.float32))
         transform[:3, 3] = np.asarray(static_floats(statics, f"{camera}:Transform3D:translation", where), dtype=np.float32)
@@ -314,12 +325,12 @@ def read_rig(statics: pa.Table, info: SegmentInfo) -> tuple[CameraRig, tuple[Let
             model: str = static_text(statics, f"{camera}/pinhole:simplecv.components.DistortionModel", where)
             coefficients: list[float] = static_floats(statics, coefficients_column, where)
             if model != "kannala_brandt" or len(coefficients) != 8:
-                raise ValueError(f"{where}: {camera} has {model} with {len(coefficients)} coefficients; expected Fisheye62 [k1..k6, p1, p2]")
+                raise CatalogDataError(f"{where}: {camera} has {model} with {len(coefficients)} coefficients; expected Fisheye62 [k1..k6, p1, p2]")
             distortion.append(coefficients)
         else:
             distortion.append(None)
     if any(d is None for d in distortion) and not all(d is None for d in distortion):
-        raise ValueError(f"{where}: mixed pinhole and fisheye cameras")
+        raise CatalogDataError(f"{where}: mixed pinhole and fisheye cameras")
     rig: CameraRig = CameraRig(
         names=layout.cameras,
         image_size=torch.tensor(sizes, dtype=torch.float32),
@@ -352,7 +363,7 @@ class HandTimeline:
     poses: tuple[HandPose, HandPose]
     """Left and right hand poses [f], NaN where the hand has no pose."""
     confidence: Float32[Tensor, "f 2"]
-    """The stored per-hand confidence; 0 where it is missing."""
+    """The stored per-hand confidence; NaN where it is unavailable (never an absence label)."""
     has_pose: Bool[Tensor, "f 2"]
     """Joint angles and wrist are both present and finite."""
     hand_model: HandModelTorch
@@ -390,7 +401,7 @@ def hand_timeline(table: pa.Table, statics: pa.Table, info: SegmentInfo) -> Hand
     where: str = f"{info.dataset} {info.segment_id}"
     times: Int64[ndarray, "f"] = np.asarray(table[TIMELINE].combine_chunks().to_numpy(zero_copy_only=False)).view(np.int64)
     if len(times) == 0 or not np.all(np.diff(times) > 0):
-        raise ValueError(f"{where}: expected label rows with strictly increasing {TIMELINE}")
+        raise CatalogDataError(f"{where}: expected label rows with strictly increasing {TIMELINE}")
     frames: int = len(times)
     world_from_rig: Float32[ndarray, "f 4 4"] = np.zeros((frames, 4, 4), dtype=np.float32)
     world_from_rig[:, 3, 3] = 1.0
@@ -409,7 +420,7 @@ def hand_timeline(table: pa.Table, statics: pa.Table, info: SegmentInfo) -> Hand
     has_pose: Bool[ndarray, "f 2"] = np.zeros((frames, 2), dtype=bool)
     for side in Side:
         prefix: str = f"{HAND_ROOT}/{SIDE_NAMES[side]}"
-        confidence[:, side] = np.nan_to_num(list_rows(table[f"{prefix}/confidence:Scalars:scalars"], 1)[:, 0], nan=0.0)
+        confidence[:, side] = list_rows(table[f"{prefix}/confidence:Scalars:scalars"], 1)[:, 0] if f"{prefix}/confidence:Scalars:scalars" in table.column_names else np.nan
         joint_angles: Float32[ndarray, "f 22"] = list_rows(table[f"{prefix}/joint_angles:joint_angles"], 22)
         rotation: Float32[ndarray, "f 3 3"] = rotation_from_quaternion_xyzw(list_rows(table[f"{prefix}/wrist:Transform3D:quaternion"], 4))
         translation: Float32[ndarray, "f 3"] = list_rows(table[f"{prefix}/wrist:Transform3D:translation"], 3)

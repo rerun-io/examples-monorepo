@@ -1,6 +1,7 @@
 import dataclasses
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import torch
 from simplecv.catalog_video import CatalogVideo
@@ -38,14 +39,16 @@ def _tagged(ids: list[int]) -> DetNetSamples:
     return dataclasses.replace(samples, dataset=torch.tensor(ids, dtype=torch.int64))
 
 
-def test_pool_draws_without_replacement_and_overwrites_when_full() -> None:
+def test_pool_draws_without_replacement_and_rejects_overflow() -> None:
     pool: SamplePool[DetNetSamples] = SamplePool(empty_detnet_samples(10, torch.device("cpu")), torch.Generator().manual_seed(0))
     pool.add(_tagged(list(range(6))))
     first: set[int] = set(pool.draw(4).dataset.tolist())
     assert len(first) == 4 and pool.count == 2
     assert set(pool.storage.dataset[: pool.count].tolist()) == set(range(6)) - first
-    pool.add(_tagged(list(range(100, 112))))
-    assert pool.count == 10 and pool.overwritten == 4
+    with pytest.raises(ValueError, match="full"):
+        pool.add(_tagged(list(range(100, 112))))
+    pool.add(_tagged(list(range(100, 108))))
+    assert pool.count == 10 and pool.overwritten == 0
     everything: list[int] = pool.draw(10).dataset.tolist()
     assert len(set(everything)) == 10 and pool.count == 0
     with pytest.raises(ValueError, match="cannot draw"):
@@ -97,10 +100,10 @@ def test_keynet_samples_positive_and_negatives() -> None:
     inside: torch.Tensor = ((samples.points_crop[positive] >= 0) & (samples.points_crop[positive] < CROP_SIZE)).all(dim=-1)
     assert int(inside.sum()) >= 17
     assert samples.crops[positive].float().mean() > 50.0
-    # The positive's keypoint input is its (noisy) prior; the right hand has no prior, so its negatives get zeros.
+    # Missing negative histories borrow a usable positive prior from this batch.
     assert samples.keypoints[positive].abs().sum() > 0
     right_negatives: list[int] = [i for i, k in enumerate(kinds) if k == int(CropKind.BACKGROUND)]
-    assert right_negatives and all(samples.keypoints[i].abs().sum() == 0 for i in right_negatives)
+    assert right_negatives and all(samples.keypoints[i].abs().sum() > 0 for i in right_negatives)
     assert samples.points_crop[right_negatives].eq(0).all() and samples.crop_from_net.shape == (len(kinds), 3, 3)
     zero_inputs = keynet_samples(net, truth, label, circles, truth, truth, 1.0, 0, dataclasses.replace(augment, zero_input_probability=1.0), torch.Generator().manual_seed(3))
     assert zero_inputs.keypoints.eq(0).all()
@@ -206,7 +209,7 @@ def test_machinery_failures_stay_fatal() -> None:
         stream.start_epoch(0)
         with pytest.raises(RuntimeError, match=r"a catalog producer failed \(dataforge-umetrack good-segment\)"):
             stream.next_detnet_batch()
-    assert is_fatal(torch.OutOfMemoryError("x")) and not is_fatal(RuntimeError("Invalid data")) and not is_fatal(ValueError("bad labels"))
+    assert is_fatal(torch.OutOfMemoryError("x")) and is_fatal(RuntimeError("Invalid data")) and is_fatal(ValueError("bad labels"))
 
 
 @pytest.mark.parametrize('evaluation', [False, True])
@@ -224,7 +227,7 @@ def test_cancel_interrupts_producer_wait(evaluation: bool) -> None:
         return data
 
     stream = CatalogStream(StreamConfig(device='cpu', validation=evaluation, producers=1, fetchers=1, detnet_buffer=4),
-                           segments=(info,), read_segment=reader, open_decoder=lambda *args: _GrayDecoder())
+                           segments=(info,), read_segment=reader, open_decoder=lambda *_args: _GrayDecoder())
     batches = []
 
     def consume() -> None:
@@ -248,9 +251,297 @@ def test_cancel_interrupts_producer_wait(evaluation: bool) -> None:
 def test_evaluation_retains_native_hand_eligibility() -> None:
     info, data = _fake_segment('native', 1)
     with CatalogStream(StreamConfig(device='cpu', validation=True, producers=1, fetchers=1),
-                       segments=(info,), read_segment=lambda info: data, open_decoder=lambda *args: _GrayDecoder()) as stream:
+                       segments=(info,), read_segment=lambda info: data, open_decoder=lambda *_args: _GrayDecoder()) as stream:
         stream.start_epoch(0)
         batch = stream.next_detnet_batch()
         assert batch is not None
         metadata = stream.detnet_validation()
         assert metadata.eligible.tolist() == [[True, False], [True, False]]
+
+
+def test_epoch_publication_cannot_discard_claimed_work() -> None:
+    import threading
+    import time
+
+    info, data = _fake_segment('race', 1)
+    claimed = threading.Event()
+
+    class InterleavedStream(CatalogStream):
+        def _discard(self) -> None:
+            if self._generation >= 0 and not self._stop.is_set():
+                assert claimed.wait(2.0)
+                deadline = time.monotonic() + 2.0
+                while self._work.empty() and self._queue.empty() and time.monotonic() < deadline:
+                    time.sleep(0.001)
+            super()._discard()
+
+        def _produce(self, worker: int) -> None:
+            # Hold the decoder until epoch setup has discarded the claimed work.
+            release.wait(3.0)
+            super()._produce(worker)
+
+    def reader(info: SegmentInfo) -> SegmentData:
+        claimed.set()
+        return data
+
+    release = threading.Event()
+    stream = InterleavedStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=4, detnet_batch_size=2, min_fill=0.0),
+                               segments=(info,), read_segment=reader, open_decoder=lambda *_args: _GrayDecoder())
+    returned = threading.Event()
+    batches = []
+
+    def consume() -> None:
+        batches.append(stream.next_detnet_batch())
+        returned.set()
+
+    try:
+        stream.start_epoch(0)
+        release.set()
+        consumer = threading.Thread(target=consume, daemon=True)
+        consumer.start()
+        assert returned.wait(3.0), 'claimed segment must reach completion'
+        assert batches[0] is not None
+        assert stream.next_detnet_batch() is None
+    finally:
+        stream.cancel()
+        release.set()
+        stream.close()
+
+
+@pytest.mark.parametrize('failures', [1, 2])
+def test_camera_retry_does_not_duplicate_published_prefix(failures: int) -> None:
+    info, data = _fake_segment('retry', 1)
+    _, other = _fake_segment('other', 2)
+    rig = dataclasses.replace(data.rig, names=('a', 'b'), image_size=data.rig.image_size.repeat(2, 1),
+                              cam_from_rig=data.rig.cam_from_rig.repeat(2, 1, 1), focal=data.rig.focal.repeat(2, 1), principal=data.rig.principal.repeat(2, 1))
+    data = dataclasses.replace(data, rig=rig, videos=(data.videos[0], other.videos[0]), letterboxes=data.letterboxes * 2)
+    attempts = []
+    first_camera_opens = []
+
+    def opener(video: CatalogVideo, fps: int, device: torch.device) -> _GrayDecoder:
+        if video.samples[0][0] == 1:
+            first_camera_opens.append(1)
+        if video.samples[0][0] == 2:
+            attempts.append(1)
+            if len(attempts) <= failures:
+                raise RuntimeError('FFmpeg invalid data')
+        return _GrayDecoder()
+
+    with _stream({'retry': (info, data)}, opener) as stream:
+        stream.start_epoch(0)
+        cameras = []
+        while stream.next_detnet_batch() is not None:
+            cameras.extend(stream.detnet_validation().camera.tolist())
+        assert sorted(cameras) == ([0, 0, 1, 1] if failures == 1 else [0, 0])
+        assert len(first_camera_opens) == 1
+        assert stream.stats.detnet_samples == len(cameras)
+        assert stream.stats.segments == 1
+        assert stream.stats.skipped_segments == (1 if failures == 2 else 0)
+
+
+def test_slow_consumer_receives_all_samples_including_tail() -> None:
+    import time
+
+    segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
+    with CatalogStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=3,
+                                    detnet_batch_size=2, queue_chunks=2, min_fill=1.0),
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
+                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        time.sleep(0.3)
+        count = 0
+        while (batch := stream.next_detnet_batch()) is not None:
+            count += len(batch.dataset)
+            time.sleep(0.01)
+        assert count == 10
+        assert stream.overwritten() == (0, 0)
+
+
+def test_evaluation_selection_is_bounded_and_completion_order_independent() -> None:
+    from handtrack.data.stream import _Chunk
+
+    class BoundedStream(CatalogStream):
+        def _insert(self, chunk: _Chunk) -> None:
+            super()._insert(chunk)
+            assert sum(sample_count(samples) for samples in (self._evaluation or ()) if samples is not None) <= self.config.validation_samples
+
+    info, data = _fake_segment('evaluation', 1)
+    results = []
+    for order in (range(10), reversed(range(10))):
+        with BoundedStream(StreamConfig(device='cpu', nets='detnet', validation=True, validation_samples=3),
+                           segments=(info,), read_segment=lambda info: data, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+            # Feed the same decoded sample identities in opposite completion orders.
+            stream._epoch_segments = [dataclasses.replace(info, segment_id=str(i)) for i in range(10)]
+            for i in order:
+                stream._insert(_Chunk(0, (i, 0, 0), _tagged([i]), None))
+            results.append(sorted(stream._evaluation[0].dataset.tolist()) if stream._evaluation is not None else [])
+    assert len(results[0]) == 3 and results[0] == results[1]
+
+
+@pytest.mark.parametrize('error', [AssertionError('bug'), TypeError('bug'), IndexError('bug'), KeyError('bug'), AttributeError('bug'), NameError('bug'), RuntimeError('bug'), ValueError('bug')])
+def test_programming_errors_cancel_workers_without_retry(error: Exception) -> None:
+    info, data = _fake_segment('fatal', 1)
+    calls = []
+
+    def reader(info: SegmentInfo) -> SegmentData:
+        calls.append(info)
+        raise error
+
+    with CatalogStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1), segments=(info,),
+                       read_segment=reader, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        with pytest.raises(RuntimeError, match='catalog producer failed') as caught:
+            stream.next_detnet_batch()
+        assert caught.value.__cause__ is error
+        assert len(calls) == 1 and stream.stats.retried_segments == 0
+        assert stream._stop.is_set()
+
+
+@pytest.mark.parametrize('evaluation', [False, True])
+def test_cancel_is_terminal_for_readiness(evaluation: bool) -> None:
+    info, data = _fake_segment('terminal', 1)
+    with CatalogStream(StreamConfig(device='cpu', validation=evaluation), segments=(info,), read_segment=lambda info: data,
+                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        stream.cancel()
+        assert not stream.detnet_ready() and not stream.keynet_ready()
+        assert stream.next_detnet_batch() is None and stream.next_keynet_batch() is None
+
+
+def test_close_reports_workers_alive_at_deadline(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import handtrack.data.stream as module
+
+    info, data = _fake_segment('timeout', 1)
+    stream = _stream({'timeout': (info, data)}, lambda *_args: _GrayDecoder())
+    stream.close()
+
+    class StuckThread:
+        name = 'stuck-test-worker'
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:
+            pass
+
+    stream._threads = [StuckThread()]
+    ticks = iter([0.0, 31.0])
+    monkeypatch.setattr(module.time, 'monotonic', lambda: next(ticks))
+    stream.close()
+    assert 'stuck-test-worker' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('stale_probability', [0.0, 1.0])
+def test_negative_inputs_use_usable_selected_history(stale_probability: float) -> None:
+    left = _hand_points((320.0, 240.0), 30.0, 7)
+    xy = torch.stack([left, left + 900.0])[None]
+    cam = torch.zeros(1, 2, 21, 3)
+    cam[:, 0, :, 2] = 0.4
+    cam[:, 1, :, 2] = -0.4
+    prior = ImageHands(xy, cam, torch.tensor([[[True] * 21, [False] * 21]]), torch.ones(1, 2, dtype=torch.bool))
+    truth = dataclasses.replace(prior, valid=torch.tensor([[True, False]]))
+    stale = dataclasses.replace(prior, net_xy=xy + 2000.0)
+    circles = bounding_circles(xy.reshape(2, 21, 2), prior.in_front.reshape(2, 21)).reshape(1, 2, 3)
+    augment = dataclasses.replace(evaluation_augment(KeyNetAugment()), other_hand_probability=1.0, background_probability=1.0,
+                                  stale_input_probability=stale_probability)
+    samples = keynet_samples(torch.zeros(1, 480, 640, dtype=torch.uint8), truth,
+                             torch.tensor([[HandLabel.PRESENT, HandLabel.ABSENT]]), circles, prior, stale,
+                             1.0, 0, augment, torch.Generator().manual_seed(4))
+    negatives = samples.keypoints[samples.presence == 0]
+    assert len(negatives) > 0 and torch.isfinite(negatives).all()
+    assert negatives.abs().max() < 2.0
+    assert (negatives.abs().sum(dim=1) > 0).all()
+
+
+def test_edge_negatives_cross_an_image_edge() -> None:
+    left = _hand_points((320.0, 240.0), 30.0, 2)
+    xy = torch.stack([left, left])[None]
+    prior = ImageHands(xy, torch.ones(1, 2, 21, 3), torch.ones(1, 2, 21, dtype=torch.bool), torch.ones(1, 2, dtype=torch.bool))
+    truth = dataclasses.replace(prior, in_front=torch.zeros_like(prior.in_front), valid=torch.zeros_like(prior.valid))
+    circles = bounding_circles(xy.reshape(2, 21, 2), prior.in_front.reshape(2, 21)).reshape(1, 2, 3)
+    augment = dataclasses.replace(KeyNetAugment(), edge_probability=1.0, background_probability=0.0, other_hand_probability=0.0)
+    for seed in range(8):
+        samples = keynet_samples(torch.zeros(1, 480, 640, dtype=torch.uint8), truth,
+                                 torch.zeros(1, 2, dtype=torch.int64), circles, prior, prior,
+                                 1.0, 0, augment, torch.Generator().manual_seed(seed))
+        edges = samples.crop_from_net[samples.kind == int(CropKind.EDGE)]
+        assert len(edges) == 2
+        corners = torch.tensor([[-0.5, -0.5, 1.0], [95.5, -0.5, 1.0], [-0.5, 95.5, 1.0], [95.5, 95.5, 1.0]])
+        net_corners = corners[None] @ torch.linalg.inv(edges).transpose(-1, -2)
+        low = net_corners[..., :2].amin(dim=1)
+        high = net_corners[..., :2].amax(dim=1)
+        crosses = ((low[:, 0] <= -0.5) & (high[:, 0] >= -0.5) | (low[:, 0] <= 639.5) & (high[:, 0] >= 639.5)
+                   | (low[:, 1] <= -0.5) & (high[:, 1] >= -0.5) | (low[:, 1] <= 479.5) & (high[:, 1] >= 479.5))
+        assert crosses.all()
+
+
+def test_joint_readiness_allows_consumer_ratio_to_adapt() -> None:
+    import time
+
+    segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
+    with CatalogStream(StreamConfig(device='cpu', nets='both', producers=1, fetchers=1, detnet_buffer=1, keynet_buffer=1,
+                                    detnet_batch_size=4, keynet_batch_size=4, queue_chunks=1, min_fill=1.0),
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
+                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        detnet = keynet = 0
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if stream.detnet_ready():
+                batch = stream.next_detnet_batch()
+                assert batch is not None
+                detnet += len(batch.dataset)
+            elif stream.keynet_ready():
+                keys = stream.next_keynet_batch()
+                assert keys is not None
+                keynet += len(keys.dataset)
+            elif stream._epoch_produced() and stream._queue.empty() and stream._pending is None:
+                break
+            else:
+                time.sleep(0.001)
+        assert detnet == stream.stats.detnet_samples == 10
+        assert keynet == stream.stats.keynet_samples > 0
+        assert stream.overwritten() == (0, 0)
+        assert not stream.detnet_ready() and not stream.keynet_ready()
+
+
+@pytest.mark.parametrize('error', [OSError('transport'), pa.ArrowInvalid('bad arrow')])
+def test_classified_transport_failures_retry(error: Exception) -> None:
+    info, data = _fake_segment('transport', 1)
+    calls = []
+
+    def reader(info: SegmentInfo) -> SegmentData:
+        calls.append(info)
+        if len(calls) == 1:
+            raise error
+        return data
+
+    with CatalogStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1), segments=(info,),
+                       read_segment=reader, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        assert stream.next_detnet_batch() is not None
+        assert stream.next_detnet_batch() is None
+        assert len(calls) == 2 and stream.stats.retried_segments == 1
+
+
+def test_missing_confidence_preserves_show3d_geometric_absence() -> None:
+    from handtrack.data.segment_labels import segment_labels
+
+    _, data = _fake_segment('missing', 1)
+    timeline = dataclasses.replace(data.timeline, confidence=torch.full_like(data.timeline.confidence, torch.nan),
+                                   has_pose=torch.ones_like(data.timeline.has_pose), poses=(data.timeline.poses[0], data.timeline.poses[0]))
+    visible = segment_labels(timeline, data.rig, data.letterboxes, np.array([0], dtype=np.int64), True)
+    assert not visible.image_valid.any()
+    outside_pose = dataclasses.replace(timeline.poses[0], translation=timeline.poses[0].translation + torch.tensor([10.0, 0.0, 0.0]))
+    outside = segment_labels(dataclasses.replace(timeline, poses=(outside_pose, outside_pose)), data.rig, data.letterboxes,
+                             np.array([0], dtype=np.int64), True)
+    assert outside.image_valid.all() and (outside.hand_label == HandLabel.ABSENT).all()
+
+
+def test_invalid_catalog_confidence_is_a_classified_data_failure() -> None:
+    info, data = _fake_segment('invalid-confidence', 1)
+    data = dataclasses.replace(data, timeline=dataclasses.replace(data.timeline, confidence=torch.full_like(data.timeline.confidence, 0.5)))
+    with _stream({'invalid-confidence': (info, data)}, lambda *_args: _GrayDecoder()) as stream:
+        stream.start_epoch(0)
+        assert stream.next_detnet_batch() is None
+        assert stream.stats.retried_segments == stream.stats.skipped_segments == 1
