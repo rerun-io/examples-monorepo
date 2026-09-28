@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import FrameType
-from typing import Literal, TypeAlias
+from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 import torch
 from einops import rearrange
@@ -27,6 +27,19 @@ from handtrack.train.source import BatchSource, DetNetValidation, DetNetValidati
 
 Nets: TypeAlias = Literal['detnet', 'keynet', 'both']
 Net: TypeAlias = Literal['detnet', 'keynet']
+
+
+@runtime_checkable
+class ReadySource(Protocol):
+    """Optional backpressure-aware scheduling contract for shared producer pools."""
+
+    def detnet_ready(self) -> bool: ...
+
+    def keynet_ready(self) -> bool: ...
+
+    def wait_for_batch(self) -> bool:
+        """Wait for either pool; False permits terminal next_* probes."""
+        ...
 
 
 @serde(deny_unknown_fields=True)
@@ -58,7 +71,10 @@ class LoopSettings:
     checkpoint_every: int = 5
     """Keep epoch_NNN.pt every this many completed epochs."""
     keynet_steps_per_detnet_step: int = 1
-    """Joint scheduling ratio; exhausted pools are skipped."""
+    """Minimum KeyNet steps requested per DetNet step, subject to readiness and exhaustion.
+    Shared pools drain all ready KeyNet batches, which may exceed this ratio;
+    they never block to enforce it. Sources without readiness use the fixed ratio.
+    """
     bf16: bool = False
     """Enable bfloat16 autocast in production (models have Float32 dev contracts)."""
     presence_weight: float = 1.0
@@ -368,8 +384,28 @@ class Trainer:
                     factor: float = (1 + math.cos(math.pi * self.state.epoch / self.cadence.epochs)) / 2 if settings.schedule == 'cosine' else 1.0
                     for group in optimiser.param_groups:
                         group['lr'] = settings.lr * factor
+                drain_keynet: bool = False
                 while active and not self.stopping:
-                    for name in schedule:
+                    draws: list[Net] = schedule
+                    if len(self.models) == 2 and isinstance(source, ReadySource):
+                        det_ready: bool = 'detnet' in active and source.detnet_ready()
+                        key_ready: bool = 'keynet' in active and source.keynet_ready()
+                        if key_ready and (drain_keynet or not det_ready):
+                            draws = ['keynet']
+                        elif det_ready:
+                            draws = ['detnet']
+                            drain_keynet = True
+                        else:
+                            start_wait: float = time.perf_counter()
+                            available: bool = source.wait_for_batch()
+                            waited_for_either: float = time.perf_counter() - start_wait
+                            self.wait_seconds += waited_for_either
+                            self.elapsed += waited_for_either
+                            if available:
+                                continue
+                            # Both pools are empty and production ended: retain next_*'s
+                            # None contract, including resume-cursor checks below.
+                    for name in draws:
                         if name not in active or self.stopping:
                             continue
                         start: float = time.perf_counter()
