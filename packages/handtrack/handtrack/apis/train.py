@@ -1,13 +1,14 @@
 """Tyro training entry point: DetNet-F, KeyNet-F or both, trained from one catalog stream."""
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import get_args
 
 import torch
 from serde import serde
 from serde.json import to_json
 
 from handtrack.data.batches import BatchSource
-from handtrack.data.catalog import SHOW3D, SHOW3D_SAMPLE, UMETRACK, DatasetName, SplitName
+from handtrack.data.catalog import DatasetName, SplitName
 from handtrack.data.stream import CatalogStream, StreamConfig
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 
@@ -73,7 +74,8 @@ class Config:
 
 SPLITS: dict[str, SplitName] = {"training": "train", "train": "train", "validation": "val", "val": "val", "testing": "test", "test": "test"}
 """Trainer split names onto ``catalog.select_split``'s."""
-DATASETS: dict[str, DatasetName] = {UMETRACK: UMETRACK, SHOW3D: SHOW3D, SHOW3D_SAMPLE: SHOW3D_SAMPLE}
+DATASETS: dict[str, DatasetName] = {name: name for name in get_args(DatasetName)}
+"""Every catalog dataset the stream knows, keyed by its CLI spelling."""
 VALIDATION_SEGMENTS: int = 32
 """Segments an evaluation set is built from (one seeded shuffle of the split's segments), unless segment_ids fixes them."""
 
@@ -128,10 +130,9 @@ def main(config: Config) -> None:
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
                                resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config))
     source: BatchSource = build_source(config.stream, config.stream.train_split, config.nets)
-    validation: BatchSource | None = None
     try:
-        validation = build_source(config.stream, config.stream.val_split, config.nets)
-    finally:
-        if validation is None:
-            source.close()
+        validation: BatchSource = build_source(config.stream, config.stream.val_split, config.nets)
+    except BaseException:
+        source.close()
+        raise
     trainer.run(source, validation)

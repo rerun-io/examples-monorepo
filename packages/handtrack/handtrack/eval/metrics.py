@@ -1,11 +1,14 @@
 """CPU-compatible metrics. Positions use metres unless explicitly labelled pixels or mm."""
 from dataclasses import dataclass
+from itertools import groupby
 
 import torch
 from jaxtyping import Bool, Float32, Int64
 from torch import Tensor
 
+from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH
 from handtrack.labels.circles import enclosing_circles
+from handtrack.labels.validity import MIN_VISIBLE_KEYPOINTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +41,12 @@ class DetectionMetrics:
     by_camera_hand: dict[tuple[int, int], Counts]
     """Counts keyed by (camera ID, hand slot)."""
 
+    def __add__(self, other: 'DetectionMetrics') -> 'DetectionMetrics':
+        groups: dict[tuple[int, int], Counts] = dict(self.by_camera_hand)
+        for key, counts in other.by_camera_hand.items():
+            groups[key] = groups.get(key, Counts()) + counts
+        return DetectionMetrics(self.total + other.total, groups)
+
 
 def detection_metrics(
     boxes: Float32[Tensor, 'n 4'], probability: Float32[Tensor, 'n'],
@@ -46,15 +55,16 @@ def detection_metrics(
 ) -> DetectionMetrics:
     """Apply §5.4 to unexpanded square boxes in 640x480 pixels.
 
-    Recall includes hands with >16 in-front points in [0,640)x[0,480).
+    Recall includes hands with at least MIN_VISIBLE_KEYPOINTS (17) in-front points
+    in [0,640)x[0,480), the label rule for a present hand.
     TP also requires probability >0.5, width within 20% of the smallest
     enclosing-circle diameter, and all in-front points inside the predicted
     closed square. Nonfinite predictions cannot be TP. Behind-camera points
     are excluded from the circle and containment tests.
     """
     circles: Float32[Tensor, "n 3"] = torch.from_numpy(enclosing_circles(points.detach().cpu().numpy(), in_front.cpu().numpy())).to(points.device)
-    inside: Bool[Tensor, "n 21"] = in_front & (points >= 0).all(-1) & (points[..., 0] < 640) & (points[..., 1] < 480)
-    eligible: Bool[Tensor, "n"] = inside.sum(-1) > 16
+    inside: Bool[Tensor, "n 21"] = in_front & (points >= 0).all(-1) & (points[..., 0] < NET_WIDTH) & (points[..., 1] < NET_HEIGHT)
+    eligible: Bool[Tensor, "n"] = inside.sum(-1) >= MIN_VISIBLE_KEYPOINTS
     width: Float32[Tensor, "n"] = boxes[:, 2] - boxes[:, 0]
     diameter: Float32[Tensor, "n"] = 2 * circles[:, 2]
     contains: Bool[Tensor, "n"] = (((points >= boxes[:, None, :2]) & (points <= boxes[:, None, 2:])).all(-1) | ~in_front).all(-1)
@@ -90,6 +100,17 @@ class KeypointMetrics:
     def distance_mm(self) -> float | None:
         return self.distance_error_sum / self.keypoints if self.keypoints else None
 
+    def __add__(self, other: 'KeypointMetrics') -> 'KeypointMetrics':
+        return KeypointMetrics(self.pixel_error_sum + other.pixel_error_sum, self.distance_error_sum + other.distance_error_sum,
+                               self.keypoints + other.keypoints, self.presence + other.presence)
+
+
+def presence_counts(probability: Float32[Tensor, 'b'], presence: Float32[Tensor, 'b'], presence_mask: Bool[Tensor, 'b']) -> Counts:
+    """Presence counts over unmasked crops, with probability >=0.5 positive."""
+    predicted: Bool[Tensor, "b"] = (probability >= 0.5) & presence_mask
+    gt: Bool[Tensor, "b"] = (presence > 0.5) & presence_mask
+    return Counts(int((predicted & gt).sum()), int(predicted.sum()), int(gt.sum()))
+
 
 def keynet_metrics(
     predicted_crop: Float32[Tensor, 'b 21 2'], target_crop: Float32[Tensor, 'b 21 2'],
@@ -105,10 +126,8 @@ def keynet_metrics(
     inverse: Float32[Tensor, "positive 3 3"] = torch.linalg.inv(crop_from_net[positive])
     delta: Float32[Tensor, "positive 21 2"] = predicted_crop[positive] - target_crop[positive]
     net_delta: Float32[Tensor, "positive 21 2"] = torch.einsum('bij,bkj->bki', inverse[:, :2, :2], delta)
-    predicted: Bool[Tensor, "b"] = (probability >= 0.5) & presence_mask
-    gt: Bool[Tensor, "b"] = (presence > 0.5) & presence_mask
     return KeypointMetrics(float(net_delta.norm(dim=-1).sum()), float((predicted_distance[positive] - target_distance[positive]).abs().sum()),
-                           int(positive.sum()) * 21, Counts(int((predicted & gt).sum()), int(predicted.sum()), int(gt.sum())))
+                           int(positive.sum()) * 21, presence_counts(probability, presence, presence_mask))
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,15 +189,12 @@ def tracking_metrics(visible: Bool[Tensor, 't'], tracked: Bool[Tensor, 't']) -> 
     tr: list[bool] = tracked.tolist()
     acquire: list[int | None] = []
     drop: list[int | None] = []
-    for start in range(len(v)):
-        if start and v[start] == v[start - 1]:
-            continue
-        end: int = start + 1
-        while end < len(v) and v[end] == v[start]:
-            end += 1
-        if v[start]:
-            acquire.append(next((i - start for i in range(start, end) if tr[i]), None))
+    for value, run in groupby(range(len(v)), key=v.__getitem__):
+        frames: list[int] = list(run)
+        start: int = frames[0]
+        if value:
+            acquire.append(next((i - start for i in frames if tr[i]), None))
         elif start:
-            drop.append(next((i - start for i in range(start, end) if not tr[i]), None))
+            drop.append(next((i - start for i in frames if not tr[i]), None))
     count: int = int(visible.sum())
     return TrackingMetrics(int((visible & tracked).sum()) / count if count else None, tuple(acquire), tuple(drop), int((~visible & tracked).sum()))

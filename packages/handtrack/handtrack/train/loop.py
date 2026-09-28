@@ -11,14 +11,14 @@ from typing import Literal, TypeAlias
 
 import torch
 from einops import rearrange
-from jaxtyping import Bool
+from jaxtyping import Bool, Float32
 from serde import serde
 from serde.json import to_json
 from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from handtrack.data.batches import DetNetBatch, KeyNetBatch
-from handtrack.eval.metrics import Counts, DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics
+from handtrack.eval.metrics import Counts, DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics, presence_counts
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.models.detnet import Detections, DetNetF, DetNetLoss, DetNetOutput, decode_detections, detnet_loss
 from handtrack.models.keynet import KeyNetF, KeyNetLoss, KeyNetOutput, keynet_loss
@@ -65,7 +65,8 @@ class LoopSettings:
     """Chosen multiplier for the added KeyNet presence BCE."""
     resume_next_epoch: bool = False
     """On resume from a mid-epoch last.pt, skip the rest of that epoch instead of replaying its consumed batches: start
-    the next epoch with the global step, optimisers, best scores and history kept."""
+    the next epoch with the global step, optimisers, best scores and history kept. Replay assumes a deterministic source;
+    ``CatalogStream`` pools depend on producer timing, so resumes from it should set this."""
 
     def __post_init__(self) -> None:
         if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or self.validate_every < 0:
@@ -103,18 +104,10 @@ class ValidationTotals:
     """Sample-weighted loss sums."""
     samples: dict[str, int] = field(default_factory=dict)
     """Images/crops contributing to each loss summary."""
-    detections: Counts = field(default_factory=Counts)
-    """Global DetNet counts."""
-    groups: dict[tuple[int, int], Counts] = field(default_factory=dict)
-    """Per-camera, per-hand detection counts."""
-    presence: Counts = field(default_factory=Counts)
-    """KeyNet presence counts."""
-    pixel_sum: float = 0.0
-    """KeyNet pixel error sum."""
-    distance_sum: float = 0.0
-    """KeyNet d_rel absolute error sum."""
-    keypoints: int = 0
-    """Number of positive keypoints."""
+    detections: DetectionMetrics = field(default_factory=lambda: DetectionMetrics(Counts(), {}))
+    """DetNet counts, global and per camera and hand."""
+    keypoints: KeypointMetrics = field(default_factory=lambda: KeypointMetrics(0.0, 0.0, 0, Counts()))
+    """KeyNet error sums and presence counts."""
 
 
 class Trainer:
@@ -258,24 +251,22 @@ class Trainer:
                             result: DetectionMetrics = detection_metrics(rearrange(detections.box, 'b h c -> (b h) c'), detections.probability.flatten(),
                                 rearrange(metadata.points.to(self.device), 'b h k c -> (b h) k c'), rearrange(metadata.in_front.to(self.device), 'b h k -> (b h) k'),
                                 metadata.camera.to(self.device).repeat_interleave(2), torch.arange(2, device=self.device).repeat(count))
-                            totals.detections = totals.detections + result.total
-                            for group, counts in result.by_camera_hand.items():
-                                totals.groups[group] = totals.groups.get(group, Counts()) + counts
+                            totals.detections = totals.detections + result
                     else:
                         key_output: KeyNetOutput = self.forward_keynet(batch)
                         loss = self.keynet_objective(batch, key_output)
                         count = batch.crops.shape[0]
-                        predicted: Bool[Tensor, "b"] = (key_output.presence_logit.sigmoid() >= 0.5) & batch.presence_mask.to(self.device)
-                        gt: Bool[Tensor, "b"] = (batch.presence.to(self.device) > 0.5) & batch.presence_mask.to(self.device)
-                        totals.presence = totals.presence + Counts(int((predicted & gt).sum()), int(predicted.sum()), int(gt.sum()))
+                        probability: Float32[Tensor, "b"] = key_output.presence_logit.sigmoid()
+                        presence: Float32[Tensor, "b"] = batch.presence.to(self.device)
+                        presence_mask: Bool[Tensor, "b"] = batch.presence_mask.to(self.device)
                         if isinstance(source, KeyNetValidationSource):
                             key_metadata: KeyNetValidation = source.keynet_validation()
                             key_result: KeypointMetrics = keynet_metrics(decode_heatmaps(key_output.heatmaps)[0], key_metadata.points_crop.to(self.device),
                                 key_metadata.crop_from_net.to(self.device), decode_distance(key_output.distance), key_metadata.distance_mm.to(self.device),
-                                key_output.presence_logit.sigmoid(), batch.presence.to(self.device), batch.positive.to(self.device), batch.presence_mask.to(self.device))
-                            totals.pixel_sum += key_result.pixel_error_sum
-                            totals.distance_sum += key_result.distance_error_sum
-                            totals.keypoints += key_result.keypoints
+                                probability, presence, batch.positive.to(self.device), presence_mask)
+                        else:  # Presence needs no metadata; the geometric scores stay unscored.
+                            key_result = KeypointMetrics(0.0, 0.0, 0, presence_counts(probability, presence, presence_mask))
+                        totals.keypoints = totals.keypoints + key_result
                     if not torch.isfinite(loss.total):
                         raise ValueError(f'Nonfinite {name} validation loss')
                     totals.losses[name] = totals.losses.get(name, 0.0) + float(loss.total) * count
@@ -285,15 +276,14 @@ class Trainer:
                 model.train(modes[name])
         values: dict[str, float | None] = {f'{name}/loss': loss / totals.samples[name] for name, loss in totals.losses.items()}
         if 'detnet' in self.models:
-            values.update({'detnet/precision': totals.detections.precision, 'detnet/recall': totals.detections.recall})
-            for (camera, hand), counts in totals.groups.items():
+            values.update({'detnet/precision': totals.detections.total.precision, 'detnet/recall': totals.detections.total.recall})
+            for (camera, hand), counts in totals.detections.by_camera_hand.items():
                 for label, value in (('tp', counts.true_positive), ('predicted', counts.predicted), ('gt', counts.ground_truth),
                                      ('precision', counts.precision), ('recall', counts.recall)):
                     values[f'detnet/camera_{camera}/hand_{hand}/{label}'] = float(value) if value is not None else None
         if 'keynet' in self.models:
-            values.update({'keynet/error_px': totals.pixel_sum / totals.keypoints if totals.keypoints else None,
-                           'keynet/d_rel_mm': totals.distance_sum / totals.keypoints if totals.keypoints else None,
-                           'keynet/precision': totals.presence.precision, 'keynet/recall': totals.presence.recall})
+            values.update({'keynet/error_px': totals.keypoints.error_px, 'keynet/d_rel_mm': totals.keypoints.distance_mm,
+                           'keynet/precision': totals.keypoints.presence.precision, 'keynet/recall': totals.keypoints.presence.recall})
         record: MetricRecord = MetricRecord(self.state.step, self.state.epoch, values)
         if self.stopping:
             return record  # Partial SIGTERM validation must not select best weights.
@@ -322,18 +312,18 @@ class Trainer:
 
     def run(self, source: BatchSource, validation: BatchSource) -> TrainingState:
         """Train to exhaustion of BOTH pools, close sources, and retain checkpoints."""
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        schedule: list[Net] = []
+        if 'detnet' in self.models:
+            schedule.append('detnet')
+        if 'keynet' in self.models:
+            schedule.extend(['keynet'] * self.cadence.keynet_steps_per_detnet_step)
         previous: signal.Handlers | int | Callable[[int, FrameType | None], None] | None = signal.signal(signal.SIGTERM, self.handle_sigterm)
         try:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
             while self.state.epoch < self.cadence.epochs and not self.stopping:
                 source.start_epoch(self.state.epoch)
                 replay: dict[str, int] = dict(self.state.epoch_steps)
                 active: set[str] = set(self.models)
-                schedule: list[Net] = []
-                if 'detnet' in active:
-                    schedule.append('detnet')
-                if 'keynet' in active:
-                    schedule.extend(['keynet'] * self.cadence.keynet_steps_per_detnet_step)
                 for name, optimiser in self.optimisers.items():
                     settings: OptimiserSettings = self.settings[name]
                     factor: float = (1 + math.cos(math.pi * self.state.epoch / self.cadence.epochs)) / 2 if settings.schedule == 'cosine' else 1.0

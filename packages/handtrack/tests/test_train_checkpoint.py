@@ -1,4 +1,6 @@
 """Checkpoint integrity and training-state round trips."""
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -6,7 +8,7 @@ import pytest
 pytest.importorskip('torch', reason='requires handtrack environment')
 import torch
 
-from handtrack.train.checkpoint import TrainingState, load_checkpoint, save_checkpoint
+from handtrack.train.checkpoint import TrainingState, load_checkpoint, read_disk, save_checkpoint
 
 
 def test_checkpoint_roundtrip_and_corruption(tmp_path: Path) -> None:
@@ -32,10 +34,6 @@ def test_checkpoint_roundtrip_and_corruption(tmp_path: Path) -> None:
 
 
 def test_direct_io_falls_back_only_when_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import errno
-    import os
-
-    from handtrack.train.checkpoint import read_disk
     path = tmp_path / 'bytes'
     path.write_bytes(b'checked bytes')
 

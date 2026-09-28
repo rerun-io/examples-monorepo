@@ -11,6 +11,8 @@ from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch  # noqa: E
 from handtrack.data.catalog import CATALOG_URL, SHOW3D_SAMPLE, UMETRACK  # noqa: E402
 from handtrack.data.stream import CatalogStream, StreamConfig  # noqa: E402
 from handtrack.eval.metrics import DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics  # noqa: E402
+from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH  # noqa: E402
+from handtrack.labels.circles import square_boxes  # noqa: E402
 from handtrack.train.source import DetNetValidation, KeyNetValidation  # noqa: E402
 
 pytestmark = pytest.mark.integration
@@ -86,9 +88,8 @@ def test_evaluation_set_is_exact_and_repeatable() -> None:
         assert first is not None
         metadata: DetNetValidation = stream.detnet_validation()
         # Ground-truth circles as predictions score perfect precision and recall under the paper's rule.
-        pixels: torch.Tensor = first.circle * torch.tensor([640.0, 480.0, 640.0], device=first.circle.device)
-        radius: torch.Tensor = pixels[..., 2:] + 1e-2
-        boxes: torch.Tensor = torch.cat([pixels[..., :2] - radius, pixels[..., :2] + radius], dim=-1)
+        circles: torch.Tensor = first.circle * first.circle.new_tensor([NET_WIDTH, NET_HEIGHT, NET_WIDTH]) + first.circle.new_tensor([0.0, 0.0, 1e-2])
+        boxes: torch.Tensor = square_boxes(circles)
         count: int = first.pooled.shape[0]
         result: DetectionMetrics = detection_metrics(
             boxes.reshape(-1, 4),

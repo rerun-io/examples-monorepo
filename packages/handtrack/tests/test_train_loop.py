@@ -9,8 +9,13 @@ pytest.importorskip('torch', reason='requires handtrack environment')
 import torch
 
 from handtrack.data.batches import DetNetBatch, KeyNetBatch
+from handtrack.models.detnet import DetNetF
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 from handtrack.train.source import DetNetValidation, KeyNetValidation
+
+DETNET_SGD: OptimiserSettings = OptimiserSettings(0.001)
+KEYNET_SGD: OptimiserSettings = OptimiserSettings(0.025)
+"""The CLI defaults (``handtrack.apis.train.Config``)."""
 
 
 @pytest.fixture(autouse=True)
@@ -55,24 +60,34 @@ class FakeSource:
         self.closed = True
 
 
+class InterruptSource(FakeSource):
+    """Requests a stop on every KeyNet draw, as SIGTERM would mid-epoch."""
+    trainer: Trainer
+
+    def next_keynet_batch(self) -> KeyNetBatch | None:
+        batch = super().next_keynet_batch()
+        self.trainer.handle_sigterm(signal.SIGTERM, None)
+        return batch
+
+
 @pytest.mark.parametrize('nets,steps', [('detnet', 2), ('keynet', 3), ('both', 5)])
 def test_training_and_resume(tmp_path: Path, nets: Nets, steps: int) -> None:
     torch.manual_seed(0)
     source = FakeSource()
     validation = FakeSource(1, 1)
-    trainer = Trainer(nets, OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1, log_every=1, validate_every=2), tmp_path, 'cpu', max_val_batches=1)
+    trainer = Trainer(nets, DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1, log_every=1, validate_every=2), tmp_path, 'cpu', max_val_batches=1)
     state = trainer.run(source, validation)
     assert state.step == steps and state.epoch == 1
     assert source.closed and validation.closed
     assert state.history
     assert all(torch.isfinite(p).all() for model in trainer.models.values() for p in model.parameters())
-    resumed = Trainer(nets, OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=2, log_every=1), tmp_path, 'cpu', resume=True)
+    resumed = Trainer(nets, DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=2, log_every=1), tmp_path, 'cpu', resume=True)
     assert resumed.run(FakeSource(), FakeSource(1, 1)).step == 2 * steps
     assert (tmp_path / 'train.jsonl').exists()
 
 
 def test_sigterm_handler(tmp_path: Path) -> None:
-    trainer = Trainer('detnet', OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1), tmp_path, 'cpu')
+    trainer = Trainer('detnet', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1), tmp_path, 'cpu')
     trainer.handle_sigterm(signal.SIGTERM, None)
     state = trainer.run(FakeSource(), FakeSource())
     assert state.step == 0
@@ -82,7 +97,7 @@ def test_sigterm_handler(tmp_path: Path) -> None:
 @pytest.mark.parametrize('nets', ['detnet', 'keynet', 'both'])
 def test_fixed_batch_overfit(tmp_path: Path, nets: Nets) -> None:
     torch.manual_seed(10)
-    trainer = Trainer(nets, OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1), tmp_path, 'cpu')
+    trainer = Trainer(nets, DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1), tmp_path, 'cpu')
     source = FakeSource()
     first: dict[str, float] = {}
     for iteration in range(10):
@@ -97,29 +112,21 @@ def test_fixed_batch_overfit(tmp_path: Path, nets: Nets) -> None:
 
 
 def test_mid_epoch_joint_resume_preserves_updates(tmp_path: Path) -> None:
-    class InterruptSource(FakeSource):
-        trainer: Trainer
-
-        def next_keynet_batch(self) -> KeyNetBatch | None:
-            batch = super().next_keynet_batch()
-            self.trainer.handle_sigterm(signal.SIGTERM, None)
-            return batch
-
     torch.manual_seed(9)
     source = InterruptSource(2, 3)
     cadence = LoopSettings(epochs=1, checkpoint_every=1, keynet_steps_per_detnet_step=2, validate_every=0)
     torch.manual_seed(42)
-    interrupted = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), cadence, tmp_path / 'resume', 'cpu')
+    interrupted = Trainer('both', DETNET_SGD, KEYNET_SGD, cadence, tmp_path / 'resume', 'cpu')
     source.trainer = interrupted
     state = interrupted.run(source, FakeSource(1, 1))
     assert state.step == 2
     assert state.epoch_steps == {'detnet': 1, 'keynet': 1}
     replay = FakeSource(2, 3)
     replay.det, replay.key = source.det, source.key
-    resumed = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), cadence, tmp_path / 'resume', 'cpu', resume=True)
+    resumed = Trainer('both', DETNET_SGD, KEYNET_SGD, cadence, tmp_path / 'resume', 'cpu', resume=True)
     assert resumed.run(replay, FakeSource(1, 1)).step == 5
     torch.manual_seed(42)
-    uninterrupted = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), cadence, tmp_path / 'reference', 'cpu')
+    uninterrupted = Trainer('both', DETNET_SGD, KEYNET_SGD, cadence, tmp_path / 'reference', 'cpu')
     uninterrupted.run(replay, FakeSource(1, 1))
     for name, model in resumed.models.items():
         for key, tensor in model.state_dict().items():
@@ -145,7 +152,7 @@ def test_validation_without_metadata_has_no_geometric_score(tmp_path: Path) -> N
         def close(self) -> None:
             self.source.close()
 
-    trainer = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1), tmp_path, 'cpu')
+    trainer = Trainer('both', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1), tmp_path, 'cpu')
     trainer.run(TrainingOnlySource(), TrainingOnlySource())
     assert trainer.state.best == {}
     assert trainer.state.history[-1].values['keynet/error_px'] is None
@@ -160,8 +167,7 @@ def test_best_checkpoint_uses_detection_score_and_exports_weights(tmp_path: Path
             points[:, :, 1, 0] = 110.0
             return DetNetValidation(points, torch.ones(2, 2, 21, dtype=torch.bool), torch.zeros(2, dtype=torch.int64))
 
-    from handtrack.models.detnet import DetNetF
-    trainer = Trainer('detnet', OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1), tmp_path, 'cpu', max_val_batches=1)
+    trainer = Trainer('detnet', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1), tmp_path, 'cpu', max_val_batches=1)
     model = trainer.models['detnet']
     assert isinstance(model, DetNetF)
     with torch.no_grad():
@@ -185,21 +191,13 @@ def test_best_checkpoint_uses_detection_score_and_exports_weights(tmp_path: Path
 
 
 def test_resume_next_epoch_skips_the_rest_of_the_interrupted_epoch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    class InterruptSource(FakeSource):
-        trainer: Trainer
-
-        def next_keynet_batch(self) -> KeyNetBatch | None:
-            batch = super().next_keynet_batch()
-            self.trainer.handle_sigterm(signal.SIGTERM, None)
-            return batch
-
     cadence = LoopSettings(epochs=2, checkpoint_every=1, validate_every=0)
-    interrupted = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), cadence, tmp_path, 'cpu')
+    interrupted = Trainer('both', DETNET_SGD, KEYNET_SGD, cadence, tmp_path, 'cpu')
     source = InterruptSource(2, 3)
     source.trainer = interrupted
     state = interrupted.run(source, FakeSource(1, 1))
     assert state.epoch == 0 and state.step == 2 and state.epoch_steps == {'detnet': 1, 'keynet': 1}
-    resumed = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=2, checkpoint_every=1, validate_every=0, resume_next_epoch=True),
+    resumed = Trainer('both', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=2, checkpoint_every=1, validate_every=0, resume_next_epoch=True),
                       tmp_path, 'cpu', resume=True)
     assert resumed.state.epoch == 1 and resumed.state.step == 2 and resumed.state.epoch_steps == {}
     assert 'resume-next-epoch: skipping the rest of epoch 0' in capsys.readouterr().out

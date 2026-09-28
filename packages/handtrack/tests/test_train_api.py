@@ -28,11 +28,11 @@ import sys
 from pathlib import Path
 import torch
 sys.path.insert(0, str(Path.cwd() / 'tests'))
-from test_train_loop import FakeSource
-from handtrack.train.loop import Trainer, LoopSettings, OptimiserSettings
+from test_train_loop import DETNET_SGD, KEYNET_SGD, FakeSource
+from handtrack.train.loop import Trainer, LoopSettings
 
 torch.set_num_threads(2)
-trainer = Trainer('both', OptimiserSettings(0.001), OptimiserSettings(0.025), LoopSettings(epochs=1, bf16=True), Path(sys.argv[1]), 'cpu')
+trainer = Trainer('both', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1, bf16=True), Path(sys.argv[1]), 'cpu')
 state = trainer.run(FakeSource(1, 1), FakeSource(1, 1))
 assert state.step == 2
 assert all(torch.isfinite(p).all() for model in trainer.models.values() for p in model.parameters())
