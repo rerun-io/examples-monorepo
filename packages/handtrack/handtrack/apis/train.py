@@ -80,7 +80,7 @@ VALIDATION_SEGMENTS: int = 32
 """Segments an evaluation set is built from (one seeded shuffle of the split's segments), unless segment_ids fixes them."""
 
 
-def build_source(settings: StreamSettings, split: str, nets: Nets) -> BatchSource:
+def build_source(settings: StreamSettings, split: str, nets: Nets, device: str = "cuda") -> BatchSource:
     """A ``CatalogStream`` for the split: the training split streams with augmentation and one decode for every
     requested net; any other split is a fixed, unaugmented evaluation set with exact validation metadata
     (``detnet_validation`` / ``keynet_validation``). ``segment_ids`` fixes the segments of both (overfit runs)."""
@@ -93,6 +93,7 @@ def build_source(settings: StreamSettings, split: str, nets: Nets) -> BatchSourc
     evaluation: bool = ours != "train"
     return CatalogStream(
         StreamConfig(
+            device=device,
             datasets=tuple(DATASETS[name] for name in settings.datasets),
             split=ours,
             segment_ids=settings.segment_ids,
@@ -129,9 +130,9 @@ def main(config: Config) -> None:
     cap_gpu_memory(config.stream.gpu_memory_gb, config.device)
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
                                resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config))
-    source: BatchSource = build_source(config.stream, config.stream.train_split, config.nets)
+    source: BatchSource = build_source(config.stream, config.stream.train_split, config.nets, device=config.device)
     try:
-        validation: BatchSource = build_source(config.stream, config.stream.val_split, config.nets)
+        validation: BatchSource = build_source(config.stream, config.stream.val_split, config.nets, device=config.device)
     except BaseException:
         source.close()
         raise

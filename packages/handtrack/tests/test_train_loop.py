@@ -53,10 +53,13 @@ class FakeSource:
         return self.key
 
     def detnet_validation(self) -> DetNetValidation:
-        return DetNetValidation(torch.full((2, 2, 21, 2), 100.0), torch.ones(2, 2, 21, dtype=torch.bool), torch.zeros(2, dtype=torch.int64))
+        return DetNetValidation(torch.full((2, 2, 21, 2), 100.0), torch.ones(2, 2, 21, dtype=torch.bool), torch.zeros(2, dtype=torch.int64), torch.ones(2, 2, dtype=torch.bool))
 
     def keynet_validation(self) -> KeyNetValidation:
         return KeyNetValidation(torch.eye(3).repeat(2, 1, 1), torch.zeros(2, 21, 2), torch.zeros(2, 21))
+
+    def cancel(self) -> None:
+        pass
 
     def close(self) -> None:
         self.closed = True
@@ -141,7 +144,7 @@ def test_heatmap_warmup_uses_mean_for_its_epochs(tmp_path: Path) -> None:
 def test_mid_epoch_joint_resume_preserves_updates(tmp_path: Path) -> None:
     torch.manual_seed(9)
     source = InterruptSource(2, 3)
-    cadence = LoopSettings(epochs=1, checkpoint_every=1, keynet_steps_per_detnet_step=2, validate_every=0)
+    cadence = LoopSettings(epochs=1, checkpoint_every=1, keynet_steps_per_detnet_step=2, validate_every=0, resume_next_epoch=False)
     torch.manual_seed(42)
     interrupted = Trainer('both', DETNET_SGD, KEYNET_SGD, cadence, tmp_path / 'resume', 'cpu')
     source.trainer = interrupted
@@ -176,6 +179,9 @@ def test_validation_without_metadata_has_no_geometric_score(tmp_path: Path) -> N
         def next_keynet_batch(self) -> KeyNetBatch | None:
             return self.source.next_keynet_batch()
 
+        def cancel(self) -> None:
+            self.source.cancel()
+
         def close(self) -> None:
             self.source.close()
 
@@ -192,7 +198,7 @@ def test_best_checkpoint_uses_detection_score_and_exports_weights(tmp_path: Path
             points = torch.full((2, 2, 21, 2), 100.0)
             points[:, :, 0, 0] = 90.0
             points[:, :, 1, 0] = 110.0
-            return DetNetValidation(points, torch.ones(2, 2, 21, dtype=torch.bool), torch.zeros(2, dtype=torch.int64))
+            return DetNetValidation(points, torch.ones(2, 2, 21, dtype=torch.bool), torch.zeros(2, dtype=torch.int64), torch.ones(2, 2, dtype=torch.bool))
 
     trainer = Trainer('detnet', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1), tmp_path, 'cpu', max_val_batches=1)
     model = trainer.models['detnet']
@@ -231,3 +237,65 @@ def test_resume_next_epoch_skips_the_rest_of_the_interrupted_epoch(tmp_path: Pat
     # Epoch 1 runs in full from the source's first batch: 2 DetNet + 3 KeyNet steps, no replayed cursor.
     final = resumed.run(FakeSource(2, 3), FakeSource(1, 1))
     assert final.epoch == 2 and final.step == 2 + 5
+
+
+def test_resume_records_recipe_changes_and_applies_new_sgd(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from serde.json import to_json
+
+    from handtrack.apis.train import Config, StreamSettings
+    from handtrack.train.checkpoint import TrainingState, load_checkpoint, save_checkpoint
+
+    old = Config(nets='keynet', keynet=OptimiserSettings(0.004, 0.8), loop=LoopSettings(heatmap_reduction='pixel_sum'))
+    new = replace(old, keynet=OptimiserSettings(0.025, 0.7, 'cosine'),
+                  loop=LoopSettings(heatmap_reduction='mean', heatmap_warmup_epochs=1, presence_weight=2.0), stream=StreamSettings(seed=4))
+    trainer = Trainer('keynet', old.detnet, old.keynet, old.loop, tmp_path, 'cpu')
+    save_checkpoint(tmp_path / 'last.pt', trainer.models, trainer.optimisers, TrainingState(step=9, config_json=to_json(old)))
+    resumed = Trainer('keynet', new.detnet, new.keynet, new.loop, tmp_path, 'cpu', resume=True, config_json=to_json(new))
+    output = capsys.readouterr().out
+    for field in ('keynet.lr', 'keynet.momentum', 'keynet.schedule', 'loop.heatmap_reduction', 'loop.heatmap_warmup_epochs', 'loop.presence_weight', 'stream.seed'):
+        assert f'RECIPE CHANGE on resume at step 9: {field}:' in output
+    assert resumed.optimisers['keynet'].param_groups[0]['lr'] == 0.025
+    assert resumed.optimisers['keynet'].param_groups[0]['momentum'] == 0.7
+    assert resumed.state.history[-1].recipe_changes['keynet.lr'] == ('0.004', '0.025')
+    save_checkpoint(tmp_path / 'last.pt', resumed.models, resumed.optimisers, resumed.state)
+    assert load_checkpoint(tmp_path / 'last.pt', resumed.models, resumed.optimisers).history == resumed.state.history
+
+
+@pytest.mark.parametrize('during_validation', [False, True])
+def test_cancel_unblocks_wait_without_completing_epoch(tmp_path: Path, during_validation: bool) -> None:
+    import threading
+
+    class WaitingSource(FakeSource):
+        def __init__(self) -> None:
+            super().__init__(1, 0)
+            self.cancelled = threading.Event()
+
+        def cancel(self) -> None:
+            self.cancelled.set()
+
+        def wait(self) -> None:
+            trainer.handle_sigterm(signal.SIGTERM, None)
+            assert self.cancelled.wait(0.5), 'SIGTERM must cancel the blocked source'
+
+        def start_epoch(self, epoch: int) -> None:
+            super().start_epoch(epoch)
+            if during_validation:
+                self.wait()
+
+        def next_detnet_batch(self) -> DetNetBatch | None:
+            self.wait()
+            return None
+
+    trainer = Trainer('detnet', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1, validate_every=1), tmp_path, 'cpu')
+    waiting = WaitingSource()
+    other = WaitingSource()
+    source = FakeSource(1, 0) if during_validation else waiting
+    validation = waiting if during_validation else other
+    state = trainer.run(source, validation)
+    assert waiting.cancelled.is_set()
+    if not during_validation:
+        assert other.cancelled.is_set()
+    assert state.epoch == 0
+    assert state.step == int(during_validation)
+    assert source.closed and validation.closed
+    assert (tmp_path / 'last.pt.sha256').exists()

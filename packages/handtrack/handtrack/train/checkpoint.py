@@ -26,6 +26,8 @@ class MetricRecord:
     """Zero-based epoch."""
     values: dict[str, float | None]
     """Named scores; missing scores are null."""
+    recipe_changes: dict[str, tuple[str, str]] = field(default_factory=dict)
+    """Resume overrides as field -> (old, new); absent in legacy records."""
 
 
 @serde(deny_unknown_fields=True)
@@ -98,22 +100,55 @@ def read_disk(path: Path) -> bytes:
         return path.read_bytes()
 
 
-def save_archive(path: Path, payload: bytes) -> None:
-    """Write archive and SHA-256 sidecar, then verify the on-disk bytes.
+def verified_payload(path: Path) -> bytes:
+    """Read both persisted files and reject a mismatched digest."""
+    payload: bytes = read_disk(path)
+    expected: bytes = read_disk(Path(f'{path}.sha256')).strip()
+    if hashlib.sha256(payload).hexdigest().encode('ascii') != expected:
+        raise ValueError(f'SHA-256 mismatch for {path}')
+    return payload
 
-    A crash between the two replacements leaves a detectable mismatch. Readers
-    must not load files concurrently with a writer; a mismatched pair fails shut.
+
+def save_archive(path: Path, payload: bytes) -> None:
+    """Verify a staged pair, retain current as .prev, then publish the new pair.
+
+    Readers must not run concurrently with a writer. The archive/hex-sidecar
+    format is unchanged. A partial publication falls back to the previous pair.
     """
-    digest: str = hashlib.sha256(payload).hexdigest()
-    # One rewrite on a mismatch: this host's RAM flips page-cache bits now and then (a spurious mismatch showed up about
-    # once in ten test runs), and a long run must not die of one; a second mismatch still fails shut.
-    for attempt in (1, 2):
-        atomic_write(path, payload)
-        atomic_write(Path(f'{path}.sha256'), (digest + '\n').encode('ascii'))
-        if hashlib.sha256(read_disk(path)).hexdigest() == digest:
-            return
-        print(f'SHA-256 mismatch after writing {path} (attempt {attempt})', flush=True)
-    raise ValueError(f'SHA-256 mismatch after writing {path}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f'.{path.name}.', dir=path.parent) as directory:
+        staged: Path = Path(directory) / '.archive'
+        sidecar: Path = Path(f'{staged}.sha256')
+        digest: bytes = hashlib.sha256(payload).hexdigest().encode('ascii')
+        for attempt in (1, 2):
+            atomic_write(staged, payload)
+            atomic_write(sidecar, digest + b'\n')
+            try:
+                persisted: bytes = verified_payload(staged)
+                if hashlib.sha256(persisted).hexdigest().encode('ascii') != digest:
+                    raise ValueError(f'SHA-256 mismatch for {staged}')
+                break
+            except ValueError:
+                if attempt == 2:
+                    raise
+                print(f'SHA-256 mismatch after writing {path} (attempt {attempt})', flush=True)
+        try:
+            previous: bytes = verified_payload(path)
+        except (OSError, ValueError):
+            pass  # Preserve an existing fallback after interrupted publication.
+        else:
+            # Keep current intact until both previous files are durable.
+            backup: Path = Path(f'{path}.prev')
+            atomic_write(backup, previous)
+            atomic_write(Path(f'{backup}.sha256'), hashlib.sha256(previous).hexdigest().encode('ascii') + b'\n')
+            verified_payload(backup)
+        os.replace(staged, path)
+        os.replace(sidecar, Path(f'{path}.sha256'))
+        descriptor: int = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def save_checkpoint(path: Path, models: dict[str, nn.Module], optimisers: dict[str, Optimizer], state: TrainingState) -> None:
@@ -128,10 +163,18 @@ def save_checkpoint(path: Path, models: dict[str, nn.Module], optimisers: dict[s
 
 def load_checkpoint(path: Path, models: dict[str, nn.Module], optimisers: dict[str, Optimizer]) -> TrainingState:
     """Verify disk bytes before safe deserialization and restore RNG and SGD state."""
-    payload: bytes = read_disk(path)
-    expected: str = read_disk(Path(f'{path}.sha256')).decode('ascii').strip()
-    if hashlib.sha256(payload).hexdigest() != expected:
-        raise ValueError(f'SHA-256 mismatch for {path}')
+    try:
+        payload: bytes = verified_payload(path)
+    except (OSError, ValueError) as error:
+        previous: Path = Path(f'{path}.prev')
+        print(f'Checkpoint {path} failed verification: {error}; trying {previous}', flush=True)
+        try:
+            payload = verified_payload(previous)
+        except (OSError, ValueError):
+            raise error from None
+        print(f'Loading checkpoint {previous}', flush=True)
+    else:
+        print(f'Loading checkpoint {path}', flush=True)
     archive = torch.load(io.BytesIO(payload), map_location='cpu', weights_only=True)
     try:
         state: TrainingState = from_json(TrainingState, archive['metadata'])
