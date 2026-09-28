@@ -13,8 +13,9 @@ Producers hand chunks to the main thread through a bounded queue; the main threa
 network) and draws uniform random batches without replacement. All CUDA work runs on the default stream, so the pools
 need no cross-stream bookkeeping; producers synchronise before they publish a chunk.
 
-Pools never overwrite samples. In joint mode the trainer must check both readiness methods and consume whichever side
-is ready, adapting its requested ratio when the other pool applies backpressure. Only enabled pools are built.
+Pools apply backpressure without loss for readiness-driven consumers. In joint mode consume whichever side is ready
+and use wait_for_batch() only when neither is ready. A blocking next_* consumer that neglects the other full pool
+for 30 seconds triggers a counted oldest-sample overwrite, with one warning per stream. Only enabled pools are built.
 Producer exceptions are re-raised in the main thread by the next call.
 """
 
@@ -90,6 +91,10 @@ DECODE_CHUNK_PIXELS: int = 10_000_000
 Bounds each producer's transient memory (RGB output, resize in float) to about 0.1 GB."""
 MIN_BOX_RADIUS: float = 8.0
 """Our floor on a crop box's circle radius (net px), so a degenerate circle still gives a valid crop."""
+
+
+_BACKPRESSURE_TIMEOUT_S: float = 30.0
+"""Maximum continuous wait behind the other full pool before permitting loss."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +271,8 @@ class SamplePool[SampleT: (DetNetSamples, KeyNetSamples)]:
         self.overwritten: int = 0
         self._generator: torch.Generator = generator
         self._device: torch.device = storage.dataset.device
+        self._arrival: Int64[Tensor, "capacity"] = torch.empty(self.capacity, dtype=torch.int64, device=self._device)
+        self._sequence: int = 0
 
     def _write(self, slots: Int64[Tensor, "m"], samples: SampleT) -> None:
         for f in dataclasses.fields(self.storage):
@@ -278,6 +285,8 @@ class SamplePool[SampleT: (DetNetSamples, KeyNetSamples)]:
             raise ValueError("sample pool is full")
         for f in dataclasses.fields(self.storage):
             getattr(self.storage, f.name)[self.count : self.count + incoming] = getattr(samples, f.name)
+        self._arrival[self.count : self.count + incoming] = torch.arange(self._sequence, self._sequence + incoming, device=self._device)
+        self._sequence += incoming
         self.count += incoming
 
     def draw(self, n: int) -> SampleT:
@@ -292,11 +301,24 @@ class SamplePool[SampleT: (DetNetSamples, KeyNetSamples)]:
         holes: Int64[Tensor, "m"] = chosen[chosen < boundary]
         if holes.numel():
             self._write(holes, select_samples(self.storage, movers))
+            self._arrival[holes] = self._arrival[movers]
         self.count = boundary
         return drawn
 
+    def discard_oldest(self, n: int) -> None:
+        """Free n slots for the stalled-consumer safety valve, preserving arrival order through shuffles."""
+        if not 0 <= n <= self.count:
+            raise ValueError(f"cannot discard {n} of {self.count} samples")
+        keep: Int64[Tensor, "m"] = self._arrival[:self.count].argsort()[n:]
+        slots: Int64[Tensor, "m"] = torch.arange(self.count - n, device=self._device)
+        self._write(slots, select_samples(self.storage, keep))
+        self._arrival[slots] = self._arrival[keep]
+        self.count -= n
+        self.overwritten += n
+
     def clear(self) -> None:
         self.count = 0
+        self._sequence = 0
 
 
 # --- building samples from one chunk of letterboxed images ------------------------------------------------------
@@ -693,6 +715,7 @@ class CatalogStream:
             SamplePool(empty_keynet_samples(config.keynet_buffer, self.device), self._generator) if self._keynet_on and training else None
         )
         self._pending: _Chunk | None = None
+        self._warned_backpressure: bool = False
         self._evaluation_heaps: list[list[tuple[int, tuple[int, int, int, int], int]]] = [[], []]
         """Per-network priority heaps, bounded by validation_samples."""
         self._evaluation: tuple[DetNetSamples | None, KeyNetSamples | None] | None = None
@@ -874,6 +897,7 @@ class CatalogStream:
         )
 
     def detnet_ready(self) -> bool:
+        """True when next_detnet_batch can draw without waiting (including a partial batch)."""
         self._raise_if_failed()
         if self._stop.is_set():
             return False
@@ -884,6 +908,7 @@ class CatalogStream:
         return self._ready(self._require(self._detnet_pool), self.config.detnet_batch_size)
 
     def keynet_ready(self) -> bool:
+        """True when next_keynet_batch can draw without waiting (including a partial batch)."""
         self._raise_if_failed()
         if self._stop.is_set():
             return False
@@ -892,6 +917,24 @@ class CatalogStream:
             samples = self._evaluation[1]
             return samples is not None and self._cursor[1] < sample_count(samples)
         return self._ready(self._require(self._keynet_pool), self.config.keynet_batch_size)
+
+    def wait_for_batch(self) -> bool:
+        """Wait for either enabled pool; False means exhaustion or cancellation.
+
+        Joint consumers must recheck readiness after each draw. This wait never
+        waits for one particular network and never discards samples.
+        """
+        while not self._stop.is_set():
+            produced: bool = self._epoch_produced()
+            if (self._detnet_on and self.detnet_ready()) or (self._keynet_on and self.keynet_ready()):
+                return True
+            if self._evaluation is not None or (produced and self._pending is None and self._queue.empty()):
+                return False
+            start: float = time.perf_counter()
+            self._drain(0.1)
+            self.stats.wait_s += time.perf_counter() - start
+        self._raise_if_failed()
+        return False
 
     def detnet_validation(self) -> DetNetValidation:
         """Exact GT of the last DetNet batch (net-frame keypoints, in-front flags, camera ids); does not advance."""
@@ -1015,6 +1058,8 @@ class CatalogStream:
         return pool.count > 0 and (produced or self._pending is not None or pool.count >= self._threshold(pool.capacity, batch))
 
     def _next_samples[SampleT: (DetNetSamples, KeyNetSamples)](self, pool: SamplePool[SampleT], batch: int) -> SampleT | None:
+        blocked_since: float | None = None
+        other: SamplePool[DetNetSamples] | SamplePool[KeyNetSamples] | None = self._keynet_pool if pool is self._detnet_pool else self._detnet_pool
         while not self._stop.is_set():
             # Read "produced" before draining: a producer queues its last chunk before it counts the segment done.
             produced: bool = self._epoch_produced()
@@ -1024,7 +1069,24 @@ class CatalogStream:
             if produced and self._pending is None and self._queue.empty():
                 return None
             start: float = time.perf_counter()
-            self._drain(0.5)
+            if self._pending is not None and other is not None and other.count == other.capacity:
+                now: float = time.monotonic()
+                if blocked_since is None:
+                    blocked_since = now
+                if now - blocked_since >= _BACKPRESSURE_TIMEOUT_S:
+                    remainder: DetNetSamples | KeyNetSamples | None = self._pending.keynet if other is self._keynet_pool else self._pending.detnet
+                    if remainder is not None:
+                        other.discard_oldest(min(other.count, sample_count(remainder)))
+                        if not self._warned_backpressure:
+                            print("[catalog stream] WARNING: backpressure safety valve overwriting oldest samples in the other full pool; consume both ready pools", file=sys.stderr, flush=True)
+                            self._warned_backpressure = True
+                        blocked_since = now
+                else:
+                    # _drain returns immediately under backpressure; avoid a busy loop.
+                    self._stop.wait(min(0.1, _BACKPRESSURE_TIMEOUT_S - (now - blocked_since)))
+            else:
+                blocked_since = None
+            self._drain(0.1)
             self.stats.wait_s += time.perf_counter() - start
         self._raise_if_failed()
         return None
