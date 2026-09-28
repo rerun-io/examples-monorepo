@@ -19,7 +19,7 @@ from handtrack.labels.keypoint_input import relative_distances
 MAX_VIEWS: int = 2
 """KeyNet runs on at most two views per hand (§5.1)."""
 DIST_REFERENCE: int = int(LANDMARK.WRIST_JOINT)
-"""p_0 of E_dist, the keypoint the relative distances are measured from; the paper does not name it."""
+"""Preferred p_0 of E_dist: the wrist, with the palm centre used per view when the wrist is unobserved."""
 
 
 @dataclass(frozen=True, slots=True)
