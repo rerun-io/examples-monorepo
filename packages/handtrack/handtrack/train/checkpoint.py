@@ -49,9 +49,9 @@ class TrainingState:
 def atomic_write(path: Path, payload: bytes) -> None:
     """Fsync bytes in the destination directory, replace, then fsync the directory."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor: int
-    temporary: str
-    descriptor, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+    created: tuple[int, str] = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+    descriptor: int = created[0]
+    temporary: str = created[1]
     try:
         with os.fdopen(descriptor, 'wb') as stream:
             stream.write(payload)

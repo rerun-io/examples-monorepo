@@ -4,7 +4,7 @@ import pytest
 pytest.importorskip('torch', reason='requires handtrack environment')
 import torch
 
-from handtrack.eval.metrics import detection_metrics
+from handtrack.eval.metrics import detection_metrics, keynet_metrics, pipeline_metrics, tracking_metrics
 
 
 def test_detection_rule() -> None:
@@ -23,7 +23,6 @@ def test_detection_rule() -> None:
 
 
 def test_keypoint_pipeline_and_tracking() -> None:
-    from handtrack.eval.metrics import keynet_metrics, pipeline_metrics, tracking_metrics
     xy = torch.zeros(2, 21, 2)
     pred = xy.clone()
     pred[0, :, 0] = 3.0
@@ -60,7 +59,6 @@ def test_presence_threshold_and_behind_camera_points() -> None:
 
 
 def test_tracking_censored_drop_and_empty_metrics() -> None:
-    from handtrack.eval.metrics import pipeline_metrics, tracking_metrics
     result = tracking_metrics(torch.tensor([True, False, False]), torch.tensor([True, True, True]))
     assert result.acquire_frames == (0,)
     assert result.drop_frames == (None,)
@@ -70,7 +68,6 @@ def test_tracking_censored_drop_and_empty_metrics() -> None:
 
 
 def test_acceleration_and_mirrored_crop() -> None:
-    from handtrack.eval.metrics import keynet_metrics, pipeline_metrics
     trajectory = torch.zeros(3, 1, 21, 3)
     trajectory[2, :, :, 0] = 0.002
     result = pipeline_metrics(trajectory, trajectory, torch.ones(3, 1, dtype=torch.bool))
