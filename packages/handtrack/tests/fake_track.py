@@ -11,9 +11,10 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Int8, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 
 from handtrack.geometry.camera import CameraRig
-from handtrack.rerun_layers import GroundTruth, camera_pixels, enclosing_squares, generic_numpy_model, gt_landmarks, skinned_landmarks
+from handtrack.rerun_layers import GroundTruth, camera_pixels, enclosing_squares, generic_numpy_model, gt_landmarks, inside_images, skinned_landmarks
 from handtrack.results import BoxSource, SegmentTrack, TrackMetadata
 
 FAKE_PRESENCE: float = 0.9
@@ -21,21 +22,11 @@ BOX_ENLARGE: float = 1.2
 """The KeyNet crop's +20 %."""
 
 
-def rotation_about(axis: int, angle: float) -> Float32[ndarray, "3 3"]:
-    c: float = float(np.cos(angle))
-    s: float = float(np.sin(angle))
-    i: int = (axis + 1) % 3
-    j: int = (axis + 2) % 3
-    matrix: Float32[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
-    matrix[i, i], matrix[i, j], matrix[j, i], matrix[j, j] = c, -s, s, c
-    return matrix
-
-
 def synthetic_rig() -> CameraRig:
     """Four 636x480 equidistant fisheyes looking along +z, toed out left/right and tilted down/up like UmeTrack's headset."""
     cam_from_rig: Float32[ndarray, "4 4 4"] = np.tile(np.eye(4, dtype=np.float32), (4, 1, 1))
     for index, (yaw, pitch) in enumerate([(-0.5, 0.0), (-0.15, 0.35), (0.15, 0.35), (0.5, 0.0)]):
-        cam_from_rig[index, :3, :3] = rotation_about(0, pitch) @ rotation_about(1, yaw)
+        cam_from_rig[index, :3, :3] = Rotation.from_euler("yx", [yaw, pitch]).as_matrix()  # R_x(pitch) @ R_y(yaw)
         cam_from_rig[index, :3, 3] = [0.03 * (index - 1.5), 0.0, 0.0]
     return CameraRig(
         names=tuple(f"/world/rig_00/cam_{index:02}" for index in range(4)),
@@ -53,7 +44,7 @@ def synthetic_truth(num_frames: int, *, segment: str = "umetrack__synthetic__tes
     translation: Float32[ndarray, "f 2 3"] = np.zeros((num_frames, 2, 3), dtype=np.float32)
     translation[:, 0] = np.stack([-0.08 + 0.03 * np.sin(6 * t), 0.08 + 0.0 * t, 0.3 + 0.0 * t], axis=-1)
     translation[:, 1] = np.stack([0.08 - 0.03 * np.sin(6 * t), 0.08 + 0.0 * t, 0.3 + 0.0 * t], axis=-1)
-    rotation: Float32[ndarray, "f 2 3 3"] = np.tile(rotation_about(0, -1.2), (num_frames, 2, 1, 1))
+    rotation: Float32[ndarray, "f 2 3 3"] = np.tile(Rotation.from_euler("x", -1.2).as_matrix().astype(np.float32), (num_frames, 2, 1, 1))
     joint_angles: Float32[ndarray, "f 2 22"] = np.tile(np.linspace(0.0, 0.4, 22, dtype=np.float32), (num_frames, 2, 1))
     present: Bool[ndarray, "f 2"] = np.ones((num_frames, 2), dtype=bool)
     present[int(num_frames * 0.8) :, 1] = False
@@ -87,8 +78,7 @@ def fake_track(truth: GroundTruth, *, seed: int = 0, drop: tuple[float, float] =
     landmarks: Float32[ndarray, "f 2 21 3"] = skinned_landmarks(truth.model, truth.rotation, translation, joint_angles, tracked)
     gt_pixels: Float32[ndarray, "f 4 2 21 2"] = camera_pixels(truth.rig, truth.world_from_rig, gt_landmarks(truth))
     pred_pixels: Float32[ndarray, "f 4 2 21 2"] = camera_pixels(truth.rig, truth.world_from_rig, landmarks)
-    size: Float32[ndarray, "4 1 1 2"] = truth.rig.image_size.numpy()[:, None, None, :]
-    inside: Bool[ndarray, "f 4 2 21"] = np.isfinite(gt_pixels).all(-1) & (gt_pixels >= 0).all(-1) & (gt_pixels < size).all(-1)
+    inside: Bool[ndarray, "f 4 2 21"] = inside_images(truth.rig, gt_pixels)
     counts: Int64[ndarray, "f 4 2"] = inside.sum(-1)
     box: Float32[ndarray, "f 4 2 4"] = enclosing_squares(gt_pixels, inside, enlarge=BOX_ENLARGE)
     seen: Bool[ndarray, "f 4 2"] = tracked[:, None, :] & (counts > 0)
@@ -138,8 +128,7 @@ def fake_detnet(truth: GroundTruth, *, seed: int = 1) -> SegmentTrack:
     """DetNet alone on every frame and camera: the GT box +20 % wherever a hand has a keypoint inside, presence 0.9 (0.1 elsewhere)."""
     base: SegmentTrack = fake_track(truth, seed=seed, drop=(0.0, 0.0))
     gt_pixels: Float32[ndarray, "f 4 2 21 2"] = camera_pixels(truth.rig, truth.world_from_rig, gt_landmarks(truth))
-    size: Float32[ndarray, "4 1 1 2"] = truth.rig.image_size.numpy()[:, None, None, :]
-    inside: Bool[ndarray, "f 4 2 21"] = np.isfinite(gt_pixels).all(-1) & (gt_pixels >= 0).all(-1) & (gt_pixels < size).all(-1)
+    inside: Bool[ndarray, "f 4 2 21"] = inside_images(truth.rig, gt_pixels)
     seen: Bool[ndarray, "f 4 2"] = inside.any(-1)
     box: Float32[ndarray, "f 4 2 4"] = enclosing_squares(gt_pixels, inside, enlarge=BOX_ENLARGE)
     box[~seen] = np.nan
