@@ -3,7 +3,8 @@
 E(θ) = E_2D + w_1·E_dist + w_2·E_temporal, with
 
 - E_2D = Σ_ij w_ij ‖Π_j(p_i(θ)) − p̂_ij‖², in pixels of each camera's own image, Π_j its own lens model;
-- E_dist = Σ_ij w_ij w_0j ((dist_j(p_i) − dist_j(p_0)) − ϕ·(d̂_ij − d̂_0j))², in millimetres, p_0 the wrist;
+- E_dist = Σ_ij w_ij w_0j ((dist_j(p_i) − dist_j(p_0)) − ϕ·(d̂_ij − d̂_0j))², in millimetres;
+  p_0 is the wrist when observed, otherwise the palm centre; neither observed means no distance terms for that view.
 - E_temporal = ‖θ − θ(t−1)‖², a constant-position prior: the wrist rotation as the chordal distance ½‖R − R(t−1)‖²_F
   (≈ the squared angle in radians), the wrist translation in ``Problem.temporal_translation_unit_m``, the joint angles in radians.
 
@@ -19,7 +20,7 @@ from dataclasses import dataclass, replace
 
 import torch
 from jaxtyping import Bool, Float32, Float64, Int64
-from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch, hat
+from simplecv.umetrack_temp.generic_hand_model_torch import LANDMARK, HandModelTorch, hat
 from torch import Tensor
 
 from handtrack.fit.observations import DIST_REFERENCE, MAX_VIEWS, HandObservation, ViewObservation
@@ -240,10 +241,12 @@ def residuals(problem: Problem, theta: Theta, delta: Float32[Tensor, "f b 27"]) 
     pixels: Float32[Tensor, "f b 2 21 2"] = project(views.cameras, points_cam.reshape(f, b * MAX_VIEWS, 21, 3)).reshape(f, b, MAX_VIEWS, 21, 2)
     two_d: Float32[Tensor, "f b 2 21 2"] = views.weights.sqrt()[..., None] * (pixels - views.keypoints_px)
     distance_mm: Float32[Tensor, "f b 2 21"] = points_cam.norm(dim=-1) * 1000.0
-    reference: int = DIST_REFERENCE
-    model_mm: Float32[Tensor, "f b 2 21"] = distance_mm - distance_mm[..., reference : reference + 1]
-    observed_mm: Float32[Tensor, "b 2 21"] = problem.phi * (views.d_rel_mm - views.d_rel_mm[..., reference : reference + 1])
-    dist_weight: Float32[Tensor, "b 2 21"] = problem.dist_weight * views.weights * views.weights[..., reference : reference + 1]
+    reference: Int64[Tensor, "b 2 1"] = torch.where(
+        views.weights[..., DIST_REFERENCE : DIST_REFERENCE + 1] > 0, DIST_REFERENCE, int(LANDMARK.PALM_CENTER)
+    )
+    model_mm: Float32[Tensor, "f b 2 21"] = distance_mm - distance_mm.gather(-1, reference.expand(f, b, MAX_VIEWS, 1))
+    observed_mm: Float32[Tensor, "b 2 21"] = problem.phi * (views.d_rel_mm - views.d_rel_mm.gather(-1, reference))
+    dist_weight: Float32[Tensor, "b 2 21"] = problem.dist_weight * views.weights * views.weights.gather(-1, reference)
     dist: Float32[Tensor, "f b 2 21"] = dist_weight.sqrt() * (model_mm - observed_mm)
     prior: Prior = problem.prior
     temporal: Float32[Tensor, "f b 32"] = (
