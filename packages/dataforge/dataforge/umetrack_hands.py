@@ -63,15 +63,17 @@ def log_hand_meshes(
     *,
     times_ns: Int64[ndarray, "n"],
     frame_indices: Int64[ndarray, "n"],
+    path: str | None = None,
 ) -> None:
     """Log the static albedo, then skin trusted rows in bounded batches (topology rides on each batch).
 
     Wrists are world-from-wrist in millimetres; untrusted rows are ignored and written
-    as empty meshes so the viewer's latest-at never holds a stale hand.
+    as empty meshes so the viewer's latest-at never holds a stale hand. ``path`` defaults
+    to the ground-truth mesh entity; a predicted hand passes its own.
     """
-    path: str = schema.hand_mesh_path(side.name)
+    entity: str = schema.hand_mesh_path(side.name) if path is None else path
     faces: UInt32[ndarray, "f 3"] = np.asarray(model.mesh_triangles, dtype=np.uint32)
-    meshes.log_mesh_static(recording, path, albedo_factor=hands.HAND_ALBEDO[side.name])
+    meshes.log_mesh_static(recording, entity, albedo_factor=hands.HAND_ALBEDO[side.name])
     for start in range(0, len(trusted), SKINNING_BATCH_SIZE):
         batch: slice = slice(start, start + SKINNING_BATCH_SIZE)
         keep: Bool[ndarray, "b"] = trusted[batch]
@@ -79,6 +81,6 @@ def log_hand_meshes(
         if keep.any():
             vertices = skin_mesh(model, angles[batch][keep], wrist_for_hand(wrists[batch][keep], side.model_index)) * np.float32(0.001)
         meshes.log_mesh_batch(
-            recording, path, times_ns=times_ns[batch], frame_indices=frame_indices[batch], vertices=vertices, trusted=keep.tolist(),
+            recording, entity, times_ns=times_ns[batch], frame_indices=frame_indices[batch], vertices=vertices, trusted=keep.tolist(),
             topology=faces,
         )

@@ -37,6 +37,8 @@ paths = ["handtrack", "tests"]
 ignore_names = [
     # Tracker: serialized record fields (metrics JSON, SegmentTrack npz keys read by the Rerun layers).
     "gt_frames", "tracked_frames", "keypoints_2d",
+    # pyserde metadata field of results.TrackMetadata.
+    "timings_s",
     # Serialized logs and Tyro/source-facing fields consumed outside this package (W3 trainer).
     "datasets", "segment_ids", "gpu_memory_bytes", "gpu_peak_memory_bytes",
     "CropKind", "POSITIVE", "DRIFT", "EDGE", "OTHER_HAND", "BACKGROUND",
