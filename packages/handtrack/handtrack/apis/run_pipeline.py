@@ -30,7 +30,16 @@ from serde.json import to_json
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 
 from handtrack.data.catalog import CATALOG_URL, UMETRACK, SegmentInfo, list_segments, select_split
-from handtrack.eval.segment import DetectionScore, DetNetAloneMetrics, HandScore, PositionScore, SegmentMetrics, score_detnet_alone, score_track
+from handtrack.eval.segment import (
+    DetectionScore,
+    DetNetAloneMetrics,
+    HandScore,
+    PositionScore,
+    SegmentMetrics,
+    TrackingScore,
+    score_detnet_alone,
+    score_track,
+)
 from handtrack.fit.observations import HandObservation
 from handtrack.fit.scale import ScaleCalibration, calibrate_scale, scaled_hand_model
 from handtrack.hand.pose import HandPose, generic_hand_model
@@ -141,6 +150,11 @@ def file_sha256(path: Path) -> str:
 
 def metrics_path(directory: Path, segment: str) -> Path:
     return directory / f"{segment}.metrics.json"
+
+
+def format_number(value: float | None, digits: int = 1) -> str:
+    """A score for a log line or a table cell; an unscored one is a dash."""
+    return "–" if value is None else f"{value:.{digits}f}"
 
 
 def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTruthViews, phi: float) -> KeypointEstimator:
@@ -269,9 +283,7 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
         track: SegmentTrack = segment_track(data, run, meta)
         directory: Path = root / mode
         npz: Path = save_track(track, directory)
-        position: tuple[PositionScore, list[HandScore], list[DetectionScore], list[DetectionScore]] = score_track(
-            track, data.labels, data.letterboxes
-        )
+        scored: tuple[PositionScore, list[HandScore], list[DetectionScore], list[DetectionScore]] = score_track(track, data.labels, data.letterboxes)
         metrics: SegmentMetrics = SegmentMetrics(
             segment=info.segment_id,
             domain=info.domain,
@@ -283,10 +295,10 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
             keypoints=config.keypoints,
             detnet_sha256=networks.detnet_sha256,
             keynet_sha256=networks.keynet_sha256,
-            position=position[0],
-            hands=position[1],
-            detnet_with_tracking=position[2],
-            detnet_with_tracking_crop=position[3],
+            position=scored[0],
+            hands=scored[1],
+            detnet_with_tracking=scored[2],
+            detnet_with_tracking_crop=scored[3],
             keynet_views=int(np.isfinite(track.presence).sum()),
             detnet_runs=int((track.detnet_camera >= 0).sum()),
             track_sha256=file_sha256(npz),
@@ -302,25 +314,21 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
 
 def summary_lines(metrics: SegmentMetrics) -> list[str]:
     """Five lines for a progress log."""
-
-    def number(value: float | None, digits: int = 1) -> str:
-        return "-" if value is None else f"{value:.{digits}f}"
-
     lines: list[str] = [
         f"{metrics.segment} [{metrics.hand_mode}, phi {metrics.hand_scale:.3f} ({metrics.calibration_note}), {metrics.frames} frames, {metrics.detector}/{metrics.keypoints}]",
-        f"  MKPE {number(metrics.position.mkpe_mm)} mm, MKA {number(metrics.position.mka_mm, 2)} (GT {number(metrics.position.mka_gt_mm, 2)}) mm/frame², scored keypoints {metrics.position.keypoints}",
+        f"  MKPE {format_number(metrics.position.mkpe_mm)} mm, MKA {format_number(metrics.position.mka_mm, 2)} (GT {format_number(metrics.position.mka_gt_mm, 2)}) mm/frame², scored keypoints {metrics.position.keypoints}",
     ]
     for hand in metrics.hands:
-        tracking = hand.tracking
+        tracking: TrackingScore = hand.tracking
         lines.append(
-            f"  {hand.side}: MKPE {number(hand.position.mkpe_mm)} mm, tracked {tracking.visible_tracked_frames}/{tracking.visible_frames} visible"
-            f" ({number(tracking.visible_tracked_fraction, 3)}), acquire {tracking.acquire_frames}, drops {tracking.drop_frames}, tracked w/o hand {tracking.tracked_without_hand}"
+            f"  {hand.side}: MKPE {format_number(hand.position.mkpe_mm)} mm, tracked {tracking.visible_tracked_frames}/{tracking.visible_frames} visible"
+            f" ({format_number(tracking.visible_tracked_fraction, 3)}), acquire {tracking.acquire_frames}, drops {tracking.drop_frames}, tracked w/o hand {tracking.tracked_without_hand}"
         )
     lines.append(
         "  DetNet P/R with tracking per camera: "
-        + ", ".join(f"cam{s.camera} {number(s.precision, 2)}/{number(s.recall, 2)}" for s in metrics.detnet_with_tracking)
+        + ", ".join(f"cam{s.camera} {format_number(s.precision, 2)}/{format_number(s.recall, 2)}" for s in metrics.detnet_with_tracking)
         + " (in the x1.2 crop: "
-        + ", ".join(f"{number(s.precision, 2)}/{number(s.recall, 2)}" for s in metrics.detnet_with_tracking_crop)
+        + ", ".join(f"{format_number(s.precision, 2)}/{format_number(s.recall, 2)}" for s in metrics.detnet_with_tracking_crop)
         + ")"
         + f"; {metrics.keynet_views} KeyNet crops, {metrics.detnet_runs} DetNet runs, {metrics.timings_s['total']:.1f} s"
     )

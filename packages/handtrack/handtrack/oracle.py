@@ -89,12 +89,12 @@ class OracleKeypoints:
         )
 
 
+@dataclass(frozen=True, slots=True)
 class KeyNetOnTruthBoxes:
     """A keypoint estimator that sends every requested view to KeyNet on its ground-truth crop box; falls back to the tracker's crop without one."""
 
-    def __init__(self, truth: GroundTruthViews, keynet: KeypointEstimator) -> None:
-        self.truth: GroundTruthViews = truth
-        self.keynet: KeypointEstimator = keynet
+    truth: GroundTruthViews
+    keynet: KeypointEstimator
 
     def __call__(self, images: UInt8[Tensor, "c 480 640"], frame: int, request: CropRequest) -> KeypointEstimate:
         circle: Float32[Tensor, "n 3"] = self.truth.circles[frame, request.camera, request.side]

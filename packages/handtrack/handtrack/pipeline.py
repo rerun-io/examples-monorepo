@@ -20,17 +20,18 @@ from jaxtyping import Bool, Float32, Int8, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
 from torch import Tensor, nn
-from torchcodec.decoders import VideoDecoder
 
 from handtrack.data.catalog import TIMELINE, HandTimeline, SegmentInfo, is_show3d, layout_for, read_hand_timeline, read_rig, read_statics
 from handtrack.data.segment_labels import SegmentLabels, segment_labels
+from handtrack.data.stream import FrameDecoder, open_nvdec_decoder
 from handtrack.geometry.camera import CameraRig
 from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH, Letterbox
+from handtrack.hand.pose import HandPose
 from handtrack.models.detnet import Detections
 from handtrack.results import BoxSource, SegmentTrack, TrackMetadata
 from handtrack.tracker import DetNetDetector, FrameResult, Tracker
+from handtrack.train.checkpoint import read_disk
 
 DECODE_CHUNK: int = 32
 """Timeline rows per decode call and camera."""
@@ -72,18 +73,11 @@ def net_frames(data: SegmentData, frames: int, device: torch.device) -> Iterator
     A camera without a video frame at a row's time gives a black image there.
     """
     times: Int64[ndarray, "f"] = data.timeline.video_time_ns[:frames]
-    decoders: list[VideoDecoder] = []
+    decoders: list[FrameDecoder] = []
     positions: list[Int64[ndarray, "f"]] = []
     matched: list[Bool[ndarray, "f"]] = []
     for video in data.videos:
-        decoders.append(
-            VideoDecoder(
-                wrap_mp4(video.samples, video.keyframes, data.info.fps, codec=video.codec),
-                device=str(device),
-                seek_mode="exact",
-                num_ffmpeg_threads=0,
-            )
-        )
+        decoders.append(open_nvdec_decoder(video, data.info.fps, device))
         position: Int64[ndarray, "f"] = np.clip(np.searchsorted(video.t_ns, times), 0, len(video.t_ns) - 1)
         positions.append(position)
         matched.append(video.t_ns[position] == times)
@@ -182,20 +176,11 @@ def segment_track(data: SegmentData, run: TrackerRun, meta: TrackMetadata) -> Se
     """The tracker's frames as the per-segment record (camera pixels)."""
     frames: list[FrameResult] = run.frames
     f: int = len(frames)
-    nan_pose: tuple[Float32[Tensor, "3 3"], Float32[Tensor, "3"], Float32[Tensor, "22"]] = (
-        torch.full((3, 3), torch.nan),
-        torch.full((3,), torch.nan),
-        torch.full((22,), torch.nan),
-    )
-    rotation: Float32[Tensor, "f 2 3 3"] = torch.stack(
-        [torch.stack([nan_pose[0] if pose is None else pose.rotation for pose in frame.poses]) for frame in frames]
-    )
-    translation: Float32[Tensor, "f 2 3"] = torch.stack(
-        [torch.stack([nan_pose[1] if pose is None else pose.translation for pose in frame.poses]) for frame in frames]
-    )
-    joint_angles: Float32[Tensor, "f 2 22"] = torch.stack(
-        [torch.stack([nan_pose[2] if pose is None else pose.joint_angles for pose in frame.poses]) for frame in frames]
-    )
+    untracked: HandPose = HandPose(torch.full((3, 3), torch.nan), torch.full((3,), torch.nan), torch.full((22,), torch.nan))
+    poses: list[list[HandPose]] = [[untracked if pose is None else pose for pose in frame.poses] for frame in frames]
+    rotation: Float32[Tensor, "f 2 3 3"] = torch.stack([torch.stack([pose.rotation for pose in row]) for row in poses])
+    translation: Float32[Tensor, "f 2 3"] = torch.stack([torch.stack([pose.translation for pose in row]) for row in poses])
+    joint_angles: Float32[Tensor, "f 2 22"] = torch.stack([torch.stack([pose.joint_angles for pose in row]) for row in poses])
     keypoints_net: Float32[Tensor, "f c 2 21 2"] = torch.stack([frame.keypoints for frame in frames])
     keypoints_cam: Float32[Tensor, "f c 2 21 2"] = torch.stack(
         [letterbox.from_net(keypoints_net[:, camera]) for camera, letterbox in enumerate(data.letterboxes)], dim=1
@@ -246,18 +231,15 @@ def detnet_alone_track(data: SegmentData, alone: DetNetAlone, meta: TrackMetadat
 
 
 def load_weights(model: nn.Module, path: Path) -> str:
-    """Load a model-only state_dict after checking its ``.sha256`` sidecar; returns the digest.
+    """Load a model-only state_dict after checking its ``<file>.sha256`` sidecar (the checkpoint writer's and
+    ``promote.sh``'s convention); returns the digest.
 
-    The sidecar is ``<file>.sha256`` (W3's checkpoint writer) or ``<stem>.sha256``. The bytes are read once and loaded
-    from memory, so a checkpoint replaced during a run cannot mix two versions.
+    Both files are read once through ``read_disk`` (O_DIRECT, as the checkpoint reader does) and the state_dict is
+    loaded from those bytes, so a checkpoint replaced during a run cannot mix two versions.
     """
-    payload: bytes = path.read_bytes()
+    payload: bytes = read_disk(path)
     digest: str = hashlib.sha256(payload).hexdigest()
-    candidates: list[Path] = [Path(f"{path}.sha256"), path.with_suffix(".sha256")]
-    sidecar: Path | None = next((candidate for candidate in candidates if candidate.exists()), None)
-    if sidecar is None:
-        raise FileNotFoundError(f"{path}: no .sha256 sidecar ({candidates[0].name} or {candidates[1].name})")
-    expected: str = sidecar.read_text().split()[0].strip()
+    expected: str = read_disk(Path(f"{path}.sha256")).decode("ascii").split()[0]
     if digest != expected:
         raise ValueError(f"{path}: sha256 {digest} does not match its sidecar {expected}")
     model.load_state_dict(torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True))
