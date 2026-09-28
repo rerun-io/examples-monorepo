@@ -34,3 +34,11 @@ def test_landmarks_match_simplecv_numpy_skinning_for_both_hands() -> None:
         expected: np.ndarray = skin_landmarks_numpy(numpy_model, angles.numpy(), wrist_for_hand(wrist, int(side))) / 1000.0
         np.testing.assert_allclose(landmarks(model, pose, side).numpy(), expected, atol=1e-6)
     assert landmarks(model, pose, Side.LEFT).shape == (21, 3)
+
+
+def test_profile_reader_accepts_bare_and_enveloped_models() -> None:
+    from handtrack.hand.pose import hand_model_from_profile
+
+    bare: str = GENERIC_HAND_MODEL.read_text()
+    for text in (bare, '{"hand_model":' + bare + "}"):
+        torch.testing.assert_close(hand_model_from_profile(text).landmark_rest_positions, generic_hand_model().landmark_rest_positions)
