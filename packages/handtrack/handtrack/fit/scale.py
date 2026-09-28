@@ -42,6 +42,7 @@ from handtrack.fit.solver import (
     retract,
     stack_views,
     theta_from_poses,
+    undamped_inverse,
 )
 from handtrack.hand.pose import HandPose
 
@@ -82,7 +83,7 @@ class ScaleCalibration:
     iterations: int
     """LM iterations run."""
     converged: bool
-    """True only when the convergence tolerance was reached."""
+    """True when the convergence tolerance was reached or damping stopped at a stationary solution."""
     termination: Termination = "iterations"
     """Why the solve stopped; non-finite energy returns NaN phi and converged=False."""
 
@@ -182,7 +183,32 @@ def calibrate_scale(
             termination = "tolerance"
             break
         if damping > MAX_DAMPING:
-            termination = "damping"
+            # Recompute at the retained solution: the last step may have been accepted.
+            hessian, gradient, mask = normal_equations(theta, residual, jacobian, free, limits)
+            pose_block = hessian[:, :POSE_PARAMETERS, :POSE_PARAMETERS]
+            coupling = hessian[:, :POSE_PARAMETERS, POSE_PARAMETERS]
+            pose_mask = mask[:, :POSE_PARAMETERS]
+            scaling = marquardt_scaling(torch.diagonal(pose_block, dim1=1, dim2=2), pose_mask)
+            inverse: Float64[Tensor, "n 26 26"] = undamped_inverse(pose_block, pose_mask)
+            solved = inverse @ torch.stack([coupling, gradient[:, :POSE_PARAMETERS]], dim=-1)
+            scale_curvature = float(hessian[:, POSE_PARAMETERS, POSE_PARAMETERS].sum())
+            scale_gradient: float = float(gradient[:, POSE_PARAMETERS].sum())
+            schur = scale_curvature - float((coupling * solved[..., 0]).sum())
+            gn_prediction: float = math.inf
+            if schur > torch.finfo(torch.float64).eps * scale_curvature:
+                scale_step = (-scale_gradient + float((coupling * solved[..., 1]).sum())) / schur
+                pose_step = -(solved[..., 1] + solved[..., 0] * scale_step)
+                step = torch.cat([pose_step, torch.full((n, 1), scale_step, dtype=torch.float64)], dim=-1)
+                candidate = retract(theta, step.to(torch.float32), limits)
+                gn_prediction = float(predicted_reduction(theta, candidate, free, step, hessian, gradient).sum())
+            scaled_gradient_sq: float = max(
+                float((gradient[:, :POSE_PARAMETERS].square() / scaling).amax()),
+                scale_gradient**2 / max(scale_curvature, 1e-30),
+            )
+            # The residuals are float32: a gradient whose squared normalized size is
+            # below their energy resolution cannot justify another energy-decreasing step.
+            converged = abs(gn_prediction) <= config.relative_tolerance * energy or scaled_gradient_sq <= torch.finfo(torch.float32).eps * energy
+            termination = "stationary" if converged else "damping"
             break
     if not bool(torch.isfinite(theta.scale).all()):
         raise ValueError("the scale calibration diverged")
