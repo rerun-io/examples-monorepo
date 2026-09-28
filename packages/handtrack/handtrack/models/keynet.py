@@ -17,8 +17,9 @@ from torch.nn import functional as F
 from handtrack.models.blocks import inverted_residual_stack
 
 HeatmapReduction: TypeAlias = Literal["mean", "pixel_sum"]
-"""How the heatmap MSEs reduce (the paper does not say): ``mean`` averages every heatmap value; ``pixel_sum`` sums
-each keypoint's 18x18 pixels (and 18 distance bins) and averages over keypoints and positive crops."""
+"""The paper writes squared L2 norms (sums): ``pixel_sum`` sums each keypoint's 18x18 pixels (and 18 distance bins),
+then averages over keypoints and positive crops. ``mean`` averages every heatmap value; using it during warm-up
+is our optimisation policy."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import FrameType
 from typing import Literal, TypeAlias
@@ -13,7 +13,7 @@ import torch
 from einops import rearrange
 from jaxtyping import Bool, Float32
 from serde import serde
-from serde.json import to_json
+from serde.json import from_json, to_json
 from torch import Tensor, nn
 from torch.optim import Optimizer
 
@@ -63,10 +63,11 @@ class LoopSettings:
     """Enable bfloat16 autocast in production (models have Float32 dev contracts)."""
     presence_weight: float = 1.0
     """Chosen multiplier for the added KeyNet presence BCE."""
-    resume_next_epoch: bool = False
+    resume_next_epoch: bool = True
     """On resume from a mid-epoch last.pt, skip the rest of that epoch instead of replaying its consumed batches: start
     the next epoch with the global step, optimisers, best scores and history kept. Replay assumes a deterministic source;
-    ``CatalogStream`` pools depend on producer timing, so resumes from it should set this."""
+    ``CatalogStream`` pools depend on producer timing and cannot replay. Deterministic sources may opt into replay
+    with ``--loop.no-resume-next-epoch``."""
     heatmap_reduction: HeatmapReduction = 'mean'
     """KeyNet heatmap MSE over pixels: 'mean' averages every value, 'pixel_sum' sums each keypoint's pixels."""
     heatmap_warmup_epochs: int = 0
@@ -119,11 +120,10 @@ class ValidationTotals:
 class Trainer:
     """Own models, SGD, validation, and resumable progress.
 
-    BatchSource.start_epoch must deterministically recreate each pool from its
-    seed and epoch. Mid-epoch resume replays and discards consumed batches;
-    it never repeats their optimiser updates. Sources own their random generators.
-    SIGTERM requests a stop after the active batch; a blocked next_* must return
-    before the loop can save. The stream should therefore bound blocking waits.
+    Mid-epoch resume starts the next epoch by default. Explicit replay requires
+    start_epoch to recreate deterministic batches; catalog streams cannot do so.
+    Sources own their random generators. SIGTERM cancels source waits and saves
+    incomplete progress in the main control flow.
     """
     def __init__(self, nets: Nets, detnet: OptimiserSettings, keynet: OptimiserSettings,
                  cadence: LoopSettings, run_dir: Path, device: str, *, resume: bool = False,
@@ -146,11 +146,37 @@ class Trainer:
         if resume:
             self.state = load_checkpoint(run_dir / 'last.pt', self.models, self.optimisers)
             if config_json != '{}':
+                # Import at the CLI boundary to avoid a module initialization cycle.
+                from handtrack.apis.train import Config, StreamSettings
+
+                old: Config = from_json(Config, self.state.config_json)
+                new: Config = from_json(Config, config_json)
+                changes: dict[str, tuple[str, str]] = {}
+                for section in ('detnet', 'keynet', 'loop', 'stream'):
+                    old_section: OptimiserSettings | LoopSettings | StreamSettings = getattr(old, section)
+                    new_section: OptimiserSettings | LoopSettings | StreamSettings = getattr(new, section)
+                    for setting in fields(new_section):
+                        before: str | int | float | bool | tuple[str, ...] = getattr(old_section, setting.name)
+                        after: str | int | float | bool | tuple[str, ...] = getattr(new_section, setting.name)
+                        if before != after:
+                            name: str = f'{section}.{setting.name}'
+                            changes[name] = (str(before), str(after))
+                            print(f'RECIPE CHANGE on resume at step {self.state.step}: {name}: {before} -> {after}', flush=True)
+                if changes:
+                    record: MetricRecord = MetricRecord(self.state.step, self.state.epoch, {}, changes)
+                    self.state = replace(self.state, history=[*self.state.history, record])
                 self.state = replace(self.state, config_json=config_json)
+            # Keep momentum buffers, but use the new recipe's LR and momentum.
+            # Epoch startup applies the new schedule to this base learning rate.
+            for name, optimiser in self.optimisers.items():
+                for group in optimiser.param_groups:
+                    group['lr'] = self.settings[name].lr
+                    group['momentum'] = self.settings[name].momentum
             if cadence.resume_next_epoch and self.state.epoch_steps:
                 print(f'resume-next-epoch: skipping the rest of epoch {self.state.epoch} ({self.state.epoch_steps} batches were consumed); '
                       f'starting epoch {self.state.epoch + 1} at step {self.state.step}', flush=True)
                 self.state = replace(self.state, epoch=self.state.epoch + 1, epoch_steps={})
+        self.sources: tuple[BatchSource, ...] = ()
         self.stopping: bool = False
         self.elapsed: float = 0.0
         self.wait_seconds: float = 0.0
@@ -161,6 +187,8 @@ class Trainer:
         """Signal-safe request; checkpoint writes happen in the main control flow."""
         del signum, frame
         self.stopping = True
+        for source in self.sources:
+            source.cancel()
 
     def forward_detnet(self, batch: DetNetBatch) -> DetNetOutput:
         """Run pooled images and cast heads to Float32 before the existing loss."""
@@ -257,7 +285,7 @@ class Trainer:
                             detections: Detections = decode_detections(output)
                             result: DetectionMetrics = detection_metrics(rearrange(detections.box, 'b h c -> (b h) c'), detections.probability.flatten(),
                                 rearrange(metadata.points.to(self.device), 'b h k c -> (b h) k c'), rearrange(metadata.in_front.to(self.device), 'b h k -> (b h) k'),
-                                metadata.camera.to(self.device).repeat_interleave(2), torch.arange(2, device=self.device).repeat(count))
+                                metadata.camera.to(self.device).repeat_interleave(2), torch.arange(2, device=self.device).repeat(count), metadata.eligible.to(self.device).flatten())
                             totals.detections = totals.detections + result
                     else:
                         key_output: KeyNetOutput = self.forward_keynet(batch)
@@ -319,6 +347,10 @@ class Trainer:
 
     def run(self, source: BatchSource, validation: BatchSource) -> TrainingState:
         """Train to exhaustion of BOTH pools, close sources, and retain checkpoints."""
+        self.sources = (source, validation)
+        if self.stopping:
+            for stream in self.sources:
+                stream.cancel()
         schedule: list[Net] = []
         if 'detnet' in self.models:
             schedule.append('detnet')
@@ -344,7 +376,7 @@ class Trainer:
                         batch: DetNetBatch | KeyNetBatch | None = source.next_detnet_batch() if name == 'detnet' else source.next_keynet_batch()
                         waited: float = time.perf_counter() - start
                         if batch is None:
-                            if replay.get(name, 0):
+                            if replay.get(name, 0) and not self.stopping:
                                 raise ValueError(f'{name} source exhausted before the resume cursor')
                             self.wait_seconds += waited
                             self.elapsed += time.perf_counter() - start
@@ -375,6 +407,7 @@ class Trainer:
             save_checkpoint(self.run_dir / 'last.pt', self.models, self.optimisers, self.state)
             return self.state
         finally:
+            self.sources = ()
             signal.signal(signal.SIGTERM, previous)
             try:
                 source.close()

@@ -188,3 +188,14 @@ def test_training_backward_reaches_both_network_inputs() -> None:
     ).total.backward()
     for source in (crop, keypoints):
         assert source.grad is not None and torch.isfinite(source.grad).all() and source.grad.abs().sum() > 0
+
+
+def test_heatmap_reduction_documents_paper_and_warmup_policy() -> None:
+    import inspect
+
+    from handtrack.models import keynet
+
+    documentation = inspect.getsource(keynet)
+    assert 'the paper does not say' not in documentation
+    assert 'squared L2 norms' in documentation
+    assert 'mean' in documentation and 'optimisation policy' in documentation

@@ -98,6 +98,7 @@ def test_evaluation_set_is_exact_and_repeatable() -> None:
             metadata.in_front.reshape(-1, 21),
             metadata.camera.repeat_interleave(2),
             torch.arange(2, device=boxes.device).repeat(count),
+            eligible=metadata.eligible.flatten(),
         )
         assert result.total.ground_truth > 0 and result.total.precision == 1.0 and result.total.recall == 1.0
         crops: KeyNetBatch | None = stream.next_keynet_batch()

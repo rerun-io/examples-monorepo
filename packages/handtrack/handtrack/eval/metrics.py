@@ -6,9 +6,7 @@ import torch
 from jaxtyping import Bool, Float32, Int64
 from torch import Tensor
 
-from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH
 from handtrack.labels.circles import enclosing_circles
-from handtrack.labels.validity import MIN_VISIBLE_KEYPOINTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,20 +49,20 @@ class DetectionMetrics:
 def detection_metrics(
     boxes: Float32[Tensor, 'n 4'], probability: Float32[Tensor, 'n'],
     points: Float32[Tensor, 'n 21 2'], in_front: Bool[Tensor, 'n 21'],
-    camera: Int64[Tensor, 'n'], hand: Int64[Tensor, 'n'],
+    camera: Int64[Tensor, 'n'], hand: Int64[Tensor, 'n'], eligible: Bool[Tensor, 'n'],
 ) -> DetectionMetrics:
     """Apply §5.4 to unexpanded square boxes in 640x480 pixels.
 
     Recall includes hands with at least MIN_VISIBLE_KEYPOINTS (17) in-front points
-    in [0,640)x[0,480), the label rule for a present hand.
+    in the NATIVE camera image. The caller supplies this eligibility from native
+    labels; letterbox padding must not add points to the recall denominator.
     TP also requires probability >0.5, width within 20% of the smallest
     enclosing-circle diameter, and all in-front points inside the predicted
     closed square. Nonfinite predictions cannot be TP. Behind-camera points
-    are excluded from the circle and containment tests.
+    have no image position and are excluded from the circle and containment
+    tests: §5.4 projected keypoints are the in-front ones.
     """
     circles: Float32[Tensor, "n 3"] = torch.from_numpy(enclosing_circles(points.detach().cpu().numpy(), in_front.cpu().numpy())).to(points.device)
-    inside: Bool[Tensor, "n 21"] = in_front & (points >= 0).all(-1) & (points[..., 0] < NET_WIDTH) & (points[..., 1] < NET_HEIGHT)
-    eligible: Bool[Tensor, "n"] = inside.sum(-1) >= MIN_VISIBLE_KEYPOINTS
     width: Float32[Tensor, "n"] = boxes[:, 2] - boxes[:, 0]
     diameter: Float32[Tensor, "n"] = 2 * circles[:, 2]
     contains: Bool[Tensor, "n"] = (((points >= boxes[:, None, :2]) & (points <= boxes[:, None, 2:])).all(-1) | ~in_front).all(-1)

@@ -14,7 +14,7 @@ def test_detection_rule() -> None:
     front = torch.ones(4, 21, dtype=torch.bool)
     boxes = torch.tensor([[90., 90., 110., 110.], [87.5, 87.5, 112.5, 112.5], [91., 90., 111., 110.], [90., 90., 110., 110.]])
     front[3, 16:] = False
-    result = detection_metrics(boxes, torch.ones(4), points, front, torch.tensor([0, 0, 1, 1]), torch.tensor([0, 1, 0, 1]))
+    result = detection_metrics(boxes, torch.ones(4), points, front, torch.tensor([0, 0, 1, 1]), torch.tensor([0, 1, 0, 1]), eligible=torch.tensor([True, True, True, False]))
     assert result.total.true_positive == 1
     assert result.total.ground_truth == 3
     assert result.total.predicted == 4
@@ -51,7 +51,7 @@ def test_presence_threshold_and_behind_camera_points() -> None:
     points[:, -1] = 999.0
     front = torch.ones(2, 21, dtype=torch.bool)
     front[:, -1] = False
-    result = detection_metrics(torch.tensor([[90., 90., 110., 110.]]).repeat(2, 1), torch.tensor([0.5, 0.51]), points, front, torch.zeros(2, dtype=torch.int64), torch.tensor([0, 1]))
+    result = detection_metrics(torch.tensor([[90., 90., 110., 110.]]).repeat(2, 1), torch.tensor([0.5, 0.51]), points, front, torch.zeros(2, dtype=torch.int64), torch.tensor([0, 1]), eligible=torch.ones(2, dtype=torch.bool))
     assert result.total.predicted == result.total.true_positive == 1
     assert result.total.recall == 0.5
     assert result.by_camera_hand[(0, 0)].precision is None
@@ -78,3 +78,16 @@ def test_acceleration_and_mirrored_crop() -> None:
     key = keynet_metrics(torch.ones(1, 21, 2), torch.zeros(1, 21, 2), affine, torch.zeros(1, 21), torch.zeros(1, 21), torch.tensor([0.5]), torch.ones(1), torch.ones(1, dtype=torch.bool), torch.ones(1, dtype=torch.bool))
     assert key.error_px == pytest.approx(8 ** 0.5)
     assert key.presence.recall == key.presence.precision == 1.0
+
+
+def test_detection_recall_uses_native_visibility_not_umetrack_padding() -> None:
+    points = torch.full((1, 21, 2), 100.0)
+    points[:, 16:, 0] = 1.0  # Native x=-1, inside the two-pixel left net padding.
+    native_visible = torch.ones(1, 21, dtype=torch.bool)
+    native_visible[:, 16:] = False
+    result = detection_metrics(torch.tensor([[0., 0., 200., 200.]]), torch.ones(1), points,
+                               torch.ones(1, 21, dtype=torch.bool), torch.zeros(1, dtype=torch.int64),
+                               torch.zeros(1, dtype=torch.int64), eligible=native_visible.sum(-1) >= 17)
+    assert result.total.ground_truth == 0
+    assert result.total.true_positive == 0
+    assert result.total.recall is None

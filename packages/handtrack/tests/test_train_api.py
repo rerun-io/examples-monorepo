@@ -48,3 +48,25 @@ assert all(torch.isfinite(p).all() for model in trainer.models.values() for p in
     environment.pop('PIXI_DEV_MODE', None)
     result = subprocess.run([sys.executable, '-c', script, str(tmp_path)], cwd=Path(__file__).resolve().parents[1], env=environment, text=True, capture_output=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_resume_defaults_to_next_epoch_with_explicit_replay() -> None:
+    assert Config().loop.resume_next_epoch is True
+    assert tyro.cli(Config, args=['--loop.no-resume-next-epoch']).loop.resume_next_epoch is False
+
+
+@pytest.mark.parametrize('split', ['training', 'validation'])
+def test_source_factory_passes_device(monkeypatch: pytest.MonkeyPatch, split: str) -> None:
+    from test_train_loop import FakeSource
+
+    from handtrack.apis import train
+
+    configs = []
+
+    def factory(config):
+        configs.append(config)
+        return FakeSource()
+
+    monkeypatch.setattr(train, 'CatalogStream', factory)
+    build_source(StreamSettings(), split, 'both', device='cuda:1')
+    assert configs[0].device == 'cuda:1'
