@@ -97,6 +97,9 @@ def test_export_rejects_missing_base_before_any_mutation(tmp_path: Path, monkeyp
             "rerun_segment_id": [truth.segment] if layers is not None else [],
             "rerun_layer_names": [layers] if layers is not None else [],
             "property:episode:domain": [["real"]] if layers is not None else [],
+            "property:episode:interaction": [["hand_hand"]] if layers is not None else [],
+            "property:episode:split": [["testing"]] if layers is not None else [],
+            "property:episode:user": [["user_00"]] if layers is not None else [],
         })
         return result
 
