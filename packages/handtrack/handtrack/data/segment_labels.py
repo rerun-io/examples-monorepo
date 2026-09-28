@@ -15,7 +15,7 @@ from numpy import ndarray
 from torch import Tensor
 
 from handtrack.data.catalog import HandTimeline
-from handtrack.geometry.camera import CameraRig, in_front, project, world_to_cameras
+from handtrack.geometry.camera import CameraRig, in_front, inside_image, project, world_to_cameras
 from handtrack.geometry.letterbox import Letterbox
 from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks
 from handtrack.labels.circles import enclosing_circles
@@ -48,8 +48,7 @@ def project_hands(rig: CameraRig, letterboxes: Sequence[Letterbox], world_from_r
     pixels: Float32[Tensor, "k c 42 2"] = project(rig, points_cam)
     net_xy: Float32[Tensor, "k c 42 2"] = torch.stack([letterbox.to_net(pixels[:, camera]) for camera, letterbox in enumerate(letterboxes)], dim=1)
     front: Bool[Tensor, "k c 42"] = in_front(points_cam)
-    size: Float32[Tensor, "c 1 2"] = rig.image_size[:, None, :]
-    inside: Bool[Tensor, "k c 42"] = front & torch.isfinite(pixels).all(dim=-1) & (pixels >= 0).all(dim=-1) & (pixels < size).all(dim=-1)
+    inside: Bool[Tensor, "k c 42"] = front & inside_image(rig, pixels)
     cameras: int = rig.image_size.shape[0]
     return HandProjection(
         points_cam=points_cam.reshape(frames, cameras, 2, 21, 3),

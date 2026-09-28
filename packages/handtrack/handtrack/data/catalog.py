@@ -110,7 +110,8 @@ def segment_infos(dataset: str, table: pa.Table) -> tuple[SegmentInfo, ...]:
     layers: list[list[str] | None] = table["rerun_layer_names"].to_pylist()
 
     def prop(key: str, row: int, default: str | int) -> str | int:
-        values: list[str | int] | None = columns.get(f"property:{key}", [None] * table.num_rows)[row]
+        column: list[list[str | int] | None] | None = columns.get(f"property:{key}")
+        values: list[str | int] | None = None if column is None else column[row]
         return values[0] if values else default
 
     infos: list[SegmentInfo] = []
