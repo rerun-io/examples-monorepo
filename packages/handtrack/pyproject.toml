@@ -35,8 +35,6 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.vulture]
 paths = ["handtrack", "tests"]
 ignore_names = [
-    # Validation metadata the trainer (next PR) reads from the evaluation stream.
-    "detnet_validation", "keynet_validation", "distance_mm", "SHOW3D_SAMPLE", "wait_for_batch",
     # Serialized logs and Tyro/source-facing fields consumed outside this package (W3 trainer).
     "datasets", "segment_ids", "gpu_memory_bytes", "gpu_peak_memory_bytes",
     "CropKind", "POSITIVE", "DRIFT", "EDGE", "OTHER_HAND", "BACKGROUND",
