@@ -346,3 +346,15 @@ def predicted_reduction(
     effective: Float64[Tensor, "b k"] = step.clone()
     effective[:, is_angle] = (candidate.angles - theta.angles)[:, free[is_angle] - ANGLE_OFFSET].to(torch.float64)
     return -(2.0 * (effective * gradient).sum(-1) + torch.einsum("bk,bkl,bl->b", effective, hessian, effective))
+
+
+def undamped_inverse(hessian: Float64[Tensor, "b k k"], mask: Float64[Tensor, "b k"]) -> Float64[Tensor, "b k k"]:
+    """Inverse curvature for a Gauss–Newton stop check, scaled by column norms and allowing unobserved parameters.
+
+    Args:
+        hessian: Float64[Tensor, "b k k"], active-set normal matrix.
+        mask: Float64[Tensor, "b k"], one for free parameters and zero for held angles.
+    """
+    units: Float64[Tensor, "b k"] = marquardt_scaling(torch.diagonal(hessian, dim1=1, dim2=2), mask).rsqrt()
+    normalized: Float64[Tensor, "b k k"] = hessian * units[:, :, None] * units[:, None, :]
+    return torch.linalg.pinv(normalized, hermitian=True) * units[:, :, None] * units[:, None, :]

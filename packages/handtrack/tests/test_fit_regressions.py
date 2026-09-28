@@ -8,7 +8,7 @@ import pytest
 import torch
 from jaxtyping import Float32, Float64
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
-from test_fit_synthetic import _views, _visible_scene
+from test_fit_synthetic import _landmark_error_mm, _noisy, _views, _visible_scene
 from torch import Tensor
 
 from handtrack.fit.observations import HandObservation, ViewObservation, observe
@@ -16,6 +16,49 @@ from handtrack.fit.pose_fit import FitConfig, FitResult, Termination, fit_pose
 from handtrack.fit.scale import CalibrationConfig, ScaleCalibration, calibrate_scale
 from handtrack.fit.solver import Theta, fit_limits, predicted_reduction, retract, theta_from_poses
 from handtrack.hand.pose import HandPose, Side, generic_hand_model
+
+
+def test_precision_limited_stereo_acquisition_is_stationary() -> None:
+    model: HandModelTorch = generic_hand_model()
+    generator: torch.Generator = torch.Generator().manual_seed(3)
+    truth, observation = _visible_scene(model, Side.LEFT, generator, (0, 1))
+    noisy: HandObservation = _noisy(observation, generator, 1.5, 5.0)
+    assert all(int(view.weights.sum()) == 21 for view in noisy.views)
+    result: FitResult = fit_pose(model, 1.0, [noisy], [None])[0]
+    assert result.converged
+    assert result.termination == "stationary"
+    assert _landmark_error_mm(model, result.pose, truth, Side.LEFT) == pytest.approx(2.749, abs=0.002)
+
+
+def test_noisy_stereo_acquisitions_keep_parent_success_rate() -> None:
+    """The re-review's 40 scenes: draw all poses before drawing 1.5 px / 5 mm noise."""
+    model: HandModelTorch = generic_hand_model()
+    generator: torch.Generator = torch.Generator().manual_seed(3)
+    scenes: list[tuple[HandPose, HandObservation]] = [_visible_scene(model, Side(i % 2), generator, (0, 1)) for i in range(40)]
+    observations: list[HandObservation] = [_noisy(observation, generator, 1.5, 5.0) for _, observation in scenes]
+    results: list[FitResult] = fit_pose(model, 1.0, observations, [None] * 40)
+    assert sum(result.converged for result in results) >= 38
+
+
+def test_zero_gradient_is_stationary() -> None:
+    model: HandModelTorch = generic_hand_model()
+    pose: HandPose = HandPose(torch.eye(3), torch.tensor([0.0, 0.0, 0.5]), model.joint_limits.mean(-1))
+    observation: HandObservation = observe(model, pose, Side.LEFT, 1.0, _views((0, 1)))
+    # No data term and a pose at its temporal target give exactly zero gradient and energy.
+    observation = replace(observation, views=tuple(replace(view, weights=torch.zeros(21)) for view in observation.views))
+    result: FitResult = fit_pose(model, 1.0, [observation], [pose])[0]
+    assert result.converged
+    assert result.termination == "stationary"
+
+
+def test_precision_limited_scale_calibration_is_stationary() -> None:
+    model: HandModelTorch = generic_hand_model()
+    generator: torch.Generator = torch.Generator().manual_seed(12)
+    pose, observation = _visible_scene(model, Side.LEFT, generator, (0, 1))
+    noisy: HandObservation = _noisy(observation, generator, 1.5, 5.0)
+    result: ScaleCalibration = calibrate_scale(model, [noisy], [pose], CalibrationConfig(iterations=60))
+    assert result.converged
+    assert result.termination == "stationary"
 
 
 @pytest.mark.parametrize("calibration", [False, True])
@@ -86,11 +129,12 @@ def test_projected_prediction_uses_the_joint_motion_applied(other_parameter: int
 def test_termination_does_not_claim_convergence(calibration: bool, iterations: int, termination: Termination) -> None:
     model: HandModelTorch = generic_hand_model()
     pose, observation = _visible_scene(model, Side.LEFT, torch.Generator().manual_seed(1), (0, 1))
+    start: HandPose = replace(pose, translation=pose.translation + torch.tensor([0.02, 0.0, 0.0]))
     result: FitResult | ScaleCalibration
     if calibration:
-        result = calibrate_scale(model, [observation], [pose], CalibrationConfig(iterations=iterations, initial_damping=1e30))
+        result = calibrate_scale(model, [observation], [start], CalibrationConfig(iterations=iterations, initial_damping=1e30))
     else:
-        result = fit_pose(model, 1.0, [observation], [pose], FitConfig(max_iterations=iterations, initial_damping=1e30))[0]
+        result = fit_pose(model, 1.0, [observation], [start], FitConfig(max_iterations=iterations, initial_damping=1e30))[0]
     assert not result.converged
     assert result.termination == termination
 

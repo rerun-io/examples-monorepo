@@ -44,6 +44,7 @@ from handtrack.fit.solver import (
     stack_views,
     take,
     theta_from_poses,
+    undamped_inverse,
 )
 from handtrack.geometry.camera import CameraRig, project
 from handtrack.hand.pose import HandPose
@@ -118,7 +119,7 @@ class FitConfig:
 
 DEFAULT_CONFIG: FitConfig = FitConfig()
 
-Termination: TypeAlias = Literal["tolerance", "iterations", "damping", "no_evidence", "non_finite"]
+Termination: TypeAlias = Literal["tolerance", "stationary", "iterations", "damping", "no_evidence", "non_finite"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +139,7 @@ class FitResult:
     iterations: int
     """LM iterations of the final solve."""
     converged: bool
-    """True only when the convergence tolerance was reached."""
+    """True when the convergence tolerance was reached or damping stopped at a stationary solution."""
     termination: Termination = "iterations"
     """Why the solve stopped; acquisition without evidence returns a neutral pose and NaN energy."""
 
@@ -182,6 +183,7 @@ def _levenberg_marquardt(problem: Problem, theta: Theta, free: Int64[Tensor, "k"
     non_finite: Bool[Tensor, "b"] = ~torch.isfinite(energy)
     done: Bool[Tensor, "b"] = non_finite.clone()
     converged: Bool[Tensor, "b"] = torch.zeros(b, dtype=torch.bool)
+    stationary: Bool[Tensor, "b"] = torch.zeros(b, dtype=torch.bool)
     count: Int64[Tensor, "b"] = torch.zeros(b, dtype=torch.int64)
     for _ in range(config.max_iterations):
         if bool(done.all()):
@@ -213,11 +215,32 @@ def _levenberg_marquardt(problem: Problem, theta: Theta, free: Int64[Tensor, "k"
         damping = torch.where(accept, damping * torch.clamp(1.0 - (2.0 * ratio - 1.0) ** 3, min=MIN_DAMPING_FACTOR), damping * growth)
         growth = torch.where(accept, torch.full_like(growth, DAMPING_GROWTH), growth * DAMPING_GROWTH)
         converged = converged | (accept & small)
+        exhausted: Bool[Tensor, "b"] = (damping > MAX_DAMPING) & ~done & ~converged & ~non_finite
+        if bool(exhausted.any()):
+            # Check the undamped model only at the existing stop; never apply this diagnostic step.
+            indices: Int64[Tensor, "q"] = exhausted.nonzero().flatten()
+            stopped: Theta = take(theta, indices)
+            stop_hessian, stop_gradient, stop_mask = normal_equations(stopped, residual[indices], jacobian[indices], free, limits)
+            gn_step: Float64[Tensor, "q k"] = -torch.einsum("qkl,ql->qk", undamped_inverse(stop_hessian, stop_mask), stop_gradient)
+            diagnostic: Float32[Tensor, "q 27"] = torch.zeros((indices.numel(), PARAMETERS), dtype=torch.float32)
+            diagnostic[:, free] = gn_step.to(torch.float32)
+            gn_candidate: Theta = retract(stopped, diagnostic, limits)
+            gn_prediction: Float64[Tensor, "q"] = predicted_reduction(stopped, gn_candidate, free, gn_step, stop_hessian, stop_gradient)
+            scaled_gradient: Float64[Tensor, "q k"] = stop_gradient / marquardt_scaling(
+                torch.diagonal(stop_hessian, dim1=1, dim2=2), stop_mask
+            ).sqrt()
+            stationary[indices] = (gn_prediction.abs() <= config.relative_tolerance * energy[indices]) | (
+                # Residuals are float32: compare the squared normalized gradient
+                # with the energy resolution, not the precision of the float64 solve.
+                scaled_gradient.square().amax(-1) <= torch.finfo(torch.float32).eps * energy[indices]
+            )
+        converged = converged | stationary
         done = done | converged | non_finite | (damping > MAX_DAMPING)
         if bool(done.all()):
             break
     termination: list[Termination] = [
-        "non_finite" if non_finite[i] else "tolerance" if converged[i] else "damping" if done[i] else "iterations" for i in range(b)
+        "non_finite" if non_finite[i] else "stationary" if stationary[i] else "tolerance" if converged[i] else "damping" if done[i] else "iterations"
+        for i in range(b)
     ]
     return _Solved(theta=theta, energy=energy, iterations=count, converged=converged, termination=termination)
 
