@@ -25,6 +25,8 @@ class DetNetValidation:
     """Points with positive camera depth; absent hands have all False."""
     camera: Int64[Tensor, 'b']
     """Globally unique camera IDs (namespace across datasets)."""
+    eligible: Bool[Tensor, "b 2"]
+    """Valid hands with at least 17 keypoints inside the native camera image."""
 
 
 @dataclass(frozen=True, slots=True)

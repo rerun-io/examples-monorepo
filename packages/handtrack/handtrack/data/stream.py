@@ -694,6 +694,8 @@ class CatalogStream:
     # ---- trainer API
 
     def start_epoch(self, epoch: int) -> None:
+        if self._stop.is_set():
+            return
         self._raise_if_failed()
         if self.config.validation:
             if self._evaluation is None:
@@ -721,12 +723,15 @@ class CatalogStream:
     def _build_evaluation(self) -> None:
         """One pass over a fixed seeded subset of the segments, kept in a deterministic order."""
         self._begin_pass(0)
-        while True:
+        while not self._stop.is_set():
             produced: bool = self._epoch_produced()
             self._drain(None)
             if produced:
                 break
             self._drain(0.5)
+        if self._stop.is_set():
+            self._collected.clear()
+            return
         chunks: list[_Chunk] = sorted(self._collected, key=lambda chunk: chunk.order)
         self._collected = []
         order: torch.Generator = torch.Generator().manual_seed(self.config.seed)
@@ -751,6 +756,8 @@ class CatalogStream:
         return select_samples(samples, torch.arange(start, min(start + batch, sample_count(samples)), device=self.device))
 
     def next_detnet_batch(self) -> DetNetBatch | None:
+        if self._stop.is_set():
+            return None
         self._check("DetNet", self._detnet_on)
         samples: DetNetSamples | None
         if self._evaluation is not None:
@@ -773,6 +780,8 @@ class CatalogStream:
         )
 
     def next_keynet_batch(self) -> KeyNetBatch | None:
+        if self._stop.is_set():
+            return None
         self._check("KeyNet", self._keynet_on)
         samples: KeyNetSamples | None
         if self._evaluation is not None:
@@ -814,7 +823,8 @@ class CatalogStream:
         """Exact GT of the last DetNet batch (net-frame keypoints, in-front flags, camera ids); does not advance."""
         if self._last_detnet is None:
             raise RuntimeError("no DetNet batch drawn yet")
-        return DetNetValidation(points=self._last_detnet.points, in_front=self._last_detnet.in_front, camera=self._last_detnet.camera)
+        return DetNetValidation(points=self._last_detnet.points, in_front=self._last_detnet.in_front, camera=self._last_detnet.camera,
+                                eligible=self._last_detnet.circle_mask)
 
     def keynet_validation(self) -> KeyNetValidation:
         """Exact GT of the last KeyNet batch (crop affine, crop keypoints, unclamped d_rel); does not advance."""
@@ -826,8 +836,12 @@ class CatalogStream:
         """Samples lost to a full pool (the side that was not consumed fast enough), DetNet and KeyNet."""
         return (0 if self._detnet_pool is None else self._detnet_pool.overwritten, 0 if self._keynet_pool is None else self._keynet_pool.overwritten)
 
-    def close(self) -> None:
+    def cancel(self) -> None:
+        """Request stop without joining producers; next_* returns None."""
         self._stop.set()
+
+    def close(self) -> None:
+        self.cancel()
         with self._cond:
             self._cond.notify_all()
         deadline: float = time.monotonic() + 30.0
@@ -878,12 +892,14 @@ class CatalogStream:
 
     def _drain(self, timeout: float | None) -> None:
         """Move every queued chunk of this epoch into the pools; with a timeout, wait that long for the first one."""
+        if self._stop.is_set():
+            return
         self._raise_if_failed()
         try:
-            chunk: _Chunk = self._queue.get(timeout=timeout) if timeout is not None else self._queue.get_nowait()
+            chunk: _Chunk = self._queue.get(timeout=min(timeout, 0.1)) if timeout is not None else self._queue.get_nowait()
         except queue.Empty:
             return
-        while True:
+        while not self._stop.is_set():
             if chunk.generation == self._generation:
                 self._insert(chunk)
             try:
@@ -906,7 +922,7 @@ class CatalogStream:
         return pool.count >= (batch if produced else self._threshold(pool.capacity, batch))
 
     def _next_samples[SampleT: (DetNetSamples, KeyNetSamples)](self, pool: SamplePool[SampleT], batch: int) -> SampleT | None:
-        while True:
+        while not self._stop.is_set():
             # Read "produced" before draining: a producer queues its last chunk before it counts the segment done.
             produced: bool = self._epoch_produced()
             self._drain(None)
@@ -917,6 +933,7 @@ class CatalogStream:
             start: float = time.perf_counter()
             self._drain(0.5)
             self.stats.wait_s += time.perf_counter() - start
+        return None
 
     # ---- fetchers and producers
 
