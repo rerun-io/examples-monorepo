@@ -44,7 +44,7 @@ class HandPose:
         transform[..., :3, 3] = self.translation * 1000.0
         transform[..., 3, 3] = 1.0
         if side == Side.RIGHT:
-            transform[..., :, 0] = -transform[..., :, 0]
+            transform[..., :, 0] *= -1
         return transform
 
 
@@ -82,4 +82,5 @@ GENERIC_HAND_MODEL: Path = Path(__file__).resolve().parents[1] / "assets" / "gen
 
 
 def generic_hand_model() -> HandModelTorch:
+    """The generic hand model as torch tensors."""
     return hand_model_numpy_to_tensor(from_json(HandModelNumpy, GENERIC_HAND_MODEL.read_text()))

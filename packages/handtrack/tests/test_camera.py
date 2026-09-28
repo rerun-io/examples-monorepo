@@ -23,8 +23,7 @@ def test_fisheye62_matches_simplecv_formula() -> None:
     points: np.ndarray = np.column_stack([rng.uniform(-0.3, 0.3, 50), rng.uniform(-0.3, 0.3, 50), rng.uniform(0.05, 0.8, 50)])
     radius: np.ndarray = np.hypot(points[:, 0], points[:, 1])
     normalized: np.ndarray = points[:, :2] * (np.arctan2(radius, points[:, 2]) / radius)[:, None]
-    k1, k2, k3, k4, k5, k6, p1, p2 = COEFFS
-    distorted: np.ndarray = apply_radial_tangential_distortion(KannalaBrandtDistortion(k1=k1, k2=k2, k3=k3, k4=k4, k5=k5, k6=k6, p1=p1, p2=p2), normalized)
+    distorted: np.ndarray = apply_radial_tangential_distortion(KannalaBrandtDistortion(*COEFFS), normalized)
     expected: np.ndarray = distorted * [240.0, 241.0] + [320.0, 240.0]
     got: torch.Tensor = project(_rig(fisheye=True), torch.from_numpy(points).float()[None, None].expand(1, 2, -1, -1))
     np.testing.assert_allclose(got[0, 0].double().numpy(), expected, atol=2e-3)

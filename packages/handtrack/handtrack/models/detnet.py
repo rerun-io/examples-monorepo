@@ -58,8 +58,8 @@ class DetNetF(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
+        self.pool: nn.AvgPool2d = nn.AvgPool2d(4, 4)
         self.backbone: nn.Sequential = nn.Sequential(
-            nn.AvgPool2d(4, 4),
             nn.Conv2d(1, 32, 3, 2, 1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(),
@@ -86,7 +86,7 @@ class DetNetF(nn.Module):
 
     def forward(self, frame: Float32[Tensor, "b 1 480 640"]) -> DetNetOutput:
         """Detect hands in Float32[Tensor, 'b 1 480 640'] frames valued in [0, 1]."""
-        return self.forward_pooled(self.backbone[0](frame))
+        return self.forward_pooled(self.pool(frame))
 
     def forward_pooled(self, pooled: Float32[Tensor, "b 1 120 160"]) -> DetNetOutput:
         """Detect hands in Float32[Tensor, 'b 1 120 160'] frames already pooled 4 x 4.
@@ -94,9 +94,7 @@ class DetNetF(nn.Module):
         Coordinates remain normalized to the original 640 x 480 net frame.
         This runs the same layers and weights as forward, skipping only its pool.
         """
-        features: Float32[Tensor, "b channels h w"] = pooled
-        for layer in list(self.backbone.children())[1:]:
-            features = layer(features)
+        features: Float32[Tensor, "b 160 4 5"] = self.backbone(pooled)
         return DetNetOutput(
             center=rearrange(self.center_head(features), "b (hand xy) 1 1 -> b hand xy", hand=2, xy=2),
             radius=rearrange(self.radius_head(features), "b hand 1 1 -> b hand"),
