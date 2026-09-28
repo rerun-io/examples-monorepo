@@ -62,7 +62,8 @@ DETNET_LAYER_COLOR: tuple[int, int, int] = (255, 220, 0)
 """``detnet_v1`` boxes: yellow, so DetNet-alone never reads as the tracker's own DetNet acquisitions (magenta)."""
 DETNET_BELOW_THRESHOLD_COLOR: tuple[int, int, int] = (120, 120, 120)
 PRESENCE_THRESHOLD: float = 0.5
-KEYPOINT_RADIUS_UI: float = 2.5
+KEYPOINT_RADIUS_UI: float = -2.5
+"""2D keypoints: 2.5 UI points (``rr.components.Radius`` reads a negative radius as UI points, a positive one as scene units)."""
 KEYPOINT_RADIUS_M: float = 0.004
 LANDMARK_TOLERANCE_M: float = 0.001
 """The mesh's hand model must reproduce the track's landmarks to this, or the mesh is not the fitted hand."""
@@ -126,18 +127,13 @@ def prediction_model(track: SegmentTrack, truth: GroundTruth) -> HandModelNumpy:
     return truth.model if track.meta.hand_mode == "known" else scaled_model(generic_numpy_model(), track.meta.hand_scale)
 
 
-def rigid_transforms(rotation: Float32[ndarray, "*batch 3 3"], translation: Float32[ndarray, "*batch 3"]) -> Float32[ndarray, "*batch 4 4"]:
-    """4x4 transforms from rotations and translations."""
-    transform: Float32[ndarray, "*batch 4 4"] = np.zeros((*translation.shape[:-1], 4, 4), dtype=np.float32)
-    transform[..., :3, :3] = rotation
-    transform[..., :3, 3] = translation
-    transform[..., 3, 3] = 1.0
-    return transform
-
-
 def wrists_mm(rotation: Float32[ndarray, "*batch 3 3"], translation: Float32[ndarray, "*batch 3"]) -> Float32[ndarray, "*batch 4 4"]:
     """World-from-wrist transforms in millimetres (the skinning unit), unmirrored; ``translation`` is in metres."""
-    return rigid_transforms(rotation, translation * np.float32(1000.0))
+    transform: Float32[ndarray, "*batch 4 4"] = np.zeros((*translation.shape[:-1], 4, 4), dtype=np.float32)
+    transform[..., :3, :3] = rotation
+    transform[..., :3, 3] = translation * np.float32(1000.0)
+    transform[..., 3, 3] = 1.0
+    return transform
 
 
 def skinned_landmarks(model: HandModelNumpy, rotation: Float32[ndarray, "f 2 3 3"], translation: Float32[ndarray, "f 2 3"], joint_angles: Float32[ndarray, "f 2 22"], keep: Bool[ndarray, "f 2"]) -> Float32[ndarray, "f 2 21 3"]:
@@ -417,9 +413,9 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
     gt_boxes: Float32[ndarray, "g c 2 4"] = enclosing_squares(gt_pixels, inside_images(truth.rig, gt_pixels))
     error: Float32[ndarray, "f 2"] = keypoint_error_mm(track.landmarks, gt_landmarks(truth.on_frames(track.video_time_ns)), track.tracked)
     palette: UInt8[ndarray, "3 3"] = np.array([(0, 0, 0), SOURCE_COLORS[BoxSource.DETNET], SOURCE_COLORS[BoxSource.TRACKED]], dtype=np.uint8)
-    radius: float = -KEYPOINT_RADIUS_UI  # a negative radius is in UI points (rr.components.Radius)
+    context: rr.AnnotationContext = hand_annotation_context()
     for camera in range(NUM_CAMERAS):
-        rr.log(camera_root(camera), hand_annotation_context(), static=True, recording=recording)
+        rr.log(camera_root(camera), context, static=True, recording=recording)
         for index, side in enumerate(SIDES):
             source: Int64[ndarray, "s"] = shown.box_source[:, camera, index].astype(np.int64)
             keep: Bool[ndarray, "s"] = (source != BoxSource.NONE) & np.isfinite(shown.box[:, camera, index]).all(axis=-1)
@@ -431,10 +427,12 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
             gt_keep: Bool[ndarray, "g"] = np.isfinite(gt_boxes[:, camera, index]).all(axis=-1)
             gt_colors: UInt8[ndarray, "g 3"] = np.tile(np.array(GT_BOX_COLOR, dtype=np.uint8), (len(gt_keep), 1))
             _send_boxes(recording, gt_box_path(camera, side), truth_clock, gt_boxes[:, camera, index], gt_keep, colors=gt_colors, labels=None)
-            _send_keypoints(recording, pred_keypoints2d_path(camera, side), shown_clock, shown.keypoints_2d[:, camera, index], class_id=index, radius=radius)
-            _send_keypoints(recording, gt_keypoints2d_path(camera, side), truth_clock, gt_pixels[:, camera, index], class_id=GT_CLASS_OFFSET + index, radius=radius)
+            _send_keypoints(recording, pred_keypoints2d_path(camera, side), shown_clock, shown.keypoints_2d[:, camera, index], class_id=index, radius=KEYPOINT_RADIUS_UI)
+            _send_keypoints(
+                recording, gt_keypoints2d_path(camera, side), truth_clock, gt_pixels[:, camera, index], class_id=GT_CLASS_OFFSET + index, radius=KEYPOINT_RADIUS_UI
+            )
             _send_scalars(recording, presence_path(camera, side), clock, track.presence[:, camera, index], name=f"cam_{camera:02} {side}", color=PRED_COLORS[index])
-    rr.log(schema.run_path(RUN_SOURCE), hand_annotation_context(), static=True, recording=recording)
+    rr.log(schema.run_path(RUN_SOURCE), context, static=True, recording=recording)
     for index, side in enumerate(SIDES):
         _send_keypoints(recording, pred_keypoints3d_path(side), shown_clock, shown.landmarks[:, index], class_id=index, radius=KEYPOINT_RADIUS_M)
         log_hand_meshes(
