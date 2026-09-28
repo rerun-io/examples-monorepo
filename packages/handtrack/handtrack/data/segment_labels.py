@@ -14,7 +14,7 @@ from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from torch import Tensor
 
-from handtrack.data.catalog import HandTimeline
+from handtrack.data.catalog import CatalogDataError, HandTimeline
 from handtrack.geometry.camera import CameraRig, in_front, inside_image, project, world_to_cameras
 from handtrack.geometry.letterbox import Letterbox
 from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks
@@ -114,7 +114,13 @@ def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence
         validity: tuple[Bool[Tensor, "k c"], Bool[Tensor, "k c 2"]] = show3d_hands(confidence, has_pose, projection.visible, headset_valid)
         image_valid, labelled = validity[0], validity[1]
     else:
-        frame_rules: tuple[Bool[Tensor, "k"], Bool[Tensor, "k 2"]] = umetrack_hands(confidence, headset_valid)
+        confidence_available: Bool[Tensor, "k 2"] = torch.isfinite(confidence)
+        try:
+            frame_rules: tuple[Bool[Tensor, "k"], Bool[Tensor, "k 2"]] = umetrack_hands(
+                torch.where(confidence_available, confidence, 0.0), headset_valid & confidence_available.all(dim=-1)
+            )
+        except ValueError as error:
+            raise CatalogDataError(str(error)) from error
         # A labelled hand must have a pose; if the stored pose is missing the frame cannot be labelled.
         frame_valid: Bool[Tensor, "k"] = frame_rules[0] & (has_pose | ~frame_rules[1]).all(dim=-1)
         image_valid = frame_valid[:, None].expand(-1, cameras).clone()
