@@ -1,3 +1,4 @@
+import pytest
 import torch
 from jaxtyping import Bool, Float32, Int64, UInt8
 from torch import Tensor
@@ -49,7 +50,7 @@ def test_cut_crops_samples_selected_frames_and_zero_padding() -> None:
 
 
 def test_inside_crop_excludes_behind_nonfinite_and_upper_edges() -> None:
-    points: Float32[Tensor, '1 6 2'] = torch.tensor([[[0.0, 0.0], [95.99, 95.99], [96.0, 1.0], [-0.1, 1.0], [1.0, 1.0], [float('nan'), 0.0]]])
+    points: Float32[Tensor, '1 6 2'] = torch.tensor([[[-0.5, -0.5], [95.25, 95.25], [95.5, 1.0], [1.0, 95.5], [1.0, 1.0], [float('nan'), 0.0]]])
     assert count_inside_crop(points, torch.tensor([[True, True, True, True, False, True]])).tolist() == [2]
 
 
@@ -87,3 +88,32 @@ def test_intensity_is_one_factor_per_image_and_clamped() -> None:
     assert output[:, 0, 0, 0].unique().numel() == 8
     torch.testing.assert_close(output, output[:, :, :1, :1].expand_as(output))
     torch.testing.assert_close(scale_intensity(images, torch.Generator(), 3.0, 3.0), torch.ones_like(images))
+
+
+def test_inside_crop_is_mirror_invariant_at_pixel_centre_extent() -> None:
+    points: Float32[Tensor, '2 4 2'] = torch.tensor([[[95.25, 10.0], [95.25, -0.25], [96.0, 20.0], [10.0, 10.0]], [[-0.25, 10.0], [-0.25, 95.25], [-1.0, 20.0], [10.0, 10.0]]])
+    front: Bool[Tensor, '2 4'] = torch.tensor([[True, True, True, False]]).repeat(2, 1)
+    mirrored: Float32[Tensor, '2 4 2'] = points.clone()
+    mirrored[..., 0] = 95 - mirrored[..., 0]
+    assert count_inside_crop(points, front).tolist() == [2, 2]
+    torch.testing.assert_close(count_inside_crop(points, front), count_inside_crop(mirrored, front))
+
+
+@pytest.mark.parametrize(('side', 'rotation', 'scale', 'shift'), [(float('inf'), 0.0, 1.0, 0.0), (96.0, float('nan'), 1.0, 0.0), (96.0, 0.0, 1.0, float('nan')), (96.0, 0.0, float('inf'), 0.0), (0.0, 0.0, 1.0, 0.0)])
+def test_crop_rejects_nonfinite_boxes_and_jitter(side: float, rotation: float, scale: float, shift: float) -> None:
+    jitter: CropJitter = CropJitter(torch.tensor([rotation]), torch.tensor([scale]), torch.tensor([[shift, 0.0]]))
+    with pytest.raises(ValueError):
+        crop_from_net(torch.tensor([[0.0, 0.0, side, 96.0]]), torch.tensor([False]), jitter)
+
+
+def test_cut_crops_matches_reference_with_jitter_and_padding() -> None:
+    frames: UInt8[Tensor, '2 480 640'] = torch.randint(0, 256, (2, 480, 640), dtype=torch.uint8, generator=torch.Generator().manual_seed(42))
+    boxes: Float32[Tensor, '3 4'] = torch.tensor([[-20.0, -30.0, 80.0, 70.0], [550.0, 410.0, 680.0, 540.0], [120.0, 90.0, 240.0, 210.0]])
+    affine: Float32[Tensor, '3 3 3'] = crop_from_net(boxes, torch.tensor([False, True, True]), sample_jitter(3, torch.Generator().manual_seed(9), 'cpu', 0.5, (0.8, 1.2), 0.1))
+    indices: Int64[Tensor, '3'] = torch.tensor([1, 0, 1])
+    axis: Float32[Tensor, '96'] = torch.arange(96, dtype=torch.float32)
+    grid: Float32[Tensor, '3 9216 2'] = torch.stack(torch.meshgrid(axis, axis, indexing='xy'), dim=-1).reshape(1, -1, 2).expand(3, -1, -1)
+    pixels: Float32[Tensor, '3 9216 2'] = apply_affine(torch.linalg.inv(affine), grid)
+    normalized: Float32[Tensor, '3 96 96 2'] = ((pixels + 0.5) * torch.tensor([2.0 / 640, 2.0 / 480]) - 1.0).reshape(3, 96, 96, 2)
+    expected: Float32[Tensor, '3 1 96 96'] = torch.nn.functional.grid_sample(frames[indices, None].float() / 255.0, normalized, mode='bilinear', padding_mode='zeros', align_corners=False)
+    torch.testing.assert_close(cut_crops(frames, indices, affine), expected, atol=1e-6, rtol=0.0)

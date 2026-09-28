@@ -42,10 +42,12 @@ def crop_from_net(boxes: Float32[Tensor, 'b 4'], mirror: Bool[Tensor, 'b'], jitt
     side: Float32[Tensor, 'b 2'] = boxes[:, 2:] - boxes[:, :2]
     centre: Float32[Tensor, 'b 2'] = (boxes[:, 2:] + boxes[:, :2]) * 0.5
     angle: Float32[Tensor, 'b'] = boxes.new_zeros(boxes.shape[0]) if jitter is None else jitter.rotation
+    valid: Bool[Tensor, ''] = torch.isfinite(boxes).all() & (side > 0).all()
     if jitter is not None:
+        valid = valid & torch.isfinite(jitter.rotation).all() & torch.isfinite(jitter.scale).all() & torch.isfinite(jitter.shift).all()
         centre = centre + jitter.shift * side
         side = side * jitter.scale[:, None]
-    if not bool((side > 0).all()):
+    if not bool(valid & torch.isfinite(side).all() & (side > 0).all() & torch.isfinite(centre).all()):
         raise ValueError('Crop boxes must have positive finite sides and jitter scale')
     affine: Float32[Tensor, 'b 3 3'] = boxes.new_zeros((boxes.shape[0], 3, 3))
     cosine: Float32[Tensor, 'b'] = angle.cos()
@@ -67,9 +69,9 @@ def cut_crops(frames: UInt8[Tensor, 'f 480 640'], frame_index: Int64[Tensor, 'b'
     """Sample inverse-mapped crop centres with bilinear interpolation and zero padding."""
     axis: Float32[Tensor, '96'] = torch.arange(CROP_SIZE, device=frames.device, dtype=torch.float32)
     grid: Float32[Tensor, '96 96 2'] = torch.stack(torch.meshgrid(axis, axis, indexing='xy'), dim=-1)
-    pixels: Float32[Tensor, 'b n 2'] = apply_affine(torch.linalg.inv(crop_from_net), rearrange(grid, 'h w xy -> (h w) xy')[None].expand(frame_index.numel(), -1, -1))
-    normalized: Float32[Tensor, 'b n 2'] = (pixels + 0.5) * pixels.new_tensor([2.0 / NET_WIDTH, 2.0 / NET_HEIGHT]) - 1.0
-    return F.grid_sample(frames[frame_index, None].float() / 255.0, rearrange(normalized, 'b (h w) xy -> b h w xy', h=CROP_SIZE, w=CROP_SIZE), mode='bilinear', padding_mode='zeros', align_corners=False)
+    pixels: Float32[Tensor, 'b n 2'] = apply_affine(torch.linalg.inv_ex(crop_from_net).inverse, rearrange(grid, 'h w xy -> (h w) xy')[None].expand(frame_index.numel(), -1, -1))
+    normalized: Float32[Tensor, 'b n 2'] = torch.stack(((pixels[..., 0] + 0.5) * (2.0 / NET_WIDTH) - 1.0, (pixels[..., 1] + 0.5) * (2.0 / NET_HEIGHT) - 1.0), dim=-1)
+    return F.grid_sample(frames[frame_index, None].float(), rearrange(normalized, 'b (h w) xy -> b h w xy', h=CROP_SIZE, w=CROP_SIZE), mode='bilinear', padding_mode='zeros', align_corners=False) / 255.0
 
 
 def sample_jitter(n: int, generator: torch.Generator, device: torch.device | str, max_rotation: float, scale_range: tuple[float, float], max_shift: float) -> CropJitter:
@@ -84,8 +86,8 @@ def sample_jitter(n: int, generator: torch.Generator, device: torch.device | str
 
 
 def count_inside_crop(points_crop: Float32[Tensor, 'b n 2'], in_front: Bool[Tensor, 'b n']) -> Int64[Tensor, 'b']:
-    """Count front-facing points inside [0,96) on both axes."""
-    return (in_front & (points_crop >= 0).all(dim=-1) & (points_crop < CROP_SIZE).all(dim=-1)).sum(dim=-1)
+    """Count front-facing points inside the pixel-centre extent [-0.5,95.5) on both axes."""
+    return (in_front & (points_crop >= -0.5).all(dim=-1) & (points_crop < CROP_SIZE - 0.5).all(dim=-1)).sum(dim=-1)
 
 
 def boundary_occlusion(n: int, generator: torch.Generator, device: torch.device | str, probability: float, max_fraction: float) -> Bool[Tensor, 'b 96 96']:

@@ -31,3 +31,10 @@ def test_show3d_per_camera_missing_pose_and_headset_rules() -> None:
     result: tuple[Bool[Tensor, '5 2'], Bool[Tensor, '5 2 2']] = show3d_hands(confidence, has_pose, inside, torch.tensor([True, True, True, False, True]))
     assert result[0].tolist() == [[True, False], [True, False], [False, False], [False, False], [True, True]]
     assert result[1].tolist() == [[[True, False]] * 2, [[False, False]] * 2, [[False, True]] * 2, [[True, True]] * 2, [[True, True]] * 2]
+
+
+def test_show3d_labels_allow_independent_in_place_camera_masks() -> None:
+    result: tuple[Bool[Tensor, '1 2'], Bool[Tensor, '1 2 2']] = show3d_hands(torch.ones(1, 2), torch.ones(1, 2, dtype=torch.bool), torch.ones(1, 2, 2, dtype=torch.int64), torch.ones(1, dtype=torch.bool))
+    labelled: Bool[Tensor, '1 2 2'] = result[1]
+    labelled &= torch.tensor([[[True, False], [False, True]]])
+    assert labelled.tolist() == [[[True, False], [False, True]]]

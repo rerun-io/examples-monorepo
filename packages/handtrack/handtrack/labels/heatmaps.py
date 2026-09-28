@@ -32,9 +32,10 @@ def render_heatmaps(points_crop: Float32[Tensor, 'b k 2'], sigma: float = HEATMA
     if sigma <= 0:
         raise ValueError('Heatmap sigma must be positive')
     axis: Float32[Tensor, '18'] = torch.arange(HEATMAP_SIZE, dtype=torch.float32, device=points_crop.device)
-    grid: Float32[Tensor, '18 18 2'] = torch.stack(torch.meshgrid(axis, axis, indexing='xy'), dim=-1)
-    delta: Float32[Tensor, 'b k 18 18 2'] = grid - crop_to_heatmap(points_crop)[:, :, None, None, :]
-    return torch.exp(-delta.square().sum(dim=-1) / (2 * sigma * sigma))
+    centre: Float32[Tensor, 'b k 2'] = crop_to_heatmap(points_crop)
+    profile: Float32[Tensor, 'b k 2 18'] = torch.exp(-(axis - centre[..., None]).square() / (2 * sigma * sigma))
+    return profile[..., 1, :, None] * profile[..., 0, None, :]
+
 
 
 def _refine_peak(profiles: Float32[Tensor, '*b n'], peak: Int64[Tensor, '*b']) -> Float32[Tensor, '*b']:
@@ -57,13 +58,15 @@ def _refine_peak(profiles: Float32[Tensor, '*b n'], peak: Int64[Tensor, '*b']) -
 def decode_heatmaps(heatmaps: Float32[Tensor, 'b k 18 18']) -> tuple[Float32[Tensor, 'b k 2'], Float32[Tensor, 'b k']]:
     """Return crop pixels and sampled peak values using separable log-quadratic fits."""
     flat: Float32[Tensor, 'b k n'] = rearrange(heatmaps, 'b k h w -> b k (h w)')
-    index: Int64[Tensor, 'b k'] = flat.argmax(dim=-1)
+    maximum: torch.return_types.max = flat.max(dim=-1)
+    peak: Float32[Tensor, 'b k'] = maximum.values
+    index: Int64[Tensor, 'b k'] = maximum.indices
     x: Int64[Tensor, 'b k'] = index % HEATMAP_SIZE
     y: Int64[Tensor, 'b k'] = index // HEATMAP_SIZE
     rows: Float32[Tensor, 'b k 18'] = heatmaps.gather(-2, y[..., None, None].expand(-1, -1, 1, HEATMAP_SIZE)).squeeze(-2)
     columns: Float32[Tensor, 'b k 18'] = heatmaps.gather(-1, x[..., None, None].expand(-1, -1, HEATMAP_SIZE, 1)).squeeze(-1)
     points: Float32[Tensor, 'b k 2'] = torch.stack((_refine_peak(rows, x), _refine_peak(columns, y)), dim=-1)
-    return heatmap_to_crop(points), flat.gather(-1, index[..., None]).squeeze(-1)
+    return heatmap_to_crop(points), peak
 
 
 def render_distance(d_rel_mm: Float32[Tensor, 'b k'], sigma: float = DISTANCE_SIGMA) -> Float32[Tensor, 'b k 18']:

@@ -43,6 +43,8 @@ def keypoint_input(points_crop: Float32[Tensor, 'b 21 2'], d_rel_mm: Float32[Ten
 
 def add_input_noise(vectors: Float32[Tensor, 'b 63'], generator: torch.Generator, uv_std: float, d_std: float) -> Float32[Tensor, 'b 63']:
     """Add independent Gaussian noise in normalised feature units; do not clamp."""
-    noise: Float32[Tensor, 'b 21 3'] = torch.randn((vectors.shape[0], 21, 3), generator=generator, device=vectors.device)
-    noise = noise * vectors.new_tensor([uv_std, uv_std, d_std])
-    return vectors + rearrange(noise, 'b k feature -> b (k feature)')
+    noise: Float32[Tensor, 'b 63'] = torch.randn((vectors.shape[0], 63), generator=generator, device=vectors.device)
+    noise[..., 0::3] *= uv_std
+    noise[..., 1::3] *= uv_std
+    noise[..., 2::3] *= d_std
+    return vectors + noise
