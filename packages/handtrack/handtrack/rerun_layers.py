@@ -12,7 +12,7 @@ Entity paths (rig 0, cameras ``cam_00``..``cam_03``, sides ``left``/``right``):
 - ``handtrack_v1``: the full pipeline.
   - ``<pinhole>/handtrack/boxes/{side}_hand``: Boxes2D coloured by source (DetNet magenta, tracked green), labelled with it.
   - ``<pinhole>/handtrack/gt_boxes/{side}_hand``: Boxes2D, the ground-truth box (square of the smallest circle enclosing
-    the projected ground-truth landmarks inside the image), for comparison.
+    the finite projected ground-truth landmarks in front of the camera), for comparison.
   - ``<pinhole>/handtrack/keypoints/{side}``: Points2D, KeyNet's 21 keypoints with the UmeTrack skeleton.
   - ``<pinhole>/handtrack/gt_keypoints/{side}``: Points2D, the projected ground-truth landmarks with the same skeleton (white).
   - ``/world/runs/handtrack/hands/{side}/keypoints``: Points3D, the fitted landmarks with the skeleton.
@@ -276,9 +276,19 @@ class _Clock:
         return [time_column(self.video_time_ns), frame_index_column(self.frame_index)]
 
 
-def _send_scalars(recording: rr.RecordingStream, path: str, clock: _Clock, values: Float32[ndarray, "f"] | Float64[ndarray, "f"], *, name: str, color: tuple[int, int, int]) -> None:
+def _send_scalars(
+    recording: rr.RecordingStream,
+    path: str,
+    clock: _Clock,
+    values: Float32[ndarray, "f"] | Float64[ndarray, "f"],
+    *,
+    name: str,
+    color: tuple[int, int, int],
+    width: float = 1.5,
+    interpolation: rr.components.InterpolationMode = rr.components.InterpolationMode.Linear,
+) -> None:
     """One series on every frame; NaN where there is no value (a gap in the line)."""
-    rr.log(path, rr.SeriesLines(names=name, colors=color), static=True, recording=recording)
+    rr.log(path, rr.SeriesLines(names=name, colors=color, widths=width, interpolation_mode=interpolation), static=True, recording=recording)
     rr.send_columns(path, indexes=clock.indexes(), columns=rr.Scalars.columns(scalars=values.astype(np.float64)), recording=recording)
 
 
@@ -308,24 +318,26 @@ def _send_boxes(
 
 
 def _send_keypoints(recording: rr.RecordingStream, path: str, clock: _Clock, points: Float32[ndarray, "f 21 d"], *, class_id: int, radius: float) -> None:
-    """21 keypoints on the frames where all are finite, an empty row elsewhere; class and keypoint ids are static.
+    """Finite keypoints with their original temporal IDs; an empty row when none remain.
 
     ``radius`` is in scene units, or UI points when negative (``rr.components.Radius``).
     """
-    keep: Bool[ndarray, "f"] = np.isfinite(points).all(axis=(1, 2))
+    keep: Bool[ndarray, "f 21"] = np.isfinite(points).all(axis=-1)
     archetype: type[rr.Points2D] | type[rr.Points3D] = rr.Points2D if points.shape[-1] == 2 else rr.Points3D
-    rr.log(path, archetype.from_fields(class_ids=class_id, keypoint_ids=np.arange(21), radii=radius, show_labels=False), static=True, recording=recording)
+    rr.log(path, archetype.from_fields(class_ids=class_id, radii=radius, show_labels=False), static=True, recording=recording)
     rr.send_columns(
-        path, indexes=clock.indexes(), columns=archetype.columns(positions=points[keep].reshape(-1, points.shape[-1])).partition((keep * 21).tolist()), recording=recording
+        path, indexes=clock.indexes(), columns=archetype.columns(positions=points[keep], keypoint_ids=np.broadcast_to(np.arange(21), keep.shape)[keep]).partition(keep.sum(axis=-1).tolist()), recording=recording
     )
 
 
-def write_detnet_layer(recording: rr.RecordingStream, detections: SegmentTrack) -> None:
+def write_detnet_layer(recording: rr.RecordingStream, detections: SegmentTrack, truth: GroundTruth) -> None:
     """``detnet_v1``: DetNet's box per camera and hand (labelled with its presence) and the presence series.
 
     ``detections`` is the DetNet-alone record (``meta.kind == "detnet_alone"``): ``presence`` is DetNet's per camera
     and hand, ``box`` and ``box_source`` = DetNet where it reported a hand. A box below the presence threshold is grey.
+    ``truth`` supplies the full base segment clock; a partial run clears at its next frame on both timelines.
     """
+    detections = with_clearing_frame(detections, truth)
     clock: _Clock = _Clock(detections.video_time_ns, detections.frame_index)
     if detections.meta.kind != "detnet_alone":
         raise ValueError(f"{detections.meta.segment}: detnet_v1 needs a DetNet-alone record, got kind={detections.meta.kind!r}")
@@ -410,7 +422,7 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
     truth_clock: _Clock = _Clock(truth.video_time_ns, truth.frame_index)
     gt: Float32[ndarray, "g 2 21 3"] = gt_landmarks(truth)
     gt_pixels: Float32[ndarray, "g c 2 21 2"] = camera_pixels(truth.rig, truth.world_from_rig, gt)
-    gt_boxes: Float32[ndarray, "g c 2 4"] = enclosing_squares(gt_pixels, inside_images(truth.rig, gt_pixels))
+    gt_boxes: Float32[ndarray, "g c 2 4"] = enclosing_squares(gt_pixels, np.isfinite(gt_pixels).all(-1))
     error: Float32[ndarray, "f 2"] = keypoint_error_mm(track.landmarks, gt_landmarks(truth.on_frames(track.video_time_ns)), track.tracked)
     palette: UInt8[ndarray, "3 3"] = np.array([(0, 0, 0), SOURCE_COLORS[BoxSource.DETNET], SOURCE_COLORS[BoxSource.TRACKED]], dtype=np.uint8)
     context: rr.AnnotationContext = hand_annotation_context()
@@ -447,8 +459,8 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
             path=pred_mesh_path(side),
         )
         _send_scalars(recording, error_path(side), clock, error[:, index], name=side, color=PRED_COLORS[index])
-        _send_scalars(recording, tracked_path(side), clock, track.tracked[:, index].astype(np.float64), name=side, color=PRED_COLORS[index])
-        _send_scalars(recording, round_robin_presence_path(side), clock, track.detnet_presence[:, index], name=side, color=PRED_COLORS[index])
+        _send_scalars(recording, tracked_path(side), clock, track.tracked[:, index].astype(np.float64), name=f"{side} tracked", color=PRED_COLORS[index], width=3.0, interpolation=rr.components.InterpolationMode.StepAfter)
+        _send_scalars(recording, round_robin_presence_path(side), clock, track.detnet_presence[:, index], name=f"{side} DetNet presence", color=PRED_COLORS[index])
         _send_scalars(recording, fit_energy_path(side), clock, track.fit_energy[:, index], name=side, color=PRED_COLORS[index])
     _send_scalars(
         recording, DETNET_CAMERA_PATH, clock, np.where(track.detnet_camera >= 0, track.detnet_camera, np.nan).astype(np.float64), name="DetNet camera", color=(255, 60, 255)

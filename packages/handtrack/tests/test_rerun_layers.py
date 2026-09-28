@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from dataforge.writing import atomic_recording
 from fake_track import fake_detnet, fake_track, synthetic_rig, synthetic_truth
 from jaxtyping import Bool, Float32
 from numpy import ndarray
-from rerun.chunk import RrdReader
+from rerun.chunk import ChunkStore, RrdReader
 
 from handtrack import rerun_layers
 from handtrack.results import BoxSource, SegmentTrack
@@ -113,7 +114,7 @@ def test_detnet_layer_writes_boxes_on_the_reserved_schema_paths(tmp_path: Path) 
     detections: SegmentTrack = fake_detnet(truth)
     target: Path = tmp_path / f"{truth.segment}.rrd"
     with atomic_recording(target, recording_id=truth.segment, send_properties=False) as recording:
-        rerun_layers.write_detnet_layer(recording, detections)
+        rerun_layers.write_detnet_layer(recording, detections, truth)
     rows: dict[str, list[pa.RecordBatch]] = _rows_by_entity(target)
     for camera in range(4):
         for side_index, side in enumerate(("left", "right")):
@@ -154,3 +155,83 @@ def test_a_hand_model_that_misses_the_tracked_landmarks_is_refused(tmp_path: Pat
     track: SegmentTrack = fake_track(truth)
     with atomic_recording(tmp_path / "layer.rrd", recording_id=truth.segment, send_properties=False) as recording, pytest.raises(ValueError, match="misses"):
         rerun_layers.write_handtrack_layer(recording, track, truth, rerun_layers.scaled_model(truth.model, 1.1))
+
+
+def test_gt_box_keeps_landmarks_beyond_image_edge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    truth: rerun_layers.GroundTruth = synthetic_truth(2)
+    track: SegmentTrack = fake_track(truth)
+    pixels: Float32[ndarray, "2 4 2 21 2"] = np.full((2, 4, 2, 21, 2), [630, 240], dtype=np.float32)
+    pixels[..., -1, 0] = 690
+    monkeypatch.setattr(rerun_layers, "camera_pixels", lambda *args: pixels)
+    target = tmp_path / "edge.rrd"
+    with atomic_recording(target, recording_id=truth.segment, send_properties=False) as recording:
+        rerun_layers.write_handtrack_layer(recording, track, truth, truth.model)
+    batches = _rows_by_entity(target)[rerun_layers.gt_box_path(0, "left")]
+    half_sizes = [value for batch in batches if "Boxes2D:half_sizes" in batch.schema.names for row in batch.column("Boxes2D:half_sizes").to_pylist() for value in row]
+    np.testing.assert_allclose(half_sizes, [[30, 30], [30, 30]], atol=1e-3)
+
+
+@pytest.mark.parametrize("timeline", [schema.TIMELINE, schema.FRAME_INDEX])
+def test_partial_detnet_clears_at_next_base_frame(tmp_path: Path, timeline: str) -> None:
+    truth = synthetic_truth(40)
+    detections = fake_detnet(truth.on_frames(truth.video_time_ns[:20]))
+    target = tmp_path / "partial-detnet.rrd"
+    with atomic_recording(target, recording_id=truth.segment, send_properties=False) as recording:
+        rerun_layers.write_detnet_layer(recording, detections, truth)
+    reader = RrdReader(target)
+    store = ChunkStore.from_chunks(reader.stream(store=reader.recordings()[0]).to_chunks())
+    clock = truth.video_time_ns if timeline == schema.TIMELINE else truth.frame_index
+    path = rerun_layers.detnet_box_path(0, "left")
+    table = store.reader(timeline, contents=path, fill_latest_at=True, using_index_values=clock[[19, 20, 39]]).to_arrow_table()
+    boxes = table[f"{path}:Boxes2D:centers"].to_pylist()
+    assert len(boxes[0]) == 1
+    assert boxes[1:] == [[], []]
+
+
+def test_partial_skeleton_preserves_temporal_keypoint_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    truth: rerun_layers.GroundTruth = synthetic_truth(3)
+    track: SegmentTrack = fake_track(truth)
+    pixels: Float32[ndarray, "3 4 2 21 2"] = np.full((3, 4, 2, 21, 2), [100, 200], dtype=np.float32)
+    pixels[0, ..., 7, :] = np.nan
+    pixels[1, ..., 3, :] = np.nan
+    pixels[2] = np.nan
+    monkeypatch.setattr(rerun_layers, "camera_pixels", lambda *args: pixels)
+    target = tmp_path / "partial-skeleton.rrd"
+    with atomic_recording(target, recording_id=truth.segment, send_properties=False) as recording:
+        rerun_layers.write_handtrack_layer(recording, track, truth, truth.model)
+    batches = _rows_by_entity(target)[rerun_layers.gt_keypoints2d_path(0, "left")]
+    assert _instances(batches, "Points2D:positions") == [20, 20, 0]
+    ids = [row for batch in batches if schema.TIMELINE in batch.schema.names and "Points2D:keypoint_ids" in batch.schema.names for row in batch.column("Points2D:keypoint_ids").to_pylist()]
+    assert ids == [[i for i in range(21) if i != 7], [i for i in range(21) if i != 3], []]
+
+
+@pytest.mark.parametrize("factory", [fake_track, fake_detnet])
+def test_fake_outputs_store_unenlarged_unclipped_hand_boxes(monkeypatch: pytest.MonkeyPatch, factory: Callable[[rerun_layers.GroundTruth], SegmentTrack]) -> None:
+    import fake_track as fixtures
+
+    truth = synthetic_truth(4)
+    pixels: Float32[ndarray, "4 4 2 21 2"] = np.full((4, 4, 2, 21, 2), [630, 240], dtype=np.float32)
+    pixels[..., -1, 0] = 690
+    monkeypatch.setattr(fixtures, "camera_pixels", lambda *args: pixels)
+    track: SegmentTrack = factory(truth)
+    kept: Float32[ndarray, "n 4"] = track.box[track.box_source != BoxSource.NONE]
+    assert len(kept) > 1
+    np.testing.assert_allclose(kept[:, 2:] - kept[:, :2], np.full((len(kept), 2), 60), atol=1e-3)
+    np.testing.assert_allclose(kept[0], [630, 210, 690, 270], atol=1e-3)
+
+
+def test_state_and_detnet_series_have_distinct_legend_names_and_styles(tmp_path: Path) -> None:
+    truth = synthetic_truth(8)
+    target = tmp_path / "series.rrd"
+    with atomic_recording(target, recording_id=truth.segment, send_properties=False) as recording:
+        rerun_layers.write_handtrack_layer(recording, fake_track(truth), truth, truth.model)
+    rows = _rows_by_entity(target)
+    for side in ("left", "right"):
+        for path, name, width, interpolation in (
+            (rerun_layers.tracked_path(side), f"{side} tracked", 3.0, 2),
+            (rerun_layers.round_robin_presence_path(side), f"{side} DetNet presence", 1.5, 1),
+        ):
+            style = next(batch for batch in rows[path] if "SeriesLines:names" in batch.schema.names)
+            assert style.column("SeriesLines:names").to_pylist() == [[name]]
+            assert style.column("SeriesLines:widths").to_pylist() == [[width]]
+            assert style.column("SeriesLines:interpolation_mode").to_pylist() == [[interpolation]]

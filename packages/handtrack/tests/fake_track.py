@@ -18,8 +18,6 @@ from handtrack.rerun_layers import GroundTruth, camera_pixels, enclosing_squares
 from handtrack.results import BoxSource, SegmentTrack, TrackMetadata
 
 FAKE_PRESENCE: float = 0.9
-BOX_ENLARGE: float = 1.2
-"""The KeyNet crop's +20 %."""
 
 
 def synthetic_rig() -> CameraRig:
@@ -63,7 +61,7 @@ def synthetic_truth(num_frames: int, *, segment: str = "umetrack__synthetic__tes
 
 
 def fake_track(truth: GroundTruth, *, seed: int = 0, drop: tuple[float, float] = (0.4, 0.5)) -> SegmentTrack:
-    """A ``SegmentTrack`` from ground truth: GT pose + noise (3 mm, 0.03 rad), GT boxes +20 %, presence 0.9.
+    """A ``SegmentTrack`` from ground truth: GT pose + noise (3 mm, 0.03 rad), GT hand boxes, presence 0.9.
 
     Hands are untracked while absent and during the ``drop`` fraction of the frames; the first tracked frame
     of every run is a DetNet acquisition on the round-robin camera, the rest are tracked boxes.
@@ -80,7 +78,7 @@ def fake_track(truth: GroundTruth, *, seed: int = 0, drop: tuple[float, float] =
     pred_pixels: Float32[ndarray, "f 4 2 21 2"] = camera_pixels(truth.rig, truth.world_from_rig, landmarks)
     inside: Bool[ndarray, "f 4 2 21"] = inside_images(truth.rig, gt_pixels)
     counts: Int64[ndarray, "f 4 2"] = inside.sum(-1)
-    box: Float32[ndarray, "f 4 2 4"] = enclosing_squares(gt_pixels, inside, enlarge=BOX_ENLARGE)
+    box: Float32[ndarray, "f 4 2 4"] = enclosing_squares(gt_pixels, np.isfinite(gt_pixels).all(-1))
     seen: Bool[ndarray, "f 4 2"] = tracked[:, None, :] & (counts > 0)
     box[~seen] = np.nan
     acquired: Bool[ndarray, "f 2"] = tracked & ~np.concatenate([np.zeros((1, 2), dtype=bool), tracked[:-1]])
@@ -92,7 +90,7 @@ def fake_track(truth: GroundTruth, *, seed: int = 0, drop: tuple[float, float] =
         box[frame, :, side] = np.nan
         if counts[frame, camera, side] > 0:
             box_source[frame, camera, side] = BoxSource.DETNET
-            box[frame, camera, side] = enclosing_squares(gt_pixels[frame, camera, side], inside[frame, camera, side], enlarge=BOX_ENLARGE)
+            box[frame, camera, side] = enclosing_squares(gt_pixels[frame, camera, side], np.isfinite(gt_pixels[frame, camera, side]).all(-1))
     # KeyNet runs on the (at most) two views with the most keypoints inside.
     order: Int64[ndarray, "f 4 2"] = np.argsort(-np.where(box_source > 0, counts, -1), axis=1, kind="stable")
     ran: Bool[ndarray, "f 4 2"] = np.zeros((num_frames, 4, 2), dtype=bool)
@@ -125,12 +123,12 @@ def fake_track(truth: GroundTruth, *, seed: int = 0, drop: tuple[float, float] =
 
 
 def fake_detnet(truth: GroundTruth, *, seed: int = 1) -> SegmentTrack:
-    """DetNet alone on every frame and camera: the GT box +20 % wherever a hand has a keypoint inside, presence 0.9 (0.1 elsewhere)."""
+    """DetNet alone on every frame and camera: the GT hand box wherever a hand has a keypoint inside, presence 0.9 (0.1 elsewhere)."""
     base: SegmentTrack = fake_track(truth, seed=seed, drop=(0.0, 0.0))
     gt_pixels: Float32[ndarray, "f 4 2 21 2"] = camera_pixels(truth.rig, truth.world_from_rig, gt_landmarks(truth))
     inside: Bool[ndarray, "f 4 2 21"] = inside_images(truth.rig, gt_pixels)
     seen: Bool[ndarray, "f 4 2"] = inside.any(-1)
-    box: Float32[ndarray, "f 4 2 4"] = enclosing_squares(gt_pixels, inside, enlarge=BOX_ENLARGE)
+    box: Float32[ndarray, "f 4 2 4"] = enclosing_squares(gt_pixels, np.isfinite(gt_pixels).all(-1))
     box[~seen] = np.nan
     return replace(
         base,

@@ -51,6 +51,8 @@ ignore_names = [
     # Tyro-facing entry points and config fields.
     "main",
     "rr_config",
+    # unittest.mock configures the catalog boundary in export validation tests.
+    "side_effect",
     # pytest's module-level skip marker.
     "pytestmark",
 ]
