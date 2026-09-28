@@ -6,8 +6,11 @@ from jaxtyping import Float32
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 from torch import Tensor
 
+from handtrack.geometry.letterbox import letterbox_for
 from handtrack.hand.pose import generic_hand_model
-from handtrack.labels.heatmaps import DISTANCE_RANGE_MM
+from handtrack.labels.circles import enclosing_circles
+from handtrack.labels.crops import apply_affine, crop_boxes, crop_from_net
+from handtrack.labels.heatmaps import DISTANCE_RANGE_MM, decode_distance, decode_heatmaps, render_distance, render_heatmaps
 from handtrack.labels.keypoint_input import ZERO_INPUT, add_input_noise, hand_scale, keypoint_input, relative_distances
 
 
@@ -51,11 +54,6 @@ def test_seeded_input_noise_has_separate_uv_and_distance_scales() -> None:
 
 
 def test_labels_flow_from_source_pixels_to_keynet_features() -> None:
-    from handtrack.geometry.letterbox import letterbox_for
-    from handtrack.labels.circles import enclosing_circles
-    from handtrack.labels.crops import apply_affine, crop_boxes, crop_from_net
-    from handtrack.labels.heatmaps import decode_distance, decode_heatmaps, render_distance, render_heatmaps
-
     source: Float32[Tensor, '1 21 2'] = torch.stack((torch.linspace(300.0, 500.0, 21), torch.linspace(500.0, 700.0, 21)), dim=-1)[None]
     net: Float32[Tensor, '1 21 2'] = letterbox_for(1024, 1280).to_net(source)
     circles: Float32[Tensor, '1 3'] = torch.from_numpy(enclosing_circles(net.numpy(), torch.ones(1, 21, dtype=torch.bool).numpy()))
