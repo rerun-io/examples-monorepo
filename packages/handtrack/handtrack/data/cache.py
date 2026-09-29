@@ -120,7 +120,7 @@ class _HostBatch:
 class DetNetCache:
     """DetNet training batches from a cache held in host RAM (a ``batches.BatchSource``).
 
-    Every epoch visits each cached sample once, in a seeded order; a background thread gathers the next batches into
+    Every epoch visits the cached samples in a seeded order, in full batches only (the few left over differ every epoch); a background thread gathers the next batches into
     pinned memory, and the main thread copies them to the device and scales their intensity there.
     """
 
@@ -164,7 +164,8 @@ class DetNetCache:
 
     def _gather(self, order: Int64[Tensor, "n"]) -> None:
         try:
-            for begin in range(0, len(order), self.batch_size):
+            full: int = len(order) - len(order) % self.batch_size  # drop the partial batch: a new shape makes torch.compile recompile
+            for begin in range(0, full, self.batch_size):
                 index: Int64[Tensor, "b"] = order[begin : begin + self.batch_size].sort().values
                 rows: dict[str, Tensor] = {name: array.index_select(0, index) for name, array in self.arrays.items()}
                 batch: _HostBatch = _HostBatch(**{name: value.pin_memory() if self._pin else value for name, value in rows.items()})

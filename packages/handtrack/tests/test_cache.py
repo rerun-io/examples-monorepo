@@ -33,7 +33,7 @@ def test_cache_holds_one_epoch_and_every_epoch_visits_each_sample_once(tmp_path:
         while (batch := cache.next_detnet_batch()) is not None:
             assert batch.pooled.shape[1:] == (1, 120, 160) and batch.pooled.dtype == torch.float32
             seen += (batch.circle[:, 0, 0] / 6).long().tolist()
-        assert sorted(seen) == list(range(10))
+        assert len(seen) == 8 and len(set(seen)) == 8 and set(seen) <= set(range(10))  # two full batches; the remainder is dropped
         orders.append(seen)
     assert orders[0] != orders[1]
     cache.close()
