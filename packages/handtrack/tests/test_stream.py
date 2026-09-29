@@ -23,6 +23,7 @@ from handtrack.data.stream import (
     evaluation_augment,
     is_fatal,
     keynet_samples,
+    perspective_keynet_samples,
     sample_count,
     select_samples,
 )
@@ -107,6 +108,36 @@ def test_keynet_samples_positive_and_negatives() -> None:
     assert samples.points_crop[right_negatives].eq(0).all() and samples.crop_from_net.shape == (len(kinds), 3, 3)
     zero_inputs = keynet_samples(net, truth, label, circles, truth, truth, 1.0, 0, dataclasses.replace(augment, zero_input_probability=1.0), torch.Generator().manual_seed(3))
     assert zero_inputs.keypoints.eq(0).all()
+
+
+def test_perspective_keynet_samples_positive_and_negatives() -> None:
+    rig: CameraRig = CameraRig(names=("/cam",), image_size=torch.tensor([[640.0, 480.0]]), cam_from_rig=torch.eye(4)[None],
+                               focal=torch.tensor([[300.0, 300.0]]), principal=torch.tensor([[319.5, 239.5]]), fisheye62=None)
+    rng: np.random.Generator = np.random.default_rng(0)
+    left_cam: torch.Tensor = torch.from_numpy(np.array([0.0, 0.0, 0.4]) + rng.uniform(-0.04, 0.04, (21, 3))).float()
+    points_cam: torch.Tensor = torch.stack([left_cam, torch.full((21, 3), torch.nan)])[None]
+    net_xy: torch.Tensor = points_cam[..., :2] / points_cam[..., 2:] * 300.0 + torch.tensor([319.5, 239.5])
+    frames: torch.Tensor = torch.zeros((1, 480, 640), dtype=torch.uint8)
+    frames[0, 200:280, 280:360] = 200  # the hand's image region: +-0.04 m at 0.4 m is +-30 px about the centre
+    truth: ImageHands = ImageHands(net_xy=net_xy, points_cam=points_cam, in_front=torch.tensor([[[True] * 21, [False] * 21]]), valid=torch.tensor([[True, False]]))
+    label: torch.Tensor = torch.tensor([[HandLabel.PRESENT, HandLabel.ABSENT]])
+    augment: KeyNetAugment = dataclasses.replace(
+        KeyNetAugment(), drift_probability=1.0, other_hand_probability=0.0, edge_probability=1.0, background_probability=1.0, zero_input_probability=0.0, stale_input_probability=0.0
+    )
+    samples = perspective_keynet_samples(frames, rig, letterbox_for(640, 480), 0.0, truth, label, truth, truth, 1.0, 0, augment, torch.Generator().manual_seed(3))
+    kinds: list[int] = samples.kind.tolist()
+    assert kinds.count(int(CropKind.POSITIVE)) == 1 and len(kinds) >= 2
+    positive: int = kinds.index(int(CropKind.POSITIVE))
+    assert samples.presence[positive] == 1.0 and (samples.presence[[i for i in range(len(kinds)) if i != positive]] == 0).all()
+    inside: torch.Tensor = ((samples.points_crop[positive] >= 0) & (samples.points_crop[positive] < CROP_SIZE)).all(dim=-1)
+    assert int(inside.sum()) >= 17
+    assert samples.crops[positive].float().mean() > 50.0  # the crop sits on the bright hand region
+    assert samples.keypoints[positive].abs().sum() > 0 and bool(torch.isfinite(samples.crop_from_net).all())
+    negatives: list[int] = [i for i in range(len(kinds)) if i != positive]
+    assert samples.points_crop[negatives].eq(0).all() and samples.d_rel_mm[negatives].eq(0).all()
+    # The local affine maps the hand's net-frame keypoints close to their exact crop positions.
+    mapped = torch.einsum('ij,kj->ki', samples.crop_from_net[positive, :2, :2], net_xy[0, 0]) + samples.crop_from_net[positive, :2, 2]
+    assert float((mapped - samples.points_crop[positive]).norm(dim=-1).median()) < 2.0
 
 
 def test_bounding_circles_and_evaluation_recipe() -> None:
