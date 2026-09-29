@@ -25,6 +25,8 @@ from handtrack.models.keynet import HeatmapReduction, KeyNetF, KeyNetLoss, KeyNe
 from handtrack.train.checkpoint import MetricRecord, TrainingState, export_weights, load_checkpoint, save_checkpoint
 from handtrack.train.source import BatchSource, DetNetValidation, DetNetValidationSource, KeyNetValidation, KeyNetValidationSource
 
+HEATMAP_PIXELS: int = 18 * 18
+"""Pixels per 2D heatmap: the factor between the pixel-sum and mean heatmap MSEs."""
 Nets: TypeAlias = Literal['detnet', 'keynet', 'both']
 Net: TypeAlias = Literal['detnet', 'keynet']
 
@@ -103,14 +105,20 @@ class LoopSettings:
     heatmap_warmup_steps: int = 0
     """Global steps that use 'mean' (also while ``heatmap_warmup_epochs`` lasts). The warm-up that worked (probe A5) was one
     2-segment epoch, about 120 steps; one epoch of a KeyNet cache is ~17 k steps, so cache runs count the warm-up in steps."""
+    heatmap_ramp_steps: int = 0
+    """Steps after ``heatmap_warmup_steps`` over which the pixel-sum heatmap terms grow geometrically from the 'mean' scale
+    (1/324 of the pixel sum) to full weight, instead of jumping 324x in one step at an unchanged learning rate; the jump is
+    the likely way the wrist channel's final BN bias went negative (-0.45) and killed its ReLU in joint-full-1."""
 
     def __post_init__(self) -> None:
         if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or self.validate_every < 0:
             raise ValueError('Cadences must be positive (validate_every may be zero)')
         if min(self.presence_weight, self.detnet_circle_weight, self.detnet_presence_weight) < 0:
             raise ValueError('Loss weights must be nonnegative')
-        if self.heatmap_warmup_epochs < 0 or self.heatmap_warmup_steps < 0:
-            raise ValueError('heatmap_warmup_epochs and heatmap_warmup_steps must be nonnegative')
+        if self.heatmap_warmup_epochs < 0 or self.heatmap_warmup_steps < 0 or self.heatmap_ramp_steps < 0:
+            raise ValueError('heatmap_warmup_epochs, heatmap_warmup_steps and heatmap_ramp_steps must be nonnegative')
+        if self.heatmap_ramp_steps and self.heatmap_reduction != 'pixel_sum':
+            raise ValueError("heatmap_ramp_steps ramps up the pixel sum; it needs heatmap_reduction='pixel_sum'")
         if self.bf16 and os.environ.get('PIXI_DEV_MODE') == '1':
             raise ValueError('bf16 needs the prod environment: existing model internals enforce Float32 in dev')
 
@@ -258,8 +266,13 @@ class Trainer:
     def keynet_objective(self, batch: KeyNetBatch, output: KeyNetOutput) -> KeyNetLoss:
         warming: bool = self.state.epoch < self.cadence.heatmap_warmup_epochs or self.state.step < self.cadence.heatmap_warmup_steps
         reduction: HeatmapReduction = 'mean' if warming else self.cadence.heatmap_reduction
+        scale: float = 1.0
+        ramp: int = self.cadence.heatmap_ramp_steps
+        if not warming and ramp and self.state.step < self.cadence.heatmap_warmup_steps + ramp:
+            progress: float = (self.state.step - self.cadence.heatmap_warmup_steps) / ramp
+            scale = float(HEATMAP_PIXELS ** (progress - 1.0))  # 1/324 (the 'mean' scale) at the switch, 1 at the end
         return keynet_loss(output, batch.heatmaps.to(self.device), batch.distance.to(self.device), batch.presence.to(self.device), batch.positive.to(self.device),
-                           batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction)
+                           batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction, heatmap_scale=scale)
 
     def train_batch(self, batch: DetNetBatch | KeyNetBatch) -> None:
         """Apply one SGD step and retain detached scalar loss terms."""
