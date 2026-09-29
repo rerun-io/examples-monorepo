@@ -176,7 +176,14 @@ def unproject(camera: CameraRig, pixels: Float32[Tensor, "n 2"], iterations: int
             projected: Float32[Tensor, "n 3 2"] = project(camera, points[None])[0]
             residual: Float32[Tensor, "n 2"] = projected[:, 0] - pixels
             jacobian: Float32[Tensor, "n 2 2"] = torch.stack([(projected[:, 1] - projected[:, 0]) / step, (projected[:, 2] - projected[:, 0]) / step], dim=-1)
-            ab = ab - torch.linalg.solve(jacobian, residual[..., None])[..., 0]
+            # An explicit 2x2 inverse: where the lens model saturates (Fisheye62 clips r^2 at pi^2) the Jacobian is singular,
+            # and those rays keep their last estimate instead of failing the whole batch.
+            a, b, c, d = jacobian[:, 0, 0], jacobian[:, 0, 1], jacobian[:, 1, 0], jacobian[:, 1, 1]
+            det: Float32[Tensor, "n"] = a * d - b * c
+            ok: Bool[Tensor, "n"] = det.abs() > 1e-9
+            safe_det: Float32[Tensor, "n"] = torch.where(ok, det, torch.ones_like(det))
+            delta: Float32[Tensor, "n 2"] = torch.stack([d * residual[:, 0] - b * residual[:, 1], a * residual[:, 1] - c * residual[:, 0]], dim=-1) / safe_det[:, None]
+            ab = ab - torch.where(ok[:, None] & torch.isfinite(delta), delta, torch.zeros_like(delta))
         guess = torch.cat([ab, torch.ones_like(ab[:, :1])], dim=-1)
     return guess / torch.linalg.vector_norm(guess, dim=-1, keepdim=True)
 
