@@ -30,6 +30,13 @@ def test_keypoint_pipeline_and_tracking() -> None:
     affine[:, 0, 0] = 0.5
     result = keynet_metrics(pred, xy, affine, torch.ones(2, 21), torch.zeros(2, 21), torch.tensor([0.8, 0.9]), torch.ones(2), torch.tensor([True, False]), torch.tensor([True, False]))
     assert result.error_px == 6.0
+    assert result.joint_error_px == (6.0,) * 21
+    wrist_off = xy[:1].clone()
+    wrist_off[0, 5] = torch.tensor([0.0, 4.0])
+    one = keynet_metrics(wrist_off, xy[:1], torch.eye(3)[None], torch.ones(1, 21), torch.ones(1, 21), torch.tensor([0.9]), torch.ones(1),
+                         torch.tensor([True]), torch.tensor([True]))
+    joints = (one + result).joint_error_px  # sums add per landmark over both batches' scored crops
+    assert joints is not None and joints[5] == pytest.approx((4.0 + 6.0) / 2) and joints[0] == pytest.approx(3.0)
     assert result.distance_mm == 1.0
     assert result.presence.precision == 1.0
     trajectory = torch.arange(5).float()[:, None, None, None].expand(5, 1, 21, 3) * 0.01

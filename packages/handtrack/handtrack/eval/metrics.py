@@ -95,18 +95,27 @@ class KeypointMetrics:
     """Number of scored keypoints."""
     presence: Counts
     """Presence counts after masking."""
+    joint_error_sums: tuple[float, ...] = ()
+    """Per-landmark sums of the 2D errors in ``LANDMARK`` order (empty when nothing was scored): shows a dead output channel."""
 
     @property
     def error_px(self) -> float | None:
         return self.pixel_error_sum / self.keypoints if self.keypoints else None
 
     @property
+    def joint_error_px(self) -> tuple[float, ...] | None:
+        crops: int = self.keypoints // 21
+        return tuple(total / crops for total in self.joint_error_sums) if crops and self.joint_error_sums else None
+
+    @property
     def distance_mm(self) -> float | None:
         return self.distance_error_sum / self.keypoints if self.keypoints else None
 
     def __add__(self, other: 'KeypointMetrics') -> 'KeypointMetrics':
+        joints: tuple[float, ...] = (tuple(a + b for a, b in zip(self.joint_error_sums, other.joint_error_sums, strict=True))
+                                     if self.joint_error_sums and other.joint_error_sums else self.joint_error_sums or other.joint_error_sums)
         return KeypointMetrics(self.pixel_error_sum + other.pixel_error_sum, self.distance_error_sum + other.distance_error_sum,
-                               self.keypoints + other.keypoints, self.presence + other.presence)
+                               self.keypoints + other.keypoints, self.presence + other.presence, joints)
 
 
 def presence_counts(probability: Float32[Tensor, 'b'], presence: Float32[Tensor, 'b'], presence_mask: Bool[Tensor, 'b']) -> Counts:
@@ -130,8 +139,10 @@ def keynet_metrics(
     inverse: Float32[Tensor, "positive 3 3"] = torch.linalg.inv(crop_from_net[positive])
     delta: Float32[Tensor, "positive 21 2"] = predicted_crop[positive] - target_crop[positive]
     net_delta: Float32[Tensor, "positive 21 2"] = torch.einsum('bij,bkj->bki', inverse[:, :2, :2], delta)
-    return KeypointMetrics(float(net_delta.norm(dim=-1).sum()), float((predicted_distance[positive] - target_distance[positive]).abs().sum()),
-                           int(positive.sum()) * 21, presence_counts(probability, presence, presence_mask))
+    errors: Float32[Tensor, "positive 21"] = net_delta.norm(dim=-1)
+    return KeypointMetrics(float(errors.sum()), float((predicted_distance[positive] - target_distance[positive]).abs().sum()),
+                           int(positive.sum()) * 21, presence_counts(probability, presence, presence_mask),
+                           tuple(errors.sum(dim=0).tolist()) if errors.shape[0] else ())
 
 
 @dataclass(frozen=True, slots=True)
