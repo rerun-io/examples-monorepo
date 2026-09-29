@@ -168,6 +168,9 @@ class TrackerConfig:
     """End a UmeTrack track after this many consecutive frames without DetNet confirmation in its requested views.
     During the grace frames, fit all usable network views; a confirmed frame fits only confirmed views.
     Acquisition requires confirmation immediately. Missing/invalid network output ends the track immediately."""
+    end_on_view_rejection: bool = False
+    """Our addition, off by default: end a tracked hand when KeyNet rejects some of its requested views and one view is left.
+    On UmeTrack synthetic user_12/rec_09 those one-view frames averaged ~170 mm (their last view is off the hand as well)."""
     fit: FitConfig = field(default_factory=FitConfig)
 
     def __post_init__(self) -> None:
@@ -452,6 +455,8 @@ class Tracker:
                 out.keypoints[views[index].camera, side] = estimate.points_net[index]
                 out.presence[views[index].camera, side] = estimate.presence[index] if detector_presence is None else detector_presence[index]
             good: list[int] = [index for index in mine if float(estimate.presence[index]) >= self.config.presence_threshold]
+            if self.config.end_on_view_rejection and self.history[side].previous is not None and len(mine) >= 2 and len(good) == 1:
+                good = []  # the pose is slipping off the hand: a one-view fit from here is poor; DetNet re-acquires next frame
             if detector_presence is not None:
                 confirmed: list[int] = [index for index in good if float(detector_presence[index]) > self.config.umetrack_presence_threshold]
                 history: _History = self.history[side]
