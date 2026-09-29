@@ -20,6 +20,8 @@ class Config:
     """Start of the kept rows within each segment's pool stride, as a fraction of it (``StreamConfig.row_phase``)."""
     row_density: int = 1
     """Rows kept per pool stride (``StreamConfig.row_density``): more samples for the same decode."""
+    keynet_crop: Literal["affine", "perspective"] = "affine"
+    """KeyNet crop type (``StreamConfig.keynet_crop``)."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d")
     split: str = "training"
     producers: int = 4
@@ -39,6 +41,7 @@ def main(config: Config) -> None:
         device=config.device,
         row_phase=config.row_phase,
         row_density=config.row_density,
+        keynet_crop=config.keynet_crop,
     ))
     with stream:
         manifest: CacheManifest = write_cache(stream, config.output, config.split, net=config.net)

@@ -1,7 +1,7 @@
 """Tyro training entry point: DetNet-F, KeyNet-F or both, trained from one catalog stream."""
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import get_args
+from typing import Literal, get_args
 
 import torch
 from serde import serde
@@ -44,6 +44,9 @@ class StreamSettings:
     detnet_cache: Path | None = None
     """A decoded DetNet cache (``tools/build_detnet_cache.py``) to train from instead of the catalog stream; DetNet only.
     Validation still decodes its fixed evaluation set from the catalog."""
+    keynet_crop: Literal["affine", "perspective"] = "affine"
+    """KeyNet crops of the streams (training and validation): 'perspective' = UmeTrack's crop cameras on the native frames.
+    A KeyNet cache records its own crop type; it must match."""
     keynet_cache: tuple[Path, ...] = ()
     """KeyNet cache passes (``tools/build_detnet_cache.py --net keynet``) to train from instead of the catalog stream; KeyNet only.
     Epoch e reads pass e mod len(passes). Validation still decodes its fixed evaluation set from the catalog."""
@@ -112,6 +115,8 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
         if nets != "keynet":
             raise ValueError("stream.keynet_cache holds KeyNet samples only; train with nets=keynet")
         crops: KeyNetCache = KeyNetCache(settings.keynet_cache, settings.keynet_batch, device, seed=settings.seed)
+        if {manifest.keynet_crop for manifest in crops.manifests} != {settings.keynet_crop}:
+            raise ValueError(f"{settings.keynet_cache} hold {sorted({m.keynet_crop for m in crops.manifests})} crops; the run validates on {settings.keynet_crop!r}")
         if crops.dataset_names != tuple(settings.datasets):
             raise ValueError(f"{settings.keynet_cache} hold {crops.dataset_names}, the run asks for {settings.datasets}")
         return crops
@@ -132,6 +137,7 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
             seed=settings.seed,
             validation=evaluation,
             validation_samples=settings.max_val_batches * max(settings.detnet_batch, settings.keynet_batch),
+            keynet_crop=settings.keynet_crop,
         )
     )
 

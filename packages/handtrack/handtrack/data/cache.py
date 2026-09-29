@@ -65,6 +65,8 @@ class CacheManifest:
     seed: int = 0
     row_phase: float = 0.0
     row_density: int = 1
+    keynet_crop: str = "affine"
+    """KeyNet caches: 'affine' or 'perspective' crops (``StreamConfig.keynet_crop``)."""
 
 
 def write_cache(stream: CatalogStream, directory: Path, split: str, draw: int = 8192, net: str = "detnet") -> CacheManifest:
@@ -109,6 +111,7 @@ def write_cache(stream: CatalogStream, directory: Path, split: str, draw: int = 
         seed=stream.config.seed,
         row_phase=stream.config.row_phase,
         row_density=stream.config.row_density,
+        keynet_crop=stream.config.keynet_crop,
     )
     (directory / "manifest.json").write_text(to_json(manifest))
     return manifest
