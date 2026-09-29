@@ -26,8 +26,8 @@ CROP_MARGIN: float = 1.2
 """The farthest crop point sits at 1/1.2 of the half-side from the centre (the affine crops' 20 % box enlargement)."""
 MIN_AXIS_COSINE: float = 0.05
 """A crop camera must look less than ~87 degrees off its source camera's axis (the minimal rotation degenerates at 180)."""
-_SAMPLE_CHUNK: int = 64
-"""Crops sampled per grid_sample call: each gathers its full native image as float."""
+_SAMPLE_CHUNK: int = 16
+"""Frames converted to float and sampled per grid_sample call (a 1.3 MP frame is 5.2 MB as float)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,20 +141,38 @@ def crop_rays(cameras: CropCameras) -> Float32[Tensor, "n p 3"]:
 
 
 def sample_crops(frames: UInt8[Tensor, "m h w"], image: Int64[Tensor, "n"], cameras: CropCameras, camera: CameraRig) -> Float32[Tensor, "n 1 96 96"]:
-    """Sample each crop from its native frame through the one-camera rig ``camera`` (bilinear; zero outside the image)."""
+    """Sample each crop from its native frame through the one-camera rig ``camera`` (bilinear; zero outside the image).
+
+    Crops are grouped by frame: each frame is converted to float once and sampled by one grid holding all of its crops
+    stacked along the grid's height (converting a 1.3 MP frame per crop cost 4x the whole build's decode)."""
     n: int = image.shape[0]
     height, width = frames.shape[1], frames.shape[2]
     out: Float32[Tensor, "n 1 96 96"] = torch.zeros((n, 1, CROP_SIZE, CROP_SIZE), dtype=torch.float32, device=frames.device)
+    if n == 0:
+        return out
     size: Float32[Tensor, "2"] = torch.tensor([width, height], dtype=torch.float32, device=frames.device)
-    for begin in range(0, n, _SAMPLE_CHUNK):
-        rows: slice = slice(begin, min(n, begin + _SAMPLE_CHUNK))
-        part: CropCameras = CropCameras(cameras.rotation[rows], cameras.focal[rows], cameras.mirror[rows])
-        rays: Float32[Tensor, "k p 3"] = crop_rays(part)
-        pixels: Float32[Tensor, "k p 2"] = project(camera, rays[:, None])[:, 0]
-        grid: Float32[Tensor, "k p 2"] = (pixels + 0.5) / size * 2.0 - 1.0
-        grid = torch.where((rays[..., 2:] > 1e-6) & torch.isfinite(grid), grid, torch.full_like(grid, 2.0))  # behind the camera: outside, so zero
-        source: Float32[Tensor, "k 1 h w"] = frames[image[rows]].float()[:, None] / 255.0
-        out[rows] = F.grid_sample(source, grid.reshape(-1, CROP_SIZE, CROP_SIZE, 2), mode="bilinear", padding_mode="zeros", align_corners=False)
+    rays: Float32[Tensor, "n p 3"] = crop_rays(cameras)
+    pixels: Float32[Tensor, "n p 2"] = project(camera, rays[:, None])[:, 0]
+    grid: Float32[Tensor, "n p 2"] = (pixels + 0.5) / size * 2.0 - 1.0
+    grid = torch.where((rays[..., 2:] > 1e-6) & torch.isfinite(grid), grid, torch.full_like(grid, 2.0))  # behind the camera: outside, so zero
+    # Slot each crop into its frame's column of a padded (frames, most crops per frame) layout.
+    used, slot_of = torch.unique(image, return_inverse=True)
+    order: Int64[Tensor, "n"] = torch.argsort(slot_of, stable=True)
+    counts: Int64[Tensor, "u"] = torch.bincount(slot_of, minlength=used.shape[0])
+    starts: Int64[Tensor, "u"] = torch.cumsum(counts, dim=0) - counts
+    rank: Int64[Tensor, "n"] = torch.empty_like(order)
+    rank[order] = torch.arange(n, device=image.device) - starts[slot_of[order]]
+    most: int = int(counts.max())
+    padded: Float32[Tensor, "u k p 2"] = torch.full((used.shape[0], most, CROP_SIZE * CROP_SIZE, 2), 2.0, device=frames.device)
+    padded[slot_of, rank] = grid
+    for begin in range(0, used.shape[0], _SAMPLE_CHUNK):
+        part: slice = slice(begin, min(used.shape[0], begin + _SAMPLE_CHUNK))
+        source: Float32[Tensor, "g 1 h w"] = frames[used[part]].float()[:, None] / 255.0
+        stacked: Float32[Tensor, "g kh 96 2"] = padded[part].reshape(source.shape[0], most * CROP_SIZE, CROP_SIZE, 2)
+        sampled: Float32[Tensor, "g 1 kh 96"] = F.grid_sample(source, stacked, mode="bilinear", padding_mode="zeros", align_corners=False)
+        crops: Float32[Tensor, "g k 96 96"] = sampled.reshape(source.shape[0], most, CROP_SIZE, CROP_SIZE)
+        mine: Bool[Tensor, "n"] = (slot_of >= begin) & (slot_of < part.stop)
+        out[mine, 0] = crops[slot_of[mine] - begin, rank[mine]]
     return out
 
 
