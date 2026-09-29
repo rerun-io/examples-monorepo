@@ -210,6 +210,20 @@ def test_low_presence_drops_the_view_then_the_track() -> None:
     assert [result.detnet_camera for result in results] == [0, 1, 2, 3, 0]
 
 
+def test_end_on_view_rejection_drops_a_track_left_with_one_view() -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+
+    def presence(frame: int, camera: int, side: int) -> float:
+        return 0.3 if side == Side.LEFT and frame == 2 and camera == 1 else 0.9  # one of two views rejected at frame 2
+
+    keynet: FakeKeyNet = FakeKeyNet(scene, presence=presence)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet,
+                                              TrackerConfig(end_on_view_rejection=True)), 4)
+    assert results[1].tracked[Side.LEFT] and not results[2].tracked[Side.LEFT]  # the one-view frame ends the track
+    assert results[3].box_source[:, Side.LEFT].tolist() == [0, 0, 0, 0]  # DetNet looks for it again
+
+
 def test_a_detection_that_keynet_rejects_is_not_tracked() -> None:
     scene: Scene = _scene()
     detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
