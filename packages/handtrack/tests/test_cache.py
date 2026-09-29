@@ -109,6 +109,17 @@ def test_keynet_cache_refuses_detnet_passes(tmp_path: Path) -> None:
         KeyNetCache((tmp_path,), batch_size=2, device='cpu')
 
 
-def test_row_phase_must_lie_in_the_unit_interval() -> None:
+def test_row_phase_and_density_are_validated_and_density_multiplies_the_samples(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match='row_phase'):
         StreamConfig(row_phase=1.0)
+    with pytest.raises(ValueError, match='row_density'):
+        StreamConfig(row_density=0)
+    segments = {str(i): _fake_segment(str(i), i) for i in range(3)}
+    counts = []
+    for density in (1, 3):
+        with CatalogStream(StreamConfig(datasets=(UMETRACK,), device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=64, min_fill=0.0,
+                                        row_density=density),
+                           segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
+                           open_decoder=lambda *_args: _GrayDecoder()) as stream:
+            counts.append(write_cache(stream, tmp_path / str(density), 'training', draw=64).samples)
+    assert counts == [6, 18]  # 12 frames at UmeTrack's stride 6: rows {0, 6}, then every second row

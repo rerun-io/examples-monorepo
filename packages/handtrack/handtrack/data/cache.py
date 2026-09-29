@@ -64,6 +64,7 @@ class CacheManifest:
     """Whose samples: 'detnet' (``DetNetSamples``) or 'keynet' (``KeyNetSamples``)."""
     seed: int = 0
     row_phase: float = 0.0
+    row_density: int = 1
 
 
 def write_cache(stream: CatalogStream, directory: Path, split: str, draw: int = 8192, net: str = "detnet") -> CacheManifest:
@@ -107,6 +108,7 @@ def write_cache(stream: CatalogStream, directory: Path, split: str, draw: int = 
         net=net,
         seed=stream.config.seed,
         row_phase=stream.config.row_phase,
+        row_density=stream.config.row_density,
     )
     (directory / "manifest.json").write_text(to_json(manifest))
     return manifest
