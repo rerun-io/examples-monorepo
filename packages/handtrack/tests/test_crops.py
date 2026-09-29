@@ -117,3 +117,10 @@ def test_cut_crops_matches_reference_with_jitter_and_padding() -> None:
     normalized: Float32[Tensor, '3 96 96 2'] = ((pixels + 0.5) * torch.tensor([2.0 / 640, 2.0 / 480]) - 1.0).reshape(3, 96, 96, 2)
     expected: Float32[Tensor, '3 1 96 96'] = torch.nn.functional.grid_sample(frames[indices, None].float() / 255.0, normalized, mode='bilinear', padding_mode='zeros', align_corners=False)
     torch.testing.assert_close(cut_crops(frames, indices, affine), expected, atol=1e-6, rtol=0.0)
+
+
+def test_count_inside_crop_grows_by_the_margin() -> None:
+    points = torch.tensor([[[-3.0, 50.0], [50.0, 50.0], [100.0, 50.0]]])
+    front = torch.ones(1, 3, dtype=torch.bool)
+    assert count_inside_crop(points, front).tolist() == [1]
+    assert count_inside_crop(points, front, margin_px=5.0).tolist() == [3]

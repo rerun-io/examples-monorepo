@@ -11,7 +11,7 @@ from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
 from handtrack.data.cache import DetNetCache, KeyNetCache
 from handtrack.data.catalog import DatasetName, SplitName
-from handtrack.data.stream import CatalogStream, StreamConfig
+from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 
 
@@ -47,6 +47,11 @@ class StreamSettings:
     keynet_crop: Literal["affine", "perspective"] = "affine"
     """KeyNet crops of the streams (training and validation): 'perspective' = UmeTrack's crop cameras on the native frames.
     A KeyNet cache records its own crop type; it must match."""
+    keynet_negative_margin: float = 0.0
+    """``KeyNetAugment.negative_margin`` of the streams (validation's negatives); a KeyNet cache records its own and must match."""
+    keynet_other_hand_negatives: bool = True
+    """False: drop every cached negative that shows the other hand (``KeyNetSamples.other_inside``), the ablation of the
+    left/right presence task. Validation keeps them, so both variants are scored on the same set."""
     keynet_cache: tuple[Path, ...] = ()
     """KeyNet cache passes (``tools/build_detnet_cache.py --net keynet``) to train from instead of the catalog stream; KeyNet only.
     Epoch e reads pass e mod len(passes). Validation still decodes its fixed evaluation set from the catalog."""
@@ -114,7 +119,11 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
     if settings.keynet_cache and not evaluation:
         if nets != "keynet":
             raise ValueError("stream.keynet_cache holds KeyNet samples only; train with nets=keynet")
-        crops: KeyNetCache = KeyNetCache(settings.keynet_cache, settings.keynet_batch, device, seed=settings.seed)
+        crops: KeyNetCache = KeyNetCache(settings.keynet_cache, settings.keynet_batch, device, seed=settings.seed,
+                                         other_hand_negatives=settings.keynet_other_hand_negatives)
+        if {manifest.negative_margin for manifest in crops.manifests} != {settings.keynet_negative_margin}:
+            raise ValueError(f"{settings.keynet_cache} were built with negative margins {sorted({m.negative_margin for m in crops.manifests})}, "
+                             f"the run validates with {settings.keynet_negative_margin}")
         if {manifest.keynet_crop for manifest in crops.manifests} != {settings.keynet_crop}:
             raise ValueError(f"{settings.keynet_cache} hold {sorted({m.keynet_crop for m in crops.manifests})} crops; the run validates on {settings.keynet_crop!r}")
         if crops.dataset_names != tuple(settings.datasets):
@@ -138,6 +147,7 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
             validation=evaluation,
             validation_samples=settings.max_val_batches * max(settings.detnet_batch, settings.keynet_batch),
             keynet_crop=settings.keynet_crop,
+            keynet=KeyNetAugment(negative_margin=settings.keynet_negative_margin),
         )
     )
 

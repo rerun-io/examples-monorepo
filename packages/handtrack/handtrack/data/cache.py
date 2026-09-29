@@ -33,7 +33,7 @@ CACHE_VERSION: int = 1
 TRAINING_FIELDS: tuple[str, ...] = ("pooled", "circle", "presence", "circle_mask", "presence_mask", "dataset", "points", "in_front")
 """The DetNetSamples fields a training batch needs (keypoints for the augmentation's visibility recount); the camera id stays on disk."""
 KEYNET_TRAINING_FIELDS: tuple[str, ...] = ("crops", "points_crop", "d_rel_mm", "keypoints", "presence", "kind", "dataset")
-"""The KeyNetSamples fields a training batch needs; the crop affine stays on disk."""
+"""The KeyNetSamples fields a training batch needs; the crop affine and ``other_inside`` (row selection only) stay on disk."""
 TRAINING_SPLITS: tuple[str, ...] = ("train", "training")
 MAX_CIRCLE_RADIUS: float = 0.5
 """Largest usable target radius, in image widths. A few SHOW3D hands right at a fisheye lens project to circles tens of image
@@ -67,6 +67,8 @@ class CacheManifest:
     row_density: int = 1
     keynet_crop: str = "affine"
     """KeyNet caches: 'affine' or 'perspective' crops (``StreamConfig.keynet_crop``)."""
+    negative_margin: float = 0.0
+    """KeyNet caches: ``KeyNetAugment.negative_margin``."""
 
 
 def write_cache(stream: CatalogStream, directory: Path, split: str, draw: int = 8192, net: str = "detnet") -> CacheManifest:
@@ -112,6 +114,7 @@ def write_cache(stream: CatalogStream, directory: Path, split: str, draw: int = 
         row_phase=stream.config.row_phase,
         row_density=stream.config.row_density,
         keynet_crop=stream.config.keynet_crop,
+        negative_margin=stream.config.keynet.negative_margin,
     )
     (directory / "manifest.json").write_text(to_json(manifest))
     return manifest
@@ -147,16 +150,24 @@ class _PinnedEpochs:
         self._error: BaseException | None = None
 
     def _epoch_arrays(self, epoch: int) -> dict[str, Tensor]:
-        """The rows epoch ``epoch`` visits, one array per field (host tensors, memory-mapped or in RAM)."""
+        """The arrays epoch ``epoch`` reads, one per field (host tensors, memory-mapped or in RAM)."""
         raise NotImplementedError
+
+    def _epoch_rows(self, epoch: int) -> Int64[Tensor, "r"] | None:
+        """The rows of those arrays the epoch visits; None visits every row."""
+        del epoch
+        return None
 
     def start_epoch(self, epoch: int) -> None:
         self._halt()
         self._raise_if_failed()
         self._stop.clear()
         arrays: dict[str, Tensor] = self._epoch_arrays(epoch)
-        count: int = int(next(iter(arrays.values())).shape[0])
+        rows: Int64[Tensor, "r"] | None = self._epoch_rows(epoch)
+        count: int = int(next(iter(arrays.values())).shape[0]) if rows is None else int(rows.shape[0])
         order: Int64[Tensor, "n"] = torch.randperm(count, generator=torch.Generator().manual_seed(self.seed * 1_000_003 + epoch))
+        if rows is not None:
+            order = rows[order]
         self._thread = threading.Thread(target=self._gather, args=(arrays, order), name=f"{self._name}-gather", daemon=True)
         self._thread.start()
 
@@ -282,7 +293,7 @@ class KeyNetCache(_PinnedEpochs):
     memory-mapped, and the device draws the stream's border occlusion and intensity scaling and renders the targets."""
 
     def __init__(self, directories: tuple[Path, ...], batch_size: int, device: str, seed: int = 0,
-                 augment: KeyNetAugment | None = None, prefetch: int = 8) -> None:
+                 augment: KeyNetAugment | None = None, prefetch: int = 8, other_hand_negatives: bool = True) -> None:
         super().__init__(batch_size, device, seed, prefetch, "keynet-cache")
         if not directories:
             raise ValueError("a KeyNet cache needs at least one pass directory")
@@ -291,17 +302,30 @@ class KeyNetCache(_PinnedEpochs):
         if len(names) != 1:
             raise ValueError(f"the KeyNet cache passes hold different datasets: {sorted(names)}")
         self.passes: list[dict[str, Tensor]] = []
+        self.rows: list[Int64[Tensor, "r"] | None] = []
         for directory, manifest in zip(directories, self.manifests, strict=True):
             with warnings.catch_warnings():  # read-only memory maps: torch warns that writes would be undefined; nothing writes them
                 warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
                 arrays: dict[str, Tensor] = {name: torch.from_numpy(np.load(directory / f"{name}.npy", mmap_mode="r")) for name in KEYNET_TRAINING_FIELDS}
             _check_rows(directory, arrays, manifest.samples)
             self.passes.append(arrays)
+            if other_hand_negatives:
+                self.rows.append(None)
+                continue
+            # The ablation without negatives that show the other hand: presence then never depends on left/right alone.
+            flag: Path = directory / "other_inside.npy"
+            if not flag.exists():
+                raise ValueError(f"{directory} predates other_inside.npy; rebuild it to train without other-hand negatives")
+            shows_other: np.ndarray = np.load(flag)
+            self.rows.append(torch.from_numpy(np.flatnonzero(~shows_other)).to(torch.int64))
         self.dataset_names: tuple[str, ...] = self.manifests[0].datasets
         self.augment: KeyNetAugment = KeyNetAugment() if augment is None else augment
 
     def _epoch_arrays(self, epoch: int) -> dict[str, Tensor]:
         return self.passes[epoch % len(self.passes)]
+
+    def _epoch_rows(self, epoch: int) -> Int64[Tensor, "r"] | None:
+        return self.rows[epoch % len(self.rows)]
 
     def next_detnet_batch(self) -> DetNetBatch | None:
         raise RuntimeError("a KeyNet cache has no DetNet batches")

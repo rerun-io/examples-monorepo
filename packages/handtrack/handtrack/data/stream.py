@@ -147,6 +147,10 @@ class KeyNetAugment:
     """Per absent hand: a BACKGROUND negative, a random box anywhere in the image."""
     background_side_range: tuple[float, float] = (48.0, 240.0)
     """Side of a background box in net px."""
+    negative_margin: float = 0.0
+    """A negative is kept only if none of its slot's own keypoints lie within this fraction of the crop side around the crop
+    (0: none inside the crop itself). 0.25 drops the ambiguous crops where part of the tracked hand shows without a keypoint
+    inside, e.g. overlapping hands (the 2026-09-29 audit: most SHOW3D OTHER_HAND presence errors were such crops)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +254,9 @@ class KeyNetSamples:
     dataset: Int64[Tensor, "n"]
     crop_from_net: Float32[Tensor, "n 3 3"]
     """The affine the crop was cut with, mirror included (validation metadata)."""
+    other_inside: Bool[Tensor, "n"]
+    """A negative that shows the OTHER hand: OTHER_HAND crops, and any negative with one of the other hand's keypoints within
+    the negative margin of the crop. Presence is then decided by left/right alone; an ablation can drop these rows."""
 
 
 def empty_detnet_samples(capacity: int, device: torch.device) -> DetNetSamples:
@@ -278,6 +285,7 @@ def empty_keynet_samples(capacity: int, device: torch.device) -> KeyNetSamples:
         kind=torch.zeros(capacity, dtype=torch.int64, device=device),
         dataset=torch.zeros(capacity, dtype=torch.int64, device=device),
         crop_from_net=torch.zeros((capacity, 3, 3), device=device),
+        other_inside=torch.zeros(capacity, dtype=torch.bool, device=device),
     )
 
 
@@ -513,7 +521,13 @@ def keynet_samples(
     truth_front: Bool[Tensor, "n 21"] = truth.in_front.reshape(-1, 21)[slot] & truth.valid.reshape(-1, 1)[slot]
     crop_label: Int64[Tensor, "n"] = classify_visibility(count_inside_crop(truth_xy, truth_front))
     positive: Bool[Tensor, "n"] = is_kind[CropKind.POSITIVE]
-    keep: Bool[Tensor, "n"] = torch.where(positive, crop_label == int(HandLabel.PRESENT), crop_label == int(HandLabel.ABSENT))
+    margin: float = augment.negative_margin * CROP_SIZE
+    clear: Bool[Tensor, "n"] = count_inside_crop(truth_xy, truth_front, margin) == 0
+    keep: Bool[Tensor, "n"] = torch.where(positive, crop_label == int(HandLabel.PRESENT), clear)
+    other_slot: Int64[Tensor, "n"] = slot + 1 - 2 * (slot % 2)
+    other_xy: Float32[Tensor, "n 21 2"] = apply_affine(affine, truth.net_xy.reshape(-1, 21, 2)[other_slot])
+    other_front: Bool[Tensor, "n 21"] = truth.in_front.reshape(-1, 21)[other_slot] & truth.valid.reshape(-1, 1)[other_slot]
+    other_inside: Bool[Tensor, "n"] = ~positive & (is_kind[CropKind.OTHER_HAND] | (count_inside_crop(torch.nan_to_num(other_xy, nan=-1e6), other_front, margin) > 0))
     # Choose history first. Its own projection defines a negative's reference box.
     source_draw: Float32[Tensor, "n"] = torch.rand(n, generator=generator, device=device)
     zero: Bool[Tensor, "n"] = source_draw < augment.zero_input_probability
@@ -563,6 +577,7 @@ def keynet_samples(
         kind=kind[kept],
         dataset=torch.full_like(kept, dataset),
         crop_from_net=affine[kept],
+        other_inside=other_inside[kept],
     )
 
 
@@ -654,9 +669,15 @@ def perspective_keynet_samples(
     # EDGE placement already draws its exact overlap; jitter must not move it off the edge.
     cut: CropCameras = CropCameras(torch.where(edge_kind[:, None, None], placed.rotation, shaken.rotation), torch.where(edge_kind, placed.focal, shaken.focal), mirror)
     truth_uv, truth_depth = to_crop(cut, truth_cam[slot])
-    crop_label: Int64[Tensor, "n"] = classify_visibility(count_inside_crop(truth_uv, truth_front[slot] & (truth_depth > 0)))
+    own_front: Bool[Tensor, "n 21"] = truth_front[slot] & (truth_depth > 0)
+    crop_label: Int64[Tensor, "n"] = classify_visibility(count_inside_crop(truth_uv, own_front))
     positive: Bool[Tensor, "n"] = is_kind[CropKind.POSITIVE]
-    keep: Bool[Tensor, "n"] = torch.where(positive, crop_label == int(HandLabel.PRESENT), crop_label == int(HandLabel.ABSENT)) & torch.isfinite(cut.focal)
+    margin: float = augment.negative_margin * CROP_SIZE
+    clear: Bool[Tensor, "n"] = count_inside_crop(truth_uv, own_front, margin) == 0
+    keep: Bool[Tensor, "n"] = torch.where(positive, crop_label == int(HandLabel.PRESENT), clear) & torch.isfinite(cut.focal)
+    other_uv, other_depth = to_crop(cut, torch.nan_to_num(truth_cam[other_slot]))
+    other_front: Bool[Tensor, "n 21"] = truth_front[other_slot] & (other_depth > 0)
+    other_inside: Bool[Tensor, "n"] = ~positive & (other_hand | (count_inside_crop(other_uv, other_front, margin) > 0))
     # Keypoint input: as keynet_samples, with crop cameras in place of boxes.
     source_draw: Float32[Tensor, "n"] = torch.rand(n, generator=generator, device=device)
     zero: Bool[Tensor, "n"] = source_draw < augment.zero_input_probability
@@ -704,6 +725,7 @@ def perspective_keynet_samples(
         kind=kind[kept],
         dataset=torch.full_like(kept, dataset),
         crop_from_net=local_crop_from_net(kept_cameras, camera, letterbox),
+        other_inside=other_inside[kept],
     )
 
 

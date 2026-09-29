@@ -5,7 +5,7 @@ from typing import Literal
 
 from handtrack.apis.train import DATASETS, SPLITS
 from handtrack.data.cache import CacheManifest, write_cache
-from handtrack.data.stream import CatalogStream, StreamConfig
+from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,8 @@ class Config:
     """Rows kept per pool stride (``StreamConfig.row_density``): more samples for the same decode."""
     keynet_crop: Literal["affine", "perspective"] = "affine"
     """KeyNet crop type (``StreamConfig.keynet_crop``)."""
+    negative_margin: float = 0.0
+    """KeyNet negatives keep their own hand this fraction of the crop side outside the crop (``KeyNetAugment.negative_margin``)."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d")
     split: str = "training"
     producers: int = 4
@@ -42,6 +44,7 @@ def main(config: Config) -> None:
         row_phase=config.row_phase,
         row_density=config.row_density,
         keynet_crop=config.keynet_crop,
+        keynet=KeyNetAugment(negative_margin=config.negative_margin),
     ))
     with stream:
         manifest: CacheManifest = write_cache(stream, config.output, config.split, net=config.net)
