@@ -69,13 +69,18 @@ def mesh_vertices(model: HandModelTorch, pose: HandPose, side: Side) -> Float32[
     return skin_mesh(model, pose.joint_angles, pose.world_from_wrist_mm(side)) / 1000.0
 
 
-def hand_model_from_profile(text: str) -> HandModelTorch:
+def hand_model_numpy_from_profile(text: str) -> HandModelNumpy:
     """The subject's hand model from the ``/world/gt/hands/profile`` JSON document.
 
     SHOW3D wraps the model in a ``hand_model`` envelope; UmeTrack stores the bare model.
     """
     document: HandProfile | HandModelNumpy = from_json(Untagged(HandProfile | HandModelNumpy), text)
-    return hand_model_numpy_to_tensor(document.hand_model if isinstance(document, HandProfile) else document)
+    return document.hand_model if isinstance(document, HandProfile) else document
+
+
+def hand_model_from_profile(text: str) -> HandModelTorch:
+    """``hand_model_numpy_from_profile`` as torch tensors."""
+    return hand_model_numpy_to_tensor(hand_model_numpy_from_profile(text))
 
 
 GENERIC_HAND_MODEL: Path = Path(__file__).resolve().parents[1] / "assets" / "generic_hand_model.json"

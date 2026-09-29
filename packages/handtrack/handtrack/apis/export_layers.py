@@ -23,13 +23,12 @@ import rerun as rr
 from dataforge import schema, writing
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rerun.chunk import LazyChunkStream, RrdReader
-from serde.json import from_json
-from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy
 
 from handtrack import rerun_layers
 from handtrack.blueprint import handtrack_blueprint
 from handtrack.data import catalog
 from handtrack.data.catalog import HandTimeline, SegmentInfo
+from handtrack.hand.pose import hand_model_numpy_from_profile
 from handtrack.labels.validity import SHOW3D_CONFIDENCE_THRESHOLD
 from handtrack.results import SegmentTrack, load_track
 
@@ -91,7 +90,7 @@ def read_ground_truth(entry: DatasetEntry, info: SegmentInfo) -> rerun_layers.Gr
         joint_angles=np.stack([pose.joint_angles.numpy() for pose in timeline.poses], axis=1),
         present=(timeline.has_pose & timeline.headset_valid[:, None]
                  & (timeline.confidence > (SHOW3D_CONFIDENCE_THRESHOLD if catalog.is_show3d(info.dataset) else 0.0))).numpy(),
-        model=from_json(HandModelNumpy, catalog.static_text(statics, catalog.PROFILE_COLUMN, f"{info.dataset} {info.segment_id}")),
+        model=hand_model_numpy_from_profile(catalog.static_text(statics, catalog.PROFILE_COLUMN, f"{info.dataset} {info.segment_id}")),
     )
 
 
