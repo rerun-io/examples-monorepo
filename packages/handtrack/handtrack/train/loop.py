@@ -173,8 +173,9 @@ class Trainer:
                 model.to(memory_format=torch.channels_last)  # pyrefly: ignore[no-matching-overload]  (the stubs omit memory_format)
         detnet_model: nn.Module | None = self.models.get('detnet')
         if cadence.compile != 'none' and isinstance(detnet_model, DetNetF):
-            # An instance attribute shadows the method; state_dict and checkpoints are unchanged.
-            detnet_model.forward_pooled = torch.compile(detnet_model.forward_pooled, mode=cadence.compile)
+            # An instance attribute shadows the method; state_dict and checkpoints are unchanged. dynamic=False: a new batch shape
+            # (a validation remainder) gets its own static graph instead of turning every later step into a slower dynamic-shape graph.
+            detnet_model.forward_pooled = torch.compile(detnet_model.forward_pooled, mode=cadence.compile, dynamic=False)
         self.optimisers: dict[str, Optimizer] = {name: torch.optim.SGD(model.parameters(), lr=self.settings[name].lr, momentum=self.settings[name].momentum)
                                                 for name, model in self.models.items()}
         self.state: TrainingState = TrainingState(config_json=config_json)
