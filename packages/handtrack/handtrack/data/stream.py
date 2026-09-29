@@ -63,9 +63,10 @@ from handtrack.data.catalog import (
     read_rig,
     read_statics,
     select_split,
+    static_number,
 )
 from handtrack.data.segment_labels import HandProjection, KeypointPriors, SegmentLabels, keypoint_priors, segment_labels
-from handtrack.geometry.camera import CameraRig
+from handtrack.geometry.camera import CameraRig, project
 from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH, Letterbox
 from handtrack.labels.crops import (
     BOX_ENLARGE,
@@ -82,6 +83,18 @@ from handtrack.labels.crops import (
 )
 from handtrack.labels.heatmaps import render_distance, render_heatmaps
 from handtrack.labels.keypoint_input import add_input_noise, keypoint_input, relative_distances
+from handtrack.labels.perspective import (
+    CROP_CENTRE,
+    CropCameras,
+    aim,
+    crop_cameras,
+    jitter,
+    local_crop_from_net,
+    look_at,
+    sample_crops,
+    to_crop,
+    unproject,
+)
 from handtrack.labels.validity import HandLabel, classify_visibility
 from handtrack.train.source import DetNetValidation, KeyNetValidation
 
@@ -183,6 +196,9 @@ class StreamConfig:
     """Where in each segment's stride the kept timeline rows start, as a fraction of the stride: cache passes with phases
     0, 1/3 and 2/3 read different frames (UmeTrack stride 6: rows 0, 2 and 4 mod 6; SHOW3D stride 12: 0, 4 and 8)."""
 
+    keynet_crop: Literal["affine", "perspective"] = "affine"
+    """KeyNet crops: 'affine' cuts the letterboxed net frame; 'perspective' samples the native frame through a crop camera
+    aimed at the hand (``labels.perspective``, UmeTrack's crops), which works at any camera's resolution and lens."""
     row_density: int = 1
     """Keep this many times more timeline rows per segment (``pool_stride`` divided by it, at least every row). A cache pass
     decodes every frame anyway (AV1 with a 60-frame GOP), so a denser pass costs no more decode: density 3 turns UmeTrack's
@@ -550,6 +566,147 @@ def keynet_samples(
     )
 
 
+def perspective_keynet_samples(
+    frames: UInt8[Tensor, "m h w"],
+    camera: CameraRig,
+    letterbox: Letterbox,
+    roll_rad: float,
+    truth: ImageHands,
+    hand_label: Int64[Tensor, "m 2"],
+    extrapolated: ImageHands,
+    stale: ImageHands,
+    phi: float,
+    dataset: int,
+    augment: KeyNetAugment,
+    generator: torch.Generator,
+) -> KeyNetSamples:
+    """``keynet_samples`` with perspective crops (``labels.perspective``): the same candidates, visibility rules and keypoint
+    inputs, but every crop is a crop camera that samples the native ``frames`` of the one-camera rig ``camera`` through its lens.
+
+    A positive's crop camera fits its ground-truth landmarks (the affine crops' +20 % margin), then the same jitter (aim
+    shift, roll, zoom). DRIFT re-aims it 1.0-1.6 crop sides off the hand; OTHER_HAND fits the other hand with this slot's
+    mirroring; EDGE aims the prior's crop camera at an image edge with the drawn overlap; BACKGROUND aims at a random pixel
+    with a random size. ``roll_rad`` is the camera's mounting angle (UmeTrack's ``camera_angle``), so hands come out upright.
+    """
+    device: torch.device = frames.device
+    images: int = frames.shape[0]
+    label: Int64[Tensor, "s"] = hand_label.reshape(-1)
+    present: Bool[Tensor, "s"] = label == int(HandLabel.PRESENT)
+    absent: Bool[Tensor, "s"] = label == int(HandLabel.ABSENT)
+    other_present: Bool[Tensor, "s"] = hand_label.flip(1).reshape(-1) == int(HandLabel.PRESENT)
+    truth_cam: Float32[Tensor, "s 21 3"] = truth.points_cam.reshape(-1, 21, 3)
+    truth_front: Bool[Tensor, "s 21"] = truth.in_front.reshape(-1, 21) & truth.valid.reshape(-1, 1)
+    prior_cam: Float32[Tensor, "s 21 3"] = extrapolated.points_cam.reshape(-1, 21, 3)
+    prior_front: Bool[Tensor, "s 21"] = extrapolated.in_front.reshape(-1, 21) & extrapolated.valid.reshape(-1, 1)
+    all_roll: Float32[Tensor, "s"] = torch.full((2 * images,), roll_rad, device=device)
+    prior_usable: Bool[Tensor, "s"] = torch.isfinite(crop_cameras(prior_cam, prior_front, all_roll, torch.zeros_like(present)).focal)
+    draws: Float32[Tensor, "s 4"] = torch.rand((2 * images, 4), generator=generator, device=device)
+    candidates: list[tuple[Bool[Tensor, "s"], CropKind]] = [
+        (present, CropKind.POSITIVE),
+        (present & (draws[:, 0] < augment.drift_probability), CropKind.DRIFT),
+        (other_present & (label != int(HandLabel.PARTIAL)) & (draws[:, 1] < augment.other_hand_probability), CropKind.OTHER_HAND),
+        (absent & prior_usable & (draws[:, 2] < augment.edge_probability), CropKind.EDGE),
+        (absent & (draws[:, 3] < augment.background_probability), CropKind.BACKGROUND),
+    ]
+    hits: Int64[Tensor, "n 2"] = torch.stack([mask for mask, _ in candidates]).nonzero()
+    n: int = hits.shape[0]
+    if n == 0:
+        return empty_keynet_samples(0, device)
+    slot: Int64[Tensor, "n"] = hits[:, 1]
+    kind: Int64[Tensor, "n"] = torch.tensor([int(k) for _, k in candidates], device=device)[hits[:, 0]]
+    image: Int64[Tensor, "n"] = slot // 2
+    mirror: Bool[Tensor, "n"] = slot % 2 == 1
+    other_slot: Int64[Tensor, "n"] = slot + 1 - 2 * (slot % 2)
+    roll: Float32[Tensor, "n"] = all_roll[slot]
+    is_kind: dict[CropKind, Bool[Tensor, "n"]] = {k: kind == int(k) for k in CropKind}
+    # The points each crop camera fits: the other hand's for OTHER_HAND, the prior's for EDGE, else the hand's own.
+    other_hand: Bool[Tensor, "n"] = is_kind[CropKind.OTHER_HAND]
+    edge_kind: Bool[Tensor, "n"] = is_kind[CropKind.EDGE]
+    base_cam: Float32[Tensor, "n 21 3"] = torch.where(other_hand[:, None, None], truth_cam[other_slot], torch.where(edge_kind[:, None, None], prior_cam[slot], truth_cam[slot]))
+    base_front: Bool[Tensor, "n 21"] = torch.where(other_hand[:, None], truth_front[other_slot], torch.where(edge_kind[:, None], prior_front[slot], truth_front[slot]))
+    fitted: CropCameras = crop_cameras(base_cam, base_front, roll, mirror)
+    size: Float32[Tensor, "2"] = camera.image_size[0]
+    source_focal: float = float(camera.focal[0].mean())
+    # DRIFT: aim 1.0-1.6 crop sides away, in a random direction of the crop.
+    angle: Float32[Tensor, "n"] = uniform(generator, n, (0.0, 2.0 * math.pi), device)
+    drift: Float32[Tensor, "n"] = CROP_SIZE * uniform(generator, n, augment.drift_shift_range, device)
+    drifted: Float32[Tensor, "n 3 3"] = aim(fitted.rotation, drift[:, None] * torch.stack([angle.cos(), angle.sin()], dim=-1), fitted.focal, torch.zeros_like(drift))
+    # EDGE: the prior's crop moved perpendicular to a random image edge until the drawn fraction of it overlaps the image.
+    safe_focal: Float32[Tensor, "n"] = torch.where(torch.isfinite(fitted.focal), fitted.focal, torch.full_like(fitted.focal, 100.0))
+    axis_pixel: Float32[Tensor, "n 2"] = project(camera, fitted.rotation[:, 2][None, :, None])[0, :, 0]
+    half: Float32[Tensor, "n"] = CROP_CENTRE * source_focal / safe_focal
+    overlap: Float32[Tensor, "n"] = 2.0 * half * uniform(generator, n, augment.edge_overlap_range, device)
+    edge: Int64[Tensor, "n"] = torch.randint(4, (n,), generator=generator, device=device)
+    at_edge: Float32[Tensor, "n 2"] = torch.maximum(torch.minimum(torch.nan_to_num(axis_pixel), size - 0.5 - half[:, None]), half[:, None] - 0.5)
+    edge_axis: Int64[Tensor, "n"] = edge // 2
+    perpendicular: Float32[Tensor, "n"] = torch.where(edge % 2 == 0, overlap - half - 0.5, size[edge_axis] - 0.5 - overlap + half)
+    at_edge[torch.arange(n, device=device), edge_axis] = perpendicular
+    # BACKGROUND: a random pixel, the crop spanning 48-240 net px (converted to native px) around it.
+    background_pixel: Float32[Tensor, "n 2"] = torch.rand((n, 2), generator=generator, device=device) * size - 0.5
+    background_side: Float32[Tensor, "n"] = uniform(generator, n, augment.background_side_range, device) / letterbox.scale
+    aimed: Float32[Tensor, "n 3"] = unproject(camera, torch.where(edge_kind[:, None], at_edge, background_pixel))
+    background: Bool[Tensor, "n"] = is_kind[CropKind.BACKGROUND]
+    rotation: Float32[Tensor, "n 3 3"] = torch.where(is_kind[CropKind.DRIFT][:, None, None], drifted, fitted.rotation)
+    rotation = torch.where((edge_kind | background)[:, None, None], look_at(aimed, roll), rotation)
+    focal: Float32[Tensor, "n"] = torch.where(background, CROP_SIZE * source_focal / background_side, fitted.focal)
+    placed: CropCameras = CropCameras(rotation, focal, mirror)
+    shaken: CropCameras = jitter(placed, generator, augment.max_rotation, augment.scale_range, augment.max_shift)
+    # EDGE placement already draws its exact overlap; jitter must not move it off the edge.
+    cut: CropCameras = CropCameras(torch.where(edge_kind[:, None, None], placed.rotation, shaken.rotation), torch.where(edge_kind, placed.focal, shaken.focal), mirror)
+    truth_uv, truth_depth = to_crop(cut, truth_cam[slot])
+    crop_label: Int64[Tensor, "n"] = classify_visibility(count_inside_crop(truth_uv, truth_front[slot] & (truth_depth > 0)))
+    positive: Bool[Tensor, "n"] = is_kind[CropKind.POSITIVE]
+    keep: Bool[Tensor, "n"] = torch.where(positive, crop_label == int(HandLabel.PRESENT), crop_label == int(HandLabel.ABSENT)) & torch.isfinite(cut.focal)
+    # Keypoint input: as keynet_samples, with crop cameras in place of boxes.
+    source_draw: Float32[Tensor, "n"] = torch.rand(n, generator=generator, device=device)
+    zero: Bool[Tensor, "n"] = source_draw < augment.zero_input_probability
+    use_stale: Bool[Tensor, "n"] = ~zero & (source_draw < augment.zero_input_probability + augment.stale_input_probability)
+    source_cam: Float32[Tensor, "n 21 3"] = torch.zeros((n, 21, 3), device=device)
+    source_front: Bool[Tensor, "n 21"] = torch.zeros((n, 21), dtype=torch.bool, device=device)
+    source_usable: Bool[Tensor, "n"] = torch.zeros(n, dtype=torch.bool, device=device)
+    for history, chosen in ((extrapolated, ~use_stale), (stale, use_stale)):
+        history_cam: Float32[Tensor, "s 21 3"] = history.points_cam.reshape(-1, 21, 3)
+        history_front: Bool[Tensor, "s 21"] = history.in_front.reshape(-1, 21)
+        usable: Bool[Tensor, "s"] = (history.valid.reshape(-1) & torch.isfinite(history_cam).all(dim=(-1, -2))
+                                      & torch.isfinite(crop_cameras(history_cam, history_front, all_roll, torch.zeros_like(present)).focal))
+        selected: Int64[Tensor, "n"] = slot.clone()
+        donors: Int64[Tensor, "d"] = (present & usable).nonzero()[:, 0]
+        needs_prior: Bool[Tensor, "n"] = ~positive & ~usable[slot]
+        if donors.numel():
+            donor_rows: Int64[Tensor, "n"] = donors[torch.randint(len(donors), (n,), generator=generator, device=device)]
+            selected = torch.where(needs_prior, donor_rows, selected)
+        source_cam[chosen] = history_cam[selected][chosen]
+        source_front[chosen] = history_front[selected][chosen]
+        source_usable[chosen] = usable[selected][chosen]
+    keep &= positive | source_usable
+    # A negative's reference is the crop camera its own history would give (a tracker aims at its own guess).
+    guessed: CropCameras = jitter(crop_cameras(torch.nan_to_num(source_cam), source_front, roll, mirror), generator, augment.max_rotation,
+                                  augment.scale_range, augment.max_shift)
+    reference: CropCameras = CropCameras(torch.where(positive[:, None, None], cut.rotation, guessed.rotation), torch.where(positive, cut.focal, guessed.focal), mirror)
+    source_uv, _ = to_crop(reference, torch.nan_to_num(source_cam))
+    phi_n: Float32[Tensor, "n"] = torch.full((n,), phi, dtype=torch.float32, device=device)
+    noisy: Float32[Tensor, "n 63"] = add_input_noise(keypoint_input(source_uv, relative_distances(torch.nan_to_num(source_cam), phi_n)), generator,
+                                                     augment.uv_noise_std, augment.d_noise_std)
+    keypoints: Float32[Tensor, "n 63"] = torch.where((~zero & source_usable & torch.isfinite(noisy).all(dim=-1))[:, None], noisy, torch.zeros_like(noisy))
+    truth_d: Float32[Tensor, "n 21"] = relative_distances(truth_cam[slot], phi_n)
+    kept: Int64[Tensor, "q"] = keep.nonzero()[:, 0]
+    kept_positive: Bool[Tensor, "q"] = positive[kept]
+    kept_cameras: CropCameras = cut.select(kept)
+    kept_uv: Float32[Tensor, "q 21 2"] = truth_uv[kept]
+    kept_d: Float32[Tensor, "q 21"] = truth_d[kept]
+    crops: Float32[Tensor, "q 1 96 96"] = sample_crops(frames, image[kept], kept_cameras, camera)
+    return KeyNetSamples(
+        crops=(crops[:, 0] * 255.0).round().to(torch.uint8),
+        points_crop=torch.where(kept_positive[:, None, None], kept_uv, torch.zeros_like(kept_uv)),
+        d_rel_mm=torch.where(kept_positive[:, None], kept_d, torch.zeros_like(kept_d)),
+        keypoints=keypoints[kept],
+        presence=kept_positive.float(),
+        kind=kind[kept],
+        dataset=torch.full_like(kept, dataset),
+        crop_from_net=local_crop_from_net(kept_cameras, camera, letterbox),
+    )
+
+
 # --- the stream ------------------------------------------------------------------------------------------------
 
 
@@ -597,6 +754,8 @@ class _SegmentWork:
     times: Int64[ndarray, "k"]
     """``video_time`` of the labelled rows."""
     videos: tuple[CatalogVideo, ...]
+    rig: CameraRig
+    camera_angles: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -636,6 +795,8 @@ class SegmentData:
     letterboxes: tuple[Letterbox, ...]
     timeline: HandTimeline
     videos: tuple[CatalogVideo, ...]
+    camera_angles: tuple[float, ...] = ()
+    """Each camera's mounting roll in degrees (UmeTrack's ``source_camera_angle_deg``; SHOW3D 0), for perspective crops; empty = 0."""
 
 
 SegmentReader: TypeAlias = Callable[[SegmentInfo], SegmentData]
@@ -1147,7 +1308,9 @@ class CatalogStream:
         rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info)
         timeline: HandTimeline = read_hand_timeline(entry, info, statics)
         videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in layout.cameras], TIMELINE)
-        return SegmentData(rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, videos=videos)
+        angles: tuple[float, ...] = tuple(0.0 if is_show3d(info.dataset) else static_number(statics, f"{camera}/pinhole:source_camera_angle_deg", info.segment_id)
+                                          for camera in layout.cameras)
+        return SegmentData(rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, videos=videos, camera_angles=angles)
 
     def _record_failure(self, info: SegmentInfo, stage: str, attempt: int, error: BaseException) -> None:
         cause: BaseException | None = error.__cause__ if isinstance(error, SegmentFailure) else None
@@ -1236,6 +1399,8 @@ class CatalogStream:
             hand_scale=data.timeline.hand_scale,
             times=data.timeline.video_time_ns[rows],
             videos=data.videos,
+            rig=data.rig.to(self.device),
+            camera_angles=data.camera_angles or (0.0,) * len(data.letterboxes),
         )
 
     def _produce(self, worker: int) -> None:
@@ -1363,7 +1528,6 @@ class CatalogStream:
                 raise SegmentFailure("decoder frames") from error
             frames: UInt8[Tensor, "m h w"] = decoded_frames.data[:, 0]
             net: UInt8[Tensor, "m 480 640"] = letterbox.apply(frames)
-            del frames
             index: Int64[Tensor, "m"] = torch.from_numpy(chunk_rows).to(self.device)
             hand_label: Int64[Tensor, "m 2"] = labels.hand_label[index, camera]
             circles: Float32[Tensor, "m 2 3"] = labels.circles[index, camera]
@@ -1372,7 +1536,22 @@ class CatalogStream:
             if self._detnet_on:
                 detnet = detnet_samples(net, hand_label, circles, truth, dataset=work.dataset_index, camera=layout.camera_offset + camera)
             keynet: KeyNetSamples | None = None
-            if priors is not None:
+            if priors is not None and self.config.keynet_crop == "perspective":
+                keynet = perspective_keynet_samples(
+                    frames,
+                    work.rig.select([camera]),
+                    letterbox,
+                    math.radians(work.camera_angles[camera]),
+                    truth,
+                    hand_label,
+                    extrapolated=image_hands(priors.extrapolated, priors.extrapolated_valid, index, camera),
+                    stale=image_hands(priors.stale, priors.stale_valid, index, camera),
+                    phi=work.hand_scale,
+                    dataset=work.dataset_index,
+                    augment=self._augment,
+                    generator=generator,
+                )
+            elif priors is not None:
                 keynet = keynet_samples(
                     net,
                     truth,
@@ -1385,6 +1564,7 @@ class CatalogStream:
                     augment=self._augment,
                     generator=generator,
                 )
+            del frames
             if self.device.type == "cuda":
                 torch.cuda.current_stream(self.device).synchronize()
             # Read the device before taking the lock: a host sync under ``_cond`` would stall the trainer thread too.
