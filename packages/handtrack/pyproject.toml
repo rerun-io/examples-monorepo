@@ -35,6 +35,8 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.vulture]
 paths = ["handtrack", "tests"]
 ignore_names = [
+    # torch.backends.cudnn.benchmark, a torch switch set in apis/train.py.
+    "benchmark",
     # Tracker: serialized record fields (metrics JSON, SegmentTrack npz keys read by the Rerun layers).
     "gt_frames", "tracked_frames", "keypoints_2d",
     # pyserde metadata field of results.TrackMetadata.

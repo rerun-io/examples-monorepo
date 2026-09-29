@@ -77,6 +77,11 @@ class LoopSettings:
     """
     bf16: bool = False
     """Enable bfloat16 autocast in production (models have Float32 dev contracts)."""
+    channels_last: bool = False
+    """Hold the models and their image inputs in channels-last layout (with bf16, DetNet-F trains about 2x faster)."""
+    compile: Literal['none', 'default', 'reduce-overhead'] = 'none'
+    """torch.compile mode for DetNet's forward (reduce-overhead adds CUDA graphs); Triton needs TRITON_PTXAS_BLACKWELL_PATH
+    set to the environment's ptxas on sm_120."""
     presence_weight: float = 1.0
     """Chosen multiplier for the added KeyNet presence BCE."""
     detnet_circle_weight: float = 100.0
@@ -163,6 +168,13 @@ class Trainer:
             self.models['detnet'] = DetNetF().to(self.device)
         if nets in ('keynet', 'both'):
             self.models['keynet'] = KeyNetF().to(self.device)
+        if cadence.channels_last:
+            for model in self.models.values():
+                model.to(memory_format=torch.channels_last)  # pyrefly: ignore[no-matching-overload]  (the stubs omit memory_format)
+        detnet_model: nn.Module | None = self.models.get('detnet')
+        if cadence.compile != 'none' and isinstance(detnet_model, DetNetF):
+            # An instance attribute shadows the method; state_dict and checkpoints are unchanged.
+            detnet_model.forward_pooled = torch.compile(detnet_model.forward_pooled, mode=cadence.compile)
         self.optimisers: dict[str, Optimizer] = {name: torch.optim.SGD(model.parameters(), lr=self.settings[name].lr, momentum=self.settings[name].momentum)
                                                 for name, model in self.models.items()}
         self.state: TrainingState = TrainingState(config_json=config_json)
@@ -179,8 +191,8 @@ class Trainer:
                     old_section: OptimiserSettings | LoopSettings | StreamSettings = getattr(old, section)
                     new_section: OptimiserSettings | LoopSettings | StreamSettings = getattr(new, section)
                     for setting in fields(new_section):
-                        before: str | int | float | bool | tuple[str, ...] = getattr(old_section, setting.name)
-                        after: str | int | float | bool | tuple[str, ...] = getattr(new_section, setting.name)
+                        before: object = getattr(old_section, setting.name)
+                        after: object = getattr(new_section, setting.name)
                         if before != after:
                             name: str = f'{section}.{setting.name}'
                             changes[name] = (str(before), str(after))
@@ -213,12 +225,15 @@ class Trainer:
         for source in self.sources:
             source.cancel()
 
+    def layout(self, images: Float32[Tensor, "b 1 h w"]) -> Float32[Tensor, "b 1 h w"]:
+        return images.contiguous(memory_format=torch.channels_last) if self.cadence.channels_last else images
+
     def forward_detnet(self, batch: DetNetBatch) -> DetNetOutput:
         """Run pooled images and cast heads to Float32 before the existing loss."""
         model: nn.Module = self.models['detnet']
         assert isinstance(model, DetNetF)
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.cadence.bf16):
-            output: DetNetOutput = model.forward_pooled(batch.pooled.to(self.device))
+            output: DetNetOutput = model.forward_pooled(self.layout(batch.pooled.to(self.device)))
         return DetNetOutput(output.center.float(), output.radius.float(), output.presence_logit.float())
 
     def forward_keynet(self, batch: KeyNetBatch) -> KeyNetOutput:
@@ -226,7 +241,7 @@ class Trainer:
         model: nn.Module = self.models['keynet']
         assert isinstance(model, KeyNetF)
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.cadence.bf16):
-            output: KeyNetOutput = model(batch.crops.to(self.device), batch.keypoints.to(self.device))
+            output: KeyNetOutput = model(self.layout(batch.crops.to(self.device)), batch.keypoints.to(self.device))
         return KeyNetOutput(output.heatmaps.float(), output.distance.float(), output.presence_logit.float())
 
     def detnet_objective(self, batch: DetNetBatch, output: DetNetOutput) -> DetNetLoss:

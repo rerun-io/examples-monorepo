@@ -8,6 +8,7 @@ from serde import serde
 from serde.json import to_json
 
 from handtrack.data.batches import BatchSource
+from handtrack.data.cache import DetNetCache
 from handtrack.data.catalog import DatasetName, SplitName
 from handtrack.data.stream import CatalogStream, StreamConfig
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
@@ -39,6 +40,9 @@ class StreamSettings:
     """DetNet shuffle pool on the GPU (uint8 pooled frames: 19.6 kB each, 1.29 GB at the default)."""
     keynet_buffer: int = 65_536
     """KeyNet shuffle pool on the GPU (uint8 crops: 9.8 kB each, 0.64 GB at the default)."""
+    detnet_cache: Path | None = None
+    """A decoded DetNet cache (``tools/build_detnet_cache.py``) to train from instead of the catalog stream; DetNet only.
+    Validation still decodes its fixed evaluation set from the catalog."""
     gpu_memory_gb: float = 0.0
     """Hard cap on this process's GPU memory (torch's allocator gets the cap minus 0.75 GB for the CUDA context and
     NVDEC); 0 leaves it unbounded. At batch 256 the two nets' fp32 activations alone need 7.5 GB, bf16 3.8 GB."""
@@ -91,6 +95,13 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
         raise ValueError(f"unknown datasets {unknown}; expected some of {sorted(DATASETS)}")
     ours: SplitName = SPLITS[split]
     evaluation: bool = ours != "train"
+    if settings.detnet_cache is not None and not evaluation:
+        if nets != "detnet":
+            raise ValueError("stream.detnet_cache holds DetNet samples only; train with nets=detnet")
+        cache: DetNetCache = DetNetCache(settings.detnet_cache, settings.detnet_batch, device, seed=settings.seed)
+        if cache.dataset_names != tuple(settings.datasets):
+            raise ValueError(f"{settings.detnet_cache} holds {cache.dataset_names}, the run asks for {settings.datasets}")
+        return cache
     return CatalogStream(
         StreamConfig(
             device=device,
@@ -127,6 +138,7 @@ def cap_gpu_memory(gigabytes: float, device: str) -> None:
 def main(config: Config) -> None:
     """Build exactly one training and one validation source, then train."""
     torch.manual_seed(config.stream.seed)
+    torch.backends.cudnn.benchmark = config.device.startswith("cuda")
     cap_gpu_memory(config.stream.gpu_memory_gb, config.device)
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
                                resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config))
