@@ -180,12 +180,19 @@ class StreamConfig:
     """A segment that fails twice (fetch, label or decode) is skipped for the rest of the run; more than this fraction of
     the segments (at least 3) failing means something other than bad data, and the stream stops with the failures listed."""
     row_phase: float = 0.0
-    """Where in each segment's ``pool_stride`` the kept timeline rows start, as a fraction of the stride: cache passes with
-    phases 0, 1/3 and 2/3 read different frames (UmeTrack stride 6: rows 0, 2 and 4 mod 6; SHOW3D stride 12: 0, 4 and 8)."""
+    """Where in each segment's stride the kept timeline rows start, as a fraction of the stride: cache passes with phases
+    0, 1/3 and 2/3 read different frames (UmeTrack stride 6: rows 0, 2 and 4 mod 6; SHOW3D stride 12: 0, 4 and 8)."""
+
+    row_density: int = 1
+    """Keep this many times more timeline rows per segment (``pool_stride`` divided by it, at least every row). A cache pass
+    decodes every frame anyway (AV1 with a 60-frame GOP), so a denser pass costs no more decode: density 3 turns UmeTrack's
+    5 fps into 15 fps and SHOW3D's 2.5 fps into 7.5 fps."""
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.row_phase < 1.0:
             raise ValueError("row_phase must lie in [0, 1)")
+        if self.row_density < 1:
+            raise ValueError("row_density must be positive")
 
 
 # --- samples and pools -----------------------------------------------------------------------------------------
@@ -1210,8 +1217,9 @@ class CatalogStream:
         start: float = time.perf_counter()
         data: SegmentData = self._read_segment(info)
         queried: float = time.perf_counter()
-        first: int = int(self.config.row_phase * layout.pool_stride)
-        rows: Int64[ndarray, "k"] = np.arange(first, len(data.timeline.video_time_ns), layout.pool_stride, dtype=np.int64)
+        stride: int = max(1, layout.pool_stride // self.config.row_density)
+        first: int = int(self.config.row_phase * stride)
+        rows: Int64[ndarray, "k"] = np.arange(first, len(data.timeline.video_time_ns), stride, dtype=np.int64)
         labels: SegmentLabels = segment_labels(data.timeline, data.rig, data.letterboxes, rows, is_show3d(info.dataset))
         priors: KeypointPriors | None = keypoint_priors(data.timeline, data.rig, data.letterboxes, rows, layout.tracker_step) if self._keynet_on else None
         with self._cond:

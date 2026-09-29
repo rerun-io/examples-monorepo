@@ -18,6 +18,8 @@ class Config:
     """'detnet' (pooled frames) or 'keynet' (augmented crops: build several passes with other seeds and row phases)."""
     row_phase: float = 0.0
     """Start of the kept rows within each segment's pool stride, as a fraction of it (``StreamConfig.row_phase``)."""
+    row_density: int = 1
+    """Rows kept per pool stride (``StreamConfig.row_density``): more samples for the same decode."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d")
     split: str = "training"
     producers: int = 4
@@ -36,6 +38,7 @@ def main(config: Config) -> None:
         seed=config.seed,
         device=config.device,
         row_phase=config.row_phase,
+        row_density=config.row_density,
     ))
     with stream:
         manifest: CacheManifest = write_cache(stream, config.output, config.split, net=config.net)
