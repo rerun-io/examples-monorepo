@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import torch
 
@@ -47,7 +49,7 @@ def _timeline(left_confidence: float = 1.0, right_translation: tuple[float, floa
 
 def test_umetrack_labels_present_and_absent() -> None:
     rows: np.ndarray = np.arange(FRAMES, dtype=np.int64)
-    labels: SegmentLabels = segment_labels(_timeline(), _rig(), (letterbox_for(640, 480),), rows, show3d=False)
+    labels: SegmentLabels = segment_labels(_timeline(), _rig(), (letterbox_for(640, 480),), rows, pose_gated=False)
     assert labels.image_valid.all()
     assert labels.labelled[..., 0].all() and not labels.labelled[..., 1].any()
     assert (labels.projection.visible[:, 0, 0] == 21).all()
@@ -60,17 +62,35 @@ def test_umetrack_labels_present_and_absent() -> None:
 
 def test_show3d_low_confidence_visible_hand_drops_the_image() -> None:
     rows: np.ndarray = np.arange(FRAMES, dtype=np.int64)
-    kept: SegmentLabels = segment_labels(_timeline(left_confidence=0.5, right_translation=(0.0, 0.0, -0.4)), _rig(), (letterbox_for(640, 480),), rows, show3d=True)
+    kept: SegmentLabels = segment_labels(_timeline(left_confidence=0.5, right_translation=(0.0, 0.0, -0.4)), _rig(), (letterbox_for(640, 480),), rows, pose_gated=True)
     # The right hand is behind the camera: known absent, so the image stays.
     assert kept.image_valid.all() and (kept.hand_label[:, 0, 1] == HandLabel.ABSENT).all()
-    dropped: SegmentLabels = segment_labels(_timeline(left_confidence=0.05), _rig(), (letterbox_for(640, 480),), rows, show3d=True)
+    dropped: SegmentLabels = segment_labels(_timeline(left_confidence=0.05), _rig(), (letterbox_for(640, 480),), rows, pose_gated=True)
     assert not dropped.image_valid.any()
+
+
+def test_pose_gated_missing_pose_drops_the_image_where_umetrack_calls_it_absent() -> None:
+    # The right hand has no pose and confidence 0: UmeTrack reads that as absent, SHOW3D and HOT3D as unlabelled.
+    rows: np.ndarray = np.arange(FRAMES, dtype=np.int64)
+    umetrack: SegmentLabels = segment_labels(_timeline(), _rig(), (letterbox_for(640, 480),), rows, pose_gated=False)
+    gated: SegmentLabels = segment_labels(_timeline(), _rig(), (letterbox_for(640, 480),), rows, pose_gated=True)
+    assert umetrack.image_valid.all() and not gated.image_valid.any()
+
+
+def test_camera_quality_flags_drop_single_images() -> None:
+    rows: np.ndarray = np.arange(FRAMES, dtype=np.int64)
+    flags: torch.Tensor = torch.tensor([[True], [False], [True], [True], [False], [True]])
+    timeline: HandTimeline = replace(_timeline(right_translation=(0.0, 0.0, -0.4)), camera_valid=flags)
+    labels: SegmentLabels = segment_labels(timeline, _rig(), (letterbox_for(640, 480),), rows, pose_gated=True)
+    assert labels.image_valid.equal(flags)
+    # The flag removes the image, not the hand's label.
+    assert labels.labelled[:, 0, 0].all() and (labels.hand_label[:, 0, 0] == HandLabel.PRESENT).all()
 
 
 def test_extrapolated_prior_recovers_constant_velocity() -> None:
     timeline: HandTimeline = _timeline()
     rows: np.ndarray = np.arange(FRAMES, dtype=np.int64)
-    labels: SegmentLabels = segment_labels(timeline, _rig(), (letterbox_for(640, 480),), rows, show3d=False)
+    labels: SegmentLabels = segment_labels(timeline, _rig(), (letterbox_for(640, 480),), rows, pose_gated=False)
     priors = keypoint_priors(timeline, _rig(), (letterbox_for(640, 480),), rows, tracker_step=1)
     assert priors.extrapolated_valid[:, 0].tolist() == [False] + [True] * (FRAMES - 1)
     assert not priors.extrapolated_valid[:, 1].any() and not priors.stale_valid.any()

@@ -5,6 +5,8 @@ import torch
 from scipy.spatial.transform import Rotation
 
 from handtrack.data.catalog import (
+    HOT3D_QUEST3,
+    HOT3D_QUEST3_LAYOUT,
     PROFILE_COLUMN,
     SHOW3D,
     SHOW3D_HELDOUT_SUBJECTS,
@@ -12,10 +14,14 @@ from handtrack.data.catalog import (
     UMETRACK,
     UMETRACK_LAYOUT,
     UMETRACK_VALIDATION_USERS,
+    CatalogDataError,
+    DatasetLayout,
     SegmentInfo,
     bool_rows,
+    camera_angles,
     column_major_3x3,
     hand_timeline,
+    layout_for,
     list_rows,
     point_rows,
     read_rig,
@@ -115,8 +121,9 @@ def test_show3d_needs_hand_pose_and_holds_out_subjects() -> None:
         select_split(infos, "test")
 
 
-def _statics(fisheye: bool, relation: int = 2) -> pa.Table:
-    layout = UMETRACK_LAYOUT if fisheye else SHOW3D_LAYOUT
+def _statics(fisheye: bool, relation: int = 2, layout: DatasetLayout | None = None, resolution: tuple[float, float] | None = None) -> pa.Table:
+    layout = layout or (UMETRACK_LAYOUT if fisheye else SHOW3D_LAYOUT)
+    size: list[float] = list(resolution or ((636.0, 480.0) if fisheye else (1024.0, 1280.0)))
     columns: dict[str, list] = {"rerun_segment_id": ["s"]}
     for index, camera in enumerate(layout.cameras):
         rotation: np.ndarray = Rotation.from_euler("y", 0.2 * index).as_matrix()
@@ -125,7 +132,7 @@ def _statics(fisheye: bool, relation: int = 2) -> pa.Table:
         columns[f"{camera}:Transform3D:translation"] = [[[0.01 * index, 0.0, 0.0]]]
         intrinsics: np.ndarray = np.array([[240.0, 0.0, 318.0], [0.0, 241.0, 239.0], [0.0, 0.0, 1.0]])
         columns[f"{camera}/pinhole:Pinhole:image_from_camera"] = [[intrinsics.T.reshape(9).tolist()]]
-        columns[f"{camera}/pinhole:Pinhole:resolution"] = [[[636.0, 480.0] if fisheye else [1024.0, 1280.0]]]
+        columns[f"{camera}/pinhole:Pinhole:resolution"] = [[size]]
         if fisheye:
             columns[f"{camera}/pinhole:simplecv.components.DistortionCoefficients"] = [[[0.1, 0.01, 0.0, 0.0, 0.0, 0.0, 0.001, -0.001]]]
             columns[f"{camera}/pinhole:simplecv.components.DistortionModel"] = [["kannala_brandt"]]
@@ -154,7 +161,7 @@ def test_hand_timeline_umetrack_masks(missing_confidence: bool) -> None:
     columns: dict[str, pa.Array] = {"video_time": pa.array([0, 33_000_000, 66_000_000], type=pa.duration("ns"))}
     four = pa.list_(pa.list_(pa.float32(), 4))
     three = pa.list_(pa.list_(pa.float32(), 3))
-    names: list[str] = timeline_columns(UMETRACK_LAYOUT, show3d=False)
+    names: list[str] = timeline_columns(UMETRACK_LAYOUT)
     columns[names[0]] = pa.array([[quaternion], [quaternion], [[np.nan] * 4]], type=four)
     columns[names[1]] = pa.array([[[0.0, 0.0, 0.0]]] * frames, type=three)
     columns[names[2]] = pa.array([[False], [True], [False]], type=pa.list_(pa.bool_()))
@@ -196,3 +203,87 @@ def test_partition_properties_are_required(dataset: str, property_name: str, val
         table = table.append_column(name, pa.array([value] * table.num_rows, type=pa.list_(pa.string())))
     with pytest.raises(ValueError, match=f'{dataset} .*{property_name}'):
         segment_infos(dataset, table)
+
+
+def _hot3d_table() -> pa.Table:
+    return pa.table(
+        {
+            "rerun_segment_id": ["hot3d-quest3__P0003_cccc", "hot3d-quest3__P0003_bbbb", "hot3d-quest3__P0002_aaaa"],
+            "rerun_layer_names": [["base", "hand_pose", "hand_mesh"], ["base"], ["base", "hand_pose"]],
+            "property:episode:participant_id": [["P0003"], ["P0003"], ["P0002"]],
+            "property:episode:has_gt": [[True], [False], [True]],
+            "property:capture:num_frames": [[395], [1200], [3981]],
+        }
+    )
+
+
+def test_hot3d_keeps_labelled_scenes_as_an_unseen_test_set() -> None:
+    infos: tuple[SegmentInfo, ...] = segment_infos(HOT3D_QUEST3, _hot3d_table())
+    assert [(info.segment_id, info.subject, info.num_frames) for info in infos] == [("hot3d-quest3__P0002_aaaa", "P0002", 3981), ("hot3d-quest3__P0003_cccc", "P0003", 395)]
+    assert all((info.domain, info.split, info.fps, info.interaction) == ("hot3d", "train", 30, "") for info in infos)
+    assert select_split(infos, "test") == infos
+    for split in ("train", "val"):
+        with pytest.raises(CatalogDataError, match="unseen test set"):
+            select_split(infos, split)
+
+
+@pytest.mark.parametrize("value", ["missing", [None], ["  "]])
+def test_hot3d_participant_is_required(value: object) -> None:
+    table: pa.Table = _hot3d_table().drop(["property:episode:participant_id"])
+    if value != "missing":
+        table = table.append_column("property:episode:participant_id", pa.array([value] * table.num_rows, type=pa.list_(pa.string())))
+    with pytest.raises(ValueError, match=f"{HOT3D_QUEST3} .*episode:participant_id"):
+        segment_infos(HOT3D_QUEST3, table)
+
+
+def test_hot3d_layout_rig_and_letterbox() -> None:
+    layout: DatasetLayout = layout_for(HOT3D_QUEST3)
+    assert layout is HOT3D_QUEST3_LAYOUT and layout.rig_index == 0 and layout.cameras == ("/world/rig_00/cam_00", "/world/rig_00/cam_01")
+    assert (layout.pool_stride, layout.tracker_step) == (6, 1)  # 30 fps: the 5 fps pool and the 30 Hz tracker step
+    ids: list[int] = [lay.camera_offset + index for lay in (UMETRACK_LAYOUT, SHOW3D_LAYOUT, HOT3D_QUEST3_LAYOUT) for index in range(len(lay.cameras))]
+    assert ids == list(range(8))
+    info: SegmentInfo = SegmentInfo(HOT3D_QUEST3, "s", "hot3d", "", "train", "P0002", 10, 30)
+    rig, letterboxes = read_rig(_statics(fisheye=True, layout=layout, resolution=(1024.0, 1280.0)), info)
+    assert rig.names == layout.cameras and rig.fisheye62 is not None and tuple(rig.fisheye62.shape) == (2, 8)
+    assert all(letterbox.quarter_turn_cw and letterbox.scale == 0.46875 for letterbox in letterboxes)
+
+
+def test_camera_angles_come_from_umetrack_statics_only() -> None:
+    umetrack: pa.Table = _statics(fisheye=True)
+    for index, camera in enumerate(UMETRACK_LAYOUT.cameras):
+        umetrack = umetrack.append_column(f"{camera}/pinhole:source_camera_angle_deg", pa.array([[90.0 * index]], type=pa.list_(pa.float64())))
+    assert camera_angles(umetrack, SegmentInfo(UMETRACK, "s", "real", "hand_hand", "training", "user_00", 3, 30)) == (0.0, 90.0, 180.0, 270.0)
+    hot3d: pa.Table = _statics(fisheye=True, layout=HOT3D_QUEST3_LAYOUT, resolution=(1024.0, 1280.0))
+    assert camera_angles(hot3d, SegmentInfo(HOT3D_QUEST3, "s", "hot3d", "", "train", "P0002", 3, 30)) == (0.0, 0.0)
+
+
+def test_hand_timeline_hot3d_reads_a_quaternion_rig_without_untracked_and_its_qa_flags() -> None:
+    info: SegmentInfo = SegmentInfo(HOT3D_QUEST3, "s", "hot3d", "", "train", "P0002", 3, 30)
+    frames: int = 3
+    quaternion: list[float] = [0.0, 0.0, 0.0, 1.0]
+    four = pa.list_(pa.list_(pa.float32(), 4))
+    three = pa.list_(pa.list_(pa.float32(), 3))
+    scalar = pa.list_(pa.float64())
+    names: list[str] = timeline_columns(HOT3D_QUEST3_LAYOUT)
+    assert not any(name.endswith(":untracked") for name in names)
+    columns: dict[str, pa.Array] = {"video_time": pa.array([0, 33_333_333, 66_666_666], type=pa.duration("ns"))}
+    columns["/world/rig_00:Transform3D:quaternion"] = pa.array([[quaternion], [quaternion], [[np.nan] * 4]], type=four)
+    columns["/world/rig_00:Transform3D:translation"] = pa.array([[[0.0, 0.0, 0.0]]] * frames, type=three)
+    for side, present in (("left", True), ("right", False)):
+        base: str = f"/world/gt/hands/{side}"
+        columns[f"{base}/confidence:Scalars:scalars"] = pa.array([[1.0 if present else 0.0]] * frames, type=scalar)
+        columns[f"{base}/joint_angles:joint_angles"] = pa.array([[[0.1] * 22] if present else []] * frames, type=pa.list_(pa.list_(pa.float32(), 22)))
+        columns[f"{base}/wrist:Transform3D:quaternion"] = pa.array([[quaternion] if present else None] * frames, type=four)
+        columns[f"{base}/wrist:Transform3D:translation"] = pa.array([[[0.0, 0.0, 0.3]] if present else None] * frames, type=three)
+    columns["/world/gt/quality/rig_00/cam_00/qa_pass:Scalars:scalars"] = pa.array([[1.0], [1.0], [0.0]], type=scalar)
+    columns["/world/gt/quality/rig_00/cam_01/qa_pass:Scalars:scalars"] = pa.array([[1.0], None, [1.0]], type=scalar)
+    table: pa.Table = pa.table(columns)
+    assert sorted(table.column_names[1:]) == sorted(names)
+    statics: pa.Table = _statics(fisheye=True, layout=HOT3D_QUEST3_LAYOUT, resolution=(1024.0, 1280.0))
+    timeline = hand_timeline(table, statics, info)
+    assert timeline.headset_valid.tolist() == [True, True, False]
+    assert timeline.has_pose.tolist() == [[True, False]] * frames
+    # A missing flag fails: the image's quality is unknown.
+    assert timeline.camera_valid is not None and timeline.camera_valid.tolist() == [[True, True], [True, False], [False, True]]
+    with pytest.raises(CatalogDataError, match="qa_pass"):
+        hand_timeline(table.drop(["/world/gt/quality/rig_00/cam_01/qa_pass:Scalars:scalars"]), statics, info)

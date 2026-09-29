@@ -38,7 +38,7 @@ from serde.json import from_json
 from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK, UME_HAND_CONNECTIONS, HandModelNumpy, skin_landmarks, wrist_for_hand
 from torch import Tensor
 
-from handtrack.data.catalog import is_show3d
+from handtrack.data.catalog import layout_for
 from handtrack.geometry.camera import CameraRig, in_front, project, world_to_cameras
 from handtrack.hand.pose import GENERIC_HAND_MODEL
 from handtrack.labels.circles import enclosing_circles, square_boxes
@@ -338,7 +338,7 @@ def write_detnet_layer(recording: rr.RecordingStream, detections: SegmentTrack, 
     and hand, ``box`` and ``box_source`` = DetNet where it reported a hand. A box below the presence threshold is grey.
     ``truth`` supplies the full base segment clock; a partial run clears at its next frame on both timelines.
     """
-    rig: int = 1 if is_show3d(detections.meta.dataset) else 0
+    rig: int = layout_for(detections.meta.dataset).rig_index
     detections = with_clearing_frame(detections, truth)
     clock: _Clock = _Clock(detections.video_time_ns, detections.frame_index)
     if detections.meta.kind != "detnet_alone":
@@ -401,7 +401,7 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
     Raises:
         ValueError: If ``model`` does not reproduce the track's landmarks (``LANDMARK_TOLERANCE_M``).
     """
-    rig: int = 1 if is_show3d(track.meta.dataset) else 0
+    rig: int = layout_for(track.meta.dataset).rig_index
     skinned: Float32[ndarray, "f 2 21 3"] = skinned_landmarks(
         model, np.nan_to_num(track.rotation), np.nan_to_num(track.translation), np.nan_to_num(track.joint_angles), track.tracked
     )

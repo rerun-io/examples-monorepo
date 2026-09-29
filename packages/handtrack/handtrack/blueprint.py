@@ -15,7 +15,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from handtrack import rerun_layers
-from handtrack.data.catalog import UMETRACK, is_show3d
+from handtrack.data.catalog import UMETRACK, DatasetLayout, layout_for
 from handtrack.rerun_layers import NUM_CAMERAS, RIG, SIDES
 
 HANDS_IN_RIG: tuple[float, float, float] = (0.05, 0.45, 0.03)
@@ -101,8 +101,9 @@ def plots() -> list[rrb.TimeSeriesView]:
 
 def handtrack_blueprint(dataset: str = UMETRACK) -> rrb.Blueprint:
     """3D beside the 2x2 camera grid, over the plots, on ``video_time``."""
-    rig: int = 1 if is_show3d(dataset) else RIG
-    cameras: int = 2 if is_show3d(dataset) else NUM_CAMERAS
+    layout: DatasetLayout = layout_for(dataset)
+    rig: int = layout.rig_index
+    cameras: int = len(layout.cameras)
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(

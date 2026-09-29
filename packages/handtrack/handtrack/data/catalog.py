@@ -28,14 +28,16 @@ from handtrack.labels.keypoint_input import hand_scale
 CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 TIMELINE: str = "video_time"
 
-DatasetName: TypeAlias = Literal["dataforge-umetrack", "dataforge-show3d", "dataforge-show3d-sample"]
-Domain: TypeAlias = Literal["real", "synthetic", "show3d"]
+DatasetName: TypeAlias = Literal["dataforge-umetrack", "dataforge-show3d", "dataforge-show3d-sample", "dataforge-hot3d-quest3"]
+Domain: TypeAlias = Literal["real", "synthetic", "show3d", "hot3d"]
 SplitName: TypeAlias = Literal["train", "val", "test"]
-"""Our splits: ``val`` is the held-out training users (UmeTrack) or subjects (SHOW3D)."""
+"""Our splits: ``val`` is the held-out training users (UmeTrack) or subjects (SHOW3D); HOT3D is only ``test``."""
+RigRotation: TypeAlias = Literal["quaternion", "mat3x3"]
 
 UMETRACK: DatasetName = "dataforge-umetrack"
 SHOW3D: DatasetName = "dataforge-show3d"
 SHOW3D_SAMPLE: DatasetName = "dataforge-show3d-sample"
+HOT3D_QUEST3: DatasetName = "dataforge-hot3d-quest3"
 
 UMETRACK_VALIDATION_USERS: tuple[str, ...] = ("user_10", "user_28", "user_46")
 """Held out of UmeTrack ``training`` for validation: positions 7, 22 and 37 of the 44 sorted training users (evenly spread).
@@ -49,6 +51,8 @@ middling size (19, 40 and 32 scenes; 185,294 frames, 5.3% of the labelled frames
 
 SHOW3D_FPS: int = 60
 """SHOW3D headset video rate; its segment table carries no fps property."""
+HOT3D_FPS: int = 30
+"""HOT3D Quest 3 video rate (dataforge encodes it at 30 fps); its segment table carries no fps property either."""
 
 HAND_ROOT: str = "/world/gt/hands"
 PROFILE_COLUMN: str = f"{HAND_ROOT}/profile:TextDocument:text"
@@ -69,20 +73,56 @@ class DatasetLayout:
     tracker_step: int
     """Frames per tracker step at 30 Hz: the gap between the poses the keypoint input extrapolates from."""
     camera_offset: int
-    """First camera id of this dataset in ids unique across datasets (UmeTrack 0-3, SHOW3D 4-5)."""
+    """First camera id of this dataset in ids unique across datasets (UmeTrack 0-3, SHOW3D 4-5, HOT3D 6-7)."""
+    rig_rotation: RigRotation
+    """How the headset pose stores its rotation."""
+    untracked_flag: bool
+    """The rig carries UmeTrack's ``untracked`` flag (True drops the headset pose)."""
+    pose_gated: bool
+    """A hand without a pose is unlabelled, not absent: an image is kept only when each hand is labelled or projects outside it
+    (``labels.validity.show3d_hands``). False is UmeTrack's rule, where confidence 0 means the hand is absent."""
+    camera_roll: bool
+    """Cameras carry UmeTrack's ``source_camera_angle_deg`` for perspective crops; otherwise every camera rolls 0 degrees."""
+    quality_flags: tuple[str, ...] = ()
+    """Per-camera ``/world/gt/quality/<rig>/<cam>/<flag>`` scalars an image must pass (1) to carry labels."""
+
+    @property
+    def rig_index(self) -> int:
+        """The ``NN`` of ``/world/rig_NN``."""
+        return int(self.rig.rsplit("_", 1)[1])
 
 
-UMETRACK_LAYOUT: DatasetLayout = DatasetLayout("/world/rig_00", tuple(f"/world/rig_00/cam_0{i}" for i in range(4)), pool_stride=6, tracker_step=1, camera_offset=0)
-SHOW3D_LAYOUT: DatasetLayout = DatasetLayout("/world/rig_01", ("/world/rig_01/cam_00", "/world/rig_01/cam_01"), pool_stride=12, tracker_step=2, camera_offset=4)
+UMETRACK_LAYOUT: DatasetLayout = DatasetLayout(
+    "/world/rig_00", tuple(f"/world/rig_00/cam_0{i}" for i in range(4)), pool_stride=6, tracker_step=1, camera_offset=0,
+    rig_rotation="quaternion", untracked_flag=True, pose_gated=False, camera_roll=True,
+)
+SHOW3D_LAYOUT: DatasetLayout = DatasetLayout(
+    "/world/rig_01", ("/world/rig_01/cam_00", "/world/rig_01/cam_01"), pool_stride=12, tracker_step=2, camera_offset=4,
+    rig_rotation="mat3x3", untracked_flag=False, pose_gated=True, camera_roll=False,
+)
 """SHOW3D runs at 60 Hz, so a 30 Hz tracker step is 2 frames (our choice; the tracker rate is UmeTrack's)."""
+HOT3D_QUEST3_LAYOUT: DatasetLayout = DatasetLayout(
+    "/world/rig_00", ("/world/rig_00/cam_00", "/world/rig_00/cam_01"), pool_stride=6, tracker_step=1, camera_offset=6,
+    rig_rotation="quaternion", untracked_flag=False, pose_gated=True, camera_roll=False, quality_flags=("qa_pass",),
+)
+"""HOT3D's two Quest 3 SLAM cameras (``camera-slam-left`` / ``-right``) at 30 fps, stored 90 degrees clockwise of the sensor
+(1024x1280 portrait, the calibration turned with them). Its hand confidence is 1 exactly where a pose exists and 0 elsewhere, so it
+says nothing beyond ``has_pose``; a missing pose is a gap in the mocap labels, not an absent hand, hence SHOW3D's gating. An image
+also needs HOT3D's own ``qa_pass`` for that camera and frame."""
 
 
 def is_show3d(dataset: str) -> bool:
     return dataset.startswith("dataforge-show3d")
 
 
+def is_hot3d(dataset: str) -> bool:
+    return dataset.startswith("dataforge-hot3d")
+
+
 def layout_for(dataset: str) -> DatasetLayout:
-    return SHOW3D_LAYOUT if is_show3d(dataset) else UMETRACK_LAYOUT
+    if is_show3d(dataset):
+        return SHOW3D_LAYOUT
+    return HOT3D_QUEST3_LAYOUT if is_hot3d(dataset) else UMETRACK_LAYOUT
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +133,11 @@ class SegmentInfo:
     segment_id: str
     domain: Domain
     interaction: str
-    """UmeTrack ``hand_hand`` / ``separate_hand``; SHOW3D's episode action."""
+    """UmeTrack ``hand_hand`` / ``separate_hand``; SHOW3D's episode action; empty for HOT3D."""
     split: str
-    """The source split: UmeTrack ``training`` / ``testing``, SHOW3D ``train`` / ``test``."""
+    """The source split: UmeTrack ``training`` / ``testing``, SHOW3D ``train`` / ``test``, HOT3D ``train`` (its scenes with ground truth)."""
     subject: str
-    """UmeTrack user or SHOW3D subject id."""
+    """UmeTrack user, SHOW3D subject or HOT3D participant id."""
     num_frames: int
     fps: int
 
@@ -107,8 +147,9 @@ class CatalogDataError(ValueError):
 
 
 def segment_infos(dataset: str, table: pa.Table) -> tuple[SegmentInfo, ...]:
-    """Parse a ``segment_table()``; SHOW3D keeps only scenes with a ``hand_pose`` layer (the others have no hand labels)."""
+    """Parse a ``segment_table()``; SHOW3D and HOT3D keep only scenes with a ``hand_pose`` layer (the others have no hand labels)."""
     show3d: bool = is_show3d(dataset)
+    hot3d: bool = is_hot3d(dataset)
     columns: dict[str, list[list[str | int | None] | None]] = {name: table[name].to_pylist() for name in table.column_names if name.startswith("property:")}
     ids: list[str] = [str(segment) for segment in table["rerun_segment_id"].to_pylist()]
     layers: list[list[str] | None] = table["rerun_layer_names"].to_pylist()
@@ -116,7 +157,7 @@ def segment_infos(dataset: str, table: pa.Table) -> tuple[SegmentInfo, ...]:
     def prop(key: str, row: int, default: str | int) -> str | int:
         column: list[list[str | int | None] | None] | None = columns.get(f"property:{key}")
         values: list[str | int | None] | None = None if column is None else column[row]
-        if key in ("episode:split", "episode:user", "episode:subject_id"):
+        if key in ("episode:split", "episode:user", "episode:subject_id", "episode:participant_id"):
             value: str | int | None = values[0] if values else None
             if not isinstance(value, str) or not value.strip():
                 raise CatalogDataError(f"{dataset} {ids[row]}: missing or empty {key}")
@@ -127,6 +168,22 @@ def segment_infos(dataset: str, table: pa.Table) -> tuple[SegmentInfo, ...]:
 
     infos: list[SegmentInfo] = []
     for row, segment in enumerate(ids):
+        if hot3d:
+            if "hand_pose" not in (layers[row] or []):
+                continue
+            infos.append(
+                SegmentInfo(
+                    dataset=dataset,
+                    segment_id=segment,
+                    domain="hot3d",
+                    interaction="",
+                    split="train",
+                    subject=str(prop("episode:participant_id", row, "")),
+                    num_frames=int(prop("capture:num_frames", row, 0)),
+                    fps=HOT3D_FPS,
+                )
+            )
+            continue
         if show3d:
             if "hand_pose" not in (layers[row] or []):
                 continue
@@ -171,11 +228,16 @@ def select_split(segments: Sequence[SegmentInfo], split: SplitName) -> tuple[Seg
 
     UmeTrack: train = ``training`` minus ``UMETRACK_VALIDATION_USERS``, val = those users, test = ``testing`` (real and
     synthetic; report them separately by ``domain``). SHOW3D: train = ``train`` minus ``SHOW3D_HELDOUT_SUBJECTS``,
-    val = those subjects; SHOW3D ``test`` has no hand labels, so asking for it raises.
+    val = those subjects; SHOW3D ``test`` has no hand labels, so asking for it raises. HOT3D is a dataset we never train
+    on: test = every labelled scene, and asking for train or val raises.
     """
     selected: list[SegmentInfo] = []
     for info in segments:
-        if info.domain == "show3d":
+        if info.domain == "hot3d":
+            if split != "test":
+                raise CatalogDataError(f"HOT3D is an unseen test set (we never train or validate on it); asked for split {split!r}")
+            selected.append(info)
+        elif info.domain == "show3d":
             if split == "test":
                 raise CatalogDataError("SHOW3D's test scenes carry no hand labels; use split 'val' (the held-out subjects) for a SHOW3D score")
             held_out: bool = info.subject in SHOW3D_HELDOUT_SUBJECTS
@@ -258,6 +320,14 @@ def column_major_3x3(values: Float32[ndarray, "*b 9"]) -> Float32[ndarray, "*b 3
 
 
 # --- statics: rig, letterboxes, hand model ---------------------------------------------------------------------
+
+
+def camera_angles(statics: pa.Table, info: SegmentInfo) -> tuple[float, ...]:
+    """Each camera's mounting roll in degrees for perspective crops: UmeTrack's ``source_camera_angle_deg``, else 0."""
+    layout: DatasetLayout = layout_for(info.dataset)
+    if not layout.camera_roll:
+        return (0.0,) * len(layout.cameras)
+    return tuple(static_number(statics, f"{camera}/pinhole:source_camera_angle_deg", f"{info.dataset} {info.segment_id}") for camera in layout.cameras)
 
 
 def static_entities(layout: DatasetLayout) -> list[str]:
@@ -359,7 +429,7 @@ class HandTimeline:
     world_from_rig: Float32[Tensor, "f 4 4"]
     """NaN where the headset pose is missing or invalid."""
     headset_valid: Bool[Tensor, "f"]
-    """UmeTrack: a finite pose and ``/world/rig_00:untracked`` False; SHOW3D: a finite ``/world/rig_01`` pose."""
+    """A finite headset pose, and for UmeTrack ``/world/rig_00:untracked`` False."""
     poses: tuple[HandPose, HandPose]
     """Left and right hand poses [f], NaN where the hand has no pose."""
     confidence: Float32[Tensor, "f 2"]
@@ -370,34 +440,44 @@ class HandTimeline:
     """The subject's hand model from ``/world/gt/hands/profile``."""
     hand_scale: float
     """ϕ: the subject's size relative to UmeTrack's generic hand (``labels.keypoint_input.hand_scale``)."""
+    camera_valid: Bool[Tensor, "f c"] | None = None
+    """Each camera passed the dataset's ``DatasetLayout.quality_flags`` (a missing flag fails); None when the dataset has none."""
 
 
-def timeline_columns(layout: DatasetLayout, show3d: bool) -> list[str]:
-    rig_columns: list[str] = (
-        [f"{layout.rig}:Transform3D:mat3x3", f"{layout.rig}:Transform3D:translation"]
-        if show3d
-        else [f"{layout.rig}:Transform3D:quaternion", f"{layout.rig}:Transform3D:translation", f"{layout.rig}:untracked"]
-    )
+def quality_flag_entity(layout: DatasetLayout, camera: str, flag: str) -> str:
+    """``/world/gt/quality/rig_NN/cam_MM/<flag>`` for a layout camera ``/world/rig_NN/cam_MM``."""
+    return f"/world/gt/quality/{camera.removeprefix('/world/')}/{flag}"
+
+
+def timeline_entities(layout: DatasetLayout) -> list[str]:
+    """The entities of the label query: the rig, both hands' confidence, joint angles and wrist, and any quality flags."""
+    hands: list[str] = [f"{HAND_ROOT}/{side}/{part}" for side in SIDE_NAMES for part in ("confidence", "joint_angles", "wrist")]
+    flags: list[str] = [quality_flag_entity(layout, camera, flag) for camera in layout.cameras for flag in layout.quality_flags]
+    return [layout.rig, *hands, *flags]
+
+
+def timeline_columns(layout: DatasetLayout) -> list[str]:
+    rotation: list[str] = [f"{layout.rig}:Transform3D:{layout.rig_rotation}", f"{layout.rig}:Transform3D:translation"]
+    untracked: list[str] = [f"{layout.rig}:untracked"] if layout.untracked_flag else []
     hand_columns: list[str] = [
         f"{HAND_ROOT}/{side}/{component}"
         for side in SIDE_NAMES
         for component in ("confidence:Scalars:scalars", "joint_angles:joint_angles", "wrist:Transform3D:quaternion", "wrist:Transform3D:translation")
     ]
-    return rig_columns + hand_columns
+    flags: list[str] = [f"{quality_flag_entity(layout, camera, flag)}:Scalars:scalars" for camera in layout.cameras for flag in layout.quality_flags]
+    return rotation + untracked + hand_columns + flags
 
 
 def read_timeline_table(dataset: DatasetEntry, info: SegmentInfo) -> pa.Table:
     """All label columns of a segment on ``video_time``: one query."""
     layout: DatasetLayout = layout_for(info.dataset)
-    entities: list[str] = [layout.rig, *(f"{HAND_ROOT}/{side}/{part}" for side in SIDE_NAMES for part in ("confidence", "joint_angles", "wrist"))]
-    columns: list[str] = timeline_columns(layout, is_show3d(info.dataset))
-    return dataset.filter_segments(info.segment_id).filter_contents(entities).reader(index=TIMELINE).select(TIMELINE, *columns).to_arrow_table()
+    columns: list[str] = timeline_columns(layout)
+    return dataset.filter_segments(info.segment_id).filter_contents(timeline_entities(layout)).reader(index=TIMELINE).select(TIMELINE, *columns).to_arrow_table()
 
 
 def hand_timeline(table: pa.Table, statics: pa.Table, info: SegmentInfo) -> HandTimeline:
     """Parse the timeline query (rows in ``video_time`` order) and the profile into a ``HandTimeline``."""
     layout: DatasetLayout = layout_for(info.dataset)
-    show3d: bool = is_show3d(info.dataset)
     where: str = f"{info.dataset} {info.segment_id}"
     times: Int64[ndarray, "f"] = np.asarray(table[TIMELINE].combine_chunks().to_numpy(zero_copy_only=False)).view(np.int64)
     if len(times) == 0 or not np.all(np.diff(times) > 0):
@@ -405,16 +485,25 @@ def hand_timeline(table: pa.Table, statics: pa.Table, info: SegmentInfo) -> Hand
     frames: int = len(times)
     world_from_rig: Float32[ndarray, "f 4 4"] = np.zeros((frames, 4, 4), dtype=np.float32)
     world_from_rig[:, 3, 3] = 1.0
-    if show3d:
+    if layout.rig_rotation == "mat3x3":
         world_from_rig[:, :3, :3] = column_major_3x3(list_rows(table[f"{layout.rig}:Transform3D:mat3x3"], 9))
     else:
         world_from_rig[:, :3, :3] = rotation_from_quaternion_xyzw(list_rows(table[f"{layout.rig}:Transform3D:quaternion"], 4))
     world_from_rig[:, :3, 3] = list_rows(table[f"{layout.rig}:Transform3D:translation"], 3)
     headset_valid: Bool[ndarray, "f"] = np.isfinite(world_from_rig).all(axis=(1, 2))
-    if not show3d:
+    if layout.untracked_flag:
         untracked: Bool[ndarray, "f"] = bool_rows(table[f"{layout.rig}:untracked"])[0]
         headset_valid &= ~untracked
     world_from_rig[~headset_valid] = np.nan
+    camera_valid: Bool[ndarray, "f c"] | None = None
+    if layout.quality_flags:
+        camera_valid = np.ones((frames, len(layout.cameras)), dtype=bool)
+        for index, camera in enumerate(layout.cameras):
+            for flag in layout.quality_flags:
+                column: str = f"{quality_flag_entity(layout, camera, flag)}:Scalars:scalars"
+                if column not in table.column_names:
+                    raise CatalogDataError(f"{where}: quality flag column {column} is missing")
+                camera_valid[:, index] &= list_rows(table[column], 1)[:, 0] == 1.0
     poses: list[HandPose] = []
     confidence: Float32[ndarray, "f 2"] = np.zeros((frames, 2), dtype=np.float32)
     has_pose: Bool[ndarray, "f 2"] = np.zeros((frames, 2), dtype=bool)
@@ -440,6 +529,7 @@ def hand_timeline(table: pa.Table, statics: pa.Table, info: SegmentInfo) -> Hand
         has_pose=torch.from_numpy(has_pose),
         hand_model=model,
         hand_scale=hand_scale(model, _generic_model()),
+        camera_valid=None if camera_valid is None else torch.from_numpy(camera_valid),
     )
 
 
