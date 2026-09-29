@@ -30,7 +30,7 @@ HandMode: TypeAlias = Literal["known", "unknown"]
 TrackKind: TypeAlias = Literal["tracker", "detnet_alone"]
 DetectorSource: TypeAlias = Literal["detnet", "oracle"]
 """``oracle``: ground-truth circles with presence 1 where the hand is present (>= 17 keypoints inside)."""
-KeypointSource: TypeAlias = Literal["keynet", "oracle", "keynet_gt_boxes", "umetrack"]
+KeypointSource: TypeAlias = Literal["keynet", "oracle", "keynet_gt_boxes", "umetrack", "keynet_perspective"]
 """``oracle``: projected ground-truth keypoints plus Gaussian noise instead of KeyNet; ``keynet_gt_boxes``: KeyNet on the
 ground-truth crop of each requested view instead of the tracker's crop (a diagnostic that removes crop drift)."""
 
