@@ -70,11 +70,13 @@ class PerspectiveKeyNetEstimator:
         crops: Float32[Tensor, "n 1 96 96"] = torch.zeros((count, 1, 96, 96), device=device)
         for camera in sorted({int(c) for c in request.camera.tolist()}):
             rows: list[int] = [i for i in range(count) if int(request.camera[i]) == camera]
-            cameras: CropCameras = CropCameras(torch.cat([planned[i][0].rotation for i in rows]).to(device), torch.cat([planned[i][0].focal for i in rows]).to(device),
+            # An unusable crop camera samples nothing (identity rotation, a finite focal): its view is zeroed after the network.
+            cameras: CropCameras = CropCameras(torch.cat([planned[i][0].rotation if self._usable(planned[i][0]) else torch.eye(3)[None] for i in rows]).to(device),
+                                               torch.cat([planned[i][0].focal if self._usable(planned[i][0]) else torch.ones(1) for i in rows]).to(device),
                                                torch.cat([planned[i][0].mirror for i in rows]).to(device))
             frames: UInt8[Tensor, "1 h w"] = request.native_images[camera].to(device)[None]
             crops[rows] = sample_crops(frames, torch.zeros(len(rows), dtype=torch.int64, device=device), cameras, self.rig.select([camera]).to(device))
-        features: Float32[Tensor, "n 63"] = torch.stack([feature for _, feature in planned]).to(device)
+        features: Float32[Tensor, "n 63"] = torch.nan_to_num(torch.stack([feature for _, feature in planned])).to(device)
         with torch.inference_mode():
             output: KeyNetOutput = self.model(crops, features)
             points_crop, confidence = decode_heatmaps(output.heatmaps.float())
@@ -87,4 +89,15 @@ class PerspectiveKeyNetEstimator:
             rays: Float32[Tensor, "1 21 3"] = from_crop(cameras, crop_uv[i : i + 1])
             native: Float32[Tensor, "21 2"] = project(self.rig.select([camera]), rays[:, None])[0, 0]
             points_net[i] = self.letterboxes[camera].to_net(native)
-        return KeypointEstimate(points_net=points_net, d_rel_mm=d_rel.cpu(), presence=presence.cpu(), confidence=confidence.cpu())
+        # A view without a usable crop camera (the hand at or past the lens edge, or no finite circle) reports nothing:
+        # presence and confidence 0 keep it out of the fit (the tracker compares presence to a threshold; NaN never fails it).
+        usable: Bool[Tensor, "n"] = torch.tensor([self._usable(planned[i][0]) for i in range(count)], dtype=torch.bool)
+        usable = usable & torch.isfinite(points_net).all(dim=(-1, -2))
+        presence_out: Float32[Tensor, "n"] = torch.where(usable, presence.cpu(), torch.zeros(count))
+        confidence_out: Float32[Tensor, "n 21"] = torch.where(usable[:, None], confidence.cpu(), torch.zeros(count, 21))
+        return KeypointEstimate(points_net=torch.nan_to_num(points_net), d_rel_mm=torch.nan_to_num(d_rel.cpu()), presence=presence_out,
+                                confidence=confidence_out)
+
+    @staticmethod
+    def _usable(cameras: CropCameras) -> bool:
+        return bool(torch.isfinite(cameras.focal).all() & torch.isfinite(cameras.rotation).all())

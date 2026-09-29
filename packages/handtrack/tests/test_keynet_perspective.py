@@ -58,3 +58,15 @@ def test_decoded_crop_points_come_back_as_the_true_net_keypoints(monkeypatch: py
     edge_ray = unproject(rig.select([0]), (circle[0, :2] + torch.tensor([60.0, 0.0]))[None])
     uv, _ = to_crop(cameras, edge_ray[None])
     assert float((uv[0, 0] - CROP_CENTRE).norm()) == pytest.approx(CROP_CENTRE / CROP_MARGIN, rel=0.02)
+
+
+def test_a_view_without_a_usable_crop_camera_reports_absent_not_nan() -> None:
+    rig, model = _rig(), generic_hand_model()
+    behind = HandPose(rotation=torch.eye(3), translation=torch.tensor([0.0, 0.0, -0.4]), joint_angles=torch.zeros(22))
+    request = CropRequest(camera=torch.tensor([0, 1]), side=torch.tensor([0, 1]), crop_from_net=torch.eye(3).repeat(2, 1, 1),
+                          keypoint_input=torch.zeros(2, 63), poses=(behind, _pose(0.05)), world_from_rig=torch.eye(4),
+                          circles=torch.tensor([[float("nan")] * 3, [320.0, 240.0, 50.0]]), native_images=(torch.zeros(480, 640, dtype=torch.uint8),) * 2)
+    estimator = PerspectiveKeyNetEstimator(KeyNetF(), rig, (letterbox_for(640, 480),) * 2, (0.0, 0.0), model, phi=1.0)
+    estimate = estimator(torch.zeros(2, 480, 640, dtype=torch.uint8), 0, request)
+    assert bool(torch.isfinite(estimate.points_net).all()) and bool(torch.isfinite(estimate.presence).all()) and bool(torch.isfinite(estimate.d_rel_mm).all())
+    assert float(estimate.presence[0]) == 0.0 and float(estimate.confidence[0].abs().sum()) == 0.0
