@@ -7,6 +7,7 @@ import torch
 from serde import serde
 from serde.json import to_json
 
+from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
 from handtrack.data.cache import DetNetCache
 from handtrack.data.catalog import DatasetName, SplitName
@@ -43,6 +44,8 @@ class StreamSettings:
     detnet_cache: Path | None = None
     """A decoded DetNet cache (``tools/build_detnet_cache.py``) to train from instead of the catalog stream; DetNet only.
     Validation still decodes its fixed evaluation set from the catalog."""
+    detnet_augment: DetNetAugment = field(default_factory=DetNetAugment)
+    """Geometric, 16:9 and photometric augmentation of cached DetNet batches (``handtrack.data.augment``); off by default."""
     gpu_memory_gb: float = 0.0
     """Hard cap on this process's GPU memory (torch's allocator gets the cap minus 0.75 GB for the CUDA context and
     NVDEC); 0 leaves it unbounded. At batch 256 the two nets' fp32 activations alone need 7.5 GB, bf16 3.8 GB."""
@@ -98,7 +101,7 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
     if settings.detnet_cache is not None and not evaluation:
         if nets != "detnet":
             raise ValueError("stream.detnet_cache holds DetNet samples only; train with nets=detnet")
-        cache: DetNetCache = DetNetCache(settings.detnet_cache, settings.detnet_batch, device, seed=settings.seed)
+        cache: DetNetCache = DetNetCache(settings.detnet_cache, settings.detnet_batch, device, seed=settings.seed, augment=settings.detnet_augment)
         if cache.dataset_names != tuple(settings.datasets):
             raise ValueError(f"{settings.detnet_cache} holds {cache.dataset_names}, the run asks for {settings.datasets}")
         return cache
