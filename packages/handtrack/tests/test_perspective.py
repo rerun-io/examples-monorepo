@@ -127,3 +127,10 @@ def test_local_affine_matches_the_crop_near_its_centre() -> None:
     net = letterbox.to_net(project(rig, near[:, None])[:, 0])
     mapped = torch.einsum('nij,nkj->nki', affine[:, :2, :2], net) + affine[:, None, :2, 2]
     torch.testing.assert_close(mapped, uv, atol=0.05, rtol=0)
+
+
+def test_unproject_survives_a_saturated_lens() -> None:
+    far = torch.tensor([[-4000.0, -3000.0], [320.0, 240.0]])  # far outside a fisheye's valid radius: a singular Jacobian
+    rays = unproject(_fisheye(), far)
+    assert bool(torch.isfinite(rays).all())
+    torch.testing.assert_close(project(_fisheye(), rays[None, None])[0, 0, 1], far[1], atol=1e-2, rtol=0)
