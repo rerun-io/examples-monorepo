@@ -95,6 +95,8 @@ class RunConfig:
     """Override the DetNet file; its .sha256 sidecar is required."""
     keynet_weights: Path | None = None
     """Override the KeyNet file; its .sha256 sidecar is required."""
+    keynet_detnet_confirmation: bool = False
+    """keynet_perspective: confirm KeyNet's views with DetNet and end drifted tracks, as the UmeTrack stage does."""
     umetrack_root: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
     """Upstream checkout, loaded lazily only for keypoints=umetrack."""
     umetrack_shim: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/shim")
@@ -201,7 +203,8 @@ def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTrut
     if networks.keynet is None:
         return OracleKeypoints(truth, phi, config.oracle_noise_px, config.oracle_noise_d_mm, config.seed)
     if config.keypoints == "keynet_perspective":
-        return PerspectiveKeyNetEstimator(networks.keynet, data.rig, data.letterboxes, data.camera_angles, model, phi)
+        return PerspectiveKeyNetEstimator(networks.keynet, data.rig, data.letterboxes, data.camera_angles, model, phi,
+                                          detnet_confirmation=config.keynet_detnet_confirmation)
     keynet: KeyNetEstimator = KeyNetEstimator(networks.keynet)
     return KeyNetOnTruthBoxes(truth, keynet) if config.keypoints == "keynet_gt_boxes" else keynet
 

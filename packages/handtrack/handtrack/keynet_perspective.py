@@ -28,8 +28,10 @@ class PerspectiveKeyNetEstimator:
     """A ``KeypointEstimator``: KeyNet-F on perspective crops of the native frames."""
 
     def __init__(self, model: KeyNetF, rig: CameraRig, letterboxes: tuple[Letterbox, ...], camera_angles_deg: tuple[float, ...],
-                 hand_model: HandModelTorch, phi: float) -> None:
+                 hand_model: HandModelTorch, phi: float, detnet_confirmation: bool = False) -> None:
         self.model: KeyNetF = model.eval()
+        self.detnet_confirmation: bool = detnet_confirmation
+        """Also ask the tracker to confirm views with DetNet and end drifted tracks (the UmeTrack stage's rule, TrackerConfig.umetrack_*)."""
         self.rig: CameraRig = rig
         self.letterboxes: tuple[Letterbox, ...] = letterboxes
         self.roll: tuple[float, ...] = tuple(math.radians(angle) for angle in (camera_angles_deg or (0.0,) * len(letterboxes)))
@@ -96,7 +98,7 @@ class PerspectiveKeyNetEstimator:
         presence_out: Float32[Tensor, "n"] = torch.where(usable, presence.cpu(), torch.zeros(count))
         confidence_out: Float32[Tensor, "n 21"] = torch.where(usable[:, None], confidence.cpu(), torch.zeros(count, 21))
         return KeypointEstimate(points_net=torch.nan_to_num(points_net), d_rel_mm=torch.nan_to_num(d_rel.cpu()), presence=presence_out,
-                                confidence=confidence_out)
+                                confidence=confidence_out, uses_detnet_presence=self.detnet_confirmation)
 
     @staticmethod
     def _usable(cameras: CropCameras) -> bool:
