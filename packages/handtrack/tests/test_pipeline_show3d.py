@@ -1,4 +1,4 @@
-"""Dataset selection and two-camera output use SHOW3D's catalog paths."""
+"""Dataset selection and two-camera output use SHOW3D's and HOT3D's catalog paths."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +14,7 @@ from test_results import _track
 from handtrack.apis import run_pipeline
 from handtrack.apis.run_pipeline import RunConfig, select_segments
 from handtrack.blueprint import handtrack_blueprint
-from handtrack.data.catalog import SHOW3D, UMETRACK, CatalogDataError, SegmentInfo
+from handtrack.data.catalog import HOT3D_QUEST3, SHOW3D, UMETRACK, CatalogDataError, SegmentInfo
 from handtrack.results import load_track, save_track
 
 
@@ -123,6 +123,20 @@ def test_umetrack_synthetic_selection_keeps_testing_filter(monkeypatch: pytest.M
     synthetic = SegmentInfo(UMETRACK, "synthetic", "synthetic", "hand_hand", "testing", "user_1", 3, 30)
     monkeypatch.setattr(run_pipeline, "list_segments", lambda entry, name: (synthetic, replace(synthetic, segment_id="real", domain="real")))
     assert select_segments(RunConfig(domain="synthetic"), MagicMock(spec=DatasetEntry)) == (synthetic,)
+
+
+def test_hot3d_selection_takes_every_labelled_scene_whatever_the_domain_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    scenes = tuple(SegmentInfo(HOT3D_QUEST3, f"hot3d-quest3__P000{i}_x", "hot3d", "", "train", f"P000{i}", 30, 30) for i in range(3))
+    monkeypatch.setattr(run_pipeline, "list_segments", lambda entry, name: scenes)
+    assert select_segments(RunConfig(dataset=HOT3D_QUEST3, domain="real"), MagicMock(spec=DatasetEntry)) == scenes
+    with pytest.raises(CatalogDataError, match="unseen test set"):
+        select_segments(RunConfig(dataset=HOT3D_QUEST3, split="val"), MagicMock(spec=DatasetEntry))
+
+
+def test_hot3d_blueprint_uses_its_two_cameras_on_rig_0() -> None:
+    origins = [str(view.origin) for view in blueprint_views(handtrack_blueprint(HOT3D_QUEST3))]
+    assert origins[:3] == ["/world/rig_00", "/world/rig_00/cam_00/pinhole", "/world/rig_00/cam_01/pinhole"]
+    assert len(origins) == 6
 
 
 def test_show3d_track_roundtrip_and_blueprint_use_two_headset_cameras(tmp_path: Path) -> None:

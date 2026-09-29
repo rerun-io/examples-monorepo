@@ -27,12 +27,12 @@ from handtrack.data.catalog import (
     TIMELINE,
     HandTimeline,
     SegmentInfo,
+    camera_angles,
     is_show3d,
     layout_for,
     read_hand_timeline,
     read_rig,
     read_statics,
-    static_number,
 )
 from handtrack.data.segment_labels import SegmentLabels, segment_labels
 from handtrack.data.stream import FrameDecoder, open_nvdec_decoder
@@ -61,7 +61,7 @@ class SegmentData:
     videos: tuple[CatalogVideo, ...]
     """One per camera, in ``rig.names`` order."""
     camera_angles: tuple[float, ...] = ()
-    """Native camera roll for UmeTrack perspective crops. SHOW3D: 0 degrees (UmeTrack gets the native image and its own camera model);
+    """Native camera roll for UmeTrack perspective crops (``catalog.camera_angles``). SHOW3D and HOT3D: 0 degrees (UmeTrack gets the native image and its own camera model);
     measured 2026-09-29 on 600 frames of show3d__HLU829: -90 -> L 40 / R 128 mm, 0 -> 28 / 46 mm, +90 -> 64 / 46 mm; the hands prefer
     mirrored rolls (-45 -> 25 / 42, +45 -> 37 / 35), an open convention question. HT_SHOW3D_ANGLE overrides for experiments."""
 
@@ -78,9 +78,9 @@ def read_segment(entry: DatasetEntry, info: SegmentInfo) -> SegmentData:
     cameras: tuple[str, ...] = layout_for(info.dataset).cameras
     videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in cameras], TIMELINE)
     rows: Int64[ndarray, "f"] = np.arange(len(timeline.video_time_ns), dtype=np.int64)
-    labels: SegmentLabels = segment_labels(timeline, rig_letterboxes[0], rig_letterboxes[1], rows, is_show3d(info.dataset))
-    angles: tuple[float, ...] = tuple(float(os.environ.get('HT_SHOW3D_ANGLE', '0')) if is_show3d(info.dataset) else
-        static_number(statics, f"{camera}/pinhole:source_camera_angle_deg", info.segment_id) for camera in cameras)
+    labels: SegmentLabels = segment_labels(timeline, rig_letterboxes[0], rig_letterboxes[1], rows, layout_for(info.dataset).pose_gated)
+    angles: tuple[float, ...] = (tuple(float(os.environ.get('HT_SHOW3D_ANGLE', '0')) for _ in cameras) if is_show3d(info.dataset)
+                                 else camera_angles(statics, info))
     return SegmentData(info=info, rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, labels=labels, videos=videos, camera_angles=angles)
 
 

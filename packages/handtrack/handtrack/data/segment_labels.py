@@ -91,15 +91,18 @@ class SegmentLabels:
     circles: Float32[Tensor, "k c 2 3"]
     """Smallest enclosing circle (cx, cy, r) of the finite in-front keypoints in the net frame; NaN where there are none."""
     image_valid: Bool[Tensor, "k c"]
-    """The validity rules: False drops the whole image."""
+    """The validity rules and the dataset's per-camera quality flags: False drops the whole image."""
     labelled: Bool[Tensor, "k c 2"]
-    """The hand carries a usable label (UmeTrack confidence 1; SHOW3D confidence > 0.1 with a pose)."""
+    """The hand carries a usable label (UmeTrack confidence 1; SHOW3D and HOT3D confidence > 0.1 with a pose)."""
     hand_label: Int64[Tensor, "k c 2"]
     """``HandLabel`` in each image: PRESENT (>= 17 visible), PARTIAL (1-16) for labelled hands, ABSENT otherwise."""
 
 
-def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence[Letterbox], rows: Int64[ndarray, "k"], show3d: bool) -> SegmentLabels:
-    """Labels for the given timeline rows (all at once)."""
+def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence[Letterbox], rows: Int64[ndarray, "k"], pose_gated: bool) -> SegmentLabels:
+    """Labels for the given timeline rows (all at once).
+
+    ``pose_gated`` is ``DatasetLayout.pose_gated``: SHOW3D's rule (SHOW3D, HOT3D) when True, UmeTrack's binary confidence when False.
+    """
     index: Int64[Tensor, "k"] = torch.from_numpy(rows)
     poses: tuple[HandPose, HandPose] = (select_pose(timeline.poses[0], index), select_pose(timeline.poses[1], index))
     has_pose: Bool[Tensor, "k 2"] = timeline.has_pose[index]
@@ -110,7 +113,7 @@ def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence
     headset_valid: Bool[Tensor, "k"] = timeline.headset_valid[index]
     image_valid: Bool[Tensor, "k c"]
     labelled: Bool[Tensor, "k c 2"]
-    if show3d:
+    if pose_gated:
         validity: tuple[Bool[Tensor, "k c"], Bool[Tensor, "k c 2"]] = show3d_hands(confidence, has_pose, projection.visible, headset_valid)
         image_valid, labelled = validity[0], validity[1]
     else:
@@ -125,6 +128,8 @@ def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence
         frame_valid: Bool[Tensor, "k"] = frame_rules[0] & (has_pose | ~frame_rules[1]).all(dim=-1)
         image_valid = frame_valid[:, None].expand(-1, cameras).clone()
         labelled = frame_rules[1][:, None, :].expand(-1, cameras, -1).clone()
+    if timeline.camera_valid is not None:
+        image_valid = image_valid & timeline.camera_valid[index]
     hand_label: Int64[Tensor, "k c 2"] = torch.where(labelled, classify_visibility(projection.visible), torch.full_like(projection.visible, int(HandLabel.ABSENT)))
     circles: Float32[ndarray, "k c 2 3"] = enclosing_circles(projection.net_xy.numpy(), projection.in_front.numpy())
     return SegmentLabels(

@@ -35,7 +35,7 @@ from handtrack.apis.run_pipeline import (
     run_segment,
     select_segments,
 )
-from handtrack.data.catalog import UMETRACK, SegmentInfo
+from handtrack.data.catalog import SegmentInfo
 from handtrack.eval.segment import (
     DetectionScore,
     DetNetAloneMetrics,
@@ -250,7 +250,7 @@ def main(config: EvaluateConfig) -> None:
     identity: str = ensure_run_identity(run)
     torch.set_num_threads(run.cpu_threads)
     device: torch.device = torch.device(run.device)
-    entry: DatasetEntry = rr.catalog.CatalogClient(run.catalog_url).get_dataset(UMETRACK)
+    entry: DatasetEntry = rr.catalog.CatalogClient(run.catalog_url).get_dataset(run.dataset)
     root: Path = run.output_root / run.name
     root.mkdir(parents=True, exist_ok=True)
     everything: tuple[SegmentInfo, ...] = select_segments(replace(run, shard=0, shards=1), entry)

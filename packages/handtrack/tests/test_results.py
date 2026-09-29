@@ -171,7 +171,7 @@ def test_segment_scoring_excludes_unknown_rows_but_counts_confidence_zero() -> N
                   image_size=camera.image_size.repeat(4, 1), cam_from_rig=camera.cam_from_rig.repeat(4, 1, 1),
                   focal=camera.focal.repeat(4, 1), principal=camera.principal.repeat(4, 1))
     letterboxes = (letterbox_for(640, 480),) * 4
-    labels = segment_labels(timeline, rig, letterboxes, np.arange(FRAMES, dtype=np.int64), show3d=False)
+    labels = segment_labels(timeline, rig, letterboxes, np.arange(FRAMES, dtype=np.int64), pose_gated=False)
     track = replace(_track(FRAMES), tracked=np.ones((FRAMES, 2), dtype=np.bool_))
     hands = score_track(track, labels, letterboxes)[1]
     assert hands[0].tracking.acquire_frames == [0, 0]

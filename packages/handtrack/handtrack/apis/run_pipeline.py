@@ -32,7 +32,7 @@ from serde import SerdeError, serde
 from serde.json import from_json, to_json
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 
-from handtrack.data.catalog import CATALOG_URL, UMETRACK, DatasetName, SegmentInfo, SplitName, is_show3d, list_segments, select_split
+from handtrack.data.catalog import CATALOG_URL, UMETRACK, DatasetName, SegmentInfo, SplitName, list_segments, select_split
 from handtrack.eval.segment import (
     DetectionScore,
     DetNetAloneMetrics,
@@ -71,9 +71,9 @@ class RunConfig:
     segments: tuple[str, ...] = ()
     """Explicit labelled ids from dataset; empty selects split. Domain/interaction filters apply only to UmeTrack."""
     dataset: DatasetName = UMETRACK
-    """Catalog dataset; SHOW3D uses the two headset cameras on rig 1."""
+    """Catalog dataset; SHOW3D uses the two headset cameras on rig 1, HOT3D Quest 3 its two SLAM cameras on rig 0."""
     split: SplitName = "test"
-    """SHOW3D official test scenes lack labels; use val (held-out training subjects) for scored demo clips."""
+    """SHOW3D official test scenes lack labels; use val (held-out training subjects) for scored demo clips. HOT3D has only test."""
     domain: Domain = "real"
     interaction: Interaction = "any"
     max_segments: int | None = None
@@ -161,7 +161,7 @@ def load_networks(config: RunConfig, device: torch.device) -> Networks:
 
 
 def select_segments(config: RunConfig, entry: DatasetEntry) -> tuple[SegmentInfo, ...]:
-    """The configured segments: the given ids, or the UmeTrack test split filtered by domain and interaction."""
+    """The configured segments: the given ids, or the split (UmeTrack's filtered by domain and interaction)."""
     listed: tuple[SegmentInfo, ...] = list_segments(entry, config.dataset)
     if config.segments:
         by_id: dict[str, SegmentInfo] = {info.segment_id: info for info in listed}
@@ -172,7 +172,7 @@ def select_segments(config: RunConfig, entry: DatasetEntry) -> tuple[SegmentInfo
     else:
         chosen = tuple(
             info for info in select_split(listed, config.split)
-            if is_show3d(config.dataset) or (info.domain == config.domain and config.interaction in ("any", info.interaction))
+            if config.dataset != UMETRACK or (info.domain == config.domain and config.interaction in ("any", info.interaction))
         )
     chosen = chosen if config.max_segments is None else chosen[: config.max_segments]
     if not chosen:

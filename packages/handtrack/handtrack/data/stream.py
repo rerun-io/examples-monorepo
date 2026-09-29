@@ -56,14 +56,13 @@ from handtrack.data.catalog import (
     HandTimeline,
     SegmentInfo,
     SplitName,
-    is_show3d,
+    camera_angles,
     layout_for,
     list_segments,
     read_hand_timeline,
     read_rig,
     read_statics,
     select_split,
-    static_number,
 )
 from handtrack.data.segment_labels import HandProjection, KeypointPriors, SegmentLabels, keypoint_priors, segment_labels
 from handtrack.geometry.camera import CameraRig, project
@@ -818,7 +817,7 @@ class SegmentData:
     timeline: HandTimeline
     videos: tuple[CatalogVideo, ...]
     camera_angles: tuple[float, ...] = ()
-    """Each camera's mounting roll in degrees (UmeTrack's ``source_camera_angle_deg``; SHOW3D 0), for perspective crops; empty = 0."""
+    """Each camera's mounting roll in degrees (``catalog.camera_angles``: UmeTrack's ``source_camera_angle_deg``; SHOW3D, HOT3D 0), for perspective crops; empty = 0."""
 
 
 SegmentReader: TypeAlias = Callable[[SegmentInfo], SegmentData]
@@ -1330,8 +1329,7 @@ class CatalogStream:
         rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info)
         timeline: HandTimeline = read_hand_timeline(entry, info, statics)
         videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in layout.cameras], TIMELINE)
-        angles: tuple[float, ...] = tuple(0.0 if is_show3d(info.dataset) else static_number(statics, f"{camera}/pinhole:source_camera_angle_deg", info.segment_id)
-                                          for camera in layout.cameras)
+        angles: tuple[float, ...] = camera_angles(statics, info)
         return SegmentData(rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, videos=videos, camera_angles=angles)
 
     def _record_failure(self, info: SegmentInfo, stage: str, attempt: int, error: BaseException) -> None:
@@ -1405,7 +1403,7 @@ class CatalogStream:
         stride: int = max(1, layout.pool_stride // self.config.row_density)
         first: int = int(self.config.row_phase * stride)
         rows: Int64[ndarray, "k"] = np.arange(first, len(data.timeline.video_time_ns), stride, dtype=np.int64)
-        labels: SegmentLabels = segment_labels(data.timeline, data.rig, data.letterboxes, rows, is_show3d(info.dataset))
+        labels: SegmentLabels = segment_labels(data.timeline, data.rig, data.letterboxes, rows, layout.pose_gated)
         priors: KeypointPriors | None = keypoint_priors(data.timeline, data.rig, data.letterboxes, rows, layout.tracker_step) if self._keynet_on else None
         with self._cond:
             self.stats.query_s += queried - start

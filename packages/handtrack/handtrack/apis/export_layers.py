@@ -70,13 +70,11 @@ class Config:
 def read_ground_truth(entry: DatasetEntry, info: SegmentInfo) -> rerun_layers.GroundTruth:
     """The catalog's static row and hand timeline (``handtrack.data.catalog``) as numpy, plus the frame index and the subject's numpy model.
 
-    The temporal query names the rig and the three hand entities it reads (``/**`` would also pull the ``hand_mesh`` layer).
+    The temporal query names the rig, the three hand entities and any quality flags it reads (``/**`` would also pull the ``hand_mesh`` layer).
     """
     statics: pa.Table = catalog.read_statics(entry, info)
-    entities: list[str] = [
-        catalog.layout_for(info.dataset).rig,
-        *(f"{schema.hands_path(side)}/{part}" for side in rerun_layers.SIDES for part in ("confidence", "joint_angles", "wrist")),
-    ]
+    layout: catalog.DatasetLayout = catalog.layout_for(info.dataset)
+    entities: list[str] = catalog.timeline_entities(layout)
     table: pa.Table = entry.filter_segments(info.segment_id).filter_contents(entities).reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
     timeline: HandTimeline = catalog.hand_timeline(table, statics, info)
     return rerun_layers.GroundTruth(
@@ -89,7 +87,7 @@ def read_ground_truth(entry: DatasetEntry, info: SegmentInfo) -> rerun_layers.Gr
         translation=np.stack([pose.translation.numpy() for pose in timeline.poses], axis=1),
         joint_angles=np.stack([pose.joint_angles.numpy() for pose in timeline.poses], axis=1),
         present=(timeline.has_pose & timeline.headset_valid[:, None]
-                 & (timeline.confidence > (SHOW3D_CONFIDENCE_THRESHOLD if catalog.is_show3d(info.dataset) else 0.0))).numpy(),
+                 & (timeline.confidence > (SHOW3D_CONFIDENCE_THRESHOLD if layout.pose_gated else 0.0))).numpy(),
         model=hand_model_numpy_from_profile(catalog.static_text(statics, catalog.PROFILE_COLUMN, f"{info.dataset} {info.segment_id}")),
     )
 

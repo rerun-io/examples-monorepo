@@ -1,5 +1,7 @@
 """Label parity with what the catalog ships: our FK + lens models against the stored landmarks and projections."""
 
+import os
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -9,6 +11,7 @@ rr = pytest.importorskip("rerun", reason="needs rerun-sdk with the catalog extra
 
 from handtrack.data.catalog import (  # noqa: E402
     CATALOG_URL,
+    HOT3D_QUEST3,
     SHOW3D,
     TIMELINE,
     UMETRACK,
@@ -29,15 +32,18 @@ COCO_SLOTS: dict[int, int] = {91: 5, 93: 6, 94: 7, 95: 0, 96: 8, 97: 9, 98: 10, 
 """COCO-133 left-hand slot -> our landmark (right hand: slot + 21). Slot 92 is the wrist/thumb-CMC midpoint; the palm centre (20) has none."""
 UMETRACK_SEGMENTS: tuple[str, ...] = ("umetrack__real__hand_hand__training__user_00__recording_01", "umetrack__synthetic__separate_hand__training__user_38__recording_12")
 SHOW3D_SEGMENT: str = "show3d__ERI327__milk_shake_7a09"
+HOT3D_SEGMENT: str = "hot3d-quest3__P0002_c7164ba4"
+HOT3D_CATALOG_URL: str = os.environ.get("HANDTRACK_HOT3D_CATALOG_URL", CATALOG_URL)
+"""HOT3D is not on the shared catalog; point this at a server that registers ``dataforge-hot3d-quest3``."""
 
 
-def _dataset(name: str):
+def _dataset(name: str, url: str = CATALOG_URL):
     try:
-        return rr.catalog.CatalogClient(CATALOG_URL).get_dataset(name)
+        return rr.catalog.CatalogClient(url).get_dataset(name)
     except BeartypeException:
         raise
     except Exception as error:  # any connection failure means the asset is absent
-        pytest.skip(f"catalog {CATALOG_URL} dataset {name} unreachable: {error}")
+        pytest.skip(f"catalog {url} dataset {name} unreachable: {error}")
 
 
 def _info(dataset, name: str, segment: str) -> SegmentInfo:
@@ -52,7 +58,7 @@ def _labels(dataset, info: SegmentInfo) -> tuple[HandTimeline, SegmentLabels]:
     rig, letterboxes = read_rig(statics, info)
     timeline: HandTimeline = read_hand_timeline(dataset, info, statics)
     rows: np.ndarray = np.arange(len(timeline.video_time_ns), dtype=np.int64)
-    return timeline, segment_labels(timeline, rig, letterboxes, rows, info.dataset == SHOW3D)
+    return timeline, segment_labels(timeline, rig, letterboxes, rows, layout_for(info.dataset).pose_gated)
 
 
 def _slots() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -61,12 +67,13 @@ def _slots() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return np.array([s[0] for s in slots]), np.array([s[1] for s in slots]), np.array([s[2] for s in slots])
 
 
-@pytest.mark.parametrize("segment", UMETRACK_SEGMENTS)
-def test_umetrack_reprojection_matches_coco133_uv_projected(segment: str) -> None:
-    dataset = _dataset(UMETRACK)
-    info: SegmentInfo = _info(dataset, UMETRACK, segment)
+@pytest.mark.parametrize(("name", "segment"), [*((UMETRACK, segment) for segment in UMETRACK_SEGMENTS), (HOT3D_QUEST3, HOT3D_SEGMENT)])
+def test_fisheye_reprojection_matches_coco133_uv_projected(name: str, segment: str) -> None:
+    """Our Fisheye62 against dataforge's projections. HOT3D ships FISHEYE624 with zero thin-prism terms on Quest 3, so dropping them is exact."""
+    dataset = _dataset(name, HOT3D_CATALOG_URL if name == HOT3D_QUEST3 else CATALOG_URL)
+    info: SegmentInfo = _info(dataset, name, segment)
     timeline, labels = _labels(dataset, info)
-    cameras: tuple[str, ...] = layout_for(UMETRACK).cameras
+    cameras: tuple[str, ...] = layout_for(name).cameras
     columns: list[str] = [f"{camera}/pinhole/coco133_uv_projected:Points2D:positions" for camera in cameras]
     table: pa.Table = (
         dataset.filter_segments(segment)
