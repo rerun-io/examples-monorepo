@@ -85,9 +85,11 @@ def sample_jitter(n: int, generator: torch.Generator, device: torch.device | str
     return CropJitter((draws[:, 0] * 2 - 1) * max_rotation, scale_range[0] + draws[:, 1] * (scale_range[1] - scale_range[0]), (draws[:, 2:] * 2 - 1) * max_shift)
 
 
-def count_inside_crop(points_crop: Float32[Tensor, 'b n 2'], in_front: Bool[Tensor, 'b n']) -> Int64[Tensor, 'b']:
-    """Count front-facing points inside the pixel-centre extent [-0.5,95.5) on both axes."""
-    return (in_front & (points_crop >= -0.5).all(dim=-1) & (points_crop < CROP_SIZE - 0.5).all(dim=-1)).sum(dim=-1)
+def count_inside_crop(points_crop: Float32[Tensor, 'b n 2'], in_front: Bool[Tensor, 'b n'], margin_px: float = 0.0) -> Int64[Tensor, 'b']:
+    """Count front-facing points inside the pixel-centre extent [-0.5,95.5) on both axes, grown by ``margin_px`` on every side."""
+    low: float = -0.5 - margin_px
+    high: float = CROP_SIZE - 0.5 + margin_px
+    return (in_front & (points_crop >= low).all(dim=-1) & (points_crop < high).all(dim=-1)).sum(dim=-1)
 
 
 def boundary_occlusion(n: int, generator: torch.Generator, device: torch.device | str, probability: float, max_fraction: float) -> Bool[Tensor, 'b 96 96']:

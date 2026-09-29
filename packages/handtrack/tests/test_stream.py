@@ -140,6 +140,34 @@ def test_perspective_keynet_samples_positive_and_negatives() -> None:
     assert float((mapped - samples.points_crop[positive]).norm(dim=-1).median()) < 2.0
 
 
+def _two_hand_scene() -> tuple[CameraRig, torch.Tensor, ImageHands, torch.Tensor]:
+    rig: CameraRig = CameraRig(names=("/cam",), image_size=torch.tensor([[640.0, 480.0]]), cam_from_rig=torch.eye(4)[None],
+                               focal=torch.tensor([[300.0, 300.0]]), principal=torch.tensor([[319.5, 239.5]]), fisheye62=None)
+    rng: np.random.Generator = np.random.default_rng(0)
+    left: torch.Tensor = torch.from_numpy(np.array([-0.12, 0.0, 0.45]) + rng.uniform(-0.04, 0.04, (21, 3))).float()
+    right: torch.Tensor = torch.from_numpy(np.array([0.12, 0.0, 0.45]) + rng.uniform(-0.04, 0.04, (21, 3))).float()
+    points_cam: torch.Tensor = torch.stack([left, right])[None].repeat(8, 1, 1, 1)
+    net_xy: torch.Tensor = points_cam[..., :2] / points_cam[..., 2:] * 300.0 + torch.tensor([319.5, 239.5])
+    frames: torch.Tensor = torch.full((8, 480, 640), 90, dtype=torch.uint8)
+    truth: ImageHands = ImageHands(net_xy=net_xy, points_cam=points_cam, in_front=torch.ones(8, 2, 21, dtype=torch.bool), valid=torch.ones(8, 2, dtype=torch.bool))
+    return rig, frames, truth, torch.full((8, 2), int(HandLabel.PRESENT))
+
+
+def test_other_hand_crops_are_flagged_and_the_margin_drops_near_negatives() -> None:
+    rig, frames, truth, label = _two_hand_scene()
+    augment: KeyNetAugment = dataclasses.replace(KeyNetAugment(), drift_probability=1.0, other_hand_probability=1.0, edge_probability=0.0, background_probability=0.0)
+    samples = perspective_keynet_samples(frames, rig, letterbox_for(640, 480), 0.0, truth, label, truth, truth, 1.0, 0, augment, torch.Generator().manual_seed(5))
+    kind = samples.kind
+    other = kind == int(CropKind.OTHER_HAND)
+    assert bool(other.any()) and bool(samples.other_inside[other].all())  # an OTHER_HAND crop always shows the other hand
+    assert not bool(samples.other_inside[kind == int(CropKind.POSITIVE)].any())
+    drifts = [int((perspective_keynet_samples(frames, rig, letterbox_for(640, 480), 0.0, truth, label, truth, truth, 1.0, 0,
+                                             dataclasses.replace(augment, negative_margin=margin), torch.Generator().manual_seed(5)).kind
+                   == int(CropKind.DRIFT)).sum()) for margin in (0.0, 2.0)]
+    # DRIFT moves the crop 1.0-1.6 sides off the hand: a 2-side margin always finds the hand and drops them all.
+    assert drifts[0] > 0 and drifts[1] == 0
+
+
 def test_bounding_circles_and_evaluation_recipe() -> None:
     points: torch.Tensor = torch.stack([_hand_points((100.0, 50.0), 20.0, 1), _hand_points((0.0, 0.0), 5.0, 2)])
     valid: torch.Tensor = torch.ones(2, 21, dtype=torch.bool)

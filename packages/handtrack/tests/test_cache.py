@@ -123,3 +123,22 @@ def test_row_phase_and_density_are_validated_and_density_multiplies_the_samples(
                            open_decoder=lambda *_args: _GrayDecoder()) as stream:
             counts.append(write_cache(stream, tmp_path / str(density), 'training', draw=64).samples)
     assert counts == [6, 18]  # 12 frames at UmeTrack's stride 6: rows {0, 6}, then every second row
+
+
+def test_the_ablation_drops_negatives_that_show_the_other_hand(tmp_path: Path) -> None:
+    _build_keynet(tmp_path / 'a')
+    rows = read_manifest(tmp_path / 'a').samples
+    flag = np.zeros(rows, dtype=bool)
+    flag[::2] = True
+    np.save(tmp_path / 'a' / 'other_inside.npy', flag)
+    np.save(tmp_path / 'a' / 'presence.npy', np.arange(rows, dtype=np.float32))  # tag rows
+    cache = KeyNetCache((tmp_path / 'a',), batch_size=1, device='cpu', other_hand_negatives=False)
+    cache.start_epoch(0)
+    seen = []
+    while (batch := cache.next_keynet_batch()) is not None:
+        seen += batch.presence.long().tolist()
+    assert sorted(seen) == list(range(1, rows, 2))
+    cache.close()
+    (tmp_path / 'a' / 'other_inside.npy').unlink()
+    with pytest.raises(ValueError, match='other_inside'):
+        KeyNetCache((tmp_path / 'a',), batch_size=1, device='cpu', other_hand_negatives=False)
