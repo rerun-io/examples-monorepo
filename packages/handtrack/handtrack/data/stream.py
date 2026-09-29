@@ -179,6 +179,13 @@ class StreamConfig:
     max_skipped_fraction: float = 0.02
     """A segment that fails twice (fetch, label or decode) is skipped for the rest of the run; more than this fraction of
     the segments (at least 3) failing means something other than bad data, and the stream stops with the failures listed."""
+    row_phase: float = 0.0
+    """Where in each segment's ``pool_stride`` the kept timeline rows start, as a fraction of the stride: cache passes with
+    phases 0, 1/3 and 2/3 read different frames (UmeTrack stride 6: rows 0, 2 and 4 mod 6; SHOW3D stride 12: 0, 4 and 8)."""
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.row_phase < 1.0:
+            raise ValueError("row_phase must lie in [0, 1)")
 
 
 # --- samples and pools -----------------------------------------------------------------------------------------
@@ -846,6 +853,14 @@ class CatalogStream:
         self._check("DetNet", self._detnet_on)
         return self._next_samples(self._require(self._detnet_pool), n)
 
+    def next_keynet_samples(self, n: int) -> KeyNetSamples | None:
+        """Up to n training crops from the pool before draw-time augmentation (what a cache stores); None once the epoch is drained."""
+        self._raise_if_failed()
+        if self._stop.is_set():
+            return None
+        self._check("KeyNet", self._keynet_on)
+        return self._next_samples(self._require(self._keynet_pool), n)
+
     def next_detnet_batch(self) -> DetNetBatch | None:
         self._raise_if_failed()
         if self._stop.is_set():
@@ -1195,7 +1210,8 @@ class CatalogStream:
         start: float = time.perf_counter()
         data: SegmentData = self._read_segment(info)
         queried: float = time.perf_counter()
-        rows: Int64[ndarray, "k"] = np.arange(0, len(data.timeline.video_time_ns), layout.pool_stride, dtype=np.int64)
+        first: int = int(self.config.row_phase * layout.pool_stride)
+        rows: Int64[ndarray, "k"] = np.arange(first, len(data.timeline.video_time_ns), layout.pool_stride, dtype=np.int64)
         labels: SegmentLabels = segment_labels(data.timeline, data.rig, data.letterboxes, rows, is_show3d(info.dataset))
         priors: KeypointPriors | None = keypoint_priors(data.timeline, data.rig, data.letterboxes, rows, layout.tracker_step) if self._keynet_on else None
         with self._cond:

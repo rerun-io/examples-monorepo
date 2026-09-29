@@ -9,7 +9,7 @@ from serde.json import to_json
 
 from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
-from handtrack.data.cache import DetNetCache
+from handtrack.data.cache import DetNetCache, KeyNetCache
 from handtrack.data.catalog import DatasetName, SplitName
 from handtrack.data.stream import CatalogStream, StreamConfig
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
@@ -44,6 +44,9 @@ class StreamSettings:
     detnet_cache: Path | None = None
     """A decoded DetNet cache (``tools/build_detnet_cache.py``) to train from instead of the catalog stream; DetNet only.
     Validation still decodes its fixed evaluation set from the catalog."""
+    keynet_cache: tuple[Path, ...] = ()
+    """KeyNet cache passes (``tools/build_detnet_cache.py --net keynet``) to train from instead of the catalog stream; KeyNet only.
+    Epoch e reads pass e mod len(passes). Validation still decodes its fixed evaluation set from the catalog."""
     detnet_augment: DetNetAugment = field(default_factory=DetNetAugment)
     """Geometric, 16:9 and photometric augmentation of cached DetNet batches (``handtrack.data.augment``); off by default."""
     gpu_memory_gb: float = 0.0
@@ -105,6 +108,13 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
         if cache.dataset_names != tuple(settings.datasets):
             raise ValueError(f"{settings.detnet_cache} holds {cache.dataset_names}, the run asks for {settings.datasets}")
         return cache
+    if settings.keynet_cache and not evaluation:
+        if nets != "keynet":
+            raise ValueError("stream.keynet_cache holds KeyNet samples only; train with nets=keynet")
+        crops: KeyNetCache = KeyNetCache(settings.keynet_cache, settings.keynet_batch, device, seed=settings.seed)
+        if crops.dataset_names != tuple(settings.datasets):
+            raise ValueError(f"{settings.keynet_cache} hold {crops.dataset_names}, the run asks for {settings.datasets}")
+        return crops
     return CatalogStream(
         StreamConfig(
             device=device,
