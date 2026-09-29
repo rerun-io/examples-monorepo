@@ -100,14 +100,17 @@ class LoopSettings:
     """KeyNet heatmap MSE over pixels: 'mean' averages every value, 'pixel_sum' sums each keypoint's pixels."""
     heatmap_warmup_epochs: int = 0
     """Epochs that use 'mean' before heatmap_reduction applies: 'pixel_sum' from initialisation drives the output ReLU dead."""
+    heatmap_warmup_steps: int = 0
+    """Global steps that use 'mean' (also while ``heatmap_warmup_epochs`` lasts). The warm-up that worked (probe A5) was one
+    2-segment epoch, about 120 steps; one epoch of a KeyNet cache is ~17 k steps, so cache runs count the warm-up in steps."""
 
     def __post_init__(self) -> None:
         if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or self.validate_every < 0:
             raise ValueError('Cadences must be positive (validate_every may be zero)')
         if min(self.presence_weight, self.detnet_circle_weight, self.detnet_presence_weight) < 0:
             raise ValueError('Loss weights must be nonnegative')
-        if self.heatmap_warmup_epochs < 0:
-            raise ValueError('heatmap_warmup_epochs must be nonnegative')
+        if self.heatmap_warmup_epochs < 0 or self.heatmap_warmup_steps < 0:
+            raise ValueError('heatmap_warmup_epochs and heatmap_warmup_steps must be nonnegative')
         if self.bf16 and os.environ.get('PIXI_DEV_MODE') == '1':
             raise ValueError('bf16 needs the prod environment: existing model internals enforce Float32 in dev')
 
@@ -253,7 +256,8 @@ class Trainer:
                            circle_weight=self.cadence.detnet_circle_weight, presence_weight=self.cadence.detnet_presence_weight)
 
     def keynet_objective(self, batch: KeyNetBatch, output: KeyNetOutput) -> KeyNetLoss:
-        reduction: HeatmapReduction = 'mean' if self.state.epoch < self.cadence.heatmap_warmup_epochs else self.cadence.heatmap_reduction
+        warming: bool = self.state.epoch < self.cadence.heatmap_warmup_epochs or self.state.step < self.cadence.heatmap_warmup_steps
+        reduction: HeatmapReduction = 'mean' if warming else self.cadence.heatmap_reduction
         return keynet_loss(output, batch.heatmaps.to(self.device), batch.distance.to(self.device), batch.presence.to(self.device), batch.positive.to(self.device),
                            batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction)
 

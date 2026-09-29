@@ -139,6 +139,14 @@ def test_heatmap_warmup_uses_mean_for_its_epochs(tmp_path: Path) -> None:
     assert trainer.keynet_objective(source.key, output).heatmap.item() == pytest.approx(0.25 * 18 * 18)
     with pytest.raises(ValueError, match='heatmap_warmup_epochs'):
         LoopSettings(heatmap_warmup_epochs=-1)
+    by_steps = Trainer('keynet', OptimiserSettings(0.001), OptimiserSettings(0.025),
+                       LoopSettings(heatmap_reduction='pixel_sum', heatmap_warmup_steps=5), tmp_path / 'steps', 'cpu')
+    by_steps.state = replace(by_steps.state, step=4)
+    assert by_steps.keynet_objective(source.key, output).heatmap.item() == pytest.approx(0.25)
+    by_steps.state = replace(by_steps.state, step=5)
+    assert by_steps.keynet_objective(source.key, output).heatmap.item() == pytest.approx(0.25 * 18 * 18)
+    with pytest.raises(ValueError, match='heatmap_warmup_steps'):
+        LoopSettings(heatmap_warmup_steps=-1)
 
 
 def test_mid_epoch_joint_resume_preserves_updates(tmp_path: Path) -> None:
