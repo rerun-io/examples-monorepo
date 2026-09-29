@@ -127,6 +127,14 @@ def jitter(cameras: CropCameras, generator: torch.Generator, max_rotation: float
     return CropCameras(aim(cameras.rotation, shift, cameras.focal, roll), cameras.focal / scale, cameras.mirror)
 
 
+def from_crop(cameras: CropCameras, uv: Float32[Tensor, "n k 2"]) -> Float32[Tensor, "n k 3"]:
+    """Camera-frame rays through crop pixels ``uv`` (mirror undone): the inverse of ``to_crop`` up to depth."""
+    u: Float32[Tensor, "n k"] = torch.where(cameras.mirror[:, None], (CROP_SIZE - 1) - uv[..., 0], uv[..., 0])
+    local: Float32[Tensor, "n k 3"] = torch.stack([(u - CROP_CENTRE) / cameras.focal[:, None], (uv[..., 1] - CROP_CENTRE) / cameras.focal[:, None],
+                                                    torch.ones_like(u)], dim=-1)
+    return torch.einsum("nji,nkj->nki", cameras.rotation, local)
+
+
 def crop_rays(cameras: CropCameras) -> Float32[Tensor, "n p 3"]:
     """The camera-frame ray of every crop pixel centre, row-major (p = 96 * 96)."""
     device: torch.device = cameras.focal.device

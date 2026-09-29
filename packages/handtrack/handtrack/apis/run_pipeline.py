@@ -46,6 +46,7 @@ from handtrack.eval.segment import (
 from handtrack.fit.observations import HandObservation
 from handtrack.fit.scale import ScaleCalibration, calibrate_scale, scaled_hand_model
 from handtrack.hand.pose import HandPose, generic_hand_model
+from handtrack.keynet_perspective import PerspectiveKeyNetEstimator
 from handtrack.models.detnet import DetNetF
 from handtrack.models.keynet import KeyNetF
 from handtrack.oracle import GroundTruthViews, KeyNetOnTruthBoxes, OracleDetector, OracleKeypoints
@@ -86,11 +87,14 @@ class RunConfig:
     detector: DetectorSource = "detnet"
     """``oracle``: ground-truth circles instead of DetNet (separates tracker and fit bugs from network quality)."""
     keypoints: KeypointSource = "keynet"
-    """``oracle``: projected ground-truth keypoints plus noise instead of KeyNet; ``keynet_gt_boxes``: KeyNet on ground-truth crops (diagnostic)."""
+    """``oracle``: projected ground-truth keypoints plus noise instead of KeyNet; ``keynet_gt_boxes``: KeyNet on ground-truth crops (diagnostic);
+    ``keynet_perspective``: KeyNet-F trained on perspective crops (``keynet_perspective.PerspectiveKeyNetEstimator``); ``umetrack``: UmeTrack's net."""
     checkpoints: Path = Path("/home/pablo/handtrack-data/checkpoints/current")
     """Holds ``detnet.weights.pt`` and ``keynet.weights.pt`` (model-only state_dicts) with ``.sha256`` sidecars."""
     detnet_weights: Path | None = None
     """Override the DetNet file; its .sha256 sidecar is required."""
+    keynet_weights: Path | None = None
+    """Override the KeyNet file; its .sha256 sidecar is required."""
     umetrack_root: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
     """Upstream checkout, loaded lazily only for keypoints=umetrack."""
     umetrack_shim: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/shim")
@@ -145,9 +149,9 @@ def load_networks(config: RunConfig, device: torch.device) -> Networks:
         detnet = DetNetF()
         detnet_sha256 = "random" if config.random_weights else load_weights(detnet, config.detnet_weights or config.checkpoints / "detnet.weights.pt")
         detnet = detnet.to(device).eval()
-    if config.keypoints in ("keynet", "keynet_gt_boxes"):
+    if config.keypoints in ("keynet", "keynet_gt_boxes", "keynet_perspective"):
         keynet = KeyNetF()
-        keynet_sha256 = "random" if config.random_weights else load_weights(keynet, config.checkpoints / "keynet.weights.pt")
+        keynet_sha256 = "random" if config.random_weights else load_weights(keynet, config.keynet_weights or config.checkpoints / "keynet.weights.pt")
         keynet = keynet.to(device).eval()
     elif config.keypoints == "umetrack":
         keynet_sha256 = file_sha256(config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch")
@@ -196,6 +200,8 @@ def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTrut
         return UmeTrackEstimator(RigPoseNetwork(stage, data.rig, data.camera_angles), data.rig, data.letterboxes, phi, calibration.median)
     if networks.keynet is None:
         return OracleKeypoints(truth, phi, config.oracle_noise_px, config.oracle_noise_d_mm, config.seed)
+    if config.keypoints == "keynet_perspective":
+        return PerspectiveKeyNetEstimator(networks.keynet, data.rig, data.letterboxes, data.camera_angles, model, phi)
     keynet: KeyNetEstimator = KeyNetEstimator(networks.keynet)
     return KeyNetOnTruthBoxes(truth, keynet) if config.keypoints == "keynet_gt_boxes" else keynet
 
@@ -490,8 +496,8 @@ def ensure_run_identity(config: RunConfig, networks: Networks | None = None) -> 
         keynet_sha256: str = "oracle"
         if config.detector == "detnet":
             detnet_sha256 = "random" if config.random_weights else file_sha256(config.detnet_weights or config.checkpoints / "detnet.weights.pt")
-        if config.keypoints in ("keynet", "keynet_gt_boxes"):
-            keynet_sha256 = "random" if config.random_weights else file_sha256(config.checkpoints / "keynet.weights.pt")
+        if config.keypoints in ("keynet", "keynet_gt_boxes", "keynet_perspective"):
+            keynet_sha256 = "random" if config.random_weights else file_sha256(config.keynet_weights or config.checkpoints / "keynet.weights.pt")
         elif config.keypoints == "umetrack":
             keynet_sha256 = file_sha256(config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch")
         networks = Networks(None, None, detnet_sha256, keynet_sha256)
