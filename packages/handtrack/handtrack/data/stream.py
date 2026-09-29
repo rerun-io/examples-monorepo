@@ -838,6 +838,14 @@ class CatalogStream:
         slots: list[int] = [entry[2] for entry in sorted(self._evaluation_heaps[slot], reverse=True)]
         return select_samples(samples, torch.tensor(slots[start : start + batch], dtype=torch.int64, device=self.device))
 
+    def next_detnet_samples(self, n: int) -> DetNetSamples | None:
+        """Up to n unaugmented training samples from the pool (what a cache stores); None once the epoch is drained."""
+        self._raise_if_failed()
+        if self._stop.is_set():
+            return None
+        self._check("DetNet", self._detnet_on)
+        return self._next_samples(self._require(self._detnet_pool), n)
+
     def next_detnet_batch(self) -> DetNetBatch | None:
         self._raise_if_failed()
         if self._stop.is_set():
