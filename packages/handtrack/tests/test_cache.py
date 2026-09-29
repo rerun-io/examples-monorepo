@@ -5,7 +5,7 @@ import pytest
 import torch
 from test_stream import _fake_segment, _GrayDecoder
 
-from handtrack.data.cache import DetNetCache, read_manifest, write_cache
+from handtrack.data.cache import DetNetCache, KeyNetCache, read_manifest, write_cache
 from handtrack.data.catalog import UMETRACK
 from handtrack.data.stream import CatalogStream, StreamConfig
 
@@ -70,3 +70,45 @@ def test_oversized_circles_lose_their_target_but_keep_presence_and_other_splits_
     (tmp_path / 'manifest.json').write_text(manifest)
     with pytest.raises(ValueError, match='training cache'):
         DetNetCache(tmp_path, batch_size=2, device='cpu')
+
+
+def _build_keynet(directory: Path, seed: int = 0, row_phase: float = 0.0) -> None:
+    segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
+    with CatalogStream(StreamConfig(datasets=(UMETRACK,), device='cpu', nets='keynet', producers=1, fetchers=1, keynet_buffer=64, min_fill=0.0,
+                                    seed=seed, row_phase=row_phase),
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
+                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+        write_cache(stream, directory, 'training', draw=3, net='keynet')
+
+
+def test_keynet_passes_hold_the_streams_crops_and_each_epoch_reads_the_next_pass(tmp_path: Path) -> None:
+    _build_keynet(tmp_path / 'a', seed=0)
+    _build_keynet(tmp_path / 'b', seed=1, row_phase=0.5)
+    first, second = read_manifest(tmp_path / 'a'), read_manifest(tmp_path / 'b')
+    assert (first.net, first.segments, second.seed, second.row_phase) == ('keynet', 5, 1, 0.5) and first.samples > 0
+    assert np.load(tmp_path / 'a' / 'crops.npy').dtype == np.uint8
+    # Tag each pass's rows so the draws can be traced back to their pass.
+    for name, offset in (('a', 0.0), ('b', 1000.0)):
+        rows = read_manifest(tmp_path / name).samples
+        np.save(tmp_path / name / 'presence.npy', np.arange(rows, dtype=np.float32) + offset)
+    cache = KeyNetCache((tmp_path / 'a', tmp_path / 'b'), batch_size=2, device='cpu', seed=3)
+    for epoch, (low, rows) in enumerate(((0.0, first.samples), (1000.0, second.samples), (0.0, first.samples))):
+        cache.start_epoch(epoch)
+        seen = []
+        while (batch := cache.next_keynet_batch()) is not None:
+            assert batch.crops.shape[1:] == (1, 96, 96) and batch.heatmaps.shape[1:] == (21, 18, 18) and batch.keypoints.shape[1:] == (63,)
+            assert bool((batch.heatmaps[~batch.positive] == 0).all()) and bool(batch.presence_mask.all())
+            seen += (batch.presence - low).long().tolist()
+        assert len(seen) == rows - rows % 2 and len(set(seen)) == len(seen) and set(seen) <= set(range(rows))
+    cache.close()
+
+
+def test_keynet_cache_refuses_detnet_passes(tmp_path: Path) -> None:
+    _build(tmp_path)
+    with pytest.raises(ValueError, match='detnet samples'):
+        KeyNetCache((tmp_path,), batch_size=2, device='cpu')
+
+
+def test_row_phase_must_lie_in_the_unit_interval() -> None:
+    with pytest.raises(ValueError, match='row_phase'):
+        StreamConfig(row_phase=1.0)

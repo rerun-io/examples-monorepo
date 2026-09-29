@@ -80,7 +80,7 @@ class LoopSettings:
     channels_last: bool = False
     """Hold the models and their image inputs in channels-last layout (with bf16, DetNet-F trains about 2x faster)."""
     compile: Literal['none', 'default', 'reduce-overhead'] = 'none'
-    """torch.compile mode for DetNet's forward (reduce-overhead adds CUDA graphs); Triton needs TRITON_PTXAS_BLACKWELL_PATH
+    """torch.compile mode for DetNet's and KeyNet's forward (reduce-overhead adds CUDA graphs); Triton needs TRITON_PTXAS_BLACKWELL_PATH
     set to the environment's ptxas on sm_120."""
     presence_weight: float = 1.0
     """Chosen multiplier for the added KeyNet presence BCE."""
@@ -176,6 +176,9 @@ class Trainer:
             # An instance attribute shadows the method; state_dict and checkpoints are unchanged. dynamic=False: a new batch shape
             # (a validation remainder) gets its own static graph instead of turning every later step into a slower dynamic-shape graph.
             detnet_model.forward_pooled = torch.compile(detnet_model.forward_pooled, mode=cadence.compile, dynamic=False)
+        keynet_model: nn.Module | None = self.models.get('keynet')
+        if cadence.compile != 'none' and isinstance(keynet_model, KeyNetF):
+            keynet_model.forward = torch.compile(keynet_model.forward, mode=cadence.compile, dynamic=False)
         self.optimisers: dict[str, Optimizer] = {name: torch.optim.SGD(model.parameters(), lr=self.settings[name].lr, momentum=self.settings[name].momentum)
                                                 for name, model in self.models.items()}
         self.state: TrainingState = TrainingState(config_json=config_json)
