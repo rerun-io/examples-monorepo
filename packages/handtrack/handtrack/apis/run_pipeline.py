@@ -32,7 +32,7 @@ from serde import SerdeError, serde
 from serde.json import from_json, to_json
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 
-from handtrack.data.catalog import CATALOG_URL, UMETRACK, SegmentInfo, list_segments, select_split
+from handtrack.data.catalog import CATALOG_URL, UMETRACK, DatasetName, SegmentInfo, SplitName, is_show3d, list_segments, select_split
 from handtrack.eval.segment import (
     DetectionScore,
     DetNetAloneMetrics,
@@ -50,8 +50,11 @@ from handtrack.models.detnet import DetNetF
 from handtrack.models.keynet import KeyNetF
 from handtrack.oracle import GroundTruthViews, KeyNetOnTruthBoxes, OracleDetector, OracleKeypoints
 from handtrack.pipeline import SegmentData, TrackerRun, detnet_alone_track, load_weights, read_segment, run_tracker, segment_track
+from handtrack.reference.results import Calibration
+from handtrack.reference.upstream import PoseStage, load_umetrack
 from handtrack.results import DetectorSource, HandMode, KeypointSource, SegmentTrack, TrackMetadata, save_track
 from handtrack.tracker import Detector, DetNetDetector, KeyNetEstimator, KeypointEstimator, Tracker, TrackerConfig
+from handtrack.umetrack import RigPoseNetwork, UmeTrackEstimator
 
 Domain: TypeAlias = Literal["real", "synthetic"]
 Interaction: TypeAlias = Literal["any", "separate_hand", "hand_hand"]
@@ -65,7 +68,11 @@ class RunConfig:
     name: str = "dev"
     """Run name: outputs go to ``<output-root>/<name>/``."""
     segments: tuple[str, ...] = ()
-    """Segment ids of ``dataforge-umetrack``; empty selects the test split filtered by ``domain`` and ``interaction``."""
+    """Explicit labelled ids from dataset; empty selects split. Domain/interaction filters apply only to UmeTrack."""
+    dataset: DatasetName = UMETRACK
+    """Catalog dataset; SHOW3D uses the two headset cameras on rig 1."""
+    split: SplitName = "test"
+    """SHOW3D official test scenes lack labels; use val (held-out training subjects) for scored demo clips."""
     domain: Domain = "real"
     interaction: Interaction = "any"
     max_segments: int | None = None
@@ -82,6 +89,16 @@ class RunConfig:
     """``oracle``: projected ground-truth keypoints plus noise instead of KeyNet; ``keynet_gt_boxes``: KeyNet on ground-truth crops (diagnostic)."""
     checkpoints: Path = Path("/home/pablo/handtrack-data/checkpoints/current")
     """Holds ``detnet.weights.pt`` and ``keynet.weights.pt`` (model-only state_dicts) with ``.sha256`` sidecars."""
+    detnet_weights: Path | None = None
+    """Override the DetNet file; its .sha256 sidecar is required."""
+    umetrack_root: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
+    """Upstream checkout, loaded lazily only for keypoints=umetrack."""
+    umetrack_shim: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/shim")
+    """Existing pytorch3d transforms shim."""
+    umetrack_weights: Path | None = None
+    """Defaults to <umetrack-root>/pretrained_models/pretrained_weights.torch."""
+    umetrack_calibration: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/reference/calibration.json")
+    """Frozen validation circle-scale Calibration JSON. Required for UmeTrack acquisition."""
     random_weights: bool = False
     """Use randomly initialised networks instead of the checkpoints (plumbing tests only; the numbers mean nothing)."""
     oracle_noise_px: float = 1.5
@@ -101,6 +118,10 @@ class RunConfig:
     """Tracker thresholds and fit settings (defaults: the paper's values plus our recorded choices)."""
     cpu_threads: int = 1
     """torch CPU threads: the fit's matrices are tiny, and one thread was the fastest measured (5.2 s vs 6.4 s at 32 for 60 frames)."""
+
+    def __post_init__(self) -> None:
+        if self.keypoints == "umetrack" and self.tracker.refine_shift is not None:
+            raise ValueError("UmeTrack runs once per hand/frame; leave tracker.refine_shift unset")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,29 +143,34 @@ def load_networks(config: RunConfig, device: torch.device) -> Networks:
     keynet_sha256: str = "oracle"
     if config.detector == "detnet":
         detnet = DetNetF()
-        detnet_sha256 = "random" if config.random_weights else load_weights(detnet, config.checkpoints / "detnet.weights.pt")
+        detnet_sha256 = "random" if config.random_weights else load_weights(detnet, config.detnet_weights or config.checkpoints / "detnet.weights.pt")
         detnet = detnet.to(device).eval()
-    if config.keypoints != "oracle":
+    if config.keypoints in ("keynet", "keynet_gt_boxes"):
         keynet = KeyNetF()
         keynet_sha256 = "random" if config.random_weights else load_weights(keynet, config.checkpoints / "keynet.weights.pt")
         keynet = keynet.to(device).eval()
+    elif config.keypoints == "umetrack":
+        keynet_sha256 = file_sha256(config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch")
     return Networks(detnet, keynet, detnet_sha256, keynet_sha256)
 
 
 def select_segments(config: RunConfig, entry: DatasetEntry) -> tuple[SegmentInfo, ...]:
     """The configured segments: the given ids, or the UmeTrack test split filtered by domain and interaction."""
-    listed: tuple[SegmentInfo, ...] = list_segments(entry, UMETRACK)
+    listed: tuple[SegmentInfo, ...] = list_segments(entry, config.dataset)
     if config.segments:
         by_id: dict[str, SegmentInfo] = {info.segment_id: info for info in listed}
         missing: list[str] = [segment for segment in config.segments if segment not in by_id]
         if missing:
-            raise ValueError(f"segments not found in {UMETRACK}: {missing}")
+            raise ValueError(f"labelled segments not found in {config.dataset}: {missing}")
         chosen: tuple[SegmentInfo, ...] = tuple(by_id[segment] for segment in config.segments)
     else:
         chosen = tuple(
-            info for info in select_split(listed, "test") if info.domain == config.domain and config.interaction in ("any", info.interaction)
+            info for info in select_split(listed, config.split)
+            if is_show3d(config.dataset) or (info.domain == config.domain and config.interaction in ("any", info.interaction))
         )
     chosen = chosen if config.max_segments is None else chosen[: config.max_segments]
+    if not chosen:
+        raise ValueError(f"No labelled segments selected in {config.dataset} ({config.split})")
     return chosen[config.shard :: config.shards]
 
 
@@ -161,11 +187,25 @@ def format_number(value: float | None, digits: int = 1) -> str:
     return "–" if value is None else f"{value:.{digits}f}"
 
 
-def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTruthViews, phi: float) -> KeypointEstimator:
+def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTruthViews, phi: float,
+                        data: SegmentData, model: HandModelTorch, device: torch.device) -> KeypointEstimator:
+    if config.keypoints == "umetrack":
+        calibration: Calibration = read_umetrack_calibration(config.umetrack_calibration)
+        stage: PoseStage = PoseStage(load_umetrack(config.umetrack_root, config.umetrack_shim), None,
+            config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch", hand_model=model, device=device)
+        return UmeTrackEstimator(RigPoseNetwork(stage, data.rig, data.camera_angles), data.rig, data.letterboxes, phi, calibration.median)
     if networks.keynet is None:
         return OracleKeypoints(truth, phi, config.oracle_noise_px, config.oracle_noise_d_mm, config.seed)
     keynet: KeyNetEstimator = KeyNetEstimator(networks.keynet)
     return KeyNetOnTruthBoxes(truth, keynet) if config.keypoints == "keynet_gt_boxes" else keynet
+
+
+def read_umetrack_calibration(path: Path) -> Calibration:
+    """Read the frozen validation calibration; name the missing/invalid file and CLI override."""
+    try:
+        return from_json(Calibration, path.read_text())
+    except (OSError, SerdeError, ValueError) as error:
+        raise ValueError(f"UmeTrack calibration {path}: {error}; supply --umetrack-calibration <calibration.json>") from error
 
 
 PHI_RANGE: tuple[float, float] = (0.75, 1.35)
@@ -193,7 +233,8 @@ def calibrate_unknown_hand(
     """
     generic: HandModelTorch = generic_hand_model()
     frames: int = min(config.calibration_frames, data.frames)
-    tracker: Tracker = Tracker(data.rig, data.letterboxes, generic, 1.0, detector, _keypoint_estimator(config, networks, truth, 1.0), config.tracker)
+    tracker: Tracker = Tracker(data.rig, data.letterboxes, generic, 1.0, detector,
+                              _keypoint_estimator(config, networks, truth, 1.0, data, generic, device), config.tracker)
     run: TrackerRun = run_tracker(data, tracker, frames, device)
     hands: list[HandObservation] = []
     initial: list[HandPose | None] = []
@@ -271,7 +312,7 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
             calibration_s = time.perf_counter() - mode_start
         phi: float = choice.phi
         tracker: Tracker = Tracker(
-            data.rig, data.letterboxes, choice.model, phi, detector, _keypoint_estimator(config, networks, truth, phi), config.tracker
+            data.rig, data.letterboxes, choice.model, phi, detector, _keypoint_estimator(config, networks, truth, phi, data, choice.model, device), config.tracker
         )
         alone: DetNetDetector | None = detnet if config.detnet_alone and index == 0 else None
         run: TrackerRun = run_tracker(data, tracker, frames, device, alone)
@@ -339,7 +380,7 @@ def summary_lines(metrics: SegmentMetrics) -> list[str]:
         + " (in the x1.2 crop: "
         + ", ".join(f"{format_number(s.precision, 2)}/{format_number(s.recall, 2)}" for s in metrics.detnet_with_tracking_crop)
         + ")"
-        + f"; {metrics.keynet_views} KeyNet crops, {metrics.detnet_runs} DetNet runs, {metrics.timings_s['total']:.1f} s"
+        + f"; {metrics.keynet_views} keypoint views, {metrics.detnet_runs} acquisition DetNet runs, {metrics.timings_s['total']:.1f} s"
     )
     return lines
 
@@ -348,7 +389,7 @@ def main(config: RunConfig) -> None:
     ensure_run_identity(config)
     torch.set_num_threads(config.cpu_threads)
     device: torch.device = torch.device(config.device)
-    entry: DatasetEntry = rr.catalog.CatalogClient(config.catalog_url).get_dataset(UMETRACK)
+    entry: DatasetEntry = rr.catalog.CatalogClient(config.catalog_url).get_dataset(config.dataset)
     networks: Networks = load_networks(config, device)
     root: Path = config.output_root / config.name
     root.mkdir(parents=True, exist_ok=True)
@@ -393,6 +434,18 @@ class RunRecord:
     """Source catalog."""
     device: str = "cuda"
     """Compute device."""
+    dataset: str = UMETRACK
+    """Source dataset."""
+    detnet_weights: str = ""
+    """Explicit checkpoint override."""
+    umetrack_root: str = ""
+    """Upstream source checkout."""
+    umetrack_shim: str = ""
+    """Local transforms shim."""
+    umetrack_weights: str = ""
+    """Pretrained pose weights (digest in keynet_sha256 for output compatibility)."""
+    umetrack_calibration_json: str = ""
+    """Exact frozen calibration used, so edits cannot silently reuse a run."""
 
     @staticmethod
     def from_config(config: RunConfig, networks: Networks) -> "RunRecord":
@@ -418,9 +471,15 @@ class RunRecord:
             min_keypoint_confidence=config.tracker.min_keypoint_confidence,
             tracker=config.tracker,
             seed=config.seed,
-            split="explicit" if config.segments else "test",
+            split="explicit" if config.segments else config.split,
             catalog_url=config.catalog_url,
             device=config.device,
+            dataset=config.dataset,
+            detnet_weights="" if config.detnet_weights is None else str(config.detnet_weights),
+            umetrack_root=str(config.umetrack_root) if config.keypoints == "umetrack" else "",
+            umetrack_shim=str(config.umetrack_shim) if config.keypoints == "umetrack" else "",
+            umetrack_weights=str(config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch") if config.keypoints == "umetrack" else "",
+            umetrack_calibration_json=to_json(read_umetrack_calibration(config.umetrack_calibration)) if config.keypoints == "umetrack" else "",
         )
 
 
@@ -430,9 +489,11 @@ def ensure_run_identity(config: RunConfig, networks: Networks | None = None) -> 
         detnet_sha256: str = "oracle"
         keynet_sha256: str = "oracle"
         if config.detector == "detnet":
-            detnet_sha256 = "random" if config.random_weights else file_sha256(config.checkpoints / "detnet.weights.pt")
-        if config.keypoints != "oracle":
+            detnet_sha256 = "random" if config.random_weights else file_sha256(config.detnet_weights or config.checkpoints / "detnet.weights.pt")
+        if config.keypoints in ("keynet", "keynet_gt_boxes"):
             keynet_sha256 = "random" if config.random_weights else file_sha256(config.checkpoints / "keynet.weights.pt")
+        elif config.keypoints == "umetrack":
+            keynet_sha256 = file_sha256(config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch")
         networks = Networks(None, None, detnet_sha256, keynet_sha256)
     record: RunRecord = RunRecord.from_config(config, networks)
     payload: bytes = to_json(record).encode()

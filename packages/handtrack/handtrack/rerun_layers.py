@@ -38,6 +38,7 @@ from serde.json import from_json
 from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK, UME_HAND_CONNECTIONS, HandModelNumpy, skin_landmarks, wrist_for_hand
 from torch import Tensor
 
+from handtrack.data.catalog import is_show3d
 from handtrack.geometry.camera import CameraRig, in_front, project, world_to_cameras
 from handtrack.hand.pose import GENERIC_HAND_MODEL
 from handtrack.labels.circles import enclosing_circles, square_boxes
@@ -180,24 +181,24 @@ def keypoint_error_mm(predicted: Float32[ndarray, "f 2 21 3"], truth: Float32[nd
     return np.where(tracked & np.isfinite(distance), distance, np.float32(np.nan)).astype(np.float32)
 
 
-def camera_root(camera: int) -> str:
-    return f"{schema.pinhole_path(RIG, camera)}/{RUN_SOURCE}"
+def camera_root(camera: int, rig: int = RIG) -> str:
+    return f"{schema.pinhole_path(rig, camera)}/{RUN_SOURCE}"
 
 
-def pred_box_path(camera: int, side: hands.Side) -> str:
-    return f"{camera_root(camera)}/boxes/{side}_hand"
+def pred_box_path(camera: int, side: hands.Side, rig: int = RIG) -> str:
+    return f"{camera_root(camera, rig)}/boxes/{side}_hand"
 
 
-def gt_box_path(camera: int, side: hands.Side) -> str:
-    return f"{camera_root(camera)}/gt_boxes/{side}_hand"
+def gt_box_path(camera: int, side: hands.Side, rig: int = RIG) -> str:
+    return f"{camera_root(camera, rig)}/gt_boxes/{side}_hand"
 
 
-def pred_keypoints2d_path(camera: int, side: hands.Side) -> str:
-    return f"{camera_root(camera)}/keypoints/{side}"
+def pred_keypoints2d_path(camera: int, side: hands.Side, rig: int = RIG) -> str:
+    return f"{camera_root(camera, rig)}/keypoints/{side}"
 
 
-def gt_keypoints2d_path(camera: int, side: hands.Side) -> str:
-    return f"{camera_root(camera)}/gt_keypoints/{side}"
+def gt_keypoints2d_path(camera: int, side: hands.Side, rig: int = RIG) -> str:
+    return f"{camera_root(camera, rig)}/gt_keypoints/{side}"
 
 
 def pred_hand_path(side: hands.Side) -> str:
@@ -235,8 +236,8 @@ def fit_energy_path(side: hands.Side) -> str:
 DETNET_CAMERA_PATH: str = f"{SERIES_ROOT}/detnet_camera"
 
 
-def detnet_box_path(camera: int, side: hands.Side) -> str:
-    return schema.boxes_path(RIG, camera, f"{side}_hand")
+def detnet_box_path(camera: int, side: hands.Side, rig: int = RIG) -> str:
+    return schema.boxes_path(rig, camera, f"{side}_hand")
 
 
 def detnet_presence_path(camera: int, side: hands.Side) -> str:
@@ -337,12 +338,13 @@ def write_detnet_layer(recording: rr.RecordingStream, detections: SegmentTrack, 
     and hand, ``box`` and ``box_source`` = DetNet where it reported a hand. A box below the presence threshold is grey.
     ``truth`` supplies the full base segment clock; a partial run clears at its next frame on both timelines.
     """
+    rig: int = 1 if is_show3d(detections.meta.dataset) else 0
     detections = with_clearing_frame(detections, truth)
     clock: _Clock = _Clock(detections.video_time_ns, detections.frame_index)
     if detections.meta.kind != "detnet_alone":
         raise ValueError(f"{detections.meta.segment}: detnet_v1 needs a DetNet-alone record, got kind={detections.meta.kind!r}")
     recording.send_property("detnet", rr.AnyValues(detnet_sha256=detections.meta.detnet_sha256, detector=detections.meta.detector))
-    for camera in range(NUM_CAMERAS):
+    for camera in range(len(truth.rig.names)):
         for index, side in enumerate(SIDES):
             presence: Float32[ndarray, "f"] = detections.presence[:, camera, index]
             keep: Bool[ndarray, "f"] = (detections.box_source[:, camera, index] == BoxSource.DETNET) & np.isfinite(detections.box[:, camera, index]).all(axis=-1)
@@ -350,7 +352,7 @@ def write_detnet_layer(recording: rr.RecordingStream, detections: SegmentTrack, 
                 (presence >= PRESENCE_THRESHOLD)[:, None], np.array(DETNET_LAYER_COLOR, dtype=np.uint8), np.array(DETNET_BELOW_THRESHOLD_COLOR, dtype=np.uint8)
             ).astype(np.uint8)
             labels: list[str] = [f"{side} {value:.2f}" for value in presence.tolist()]
-            _send_boxes(recording, detnet_box_path(camera, side), clock, detections.box[:, camera, index], keep, colors=colors, labels=labels)
+            _send_boxes(recording, detnet_box_path(camera, side, rig), clock, detections.box[:, camera, index], keep, colors=colors, labels=labels)
             _send_scalars(recording, detnet_presence_path(camera, side), clock, presence, name=f"cam_{camera:02} {side}", color=PRED_COLORS[index])
 
 
@@ -399,6 +401,7 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
     Raises:
         ValueError: If ``model`` does not reproduce the track's landmarks (``LANDMARK_TOLERANCE_M``).
     """
+    rig: int = 1 if is_show3d(track.meta.dataset) else 0
     skinned: Float32[ndarray, "f 2 21 3"] = skinned_landmarks(
         model, np.nan_to_num(track.rotation), np.nan_to_num(track.translation), np.nan_to_num(track.joint_angles), track.tracked
     )
@@ -426,8 +429,8 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
     error: Float32[ndarray, "f 2"] = keypoint_error_mm(track.landmarks, gt_landmarks(truth.on_frames(track.video_time_ns)), track.tracked)
     palette: UInt8[ndarray, "3 3"] = np.array([(0, 0, 0), SOURCE_COLORS[BoxSource.DETNET], SOURCE_COLORS[BoxSource.TRACKED]], dtype=np.uint8)
     context: rr.AnnotationContext = hand_annotation_context()
-    for camera in range(NUM_CAMERAS):
-        rr.log(camera_root(camera), context, static=True, recording=recording)
+    for camera in range(len(truth.rig.names)):
+        rr.log(camera_root(camera, rig), context, static=True, recording=recording)
         for index, side in enumerate(SIDES):
             source: Int64[ndarray, "s"] = shown.box_source[:, camera, index].astype(np.int64)
             keep: Bool[ndarray, "s"] = (source != BoxSource.NONE) & np.isfinite(shown.box[:, camera, index]).all(axis=-1)
@@ -435,13 +438,13 @@ def write_handtrack_layer(recording: rr.RecordingStream, track: SegmentTrack, tr
             labels: list[str] = [
                 f"{side} {SOURCE_NAMES.get(kind, '')}" + ("" if np.isnan(value) else f" {value:.2f}") for kind, value in zip(source.tolist(), shown_presence.tolist(), strict=True)
             ]
-            _send_boxes(recording, pred_box_path(camera, side), shown_clock, shown.box[:, camera, index], keep, colors=palette[source], labels=labels)
+            _send_boxes(recording, pred_box_path(camera, side, rig), shown_clock, shown.box[:, camera, index], keep, colors=palette[source], labels=labels)
             gt_keep: Bool[ndarray, "g"] = np.isfinite(gt_boxes[:, camera, index]).all(axis=-1)
             gt_colors: UInt8[ndarray, "g 3"] = np.tile(np.array(GT_BOX_COLOR, dtype=np.uint8), (len(gt_keep), 1))
-            _send_boxes(recording, gt_box_path(camera, side), truth_clock, gt_boxes[:, camera, index], gt_keep, colors=gt_colors, labels=None)
-            _send_keypoints(recording, pred_keypoints2d_path(camera, side), shown_clock, shown.keypoints_2d[:, camera, index], class_id=index, radius=KEYPOINT_RADIUS_UI)
+            _send_boxes(recording, gt_box_path(camera, side, rig), truth_clock, gt_boxes[:, camera, index], gt_keep, colors=gt_colors, labels=None)
+            _send_keypoints(recording, pred_keypoints2d_path(camera, side, rig), shown_clock, shown.keypoints_2d[:, camera, index], class_id=index, radius=KEYPOINT_RADIUS_UI)
             _send_keypoints(
-                recording, gt_keypoints2d_path(camera, side), truth_clock, gt_pixels[:, camera, index], class_id=GT_CLASS_OFFSET + index, radius=KEYPOINT_RADIUS_UI
+                recording, gt_keypoints2d_path(camera, side, rig), truth_clock, gt_pixels[:, camera, index], class_id=GT_CLASS_OFFSET + index, radius=KEYPOINT_RADIUS_UI
             )
             _send_scalars(recording, presence_path(camera, side), clock, track.presence[:, camera, index], name=f"cam_{camera:02} {side}", color=PRED_COLORS[index])
     rr.log(schema.run_path(RUN_SOURCE), context, static=True, recording=recording)

@@ -15,6 +15,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from handtrack import rerun_layers
+from handtrack.data.catalog import UMETRACK, is_show3d
 from handtrack.rerun_layers import NUM_CAMERAS, RIG, SIDES
 
 HANDS_IN_RIG: tuple[float, float, float] = (0.05, 0.45, 0.03)
@@ -50,24 +51,24 @@ def scene_eye() -> rrb.EyeControls3D:
     return blueprints.eye_controls_from_pose(tuple(position.tolist()), HANDS_IN_RIG, tuple(up.tolist()))
 
 
-def camera_pane(camera: int) -> rrb.Spatial2DView:
+def camera_pane(camera: int, rig: int = RIG) -> rrb.Spatial2DView:
     """One camera: its video with every box and keypoint overlay of both layers, rooted at the pinhole (``dataforge.blueprints.camera_view``)."""
-    pinhole: str = schema.pinhole_path(RIG, camera)
+    pinhole: str = schema.pinhole_path(rig, camera)
     return blueprints.camera_view(
-        f"cam_{camera:02}", RIG, camera, contents=[f"+ {schema.video_path(RIG, camera)}", f"+ {pinhole}/boxes/**", f"+ {rerun_layers.camera_root(camera)}/**"]
+        f"cam_{camera:02}", rig, camera, contents=[f"+ {schema.video_path(rig, camera)}", f"+ {pinhole}/boxes/**", f"+ {rerun_layers.camera_root(camera, rig)}/**"]
     )
 
 
-def scene_view() -> rrb.Spatial3DView:
+def scene_view(rig: int = RIG, cameras: int = NUM_CAMERAS) -> rrb.Spatial3DView:
     """Both hands' meshes and skeletons, predicted and ground truth; the camera frusta, videos and 2D overlays stay out."""
-    excluded: list[str] = [f"- {schema.pinhole_path(RIG, camera)}/**" for camera in range(NUM_CAMERAS)]
+    excluded: list[str] = [f"- {schema.pinhole_path(rig, camera)}/**" for camera in range(cameras)]
     return rrb.Spatial3DView(
         name="Hands 3D",
-        origin=schema.rig_path(RIG),
-        contents=["+ /world/**", *excluded],
+        origin=schema.rig_path(rig),
+        contents=["+ /world/**", *excluded] if rig == 0 else ["+ /world/gt/hands/**", "+ /world/runs/handtrack/**"],
         # LineGrid3D draws on the origin frame's z = 0 plane, which in the rig frame is no ground.
         line_grid=False,
-        eye_controls=scene_eye(),
+        eye_controls=scene_eye() if rig == 0 else None,
         overrides={
             **{schema.hand_mesh_path(side): rr.Mesh3D.from_fields(albedo_factor=GT_MESH_ALBEDO) for side in SIDES},
             **{
@@ -83,7 +84,7 @@ def plots() -> list[rrb.TimeSeriesView]:
     return [
         rrb.TimeSeriesView(name="3D keypoint error (mm)", origin=f"{rerun_layers.SERIES_ROOT}/error_mm", plot_legend=rrb.PlotLegend(visible=True)),
         rrb.TimeSeriesView(
-            name="KeyNet presence",
+            name="Keypoint stage presence",
             origin=f"{rerun_layers.SERIES_ROOT}/presence",
             plot_legend=rrb.PlotLegend(visible=True),
             axis_y=rrb.ScalarAxis(range=(0.0, 1.05)),
@@ -98,13 +99,15 @@ def plots() -> list[rrb.TimeSeriesView]:
     ]
 
 
-def handtrack_blueprint() -> rrb.Blueprint:
+def handtrack_blueprint(dataset: str = UMETRACK) -> rrb.Blueprint:
     """3D beside the 2x2 camera grid, over the plots, on ``video_time``."""
+    rig: int = 1 if is_show3d(dataset) else RIG
+    cameras: int = 2 if is_show3d(dataset) else NUM_CAMERAS
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                scene_view(),
-                rrb.Grid(*(camera_pane(camera) for camera in range(NUM_CAMERAS)), grid_columns=2, name="Cameras"),
+                scene_view(rig, cameras),
+                rrb.Grid(*(camera_pane(camera, rig) for camera in range(cameras)), grid_columns=2, name="Cameras"),
                 column_shares=list(VIEW_COLUMN_SHARES),
             ),
             rrb.Horizontal(*plots()),
