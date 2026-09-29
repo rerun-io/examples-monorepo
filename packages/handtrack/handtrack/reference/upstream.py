@@ -7,8 +7,10 @@ from types import ModuleType
 from typing import TypeAlias
 
 import numpy as np
+import torch
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
+from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 
 from handtrack.labels.circles import enclosing_circles
 from handtrack.reference.catalog import ReferenceLabels
@@ -61,30 +63,58 @@ def load_umetrack(root: Path, shim: Path | None = None) -> UmeTrack:
 class PoseStage:
     """Unchanged upstream HandTracker, with typed poses at the package boundary."""
 
-    def __init__(self, api: UmeTrack, labels: ReferenceLabels, weights: Path | None) -> None:
+    def __init__(self, api: UmeTrack, labels: ReferenceLabels | None, weights: Path | None,
+                 *, hand_model: HandModelTorch | None = None, device: torch.device | None = None) -> None:
         self.api: UmeTrack = api
-        self.labels: ReferenceLabels = labels
+        self.labels: ReferenceLabels | None = labels
+        profile: HandModelTorch | None = labels.hand_model if labels is not None else hand_model
+        if profile is None:
+            raise ValueError("PoseStage requires a hand model")
         # A6 torch.Tensor(list) uses float32 even for index fields. Preserve it here.
-        self.hand_model = api.hand.HandModel(**{field.name: getattr(labels.hand_model, field.name).float() for field in fields(labels.hand_model)})
+        self.hand_model = api.hand.HandModel(**{field.name: getattr(profile, field.name).float() for field in fields(profile)})
         self.tracker = None
         if weights is not None:
             model = api.loader.load_pretrained_model(str(weights))
             model.eval()
             self.tracker = api.tracker.HandTracker(model, api.tracker.HandTrackerOpts())
+            if device is not None:
+                # Upstream auto-selects CUDA; respect the pipeline's explicit device.
+                self.tracker._device = str(device)
+                model.to(device)
         self.cameras: list[ProjectionCamera] = []
-        self.angles: list[float] = [camera.angle for camera in labels.cameras]
+        self.angles: list[float] = [] if labels is None else [camera.angle for camera in labels.cameras]
 
     def set_frame(self, row: int) -> None:
+        assert self.labels is not None
         self.cameras = [self.api.camera.Fisheye62CameraModel(spec.width, spec.height, spec.focal, spec.principal,
                        spec.coefficients, camera_to_world_xf=self.labels.camera_to_world[row, index])
                         for index, spec in enumerate(self.labels.cameras)]
 
     def ground_truth(self, row: int) -> dict[int, Pose]:
+        assert self.labels is not None
         return {hand: Pose(self.labels.joints[row, hand], self.labels.wrists[row, hand], float(self.labels.confidence[row, hand]))
                 for hand in range(2) if self.labels.confidence[row, hand] > 0}
 
-    def pose_crops(self, poses: dict[int, Pose]) -> Crops:
+    def pose_crops(self, poses: dict[int, Pose], *, all_views: bool = False) -> Crops:
         """L0 and L3: upstream options and upstream camera ordering, unchanged."""
+        if all_views:
+            # Our tracker can request a partial view. A pose spanning a crop's
+            # horizon has no perspective crop; discard that view, not the hand.
+            crops: Crops = {}
+            for hand, pose in poses.items():
+                per_hand: dict[int, ProjectionCamera] = {}
+                for index, (camera, angle) in enumerate(zip(self.cameras, self.angles, strict=True)):
+                    try:
+                        candidate = self.api.crop.gen_crop_cameras_from_pose([camera], [angle], self.hand_model, pose, hand,
+                            63, (96, 96), max_view_num=1, sort_camera_index=True, focal_multiplier=0.95,
+                            mirror_right_hand=True, min_required_vis_landmarks=1)
+                    except ValueError:
+                        continue
+                    if candidate:
+                        per_hand[index] = candidate[0]
+                if per_hand:
+                    crops[hand] = per_hand
+            return crops
         if self.tracker is not None:
             return self.tracker.gen_crop_cameras(self.cameras, self.angles, self.hand_model, poses, min_num_crops=1)
         return {hand: crops for hand, pose in poses.items() if pose.hand_confidence >= 0.5
@@ -110,12 +140,12 @@ class PoseStage:
                     circles[index, hand] = enclosing_circles(pixels.astype(np.float32), np.ones(21, dtype=bool))
         return circles, visible
 
-    def circle_crops(self, circles: Float64[ndarray, "4 2 3"], scores: Float64[ndarray, "4 2"],
+    def circle_crops(self, circles: Float64[ndarray, "c 2 3"], scores: Float64[ndarray, "c 2"],
                      scale: float, gt: bool = False) -> Crops:
         crops: Crops = {}
         for hand in range(2):
             per_hand: dict[int, ProjectionCamera] = {}
-            eligible_scores: Float64[ndarray, "4"] = scores[:, hand].copy()
+            eligible_scores: Float64[ndarray, "c"] = scores[:, hand].copy()
             eligible_scores[~np.isfinite(circles[:, hand]).all(axis=-1) | (circles[:, hand, 2] <= 0)] = -np.inf
             for index in select_views(eligible_scores.tolist(), 19.0 if gt else 0.5, strict=not gt):
                 try:

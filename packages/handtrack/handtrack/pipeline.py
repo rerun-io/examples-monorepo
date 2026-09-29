@@ -8,6 +8,7 @@ on every camera at once (the DetNet-alone evaluation), so one decode serves both
 
 import hashlib
 import io
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -22,7 +23,17 @@ from rerun.catalog import DatasetEntry
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from torch import Tensor, nn
 
-from handtrack.data.catalog import TIMELINE, HandTimeline, SegmentInfo, is_show3d, layout_for, read_hand_timeline, read_rig, read_statics
+from handtrack.data.catalog import (
+    TIMELINE,
+    HandTimeline,
+    SegmentInfo,
+    is_show3d,
+    layout_for,
+    read_hand_timeline,
+    read_rig,
+    read_statics,
+    static_number,
+)
 from handtrack.data.segment_labels import SegmentLabels, segment_labels
 from handtrack.data.stream import FrameDecoder, open_nvdec_decoder
 from handtrack.geometry.camera import CameraRig
@@ -49,6 +60,10 @@ class SegmentData:
     """Ground truth for every timeline row, in row order."""
     videos: tuple[CatalogVideo, ...]
     """One per camera, in ``rig.names`` order."""
+    camera_angles: tuple[float, ...] = ()
+    """Native camera roll for UmeTrack perspective crops. SHOW3D: 0 degrees (UmeTrack gets the native image and its own camera model);
+    measured 2026-09-29 on 600 frames of show3d__HLU829: -90 -> L 40 / R 128 mm, 0 -> 28 / 46 mm, +90 -> 64 / 46 mm; the hands prefer
+    mirrored rolls (-45 -> 25 / 42, +45 -> 37 / 35), an open convention question. HT_SHOW3D_ANGLE overrides for experiments."""
 
     @property
     def frames(self) -> int:
@@ -64,10 +79,28 @@ def read_segment(entry: DatasetEntry, info: SegmentInfo) -> SegmentData:
     videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in cameras], TIMELINE)
     rows: Int64[ndarray, "f"] = np.arange(len(timeline.video_time_ns), dtype=np.int64)
     labels: SegmentLabels = segment_labels(timeline, rig_letterboxes[0], rig_letterboxes[1], rows, is_show3d(info.dataset))
-    return SegmentData(info=info, rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, labels=labels, videos=videos)
+    angles: tuple[float, ...] = tuple(float(os.environ.get('HT_SHOW3D_ANGLE', '0')) if is_show3d(info.dataset) else
+        static_number(statics, f"{camera}/pinhole:source_camera_angle_deg", info.segment_id) for camera in cameras)
+    return SegmentData(info=info, rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, labels=labels, videos=videos, camera_angles=angles)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameImages:
+    """One decoded chunk, sharing the original camera frames with the net-frame images."""
+
+    net: UInt8[Tensor, "m c 480 640"]
+    """Letterboxed images for DetNet/KeyNet."""
+    native: tuple[UInt8[Tensor, "m h w"], ...]
+    """Original camera pixels for perspective crop sampling."""
 
 
 def net_frames(data: SegmentData, frames: int, device: torch.device) -> Iterator[UInt8[Tensor, "m c 480 640"]]:
+    """Net images only, preserving the reference ladder's decode API."""
+    for chunk in decoded_frames(data, frames, device):
+        yield chunk.net
+
+
+def decoded_frames(data: SegmentData, frames: int, device: torch.device) -> Iterator[FrameImages]:
     """The first ``frames`` timeline rows as letterboxed images of every camera, in chunks of ``DECODE_CHUNK`` rows.
 
     A camera without a video frame at a row's time gives a black image there.
@@ -84,14 +117,17 @@ def net_frames(data: SegmentData, frames: int, device: torch.device) -> Iterator
     for begin in range(0, frames, DECODE_CHUNK):
         end: int = min(begin + DECODE_CHUNK, frames)
         per_camera: list[UInt8[Tensor, "m 480 640"]] = []
+        native: list[UInt8[Tensor, "m h w"]] = []
         for camera, decoder in enumerate(decoders):
-            images: UInt8[Tensor, "m 480 640"] = torch.zeros((end - begin, NET_HEIGHT, NET_WIDTH), dtype=torch.uint8, device=device)
+            letterbox: Letterbox = data.letterboxes[camera]
+            images: UInt8[Tensor, "m h w"] = torch.zeros((end - begin, letterbox.source_height, letterbox.source_width), dtype=torch.uint8, device=device)
             keep: Int64[ndarray, "k"] = np.flatnonzero(matched[camera][begin:end])
             if len(keep):
                 decoded: UInt8[Tensor, "k h w"] = decoder.get_frames_at(positions[camera][begin + keep].tolist()).data[:, 0]
-                images[torch.from_numpy(keep).to(device)] = data.letterboxes[camera].apply(decoded)
-            per_camera.append(images)
-        yield torch.stack(per_camera, dim=1)
+                images[torch.from_numpy(keep).to(device)] = decoded
+            native.append(images)
+            per_camera.append(letterbox.apply(images))
+        yield FrameImages(torch.stack(per_camera, dim=1), tuple(native))
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,16 +161,17 @@ def run_tracker(
     decode_s: float = 0.0
     detnet_alone_s: float = 0.0
     cameras: int = len(data.letterboxes)
-    chunks: Iterator[UInt8[Tensor, "m c 480 640"]] = net_frames(data, frames, device)
+    chunks: Iterator[FrameImages] = decoded_frames(data, frames, device)
     begin: int = 0
     while True:
         decode_start: float = time.perf_counter()
-        chunk: UInt8[Tensor, "m c 480 640"] | None = next(chunks, None)
+        decoded: FrameImages | None = next(chunks, None)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         decode_s += time.perf_counter() - decode_start
-        if chunk is None:
+        if decoded is None:
             break
+        chunk: UInt8[Tensor, "m c 480 640"] = decoded.net
         m: int = chunk.shape[0]
         if detnet_alone is not None:
             alone_start: float = time.perf_counter()
@@ -144,7 +181,8 @@ def run_tracker(
             detnet_alone_s += time.perf_counter() - alone_start
         if tracker is not None:
             for offset in range(m):
-                results.append(tracker.step(begin + offset, chunk[offset], data.timeline.world_from_rig[begin + offset]))
+                results.append(tracker.step(begin + offset, chunk[offset], data.timeline.world_from_rig[begin + offset],
+                                            tuple(images[offset] for images in decoded.native)))
         begin += m
     stages: dict[str, float] = {} if tracker is None else tracker.timings_s
     timings: dict[str, float] = {"decode": decode_s, "detnet_alone": detnet_alone_s, **stages, "total": time.perf_counter() - start}

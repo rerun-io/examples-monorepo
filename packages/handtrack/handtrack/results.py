@@ -1,6 +1,6 @@
 """The tracker's per-segment output: arrays in one ``.npz`` with fixed keys, metadata in a JSON sidecar.
 
-Shapes: f frames, 4 cameras, 2 hands (slot 0 = left, 1 = right). Pixels are the camera's own image
+Shapes: f frames, c cameras, 2 hands (slot 0 = left, 1 = right). Pixels are the camera's own image
 (pixel-centre convention), 3D points world metres.
 
 A box is the hand box itself: the square that encloses the hand circle (DetNet's circle, or the smallest
@@ -30,7 +30,7 @@ HandMode: TypeAlias = Literal["known", "unknown"]
 TrackKind: TypeAlias = Literal["tracker", "detnet_alone"]
 DetectorSource: TypeAlias = Literal["detnet", "oracle"]
 """``oracle``: ground-truth circles with presence 1 where the hand is present (>= 17 keypoints inside)."""
-KeypointSource: TypeAlias = Literal["keynet", "oracle", "keynet_gt_boxes"]
+KeypointSource: TypeAlias = Literal["keynet", "oracle", "keynet_gt_boxes", "umetrack"]
 """``oracle``: projected ground-truth keypoints plus Gaussian noise instead of KeyNet; ``keynet_gt_boxes``: KeyNet on the
 ground-truth crop of each requested view instead of the tracker's crop (a diagnostic that removes crop drift)."""
 
@@ -88,13 +88,13 @@ class SegmentTrack:
     """Radians, NaN when untracked."""
     landmarks: Float32[ndarray, "f 2 21 3"]
     """World metres, NaN when untracked."""
-    box: Float32[ndarray, "f 4 2 4"]
+    box: Float32[ndarray, "f c 2 4"]
     """(x0, y0, x1, y1) camera pixels, NaN when none."""
-    box_source: Int8[ndarray, "f 4 2"]
+    box_source: Int8[ndarray, "f c 2"]
     """``BoxSource`` values."""
-    keypoints_2d: Float32[ndarray, "f 4 2 21 2"]
+    keypoints_2d: Float32[ndarray, "f c 2 21 2"]
     """KeyNet's keypoints in camera pixels, NaN where KeyNet did not run."""
-    presence: Float32[ndarray, "f 4 2"]
+    presence: Float32[ndarray, "f c 2"]
     """KeyNet presence, NaN where KeyNet did not run (DetNet's presence in a DetNet-alone record)."""
     detnet_camera: Int8[ndarray, "f"]
     """Camera DetNet ran on, -1 when it did not run."""
@@ -111,6 +111,9 @@ class SegmentTrack:
             value = getattr(self, item.name)
             if not isinstance(value, cast(type, item.type)) or value.shape[0] != frames:
                 raise ValueError(f"Invalid {item.name}: expected {item.type} with {frames} frames")
+        cameras: int = self.box.shape[1]
+        if cameras not in (2, 4) or any(getattr(self, name).shape[1] != cameras for name in ("box_source", "keypoints_2d", "presence")):
+            raise ValueError("Track camera arrays must agree on two or four cameras")
 
 
 ARRAY_KEYS: tuple[str, ...] = tuple(field.name for field in fields(SegmentTrack) if field.name != "meta")

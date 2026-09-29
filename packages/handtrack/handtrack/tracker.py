@@ -61,6 +61,14 @@ class CropRequest:
     """Net frame to crop pixels (``labels.crops.crop_from_net``), right hands mirrored."""
     keypoint_input: Float32[Tensor, "n 63"]
     """21 x (u, v, d) of θ̂ in the crop; all zeros for an acquisition."""
+    poses: tuple[HandPose | None, HandPose | None] = (None, None)
+    """Our crop-planning pose per hand; None on acquisition. Used by pose-backed estimators."""
+    world_from_rig: Float32[Tensor, "4 4"] | None = None
+    """Current headset transform, world metres."""
+    circles: Float32[Tensor, "n 3"] | None = None
+    """Requested circles in net pixels, before crop enlargement and right-hand mirroring."""
+    native_images: tuple[UInt8[Tensor, "h w"], ...] = ()
+    """Original camera frames, retained for perspective crops without SHOW3D downsampling."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +83,8 @@ class KeypointEstimate:
     """Probability that the hand is in the crop."""
     confidence: Float32[Tensor, "n 21"]
     """Per keypoint: the heatmap's peak value (1 for a clean unit Gaussian; about 0 when the heatmap is empty)."""
+    uses_detnet_presence: bool = False
+    """No learned presence head: presence marks usable views; Tracker checks DetNet on those views."""
 
 
 @runtime_checkable
@@ -147,11 +157,24 @@ class TrackerConfig:
     """A fitted wrist farther than this from the headset ends the track (our addition; ground-truth wrists stay within 0.77 m)."""
     min_keypoint_confidence: float = 0.05
     """A keypoint whose heatmap peak is below this gets weight 0 in the fit (our choice): an empty heatmap decodes to the crop corner."""
+    umetrack_presence_threshold: float = 0.5
+    """DetNet must exceed this in at least one requested view to confirm a UmeTrack hand."""
+    umetrack_drift_factor: float = 0.8
+    """End a tracked UmeTrack hand whose confirmed views ALL disagree with DetNet: DetNet's circle centre lies farther than this
+    times the larger radius from the circle projected from the tracked pose. Without it a pose that slid off the hand (often onto
+    the other hand) keeps feeding its own crops for tens of frames; 0 disables the check. UmeTrack synthetic user_12/rec_09:
+    off 73.9 mm, 1.0 30.0 mm, 0.8 25.6 mm (90 % tracked), 0.6 25.5 mm (83 % tracked)."""
+    umetrack_miss_frames: int = 3
+    """End a UmeTrack track after this many consecutive frames without DetNet confirmation in its requested views.
+    During the grace frames, fit all usable network views; a confirmed frame fits only confirmed views.
+    Acquisition requires confirmation immediately. Missing/invalid network output ends the track immediately."""
     fit: FitConfig = field(default_factory=FitConfig)
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_views <= MAX_VIEWS:
             raise ValueError(f"max_views must be between 1 and {MAX_VIEWS}, got {self.max_views}")
+        if self.umetrack_miss_frames < 1 or not 0.0 <= self.umetrack_presence_threshold <= 1.0:
+            raise ValueError("UmeTrack miss frames must be positive and presence threshold must be in [0, 1]")
 
 
 DEFAULT_TRACKER_CONFIG: TrackerConfig = TrackerConfig()
@@ -191,6 +214,8 @@ class _History:
     """θ(t−1); None while the hand is untracked."""
     before: HandPose | None = None
     """θ(t−2); None after the first tracked frame."""
+    detnet_misses: int = 0
+    """Consecutive UmeTrack frames without detector support."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +226,8 @@ class _View:
     """The hand circle the crop was cut around (net frame)."""
     crop_from_net: Float32[Tensor, "3 3"]
     keypoint_input: Float32[Tensor, "63"]
+    pose: HandPose | None = None
+    """Pose that planned this crop, including extrapolation or refinement."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +291,7 @@ class Tracker:
     def _drop(self, side: Side) -> None:
         self.history[side].previous = None
         self.history[side].before = None
+        self.history[side].detnet_misses = 0
 
     def _project(self, pose: HandPose, side: Side, world_from_rig: Float32[Tensor, "4 4"]) -> _Projection:
         points_cam: Float32[Tensor, "c 21 3"] = world_to_cameras(self.rig, world_from_rig, landmarks(self.model, pose, side))
@@ -277,14 +305,14 @@ class Tracker:
             circles=torch.from_numpy(enclosing_circles(net_xy.numpy(), front.numpy())),
         )
 
-    def _view(self, side: Side, camera: int, projection: _Projection) -> _View:
+    def _view(self, side: Side, camera: int, projection: _Projection, pose: HandPose) -> _View:
         """A KeyNet view around the projected pose, with the pose as the keypoint input."""
         crop_map: Float32[Tensor, "3 3"] = _crop_map(projection.circles[camera], side)
         features: Float32[Tensor, "1 63"] = keypoint_input(
             apply_affine(crop_map[None], projection.net_xy[camera][None]),
             relative_distances(projection.points_cam[camera][None], torch.tensor([self.phi])),
         )
-        return _View(side, camera, projection.circles[camera], crop_map, features[0])
+        return _View(side, camera, projection.circles[camera], crop_map, features[0], pose)
 
     def _plan_tracked(self, side: Side, world_from_rig: Float32[Tensor, "4 4"], out: "_FrameOutput") -> list[_View]:
         """Boxes from θ̂ in every camera that sees it, and the KeyNet views; drops a hand that no camera sees."""
@@ -301,9 +329,10 @@ class Tracker:
         if not order:
             self._drop(side)
             return []
-        return [self._view(side, camera, projection) for camera in order[: self.config.max_views]]
+        return [self._view(side, camera, projection, guess) for camera in order[: self.config.max_views]]
 
-    def step(self, frame: int, images: UInt8[Tensor, "c 480 640"], world_from_rig: Float32[Tensor, "4 4"]) -> FrameResult:
+    def step(self, frame: int, images: UInt8[Tensor, "c 480 640"], world_from_rig: Float32[Tensor, "4 4"],
+             native_images: tuple[UInt8[Tensor, "h w"], ...] = ()) -> FrameResult:
         """Track frame ``frame``: its net-frame images (one per camera, any device) and the headset pose."""
         start: float = time.perf_counter()
         out: _FrameOutput = _FrameOutput.empty(len(self.cameras))
@@ -318,7 +347,7 @@ class Tracker:
                 views += self._detect(frame, images, untracked, out)
                 spent["detnet"] = time.perf_counter() - begin
             if views:
-                self._keypoints_and_fit(frame, images, world_from_rig, views, out, spent)
+                self._keypoints_and_fit(frame, images, world_from_rig, views, out, spent, native_images)
         else:
             for side in Side:
                 self._drop(side)
@@ -350,17 +379,18 @@ class Tracker:
         views: list[_View],
         out: "_FrameOutput",
         spent: dict[str, float],
+        native_images: tuple[UInt8[Tensor, "h w"], ...],
     ) -> None:
         """KeyNet on every view in one call, the presence rules, one batched fit of the hands that remain, and (optionally) one refinement pass."""
-        observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, views, out, spent)
+        observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, views, out, spent, native_images)
         for side in observed[1]:
             self._drop(side)
         hands: list[HandObservation] = observed[0]
         if not hands:
             return
         results: list[FitResult] = self._fit(hands, spent)
-        if self.config.refine_shift is not None:
-            refined: dict[Side, tuple[HandObservation, FitResult]] = self._refine(frame, images, world_from_rig, views, hands, results, out, spent)
+        if self.config.refine_shift is not None and not any(self.history[hand.side].detnet_misses for hand in hands):
+            refined: dict[Side, tuple[HandObservation, FitResult]] = self._refine(frame, images, world_from_rig, views, hands, results, out, spent, native_images)
             chosen: list[tuple[HandObservation, FitResult]] = [
                 refined.get(hand.side, (hand, result)) for hand, result in zip(hands, results, strict=True)
             ]
@@ -388,25 +418,56 @@ class Tracker:
         views: list[_View],
         out: "_FrameOutput",
         spent: dict[str, float],
+        native_images: tuple[UInt8[Tensor, "h w"], ...],
     ) -> tuple[list[HandObservation], list[Side]]:
         """KeyNet on ``views``; returns the hands with at least one view above the presence threshold, and the hands whose every view fell below it."""
+        poses: list[HandPose | None] = [next((view.pose for view in views if view.side == side), None) for side in Side]
         request: CropRequest = CropRequest(
             camera=torch.tensor([view.camera for view in views]),
             side=torch.tensor([int(view.side) for view in views]),
             crop_from_net=torch.stack([view.crop_from_net for view in views]),
             keypoint_input=torch.stack([view.keypoint_input for view in views]),
+            poses=(poses[0], poses[1]),
+            world_from_rig=world_from_rig,
+            circles=torch.stack([view.circle for view in views]),
+            native_images=native_images,
         )
         begin: float = time.perf_counter()
         estimate: KeypointEstimate = self.keypoints(images, frame, request)
         spent["keynet"] += time.perf_counter() - begin
+        detector_presence: Float32[Tensor, "n"] | None = None
+        detector_circles: Float32[Tensor, "n 3"] | None = None
+        if estimate.uses_detnet_presence:
+            begin = time.perf_counter()
+            cameras: Int64[Tensor, "k"] = request.camera.unique(sorted=True)
+            detections: Detections = self.detector(images[cameras.to(images.device)], frame, cameras)
+            detector_presence = detections.probability[torch.searchsorted(cameras, request.camera), request.side]
+            detector_circles = detections.circle[torch.searchsorted(cameras, request.camera), request.side]
+            spent["detnet"] += time.perf_counter() - begin
         hands: list[HandObservation] = []
         rejected: list[Side] = []
         for side in Side:
             mine: list[int] = [index for index, view in enumerate(views) if view.side == side]
             for index in mine:
                 out.keypoints[views[index].camera, side] = estimate.points_net[index]
-                out.presence[views[index].camera, side] = estimate.presence[index]
+                out.presence[views[index].camera, side] = estimate.presence[index] if detector_presence is None else detector_presence[index]
             good: list[int] = [index for index in mine if float(estimate.presence[index]) >= self.config.presence_threshold]
+            if detector_presence is not None:
+                confirmed: list[int] = [index for index in good if float(detector_presence[index]) > self.config.umetrack_presence_threshold]
+                history: _History = self.history[side]
+                history.detnet_misses = 0 if confirmed else history.detnet_misses + 1
+                if confirmed and history.previous is not None and self.config.umetrack_drift_factor > 0 and detector_circles is not None:
+                    tracked_circles: Float32[Tensor, "k 3"] = torch.stack([views[index].circle for index in confirmed]).to(detector_circles.device)
+                    detected: Float32[Tensor, "k 3"] = detector_circles[torch.tensor(confirmed, device=detector_circles.device)]
+                    distance: Float32[Tensor, "k"] = (tracked_circles[:, :2] - detected[:, :2]).norm(dim=-1)
+                    limit: Float32[Tensor, "k"] = self.config.umetrack_drift_factor * torch.maximum(tracked_circles[:, 2], detected[:, 2])
+                    if bool((distance > limit).all()):
+                        confirmed = []
+                        history.detnet_misses = self.config.umetrack_miss_frames  # drifted: drop now, DetNet re-acquires
+                if confirmed:
+                    good = confirmed
+                elif history.previous is None or history.detnet_misses >= self.config.umetrack_miss_frames:
+                    good = []
             if mine and not good:
                 rejected.append(side)
             if good:
@@ -439,6 +500,7 @@ class Tracker:
         results: list[FitResult],
         out: "_FrameOutput",
         spent: dict[str, float],
+        native_images: tuple[UInt8[Tensor, "h w"], ...],
     ) -> dict[Side, tuple[HandObservation, FitResult]]:
         """Re-cut the crops around the fitted pose where it moved off its crop, run KeyNet and the fit once more (our addition).
 
@@ -457,11 +519,11 @@ class Tracker:
                 float((projection.circles[view.camera, :2] - view.circle[:2]).norm() / view.circle[2].clamp_min(MIN_BOX_RADIUS)) for view in mine
             ]
             if moved and max(moved) > self.config.refine_shift:
-                again.extend(self._view(hand.side, view.camera, projection) for view in mine)
+                again.extend(self._view(hand.side, view.camera, projection, result.pose) for view in mine)
         if not again:
             return {}
         scratch: _FrameOutput = _FrameOutput.empty(len(self.cameras))
-        observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, again, scratch, spent)
+        observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, again, scratch, spent, native_images)
         if not observed[0]:
             return {}
         for hand in observed[0]:

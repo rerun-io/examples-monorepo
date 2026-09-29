@@ -30,6 +30,7 @@ from handtrack import rerun_layers
 from handtrack.blueprint import handtrack_blueprint
 from handtrack.data import catalog
 from handtrack.data.catalog import HandTimeline, SegmentInfo
+from handtrack.labels.validity import SHOW3D_CONFIDENCE_THRESHOLD
 from handtrack.results import SegmentTrack, load_track
 
 HANDTRACK_LAYER: str = "handtrack_v1"
@@ -72,11 +73,9 @@ def read_ground_truth(entry: DatasetEntry, info: SegmentInfo) -> rerun_layers.Gr
 
     The temporal query names the rig and the three hand entities it reads (``/**`` would also pull the ``hand_mesh`` layer).
     """
-    if catalog.is_show3d(info.dataset):
-        raise ValueError(f"{info.segment_id}: the handtrack layers are UmeTrack-only (rig 0, four cameras)")
     statics: pa.Table = catalog.read_statics(entry, info)
     entities: list[str] = [
-        schema.rig_path(rerun_layers.RIG),
+        catalog.layout_for(info.dataset).rig,
         *(f"{schema.hands_path(side)}/{part}" for side in rerun_layers.SIDES for part in ("confidence", "joint_angles", "wrist")),
     ]
     table: pa.Table = entry.filter_segments(info.segment_id).filter_contents(entities).reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
@@ -90,7 +89,8 @@ def read_ground_truth(entry: DatasetEntry, info: SegmentInfo) -> rerun_layers.Gr
         rotation=np.stack([pose.rotation.numpy() for pose in timeline.poses], axis=1),
         translation=np.stack([pose.translation.numpy() for pose in timeline.poses], axis=1),
         joint_angles=np.stack([pose.joint_angles.numpy() for pose in timeline.poses], axis=1),
-        present=(timeline.has_pose & (timeline.confidence > 0)).numpy(),
+        present=(timeline.has_pose & timeline.headset_valid[:, None]
+                 & (timeline.confidence > (SHOW3D_CONFIDENCE_THRESHOLD if catalog.is_show3d(info.dataset) else 0.0))).numpy(),
         model=from_json(HandModelNumpy, catalog.static_text(statics, catalog.PROFILE_COLUMN, f"{info.dataset} {info.segment_id}")),
     )
 
@@ -122,15 +122,16 @@ def storage_paths(segment_table: pa.Table, segment: str) -> dict[str, Path]:
     return {layer: Path(unquote(urlparse(url).path)) for layer, url in zip(row["rerun_layer_names"], row["rerun_storage_urls"], strict=True)}
 
 
-def export_clip(segment_table: pa.Table, segment: str, handtrack_rrd: Path, target: Path) -> None:
+def export_clip(segment_table: pa.Table, segment: str, handtrack_rrd: Path, target: Path, dataset: str = catalog.UMETRACK) -> None:
     """One standalone recording: the segment's base and ground-truth layers, ``handtrack_v1`` and the handtrack blueprint."""
     sources: dict[str, Path] = storage_paths(segment_table, segment)
-    missing: list[str] = [layer for layer in GT_LAYERS if layer not in sources]
+    required: tuple[str, ...] = ("base", "hand_pose") if catalog.is_show3d(dataset) else GT_LAYERS
+    missing: list[str] = [layer for layer in required if layer not in sources]
     if missing:
         raise ValueError(f"{segment}: the catalog has no {missing} layer")
-    streams: list[LazyChunkStream] = [RrdReader(path).stream() for path in (*(sources[layer] for layer in GT_LAYERS), handtrack_rrd)]
+    streams: list[LazyChunkStream] = [RrdReader(path).stream() for path in (*(sources[layer] for layer in GT_LAYERS if layer in sources), handtrack_rrd)]
     with writing.atomic_write(target) as temp_path, rr.RecordingStream(application_id=writing.APPLICATION_ID, recording_id=segment, send_properties=False) as recording:
-        recording.save(temp_path, default_blueprint=handtrack_blueprint(), write_footer=True)
+        recording.save(temp_path, default_blueprint=handtrack_blueprint(dataset), write_footer=True)
         rr.send_chunks(LazyChunkStream.merge(*streams), recording=recording)
 
 
@@ -161,7 +162,7 @@ def register_layers(config: Config, segments: list[str]) -> None:
         stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         blueprint_file: Path = config.layers_root / "blueprints" / f"{config.dataset}__handtrack__{stamp}.rbl"
         with writing.atomic_write(blueprint_file) as temp_path:
-            handtrack_blueprint().save(writing.APPLICATION_ID, str(temp_path))
+            handtrack_blueprint(config.dataset).save(writing.APPLICATION_ID, str(temp_path))
         entry.register_blueprint(blueprint_file.resolve().as_uri(), set_default=True)
         print(f"registered the handtrack blueprint as {config.dataset}'s default")
 
@@ -191,8 +192,7 @@ def main(config: Config) -> None:
     for clip in config.clips:
         started: float = perf_counter()
         target: Path = config.export_dir / f"{config.export_name}__{clip}.rrd"
-        export_clip(segment_table, clip, layer_path(config.layers_root, HANDTRACK_LAYER, clip), target)
+        export_clip(segment_table, clip, layer_path(config.layers_root, HANDTRACK_LAYER, clip), target, config.dataset)
         print(f"{clip}: standalone {target} ({target.stat().st_size / 1e6:.1f} MB) in {perf_counter() - started:.1f} s")
     if config.register:
         register_layers(config, sorted(set(tracks) | set(detections)))
-

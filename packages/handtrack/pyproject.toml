@@ -42,6 +42,7 @@ ignore_names = [
     # Reference evaluator: retained serialized metrics and run provenance.
     "circle_samples", "centre_error_px", "radius_error_px",
     "upstream_weights_sha256", "upstream_source_sha256", "implementation_sha256", "calibration_json",
+    "umetrack_calibration_json",
     # Tracker: serialized record fields (metrics JSON, SegmentTrack npz keys read by the Rerun layers).
     "gt_frames", "tracked_frames", "keypoints_2d",
     # pyserde metadata field of results.TrackMetadata.
