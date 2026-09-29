@@ -149,6 +149,24 @@ def test_heatmap_warmup_uses_mean_for_its_epochs(tmp_path: Path) -> None:
         LoopSettings(heatmap_warmup_steps=-1)
 
 
+def test_heatmap_ramp_grows_the_pixel_sum_from_the_mean_scale(tmp_path: Path) -> None:
+    source = FakeSource()
+    output = KeyNetOutput(torch.full((2, 21, 18, 18), 0.5), torch.full((2, 21, 18), 0.5), torch.zeros(2))
+    trainer = Trainer('keynet', OptimiserSettings(0.001), OptimiserSettings(0.025),
+                      LoopSettings(heatmap_reduction='pixel_sum', heatmap_warmup_steps=10, heatmap_ramp_steps=100, presence_weight=0.0), tmp_path, 'cpu')
+    totals = {}
+    for step in (9, 10, 60, 110):
+        trainer.state = replace(trainer.state, step=step)
+        loss = trainer.keynet_objective(source.key, output)
+        assert loss.heatmap.item() == pytest.approx(0.25 if step < 10 else 0.25 * 18 * 18)  # logged terms stay unscaled
+        totals[step] = loss.total.item()
+    pixel_sum_total = 0.25 * 18 * 18 + 0.05 * 0.25 * 18
+    assert totals[10] == pytest.approx(pixel_sum_total / 324) and totals[60] == pytest.approx(pixel_sum_total / 18)
+    assert totals[110] == pytest.approx(pixel_sum_total)
+    with pytest.raises(ValueError, match='pixel_sum'):
+        LoopSettings(heatmap_ramp_steps=5)
+
+
 def test_mid_epoch_joint_resume_preserves_updates(tmp_path: Path) -> None:
     torch.manual_seed(9)
     source = InterruptSource(2, 3)

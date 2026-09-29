@@ -124,6 +124,7 @@ def keynet_loss(
     presence_mask: Bool[Tensor, "b"],
     presence_weight: float,
     heatmap_reduction: HeatmapReduction = "mean",
+    heatmap_scale: float = 1.0,
 ) -> KeyNetLoss:
     """Average each term over its valid samples, with zero for empty selections.
 
@@ -143,6 +144,7 @@ def keynet_loss(
         presence_mask: Bool[Tensor, 'b'], crops with valid presence labels.
         presence_weight: Multiplier for presence BCE.
         heatmap_reduction: Reduction of both heatmap MSEs over pixels.
+        heatmap_scale: Multiplier of both heatmap MSEs in the total (a warm-up ramp); the logged terms stay unscaled.
 
     Returns:
         Total MSE(2D) + 0.05 MSE(1D) + presence_weight BCE, and detached terms.
@@ -157,5 +159,5 @@ def keynet_loss(
     presence_loss: Float32[Tensor, ""] = F.binary_cross_entropy_with_logits(logits, presence_target[presence_mask], reduction="sum") / max(
         logits.numel(), 1
     )
-    total: Float32[Tensor, ""] = heatmap_loss + 0.05 * distance_loss + presence_weight * presence_loss
+    total: Float32[Tensor, ""] = heatmap_scale * (heatmap_loss + 0.05 * distance_loss) + presence_weight * presence_loss
     return KeyNetLoss(total, heatmap_loss.detach(), distance_loss.detach(), presence_loss.detach())
