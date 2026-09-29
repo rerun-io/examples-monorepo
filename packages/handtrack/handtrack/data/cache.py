@@ -19,13 +19,14 @@ from serde import serde
 from serde.json import from_json, to_json
 from torch import Tensor
 
+from handtrack.data.augment import DetNetAugment, augment_detnet
 from handtrack.data.batches import DetNetBatch, KeyNetBatch
 from handtrack.data.stream import CatalogStream, DetNetSamples, StreamStats, sample_count
 from handtrack.labels.crops import scale_intensity
 
 CACHE_VERSION: int = 1
-TRAINING_FIELDS: tuple[str, ...] = ("pooled", "circle", "presence", "circle_mask", "presence_mask", "dataset")
-"""The DetNetSamples fields a training batch needs; the rest (validation metadata) stay on disk."""
+TRAINING_FIELDS: tuple[str, ...] = ("pooled", "circle", "presence", "circle_mask", "presence_mask", "dataset", "points", "in_front")
+"""The DetNetSamples fields a training batch needs (keypoints for the augmentation's visibility recount); the camera id stays on disk."""
 TRAINING_SPLITS: tuple[str, ...] = ("train", "training")
 MAX_CIRCLE_RADIUS: float = 0.5
 """Largest usable target radius, in image widths. A few SHOW3D hands right at a fisheye lens project to circles tens of image
@@ -115,6 +116,8 @@ class _HostBatch:
     circle_mask: Bool[Tensor, "b 2"]
     presence_mask: Bool[Tensor, "b 2"]
     dataset: Int64[Tensor, "b"]
+    points: Float32[Tensor, "b 2 21 2"]
+    in_front: Bool[Tensor, "b 2 21"]
 
 
 class DetNetCache:
@@ -125,7 +128,7 @@ class DetNetCache:
     """
 
     def __init__(self, directory: Path, batch_size: int, device: str, seed: int = 0,
-                 intensity_range: tuple[float, float] = (0.6, 1.4), prefetch: int = 8) -> None:
+                 intensity_range: tuple[float, float] = (0.6, 1.4), prefetch: int = 8, augment: DetNetAugment | None = None) -> None:
         if batch_size < 1 or prefetch < 1:
             raise ValueError("batch_size and prefetch must be positive")
         self.manifest: CacheManifest = read_manifest(directory)
@@ -146,6 +149,7 @@ class DetNetCache:
         self.device: torch.device = torch.device(device)
         self.seed: int = seed
         self.intensity_range: tuple[float, float] = intensity_range
+        self.augment: DetNetAugment | None = augment
         self._pin: bool = self.device.type == "cuda"
         self._generator: torch.Generator = torch.Generator(device=self.device)
         self._generator.manual_seed(seed)
@@ -198,8 +202,11 @@ class DetNetCache:
             return None
         moved: dict[str, Tensor] = {f.name: getattr(host, f.name).to(self.device, non_blocking=True) for f in dataclasses.fields(host)}
         pooled: Float32[Tensor, "b 1 120 160"] = scale_intensity(moved["pooled"][:, None].float() / 255.0, self._generator, *self.intensity_range)
-        return DetNetBatch(pooled=pooled, circle=moved["circle"], presence=moved["presence"], circle_mask=moved["circle_mask"],
-                           presence_mask=moved["presence_mask"], dataset=moved["dataset"])
+        batch: DetNetBatch = DetNetBatch(pooled=pooled, circle=moved["circle"], presence=moved["presence"], circle_mask=moved["circle_mask"],
+                                         presence_mask=moved["presence_mask"], dataset=moved["dataset"])
+        if self.augment is not None and self.augment.enabled:
+            batch = augment_detnet(batch, moved["points"], moved["in_front"], self.augment, self._generator)
+        return batch
 
     def next_keynet_batch(self) -> KeyNetBatch | None:
         raise RuntimeError("a DetNet cache has no KeyNet batches")
