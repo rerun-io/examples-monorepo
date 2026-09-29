@@ -362,6 +362,9 @@ class Trainer:
         if 'keynet' in self.models:
             values.update({'keynet/error_px': totals.keypoints.error_px, 'keynet/d_rel_mm': totals.keypoints.distance_mm,
                            'keynet/precision': totals.keypoints.presence.precision, 'keynet/recall': totals.keypoints.presence.recall})
+            joints: tuple[float, ...] | None = totals.keypoints.joint_error_px
+            if joints is not None:  # per landmark (LANDMARK order: 5 = wrist, 20 = palm centre); a dead channel stands out here
+                values.update({f'keynet/joint_px/{index:02d}': value for index, value in enumerate(joints)})
         record: MetricRecord = MetricRecord(self.state.step, self.state.epoch, values)
         if self.stopping:
             return record  # Partial SIGTERM validation must not select best weights.
