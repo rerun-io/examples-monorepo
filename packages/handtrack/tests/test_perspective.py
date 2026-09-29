@@ -134,3 +134,16 @@ def test_unproject_survives_a_saturated_lens() -> None:
     rays = unproject(_fisheye(), far)
     assert bool(torch.isfinite(rays).all())
     torch.testing.assert_close(project(_fisheye(), rays[None, None])[0, 0, 1], far[1], atol=1e-2, rtol=0)
+
+
+def test_grouped_sampling_matches_one_crop_at_a_time() -> None:
+    rig = _fisheye()
+    torch.manual_seed(1)
+    frames = (torch.rand(3, 480, 640) * 255).to(torch.uint8)
+    hands = torch.stack([_hand((0.05 * i - 0.1, 0.02 * i, 0.45)) for i in range(7)])
+    cameras = crop_cameras(hands, torch.ones(7, 21, dtype=torch.bool), torch.linspace(-0.5, 0.5, 7), torch.tensor([False, True] * 3 + [False]))
+    image = torch.tensor([2, 0, 2, 1, 2, 0, 1])
+    together = sample_crops(frames, image, cameras, rig)
+    alone = torch.cat([sample_crops(frames, image[i : i + 1], cameras.select(torch.tensor([i])), rig) for i in range(7)])
+    torch.testing.assert_close(together, alone, atol=1e-6, rtol=0)
+    assert float(together.std()) > 0.05 and sample_crops(frames, image[:0], cameras.select(image[:0]), rig).shape == (0, 1, 96, 96)
