@@ -182,6 +182,8 @@ class TrackerConfig:
     predicted_occlusion: bool = False
     """Our addition: a keypoint that the OTHER hand's predicted mesh covers in a view (both hands' planning poses, ray cast as
     ``labels.visibility``) gets weight 0 in the fit, whatever KeyNet says; needs no network output."""
+    tip_weight: float = 1.0
+    """Our addition for pinch: weight of the thumb tip and index fingertip keypoints in the fit (1 = as every keypoint)."""
     mask_out_of_image: bool = False
     """Our addition: a keypoint that the planning pose projects outside the camera image (or within ``image_margin_px`` of its edge)
     gets weight 0 in that view: KeyNet cannot see it and squeezes it into the visible part of a hand leaving the image."""
@@ -646,6 +648,9 @@ class Tracker:
     def _weights(self, estimate: KeypointEstimate, index: int) -> Float32[Tensor, "21"]:
         """A view's keypoint weights: 0 for an empty heatmap, times the visibility weighting when it is on."""
         weights: Float32[Tensor, "21"] = (estimate.confidence[index] >= self.config.min_keypoint_confidence).to(torch.float32)
+        if self.config.tip_weight != 1.0:
+            weights = weights.clone()
+            weights[:2] *= self.config.tip_weight  # LANDMARK 0 = thumb tip, 1 = index fingertip
         if self.config.visibility_weights == "off" or estimate.visibility is None:
             return weights
         probability: Float32[Tensor, "21"] = estimate.visibility[index].to(torch.float32)
