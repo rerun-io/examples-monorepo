@@ -263,7 +263,9 @@ ROBUST_TRACKER_CONFIG: TrackerConfig = TrackerConfig(
 the defaults alone are worse still: tuning-set p90 62.0 mm, 35.6 episodes per minute), the tuning set's p90 falls 52.1 -> 38.8 mm and
 its catastrophic episodes (> 100 mm) 36.3 -> 7.5 per minute; on HOT3D (never tuned on) p90 40.4 -> 35.6 mm and 14.2 -> 3.2 per minute;
 coverage 95.7 -> 93.8 % (HOT3D 86.6 -> 85.7 %). The damped extrapolation (gain 0.5) is the largest single part; confirm_frames 2 trades
-about one point of coverage for fewer bad first frames."""
+about one point of coverage for fewer bad first frames. Pinch trade-off: damping the finger joint angles too gives the most accurate
+unseen-set hands and the fewest false clicks, but on the full UmeTrack real test pinch-onset recall falls 0.675 -> 0.586;
+``joint_extrapolation_gain`` 0.75 (1.0) recovers it to 0.631 (0.657) at 5.4 (6.4) instead of 4.1 HOT3D false clicks per minute."""
 
 
 @dataclass(frozen=True, slots=True)
