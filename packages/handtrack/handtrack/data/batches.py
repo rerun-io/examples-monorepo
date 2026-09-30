@@ -61,6 +61,8 @@ class KeyNetBatch:
     """Per keypoint of a positive: inside the crop, not behind a hand surface and not under the border wipe."""
     visibility_mask: Bool[Tensor, "b"] | None = None
     """Crops whose ``visible`` is a label (positives from sources that carry visibility)."""
+    pinch_contact_mm: Float32[Tensor, "b"] | None = None
+    """A positive's mesh-contact pinch distance (``labels.pinch``), NaN without a label."""
     points_crop: Float32[Tensor, "b 21 2"] | None = None
     """Ground-truth keypoints in crop pixels (the pinch loss); zero for negatives."""
     d_rel_mm: Float32[Tensor, "b 21"] | None = None
