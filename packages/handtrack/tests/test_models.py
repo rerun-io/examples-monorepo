@@ -209,3 +209,23 @@ def test_heatmap_reduction_documents_paper_and_warmup_policy() -> None:
     assert 'the paper does not say' not in documentation
     assert 'squared L2 norms' in documentation
     assert 'mean' in documentation and 'optimisation policy' in documentation
+
+
+def test_keynet_visibility_head_and_loss() -> None:
+    torch.manual_seed(0)
+    model = KeyNetF(visibility_head=True, bn_eps=1e-3)
+    assert sum(p.numel() for p in model.visibility_head.parameters()) == 160 * 21 + 21
+    assert all(m.eps == 1e-3 for m in model.modules() if isinstance(m, torch.nn.BatchNorm2d))
+    output = model(torch.rand(3, 1, 96, 96), torch.zeros(3, 63))
+    assert output.visibility_logit is not None and output.visibility_logit.shape == (3, 21)
+    assert KeyNetF()(torch.rand(1, 1, 96, 96), torch.zeros(1, 63)).visibility_logit is None
+    visible = torch.zeros(3, 21, dtype=torch.bool)
+    visible[:, :10] = True
+    mask = torch.tensor([True, True, False])
+    zeros = torch.zeros(3, 21, 18, 18), torch.zeros(3, 21, 18)
+    loss = keynet_loss(output, *zeros, torch.ones(3), torch.ones(3, dtype=torch.bool), torch.ones(3, dtype=torch.bool), 1.0,
+                       visible=visible, visibility_mask=mask, visibility_weight=2.0)
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(output.visibility_logit[:2], visible[:2].float())
+    assert torch.allclose(loss.visibility, expected, atol=1e-6)
+    plain = keynet_loss(output, *zeros, torch.ones(3), torch.ones(3, dtype=torch.bool), torch.ones(3, dtype=torch.bool), 1.0)
+    assert plain.visibility is None and torch.allclose(loss.total - plain.total, 2.0 * expected, atol=1e-5)

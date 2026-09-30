@@ -32,6 +32,8 @@ class KeyNetOutput:
     """Nonnegative relative-distance heatmaps in landmark order."""
     presence_logit: Float32[Tensor, "b"]
     """Unbounded presence logit for each crop."""
+    visibility_logit: Float32[Tensor, "b 21"] | None = None
+    """Per keypoint: the logit that it is visible (inside the crop, not behind a hand surface); None without the visibility head."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +48,16 @@ class KeyNetLoss:
     """Detached 1D heatmap MSE over positive crops, in the loss's ``HeatmapReduction``."""
     presence: Float32[Tensor, ""]
     """Detached presence BCE over crops with valid presence labels."""
+    visibility: Float32[Tensor, ""] | None = None
+    """Detached per-keypoint visibility BCE over positive crops with visibility labels; None without the head."""
 
 
 class KeyNetF(nn.Module):
-    """Table 5 image/keypoint fusion network plus a 161-parameter presence head."""
+    """Table 5 image/keypoint fusion network plus a 161-parameter presence head, and optionally a 3,381-parameter per-keypoint
+    visibility head (``visibility_head``) on the same pooled features. ``bn_eps`` sets every BatchNorm's epsilon: a larger one bounds
+    how much a near-dead channel (running variance ~0) is amplified in eval mode."""
 
-    def __init__(self) -> None:
+    def __init__(self, visibility_head: bool = False, bn_eps: float = 1e-5) -> None:
         super().__init__()
         self.image: nn.Sequential = nn.Sequential(
             nn.Conv2d(1, 32, 3, 2, 1, bias=False),
@@ -92,6 +98,10 @@ class KeyNetF(nn.Module):
         )
         self.distance_head: nn.Sequential = nn.Sequential(nn.AvgPool2d(6, 6), nn.Conv2d(160, 378, 1), nn.ReLU())
         self.presence_head: nn.Linear = nn.Linear(160, 1)
+        self.visibility_head: nn.Linear | None = nn.Linear(160, 21) if visibility_head else None
+        for module in self.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.eps = bn_eps
 
     def forward(self, crop: Float32[Tensor, "b 1 96 96"], keypoints: Float32[Tensor, "b 63"]) -> KeyNetOutput:
         """Predict heatmaps and presence from a crop and prior keypoints.
@@ -108,10 +118,12 @@ class KeyNetF(nn.Module):
         image_features: Float32[Tensor, "b 64 12 12"] = self.image(crop)
         keypoint_features: Float32[Tensor, "b 32 12 12"] = rearrange(self.keypoints(keypoints), "b (c h w) -> b c h w", c=32, h=12, w=12)
         fused: Float32[Tensor, "b 160 6 6"] = self.fused(torch.cat((image_features, keypoint_features), dim=1))
+        pooled: Float32[Tensor, "b 160"] = fused.mean(dim=(2, 3))
         return KeyNetOutput(
             heatmaps=self.heatmap_head(fused),
             distance=rearrange(self.distance_head(fused), "b (joint bin) 1 1 -> b joint bin", joint=21, bin=18),
-            presence_logit=self.presence_head(fused.mean(dim=(2, 3))).squeeze(-1),
+            presence_logit=self.presence_head(pooled).squeeze(-1),
+            visibility_logit=None if self.visibility_head is None else self.visibility_head(pooled),
         )
 
 
@@ -125,6 +137,9 @@ def keynet_loss(
     presence_weight: float,
     heatmap_reduction: HeatmapReduction = "mean",
     heatmap_scale: float = 1.0,
+    visible: Bool[Tensor, "b 21"] | None = None,
+    visibility_mask: Bool[Tensor, "b"] | None = None,
+    visibility_weight: float = 0.0,
 ) -> KeyNetLoss:
     """Average each term over its valid samples, with zero for empty selections.
 
@@ -160,4 +175,10 @@ def keynet_loss(
         logits.numel(), 1
     )
     total: Float32[Tensor, ""] = heatmap_scale * (heatmap_loss + 0.05 * distance_loss) + presence_weight * presence_loss
-    return KeyNetLoss(total, heatmap_loss.detach(), distance_loss.detach(), presence_loss.detach())
+    visibility_loss: Float32[Tensor, ""] | None = None
+    if output.visibility_logit is not None and visible is not None and visibility_mask is not None:
+        chosen: Float32[Tensor, "valid 21"] = output.visibility_logit[visibility_mask]
+        visibility_loss = F.binary_cross_entropy_with_logits(chosen, visible[visibility_mask].float(), reduction="sum") / max(chosen.numel(), 1)
+        total = total + visibility_weight * visibility_loss
+    return KeyNetLoss(total, heatmap_loss.detach(), distance_loss.detach(), presence_loss.detach(),
+                      None if visibility_loss is None else visibility_loss.detach())
