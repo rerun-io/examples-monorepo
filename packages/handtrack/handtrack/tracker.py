@@ -256,7 +256,8 @@ ROBUST_TRACKER_CONFIG: TrackerConfig = TrackerConfig(
     extrapolate_min_age=2,
     extrapolation_max_step_m=0.15,
 )
-"""The 2026-09-30 overnight scorecard winner (``combo8``, keynet-3): against the defaults, the tuning set's p90 falls 52.1 -> 38.8 mm and
+"""The 2026-09-30 overnight scorecard winner (``combo8``, keynet-3): against the night's base (the defaults + ``end_on_view_rejection``;
+the defaults alone are worse still: tuning-set p90 62.0 mm, 35.6 episodes per minute), the tuning set's p90 falls 52.1 -> 38.8 mm and
 its catastrophic episodes (> 100 mm) 36.3 -> 7.5 per minute; on HOT3D (never tuned on) p90 40.4 -> 35.6 mm and 14.2 -> 3.2 per minute;
 coverage 95.7 -> 93.8 % (HOT3D 86.6 -> 85.7 %). The damped extrapolation (gain 0.5) is the largest single part; confirm_frames 2 trades
 about one point of coverage for fewer bad first frames."""
