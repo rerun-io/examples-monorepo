@@ -36,6 +36,9 @@ def test_extrapolate_gain_damps_and_the_step_clamp_bounds_the_wrist() -> None:
     clamped: HandPose = extrapolate(previous, before, max_step_m=0.005)
     torch.testing.assert_close(clamped.translation, torch.tensor([0.025, 0.0, 0.3]))
     torch.testing.assert_close(clamped.rotation, _rotation_z(0.5))  # the clamp bounds the wrist only
+    split: HandPose = extrapolate(previous, before, gain=0.5, joint_gain=1.0)
+    torch.testing.assert_close(split.translation, torch.tensor([0.03, 0.0, 0.3]))
+    torch.testing.assert_close(split.joint_angles, torch.full((22,), 0.4))  # the fingers keep the constant-velocity step
 
 
 def test_landmarks_and_mesh_match_simplecv_numpy_skinning_for_both_hands() -> None:
