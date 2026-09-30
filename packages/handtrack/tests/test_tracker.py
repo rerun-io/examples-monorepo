@@ -28,7 +28,7 @@ from handtrack.labels.keypoint_input import relative_distances
 from handtrack.models.detnet import Detections
 from handtrack.models.keynet import KeyNetF, KeyNetOutput
 from handtrack.results import BoxSource
-from handtrack.tracker import CropRequest, FrameResult, KeyNetEstimator, KeypointEstimate, Tracker, TrackerConfig
+from handtrack.tracker import ROBUST_TRACKER_CONFIG, CropRequest, FrameResult, KeyNetEstimator, KeypointEstimate, Tracker, TrackerConfig
 
 YAWS: tuple[float, ...] = (-0.9, -0.3, 0.3, 0.9)
 WRISTS: tuple[tuple[float, float, float], tuple[float, float, float]] = ((-0.3, 0.0, 0.3), (0.3, 0.0, 0.3))
@@ -417,3 +417,12 @@ def test_unsure_acquisitions_wait_longer_before_they_are_reported(acquisition_pr
     config: TrackerConfig = TrackerConfig(confirm_frames=1, confirm_frames_unsure=2, confident_presence=0.9)
     results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet, config), 4)
     assert [bool(result.tracked[Side.LEFT]) for result in results] == [frame >= first_reported for frame in range(4)]
+
+
+def test_the_robust_preset_tracks_the_fake_scene() -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, FakeKeyNet(scene), ROBUST_TRACKER_CONFIG), 6)
+    # confirm_frames 2: reported from the 3rd frame; the damped guess still converges onto the exact keypoints
+    assert [bool(result.tracked[Side.LEFT]) for result in results] == [False, False, True, True, True, True]
+    torch.testing.assert_close(results[5].landmarks[Side.LEFT], scene.landmarks[Side.LEFT], atol=2e-3, rtol=0.0)
