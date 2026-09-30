@@ -327,6 +327,9 @@ class KeyNetCache(_PinnedEpochs):
             else:
                 arrays["visible"] = torch.zeros((manifest.samples, 21), dtype=torch.bool)
                 arrays["has_visible"] = torch.zeros(manifest.samples, dtype=torch.bool)
+            contact: Path = directory / "pinch_contact_mm.npy"
+            arrays["pinch_contact_mm"] = (torch.from_numpy(np.load(contact, mmap_mode="r")) if contact.exists()
+                                          else torch.full((manifest.samples,), float("nan")))
             self.passes.append(arrays)
             if other_hand_negatives:
                 self.rows.append(None)
@@ -373,4 +376,5 @@ class KeyNetCache(_PinnedEpochs):
             visibility_mask=positive & moved["has_visible"],
             points_crop=moved["points_crop"],
             d_rel_mm=moved["d_rel_mm"],
+            pinch_contact_mm=moved["pinch_contact_mm"],
         )

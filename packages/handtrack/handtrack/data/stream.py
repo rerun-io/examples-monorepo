@@ -1154,6 +1154,7 @@ class CatalogStream:
             visibility_mask=positive,
             points_crop=samples.points_crop,
             d_rel_mm=samples.d_rel_mm,
+            pinch_contact_mm=samples.pinch_contact_mm,
             crops=crops,
             keypoints=samples.keypoints,
             heatmaps=render_heatmaps(samples.points_crop) * positive[:, None, None, None],
