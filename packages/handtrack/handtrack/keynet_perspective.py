@@ -86,6 +86,7 @@ class PerspectiveKeyNetEstimator:
             d_rel: Float32[Tensor, "n 21"] = decode_distance(output.distance.float())
             presence: Float32[Tensor, "n"] = output.presence_logit.float().sigmoid()
             visibility: Float32[Tensor, "n 21"] | None = None if output.visibility_logit is None else output.visibility_logit.float().sigmoid().cpu()
+            pinch: Float32[Tensor, "n"] | None = None if output.pinch_logit is None else output.pinch_logit.float().sigmoid().cpu()
         if self.oracle_visible is not None:
             visibility = self.oracle_visible[frame, request.camera, request.side].to(torch.float32)
         points_net: Float32[Tensor, "n 21 2"] = torch.zeros((count, 21, 2))
@@ -102,7 +103,7 @@ class PerspectiveKeyNetEstimator:
         presence_out: Float32[Tensor, "n"] = torch.where(usable, presence.cpu(), torch.zeros(count))
         confidence_out: Float32[Tensor, "n 21"] = torch.where(usable[:, None], confidence.cpu(), torch.zeros(count, 21))
         return KeypointEstimate(points_net=torch.nan_to_num(points_net), d_rel_mm=torch.nan_to_num(d_rel.cpu()), presence=presence_out,
-                                confidence=confidence_out, uses_detnet_presence=self.detnet_confirmation, visibility=visibility)
+                                confidence=confidence_out, uses_detnet_presence=self.detnet_confirmation, visibility=visibility, pinch=pinch)
 
     @staticmethod
     def _usable(cameras: CropCameras) -> bool:
