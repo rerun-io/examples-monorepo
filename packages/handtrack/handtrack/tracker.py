@@ -193,6 +193,9 @@ class TrackerConfig:
     young_frames: int = 0
     """For the first this-many frames of a track, scale the temporal weight by ``young_temporal_scale`` (a poor start is left quickly)."""
     young_temporal_scale: float = 1.0
+    detnet_all_cameras: bool = False
+    """Our change: while a hand is untracked, run DetNet on every camera (not the paper's one round-robin camera per frame), so an
+    acquisition starts from stereo. On the RK3588 NPU DetNet-F costs about 1 ms per camera."""
     confirm_frames: int = 0
     """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
     end_on_view_rejection: bool = False
@@ -412,7 +415,11 @@ class Tracker:
         return out.result()
 
     def _detect(self, frame: int, images: UInt8[Tensor, "c 480 640"], untracked: list[Side], out: "_FrameOutput") -> list[_View]:
-        """DetNet on this frame's round-robin camera; an untracked hand it reports gets an acquisition view (zero keypoint input)."""
+        """DetNet on this frame's round-robin camera; an untracked hand it reports gets an acquisition view (zero keypoint input).
+        With ``detnet_all_cameras`` DetNet runs on every camera and the hand gets a view in each camera that reports it (best first, at
+        most ``max_views``), so the acquisition fit sees the hand in stereo."""
+        if self.config.detnet_all_cameras:
+            return self._detect_all(frame, images, untracked, out)
         camera: int = self.next_detnet_camera
         self.next_detnet_camera = (camera + 1) % len(self.cameras)
         detections: Detections = self.detector(images[camera : camera + 1], frame, torch.tensor([camera]))
@@ -426,6 +433,26 @@ class Tracker:
                 out.circle[camera, side] = detections.circle[0, side]
                 out.box_source[camera, side] = int(BoxSource.DETNET)
                 views.append(_View(side, camera, detections.circle[0, side], _crop_map(detections.circle[0, side], side), torch.zeros(63)))
+        return views
+
+    def _detect_all(self, frame: int, images: UInt8[Tensor, "c 480 640"], untracked: list[Side], out: "_FrameOutput") -> list[_View]:
+        cameras: int = len(self.cameras)
+        detections: Detections = self.detector(images, frame, torch.arange(cameras))
+        out.detnet_camera = cameras  # all of them
+        out.detnet_presence = detections.probability.max(dim=0).values.clone()
+        views: list[_View] = []
+        for side in untracked:
+            found: list[int] = [
+                camera for camera in range(cameras)
+                if float(detections.probability[camera, side]) > self.config.detnet_threshold
+                and not (self.config.acquire_clear_of_other < 1.0
+                         and _circle_share(detections.circle[camera, side], out.circle[camera, 1 - side]) > self.config.acquire_clear_of_other)
+            ]
+            found.sort(key=lambda camera: -float(detections.probability[camera, side]))
+            for camera in found[: self.config.max_views]:
+                out.circle[camera, side] = detections.circle[camera, side]
+                out.box_source[camera, side] = int(BoxSource.DETNET)
+                views.append(_View(side, camera, detections.circle[camera, side], _crop_map(detections.circle[camera, side], side), torch.zeros(63)))
         return views
 
     def _keypoints_and_fit(
