@@ -359,6 +359,10 @@ def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, netwo
         track: SegmentTrack = segment_track(data, run, meta)
         directory: Path = root / mode
         npz: Path = save_track(track, directory)
+        if any(frame.visibility is not None for frame in run.frames):
+            cameras: int = len(data.letterboxes)
+            np.savez_compressed(directory / f"{info.segment_id}.visibility.npz", visibility=np.stack([
+                (frame.visibility if frame.visibility is not None else torch.full((cameras, 2, 21), torch.nan)).numpy() for frame in run.frames]).astype(np.float16))
         scored: tuple[PositionScore, list[HandScore], list[DetectionScore], list[DetectionScore]] = score_track(track, data.labels, data.letterboxes)
         metrics: SegmentMetrics = SegmentMetrics(
             segment=info.segment_id,
