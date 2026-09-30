@@ -19,6 +19,7 @@ from handtrack.geometry.camera import CameraRig, in_front, inside_image, project
 from handtrack.geometry.letterbox import Letterbox
 from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks, mesh_vertices
 from handtrack.labels.circles import enclosing_circles
+from handtrack.labels.pinch import contact_mm
 from handtrack.labels.validity import SHOW3D_CONFIDENCE_THRESHOLD, HandLabel, classify_visibility, show3d_hands, umetrack_hands
 from handtrack.labels.visibility import flesh_margin, keypoints_hidden
 
@@ -96,6 +97,23 @@ def hidden_keypoints(timeline: HandTimeline, rig: CameraRig, world_from_rig: Flo
     return torch.cat(hidden) if hidden else torch.zeros(points_cam.shape[:4], dtype=torch.bool, device=points_cam.device)
 
 
+def hand_contacts(timeline: HandTimeline, poses: tuple[HandPose, HandPose], valid: Bool[Tensor, "k 2"]) -> Float32[Tensor, "k 2"]:
+    """Mesh-contact pinch distance per frame and hand (mm; NaN without a pose), in chunks of ``VISIBILITY_ROWS``."""
+    frames: int = valid.shape[0]
+    out: Float32[Tensor, "k 2"] = torch.full((frames, 2), torch.nan)
+    for start in range(0, frames, VISIBILITY_ROWS):
+        rows: slice = slice(start, start + VISIBILITY_ROWS)
+        for side in Side:
+            mask: Bool[Tensor, "n"] = valid[rows, side]
+            if not bool(mask.any()):
+                continue
+            pose: HandPose = poses[side]
+            chosen: Int64[Tensor, "m"] = torch.nonzero(mask)[:, 0] + start
+            mesh: Float32[Tensor, "m v 3"] = mesh_vertices(timeline.hand_model, HandPose(pose.rotation[chosen], pose.translation[chosen], pose.joint_angles[chosen]), side)
+            out[chosen, side] = contact_mm(mesh, timeline.hand_model)
+    return out
+
+
 def select_pose(pose: HandPose, rows: Int64[Tensor, "k"]) -> HandPose:
     return HandPose(rotation=pose.rotation[rows], translation=pose.translation[rows], joint_angles=pose.joint_angles[rows])
 
@@ -133,6 +151,8 @@ class SegmentLabels:
     """The hand carries a usable label (UmeTrack confidence 1; SHOW3D and HOT3D confidence > 0.1 with a pose)."""
     hand_label: Int64[Tensor, "k c 2"]
     """``HandLabel`` in each image: PRESENT (>= 17 visible), PARTIAL (1-16) for labelled hands, ABSENT otherwise."""
+    contact_mm: Float32[Tensor, "k 2"] | None = None
+    """Pinch as mesh contact per hand (``labels.pinch``), mm; NaN without a pose."""
 
 
 def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence[Letterbox], rows: Int64[ndarray, "k"], pose_gated: bool) -> SegmentLabels:
@@ -146,6 +166,7 @@ def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence
     points_world: Float32[Tensor, "k 2 21 3"] = hand_landmarks(timeline, poses, has_pose)
     projection: HandProjection = project_hands(rig, letterboxes, timeline.world_from_rig[index], points_world)
     projection = replace(projection, hidden=hidden_keypoints(timeline, rig, timeline.world_from_rig[index], poses, has_pose, projection.points_cam))
+    contact: Float32[Tensor, "k 2"] = hand_contacts(timeline, poses, has_pose)
     cameras: int = len(letterboxes)
     confidence: Float32[Tensor, "k 2"] = timeline.confidence[index]
     headset_valid: Bool[Tensor, "k"] = timeline.headset_valid[index]
@@ -178,6 +199,7 @@ def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence
         image_valid=image_valid,
         labelled=labelled,
         hand_label=hand_label,
+        contact_mm=contact,
     )
 
 

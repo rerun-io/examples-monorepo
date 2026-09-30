@@ -258,6 +258,8 @@ class KeyNetSamples:
     the negative margin of the crop. Presence is then decided by left/right alone; an ablation can drop these rows."""
     visible: Bool[Tensor, "n 21"]
     """Per keypoint of a positive: inside the crop and not behind a hand surface (``labels.visibility``); False for negatives."""
+    pinch_contact_mm: Float32[Tensor, "n"]
+    """A positive's mesh-contact pinch distance (``labels.pinch``); NaN for negatives or without a label."""
 
 
 def empty_detnet_samples(capacity: int, device: torch.device) -> DetNetSamples:
@@ -288,6 +290,7 @@ def empty_keynet_samples(capacity: int, device: torch.device) -> KeyNetSamples:
         crop_from_net=torch.zeros((capacity, 3, 3), device=device),
         other_inside=torch.zeros(capacity, dtype=torch.bool, device=device),
         visible=torch.zeros((capacity, 21), dtype=torch.bool, device=device),
+        pinch_contact_mm=torch.full((capacity,), torch.nan, device=device),
     )
 
 
@@ -400,6 +403,8 @@ class ImageHands:
     valid: Bool[Tensor, "m 2"]
     hidden: Bool[Tensor, "m 2 21"] | None = None
     """Keypoints behind a hand surface (ground truth only)."""
+    contact_mm: Float32[Tensor, "m 2"] | None = None
+    """Mesh-contact pinch distance per hand (ground truth only)."""
 
 
 def image_hands(projection: HandProjection, valid: Bool[Tensor, "k 2"], rows: Int64[Tensor, "m"], camera: int) -> ImageHands:
@@ -585,6 +590,7 @@ def keynet_samples(
         other_inside=other_inside[kept],
         visible=visible_in_crop(kept_xy, (truth.in_front.reshape(-1, 21) & truth.valid.reshape(-1, 1))[slot][kept],
                                 None if truth.hidden is None else truth.hidden.reshape(-1, 21)[slot][kept], kept_positive),
+        pinch_contact_mm=_slot_contact(truth, slot[kept], kept_positive),
     )
 
 
@@ -602,6 +608,14 @@ def blank_keypoints(crops: Float32[Tensor, "b 1 96 96"], points_crop: Float32[Te
     pixel: Int64[Tensor, "b 21 2"] = points_crop.round().long().clamp(0, crops.shape[-1] - 1)
     rows: Int64[Tensor, "b 21"] = torch.arange(crops.shape[0], device=crops.device)[:, None].expand(-1, 21)
     return peak[rows, 0, pixel[..., 1], pixel[..., 0]] <= 0.0
+
+
+def _slot_contact(truth: "ImageHands", slot: Int64[Tensor, "q"], positive: Bool[Tensor, "q"]) -> Float32[Tensor, "q"]:
+    """Per kept crop: its hand's mesh-contact pinch distance (positives with a label), NaN otherwise."""
+    if truth.contact_mm is None:
+        return torch.full(slot.shape, torch.nan, device=slot.device)
+    values: Float32[Tensor, "q"] = truth.contact_mm.reshape(-1).to(slot.device)[slot]
+    return torch.where(positive, values, torch.full_like(values, torch.nan))
 
 
 def visible_in_crop(points_crop: Float32[Tensor, "q 21 2"], front: Bool[Tensor, "q 21"], hidden: Bool[Tensor, "q 21"] | None,
@@ -759,6 +773,7 @@ def perspective_keynet_samples(
         crop_from_net=local_crop_from_net(kept_cameras, camera, letterbox),
         other_inside=other_inside[kept],
         visible=visible_in_crop(kept_uv, own_front[kept], None if truth.hidden is None else truth.hidden.reshape(-1, 21)[slot][kept], kept_positive),
+        pinch_contact_mm=_slot_contact(truth, slot[kept], kept_positive),
     )
 
 
@@ -1594,6 +1609,8 @@ class CatalogStream:
             hand_label: Int64[Tensor, "m 2"] = labels.hand_label[index, camera]
             circles: Float32[Tensor, "m 2 3"] = labels.circles[index, camera]
             truth: ImageHands = image_hands(labels.projection, has_pose, index, camera)
+            if labels.contact_mm is not None:
+                truth = dataclasses.replace(truth, contact_mm=labels.contact_mm[index])
             detnet: DetNetSamples | None = None
             if self._detnet_on:
                 detnet = detnet_samples(net, hand_label, circles, truth, dataset=work.dataset_index, camera=layout.camera_offset + camera)
@@ -1654,6 +1671,7 @@ def labels_to(labels: SegmentLabels, device: torch.device) -> SegmentLabels:
         image_valid=labels.image_valid.to(device),
         labelled=labels.labelled.to(device),
         hand_label=labels.hand_label.to(device),
+        contact_mm=None if labels.contact_mm is None else labels.contact_mm.to(device),
     )
 
 
