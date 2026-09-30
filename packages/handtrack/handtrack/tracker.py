@@ -25,6 +25,7 @@ All KeyNet crops of a pass (at most four) go through one batched call. The netwo
 tests and the oracle mode can replace them; the fit and all state live on the CPU.
 """
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
@@ -38,11 +39,12 @@ from handtrack.fit.observations import MAX_VIEWS, HandObservation, ViewObservati
 from handtrack.fit.pose_fit import FitConfig, FitResult, fit_pose
 from handtrack.geometry.camera import CameraRig, in_front, inside_image, project, world_to_cameras
 from handtrack.geometry.letterbox import Letterbox
-from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks
+from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks, mesh_vertices
 from handtrack.labels.circles import enclosing_circles
 from handtrack.labels.crops import apply_affine, crop_boxes, crop_from_net, cut_crops
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.labels.keypoint_input import keypoint_input, relative_distances
+from handtrack.labels.visibility import flesh_margin, keypoints_hidden
 from handtrack.models.detnet import Detections, DetNetF, decode_detections
 from handtrack.models.keynet import KeyNetF, KeyNetOutput
 from handtrack.results import BoxSource
@@ -176,6 +178,16 @@ class TrackerConfig:
     visibility_floor: float = 0.0
     min_visible_keypoints: int = 0
     """Visibility as presence: a view with fewer keypoints of probability >= 0.5 is rejected like a low presence (0 disables)."""
+    predicted_occlusion: bool = False
+    """Our addition: a keypoint that the OTHER hand's predicted mesh covers in a view (both hands' planning poses, ray cast as
+    ``labels.visibility``) gets weight 0 in the fit, whatever KeyNet says; needs no network output."""
+    rejection_patience: int = 1
+    """With ``end_on_view_rejection``: end the track only after this many consecutive frames with a rejected view."""
+    acquire_clear_of_other: float = 1.0
+    """Skip an acquisition whose DetNet circle has more than this share of its area inside the other (tracked) hand's circle in that
+    camera (1.0 never skips): a hand under the other hand starts off the hand."""
+    confirm_frames: int = 0
+    """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
     end_on_view_rejection: bool = False
     """Our addition, off by default: end a tracked hand when KeyNet rejects some of its requested views and one view is left.
     On UmeTrack synthetic user_12/rec_09 those one-view frames averaged ~170 mm (their last view is off the hand as well)."""
@@ -227,6 +239,10 @@ class _History:
     """θ(t−2); None after the first tracked frame."""
     detnet_misses: int = 0
     """Consecutive UmeTrack frames without detector support."""
+    rejections: int = 0
+    """Consecutive frames with a rejected view (``rejection_patience``)."""
+    age: int = 0
+    """Frames this track has been fitted (``confirm_frames``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +272,24 @@ class _Projection:
 def _crop_map(circle: Float32[Tensor, "3"], side: Side) -> Float32[Tensor, "3 3"]:
     floored: Float32[Tensor, "1 3"] = torch.cat([circle[:2], circle[2:].clamp_min(MIN_BOX_RADIUS)])[None]
     return crop_from_net(crop_boxes(floored), torch.tensor([side == Side.RIGHT]))[0]
+
+
+def _circle_share(circle: Float32[Tensor, "3"], other: Float32[Tensor, "3"]) -> float:
+    """Share of ``circle``'s area inside ``other`` (0 when ``other`` is NaN): the lens area of two circles over the first's area."""
+    if not bool(torch.isfinite(other).all()) or not bool(torch.isfinite(circle).all()):
+        return 0.0
+    r1, r2 = float(circle[2]), float(other[2])
+    d: float = float((circle[:2] - other[:2]).norm())
+    if r1 <= 0:
+        return 0.0
+    if d >= r1 + r2:
+        return 0.0
+    if d <= abs(r2 - r1):
+        return 1.0 if r2 >= r1 else (r2 * r2) / (r1 * r1)
+    a1: float = r1 * r1 * math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1))
+    a2: float = r2 * r2 * math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2))
+    a3: float = 0.5 * math.sqrt(max((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2), 0.0))
+    return (a1 + a2 - a3) / (math.pi * r1 * r1)
 
 
 def _finite(pose: HandPose) -> bool:
@@ -296,6 +330,7 @@ class Tracker:
         self.config: TrackerConfig = config
         self.history: tuple[_History, _History] = (_History(), _History())
         self.next_detnet_camera: int = 0
+        self._margin: Float32[Tensor, "21"] = flesh_margin(model)
         self.timings_s: dict[str, float] = {"detnet": 0.0, "keynet": 0.0, "fit": 0.0, "tracker": 0.0}
         """Seconds per stage, summed over frames (``tracker`` is the rest: projection, circles, bookkeeping)."""
 
@@ -303,6 +338,8 @@ class Tracker:
         self.history[side].previous = None
         self.history[side].before = None
         self.history[side].detnet_misses = 0
+        self.history[side].rejections = 0
+        self.history[side].age = 0
 
     def _project(self, pose: HandPose, side: Side, world_from_rig: Float32[Tensor, "4 4"]) -> _Projection:
         points_cam: Float32[Tensor, "c 21 3"] = world_to_cameras(self.rig, world_from_rig, landmarks(self.model, pose, side))
@@ -376,6 +413,8 @@ class Tracker:
         out.detnet_presence = detections.probability[0].clone()
         views: list[_View] = []
         for side in untracked:
+            if self.config.acquire_clear_of_other < 1.0 and _circle_share(detections.circle[0, side], out.circle[camera, 1 - side]) > self.config.acquire_clear_of_other:
+                continue
             if float(detections.probability[0, side]) > self.config.detnet_threshold:
                 out.circle[camera, side] = detections.circle[0, side]
                 out.box_source[camera, side] = int(BoxSource.DETNET)
@@ -416,6 +455,9 @@ class Tracker:
             history: _History = self.history[hand.side]
             history.before = history.previous
             history.previous = result.pose
+            history.age += 1
+            if history.age <= self.config.confirm_frames:
+                continue  # tentative: tracked internally, not reported yet
             out.poses[hand.side] = result.pose
             out.observations[hand.side] = hand
             out.fit_energy[hand.side] = result.energy
@@ -465,8 +507,13 @@ class Tracker:
             good: list[int] = [index for index in mine if float(estimate.presence[index]) >= self.config.presence_threshold]
             if self.config.min_visible_keypoints and estimate.visibility is not None:
                 good = [index for index in good if int((estimate.visibility[index] >= 0.5).sum()) >= self.config.min_visible_keypoints]
-            if self.config.end_on_view_rejection and self.history[side].previous is not None and len(mine) >= 2 and len(good) == 1:
-                good = []  # the pose is slipping off the hand: a one-view fit from here is poor; DetNet re-acquires next frame
+            if self.config.end_on_view_rejection and self.history[side].previous is not None and len(mine) >= 2:
+                if len(good) == 1:
+                    self.history[side].rejections += 1
+                    if self.history[side].rejections >= self.config.rejection_patience:
+                        good = []  # the pose is slipping off the hand: a one-view fit from here is poor; DetNet re-acquires next frame
+                else:
+                    self.history[side].rejections = 0
             if detector_presence is not None:
                 confirmed: list[int] = [index for index in good if float(detector_presence[index]) > self.config.umetrack_presence_threshold]
                 history: _History = self.history[side]
@@ -491,13 +538,28 @@ class Tracker:
                         camera=self.cameras[views[index].camera],
                         world_from_rig=world_from_rig,
                         keypoints_px=self.letterboxes[views[index].camera].from_net(estimate.points_net[index]),
-                        weights=self._weights(estimate, index),
+                        weights=self._weights(estimate, index) * self._clear(views[index], poses, world_from_rig),
                         d_rel_mm=estimate.d_rel_mm[index],
                     )
                     for index in good
                 )
                 hands.append(HandObservation(side=side, views=views_seen))
         return hands, rejected
+
+    def _clear(self, view: "_View", poses: list[HandPose | None], world_from_rig: Float32[Tensor, "4 4"]) -> Float32[Tensor, "21"]:
+        """1 per keypoint, or 0 where the other hand's planning pose covers it in this view (``predicted_occlusion``)."""
+        own: HandPose | None = poses[view.side]
+        other: HandPose | None = poses[1 - view.side]
+        if not self.config.predicted_occlusion or own is None or other is None:
+            return torch.ones(21)
+        camera: CameraRig = self.cameras[view.camera]
+        points: Float32[Tensor, "1 1 21 3"] = world_to_cameras(camera, world_from_rig, landmarks(self.model, own, view.side))[:, None]
+        sides: tuple[Side, Side] = (view.side, Side(1 - view.side))
+        meshes: Float32[Tensor, "2 v 3"] = torch.stack([mesh_vertices(self.model, pose, side) for pose, side in ((own, sides[0]), (other, sides[1]))])
+        in_camera: Float32[Tensor, "1 2 v 3"] = world_to_cameras(camera, world_from_rig, meshes.reshape(-1, 3)).reshape(1, 2, -1, 3)
+        pair: Float32[Tensor, "1 2 21 3"] = torch.cat([points, torch.full_like(points, torch.nan)], dim=1)
+        hidden: Bool[Tensor, "21"] = keypoints_hidden(pair, in_camera, self.model.mesh_triangles, self._margin)[0, 0]
+        return (~hidden).to(torch.float32)
 
     def _weights(self, estimate: KeypointEstimate, index: int) -> Float32[Tensor, "21"]:
         """A view's keypoint weights: 0 for an empty heatmap, times the visibility weighting when it is on."""
