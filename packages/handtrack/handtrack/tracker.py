@@ -199,7 +199,7 @@ class TrackerConfig:
     warm_restart_frames: int = 0
     """Our addition: a hand re-acquired within this many frames of losing its track is also fitted from its last pose (no temporal
     term); the lower-energy fit of that and the neutral start wins."""
-    acquire_max_rms_px: float = math.inf
+    acquire_max_rms_px: float = 1e9
     """Reject an acquisition whose fit leaves an RMS 2D residual above this (pixels of the camera images)."""
     confirm_frames: int = 0
     """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
@@ -244,6 +244,8 @@ class FrameResult:
     """NaN when untracked."""
     observations: tuple[HandObservation | None, HandObservation | None]
     """What each fitted hand's fit saw (for the scale calibration)."""
+    visibility: Float32[Tensor, "c 2 21"] | None = None
+    """KeyNet's per-keypoint visibility per camera and hand (NaN where it did not run); None without a visibility output."""
 
 
 @dataclass(slots=True)
@@ -559,6 +561,10 @@ class Tracker:
             for index in mine:
                 out.keypoints[views[index].camera, side] = estimate.points_net[index]
                 out.presence[views[index].camera, side] = estimate.presence[index] if detector_presence is None else detector_presence[index]
+                if estimate.visibility is not None:
+                    if out.visibility is None:
+                        out.visibility = torch.full((out.presence.shape[0], 2, 21), torch.nan)
+                    out.visibility[views[index].camera, side] = estimate.visibility[index]
             good: list[int] = [index for index in mine if float(estimate.presence[index]) >= self.config.presence_threshold]
             if self.config.min_visible_keypoints and estimate.visibility is not None:
                 good = [index for index in good if int((estimate.visibility[index] >= 0.5).sum()) >= self.config.min_visible_keypoints]
@@ -743,6 +749,7 @@ class _FrameOutput:
     poses: list[HandPose | None]
     observations: list[HandObservation | None]
     detnet_camera: int = -1
+    visibility: Float32[Tensor, "c 2 21"] | None = None
 
     @staticmethod
     def empty(cameras: int) -> "_FrameOutput":
@@ -771,4 +778,5 @@ class _FrameOutput:
             detnet_presence=self.detnet_presence,
             fit_energy=self.fit_energy,
             observations=(self.observations[0], self.observations[1]),
+            visibility=self.visibility,
         )
