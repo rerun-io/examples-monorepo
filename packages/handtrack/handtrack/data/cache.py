@@ -25,7 +25,16 @@ from torch import Tensor
 
 from handtrack.data.augment import DetNetAugment, augment_detnet
 from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch
-from handtrack.data.stream import CatalogStream, DetNetSamples, KeyNetAugment, KeyNetSamples, StreamStats, sample_count, wiped_keypoints
+from handtrack.data.stream import (
+    CatalogStream,
+    DetNetSamples,
+    KeyNetAugment,
+    KeyNetSamples,
+    StreamStats,
+    blank_keypoints,
+    sample_count,
+    wiped_keypoints,
+)
 from handtrack.labels.crops import boundary_occlusion, scale_intensity
 from handtrack.labels.heatmaps import render_distance, render_heatmaps
 
@@ -360,6 +369,6 @@ class KeyNetCache(_PinnedEpochs):
             presence_mask=torch.ones_like(positive),
             kind=moved["kind"],
             dataset=moved["dataset"],
-            visible=moved["visible"] & ~wiped_keypoints(occluded, moved["points_crop"]),
+            visible=moved["visible"] & ~wiped_keypoints(occluded, moved["points_crop"]) & ~blank_keypoints((moved["crops"].float() / 255.0)[:, None], moved["points_crop"]),
             visibility_mask=positive & moved["has_visible"],
         )

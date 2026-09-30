@@ -595,6 +595,15 @@ def wiped_keypoints(occluded: Bool[Tensor, "b 96 96"], points_crop: Float32[Tens
     return occluded[rows, pixel[..., 1], pixel[..., 0]]
 
 
+def blank_keypoints(crops: Float32[Tensor, "b 1 96 96"], points_crop: Float32[Tensor, "b 21 2"]) -> Bool[Tensor, "b 21"]:
+    """Keypoints on blank crop pixels (the 3x3 around them all exactly 0): outside the camera image (a perspective crop samples black
+    there), in the fisheye's black vignette, or under the border wipe. Such a keypoint is not visible."""
+    peak: Float32[Tensor, "b 1 96 96"] = F.max_pool2d(crops, 3, stride=1, padding=1)
+    pixel: Int64[Tensor, "b 21 2"] = points_crop.round().long().clamp(0, crops.shape[-1] - 1)
+    rows: Int64[Tensor, "b 21"] = torch.arange(crops.shape[0], device=crops.device)[:, None].expand(-1, 21)
+    return peak[rows, 0, pixel[..., 1], pixel[..., 0]] <= 0.0
+
+
 def visible_in_crop(points_crop: Float32[Tensor, "q 21 2"], front: Bool[Tensor, "q 21"], hidden: Bool[Tensor, "q 21"] | None,
                     positive: Bool[Tensor, "q"]) -> Bool[Tensor, "q 21"]:
     """``KeyNetSamples.visible``: a positive's keypoints in front, inside the crop's pixel-centre extent and not behind a hand surface."""
@@ -1123,6 +1132,7 @@ class CatalogStream:
             visible: Bool[Tensor, "b 21"] = samples.visible & ~wiped_keypoints(occluded, samples.points_crop)
         else:
             visible = samples.visible
+        visible = visible & ~blank_keypoints((samples.crops.float() / 255.0)[:, None], samples.points_crop)
         positive: Bool[Tensor, "b"] = samples.kind == int(CropKind.POSITIVE)
         return KeyNetBatch(
             visible=visible,
