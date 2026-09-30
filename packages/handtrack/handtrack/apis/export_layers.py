@@ -167,7 +167,8 @@ def register_layers(config: Config, segments: list[str]) -> None:
 def _run_files(directory: Path | None, segments: tuple[str, ...]) -> dict[str, Path]:
     if directory is None:
         return {}
-    found: dict[str, Path] = {path.stem: path for path in sorted(directory.glob("*.npz"))}
+    # <segment>.visibility.npz beside a track is run_pipeline's per-view visibility/pinch sidecar, not a segment
+    found: dict[str, Path] = {path.stem: path for path in sorted(directory.glob("*.npz")) if not path.stem.endswith(".visibility")}
     return {segment: path for segment, path in found.items() if not segments or segment in segments}
 
 

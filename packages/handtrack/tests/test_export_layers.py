@@ -115,3 +115,10 @@ def test_export_rejects_missing_base_before_any_mutation(tmp_path: Path, monkeyp
     source.register.assert_not_called()
     destination.register.assert_not_called()
     destination.register_blueprint.assert_not_called()
+
+
+def test_run_files_skip_the_visibility_sidecars(tmp_path: Path) -> None:
+    for name in ("seg_a.npz", "seg_a.visibility.npz", "seg_b.npz", "seg_a.json"):
+        (tmp_path / name).write_bytes(b"")
+    assert sorted(export_layers._run_files(tmp_path, ())) == ["seg_a", "seg_b"]
+    assert list(export_layers._run_files(tmp_path, ("seg_b",))) == ["seg_b"]
