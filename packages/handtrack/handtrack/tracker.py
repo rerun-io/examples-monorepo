@@ -196,6 +196,11 @@ class TrackerConfig:
     detnet_all_cameras: bool = False
     """Our change: while a hand is untracked, run DetNet on every camera (not the paper's one round-robin camera per frame), so an
     acquisition starts from stereo. On the RK3588 NPU DetNet-F costs about 1 ms per camera."""
+    warm_restart_frames: int = 0
+    """Our addition: a hand re-acquired within this many frames of losing its track is also fitted from its last pose (no temporal
+    term); the lower-energy fit of that and the neutral start wins."""
+    acquire_max_rms_px: float = math.inf
+    """Reject an acquisition whose fit leaves an RMS 2D residual above this (pixels of the camera images)."""
     confirm_frames: int = 0
     """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
     end_on_view_rejection: bool = False
@@ -253,6 +258,9 @@ class _History:
     """Consecutive frames with a rejected view (``rejection_patience``)."""
     age: int = 0
     """Frames this track has been fitted (``confirm_frames``)."""
+    lost_pose: HandPose | None = None
+    """The pose when the track was last lost (``warm_restart_frames``)."""
+    lost_frame: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,10 +349,14 @@ class Tracker:
         self.history: tuple[_History, _History] = (_History(), _History())
         self.next_detnet_camera: int = 0
         self._margin: Float32[Tensor, "21"] = flesh_margin(model)
+        self._frame: int = 0
         self.timings_s: dict[str, float] = {"detnet": 0.0, "keynet": 0.0, "fit": 0.0, "tracker": 0.0}
         """Seconds per stage, summed over frames (``tracker`` is the rest: projection, circles, bookkeeping)."""
 
     def _drop(self, side: Side) -> None:
+        if self.history[side].previous is not None:
+            self.history[side].lost_pose = self.history[side].previous
+            self.history[side].lost_frame = self._frame
         self.history[side].previous = None
         self.history[side].before = None
         self.history[side].detnet_misses = 0
@@ -393,6 +405,7 @@ class Tracker:
              native_images: tuple[UInt8[Tensor, "h w"], ...] = ()) -> FrameResult:
         """Track frame ``frame``: its net-frame images (one per camera, any device) and the headset pose."""
         start: float = time.perf_counter()
+        self._frame = frame
         out: _FrameOutput = _FrameOutput.empty(len(self.cameras))
         spent: dict[str, float] = {"detnet": 0.0, "keynet": 0.0, "fit": 0.0}
         if bool(torch.isfinite(world_from_rig).all()):
@@ -486,6 +499,11 @@ class Tracker:
         for hand, result in zip(hands, results, strict=True):
             reach: float = float((result.pose.translation - world_from_rig[:3, 3]).norm())
             acquiring: bool = self.history[hand.side].previous is None
+            weighted: float = float(sum(float(view.weights.sum()) for view in hand.views))
+            rms: float = math.sqrt(result.e_2d / max(weighted, 1.0)) if math.isfinite(result.e_2d) else math.inf
+            if acquiring and rms > self.config.acquire_max_rms_px:
+                self._drop(hand.side)
+                continue
             if (acquiring and not result.converged) or not _finite(result.pose) or reach > self.config.max_reach_m:
                 self._drop(hand.side)
                 continue
@@ -623,6 +641,16 @@ class Tracker:
             spent["fit"] += time.perf_counter() - begin
             return [result for result in results if result is not None]
         results_all: list[FitResult] = fit_pose(self.model, self.phi, hands, [self.history[hand.side].previous for hand in hands], self.config.fit)
+        if self.config.warm_restart_frames:
+            warm: list[int] = [i for i, hand in enumerate(hands) if self.history[hand.side].previous is None and self.history[hand.side].lost_pose is not None
+                               and self._frame - self.history[hand.side].lost_frame <= self.config.warm_restart_frames]
+            if warm:
+                starts: list[HandPose | None] = [self.history[hands[i].side].lost_pose for i in warm]
+                refits: list[FitResult] = fit_pose(self.model, self.phi, [hands[i] for i in warm], starts, replace(self.config.fit, temporal_weight=0.0))
+                for i, refit in zip(warm, refits, strict=True):
+                    first: FitResult = results_all[i]
+                    if refit.converged and _finite(refit.pose) and (not math.isfinite(first.energy) or refit.e_2d + refit.e_dist < first.e_2d + first.e_dist):
+                        results_all[i] = refit
         spent["fit"] += time.perf_counter() - begin
         return results_all
 
