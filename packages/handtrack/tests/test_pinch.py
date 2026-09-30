@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from handtrack.eval.scorecard import pinch_state as scorecard_pinch_state
-from handtrack.pinch import OPEN_MM, PinchConfig, PinchDetector, pinch_signal, pinch_state
+from handtrack.pinch import OPEN_MM, PinchConfig, PinchDetector, pinch_signal, pinch_state, pinch_states
 
 NAN = float("nan")
 
@@ -54,3 +54,26 @@ def test_streaming_step_with_a_head_matches_the_batch_signal() -> None:
     detector = PinchDetector(config)
     streamed = [detector.step(float(c), float(h)).pinched for c, h in zip(contact, head, strict=True)]
     assert streamed == pinch_state(pinch_signal(contact, head, config), 14.0, 18.0, 1, config.hold).tolist() == [False, False, True, True, False, False]
+
+
+def test_veto_keeps_a_pinch_the_head_confirms_and_delays_its_click() -> None:
+    config = PinchConfig(veto_threshold=0.7, veto_window=3)
+    contact = np.array([30, 5, 5, 5, 5, 5, 30, 30], dtype=np.float32)
+    head = np.array([0.0, 0.9, 0.8, 0.9, 0.7, 0.9, 0.1, 0.1], dtype=np.float32)
+    # the machine enters on frame 2 (2 frames under 10 mm); votes on frames 2-4 (mean 0.8) -> the click is reported on frame 4
+    assert pinch_states(contact, head, config).tolist() == [False, False, False, False, True, True, True, False]
+
+
+def test_veto_drops_a_whole_pinch_the_head_rejects() -> None:
+    config = PinchConfig(veto_threshold=0.7, veto_window=3)
+    contact = np.array([30, 5, 5, 5, 5, 5, 5, 30, 30, 5, 5, 5, 5], dtype=np.float32)
+    head = np.array([0, 0.9, 0.2, 0.3, 0.4, 0.99, 0.99, 0, 0, 0.9, 0.9, 0.9, 0.9], dtype=np.float32)
+    # first pinch: votes 0.2, 0.3, 0.4 -> dropped even though the head rises later; the next pinch starts a new vote
+    assert pinch_states(contact, head, config).tolist() == [False] * 12 + [True]
+
+
+def test_veto_window_one_adds_no_latency() -> None:
+    contact = np.array([30, 5, 5, 5], dtype=np.float32)
+    head = np.array([0.0, 0.9, 0.9, 0.9], dtype=np.float32)
+    vetoed = pinch_states(contact, head, PinchConfig(veto_threshold=0.5, veto_window=1))
+    assert vetoed.tolist() == pinch_states(contact, None, PinchConfig()).tolist() == [False, False, True, True]
