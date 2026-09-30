@@ -256,6 +256,8 @@ class KeyNetSamples:
     other_inside: Bool[Tensor, "n"]
     """A negative that shows the OTHER hand: OTHER_HAND crops, and any negative with one of the other hand's keypoints within
     the negative margin of the crop. Presence is then decided by left/right alone; an ablation can drop these rows."""
+    visible: Bool[Tensor, "n 21"]
+    """Per keypoint of a positive: inside the crop and not behind a hand surface (``labels.visibility``); False for negatives."""
 
 
 def empty_detnet_samples(capacity: int, device: torch.device) -> DetNetSamples:
@@ -285,6 +287,7 @@ def empty_keynet_samples(capacity: int, device: torch.device) -> KeyNetSamples:
         dataset=torch.zeros(capacity, dtype=torch.int64, device=device),
         crop_from_net=torch.zeros((capacity, 3, 3), device=device),
         other_inside=torch.zeros(capacity, dtype=torch.bool, device=device),
+        visible=torch.zeros((capacity, 21), dtype=torch.bool, device=device),
     )
 
 
@@ -395,6 +398,8 @@ class ImageHands:
     points_cam: Float32[Tensor, "m 2 21 3"]
     in_front: Bool[Tensor, "m 2 21"]
     valid: Bool[Tensor, "m 2"]
+    hidden: Bool[Tensor, "m 2 21"] | None = None
+    """Keypoints behind a hand surface (ground truth only)."""
 
 
 def image_hands(projection: HandProjection, valid: Bool[Tensor, "k 2"], rows: Int64[Tensor, "m"], camera: int) -> ImageHands:
@@ -403,6 +408,7 @@ def image_hands(projection: HandProjection, valid: Bool[Tensor, "k 2"], rows: In
         points_cam=projection.points_cam[rows, camera],
         in_front=projection.in_front[rows, camera],
         valid=valid[rows],
+        hidden=None if projection.hidden is None else projection.hidden[rows, camera],
     )
 
 
@@ -577,7 +583,18 @@ def keynet_samples(
         dataset=torch.full_like(kept, dataset),
         crop_from_net=affine[kept],
         other_inside=other_inside[kept],
+        visible=visible_in_crop(kept_xy, (truth.in_front.reshape(-1, 21) & truth.valid.reshape(-1, 1))[slot][kept],
+                                None if truth.hidden is None else truth.hidden.reshape(-1, 21)[slot][kept], kept_positive),
     )
+
+
+def visible_in_crop(points_crop: Float32[Tensor, "q 21 2"], front: Bool[Tensor, "q 21"], hidden: Bool[Tensor, "q 21"] | None,
+                    positive: Bool[Tensor, "q"]) -> Bool[Tensor, "q 21"]:
+    """``KeyNetSamples.visible``: a positive's keypoints in front, inside the crop's pixel-centre extent and not behind a hand surface."""
+    inside: Bool[Tensor, "q 21"] = front & (points_crop >= -0.5).all(dim=-1) & (points_crop < CROP_SIZE - 0.5).all(dim=-1)
+    if hidden is not None:
+        inside = inside & ~hidden
+    return inside & positive[:, None]
 
 
 def perspective_keynet_samples(
@@ -725,6 +742,7 @@ def perspective_keynet_samples(
         dataset=torch.full_like(kept, dataset),
         crop_from_net=local_crop_from_net(kept_cameras, camera, letterbox),
         other_inside=other_inside[kept],
+        visible=visible_in_crop(kept_uv, own_front[kept], None if truth.hidden is None else truth.hidden.reshape(-1, 21)[slot][kept], kept_positive),
     )
 
 
@@ -1600,7 +1618,7 @@ class CatalogStream:
 
 
 def projection_to(projection: HandProjection, device: torch.device) -> HandProjection:
-    return HandProjection(**{f.name: getattr(projection, f.name).to(device) for f in dataclasses.fields(projection)})
+    return HandProjection(**{f.name: None if getattr(projection, f.name) is None else getattr(projection, f.name).to(device) for f in dataclasses.fields(projection)})
 
 
 def labels_to(labels: SegmentLabels, device: torch.device) -> SegmentLabels:

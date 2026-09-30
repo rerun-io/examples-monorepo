@@ -7,7 +7,7 @@ Everything here runs on the device of its inputs; the stream computes it on CPU 
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from jaxtyping import Bool, Float32, Int64
@@ -17,8 +17,9 @@ from torch import Tensor
 from handtrack.data.catalog import CatalogDataError, HandTimeline
 from handtrack.geometry.camera import CameraRig, in_front, inside_image, project, world_to_cameras
 from handtrack.geometry.letterbox import Letterbox
-from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks
+from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks, mesh_vertices
 from handtrack.labels.circles import enclosing_circles
+from handtrack.labels.visibility import flesh_margin, keypoints_hidden
 from handtrack.labels.validity import SHOW3D_CONFIDENCE_THRESHOLD, HandLabel, classify_visibility, show3d_hands, umetrack_hands
 
 STALE_TRACKER_STEPS: int = 20
@@ -38,6 +39,8 @@ class HandProjection:
     in_front: Bool[Tensor, "k c 2 21"]
     visible: Int64[Tensor, "k c 2"]
     """Keypoints in front of the camera and inside its image [0, W) x [0, H)."""
+    hidden: Bool[Tensor, "k c 2 21"] | None = None
+    """Keypoints behind a hand surface in this camera (``labels.visibility``); ground-truth projections only, None for priors."""
 
 
 def project_hands(rig: CameraRig, letterboxes: Sequence[Letterbox], world_from_rig: Float32[Tensor, "k 4 4"], points_world: Float32[Tensor, "k 2 21 3"]) -> HandProjection:
@@ -57,6 +60,40 @@ def project_hands(rig: CameraRig, letterboxes: Sequence[Letterbox], world_from_r
         in_front=front.reshape(frames, cameras, 2, 21),
         visible=inside.reshape(frames, cameras, 2, 21).sum(dim=-1),
     )
+
+
+VISIBILITY_ROWS: int = 128
+"""Timeline rows per mesh ray-casting chunk (bounds the skinned meshes held at once)."""
+
+
+def hidden_keypoints(timeline: HandTimeline, rig: CameraRig, world_from_rig: Float32[Tensor, "k 4 4"], poses: tuple[HandPose, HandPose],
+                     valid: Bool[Tensor, "k 2"], points_cam: Float32[Tensor, "k c 2 21 3"]) -> Bool[Tensor, "k c 2 21"]:
+    """``labels.visibility.keypoints_hidden`` for every camera of k frames: both hands' skinned meshes (NaN without a pose), cast
+    on the GPU when there is one, returned on the device of ``points_cam``."""
+    device: torch.device = torch.device("cuda") if torch.cuda.is_available() else points_cam.device
+    frames, cameras = points_cam.shape[:2]
+    margin: Float32[Tensor, "21"] = flesh_margin(timeline.hand_model)
+    hidden: list[Bool[Tensor, "n c 2 21"]] = []
+    for start in range(0, frames, VISIBILITY_ROWS):
+        rows: slice = slice(start, start + VISIBILITY_ROWS)
+        meshes: list[Float32[Tensor, "n v 3"]] = []
+        for side in Side:
+            pose: HandPose = poses[side]
+            mask: Bool[Tensor, "n"] = valid[rows, side]
+            safe: HandPose = HandPose(
+                rotation=torch.where(mask[:, None, None], pose.rotation[rows], torch.eye(3, dtype=pose.rotation.dtype).expand_as(pose.rotation[rows])),
+                translation=torch.where(mask[:, None], pose.translation[rows], torch.zeros_like(pose.translation[rows])),
+                joint_angles=torch.where(mask[:, None], pose.joint_angles[rows], torch.zeros_like(pose.joint_angles[rows])),
+            )
+            skinned: Float32[Tensor, "n v 3"] = mesh_vertices(timeline.hand_model, safe, side)
+            meshes.append(torch.where(mask[:, None, None], skinned, torch.full_like(skinned, torch.nan)))
+        both: Float32[Tensor, "n 2 v 3"] = torch.stack(meshes, dim=1)
+        count, vertices = both.shape[0], both.shape[2]
+        in_cameras: Float32[Tensor, "n c 2 v 3"] = world_to_cameras(rig, world_from_rig[rows], both.reshape(count, 2 * vertices, 3)).reshape(count, cameras, 2, vertices, 3)
+        views: Bool[Tensor, "q 2 21"] = keypoints_hidden(points_cam[rows].reshape(count * cameras, 2, 21, 3).to(device),
+                                                         in_cameras.reshape(count * cameras, 2, vertices, 3).to(device), timeline.hand_model.mesh_triangles, margin)
+        hidden.append(views.reshape(count, cameras, 2, 21).to(points_cam.device))
+    return torch.cat(hidden) if hidden else torch.zeros(points_cam.shape[:4], dtype=torch.bool, device=points_cam.device)
 
 
 def select_pose(pose: HandPose, rows: Int64[Tensor, "k"]) -> HandPose:
@@ -108,6 +145,7 @@ def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence
     has_pose: Bool[Tensor, "k 2"] = timeline.has_pose[index]
     points_world: Float32[Tensor, "k 2 21 3"] = hand_landmarks(timeline, poses, has_pose)
     projection: HandProjection = project_hands(rig, letterboxes, timeline.world_from_rig[index], points_world)
+    projection = replace(projection, hidden=hidden_keypoints(timeline, rig, timeline.world_from_rig[index], poses, has_pose, projection.points_cam))
     cameras: int = len(letterboxes)
     confidence: Float32[Tensor, "k 2"] = timeline.confidence[index]
     headset_valid: Bool[Tensor, "k"] = timeline.headset_valid[index]
