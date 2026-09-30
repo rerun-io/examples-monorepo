@@ -223,6 +223,10 @@ class TrackerConfig:
     """Reject an acquisition whose fit leaves an RMS 2D residual above this (pixels of the camera images)."""
     confirm_frames: int = 0
     """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
+    confirm_frames_unsure: int | None = None
+    """A new track whose KeyNet presence at acquisition (after any re-crop; the best view) is under ``confident_presence`` waits this many
+    frames instead of ``confirm_frames``. None: every track waits ``confirm_frames``."""
+    confident_presence: float = 0.9
     end_on_view_rejection: bool = False
     """Our addition, off by default: end a tracked hand when KeyNet rejects some of its requested views and one view is left.
     On UmeTrack synthetic user_12/rec_09 those one-view frames averaged ~170 mm (their last view is off the hand as well)."""
@@ -286,6 +290,8 @@ class _History:
     """Consecutive frames with a rejected view (``rejection_patience``)."""
     age: int = 0
     """Frames this track has been fitted (``confirm_frames``)."""
+    confirm: int = 0
+    """Frames this track stays tentative (``confirm_frames``, or ``confirm_frames_unsure`` after an unsure acquisition)."""
     lost_pose: HandPose | None = None
     """The pose when the track was last lost (``warm_restart_frames``)."""
     lost_frame: int = -1
@@ -549,7 +555,12 @@ class Tracker:
             history.before = history.previous
             history.previous = result.pose
             history.age += 1
-            if history.age <= self.config.confirm_frames:
+            if acquiring:
+                presence: Float32[Tensor, "c"] = out.presence[:, hand.side]
+                best: float = float(presence[torch.isfinite(presence)].max()) if bool(torch.isfinite(presence).any()) else 0.0
+                unsure: bool = self.config.confirm_frames_unsure is not None and best < self.config.confident_presence
+                history.confirm = self.config.confirm_frames_unsure if unsure and self.config.confirm_frames_unsure is not None else self.config.confirm_frames
+            if history.age <= history.confirm:
                 continue  # tentative: tracked internally, not reported yet
             out.poses[hand.side] = result.pose
             out.observations[hand.side] = hand

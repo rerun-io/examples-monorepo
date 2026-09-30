@@ -407,3 +407,13 @@ def test_stationary_acquires_and_finite_unconverged_tracking_keeps_its_pose(monk
 def test_tracker_rejects_unsupported_view_counts(max_views: int) -> None:
     with pytest.raises(ValueError, match="max_views"):
         TrackerConfig(max_views=max_views)
+
+
+@pytest.mark.parametrize(("acquisition_presence", "first_reported"), [(0.95, 1), (0.6, 2)])
+def test_unsure_acquisitions_wait_longer_before_they_are_reported(acquisition_presence: float, first_reported: int) -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+    keynet: FakeKeyNet = FakeKeyNet(scene, presence=lambda frame, camera, side: acquisition_presence if frame == 0 else 0.95)
+    config: TrackerConfig = TrackerConfig(confirm_frames=1, confirm_frames_unsure=2, confident_presence=0.9)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet, config), 4)
+    assert [bool(result.tracked[Side.LEFT]) for result in results] == [frame >= first_reported for frame in range(4)]
