@@ -24,6 +24,7 @@ from handtrack.data.catalog import HandTimeline, SegmentInfo, layout_for, read_h
 from handtrack.data.segment_labels import SegmentLabels, segment_labels
 from handtrack.hand.pose import HandPose, Side, mesh_vertices
 from handtrack.labels.validity import HandLabel
+from handtrack.pinch import pinch_state as runtime_pinch_state
 
 GOOD_MM: float = 30.0
 """A tracked frame this close to the truth counts as good."""
@@ -173,26 +174,8 @@ def _contact_mm(mesh: torch.Tensor, thumb: np.ndarray, index: np.ndarray) -> np.
 
 def pinch_state(distance: np.ndarray, enter: float = DETECT_ENTER_MM, leave: float = DETECT_EXIT_MM, frames: int = DETECT_FRAMES,
                 hold: int = HOLD_FRAMES) -> np.ndarray:
-    """The pinch state machine on a per-frame distance (NaN = untracked): enter after ``frames`` frames under ``enter``, release after
-    ``frames`` frames over ``leave``; an untracked stretch holds the state for up to ``hold`` frames, then releases."""
-    state = np.zeros(len(distance), dtype=bool)
-    on, below, above, missing = False, 0, 0, 0
-    for t, d in enumerate(distance):
-        if not np.isfinite(d):
-            missing += 1
-            if missing > hold:
-                on = False
-            below = above = 0
-        else:
-            missing = 0
-            below = below + 1 if d < enter else 0
-            above = above + 1 if d > leave else 0
-            if not on and below >= frames:
-                on = True
-            elif on and above >= frames:
-                on = False
-        state[t] = on
-    return state
+    """``handtrack.pinch.pinch_state`` with the scorecard's detector thresholds as defaults (the runtime detector and the KPI are one machine)."""
+    return runtime_pinch_state(distance, enter, leave, frames, hold)
 
 
 def _runs(mask: Bool[ndarray, "f"]) -> Int64[ndarray, "r"]:
