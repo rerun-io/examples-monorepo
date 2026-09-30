@@ -1137,6 +1137,8 @@ class CatalogStream:
         return KeyNetBatch(
             visible=visible,
             visibility_mask=positive,
+            points_crop=samples.points_crop,
+            d_rel_mm=samples.d_rel_mm,
             crops=crops,
             keypoints=samples.keypoints,
             heatmaps=render_heatmaps(samples.points_crop) * positive[:, None, None, None],

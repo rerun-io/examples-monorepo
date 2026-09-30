@@ -30,6 +30,15 @@ GOOD_MM: float = 30.0
 BAD_MM: float = 50.0
 CATASTROPHE_MM: float = 100.0
 """A run of tracked frames above this is one catastrophic episode."""
+PINCH_CLOSED_MM: float = 10.0
+"""Ground truth: thumb-tip to index-tip distance below this is a pinch (UmeTrack's epsilon_1)."""
+PINCH_OPEN_MM: float = 20.0
+"""Ground truth: above this the hand is not pinching (UmeTrack's epsilon_2); in between is ambiguous and not scored."""
+PINCH_DETECT_MM: float = 15.0
+"""Predicted pinch: the fitted thumb-tip to index-tip distance below this."""
+NEAR_PINCH_MM: float = 40.0
+"""Frames whose true fingertip distance is below this score the thumb-index distance error."""
+THUMB_TIP, INDEX_TIP = 0, 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +78,9 @@ class FrameScores:
     predicted: Float32[ndarray, "f 2 21 3"]
     """Tracked landmarks, world metres (NaN when untracked)."""
     truth: Float32[ndarray, "f 2 21 3"]
+    pinch_pred_mm: Float32[ndarray, "f 2"]
+    """Fitted thumb-tip to index-tip distance (NaN untracked)."""
+    pinch_true_mm: Float32[ndarray, "f 2"]
 
 
 def frame_scores(track: dict[str, ndarray], truth: Truth) -> FrameScores:
@@ -112,6 +124,8 @@ def frame_scores(track: dict[str, ndarray], truth: Truth) -> FrameScores:
         hidden_share=np.where(np.isfinite(least), least, np.nan).astype(np.float32),
         predicted=np.where(tracked[..., None, None], predicted, np.nan).astype(np.float32),
         truth=truth_points.astype(np.float32),
+        pinch_pred_mm=np.where(tracked, np.linalg.norm(predicted[:, :, THUMB_TIP] - predicted[:, :, INDEX_TIP], axis=-1) * 1000.0, np.nan).astype(np.float32),
+        pinch_true_mm=(np.linalg.norm(truth_points[:, :, THUMB_TIP] - truth_points[:, :, INDEX_TIP], axis=-1) * 1000.0).astype(np.float32),
     )
 
 
@@ -157,6 +171,19 @@ class ScoreRow:
     mka_truth: float | None
     hidden_error_share: float | None
     """Share of the summed error carried by frames where >= half of the hand's keypoints are hidden in every camera that shows it."""
+    pinch_tp: int = 0
+    """Scored frames with a true pinch (< 10 mm) that the fitted pose calls a pinch (< 15 mm)."""
+    pinch_fp: int = 0
+    """Scored frames with an open hand (> 20 mm) that the fitted pose calls a pinch."""
+    pinch_fn: int = 0
+    pinch_precision: float | None = None
+    pinch_recall: float | None = None
+    pinch_f1: float | None = None
+    false_pinches_per_min: float = 0.0
+    """Onsets of a predicted pinch (open -> pinch) that start while the true hand is open (> 20 mm), per minute."""
+    pinch_distance_mae: float | None = None
+    """Mean |fitted - true| thumb-index distance over scored frames with the true distance under 40 mm."""
+    near_pinch_frames: int = 0
 
 
 def _acceleration(points: Float32[ndarray, "f 21 3"], valid: Bool[ndarray, "f"]) -> Float32[ndarray, "a"]:
@@ -165,6 +192,23 @@ def _acceleration(points: Float32[ndarray, "f 21 3"], valid: Bool[ndarray, "f"])
         return np.zeros(0, dtype=np.float32)
     acc: Float32[ndarray, "g 21 3"] = points[:-2] + points[2:] - 2.0 * points[1:-1]
     return np.linalg.norm(acc[triple], axis=-1).mean(-1) * 1000.0
+
+
+def pinch_counts(predicted: Float32[ndarray, "f"], truth: Float32[ndarray, "f"], scored: Bool[ndarray, "f"], minutes: float) -> dict:
+    """The pinch KPIs of one hand: frame-level detection against the true state, false onsets, and the fingertip distance error."""
+    closed: Bool[ndarray, "f"] = scored & (truth < PINCH_CLOSED_MM)
+    opened: Bool[ndarray, "f"] = scored & (truth > PINCH_OPEN_MM)
+    called: Bool[ndarray, "f"] = scored & (np.nan_to_num(predicted, nan=np.inf) < PINCH_DETECT_MM)
+    tp, fp, fn = int((closed & called).sum()), int((opened & called).sum()), int((closed & ~called).sum())
+    onsets: Bool[ndarray, "f"] = called & ~np.r_[False, called[:-1]]
+    near: Bool[ndarray, "f"] = scored & (truth < NEAR_PINCH_MM) & np.isfinite(predicted)
+    return {
+        "pinch_tp": tp, "pinch_fp": fp, "pinch_fn": fn,
+        "pinch_precision": tp / (tp + fp) if tp + fp else None, "pinch_recall": tp / (tp + fn) if tp + fn else None,
+        "pinch_f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None,
+        "false_pinches_per_min": float((onsets & opened).sum()) / max(minutes, 1e-9),
+        "pinch_distance_mae": float(np.abs(predicted[near] - truth[near]).mean()) if near.any() else None, "near_pinch_frames": int(near.sum()),
+    }
 
 
 def score_hand(scores: FrameScores, side: int, dataset: str, segment: str, fps: float) -> ScoreRow:
@@ -185,6 +229,7 @@ def score_hand(scores: FrameScores, side: int, dataset: str, segment: str, fps: 
     acc_truth = _acceleration(scores.truth[:, side], scored)
     empty: bool = not len(values)
     return ScoreRow(
+        **pinch_counts(scores.pinch_pred_mm[:, side], scores.pinch_true_mm[:, side], scored, minutes),
         dataset=dataset, segment=segment, hand=("left", "right")[side], minutes=minutes,
         required_frames=int(required.sum()), scored_frames=int(scored.sum()),
         coverage=float((required & tracked).sum() / max(required.sum(), 1)),
@@ -228,4 +273,10 @@ def pool(rows: list[ScoreRow], frames: list[tuple[Float32[ndarray, "s"], Float32
         mpvpe=None if empty else float(vertex.mean()), mpvpe_p90=None if empty else float(np.percentile(vertex, 90)),
         mka=weighted("mka", "scored_frames"), mka_truth=weighted("mka_truth", "scored_frames"),
         hidden_error_share=weighted("hidden_error_share", "scored_frames"),
+        pinch_tp=sum(r.pinch_tp for r in rows), pinch_fp=sum(r.pinch_fp for r in rows), pinch_fn=sum(r.pinch_fn for r in rows),
+        pinch_precision=(sum(r.pinch_tp for r in rows)) / (sum(r.pinch_tp for r in rows) + sum(r.pinch_fp for r in rows)) if sum(r.pinch_tp for r in rows) + sum(r.pinch_fp for r in rows) else None,
+        pinch_recall=(sum(r.pinch_tp for r in rows)) / (sum(r.pinch_tp for r in rows) + sum(r.pinch_fn for r in rows)) if sum(r.pinch_tp for r in rows) + sum(r.pinch_fn for r in rows) else None,
+        pinch_f1=2 * (sum(r.pinch_tp for r in rows)) / (2 * sum(r.pinch_tp for r in rows) + sum(r.pinch_fp for r in rows) + sum(r.pinch_fn for r in rows)) if sum(r.pinch_tp for r in rows) + sum(r.pinch_fp for r in rows) + sum(r.pinch_fn for r in rows) else None,
+        false_pinches_per_min=sum(r.false_pinches_per_min * r.minutes for r in rows) / max(minutes, 1e-9),
+        pinch_distance_mae=weighted("pinch_distance_mae", "near_pinch_frames"), near_pinch_frames=sum(r.near_pinch_frames for r in rows),
     )

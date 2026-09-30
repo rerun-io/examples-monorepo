@@ -90,6 +90,8 @@ class LoopSettings:
     """Give KeyNet-F the per-keypoint visibility head (``KeyNetF(visibility_head=True)``)."""
     visibility_weight: float = 1.0
     """Multiplier for the visibility BCE (positives whose source carries visibility labels)."""
+    pinch_weight: float = 0.0
+    """Multiplier for the pinch-relation loss (``models.keynet.pinch_loss``), scaled with the heatmap ramp."""
     keynet_bn_eps: float = 1e-5
     """KeyNet-F BatchNorm epsilon (1e-3 bounds the eval-mode amplification of near-dead channels)."""
     detnet_circle_weight: float = 100.0
@@ -284,7 +286,9 @@ class Trainer:
                            batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction, heatmap_scale=scale,
                            visible=None if batch.visible is None else batch.visible.to(self.device),
                            visibility_mask=None if batch.visibility_mask is None else batch.visibility_mask.to(self.device),
-                           visibility_weight=self.cadence.visibility_weight)
+                           visibility_weight=self.cadence.visibility_weight,
+                           points_crop=None if batch.points_crop is None else batch.points_crop.to(self.device),
+                           d_rel_mm=None if batch.d_rel_mm is None else batch.d_rel_mm.to(self.device), pinch_weight=self.cadence.pinch_weight)
 
     def train_batch(self, batch: DetNetBatch | KeyNetBatch) -> None:
         """Apply one SGD step and retain detached scalar loss terms."""
@@ -302,6 +306,8 @@ class Trainer:
             terms: dict[str, float] = {'total': float(key_loss.total.detach()), 'heatmap': float(key_loss.heatmap), 'distance': float(key_loss.distance), 'presence': float(key_loss.presence)}
             if key_loss.visibility is not None:
                 terms['visibility'] = float(key_loss.visibility)
+            if key_loss.pinch is not None:
+                terms['pinch'] = float(key_loss.pinch)
             count = batch.crops.shape[0]
         if not math.isfinite(terms['total']):
             raise ValueError(f'Nonfinite {name} training loss at step {self.state.step}')
