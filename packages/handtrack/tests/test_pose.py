@@ -23,6 +23,21 @@ def test_extrapolate_is_constant_velocity() -> None:
     torch.testing.assert_close(guess.joint_angles, torch.full((22,), 0.4))
 
 
+def test_extrapolate_gain_damps_and_the_step_clamp_bounds_the_wrist() -> None:
+    before: HandPose = HandPose(_rotation_z(0.1), torch.tensor([0.0, 0.0, 0.3]), torch.zeros(22))
+    previous: HandPose = HandPose(_rotation_z(0.3), torch.tensor([0.02, 0.0, 0.3]), torch.full((22,), 0.2))
+    half: HandPose = extrapolate(previous, before, gain=0.5)
+    torch.testing.assert_close(half.rotation, _rotation_z(0.4), atol=2e-3, rtol=0.0)  # 0.1 rad of the 0.2 rad step, to first order
+    torch.testing.assert_close(torch.linalg.det(half.rotation), torch.tensor(1.0))
+    torch.testing.assert_close(half.rotation @ half.rotation.T, torch.eye(3), atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(half.translation, torch.tensor([0.03, 0.0, 0.3]))
+    torch.testing.assert_close(half.joint_angles, torch.full((22,), 0.3))
+    torch.testing.assert_close(extrapolate(previous, before, gain=0.0).rotation, previous.rotation)
+    clamped: HandPose = extrapolate(previous, before, max_step_m=0.005)
+    torch.testing.assert_close(clamped.translation, torch.tensor([0.025, 0.0, 0.3]))
+    torch.testing.assert_close(clamped.rotation, _rotation_z(0.5))  # the clamp bounds the wrist only
+
+
 def test_landmarks_and_mesh_match_simplecv_numpy_skinning_for_both_hands() -> None:
     model: HandModelTorch = generic_hand_model()
     numpy_model: HandModelNumpy = from_json(HandModelNumpy, GENERIC_HAND_MODEL.read_text())

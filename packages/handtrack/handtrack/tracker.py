@@ -157,6 +157,13 @@ class TrackerConfig:
     """KeyNet views per tracked hand (§5.1: at most two)."""
     extrapolate: bool = True
     """Boxes and keypoint input from θ̂ = 2θ(t−1) − θ(t−2) (§3.3); False uses θ(t−1) as it is (a diagnostic, not the paper)."""
+    extrapolation_gain: float = 1.0
+    """θ̂ = θ(t−1) + gain·(θ(t−1) − θ(t−2)): 1 is the paper's constant velocity; below 1 damps the overshoot after a corrected frame."""
+    extrapolate_min_age: int = 0
+    """Plan from θ(t−1) until the track has been fitted more than this many frames (a young track's velocity is mostly the correction
+    of a poor first fit)."""
+    extrapolation_max_step_m: float | None = None
+    """Clamp θ̂'s wrist step to this length (metres per frame); None: no clamp."""
     refine_shift: float | None = None
     """Our addition, off by default: re-cut a hand's crops around its fitted pose and run KeyNet and the fit again when the
     pose's circle moved by more than this many crop radii in one of its views."""
@@ -412,7 +419,8 @@ class Tracker:
         """Boxes from θ̂ in every camera that sees it, and the KeyNet views; drops a hand that no camera sees."""
         history: _History = self.history[side]
         assert history.previous is not None
-        guess: HandPose = history.previous if history.before is None or not self.config.extrapolate else extrapolate(history.previous, history.before)
+        guess: HandPose = (history.previous if history.before is None or not self.config.extrapolate or history.age <= self.config.extrapolate_min_age
+                           else extrapolate(history.previous, history.before, self.config.extrapolation_gain, self.config.extrapolation_max_step_m))
         projection: _Projection = self._project(guess, side, world_from_rig)
         seen: Bool[Tensor, "c"] = projection.inside > 0
         out.circle[seen, side] = projection.circles[seen]

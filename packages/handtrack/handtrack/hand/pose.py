@@ -49,13 +49,24 @@ class HandPose:
         return transform
 
 
-def extrapolate(previous: HandPose, before_previous: HandPose) -> HandPose:
-    """Constant-velocity guess θ̂ = 2θ(t−1) − θ(t−2), with the rotation extrapolated on SO(3): R̂ = R(t−1)·R(t−2)ᵀ·R(t−1)."""
-    rotation: Float32[Tensor, "*batch 3 3"] = previous.rotation @ before_previous.rotation.transpose(-1, -2) @ previous.rotation
+def extrapolate(previous: HandPose, before_previous: HandPose, gain: float = 1.0, max_step_m: float | None = None) -> HandPose:
+    """θ̂ = θ(t−1) + gain·(θ(t−1) − θ(t−2)); gain 1 is the constant-velocity guess 2θ(t−1) − θ(t−2), with the rotation extrapolated
+    on SO(3): R̂ = D·R(t−1), D = R(t−1)·R(t−2)ᵀ. Another gain scales D towards the identity (I + gain·(D − I), projected back onto
+    SO(3); exact to first order in the per-frame rotation). ``max_step_m`` clamps the length of the wrist's translation step."""
+    delta: Float32[Tensor, "*batch 3 3"] = previous.rotation @ before_previous.rotation.transpose(-1, -2)
+    if gain != 1.0:
+        eye: Float32[Tensor, "3 3"] = torch.eye(3, dtype=delta.dtype, device=delta.device)
+        u, _, vt = torch.linalg.svd(eye + gain * (delta - eye))
+        flip: Float32[Tensor, "*batch 3"] = torch.ones_like(delta[..., 0])
+        flip[..., -1] = torch.linalg.det(u @ vt)
+        delta = (u * flip[..., None, :]) @ vt
+    step: Float32[Tensor, "*batch 3"] = gain * (previous.translation - before_previous.translation)
+    if max_step_m is not None:
+        step = step * torch.clamp(max_step_m / step.norm(dim=-1, keepdim=True).clamp_min(1e-9), max=1.0)
     return HandPose(
-        rotation=rotation,
-        translation=2 * previous.translation - before_previous.translation,
-        joint_angles=2 * previous.joint_angles - before_previous.joint_angles,
+        rotation=delta @ previous.rotation,
+        translation=previous.translation + step,
+        joint_angles=previous.joint_angles + gain * (previous.joint_angles - before_previous.joint_angles),
     )
 
 
