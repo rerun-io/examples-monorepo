@@ -53,6 +53,9 @@ def pinch_state(distance: np.ndarray, enter: float = 10.0, leave: float = 16.0, 
     return np.array([detector.update(float(d)) for d in distance], dtype=bool)
 
 
+DEFAULT_PINCH_CONFIG: PinchConfig = PinchConfig()
+
+
 @dataclass(frozen=True, slots=True)
 class PinchEvent:
     pinched: bool
@@ -64,7 +67,7 @@ class PinchEvent:
 class PinchDetector:
     """``pinch_state`` one frame at a time, for a live consumer."""
 
-    def __init__(self, config: PinchConfig = PinchConfig()) -> None:
+    def __init__(self, config: PinchConfig = DEFAULT_PINCH_CONFIG) -> None:
         self.config: PinchConfig = config
         self.on: bool = False
         self._below: int = 0
