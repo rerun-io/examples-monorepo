@@ -29,6 +29,10 @@ def test_other_hand_hides_and_missing_hands_hide_nothing() -> None:
     margin = torch.full((21,), 0.01)
     hidden = keypoints_hidden(points, vertices, faces, margin)
     assert hidden[0, 0].all() and not hidden[0, 1].any()  # the right hand has no keypoints: no statement
+    # its own mesh in front hides it only with self_occlusion
+    swapped = vertices[:, [1, 0]]
+    assert not keypoints_hidden(points, swapped, faces, margin).any()
+    assert keypoints_hidden(points, swapped, faces, margin, self_occlusion=True)[0, 0].all()
     vertices[0, 1, :, 2] = 0.5 - OTHER_HAND_MARGIN_M / 2  # touching: closer than the margin
     assert not keypoints_hidden(points, vertices, faces, margin).any()
     vertices[0, 1] = float("nan")

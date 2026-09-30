@@ -1,9 +1,12 @@
-"""Per-keypoint visibility from the ground-truth hand meshes: is a keypoint hidden behind a hand surface in a camera?
+"""Per-keypoint visibility from the ground-truth hand meshes: is a keypoint hidden behind the OTHER hand in a camera?
 
-A keypoint is seen along the ray from the camera centre to it. It is hidden when a triangle of the OTHER hand's mesh crosses
-that ray more than ``OTHER_HAND_MARGIN_M`` in front of it, or a triangle of its OWN hand crosses it more than the keypoint's
-flesh margin in front of it (a finger or the palm in front: self-occlusion). The flesh margin lets the ray pass the flesh
-around the keypoint itself: twice the landmark's distance to the nearest mesh vertex at rest, plus ``FLESH_SLACK_M``.
+A keypoint is seen along the ray from the camera centre to it. It is hidden when a triangle of the other hand's mesh crosses that
+ray more than ``OTHER_HAND_MARGIN_M`` in front of it. This is the failure the tracker needs to know about: under the other hand,
+KeyNet's keypoints slide onto that hand. Self-occlusion (the hand's own fingers or palm in front) is optional (``self_occlusion``)
+and off for the labels: on 2026-09-29 the strict rule marked fingertips hidden in 94-99 % of a two-hand clip's frames and the palm
+centre always (the landmarks sit on or under the skin), while KeyNet predicts self-occluded keypoints well from its prior. With it
+on, the own hand hides a keypoint when it crosses the ray more than the keypoint's flesh margin in front (twice the rest distance to
+the nearest mesh vertex, plus ``FLESH_SLACK_M``).
 
 Visibility depends on the camera only, not on a crop: a perspective crop camera shares the camera's centre, so it sees the
 keypoint along the same ray. Objects are not modelled (UmeTrack has none; SHOW3D's and HOT3D's objects can still hide a
@@ -59,9 +62,10 @@ def keypoints_hidden(
     faces: Int64[Tensor, "f 3"],
     margin: Float32[Tensor, "21"],
     chunk: int = 64,
+    self_occlusion: bool = False,
 ) -> Bool[Tensor, "b 2 21"]:
-    """Both hands' keypoints hidden by either hand's mesh, per camera view b. NaN hands (no pose) hide nothing and are hidden
-    nowhere (their keypoints come back False: no statement)."""
+    """Both hands' keypoints hidden by the other hand's mesh (and, with ``self_occlusion``, by their own), per camera view b. NaN
+    hands (no pose) hide nothing and are hidden nowhere (their keypoints come back False: no statement)."""
     device: torch.device = points_cam.device
     faces = faces.to(device)
     margin = margin.to(device)
@@ -74,7 +78,8 @@ def keypoints_hidden(
         safe_points: Float32[Tensor, "n 2 21 3"] = torch.nan_to_num(points, nan=1.0)
         distance: Float32[Tensor, "n 2 21"] = safe_points.norm(dim=-1)
         for side in (0, 1):
-            own: Bool[Tensor, "n 21"] = ray_blocked(safe_points[:, side], distance[:, side] - margin, triangles[:, side])
             other: Bool[Tensor, "n 21"] = ray_blocked(safe_points[:, side], distance[:, side] - OTHER_HAND_MARGIN_M, triangles[:, 1 - side])
-            hidden[start : start + chunk, side] = (own | other) & valid_points[:, side]
+            if self_occlusion:
+                other = other | ray_blocked(safe_points[:, side], distance[:, side] - margin, triangles[:, side])
+            hidden[start : start + chunk, side] = other & valid_points[:, side]
     return hidden
