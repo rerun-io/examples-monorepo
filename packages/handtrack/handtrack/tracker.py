@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, runtime_checkable
 
+import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Int8, Int64, UInt8
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
@@ -190,6 +191,10 @@ class TrackerConfig:
     acquire_clear_of_other: float = 1.0
     """Skip an acquisition whose DetNet circle has more than this share of its area inside the other (tracked) hand's circle in that
     camera (1.0 never skips): a hand under the other hand starts off the hand."""
+    acquire_recrop: int = 0
+    """Our addition: before an acquisition's fit, this many passes that run KeyNet on the acquisition crop and re-cut it around the
+    enclosing circle of KeyNet's own keypoints (as MediaPipe re-crops from landmarks). On unseen HOT3D DetNet's circles were 2.8x too
+    large (median IoU 0 with the hand), so the first crop showed a tiny hand and the first fit was 170 mm off."""
     acquire_refine: int = 0
     """Our addition: after an acquisition's first fit (one DetNet view, zero prior), this many same-frame passes that cut crops around the
     fitted pose in its best cameras (at most ``max_views``, prior = the fit), run KeyNet and refit from the first fit without the temporal
@@ -485,6 +490,9 @@ class Tracker:
         native_images: tuple[UInt8[Tensor, "h w"], ...],
     ) -> None:
         """KeyNet on every view in one call, the presence rules, one batched fit of the hands that remain, and (optionally) one refinement pass."""
+        if self.config.acquire_recrop:
+            for _ in range(self.config.acquire_recrop):
+                views = self._recrop_acquisitions(frame, images, world_from_rig, views, spent, native_images)
         observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, views, out, spent, native_images)
         for side in observed[1]:
             self._drop(side)
@@ -672,6 +680,27 @@ class Tracker:
                         results_all[i] = refit
         spent["fit"] += time.perf_counter() - begin
         return results_all
+
+    def _recrop_acquisitions(self, frame: int, images: UInt8[Tensor, "c 480 640"], world_from_rig: Float32[Tensor, "4 4"], views: list["_View"],
+                             spent: dict[str, float], native_images: tuple[UInt8[Tensor, "h w"], ...]) -> list["_View"]:
+        """One ``acquire_recrop`` pass: acquisition views (no planning pose) whose KeyNet presence passes get a new circle, the enclosing
+        circle of KeyNet's keypoints in the net frame; tracked views are unchanged."""
+        fresh: list[int] = [index for index, view in enumerate(views) if view.pose is None]
+        if not fresh:
+            return views
+        scratch: _FrameOutput = _FrameOutput.empty(len(self.cameras))
+        self._observe(frame, images, world_from_rig, [views[index] for index in fresh], scratch, spent, native_images)
+        updated: list[_View] = list(views)
+        for index in fresh:
+            view: _View = views[index]
+            presence: float = float(scratch.presence[view.camera, view.side])
+            points: Float32[Tensor, "21 2"] = scratch.keypoints[view.camera, view.side]
+            if not math.isfinite(presence) or presence < self.config.presence_threshold or not bool(torch.isfinite(points).all()):
+                continue
+            circle: Float32[Tensor, "3"] = torch.from_numpy(enclosing_circles(points.numpy()[None], np.ones((1, 21), dtype=bool)))[0]
+            if bool(torch.isfinite(circle).all()):
+                updated[index] = _View(view.side, view.camera, circle, _crop_map(circle, view.side), torch.zeros(63))
+        return updated
 
     def _refine_acquisitions(self, frame: int, images: UInt8[Tensor, "c 480 640"], world_from_rig: Float32[Tensor, "4 4"], hands: list[HandObservation],
                              results: list[FitResult], out: "_FrameOutput", spent: dict[str, float],
