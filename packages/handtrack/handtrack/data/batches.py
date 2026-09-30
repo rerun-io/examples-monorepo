@@ -57,6 +57,10 @@ class KeyNetBatch:
     kind: Int64[Tensor, "b"]
     """``CropKind`` per crop."""
     dataset: Int64[Tensor, "b"]
+    visible: Bool[Tensor, "b 21"] | None = None
+    """Per keypoint of a positive: inside the crop, not behind a hand surface and not under the border wipe."""
+    visibility_mask: Bool[Tensor, "b"] | None = None
+    """Crops whose ``visible`` is a label (positives from sources that carry visibility)."""
 
 
 @runtime_checkable

@@ -19,8 +19,8 @@ from handtrack.geometry.camera import CameraRig, in_front, inside_image, project
 from handtrack.geometry.letterbox import Letterbox
 from handtrack.hand.pose import HandPose, Side, extrapolate, landmarks, mesh_vertices
 from handtrack.labels.circles import enclosing_circles
-from handtrack.labels.visibility import flesh_margin, keypoints_hidden
 from handtrack.labels.validity import SHOW3D_CONFIDENCE_THRESHOLD, HandLabel, classify_visibility, show3d_hands, umetrack_hands
+from handtrack.labels.visibility import flesh_margin, keypoints_hidden
 
 STALE_TRACKER_STEPS: int = 20
 """KeyNet's alternative keypoint input: the ground-truth pose this many tracker steps earlier (the paper's 20 frames)."""

@@ -86,6 +86,12 @@ class LoopSettings:
     set to the environment's ptxas on sm_120."""
     presence_weight: float = 1.0
     """Chosen multiplier for the added KeyNet presence BCE."""
+    keynet_visibility_head: bool = False
+    """Give KeyNet-F the per-keypoint visibility head (``KeyNetF(visibility_head=True)``)."""
+    visibility_weight: float = 1.0
+    """Multiplier for the visibility BCE (positives whose source carries visibility labels)."""
+    keynet_bn_eps: float = 1e-5
+    """KeyNet-F BatchNorm epsilon (1e-3 bounds the eval-mode amplification of near-dead channels)."""
     detnet_circle_weight: float = 100.0
     """Multiplier for DetNet's circle MSE in normalized units (cx/640, cy/480, r/640). The paper's L = MSE + 100 BCE (circle
     weight 1) leaves the circle 0.4 % of the loss at these units: after 150 k steps it stalls near 50 px while presence trains.
@@ -153,6 +159,8 @@ class ValidationTotals:
     detections: DetectionMetrics = field(default_factory=lambda: DetectionMetrics(Counts(), {}))
     """DetNet counts, global and per camera and hand."""
     keypoints: KeypointMetrics = field(default_factory=lambda: KeypointMetrics(0.0, 0.0, 0, Counts()))
+    visibility: list[int] = field(default_factory=lambda: [0, 0, 0, 0, 0])
+    """Visibility head counts over labelled keypoints: hidden true positives, false positives, false negatives, correct, all."""
     """KeyNet error sums and presence counts."""
 
 
@@ -178,7 +186,7 @@ class Trainer:
         if nets in ('detnet', 'both'):
             self.models['detnet'] = DetNetF().to(self.device)
         if nets in ('keynet', 'both'):
-            self.models['keynet'] = KeyNetF().to(self.device)
+            self.models['keynet'] = KeyNetF(visibility_head=cadence.keynet_visibility_head, bn_eps=cadence.keynet_bn_eps).to(self.device)
         if cadence.channels_last:
             for model in self.models.values():
                 model.to(memory_format=torch.channels_last)  # pyrefly: ignore[no-matching-overload]  (the stubs omit memory_format)
@@ -257,7 +265,8 @@ class Trainer:
         assert isinstance(model, KeyNetF)
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.cadence.bf16):
             output: KeyNetOutput = model(self.layout(batch.crops.to(self.device)), batch.keypoints.to(self.device))
-        return KeyNetOutput(output.heatmaps.float(), output.distance.float(), output.presence_logit.float())
+        return KeyNetOutput(output.heatmaps.float(), output.distance.float(), output.presence_logit.float(),
+                            None if output.visibility_logit is None else output.visibility_logit.float())
 
     def detnet_objective(self, batch: DetNetBatch, output: DetNetOutput) -> DetNetLoss:
         return detnet_loss(output, batch.circle.to(self.device), batch.presence.to(self.device), batch.presence_mask.to(self.device), batch.circle_mask.to(self.device),
@@ -272,7 +281,10 @@ class Trainer:
             progress: float = (self.state.step - self.cadence.heatmap_warmup_steps) / ramp
             scale = float(HEATMAP_PIXELS ** (progress - 1.0))  # 1/324 (the 'mean' scale) at the switch, 1 at the end
         return keynet_loss(output, batch.heatmaps.to(self.device), batch.distance.to(self.device), batch.presence.to(self.device), batch.positive.to(self.device),
-                           batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction, heatmap_scale=scale)
+                           batch.presence_mask.to(self.device), self.cadence.presence_weight, reduction, heatmap_scale=scale,
+                           visible=None if batch.visible is None else batch.visible.to(self.device),
+                           visibility_mask=None if batch.visibility_mask is None else batch.visibility_mask.to(self.device),
+                           visibility_weight=self.cadence.visibility_weight)
 
     def train_batch(self, batch: DetNetBatch | KeyNetBatch) -> None:
         """Apply one SGD step and retain detached scalar loss terms."""
@@ -288,6 +300,8 @@ class Trainer:
             key_loss: KeyNetLoss = self.keynet_objective(batch, self.forward_keynet(batch))
             loss = key_loss
             terms: dict[str, float] = {'total': float(key_loss.total.detach()), 'heatmap': float(key_loss.heatmap), 'distance': float(key_loss.distance), 'presence': float(key_loss.presence)}
+            if key_loss.visibility is not None:
+                terms['visibility'] = float(key_loss.visibility)
             count = batch.crops.shape[0]
         if not math.isfinite(terms['total']):
             raise ValueError(f'Nonfinite {name} training loss at step {self.state.step}')
@@ -362,6 +376,12 @@ class Trainer:
                         else:  # Presence needs no metadata; the geometric scores stay unscored.
                             key_result = KeypointMetrics(0.0, 0.0, 0, presence_counts(probability, presence, presence_mask))
                         totals.keypoints = totals.keypoints + key_result
+                        if key_output.visibility_logit is not None and batch.visible is not None and batch.visibility_mask is not None:
+                            chosen: Bool[Tensor, "b"] = batch.visibility_mask.to(self.device)
+                            predicted: Bool[Tensor, "v 21"] = key_output.visibility_logit[chosen] >= 0.0
+                            truth: Bool[Tensor, "v 21"] = batch.visible.to(self.device)[chosen]
+                            for index, value in enumerate(((~predicted & ~truth).sum(), (~predicted & truth).sum(), (predicted & ~truth).sum(), (predicted == truth).sum(), truth.numel())):
+                                totals.visibility[index] += int(value)
                     if not torch.isfinite(loss.total):
                         raise ValueError(f'Nonfinite {name} validation loss')
                     totals.losses[name] = totals.losses.get(name, 0.0) + float(loss.total) * count
@@ -379,6 +399,10 @@ class Trainer:
         if 'keynet' in self.models:
             values.update({'keynet/error_px': totals.keypoints.error_px, 'keynet/d_rel_mm': totals.keypoints.distance_mm,
                            'keynet/precision': totals.keypoints.presence.precision, 'keynet/recall': totals.keypoints.presence.recall})
+            tp, fp, fn, correct, seen = totals.visibility
+            if seen:  # 'hidden' is the positive class: finding hidden keypoints is what the fit needs
+                values.update({'keynet/visibility_acc': correct / seen, 'keynet/hidden_precision': tp / max(tp + fp, 1), 'keynet/hidden_recall': tp / max(tp + fn, 1),
+                               'keynet/hidden_f1': 2 * tp / max(2 * tp + fp + fn, 1)})
             joints: tuple[float, ...] | None = totals.keypoints.joint_error_px
             if joints is not None:  # per landmark (LANDMARK order: 5 = wrist, 20 = palm centre); a dead channel stands out here
                 values.update({f'keynet/joint_px/{index:02d}': value for index, value in enumerate(joints)})

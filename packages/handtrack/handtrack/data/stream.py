@@ -588,6 +588,13 @@ def keynet_samples(
     )
 
 
+def wiped_keypoints(occluded: Bool[Tensor, "b 96 96"], points_crop: Float32[Tensor, "b 21 2"]) -> Bool[Tensor, "b 21"]:
+    """Keypoints whose crop pixel the border wipe blanked (they are then not visible)."""
+    pixel: Int64[Tensor, "b 21 2"] = points_crop.round().long().clamp(0, occluded.shape[-1] - 1)
+    rows: Int64[Tensor, "b 21"] = torch.arange(occluded.shape[0], device=occluded.device)[:, None].expand(-1, 21)
+    return occluded[rows, pixel[..., 1], pixel[..., 0]]
+
+
 def visible_in_crop(points_crop: Float32[Tensor, "q 21 2"], front: Bool[Tensor, "q 21"], hidden: Bool[Tensor, "q 21"] | None,
                     positive: Bool[Tensor, "q"]) -> Bool[Tensor, "q 21"]:
     """``KeyNetSamples.visible``: a positive's keypoints in front, inside the crop's pixel-centre extent and not behind a hand surface."""
@@ -1113,8 +1120,13 @@ class CatalogStream:
                 sample_count(samples), self._generator, self.device, augment.occlusion_probability, augment.occlusion_max_fraction
             )
             crops = scale_intensity(crops.masked_fill(occluded[:, None], 0.0), self._generator, *augment.intensity_range)
+            visible: Bool[Tensor, "b 21"] = samples.visible & ~wiped_keypoints(occluded, samples.points_crop)
+        else:
+            visible = samples.visible
         positive: Bool[Tensor, "b"] = samples.kind == int(CropKind.POSITIVE)
         return KeyNetBatch(
+            visible=visible,
+            visibility_mask=positive,
             crops=crops,
             keypoints=samples.keypoints,
             heatmaps=render_heatmaps(samples.points_crop) * positive[:, None, None, None],

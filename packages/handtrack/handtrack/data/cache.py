@@ -25,7 +25,7 @@ from torch import Tensor
 
 from handtrack.data.augment import DetNetAugment, augment_detnet
 from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch
-from handtrack.data.stream import CatalogStream, DetNetSamples, KeyNetAugment, KeyNetSamples, StreamStats, sample_count
+from handtrack.data.stream import CatalogStream, DetNetSamples, KeyNetAugment, KeyNetSamples, StreamStats, sample_count, wiped_keypoints
 from handtrack.labels.crops import boundary_occlusion, scale_intensity
 from handtrack.labels.heatmaps import render_distance, render_heatmaps
 
@@ -308,6 +308,16 @@ class KeyNetCache(_PinnedEpochs):
                 warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
                 arrays: dict[str, Tensor] = {name: torch.from_numpy(np.load(directory / f"{name}.npy", mmap_mode="r")) for name in KEYNET_TRAINING_FIELDS}
             _check_rows(directory, arrays, manifest.samples)
+            # Visibility labels (labels.visibility) exist in passes built since 2026-09-29 night; older passes train no visibility.
+            labelled: Path = directory / "visible.npy"
+            if labelled.exists():
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
+                    arrays["visible"] = torch.from_numpy(np.load(labelled, mmap_mode="r"))
+                arrays["has_visible"] = torch.ones(manifest.samples, dtype=torch.bool)
+            else:
+                arrays["visible"] = torch.zeros((manifest.samples, 21), dtype=torch.bool)
+                arrays["has_visible"] = torch.zeros(manifest.samples, dtype=torch.bool)
             self.passes.append(arrays)
             if other_hand_negatives:
                 self.rows.append(None)
@@ -350,4 +360,6 @@ class KeyNetCache(_PinnedEpochs):
             presence_mask=torch.ones_like(positive),
             kind=moved["kind"],
             dataset=moved["dataset"],
+            visible=moved["visible"] & ~wiped_keypoints(occluded, moved["points_crop"]),
+            visibility_mask=positive & moved["has_visible"],
         )
