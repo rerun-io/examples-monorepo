@@ -27,7 +27,7 @@ tests and the oracle mode can replace them; the fit and all state live on the CP
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, runtime_checkable
 
 import torch
@@ -186,6 +186,13 @@ class TrackerConfig:
     acquire_clear_of_other: float = 1.0
     """Skip an acquisition whose DetNet circle has more than this share of its area inside the other (tracked) hand's circle in that
     camera (1.0 never skips): a hand under the other hand starts off the hand."""
+    acquire_refine: int = 0
+    """Our addition: after an acquisition's first fit (one DetNet view, zero prior), this many same-frame passes that cut crops around the
+    fitted pose in its best cameras (at most ``max_views``, prior = the fit), run KeyNet and refit from the first fit without the temporal
+    term: the second view fixes the monocular depth before the track's history exists."""
+    young_frames: int = 0
+    """For the first this-many frames of a track, scale the temporal weight by ``young_temporal_scale`` (a poor start is left quickly)."""
+    young_temporal_scale: float = 1.0
     confirm_frames: int = 0
     """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
     end_on_view_rejection: bool = False
@@ -439,6 +446,9 @@ class Tracker:
         if not hands:
             return
         results: list[FitResult] = self._fit(hands, spent)
+        if self.config.acquire_refine:
+            for _ in range(self.config.acquire_refine):
+                hands, results = self._refine_acquisitions(frame, images, world_from_rig, hands, results, out, spent, native_images)
         if self.config.refine_shift is not None and not any(self.history[hand.side].detnet_misses for hand in hands):
             refined: dict[Side, tuple[HandObservation, FitResult]] = self._refine(frame, images, world_from_rig, views, hands, results, out, spent, native_images)
             chosen: list[tuple[HandObservation, FitResult]] = [
@@ -573,9 +583,53 @@ class Tracker:
 
     def _fit(self, hands: list[HandObservation], spent: dict[str, float]) -> list[FitResult]:
         begin: float = time.perf_counter()
-        results: list[FitResult] = fit_pose(self.model, self.phi, hands, [self.history[hand.side].previous for hand in hands], self.config.fit)
+        young: list[bool] = [self.history[hand.side].previous is not None and self.history[hand.side].age < self.config.young_frames for hand in hands]
+        if any(young) and self.config.young_temporal_scale != 1.0:
+            relaxed: FitConfig = replace(self.config.fit, temporal_weight=self.config.fit.temporal_weight * self.config.young_temporal_scale)
+            results: list[FitResult | None] = [None] * len(hands)
+            for flag, config in ((True, relaxed), (False, self.config.fit)):
+                chosen: list[int] = [index for index, value in enumerate(young) if value == flag]
+                if chosen:
+                    fitted: list[FitResult] = fit_pose(self.model, self.phi, [hands[i] for i in chosen], [self.history[hands[i].side].previous for i in chosen], config)
+                    for i, result in zip(chosen, fitted, strict=True):
+                        results[i] = result
+            spent["fit"] += time.perf_counter() - begin
+            return [result for result in results if result is not None]
+        results_all: list[FitResult] = fit_pose(self.model, self.phi, hands, [self.history[hand.side].previous for hand in hands], self.config.fit)
         spent["fit"] += time.perf_counter() - begin
-        return results
+        return results_all
+
+    def _refine_acquisitions(self, frame: int, images: UInt8[Tensor, "c 480 640"], world_from_rig: Float32[Tensor, "4 4"], hands: list[HandObservation],
+                             results: list[FitResult], out: "_FrameOutput", spent: dict[str, float],
+                             native_images: tuple[UInt8[Tensor, "h w"], ...]) -> tuple[list[HandObservation], list[FitResult]]:
+        """One ``acquire_refine`` pass: re-observe each freshly acquired, converged hand in the best cameras of its fitted pose and refit."""
+        again: list[_View] = []
+        for hand, result in zip(hands, results, strict=True):
+            if self.history[hand.side].previous is not None or not result.converged or not _finite(result.pose):
+                continue
+            projection: _Projection = self._project(result.pose, hand.side, world_from_rig)
+            order: list[int] = sorted((c for c in range(len(self.cameras)) if int(projection.inside[c]) > 0), key=lambda c: -int(projection.inside[c]))
+            again.extend(self._view(hand.side, camera, projection, result.pose) for camera in order[: self.config.max_views])
+        if not again:
+            return hands, results
+        scratch: _FrameOutput = _FrameOutput.empty(len(self.cameras))
+        observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, again, scratch, spent, native_images)
+        if not observed[0]:
+            return hands, results
+        by_side: dict[Side, FitResult] = {hand.side: result for hand, result in zip(hands, results, strict=True)}
+        begin: float = time.perf_counter()
+        refits: list[FitResult] = fit_pose(self.model, self.phi, observed[0], [by_side[hand.side].pose for hand in observed[0]],
+                                           replace(self.config.fit, temporal_weight=0.0))
+        spent["fit"] += time.perf_counter() - begin
+        replaced: dict[Side, tuple[HandObservation, FitResult]] = {}
+        for hand, refit in zip(observed[0], refits, strict=True):
+            if refit.converged and _finite(refit.pose):
+                replaced[hand.side] = (hand, refit)
+                ran: Bool[Tensor, "c"] = torch.isfinite(scratch.presence[:, hand.side])
+                out.keypoints[ran, hand.side] = scratch.keypoints[ran, hand.side]
+                out.presence[ran, hand.side] = scratch.presence[ran, hand.side]
+        pairs: list[tuple[HandObservation, FitResult]] = [replaced.get(hand.side, (hand, result)) for hand, result in zip(hands, results, strict=True)]
+        return [hand for hand, _ in pairs], [result for _, result in pairs]
 
     def _refine(
         self,
