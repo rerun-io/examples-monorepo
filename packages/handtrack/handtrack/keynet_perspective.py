@@ -28,8 +28,10 @@ class PerspectiveKeyNetEstimator:
     """A ``KeypointEstimator``: KeyNet-F on perspective crops of the native frames."""
 
     def __init__(self, model: KeyNetF, rig: CameraRig, letterboxes: tuple[Letterbox, ...], camera_angles_deg: tuple[float, ...],
-                 hand_model: HandModelTorch, phi: float, detnet_confirmation: bool = False) -> None:
+                 hand_model: HandModelTorch, phi: float, detnet_confirmation: bool = False, oracle_visible: Bool[Tensor, "f c 2 21"] | None = None) -> None:
         self.model: KeyNetF = model.eval()
+        self.oracle_visible: Bool[Tensor, "f c 2 21"] | None = oracle_visible
+        """Ground-truth visibility per timeline row, camera and hand: replaces the network's (the oracle upper bound)."""
         self.detnet_confirmation: bool = detnet_confirmation
         """Also ask the tracker to confirm views with DetNet and end drifted tracks (the UmeTrack stage's rule, TrackerConfig.umetrack_*)."""
         self.rig: CameraRig = rig
@@ -63,7 +65,6 @@ class PerspectiveKeyNetEstimator:
         return CropCameras(look_at(rays[:1], roll), focal, mirror), torch.zeros(63)
 
     def __call__(self, images: UInt8[Tensor, "c 480 640"], frame: int, request: CropRequest) -> KeypointEstimate:
-        del frame
         if not request.native_images:
             raise ValueError("perspective crops need the native camera frames (CropRequest.native_images)")
         device: torch.device = images.device
@@ -84,6 +85,9 @@ class PerspectiveKeyNetEstimator:
             points_crop, confidence = decode_heatmaps(output.heatmaps.float())
             d_rel: Float32[Tensor, "n 21"] = decode_distance(output.distance.float())
             presence: Float32[Tensor, "n"] = output.presence_logit.float().sigmoid()
+            visibility: Float32[Tensor, "n 21"] | None = None if output.visibility_logit is None else output.visibility_logit.float().sigmoid().cpu()
+        if self.oracle_visible is not None:
+            visibility = self.oracle_visible[frame, request.camera, request.side].to(torch.float32)
         points_net: Float32[Tensor, "n 21 2"] = torch.zeros((count, 21, 2))
         crop_uv: Float32[Tensor, "n 21 2"] = points_crop.cpu()
         for i, (cameras, _) in enumerate(planned):
@@ -98,7 +102,7 @@ class PerspectiveKeyNetEstimator:
         presence_out: Float32[Tensor, "n"] = torch.where(usable, presence.cpu(), torch.zeros(count))
         confidence_out: Float32[Tensor, "n 21"] = torch.where(usable[:, None], confidence.cpu(), torch.zeros(count, 21))
         return KeypointEstimate(points_net=torch.nan_to_num(points_net), d_rel_mm=torch.nan_to_num(d_rel.cpu()), presence=presence_out,
-                                confidence=confidence_out, uses_detnet_presence=self.detnet_confirmation)
+                                confidence=confidence_out, uses_detnet_presence=self.detnet_confirmation, visibility=visibility)
 
     @staticmethod
     def _usable(cameras: CropCameras) -> bool:
