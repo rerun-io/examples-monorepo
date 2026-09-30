@@ -35,6 +35,10 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.vulture]
 paths = ["handtrack", "tests"]
 ignore_names = [
+    # eval.scorecard: ScoreRow KPI fields (read through serde / dataclasses.asdict) and the scorer entry points the overnight runner calls.
+    "contact_f1", "contact_precision", "contact_recall", "hidden_error_share", "mka", "mka_truth", "mkpe", "mpvpe", "mpvpe_p90",
+    "onset_latency_frames", "onset_precision", "onset_recall", "over100", "over50", "p90", "p95", "pinch_distance_mae", "pinch_f1",
+    "pinch_precision", "pinch_recall", "scored_frames", "read_truth", "frame_scores", "score_hand",
     # torch.backends.cudnn.benchmark, a torch switch set in apis/train.py.
     "benchmark",
     # Upstream fake CPU network methods called by the external HandTracker.

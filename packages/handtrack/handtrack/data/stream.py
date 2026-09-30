@@ -1660,7 +1660,8 @@ class CatalogStream:
 
 
 def projection_to(projection: HandProjection, device: torch.device) -> HandProjection:
-    return HandProjection(**{f.name: None if getattr(projection, f.name) is None else getattr(projection, f.name).to(device) for f in dataclasses.fields(projection)})
+    return HandProjection(projection.points_cam.to(device), projection.pixels.to(device), projection.net_xy.to(device), projection.in_front.to(device),
+                          projection.visible.to(device), None if projection.hidden is None else projection.hidden.to(device))
 
 
 def labels_to(labels: SegmentLabels, device: torch.device) -> SegmentLabels:
