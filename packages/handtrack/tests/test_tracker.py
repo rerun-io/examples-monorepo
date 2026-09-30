@@ -426,3 +426,25 @@ def test_the_robust_preset_tracks_the_fake_scene() -> None:
     # confirm_frames 2: reported from the 3rd frame; the damped guess still converges onto the exact keypoints
     assert [bool(result.tracked[Side.LEFT]) for result in results] == [False, False, True, True, True, True]
     torch.testing.assert_close(results[5].landmarks[Side.LEFT], scene.landmarks[Side.LEFT], atol=2e-3, rtol=0.0)
+
+
+@pytest.mark.parametrize("target", ["previous", "guess"])
+def test_temporal_target_chooses_the_fits_start(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    scene: Scene = _scene()
+    seen: list[HandPose | None] = []
+    real_fit = tracker_module.fit_pose
+
+    def recording(model: HandModelTorch, phi: float, hands: list[HandObservation], previous: list[HandPose | None], config: FitConfig) -> list[FitResult]:
+        seen[:] = list(previous)
+        return real_fit(model, phi, hands, previous, config)
+
+    monkeypatch.setattr(tracker_module, "fit_pose", recording)
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+    tracker: Tracker = Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, FakeKeyNet(scene), TrackerConfig(temporal_target=target))
+    images: UInt8[Tensor, "4 480 640"] = torch.zeros((4, 480, 640), dtype=torch.uint8)
+    for frame in range(3):
+        tracker.step(frame, images, torch.eye(4))
+    # frame 2 was fitted from θ(t−1) (now ``before``) or from its planning guess (now ``guess``, an extrapolated pose object)
+    history = tracker.history[Side.LEFT]
+    assert history.guess is not None and history.guess is not history.before
+    assert seen[0] is (history.before if target == "previous" else history.guess)
