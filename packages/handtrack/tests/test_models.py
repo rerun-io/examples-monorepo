@@ -229,3 +229,22 @@ def test_keynet_visibility_head_and_loss() -> None:
     assert torch.allclose(loss.visibility, expected, atol=1e-6)
     plain = keynet_loss(output, *zeros, torch.ones(3), torch.ones(3, dtype=torch.bool), torch.ones(3, dtype=torch.bool), 1.0)
     assert plain.visibility is None and torch.allclose(loss.total - plain.total, 2.0 * expected, atol=1e-5)
+
+
+def test_soft_points_and_pinch_loss() -> None:
+    from handtrack.labels.heatmaps import render_distance, render_heatmaps
+    from handtrack.models.keynet import KeyNetOutput, pinch_loss, soft_distance, soft_points
+
+    torch.manual_seed(1)
+    points = 20.0 + 56.0 * torch.rand(4, 21, 2)
+    d_rel = 100.0 * torch.rand(4, 21) - 50.0
+    perfect = KeyNetOutput(render_heatmaps(points), render_distance(d_rel), torch.zeros(4))
+    assert torch.allclose(soft_points(perfect.heatmaps), points, atol=0.05)
+    assert torch.allclose(soft_distance(perfect.distance), d_rel, atol=0.5)
+    positive = torch.ones(4, dtype=torch.bool)
+    assert float(pinch_loss(perfect, points, d_rel, positive)) < 0.1
+    moved = points.clone()
+    moved[:, 0] += 6.0  # the thumb tip 6 px off in x and y: the tip vector error is 12 px (L1)
+    wrong = KeyNetOutput(render_heatmaps(moved), render_distance(d_rel), torch.zeros(4))
+    assert abs(float(pinch_loss(wrong, points, d_rel, positive)) - 12.0) < 0.5
+    assert float(pinch_loss(wrong, points, d_rel, torch.zeros(4, dtype=torch.bool))) == 0.0

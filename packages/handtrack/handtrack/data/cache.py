@@ -371,4 +371,6 @@ class KeyNetCache(_PinnedEpochs):
             dataset=moved["dataset"],
             visible=moved["visible"] & ~wiped_keypoints(occluded, moved["points_crop"]) & ~blank_keypoints((moved["crops"].float() / 255.0)[:, None], moved["points_crop"]),
             visibility_mask=positive & moved["has_visible"],
+            points_crop=moved["points_crop"],
+            d_rel_mm=moved["d_rel_mm"],
         )

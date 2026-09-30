@@ -14,6 +14,7 @@ from jaxtyping import Bool, Float32
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from handtrack.labels.heatmaps import DISTANCE_RANGE_MM, heatmap_to_crop
 from handtrack.models.blocks import inverted_residual_stack
 
 HeatmapReduction: TypeAlias = Literal["mean", "pixel_sum"]
@@ -50,6 +51,8 @@ class KeyNetLoss:
     """Detached presence BCE over crops with valid presence labels."""
     visibility: Float32[Tensor, ""] | None = None
     """Detached per-keypoint visibility BCE over positive crops with visibility labels; None without the head."""
+    pinch: Float32[Tensor, ""] | None = None
+    """Detached pinch-relation loss (``pinch_loss``); None when not computed."""
 
 
 DEFAULT_BN_EPS: float = 1e-5
@@ -145,6 +148,9 @@ def keynet_loss(
     visible: Bool[Tensor, "b 21"] | None = None,
     visibility_mask: Bool[Tensor, "b"] | None = None,
     visibility_weight: float = 0.0,
+    points_crop: Float32[Tensor, "b 21 2"] | None = None,
+    d_rel_mm: Float32[Tensor, "b 21"] | None = None,
+    pinch_weight: float = 0.0,
 ) -> KeyNetLoss:
     """Average each term over its valid samples, with zero for empty selections.
 
@@ -185,8 +191,53 @@ def keynet_loss(
         chosen: Float32[Tensor, "valid 21"] = output.visibility_logit[visibility_mask]
         visibility_loss = F.binary_cross_entropy_with_logits(chosen, visible[visibility_mask].float(), reduction="sum") / max(chosen.numel(), 1)
         total = total + visibility_weight * visibility_loss
+    pinch: Float32[Tensor, ""] | None = None
+    if pinch_weight > 0 and points_crop is not None and d_rel_mm is not None:
+        pinch = pinch_loss(output, points_crop, d_rel_mm, positive)
+        total = total + heatmap_scale * pinch_weight * pinch
     return KeyNetLoss(total, heatmap_loss.detach(), distance_loss.detach(), presence_loss.detach(),
-                      None if visibility_loss is None else visibility_loss.detach())
+                      None if visibility_loss is None else visibility_loss.detach(), None if pinch is None else pinch.detach())
+
+
+PINCH_TIPS: tuple[int, int] = (0, 1)
+"""Thumb tip and index fingertip in LANDMARK order."""
+
+
+def soft_points(heatmaps: Float32[Tensor, "b k 18 18"]) -> Float32[Tensor, "b k 2"]:
+    """Differentiable keypoints in crop pixels: the mean of each heatmap's squared (sharpened) positive part."""
+    weights: Float32[Tensor, "b k 18 18"] = heatmaps.clamp_min(0.0).square()
+    weights = weights / (weights.sum(dim=(-1, -2), keepdim=True) + 1e-6)
+    axis: Float32[Tensor, "18"] = torch.arange(heatmaps.shape[-1], dtype=heatmaps.dtype, device=heatmaps.device)
+    points: Float32[Tensor, "b k 2"] = torch.stack(((weights.sum(-2) * axis).sum(-1), (weights.sum(-1) * axis).sum(-1)), dim=-1)
+    return heatmap_to_crop(points)
+
+
+def soft_distance(distance: Float32[Tensor, "b k 18"]) -> Float32[Tensor, "b k"]:
+    """Differentiable relative distance in mm: the mean bin of each distance heatmap's squared positive part."""
+    weights: Float32[Tensor, "b k 18"] = distance.clamp_min(0.0).square()
+    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-6)
+    bins: Float32[Tensor, "18"] = torch.arange(distance.shape[-1], dtype=distance.dtype, device=distance.device)
+    return (weights * bins).sum(-1) * (2 * DISTANCE_RANGE_MM / (distance.shape[-1] - 1)) - DISTANCE_RANGE_MM
+
+
+def pinch_loss(output: KeyNetOutput, points_crop: Float32[Tensor, "b 21 2"], d_rel_mm: Float32[Tensor, "b 21"], positive: Bool[Tensor, "b"]) -> Float32[Tensor, ""]:
+    """Our pinch term, the crop-level analogue of UmeTrack's pinch loss (which needs 3D poses): the L1 error of the thumb-tip to index-tip
+    vector in crop pixels plus 0.1 x the error of their relative-distance difference in mm, on positives with both tips inside the crop,
+    weighted 1 + 4 exp(-|true tip vector| / 8 px) so that near-pinch configurations count up to five times more."""
+    thumb, index = PINCH_TIPS
+    inside: Bool[Tensor, "b"] = ((points_crop[:, [thumb, index]] >= -0.5) & (points_crop[:, [thumb, index]] < 95.5)).all(dim=(-1, -2))
+    chosen: Bool[Tensor, "b"] = positive & inside
+    if not bool(chosen.any()):
+        return output.heatmaps.sum() * 0.0
+    predicted: Float32[Tensor, "n 21 2"] = soft_points(output.heatmaps[chosen])
+    depth: Float32[Tensor, "n 21"] = soft_distance(output.distance[chosen])
+    truth: Float32[Tensor, "n 21 2"] = points_crop[chosen]
+    vector_true: Float32[Tensor, "n 2"] = truth[:, thumb] - truth[:, index]
+    vector_error: Float32[Tensor, "n"] = ((predicted[:, thumb] - predicted[:, index]) - vector_true).abs().sum(-1)
+    depth_true: Float32[Tensor, "n"] = d_rel_mm[chosen][:, thumb] - d_rel_mm[chosen][:, index]
+    depth_error: Float32[Tensor, "n"] = ((depth[:, thumb] - depth[:, index]) - depth_true).abs()
+    weight: Float32[Tensor, "n"] = 1.0 + 4.0 * torch.exp(-vector_true.norm(dim=-1) / 8.0)
+    return (weight * (vector_error + 0.1 * depth_error)).sum() / weight.sum()
 
 
 def keynet_for_state(state: dict[str, Tensor]) -> KeyNetF:
