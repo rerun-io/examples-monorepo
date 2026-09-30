@@ -90,6 +90,8 @@ class KeypointEstimate:
     """No learned presence head: presence marks usable views; Tracker checks DetNet on those views."""
     visibility: Float32[Tensor, "n 21"] | None = None
     """Per keypoint: the probability that it is visible (KeyNet's visibility head, or the ground truth in oracle mode); None without."""
+    pinch: Float32[Tensor, "n"] | None = None
+    """Per view: the probability that thumb and index touch (KeyNet's pinch head); None without."""
 
 
 @runtime_checkable
@@ -257,6 +259,8 @@ class FrameResult:
     """What each fitted hand's fit saw (for the scale calibration)."""
     visibility: Float32[Tensor, "c 2 21"] | None = None
     """KeyNet's per-keypoint visibility per camera and hand (NaN where it did not run); None without a visibility output."""
+    pinch: Float32[Tensor, "c 2"] | None = None
+    """KeyNet's pinch probability per camera and hand (NaN where it did not run); None without a pinch head."""
 
 
 @dataclass(slots=True)
@@ -579,6 +583,10 @@ class Tracker:
                     if out.visibility is None:
                         out.visibility = torch.full((out.presence.shape[0], 2, 21), torch.nan)
                     out.visibility[views[index].camera, side] = estimate.visibility[index]
+                if estimate.pinch is not None:
+                    if out.pinch is None:
+                        out.pinch = torch.full((out.presence.shape[0], 2), torch.nan)
+                    out.pinch[views[index].camera, side] = estimate.pinch[index]
             good: list[int] = [index for index in mine if float(estimate.presence[index]) >= self.config.presence_threshold]
             if self.config.min_visible_keypoints and estimate.visibility is not None:
                 good = [index for index in good if int((estimate.visibility[index] >= 0.5).sum()) >= self.config.min_visible_keypoints]
@@ -797,6 +805,7 @@ class _FrameOutput:
     observations: list[HandObservation | None]
     detnet_camera: int = -1
     visibility: Float32[Tensor, "c 2 21"] | None = None
+    pinch: Float32[Tensor, "c 2"] | None = None
 
     @staticmethod
     def empty(cameras: int) -> "_FrameOutput":
@@ -826,4 +835,5 @@ class _FrameOutput:
             fit_energy=self.fit_energy,
             observations=(self.observations[0], self.observations[1]),
             visibility=self.visibility,
+            pinch=self.pinch,
         )

@@ -34,6 +34,8 @@ class KeyNetOutput:
     presence_logit: Float32[Tensor, "b"]
     """Unbounded presence logit for each crop."""
     visibility_logit: Float32[Tensor, "b 21"] | None = None
+    pinch_logit: Float32[Tensor, "b"] | None = None
+    """The logit that thumb and index are in contact (``labels.pinch``); None without the pinch head."""
     """Per keypoint: the logit that it is visible (inside the crop, not behind a hand surface); None without the visibility head."""
 
 
@@ -63,7 +65,7 @@ class KeyNetF(nn.Module):
     visibility head (``visibility_head``) on the same pooled features. ``bn_eps`` sets every BatchNorm's epsilon: a larger one bounds
     how much a near-dead channel (running variance ~0) is amplified in eval mode."""
 
-    def __init__(self, visibility_head: bool = False, bn_eps: float = DEFAULT_BN_EPS) -> None:
+    def __init__(self, visibility_head: bool = False, bn_eps: float = DEFAULT_BN_EPS, pinch_head: bool = False) -> None:
         super().__init__()
         self.image: nn.Sequential = nn.Sequential(
             nn.Conv2d(1, 32, 3, 2, 1, bias=False),
@@ -105,6 +107,7 @@ class KeyNetF(nn.Module):
         self.distance_head: nn.Sequential = nn.Sequential(nn.AvgPool2d(6, 6), nn.Conv2d(160, 378, 1), nn.ReLU())
         self.presence_head: nn.Linear = nn.Linear(160, 1)
         self.visibility_head: nn.Linear | None = nn.Linear(160, 21) if visibility_head else None
+        self.pinch_head: nn.Linear | None = nn.Linear(160, 1) if pinch_head else None
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d):
                 module.eps = bn_eps
@@ -132,6 +135,7 @@ class KeyNetF(nn.Module):
             distance=rearrange(self.distance_head(fused), "b (joint bin) 1 1 -> b joint bin", joint=21, bin=18),
             presence_logit=self.presence_head(pooled).squeeze(-1),
             visibility_logit=None if self.visibility_head is None else self.visibility_head(pooled),
+            pinch_logit=None if self.pinch_head is None else self.pinch_head(pooled).squeeze(-1),
         )
 
 
@@ -243,4 +247,4 @@ def pinch_loss(output: KeyNetOutput, points_crop: Float32[Tensor, "b 21 2"], d_r
 def keynet_for_state(state: dict[str, Tensor]) -> KeyNetF:
     """An untrained KeyNetF shaped like ``state``: the visibility head if the weights have one, their BatchNorm eps if stored."""
     eps: float = float(state["bn_eps"]) if "bn_eps" in state else DEFAULT_BN_EPS
-    return KeyNetF(visibility_head="visibility_head.weight" in state, bn_eps=eps)
+    return KeyNetF(visibility_head="visibility_head.weight" in state, bn_eps=eps, pinch_head="pinch_head.weight" in state)
