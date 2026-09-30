@@ -48,9 +48,9 @@ from handtrack.fit.scale import ScaleCalibration, calibrate_scale, scaled_hand_m
 from handtrack.hand.pose import HandPose, generic_hand_model
 from handtrack.keynet_perspective import PerspectiveKeyNetEstimator
 from handtrack.models.detnet import DetNetF
-from handtrack.models.keynet import KeyNetF
+from handtrack.models.keynet import KeyNetF, keynet_for_state
 from handtrack.oracle import GroundTruthViews, KeyNetOnTruthBoxes, OracleDetector, OracleKeypoints
-from handtrack.pipeline import SegmentData, TrackerRun, detnet_alone_track, load_weights, read_segment, run_tracker, segment_track
+from handtrack.pipeline import SegmentData, TrackerRun, detnet_alone_track, load_weights, read_segment, read_state, run_tracker, segment_track
 from handtrack.reference.results import Calibration
 from handtrack.reference.upstream import PoseStage, load_umetrack
 from handtrack.results import DetectorSource, HandMode, KeypointSource, SegmentTrack, TrackMetadata, save_track
@@ -95,6 +95,9 @@ class RunConfig:
     """Override the DetNet file; its .sha256 sidecar is required."""
     keynet_weights: Path | None = None
     """Override the KeyNet file; its .sha256 sidecar is required."""
+    oracle_visibility: bool = False
+    """keynet_perspective: replace the network's per-keypoint visibility by the ground truth (in front, in the image, not behind a hand
+    surface): the upper bound of visibility weighting (``tracker.visibility_weights``)."""
     keynet_detnet_confirmation: bool = False
     """keynet_perspective: confirm KeyNet's views with DetNet and end drifted tracks, as the UmeTrack stage does."""
     umetrack_root: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
@@ -152,8 +155,12 @@ def load_networks(config: RunConfig, device: torch.device) -> Networks:
         detnet_sha256 = "random" if config.random_weights else load_weights(detnet, config.detnet_weights or config.checkpoints / "detnet.weights.pt")
         detnet = detnet.to(device).eval()
     if config.keypoints in ("keynet", "keynet_gt_boxes", "keynet_perspective"):
-        keynet = KeyNetF()
-        keynet_sha256 = "random" if config.random_weights else load_weights(keynet, config.keynet_weights or config.checkpoints / "keynet.weights.pt")
+        if config.random_weights:
+            keynet, keynet_sha256 = KeyNetF(), "random"
+        else:
+            state, keynet_sha256 = read_state(config.keynet_weights or config.checkpoints / "keynet.weights.pt")
+            keynet = keynet_for_state(state)
+            keynet.load_state_dict(state)
         keynet = keynet.to(device).eval()
     elif config.keypoints == "umetrack":
         keynet_sha256 = file_sha256(config.umetrack_weights or config.umetrack_root / "pretrained_models/pretrained_weights.torch")
@@ -204,9 +211,20 @@ def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTrut
         return OracleKeypoints(truth, phi, config.oracle_noise_px, config.oracle_noise_d_mm, config.seed)
     if config.keypoints == "keynet_perspective":
         return PerspectiveKeyNetEstimator(networks.keynet, data.rig, data.letterboxes, data.camera_angles, model, phi,
-                                          detnet_confirmation=config.keynet_detnet_confirmation)
+                                          detnet_confirmation=config.keynet_detnet_confirmation,
+                                          oracle_visible=truth_visible(data) if config.oracle_visibility else None)
     keynet: KeyNetEstimator = KeyNetEstimator(networks.keynet)
     return KeyNetOnTruthBoxes(truth, keynet) if config.keypoints == "keynet_gt_boxes" else keynet
+
+
+def truth_visible(data: SegmentData) -> torch.Tensor:
+    """Ground-truth keypoint visibility per timeline row, camera and hand (f c 2 21): in front, inside the image, not hidden."""
+    projection = data.labels.projection
+    size: torch.Tensor = data.rig.image_size.to(projection.pixels.dtype)  # c 2 (width, height)
+    pixels: torch.Tensor = projection.pixels
+    inside: torch.Tensor = (pixels >= -0.5).all(-1) & (pixels < size[None, :, None, None, :] - 0.5).all(-1) & projection.in_front
+    hidden: torch.Tensor = projection.hidden if projection.hidden is not None else torch.zeros_like(inside)
+    return inside & ~hidden
 
 
 def read_umetrack_calibration(path: Path) -> Calibration:

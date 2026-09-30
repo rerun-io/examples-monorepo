@@ -268,6 +268,16 @@ def detnet_alone_track(data: SegmentData, alone: DetNetAlone, meta: TrackMetadat
     )
 
 
+def read_state(path: Path) -> tuple[dict[str, torch.Tensor], str]:
+    """A model-only state_dict and its sha256, checked against the ``<file>.sha256`` sidecar (read once, O_DIRECT)."""
+    payload: bytes = read_disk(path)
+    digest: str = hashlib.sha256(payload).hexdigest()
+    expected: str = read_disk(Path(f"{path}.sha256")).decode("ascii").split()[0]
+    if digest != expected:
+        raise ValueError(f"{path}: sha256 {digest} does not match its sidecar {expected}")
+    return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True), digest
+
+
 def load_weights(model: nn.Module, path: Path) -> str:
     """Load a model-only state_dict after checking its ``<file>.sha256`` sidecar (the checkpoint writer's and
     ``promote.sh``'s convention); returns the digest.

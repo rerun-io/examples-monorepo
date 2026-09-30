@@ -52,12 +52,15 @@ class KeyNetLoss:
     """Detached per-keypoint visibility BCE over positive crops with visibility labels; None without the head."""
 
 
+DEFAULT_BN_EPS: float = 1e-5
+
+
 class KeyNetF(nn.Module):
     """Table 5 image/keypoint fusion network plus a 161-parameter presence head, and optionally a 3,381-parameter per-keypoint
     visibility head (``visibility_head``) on the same pooled features. ``bn_eps`` sets every BatchNorm's epsilon: a larger one bounds
     how much a near-dead channel (running variance ~0) is amplified in eval mode."""
 
-    def __init__(self, visibility_head: bool = False, bn_eps: float = 1e-5) -> None:
+    def __init__(self, visibility_head: bool = False, bn_eps: float = DEFAULT_BN_EPS) -> None:
         super().__init__()
         self.image: nn.Sequential = nn.Sequential(
             nn.Conv2d(1, 32, 3, 2, 1, bias=False),
@@ -102,6 +105,8 @@ class KeyNetF(nn.Module):
         for module in self.modules():
             if isinstance(module, nn.BatchNorm2d):
                 module.eps = bn_eps
+        if bn_eps != DEFAULT_BN_EPS:  # BatchNorm's eps is not part of a state_dict: keep a non-default one with the weights
+            self.register_buffer("bn_eps", torch.tensor(bn_eps, dtype=torch.float64))
 
     def forward(self, crop: Float32[Tensor, "b 1 96 96"], keypoints: Float32[Tensor, "b 63"]) -> KeyNetOutput:
         """Predict heatmaps and presence from a crop and prior keypoints.
@@ -182,3 +187,9 @@ def keynet_loss(
         total = total + visibility_weight * visibility_loss
     return KeyNetLoss(total, heatmap_loss.detach(), distance_loss.detach(), presence_loss.detach(),
                       None if visibility_loss is None else visibility_loss.detach())
+
+
+def keynet_for_state(state: dict[str, Tensor]) -> KeyNetF:
+    """An untrained KeyNetF shaped like ``state``: the visibility head if the weights have one, their BatchNorm eps if stored."""
+    eps: float = float(state["bn_eps"]) if "bn_eps" in state else DEFAULT_BN_EPS
+    return KeyNetF(visibility_head="visibility_head.weight" in state, bn_eps=eps)

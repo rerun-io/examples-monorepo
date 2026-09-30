@@ -27,7 +27,7 @@ tests and the oracle mode can replace them; the fit and all state live on the CP
 
 import time
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 import torch
 from jaxtyping import Bool, Float32, Int8, Int64, UInt8
@@ -85,6 +85,8 @@ class KeypointEstimate:
     """Per keypoint: the heatmap's peak value (1 for a clean unit Gaussian; about 0 when the heatmap is empty)."""
     uses_detnet_presence: bool = False
     """No learned presence head: presence marks usable views; Tracker checks DetNet on those views."""
+    visibility: Float32[Tensor, "n 21"] | None = None
+    """Per keypoint: the probability that it is visible (KeyNet's visibility head, or the ground truth in oracle mode); None without."""
 
 
 @runtime_checkable
@@ -168,6 +170,12 @@ class TrackerConfig:
     """End a UmeTrack track after this many consecutive frames without DetNet confirmation in its requested views.
     During the grace frames, fit all usable network views; a confirmed frame fits only confirmed views.
     Acquisition requires confirmation immediately. Missing/invalid network output ends the track immediately."""
+    visibility_weights: Literal["off", "soft", "hard"] = "off"
+    """Weight each keypoint in the fit by its visibility: ``soft`` by the probability (floored at ``visibility_floor``), ``hard`` by
+    probability >= 0.5 (hidden keypoints leave the fit and the temporal term carries them). Needs ``KeypointEstimate.visibility``."""
+    visibility_floor: float = 0.0
+    min_visible_keypoints: int = 0
+    """Visibility as presence: a view with fewer keypoints of probability >= 0.5 is rejected like a low presence (0 disables)."""
     end_on_view_rejection: bool = False
     """Our addition, off by default: end a tracked hand when KeyNet rejects some of its requested views and one view is left.
     On UmeTrack synthetic user_12/rec_09 those one-view frames averaged ~170 mm (their last view is off the hand as well)."""
@@ -455,6 +463,8 @@ class Tracker:
                 out.keypoints[views[index].camera, side] = estimate.points_net[index]
                 out.presence[views[index].camera, side] = estimate.presence[index] if detector_presence is None else detector_presence[index]
             good: list[int] = [index for index in mine if float(estimate.presence[index]) >= self.config.presence_threshold]
+            if self.config.min_visible_keypoints and estimate.visibility is not None:
+                good = [index for index in good if int((estimate.visibility[index] >= 0.5).sum()) >= self.config.min_visible_keypoints]
             if self.config.end_on_view_rejection and self.history[side].previous is not None and len(mine) >= 2 and len(good) == 1:
                 good = []  # the pose is slipping off the hand: a one-view fit from here is poor; DetNet re-acquires next frame
             if detector_presence is not None:
@@ -481,13 +491,23 @@ class Tracker:
                         camera=self.cameras[views[index].camera],
                         world_from_rig=world_from_rig,
                         keypoints_px=self.letterboxes[views[index].camera].from_net(estimate.points_net[index]),
-                        weights=(estimate.confidence[index] >= self.config.min_keypoint_confidence).to(torch.float32),
+                        weights=self._weights(estimate, index),
                         d_rel_mm=estimate.d_rel_mm[index],
                     )
                     for index in good
                 )
                 hands.append(HandObservation(side=side, views=views_seen))
         return hands, rejected
+
+    def _weights(self, estimate: KeypointEstimate, index: int) -> Float32[Tensor, "21"]:
+        """A view's keypoint weights: 0 for an empty heatmap, times the visibility weighting when it is on."""
+        weights: Float32[Tensor, "21"] = (estimate.confidence[index] >= self.config.min_keypoint_confidence).to(torch.float32)
+        if self.config.visibility_weights == "off" or estimate.visibility is None:
+            return weights
+        probability: Float32[Tensor, "21"] = estimate.visibility[index].to(torch.float32)
+        if self.config.visibility_weights == "hard":
+            return weights * (probability >= 0.5).to(torch.float32)
+        return weights * probability.clamp_min(self.config.visibility_floor)
 
     def _fit(self, hands: list[HandObservation], spent: dict[str, float]) -> list[FitResult]:
         begin: float = time.perf_counter()
