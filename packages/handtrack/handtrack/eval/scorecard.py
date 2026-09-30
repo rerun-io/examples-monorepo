@@ -39,6 +39,22 @@ PINCH_DETECT_MM: float = 15.0
 NEAR_PINCH_MM: float = 40.0
 """Frames whose true fingertip distance is below this score the thumb-index distance error."""
 THUMB_TIP, INDEX_TIP = 0, 1
+THUMB_DISTAL_BONE: int = 4
+"""Skinning frame of the thumb's distal phalanx (the thumb-tip landmark's bone)."""
+INDEX_CONTACT_BONES: tuple[int, int] = (6, 7)
+"""The index finger's middle and distal phalanges (the index-tip landmark's bone is 7)."""
+CONTACT_CLOSED_MM: float = 5.0
+"""Mesh contact: the thumb's distal pad within this of the index finger's last two phalanges is a pinch (pad pinches count; the tip
+landmarks sit 22-25 mm past the DIP joint, so a tip-to-tip rule misses them)."""
+CONTACT_OPEN_MM: float = 15.0
+DETECT_ENTER_MM: float = 10.0
+"""State-machine detector on the fitted mesh's contact distance: enter a pinch after ``DETECT_FRAMES`` frames under this..."""
+DETECT_EXIT_MM: float = 16.0
+"""...and release after ``DETECT_FRAMES`` frames over this; untracked frames hold the state for up to ``HOLD_FRAMES`` frames."""
+DETECT_FRAMES: int = 2
+HOLD_FRAMES: int = 3
+EVENT_TOLERANCE: int = 3
+"""A detected pinch onset matches a true onset within this many frames."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +97,9 @@ class FrameScores:
     pinch_pred_mm: Float32[ndarray, "f 2"]
     """Fitted thumb-tip to index-tip distance (NaN untracked)."""
     pinch_true_mm: Float32[ndarray, "f 2"]
+    contact_pred_mm: Float32[ndarray, "f 2"]
+    """Fitted mesh: minimum distance from the thumb's distal-phalanx vertices to the index finger's middle and distal phalanx vertices."""
+    contact_true_mm: Float32[ndarray, "f 2"]
 
 
 def frame_scores(track: dict[str, ndarray], truth: Truth) -> FrameScores:
@@ -96,6 +115,19 @@ def frame_scores(track: dict[str, ndarray], truth: Truth) -> FrameScores:
     keypoint: Float32[ndarray, "f 2"] = np.linalg.norm(predicted - truth_points, axis=-1).mean(-1) * 1000.0
     other: Float32[ndarray, "f 2"] = np.linalg.norm(predicted - truth_points[:, ::-1], axis=-1).mean(-1) * 1000.0
     vertex: Float32[ndarray, "f 2"] = np.full((frames, 2), np.nan, dtype=np.float32)
+    contact_pred: Float32[ndarray, "f 2"] = np.full((frames, 2), np.nan, dtype=np.float32)
+    contact_true: Float32[ndarray, "f 2"] = np.full((frames, 2), np.nan, dtype=np.float32)
+    bones: Int64[ndarray, "v"] = model.dense_bone_weights.argmax(dim=1).numpy()
+    thumb_vertices: Int64[ndarray, "a"] = np.flatnonzero(bones == THUMB_DISTAL_BONE)
+    index_vertices: Int64[ndarray, "b"] = np.flatnonzero(np.isin(bones, INDEX_CONTACT_BONES))
+    for side in Side:
+        truth_rows: Int64[ndarray, "k"] = np.flatnonzero(has_pose[:, side])
+        if len(truth_rows):
+            pose = timeline.poses[side]
+            index = torch.from_numpy(truth_rows)
+            with torch.inference_mode():
+                mesh = mesh_vertices(model, HandPose(pose.rotation[index], pose.translation[index], pose.joint_angles[index]), side)
+            contact_true[truth_rows, side] = _contact_mm(mesh, thumb_vertices, index_vertices)
     for side in Side:
         rows: Int64[ndarray, "k"] = np.flatnonzero(tracked[:, side] & has_pose[:, side])
         if not len(rows):
@@ -106,8 +138,10 @@ def frame_scores(track: dict[str, ndarray], truth: Truth) -> FrameScores:
         pose = timeline.poses[side]
         reference = HandPose(pose.rotation[index], pose.translation[index], pose.joint_angles[index])
         with torch.inference_mode():
-            difference = mesh_vertices(model, fitted, side) - mesh_vertices(model, reference, side)
+            fitted_mesh = mesh_vertices(model, fitted, side)
+            difference = fitted_mesh - mesh_vertices(model, reference, side)
         vertex[rows, side] = difference.norm(dim=-1).mean(dim=-1).numpy() * 1000.0
+        contact_pred[rows, side] = _contact_mm(fitted_mesh, thumb_vertices, index_vertices)
     scored: Bool[ndarray, "f 2"] = tracked & has_pose & np.isfinite(keypoint)
     present: Bool[ndarray, "f c 2"] = labels.hand_label[:frames].numpy() == int(HandLabel.PRESENT)
     required: Bool[ndarray, "f 2"] = has_pose & labels.labelled[:frames].numpy().any(axis=1) & present.any(axis=1)
@@ -126,7 +160,39 @@ def frame_scores(track: dict[str, ndarray], truth: Truth) -> FrameScores:
         truth=truth_points.astype(np.float32),
         pinch_pred_mm=np.where(tracked, np.linalg.norm(predicted[:, :, THUMB_TIP] - predicted[:, :, INDEX_TIP], axis=-1) * 1000.0, np.nan).astype(np.float32),
         pinch_true_mm=(np.linalg.norm(truth_points[:, :, THUMB_TIP] - truth_points[:, :, INDEX_TIP], axis=-1) * 1000.0).astype(np.float32),
+        contact_pred_mm=contact_pred,
+        contact_true_mm=contact_true,
     )
+
+
+def _contact_mm(mesh: torch.Tensor, thumb: np.ndarray, index: np.ndarray) -> np.ndarray:
+    """Per frame: the minimum thumb-pad to index vertex distance, mm."""
+    distances = torch.cdist(mesh[:, torch.from_numpy(thumb)], mesh[:, torch.from_numpy(index)])
+    return (distances.amin(dim=(-1, -2)) * 1000.0).numpy().astype(np.float32)
+
+
+def pinch_state(distance: np.ndarray, enter: float = DETECT_ENTER_MM, leave: float = DETECT_EXIT_MM, frames: int = DETECT_FRAMES,
+                hold: int = HOLD_FRAMES) -> np.ndarray:
+    """The pinch state machine on a per-frame distance (NaN = untracked): enter after ``frames`` frames under ``enter``, release after
+    ``frames`` frames over ``leave``; an untracked stretch holds the state for up to ``hold`` frames, then releases."""
+    state = np.zeros(len(distance), dtype=bool)
+    on, below, above, missing = False, 0, 0, 0
+    for t, d in enumerate(distance):
+        if not np.isfinite(d):
+            missing += 1
+            if missing > hold:
+                on = False
+            below = above = 0
+        else:
+            missing = 0
+            below = below + 1 if d < enter else 0
+            above = above + 1 if d > leave else 0
+            if not on and below >= frames:
+                on = True
+            elif on and above >= frames:
+                on = False
+        state[t] = on
+    return state
 
 
 def _runs(mask: Bool[ndarray, "f"]) -> Int64[ndarray, "r"]:
@@ -184,6 +250,25 @@ class ScoreRow:
     pinch_distance_mae: float | None = None
     """Mean |fitted - true| thumb-index distance over scored frames with the true distance under 40 mm."""
     near_pinch_frames: int = 0
+    contact_tp: int = 0
+    """Frames in mesh contact (< 5 mm) that the state machine calls a pinch."""
+    contact_fp: int = 0
+    """Open frames (> 15 mm) that the state machine calls a pinch."""
+    contact_fn: int = 0
+    contact_precision: float | None = None
+    contact_recall: float | None = None
+    contact_f1: float | None = None
+    true_onsets: int = 0
+    """Pinch onsets of the state machine run on the true contact distance (thresholds 5 / 15 mm)."""
+    matched_onsets: int = 0
+    """True onsets with a detected onset within 3 frames."""
+    detected_onsets: int = 0
+    onset_recall: float | None = None
+    onset_precision: float | None = None
+    false_onsets_per_min: float = 0.0
+    """Detected onsets with no true onset within 3 frames, per minute."""
+    onset_latency_frames: float | None = None
+    """Median frames from a true onset to its matched detected onset."""
 
 
 def _acceleration(points: Float32[ndarray, "f 21 3"], valid: Bool[ndarray, "f"]) -> Float32[ndarray, "a"]:
@@ -211,6 +296,34 @@ def pinch_counts(predicted: Float32[ndarray, "f"], truth: Float32[ndarray, "f"],
     }
 
 
+def contact_counts(predicted: np.ndarray, truth: np.ndarray, scored: np.ndarray, minutes: float) -> dict:
+    """Mesh-contact pinch KPIs: frame-level state machine against the true contact state, and onset events."""
+    detected: np.ndarray = pinch_state(np.where(scored, predicted, np.nan))
+    true_state: np.ndarray = pinch_state(truth, CONTACT_CLOSED_MM, CONTACT_OPEN_MM, 1, 0)
+    closed: np.ndarray = scored & (truth < CONTACT_CLOSED_MM)
+    opened: np.ndarray = scored & (truth > CONTACT_OPEN_MM)
+    tp, fp, fn = int((closed & detected).sum()), int((opened & detected).sum()), int((closed & ~detected).sum())
+    true_on: np.ndarray = np.flatnonzero(true_state & ~np.r_[False, true_state[:-1]])
+    det_on: np.ndarray = np.flatnonzero(detected & ~np.r_[False, detected[:-1]])
+    matched, latencies, used = 0, [], set()
+    for onset in true_on:
+        near = [d for d in det_on if abs(d - onset) <= EVENT_TOLERANCE and d not in used]
+        if near:
+            best = min(near, key=lambda d: abs(d - onset))
+            used.add(best)
+            matched += 1
+            latencies.append(best - onset)
+    false: int = len(det_on) - len(used)
+    return {
+        "contact_tp": tp, "contact_fp": fp, "contact_fn": fn,
+        "contact_precision": tp / (tp + fp) if tp + fp else None, "contact_recall": tp / (tp + fn) if tp + fn else None,
+        "contact_f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None,
+        "true_onsets": int(len(true_on)), "matched_onsets": matched, "detected_onsets": int(len(det_on)),
+        "onset_recall": matched / len(true_on) if len(true_on) else None, "onset_precision": len(used) / len(det_on) if len(det_on) else None,
+        "false_onsets_per_min": false / max(minutes, 1e-9), "onset_latency_frames": float(np.median(latencies)) if latencies else None,
+    }
+
+
 def score_hand(scores: FrameScores, side: int, dataset: str, segment: str, fps: float) -> ScoreRow:
     """The KPIs of one hand of one segment."""
     frames: int = len(scores.tracked)
@@ -230,6 +343,7 @@ def score_hand(scores: FrameScores, side: int, dataset: str, segment: str, fps: 
     empty: bool = not len(values)
     return ScoreRow(
         **pinch_counts(scores.pinch_pred_mm[:, side], scores.pinch_true_mm[:, side], scored, minutes),
+        **contact_counts(scores.contact_pred_mm[:, side], scores.contact_true_mm[:, side], scored, minutes),
         dataset=dataset, segment=segment, hand=("left", "right")[side], minutes=minutes,
         required_frames=int(required.sum()), scored_frames=int(scored.sum()),
         coverage=float((required & tracked).sum() / max(required.sum(), 1)),
@@ -279,4 +393,13 @@ def pool(rows: list[ScoreRow], frames: list[tuple[Float32[ndarray, "s"], Float32
         pinch_f1=2 * (sum(r.pinch_tp for r in rows)) / (2 * sum(r.pinch_tp for r in rows) + sum(r.pinch_fp for r in rows) + sum(r.pinch_fn for r in rows)) if sum(r.pinch_tp for r in rows) + sum(r.pinch_fp for r in rows) + sum(r.pinch_fn for r in rows) else None,
         false_pinches_per_min=sum(r.false_pinches_per_min * r.minutes for r in rows) / max(minutes, 1e-9),
         pinch_distance_mae=weighted("pinch_distance_mae", "near_pinch_frames"), near_pinch_frames=sum(r.near_pinch_frames for r in rows),
+        contact_tp=sum(r.contact_tp for r in rows), contact_fp=sum(r.contact_fp for r in rows), contact_fn=sum(r.contact_fn for r in rows),
+        contact_precision=(sum(r.contact_tp for r in rows)) / (sum(r.contact_tp for r in rows) + sum(r.contact_fp for r in rows)) if sum(r.contact_tp for r in rows) + sum(r.contact_fp for r in rows) else None,
+        contact_recall=(sum(r.contact_tp for r in rows)) / (sum(r.contact_tp for r in rows) + sum(r.contact_fn for r in rows)) if sum(r.contact_tp for r in rows) + sum(r.contact_fn for r in rows) else None,
+        contact_f1=2 * (sum(r.contact_tp for r in rows)) / (2 * sum(r.contact_tp for r in rows) + sum(r.contact_fp for r in rows) + sum(r.contact_fn for r in rows)) if sum(r.contact_tp for r in rows) + sum(r.contact_fp for r in rows) + sum(r.contact_fn for r in rows) else None,
+        true_onsets=sum(r.true_onsets for r in rows), matched_onsets=sum(r.matched_onsets for r in rows), detected_onsets=sum(r.detected_onsets for r in rows),
+        onset_recall=(sum(r.matched_onsets for r in rows)) / (sum(r.true_onsets for r in rows)) if sum(r.true_onsets for r in rows) else None,
+        onset_precision=sum(r.detected_onsets - r.false_onsets_per_min * r.minutes for r in rows) / (sum(r.detected_onsets for r in rows)) if sum(r.detected_onsets for r in rows) else None,
+        false_onsets_per_min=sum(r.false_onsets_per_min * r.minutes for r in rows) / max(minutes, 1e-9),
+        onset_latency_frames=weighted("onset_latency_frames", "matched_onsets"),
     )
