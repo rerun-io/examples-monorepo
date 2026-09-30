@@ -164,6 +164,8 @@ class TrackerConfig:
     of a poor first fit)."""
     extrapolation_max_step_m: float | None = None
     """Clamp θ̂'s wrist step to this length (metres per frame); None: no clamp."""
+    temporal_target: Literal["previous", "guess"] = "previous"
+    """The pose a tracked hand's fit starts from and E_temporal pulls towards: θ(t−1) (the paper), or the planning guess θ̂."""
     refine_shift: float | None = None
     """Our addition, off by default: re-cut a hand's crops around its fitted pose and run KeyNet and the fit again when the
     pose's circle moved by more than this many crop radii in one of its views."""
@@ -304,6 +306,8 @@ class _History:
     """Consecutive frames with a rejected view (``rejection_patience``)."""
     age: int = 0
     """Frames this track has been fitted (``confirm_frames``)."""
+    guess: HandPose | None = None
+    """This frame's planning pose θ̂ (``temporal_target`` 'guess'); None while untracked."""
     confirm: int = 0
     """Frames this track stays tentative (``confirm_frames``, or ``confirm_frames_unsure`` after an unsure acquisition)."""
     lost_pose: HandPose | None = None
@@ -413,6 +417,7 @@ class Tracker:
         self.history[side].detnet_misses = 0
         self.history[side].rejections = 0
         self.history[side].age = 0
+        self.history[side].guess = None
 
     def _project(self, pose: HandPose, side: Side, world_from_rig: Float32[Tensor, "4 4"]) -> _Projection:
         points_cam: Float32[Tensor, "c 21 3"] = world_to_cameras(self.rig, world_from_rig, landmarks(self.model, pose, side))
@@ -441,6 +446,7 @@ class Tracker:
         assert history.previous is not None
         guess: HandPose = (history.previous if history.before is None or not self.config.extrapolate or history.age <= self.config.extrapolate_min_age
                            else extrapolate(history.previous, history.before, self.config.extrapolation_gain, self.config.extrapolation_max_step_m))
+        history.guess = guess
         projection: _Projection = self._project(guess, side, world_from_rig)
         seen: Bool[Tensor, "c"] = projection.inside > 0
         out.circle[seen, side] = projection.circles[seen]
@@ -751,6 +757,13 @@ class Tracker:
             return weights * (probability >= 0.5).to(torch.float32)
         return weights * probability.clamp_min(self.config.visibility_floor)
 
+    def _prior(self, side: Side) -> HandPose | None:
+        """The fit's start and E_temporal target for a hand (``temporal_target``); None for a new hand."""
+        history: _History = self.history[side]
+        if history.previous is not None and self.config.temporal_target == "guess" and history.guess is not None:
+            return history.guess
+        return history.previous
+
     def _fit(self, hands: list[HandObservation], spent: dict[str, float]) -> list[FitResult]:
         begin: float = time.perf_counter()
         young: list[bool] = [self.history[hand.side].previous is not None and self.history[hand.side].age < self.config.young_frames for hand in hands]
@@ -760,12 +773,12 @@ class Tracker:
             for flag, config in ((True, relaxed), (False, self.config.fit)):
                 chosen: list[int] = [index for index, value in enumerate(young) if value == flag]
                 if chosen:
-                    fitted: list[FitResult] = fit_pose(self.model, self.phi, [hands[i] for i in chosen], [self.history[hands[i].side].previous for i in chosen], config)
+                    fitted: list[FitResult] = fit_pose(self.model, self.phi, [hands[i] for i in chosen], [self._prior(hands[i].side) for i in chosen], config)
                     for i, result in zip(chosen, fitted, strict=True):
                         results[i] = result
             spent["fit"] += time.perf_counter() - begin
             return [result for result in results if result is not None]
-        results_all: list[FitResult] = fit_pose(self.model, self.phi, hands, [self.history[hand.side].previous for hand in hands], self.config.fit)
+        results_all: list[FitResult] = fit_pose(self.model, self.phi, hands, [self._prior(hand.side) for hand in hands], self.config.fit)
         if self.config.warm_restart_frames:
             warm: list[int] = [i for i, hand in enumerate(hands) if self.history[hand.side].previous is None and self.history[hand.side].lost_pose is not None
                                and self._frame - self.history[hand.side].lost_frame <= self.config.warm_restart_frames]
