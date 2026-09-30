@@ -224,6 +224,45 @@ def test_end_on_view_rejection_drops_a_track_left_with_one_view() -> None:
     assert results[3].box_source[:, Side.LEFT].tolist() == [0, 0, 0, 0]  # DetNet looks for it again
 
 
+def test_rescue_rejected_view_keeps_a_track_whose_recut_view_passes() -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+    asked: list[int] = []
+
+    def presence(frame: int, camera: int, side: int) -> float:
+        if side == Side.LEFT and frame == 2 and camera == 1:
+            asked.append(frame)
+            return 0.3 if len(asked) == 1 else 0.9  # the planned crop misses; the crop re-cut around the one-view fit holds the hand
+        return 0.9
+
+    keynet: FakeKeyNet = FakeKeyNet(scene, presence=presence)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet,
+                                              TrackerConfig(end_on_view_rejection=True, rescue_rejected_view=True)), 4)
+    assert all(bool(result.tracked[Side.LEFT]) for result in results)
+    frame_two: list[CropRequest] = [request for frame, request in keynet.calls if frame == 2]
+    assert len(frame_two) == 2, "the rescue is one more KeyNet call on the same frame"
+    assert sorted(frame_two[1].camera[frame_two[1].side == Side.LEFT].tolist()) == [0, 1]
+    left_observation = results[2].observations[Side.LEFT]
+    assert left_observation is not None and len(left_observation.views) == 2
+    torch.testing.assert_close(results[2].presence[:2, Side.LEFT], torch.tensor([0.9, 0.9]))
+    torch.testing.assert_close(results[2].landmarks[Side.LEFT], scene.landmarks[Side.LEFT], atol=2e-3, rtol=0.0)
+
+
+def test_rescue_rejected_view_still_ends_a_track_whose_recut_view_fails() -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+
+    def presence(frame: int, camera: int, side: int) -> float:
+        return 0.3 if side == Side.LEFT and frame == 2 and camera == 1 else 0.9
+
+    keynet: FakeKeyNet = FakeKeyNet(scene, presence=presence)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, keynet,
+                                              TrackerConfig(end_on_view_rejection=True, rescue_rejected_view=True)), 4)
+    assert results[1].tracked[Side.LEFT] and not results[2].tracked[Side.LEFT]
+    assert len([frame for frame, _ in keynet.calls if frame == 2]) == 2  # tried once more, then ended
+    assert results[3].box_source[:, Side.LEFT].tolist() == [0, 0, 0, 0]
+
+
 def test_a_detection_that_keynet_rejects_is_not_tracked() -> None:
     scene: Scene = _scene()
     detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})

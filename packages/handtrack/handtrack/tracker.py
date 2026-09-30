@@ -219,6 +219,10 @@ class TrackerConfig:
     end_on_view_rejection: bool = False
     """Our addition, off by default: end a tracked hand when KeyNet rejects some of its requested views and one view is left.
     On UmeTrack synthetic user_12/rec_09 those one-view frames averaged ~170 mm (their last view is off the hand as well)."""
+    rescue_rejected_view: bool = False
+    """With ``end_on_view_rejection``: before ending such a track, fit the hand to its one remaining view, re-cut the crops around that fit
+    in its best cameras and run KeyNet once more; the track goes on if that pass keeps two views. Fast motion (snaps, punches) moves a
+    hand off the crop planned from θ̂ in one camera while the other still holds it."""
     fit: FitConfig = field(default_factory=FitConfig)
 
     def __post_init__(self) -> None:
@@ -367,6 +371,9 @@ class Tracker:
         self.next_detnet_camera: int = 0
         self._margin: Float32[Tensor, "21"] = flesh_margin(model)
         self._frame: int = 0
+        self._rescue: dict[Side, HandObservation] = {}
+        """``rescue_rejected_view``: this frame's one-view observation of each hand that ``end_on_view_rejection`` is about to end."""
+        self._rescuing: bool = False
         self.timings_s: dict[str, float] = {"detnet": 0.0, "keynet": 0.0, "fit": 0.0, "tracker": 0.0}
         """Seconds per stage, summed over frames (``tracker`` is the rest: projection, circles, bookkeeping)."""
 
@@ -499,10 +506,13 @@ class Tracker:
         if self.config.acquire_recrop:
             for _ in range(self.config.acquire_recrop):
                 views = self._recrop_acquisitions(frame, images, world_from_rig, views, spent, native_images)
+        self._rescue = {}
         observed: tuple[list[HandObservation], list[Side]] = self._observe(frame, images, world_from_rig, views, out, spent, native_images)
+        rescued: dict[Side, HandObservation] = self._rescue_views(frame, images, world_from_rig, out, spent, native_images) if self._rescue else {}
         for side in observed[1]:
-            self._drop(side)
-        hands: list[HandObservation] = observed[0]
+            if side not in rescued:
+                self._drop(side)
+        hands: list[HandObservation] = observed[0] + list(rescued.values())
         if not hands:
             return
         results: list[FitResult] = self._fit(hands, spent)
@@ -594,6 +604,8 @@ class Tracker:
                 if len(good) == 1:
                     self.history[side].rejections += 1
                     if self.history[side].rejections >= self.config.rejection_patience:
+                        if self.config.rescue_rejected_view and not self._rescuing:
+                            self._rescue[side] = HandObservation(side=side, views=(self._seen(views[good[0]], estimate, good[0], poses, world_from_rig),))
                         good = []  # the pose is slipping off the hand: a one-view fit from here is poor; DetNet re-acquires next frame
                 else:
                     self.history[side].rejections = 0
@@ -616,18 +628,58 @@ class Tracker:
             if mine and not good:
                 rejected.append(side)
             if good:
-                views_seen: tuple[ViewObservation, ...] = tuple(
-                    ViewObservation(
-                        camera=self.cameras[views[index].camera],
-                        world_from_rig=world_from_rig,
-                        keypoints_px=self.letterboxes[views[index].camera].from_net(estimate.points_net[index]),
-                        weights=self._weights(estimate, index) * self._clear(views[index], poses, world_from_rig),
-                        d_rel_mm=estimate.d_rel_mm[index],
-                    )
-                    for index in good
-                )
-                hands.append(HandObservation(side=side, views=views_seen))
+                hands.append(HandObservation(side=side, views=tuple(self._seen(views[index], estimate, index, poses, world_from_rig) for index in good)))
         return hands, rejected
+
+    def _seen(self, view: _View, estimate: KeypointEstimate, index: int, poses: list[HandPose | None],
+              world_from_rig: Float32[Tensor, "4 4"]) -> ViewObservation:
+        """KeyNet's row ``index`` as the fit's observation of ``view``."""
+        return ViewObservation(
+            camera=self.cameras[view.camera],
+            world_from_rig=world_from_rig,
+            keypoints_px=self.letterboxes[view.camera].from_net(estimate.points_net[index]),
+            weights=self._weights(estimate, index) * self._clear(view, poses, world_from_rig),
+            d_rel_mm=estimate.d_rel_mm[index],
+        )
+
+    def _rescue_views(self, frame: int, images: UInt8[Tensor, "c 480 640"], world_from_rig: Float32[Tensor, "4 4"], out: "_FrameOutput",
+                      spent: dict[str, float], native_images: tuple[UInt8[Tensor, "h w"], ...]) -> dict[Side, HandObservation]:
+        """``rescue_rejected_view``: fit each stashed one-view hand, re-cut its crops around that fit in its best cameras and run KeyNet
+        once more; returns the hands that keep two views (their KeyNet outputs replace this frame's), the rest stay rejected."""
+        candidates: dict[Side, HandObservation] = self._rescue
+        self._rescue = {}
+        sides: list[Side] = list(candidates)
+        again: list[_View] = []
+        for side, result in zip(sides, self._fit([candidates[side] for side in sides], spent), strict=True):
+            if not result.converged or not _finite(result.pose):
+                continue
+            projection: _Projection = self._project(result.pose, side, world_from_rig)
+            order: list[int] = sorted((c for c in range(len(self.cameras)) if int(projection.inside[c]) > 0), key=lambda c: -int(projection.inside[c]))
+            if len(order) >= 2:
+                again.extend(self._view(side, camera, projection, result.pose) for camera in order[: self.config.max_views])
+        if not again:
+            return {}
+        scratch: _FrameOutput = _FrameOutput.empty(len(self.cameras))
+        self._rescuing = True
+        try:
+            hands: list[HandObservation] = self._observe(frame, images, world_from_rig, again, scratch, spent, native_images)[0]
+        finally:
+            self._rescuing = False
+        kept: dict[Side, HandObservation] = {hand.side: hand for hand in hands if len(hand.views) >= 2}
+        for side in kept:
+            ran: Bool[Tensor, "c"] = torch.isfinite(scratch.presence[:, side])
+            out.keypoints[ran, side] = scratch.keypoints[ran, side]
+            out.presence[ran, side] = scratch.presence[ran, side]
+            for view in again:
+                if view.side == side:
+                    out.circle[view.camera, side] = view.circle
+            for name in ("visibility", "pinch"):
+                source: Tensor | None = getattr(scratch, name)
+                if source is not None:
+                    if getattr(out, name) is None:
+                        setattr(out, name, torch.full_like(source, torch.nan))
+                    getattr(out, name)[ran, side] = source[ran, side]
+        return kept
 
     def _clear(self, view: "_View", poses: list[HandPose | None], world_from_rig: Float32[Tensor, "4 4"]) -> Float32[Tensor, "21"]:
         """1 per keypoint, or 0 where the other hand's planning pose covers it in this view (``predicted_occlusion``)."""
