@@ -49,10 +49,12 @@ class HandPose:
         return transform
 
 
-def extrapolate(previous: HandPose, before_previous: HandPose, gain: float = 1.0, max_step_m: float | None = None) -> HandPose:
+def extrapolate(previous: HandPose, before_previous: HandPose, gain: float = 1.0, max_step_m: float | None = None,
+                joint_gain: float | None = None) -> HandPose:
     """θ̂ = θ(t−1) + gain·(θ(t−1) − θ(t−2)); gain 1 is the constant-velocity guess 2θ(t−1) − θ(t−2), with the rotation extrapolated
     on SO(3): R̂ = D·R(t−1), D = R(t−1)·R(t−2)ᵀ. Another gain scales D towards the identity (I + gain·(D − I), projected back onto
-    SO(3); exact to first order in the per-frame rotation). ``max_step_m`` clamps the length of the wrist's translation step."""
+    SO(3); exact to first order in the per-frame rotation). ``max_step_m`` clamps the length of the wrist's translation step;
+    ``joint_gain`` (default: ``gain``) is the finger joint angles' own gain."""
     delta: Float32[Tensor, "*batch 3 3"] = previous.rotation @ before_previous.rotation.transpose(-1, -2)
     if gain != 1.0:
         eye: Float32[Tensor, "3 3"] = torch.eye(3, dtype=delta.dtype, device=delta.device)
@@ -66,7 +68,7 @@ def extrapolate(previous: HandPose, before_previous: HandPose, gain: float = 1.0
     return HandPose(
         rotation=delta @ previous.rotation,
         translation=previous.translation + step,
-        joint_angles=previous.joint_angles + gain * (previous.joint_angles - before_previous.joint_angles),
+        joint_angles=previous.joint_angles + (gain if joint_gain is None else joint_gain) * (previous.joint_angles - before_previous.joint_angles),
     )
 
 

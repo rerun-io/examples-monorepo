@@ -164,6 +164,9 @@ class TrackerConfig:
     of a poor first fit)."""
     extrapolation_max_step_m: float | None = None
     """Clamp θ̂'s wrist step to this length (metres per frame); None: no clamp."""
+    joint_extrapolation_gain: float | None = None
+    """The finger joint angles' own gain (None: ``extrapolation_gain``). Damping the wrist fixes crop placement; the fingers keep their
+    velocity so fast closures (pinch onsets) do not lag behind a damped keypoint prior."""
     temporal_target: Literal["previous", "guess"] = "previous"
     """The pose a tracked hand's fit starts from and E_temporal pulls towards: θ(t−1) (the paper), or the planning guess θ̂."""
     refine_shift: float | None = None
@@ -446,7 +449,8 @@ class Tracker:
         history: _History = self.history[side]
         assert history.previous is not None
         guess: HandPose = (history.previous if history.before is None or not self.config.extrapolate or history.age <= self.config.extrapolate_min_age
-                           else extrapolate(history.previous, history.before, self.config.extrapolation_gain, self.config.extrapolation_max_step_m))
+                           else extrapolate(history.previous, history.before, self.config.extrapolation_gain, self.config.extrapolation_max_step_m,
+                                            self.config.joint_extrapolation_gain))
         history.guess = guess
         projection: _Projection = self._project(guess, side, world_from_rig)
         seen: Bool[Tensor, "c"] = projection.inside > 0
