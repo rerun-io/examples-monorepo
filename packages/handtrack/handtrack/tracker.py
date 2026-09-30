@@ -181,6 +181,10 @@ class TrackerConfig:
     predicted_occlusion: bool = False
     """Our addition: a keypoint that the OTHER hand's predicted mesh covers in a view (both hands' planning poses, ray cast as
     ``labels.visibility``) gets weight 0 in the fit, whatever KeyNet says; needs no network output."""
+    mask_out_of_image: bool = False
+    """Our addition: a keypoint that the planning pose projects outside the camera image (or within ``image_margin_px`` of its edge)
+    gets weight 0 in that view: KeyNet cannot see it and squeezes it into the visible part of a hand leaving the image."""
+    image_margin_px: float = 0.0
     rejection_patience: int = 1
     """With ``end_on_view_rejection``: end the track only after this many consecutive frames with a rejected view."""
     acquire_clear_of_other: float = 1.0
@@ -611,16 +615,25 @@ class Tracker:
         """1 per keypoint, or 0 where the other hand's planning pose covers it in this view (``predicted_occlusion``)."""
         own: HandPose | None = poses[view.side]
         other: HandPose | None = poses[1 - view.side]
-        if not self.config.predicted_occlusion or own is None or other is None:
-            return torch.ones(21)
+        clear: Float32[Tensor, "21"] = torch.ones(21)
+        if own is None or not (self.config.mask_out_of_image or self.config.predicted_occlusion):
+            return clear
         camera: CameraRig = self.cameras[view.camera]
         points: Float32[Tensor, "1 1 21 3"] = world_to_cameras(camera, world_from_rig, landmarks(self.model, own, view.side))[:, None]
+        if self.config.mask_out_of_image:
+            pixels: Float32[Tensor, "21 2"] = project(camera, points[:, 0])[0]
+            size: Float32[Tensor, "2"] = camera.image_size[0].to(pixels.dtype)
+            margin: float = self.config.image_margin_px
+            inside: Bool[Tensor, "21"] = (pixels >= margin - 0.5).all(-1) & (pixels < size - 0.5 - margin).all(-1) & (points[0, 0, :, 2] > 0)
+            clear = clear * inside.to(torch.float32)
+        if not self.config.predicted_occlusion or other is None:
+            return clear
         sides: tuple[Side, Side] = (view.side, Side(1 - view.side))
         meshes: Float32[Tensor, "2 v 3"] = torch.stack([mesh_vertices(self.model, pose, side) for pose, side in ((own, sides[0]), (other, sides[1]))])
         in_camera: Float32[Tensor, "1 2 v 3"] = world_to_cameras(camera, world_from_rig, meshes.reshape(-1, 3)).reshape(1, 2, -1, 3)
         pair: Float32[Tensor, "1 2 21 3"] = torch.cat([points, torch.full_like(points, torch.nan)], dim=1)
         hidden: Bool[Tensor, "21"] = keypoints_hidden(pair, in_camera, self.model.mesh_triangles, self._margin)[0, 0]
-        return (~hidden).to(torch.float32)
+        return clear * (~hidden).to(torch.float32)
 
     def _weights(self, estimate: KeypointEstimate, index: int) -> Float32[Tensor, "21"]:
         """A view's keypoint weights: 0 for an empty heatmap, times the visibility weighting when it is on."""
