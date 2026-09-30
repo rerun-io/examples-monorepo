@@ -24,6 +24,12 @@ class Config:
     """KeyNet crop type (``StreamConfig.keynet_crop``)."""
     negative_margin: float = 0.0
     """KeyNet negatives keep their own hand this fraction of the crop side outside the crop (``KeyNetAugment.negative_margin``)."""
+    keynet_scale_range: tuple[float, float] = (0.9, 1.25)
+    """KeyNet crop side multiplier range (KeyNetAugment.scale_range); (1.0, 3.0) mimics DetNet's oversized acquisition circles."""
+    keynet_max_shift: float = 0.1
+    """KeyNet box centre shift, fraction of the side per axis (KeyNetAugment.max_shift)."""
+    keynet_zero_input_probability: float = 0.2
+    """Share of KeyNet samples with an all-zero keypoint input, the acquisition case (KeyNetAugment.zero_input_probability)."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d")
     split: str = "training"
     producers: int = 4
@@ -44,7 +50,8 @@ def main(config: Config) -> None:
         row_phase=config.row_phase,
         row_density=config.row_density,
         keynet_crop=config.keynet_crop,
-        keynet=KeyNetAugment(negative_margin=config.negative_margin),
+        keynet=KeyNetAugment(negative_margin=config.negative_margin, scale_range=config.keynet_scale_range, max_shift=config.keynet_max_shift,
+                             zero_input_probability=config.keynet_zero_input_probability),
     ))
     with stream:
         manifest: CacheManifest = write_cache(stream, config.output, config.split, net=config.net)
