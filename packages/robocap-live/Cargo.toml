@@ -2,7 +2,7 @@
 # and the same core replaying an exported session. Its own workspace: it path-depends on slam-rs and handfit.
 [workspace]
 resolver = "3"
-members = ["crates/robocap-live", "crates/robocap-panel"]
+members = ["crates/robocap-live", "crates/robocap-panel", "crates/robocap-types"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 nalgebra = "0.35"
+robocap-types = { path = "crates/robocap-types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 slam-rs = { path = "../slam-rs/crates/slam-rs" }

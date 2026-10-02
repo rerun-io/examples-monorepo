@@ -20,6 +20,7 @@ libc = "0.2"
 # nets: librknnrt is dlopened at run time (never linked).
 libloading = "0.8"
 nalgebra = { workspace = true }
+robocap-types = { workspace = true }
 # nets: ONNX Runtime for hosts, behind the `ort` feature (kornia-rs examples/onnx's pin; the library is loaded at run time
 # from ORT_DYLIB_PATH, so the cap build carries no ONNX Runtime).
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["load-dynamic", "cuda", "std"], optional = true }
