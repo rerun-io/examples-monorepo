@@ -448,3 +448,43 @@ def test_temporal_target_chooses_the_fits_start(monkeypatch: pytest.MonkeyPatch,
     history = tracker.history[Side.LEFT]
     assert history.guess is not None and history.guess is not history.before
     assert seen[0] is (history.before if target == "previous" else history.guess)
+
+
+@pytest.mark.parametrize("preset", ["default", "robust"])
+def test_the_native_fit_backend_tracks_the_fake_scene_like_torch(preset: str) -> None:
+    scene: Scene = _scene()
+    base: TrackerConfig = ROBUST_TRACKER_CONFIG if preset == "robust" else TrackerConfig()
+    runs: dict[str, list[FrameResult]] = {}
+    for backend in ("torch", "native"):
+        detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT), (1, 1, Side.RIGHT)})
+        config: TrackerConfig = replace(base, fit_backend=backend)
+        runs[backend] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, FakeKeyNet(scene), config), 6)
+    for torch_frame, native_frame in zip(runs["torch"], runs["native"], strict=True):
+        assert native_frame.tracked.tolist() == torch_frame.tracked.tolist()
+        tracked: Tensor = torch_frame.tracked
+        torch.testing.assert_close(native_frame.landmarks[tracked], torch_frame.landmarks[tracked], atol=1e-3, rtol=0.0)
+
+
+@pytest.mark.parametrize(("separation_m", "right_tracked"), [(0.0, True), (10.0, False)])
+def test_an_acquisition_too_close_to_the_other_tracked_hand_is_rejected(separation_m: float, right_tracked: bool) -> None:
+    scene: Scene = _scene()
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT), (1, 1, Side.RIGHT)})
+    config: TrackerConfig = TrackerConfig(acquire_min_separation_m=separation_m)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, FakeKeyNet(scene), config), 2)
+    # the left hand is tracked from frame 0; the right hand's acquisition on frame 1 lies within 10 m of it
+    assert results[1].tracked.tolist() == [True, right_tracked]
+
+
+@pytest.mark.parametrize(("noise", "max_relative_rms", "tracked"), [(0.0, 0.02, True), (0.25, 1e9, True), (0.25, 0.02, False)])
+def test_an_acquisition_whose_fit_leaves_a_large_residual_for_its_keypoints_size_is_rejected(
+    noise: float, max_relative_rms: float, tracked: bool
+) -> None:
+    scene: Scene = _scene()
+    net_xy: Float32[Tensor, "4 2 21 2"] = scene.net_xy.clone()
+    # KeyNet's left-hand keypoints jittered by this share of their spread: a fit converges but cannot explain them
+    spread: Float32[Tensor, "4 1 1"] = (net_xy[:, Side.LEFT] - net_xy[:, Side.LEFT].mean(dim=1, keepdim=True)).square().sum(-1).mean(-1).sqrt()[:, None, None]
+    net_xy[:, Side.LEFT] += noise * spread * torch.randn(net_xy[:, Side.LEFT].shape, generator=torch.Generator().manual_seed(0))
+    detector: FakeDetector = FakeDetector(scene, detections={(0, 0, Side.LEFT)})
+    config: TrackerConfig = TrackerConfig(acquire_max_relative_rms=max_relative_rms)
+    results: list[FrameResult] = _run(Tracker(scene.rig, scene.letterboxes, scene.model, 1.0, detector, FakeKeyNet(replace(scene, net_xy=net_xy)), config), 1)
+    assert bool(results[0].tracked[Side.LEFT]) == tracked

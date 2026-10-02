@@ -103,6 +103,9 @@ packages/mvs/data/
 packages/gauss-surf/data/
 packages/dataforge/data/
 packages/handtrack/data/
+packages/handfit/data/
+packages/handfit/target/
+packages/handfit/handfit/_core.so
 packages/exo-calib/data/
 packages/lamp/data/
 # License-gated SMPL-X body model (lazily downloaded; the MANO pkls next to it stay tracked)
