@@ -2,7 +2,11 @@ slam-rs JSON inputs: dataset VIO configurations and RoboCap calibration.
 
 Each dataset in ../slam.toml selects one configuration. The
 reference profile leaves it unchanged. The default fast profile applies the
-three keys in profiles/fast.json. tests/test_config_profiles.py checks overlays
+three keys in profiles/fast.json. profiles/live.json is the RoboCap live
+profile (robocap-live's default): the fast keys plus a deferred keyframe solve
+(port.keyframe_solve_deferred, D84) and 5 LM iterations. profiles/live30.json
+adds a 70 px detection grid (about 40 % less frontend work; outside the 10 s
+clip's ATE band, inside the full session's). tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 

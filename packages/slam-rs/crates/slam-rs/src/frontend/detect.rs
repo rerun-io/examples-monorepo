@@ -168,6 +168,18 @@ pub struct BandRequest {
 /// across the interpreter's threads even though nothing here runs on more than
 /// one.
 pub trait CornerScan: std::fmt::Debug + Send + Sync {
+    /// Make an independent scanner with the same corner-selection behavior.
+    ///
+    /// # Returns
+    ///
+    /// A scanner that can scan any camera concurrently with this one, or
+    /// `None` when callers must use this scanner serially. Implementations
+    /// must preserve configuration and must not depend on shared per-frame
+    /// preparation such as `submit_cells` on the original scanner.
+    fn fork(&self) -> Option<Box<dyn CornerScan>> {
+        None
+    }
+
     /// Take camera `camera`'s frame, discarding whatever the last one left.
     ///
     /// Called once per camera per frameset, before any [`CornerScan::band`].

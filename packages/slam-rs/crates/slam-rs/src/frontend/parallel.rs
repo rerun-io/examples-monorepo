@@ -3,6 +3,8 @@
 //! thread count instead of the ambient Rayon pool. Each loop is a pure function
 //! of its index; tests require identical output at one and four threads.
 
+use std::sync::Arc;
+
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 
@@ -15,13 +17,21 @@ use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 /// and about 8 GB of thread stacks.
 pub const MAX_THREADS: usize = 1024;
 
+/// Chunks per worker in [`WorkPool::for_each_warp`].
+const CHUNKS_PER_WORKER: usize = 8;
+/// The fewest warps one chunk carries.
+const MIN_CHUNK: usize = 8;
+
 /// A fixed-width worker pool, or the sequential path when one thread was asked for.
-#[derive(Debug)]
+///
+/// Cloning shares the workers: the tracker and the patch stores it makes run on
+/// the same pool.
+#[derive(Debug, Clone)]
 pub struct WorkPool {
     threads: usize,
     /// `None` at `threads == 1`: the sequential path runs on the caller's thread
     /// and never touches rayon at all.
-    pool: Option<ThreadPool>,
+    pool: Option<Arc<ThreadPool>>,
 }
 
 impl WorkPool {
@@ -36,10 +46,12 @@ impl WorkPool {
     /// [`ThreadPoolBuildError`] when the operating system refuses the threads.
     pub fn new(threads: usize) -> Result<Self, ThreadPoolBuildError> {
         let threads: usize = threads.max(1);
-        let pool: Option<ThreadPool> = if threads == 1 {
+        let pool: Option<Arc<ThreadPool>> = if threads == 1 {
             None
         } else {
-            Some(ThreadPoolBuilder::new().num_threads(threads).build()?)
+            Some(Arc::new(
+                ThreadPoolBuilder::new().num_threads(threads).build()?,
+            ))
         };
         Ok(Self { threads, pool })
     }
@@ -47,6 +59,13 @@ impl WorkPool {
     /// Workers this pool runs on.
     pub fn threads(&self) -> usize {
         self.threads
+    }
+
+    /// Run `f` with these workers as rayon's current pool, so the parallel
+    /// iterators inside it use exactly them; `None`, without running `f`, on
+    /// the sequential path, where the caller runs its own loop instead.
+    pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> Option<R> {
+        self.pool.as_ref().map(|pool| pool.install(f))
     }
 
     /// Apply `body` to every index of the shortest input, writing the warp it
@@ -91,9 +110,13 @@ impl WorkPool {
             return;
         };
 
-        // One chunk per worker, rounded up: a fixed split for a given
-        // (len, threads), not whatever rayon's work stealing would pick.
-        let chunk: usize = len.div_ceil(self.threads).max(1);
+        // A fixed split for a given (len, threads): eight chunks per worker of
+        // at least eight warps, so a worker that drew the expensive points does
+        // not hold the others up. Which worker runs a chunk is rayon's choice
+        // and cannot matter: every index is a pure function of itself.
+        let chunk: usize = len
+            .div_ceil(self.threads * CHUNKS_PER_WORKER)
+            .max(MIN_CHUNK);
         pool.install(|| {
             m00[..len]
                 .par_chunks_mut(chunk)

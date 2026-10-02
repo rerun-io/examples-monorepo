@@ -253,5 +253,6 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-doc
 - **D81** — Prefer a host/lane/profile baseline; fall back to the first lane/profile row, and gate speed only on the selected row's host (2026-09-11)
 - **D82** — Ship the CubeCL worker fix as a checksummed archive plus local patch, prepared under a process lock and selected by Cargo; no maintained fork or upstream worker PR (2026-09-11)
 - **D83** — Require at least 1.2x GPU/CPU speedup on the same machine with accuracy in band; 1.5x is a research goal, separate from the 1.10x regression limits (2026-09-11)
+- **D84** — `port.keyframe_solve_deferred`: a keyframe frameset with visual support returns the frame-update pose; its triangulation, joint solve and marginalization run on a second thread beside the next frameset's frontend and finish before the estimator touches the window again (deterministic; gated on ATE, 2026-10-01)
 - **S34** — Remove external comparison fixtures and fallbacks; use catalog ground truth, lane/profile baselines, and library numerics.
 - **S36** — Remove Metal wait and worker sleeps through the wgpu upgrade and local CubeCL park/unpark patch; use matched host baselines.

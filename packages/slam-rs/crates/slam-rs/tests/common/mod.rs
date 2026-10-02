@@ -687,5 +687,7 @@ pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
     pyramid
 }
 
+pub mod flow;
+
 #[cfg(feature = "gpu-core")]
 pub mod gpu;

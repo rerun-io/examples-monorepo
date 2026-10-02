@@ -122,7 +122,9 @@ def load_slam_config(path: Path = SLAM_CONFIG_PATH) -> SlamConfig:
     return replace(parsed, package_root=path.parent, catalog_url=os.environ.get(CATALOG_URL_ENV, parsed.catalog_url))
 
 
-PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio", "port.frame_update_max_iterations"})
+PORT_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"port.redetect_survivor_ratio", "port.frame_update_max_iterations", "port.keyframe_solve_deferred"}
+)
 """Additional port configuration keys accepted in profile overlays."""
 
 

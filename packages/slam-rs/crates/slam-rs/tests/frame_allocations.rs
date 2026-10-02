@@ -474,6 +474,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
             fail_from: 8,
         },
         Box::new(CpuCornerScan::default()),
+        WorkPool::new(1).unwrap(),
     )
     .unwrap();
 
