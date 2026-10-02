@@ -8,7 +8,7 @@ rr = pytest.importorskip("rerun", reason="needs rerun-sdk with the catalog extra
 pytest.importorskip("torchcodec", reason="needs torchcodec for NVDEC decode")
 
 from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch  # noqa: E402
-from handtrack.data.catalog import CATALOG_URL, SHOW3D_SAMPLE, UMETRACK  # noqa: E402
+from handtrack.data.catalog import CATALOG_URL, SHOW3D, UMETRACK  # noqa: E402
 from handtrack.data.stream import CatalogStream, StreamConfig  # noqa: E402
 from handtrack.eval.metrics import DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics  # noqa: E402
 from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH  # noqa: E402
@@ -54,7 +54,7 @@ def _check_keynet(batch: KeyNetBatch) -> None:
     assert batch.heatmaps[~batch.positive].eq(0).all() and batch.distance[~batch.positive].eq(0).all()
 
 
-@pytest.mark.parametrize(("dataset", "segment"), [(UMETRACK, UMETRACK_SEGMENT), (SHOW3D_SAMPLE, SHOW3D_SEGMENT)])
+@pytest.mark.parametrize(("dataset", "segment"), [(UMETRACK, UMETRACK_SEGMENT), (SHOW3D, SHOW3D_SEGMENT)])
 def test_one_segment_through_the_stream(dataset: str, segment: str) -> None:
     _require_resources(dataset)
     config: StreamConfig = StreamConfig(
