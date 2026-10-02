@@ -28,7 +28,7 @@ from handtrack.labels.keypoint_input import hand_scale
 CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 TIMELINE: str = "video_time"
 
-DatasetName: TypeAlias = Literal["dataforge-umetrack", "dataforge-show3d", "dataforge-show3d-sample", "dataforge-hot3d-quest3"]
+DatasetName: TypeAlias = Literal["dataforge-umetrack", "dataforge-show3d", "dataforge-hot3d-quest3"]
 Domain: TypeAlias = Literal["real", "synthetic", "show3d", "hot3d"]
 SplitName: TypeAlias = Literal["train", "val", "test"]
 """Our splits: ``val`` is the held-out training users (UmeTrack) or subjects (SHOW3D); HOT3D is only ``test``."""
@@ -36,7 +36,6 @@ RigRotation: TypeAlias = Literal["quaternion", "mat3x3"]
 
 UMETRACK: DatasetName = "dataforge-umetrack"
 SHOW3D: DatasetName = "dataforge-show3d"
-SHOW3D_SAMPLE: DatasetName = "dataforge-show3d-sample"
 HOT3D_QUEST3: DatasetName = "dataforge-hot3d-quest3"
 
 UMETRACK_VALIDATION_USERS: tuple[str, ...] = ("user_10", "user_28", "user_46")
