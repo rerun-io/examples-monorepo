@@ -148,6 +148,19 @@ pub struct VioConfig {
     /// trials. `configs/profiles/fast.json` selects this schedule through the `port.` key.
     #[serde(rename = "port.frame_update_max_iterations")]
     pub port_frame_update_max_iterations: i32,
+    /// Defer a keyframe's joint solve beside the next frameset's frontend (D84).
+    ///
+    /// Off solves a keyframe frameset's window before the frameset returns. On,
+    /// and with [`Self::port_frame_update_max_iterations`] above zero, a
+    /// keyframe frameset first gets the newest-state update every other
+    /// frameset gets, returns that pose, and leaves triangulation, the joint
+    /// solve and the marginalization pending; [`crate::Vio::track`] runs them on
+    /// a second thread while the next frameset's frontend runs, and the
+    /// estimator finishes them before it touches the window again. The
+    /// frontend's prediction for that next frameset comes from the updated, not
+    /// the jointly solved, state. Deterministic: no timing enters a decision.
+    #[serde(rename = "port.keyframe_solve_deferred")]
+    pub port_keyframe_solve_deferred: bool,
 
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
@@ -259,6 +272,7 @@ impl Default for VioConfig {
 
             port_redetect_survivor_ratio: 0.0,
             port_frame_update_max_iterations: 0,
+            port_keyframe_solve_deferred: false,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
@@ -372,6 +386,7 @@ mod tests {
                 serde_json::from_str(&config.to_json_string().unwrap()).unwrap();
             assert_eq!(written["value0"]["port.redetect_survivor_ratio"], 0.0);
             assert_eq!(written["value0"]["port.frame_update_max_iterations"], 0);
+            assert_eq!(written["value0"]["port.keyframe_solve_deferred"], false);
         }
     }
 

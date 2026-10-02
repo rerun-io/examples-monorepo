@@ -135,6 +135,10 @@ impl std::fmt::Debug for CpuCornerScan {
 }
 
 impl CornerScan for CpuCornerScan {
+    fn fork(&self) -> Option<Box<dyn CornerScan>> {
+        Some(Box::new(Self::default()))
+    }
+
     /// `_camera` is unused: the caller holds the frame and nothing here is
     /// shared between cameras.
     fn scan(&mut self, _camera: usize, image: &ImageU16) -> Result<(), DetectError> {

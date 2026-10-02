@@ -665,3 +665,20 @@ fn the_flow_result_writing_surface_compacts_what_it_is_given() {
     assert!(out.tracked().is_empty());
     assert!(!out.is_valid(1));
 }
+
+/// A zero-capacity patch set is valid (`PatchSoA::new` accepts it); building it from no positions is a no-op on one worker and
+/// on a pool, as it was before the per-level chunked build.
+#[test]
+fn an_empty_patch_set_builds_on_one_worker_and_on_a_pool() {
+    let levels: usize = 3;
+    let base: ImageU16 = shifted_image(160, 160, 0.0, 0.0);
+    let prev: PyramidU16 = pyramid_of(&base, levels);
+    let positions: PointsSoA = PointsSoA::default();
+    let mut single: PatchSoA<Pattern51> = PatchSoA::new(0, levels + 1).unwrap();
+    single.build(&prev, &positions, None).unwrap();
+    let mut pooled: PatchSoA<Pattern51> = PatchSoA::new(0, levels + 1)
+        .unwrap()
+        .with_pool(WorkPool::new(4).unwrap());
+    pooled.build(&prev, &positions, None).unwrap();
+    assert_eq!((single.len(), pooled.len()), (0, 0));
+}

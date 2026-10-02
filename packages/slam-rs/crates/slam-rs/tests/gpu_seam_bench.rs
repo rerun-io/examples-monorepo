@@ -16,6 +16,7 @@
 #![cfg(feature = "gpu-wgpu")]
 
 use slam_rs::frontend::flow::{FrameToFrameOpticalFlow, FrontendOptions, PosePrediction};
+use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::image::ImageU16;
 
@@ -94,6 +95,7 @@ fn the_gpu_frontend_reports_its_host_seam() {
         builder,
         tracker,
         scanner,
+        WorkPool::new(1).unwrap(),
     )
     .unwrap();
 
@@ -220,6 +222,7 @@ fn the_queue_peak_of_a_whole_frameset_stays_below_the_channel_depth() {
             builder,
             tracker,
             scanner,
+            WorkPool::new(1).unwrap(),
         )
         .unwrap();
 
