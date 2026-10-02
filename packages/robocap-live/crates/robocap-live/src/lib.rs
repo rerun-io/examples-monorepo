@@ -2,8 +2,13 @@
 //! an exported session. See SPEC.md for the dump and record formats, and UPSTREAM.md for the pieces written in kornia-rs style
 //! to be upstreamed.
 
+pub mod capture;
 pub mod downsample;
 pub mod frame;
 pub mod hands;
 pub mod kornia_ext;
+pub mod log;
 pub mod nets;
+pub mod sched;
+pub mod slam;
+pub mod source;

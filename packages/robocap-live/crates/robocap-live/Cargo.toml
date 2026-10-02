@@ -7,6 +7,8 @@ publish.workspace = true
 description = "Live SLAM + hand tracking on the RoboCap cap, and the same core replaying an exported session."
 
 [dependencies]
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
 handfit = { workspace = true }
 # nets: f32 -> f16 for FP16 RKNN model inputs.
 half = "2"
@@ -21,13 +23,29 @@ nalgebra = { workspace = true }
 # nets: ONNX Runtime for hosts, behind the `ort` feature (kornia-rs examples/onnx's pin; the library is loaded at run time
 # from ORT_DYLIB_PATH, so the cap build carries no ONNX Runtime).
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["load-dynamic", "cuda", "std"], optional = true }
+# log: the Rerun SDK at the viewer/Python pin, and the rrd decoder for the display asset (static scene + blueprint).
+re_log_encoding = { version = "=0.38.1", default-features = false, features = ["decoder"] }
+rerun = { version = "=0.38.1", default-features = false, features = ["sdk"] }
 rayon = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+slam-rs = { workspace = true }
 thiserror = { workspace = true }
 
+[build-dependencies]
+cc = "1"
+
+# Live capture needs no feature: it is compiled on Linux (cfg(target_os = "linux")) and refuses to run anywhere but Cap A or
+# Cap B.
 [features]
 default = []
 # ONNX Runtime backend for HandNets (hosts: CUDA where there is an NVIDIA GPU, CPU elsewhere).
 ort = ["dep:ort"]
 
+[[example]]
+name = "nets_bench"
+path = "examples/nets_bench.rs"
+
+[[bin]]
+name = "robocap-live"
+path = "src/main.rs"
