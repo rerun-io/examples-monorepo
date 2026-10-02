@@ -2,7 +2,7 @@
 
 Each line: module in this crate -> target kornia crate/repo: what it is.
 
-- `src/frame.rs` FrameMeta / ImuSample / dump format -> kornia-sensors (kornia-slam repo): multi-camera frameset + combined IMU sample
+- `crates/robocap-types` (FrameMeta / Frameset / ImuSample / SourceEvent) and `src/frame.rs`'s dump format -> kornia-sensors (kornia-slam repo): multi-camera frameset + combined IMU sample
   types with integer-ns time; a raw multi-camera replay format.
 - `src/source/mod.rs` FrameSource (rig, next_event) -> kornia-slam: an N-camera + IMU source trait (its roadmap item
   "multi-camera rigs, ported from slam-rs").

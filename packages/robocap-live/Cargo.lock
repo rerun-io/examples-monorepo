@@ -4363,6 +4363,7 @@ dependencies = [
  "rayon",
  "re_log_encoding",
  "rerun",
+ "robocap-types",
  "serde",
  "serde_json",
  "slam-rs",
@@ -4374,6 +4375,15 @@ name = "robocap-panel"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "robocap-types"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "nalgebra",
+ "serde",
 ]
 
 [[package]]

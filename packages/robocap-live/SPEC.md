@@ -5,7 +5,9 @@ KeyNet on the NPU, the handfit fit), and streams the result to a Rerun viewer. T
 
 This file holds what only it says: the dump format, the `--record` JSONL, and the code conventions. The types live in the code:
 
-- `crates/robocap-live/src/frame.rs`: camera indices and names, `Frameset`, `ImuSample`, `Rig`, `DumpMeta`, `FrameHeader`.
+- `crates/robocap-types`: camera indices and names, `FrameMeta`, `CameraFrame`, `Frameset`, `ImuSample`, `SourceEvent`, and
+  `SlamPose` / `SlamStatus` / `SlamStages` (no runtime, device or estimator; `frame.rs` and `slam.rs` re-export them).
+- `crates/robocap-live/src/frame.rs`: `Rig`, `DumpMeta`, `FrameHeader`.
 - `crates/robocap-live/src/nets/mod.rs`: the `HandNets` trait and the raw net outputs; `models/MODELS.md` for the model files.
 - `crates/robocap-live/src/hands/mod.rs`: the tracker's inputs, config and per-frameset results.
 - `crates/robocap-live/src/sched/record.rs`: `RecordLine`, the record JSONL below.
