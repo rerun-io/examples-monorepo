@@ -1,0 +1,4 @@
+# Models and build output stay out of git; MODELS.md lists the models and their sha256.
+/models/*
+!/models/MODELS.md
+/target/

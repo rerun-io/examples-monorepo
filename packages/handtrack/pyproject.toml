@@ -38,6 +38,8 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.vulture]
 paths = ["handtrack", "tests"]
 ignore_names = [
+    # apis.export_nets_onnx (robocap-live nets): ExportReport fields written through serde, and an onnxruntime SessionOptions setting.
+    "torch_version", "onnxruntime_version", "graphs", "intra_op_num_threads",
     # eval.scorecard: ScoreRow KPI fields (read through serde / dataclasses.asdict) and the scorer entry points the overnight runner calls.
     "contact_f1", "contact_precision", "contact_recall", "hidden_error_share", "mka", "mka_truth", "mkpe", "mpvpe", "mpvpe_p90",
     "onset_latency_frames", "onset_precision", "onset_recall", "over100", "over50", "p90", "p95", "pinch_distance_mae", "pinch_f1",
