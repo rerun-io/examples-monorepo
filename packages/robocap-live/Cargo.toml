@@ -1,8 +1,8 @@
 # robocap-live: the on-cap live pipeline (raw cameras + IMU -> slam-rs VIO + DetNet/KeyNet on the NPU + handfit fit -> Rerun),
-# and the same core replaying an exported session. Its own workspace: it path-depends on handfit.
+# and the same core replaying an exported session. Its own workspace: it path-depends on slam-rs and handfit.
 [workspace]
 resolver = "3"
-members = ["crates/robocap-live"]
+members = ["crates/robocap-live", "crates/robocap-panel"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ rust-version = "1.85"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1"
 handfit = { path = "../handfit/crates/handfit" }
 # kornia-rs first, at slam-rs's pinned revision (7 commits behind the v0.2.0 release) so slam-rs and this crate share one Image type.
 # Moving both to crates.io 0.2.0 together comes before any kornia-slam dependency (it builds on 0.2.0). See UPSTREAM.md.
@@ -21,7 +22,12 @@ kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 nalgebra = "0.35"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+slam-rs = { path = "../slam-rs/crates/slam-rs" }
 thiserror = "2"
+
+# slam-rs's patched cubecl-common (see packages/slam-rs/Cargo.toml); the tree is prepared by slam-rs-patch-deps.
+[patch.crates-io]
+cubecl-common = { path = "../slam-rs/target/patch/cubecl-common-0.11.0-pre.3" }
 
 [profile.dev]
 opt-level = 2

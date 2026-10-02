@@ -1,0 +1,10 @@
+[package]
+name = "robocap-panel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "A small web panel on the cap: start and stop the live run; watch temperatures, CPU/NPU/GPU/DDR/VPU, power, Wi-Fi, disk and the pipeline."
+
+[dependencies]
+serde_json = { workspace = true }
