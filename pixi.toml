@@ -2517,10 +2517,13 @@ cmd = "bash -c 'test \"$(ls data/msd-rrd/{base,gt,sensor_metadata}/*.rrd 2>/dev/
 cwd = "packages/slam-rs"
 description = "Download every MSD recording (about 15.5 GB)"
 
-[feature.slam-rs.tasks.slam-rs-catalog-layer]
+# A catalog run belongs on the GPU: the wgpu frontend (built first, so no CPU-only core left by a test run is used) and NVDEC
+# decode, which only the slam-rs-cuda environments carry. Without a GPU adapter it falls back to the CPU and says so.
+[feature.slam-rs-nvdec.tasks.slam-rs-catalog-layer]
+depends-on = ["slam-rs-wgpu-build"]
 cmd = "python tools/apps/catalog_layer.py"
 cwd = "packages/slam-rs"
-description = "Run catalog VIO and replace its slam_rs pose layer (fast profile, GPU when available)"
+description = "Run catalog VIO on the GPU (wgpu frontend, NVDEC decode) and replace its slam_rs pose layer (fast profile)"
 
 [feature.slam-rs.tasks.slam-rs-import-imu-calibration]
 cmd = "python tools/import_imu_calibration.py"
@@ -2572,7 +2575,9 @@ description = "Prepare checksummed Cargo dependencies with local patches"
 
 [feature.slam-rs.tasks.slam-rs-build]
 depends-on = ["slam-rs-patch-deps"]
-cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
+# The CPU core and the GPU core (slam-rs-wgpu-build) share slam_rs/_core.so: each task that needs one installs it first, and
+# the install is a rename, so a running process keeps the file it loaded. Separate target dirs make the switch a copy, not a rebuild.
+cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/patches/**",
@@ -2676,7 +2681,7 @@ description = "Build wgpu Rust documentation with warnings denied"
 # wgpu, the only GPU runtime (D70).
 [feature.slam-rs.tasks.slam-rs-wgpu-build]
 depends-on = ["slam-rs-patch-deps"]
-cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
+cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu --target-dir target/wgpu && cp target/wgpu/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/patches/**",
@@ -3312,6 +3317,77 @@ PACKAGE_DIR = "packages/handtrack"
 PYREFLY_TARGET = "handtrack"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# robocap-live
+# ═══════════════════════════════════════════════════════════════════════════
+# The RoboCap hands catalog layer: robocap-live's Rust hand pipeline (DetNet and KeyNet on ONNX Runtime, the perspective
+# KeyNet crops, the ROBUST tracker on handfit, the UmeTrack mesh and the hands-layer writer) as the pyo3 module
+# robocap_live._core, fed one catalog segment at a time by robocap_live.catalog_segment. The cap binary needs none of this:
+# it builds in `robocap-cross` (packages/robocap-live/scripts/build-arm.sh). The env composes `cuda` for onnxruntime-gpu,
+# whose libonnxruntime.so the core loads at run time (CUDA execution provider, or the CPU one), and the cuDNN/cuBLAS libraries
+# that provider opens. Explicit platforms — see AGENTS.md.
+[feature.robocap-live]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.robocap-live.dependencies]
+python = "3.12.*"
+# conda-forge `rust` ships cargo/rustc and the host C compiler the capture shim's build.rs needs; same pin as slam-rs.
+rust = "1.98.*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.robocap-live.pypi-dependencies]
+robocap-live = { path = "packages/robocap-live", editable = true }
+
+[feature.robocap-live.activation.env]
+PACKAGE_DIR = "packages/robocap-live"
+PYREFLY_TARGET = "robocap_live tools/apps tests"
+
+# cargo never runs during `pixi lock`/`pixi install`: the extension is built here and dropped beside the Python sources
+# (the slam-rs-build pattern). robocap-live path-depends on slam-rs, whose patched cubecl-common tree slam-rs-patch-deps
+# prepares.
+[feature.robocap-live.tasks.robocap-live-build]
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+cmd = "cargo build --release -p robocap-live-py && cp target/release/lib_core.so robocap_live/_core.so.new && mv robocap_live/_core.so.new robocap_live/_core.so"
+cwd = "packages/robocap-live"
+inputs = [
+    "packages/robocap-live/Cargo.toml",
+    "packages/robocap-live/Cargo.lock",
+    "packages/robocap-live/crates/*/Cargo.toml",
+    "packages/robocap-live/crates/*/build.rs",
+    "packages/robocap-live/crates/*/src/**/*",
+    "packages/slam-rs/crates/slam-rs/Cargo.toml",
+    "packages/slam-rs/crates/slam-rs/src/**/*.rs",
+    "packages/handfit/crates/handfit/Cargo.toml",
+    "packages/handfit/crates/handfit/src/**/*.rs",
+]
+outputs = ["packages/robocap-live/robocap_live/_core.so"]
+description = "Build the Rust hands-layer core and install robocap_live._core in place"
+
+[feature.robocap-live.tasks.robocap-hands-layer]
+cmd = "python tools/apps/hands_layer.py"
+cwd = "packages/robocap-live"
+depends-on = ["robocap-live-build"]
+description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
+
+# Python tests import robocap_live._core, so every tier needs the build first; these shadow the dev feature's tasks.
+[feature.robocap-live.tasks.tests]
+cmd = "pytest -q"
+depends-on = ["robocap-live-build"]
+cwd = "packages/robocap-live"
+description = "Build the core, then run the package unit tests"
+
+[feature.robocap-live.tasks.tests-integration]
+cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["robocap-live-build"]
+cwd = "packages/robocap-live"
+description = "Build the core, then run the package integration tests"
+
+[feature.robocap-live.tasks.tests-golden]
+cmd = "sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["robocap-live-build"]
+cwd = "packages/robocap-live"
+description = "Build the core, then run the package golden reference tests"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -3705,6 +3781,19 @@ handtrack-dev = { features = [
     "handfit",
     "dev",
 ], solve-group = "handtrack", no-default-feature = true }
+robocap-live = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "robocap-live",
+], solve-group = "robocap-live", no-default-feature = true }
+robocap-live-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "robocap-live",
+    "dev",
+], solve-group = "robocap-live", no-default-feature = true }
 handfit = { features = ["handfit"], solve-group = "handfit", no-default-feature = true }
 handfit-dev = { features = ["handfit", "dev"], solve-group = "handfit", no-default-feature = true }
 handfit-codegen = { features = ["handfit", "handfit-codegen", "dev"], solve-group = "handfit-codegen", no-default-feature = true }

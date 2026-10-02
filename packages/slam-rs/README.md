@@ -35,8 +35,12 @@ pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
 pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
 pixi run -e slam-rs slam-rs-gate --tier release    # three longer clips; --tier listed scores the other five
 pixi run -e slam-rs slam-rs-wgpu-build             # the GPU frontend; then --gpu on any tool
+pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment <id> --output-dir <dir>   # a catalog segment's slam_rs layer, on the GPU
 pixi run -e slam-rs python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # your own recording, no catalog
 ```
+
+`slam-rs-catalog-layer` runs on the GPU by default: it builds the wgpu core first and decodes with NVDEC, so it lives in the
+`slam-rs-cuda` environment; it falls back to the CPU only without a GPU adapter, and warns when it does.
 
 The gate prints the ATE beside the baseline and pass or fail; on a host that
 recorded no baseline the speed clause is reported, not gated. `slam-rs-serve`

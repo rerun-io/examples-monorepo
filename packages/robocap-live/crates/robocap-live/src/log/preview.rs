@@ -163,7 +163,7 @@ impl PreviewSender {
                         Ok(fresh) => {
                             delivered = DeliveredState::reconnected();
                             if let Some(snapshot) = &latest
-                                && let Err(error) = scene::write_record(&fresh.0, &delivered.record(snapshot))
+                                && let Err(error) = scene::write_record(&fresh.0, &delivered.record(snapshot), self.prelude.content)
                             {
                                 self.counters.error("preview scene restore", &error);
                             }
@@ -195,7 +195,7 @@ impl PreviewSender {
                     LogCounters::add(&self.counters.preview_payload_bytes, luma.as_slice().len() as u64);
                     log_image(rec, *camera, *t_ns, luma)
                 }
-                PreviewItem::Frame(record) => scene::write_record(rec, &delivered.record(record)),
+                PreviewItem::Frame(record) => scene::write_record(rec, &delivered.record(record), self.prelude.content),
             };
             match result {
                 Ok(()) => LogCounters::add(&self.counters.preview_sent, 1),

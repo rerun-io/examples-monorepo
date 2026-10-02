@@ -7,6 +7,7 @@ pub mod downsample;
 pub mod frame;
 pub mod hands;
 pub mod kornia_ext;
+pub mod layer;
 pub mod log;
 pub mod nets;
 pub mod sched;

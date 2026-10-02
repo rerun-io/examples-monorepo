@@ -146,6 +146,26 @@ pub trait HandNets: Send {
     fn describe(&self) -> String;
 }
 
+/// No networks: DetNet sees no hand and KeyNet is never asked (`--nets none`; the tracker then runs but tracks nothing).
+pub struct NoNets;
+
+impl HandNets for NoNets {
+    fn detnet(&mut self, frames: &[NetFrame<'_>]) -> Result<Vec<DetNetRaw>, NetsError> {
+        Ok(frames.iter().map(|_| DetNetRaw { center: [[0.5, 0.5]; 2], radius: [0.0; 2], presence_logit: [-20.0; 2] }).collect())
+    }
+
+    fn keynet(&mut self, crops: &[&[f32]], _: &[[f32; 3 * NUM_LANDMARKS]]) -> Result<Vec<KeyNetRaw>, NetsError> {
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(NetsError::Run { net: "keynet", message: "no networks: there is no KeyNet".into() })
+    }
+
+    fn describe(&self) -> String {
+        "none (no hands)".into()
+    }
+}
+
 // Backends.
 pub mod golden;
 #[cfg(feature = "ort")]

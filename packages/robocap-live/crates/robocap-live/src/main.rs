@@ -21,9 +21,9 @@ use robocap_live::capture::Cap;
 use robocap_live::frame::{NUM_CAMERAS, SMALL_SIZE};
 use robocap_live::hands::{self, HandsConfig, ScaleMode};
 use robocap_live::log::video::{EncoderConfig, EncoderKind};
-use robocap_live::log::{FrameLog, Logger, LoggerConfig, VideoMode};
-use robocap_live::nets::{DetNetRaw, HandNets, KeyNetRaw, NetFrame, NetsError};
-use robocap_live::sched::{self, FramesetSink, HandsStage, OutputRecord, PipelineConfig, RecordWriter, SinkError};
+use robocap_live::log::{Logger, LoggerConfig, LoggerSink, VideoMode};
+use robocap_live::nets::{HandNets, NetsError, NoNets};
+use robocap_live::sched::{self, FramesetSink, HandsStage, PipelineConfig, RecordWriter};
 use robocap_live::slam::{ReferencePoses, SlamConfig, SlamMode, SlamProfile, parse_override};
 use robocap_live::source::FrameSource;
 use robocap_live::source::replay::{ReplayConfig, ReplaySource, read_reference_poses};
@@ -335,24 +335,6 @@ fn install_signal_handlers() {
     }
 }
 
-/// `--nets none`: DetNet sees no hands, KeyNet returns nothing.
-struct NoNets;
-
-impl HandNets for NoNets {
-    fn detnet(&mut self, frames: &[NetFrame<'_>]) -> Result<Vec<DetNetRaw>, NetsError> {
-        Ok(frames.iter().map(|_| DetNetRaw { center: [[0.5, 0.5]; 2], radius: [0.0; 2], presence_logit: [-20.0; 2] }).collect())
-    }
-    fn keynet(&mut self, crops: &[&[f32]], _: &[[f32; 63]]) -> Result<Vec<KeyNetRaw>, NetsError> {
-        if crops.is_empty() {
-            return Ok(Vec::new());
-        }
-        Err(NetsError::Run { net: "keynet", message: "--nets none has no KeyNet".into() })
-    }
-    fn describe(&self) -> String {
-        "none (no hands)".into()
-    }
-}
-
 fn build_nets(spec: &[String]) -> Result<Option<Box<dyn HandNets>>> {
     let dir = |kind: &str| spec.get(1).map(PathBuf::from).with_context(|| format!("--nets {kind} needs a models directory"));
     match spec.first().map(String::as_str) {
@@ -386,37 +368,6 @@ fn nets_factory(spec: &[String]) -> Option<sched::NetsFactory> {
         });
         factory
     })
-}
-
-/// The Rerun logger as an output sink.
-struct LoggerSink {
-    logger: Option<Logger>,
-}
-
-impl FramesetSink for LoggerSink {
-    fn frameset(&mut self, record: &OutputRecord<'_>) -> Result<(), SinkError> {
-        let Some(logger) = self.logger.as_mut() else { return Ok(()) };
-        let world_from_rig = record.pose.filter(|pose| pose.ok).map(|pose| &pose.world_from_rig);
-        let frame = FrameLog {
-            t_ns: record.frameset.t_ns,
-            small: std::array::from_fn(|c| record.small[c].as_ref()),
-            world_from_rig,
-            slam_status: record.pose.map_or("none", |pose| pose.status.as_str()),
-            hands: record.hands,
-            timings: record.timings,
-        };
-        logger.log_frameset(&frame).map_err(|e| SinkError { sink: "rerun".into(), message: e.to_string() })
-    }
-
-    fn finish(&mut self) -> Result<(), SinkError> {
-        let Some(logger) = self.logger.take() else { return Ok(()) };
-        let (stats, encoders) = logger.finish().map_err(|e| SinkError { sink: "rerun".into(), message: e.to_string() })?;
-        eprintln!("robocap-live: rerun logger {stats:?}");
-        for encoder in encoders {
-            eprintln!("robocap-live: encoder {encoder:?}");
-        }
-        Ok(())
-    }
 }
 
 fn main() -> Result<()> {
@@ -579,7 +530,7 @@ fn main() -> Result<()> {
             cli.video,
             options_overlays
         );
-        sinks.push(Box::new(LoggerSink { logger: Some(logger) }));
+        sinks.push(Box::new(LoggerSink::new(logger)));
     }
 
     let slam_overrides =

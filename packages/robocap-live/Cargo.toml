@@ -2,7 +2,10 @@
 # and the same core replaying an exported session. Its own workspace: it path-depends on slam-rs and handfit.
 [workspace]
 resolver = "3"
-members = ["crates/robocap-live", "crates/robocap-panel", "crates/robocap-types"]
+members = ["crates/robocap-live", "crates/robocap-live-py", "crates/robocap-panel", "crates/robocap-types"]
+# robocap-live-py (the Python extension) builds only when named (`-p robocap-live-py`, the robocap-live-build pixi task): the cap
+# build and the workspace's own build, test and clippy runs need no Python.
+default-members = ["crates/robocap-live", "crates/robocap-panel", "crates/robocap-types"]
 
 [workspace.package]
 version = "0.1.0"

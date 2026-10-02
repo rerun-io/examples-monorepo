@@ -52,6 +52,8 @@ def main(config: Config) -> None:
     if config.decode_device == "cuda" and not cuda_available:
         raise ValueError("CUDA decoding requires an available NVIDIA GPU and the slam-rs-cuda environment")
     decode_device: Literal["cpu", "cuda"] = "cuda" if config.decode_device == "cuda" or (config.decode_device == "auto" and cuda_available) else "cpu"
+    if decode_device == "cpu" and config.decode_device == "auto":
+        print("WARNING: decoding on the CPU: no CUDA device in this environment (the slam-rs-cuda environment decodes with NVDEC)", flush=True)
     print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
@@ -61,6 +63,9 @@ def main(config: Config) -> None:
         calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
         flow: _core.VioConfig = _core.VioConfig.from_json(config_text)
         use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
+        if config.backend == "auto" and _core.gpu_backend is None:
+            print("WARNING: tracking on the CPU: this slam_rs._core has no GPU frontend (run slam-rs-wgpu-build; the "
+                  "slam-rs-catalog-layer task does it first)", flush=True)
         vio: _core.Vio
         try:
             vio = _core.Vio(calibration, flow, gpu=use_gpu)

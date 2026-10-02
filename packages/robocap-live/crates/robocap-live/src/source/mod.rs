@@ -1,8 +1,10 @@
-//! Frame sources: the live cameras + IMU on the cap, or a `robocap-live-dump/1` replay. Both yield [`SourceEvent`]s in time order
-//! (IMU samples up to a frameset's time come before it, as slam-rs needs). The pull shape follows kornia-slam's app `FrameSource`
+//! Frame sources: the live cameras + IMU on the cap, a `robocap-live-dump/1` replay, or framesets handed over by another thread
+//! ([`channel`]). Each yields [`SourceEvent`]s in time order (IMU samples up to a frameset's time come before it, as slam-rs
+//! needs). The pull shape follows kornia-slam's app `FrameSource`
 //! (`next_frame() -> Result<Option<_>, SourceError>`), generalised to a six-camera rig with integer-nanosecond time.
 #![deny(missing_docs)]
 
+pub mod channel;
 #[cfg(target_os = "linux")]
 pub mod live;
 pub mod replay;

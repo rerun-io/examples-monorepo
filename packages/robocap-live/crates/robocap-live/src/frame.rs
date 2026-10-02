@@ -95,15 +95,28 @@ impl Rig {
     pub fn load(path: &Path) -> Result<Self, FrameError> {
         let text = std::fs::read_to_string(path).map_err(io_error(path))?;
         let rig: Rig = serde_json::from_str(&text).map_err(|source| FrameError::Json { path: path.to_path_buf(), source })?;
-        if rig.cameras.len() != NUM_CAMERAS {
-            return Err(invalid(format!("{}: {} cameras, expected {NUM_CAMERAS}", path.display(), rig.cameras.len())));
+        rig.validate().map_err(|error| match error {
+            FrameError::Invalid(message) => invalid(format!("{}: {message}", path.display())),
+            other => other,
+        })?;
+        Ok(rig)
+    }
+
+    /// Check that the rig holds the six cameras in [`CAMERA_NAMES`] order.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameError::Invalid`] naming the first camera out of place.
+    pub fn validate(&self) -> Result<(), FrameError> {
+        if self.cameras.len() != NUM_CAMERAS {
+            return Err(invalid(format!("{} cameras, expected {NUM_CAMERAS}", self.cameras.len())));
         }
-        for (camera, name) in rig.cameras.iter().zip(CAMERA_NAMES) {
+        for (camera, name) in self.cameras.iter().zip(CAMERA_NAMES) {
             if camera.name != name {
-                return Err(invalid(format!("{}: camera {} where {name} was expected", path.display(), camera.name)));
+                return Err(invalid(format!("camera {} where {name} was expected", camera.name)));
             }
         }
-        Ok(rig)
+        Ok(())
     }
 }
 
