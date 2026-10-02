@@ -3225,6 +3225,64 @@ cwd = "packages/dataforge"
 description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep running to register/view)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# handfit
+# ═══════════════════════════════════════════════════════════════════════════
+# The native (Rust) hand-pose fit and its pyo3 binding; handtrack's fit_backend="native" and robocap-live use it.
+[feature.handfit]
+# The native hand-pose fit must build where the tracker runs: x86 workstations, the RoboCap cap (linux-aarch64) and the Mac mini.
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.handfit.dependencies]
+python = "3.12.*"
+# conda-forge `rust` ships cargo/rustc and sets the linker; same pin as slam-rs.
+rust = "1.98.*"
+numpy = "*"
+tyro = ">=0.9.1,<0.10"
+jaxtyping = "*"
+
+[feature.handfit.pypi-dependencies]
+handfit = { path = "packages/handfit", editable = true }
+
+[feature.handfit.activation.env]
+PACKAGE_DIR = "packages/handfit"
+PYREFLY_TARGET = "handfit tools tests"
+# cargo names the cdylib per platform; one variable instead of a second build task (as slam-rs's CORE_CDYLIB).
+HANDFIT_CDYLIB = "lib_core.so"
+
+[feature.handfit.target.osx-arm64.activation.env]
+HANDFIT_CDYLIB = "lib_core.dylib"
+
+[feature.handfit.tasks.handfit-build]
+cmd = "cargo build --release -p handfit-py && cp target/release/$HANDFIT_CDYLIB handfit/_core.so"
+cwd = "packages/handfit"
+inputs = [
+    "packages/handfit/Cargo.toml",
+    "packages/handfit/Cargo.lock",
+    "packages/handfit/crates/*/Cargo.toml",
+    "packages/handfit/crates/*/src/**/*.rs",
+]
+outputs = ["packages/handfit/handfit/_core.so"]
+description = "Build the native hand-pose fit and install handfit._core in place"
+
+[feature.handfit.tasks.handfit-cargo-test]
+cmd = "cargo test --release --workspace"
+cwd = "packages/handfit"
+description = "Run the Rust unit tests of the native fit"
+
+[feature.handfit-codegen]
+# SymForce turns the symbolic residuals into Rust (committed under crates/handfit/src/generated/); only the generator needs it.
+# Linux only: SymForce's macOS wheel needs macOS 14 and pixi's osx-arm64 lane assumes 13; the generated code is committed anyway.
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.handfit-codegen.pypi-dependencies]
+symforce = "==0.12.0"
+
+[feature.handfit-codegen.tasks.handfit-codegen]
+cmd = "python tools/codegen.py"
+cwd = "packages/handfit"
+description = "Regenerate the SymForce residual/Jacobian Rust code"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # handtrack
 # ═══════════════════════════════════════════════════════════════════════════
 # MEgATrack's hand tracker (DetNet-F, KeyNet-F, the LM pose fit, the tracker), trained on
@@ -3637,14 +3695,19 @@ handtrack = { features = [
     "rerun-prerelease",
     "cuda",
     "handtrack",
+    "handfit",
 ], solve-group = "handtrack", no-default-feature = true }
 handtrack-dev = { features = [
     "catalog-common",
     "rerun-prerelease",
     "cuda",
     "handtrack",
+    "handfit",
     "dev",
 ], solve-group = "handtrack", no-default-feature = true }
+handfit = { features = ["handfit"], solve-group = "handfit", no-default-feature = true }
+handfit-dev = { features = ["handfit", "dev"], solve-group = "handfit", no-default-feature = true }
+handfit-codegen = { features = ["handfit", "handfit-codegen", "dev"], solve-group = "handfit-codegen", no-default-feature = true }
 dpvo = { features = [
     "common",
     "cuda",

@@ -1,0 +1,34 @@
+[project]
+name = "handfit"
+version = "0.1.0"
+description = "Native (Rust) hand-pose fit for handtrack: the same Levenberg-Marquardt fit, SymForce-generated Jacobians, numpy API"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only: `pixi lock` must never build this package; the Rust core is compiled by the
+# `handfit-build` pixi task, not by the wheel build. numpy only, so the package runs where torch does not (the cap).
+dependencies = ["numpy"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["handfit"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e handfit-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e handfit-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["handfit", "tools", "tests"]
+min_confidence = 80

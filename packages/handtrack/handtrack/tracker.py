@@ -36,6 +36,7 @@ from jaxtyping import Bool, Float32, Int8, Int64, UInt8
 from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
 from torch import Tensor
 
+from handtrack.fit import native
 from handtrack.fit.observations import MAX_VIEWS, HandObservation, ViewObservation
 from handtrack.fit.pose_fit import FitConfig, FitResult, fit_pose
 from handtrack.geometry.camera import CameraRig, in_front, inside_image, project, world_to_cameras
@@ -226,6 +227,13 @@ class TrackerConfig:
     term); the lower-energy fit of that and the neutral start wins."""
     acquire_max_rms_px: float = 1e9
     """Reject an acquisition whose fit leaves an RMS 2D residual above this (pixels of the camera images)."""
+    acquire_max_relative_rms: float = 1e9
+    """Reject an acquisition whose fit leaves an RMS 2D residual above this share of the RMS spread of its observed keypoints about
+    their centre (1e9 never rejects). Unlike ``acquire_max_rms_px`` it does not depend on the camera resolution or the hand's distance."""
+    acquire_min_separation_m: float = 0.0
+    """Reject an acquisition whose fitted wrist lies closer than this to the other tracked hand's wrist (0 never rejects): DetNet's
+    other-side detection of an already tracked hand would otherwise start a second track on the same hand. torch's float32
+    acquisition fit happened to reject many of these as unconverged; the native fit converges on them."""
     confirm_frames: int = 0
     """A new track is reported (tracked, landmarks) only from its (confirm_frames+1)-th frame; it is tracked internally from the first."""
     confirm_frames_unsure: int | None = None
@@ -240,6 +248,9 @@ class TrackerConfig:
     in its best cameras and run KeyNet once more; the track goes on if that pass keeps two views. Fast motion (snaps, punches) moves a
     hand off the crop planned from θ̂ in one camera while the other still holds it."""
     fit: FitConfig = field(default_factory=FitConfig)
+    fit_backend: Literal["torch", "native"] = "torch"
+    """The LM fit's implementation: ``torch`` (``fit.pose_fit``, the reference) or ``native`` (``fit.native``: the handfit Rust
+    crate, same model and solver rules, ~25x faster per frame; results close to torch, not bit-exact)."""
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_views <= MAX_VIEWS:
@@ -258,8 +269,12 @@ ROBUST_TRACKER_CONFIG: TrackerConfig = TrackerConfig(
     extrapolation_gain=0.5,
     extrapolate_min_age=2,
     extrapolation_max_step_m=0.15,
+    acquire_max_relative_rms=0.08,
 )
-"""The 2026-09-30 overnight scorecard winner (``combo8``, keynet-3): against the night's base (the defaults + ``end_on_view_rejection``;
+"""The acquisition gate (``acquire_max_relative_rms`` 0.08, added 2026-09-30 late) rejects acquisitions whose fit cannot explain KeyNet's
+keypoints; with the strong-pinch KeyNet (final2 settings) it lowers DEV p90 34.0 -> 32.7 mm (torch fit) / 32.9 mm (native fit) and
+catastrophes 7.35 -> 5.85 / 5.53 per minute, HOT3D MKPE 19.5 -> 18.1 mm, at -0.4 to -1.0 points of coverage. 0.06 is slightly more accurate
+again but costs 1.3 points of DEV coverage. Before it: the 2026-09-30 overnight scorecard winner (``combo8``, keynet-3): against the night's base (the defaults + ``end_on_view_rejection``;
 the defaults alone are worse still: tuning-set p90 62.0 mm, 35.6 episodes per minute), the tuning set's p90 falls 52.1 -> 38.8 mm and
 its catastrophic episodes (> 100 mm) 36.3 -> 7.5 per minute; on HOT3D (never tuned on) p90 40.4 -> 35.6 mm and 14.2 -> 3.2 per minute;
 coverage 95.7 -> 93.8 % (HOT3D 86.6 -> 85.7 %). The damped extrapolation (gain 0.5) is the largest single part; confirm_frames 2 trades
@@ -348,6 +363,20 @@ class _Projection:
 def _crop_map(circle: Float32[Tensor, "3"], side: Side) -> Float32[Tensor, "3 3"]:
     floored: Float32[Tensor, "1 3"] = torch.cat([circle[:2], circle[2:].clamp_min(MIN_BOX_RADIUS)])[None]
     return crop_from_net(crop_boxes(floored), torch.tensor([side == Side.RIGHT]))[0]
+
+
+def _keypoint_spread_px(hand: HandObservation) -> float:
+    """RMS distance of a hand's observed keypoints from their weighted centre in each view (pixels; the same weights as E_2D)."""
+    total: float = 0.0
+    weighted: float = 0.0
+    for view in hand.views:
+        weights: Float32[Tensor, "21"] = view.weights
+        if float(weights.sum()) <= 0.0:
+            continue
+        centre: Float32[Tensor, "2"] = (weights[:, None] * view.keypoints_px).sum(dim=0) / weights.sum()
+        total += float((weights * (view.keypoints_px - centre).square().sum(dim=-1)).sum())
+        weighted += float(weights.sum())
+    return math.sqrt(total / max(weighted, 1.0))
 
 
 def _circle_share(circle: Float32[Tensor, "3"], other: Float32[Tensor, "3"]) -> float:
@@ -575,7 +604,15 @@ class Tracker:
             if acquiring and rms > self.config.acquire_max_rms_px:
                 self._drop(hand.side)
                 continue
+            if acquiring and rms > self.config.acquire_max_relative_rms * _keypoint_spread_px(hand):
+                self._drop(hand.side)
+                continue
             if (acquiring and not result.converged) or not _finite(result.pose) or reach > self.config.max_reach_m:
+                self._drop(hand.side)
+                continue
+            other: HandPose | None = self.history[1 - hand.side].previous
+            if (acquiring and self.config.acquire_min_separation_m > 0.0 and other is not None
+                    and float((result.pose.translation - other.translation).norm()) < self.config.acquire_min_separation_m):
                 self._drop(hand.side)
                 continue
             history: _History = self.history[hand.side]
@@ -771,6 +808,13 @@ class Tracker:
             return history.guess
         return history.previous
 
+    def _fit_backend(
+        self, model: HandModelTorch, phi: float, hands: list[HandObservation], previous: list[HandPose | None], config: FitConfig
+    ) -> list[FitResult]:
+        """``fit_pose`` of the configured backend (``TrackerConfig.fit_backend``)."""
+        fit = native.fit_pose if self.config.fit_backend == "native" else fit_pose
+        return fit(model, phi, hands, previous, config)
+
     def _fit(self, hands: list[HandObservation], spent: dict[str, float]) -> list[FitResult]:
         begin: float = time.perf_counter()
         young: list[bool] = [self.history[hand.side].previous is not None and self.history[hand.side].age < self.config.young_frames for hand in hands]
@@ -780,18 +824,18 @@ class Tracker:
             for flag, config in ((True, relaxed), (False, self.config.fit)):
                 chosen: list[int] = [index for index, value in enumerate(young) if value == flag]
                 if chosen:
-                    fitted: list[FitResult] = fit_pose(self.model, self.phi, [hands[i] for i in chosen], [self._prior(hands[i].side) for i in chosen], config)
+                    fitted: list[FitResult] = self._fit_backend(self.model, self.phi, [hands[i] for i in chosen], [self._prior(hands[i].side) for i in chosen], config)
                     for i, result in zip(chosen, fitted, strict=True):
                         results[i] = result
             spent["fit"] += time.perf_counter() - begin
             return [result for result in results if result is not None]
-        results_all: list[FitResult] = fit_pose(self.model, self.phi, hands, [self._prior(hand.side) for hand in hands], self.config.fit)
+        results_all: list[FitResult] = self._fit_backend(self.model, self.phi, hands, [self._prior(hand.side) for hand in hands], self.config.fit)
         if self.config.warm_restart_frames:
             warm: list[int] = [i for i, hand in enumerate(hands) if self.history[hand.side].previous is None and self.history[hand.side].lost_pose is not None
                                and self._frame - self.history[hand.side].lost_frame <= self.config.warm_restart_frames]
             if warm:
                 starts: list[HandPose | None] = [self.history[hands[i].side].lost_pose for i in warm]
-                refits: list[FitResult] = fit_pose(self.model, self.phi, [hands[i] for i in warm], starts, replace(self.config.fit, temporal_weight=0.0))
+                refits: list[FitResult] = self._fit_backend(self.model, self.phi, [hands[i] for i in warm], starts, replace(self.config.fit, temporal_weight=0.0))
                 for i, refit in zip(warm, refits, strict=True):
                     first: FitResult = results_all[i]
                     if refit.converged and _finite(refit.pose) and (not math.isfinite(first.energy) or refit.e_2d + refit.e_dist < first.e_2d + first.e_dist):
@@ -839,7 +883,7 @@ class Tracker:
             return hands, results
         by_side: dict[Side, FitResult] = {hand.side: result for hand, result in zip(hands, results, strict=True)}
         begin: float = time.perf_counter()
-        refits: list[FitResult] = fit_pose(self.model, self.phi, observed[0], [by_side[hand.side].pose for hand in observed[0]],
+        refits: list[FitResult] = self._fit_backend(self.model, self.phi, observed[0], [by_side[hand.side].pose for hand in observed[0]],
                                            replace(self.config.fit, temporal_weight=0.0))
         spent["fit"] += time.perf_counter() - begin
         replaced: dict[Side, tuple[HandObservation, FitResult]] = {}

@@ -1,0 +1,11 @@
+[package]
+name = "handfit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Hand-pose LM fit core: hand model, Fisheye62/pinhole projection, generated residual Jacobians, the solver."
+
+[dependencies]
+nalgebra = { workspace = true }
+thiserror = { workspace = true }
