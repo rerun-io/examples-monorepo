@@ -45,16 +45,16 @@ from handtrack.train.checkpoint import atomic_write
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Config:
+    umetrack_root: Path
+    """External upstream checkout; loaded lazily by one loader."""
+    umetrack_shim: Path
+    """A6's existing pytorch3d SO3 shim; no dependency installation or upstream edits."""
+    output: Path
+    """Run output directory; use a separate directory for each configuration."""
     action: Literal["evaluate", "calibrate", "aggregate"] = "evaluate"
     """Calibration only reads validation labels; evaluation decodes shared NVDEC frames."""
-    umetrack_root: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
-    """External upstream checkout; loaded lazily by one loader."""
-    umetrack_shim: Path = Path("/home/pablo/handtrack-data/umetrack_baseline/shim")
-    """A6's existing pytorch3d SO3 shim; no dependency installation or upstream edits."""
-    detnet_weights: Path = Path("/home/pablo/handtrack-data/checkpoints/current/detnet.weights.pt")
-    """Checkpoint verified by pipeline.load_weights against its .sha256 sidecar."""
-    output: Path = Path("/tmp/fleet-artifacts/handtrack/notes/r1-reference/run")
-    """Run output directory; use a separate directory for each configuration."""
+    detnet_weights: Path | None = None
+    """Checkpoint verified by pipeline.load_weights against its .sha256 sidecar; required to evaluate and aggregate."""
     calibration: Path | None = None
     """Frozen validation Calibration JSON; required for every circle mode."""
     modes: tuple[Mode, ...] = ("gt_pose", "gt_circle", "detnet", "track")
@@ -286,6 +286,8 @@ def main(config: Config) -> None:
         raise ValueError("Circle modes require --calibration from a validation-only calibration run")
     if calibration is not None and calibration.source_sha256 != source:
         raise ValueError("Calibration used different upstream source")
+    if config.detnet_weights is None:
+        raise ValueError(f"action={config.action} needs --detnet-weights")
     model: DetNetF = DetNetF()
     detnet_digest: str = load_weights(model, config.detnet_weights)
     weights: Path = config.umetrack_root / "pretrained_models/pretrained_weights.torch"

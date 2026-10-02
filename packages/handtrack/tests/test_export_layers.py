@@ -108,7 +108,7 @@ def test_export_rejects_missing_base_before_any_mutation(tmp_path: Path, monkeyp
     client = MagicMock()
     client.get_dataset.side_effect = [source, destination, destination]
     monkeypatch.setattr(export_layers, "CatalogClient", lambda url: client)
-    config = export_layers.Config(detnet_dir=tmp_path / "detnet", layers_root=tmp_path / "layers", register=True, register_url="rerun+http://destination:9999")
+    config = export_layers.Config(detnet_dir=tmp_path / "detnet", layers_root=tmp_path / "layers", export_dir=tmp_path / "export", register=True, register_url="rerun+http://destination:9999")
     with pytest.raises(ValueError, match="segment|base"):
         export_layers.main(config)
     assert not config.layers_root.exists()

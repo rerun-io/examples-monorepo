@@ -131,7 +131,7 @@ def test_run_record_preserves_the_whole_tracker_config(tmp_path: Path) -> None:
         refine_shift=0.3, max_reach_m=0.8, min_keypoint_confidence=0.1,
         fit=FitConfig(max_iterations=7, init_iterations=23, dist_weight=0.08, rotation_hypotheses=4),
     )
-    record: RunRecord = RunRecord.from_config(RunConfig(tracker=tracker), Networks(None, None, "oracle", "oracle"))
+    record: RunRecord = RunRecord.from_config(RunConfig(tracker=tracker, output_root=tmp_path), Networks(None, None, "oracle", "oracle"))
     path: Path = tmp_path / "config.json"
     path.write_text(to_json(record))
     assert json.loads(path.read_text())["tracker"] == asdict(tracker)

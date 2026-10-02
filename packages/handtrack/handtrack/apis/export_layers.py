@@ -38,7 +38,7 @@ GT_LAYERS: tuple[str, ...] = ("base", "hand_pose", "hand_mesh", "projections")
 """The segment's layers a standalone clip carries beside ``handtrack_v1``."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Config:
     """Export a tracker run's Rerun layers and standalone clips; optionally register the layers."""
 
@@ -50,8 +50,10 @@ class Config:
     """Only these segments; all the run's segments when empty."""
     clips: tuple[str, ...] = ()
     """Segments to export as standalone rrds (must be in the run)."""
-    layers_root: Path = Path("/home/pablo/handtrack-data/layers")
-    export_dir: Path = Path("/home/pablo/handtrack-data/export")
+    layers_root: Path
+    """Layer rrds go to ``<layers-root>/<layer>/<segment>.rrd``, blueprints to ``<layers-root>/blueprints/``."""
+    export_dir: Path
+    """Standalone clip rrds."""
     export_name: str = "handtrack"
     """Prefix of the standalone clip file names."""
     catalog_url: str = catalog.CATALOG_URL

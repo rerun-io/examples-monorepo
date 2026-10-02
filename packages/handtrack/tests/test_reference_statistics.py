@@ -118,7 +118,7 @@ def test_summary_pools_circle_samples_across_unequal_segments(tmp_path):
         npz = tmp_path / f'{info.segment_id}.npz'
         record = SegmentResult('id', info.segment_id, [metric], npz.name, save_frames(stream, npz))
         (tmp_path / f'{info.segment_id}.json').write_text(to_json(record))
-    assert publish_summary(Config(output=tmp_path, modes=('detnet',)), infos, 'id')
+    assert publish_summary(Config(output=tmp_path, umetrack_root=tmp_path, umetrack_shim=tmp_path, modes=('detnet',)), infos, 'id')
     summary = from_json(Summary, (tmp_path / 'summary.json').read_text())
     score = summary.metrics[0]
     assert score.circle_samples == 8

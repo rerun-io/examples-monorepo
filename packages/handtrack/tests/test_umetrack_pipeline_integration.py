@@ -17,11 +17,13 @@ from handtrack.tracker import CropRequest
 from handtrack.umetrack import RigPoseNetwork, UmeTrackEstimator
 
 pytestmark = pytest.mark.integration
+UMETRACK_ROOT: Path = Path(__file__).resolve().parents[1] / "data/umetrack_baseline/UmeTrack"
+"""The upstream UmeTrack checkout (with pretrained_models/), in the package's untracked data/ directory."""
 
 
 @pytest.mark.parametrize("show3d", [False, True])
 def test_pretrained_cpu_inference_supports_our_rigs_and_both_crop_sources(show3d: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
+    root = UMETRACK_ROOT
     weights = root / "pretrained_models/pretrained_weights.torch"
     if not weights.is_file() or not (root / "lib/tracker/tracker.py").is_file():
         pytest.skip(f"UmeTrack source/weights missing: {root}")
