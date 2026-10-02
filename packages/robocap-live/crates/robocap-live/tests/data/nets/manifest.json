@@ -1,0 +1,29 @@
+{
+  "format": "robocap-live-nets-golden/1",
+  "detnet_weights_sha256": "edda4177599bf6f862cdabd5afbca198ff353cb9156d8eaca6f1351818c51a23",
+  "keynet_weights_sha256": "067cf7f677dbeb8c1fbe741f7bf16c395e5d52ebc79f9ab63498bf74a2faac75",
+  "detnet": {
+    "samples": 4,
+    "source_indices": [
+      0,
+      565,
+      1121,
+      1679
+    ],
+    "pooled_u8": "detnet_pooled_u8.bin [k,120,160]",
+    "out_f32": "detnet_out_f32.bin [k,8] = center (l.x, l.y, r.x, r.y), radius (l, r), presence_logit (l, r)"
+  },
+  "keynet": {
+    "samples": 4,
+    "source_indices": [
+      0,
+      847,
+      1711,
+      2576
+    ],
+    "crops_u8": "keynet_crops_u8.bin [k,96,96] (crop = u8 / 255)",
+    "keypoints_f32": "keynet_keypoints_f32.bin [k,63]",
+    "out_f32": "keynet_out_f32.bin [k,7184] = heatmaps 21*18*18, distance 21*18, presence_logit, pinch_logit",
+    "points_crop_f32": "keynet_points_crop_f32.bin [k,21,2] = decode_heatmaps(heatmaps) in crop px"
+  }
+}
