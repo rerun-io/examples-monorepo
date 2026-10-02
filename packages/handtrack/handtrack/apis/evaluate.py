@@ -18,6 +18,7 @@ from pathlib import Path
 
 import rerun as rr
 import torch
+import tyro
 from rerun.catalog import DatasetEntry
 from serde import SerdeError, serde
 from serde.json import from_json, to_json
@@ -55,7 +56,8 @@ GROUPS: tuple[str, ...] = ("all", "separate_hand", "hand_hand")
 class EvaluateConfig:
     """A split-wide run: the pipeline options, plus whether to only rebuild the tables."""
 
-    run: RunConfig = field(default_factory=lambda: RunConfig(name="test-real", hand_modes=("known", "unknown")))
+    run: RunConfig = field(default_factory=lambda: RunConfig(name="test-real", hand_modes=("known", "unknown"), output_root=tyro.MISSING))
+    """``--run.output-root`` is required."""
     aggregate_only: bool = False
     """Skip tracking; rebuild the tables from the outputs on disk."""
 

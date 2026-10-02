@@ -11,10 +11,12 @@ from handtrack.reference.geometry import FisheyeRays, circle_crop
 from handtrack.reference.upstream import PoseStage, load_umetrack
 
 pytestmark = pytest.mark.integration
+UMETRACK_ROOT: Path = Path(__file__).resolve().parents[1] / "data/umetrack_baseline/UmeTrack"
+"""The upstream UmeTrack checkout (with pretrained_models/), in the package's untracked data/ directory."""
 
 
 def test_upstream_camera_skinning_and_circle_crop_contract():
-    root = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
+    root = UMETRACK_ROOT
     if not (root / "lib/tracker/tracker.py").is_file():
         pytest.skip(f"UmeTrack checkout missing: {root}")
     api = load_umetrack(root)
@@ -53,7 +55,7 @@ def test_upstream_camera_skinning_and_circle_crop_contract():
 def test_upstream_clears_only_ended_hand_memory(monkeypatch):
     import torch
 
-    root = Path("/home/pablo/handtrack-data/umetrack_baseline/UmeTrack")
+    root = UMETRACK_ROOT
     if not (root / "lib/tracker/tracker.py").is_file():
         pytest.skip(f"UmeTrack checkout missing: {root}")
     api = load_umetrack(root)

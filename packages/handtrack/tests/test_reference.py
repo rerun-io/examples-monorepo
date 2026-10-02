@@ -137,7 +137,7 @@ def test_restart_checks_identity_modes_and_pools_by_sample_count(tmp_path):
     from handtrack.eval.segment import PositionScore
     from handtrack.reference.results import ReferenceMetrics, Summary, save_frames
     infos = tuple(SegmentInfo(UMETRACK, f"s{i}", "real", "hand_hand", "testing", "user_12", 4, 30) for i in range(2))
-    config = Config(output=tmp_path, modes=("gt_pose",))
+    config = Config(output=tmp_path, umetrack_root=tmp_path, umetrack_shim=tmp_path, modes=("gt_pose",))
     for index, info in enumerate(infos):
         count = index + 1
         metric = ReferenceMetrics(info.segment_id, "gt_pose", "none", "identity", 4,

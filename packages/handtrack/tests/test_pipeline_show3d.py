@@ -98,7 +98,7 @@ def test_show3d_reader_keeps_native_pixels_and_exports_headset_layers(tmp_path: 
     assert not any(entity.startswith("/world/rig_00/") for entity in entities)
 
 
-def test_show3d_selection_uses_heldout_subjects_and_explicit_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_show3d_selection_uses_heldout_subjects_and_explicit_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     heldout = SegmentInfo(SHOW3D, "heldout", "show3d", "grab", "train", "HLU829", 3, 60)
     training = replace(heldout, segment_id="training", subject="OTHER")
     calls: list[str] = []
@@ -109,7 +109,7 @@ def test_show3d_selection_uses_heldout_subjects_and_explicit_ids(monkeypatch: py
 
     monkeypatch.setattr(run_pipeline, "list_segments", listed)
     entry = MagicMock(spec=DatasetEntry)
-    config = RunConfig(dataset=SHOW3D, split="val", domain="synthetic")
+    config = RunConfig(dataset=SHOW3D, split="val", domain="synthetic", output_root=tmp_path)
     assert select_segments(config, entry) == (heldout,)
     assert select_segments(replace(config, segments=("training", "heldout")), entry) == (training, heldout)
     assert calls == [SHOW3D, SHOW3D]
@@ -119,18 +119,18 @@ def test_show3d_selection_uses_heldout_subjects_and_explicit_ids(monkeypatch: py
         select_segments(replace(config, segments=("missing",)), entry)
 
 
-def test_umetrack_synthetic_selection_keeps_testing_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_umetrack_synthetic_selection_keeps_testing_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     synthetic = SegmentInfo(UMETRACK, "synthetic", "synthetic", "hand_hand", "testing", "user_1", 3, 30)
     monkeypatch.setattr(run_pipeline, "list_segments", lambda entry, name: (synthetic, replace(synthetic, segment_id="real", domain="real")))
-    assert select_segments(RunConfig(domain="synthetic"), MagicMock(spec=DatasetEntry)) == (synthetic,)
+    assert select_segments(RunConfig(domain="synthetic", output_root=tmp_path), MagicMock(spec=DatasetEntry)) == (synthetic,)
 
 
-def test_hot3d_selection_takes_every_labelled_scene_whatever_the_domain_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hot3d_selection_takes_every_labelled_scene_whatever_the_domain_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scenes = tuple(SegmentInfo(HOT3D_QUEST3, f"hot3d-quest3__P000{i}_x", "hot3d", "", "train", f"P000{i}", 30, 30) for i in range(3))
     monkeypatch.setattr(run_pipeline, "list_segments", lambda entry, name: scenes)
-    assert select_segments(RunConfig(dataset=HOT3D_QUEST3, domain="real"), MagicMock(spec=DatasetEntry)) == scenes
+    assert select_segments(RunConfig(dataset=HOT3D_QUEST3, domain="real", output_root=tmp_path), MagicMock(spec=DatasetEntry)) == scenes
     with pytest.raises(CatalogDataError, match="unseen test set"):
-        select_segments(RunConfig(dataset=HOT3D_QUEST3, split="val"), MagicMock(spec=DatasetEntry))
+        select_segments(RunConfig(dataset=HOT3D_QUEST3, split="val", output_root=tmp_path), MagicMock(spec=DatasetEntry))
 
 
 def test_hot3d_blueprint_uses_its_two_cameras_on_rig_0() -> None:
@@ -163,7 +163,8 @@ def test_umetrack_loads_no_keynet_and_records_pretrained_weights_and_calibration
     calibration.write_text(to_json(Calibration(["umetrack__synthetic__hand_hand__training__user_10__recording_00"],
                                               "source", 10, 0.87, 0.8, 0.9, 1.0, 0.5, 1.5, 1)))
     config = RunConfig(dataset=SHOW3D, keypoints="umetrack", detector="oracle", umetrack_weights=weights,
-                       umetrack_calibration=calibration, checkpoints=tmp_path / "no-keynet", output_root=tmp_path)
+                       umetrack_calibration=calibration, umetrack_root=tmp_path, umetrack_shim=tmp_path, checkpoints=tmp_path / "no-keynet",
+                       output_root=tmp_path)
     networks = run_pipeline.load_networks(config, torch.device("cpu"))
     assert networks.keynet is None and networks.keynet_sha256 == run_pipeline.file_sha256(weights)
     identity = run_pipeline.ensure_run_identity(config, networks)
