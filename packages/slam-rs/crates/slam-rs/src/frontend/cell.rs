@@ -231,7 +231,7 @@ const KEY_FIELD_MASK: u32 = 0xFFF;
 /// band path instead of losing a coordinate.
 pub const CELL_KEY_LIMIT: usize = 1 << KEY_ROW_SHIFT;
 
-/// The device selection [`super::detect::detect_keypoints_with_cells`] would ask `camera` for,
+/// The cell selection [`super::detect::detect_keypoints_with_cells`] would ask `camera` for,
 /// or `None` when nothing about the shape can take the device path.
 ///
 /// Mask-independent on purpose: `cell_masks` decides the rest of the gate and is
@@ -246,13 +246,13 @@ pub fn cell_select(
     config: &DetectorConfig,
 ) -> Option<CellSelect> {
     let (width, height): (usize, usize) = (image.width(), image.height());
-    let takes_device: bool = config.num_points_cell == 1
+    let takes_cell_selection: bool = config.num_points_cell == 1
         && grid.cell > 2 * FAST_BORDER
         && width >= grid.cell
         && height >= grid.cell
         && width < CELL_KEY_LIMIT
         && height < CELL_KEY_LIMIT;
-    if !takes_device {
+    if !takes_cell_selection {
         return None;
     }
     Some(CellSelect {
@@ -279,7 +279,7 @@ fn cell_index(edge: f32, start: usize, cell: f32) -> Option<usize> {
 
 /// Fold `masks` into one flag per cell, or refuse the whole camera.
 ///
-/// The device path picks one corner per cell and cannot ask the masks about the
+/// Cell selection picks one corner per cell and cannot ask the masks about the
 /// runner-up, so it is only sound where a mask covers a cell **whole**: then the
 /// cell has no unmasked candidate at all and dropping its key is the same answer
 /// the host walk gives. That is what the frontend's masks are —

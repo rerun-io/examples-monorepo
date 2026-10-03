@@ -1,0 +1,28 @@
+# Implicit workgroup-memory lowering: give GlobalVariableOp the element type (it wraps it in the Workgroup pointer
+# itself) and AddressOfOp the pointer type, as lower_shared_explicit already does. Unpatched, every kernel that uses
+# Shared declares `OpVariable %_ptr_Workgroup__ptr_Workgroup_arr Workgroup` (a pointer to a pointer; spirv-val rejects it
+# without VariablePointers). Devices without VK_KHR_workgroup_memory_explicit_layout take this path: Mali-G610 (libmali
+# g24p0) SIGSEGVs in cmpbe_v2_compile_multiple_shaders on the first such kernel (fast_cell_select_kernel). Regression
+# from CubeCL 0.10, whose declare_shared_memories_implicit was correct. NVIDIA, Apple and lavapipe take the explicit
+# path and are unaffected.
+
+diff --git a/src/ops/memory.rs b/src/ops/memory.rs
+index 2ce1cfb..f3d2b1d 100644
+--- a/src/ops/memory.rs
++++ b/src/ops/memory.rs
+@@ -198,12 +198,13 @@ fn lower_shared_implicit(
+         let name = slice.get_result(ctx).unique_name(ctx);
+         shared_size += slice.value_ty(ctx).size(ctx);
+         entry_args.push(name.clone());
+-        let var = GlobalVariableOp::new(ctx, value_ty, StorageClass::Workgroup, name.clone(), None);
++        // GlobalVariableOp wraps the element type in the Workgroup pointer itself.
++        let var = GlobalVariableOp::new(ctx, ty, StorageClass::Workgroup, name.clone(), None);
+         rewriter.set_insertion_point_to_block_start(module.get_body(ctx, 0));
+         rewriter.append_op(ctx, &var);
+ 
+         rewriter.set_insertion_point_before_operation(slice.get_operation());
+-        let addr = AddressOfOp::new(ctx, ty, name);
++        let addr = AddressOfOp::new(ctx, value_ty, name);
+         rewriter.append_op(ctx, &addr);
+         rewriter.replace_operation(ctx, slice.get_operation(), addr.get_operation());
+     }

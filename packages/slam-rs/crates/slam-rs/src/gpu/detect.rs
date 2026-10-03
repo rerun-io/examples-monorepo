@@ -9,8 +9,8 @@ use super::pyramid::{Level0, Level0Table};
 use super::{GpuError, guarded};
 use crate::frontend::cell::SelectionStatus;
 use crate::frontend::detect::{
-    BandCache, BandRequest, CellSelect, CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN,
-    FAST_RING_ROW, block_filter_end, opencv_corner_score,
+    BandCache, BandRequest, CELL_KEY_LIMIT, CellSelect, CornerScan, DetectError, FAST_BORDER,
+    FAST_RING_COLUMN, FAST_RING_ROW, LOWEST_THRESHOLD_RUNG, block_filter_end, opencv_corner_score,
 };
 use crate::image::ImageU16;
 
@@ -252,6 +252,12 @@ impl<R: Runtime> GpuCornerScan<R> {
         image: &ImageU16,
         select: &CellSelect,
     ) -> Option<(cubecl::server::Handle, usize)> {
+        if image.width() >= CELL_KEY_LIMIT
+            || image.height() >= CELL_KEY_LIMIT
+            || select.threshold < LOWEST_THRESHOLD_RUNG
+        {
+            return None;
+        }
         let grid: &crate::frontend::detect::CellGrid = &select.grid;
         let (cells_x, cells_y) = grid.dimensions();
         let ceiling: usize = kernels::MAX_CUBES_PER_DIM as usize;
@@ -502,9 +508,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     /// non-maxima against the same zero rim `suppress_non_maxima` sees, applies
     /// `safe_radius` and the edge margin, and reduces the survivors under the
     /// host's own total order. What comes back is 361 x 4 B on the 960x960 index
-    /// rig. The band path stays for the shapes the trait's contract excludes and
-    /// for [`CpuCornerScan`](crate::frontend::detect::CpuCornerScan), which is
-    /// the reference the equality tests measure this against.
+    /// rig. The band path stays for the shapes the trait's contract excludes.
+    /// Equality tests compare both CPU and GPU cell selectors with a band-only
+    /// wrapper around [`CpuCornerScan`](crate::frontend::detect::CpuCornerScan).
     ///
     /// `out` is left empty — and the frame untouched — when the grid needs more
     /// cubes in one dispatch dimension than a WebGPU implementation must allow.
@@ -516,6 +522,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         out: &mut Vec<u32>,
     ) -> Result<SelectionStatus, DetectError> {
         out.clear();
+        if image.width() >= CELL_KEY_LIMIT
+            || image.height() >= CELL_KEY_LIMIT
+            || select.threshold < LOWEST_THRESHOLD_RUNG
+        {
+            return Ok(SelectionStatus::Unsupported);
+        }
         // Spent, not read twice: an entry left behind would answer a later
         // frameset with this one's corners.
         if let Some(workspace) = self.cameras.get_mut(camera) {

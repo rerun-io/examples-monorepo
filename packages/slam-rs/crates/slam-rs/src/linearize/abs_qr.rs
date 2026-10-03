@@ -6,8 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Matrix4, Matrix6};
+use rayon::prelude::*;
 
 use crate::ba_base::BundleAdjustmentBase;
+use crate::frontend::parallel::WorkPool;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, Se3};
@@ -82,6 +84,8 @@ struct ImuMeta {
 /// The linearizer: one landmark block per landmark, plus IMU and prior.
 #[derive(Debug, Clone)]
 pub struct LinearizationAbsQR<S: LieScalar> {
+    /// Shared frontend workers; absent for standalone and deferred solves.
+    pool: Option<WorkPool>,
     options: LinearizationOptions<S>,
     /// `landmark_ids`, sorted.
     landmark_ids: Vec<LandmarkId>,
@@ -165,6 +169,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             )?);
         }
 
+        assert_eq!(landmark_blocks.len(), landmark_ids.len());
         let mut landmark_block_idx: Vec<usize> = Vec::with_capacity(landmark_blocks.len());
         let mut num_rows_q2r: usize = 0;
         for block in &landmark_blocks {
@@ -211,6 +216,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         }
 
         Ok(Self {
+            pool: estimator.pool.clone(),
             options,
             landmark_ids,
             landmark_blocks,
@@ -222,6 +228,13 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             imu_blocks: Vec::new(),
             aom: aom.clone(),
         })
+    }
+
+    /// Select explicit workers, or keep a small linearization serial with `None`.
+    /// Scalar reductions retain landmark order; one worker also runs serially.
+    pub fn with_pool(mut self, pool: Option<WorkPool>) -> Self {
+        self.pool = pool;
+        self
     }
 
     /// Linearize in fixed order: relative poses, landmark blocks, IMU blocks, prior.
@@ -293,26 +306,45 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         }
 
         // 2. Fold errors in landmark order and AND the validity flags.
-        // Accumulate sequentially in landmark order.
+        // Workers return one result per block; only the ordered fold adds them.
         let cameras = estimator.cameras();
         let lb_options: LandmarkBlockOptions<S> = self.options.lb_options;
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
         let ids: &[LandmarkId] = &self.landmark_ids;
         let rel_pose_lin: &[RelPoseLin<S>] = &self.rel_pose_lin;
         let mut numerically_valid: bool = true;
-        let mut error: S = (0..blocks.len()).try_fold(S::zero(), |acc, i| {
-            let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
+        let linearize = |(block, &lm_id): (&mut LandmarkBlock<S>, &LandmarkId)| {
             let lm: &Landmark<S> = estimator
                 .lmdb
                 .get_landmark(lm_id)
                 .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
-            let block: &mut LandmarkBlock<S> =
-                blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
             let contribution: S =
                 block.linearize_landmark(lm, rel_pose_lin, cameras, &lb_options)?;
-            numerically_valid = numerically_valid && !block.is_numerical_failure();
-            Ok::<S, LinearizeError>(acc + contribution)
-        })?;
+            Ok::<_, LinearizeError>((contribution, !block.is_numerical_failure()))
+        };
+        let partials = self.pool.as_ref().and_then(|pool| {
+            pool.install(|| {
+                blocks
+                    .par_iter_mut()
+                    .zip(ids)
+                    .map(linearize)
+                    .collect::<Vec<_>>()
+            })
+        });
+        let mut error = S::zero();
+        if let Some(partials) = partials {
+            for partial in partials {
+                let (contribution, valid) = partial?;
+                error += contribution;
+                numerically_valid &= valid;
+            }
+        } else {
+            for pair in blocks.iter_mut().zip(ids) {
+                let (contribution, valid) = linearize(pair)?;
+                error += contribution;
+                numerically_valid &= valid;
+            }
+        }
 
         // 3a. the IMU blocks.
         self.imu_blocks.clear();
@@ -348,6 +380,19 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     /// `performQR()` : eliminate every block's landmark columns.
     pub fn perform_qr(&mut self) -> Result<(), LinearizeError> {
         let options: LandmarkBlockOptions<S> = self.options.lb_options;
+        if let Some(results) = self.pool.as_ref().and_then(|pool| {
+            pool.install(|| {
+                self.landmark_blocks
+                    .par_iter_mut()
+                    .map(|block| block.perform_qr(&options))
+                    .collect::<Vec<_>>()
+            })
+        }) {
+            for result in results {
+                result?;
+            }
+            return Ok(());
+        }
         for block in &mut self.landmark_blocks {
             block.perform_qr(&options)?;
         }
@@ -381,7 +426,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         workspace: &'w mut DenseHbWorkspace<S>,
     ) -> Result<(&'w mut DMatrix<S>, &'w mut DVector<S>), LinearizeError> {
         let opt_size: usize = self.aom.total_size();
-        let (h, b) = workspace.reduce(opt_size, &self.landmark_blocks)?;
+        let (h, b) = workspace.reduce(opt_size, &self.landmark_blocks, self.pool.as_ref())?;
 
         // `add_dense_H_b_imu`.
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
@@ -472,22 +517,24 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             });
         }
 
-        // Fold in landmark order, subtracting each block's change from the
-        // accumulator. The fold is deterministic and independent of thread count.
+        // This small phase is faster serially on the RK3588: worker handoff and
+        // an ordered update pass cost more than these short block solves save.
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
         let ids: &[LandmarkId] = &self.landmark_ids;
         let lmdb: &mut crate::landmark::LandmarkDatabase<S> = &mut estimator.lmdb;
-        let mut l_diff: S = (0..blocks.len()).try_fold(S::zero(), |acc, i| {
-            let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
-            let lm: &mut Landmark<S> = lmdb
+        let mut l_diff = S::zero();
+        let pose_inc_is_finite = pose_inc.iter().all(|value| value.is_finite());
+        for (block, &lm_id) in blocks.iter_mut().zip(ids) {
+            let lm = lmdb
                 .get_landmark_mut(lm_id)
                 .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
-            let block: &mut LandmarkBlock<S> =
-                blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
-            let mut value: S = acc;
-            block.back_substitute(lm, pose_inc, &mut value)?;
-            Ok::<S, LinearizeError>(value)
-        })?;
+            block.back_substitute_with_finite_pose(
+                lm,
+                pose_inc,
+                pose_inc_is_finite,
+                &mut l_diff,
+            )?;
+        }
 
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
             block.back_substitute(meta.start_idx, meta.end_idx, pose_inc, &mut l_diff);

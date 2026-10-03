@@ -20,6 +20,185 @@ mod common;
 
 use common::pyramid_of;
 
+#[test]
+fn grouped_warps_visit_every_lane_once_including_the_tail() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for threads in [1, 4] {
+        for len in [0, 1, 3, 4, 5, 31, 101] {
+            let pool = WorkPool::new(threads).unwrap();
+            let mut coefficients: [Vec<f32>; 6] = std::array::from_fn(|_| vec![-1.0; len + 3]);
+            let mut valid = vec![false; len];
+            let visits: Vec<_> = (0..len).map(|_| AtomicUsize::new(0)).collect();
+            let [m00, m01, m10, m11, tx, ty] = &mut coefficients;
+            pool.for_each_warp_group([m00, m01, m10, m11, tx, ty], &mut valid, |base, count| {
+                assert_eq!(base % 4, 0);
+                assert!((1..=4).contains(&count));
+                for visit in &visits[base..base + count] {
+                    visit.fetch_add(1, Ordering::Relaxed);
+                }
+                (
+                    std::array::from_fn(|lane| [(base + lane) as f32; 6]),
+                    [true; 4],
+                )
+            });
+            assert!(visits.iter().all(|v| v.load(Ordering::Relaxed) == 1));
+            for values in coefficients {
+                assert_eq!(
+                    &values[..len],
+                    &(0..len).map(|i| i as f32).collect::<Vec<_>>()
+                );
+                assert_eq!(&values[len..], &[-1.0; 3]);
+            }
+            assert!(valid.iter().all(|ok| *ok));
+        }
+    }
+}
+
+/// Compare the public scalar and four-point patch operations at the bit level.
+fn assert_group_bits<P: Pattern>(image: &ImageU16, positions: [Vector2<f32>; 4], angle: f32) {
+    use nalgebra::Vector3;
+    use slam_rs::frontend::patch::{
+        OpticalFlowPatch, build_patch_group, patch_increment, patch_increment_group,
+        patch_increment_rows, patch_residual_group, patch_residual_taps,
+    };
+    use slam_rs::frontend::patterns::MAX_PATTERN_SIZE;
+    use slam_rs::frontend::se2::se2_exp;
+    let mut data = vec![0.0; 4 * P::SIZE];
+    let mut jacobian = vec![0.0; 12 * P::SIZE];
+    let (means, valid) = build_patch_group::<P>(image, positions, &mut data, &mut jacobian);
+    let transforms = positions.map(|pos| {
+        let mut transform = se2_exp(&Vector3::new(0.0, 0.0, angle));
+        transform.translation = pos + Vector2::new(0.21, -0.37);
+        transform
+    });
+    let mut residuals = [0.0; MAX_PATTERN_SIZE * 4];
+    let survived = patch_residual_group::<P>(&data, image, &transforms, &mut residuals);
+    let increments = patch_increment_group::<P>(&jacobian, &residuals);
+    for lane in 0..4 {
+        let scalar = OpticalFlowPatch::<P>::new(image, positions[lane]);
+        assert_eq!(valid[lane], scalar.valid, "lane {lane}");
+        assert_eq!(means[lane].to_bits(), scalar.mean.to_bits());
+        for tap in 0..P::SIZE {
+            assert_eq!(
+                data[4 * tap + lane].to_bits(),
+                scalar.data[tap].to_bits(),
+                "data lane {lane}, tap {tap}"
+            );
+            for row in 0..3 {
+                assert_eq!(
+                    jacobian[4 * (row * P::SIZE + tap) + lane].to_bits(),
+                    scalar.h_se2_inv_j_se2_t[row][tap].to_bits(),
+                    "factor lane {lane}, row {row}, tap {tap}"
+                );
+            }
+        }
+        let mut residual = [0.0; MAX_PATTERN_SIZE];
+        assert_eq!(
+            survived[lane],
+            scalar.residual(image, &transforms[lane], &mut residual)
+        );
+        let mut tap_residual = [0.0; MAX_PATTERN_SIZE];
+        assert_eq!(
+            survived[lane],
+            patch_residual_taps::<P>(
+                &data[lane..],
+                4,
+                image,
+                &transforms[lane],
+                &mut tap_residual
+            )
+        );
+        assert_eq!(residual.map(f32::to_bits), tap_residual.map(f32::to_bits));
+        for tap in 0..P::SIZE {
+            assert_eq!(
+                residuals[tap * 4 + lane].to_bits(),
+                residual[tap].to_bits(),
+                "residual lane {lane}, tap {tap}"
+            );
+        }
+        let increment = patch_increment::<P>(
+            scalar.h_se2_inv_j_se2_t.as_flattened(),
+            1,
+            MAX_PATTERN_SIZE,
+            &residual,
+        );
+        assert_eq!(
+            increments[lane].map(f32::to_bits),
+            increment.map(f32::to_bits)
+        );
+        let row_increment = patch_increment_rows::<P>(&jacobian[lane..], 4, 4 * P::SIZE, &residual);
+        assert_eq!(row_increment.map(f32::to_bits), increment.map(f32::to_bits));
+    }
+}
+
+/// SIMD lanes must retain the scalar tap order, including partial border patches.
+#[test]
+fn four_patch_builds_match_scalar_bits() {
+    use slam_rs::frontend::patterns::Pattern52;
+    let mut image = ImageU16::zeros_with_stride(80, 64, 87).unwrap();
+    let mut state = 0x7d91_230bu32;
+    let mut random = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        state
+    };
+    for y in 0..64 {
+        for x in 0..80 {
+            image.set(x, y, (random() >> 16) as u16);
+        }
+    }
+    for _ in 0..256 {
+        let positions = std::array::from_fn(|_| {
+            Vector2::new(
+                (random() % 84_000) as f32 / 1000.0 - 2.0,
+                (random() % 68_000) as f32 / 1000.0 - 2.0,
+            )
+        });
+        let angle = (random() % 600) as f32 / 1000.0 - 0.3;
+        assert_group_bits::<Pattern51>(&image, positions, angle);
+        assert_group_bits::<Pattern52>(&image, positions, angle);
+    }
+}
+
+#[test]
+fn four_patch_degenerate_and_invalid_lanes_match_scalar_bits() {
+    let mut image = ImageU16::zeros_with_stride(80, 64, 87).unwrap();
+    let positions = [
+        Vector2::new(32.25, 30.5),
+        Vector2::new(2.0, 2.0),
+        Vector2::new(-100.0, -100.0),
+        Vector2::new(f32::NAN, f32::INFINITY),
+    ];
+    assert_group_bits::<Pattern51>(&image, positions, 0.0);
+    for y in 0..64 {
+        for x in 0..80 {
+            image.set(x, y, 12_345);
+        }
+    }
+    assert_group_bits::<Pattern51>(&image, positions, -0.0);
+}
+
+/// Run explicitly with SLAM_RS_KLT_FRAMES naming a directory of 640x480 PGMs.
+#[test]
+#[ignore = "requires recorded G2 frames in SLAM_RS_KLT_FRAMES"]
+fn four_patch_recorded_frames_match_scalar_bits() {
+    let directory = std::path::PathBuf::from(std::env::var_os("SLAM_RS_KLT_FRAMES").unwrap());
+    for frame in [0, 53, 100] {
+        for camera in 0..4 {
+            let pgm = common::read_pgm(&directory, frame, camera);
+            let image =
+                ImageU16::from_u8_strided(&pgm.pixels, pgm.width, pgm.height, pgm.width).unwrap();
+            for y in (0..pgm.height).step_by(17) {
+                for x in (0..pgm.width).step_by(23) {
+                    let points = std::array::from_fn(|lane| {
+                        Vector2::new(x as f32 + lane as f32 * 0.21, y as f32 + lane as f32 * 0.37)
+                    });
+                    assert_group_bits::<Pattern51>(&image, points, 0.017);
+                }
+            }
+        }
+    }
+}
+
 /// A band-limited texture: twelve plane waves with wavelengths between 16
 /// and 56 pixels, in fixed pseudo-random directions and phases.
 ///
@@ -122,6 +301,243 @@ fn tracker(capacity: usize, levels: usize, threads: usize) -> CpuPatchTracker<Pa
         WorkPool::new(threads).unwrap(),
     )
     .unwrap()
+}
+
+fn batch_input(ids: &[slam_rs::types::KeypointId], positions: &PointsSoA) -> TrackInput {
+    let mut input = TrackInput {
+        ids: ids.to_vec(),
+        positions: positions.clone(),
+        ..TrackInput::default()
+    };
+    for index in 0..positions.len() {
+        input
+            .guesses
+            .push(&AffineCompact2f::at(positions.get(index)));
+    }
+    input
+}
+
+/// Equal ids and position bits must not reuse templates from a different image.
+#[test]
+fn submit_batch_rebuilds_templates_when_the_previous_pyramid_changes() {
+    use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder};
+    use slam_rs::types::KeypointId;
+
+    for rebuild in 0..3 {
+        let scene = fixture(0.6, 1.4, 3);
+        let mut cached = tracker(scene.positions.len(), 3, 1);
+        let mut patches = cached.make_patches().unwrap();
+        let ids: Vec<_> = (0..scene.positions.len())
+            .map(|id| KeypointId(id as u64))
+            .collect();
+        let mut first = [batch_input(&ids, &scene.positions)];
+        cached
+            .submit_batch(
+                std::slice::from_ref(&scene.prev),
+                std::slice::from_ref(&scene.next),
+                &mut first,
+                &mut patches,
+                true,
+            )
+            .unwrap();
+        cached.collect().unwrap();
+        let result = cached.result(first[0].result);
+        assert_eq!(result.len(), ids.len());
+        let mut positions = PointsSoA::default();
+        for index in 0..ids.len() {
+            positions.push(result.transform(index).translation);
+        }
+
+        let image = shifted_image(160, 160, 31.0, -23.0);
+        // Separate pyramids can have the same local build count. A clone can
+        // also be rebuilt through either public builder entry point.
+        let mut c = scene.next.clone();
+        let mut builder = CpuPyramidBuilder::new();
+        match rebuild {
+            0 => c = pyramid_of(&image, 3),
+            1 => builder.build(0, &image, &mut c).unwrap(),
+            _ => builder
+                .build_frames(
+                    &[image],
+                    std::slice::from_mut(&mut c),
+                    &WorkPool::new(4).unwrap(),
+                )
+                .unwrap(),
+        }
+        let mut second = [batch_input(&ids, &positions)];
+        cached
+            .submit_batch(
+                std::slice::from_ref(&c),
+                std::slice::from_ref(&c),
+                &mut second,
+                &mut patches,
+                true,
+            )
+            .unwrap();
+        cached.collect().unwrap();
+
+        let mut fresh = tracker(ids.len(), 3, 1);
+        let mut source = fresh.make_patches().unwrap();
+        source.build(&c, &positions, None).unwrap();
+        let mut expected = FlowResult::default();
+        fresh
+            .track(&c, &c, &source, &second[0].guesses, &mut expected)
+            .unwrap();
+        assert_eq!(expected.len(), ids.len(), "all points track on C");
+        assert_eq!(
+            cached.result(second[0].result),
+            &expected,
+            "rebuild path {rebuild}"
+        );
+    }
+}
+
+#[test]
+fn submit_batch_refuses_matching_lanes_with_different_template_counts() {
+    use slam_rs::types::KeypointId;
+    let scene = fixture(0.0, 0.0, 3);
+    let mut cpu = tracker(32, 3, 1);
+    let mut patches = cpu.make_patches().unwrap();
+    for count in [2, 8] {
+        let mut inputs: [TrackInput; 2] = std::array::from_fn(|lane| {
+            let len = if lane == 0 { 3 } else { count };
+            let mut positions = PointsSoA::default();
+            for index in 0..len {
+                positions.push(scene.positions.get(index));
+            }
+            let ids: Vec<_> = (0..len).map(|id| KeypointId(id as u64)).collect();
+            let mut input = batch_input(&ids, &positions);
+            input.destination = lane + 1;
+            input
+        });
+        let next = [scene.next.clone(), scene.next.clone(), scene.next.clone()];
+        assert_eq!(
+            cpu.submit_batch(
+                std::slice::from_ref(&scene.prev),
+                &next,
+                &mut inputs,
+                &mut patches,
+                false
+            ),
+            Err(TrackerError::LengthMismatch {
+                first_name: "patches",
+                first: 3,
+                second_name: "transforms",
+                second: count,
+            })
+        );
+    }
+}
+
+/// Exercise the production batch path and the single-pass API on real G2 frames,
+/// including cached temporal survivors, stereo lanes, empty lanes and bad guesses.
+#[test]
+#[ignore = "requires recorded G2 frames in SLAM_RS_KLT_FRAMES"]
+fn submit_batch_matches_track_on_recorded_frames() {
+    use slam_rs::types::KeypointId;
+    let directory = std::path::PathBuf::from(std::env::var_os("SLAM_RS_KLT_FRAMES").unwrap());
+    let frames: Vec<Vec<PyramidU16>> = (0..3)
+        .map(|frame| {
+            (0..4)
+                .map(|camera| {
+                    let pgm = common::read_pgm(&directory, frame, camera);
+                    let image =
+                        ImageU16::from_u8_strided(&pgm.pixels, pgm.width, pgm.height, pgm.width)
+                            .unwrap();
+                    pyramid_of(&image, 3)
+                })
+                .collect()
+        })
+        .collect();
+    let mut positions = PointsSoA::default();
+    for y in (40..440).step_by(37) {
+        for x in (40..600).step_by(41) {
+            positions.push(Vector2::new(x as f32 + 0.25, y as f32 + 0.5));
+        }
+    }
+    let ids: Vec<_> = (0..positions.len())
+        .map(|id| KeypointId(id as u64))
+        .collect();
+    for threads in [1, 4] {
+        for temporal in [true, false] {
+            let mut cached = tracker(256, 3, threads);
+            let mut direct = tracker(256, 3, threads);
+            let mut cache_patches = cached.make_patches().unwrap();
+            let mut direct_patches = direct.make_patches().unwrap();
+            let mut inputs: Vec<_> = (0..if temporal { 4 } else { 3 })
+                .map(|lane| {
+                    let mut input = batch_input(&ids, &positions);
+                    input.source = if temporal { lane } else { 0 };
+                    input.destination = lane + usize::from(!temporal);
+                    // A middle empty temporal lane checks batch offsets; matching
+                    // lanes must all keep the shared source template count.
+                    if temporal && lane == 1 {
+                        input.ids.clear();
+                        input.positions.clear();
+                        input.guesses.clear();
+                    } else {
+                        input
+                            .guesses
+                            .set(0, &AffineCompact2f::at(Vector2::new(-10.0, 10.0)));
+                    }
+                    input
+                })
+                .collect();
+            for pair in 0..2 {
+                let prev = if temporal {
+                    &frames[pair]
+                } else {
+                    &frames[pair + 1]
+                };
+                let next = &frames[pair + 1];
+                cached
+                    .submit_batch(prev, next, &mut inputs, &mut cache_patches, temporal)
+                    .unwrap();
+                cached.collect().unwrap();
+                for input in &mut inputs {
+                    direct_patches
+                        .build(&prev[input.source], &input.positions, None)
+                        .unwrap();
+                    let mut expected = FlowResult::default();
+                    direct
+                        .track(
+                            &prev[input.source],
+                            &next[input.destination],
+                            &direct_patches,
+                            &input.guesses,
+                            &mut expected,
+                        )
+                        .unwrap();
+                    let got = cached.result(input.result);
+                    assert_eq!(got.tracked(), expected.tracked());
+                    for slot in 0..input.ids.len() {
+                        assert_eq!(got.is_valid(slot), expected.is_valid(slot));
+                        assert_eq!(
+                            got.transform(slot).coefficients().map(f32::to_bits),
+                            expected.transform(slot).coefficients().map(f32::to_bits),
+                            "threads {threads}, temporal {temporal}, pair {pair}, camera {}, slot {slot}",
+                            input.destination
+                        );
+                    }
+                    if temporal && !input.ids.is_empty() {
+                        assert!(!got.is_empty(), "recorded temporal lane must track points");
+                        let mut survivors = TrackInput {
+                            source: input.source,
+                            destination: input.destination,
+                            ..TrackInput::default()
+                        };
+                        for &slot in got.tracked() {
+                            let slot = slot as usize;
+                            survivors.ids.push(input.ids[slot]);
+                            survivors.positions.push(got.transform(slot).translation);
+                            survivors.guesses.push(&got.transform(slot));
+                        }
+                        *input = survivors;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

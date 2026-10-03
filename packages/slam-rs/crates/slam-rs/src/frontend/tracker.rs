@@ -15,12 +15,12 @@
 mod patch_soa;
 mod storage;
 pub use patch_soa::PatchSoA;
-pub use storage::{FlowTransforms, PointsSoA};
+pub use storage::{FlowTransforms, PointsSoA, TrackInput};
 
 use nalgebra::{Matrix2, Vector2, Vector3};
 
 use crate::frontend::parallel::WorkPool;
-use crate::frontend::patch::{patch_increment, patch_residual};
+use crate::frontend::patch::{patch_increment_rows, patch_residual_taps};
 use crate::frontend::patterns::{MAX_PATTERN_SIZE, Pattern};
 use crate::frontend::se2::{AffineCompact2f, se2_exp};
 use crate::image::ImageU16;
@@ -519,6 +519,38 @@ pub trait PatchTracker {
         transforms_in: &FlowTransforms,
     ) -> Result<usize, TrackerError>;
 
+    /// Submit all cameras of one phase, retaining camera order for results.
+    /// Temporal calls use each camera's previous pyramid. Matching calls use
+    /// the same camera-zero templates for every destination. The default keeps
+    /// device launch/collect batching; CPU trackers can run each phase jointly.
+    ///
+    /// For template reuse, pass the last committed temporal batch's `next` as
+    /// `prev`; newly matched points use the matching batch's destination pyramid.
+    /// Call [`Self::discard`] after any failed or abandoned batch, including in
+    /// wrappers that forward submission. The CPU cache also checks the source
+    /// pyramid's build generation, so a different or rebuilt `prev` is a miss.
+    fn submit_batch(
+        &mut self,
+        prev: &[Self::Pyramid],
+        next: &[Self::Pyramid],
+        inputs: &mut [TrackInput],
+        patches: &mut Self::Patches,
+        temporal: bool,
+    ) -> Result<(), TrackerError> {
+        for (index, input) in inputs.iter_mut().enumerate() {
+            if temporal || index == 0 {
+                patches.prepare(&prev[input.source], &input.positions, None)?;
+            }
+            input.result = self.submit_prepared(
+                &prev[input.source],
+                &next[input.destination],
+                patches,
+                &input.guesses,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Read a result by the slot returned from submission, after collection.
     fn result(&self, pass: usize) -> &FlowResult {
         self.batch().result(pass)
@@ -585,6 +617,10 @@ pub trait PatchTracker {
 }
 
 /// The CPU tracker: `trackPoints` with the same arithmetic and a fixed thread budget.
+///
+/// Template reuse follows [`PatchTracker::submit_batch`]'s caller rules: carry
+/// committed pyramids forward and discard failed or abandoned batches. Cache
+/// hits require the id, position bits, and source pyramid build generation.
 #[derive(Debug)]
 pub struct CpuPatchTracker<P: Pattern> {
     capacity: usize,
@@ -601,6 +637,31 @@ pub struct CpuPatchTracker<P: Pattern> {
     /// The positions the backward patches are built at.
     backward_positions: PointsSoA,
     batch: TrackBatch,
+    /// Temporal source templates and the last backward templates per camera.
+    cameras: Vec<CpuCameraBuffers<P>>,
+    temporal: Vec<CpuBackwardCache<P>>,
+    /// Stereo backward templates for newly detected ids in the same frame.
+    /// Those ids are disjoint from the temporal cache's surviving ids.
+    stereo: Vec<CpuBackwardCache<P>>,
+    offsets: Vec<usize>,
+    batch_result: FlowResult,
+}
+
+#[derive(Debug)]
+struct CpuBackwardCache<P: Pattern> {
+    patches: PatchSoA<P>,
+    generation: crate::pyramid::PyramidGeneration,
+    ids: Vec<crate::types::KeypointId>,
+    positions: PointsSoA,
+    valid: Vec<bool>,
+}
+
+#[derive(Debug)]
+struct CpuCameraBuffers<P: Pattern> {
+    source: PatchSoA<P>,
+    build: Vec<bool>,
+    temporal_columns: Vec<(usize, usize)>,
+    stereo_columns: Vec<(usize, usize)>,
 }
 
 impl<P: Pattern> CpuPatchTracker<P> {
@@ -640,12 +701,25 @@ impl<P: Pattern> CpuPatchTracker<P> {
             forward_valid: vec![false; capacity],
             backward_positions,
             batch: TrackBatch::default(),
+            cameras: Vec::new(),
+            temporal: Vec::new(),
+            stereo: Vec::new(),
+            offsets: Vec::new(),
+            batch_result: FlowResult::default(),
         })
     }
 
     /// Workers the tracking passes run on.
     pub fn threads(&self) -> usize {
         self.pool.threads()
+    }
+
+    fn steps(&self) -> TrackingSteps {
+        TrackingSteps {
+            num_levels: self.num_levels,
+            max_iterations: self.max_iterations,
+            max_recovered_dist2: self.max_recovered_dist2,
+        }
     }
 }
 
@@ -693,6 +767,304 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         self.batch_mut().submitted += 1;
         Ok(pass)
     }
+
+    fn discard(&mut self) {
+        self.batch.submitted = 0;
+        // A refused frame may have replaced some backward stores. Rebuild from
+        // the committed pyramids on retry instead of reusing uncommitted data.
+        for camera in self.temporal.iter_mut().chain(&mut self.stereo) {
+            camera.ids.clear();
+        }
+    }
+
+    fn submit_batch(
+        &mut self,
+        prev: &[PyramidU16],
+        next: &[PyramidU16],
+        inputs: &mut [TrackInput],
+        patches: &mut PatchSoA<P>,
+        temporal: bool,
+    ) -> Result<(), TrackerError> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        // Validate the whole batch before modifying either cache. Source and
+        // destination indices come from the driver, but are checked at this
+        // public boundary just like the ordinary single-pass inputs.
+        for (camera, input) in inputs.iter().enumerate() {
+            let destination = camera + usize::from(!temporal);
+            let source = if temporal { camera } else { 0 };
+            for (actual, expected, name) in [
+                (input.source, source, "source camera"),
+                (input.destination, destination, "destination camera"),
+            ] {
+                if actual != expected {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: name,
+                        first: actual,
+                        second_name: "camera in batch order",
+                        second: expected,
+                    });
+                }
+            }
+            for (index, len, name) in [
+                (input.source, prev.len(), "source camera"),
+                (input.destination, next.len(), "destination camera"),
+            ] {
+                if index >= len {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: name,
+                        first: index,
+                        second_name: "cameras",
+                        second: len,
+                    });
+                }
+            }
+            check_track_inputs(
+                input.guesses.len(),
+                input.positions.len(),
+                self.num_levels,
+                prev[input.source].num_levels(),
+                next[input.destination].num_levels(),
+                self.capacity,
+                self.num_levels,
+            )?;
+            if input.ids.len() != input.positions.len() {
+                return Err(TrackerError::LengthMismatch {
+                    first_name: "keypoint ids",
+                    first: input.ids.len(),
+                    second_name: "positions",
+                    second: input.positions.len(),
+                });
+            }
+            if !temporal {
+                if input.positions.len() != inputs[0].positions.len() {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: "patches",
+                        first: inputs[0].positions.len(),
+                        second_name: "transforms",
+                        second: input.guesses.len(),
+                    });
+                }
+                debug_assert_eq!(input.ids, inputs[0].ids);
+                debug_assert_eq!(input.positions, inputs[0].positions);
+            }
+        }
+        while self.cameras.len() < next.len() {
+            self.cameras.push(CpuCameraBuffers {
+                source: self.make_patches()?,
+                build: Vec::new(),
+                temporal_columns: Vec::new(),
+                stereo_columns: Vec::new(),
+            });
+            self.temporal.push(CpuBackwardCache {
+                patches: self.make_patches()?,
+                generation: crate::pyramid::PyramidGeneration::default(),
+                ids: Vec::new(),
+                positions: PointsSoA::default(),
+                valid: Vec::new(),
+            });
+            self.stereo.push(CpuBackwardCache {
+                patches: self.make_patches()?,
+                generation: crate::pyramid::PyramidGeneration::default(),
+                ids: Vec::new(),
+                positions: PointsSoA::default(),
+                valid: Vec::new(),
+            });
+        }
+        self.offsets.clear();
+        self.offsets.push(0);
+        let mut total = 0;
+        for input in inputs.iter() {
+            total += input.guesses.len();
+            self.offsets.push(total);
+        }
+        self.forward.resize(total);
+        self.forward_valid.resize(total, false);
+        self.batch_result.reset(total);
+
+        // Forward builds: copy surviving columns from the last frame, and
+        // sample detections with no matching template. The cache key is id,
+        // position bits, and the committed source pyramid's build generation.
+        if temporal {
+            let prepare = |(camera, buffers): (usize, &mut CpuCameraBuffers<P>)| {
+                let input = &inputs[camera];
+                let temporal = &self.temporal[input.destination];
+                let stereo = &self.stereo[input.destination];
+                buffers.build.clear();
+                buffers.temporal_columns.clear();
+                buffers.stereo_columns.clear();
+                for (slot, id) in input.ids.iter().enumerate() {
+                    let position = input.positions.get(slot);
+                    let cached = |cache: &CpuBackwardCache<P>| {
+                        if cache.generation != prev[input.source].generation() {
+                            return None;
+                        }
+                        cache.ids.binary_search(id).ok().filter(|&column| {
+                            let old = cache.patches.position(column);
+                            cache.valid[column]
+                                && old.x.to_bits() == position.x.to_bits()
+                                && old.y.to_bits() == position.y.to_bits()
+                        })
+                    };
+                    if let Some(column) = cached(temporal) {
+                        buffers.temporal_columns.push((slot, column));
+                        buffers.build.push(false);
+                    } else if let Some(column) = cached(stereo) {
+                        buffers.stereo_columns.push((slot, column));
+                        buffers.build.push(false);
+                    } else {
+                        buffers.build.push(true);
+                    }
+                }
+                buffers.source.build(
+                    &prev[input.source],
+                    &input.positions,
+                    Some(&buffers.build),
+                )?;
+                buffers
+                    .source
+                    .copy_columns_from(&temporal.patches, &buffers.temporal_columns)?;
+                buffers
+                    .source
+                    .copy_columns_from(&stereo.patches, &buffers.stereo_columns)
+            };
+            if let Some(result) = self.pool.install(|| {
+                use rayon::prelude::*;
+                self.cameras[..inputs.len()]
+                    .par_iter_mut()
+                    .enumerate()
+                    .try_for_each(prepare)
+            }) {
+                result?;
+            } else {
+                self.cameras[..inputs.len()]
+                    .iter_mut()
+                    .enumerate()
+                    .try_for_each(prepare)?;
+            }
+            // Stereo caches are valid for exactly the next temporal call.
+            // A frame that skips detection must never leave old templates live.
+            for cache in &mut self.stereo {
+                cache.ids.clear();
+            }
+        } else {
+            patches.prepare(&prev[inputs[0].source], &inputs[0].positions, None)?;
+        }
+
+        let steps = self.steps();
+        let offsets = &self.offsets;
+        let cameras = &self.cameras;
+        let source = |camera: usize| {
+            if temporal {
+                &cameras[camera].source
+            } else {
+                &*patches
+            }
+        };
+        // One point range across all cameras. Empty lanes have equal offsets;
+        // partition_point skips them without scheduling empty work.
+        self.pool.for_each_warp(
+            self.forward.coefficients_prefix_mut(total),
+            &mut self.forward_valid[..total],
+            |slot| {
+                let camera = offsets.partition_point(|&start| start <= slot) - 1;
+                let index = slot - offsets[camera];
+                let input = &inputs[camera];
+                steps.forward_slot(
+                    source(camera),
+                    index,
+                    &next[input.destination],
+                    input.guesses.get(index),
+                )
+            },
+        );
+
+        // Build all backward stores before the backward KLT region starts.
+        let forward = &self.forward;
+        let forward_valid = &self.forward_valid;
+        let build_backward = |camera: usize, cache: &mut CpuBackwardCache<P>| {
+            let input = &inputs[camera];
+            let start = offsets[camera];
+            let count = input.guesses.len();
+            cache.positions.resize(count);
+            for index in 0..count {
+                cache
+                    .positions
+                    .set(index, forward.translation(start + index));
+            }
+            cache.patches.build(
+                &next[input.destination],
+                &cache.positions,
+                Some(&forward_valid[start..start + count]),
+            )?;
+            cache.ids.clone_from(&input.ids);
+            cache.generation = next[input.destination].generation();
+            Ok::<(), TrackerError>(())
+        };
+        let caches = if temporal {
+            &mut self.temporal[..inputs.len()]
+        } else {
+            &mut self.stereo[1..1 + inputs.len()]
+        };
+        if let Some(result) = self.pool.install(|| {
+            use rayon::prelude::*;
+            caches
+                .par_iter_mut()
+                .enumerate()
+                .try_for_each(|(camera, cache)| build_backward(camera, cache))
+        }) {
+            result?;
+        } else {
+            for (camera, cache) in caches.iter_mut().enumerate() {
+                build_backward(camera, cache)?;
+            }
+        }
+
+        let (valid, transforms) = self.batch_result.parts_mut();
+        self.pool.for_each_warp(
+            transforms.coefficients_prefix_mut(total),
+            &mut valid[..total],
+            |slot| {
+                let camera = offsets.partition_point(|&start| start <= slot) - 1;
+                let index = slot - offsets[camera];
+                let input = &inputs[camera];
+                let backward = if temporal {
+                    &self.temporal[camera].patches
+                } else {
+                    &self.stereo[input.destination].patches
+                };
+                steps.backward_slot(
+                    backward,
+                    index,
+                    &prev[input.source],
+                    input.positions.get(index),
+                    input.guesses.translation(index),
+                    (forward.get(slot), forward_valid[slot]),
+                )
+            },
+        );
+        // Publish in camera order, independent of which worker finished first.
+        for (camera, input) in inputs.iter_mut().enumerate() {
+            let (pass, result) = self.batch.submit_slot(self.capacity);
+            input.result = pass;
+            result.reset(input.guesses.len());
+            let cache = if temporal {
+                &mut self.temporal[camera]
+            } else {
+                &mut self.stereo[input.destination]
+            };
+            cache.valid.resize(input.guesses.len(), false);
+            for index in 0..input.guesses.len() {
+                let slot = offsets[camera] + index;
+                let valid = self.batch_result.is_valid(slot);
+                cache.valid[index] = valid;
+                result.set_track(index, valid, &forward.get(slot));
+            }
+            result.finish(input.guesses.len());
+        }
+        Ok(())
+    }
 }
 
 impl<P: Pattern> CpuPatchTracker<P> {
@@ -716,36 +1088,17 @@ impl<P: Pattern> CpuPatchTracker<P> {
         )?;
 
         out.reset(count);
+        // A previous batch may have left these at a different live length.
+        self.forward.resize(count);
+        self.forward_valid.resize(count, false);
 
         // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)`
-        let max_iterations: usize = self.max_iterations;
-        let num_levels: usize = self.num_levels;
-        let (target_width, target_height): (f32, f32) = level0_size(next);
+        let steps = self.steps();
         {
             self.pool.for_each_warp(
                 self.forward.coefficients_prefix_mut(count),
                 &mut self.forward_valid[..count],
-                |index| {
-                    let guess: Vector2<f32> = transforms_in.translation(index);
-                    // `valid = t2(0) >= 0 && t2(1) >= 0 && t2(0) < w && t2(1) < h`.
-                    if guess.x < 0.0
-                        || guess.y < 0.0
-                        || guess.x >= target_width
-                        || guess.y >= target_height
-                    {
-                        return (AffineCompact2f::identity().coefficients(), false);
-                    }
-                    let (tracked, ok) = track_point::<P>(
-                        patches,
-                        index,
-                        next,
-                        transforms_in.get(index).linear,
-                        guess,
-                        num_levels,
-                        max_iterations,
-                    );
-                    (tracked.coefficients(), ok)
-                },
+                |index| steps.forward_slot(patches, index, next, transforms_in.get(index)),
             );
         }
 
@@ -773,43 +1126,91 @@ impl<P: Pattern> CpuPatchTracker<P> {
         let backward: &PatchSoA<P> = &self.backward;
         let forward: &FlowTransforms = &self.forward;
         let forward_valid: &[bool] = &self.forward_valid[..count];
-        let max_recovered_dist2: f32 = self.max_recovered_dist2;
         {
             let (valid, transforms) = out.parts_mut();
             self.pool.for_each_warp(
                 transforms.coefficients_prefix_mut(count),
                 &mut valid[..count],
                 |index| {
-                    let kept: [f32; 6] = forward.coefficients(index);
-                    if !forward_valid[index] {
-                        return (kept, false);
-                    }
-                    // `off = t2 - t2_guess` with `t2 == t1` at that point,
-                    // so `off == source position - guess`; `t1_recovered += off`.
-                    let source: Vector2<f32> = patches.position(index);
-                    let offset: Vector2<f32> = source - transforms_in.translation(index);
-                    let recovered_guess: Vector2<f32> = forward.translation(index) + offset;
-                    let (recovered, ok) = track_point::<P>(
+                    steps.backward_slot(
                         backward,
                         index,
                         prev,
-                        forward.get(index).linear,
-                        recovered_guess,
-                        num_levels,
-                        max_iterations,
-                    );
-                    if !ok {
-                        return (kept, false);
-                    }
-                    // `dist2 = (t1 - t1_recovered).squaredNorm()`.
-                    let dist2: f32 = (source - recovered.translation).norm_squared();
-                    (kept, dist2 < max_recovered_dist2)
+                        patches.position(index),
+                        transforms_in.translation(index),
+                        (forward.get(index), forward_valid[index]),
+                    )
                 },
             );
         }
 
         out.finish(count);
         Ok(())
+    }
+}
+
+/// Per-point KLT arithmetic shared by single-pass and cached batch tracking.
+struct TrackingSteps {
+    num_levels: usize,
+    max_iterations: usize,
+    max_recovered_dist2: f32,
+}
+
+impl TrackingSteps {
+    fn forward_slot<P: Pattern>(
+        &self,
+        patches: &PatchSoA<P>,
+        index: usize,
+        target: &PyramidU16,
+        guess: AffineCompact2f,
+    ) -> ([f32; 6], bool) {
+        let (width, height) = level0_size(target);
+        let position = guess.translation;
+        if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
+            return (AffineCompact2f::identity().coefficients(), false);
+        }
+        let (tracked, ok) = track_point::<P>(
+            patches,
+            index,
+            target,
+            guess.linear,
+            position,
+            self.num_levels,
+            self.max_iterations,
+        );
+        (tracked.coefficients(), ok)
+    }
+
+    fn backward_slot<P: Pattern>(
+        &self,
+        patches: &PatchSoA<P>,
+        index: usize,
+        target: &PyramidU16,
+        source: Vector2<f32>,
+        guess: Vector2<f32>,
+        (forward, valid): (AffineCompact2f, bool),
+    ) -> ([f32; 6], bool) {
+        let kept = forward.coefficients();
+        if !valid {
+            return (kept, false);
+        }
+        // `off = source position - guess`; `t1_recovered += off`.
+        let offset = source - guess;
+        let recovered_guess = forward.translation + offset;
+        let (recovered, ok) = track_point::<P>(
+            patches,
+            index,
+            target,
+            forward.linear,
+            recovered_guess,
+            self.num_levels,
+            self.max_iterations,
+        );
+        if !ok {
+            return (kept, false);
+        }
+        let dist2 = (source - recovered.translation).norm_squared();
+        (kept, dist2 < self.max_recovered_dist2)
     }
 }
 
@@ -894,8 +1295,8 @@ fn track_point_at_level<P: Pattern>(
     let mut residual: [f32; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
     let data_offset: usize = patches.data_offset(level, index);
     let jacobian_offset: usize = patches.jacobian_offset(level, index);
-    let capacity: usize = patches.capacity;
-    let row_stride: usize = P::SIZE * capacity;
+    let element_stride: usize = 4;
+    let row_stride: usize = P::SIZE * element_stride;
     let mut patch_valid: bool = true;
 
     for _ in 0..max_iterations {
@@ -904,18 +1305,18 @@ fn track_point_at_level<P: Pattern>(
             continue;
         }
 
-        patch_valid &= patch_residual::<P, ImageU16>(
+        patch_valid &= patch_residual_taps::<P>(
             &patches.data[data_offset..],
-            capacity,
+            element_stride,
             image,
             transform,
             &mut residual,
         );
 
         if patch_valid {
-            let increment: Vector3<f32> = -patch_increment::<P>(
+            let increment: Vector3<f32> = -patch_increment_rows::<P>(
                 &patches.h_inv_jt[jacobian_offset..],
-                capacity,
+                element_stride,
                 row_stride,
                 &residual,
             );

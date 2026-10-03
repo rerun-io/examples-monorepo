@@ -42,6 +42,15 @@ macro_rules! on_lane {
 }
 
 impl FrontendLane {
+    /// Share the CPU frontend's workers with the synchronous estimator.
+    pub(super) fn cpu_pool(&self) -> Option<frontend::parallel::WorkPool> {
+        match self {
+            Self::Cpu(flow) => Some(flow.pool().clone()),
+            #[cfg(feature = "gpu-core")]
+            Self::Gpu(_) => None,
+        }
+    }
+
     // ── the seven [`Vio`] drives ──────────────────────────────────────────
 
     /// Which backend this lane runs.

@@ -82,6 +82,30 @@ impl WorkPool {
         valid: &mut [bool],
         body: impl Fn(usize) -> ([f32; 6], bool) + Sync + Send,
     ) {
+        self.for_each_warp_batch::<1>(coefficients, valid, |base, _| {
+            let (warp, ok) = body(base);
+            ([warp], [ok])
+        });
+    }
+
+    /// Apply a four-point operation to aligned groups. The last group receives
+    /// its live lane count; unused lanes are never written. Chunk boundaries
+    /// remain aligned so each group is independent of the worker count.
+    pub fn for_each_warp_group(
+        &self,
+        coefficients: [&mut [f32]; 6],
+        valid: &mut [bool],
+        body: impl Fn(usize, usize) -> ([[f32; 6]; 4], [bool; 4]) + Sync + Send,
+    ) {
+        self.for_each_warp_batch::<4>(coefficients, valid, body);
+    }
+
+    fn for_each_warp_batch<const LANES: usize>(
+        &self,
+        coefficients: [&mut [f32]; 6],
+        valid: &mut [bool],
+        body: impl Fn(usize, usize) -> ([[f32; 6]; LANES], [bool; LANES]) + Sync + Send,
+    ) {
         let [m00, m01, m10, m11, tx, ty] = coefficients;
         let len: usize = [
             m00.len(),
@@ -97,15 +121,20 @@ impl WorkPool {
         .unwrap_or(0);
 
         let Some(pool) = self.pool.as_ref() else {
-            for index in 0..len {
-                let (warp, ok) = body(index);
-                m00[index] = warp[0];
-                m01[index] = warp[1];
-                m10[index] = warp[2];
-                m11[index] = warp[3];
-                tx[index] = warp[4];
-                ty[index] = warp[5];
-                valid[index] = ok;
+            for base in (0..len).step_by(LANES) {
+                let count = (len - base).min(LANES);
+                let (warps, flags) = body(base, count);
+                for lane in 0..count {
+                    let index = base + lane;
+                    let warp = warps[lane];
+                    m00[index] = warp[0];
+                    m01[index] = warp[1];
+                    m10[index] = warp[2];
+                    m11[index] = warp[3];
+                    tx[index] = warp[4];
+                    ty[index] = warp[5];
+                    valid[index] = flags[lane];
+                }
             }
             return;
         };
@@ -116,7 +145,9 @@ impl WorkPool {
         // and cannot matter: every index is a pure function of itself.
         let chunk: usize = len
             .div_ceil(self.threads * CHUNKS_PER_WORKER)
-            .max(MIN_CHUNK);
+            .max(MIN_CHUNK)
+            .div_ceil(LANES)
+            * LANES;
         pool.install(|| {
             m00[..len]
                 .par_chunks_mut(chunk)
@@ -129,15 +160,20 @@ impl WorkPool {
                 .enumerate()
                 .for_each(|(block, ((((((m00, m01), m10), m11), tx), ty), valid))| {
                     let base: usize = block * chunk;
-                    for offset in 0..valid.len() {
-                        let (warp, ok) = body(base + offset);
-                        m00[offset] = warp[0];
-                        m01[offset] = warp[1];
-                        m10[offset] = warp[2];
-                        m11[offset] = warp[3];
-                        tx[offset] = warp[4];
-                        ty[offset] = warp[5];
-                        valid[offset] = ok;
+                    for start in (0..valid.len()).step_by(LANES) {
+                        let count = (valid.len() - start).min(LANES);
+                        let (warps, flags) = body(base + start, count);
+                        for lane in 0..count {
+                            let offset = start + lane;
+                            let warp = warps[lane];
+                            m00[offset] = warp[0];
+                            m01[offset] = warp[1];
+                            m10[offset] = warp[2];
+                            m11[offset] = warp[3];
+                            tx[offset] = warp[4];
+                            ty[offset] = warp[5];
+                            valid[offset] = flags[lane];
+                        }
                     }
                 });
         });

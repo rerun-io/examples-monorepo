@@ -10,6 +10,12 @@ description = "Native runner for the slam-rs core, usable with no Python at all.
 name = "slam-rs"
 path = "src/main.rs"
 
+[features]
+# The CubeCL frontend through wgpu, for `replay --lane gpu`.
+gpu-wgpu = ["slam-rs/gpu-wgpu"]
+
 [dependencies]
 slam-rs = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

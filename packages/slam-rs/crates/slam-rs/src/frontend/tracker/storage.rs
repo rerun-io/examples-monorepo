@@ -5,6 +5,25 @@
 use nalgebra::{Matrix2, Vector2};
 
 use crate::frontend::se2::AffineCompact2f;
+use crate::types::KeypointId;
+
+/// One camera's inputs and output slot in a submitted tracking batch.
+/// IDs and positions are in the same order as the initial guesses.
+#[derive(Debug, Default)]
+pub struct TrackInput {
+    /// Source camera index in the supplied previous pyramid set.
+    pub source: usize,
+    /// Destination camera index in the current pyramid set.
+    pub destination: usize,
+    /// Keypoint identities, ascending, after source masking.
+    pub ids: Vec<KeypointId>,
+    /// Source template positions at level zero.
+    pub positions: PointsSoA,
+    /// Source linear transforms with predicted destination positions.
+    pub guesses: FlowTransforms,
+    /// Result slot set by batch submission.
+    pub result: usize,
+}
 
 /// A list of 2-D points with the coordinates in two flat arrays.
 ///

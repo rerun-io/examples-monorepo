@@ -1,4 +1,4 @@
-//! The GPU detector against the host band walk, cell for cell.
+//! CPU and GPU cell selectors against the kornia band walk, cell for cell.
 //!
 //! A binary of its own rather than three more tests in `gpu_kernels.rs`, and for
 //! a measurable reason: `the_whole_gpu_path_holds_the_pool_flat` asserts that
@@ -11,15 +11,14 @@
 //! What is checked here is the exactness argument behind
 //! [`slam_rs::frontend::detect::CornerScan::select_cells`]: the whole of
 //! `detectKeypointsWithCells` runs twice over the same frame — once through
-//! `CpuCornerScan`, which walks the threshold ladder band by band, and once
-//! through `GpuCornerScan`, which picks one winner per cell on the device — and
+//! a band-only `CpuCornerScan`, and once through each cell selector — and
 //! the two results have to be equal corner for corner, response for response, in
 //! the same cell scan order. Ties are included rather than excused: the packed
 //! key's row and column fields break them the way the row-major band walk and a
 //! stable sort do.
 //!
-//! These run only under `--features gpu-wgpu` and need a working CubeCL runtime.
-#![cfg(feature = "gpu-core")]
+//! CPU comparisons always run. GPU comparisons and lifecycle tests need
+//! `--features gpu-wgpu` and a working CubeCL runtime.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
@@ -30,14 +29,32 @@ use slam_rs::frontend::detect::{
     DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, Masks, Occupancy,
     Rect, detect_keypoints_with_cells, threshold_rungs,
 };
+#[cfg(feature = "gpu-core")]
 use slam_rs::frontend::patterns::Pattern51;
+#[cfg(feature = "gpu-core")]
 use slam_rs::frontend::tracker::PatchTracker;
+#[cfg(feature = "gpu-core")]
 use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, gpu_client};
 use slam_rs::image::ImageU16;
 
 mod common;
 
 use common::cornered_image;
+
+/// Keep kornia's threshold ladder as an independent reference after the CPU
+/// scanner learns cell selection.
+#[derive(Debug, Default)]
+struct BandScan(CpuCornerScan);
+
+impl CornerScan for BandScan {
+    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
+        self.0.scan(camera, image)
+    }
+
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
+        self.0.band(request)
+    }
+}
 
 /// The msd-index detector, which is `num_points_cell = 1` and the 40/20/10/5
 /// ladder every shipped config runs.
@@ -81,6 +98,20 @@ impl CornerScan for CountingScan {
     ) -> Result<slam_rs::frontend::cell::SelectionStatus, DetectError> {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner.select_cells(camera, image, select, out)
+    }
+
+    fn select_unoccupied_cells(
+        &mut self,
+        camera: usize,
+        image: &ImageU16,
+        select: &CellSelect,
+        occupancy: &Occupancy<'_>,
+        masked: &[bool],
+        out: &mut Vec<u32>,
+    ) -> Result<slam_rs::frontend::cell::SelectionStatus, DetectError> {
+        self.selections.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .select_unoccupied_cells(camera, image, select, occupancy, masked, out)
     }
 
     /// Forwarded, not defaulted: the trait's default prepares nothing, so a
@@ -164,11 +195,10 @@ struct DetectionCase<'a> {
     label: &'a str,
 }
 
-/// The GPU's per-cell winners are the ones the host band walk chooses.
+/// Every selector's per-cell winners are the ones the kornia band walk chooses.
 ///
 /// The whole of `detectKeypointsWithCells` runs twice over the same frame — once
-/// through `CpuCornerScan`, which takes the trait's default and walks bands, and
-/// once through `GpuCornerScan`, which picks each cell's winner on the device —
+/// through `BandScan`, which walks bands, and once through each selector —
 /// and the two `KeypointsData` must be equal, corner for corner and response for
 /// response, in the same cell scan order.
 ///
@@ -188,7 +218,7 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         label,
     } = case;
     let want: KeypointsData = detect_with(
-        Box::new(CpuCornerScan::default()),
+        Box::new(BandScan::default()),
         image,
         grid,
         counts,
@@ -196,46 +226,203 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         masks,
         budget,
     );
-    let bands: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-    let selections: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-    let got: KeypointsData = detect_with(
-        Box::new(CountingScan {
-            inner: Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()),
-            bands: Arc::clone(&bands),
-            selections: Arc::clone(&selections),
-        }),
-        image,
-        grid,
-        counts,
-        config,
-        masks,
-        budget,
-    );
-    assert_eq!(
-        got.corners.len(),
-        want.corners.len(),
-        "{label}: {} corners against {}",
-        got.corners.len(),
-        want.corners.len()
-    );
-    for (index, (got, want)) in got.corners.iter().zip(want.corners.iter()).enumerate() {
-        assert_eq!(got, want, "{label}: corner {index}");
+    let scanners: Vec<(&str, Box<dyn CornerScan>)> = vec![
+        ("CPU", Box::new(CpuCornerScan::with_cell_selection(true))),
+        #[cfg(feature = "gpu-core")]
+        (
+            "GPU",
+            Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()),
+        ),
+    ];
+    for (selector, scanner) in scanners {
+        let label = &format!("{label} ({selector})");
+        let bands: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let selections: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let got: KeypointsData = detect_with(
+            Box::new(CountingScan {
+                inner: scanner,
+                bands: Arc::clone(&bands),
+                selections: Arc::clone(&selections),
+            }),
+            image,
+            grid,
+            counts,
+            config,
+            masks,
+            budget,
+        );
+        assert_eq!(got, want, "{label}: corners and responses");
+        expected.assert(
+            bands.load(Ordering::Relaxed),
+            selections.load(Ordering::Relaxed),
+            label,
+        );
     }
-    assert_eq!(got.responses, want.responses, "{label}: responses");
-    expected.assert(
-        bands.load(Ordering::Relaxed),
-        selections.load(Ordering::Relaxed),
-        label,
-    );
     want.corners.len()
 }
 
 mod numerical_selection {
     use super::*;
 
+    /// Run this binary both with and without KORNIA_FAST_NEON=0 on aarch64.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn default_cell_selection_follows_kornias_neon_gate() {
+        use slam_rs::frontend::detect::SelectionStatus;
+        let image = ImageU16::zeros(64, 64).unwrap();
+        let select = CellSelect {
+            grid: CellGrid::new(64, 64, 32).unwrap(),
+            threshold: 5,
+            safe_radius: 0.0,
+        };
+        let expected = if std::env::var("KORNIA_FAST_NEON").map_or(true, |value| value != "0") {
+            SelectionStatus::Selected
+        } else {
+            SelectionStatus::Unsupported
+        };
+        assert_eq!(
+            CpuCornerScan::default()
+                .select_cells(0, &image, &select, &mut Vec::new())
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cell_selection_refuses_unrepresentable_keys_and_thresholds() {
+        use slam_rs::frontend::detect::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
+        for (width, height, threshold) in [
+            (CELL_KEY_LIMIT, 64, 5),
+            (64, CELL_KEY_LIMIT, 5),
+            (64, 64, LOWEST_THRESHOLD_RUNG - 1),
+        ] {
+            let image = ImageU16::zeros(width, height).unwrap();
+            let grid = CellGrid::new(width, height, 32).unwrap();
+            let select = CellSelect {
+                grid,
+                threshold,
+                safe_radius: 0.0,
+            };
+            let counts = vec![0; grid.rows * grid.columns];
+            let occupancy = Occupancy {
+                counts: &counts,
+                rows: grid.rows,
+                columns: grid.columns,
+            };
+            let masked = vec![false; grid.dimensions().0 * grid.dimensions().1];
+            let mut scanner = CpuCornerScan::with_cell_selection(true);
+            let mut keys = Vec::new();
+            assert_eq!(
+                scanner.select_cells(0, &image, &select, &mut keys).unwrap(),
+                SelectionStatus::Unsupported
+            );
+            assert_eq!(
+                scanner
+                    .select_unoccupied_cells(0, &image, &select, &occupancy, &masked, &mut keys)
+                    .unwrap(),
+                SelectionStatus::Unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn cell_selection_matches_the_band_walk_on_random_strided_images() {
+        let mut state = 0x8912_ab34u32;
+        for (width, height, cell) in [
+            (97, 83, 7),
+            (128, 95, 17),
+            (157, 97, 21),
+            (167, 97, 22),
+            (181, 97, 23),
+            (640, 123, 50),
+            (799, 129, 37),
+            (800, 129, 50),
+            (817, 127, 60),
+            (960, 129, 50),
+        ] {
+            let mut image = ImageU16::zeros_with_stride(width, height, width + 13).unwrap();
+            for y in 0..height {
+                for x in 0..width {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    image.set(x, y, (state >> 16) as u16);
+                }
+            }
+            let grid = CellGrid::new(width, height, cell).unwrap();
+            let counts: Vec<i32> = (0..grid.rows * grid.columns)
+                .map(|i| i32::from(i % 5 == 0))
+                .collect();
+            let masks = Masks {
+                masks: grid
+                    .cells()
+                    .enumerate()
+                    .filter(|(i, _)| i % 3 == 0)
+                    .map(|(_, (column, row))| Rect {
+                        x: (grid.x_start + column * cell) as f32,
+                        y: (grid.y_start + row * cell) as f32,
+                        w: cell as f32,
+                        h: cell as f32,
+                    })
+                    .collect(),
+            };
+            for threshold in [1, 5, 10, 40, 127, 254, 255, 300] {
+                detection_agrees(
+                    DetectionCase {
+                        image: &image,
+                        grid: &grid,
+                        counts: &counts,
+                        config: &DetectorConfig {
+                            min_threshold: threshold,
+                            max_threshold: threshold,
+                            ..detector_config(0.0)
+                        },
+                        masks: &masks,
+                        budget: 4096,
+                        label: &format!(
+                            "random {width}x{height}, cell {cell}, threshold {threshold}"
+                        ),
+                    },
+                    ExpectedPath::CellSelection,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
+        let mut image = ImageU16::zeros(100, 100).unwrap();
+        for y in 0..100 {
+            for x in 0..100 {
+                image.set(x, y, 128 << 8);
+            }
+        }
+        for (x, y) in [(35, 35), (65, 35), (35, 65)] {
+            image.set(x, y, 0);
+        }
+        let grid = CellGrid::new(100, 100, 100).unwrap();
+        let counts = vec![0; grid.rows * grid.columns];
+        let detect = |image: &ImageU16| {
+            detect_with(
+                Box::new(CpuCornerScan::with_cell_selection(true)),
+                image,
+                &grid,
+                &counts,
+                &detector_config(0.0),
+                &Masks::default(),
+                1,
+            )
+        };
+        let tied = detect(&image);
+        assert_eq!(tied.corners, [[35.0, 35.0]]);
+        assert_eq!(tied.responses, [127.0]);
+        image.set(36, 35, 0);
+        let plateau = detect(&image);
+        assert_eq!(plateau.corners, [[65.0, 35.0]]);
+        assert_eq!(plateau.responses, [127.0]);
+    }
+
     /// Every cell of a real MIO10 frameset, both cameras, empty and half full.
     #[test]
-    fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
+    fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
         let config: DetectorConfig = detector_config(472.0);
         for camera in 0..2 {
             let image: ImageU16 = common::mio10_frame(0, camera);
@@ -285,7 +472,7 @@ mod numerical_selection {
 
     /// The gates the kernel took over, one at a time, and the budget the host keeps.
     #[test]
-    fn the_gpu_cell_selection_applies_the_same_gates() {
+    fn the_cell_selection_applies_the_same_gates() {
         let image: ImageU16 = common::mio10_frame(1, 0);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
@@ -391,7 +578,7 @@ mod numerical_selection {
     /// is not a whole number of cells moves the grid's own start, both of which
     /// change the candidate set the selection reads.
     #[test]
-    fn the_gpu_cell_selection_matches_the_host_walk_on_uneven_frames() {
+    fn the_cell_selection_matches_the_host_walk_on_uneven_frames() {
         for (width, height, cell) in [
             (960usize, 240usize, 50usize),
             (512, 192, 32),
@@ -458,7 +645,7 @@ mod numerical_selection {
     /// `width - EDGE_THRESHOLD - 1`, so no corner can come out of them on either
     /// lane whatever the clamp does.
     #[test]
-    fn the_gpu_cell_selection_matches_the_host_walk_on_overhanging_cells() {
+    fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
         let (width, height, cell): (usize, usize, usize) = (200, 150, 50);
         let image: ImageU16 = cornered_image(width, height);
 
@@ -516,7 +703,7 @@ mod numerical_selection {
     /// asserting it finds strictly more corners is what stops this from passing
     /// vacuously.
     #[test]
-    fn the_gpu_cell_selection_stops_at_the_last_rung_the_walk_visits() {
+    fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
         let image: ImageU16 = common::mio10_frame(0, 0);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
@@ -537,7 +724,7 @@ mod numerical_selection {
             };
             assert_eq!(threshold_rungs(&at_the_minimum).last(), Some(min_threshold));
             let admitted: usize = detect_with(
-                Box::new(CpuCornerScan::default()),
+                Box::new(CpuCornerScan::with_cell_selection(true)),
                 &image,
                 &grid,
                 &counts,
@@ -573,7 +760,7 @@ mod numerical_selection {
     /// A frame a packed key cannot name takes the band walk.
     ///
     /// The key keeps twelve bits each for the row and the column, so
-    /// [`CELL_KEY_LIMIT`] pixels on a side is where the device path has to give up
+    /// [`CELL_KEY_LIMIT`] pixels on a side is where cell selection has to give up
     /// rather than lose a coordinate. The guard is on the frame, not on the grid, so
     /// a wide short frame is enough to reach it.
     #[test]
@@ -626,6 +813,7 @@ mod numerical_selection {
     }
 }
 
+#[cfg(feature = "gpu-core")]
 mod batch_lifecycle {
     use super::*;
 

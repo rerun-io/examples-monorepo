@@ -279,22 +279,12 @@ fn band_scan_bound(grid: &CellGrid, cameras: usize) -> usize {
     cameras * rows * ladder * (rows_per_band + 1) * 2 + 512
 }
 
-/// What a whole steady-state frame costs, and where that goes.
-///
-/// A frame is **not** allocation-free and is not claimed to be. Every one of
-/// those allocations is kornia's, not the port's, and [`band_scan_bound`] is
-/// where they come from. A *textured* frame here costs a few hundred, because
-/// most cells are full and never ask for a band; the flat frame in the next test
-/// asks for all of them and costs a few thousand.
-///
-/// The next test is the attribution: a frame that finds **no keypoints at all**
-/// costs more than a textured one, so nothing on the port's own per-frame path —
-/// the snapshot, the keypoint arrays, the patch storage — is the source.
-///
-/// Fixing it means an upstream change (a `fast_detect_rect_u8_into` taking a
-/// caller buffer) or forking ~200 lines of kornia; it is recorded rather than
-/// papered over. What this test asserts is the **structural bound**, so a new
-/// per-keypoint or per-patch allocation on the frame path shows up against it.
+/// A steady-state textured frame stays within the band scanner's structural bound.
+/// On aarch64 with kornia NEON enabled, cell selection reuses its score scratch.
+/// Other targets (and aarch64 with KORNIA_FAST_NEON=0) use kornia's band walk,
+/// whose row buffers account for a few hundred allocations on this scene.
+/// This test bounds and reports each frame independently; the flat-frame test
+/// below checks the allocation cost of the selected detector path.
 #[test]
 fn a_steady_state_frame_reports_its_allocation_count() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
@@ -334,18 +324,12 @@ fn a_steady_state_frame_reports_its_allocation_count() {
 
 /// The same frame over a flat image, which yields no keypoints at all.
 ///
-/// If the per-frame allocations came from the keypoints — growing the id, warp
-/// and response arrays, or the snapshot copying them — this would be near zero.
-/// It is not: it is the same order as the textured frame, which is what pins the
-/// cost on the detector's band scans rather than on anything the port owns.
-///
-/// This frame is also the one [`band_scan_bound`] is tight on: no cell ever
-/// fills, so every cell row is scanned at every rung of the ladder and the count
-/// is the whole band term. That is what makes the upper bound here a regression
-/// test and the textured one only a ceiling — a per-cell scan multiplies this
-/// frame's count by the grid's column count and fails.
+/// No cell fills, so the detector visits every cell. On aarch64 with kornia
+/// NEON enabled, reusable cell-selection scratch keeps allocations near zero.
+/// Elsewhere the band walk allocates more than 1,000 row buffers but remains
+/// within [`band_scan_bound`]. Disabling NEON on aarch64 also takes that band path.
 #[test]
-fn a_frame_that_finds_nothing_costs_the_same_order() {
+fn a_flat_frame_has_the_expected_detector_allocation_cost() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
         FrameToFrameOpticalFlow::new(flow_config(), &flow_rig(2), FrontendOptions::default())
             .unwrap();
@@ -374,11 +358,19 @@ fn a_frame_that_finds_nothing_costs_the_same_order() {
             .unwrap();
     });
     println!("flat frame, zero keypoints: {counted:?}");
-    assert!(
-        counted.total() > 1_000,
-        "a frame with no keypoints at all cost only {counted:?}, so the \
-         detector's band scans are not the dominant source after all"
-    );
+    if cfg!(target_arch = "aarch64")
+        && std::env::var("KORNIA_FAST_NEON").map_or(true, |value| value != "0")
+    {
+        assert!(
+            counted.total() <= 16,
+            "cell selection allocated {counted:?}"
+        );
+    } else {
+        assert!(
+            counted.total() > 1000,
+            "expected kornia row-buffer allocations: {counted:?}"
+        );
+    }
     let bound: usize = band_scan_bound(&flow.occupancy_grid(), 2);
     assert!(
         counted.total() <= bound,

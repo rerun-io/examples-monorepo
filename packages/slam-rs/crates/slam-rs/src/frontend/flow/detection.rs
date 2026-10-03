@@ -273,18 +273,14 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // is downloaded.
         let mark: std::time::Instant = std::time::Instant::now();
         if self.cameras.len() > 1 {
-            // Every match in this batch tracks the *same* keypoints — camera
-            // 0's new ones — into a different destination, and
-            // `submit_track_points` only reads the source warps, so the copy
-            // happens once here rather than once per camera.
-            self.source.clone_from(&self.new_cam0.transforms);
-        }
-        for camera in 1..self.cameras.len() {
-            let lane: usize = camera;
-            self.passes[lane].ids.clear();
-            self.passes[lane].ids.extend_from_slice(&self.new_cam0.ids);
-            let t_c0_ci: Se3<f32> = self.calib.t_i_c[0].inverse() * self.calib.t_i_c[camera];
-            self.submit_track_points(lane, 0, camera, &t_c0_ci, false)?;
+            self.prepare_tracks(None);
+            self.tracker.submit_batch(
+                &self.staging,
+                &self.staging,
+                &mut self.passes[1..],
+                &mut self.patches,
+                false,
+            )?;
         }
         self.timings.stereo_ns += duration_ns(mark);
 

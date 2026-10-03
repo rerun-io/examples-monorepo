@@ -1,9 +1,11 @@
 //! Reusable storage for deterministic dense landmark reduction.
 
 use nalgebra::{DMatrix, DVector};
+use rayon::prelude::*;
 
 use super::LinearizeError;
-use super::landmark_block::{DenseHbScratch, LandmarkBlock};
+use super::landmark_block::{DenseHbContribution, DenseHbScratch, LandmarkBlock};
+use crate::frontend::parallel::WorkPool;
 use crate::lie::LieScalar;
 
 /// Dense accumulator, reset to positive zero before each assembly.
@@ -46,15 +48,18 @@ impl<S: LieScalar> DensePartial<S> {
     }
 }
 
-/// Reusable dense accumulator and per-landmark transpose scratch.
-/// Blocks accumulate sequentially in their existing order. Buffers resize when
-/// the window ordering changes and are cleared before each assembly.
+/// Reusable dense accumulator and compact per-landmark coefficients.
+/// Transpose scratch belongs to each parallel job or to the serial loop.
+/// Blocks scatter in their existing order. Buffers resize with the window
+/// ordering and are cleared before each assembly.
 #[derive(Debug, Clone)]
 pub struct DenseHbWorkspace<S: LieScalar> {
     /// What the reduction accumulates into and the caller reads.
     accumulator: DensePartial<S>,
-    /// The per-block transpose buffer of [`LandmarkBlock::add_dense_h_b`].
+    /// One transpose buffer reused across blocks on the serial path.
     leaf: DenseHbScratch<S>,
+    /// One compact partial per landmark, reused across LM iterations and frames.
+    partials: Vec<DenseHbContribution<S>>,
 }
 
 impl<S: LieScalar> Default for DenseHbWorkspace<S> {
@@ -62,6 +67,7 @@ impl<S: LieScalar> Default for DenseHbWorkspace<S> {
         Self {
             accumulator: DensePartial::zeros(0),
             leaf: DenseHbScratch::default(),
+            partials: Vec::new(),
         }
     }
 }
@@ -72,11 +78,38 @@ impl<S: LieScalar> DenseHbWorkspace<S> {
         &mut self,
         opt_size: usize,
         blocks: &[LandmarkBlock<S>],
+        pool: Option<&WorkPool>,
     ) -> Result<(&mut DMatrix<S>, &mut DVector<S>), LinearizeError> {
         self.accumulator.reset_sized(opt_size);
-        let DenseHbWorkspace { accumulator, leaf } = self;
-        for block in blocks {
-            accumulator.accumulate(block, leaf)?;
+        let DenseHbWorkspace {
+            accumulator,
+            leaf,
+            partials,
+        } = self;
+        let computed = pool.and_then(|pool| {
+            pool.install(|| {
+                for block in blocks {
+                    block.check_dense_h_b_size(&accumulator.h, &accumulator.b)?;
+                }
+                partials.resize_with(blocks.len(), DenseHbContribution::default);
+                partials
+                    .par_iter_mut()
+                    .zip(blocks)
+                    .for_each_init(DenseHbScratch::default, |scratch, (partial, block)| {
+                        partial.compute(block, scratch)
+                    });
+                Ok::<_, LinearizeError>(())
+            })
+        });
+        if let Some(result) = computed {
+            result?;
+            for partial in partials {
+                partial.scatter(&mut accumulator.h, &mut accumulator.b);
+            }
+        } else {
+            for block in blocks {
+                accumulator.accumulate(block, leaf)?;
+            }
         }
         let DensePartial { h, b, .. } = accumulator;
 
@@ -167,6 +200,21 @@ mod tests {
         block
     }
 
+    /// Pooled assembly returns the same typed size error as serial assembly.
+    #[test]
+    fn an_undersized_pooled_system_returns_a_size_error() {
+        let block = a_block_carrying_a_nan();
+        let expected = block.pose_columns().len();
+        let found = expected - 1;
+        let pool = WorkPool::new(4).unwrap();
+        let mut workspace = DenseHbWorkspace::default();
+        assert!(matches!(
+            workspace.reduce(found, &[block], Some(&pool)),
+            Err(LinearizeError::StackedSystemSize { expected: e, found: f })
+                if e == expected && f == found
+        ));
+    }
+
     /// Non-finite blocks must write every column so unobserved columns retain NaNs.
     #[test]
     fn a_non_finite_block_is_reduced_at_full_width() {
@@ -208,5 +256,16 @@ mod tests {
                 .all(|value| value.to_bits() == 0.0f64.to_bits()),
             "the reset left a coefficient behind"
         );
+
+        let pool = WorkPool::new(4).unwrap();
+        let mut workspace = DenseHbWorkspace::default();
+        let (parallel_h, parallel_b) = workspace.reduce(n, &[block], Some(&pool)).unwrap();
+        for (expected, actual) in h
+            .iter()
+            .chain(b.iter())
+            .zip(parallel_h.iter().chain(parallel_b.iter()))
+        {
+            assert_eq!(expected.to_bits(), actual.to_bits());
+        }
     }
 }

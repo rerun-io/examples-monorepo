@@ -237,11 +237,70 @@ impl ImageU16 {
 
     /// Read a pixel after validating `x < width && y < height`.
     ///
-    /// # Panics
-    /// If the resulting slice index is outside storage.
+    /// # Safety
+    /// The caller must prove `x < width && y < height`.
     #[inline]
-    fn at(&self, x: usize, y: usize) -> f32 {
-        f32::from(self.data[y * self.stride + x])
+    unsafe fn at_unchecked(&self, x: usize, y: usize) -> f32 {
+        // SAFETY: the caller bounds the stencil; construction checked stride * height.
+        f32::from(unsafe { *self.data.get_unchecked(y * self.stride + x) })
+    }
+
+    /// Four KLT samples with a two-pixel border. Gather pixels once their whole
+    /// stencil is in bounds, then keep the scalar bilinear operation order in
+    /// each SIMD lane. Invalid lanes return -1; callers mask their gradients.
+    #[inline]
+    pub(crate) fn sample_group<const GRAD: bool>(
+        &self,
+        x: crate::frontend::patch::simd::F32x4,
+        y: crate::frontend::patch::simd::F32x4,
+    ) -> (
+        crate::frontend::patch::simd::F32x4,
+        [crate::frontend::patch::simd::F32x4; 2],
+        [bool; 4],
+    ) {
+        use crate::frontend::patch::simd::F32x4;
+        let ix = x.0.map(|v| v as usize);
+        let iy = y.0.map(|v| v as usize);
+        let valid = std::array::from_fn(|lane| {
+            self.in_bounds(x.0[lane], y.0[lane], 2.0)
+                // Integer checks also cover dimensions beyond f32's exact range.
+                && ix[lane] >= 1 && ix[lane] < self.width.saturating_sub(2)
+                && iy[lane] >= 1 && iy[lane] < self.height.saturating_sub(2)
+        });
+        let dx = x - F32x4(ix.map(|v| v as f32));
+        let dy = y - F32x4(iy.map(|v| v as f32));
+        let ddx = F32x4::splat(1.0) - dx;
+        let ddy = F32x4::splat(1.0) - dy;
+        let weights = [ddx * ddy, ddx * dy, dx * ddy, dx * dy];
+        let pixel = |ox: usize, oy: usize| {
+            F32x4(std::array::from_fn(|lane| {
+                if valid[lane] {
+                    let offset = (iy[lane] - 1 + oy) * self.stride + ix[lane] - 1 + ox;
+                    // SAFETY: valid covers the entire [-1, +2] stencil; image
+                    // construction guarantees stride >= width and stride * height storage.
+                    f32::from(unsafe { *self.data.get_unchecked(offset) })
+                } else {
+                    0.0
+                }
+            }))
+        };
+        let interpolate =
+            |a, b, c, d| weights[0] * a + weights[1] * b + weights[2] * c + weights[3] * d;
+        let p00 = pixel(1, 1);
+        let p01 = pixel(1, 2);
+        let p10 = pixel(2, 1);
+        let p11 = pixel(2, 2);
+        let value = F32x4::select(valid, interpolate(p00, p01, p10, p11), F32x4::splat(-1.0));
+        let gradients = if GRAD {
+            let mx = interpolate(pixel(0, 1), pixel(0, 2), p00, p01);
+            let px = interpolate(p10, p11, pixel(3, 1), pixel(3, 2));
+            let my = interpolate(pixel(1, 0), p00, pixel(2, 0), p10);
+            let py = interpolate(p01, pixel(1, 3), p11, pixel(2, 3));
+            [F32x4::splat(0.5) * (px - mx), F32x4::splat(0.5) * (py - my)]
+        } else {
+            [F32x4::ZERO; 2]
+        };
+        (value, gradients, valid)
     }
 
     /// Floating-point bounds: `border <= x < w - border - 1`, and likewise for y.
@@ -267,6 +326,12 @@ impl ImageU16 {
 
         let ix: usize = x as usize;
         let iy: usize = y as usize;
+        assert!(
+            ix < self.width.saturating_sub(1) && iy < self.height.saturating_sub(1),
+            "interp stencil outside image"
+        );
+        // SAFETY: the check above covers all four reads, including padded rows.
+        let at = |px, py| unsafe { self.at_unchecked(px, py) };
 
         let dx: f32 = x - ix as f32;
         let dy: f32 = y - iy as f32;
@@ -274,10 +339,10 @@ impl ImageU16 {
         let ddx: f32 = 1.0 - dx;
         let ddy: f32 = 1.0 - dy;
 
-        ddx * ddy * self.at(ix, iy)
-            + ddx * dy * self.at(ix, iy + 1)
-            + dx * ddy * self.at(ix + 1, iy)
-            + dx * dy * self.at(ix + 1, iy + 1)
+        ddx * ddy * at(ix, iy)
+            + ddx * dy * at(ix, iy + 1)
+            + dx * ddy * at(ix + 1, iy)
+            + dx * dy * at(ix + 1, iy + 1)
     }
 
     /// Bilinear value and unit-spacing central differences of the bilinear surface.
@@ -296,6 +361,15 @@ impl ImageU16 {
 
         let ix: usize = x as usize;
         let iy: usize = y as usize;
+        assert!(
+            ix >= 1
+                && ix < self.width.saturating_sub(2)
+                && iy >= 1
+                && iy < self.height.saturating_sub(2),
+            "interp_grad stencil outside image"
+        );
+        // SAFETY: the check above covers every read in the [-1, +2] stencil.
+        let at = |px, py| unsafe { self.at_unchecked(px, py) };
 
         let dx: f32 = x - ix as f32;
         let dy: f32 = y - iy as f32;
@@ -303,34 +377,34 @@ impl ImageU16 {
         let ddx: f32 = 1.0 - dx;
         let ddy: f32 = 1.0 - dy;
 
-        let px0y0: f32 = self.at(ix, iy);
-        let px1y0: f32 = self.at(ix + 1, iy);
-        let px0y1: f32 = self.at(ix, iy + 1);
-        let px1y1: f32 = self.at(ix + 1, iy + 1);
+        let px0y0: f32 = at(ix, iy);
+        let px1y0: f32 = at(ix + 1, iy);
+        let px0y1: f32 = at(ix, iy + 1);
+        let px1y1: f32 = at(ix + 1, iy + 1);
 
         let value: f32 = ddx * ddy * px0y0 + ddx * dy * px0y1 + dx * ddy * px1y0 + dx * dy * px1y1;
 
-        let pxm1y0: f32 = self.at(ix - 1, iy);
-        let pxm1y1: f32 = self.at(ix - 1, iy + 1);
+        let pxm1y0: f32 = at(ix - 1, iy);
+        let pxm1y1: f32 = at(ix - 1, iy + 1);
 
         let res_mx: f32 =
             ddx * ddy * pxm1y0 + ddx * dy * pxm1y1 + dx * ddy * px0y0 + dx * dy * px0y1;
 
-        let px2y0: f32 = self.at(ix + 2, iy);
-        let px2y1: f32 = self.at(ix + 2, iy + 1);
+        let px2y0: f32 = at(ix + 2, iy);
+        let px2y1: f32 = at(ix + 2, iy + 1);
 
         let res_px: f32 = ddx * ddy * px1y0 + ddx * dy * px1y1 + dx * ddy * px2y0 + dx * dy * px2y1;
 
         let grad_x: f32 = 0.5 * (res_px - res_mx);
 
-        let px0ym1: f32 = self.at(ix, iy - 1);
-        let px1ym1: f32 = self.at(ix + 1, iy - 1);
+        let px0ym1: f32 = at(ix, iy - 1);
+        let px1ym1: f32 = at(ix + 1, iy - 1);
 
         let res_my: f32 =
             ddx * ddy * px0ym1 + ddx * dy * px0y0 + dx * ddy * px1ym1 + dx * dy * px1y0;
 
-        let px0y2: f32 = self.at(ix, iy + 2);
-        let px1y2: f32 = self.at(ix + 1, iy + 2);
+        let px0y2: f32 = at(ix, iy + 2);
+        let px1y2: f32 = at(ix + 1, iy + 2);
 
         let res_py: f32 = ddx * ddy * px0y1 + ddx * dy * px0y2 + dx * ddy * px1y1 + dx * dy * px1y2;
 

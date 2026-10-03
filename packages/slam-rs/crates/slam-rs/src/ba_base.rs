@@ -21,9 +21,11 @@ use nalgebra::{
     DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix4, Matrix4x2, Matrix4x3,
     Matrix6, Vector2, Vector3, Vector4,
 };
+use rayon::prelude::*;
 
 use crate::calib::Calibration;
 use crate::camera::{CameraEnum, CameraError};
+use crate::frontend::parallel::WorkPool;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
 use crate::lie::{LieScalar, Se3, So3, c};
 use crate::types::{
@@ -373,6 +375,8 @@ pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std
 /// maps; [`Self::get_pose_state_with_lin`] hides which.
 #[derive(Debug, Clone)]
 pub struct BundleAdjustmentBase<S: LieScalar> {
+    /// Shared frontend workers, disabled while a deferred solve runs.
+    pub(crate) pool: Option<WorkPool>,
     /// Full states, newest frames.
     pub frame_states: BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
     /// Pose-only blocks, keyframes.
@@ -401,6 +405,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             .map(CameraEnum::from_model)
             .collect::<Result<_, CameraError>>()?;
         Ok(Self {
+            pool: None,
             frame_states: BTreeMap::new(),
             frame_poses: BTreeMap::new(),
             lmdb: LandmarkDatabase::new(),
@@ -494,6 +499,24 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 
         let mut error: S = S::zero();
         let mut num_points: usize = 0;
+        // Outlier collection is a cold, mutating path; preserve its traversal.
+        if outliers.is_none()
+            && let Some(partials) = self.pool.as_ref().and_then(|pool| {
+                pool.install(|| {
+                    host_frames
+                        .par_iter()
+                        .map(|&host| self.host_frame_error(host, None, outlier_threshold))
+                        .collect::<Vec<_>>()
+                })
+            })
+        {
+            for partial in partials {
+                let (host_error, host_points) = partial?;
+                error += host_error;
+                num_points += host_points;
+            }
+            return Ok((error, num_points));
+        }
         for &tcid_h in &host_frames {
             let (host_error, host_points) =
                 self.host_frame_error(tcid_h, outliers.as_deref_mut(), outlier_threshold)?;
@@ -1307,6 +1330,28 @@ mod tests {
         let mut none: BTreeMap<LandmarkId, Vec<(TimeCamId, f64)>> = BTreeMap::new();
         ba.compute_error(Some(&mut none), 1e6).unwrap();
         assert!(none.values().all(|v| v.iter().all(|&(_, f)| f == -2.0)));
+    }
+
+    #[test]
+    fn pooled_host_errors_preserve_bits_and_outliers() {
+        let mut ba = a_window(MSDMI, &synthetic_points(), 0.4);
+        // Populate all four host buckets so the test exercises the ordered fold.
+        for (index, mut landmark) in ba.lmdb.landmarks().to_vec().into_iter().enumerate() {
+            landmark.host_kf_id = tcid((index % 2) as i64, (index / 2) % 2);
+            ba.lmdb.add_landmark(landmark.id, &landmark);
+        }
+        let serial = ba.compute_error(None, 0.0).unwrap();
+        let mut serial_outliers = BTreeMap::new();
+        ba.compute_error(Some(&mut serial_outliers), 0.1).unwrap();
+        for threads in [1, 2, 4] {
+            ba.pool = Some(WorkPool::new(threads).unwrap());
+            let parallel = ba.compute_error(None, 0.0).unwrap();
+            assert_eq!(serial.0.to_bits(), parallel.0.to_bits());
+            assert_eq!(serial.1, parallel.1);
+            let mut outliers = BTreeMap::new();
+            ba.compute_error(Some(&mut outliers), 0.1).unwrap();
+            assert_eq!(serial_outliers, outliers);
+        }
     }
 
     #[test]

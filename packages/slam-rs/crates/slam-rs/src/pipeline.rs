@@ -109,8 +109,9 @@ impl<S: lie::LieScalar> Vio<S> {
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: imu::ImuNoise<f64> = imu::ImuNoise::from_calibration(&calibration);
-        let estimator: estimator::SqrtKeypointVio<S> =
+        let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
+        estimator.ba.pool = frontend.cpu_pool();
         Ok(Self {
             frontend,
             estimator,

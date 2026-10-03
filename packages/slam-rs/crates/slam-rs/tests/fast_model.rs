@@ -11,12 +11,109 @@
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{FastCorner, Rect as KorniaRect, fast_detect_rect_u8};
 use slam_rs::frontend::detect::{
-    FAST_BORDER, FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
+    CellGrid, CornerScan, CpuCornerScan, DetectorConfig, FAST_BORDER, FAST_FILTER_LANES,
+    FAST_RING_COLUMN, FAST_RING_ROW, Occupancy, SelectionStatus, block_filter_end, cell_select,
 };
 
 mod common;
 
 use common::cornered_bytes;
+
+#[test]
+fn cpu_selects_cells_without_a_band_scan() {
+    let image = common::cornered_image(640, 480);
+    let grid = CellGrid::new(640, 480, 50).unwrap();
+    let select = cell_select(
+        &image,
+        &grid,
+        &DetectorConfig {
+            num_points_cell: 1,
+            min_threshold: 5,
+            max_threshold: 40,
+            safe_radius: 0.0,
+        },
+    )
+    .unwrap();
+    let mut keys = Vec::new();
+    assert_eq!(
+        CpuCornerScan::with_cell_selection(true)
+            .select_cells(0, &image, &select, &mut keys)
+            .unwrap(),
+        SelectionStatus::Selected
+    );
+    assert_eq!(keys.len(), 12 * 9);
+    assert!(keys.iter().any(|&key| key != u32::MAX));
+}
+
+#[test]
+fn cpu_selection_omits_occupied_masked_and_out_of_occupancy_cells() {
+    let image = common::cornered_image(640, 480);
+    let grid = CellGrid::new(640, 480, 50).unwrap();
+    let select = cell_select(
+        &image,
+        &grid,
+        &DetectorConfig {
+            num_points_cell: 1,
+            min_threshold: 5,
+            max_threshold: 40,
+            safe_radius: 0.0,
+        },
+    )
+    .unwrap();
+    let mut scanner = CpuCornerScan::with_cell_selection(true);
+    let mut all = Vec::new();
+    scanner.select_cells(0, &image, &select, &mut all).unwrap();
+    let counts: Vec<i32> = (0..7 * 10).map(|i| i32::from(i % 3 == 0)).collect();
+    let masked: Vec<bool> = (0..12 * 9).map(|i| i % 5 == 0).collect();
+    let mut selected = vec![0; 200];
+    scanner
+        .select_unoccupied_cells(
+            3,
+            &image,
+            &select,
+            &Occupancy {
+                counts: &counts,
+                rows: 7,
+                columns: 10,
+            },
+            &masked,
+            &mut selected,
+        )
+        .unwrap();
+    assert_eq!(selected.len(), all.len());
+    for row in 0..9 {
+        for column in 0..12 {
+            let i = row * 12 + column;
+            let expected =
+                if row >= 7 || column >= 10 || masked[i] || counts[row * 10 + column] != 0 {
+                    u32::MAX
+                } else {
+                    all[i]
+                };
+            assert_eq!(selected[i], expected, "cell ({column}, {row})");
+        }
+    }
+    // Reusing the scanner with a different eligibility map must not leave keys.
+    scanner
+        .select_unoccupied_cells(
+            1,
+            &image,
+            &select,
+            &Occupancy {
+                counts: &counts,
+                rows: 7,
+                columns: 10,
+            },
+            &[true; 12 * 9],
+            &mut selected,
+        )
+        .unwrap();
+    assert!(selected.iter().all(|&key| key == u32::MAX));
+    scanner
+        .select_cells(2, &image, &select, &mut selected)
+        .unwrap();
+    assert_eq!(selected, all);
+}
 
 /// `corner_score_9_scalar` (kornia's `fast.rs`).
 fn corner_score_9(gray: &[u8], width: usize, x: usize, y: usize) -> u8 {

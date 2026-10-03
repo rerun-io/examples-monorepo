@@ -89,6 +89,18 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let Some(deferred) = self.deferred.take() else {
             return Ok(None);
         };
+        // D84 overlaps the frontend on another thread. Leave its shared workers
+        // to the frontend and restore the pool even if the solve returns an error.
+        let pool = self.ba.pool.take();
+        let result = self.solve_deferred_keyframe(deferred);
+        self.ba.pool = pool;
+        result.map(Some)
+    }
+
+    fn solve_deferred_keyframe(
+        &mut self,
+        deferred: DeferredKeyframe,
+    ) -> Result<DeferredKeyframeStats<S>, EstimatorError> {
         let started: std::time::Instant = std::time::Instant::now();
         let t_ns: i64 = deferred.frame.t_ns;
         let num_points_added: usize =
@@ -103,7 +115,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             self.marginalize(&deferred.num_points_connected, &deferred.lost_landmarks)?;
         timings.marginalize_ns = marg.elapsed_ns;
         timings.measure_ns = duration_ns(started);
-        Ok(Some(DeferredKeyframeStats {
+        Ok(DeferredKeyframeStats {
             t_ns,
             num_points_added,
             num_landmarks: self.ba.lmdb.num_landmarks(),
@@ -111,6 +123,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             termination,
             marginalization: marg.marginalization,
             timings,
-        }))
+        })
     }
 }
