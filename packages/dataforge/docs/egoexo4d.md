@@ -14,7 +14,8 @@
 - Catalog `dataforge-egoexo4d`, sample `dataforge-egoexo4d-sample`. Identity: `egoexo4d__<take_name>`.
 - Rig 0 is the wearer's Aria; rigs 1..N are the localized GoPros in `gopro_calibs.csv` order (HM's view order).
 - `property:episode:{take_uid,activity,task,university,capture}` from `takes.json`; `property:capture:clock_source`,
-  `source_resolution`, `image_rotation_cw_deg` (90, the Aria MP4s) and `trajectory_coverage` (share of frames with a pose).
+  `clock_filled_frames` (frames whose timesync stamp was missing), `source_resolution`, `image_rotation_cw_deg` (90, the Aria
+  MP4s) and `trajectory_coverage` (share of frames with a pose).
 - Camera-source metadata: GoPros `source_width/height` 3840×2160 (2160×3840 portrait), `stored_width/height` 1920×1080;
   Aria streams carry `stream_id` (`214-1`, `1201-1`, `1201-2`, `211-1`). Everything is re-encoded (`cq` 36, `gop` 60).
 
@@ -37,8 +38,8 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
   the image-less VRS for the Aria calibration (`take_vrs_noimagestream`), and the capture's `timesync.csv` (`captures`).
   `prefetch` fetches the next take while one converts. A file lands under `<root>/.dataforge-staging` and is renamed into place
   only at the manifest's size.
-- After base is written the take files are deleted (`--keep-raw` keeps them). The fits, models, metadata, `timesync.csv` and
-  base's sidecars stay, so the derived layers rebuild without the release.
+- Right after base is written the take files are deleted (`--keep-raw` keeps them). The fits, models, metadata and base's
+  sidecars stay, so the derived layers rebuild without the release; `timesync.csv` stays because other takes of the capture share it.
 - Default raw root `$DATAFORGE_RAW_ROOT/egoexo4d`; `--model-root` moves the body models.
 
 ## Raw inventory
@@ -51,7 +52,7 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
 | `aria01_1201-1.mp4`, `aria01_1201-2.mp4` (SLAM) | 30 Hz | base | `/world/rig_00/cam_01`, `cam_02` |
 | `aria01_211-1.mp4` (both eye cameras in one frame) | 30 Hz | base | `/world/rig_00/cam_03/pinhole/video`, video only: no single calibration describes the paired image |
 | `trajectory/gopro_calibs.csv` | static | base | GoPro `world_T_cam` and KB4 lens |
-| `trajectory/closed_loop_trajectory.csv` | ~1 kHz device clock | base | `/world/rig_00` `world_T_device`, nearest sample to each frame (≤ 5 ms, else NaN) |
+| `trajectory/closed_loop_trajectory.csv` | ~1 kHz device clock | base | `/world/rig_00` `world_T_device` at each frame, interpolated inside ≤ 2 ms brackets by the shared MPS reader (`aria.read_trajectory`), else NaN |
 | other `trajectory/` files, semidense points, eye gaze, audio, full VRS, annotations | — | — | not ingested: outside this port (the ego_pose GT layer was declined) |
 | `<aria>_noimagestreams.vrs` tag `calib_json` | static | base | Aria camera calibrations (FISHEYE624), quarter-turned to the MP4 orientation |
 | `captures/<c>/timesync.csv` `<aria>_214-1_capture_timestamp_ns` | per frame | all | `video_time` |
@@ -65,7 +66,7 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
 ## Clocks
 
 `video_time` is the Aria RGB capture time on the Aria device clock (ns), from `timesync.csv` rows
-`timesync_start_idx .. timesync_end_idx - 1`; a missing stamp repeats the last one. Frame `i` of every frame-aligned video and of
+`timesync_start_idx .. timesync_end_idx - 1`; a missing stamp repeats the last one (counted in `clock_filled_frames`). Frame `i` of every frame-aligned video and of
 the HM fit is row `timesync_start_idx + i`; `frame_index` is `i`. The trajectory's `tracking_timestamp_us` is the same device clock.
 
 ## Layers and entities
