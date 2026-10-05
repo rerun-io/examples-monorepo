@@ -183,7 +183,7 @@ fn an_imu_sample_behind_the_pending_one_is_dropped() {
     // One frameset before the sample: the initialization pops it into
     // `pending` and leaves the queue empty, which is the whole setup.
     estimator
-        .process_frame(Arc::new(FlowObservations::new(5, 2)))
+        .process_frame(Arc::new(FlowObservations::new(5, 2)), None)
         .unwrap();
     assert!(estimator.imu_queue.is_empty());
     assert_eq!(estimator.pending.map(|(t_ns, _, _)| t_ns), Some(10));

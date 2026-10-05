@@ -220,6 +220,10 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
 impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Pyramid>>
     FrameToFrameOpticalFlow<P, B, T>
 {
+    pub(crate) fn pool(&self) -> &WorkPool {
+        &self.host_pool
+    }
+
     /// The config checks that do not depend on the backends.
     fn validate_config(config: &VioConfig) -> Result<(), FrontendError> {
         if config

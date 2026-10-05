@@ -42,6 +42,14 @@ macro_rules! on_lane {
 }
 
 impl FrontendLane {
+    pub(crate) fn cpu_pool(&self) -> Option<frontend::parallel::WorkPool> {
+        match self {
+            Self::Cpu(flow) => Some(flow.pool().clone()),
+            #[cfg(feature = "gpu-core")]
+            Self::Gpu(_) => None,
+        }
+    }
+
     // ── the seven [`Vio`] drives ──────────────────────────────────────────
 
     /// Which backend this lane runs.

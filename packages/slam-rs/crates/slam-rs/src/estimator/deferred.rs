@@ -8,6 +8,7 @@ use super::{
     MarginalizationStats, SqrtKeypointVio, StageTimings,
 };
 use crate::duration_ns;
+use crate::frontend::parallel::WorkPool;
 use crate::lie::LieScalar;
 use crate::types::{FrameId, KeypointId, LandmarkId};
 
@@ -78,10 +79,19 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// a synchronous keyframe.
     pub fn finish_deferred_keyframe(
         &mut self,
+        pool: Option<&WorkPool>,
     ) -> Result<Option<DeferredKeyframeStats<S>>, EstimatorError> {
         let Some(deferred) = self.deferred.take() else {
             return Ok(None);
         };
+        self.solve_deferred_keyframe(deferred, pool).map(Some)
+    }
+
+    fn solve_deferred_keyframe(
+        &mut self,
+        deferred: DeferredKeyframe,
+        pool: Option<&WorkPool>,
+    ) -> Result<DeferredKeyframeStats<S>, EstimatorError> {
         let started: std::time::Instant = std::time::Instant::now();
         let t_ns: i64 = deferred.frame.t_ns;
         let num_points_added: usize =
@@ -89,14 +99,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.num_points_kf.insert(t_ns, num_points_added);
         let keyframe_ns: u64 = duration_ns(started);
         let optimize_started: std::time::Instant = std::time::Instant::now();
-        let (lm, termination, mut timings) = self.optimize(t_ns)?;
+        let (lm, termination, mut timings) = self.optimize(t_ns, pool)?;
         timings.optimize_ns = duration_ns(optimize_started);
         timings.keyframe_ns = keyframe_ns;
         let marg: MarginalizationOutcome =
             self.marginalize(&deferred.num_points_connected, &deferred.lost_landmarks)?;
         timings.marginalize_ns = marg.elapsed_ns;
         timings.measure_ns = duration_ns(started);
-        Ok(Some(DeferredKeyframeStats {
+        Ok(DeferredKeyframeStats {
             t_ns,
             num_points_added,
             num_landmarks: self.ba.lmdb.num_landmarks(),
@@ -104,6 +114,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             termination,
             marginalization: marg.marginalization,
             timings,
-        }))
+        })
     }
 }

@@ -570,8 +570,8 @@ fn the_dense_reduction_allocates_nothing_after_its_first_call() {
             &inputs,
         )
         .unwrap();
-    lqr.linearize_problem(&estimator, &inputs).unwrap();
-    lqr.perform_qr().unwrap();
+    lqr.linearize_problem(&estimator, &inputs, None).unwrap();
+    lqr.perform_qr(None).unwrap();
 
     let mut workspace: slam_rs::linearize::DenseHbWorkspace<f32> = Default::default();
     // The first call is allowed to allocate, and does: this is where every
@@ -679,7 +679,7 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
             }
         }
         let observations = std::sync::Arc::new(observations);
-        let (outcome, counted) = measure(|| estimator.process_frame(observations).unwrap());
+        let (outcome, counted) = measure(|| estimator.process_frame(observations, None).unwrap());
         let slam_rs::estimator::FrameOutcome::Measured(stats) = outcome else {
             panic!("frame {frame} needs more IMU");
         };

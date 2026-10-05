@@ -34,8 +34,13 @@ impl<S: lie::LieScalar> Vio<S> {
         let result = if let Some(observations) = self.pending_observations.take() {
             let mark = std::time::Instant::now();
             let t_ns = observations.t_ns;
-            self.last_deferred = self.estimator.finish_deferred_keyframe()?.map(Box::new);
-            let outcome = self.estimator.process_frame(observations)?;
+            self.last_deferred = self
+                .estimator
+                .finish_deferred_keyframe(self.frontend.cpu_pool().as_ref())?
+                .map(Box::new);
+            let outcome = self
+                .estimator
+                .process_frame(observations, self.frontend.cpu_pool().as_ref())?;
             self.overlap_timings.estimator_ns = duration_ns(mark);
             Some(self.accept_outcome(t_ns, outcome)?)
         } else {
@@ -70,11 +75,13 @@ impl<S: lie::LieScalar> Vio<S> {
                 .name("slam-rs-estimator".to_owned())
                 .spawn_scoped(scope, || {
                     let mark = std::time::Instant::now();
-                    let deferred = estimator.finish_deferred_keyframe()?;
+                    let deferred = estimator.finish_deferred_keyframe(None)?;
                     let outcome = observations
                         .map(|frame| {
                             let t_ns = frame.t_ns;
-                            estimator.process_frame(frame).map(|result| (t_ns, result))
+                            estimator
+                                .process_frame(frame, None)
+                                .map(|result| (t_ns, result))
                         })
                         .transpose()?;
                     Ok::<_, estimator::EstimatorError>((outcome, deferred, duration_ns(mark)))

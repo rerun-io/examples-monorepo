@@ -46,6 +46,7 @@ use crate::ba_base::BundleAdjustmentBase;
 use crate::calib::Calibration;
 use crate::config::{LinearizationType, VioConfig};
 use crate::duration_ns;
+use crate::frontend::parallel::WorkPool;
 use crate::imu::{
     ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, Popped, gravity,
     gravity_from_first_accel,
@@ -508,6 +509,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     pub fn process_frame(
         &mut self,
         frame: Arc<FlowObservations>,
+        pool: Option<&WorkPool>,
     ) -> Result<FrameOutcome<S>, EstimatorError> {
         let num_cams: usize = self.ba.calib.t_i_c.len();
         if frame.cameras.len() != num_cams {
@@ -532,7 +534,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         // It reads no IMU, so the coverage refusal below stays side-effect free
         // for the IMU queue either way.
         if self.deferred.is_some() && self.imu_covers_frame(frame.t_ns) {
-            self.finish_deferred_keyframe()?;
+            self.finish_deferred_keyframe(pool)?;
         }
 
         // The one place Offline mode differs from a blocking queue: every pop
@@ -637,7 +639,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         }
 
         let integration_ns: u64 = duration_ns(predict_started);
-        let mut stats: FrameStats<S> = self.measure(Arc::clone(&frame), meas)?;
+        let mut stats: FrameStats<S> = self.measure(Arc::clone(&frame), meas, pool)?;
         stats.timings.predict_ns += integration_ns;
         if initializing {
             log::info!(
@@ -681,6 +683,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         &mut self,
         frame: Arc<FlowObservations>,
         meas: Option<IntegratedImuMeasurement<S>>,
+        pool: Option<&WorkPool>,
     ) -> Result<FrameStats<S>, EstimatorError> {
         let started: std::time::Instant = std::time::Instant::now();
         let num_cams: usize = frame.cameras.len();
@@ -857,7 +860,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 };
                 let (lm, termination, mut timings) = match updated {
                     Some(Ok(outcome)) => outcome,
-                    Some(Err(_)) | None => self.optimize(frame.t_ns)?,
+                    Some(Err(_)) | None => self.optimize(frame.t_ns, pool)?,
                 };
                 timings.optimize_ns = duration_ns(optimize_started);
                 timings.predict_ns = predict_ns;

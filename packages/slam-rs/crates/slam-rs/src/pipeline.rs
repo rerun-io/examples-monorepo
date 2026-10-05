@@ -196,7 +196,10 @@ impl<S: lie::LieScalar> Vio<S> {
     ///
     /// What the joint solve or the marginalization refuse.
     pub fn finish_deferred_keyframe(&mut self) -> Result<(), VioError> {
-        if let Some(stats) = self.estimator.finish_deferred_keyframe()? {
+        if let Some(stats) = self
+            .estimator
+            .finish_deferred_keyframe(self.frontend.cpu_pool().as_ref())?
+        {
             self.last_deferred = Some(Box::new(stats));
         }
         Ok(())
@@ -371,7 +374,11 @@ impl<S: lie::LieScalar> Vio<S> {
             };
             completed
         } else {
-            (t_ns, self.estimator.process_frame(observations)?)
+            (
+                t_ns,
+                self.estimator
+                    .process_frame(observations, self.frontend.cpu_pool().as_ref())?,
+            )
         };
 
         self.accept_outcome(result_t_ns, outcome)

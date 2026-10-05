@@ -31,30 +31,75 @@ impl<S: LieScalar> DensePartial<S> {
         }
     }
 
-    /// Add one landmark, preserving full-width writes when required.
-    fn accumulate(
+    /// Compute one triangle while preserving row and landmark addition order.
+    fn accumulate_symmetric(
         &mut self,
         block: &LandmarkBlock<S>,
         scratch: &mut DenseHbScratch<S>,
+        rows: &mut Vec<S>,
     ) -> Result<(), LinearizeError> {
-        if block.active_writeback_is_exact() {
-            block.add_dense_h_b_active(&mut self.h, &mut self.b, scratch)?;
-        } else {
-            block.add_dense_h_b(&mut self.h, &mut self.b, scratch)?;
+        const LANES: usize = 8;
+        block.check_dense_h_b_size(&self.h, &self.b)?;
+        if !block.active_writeback_is_exact() {
+            return block.add_dense_h_b(&mut self.h, &mut self.b, scratch);
+        }
+        let columns = block.active_cols();
+        let live = columns.len();
+        let count = block.num_q2rows();
+        let stride = (live + 1).div_ceil(LANES) * LANES;
+        rows.clear();
+        rows.resize(count * stride, S::zero());
+        let storage = block.storage();
+        for (slot, &column) in columns.iter().enumerate() {
+            for row in 0..count {
+                rows[row * stride + slot] = storage[(row + 3, column)];
+            }
+        }
+        let residual = block.layout().4;
+        for row in 0..count {
+            rows[row * stride + live] = storage[(row + 3, residual)];
+        }
+        for (slot, &i) in columns.iter().enumerate() {
+            for lo in ((slot / LANES * LANES)..stride).step_by(LANES) {
+                let mut partial = [S::zero(); LANES];
+                for row in rows.chunks_exact(stride) {
+                    let factor = row[slot];
+                    for (sum, &value) in partial.iter_mut().zip(&row[lo..lo + LANES]) {
+                        *sum += factor * value;
+                    }
+                }
+                for (offset, value) in partial.into_iter().enumerate() {
+                    let j = lo + offset;
+                    if j < slot {
+                        continue;
+                    }
+                    if j < live {
+                        let column = columns[j];
+                        self.h[(i, column)] += value;
+                        if j != slot {
+                            self.h[(column, i)] += value;
+                        }
+                    } else if j == live {
+                        self.b[i] += value;
+                    }
+                }
+            }
         }
         Ok(())
     }
 }
 
-/// Reusable dense accumulator and per-landmark transpose scratch.
-/// Blocks accumulate sequentially in their existing order. Buffers resize when
-/// the window ordering changes and are cleared before each assembly.
+/// Reusable dense accumulator and row scratch for serial symmetric assembly.
+/// Blocks scatter in their existing order. Buffers resize with the window
+/// ordering and are cleared before each assembly.
 #[derive(Debug, Clone)]
 pub struct DenseHbWorkspace<S: LieScalar> {
     /// What the reduction accumulates into and the caller reads.
     accumulator: DensePartial<S>,
-    /// The per-block transpose buffer of [`LandmarkBlock::add_dense_h_b`].
+    /// One transpose buffer reused across blocks on the serial path.
     leaf: DenseHbScratch<S>,
+    /// Row-major active columns plus residual, reused across landmarks.
+    rows: Vec<S>,
 }
 
 impl<S: LieScalar> Default for DenseHbWorkspace<S> {
@@ -62,6 +107,7 @@ impl<S: LieScalar> Default for DenseHbWorkspace<S> {
         Self {
             accumulator: DensePartial::zeros(0),
             leaf: DenseHbScratch::default(),
+            rows: Vec::new(),
         }
     }
 }
@@ -74,10 +120,11 @@ impl<S: LieScalar> DenseHbWorkspace<S> {
         blocks: &[LandmarkBlock<S>],
     ) -> Result<(&mut DMatrix<S>, &mut DVector<S>), LinearizeError> {
         self.accumulator.reset_sized(opt_size);
-        let DenseHbWorkspace { accumulator, leaf } = self;
         for block in blocks {
-            accumulator.accumulate(block, leaf)?;
+            self.accumulator
+                .accumulate_symmetric(block, &mut self.leaf, &mut self.rows)?;
         }
+        let accumulator = &mut self.accumulator;
         let DensePartial { h, b, .. } = accumulator;
 
         Ok((h, b))
@@ -105,6 +152,136 @@ mod tests {
     use crate::types::{AbsOrderMap, LandmarkId, TimeCamId};
     use nalgebra::{Matrix4, Matrix6};
     use nalgebra::{Vector2, Vector3};
+
+    /// Scalar reference: every coefficient uses the original row and landmark order.
+    fn reference_reduce<S: LieScalar>(
+        n: usize,
+        blocks: &[LandmarkBlock<S>],
+    ) -> (DMatrix<S>, DVector<S>) {
+        let mut h = DMatrix::zeros(n, n);
+        let mut b = DVector::zeros(n);
+        for block in blocks {
+            let columns: Vec<_> = if block.active_writeback_is_exact() {
+                block.active_cols().to_vec()
+            } else {
+                block.pose_columns().collect()
+            };
+            let storage = block.storage();
+            for &i in &columns {
+                for &j in &columns {
+                    let mut value = S::zero();
+                    for row in 3..3 + block.num_q2rows() {
+                        value += storage[(row, i)] * storage[(row, j)];
+                    }
+                    h[(i, j)] += value;
+                }
+                let mut value = S::zero();
+                for row in 3..3 + block.num_q2rows() {
+                    value += storage[(row, i)] * storage[(row, block.layout().4)];
+                }
+                b[i] += value;
+            }
+        }
+        (h, b)
+    }
+
+    #[test]
+    fn symmetric_dense_assembly_matches_reference_in_estimator_windows() {
+        compare_symmetric_dense::<f32>();
+        compare_symmetric_dense::<f64>();
+    }
+
+    fn compare_symmetric_dense<S: LieScalar>() {
+        use crate::camera::CameraEnum;
+        use crate::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
+        use crate::types::KeypointId;
+        use std::sync::Arc;
+        let calibration = crate::calib::Calibration::<f64>::from_json_str(include_str!(
+            "../../tests/fixtures/msdmi_calib.json"
+        ))
+        .unwrap();
+        let mut config = crate::config::VioConfig::from_json_str(include_str!(
+            "../../../../configs/msdmi_config.json"
+        ))
+        .unwrap();
+        config.vio_min_frames_after_kf = 5;
+        config.vio_new_kf_keypoints_thresh = 2.0;
+        let mut candidate =
+            SqrtKeypointVio::<S>::with_default_gravity(calibration.cast(), config).unwrap();
+        let mut observations = FlowObservations::new(0, calibration.t_i_c.len());
+        for id in 0..36 {
+            let point = calibration.t_i_c[0]
+                * Vector3::new(
+                    (id % 6) as f64 * 0.15 - 0.4,
+                    (id / 6) as f64 * 0.15 - 0.4,
+                    3.0 + (id % 3) as f64 * 0.2,
+                );
+            for (cam, pixels) in observations.cameras.iter_mut().enumerate() {
+                let p = calibration.t_i_c[cam].inverse() * point;
+                let model = CameraEnum::from_model(&calibration.intrinsics[cam]).unwrap();
+                let mut pixel = Vector2::zeros();
+                let mut jac = nalgebra::Matrix2x4::zeros();
+                assert!(model.project_with_jacobian(
+                    &nalgebra::Vector4::new(p.x, p.y, p.z, 1.0),
+                    &mut pixel,
+                    &mut jac
+                ));
+                pixels.insert(KeypointId(id), pixel.cast());
+            }
+        }
+        for n in 0..=65 {
+            let imu = crate::imu::ImuSample {
+                t_ns: n * 5_000_000,
+                gyro: Vector3::zeros(),
+                accel: Vector3::new(0.0, 0.0, 9.81),
+            };
+            candidate.push_imu(imu);
+        }
+        let mut solved = false;
+        for frame in 0..16 {
+            observations.t_ns = frame * 20_000_000;
+            let frame = Arc::new(observations.clone());
+            let actual = candidate.process_frame(frame, None).unwrap();
+            if let FrameOutcome::Measured(stats) = actual {
+                solved |= !stats.lm.is_empty() && stats.num_landmarks > 0;
+            }
+            let mut order = AbsOrderMap::new();
+            for &t in candidate.ba.frame_poses.keys() {
+                order.push(t, POSE_SIZE).unwrap();
+            }
+            for &t in candidate.ba.frame_states.keys() {
+                order.push(t, crate::types::POSE_VEL_BIAS_SIZE).unwrap();
+            }
+            let inputs = crate::linearize::LinearizationInputs::default();
+            let mut linearizer = crate::linearize::LinearizationAbsQR::new(
+                &candidate.ba,
+                &order,
+                crate::linearize::LinearizationOptions::default(),
+                &inputs,
+            )
+            .unwrap();
+            linearizer
+                .linearize_problem(&candidate.ba, &inputs, None)
+                .unwrap();
+            linearizer.perform_qr(None).unwrap();
+            let (h, b) = reference_reduce(order.total_size(), linearizer.landmark_blocks());
+            let mut workspace = DenseHbWorkspace::default();
+            let (actual_h, actual_b) = workspace
+                .reduce(order.total_size(), linearizer.landmark_blocks())
+                .unwrap();
+            for (expected, actual) in h
+                .iter()
+                .chain(b.iter())
+                .zip(actual_h.iter().chain(actual_b.iter()))
+            {
+                assert_eq!(actual.to_f64().to_bits(), expected.to_f64().to_bits());
+            }
+        }
+        assert!(
+            solved,
+            "the synthetic stereo window must exercise a joint solve"
+        );
+    }
 
     /// A two-frame ordering with one landmark hosted in the first frame and seen
     /// in both cameras, the second observation non-finite.
@@ -167,6 +344,20 @@ mod tests {
         block
     }
 
+    /// Symmetric assembly retains the typed size refusal.
+    #[test]
+    fn an_undersized_system_returns_a_size_error() {
+        let block = a_block_carrying_a_nan();
+        let expected = block.pose_columns().len();
+        let found = expected - 1;
+        let mut workspace = DenseHbWorkspace::default();
+        assert!(matches!(
+            workspace.reduce(found, &[block]),
+            Err(LinearizeError::StackedSystemSize { expected: e, found: f })
+                if e == expected && f == found
+        ));
+    }
+
     /// Non-finite blocks must write every column so unobserved columns retain NaNs.
     #[test]
     fn a_non_finite_block_is_reduced_at_full_width() {
@@ -187,7 +378,9 @@ mod tests {
         );
 
         let mut partial: DensePartial<f64> = DensePartial::zeros(n);
-        partial.accumulate(&block, &mut scratch).unwrap();
+        partial
+            .accumulate_symmetric(&block, &mut scratch, &mut Vec::new())
+            .unwrap();
         for i in 0..n {
             for j in 0..n {
                 assert_eq!(
@@ -208,5 +401,15 @@ mod tests {
                 .all(|value| value.to_bits() == 0.0f64.to_bits()),
             "the reset left a coefficient behind"
         );
+
+        let mut workspace = DenseHbWorkspace::default();
+        let (parallel_h, parallel_b) = workspace.reduce(n, &[block]).unwrap();
+        for (expected, actual) in h
+            .iter()
+            .chain(b.iter())
+            .zip(parallel_h.iter().chain(parallel_b.iter()))
+        {
+            assert_eq!(expected.to_bits(), actual.to_bits());
+        }
     }
 }

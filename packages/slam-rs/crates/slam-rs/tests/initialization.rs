@@ -66,7 +66,7 @@ fn check_threshold<S: LieScalar>() {
     }
     for (t, count) in [(0, 0), (20_000_000, 9)] {
         assert_eq!(
-            waiting.process_frame(stereo(t, count)).unwrap(),
+            waiting.process_frame(stereo(t, count), None).unwrap(),
             FrameOutcome::NoVisualFeatures
         );
         assert!(
@@ -84,11 +84,13 @@ fn check_threshold<S: LieScalar>() {
         120_000_000,
         140_000_000,
     ] {
-        let FrameOutcome::Measured(mut actual) = waiting.process_frame(stereo(t, 10)).unwrap()
+        let FrameOutcome::Measured(mut actual) =
+            waiting.process_frame(stereo(t, 10), None).unwrap()
         else {
             panic!("ten landmarks must start")
         };
-        let FrameOutcome::Measured(mut expected) = fresh.process_frame(stereo(t, 10)).unwrap()
+        let FrameOutcome::Measured(mut expected) =
+            fresh.process_frame(stereo(t, 10), None).unwrap()
         else {
             panic!("fresh start must work")
         };

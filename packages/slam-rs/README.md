@@ -136,9 +136,10 @@ arithmetic: it detects only when camera 0 has lost 15 % of its keypoints, and
 solves the whole sliding window at keyframes only, the newest state alone in
 between. `--profile reference` runs the unmodified dataset configuration.
 
-The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu;
-the estimator is one CPU thread in every lane, and ATE does not depend on the
-lane. The decisions behind both, one line each:
+The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu.
+Its estimator runs on one CPU thread; the CPU lane can use its work pool.
+Both lanes are checked against the same trajectory accuracy gates.
+The design decisions are listed in
 [docs/design-notes.md](docs/design-notes.md#decision-references).
 
 ## Data

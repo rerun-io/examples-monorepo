@@ -760,7 +760,8 @@ fn linearized_system(window: &Window) -> (DMatrix<f64>, DVector<f64>) {
         &inputs,
     )
     .unwrap();
-    lqr.linearize_problem(&window.estimator, &inputs).unwrap();
-    lqr.perform_qr().unwrap();
+    lqr.linearize_problem(&window.estimator, &inputs, None)
+        .unwrap();
+    lqr.perform_qr(None).unwrap();
     lqr.get_dense_q2jp_q2r(&window.estimator, &inputs).unwrap()
 }

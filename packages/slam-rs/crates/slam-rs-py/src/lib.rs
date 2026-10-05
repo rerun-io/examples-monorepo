@@ -615,8 +615,10 @@ impl VioSnapshot {
 /// The frontend options both entry points build, from the two knobs they expose.
 ///
 /// Everything else in `FrontendOptions` is a property of the port rather than of
-/// a run, so `None` means the default rather than "unset". `threads` is read by
-/// `CpuPatchTracker::new` alone, so it does nothing on the GPU lane.
+/// a run, so `None` means the default rather than "unset". On the CPU lane,
+/// `threads` sizes the workers shared by tracking, pyramids, detection and the
+/// estimator. The estimator runs serially on the GPU lane and during a D84
+/// deferred solve; `threads` has no effect on the GPU lane.
 fn frontend_options(threads: usize, max_keypoints: Option<usize>) -> FrontendOptions {
     let defaults: FrontendOptions = FrontendOptions::default();
     FrontendOptions {

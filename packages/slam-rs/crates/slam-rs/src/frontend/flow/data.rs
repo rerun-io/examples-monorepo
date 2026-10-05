@@ -13,8 +13,10 @@ pub const NO_RESPONSE: f32 = -1.0;
 /// Frontend options kept separate from the serialized VIO configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontendOptions {
-    /// Workers the tracking passes run on (decision D31). One is the
-    /// deterministic reference lane; any value gives the same numbers.
+    /// Workers shared by CPU tracking, pyramids, detection and the estimator
+    /// (D31). The estimator runs serially on the GPU lane and during a D84
+    /// deferred solve. One worker is the reference lane; all counts give the
+    /// same numbers.
     pub threads: usize,
     /// Maximum keypoints per camera and the capacity used for its buffers.
     /// Detection and matching stop adding in scan order when full, preserving existing

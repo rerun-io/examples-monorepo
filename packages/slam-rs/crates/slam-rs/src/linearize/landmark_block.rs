@@ -136,7 +136,7 @@ pub struct LandmarkBlock<S: LieScalar> {
     /// writes nothing because it has no relative pose, and
     /// its `abs_t_idx` is the `0` sentinel, which is a column of
     /// whichever frame the ordering puts first — so it is left out.
-    /// [`Self::add_dense_h_b_active`] is the only reader, and
+    /// QR, back-substitution and dense assembly can skip the other columns;
     /// `dense_h_b_touches_only_observed_columns` and
     /// `a_dropped_observation_writes_no_columns` pin the invariant.
     ///
@@ -145,6 +145,8 @@ pub struct LandmarkBlock<S: LieScalar> {
     /// which is why [`Self::active_writeback_is_exact`] checks rather than
     /// assumes.
     active_cols: Vec<usize>,
+    /// Full-width QR can make inactive columns non-finite. Reset for each QR.
+    qr_full_width: bool,
     /// The landmark this block belongs to.
     lm_id: LandmarkId,
     /// `lm_ptr->host_kf_id`.
@@ -315,6 +317,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             storage: DMatrix::zeros(num_rows, num_cols),
             observations,
             active_cols,
+            qr_full_width: false,
             lm_id,
             host_kf_id: host,
             is_fixed,
@@ -470,6 +473,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 found: self.state,
             });
         }
+        self.qr_full_width = !options.use_householder;
         if options.use_householder {
             self.perform_qr_householder();
         } else {
@@ -479,8 +483,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// `performQRHouseholder` : three reflections, each applied to
-    /// the whole width of the block.
+    /// Three reflections over active columns, at full width for non-finite axes.
     fn perform_qr_householder(&mut self) {
         for k in 0..3 {
             // Exclude damping rows from reflection. Skip an empty reflection when fewer
@@ -497,12 +500,32 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 remaining_rows,
                 &mut self.work_essential,
             );
-            apply_householder_on_the_left(
-                self.storage
-                    .view_mut((k, 0), (remaining_rows, self.num_cols)),
-                &self.work_essential[..remaining_rows],
-                tau,
-            );
+            let axis = &self.work_essential[..remaining_rows];
+            if axis.iter().all(|value| value.is_finite()) {
+                // A finite reflection leaves an untouched zero column at zero.
+                // Each live column still uses nalgebra's original dot/update.
+                for column in self
+                    .active_cols
+                    .iter()
+                    .copied()
+                    .chain(self.lm_idx..self.num_cols)
+                {
+                    apply_householder_on_the_left(
+                        self.storage.view_mut((k, column), (remaining_rows, 1)),
+                        axis,
+                        tau,
+                    );
+                }
+            } else {
+                // Non-finite axes must propagate through the unobserved columns.
+                self.qr_full_width = true;
+                apply_householder_on_the_left(
+                    self.storage
+                        .view_mut((k, 0), (remaining_rows, self.num_cols)),
+                    axis,
+                    tau,
+                );
+            }
         }
     }
 
@@ -530,10 +553,27 @@ impl<S: LieScalar> LandmarkBlock<S> {
     /// Project inverse distance with `max(0, inv_dist + inc[2])` (traps 11–12).
     /// There is no landmark damping or Jacobian scaling (D34, D68).
     /// The pose increment must span the full ordering.
-    pub fn back_substitute(
+    #[cfg(test)]
+    fn back_substitute(
         &mut self,
         lm: &mut Landmark<S>,
         pose_inc: &DVector<S>,
+        l_diff: &mut S,
+    ) -> Result<(), LinearizeError> {
+        self.back_substitute_with_finite_pose(
+            lm,
+            pose_inc,
+            pose_inc.iter().all(|value| value.is_finite()),
+            l_diff,
+        )
+    }
+
+    /// The window checks the shared pose increment once for all its blocks.
+    pub(super) fn back_substitute_with_finite_pose(
+        &mut self,
+        lm: &mut Landmark<S>,
+        pose_inc: &DVector<S>,
+        pose_inc_is_finite: bool,
         l_diff: &mut S,
     ) -> Result<(), LinearizeError> {
         if self.state != LandmarkBlockState::Marginalized {
@@ -585,7 +625,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         let mut rhs: Vector3<S> = Vector3::zeros();
         for r in 0..3 {
             let mut acc: S = S::zero();
-            for k in 0..self.padding_idx {
+            for k in self.back_substitution_columns(pose_inc_is_finite) {
                 acc += self.storage[(r, k)] * pose_inc[k];
             }
             rhs[r] = self.storage[(r, self.res_idx)] + acc;
@@ -615,7 +655,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         let mut qjinc: DVector<S> = DVector::zeros(q2_rows);
         for r in 0..q2_rows {
             let mut acc: S = S::zero();
-            for k in 0..self.padding_idx {
+            for k in self.back_substitution_columns(pose_inc_is_finite) {
                 acc += self.storage[(r, k)] * pose_inc[k];
             }
             qjinc[r] = acc;
@@ -645,6 +685,20 @@ impl<S: LieScalar> LandmarkBlock<S> {
             S::zero()
         };
         Ok(())
+    }
+
+    /// Finite-axis Householder QR leaves inactive columns at zero. Full-width
+    /// QR or a non-finite increment needs the original multiply order.
+    fn back_substitution_columns(
+        &self,
+        pose_inc_is_finite: bool,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let (active, full) = if pose_inc_is_finite && !self.qr_full_width {
+            (self.active_cols.as_slice(), 0..0)
+        } else {
+            (&[][..], 0..self.padding_idx)
+        };
+        active.iter().copied().chain(full)
     }
 
     /// `get_dense_Q2Jp_Q2r(Q2Jp, Q2r, start_idx)` : the null-space
@@ -713,23 +767,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// [`Self::add_dense_h_b`] over [`Self::active_cols`] only.
-    ///
-    /// Bit-identical to the full width when the destination holds `+0.0` at
-    /// every column this block does not observe and
-    /// [`Self::active_writeback_is_exact`] holds; the dense reduction is the one
-    /// caller that can say both, on its own accumulators.
-    pub(crate) fn add_dense_h_b_active(
-        &self,
-        h: &mut DMatrix<S>,
-        b: &mut DVector<S>,
-        scratch: &mut DenseHbScratch<S>,
-    ) -> Result<(), LinearizeError> {
-        self.check_dense_h_b_size(h, b)?;
-        self.add_dense_h_b_over(&self.active_cols, h, b, scratch);
-        Ok(())
-    }
-
     /// Use sparse writeback only when skipping inactive columns preserves every value,
     /// including NaNs and signed zero (D32).
     pub(crate) fn active_writeback_is_exact(&self) -> bool {
@@ -757,7 +794,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
     }
 
     /// Refuse a destination that is too small with a typed error.
-    fn check_dense_h_b_size(&self, h: &DMatrix<S>, b: &DVector<S>) -> Result<(), LinearizeError> {
+    pub(super) fn check_dense_h_b_size(
+        &self,
+        h: &DMatrix<S>,
+        b: &DVector<S>,
+    ) -> Result<(), LinearizeError> {
         if h.nrows() < self.padding_idx
             || h.ncols() < self.padding_idx
             || b.nrows() < self.padding_idx
@@ -777,6 +818,23 @@ impl<S: LieScalar> LandmarkBlock<S> {
         h: &mut DMatrix<S>,
         b: &mut DVector<S>,
         scratch: &mut DenseHbScratch<S>,
+    ) {
+        self.dense_h_b_over(columns, scratch, |i, j, value| {
+            if let Some(j) = j {
+                h[(i, j)] += value;
+            } else {
+                b[i] += value;
+            }
+        });
+    }
+
+    /// Compute raw coefficients without adding an intermediate zero. Both the
+    /// serial accumulator and parallel partials use this exact row order.
+    fn dense_h_b_over(
+        &self,
+        columns: &[usize],
+        scratch: &mut DenseHbScratch<S>,
+        mut write: impl FnMut(usize, Option<usize>, S),
     ) {
         let rows: usize = self.num_q2rows();
         let live: usize = columns.len();
@@ -819,10 +877,10 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 for (offset, &value) in partial.iter().enumerate().take(end - lo) {
                     let j: usize = lo + offset;
                     if j < live {
-                        h[(i, columns[j])] += value;
+                        write(i, Some(columns[j]), value);
                     } else {
                         // `j == live`: the residual column.
-                        b[i] += value;
+                        write(i, None, value);
                     }
                 }
             }
@@ -975,15 +1033,18 @@ mod tests {
         assert_dense_h_b_is_the_full_loop(&block);
     }
 
-    /// The system `add_dense_h_b_active` writes over `active_cols` equals the
+    /// The system `add_dense_h_b_over` writes over `active_cols` equals the
     /// one a loop over the whole `padding_idx` square produces, coefficient by
     /// coefficient and **bit for bit**. Both tests of the skip rest on this.
     fn assert_dense_h_b_is_the_full_loop(block: &LandmarkBlock<f64>) {
         let mut h: DMatrix<f64> = DMatrix::zeros(block.padding_idx, block.padding_idx);
         let mut b: DVector<f64> = DVector::zeros(block.padding_idx);
-        block
-            .add_dense_h_b_active(&mut h, &mut b, &mut DenseHbScratch::default())
-            .unwrap();
+        block.add_dense_h_b_over(
+            block.active_cols(),
+            &mut h,
+            &mut b,
+            &mut DenseHbScratch::default(),
+        );
         let rows: usize = block.num_q2rows();
         for i in 0..block.padding_idx {
             for j in 0..block.padding_idx {
