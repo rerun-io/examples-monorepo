@@ -115,8 +115,8 @@ pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config
 }
 
 fn slam_images(small: &SmallImages) -> Option<[&kornia_image::Image<u8, 1>; 4]> {
-    let [left, left_front, right_front, right] = SLAM_CAMERAS.map(|c| small[c].as_deref());
-    Some([left?, left_front?, right_front?, right?])
+    let [left_front, right_front, left, right] = SLAM_CAMERAS.map(|c| small[c].as_deref());
+    Some([left_front?, right_front?, left?, right?])
 }
 
 fn publish_slam(shared: &Shared, pose: SlamPose) {

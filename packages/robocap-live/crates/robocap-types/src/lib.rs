@@ -16,8 +16,8 @@ use serde::Serialize;
 pub const NUM_CAMERAS: usize = 6;
 /// Camera names in index order (= catalog `/world/rig_00/cam_00..cam_05`; V4L2 mainpaths 75, 111, 84, 66, 102, 93).
 pub const CAMERA_NAMES: [&str; NUM_CAMERAS] = ["left_front", "right_front", "left_eye", "right_eye", "left", "right"];
-/// The cameras slam-rs uses, in its input order (left, left_front, right_front, right), as in PR #270's live adapter.
-pub const SLAM_CAMERAS: [usize; 4] = [4, 0, 1, 5];
+/// The cameras slam-rs uses, in its input order (left_front, right_front, left, right), with the front stereo pair first.
+pub const SLAM_CAMERAS: [usize; 4] = [0, 1, 4, 5];
 /// Native capture size.
 pub const FULL_SIZE: ImageSize = ImageSize { width: 1920, height: 1080 };
 /// The "small" image: SLAM input, DetNet letterbox content and viewer video.

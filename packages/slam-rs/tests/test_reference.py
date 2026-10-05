@@ -63,7 +63,7 @@ def test_robocap_carries_s15_and_no_ground_truth(benchmarks: Benchmarks) -> None
 
 def test_robocap_names_the_configuration_the_cpp_ran(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """The four cameras, the downscale, the two rig rules and the two configured JSON files, all present."""
-    assert settings.robocap.camera_names == ("left", "left_front", "right_front", "right")
+    assert settings.robocap.camera_names == ("left_front", "right_front", "left", "right")
     assert settings.robocap.downscale == 3
     assert benchmarks.robocap.decode_path == "cpu_gray8_swscale_area_downscale3"
     # The settings defines frameset tolerance and inertial pairing.

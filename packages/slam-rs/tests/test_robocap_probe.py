@@ -18,10 +18,10 @@ from slam_rs import _core
 from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
+    RigProfile,
     CameraCalib,
     CameraStatics,
     CatalogSegment,
-    RigProfile,
     camera_calib,
     open_segment,
     scale_principal_point,
@@ -33,23 +33,19 @@ from slam_rs.tracking import check_calibration_matches_recording
 # The four fed cameras' native intrinsics exactly as the recording carries them,
 # in settings camera order. Statics carry float32 precision.
 ROBOCAP_INTRINSICS: tuple[tuple[float, float, float, float], ...] = (
-    (625.53564453125, 626.1504516601562, 999.440185546875, 539.0486450195312),
     (636.4360961914062, 634.7124633789062, 956.2034301757812, 525.4381103515625),
     (630.6917724609375, 628.777587890625, 946.6721801757812, 539.53125),
+    (625.53564453125, 626.1504516601562, 999.440185546875, 539.0486450195312),
     (612.0897827148438, 608.9950561523438, 967.4310913085938, 551.28759765625),
 )
 ROBOCAP_KB4: tuple[tuple[float, float, float, float], ...] = (
-    (0.05310669541358948, 0.017954021692276, -0.00536160776391625, 0.00056962034432217),
     (0.06166616827249527, -0.0210909266024828, 0.0371633879840374, -0.013518619351089),
     (0.07725944370031357, -0.06258341670036316, 0.08006518334150314, -0.02879575826227665),
+    (0.05310669541358948, 0.017954021692276, -0.00536160776391625, 0.00056962034432217),
     (0.07467304170131683, 0.0116525636985898, -0.00467674527317286, 0.00134803401306272),
 )
 """Each fed camera's KB4 coefficients as the recording carries them; no downscale touches them."""
 ROBOCAP_IMU_T_CAM: tuple[tuple[float, ...], ...] = (
-    (0.11399778805101912, -0.08575139322056138, 0.01508625718898565)
-    + (0.02437430433928967, -0.10791313648223877, 0.9938614964485168)
-    + (0.9846004247665405, 0.17474322021007538, -0.00517362076789141)
-    + (-0.17311225831508636, 0.9786825776100159, 0.11051056534051895),
     (0.03477445441432928, 0.00997360635818159, -0.0064599738573613)
     + (-0.9994690418243408, 0.00405994756147265, 0.03232910111546516)
     + (0.03183514997363091, -0.08968588709831238, 0.9954611659049988)
@@ -58,6 +54,10 @@ ROBOCAP_IMU_T_CAM: tuple[tuple[float, ...], ...] = (
     + (-0.999871015548706, -0.01601020060479641, -0.0012666096445173)
     + (-0.00030042274738662, -0.06020709872245789, 0.9981858730316162)
     + (-0.01605741493403912, 0.998057484626770, 0.06019452586770058),
+    (0.11399778805101912, -0.08575139322056138, 0.01508625718898565)
+    + (0.02437430433928967, -0.10791313648223877, 0.9938614964485168)
+    + (0.9846004247665405, 0.17474322021007538, -0.00517362076789141)
+    + (-0.17311225831508636, 0.9786825776100159, 0.11051056534051895),
     (-0.12514879125479297, -0.09818661029737424, 0.00357639240882723)
     + (0.02767287567257881, 0.09491033107042313, -0.9951010942459106)
     + (-0.9824655652046204, 0.1861988753080368, -0.00956229493021965)
@@ -79,10 +79,10 @@ def imu_T_cam(camera: int) -> Float64[ndarray, "4 4"]:
 
 
 def robocap_statics(
-    fx: float = 625.53564453125,
-    fy: float = 626.1504516601562,
-    cx: float = 999.440185546875,
-    cy: float = 539.0486450195312,
+    fx: float = 636.4360961914062,
+    fy: float = 634.7124633789062,
+    cx: float = 956.2034301757812,
+    cy: float = 525.4381103515625,
     camera: int = 0,
     distortion: tuple[float, float, float, float] | None = None,
     turn_deg: float = 0.0,
@@ -183,7 +183,7 @@ def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(settings
 
     moved = ROBOCAP_INTRINSICS[0][:2] + (1200.0, ROBOCAP_INTRINSICS[0][3])
     shifted = (camera_calib(0, robocap_statics(*moved), 3), *at_three[1:])
-    with pytest.raises(ValueError, match="cam 0: basalt's cx is 332.81.*the recording gives 399.66"):
+    with pytest.raises(ValueError, match="cam 0: basalt's cx is 318.40.*the recording gives 399.66"):
         check_calibration_matches_recording(basalt, shifted, robocap_imu, 3)
 
 
@@ -240,7 +240,7 @@ def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: S
     with open_segment(
         CatalogSegment(settings.catalog_url, "robocap", session.segment_id), profile=RigProfile.from_robocap(settings.robocap)
     ) as feed:
-        assert feed.camera_positions == (4, 0, 1, 5)
+        assert feed.camera_positions == (0, 1, 4, 5)
         assert feed.rig_cameras == 6
         # The feed reads its rig knobs off the profile it was given, so what the
         # settings says and what the feed does are one statement.

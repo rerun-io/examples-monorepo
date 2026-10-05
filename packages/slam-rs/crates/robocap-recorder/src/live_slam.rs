@@ -13,12 +13,12 @@ pub enum ImuChannel {
     Accel,
 }
 
-/// Left, left_front, right_front, right in estimator order.
-pub const SLAM_CAMERAS: [u8; 4] = [4, 0, 1, 5];
+/// Front-left, front-right, left, right in estimator order.
+pub const SLAM_CAMERAS: [u8; 4] = [0, 1, 4, 5];
 
 #[derive(Debug, PartialEq)]
 pub enum SlamInput {
-    /// Camera index in estimator order: left, left-front, right-front, right.
+    /// Camera index in estimator order: left-front, right-front, left, right.
     Frame {
         camera: usize,
         timestamp_ns: i64,

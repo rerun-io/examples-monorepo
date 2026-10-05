@@ -578,9 +578,9 @@ mod tests {
         assert_eq!(calibration("cap_a"), Some(CAP_A_CALIBRATION));
         assert_eq!(calibration("cap_b"), Some(CAP_B_CALIBRATION));
         assert_eq!(calibration("cap_c"), None);
-        // left_front (SLAM camera 1) at 640x360 = the factory Kalibr fx at 1920x1080 over 3: Cap A 636.4361 (its
+        // left_front (SLAM camera 0) at 640x360 = the factory Kalibr fx at 1920x1080 over 3: Cap A 636.4361 (its
         // camchain-imucam.yaml), Cap B 612.4247 (fe6fede545c972fa/imus_cam_lr_front_extrinsic).
-        let fx = |slam: &SlamEstimator| match &slam.calibration.intrinsics[1] {
+        let fx = |slam: &SlamEstimator| match &slam.calibration.intrinsics[0] {
             CameraModel::Kb4(kb4) => kb4.fx,
             _ => f64::NAN,
         };

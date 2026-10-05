@@ -140,9 +140,9 @@ def test_the_pairing_boundary_is_typed() -> None:
 
 
 def test_the_named_cameras_come_back_in_the_callers_order() -> None:
-    """Select RoboCap cameras in settings order: cam_04, cam_00, cam_01, cam_05."""
+    """Select RoboCap cameras in settings order: cam_00, cam_01, cam_04, cam_05."""
     statics: pa.Table = camera_name_statics(["left_front", "right_front", "left_eye", "right_eye", "left", "right"])
-    assert select_cameras(statics, 6, ("left", "left_front", "right_front", "right")) == (4, 0, 1, 5)
+    assert select_cameras(statics, 6, ("left_front", "right_front", "left", "right")) == (0, 1, 4, 5)
     assert select_cameras(statics, 6, None) == (0, 1, 2, 3, 4, 5)
 
 
@@ -178,7 +178,7 @@ def test_the_matcher_reproduces_basalts_median_on_robocaps_first_frameset() -> N
     left_front: Int64[ndarray, " 2"] = np.array([70258633000, 70291955222], dtype=np.int64)
     right_front: Int64[ndarray, " 2"] = np.array([70258662000, 70291984222], dtype=np.int64)
     right: Int64[ndarray, " 2"] = np.array([70258603000, 70291936333], dtype=np.int64)
-    t_ns, frame_index = match_framesets([left, left_front, right_front, right], 1_000_000)
+    t_ns, frame_index = match_framesets([left_front, right_front, left, right], 1_000_000)
 
     assert int(t_ns[0]) == 70258640500
     assert frame_index[0].tolist() == [0, 0, 0, 0]
@@ -348,7 +348,7 @@ def test_the_matcher_needs_a_camera() -> None:
 def test_the_profile_comes_from_the_manifest_not_the_code(settings: SlamConfig) -> None:
     """The rig profile reads camera, downscale, tolerance and pairing fields from one settings."""
     profile = RigProfile.from_robocap(settings.robocap)
-    assert profile.camera_names == settings.robocap.camera_names == ("left", "left_front", "right_front", "right")
+    assert profile.camera_names == settings.robocap.camera_names == ("left_front", "right_front", "left", "right")
     assert profile.downscale == settings.robocap.downscale == 3
     assert profile.interpolate_accel_onto_gyro is settings.robocap.interpolate_accel_onto_gyro is True
     assert profile.frameset_tolerance_ns == settings.robocap.frameset_tolerance_ns == 1_000_000
