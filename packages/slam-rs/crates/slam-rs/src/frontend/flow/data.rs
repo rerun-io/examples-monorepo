@@ -186,6 +186,8 @@ pub struct FlowFrame {
 /// and the epipolar filter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlowTimings {
+    /// This frameset consumed its timestamp-bound image hint.
+    pub gpu_lookahead: bool,
     /// Building this frame's pyramids, every camera.
     pub pyramid_ns: u64,
     /// `detectKeypointsWithCells`, every camera.

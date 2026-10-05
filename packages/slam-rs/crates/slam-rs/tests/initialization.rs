@@ -103,8 +103,30 @@ fn check_threshold<S: LieScalar>() {
 }
 
 #[test]
-fn frontend_keeps_tracking_while_lag_waits_for_stereo() {
+fn frontend_keeps_tracking_while_lag_and_lookahead_wait_for_stereo() {
     check_pipeline(Backend::Cpu);
+}
+
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_accepts_the_fast_profile_exit_threshold() {
+    let mut config = common::config();
+    config.port_klt_exit_step_px = Some(0.05);
+    Vio::<f32>::with_backend(
+        config.clone(),
+        common::calibration(),
+        Default::default(),
+        Backend::Gpu,
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_lag_and_lookahead_wait_for_stereo() {
+    check_pipeline(Backend::Gpu);
 }
 
 fn check_pipeline(backend: Backend) {
@@ -145,8 +167,11 @@ fn check_pipeline(backend: Backend) {
                         .collect::<Vec<_>>()
                 };
                 let views = views_for(index);
+                let next_views = views_for(index + 1);
                 let t_ns = index * 20_000_000;
-                let result = vio.track(t_ns, &views).unwrap();
+                let result = vio
+                    .track_with_lookahead(t_ns, &views, Some((t_ns + 20_000_000, &next_views)))
+                    .unwrap();
                 assert_eq!(vio.frontend().frame_counter(), index as u64 + 1);
                 if result.status != VioStatus::Buffered {
                     results.push(result);
@@ -171,6 +196,9 @@ fn check_pipeline(backend: Backend) {
                 );
             }
             assert!(vio.last_stats().unwrap().opt_started);
+            if backend == Backend::Gpu {
+                assert!(vio.frontend_timings().flow.gpu_lookahead);
+            }
         }
     }
 }

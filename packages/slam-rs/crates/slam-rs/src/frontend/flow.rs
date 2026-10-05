@@ -139,6 +139,23 @@ struct FrameState {
     last_detect_count: usize,
 }
 
+#[cfg(feature = "gpu-wgpu")]
+impl<P: Pattern> FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, crate::gpu::GpuRuntime>> {
+    pub(crate) fn discard_lookahead(&mut self) {
+        self.stages.discard_lookahead();
+    }
+
+    pub(crate) fn queue_lookahead(
+        &mut self,
+        t_ns: i64,
+        images: &mut Vec<ImageU16>,
+    ) -> Result<(), crate::VioError> {
+        self.update_cell_selects(images);
+        self.stages
+            .queue_lookahead(t_ns, images, &self.cell_selects)
+    }
+}
+
 impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     /// Workers shared by the CPU stages and the synchronous estimator.
     pub(crate) fn pool(&self) -> &WorkPool {

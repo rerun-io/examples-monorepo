@@ -185,13 +185,27 @@ pub(super) fn read_blocking<R: cubecl::prelude::Runtime>(
     handles: Vec<cubecl::server::Handle>,
     what: &'static str,
 ) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
+    read_with_lookahead(client, launches, handles, what, || Ok(()))
+}
+
+/// Submit the current readback, then queue independent work before its wait.
+#[cfg(feature = "gpu-core")]
+pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    launches: &LaunchList,
+    handles: Vec<cubecl::server::Handle>,
+    what: &'static str,
+    after_copy: impl FnOnce() -> Result<(), GpuError>,
+) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
     launches.flush(client);
     #[cfg(test)]
     if super::runtime::armed(super::runtime::BLOCKING_READ) {
         return Err(GpuError::DeviceReadFailed { what });
     }
     // `read_async` sends the copy and submits it before returning the future.
+    // Work queued now goes in a later submission, independent of this copy.
     let pending = client.read_async(handles);
+    after_copy()?;
     cubecl::future::reader::read_sync(pending).map_err(|error| read_failed(what, &error))
 }
 

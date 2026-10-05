@@ -4,7 +4,6 @@ use super::{
     GpuCornerScan, GpuError, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder,
     guarded, submission,
 };
-use crate::duration_ns;
 use crate::frontend::detect::{CellSelect, DetectorScratch};
 use crate::frontend::flow::{FlowTimings, FrontendError};
 use crate::frontend::parallel::WorkPool;
@@ -13,13 +12,22 @@ use crate::frontend::stages::FrameStages;
 use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
 use crate::image::ImageU16;
 use crate::pyramid::ensure_pyramids;
+use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameInput {
+    Queued(i64),
+    Ready(i64),
+}
 
 struct GpuFrame<R: Runtime> {
     builder: GpuPyramidBuilder<R>,
     pyramids: Vec<GpuPyramid<R>>,
     detector: DetectorScratch<GpuCornerScan<R>>,
     selects: Vec<Option<CellSelect>>,
+    input: Option<FrameInput>,
+    images: Vec<ImageU16>,
 }
 
 impl<R: Runtime> GpuFrame<R> {
@@ -34,6 +42,8 @@ impl<R: Runtime> GpuFrame<R> {
             pyramids: Vec::new(),
             detector: DetectorScratch::with_scanner(Box::new(scanner)),
             selects: Vec::new(),
+            input: None,
+            images: Vec::new(),
         })
     }
 
@@ -49,6 +59,7 @@ impl<R: Runtime> GpuFrame<R> {
 pub struct GpuStages<P: Pattern, R: Runtime> {
     client: ComputeClient<R>,
     current: GpuFrame<R>,
+    next: Option<GpuFrame<R>>,
     previous: Vec<GpuPyramid<R>>,
     tracker: GpuPatchTracker<P, R>,
     patches: GpuPatchSources<P, R>,
@@ -69,12 +80,79 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             tracker,
             patches,
             previous: Vec::new(),
+            next: None,
             guard: None,
             launches,
         })
     }
 
-    fn collect(&mut self) -> Result<(), TrackerError> {
+    pub(crate) fn queue_lookahead(
+        &mut self,
+        t_ns: i64,
+        images: &mut Vec<ImageU16>,
+        selects: &[Option<CellSelect>],
+    ) -> Result<(), VioError> {
+        if self.next.is_none() {
+            self.next = Some(
+                self.client
+                    .exclusive(|| GpuFrame::new(self.client.clone(), &self.launches))
+                    .map_err(|error| {
+                        FrontendError::from(TrackerError::from(submission::read_failed(
+                            "lookahead construction",
+                            &error,
+                        )))
+                    })?
+                    .map_err(FrontendError::from)?,
+            );
+        }
+        if let Some(next) = &mut self.next {
+            std::mem::swap(&mut next.images, images);
+            next.selects.clear();
+            next.selects.extend_from_slice(selects);
+            next.input = Some(FrameInput::Queued(t_ns));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn discard_lookahead(&mut self) {
+        self.current.input = None;
+        if let Some(next) = &mut self.next {
+            next.input = None;
+        }
+    }
+
+    fn submit_lookahead(&mut self) -> Result<(), FrontendError> {
+        let Some(next) = &mut self.next else {
+            return Ok(());
+        };
+        let Some(FrameInput::Queued(t_ns)) = next.input else {
+            return Ok(());
+        };
+        next.input = None;
+        // Move the owned input aside while building through the same frame method.
+        let images = std::mem::take(&mut next.images);
+        let outcome = next.build(&images, self.tracker.num_levels() - 1);
+        next.images = images;
+        outcome?;
+        next.detector.submit_cells(&next.images, &next.selects)?;
+        guarded(
+            GpuError::DeviceLost {
+                what: "lookahead submission",
+            },
+            || {
+                self.launches.flush(&self.client);
+                self.client.flush().map_err(|error| {
+                    TrackerError::from(submission::read_failed("lookahead submission", &error))
+                })?;
+
+                Ok::<(), TrackerError>(())
+            },
+        )?;
+        next.input = Some(FrameInput::Ready(t_ns));
+        Ok(())
+    }
+
+    fn collect(&mut self, overlap_lookahead: bool) -> Result<(), TrackerError> {
         let outcome = guarded(GpuError::DeviceLost { what: "tracker" }, || {
             let mut reads = self.tracker.read_handles();
             let lanes = reads.len();
@@ -86,11 +164,22 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             let mut bytes = if reads.is_empty() {
                 Vec::new()
             } else {
-                submission::read_blocking(
-                    &self.client,
-                    &self.launches,
+                submission::read_with_lookahead(
+                    &self.client.clone(),
+                    &self.launches.clone(),
                     reads,
                     "the tracker result",
+                    || {
+                        if overlap_lookahead {
+                            self.submit_lookahead().map_err(|error| {
+                                log::warn!("lookahead preparation failed: {error}");
+                                GpuError::DeviceLost {
+                                    what: "lookahead preparation",
+                                }
+                            })?;
+                        }
+                        Ok(())
+                    },
                 )?
             };
             let outputs = lanes;
@@ -129,7 +218,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     }
     fn prepare(
         &mut self,
-        _t_ns: i64,
+        t_ns: i64,
         images: &[ImageU16],
         levels: usize,
         _pool: &WorkPool,
@@ -137,9 +226,16 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     ) -> Result<(), FrontendError> {
         self.guard = Some(self.launches.begin().map_err(TrackerError::from)?);
         let mark = std::time::Instant::now();
-        if let Err(error) = self.current.build(images, levels) {
-            self.guard.take();
-            return Err(error);
+        // The pixel comparison preserves both exact hint validation and the
+        // established host materialization timing before temporal KLT.
+        if self.current.input == Some(FrameInput::Ready(t_ns)) && self.current.images == images {
+            timings.gpu_lookahead = true;
+        } else {
+            self.current.input = None;
+            if let Err(error) = self.current.build(images, levels) {
+                self.guard.take();
+                return Err(error);
+            }
         }
         timings.pyramid_ns = duration_ns(mark);
         Ok(())
@@ -159,9 +255,11 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
                 },
             ),
         );
-        self.current
-            .detector
-            .submit_cells(images, &self.current.selects)?;
+        if self.current.input.take().is_none() {
+            self.current
+                .detector
+                .submit_cells(images, &self.current.selects)?;
+        }
         timings.detect_ns += duration_ns(mark);
         Ok(())
     }
@@ -177,7 +275,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
             &mut self.patches,
             true,
         )?;
-        self.collect()
+        self.collect(false)
     }
     fn stereo(
         &mut self,
@@ -209,7 +307,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         }
         let mark = std::time::Instant::now();
         if !inputs.is_empty() {
-            self.collect()?;
+            self.collect(true)?;
         }
         timings.stereo_ns += duration_ns(mark);
         let mark = std::time::Instant::now();
@@ -221,7 +319,14 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         if let Some(guard) = self.guard.take() {
             guard.finish(&self.client)?;
         }
+        self.submit_lookahead()?;
         std::mem::swap(&mut self.previous, &mut self.current.pyramids);
+        // Keep the completed hint in current while the next call queues its successor.
+        if let Some(next) = &mut self.next
+            && matches!(next.input, Some(FrameInput::Ready(_)))
+        {
+            std::mem::swap(&mut self.current, next);
+        }
         Ok(())
     }
     fn discard(&mut self) {

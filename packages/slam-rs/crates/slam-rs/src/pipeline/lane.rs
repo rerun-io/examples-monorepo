@@ -4,7 +4,7 @@
 use crate::Vio;
 #[cfg(feature = "gpu-wgpu")]
 use crate::gpu;
-use crate::{Backend, VioError, calib, config, frontend, image};
+use crate::{Backend, ImageView, VioError, calib, config, frontend, image};
 
 /// The frontend of a [`Vio`], on whichever backend it was built for.
 ///
@@ -41,6 +41,44 @@ macro_rules! on_lane {
 }
 
 impl FrontendLane {
+    /// Queue image-only work on lanes that support lookahead.
+    pub(super) fn queue_lookahead(
+        &mut self,
+        _t_ns: i64,
+        _images: &mut Vec<image::ImageU16>,
+    ) -> Result<(), VioError> {
+        #[cfg(feature = "gpu-wgpu")]
+        if let Self::Gpu(flow) = self {
+            flow.queue_lookahead(_t_ns, _images)?;
+        }
+        Ok(())
+    }
+
+    /// Cancel a previous hint before an unhinted frame.
+    pub(super) fn discard_lookahead(&mut self) {
+        #[cfg(feature = "gpu-wgpu")]
+        if let Self::Gpu(flow) = self {
+            flow.discard_lookahead();
+        }
+    }
+
+    /// Preserve each lane's ingestion representation and materialization timing.
+    pub(super) fn fill_frame(
+        &self,
+        frame: &mut image::ImageU16,
+        view: &ImageView<'_>,
+    ) -> Result<(), image::ImageError> {
+        match self {
+            Self::Cpu(_) => {
+                frame.fill_from_u8_strided(view.data, view.width, view.height, view.stride)
+            }
+            #[cfg(feature = "gpu-wgpu")]
+            Self::Gpu(_) => {
+                frame.fill_packed_u8_strided(view.data, view.width, view.height, view.stride)
+            }
+        }
+    }
+
     /// Share the CPU frontend's workers with the synchronous estimator.
     pub(super) fn cpu_pool(&self) -> Option<frontend::parallel::WorkPool> {
         match self {

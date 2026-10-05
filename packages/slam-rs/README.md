@@ -148,6 +148,7 @@ checks the required subgroup operations and reports an error naming the
 CPU lane if they are unsupported. Templates stay in registers and both
 tracking directions run in one launch per phase. The opt-in exit threshold
 works on both lanes.
+Replay summaries count frames using lookahead and packed uploads.
 
 ## Data
 

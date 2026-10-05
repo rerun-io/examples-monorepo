@@ -37,8 +37,10 @@ pub struct Vio<S: lie::LieScalar = f32> {
     /// The static bias calibration, applied to the frontend's samples in `f32`
     /// and cast back to `f64`.
     calib_f32: calib::Calibration<f32>,
-    /// Widened frames, reused so a steady-state `track` does not allocate.
+    /// Owned frames: reusable widened buffers on CPU, dense bytes on GPU.
     frames: Vec<image::ImageU16>,
+    /// Reusable lookahead input, filled by the same lane as the current frame.
+    next_frames: Vec<image::ImageU16>,
     /// `img->masks`, always empty here: masks come from Monado.
     masks: Vec<frontend::detect::Masks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
@@ -126,6 +128,7 @@ impl<S: lie::LieScalar> Vio<S> {
             frontend_noise,
             calib_f32,
             frames: Vec::new(),
+            next_frames: Vec::new(),
             masks: vec![frontend::detect::Masks::default(); camera_count],
             camera_count,
             last_frame_t_ns: None,
@@ -263,6 +266,56 @@ impl<S: lie::LieScalar> Vio<S> {
         self.prepare_track(t_ns, images)?.finish()
     }
 
+    /// Track this frame and prepare the next frame's image-only GPU work while
+    /// waiting for this one's result. CPU tracking ignores the valid hint.
+    ///
+    /// The next call still supplies its images normally. A skipped timestamp or
+    /// changed image discards cached work, as do plain `track` and `prepare_track`.
+    /// No IMU coverage is required for
+    /// the lookahead, and the returned result has the same timestamp and values
+    /// as [`Self::track`]. Callers without future images keep using `track`.
+    ///
+    /// # Errors
+    ///
+    /// The errors from [`Self::track`], or invalid lookahead geometry/timestamp.
+    /// Invalid hints are refused before this frame consumes any IMU.
+    pub fn track_with_lookahead(
+        &mut self,
+        t_ns: i64,
+        images: &[ImageView<'_>],
+        lookahead: Option<(i64, &[ImageView<'_>])>,
+    ) -> Result<VioResult, VioError> {
+        if let Some((next_t_ns, next_images)) = lookahead {
+            check_frameset(next_images, self.camera_count)?;
+            self.frontend.check_frameset(
+                next_t_ns,
+                next_images.iter().map(|image| (image.width, image.height)),
+            )?;
+            if next_t_ns <= t_ns {
+                return Err(frontend::flow::FrontendError::NonMonotonicFrameset {
+                    previous_t_ns: t_ns,
+                    t_ns: next_t_ns,
+                }
+                .into());
+            }
+        }
+        let prepared = self.prepare_track_hinted(t_ns, images)?;
+        if prepared.prediction.is_some()
+            && prepared.vio.frontend.backend() == Backend::Gpu
+            && let Some((next_t_ns, next_images)) = lookahead
+        {
+            let vio = &mut *prepared.vio;
+            vio.next_frames
+                .resize_with(next_images.len(), image::ImageU16::default);
+            for (frame, view) in vio.next_frames.iter_mut().zip(next_images) {
+                vio.frontend.fill_frame(frame, view)?;
+            }
+            vio.frontend
+                .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
+        }
+        prepared.finish()
+    }
+
     /// Validate and widen borrowed pixels before releasing their owner.
     ///
     /// Checks, IMU prediction and widening run in the same order as [`Self::track`].
@@ -272,6 +325,18 @@ impl<S: lie::LieScalar> Vio<S> {
     ///
     /// The input and IMU prediction errors returned by [`Self::track`].
     pub fn prepare_track(
+        &mut self,
+        t_ns: i64,
+        images: &[ImageView<'_>],
+    ) -> Result<PreparedTrack<'_, S>, VioError> {
+        let prepared = self.prepare_track_hinted(t_ns, images)?;
+        if prepared.prediction.is_some() {
+            prepared.vio.frontend.discard_lookahead();
+        }
+        Ok(prepared)
+    }
+
+    fn prepare_track_hinted(
         &mut self,
         t_ns: i64,
         images: &[ImageView<'_>],
@@ -326,11 +391,12 @@ impl<S: lie::LieScalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        // Widen into reusable image buffers on both lanes.
+        // Keep GPU input packed until its first pyramid dispatch. CPU callers
+        // retain the existing widening into reusable image buffers.
         self.frames
             .resize_with(images.len(), image::ImageU16::default);
         for (frame, view) in self.frames.iter_mut().zip(images.iter()) {
-            frame.fill_from_u8_strided(view.data, view.width, view.height, view.stride)?;
+            self.frontend.fill_frame(frame, view)?;
         }
         Ok(PreparedTrack {
             vio: self,

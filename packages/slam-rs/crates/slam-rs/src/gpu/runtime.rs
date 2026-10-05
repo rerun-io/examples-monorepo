@@ -297,7 +297,7 @@ pub(super) const CORNER_SCAN_READ: &str = "the corner scan's read";
 pub(super) const BLOCKING_READ: &str = "the blocking read";
 
 /// Whether a test armed `site`, disarming it. The caller decides what the fault
-/// means; [`fire_if_armed`] panics, [`super::submission::read_blocking`] returns an error.
+/// means; [`fire_if_armed`] panics, [`super::submission::read_with_lookahead`] returns an error.
 #[cfg(test)]
 pub(super) fn armed(site: &'static str) -> bool {
     FAULT.with(|fault| {

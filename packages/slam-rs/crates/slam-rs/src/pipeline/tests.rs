@@ -210,3 +210,141 @@ proptest! {
         prop_assert!(vio.push_imu(first + 1, [0.0; 3], [0.0; 3]).is_ok());
     }
 }
+
+#[test]
+fn lookahead_preserves_the_imu_refusal_and_rejects_bad_geometry() {
+    let mut vio = pipeline();
+    let pixels = vec![0; 960 * 960];
+    let views = [image(&pixels, 960, 960), image(&pixels, 960, 960)];
+    let before = format!("{vio:?}");
+    assert_eq!(
+        vio.track_with_lookahead(1_000, &views, Some((2_000, &views)))
+            .unwrap()
+            .status,
+        VioStatus::NeedMoreImu
+    );
+    assert_eq!(format!("{vio:?}"), before);
+    assert!(matches!(
+        vio.track_with_lookahead(1_000, &views, Some((2_000, &views[..1]))),
+        Err(VioError::CameraCountMismatch {
+            expected: 2,
+            actual: 1
+        })
+    ));
+    assert_eq!(format!("{vio:?}"), before);
+}
+
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
+    let mut config =
+        config::VioConfig::from_json_str(include_str!("../../../../configs/msdmg_config.json"))
+            .unwrap();
+
+    config.port_frontend_lag = true;
+    let calibration =
+        calib::Calibration::from_json_str(include_str!("../../tests/fixtures/msdmg_calib.json"))
+            .unwrap();
+    let make = || {
+        Vio::<f32>::with_backend(
+            config.clone(),
+            calibration.clone(),
+            frontend::flow::FrontendOptions {
+                threads: 1,
+                ..Default::default()
+            },
+            Backend::Gpu,
+        )
+        .unwrap()
+    };
+    let mut reference = make();
+    let mut lookahead = make();
+    for tick in 0..200 {
+        for vio in [&mut reference, &mut lookahead] {
+            vio.push_imu(tick * 5_000_000, [0.0; 3], [0.0, 0.0, 9.81])
+                .unwrap();
+        }
+    }
+    let frames: Vec<Vec<Vec<u8>>> = (0..9)
+        .map(|frame| {
+            (0..4)
+                .map(|camera| {
+                    (0..648 * 480)
+                        .map(|pixel| {
+                            let x = (pixel % 648 + frame + camera * 2) as u32;
+                            let y = (pixel / 648) as u32;
+                            let value = (x / 3).wrapping_mul(374_761_393)
+                                ^ (y / 3).wrapping_mul(668_265_263);
+                            (value.wrapping_mul(1_274_126_177) >> 24) as u8
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let views = |frame: usize| {
+        frames[frame]
+            .iter()
+            .map(|pixels| ImageView {
+                data: pixels,
+                width: 640,
+                height: 480,
+                stride: 648,
+            })
+            .collect::<Vec<_>>()
+    };
+    // Valid hints (one masked), changed pixels, a skipped timestamp, and plain-track cancellation.
+    for (index, (actual, hinted)) in [
+        (0, Some(1)),
+        (1, Some(2)),
+        (2, Some(3)),
+        (8, Some(4)),
+        (5, Some(6)),
+        (6, Some(8)),
+        (7, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for vio in [&mut reference, &mut lookahead] {
+            vio.masks[0].masks.clear();
+            if index == 2 {
+                vio.masks[0].masks.push(frontend::detect::Rect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 200.0,
+                    h: 200.0,
+                });
+            }
+        }
+        let current = views(actual);
+        let next = hinted.map(views);
+        let t_ns = (index as i64 + 1 + i64::from(index >= 4)) * 33_000_000;
+        let expected = reference.track(t_ns, &current).unwrap();
+        let result = if index == 6 {
+            lookahead.track(t_ns, &current)
+        } else {
+            lookahead.track_with_lookahead(
+                t_ns,
+                &current,
+                next.as_deref().map(|images| (t_ns + 33_000_000, images)),
+            )
+        }
+        .unwrap();
+        let paths = lookahead.frontend_timings().flow;
+        if index == 1 || index == 2 || index == 5 {
+            assert!(paths.gpu_lookahead, "valid timestamp-bound hint");
+        }
+        if index == 3 || index == 4 || index == 6 {
+            assert!(!paths.gpu_lookahead, "changed, skipped, or cancelled hint");
+        }
+        assert_eq!(result, expected, "pose at frame {index}");
+        assert_eq!(
+            lookahead.frontend().frame(),
+            reference.frontend().frame(),
+            "keypoints at frame {index}"
+        );
+    }
+    assert_eq!(lookahead.flush().unwrap(), reference.flush().unwrap());
+}
