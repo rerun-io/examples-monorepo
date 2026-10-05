@@ -192,14 +192,22 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
     def convert(self, identity: SequenceIdentity, source: Take, *, force: bool) -> Path:
         """Base first (fetch, encode, publish, sidecar, prune the take), then the fit's layers from the sidecar."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
-        if not pending:
-            return targets[paths.BASE_LAYER]
         base: Path = targets[paths.BASE_LAYER]
+        sidecar: Path = paths.sidecar_path(base.parents[1], identity, SIDECAR)  # a preview's root holds its own sidecar
+        if base.exists() and paths.BASE_LAYER not in pending:
+            # Ages, not just existence: a rebuild interrupted after base was published leaves base without a newer
+            # sidecar (redo the take), or derived layers older than base (redo those).
+            published: int = base.stat().st_mtime_ns
+            if not sidecar.is_file() or sidecar.stat().st_mtime_ns < published:
+                pending = list(targets)
+            else:
+                pending = [layer for layer, target in targets.items() if layer in pending or target.stat().st_mtime_ns < published]
+        if not pending:
+            return base
         if paths.BASE_LAYER in pending:
             pending = list(targets)  # every derived layer is stamped on base's clock: a new base rebuilds them all
         if paths.BODY_MESH_LAYER in pending and self.model is None:
             self.model = SmplhModel(self.config.models)  # fails on a missing model before any fetch or encode
-        sidecar: Path = paths.sidecar_path(base.parents[1], identity, SIDECAR)  # a preview's root holds its own sidecar
         if paths.BASE_LAYER in pending:
             with self.timer.stage("fetch"):
                 self.fetch_take(source)

@@ -205,3 +205,40 @@ def test_a_sidecar_older_than_its_base_is_refused(tmp_path: Path) -> None:
     os.utime(base, ns=(sidecar.stat().st_mtime_ns + 1, sidecar.stat().st_mtime_ns + 1))  # base rebuilt, sidecar not
     with pytest.raises(ValueError, match="predates"):
         read_sidecar(sidecar, base)
+
+
+@pytest.mark.integration
+def test_a_normal_retry_finishes_an_interrupted_rebuild(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Base newer than its sidecar redoes the take; a derived layer older than base is rebuilt alone."""
+    for name in (SMPLH_FILE, SMPLX_FILE):
+        raw_asset("Ego-Exo4D-HM body model (dataforge-download egoexo4d)", MODEL_ROOT / name)
+    root: Path = tmp_path / "raw"
+    take_files: list[str] = synthetic_take(root, nvenc_ffmpeg)
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    monkeypatch.setattr(Egoexo4dDataset, "fetch_take", lambda self, take: None)
+    monkeypatch.setattr(Egoexo4dDataset, "take_files", lambda self, take: [ManifestPath(f"s3://x/{path}", path) for path in take_files])
+    dataset = Egoexo4dConfig(root=root, keep_raw=True).setup()
+    ((identity, take),) = dataset.discover()
+    dataset.convert(identity, take, force=False)
+    targets = dataset.targets(identity)
+    sidecar: Path = tmp_path / "out" / "sidecars" / identity.recording_id / SIDECAR
+
+    def age(path: Path) -> int:
+        return path.stat().st_mtime_ns
+
+    def make_newest(path: Path) -> None:
+        latest: int = max(age(target) for target in [*targets.values(), sidecar]) + 1_000_000
+        os.utime(path, ns=(latest, latest))
+
+    make_newest(targets["base"])  # base republished, then the sidecar write failed
+    stale = {layer: age(target) for layer, target in targets.items()}
+    dataset.convert(identity, take, force=False)
+    assert all(age(target) > stale[layer] for layer, target in targets.items())
+    assert age(sidecar) >= age(targets["base"])
+
+    make_newest(targets["base"])
+    make_newest(sidecar)  # base and sidecar republished, then every derived write failed
+    before = {layer: age(target) for layer, target in targets.items()}
+    dataset.convert(identity, take, force=False)
+    assert age(targets["base"]) == before["base"]
+    assert all(age(targets[layer]) > before["base"] for layer in ("body_pose", "body_mesh", "projections"))

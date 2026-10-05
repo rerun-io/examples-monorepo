@@ -74,8 +74,9 @@ the HM fit is row `timesync_start_idx + i`; `frame_index` is `i`. The trajectory
 - **base**: the cameras and videos above, the Aria pose, capture and episode properties (`source_num_frames`: every source video must
   hold exactly the take's frame count, or base refuses before anything is published or deleted). Right after base is published,
   one sidecar `<output_root>/sidecars/<recording_id>/take.npz` (`times_ns`, `world_T_device` per frame, and the camera record as
-  JSON: GoPro rows, the Aria `calib_json`, stored Aria stream sizes). Derived layers refuse a sidecar older than base, and a new
-  base rebuilds every derived layer.
+  JSON: GoPro rows, the Aria `calib_json`, stored Aria stream sizes). Staleness goes by file age, so a plain retry finishes an
+  interrupted rebuild: a base without a newer sidecar redoes the take (re-fetching it), a derived layer older than base is
+  rebuilt, and a new base rebuilds every derived layer. A copy of the output tree must keep mtimes (`rsync -a`, `tar`).
 - **body_pose**: raw SMPL-H parameters (`hand_pose` = 45 PCA coefficients per hand in SMPL-X's MANO basis, mean added), `valid`,
   and `coco133_xyz`: body 0–16 and feet 17–22 from BODY_25 (neck and mid-hip have no slot), hands 91–132, face empty. No shipped
   confidence, so 1.0; frames with `valid == 0` are NaN with confidence 0.
