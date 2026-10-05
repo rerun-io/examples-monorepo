@@ -85,20 +85,20 @@ def run_ladder(data: SegmentData, labels: ReferenceLabels, stages: dict[tuple[Mo
                 stage.set_frame(row)
                 crops: Crops = {}
                 if labels.tracked[row]:
-                    if mode == "gt_pose":
-                        crops = stage.pose_crops(gt)
-                    elif mode == "gt_circle":
-                        gt_scores: Float64[ndarray, "4 2"] = visible.copy()
-                        for hand, pose in gt.items():
-                            if pose.hand_confidence < 0.5:
-                                gt_scores[:, hand] = 0.0
-                        crops = stage.circle_crops(gt_circles, gt_scores, scale, gt=True)
-                    else:
-                        acquired: Crops = stage.circle_crops(circles, probability, scale)
-                        crops = acquired
-                        if mode == "track":
+                    match mode:
+                        case "gt_pose":
+                            crops = stage.pose_crops(gt)
+                        case "gt_circle":
+                            gt_scores: Float64[ndarray, "4 2"] = visible.copy()
+                            for hand, pose in gt.items():
+                                if pose.hand_confidence < 0.5:
+                                    gt_scores[:, hand] = 0.0
+                            crops = stage.circle_crops(gt_circles, gt_scores, scale, gt=True)
+                        case "detnet":
+                            crops = stage.circle_crops(circles, probability, scale)
+                        case "track":
+                            acquired: Crops = stage.circle_crops(circles, probability, scale)
                             predicted: Crops = stage.pose_crops(previous[key])
-                            crops = {}
                             for hand in range(2):
                                 was_tracked: bool = states[key][hand].tracked
                                 views: list[int] = states[key][hand].choose(list(acquired.get(hand, {})), list(predicted.get(hand, {})), probability[:, hand].tolist())
