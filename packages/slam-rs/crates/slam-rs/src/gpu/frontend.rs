@@ -1,5 +1,7 @@
 //! GPU frame resources and the current/next-frame submission schedule.
 
+pub(super) mod onewait;
+
 use super::{
     GpuCornerScan, GpuError, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder,
     guarded, submission,
@@ -8,7 +10,7 @@ use crate::frontend::detect::{CellSelect, DetectorScratch};
 use crate::frontend::flow::{FlowTimings, FrontendError};
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::patterns::Pattern;
-use crate::frontend::stages::FrameStages;
+use crate::frontend::stages::{FrameStages, StereoContext};
 use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
 use crate::image::ImageU16;
 use crate::pyramid::ensure_pyramids;
@@ -63,6 +65,8 @@ pub struct GpuStages<P: Pattern, R: Runtime> {
     previous: Vec<GpuPyramid<R>>,
     tracker: GpuPatchTracker<P, R>,
     patches: GpuPatchSources<P, R>,
+    one_wait: Option<onewait::OneWait>,
+    geometry: Vec<u32>,
     guard: Option<submission::FrameBatch>,
     launches: submission::LaunchList,
 }
@@ -81,6 +85,8 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             patches,
             previous: Vec::new(),
             next: None,
+            one_wait: None,
+            geometry: Vec::new(),
             guard: None,
             launches,
         })
@@ -152,10 +158,21 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         Ok(())
     }
 
-    fn collect(&mut self, overlap_lookahead: bool) -> Result<(), TrackerError> {
+    fn collect(
+        &mut self,
+        timings: &mut FlowTimings,
+        overlap_lookahead: bool,
+    ) -> Result<(), TrackerError> {
         let outcome = guarded(GpuError::DeviceLost { what: "tracker" }, || {
             let mut reads = self.tracker.read_handles();
             let lanes = reads.len();
+            let stereo_read = self
+                .one_wait
+                .as_ref()
+                .is_some_and(|state| matches!(state.phase, onewait::Phase::Submitted));
+            if let Some(state) = self.one_wait.as_ref().filter(|_| stereo_read) {
+                reads.push(state.io.clone());
+            }
             let staged = self.current.detector.scanner.take_staged();
             let selected = staged.is_some();
             if let Some(handles) = staged {
@@ -170,7 +187,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                     reads,
                     "the tracker result",
                     || {
-                        if overlap_lookahead {
+                        if stereo_read || overlap_lookahead {
                             self.submit_lookahead().map_err(|error| {
                                 log::warn!("lookahead preparation failed: {error}");
                                 GpuError::DeviceLost {
@@ -182,12 +199,20 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                     },
                 )?
             };
-            let outputs = lanes;
+            let outputs = lanes + usize::from(stereo_read);
             if selected && bytes.len() >= outputs {
                 self.current
                     .detector
                     .scanner
                     .deliver(bytes.split_off(outputs));
+            }
+            if stereo_read && bytes.len() == outputs {
+                timings.gpu_one_wait = true;
+                if let Some(state) = &mut self.one_wait
+                    && let Some(bytes) = bytes.pop()
+                {
+                    state.phase = onewait::Phase::Ready(bytes);
+                }
             }
             self.tracker.decode_results(&bytes)
         });
@@ -244,17 +269,21 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         &mut self,
         images: &[ImageU16],
         selects: &[Option<CellSelect>],
+        context: StereoContext<'_>,
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
+        let one_wait = self.prepare_one_wait(context, selects)?;
         let mark = std::time::Instant::now();
         self.current.selects.clear();
-        self.current.selects.extend(
-            selects.iter().enumerate().map(
-                |(camera, select)| {
-                    if camera == 0 { *select } else { None }
-                },
-            ),
-        );
+        self.current
+            .selects
+            .extend(selects.iter().enumerate().map(|(camera, select)| {
+                if one_wait || camera == 0 {
+                    *select
+                } else {
+                    None
+                }
+            }));
         if self.current.input.take().is_none() {
             self.current
                 .detector
@@ -266,7 +295,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     fn temporal(
         &mut self,
         inputs: &mut [TrackInput],
-        _timings: &mut FlowTimings,
+        timings: &mut FlowTimings,
     ) -> Result<(), TrackerError> {
         self.tracker.submit_batch(
             &self.previous,
@@ -275,7 +304,8 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
             &mut self.patches,
             true,
         )?;
-        self.collect(false)
+        self.submit_stereo()?;
+        self.collect(timings, false)
     }
     fn stereo(
         &mut self,
@@ -286,6 +316,10 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
         let mark = std::time::Instant::now();
+        if self.take_stereo(inputs)? {
+            timings.stereo_ns += duration_ns(mark);
+            return Ok(());
+        }
         if !inputs.is_empty() {
             self.tracker.submit_batch(
                 &self.current.pyramids,
@@ -307,7 +341,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         }
         let mark = std::time::Instant::now();
         if !inputs.is_empty() {
-            self.collect(true)?;
+            self.collect(timings, true)?;
         }
         timings.stereo_ns += duration_ns(mark);
         let mark = std::time::Instant::now();
@@ -332,6 +366,9 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     fn discard(&mut self) {
         self.guard.take();
         self.tracker.discard();
+        if let Some(state) = &mut self.one_wait {
+            state.phase = onewait::Phase::Off;
+        }
     }
 }
 

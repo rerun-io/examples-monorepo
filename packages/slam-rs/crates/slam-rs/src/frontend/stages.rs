@@ -1,5 +1,8 @@
 //! Frame preparation and tracking phases owned by the frontend.
 
+use crate::calib::Calibration;
+use crate::camera::RigCamera;
+use crate::config::VioConfig;
 use crate::duration_ns;
 use crate::frontend::detect::{CellSelect, DetectorScratch};
 use crate::frontend::parallel::WorkPool;
@@ -8,6 +11,16 @@ use crate::image::ImageU16;
 use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16, ensure_pyramids};
 
 use super::flow::{FlowTimings, FrontendError};
+
+/// Per-frame inputs to device stereo selection. Durable rig state stays in the flow.
+pub struct StereoContext<'a> {
+    pub cameras: &'a [RigCamera<f32>],
+    pub calib: &'a Calibration<f32>,
+    pub config: &'a VioConfig,
+    pub depth: f32,
+    pub last_detect_count: usize,
+    pub eligible: bool,
+}
 
 /// The frame-level seam. Patch trackers expose only patch operations.
 pub trait FrameStages {
@@ -37,6 +50,7 @@ pub trait FrameStages {
         &mut self,
         images: &[ImageU16],
         selects: &[Option<CellSelect>],
+        context: StereoContext<'_>,
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError>;
 
@@ -124,6 +138,7 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
         &mut self,
         _images: &[ImageU16],
         _selects: &[Option<CellSelect>],
+        _context: StereoContext<'_>,
         _timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
         Ok(())

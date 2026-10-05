@@ -20,6 +20,7 @@ struct ReplayCounters {
     overlap_estimator_ns: u64,
     overlap_wait_ns: u64,
     gpu_lookahead_frames: usize,
+    gpu_one_wait_frames: usize,
 }
 
 pub(super) fn replay(
@@ -132,6 +133,7 @@ pub(super) fn replay(
         counters.overlap_wait_ns += overlap.wait_ns;
         let timings = vio.frontend_timings();
         counters.gpu_lookahead_frames += usize::from(timings.flow.gpu_lookahead);
+        counters.gpu_one_wait_frames += usize::from(timings.flow.gpu_one_wait);
         counters.pyramid_ns += timings.flow.pyramid_ns;
         counters.detect_ns += timings.flow.detect_ns;
         counters.track_ns += timings.flow.track_ns;
@@ -168,7 +170,7 @@ pub(super) fn replay(
                      "p99": percentile(&sorted, 0.99), "max": sorted.last().copied().unwrap_or(f64::NAN)},
         "frontend_ms_mean": {"pyramid": per_frame(counters.pyramid_ns), "detect": per_frame(counters.detect_ns), "track": per_frame(counters.track_ns),
                              "stereo": per_frame(counters.stereo_ns), "imu": per_frame(counters.imu_ns)},
-        "gpu_path_frames": {"lookahead": counters.gpu_lookahead_frames},
+        "gpu_path_frames": {"lookahead": counters.gpu_lookahead_frames, "one_wait": counters.gpu_one_wait_frames},
         "overlap_ms_mean": {"estimator": per_frame(counters.overlap_estimator_ns), "wait": per_frame(counters.overlap_wait_ns)},
         "flush_ms": flush_ms,
         "track_ms_per_frame": track_ms,

@@ -5,6 +5,7 @@ mod fast;
 mod fast_cell;
 pub(crate) mod klt_fused;
 mod layout;
+pub(crate) mod onewait;
 mod pyramid;
 mod sampling;
 

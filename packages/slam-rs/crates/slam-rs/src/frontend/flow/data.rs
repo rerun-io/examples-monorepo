@@ -186,6 +186,8 @@ pub struct FlowFrame {
 /// and the epipolar filter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlowTimings {
+    /// Temporal and stereo results were collected in one device wait.
+    pub gpu_one_wait: bool,
     /// This frameset consumed its timestamp-bound image hint.
     pub gpu_lookahead: bool,
     /// Building this frame's pyramids, every camera.

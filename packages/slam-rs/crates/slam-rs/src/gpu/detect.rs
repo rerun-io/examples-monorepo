@@ -187,6 +187,13 @@ impl<R: Runtime> GpuCornerScan<R> {
         std::mem::swap(&mut self.level0, &mut builder.level0);
     }
 
+    pub(super) fn staged_handles(&self) -> Option<&[cubecl::server::Handle]> {
+        match &self.reads {
+            SelectionReads::Pending(handles) => Some(handles),
+            _ => None,
+        }
+    }
+
     pub(super) fn take_staged(&mut self) -> Option<Vec<cubecl::server::Handle>> {
         match &mut self.reads {
             SelectionReads::Pending(handles) => Some(std::mem::take(handles)),

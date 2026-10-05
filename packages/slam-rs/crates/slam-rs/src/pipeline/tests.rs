@@ -295,6 +295,7 @@ fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
             .collect::<Vec<_>>()
     };
     // Valid hints (one masked), changed pixels, a skipped timestamp, and plain-track cancellation.
+    let mut one_wait_resumed = false;
     for (index, (actual, hinted)) in [
         (0, Some(1)),
         (1, Some(2)),
@@ -333,6 +334,11 @@ fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
         }
         .unwrap();
         let paths = lookahead.frontend_timings().flow;
+        if index == 0 || index == 2 {
+            assert!(!paths.gpu_one_wait, "first-frame and masked fallbacks");
+        } else if index > 2 {
+            one_wait_resumed |= paths.gpu_one_wait;
+        }
         if index == 1 || index == 2 || index == 5 {
             assert!(paths.gpu_lookahead, "valid timestamp-bound hint");
         }
@@ -346,5 +352,6 @@ fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
             "keypoints at frame {index}"
         );
     }
+    assert!(one_wait_resumed, "one-wait resumes after the mask clears");
     assert_eq!(lookahead.flush().unwrap(), reference.flush().unwrap());
 }

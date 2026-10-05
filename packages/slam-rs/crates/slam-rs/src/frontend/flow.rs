@@ -17,7 +17,7 @@ mod detection;
 mod error;
 mod tracking;
 
-use super::stages::{CpuStages, FrameExecutor, FrameStages};
+use super::stages::{CpuStages, FrameExecutor, FrameStages, StereoContext};
 
 pub use data::{FlowFrame, FlowTimings, FrontendOptions, Keypoints, NO_RESPONSE, PosePrediction};
 pub use error::FrontendError;
@@ -712,8 +712,20 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
         // because it is the only camera the match needs before it launches; the
         // others go behind the matches, where another download is waiting.
         self.update_cell_selects(images);
-        self.stages
-            .prepare_detection(images, &self.cell_selects, &mut self.timings)?;
+        self.stages.prepare_detection(
+            images,
+            &self.cell_selects,
+            StereoContext {
+                cameras: &self.cameras,
+                calib: &self.calib,
+                config: &self.config,
+                depth: self.depth_guess,
+                last_detect_count: self.last_detect_count,
+                eligible: self.t_ns.is_some()
+                    && self.masks.iter().all(|masks| masks.masks.is_empty()),
+            },
+            &mut self.timings,
+        )?;
 
         if self.t_ns.is_none() {
             for keypoints in &mut self.frame.cameras {

@@ -28,14 +28,11 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
 }
 
 /// All deferred GPU work for a frame, in upload/launch order.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "the Stereo launch lands in the one-wait commit; keep the final dispatch layout"
-)]
 pub(super) enum Launch {
     Pyramid(super::pyramid::PyramidLaunch),
     Corners(super::detect::batch::CornerLaunch),
     Klt(super::track::FusedLaunch),
+    Stereo(super::frontend::onewait::StereoLaunch),
 }
 
 impl Launch {
@@ -44,6 +41,7 @@ impl Launch {
             Self::Pyramid(launch) => launch.run(client),
             Self::Corners(launch) => launch.run(client),
             Self::Klt(launch) => launch.run(client),
+            Self::Stereo(launch) => launch.run(client),
         }
     }
 }
