@@ -1,9 +1,10 @@
 # robocap-live: file formats and conventions
 
 robocap-live runs on a RoboCap (RK3588): it takes the six cameras and the IMU, runs slam-rs VIO and the hand tracker (DetNet and
-KeyNet on the NPU, the handfit fit), and streams the result to a Rerun viewer. The same core replays a dump of a recorded session.
+KeyNet on the NPU, the handfit fit), and streams the result to a Rerun viewer. The same core replays a dump of a recorded session
+and writes a catalog segment's `hands` layer.
 
-This file holds what only it says: the dump format, the `--record` JSONL, and the code conventions. The types live in the code:
+This file holds what only it says: the dump format, the hands catalog layer, the `--record` JSONL, and the code conventions. The types live in the code:
 
 - `crates/robocap-types`: camera indices and names, `FrameMeta`, `CameraFrame`, `Frameset`, `ImuSample`, `SourceEvent`, and
   `SlamPose` / `SlamStatus` / `SlamStages` (no runtime, device or estimator; `frame.rs` and `slam.rs` re-export them).
@@ -36,13 +37,33 @@ catalog by a Python tool that is not in this tree; `frame.rs`'s `FrameWriter` wr
 
 Times are nanoseconds: CLOCK_MONOTONIC on the cap, the catalog's video time in a dump.
 
+## The hands catalog layer
+
+One core, two front ends. The cap binary runs `sched::run` on the live source. `robocap_live._core` (`crates/robocap-live-py`,
+PyO3; built in place by the `robocap-live-build` pixi task and not a default workspace member, so the cap build never compiles
+it) runs the same `sched::run` through `layer::HandsLayerWriter`: Python pushes framesets into a `source::channel` source, and the
+pipeline is that of `--source replay <dump> --slam reference --hands on`: lossless queues, `downsample::small_images`, the
+`ReferencePoses` and the pose store, the hands stage's tracker step, and the output stage's `log::LoggerSink` with the logger in
+`scene::Content::HandsLayer` mode. On the CPU ONNX Runtime the layer of a catalog segment equals that replay's of the segment's
+dump.
+
+The Python side (`robocap_live.catalog_segment`) reads the rig from the `base` layer's statics, the six H.264 streams in one bulk
+query, decoded to the raw Y plane (the cap's NV12 Y), groups framesets as the live adapter does (3 ms), and gives each frameset
+the nearest `slam_rs` pose of `/world/rig_00` within 5 ms. `robocap_live.apis.hands_layer` (`pixi run -e robocap-live
+robocap-hands-layer`) writes the layer and registers it as the segment's `hands` layer, replacing an earlier one.
+
+The layer holds only the hand entities (`/world/hands/{side}/{keypoints,mesh}`, the camera-pane overlays in full-resolution
+pixels, the skeleton's `AnnotationContext` on `/world`) and no recording properties; its recording id is the segment id and its
+times are the catalog's `video_time`.
+
 ## Runtime: the `--record` JSONL
 
 `--record <file>` writes one JSON object per frameset (`RecordLine` in `src/sched/record.rs` is normative):
 
 - `index`, `t_ns`;
+- `slam_index`, `slam_t_ns`: identity of the pose actually used, or null without a pose;
 - `world_from_rig`: 16 `f64`, row-major (identity without a pose);
-- `slam_ok`, `slam_status` (`waiting_for_imu`, `no_visual_features`, `tracking`, `failed`, `off`, `reference`, or `none` before
+- `slam_ok`, `slam_status` (`no_visual_features`, `tracking`, `failed`, `off`, `reference`, or `none` before
   any pose), `slam_landmarks` (landmarks in the window), `slam_tracked` (observations of them in this frameset), `slam_optimised`;
 - `hands`: empty when the hands stage did not run, else left then right, each `{tracked, reported, landmarks (21 x 3, world
   metres, or null), views: [{camera, keypoints_px (21 x 2, full-resolution pixels), presence, pinch (or null)}], detnet_camera,

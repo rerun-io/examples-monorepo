@@ -138,6 +138,10 @@ packages/gsplat-rust-renderer/examples/*.ply
 packages/slam-rs/target/
 packages/slam-rs/slam_rs/_core.so
 
+# robocap-live (its Cargo target is ignored by the package's own .gitignore)
+packages/robocap-live/data/
+packages/robocap-live/robocap_live/_core.so
+
 # Package-specific ignores
 packages/wilor-nano/onnx_models/
 packages/wilor-nano/demo/

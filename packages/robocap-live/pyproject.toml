@@ -1,0 +1,42 @@
+[project]
+name = "robocap-live"
+version = "0.1.0"
+description = "The RoboCap hands catalog layer: robocap-live's Rust hand pipeline as a PyO3 module, fed from the Rerun catalog"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only: `pixi lock` must never build this package; the Rust core is compiled by the `robocap-live-build`
+# pixi task, not by the wheel build. catalog-common supplies numpy, jaxtyping, av, pyarrow and rerun-sdk.
+dependencies = ["simplecv", "tyro"]
+
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI namesake).
+[tool.uv.sources]
+simplecv = { path = "../simplecv", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["robocap_live"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e robocap-live-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e robocap-live-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 150
+extend-exclude = ["target"]
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["robocap_live", "tools/apps", "tests"]
+min_confidence = 80
+# The registration test double keeps the real RegistrationHandle.wait signature.
+ignore_names = ["timeout_secs"]
