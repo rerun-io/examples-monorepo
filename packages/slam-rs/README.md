@@ -131,10 +131,10 @@ those two annotations.
 
 ## Two profiles and two lanes
 
-The **fast profile**, the default, changes the schedule and nothing about the
-arithmetic: it detects only when camera 0 has lost 15 % of its keypoints, and
-solves the whole sliding window at keyframes only, the newest state alone in
-between. `--profile reference` runs the unmodified dataset configuration.
+The **fast profile**, the default, detects only when camera 0 has lost 15 % of
+its keypoints and solves the whole sliding window at keyframes, the newest
+state alone in between. KLT stops each level when its update is below 0.05 pixels.
+`--profile reference` runs the unmodified dataset configuration.
 
 The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu.
 Its estimator runs on one CPU thread; the CPU lane can use its work pool.
@@ -146,8 +146,8 @@ The GPU lane uses fused KLT on every device. Each point uses 16 subgroup
 lanes; larger power-of-two subgroups hold multiple point groups. Startup
 checks the required subgroup operations and reports an error naming the
 CPU lane if they are unsupported. Templates stay in registers and both
-tracking directions run in one launch per phase. The opt-in exit threshold
-works on both lanes.
+tracking directions run in one launch per phase. The fast profile's exit
+threshold works on both lanes.
 Replay summaries count frames using one-wait, lookahead and packed uploads.
 
 ## Data

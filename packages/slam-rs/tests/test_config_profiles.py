@@ -36,10 +36,10 @@ def test_reference_profile_preserves_vendored_text() -> None:
 
 
 def test_fast_profile_changes_only_its_declared_keys() -> None:
-    """The fast profile changes only its three declared keys.
+    """The fast profile changes only its four declared keys.
 
     The port-prefixed keys select demand-based detection (D75) and the
-    keyframe-gated joint solve (D76). Only the overlay supplies them.
+    keyframe-gated joint solve (D76), and KLT exit step. Only the overlay supplies them.
     """
     settings: SlamConfig = load_slam_config()
     for dataset in settings.datasets:
@@ -49,6 +49,7 @@ def test_fast_profile_changes_only_its_declared_keys() -> None:
         assert reference["value0"].pop("config.vio_max_iterations") == 7
         assert fast["value0"].pop("port.redetect_survivor_ratio") == 0.85
         assert fast["value0"].pop("port.frame_update_max_iterations") == 5
+        assert fast["value0"].pop("port.klt_exit_step_px") == 0.05
         assert all(key.startswith("config.") for key in reference["value0"])
         assert fast == reference
 

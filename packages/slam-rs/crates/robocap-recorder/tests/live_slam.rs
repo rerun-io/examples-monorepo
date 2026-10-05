@@ -8,7 +8,7 @@ use slam_rs::{
 };
 
 #[test]
-fn a_known_stationary_textured_rig_stays_at_its_origin() -> Result<()> {
+fn the_fast_profile_keeps_a_known_stationary_textured_rig_at_its_origin() -> Result<()> {
     let largest = stationary_probe([0.0; 3], [0.0, 0.0, 9.81], false)?;
     assert!(largest < 0.02, "stationary rig moved {largest} m");
     Ok(())
@@ -56,7 +56,10 @@ fn stationary_probe(gyro: [f64; 3], accel: [f64; 3], correct_bias: bool) -> Resu
             accel[2] - 9.81,
         ]);
     }
-    let config = VioConfig::from_json_str(include_str!("../../../configs/msdmo_config.json"))?;
+    let config = VioConfig::with_overlay(
+        include_str!("../../../configs/msdmo_config.json"),
+        include_str!("../../../configs/profiles/fast.json"),
+    )?;
     let mut slam = LiveSlam::with_configuration(calibration, config, LiveSlamOptions::default())?;
     let images: Vec<Vec<u8>> = (0..4)
         .map(|camera| {

@@ -364,7 +364,7 @@ mod tests {
             include_str!("../../../configs/profiles/fast.json"),
         )
         .unwrap();
-        assert_eq!(config.port_klt_exit_step_px, None);
+        assert_eq!(config.port_klt_exit_step_px, Some(0.05));
         assert_eq!(config.optical_flow_image_safe_radius, 388.0);
         assert!(
             VioConfig::with_overlay(r#"{"value0":{}}"#, r#"{"port.frontend_lag":true}"#)
