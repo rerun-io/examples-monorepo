@@ -9,7 +9,7 @@ import torch
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
+from slam_rs.catalog_feed import ROBOCAP_RIG, CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun, drive
@@ -40,7 +40,7 @@ def main(config: Config) -> None:
     settings: SlamConfig = load_slam_config()
     dataset_name: str = config.segment.split("__", 1)[0]
     is_robocap: bool = dataset_name == "robocap"
-    rig_profile: RigProfile = RigProfile.from_robocap(settings.robocap) if is_robocap else RigProfile()
+    rig_profile: RigProfile = ROBOCAP_RIG if is_robocap else RigProfile()
     catalog_url: str = config.catalog or settings.catalog_url
     # One manifest query resolves the dataset handle that open_segment and the final register share.
     segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]

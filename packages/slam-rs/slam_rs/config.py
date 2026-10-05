@@ -31,24 +31,14 @@ class DatasetProperties:
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class RobocapConfig:
-    """RoboCap camera selection, clock rules and estimator files."""
+    """RoboCap device and estimator files; Rust owns the rig facts."""
 
     device_id: str
     """The device whose sessions the catalog holds: segment ids are ``robocap__<device_id>__<session_id>``."""
-    camera_names: tuple[str, ...]
-    """The cameras the reference ran, by their ``name`` static, in the calibration's own order."""
-    downscale: int
-    """Integer factor the reference reader downscaled both frames and intrinsics by."""
-    frameset_tolerance_ns: int
-    """How far a camera's frame may sit from the anchor camera's and still be the same capture."""
-    interpolate_accel_onto_gyro: bool
-    """Whether the accelerometer has to be interpolated onto the gyroscope's timestamps."""
-    video_time_is_absolute: bool
-    """Whether ``video_time`` is already the device clock the reference trajectories are on."""
     vio_config: str
     """VIO configuration selected for replay, relative to the package root."""
     calibration: str
-    """Rig calibration selected for replay, at :attr:`downscale`, relative to the package root."""
+    """Rig calibration selected for replay, at the core rig profile's downscale, relative to the package root."""
 
 
 @serde(type_check=coerce, deny_unknown_fields=True)

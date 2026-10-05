@@ -13,9 +13,9 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
 from slam_rs.catalog_feed import (
+    ROBOCAP_RIG,
     CatalogSegment,
     Frameset,
-    RigProfile,
     open_segment,
 )
 from slam_rs.config import SlamConfig, load_slam_config
@@ -70,20 +70,20 @@ def main(config: Config) -> None:
     reference_path: Path | None = config.reference_csv or (settings.package_root / session.reference_csv if session.reference_csv else None)
     reference: Trajectory = read_trajectory(reference_path) if reference_path else empty_trajectory()
     print("ground truth absent, not scored; regression reference is reported, not gated")
-    print(f"basalt calibration {settings.robocap.calibration} at downscale {settings.robocap.downscale}: {list(calibration.resolution)}")
+    print(f"basalt calibration {settings.robocap.calibration} at downscale {ROBOCAP_RIG.downscale}: {list(calibration.resolution)}")
     print(f"basalt config {settings.robocap.vio_config}: safe radius {flow_config.optical_flow_image_safe_radius} px")
 
     with open_segment(
         CatalogSegment(config.catalog or settings.catalog_url, "robocap", session.segment_id),
-        profile=RigProfile.from_robocap(settings.robocap),
+        profile=ROBOCAP_RIG,
         window_s=config.window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, settings.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         first_ns: int = int(feed.frame_t_ns[0])
         last_ns: int = int(feed.frame_t_ns[-1]) if config.seconds <= 0.0 else first_ns + int(config.seconds * 1e9)
         replayed_ns: int = min(int(feed.frame_t_ns[-1]), last_ns) - first_ns
         print(
-            f"{len(feed.cameras)} of the rig's {feed.rig_cameras} cameras {settings.robocap.camera_names} at rig positions {feed.camera_positions}, "
+            f"{len(feed.cameras)} of the rig's {feed.rig_cameras} cameras {ROBOCAP_RIG.camera_names} at rig positions {feed.camera_positions}, "
             f"{feed.cameras[0].width}x{feed.cameras[0].height}, {len(feed.frame_t_ns)} framesets over "
             f"{(int(feed.frame_t_ns[-1]) - first_ns) / 1e9:.1f} s, replaying the first {replayed_ns / 1e9:.1f} s"
         )

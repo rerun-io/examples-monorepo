@@ -18,7 +18,7 @@ from slam_rs import _core
 from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
-    RigProfile,
+    ROBOCAP_RIG,
     CameraCalib,
     CameraStatics,
     CatalogSegment,
@@ -132,7 +132,7 @@ def test_downscaling_the_recording_reproduces_basalts_own_calibration(settings: 
     basalt: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
     assert list(basalt.resolution) == [(640, 360)] * 4
 
-    calib = camera_calib(0, robocap_statics(), settings.robocap.downscale)
+    calib = camera_calib(0, robocap_statics(), ROBOCAP_RIG.downscale)
     assert (calib.width, calib.height) == (640, 360)
     written = json.loads(basalt.to_json())["value0"]["intrinsics"][0]["intrinsics"]
     assert calib.fx == pytest.approx(written["fx"], abs=1e-3)
@@ -238,13 +238,13 @@ def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: S
     """
     session: RobocapSession = benchmarks.robocap.session("s00000015")
     with open_segment(
-        CatalogSegment(settings.catalog_url, "robocap", session.segment_id), profile=RigProfile.from_robocap(settings.robocap)
+        CatalogSegment(settings.catalog_url, "robocap", session.segment_id), profile=ROBOCAP_RIG
     ) as feed:
         assert feed.camera_positions == (0, 1, 4, 5)
         assert feed.rig_cameras == 6
         # The feed reads its rig knobs off the profile it was given, so what the
         # settings says and what the feed does are one statement.
-        assert feed.profile == RigProfile.from_robocap(settings.robocap)
+        assert feed.profile == ROBOCAP_RIG
         assert [(camera.width, camera.height) for camera in feed.cameras] == [(640, 360)] * 4
         assert all(camera.model == "kb4" for camera in feed.cameras)
         assert all(len(camera.distortion) == 4 for camera in feed.cameras)

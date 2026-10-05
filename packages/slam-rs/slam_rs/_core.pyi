@@ -10,6 +10,7 @@ from typing import ClassVar, Literal
 from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 
+from slam_rs.catalog_feed import RigProfile
 from slam_rs.rig import CameraCalib, ImuCalib
 
 __version__: str
@@ -435,3 +436,8 @@ class OpticalFlow:
         """
 
     def __repr__(self) -> str: ...
+
+
+def catalog_rig_profile(dataset: str) -> "RigProfile":
+    """Return the camera selection and clock rules owned by Rust."""
+    ...

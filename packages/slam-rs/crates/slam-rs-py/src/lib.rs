@@ -5,6 +5,8 @@
 //! thread can keep decoding. A bad dtype, rank, shape or memory layout raises
 //! `ValueError`, never a panic.
 
+mod catalog;
+
 use numpy::{
     PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
     ToPyArray,
@@ -1295,6 +1297,7 @@ fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
 /// The compiled core of the `slam_rs` package.
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    catalog::register(module)?;
     module.add("__version__", slam_rs::VERSION)?;
     // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;

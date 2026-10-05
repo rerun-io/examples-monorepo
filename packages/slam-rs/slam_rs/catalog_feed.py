@@ -62,6 +62,7 @@ from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframe
 from simplecv.catalog_video_codec import CatalogCodecName, wrap_mp4
 from simplecv.imu_calibration import ImuCalibration
 
+from slam_rs import _core
 from slam_rs.catalog_calibration import (
     CHILD_FROM_PARENT as CHILD_FROM_PARENT,
 )
@@ -96,7 +97,6 @@ from slam_rs.catalog_timing import (
 from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
-from slam_rs.config import RobocapConfig
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -246,29 +246,13 @@ class RigProfile:
         if self.frameset_tolerance_ns < 0:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
 
-    @classmethod
-    def from_robocap(cls, reference: RobocapConfig) -> "RigProfile":
-        """Read the RoboCap rig selection, downscale, clock and pairing rules from slam.toml.
-
-        Args:
-            reference: The runtime ``[robocap]`` table, which is where the five
-                departures from MSD are written down.
-
-        Returns:
-            The profile the probe and both fleet tools open the rig with.
-        """
-        return cls(
-            camera_names=reference.camera_names,
-            downscale=reference.downscale,
-            interpolate_accel_onto_gyro=reference.interpolate_accel_onto_gyro,
-            frameset_tolerance_ns=reference.frameset_tolerance_ns,
-            video_time_is_absolute=reference.video_time_is_absolute,
-        )
-
 
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
 
+
+ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
+"""RoboCap selection, downscale and clock rules from the Rust core."""
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
     """Every non-null value of a temporal component column, flat and float64.

@@ -16,7 +16,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
 from slam_rs.catalog_calibration import ImuCalib
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, CatalogSegment, Frameset, RigProfile, SegmentFeed, open_segment
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -323,9 +323,9 @@ def run_robocap(
     feed: SegmentFeed
     with open_segment(
         CatalogSegment(catalog or settings.catalog_url, "robocap", session.segment_id),
-        profile=RigProfile.from_robocap(settings.robocap),
+        profile=ROBOCAP_RIG,
         window_s=window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, settings.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
         return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))
