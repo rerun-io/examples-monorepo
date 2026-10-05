@@ -11,12 +11,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rerun.chunk as rrc
-from conftest import SHOW3D_RAW, index_row, read_back, read_chunks, recording_properties
+from conftest import SHOW3D_RAW, index_row, raw_asset, read_back, read_chunks, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from serde import SerdeError, from_dict
 
-from dataforge import schema
+from dataforge import schema, video_encoding
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, pane_contents, preview_world_contents, world_contents
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig, RigCalibration, headset_rig
@@ -27,6 +27,7 @@ from dataforge.datasets.show3d_object_source import ObjectFrame
 from dataforge.datasets.show3d_objects import ObjectSanity, write_object_pose_layer
 from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, FrameClock, FrameInfo, IndexRow, RecordingInfo, Show3dCamera
 from dataforge.identity import SequenceIdentity
+from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
 
 
@@ -105,8 +106,7 @@ def test_headset_rig_fits_mm_and_rejects_nonrigid_scene() -> None:
 @pytest.mark.parametrize(("subject", "scene", "count"), [("SPI102", "keyboard_toss-away_83ef", 30), ("LYA722", "birdhousetoy_shaking_8eca", 30)])
 def test_real_scene_base(tmp_path: Path, subject: str, scene: str, count: int) -> None:
     source: Path = SHOW3D_RAW / "scenes" / subject / scene
-    if not (source / "headset0.mp4").is_file():
-        pytest.skip(f"SHOW3D scene videos absent: {source}")
+    raw_asset("SHOW3D scene video", source / "headset0.mp4")
     target: Path = tmp_path / "base.rrd"
     write_base_layer(
         SequenceIdentity("show3d", (subject, scene)),
@@ -115,6 +115,7 @@ def test_real_scene_base(tmp_path: Path, subject: str, scene: str, count: int) -
         index=index_row(subject_id=subject, scene_id=scene),
         work_dir=tmp_path,
         frame_limit=count,
+        timer=SequenceTimer(),
         hf_revision="test-sha",
     )
     videos: dict[str, int] = {}
@@ -199,6 +200,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
         target,
         index=index_row(subject_id="subject", scene_id="toy_pick-up_abcd", split="test"),
         work_dir=tmp_path / "work",
+        timer=SequenceTimer(),
         hf_revision="test-sha",
     )
     chunks: list[rrc.Chunk] = read_chunks(target)
@@ -240,7 +242,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
     assert properties["num_synthesized_headset_poses"] == 1
     assert properties["source_start_frame_id"] == 20
     assert properties["source_start_time_s"] == 100.0
-    assert recording_properties(read_back(target), "convert")["version"] == "1"
+    assert recording_properties(read_back(target), "convert")["version"] == "2"
     assert recording_properties(read_back(target), "episode") == dict(subject_id="subject", split="test", object_alias="toy", action="pick-up")
     assert not list((tmp_path / "work").glob("*.mp4"))
 
@@ -254,7 +256,7 @@ def test_table_fields_name_columns_the_layer_writers_produce(tmp_path: Path, tin
     """
     identity: SequenceIdentity = SequenceIdentity("show3d", ("subject", "toy_pick-up_abcd"))
     index: IndexRow = index_row(subject_id="subject", scene_id="toy_pick-up_abcd")
-    write_base_layer(identity, tiny_scene, tmp_path / "base.rrd", index=index, work_dir=tmp_path / "work", hf_revision="test-sha")
+    write_base_layer(identity, tiny_scene, tmp_path / "base.rrd", index=index, work_dir=tmp_path / "work", timer=SequenceTimer(), hf_revision="test-sha")
     caption: Caption = from_dict(
         Caption,
         dict(
@@ -378,3 +380,40 @@ def test_table_blueprint_pairs_the_scene_with_the_headset_pane_and_its_projected
     assert scene.origin == "/world" and scene.contents == preview_world_contents()
     headset: Show3dCamera = next(camera for camera in CAMERAS if (camera.rig, camera.cam) == (1, 0))
     assert pane.origin == schema.pinhole_path(1, 0) and pane.contents == pane_contents(headset)
+
+
+def test_camera_logging_overlaps_remaining_encodes(tmp_path: Path, tiny_scene: Path, monkeypatch) -> None:
+    from threading import Event
+
+    from dataforge import timing, writing
+    from dataforge.datasets import show3d_layers
+
+    first_logged = Event()
+    logged: list[str] = []
+    clock = [10.0]
+
+    def encode(source, destination, **kwargs):
+        if source.stem == "headset1":
+            assert first_logged.wait(timeout=5.0), "logging waited for every encoder"
+        destination.write_bytes(source.read_bytes())
+        return 4
+
+    def log_video(recording, clip, entity, **kwargs):
+        assert clip.read_bytes() == (tiny_scene / clip.name).read_bytes()
+        logged.append(clip.name)
+        if clip.stem == "headset0":
+            first_logged.set()
+        else:
+            # Logging time after the last encoder must not enter transcode time.
+            clock[0] = 100.0
+
+    monkeypatch.setattr(show3d_layers, "transcode_mp4_gray", encode)
+    monkeypatch.setattr(show3d_layers, "log_video_stream", log_video)
+    monkeypatch.setattr(video_encoding, "perf_counter", lambda: clock[0])
+    scene = show3d_layers.read_scene(tiny_scene, scene_key="synthetic")
+    timer = timing.SequenceTimer()
+    with writing.atomic_recording(tmp_path / "base.rrd", recording_id="test") as recording:
+        show3d_layers.log_cameras(recording, scene, tmp_path / "clips", timer)
+    assert logged == ["headset0.mp4", "headset1.mp4"]
+    assert list((tmp_path / "clips").iterdir()) == []
+    assert timer.stage_s["transcode"] == 0.0

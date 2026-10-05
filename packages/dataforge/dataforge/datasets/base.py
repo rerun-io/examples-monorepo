@@ -15,14 +15,19 @@ discovery to conversion (a directory, or a small record of parsed path parts).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar
 
+import rerun as rr
 import rerun.blueprint as rrb
+from serde import serde
 
-from dataforge import paths
+from dataforge import paths, writing
 from dataforge.identity import SequenceIdentity
+from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
 
 
@@ -51,6 +56,32 @@ class DataforgeDatasetConfig:
         return dataset
 
 
+@dataclass
+class FrameLimitedConfig(DataforgeDatasetConfig):
+    """Config of a dataset that can convert a prefix of each sequence as a preview."""
+
+    frame_limit: int | None = None
+    """Convert only the first N frames, into output_root/preview-first<N>/, so a preview never overwrites or skips a full conversion."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class RemoteSequence:
+    """One sequence as the source lists it, before anything is downloaded (``dataforge-download --list-remote``).
+
+    Lets a caller with a small disk fetch, convert and prune in batches: download and convert with
+    ``--sequences`` set to a batch of keys, then delete that batch's ``files``.
+    """
+
+    key: str
+    """Value the dataset config's ``sequences`` accepts to download or convert just this sequence."""
+    size_bytes: int
+    """Bytes ``download()`` fetches for ``files``; shared files (calibration, models, annotations) are not counted."""
+    files: tuple[str, ...]
+    """Raw-root-relative paths only this sequence uses, safe to delete once it is converted; empty when the
+    source packs several sequences into one archive."""
+
+
 ConfigT = TypeVar("ConfigT", bound=DataforgeDatasetConfig)
 """Config type a concrete dataset is parameterized by (simplecv's sequence-loader idiom)."""
 
@@ -66,10 +97,78 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
+        self.timer: SequenceTimer = SequenceTimer()
+        """Stage clock of the sequence being converted.
+
+        dataforge-convert installs a fresh one before every sequence; converters
+        time stages with self.timer.stage(name) and report self.timer.capture_s.
+        """
+
+    def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
+        """Layer destinations for one sequence; a ``FrameLimitedConfig`` preview lands in its own tree."""
+        frame_limit: int | None = self.config.frame_limit if isinstance(self.config, FrameLimitedConfig) else None
+        return paths.layer_targets(identity, self.layers, frame_limit=frame_limit)
+
+    def pending_layers(self, identity: SequenceIdentity, *, force: bool, roots: Iterable[Path]) -> tuple[dict[str, Path], list[str]]:
+        """First half of a conversion: the sequence's targets and, in order, the layers it still has to write.
+
+        Refuses destinations (and the work directory) beneath ``roots``, the dataset's
+        protected inputs, before anything is read. A layer already published is pending
+        only under ``force``.
+        """
+        targets: dict[str, Path] = self.targets(identity)
+        paths.require_outside([*targets.values(), paths.work_root()], roots=roots)
+        pending: list[str] = [layer for layer, target in targets.items() if not writing.should_skip(target, force=force)]
+        return targets, pending
+
+    def write_layers(
+        self,
+        identity: SequenceIdentity,
+        targets: Mapping[str, Path],
+        pending: Sequence[str],
+        writers: Mapping[str, Callable[[rr.RecordingStream], None]],
+        *,
+        together: Callable[[dict[str, rr.RecordingStream]], None] | None = None,
+    ) -> None:
+        """Second half of a conversion: open, write and publish every pending layer, timed as ``write:<layer>``.
+
+        A layer with an entry in ``writers`` is written alone, in ``pending`` order. The
+        pending layers without one are opened together and handed to ``together``, for
+        layers fed by one pass over a shared read (EPFL's pose CSVs); it times its own work.
+        """
+        for layer in pending:
+            if layer in writers:
+                with self.timer.stage(f"write:{layer}"), self.layer_recording(identity, layer, targets[layer]) as recording:
+                    writers[layer](recording)
+        rest: list[str] = [layer for layer in pending if layer not in writers]
+        if not rest:
+            return
+        if together is None:
+            raise ValueError(f"no writer for pending layers {rest}")
+        with ExitStack() as stack:
+            together({layer: stack.enter_context(self.layer_recording(identity, layer, targets[layer])) for layer in rest})
+
+    def layer_recording(self, identity: SequenceIdentity, layer: str, target: Path) -> AbstractContextManager[rr.RecordingStream]:
+        """Open one layer's atomic recording; see ``writing.atomic_recording``.
+
+        Only the base layer embeds the dataset's default blueprint and Rerun's own
+        ``RecordingInfo``; a derived layer stacks onto it under the same recording id.
+        """
+        base: bool = layer == paths.BASE_LAYER
+        return writing.atomic_recording(
+            target,
+            recording_id=identity.recording_id,
+            default_blueprint=self.default_blueprint() if base else None,
+            send_properties=base,
+        )
 
     @abstractmethod
     def download(self) -> None:
         """Fetch (or verify) the raw corpus this dataset converts from."""
+
+    def remote_sequences(self) -> list[RemoteSequence]:
+        """Every sequence the source offers, without downloading it; see ``RemoteSequence``."""
+        raise NotImplementedError(f"{type(self).__name__} cannot list its source")
 
     @abstractmethod
     def discover(self) -> list[tuple[SequenceIdentity, SourceT]]:

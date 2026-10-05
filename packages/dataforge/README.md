@@ -193,12 +193,13 @@ imu-left, 129 mm away and rotated. Aria Gen1 records its cameras sideways, so
 our frames and every pixel coordinate on them — the pinholes and the
 control-point detections alike — are turned **90° clockwise** from LaMAria's
 published files, and the calibration is turned with them
-([`rotate_camera_calib_cw90deg`](https://facebookresearch.github.io/projectaria_tools/docs/data_utilities/core_code_snippets/calibration),
-which swaps the image size, moves the principal point to `(h - 1 - cy, cx)` and
+(simplecv's `fisheye624.rotate_cw90`, projectaria-tools'
+[`rotate_camera_calib_cw90deg`](https://facebookresearch.github.io/projectaria_tools/docs/data_utilities/core_code_snippets/calibration)
+repeated operation for operation, which swaps the image size, moves the principal point to `(h - 1 - cy, cx)` and
 turns `device_T_cam` about the optical axis), so the scene is upright and the
 calibration still describes it. The capture property `image_rotation_cw_deg`
 records the turn; the pGT is *not* turned, because it poses the published,
-unrotated camera. Everything comes out of the VRS device calibration via projectaria-tools: the
+unrotated camera. Everything comes out of the VRS device calibration (its `calib_json` tag, read by `dataforge.aria`): the
 published JSON has no RGB camera and no imu-left, and is used to cross-check the
 transform chain rather than to build it.
 
@@ -289,7 +290,7 @@ are cleaned beneath its `work/` directory, including on failure.
 Consumers can leave `hand_mesh`
 unregistered to avoid its storage cost; a follow-up can coarsen its clock.
 HOT3D BOP models are renumbered across releases, so mesh IDs resolve by name.
-Download discards `KHR_texture_transform` UV transforms so Rerun 0.37 can load
+Download discards `KHR_texture_transform` UV transforms so Rerun 0.38.1 can load
 the GLBs, then deletes the raw GLBs after the stripped assets are saved.
 The keyboard golden requires `in_ego_fov_fraction < 0.05`;
 it is not always behind both cameras. Source poses remain unchanged.
@@ -313,7 +314,7 @@ Each recording records the Hub commit it was built from as
 | variable | default | purpose |
 | --- | --- | --- |
 | `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds, blueprints and sidecars go; set it for convert **and** register |
-| `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to |
+| `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to; the exoego datasets default `--root` to `$DATAFORGE_RAW_ROOT/<dataset command>` (both HOT3D devices share `hot3d`), with source subfolders such as UmeTrack's `raw_data/` inside |
 | `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang. Check yours with `ffmpeg -hide_banner -encoders \| grep av1_nvenc` |
 
 Paths in `--root`/`--sequence` and the defaults above are relative to
@@ -334,8 +335,11 @@ members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
 `calibration.json` as one validated `CalibratedCamera` per camera: model,
 extrinsics, resolution, and the follow frame derived from them),
 `transports.py` (`local_verify`, `hf_fetch`, and the resuming `http_fetch` plus
-its Apache index parser), and `aria.py` (the Aria Gen1 VRS and LaMAria
-ground-truth readers).
+its Apache index parser), `vrs.py` (one VRS header scan, then the JPEG,
+H.265 and IMU readers seek to their records), and `aria.py` (the Aria device
+calibration, frame and IMU readers and the full-lens projection that hot3d, the
+Gen2 pilot and LaMAria share; LaMAria's rig and ground-truth readers are
+`datasets/lamaria_source.py`).
 
 Two of those carry their weight for datasets that do not ship video.
 `encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so
@@ -369,19 +373,6 @@ registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before. Duplicates are skipped, which keeps a re-register
 idempotent; after regenerating a layer use `--replace`, because a skipped
 duplicate leaves the server serving the old file and says nothing.
-
-### The layer rule
-
-Every dataset follows it; `lamaria` is the reference implementation. **base** is a
-faithful conversion of the raw source and the only layer that needs it: it skips on
-its own rrd, and once it is published the bulk source is deleted, leaving only the
-small sidecars (calibration, ground truth) on disk. A **derived** layer reads the
-base rrd plus those sidecars — never the raw source — skips on its own rrd and
-rebuilds under `--force`, so regenerating one across a corpus is `rm <layer>/*.rrd`,
-a convert, and a `register --replace`. Capture properties live in base; a derived
-layer is written with `send_properties=False` and carries only its own
-`property:<layer>:*` beside its data, never a properties-only layer. Layers share
-nothing but the recording id, which is what stacks them onto one segment.
 
 ### The layer rule
 
@@ -435,3 +426,30 @@ Conventions this package follows — beartype under `PIXI_DEV_MODE`, thin `tools
 shims, jaxtyping annotations, `pixi run -e dataforge-dev {lint,typecheck,deadcode,tests}` —
 are the monorepo ones in the root `AGENTS.md`. The logging schema is
 `packages/simplecv/docs/exoego_schema.md`.
+
+## Conventions for exoego ports
+
+Use the [dataset documentation template](docs/dataset-doc-template.md) for every
+port. Apply these rules:
+
+- Present joints retain shipped confidence; if none is shipped, use 1.0. Missing
+  joints and uncovered COCO slots use NaN positions and confidence 0.0.
+- `video_time` is the true timeline; `frame_index` is the second timeline. Keep
+  each stream's native rate and record its clock origin in
+  `property:capture:clock_source`.
+- Write `<pinhole>/coco133_uv` only from shipped 2D measurements.
+- Derived 2D goes to `<pinhole>/coco133_uv_projected` in the `projections` layer:
+  `coco133_xyz` through the camera's own lens model, with
+  `property:projections:derived_from` and `property:projections:camera_model`.
+- Shared output helpers live in `dataforge.hands`, `dataforge.objects`, and
+  `dataforge.meshes`; skinning and source format adapters stay dataset-specific.
+- Conversion and registration append typed timing records under `timing/`.
+  Converters time work with `self.timer.stage("fetch")`
+  and `self.timer.stage("write:<layer>")`; nested stages overlap and must not be summed.
+  Report the base `video_time` span in seconds through `self.timer.capture_s`.
+  Read either JSONL file with `dataforge.timing.load_records(path, ConvertRecord)`
+  or `load_records(path, RegisterRecord)`.
+- Register review subsets with `--catalog-name <dataset>-sample --sequences
+  <recording_id ...>`. File identities stay unchanged.
+- Compare layer data with `python tools/dev/compare_layers.py <a.rrd> <b.rrd>`
+  in the dataforge environment. Float tolerance defaults to 1e-6.

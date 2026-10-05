@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     # catalog-common supplies numpy, scipy, jaxtyping, av, opencv, pyserde, rerun-sdk.
     "simplecv",
-    # Catalog result-layer publishing; dataforge is a linux-only member (projectaria-tools has no macOS 13 wheel).
+    # Catalog result-layer publishing; dataforge is a linux-only member.
     "dataforge; sys_platform == 'linux'",
 ]
 

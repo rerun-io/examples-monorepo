@@ -18,11 +18,15 @@ from conftest import gray_frame, png_frame
 from jaxtyping import UInt8
 from numpy import ndarray
 
+from dataforge import writing
+from dataforge.logging_toolkit import log_video_stream
 from dataforge.video_encoding import (
     FrameSource,
     encode_frames_to_mp4,
+    remux_prefix,
     require_av1_nvenc,
     resolve_ffmpeg,
+    work_dir,
 )
 
 NUM_FRAMES: int = 48
@@ -49,6 +53,8 @@ rate-distortion behaviour.
 """
 WRONG_ROTATION_ERROR_FLOOR: float = 30.0
 """Mean absolute error the *wrong* rotation must exceed, so the ceiling above is a real check."""
+AV1_CLIP: Path = Path(__file__).parent / "fixtures" / "av1_48f_192x160.mp4"
+"""The checked-in 48-sample AV1 clip (``tests/fixtures/README.md``); remuxing it needs no GPU."""
 
 
 def png_bytes() -> Iterator[bytes]:
@@ -341,3 +347,41 @@ def test_env_var_ffmpeg_is_used_when_no_binary_is_passed(tmp_path: Path, monkeyp
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     output: Path = tmp_path / "env.mp4"
     assert encode_frames_to_mp4(png_bytes(), output, source=FrameSource("png"), fps=FPS) == NUM_FRAMES
+
+
+# ── remux_prefix and work_dir ─────────────────────────────────────────────
+
+
+def packets(path: Path) -> list[tuple[int, bytes]]:
+    """``(pts, payload)`` of every timed packet of the first video stream, in stream order."""
+    with av.open(str(path)) as container:
+        return [(packet.pts, bytes(packet)) for packet in container.demux(container.streams.video[0]) if packet.pts is not None]
+
+
+def test_remux_prefix_copies_the_first_packets_unchanged(tmp_path: Path) -> None:
+    prefix: Path = tmp_path / "prefix.mp4"
+    remux_prefix(AV1_CLIP, prefix, 20)
+    assert packets(prefix) == packets(AV1_CLIP)[:20]
+    assert video_stream_facts(prefix)[:2] == ("av1", 20)
+
+
+def test_remux_prefix_refuses_a_source_shorter_than_the_count(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"av1_48f_192x160.mp4: only 48 packets, expected 49"):
+        remux_prefix(AV1_CLIP, tmp_path / "prefix.mp4", 49)
+
+
+@pytest.mark.integration
+def test_a_remuxed_prefix_logs_as_that_many_samples(tmp_path: Path) -> None:
+    prefix: Path = tmp_path / "prefix.mp4"
+    remux_prefix(AV1_CLIP, prefix, 20)
+    with writing.atomic_recording(tmp_path / "prefix.rrd", recording_id="test", send_properties=False) as recording:
+        assert log_video_stream(recording, prefix, "/world/rig_00/cam_00/pinhole/video") == 20
+
+
+def test_work_dir_is_private_under_the_work_root_and_removed_on_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
+    with work_dir("clips-") as first, work_dir("clips-") as second:
+        assert first.parent == second.parent == tmp_path / "rrd/work" and first != second
+        assert first.name.startswith("clips-")
+        (first / "a.mp4").write_bytes(b"clip")
+    assert list((tmp_path / "rrd/work").iterdir()) == []

@@ -1,11 +1,12 @@
 """Shared AV1 encoders for frame iterables and grayscale MP4 transcoding.
 
 Datasets that ship image sequences instead of video get their video here:
-``encode_frames_to_mp4`` pipes PNG or raw frames straight into ffmpeg's stdin, so
+``encode_frames_to_mp4`` pipes PNG, JPEG or raw frames straight into ffmpeg's stdin, so
 a converter never materializes a decoded frame tree on disk. Two properties are
 load-bearing for the Rerun side and are enforced rather than documented — the ban
 on B-frames (``rr.VideoStream`` rejects reordered samples) and the sample-count
 check against the finished container.
+Datasets that ship JPEGs decoded on the CPU (HOT3D) feed planes from ``dataforge.jpeg``.
 
 This module knows nothing about Rerun: it turns frames into an mp4 and counts
 what landed. ``dataforge.logging_toolkit`` remuxes that mp4 into a recording, and
@@ -19,19 +20,108 @@ import functools
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Literal, TypeAlias
 
 import av
 
-FrameKind: TypeAlias = Literal["png", "gray8", "rgb24"]
+from dataforge import paths
+from dataforge.timing import SequenceTimer
+
+AV1_CQ: int = 36
+"""Port-wide AV1 NVENC quality (binding brief). Selected on RTX 5090 with SHOW3D: CQ36 is
+the smallest tested output above 40 dB median.
+
+Keyboard / birdhouse (MB, dB, seconds): builtin 53.8/44.61/9.9,
+117.5/44.77/15.0; CQ28 93.2/45.58/9.6, 188.7/45.43/12.1;
+CQ32 60.1/44.19/9.5, 128.0/44.03/12.1; CQ36 37.2/43.05/9.5,
+87.6/42.58/12.0. Source: 62.4 / 127.4 MB; 20 frames per camera.
+"""
+AV1_GOP: int = 60
+"""Port-wide AV1 NVENC keyframe interval in frames (binding brief): one second at
+SHOW3D's 60 fps, two at HO-Cap's 30 Hz."""
+
+
+@contextlib.contextmanager
+def work_dir(prefix: str) -> Iterator[Path]:
+    """A private scratch directory under ``paths.work_root()``, removed on exit."""
+    root: Path = paths.work_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as work:
+        yield Path(work)
+
+
+def remux_prefix(source: Path, target: Path, count: int) -> None:
+    """Copy the first N packets of the first video stream into an MP4 without decoding or encoding."""
+    with av.open(str(source)) as container, av.open(str(target), "w") as output:
+        stream = container.streams.video[0]
+        destination = output.add_stream_from_template(stream, opaque=True)
+        seen: int = 0
+        for packet in container.demux(stream):
+            if packet.pts is None:
+                continue
+            if seen >= count:
+                break
+            packet.stream = destination
+            output.mux(packet)
+            seen += 1
+        if seen != count:
+            raise ValueError(f"{source}: only {seen} packets, expected {count}")
+
+
+@contextlib.contextmanager
+def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceTimer) -> Iterator[Iterator[Path]]:
+    """Encode with three workers; yield clips in submission order while later jobs run.
+
+    Each clip is deleted when the caller requests the next one, so at most one finished clip waits on disk
+    for logging. Cleanup waits for encoders and removes every leftover, including on failure.
+    Transcode measures first submit to final encode completion, excluding logging.
+    """
+    finished: list[float] = []
+
+    def encode(job: Callable[[], None]) -> None:
+        try:
+            job()
+        finally:
+            finished.append(perf_counter())
+
+    started: float = perf_counter()
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures: list[Future[None]] = [executor.submit(encode, job) for _, job in jobs]
+
+            def ready() -> Iterator[Path]:
+                for (clip, _), future in zip(jobs, futures, strict=True):
+                    future.result()
+                    yield clip
+                    clip.unlink()
+
+            yield ready()
+    finally:
+        if finished:
+            timer.add("transcode", max(finished) - started)
+        for clip, _ in jobs:
+            clip.unlink(missing_ok=True)
+
+
+FrameKind: TypeAlias = Literal["hevc", "png", "jpeg", "gray8", "rgb24", "yuv420p", "yuv422p", "yuv444p"]
 """How one element of an encoder frame iterable is laid out."""
 
-RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
+RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24", "yuv420p": "yuv420p", "yuv422p": "yuv422p", "yuv444p": "yuv444p"}
 """ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
+
+ENCODED_INPUTS: dict[FrameKind, tuple[str, ...]] = {
+    "png": ("-f", "image2pipe", "-framerate", "{fps}", "-c:v", "png"),
+    "jpeg": ("-f", "image2pipe", "-framerate", "{fps}", "-c:v", "mjpeg"),
+    "hevc": ("-f", "hevc", "-r", "{fps}"),
+}
+"""ffmpeg input options for each self-describing frame kind (encoded images, a raw Annex-B stream)."""
 
 TRANSPOSE_FILTERS: dict[int, tuple[str, ...]] = {
     0: (),
@@ -59,14 +149,17 @@ class FrameSource:
     """How the caller's frame iterable is laid out for ffmpeg's stdin."""
 
     kind: FrameKind
-    """``"png"`` feeds encoded PNG bytes through ``image2pipe``; the raw kinds feed ``rawvideo`` planes."""
+    """``"png"`` / ``"jpeg"`` feed encoded image bytes through ``image2pipe``, ``"hevc"`` an Annex-B stream; the raw kinds feed ``rawvideo`` planes."""
     width: int | None = None
     """Frame width in pixels; required for the raw kinds, which carry no header."""
     height: int | None = None
     """Frame height in pixels; required for the raw kinds, which carry no header."""
 
+    full_range: bool = False
+    """JPEG colour planes require explicit full-to-limited range conversion."""
+
     def __post_init__(self) -> None:
-        if self.kind == "png":
+        if self.kind in ENCODED_INPUTS:
             return
         if self.width is None:
             raise ValueError(f"a {self.kind} source needs an explicit width: rawvideo frames carry no header")
@@ -75,8 +168,8 @@ class FrameSource:
 
     def input_args(self, *, fps: int) -> list[str]:
         """ffmpeg input-side arguments that describe this layout on ``pipe:0``."""
-        if self.kind == "png":
-            return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", "png", "-i", "pipe:0"]
+        if self.kind in ENCODED_INPUTS:
+            return [*(arg.format(fps=fps) for arg in ENCODED_INPUTS[self.kind]), "-i", "pipe:0"]
         return [
             "-f",
             "rawvideo",
@@ -141,14 +234,18 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
-def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int) -> int:
+def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int, crop: tuple[int, int, int, int] | None = None) -> int:
     """Decode a file to gray and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
+    Optional crop is (width, height, x, y), applied before grayscale conversion.
     """
     if frames <= 0:
         raise ValueError("frames must be positive")
+    if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
+        raise ValueError("crop requires positive dimensions and nonnegative offsets")
+    crop_filter: str = "" if crop is None else "crop=" + ":".join(str(value) for value in crop) + ","
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     command: list[str] = [
@@ -165,7 +262,7 @@ def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: in
         "0:v:0",
         "-an",
         "-vf",
-        f"format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}",
+        f"{crop_filter}format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}",
         "-fps_mode",
         "passthrough",
         *_nvenc_args(gop=gop, cq=cq),
@@ -192,6 +289,7 @@ def encode_frames_to_mp4(
     cq: int = 32,
     rotate_cw_quarter_turns: int = 0,
     ffmpeg: Path | None = None,
+    filter_threads: int | None = None,
 ) -> int:
     """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
 
@@ -210,7 +308,7 @@ def encode_frames_to_mp4(
     pipes are finite, so writing a large frame while stderr sits full deadlocks.
 
     Args:
-        frames: One encoded PNG (``kind="png"``) or one raw plane per frame.
+        frames: One encoded PNG/JPEG (``kind="png"``/``"jpeg"``) or all packed raw planes for one frame.
         output: mp4 to write; its parent directory must exist.
         source: Layout of the ``frames`` elements.
         fps: Nominal frame rate stamped into the container. Real per-sample
@@ -223,6 +321,7 @@ def encode_frames_to_mp4(
             and height, and a caller that also logs a calibration for these
             pixels must roll it the same way (``basalt.rotate_camera_cw``).
         ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
+        filter_threads: CPU filter workers; cap when camera jobs also decode in parallel.
 
     Returns:
         Number of frames fed into the encoder.
@@ -232,6 +331,8 @@ def encode_frames_to_mp4(
     """
     if rotate_cw_quarter_turns not in TRANSPOSE_FILTERS:
         raise ValueError(f"{rotate_cw_quarter_turns} is not a clockwise quarter turn count; it must be one of {sorted(TRANSPOSE_FILTERS)}")
+    if filter_threads is not None and filter_threads < 1:
+        raise ValueError("filter_threads must be positive")
     binary: Path = resolve_ffmpeg() if ffmpeg is None else ffmpeg
     require_av1_nvenc(binary)
     command: list[str] = [
@@ -240,9 +341,16 @@ def encode_frames_to_mp4(
         "-loglevel",
         "error",
         "-y",
+        *(["-filter_threads", str(filter_threads)] if filter_threads is not None else []),
         *source.input_args(fps=fps),
         "-vf",
-        ",".join([*TRANSPOSE_FILTERS[rotate_cw_quarter_turns], EVEN_DIMENSION_AND_PIXEL_FORMAT]),
+        ",".join(
+            [
+                *TRANSPOSE_FILTERS[rotate_cw_quarter_turns],
+                *(["scale=in_range=full:out_range=limited"] if source.full_range else []),
+                EVEN_DIMENSION_AND_PIXEL_FORMAT,
+            ]
+        ),
         *_nvenc_args(gop=gop, cq=cq),
         str(output),
     ]

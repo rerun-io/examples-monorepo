@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import GenericAlias
 from typing import Literal, TypeAlias, TypeVar
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float64, Int64
 from numpy import ndarray
-from serde import SerdeError, serde
-from serde.json import from_json
+from serde import serde
 
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
 from dataforge.logging_toolkit import frame_index_column, time_column
+from dataforge.records import read_json
 
 Split: TypeAlias = Literal["train", "test"]
 
@@ -270,12 +268,6 @@ class FrameClock:
         return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
 
 
-    def send_sparse(self, recording: rr.RecordingStream, path: str, positions: list[int], columns: Iterable[rr.ComponentColumn]) -> None:
-        """Send available rows on both recording clocks; omit absent measurements."""
-        if positions:
-            rr.send_columns(path, indexes=self.indexes(positions), columns=columns, recording=recording)
-
-
 T = TypeVar("T")
 RowT = TypeVar("RowT")
 
@@ -335,17 +327,6 @@ class BlurInfo:
                     box[:] = [min(box[0], box[2]), min(box[1], box[3]), max(box[0], box[2]), max(box[1], box[3])]
                     normalized += 1
         object.__setattr__(self, "num_normalized_boxes", normalized)
-
-
-SourceT = TypeVar("SourceT")
-
-
-def read_json(path: Path, cls: type[SourceT] | GenericAlias, *, text: str | None = None) -> SourceT:  # noqa: UP047 — beartype requires legacy generics
-    """Decode a third-party record, naming the file on schema/parser errors."""
-    try:
-        return from_json(cls, path.read_text() if text is None else text)
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: {error}") from error
 
 
 def read_headset_calibrations(scene_dir: Path, clock: FrameClock) -> dict[str, HeadsetCalibration]:

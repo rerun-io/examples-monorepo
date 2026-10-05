@@ -25,6 +25,9 @@ from rerun.recording_stream import RecordingStream
 from dataforge import schema
 from dataforge.identity import SequenceIdentity
 
+CONVERT_SCHEMA_VERSION: str = "2"
+"""Schema version shared by recording properties and conversion timing records."""
+
 SEGMENT_LINK_COLUMN: str = "recording link"
 """The segment table's generated URI column; the one the table blueprint turns into a preview."""
 
@@ -179,7 +182,8 @@ def recording_to(
             and the wall-clock start time). See ``atomic_recording``.
     """
     with rr.RecordingStream(application_id=application_id, recording_id=recording_id, send_properties=send_properties) as recording:
-        recording.save(path, default_blueprint=default_blueprint)
+        # The footer lets the catalog serve each chunk whole (meshes.log_mesh_batch relies on it).
+        recording.save(path, default_blueprint=default_blueprint, write_footer=True)
         yield recording
 
 
@@ -294,4 +298,4 @@ def send_capture_properties(
         "capture",
         rr.AnyValues(schema=schema.DATAFORGE_SCHEMA_VERSION, num_frames=num_frames, num_cameras=num_cameras, **present),
     )
-    recording.send_property("convert", rr.AnyValues(version="1"))
+    recording.send_property("convert", rr.AnyValues(version=CONVERT_SCHEMA_VERSION))

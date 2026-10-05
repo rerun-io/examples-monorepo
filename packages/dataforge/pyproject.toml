@@ -7,8 +7,6 @@ dependencies = [
     # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
     #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv
     "tyro",
-    # VRS reader for the LaMAria Aria Gen1 sequences (dataforge.aria).
-    "projectaria-tools>=2.2",
 ]
 
 [build-system]
@@ -34,6 +32,9 @@ paths = ["dataforge", "tests"]
 # Tyro-facing verb entry points and config fields (the CLI shims call them), plus the
 # keyword-only parameters a test fake must accept to match the real catalog API.
 ignore_names = [
+    # VRS binary header fields retained to match FileFormat.h positional unpacking.
+    "previous_record_size",
+    "uncompressed_size",
     "main",
     "rr_config",
     "sequence",
@@ -75,6 +76,11 @@ ignore_names = [
     "hand_pose_version",
     "object_pose_version",
     "captions_version",
+    # Timing record fields serialized by pyserde.
+    "converter_version",
+    "host",
+    # MagicMock configuration in the fake catalog (tests/test_register.py).
+    "return_value",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

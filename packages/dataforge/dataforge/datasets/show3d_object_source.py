@@ -11,7 +11,8 @@ from numpy import ndarray
 from serde import serde
 
 from dataforge.datasets.show3d_calibration import validate_transform
-from dataforge.datasets.show3d_source import DEFAULT_CONFIDENCE, FrameClock, FrameInfo, read_json
+from dataforge.datasets.show3d_source import DEFAULT_CONFIDENCE, FrameClock, FrameInfo
+from dataforge.records import read_json
 
 
 @serde

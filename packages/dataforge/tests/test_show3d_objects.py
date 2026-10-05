@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rerun.chunk as rrc
-from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, read_back, read_chunks, recording_properties
+from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, raw_asset, read_back, read_chunks, recording_properties
 from jaxtyping import Float32
 from numpy import ndarray
 from serde import from_dict
@@ -21,8 +21,8 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, skin
 from dataforge import paths, schema, transports
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
-from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, write_hand_mesh_layer
-from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, strip_texture_transform, stripped_mesh
+from dataforge.datasets.show3d_hands import HandFrame, HandPose, write_hand_mesh_layer
+from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, stripped_mesh
 from dataforge.datasets.show3d_object_source import CLOCK_TOLERANCE_S, ObjectFrame, ObjectTrack, read_object_frames
 from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
@@ -38,10 +38,12 @@ from dataforge.datasets.show3d_source import (
     hand_profile_file,
     mesh_name,
     object_pose_file,
-    read_json,
     scene_id_parts,
 )
+from dataforge.hands import HAND_SIDES
 from dataforge.identity import SequenceIdentity
+from dataforge.objects import strip_texture_transform
+from dataforge.records import read_json
 
 
 def test_object_record_accepts_empty_unposed_rows_and_checks_proper_rotation() -> None:
@@ -66,8 +68,7 @@ def test_mesh_aliases_are_unique_and_mapping_is_disjoint() -> None:
 @pytest.mark.integration
 def test_mapped_names_resolve_in_bop_census() -> None:
     path: Path = SHOW3D_RAW / "assets/hot3d_bop/object_models/models_info.json"
-    if not path.is_file():
-        pytest.skip(f"SHOW3D model census absent: {path}")
+    raw_asset("SHOW3D model census", path)
     records: dict[str, MeshInfo] = read_json(path, dict[str, MeshInfo])
     names: set[str] = {record.name for record in records.values()}
     assert all(name in names for name in OBJECTS.values() if name is not None)
@@ -76,8 +77,7 @@ def test_mapped_names_resolve_in_bop_census() -> None:
 def test_object_table_covers_both_indexes() -> None:
     indexes: list[Path] = [SHOW3D_RAW / f"dataset_index_{split}.parquet" for split in ("train", "test")]
     for path in indexes:
-        if not path.is_file():
-            pytest.skip(f"SHOW3D index absent: {path}")
+        raw_asset("SHOW3D index", path)
     aliases: set[str] = set(OBJECTS)
     for path in indexes:
         assert {scene_id_parts(scene)[0] for scene in pq.read_table(path, columns=["scene_id"]).column("scene_id").to_pylist()} <= aliases
@@ -184,8 +184,7 @@ def object_scene(show3d_scene_inputs: Show3dSceneInputs, tmp_path_factory: pytes
     inputs: Show3dSceneInputs = show3d_scene_inputs
     identity: SequenceIdentity = inputs.identity
     path: Path = SHOW3D_RAW / object_pose_file(identity.sequence_key)
-    if not path.is_file():
-        pytest.skip(f"SHOW3D object asset absent: {path}")
+    raw_asset("SHOW3D object asset", path)
     alias: str = scene_id_parts(identity.parts[1])[0]
     try:
         asset: MeshAsset = stripped_mesh(SHOW3D_RAW, alias)
@@ -251,19 +250,30 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         "mesh_source": "bop-benchmark/hot3d",
     }
     hand_chunks: list[rrc.Chunk] = read_chunks(build.output / "hand_mesh.rrd")
-    for side in HAND_SIDES:
-        temporal: list[rrc.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side.name) and not c.is_static]
+    for hand in HAND_SIDES:
+        temporal: list[rrc.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(hand.name) and not c.is_static]
         # One row per frame: skinned vertices where Meta trusts the hand, an empty row otherwise so the viewer holds nothing.
         assert sum(c.num_rows for c in temporal) == len(build.hands)
-        trusted: list[bool] = [f.hand_poses[side.key].wrist_rotation is not None and f.hand_poses[side.key].trusted for f in build.hands]
+        trusted: list[bool] = [f.hand_poses[hand.key].wrist_rotation is not None and f.hand_poses[hand.key].trusted for f in build.hands]
         rows: dict[int, int] = mesh_vertex_counts(temporal)
         assert [rows[f.index] > 0 for f in build.hands] == trusted
         assert {n for n in rows.values() if n} == {len(build.profile.mesh_vertices)}
         assert all(set(c.timeline_names) == {"video_time", "frame_index"} for c in temporal)
-        assert any(
-            c.is_static and str(c.entity_path) == schema.hand_mesh_path(side.name) and "Mesh3D:triangle_indices" in c.to_record_batch().schema.names
+        # Topology rides on each vertex chunk and is never static (meshes module docstring).
+        assert not any(
+            c.is_static and str(c.entity_path) == schema.hand_mesh_path(hand.name) and "Mesh3D:triangle_indices" in c.to_record_batch().schema.names
             for c in hand_chunks
         )
+        # Each posed chunk holds exactly one triangle list, on its first trusted row; every other row is null.
+        posed: list[rrc.Chunk] = [c for c in temporal if any(n for n in mesh_vertex_counts([c]).values())]
+        assert posed
+        for chunk in posed:
+            batch = chunk.to_record_batch()
+            vertices = batch.column(next(n for n in batch.schema.names if "vertex_positions" in n)).to_pylist()
+            triangles = batch.column(next(n for n in batch.schema.names if "triangle_indices" in n)).to_pylist()
+            first = next(row for row, value in enumerate(vertices) if value)
+            assert [row for row, value in enumerate(triangles) if value is not None] == [first]
+            assert len(triangles[first]) == len(build.profile.mesh_triangles)
     for layer in ("object_pose", "object_mesh", "hand_mesh"):
         path: Path = build.output / f"{layer}.rrd"
         assert rrc.RrdReader(path).recordings()[0].recording_id == build.identity.recording_id
@@ -274,11 +284,11 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
 @pytest.mark.golden
 def test_skinning_matches_shipped_landmarks_both_hands(object_scene: ObjectBuild) -> None:
     build: ObjectBuild = object_scene
-    for side in HAND_SIDES:
+    for hand_index, hand in enumerate(HAND_SIDES):
         poses: list[HandPose] = [
-            frame.hand_poses[side.key]
+            frame.hand_poses[hand.key]
             for frame in build.hands
-            if frame.hand_poses[side.key].wrist_rotation is not None and frame.hand_poses[side.key].landmarks_3d_mm is not None
+            if frame.hand_poses[hand.key].wrist_rotation is not None and frame.hand_poses[hand.key].landmarks_3d_mm is not None
         ]
         assert poses
         assert all(pose.joint_angles is not None for pose in poses)
@@ -287,10 +297,10 @@ def test_skinning_matches_shipped_landmarks_both_hands(object_scene: ObjectBuild
         wrists[:, :3, :3] = np.asarray([pose.wrist_rotation for pose in poses])
         wrists[:, :3, 3] = np.asarray([pose.wrist_translation for pose in poses])
         wrists[:, 3, 3] = 1.0
-        predicted: Float32[ndarray, "n 21 3"] = skin_landmarks(build.profile, angles, wrist_for_hand(wrists, side.model_index))
+        predicted: Float32[ndarray, "n 21 3"] = skin_landmarks(build.profile, angles, wrist_for_hand(wrists, hand_index))
         shipped: Float32[ndarray, "n 21 3"] = np.asarray([pose.landmarks_3d_mm for pose in poses], dtype=np.float32)
         error: float = float(np.linalg.norm(predicted - shipped, axis=-1).max())
-        print(f"{build.identity.sequence_key} hand {side.key}: max skinning error {error:.8f} mm")
+        print(f"{build.identity.sequence_key} hand {hand_index}: max skinning error {error:.8f} mm")
         assert error < 0.01
 
 
@@ -335,6 +345,7 @@ def test_convert_rebuilds_each_mesh_and_object_layer_without_video(
     assert capsys.readouterr().out.splitlines()[-1] == (
         f"done {key}: hand_pose, captions, object_pose, object_mesh, hand_mesh"
     )
+    assert dataset.timer.capture_s == {"SPI102": 9.749999999, "LYA722": 16.683333332}[build.identity.parts[0]]
     assert "commit_sha" not in dataset.__dict__
     targets: list[Path] = [output / layer / f"{build.identity.recording_id}.rrd" for layer in dataset.layers]
     for layer in ("object_pose", "object_mesh", "hand_mesh"):
