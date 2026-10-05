@@ -10,6 +10,7 @@ pub use pipeline::{
     VioError, VioPose, VioResult, VioStatus, check_imu_sample,
 };
 
+pub mod area;
 pub mod ba_base;
 pub mod calib;
 pub mod camera;

@@ -16,61 +16,7 @@ use rayon::prelude::*;
 
 use crate::frame::{Frameset, Luma, NUM_CAMERAS, SMALL_SIZE};
 
-/// Output rows per rayon task.
-const ROWS_PER_TASK: usize = 16;
-
-/// Downscale `src` by an integer factor into `dst`: each output pixel is the rounded (half up) mean of its `kx` x `ky` input
-/// block, per channel, where `kx = src.width / dst.width` and `ky = src.height / dst.height`.
-///
-/// # Arguments
-///
-/// * `src` - the input image.
-/// * `dst` - the output image; its size fixes the factors.
-///
-/// # Returns
-///
-/// `Ok(())` once `dst` holds the downscaled image.
-///
-/// # Errors
-///
-/// [`ImageError::InvalidImageSize`] when `src` is not an exact positive integer multiple of `dst` in both axes.
-///
-/// # Example
-///
-/// ```
-/// use kornia_image::{Image, ImageSize};
-/// use robocap_live::downsample::resize_area_u8;
-///
-/// let src = Image::<u8, 1>::new(ImageSize { width: 6, height: 3 }, vec![0, 3, 6, 9, 9, 9, 0, 3, 6, 9, 9, 9, 0, 3, 6, 9, 9, 9])?;
-/// let mut dst = Image::<u8, 1>::from_size_val(ImageSize { width: 2, height: 1 }, 0)?;
-/// resize_area_u8(&src, &mut dst)?;
-/// assert_eq!(dst.as_slice(), &[3, 9]);
-/// # Ok::<(), kornia_image::ImageError>(())
-/// ```
-pub fn resize_area_u8<const C: usize>(src: &Image<u8, C>, dst: &mut Image<u8, C>) -> Result<(), ImageError> {
-    let (sw, sh, dw, dh) = (src.width(), src.height(), dst.width(), dst.height());
-    if dw == 0 || dh == 0 || sw % dw != 0 || sh % dh != 0 || sw < dw || sh < dh {
-        return Err(ImageError::InvalidImageSize(sw, sh, dw, dh));
-    }
-    let (kx, ky) = (sw / dw, sh / dh);
-    let src_stride = sw * C;
-    let dst_stride = dw * C;
-    let src_data = src.as_slice();
-    dst.as_slice_mut().par_chunks_mut(ROWS_PER_TASK * dst_stride).enumerate().for_each(|(chunk, rows)| {
-        for (r, out) in rows.chunks_exact_mut(dst_stride).enumerate() {
-            let y = chunk * ROWS_PER_TASK + r;
-            let block = &src_data[y * ky * src_stride..(y + 1) * ky * src_stride];
-            if C == 1 && kx == 3 && ky == 3 {
-                kernels::area3_row(&block[..sw], &block[sw..2 * sw], &block[2 * sw..], out);
-            } else {
-                kernels::area_row_generic::<C>(block, src_stride, kx, ky, out);
-            }
-        }
-    });
-    Ok(())
-}
-
-mod kernels;
+pub use slam_rs::area::resize_area_u8;
 
 /// The small images of one frameset, by camera index.
 pub type SmallImages = [Option<Luma>; NUM_CAMERAS];
@@ -213,59 +159,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn the_3x3_kernel_matches_the_generic_box_mean_on_full_size_frames() -> Result<(), ImageError> {
-        let full = ImageSize { width: 1920, height: 1080 };
-        for seed in [1, 2] {
-            let src = Image::<u8, 1>::new(full, pseudo_random(1920 * 1080, seed))?;
-            let mut fast = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
-            resize_area_u8(&src, &mut fast)?;
-            let mut reference = vec![0u8; 640 * 360];
-            for (y, row) in reference.chunks_exact_mut(640).enumerate() {
-                kernels::area_row_generic::<1>(&src.as_slice()[3 * y * 1920..(3 * y + 3) * 1920], 1920, 3, 3, row);
-            }
-            assert_eq!(fast.as_slice(), reference.as_slice());
-        }
-        // The largest sum (9 x 255) stays 255.
-        let white = Image::<u8, 1>::from_size_val(full, 255)?;
-        let mut out = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
-        resize_area_u8(&white, &mut out)?;
-        assert!(out.as_slice().iter().all(|&v| v == 255));
-        Ok(())
-    }
-
-    #[test]
-    fn it_reproduces_pr270_slam_luma_on_a_structured_plane() -> Result<(), ImageError> {
-        // PR #270's slam_luma test: blocks of constant k plus 4 on one pixel of each block round back to k.
-        let mut plane = vec![0u8; 1920 * 1080];
-        for y in 0..1080 {
-            for x in 0..1920 {
-                plane[y * 1920 + x] = (x / 3 % 200) as u8 + if y % 3 == 0 && x % 3 == 0 { 4 } else { 0 };
-            }
-        }
-        plane[0] = 5;
-        let src = Image::<u8, 1>::new(ImageSize { width: 1920, height: 1080 }, plane)?;
-        let mut out = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
-        resize_area_u8(&src, &mut out)?;
-        assert_eq!(out.as_slice()[0], 1, "block sum 5: (5 + 4) / 9 = 1");
-        for (y, row) in out.as_slice().chunks_exact(640).enumerate() {
-            for (x, &value) in row.iter().enumerate() {
-                if (x, y) != (0, 0) {
-                    assert_eq!(value, (x % 200) as u8);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn generic_factors_and_channels_and_bad_sizes() -> Result<(), ImageError> {
-        let src = Image::<u8, 2>::new(ImageSize { width: 4, height: 2 }, vec![0, 10, 2, 20, 4, 30, 6, 40, 1, 11, 3, 21, 5, 31, 7, 41])?;
-        let mut dst = Image::<u8, 2>::from_size_val(ImageSize { width: 2, height: 1 }, 0)?;
-        resize_area_u8(&src, &mut dst)?;
-        assert_eq!(dst.as_slice(), &[2, 16, 6, 36]);
-        let mut bad = Image::<u8, 2>::from_size_val(ImageSize { width: 3, height: 1 }, 0)?;
-        assert!(resize_area_u8(&src, &mut bad).is_err());
-        Ok(())
-    }
 }

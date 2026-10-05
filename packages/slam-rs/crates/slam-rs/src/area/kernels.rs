@@ -1,13 +1,19 @@
 //! Row kernels of [`super::resize_area_u8`]: a NEON path for the 3x3 mono case on aarch64, scalar elsewhere.
 
 /// One output row of the generic box downscale. `block` holds the `ky` input rows (stride `src_stride`).
-pub(super) fn area_row_generic<const C: usize>(block: &[u8], src_stride: usize, kx: usize, ky: usize, out: &mut [u8]) {
+pub(super) fn area_row_generic<const C: usize>(
+    block: &[u8],
+    src_stride: usize,
+    kx: usize,
+    ky: usize,
+    out: &mut [u8],
+) {
     let area = (kx * ky) as u32;
     for (x, pixel) in out.chunks_exact_mut(C).enumerate() {
         for (channel, value) in pixel.iter_mut().enumerate() {
             let mut sum = 0u32;
             for dy in 0..ky {
-                let row = &block[dy * src_stride..(dy + 1) * src_stride];
+                let row = &block[dy * src_stride..];
                 for dx in 0..kx {
                     sum += u32::from(row[(x * kx + dx) * C + channel]);
                 }
@@ -37,8 +43,21 @@ pub(super) fn area3_row(r0: &[u8], r1: &[u8], r2: &[u8], out: &mut [u8]) {
     let full = n / 16 * 16;
     // SAFETY: NEON is part of the aarch64 baseline. Every load reads 48 bytes at 3*x with x + 16 <= full <= n, so it stays
     // inside r0/r1/r2 (each at least 3n long, checked above); every store writes 16 bytes at x + 16 <= n inside `out`.
-    unsafe { area3_row_neon(r0.as_ptr(), r1.as_ptr(), r2.as_ptr(), out.as_mut_ptr(), full) };
-    area3_row_scalar(&r0[3 * full..], &r1[3 * full..], &r2[3 * full..], &mut out[full..]);
+    unsafe {
+        area3_row_neon(
+            r0.as_ptr(),
+            r1.as_ptr(),
+            r2.as_ptr(),
+            out.as_mut_ptr(),
+            full,
+        )
+    };
+    area3_row_scalar(
+        &r0[3 * full..],
+        &r1[3 * full..],
+        &r2[3 * full..],
+        &mut out[full..],
+    );
 }
 
 /// Scalar build of [`area3_row`] on other architectures (the compiler vectorises it).
