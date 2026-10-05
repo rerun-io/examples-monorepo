@@ -15,6 +15,9 @@ rust-version = "1.85"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1"
+libc = "0.2"
+cc = "1"
 slam-rs = { path = "crates/slam-rs" }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"

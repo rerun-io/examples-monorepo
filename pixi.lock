@@ -42148,12 +42148,17 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_impl_linux-64-2.46.1-default_hfdba357_102.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_impl_linux-aarch64-2.46.1-default_hc5fa074_102.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_linux-aarch64-2.46.1-default_h7726a90_102.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/dav1d-1.2.1-hd590300_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/gcc_impl_linux-64-15.3.0-hc396a85_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/gcc_impl_linux-aarch64-15.3.0-hfd6ff3e_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/gcc_linux-aarch64-15.3.0-h577b2d6_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/gxx_impl_linux-64-15.3.0-h90d9265_5.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/gxx_impl_linux-aarch64-15.3.0-h858503f_5.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/gxx_linux-aarch64-15.3.0-haefe859_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_102.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ld_impl_linux-aarch64-2.46.1-default_h27e1c4c_102.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_5.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libgcc-ng-16.2.0-h69a702a_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libgomp-16.2.0-he0feb66_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libsanitizer-15.3.0-h54950a5_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_5.conda
@@ -76193,6 +76198,19 @@ packages:
   run_exports: {}
   size: 17668584
   timestamp: 1787618949985
+- conda: https://prefix.dev/conda-forge/linux-64/gxx_impl_linux-aarch64-15.3.0-h858503f_5.conda
+  sha256: 145c06ae0f4d7f0579a94340b22f4fa994783ed2961832154204cf2d0065f684
+  md5: aa245a6cb034ff6e3002ea006b990083
+  depends:
+  - gcc_impl_linux-aarch64 15.3.0 hfd6ff3e_5
+  - libstdcxx-devel_linux-aarch64 15.3.0 h2cba469_5
+  - sysroot_linux-aarch64
+  - tzdata
+  license: GPL-3.0-only WITH GCC-exception-3.1
+  license_family: GPL
+  run_exports: {}
+  size: 16036798
+  timestamp: 1789486625921
 - conda: https://prefix.dev/conda-forge/linux-64/gxx_linux-64-14.3.0-hd240bd5_27.conda
   sha256: cf5a44d14732b79e3c2bc6ebe1dba4f6b9077939f3093c75e36ad340737b5c15
   md5: 41fae38a424bbc78438cfec6a4fde187
@@ -76294,6 +76312,23 @@ packages:
     - libgcc >=16
   size: 28158
   timestamp: 1787671867996
+- conda: https://prefix.dev/conda-forge/linux-64/gxx_linux-aarch64-15.3.0-haefe859_1.conda
+  sha256: eb79ec8d0ada38719ab81dcd4c26c1e4188fa504fa8bf0c12032f843ce1a0a14
+  md5: 3beefb712bcb7231a413d0c5db8a033b
+  depends:
+  - gxx_impl_linux-64 15.3.0.*
+  - gxx_impl_linux-aarch64 15.3.0.*
+  - gcc_linux-aarch64 ==15.3.0 h577b2d6_1
+  - binutils_linux-aarch64
+  - sysroot_linux-aarch64
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports:
+    strong:
+    - libstdcxx >=15
+    - libgcc >=15
+  size: 28209
+  timestamp: 1787166215718
 - conda: https://prefix.dev/conda-forge/linux-64/h5py-3.16.0-nompi_py312ha4f8f14_102.conda
   sha256: de9ec9b1b01b90f2da2d896a5835a2fd8049859aff0c6331ca4594327ec79a8b
   md5: b270340809d19ae40ff9913f277b803a
@@ -96669,6 +96704,7 @@ packages:
   - xorg-libxext >=1.3.7,<2.0a0
   - xorg-libxrender >=0.9.12,<0.10.0a0
   license: LGPL-2.1-only or MPL-1.1
+  purls: []
   run_exports:
     weak:
     - cairo >=1.18.6,<2.0a0
@@ -98197,6 +98233,7 @@ packages:
   depends:
   - libgcc >=15
   license: LGPL-2.1-or-later
+  purls: []
   run_exports:
     weak:
     - fribidi >=1.0.17,<2.0a0
@@ -100702,6 +100739,7 @@ packages:
   - fribidi >=1.0.16,<2.0a0
   - libzlib >=1.3.2,<2.0a0
   license: ISC
+  purls: []
   run_exports:
     weak:
     - libass >=0.17.5,<0.17.6.0a0
@@ -107474,6 +107512,7 @@ packages:
   - openmp 23.1.2|23.1.2.*
   license: Apache-2.0 WITH LLVM-exception
   license_family: APACHE
+  purls: []
   run_exports:
     strong:
     - llvm-openmp >=23.1.2
@@ -108707,6 +108746,8 @@ packages:
   - __glibc >=2.17
   license: Apache-2.0
   license_family: APACHE
+  purls:
+  - pkg:pypi/orjson?source=compressed-mapping
   run_exports: {}
   size: 308382
   timestamp: 1790021210170
@@ -111373,6 +111414,8 @@ packages:
   - python_abi 3.12.* *_cp312
   license: BSD-3-Clause
   license_family: BSD
+  purls:
+  - pkg:pypi/scipy?source=compressed-mapping
   run_exports: {}
   size: 17043308
   timestamp: 1790022313127
@@ -111601,6 +111644,7 @@ packages:
   - libstdcxx >=15
   license: BSD-3-Clause
   license_family: BSD
+  purls: []
   run_exports:
     weak:
     - snappy >=1.2.2,<1.3.0a0
@@ -115138,6 +115182,9 @@ packages:
   depends:
   - python >=3.11
   license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/fsspec?source=compressed-mapping
   run_exports: {}
   size: 163722
   timestamp: 1790256848815

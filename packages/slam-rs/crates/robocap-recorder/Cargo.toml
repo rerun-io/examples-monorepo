@@ -9,9 +9,9 @@ gstreamer-capture = ["dep:gstreamer", "dep:gstreamer-app"]
 live-slam = ["dep:slam-rs"]
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 arrow-array = "58.3"
-libc = "0.2"
+libc = { workspace = true }
 sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,7 +24,7 @@ gstreamer = { version = "0.24", features = ["v1_24"], optional = true }
 gstreamer-app = { version = "0.24", features = ["v1_24"], optional = true }
 
 [build-dependencies]
-cc = "1"
+cc = { workspace = true }
 
 [[bin]]
 name = "robocap-direct"

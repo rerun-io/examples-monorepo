@@ -2457,6 +2457,12 @@ tyro = ">=0.9.1,<0.10"
 [feature.slam-rs.pypi-dependencies]
 slam-rs = { path = "packages/slam-rs", editable = true }
 
+[feature.slam-rs.target.linux-64.dependencies]
+dav1d = "1.2.*"
+
+[feature.slam-rs.target.linux-aarch64.dependencies]
+dav1d = "1.2.*"
+
 # Catalog result-layer publishing imports dataforge; dataforge is a linux-only
 # member, so the osx lane leaves it out.
 [feature.slam-rs.target.linux-64.pypi-dependencies]
@@ -2617,6 +2623,12 @@ cmd = "cargo test --locked --offline -p robocap-recorder --features live-slam --
 cwd = "packages/slam-rs"
 description = "Run the recorder's live SLAM adapter tests without capture hardware"
 
+[feature.slam-rs.tasks.slam-rs-catalog-test]
+depends-on = ["slam-rs-patch-deps"]
+cmd = """bash -c 'cargo test --locked --offline -p slam-rs-cli --features catalog && if [[ -n ${SLAM_RS_CATALOG_URL:-} && -f ${SLAM_RS_TEST_FIXTURE:-}/clip.json && ( -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8 || -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8.xz ) && -n ${SLAM_RS_TEST_OUTPUT:-} ]]; then cargo test --locked --offline -p slam-rs-cli --features catalog catalog_inputs_match_python_fixture -- --ignored --nocapture; else echo "SKIP catalog_inputs_match_python_fixture: set SLAM_RS_CATALOG_URL, SLAM_RS_TEST_FIXTURE (clip.json plus frames.u8 or frames.u8.xz), SLAM_RS_TEST_OUTPUT; dav1d required for G2"; fi'"""
+cwd = "packages/slam-rs"
+description = "Run native catalog tests and explicitly select fixture parity when its assets are configured"
+
 [feature.slam-rs.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test"]
 description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
@@ -2742,12 +2754,21 @@ platforms = ["linux-64"]
 rust = "1.98.*"
 rust-std-aarch64-unknown-linux-gnu = "1.98.*"
 gcc_linux-aarch64 = "15.*"
+gxx_linux-aarch64 = "15.*"
+dav1d = "1.2.*"
 pkg-config = "*"
 sysroot_linux-aarch64 = "2.34.*"
 
 [feature.robocap-cross.activation.env]
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "aarch64-conda-linux-gnu-gcc"
 CC_aarch64_unknown_linux_gnu = "aarch64-conda-linux-gnu-gcc"
+CXX_aarch64_unknown_linux_gnu = "aarch64-conda-linux-gnu-g++"
+
+[feature.robocap-cross.tasks.slam-rs-cli-catalog-build]
+cmd = "bash crates/slam-rs-cli/scripts/build-catalog-arm.sh"
+cwd = "packages/slam-rs"
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+description = "Build the ARM catalog replay CLI with dav1d headers and static OpenH264 C++ support"
 
 [feature.robocap-cross.tasks.robocap-direct-build]
 cmd = "bash crates/robocap-recorder/scripts/build-arm.sh"
