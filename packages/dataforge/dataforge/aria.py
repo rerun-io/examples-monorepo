@@ -15,13 +15,13 @@ formats live in ``datasets/lamaria_source.py``.
 
 from __future__ import annotations
 
-import csv
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
 import numpy as np
+import pyarrow as pa
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -31,7 +31,7 @@ from simplecv.se3 import SE3
 from simplecv.sensors.camera import fisheye624
 
 from dataforge.logging_toolkit import ImuChannel
-from dataforge.records import decode
+from dataforge.records import decode, read_csv_columns
 from dataforge.vrs import ImuRecords, VrsFile, VrsImageReader
 
 # ── streams ───────────────────────────────────────────────────────────────
@@ -436,25 +436,6 @@ QUATERNION_NORM_TOLERANCE: float = 1e-5
 """MPS prints six decimals: wrist quaternions sit up to 1.2e-6 off unit norm, trajectory ones ~1e-9."""
 
 
-def numeric_columns(path: Path, columns: list[str]) -> Float64[ndarray, "n c"]:
-    """Read selected CSV stream columns; no dataset-owned JSON copy is made."""
-    with path.open() as stream:
-        header: list[str] = next(csv.reader(stream))
-        try:
-            selected: list[int] = [header.index(name) for name in columns]
-            values: Float64[ndarray, "n c"] = np.loadtxt(stream, delimiter=",", usecols=selected, ndmin=2, dtype=np.float64)
-            for index, name in enumerate(columns):
-                if name == "tracking_timestamp_us":
-                    stamps: Float64[ndarray, "n"] = values[:, index]
-                    if not np.isfinite(stamps).all() or np.any(stamps != np.floor(stamps)):
-                        raise ValueError("tracking_timestamp_us must contain finite integers")
-                elif name.endswith("_tracking_confidence") and not np.isfinite(values[:, index]).all():
-                    raise ValueError(f"{name} must be finite")
-            return values
-        except ValueError as error:
-            raise ValueError(f"{path}: {error}") from error
-
-
 def poses_from_columns(values: Float64[ndarray, "n 7"]) -> Float64[ndarray, "n 4 4"]:
     """Translation and xyzw quaternion to SE(3); a non-finite or non-unit row is missing (NaN), never renormalised into a pose."""
     valid: Bool[ndarray, "n"] = np.isfinite(values).all(axis=1)
@@ -510,11 +491,8 @@ class Trajectory:
 
 def read_trajectory(path: Path) -> Trajectory:
     """Keep every closed-loop row; quality does not change pose availability."""
-    columns: list[str] = [
-        "tracking_timestamp_us",
-        *[f"t{axis}_world_device" for axis in "xyz"],
-        *[f"q{axis}_world_device" for axis in "xyzw"],
-        "quality_score",
-    ]
-    values: Float64[ndarray, "n 9"] = numeric_columns(path, columns)
-    return Trajectory(values[:, 0].astype(np.int64) * 1000, poses_from_columns(values[:, 1:8]), values[:, 8])
+    pose: list[str] = [*[f"t{axis}_world_device" for axis in "xyz"], *[f"q{axis}_world_device" for axis in "xyzw"]]
+    table: pa.Table = read_csv_columns(path, {"tracking_timestamp_us": pa.int64(), **dict.fromkeys([*pose, "quality_score"], pa.float64())})
+    values: Float64[ndarray, "n 7"] = np.column_stack([table.column(name).to_numpy() for name in pose])
+    times_us: Int64[ndarray, "n"] = table.column("tracking_timestamp_us").to_numpy()
+    return Trajectory(times_us * 1000, poses_from_columns(values), table.column("quality_score").to_numpy())

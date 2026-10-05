@@ -217,7 +217,7 @@ def test_named_hand_fields_survive_reordered_csv(tmp_path: Path) -> None:
     from dataforge import hands
     from dataforge.datasets.aria_gen2_pilot_source import read_hands
 
-    row = {"tracking_timestamp_us": 0.0}
+    row: dict[str, float] = {"tracking_timestamp_us": 0}  # MPS writes integer microseconds
     expected_landmarks = np.arange(126, dtype=np.float64).reshape(2, 21, 3) / 100.0
     expected_normals = np.arange(12, dtype=np.float64).reshape(2, 2, 3) / 10.0
     expected_wrists = np.tile(np.eye(4), (2, 1, 1))

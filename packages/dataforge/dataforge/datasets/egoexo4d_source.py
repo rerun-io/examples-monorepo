@@ -13,7 +13,6 @@ from typing import NamedTuple
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.csv as pacsv
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -21,7 +20,7 @@ from serde import SerdeError, coerce, from_dict, serde
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
 from dataforge import aria
-from dataforge.records import read_json
+from dataforge.records import read_csv_columns, read_json
 
 FPS: int = 30
 """Rate of every frame-aligned video and of the HM fits."""
@@ -226,7 +225,7 @@ def read_take_clock(path: Path, take: Take) -> TakeClock:
         ValueError: The column is missing, the first frame has no timestamp, or the rows run past the file.
     """
     column: str = f"{take.aria}_{aria.RGB_STREAM_ID}_capture_timestamp_ns"
-    table: pa.Table = pacsv.read_csv(path, convert_options=pacsv.ConvertOptions(include_columns=[column], column_types={column: pa.float64()}))
+    table: pa.Table = read_csv_columns(path, {column: pa.float64()})  # float: a missing stamp is an empty cell
     rows: range = take_rows(take)
     if rows.stop > table.num_rows:
         raise ValueError(f"{path}: take {take.take_name} needs rows {rows.start}..{rows.stop - 1}, the file has {table.num_rows}")

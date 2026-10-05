@@ -4,14 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye624Parameters
 from simplecv.sensors.camera import fisheye624
 
 from dataforge import aria, hands
-from dataforge.aria import Trajectory, numeric_columns, poses_from_columns, read_trajectory
+from dataforge.aria import Trajectory, poses_from_columns, read_trajectory
 from dataforge.clocks import nearest_framesets
+from dataforge.records import read_csv_columns
 from dataforge.vrs import VrsFile
 from dataforge.vrs_hevc import VrsHevcReader
 
@@ -79,10 +81,16 @@ class HandColumns:
 
 def read_hands(path: Path, trajectory: Trajectory, frame_clock: Int64[ndarray, "f"], stop_ns: int | None = None) -> HandSamples:
     """Read every native MPS row and transform device landmarks at its own time."""
-    names: list[str] = ["tracking_timestamp_us", *[name for side in hands.HAND_SIDES for group in hand_columns(side.name).values() for name in group]]
-    table: Float64[ndarray, "n c"] = numeric_columns(path, names)
+    names: list[str] = [name for side in hands.HAND_SIDES for group in hand_columns(side.name).values() for name in group]
+    csv_table: pa.Table = read_csv_columns(path, {"tracking_timestamp_us": pa.int64(), **dict.fromkeys(names, pa.float64())})
+    table: Float64[ndarray, "n c"] = np.column_stack([csv_table.column(name).to_numpy() for name in names])
     position: dict[str, int] = {name: index for index, name in enumerate(names)}
-    times: Int64[ndarray, "n"] = table[:, 0].astype(np.int64) * 1000
+    for side in hands.HAND_SIDES:
+        confidence_column: str = hand_columns(side.name)["confidence"][0]
+        if not np.isfinite(table[:, position[confidence_column]]).all():
+            raise ValueError(f"{path}: {confidence_column} must be finite")
+    times_us: Int64[ndarray, "n"] = csv_table.column("tracking_timestamp_us").to_numpy()
+    times: Int64[ndarray, "n"] = times_us * 1000
     if np.any(np.diff(times) <= 0):
         raise ValueError(f"{path}: hand timestamps must increase")
     keep: Bool[ndarray, "n"] = np.ones(len(times), dtype=np.bool_) if stop_ns is None else times <= stop_ns
