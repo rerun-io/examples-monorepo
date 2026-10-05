@@ -126,7 +126,7 @@ fn device_error(error: CaptureError) -> SourceError {
 }
 
 impl LiveSource {
-    /// Take over the cameras, trigger and IMU0 (the vendor recorder must already be stopped by `scripts/handoff-run.sh`) and
+    /// Take over the cameras, trigger and IMU0 (the vendor recorder must already be stopped by `robocap-panel handoff`) and
     /// start capturing. `stop` ends the source at the next event.
     ///
     /// # Errors

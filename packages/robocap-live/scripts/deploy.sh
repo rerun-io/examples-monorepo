@@ -1,16 +1,20 @@
 #!/bin/bash
-# Copy robocap-live to a cap: the aarch64 binary, the RKNN models, the display asset and the handoff script go to
-# /root/robocap-live/{bin,lib,models,assets,scripts}, as one tar over ssh (cap-env.sh's cap_ssh), checked by sha256 on the cap before
-# anything replaces the files in place. The previous binary is kept as bin/<name>.prev. Nothing else is touched.
+# Copy robocap-live to a cap: the aarch64 robocap-live and robocap-panel binaries (the panel also supervises every run), the RKNN
+# models and the display asset go to /root/robocap-live/{bin,lib,models,assets}, as one tar over ssh (cap-env.sh's cap_ssh), checked
+# by sha256 on the cap before anything replaces the files in place (by rename, so a running binary keeps going). The previous binary
+# is kept as bin/<name>.prev. Nothing else is touched; a running panel keeps its old binary until `panel.sh stop` and `start`.
 #
 # Usage: deploy.sh --cap a|b --models <dir> --display <asset.rrd> [--rig <rig.json>] [--root /root/robocap-live]
 #                  [--binary <path>] [--extra <file>]... [--dry-run]
+#        deploy.sh --cap a|b --panel-only [--root /root/robocap-live] [--binary <path>] [--dry-run]
+#   --panel-only  robocap-panel alone (panel.sh deploy uses it); no models, display asset, rig or Vulkan loader
 #   --models   required: *.rknn and MODELS.md from here (no *.rknn there is an error; models/MODELS.md says how they are made)
 #   --display  required: the display asset (made by: packages/handtrack/tools/robocap_live_display.py --output <it> --root <RoboCap dataset root>)
 #   --rig      the cap's calibration for the live source, to <root>/rig.json; a given rig must name the cap's device (for Cap A,
 #              e.g. the s66 dump's rig.json: Cap A's factory calibration from the catalog). Without it the cap keeps the rig.json
 #              it has (Cap B: its own factory calibration since 2026-10-01), and the deploy refuses if the cap has none
-#   --binary   default: target/aarch64-unknown-linux-gnu/release/robocap-live (scripts/build-arm.sh)
+#   --binary   default: target/aarch64-unknown-linux-gnu/release/robocap-live (scripts/build-arm.sh); robocap-panel is taken
+#              from beside it (stripped)
 #   --extra    more files for bin/ (e.g. the log_replay example)
 set -euo pipefail
 CAP=
@@ -23,6 +27,7 @@ models=
 display=
 rig=
 dry_run=0
+panel_only=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --cap) CAP=$2; shift ;;
@@ -33,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --display) display=$2; shift ;;
         --rig) rig=$2; shift ;;
         --dry-run) dry_run=1 ;;
+        --panel-only) panel_only=1 ;;
         -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "deploy.sh: unknown argument $1" >&2; exit 2 ;;
     esac
@@ -42,28 +48,37 @@ done
 source "$here/cap-env.sh"
 CAP_ROOT=${root_override:-$CAP_ROOT}
 log() { echo "[deploy $(date +%H:%M:%S)] $*" >&2; }
-[[ -n $models ]] || { log "--models <dir with the RKNN models> is required (models/MODELS.md says how they are made)"; exit 2; }
-[[ -n $display ]] || { log "--display <robocap-live-display.rrd> is required (packages/handtrack/tools/robocap_live_display.py makes it)"; exit 2; }
+if [[ $panel_only == 0 ]]; then
+    [[ -n $models ]] || { log "--models <dir with the RKNN models> is required (models/MODELS.md says how they are made)"; exit 2; }
+    [[ -n $display ]] || { log "--display <robocap-live-display.rrd> is required (packages/handtrack/tools/robocap_live_display.py makes it)"; exit 2; }
+fi
 
 stage=$(mktemp -d /tmp/robocap-live-deploy.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage"/{bin,lib,models,assets,scripts}
-bash "$here/stage-vulkan.sh" "$stage/lib"
-for file in "$binary" "${extras[@]}"; do
+mkdir -p "$stage/bin"
+panel=$(dirname "$binary")/robocap-panel
+binaries=("$panel")
+[[ $panel_only == 1 ]] || binaries+=("$binary" "${extras[@]}")
+for file in "${binaries[@]}"; do
     [[ -f $file ]] || { log "missing $file"; exit 1; }
     file -b "$file" | grep -q "ARM aarch64" || { log "$file is not an aarch64 executable: $(file -b "$file")"; exit 1; }
     cp "$file" "$stage/bin/"
 done
-compgen -G "$models/*.rknn" >/dev/null || { log "no *.rknn in $models: pass --models <dir with the RKNN models> (models/MODELS.md says how they are made)"; exit 1; }
-cp "$models"/*.rknn "$stage/models/"
-[[ -f $models/MODELS.md ]] && cp "$models/MODELS.md" "$stage/models/"
-if [[ -f $display ]]; then cp "$display" "$stage/assets/robocap-live-display.rrd"; else log "warning: no display asset at $display"; fi
-cp "$here/handoff-run.sh" "$stage/scripts/"
-# Without --rig the cap keeps the rig.json it has; a real deploy checks that it has one.
-[[ -z $rig ]] && log "no --rig: Cap $CAP keeps its own $CAP_ROOT/rig.json"
-if [[ -n $rig ]]; then
-    grep -q "\"device\": *\"cap_$CAP\"" "$rig" || { log "$rig is not a cap_$CAP rig"; exit 1; }
-    cp "$rig" "$stage/rig.json"
+# The strip comes from this checkout's robocap-cross env, as build-arm.sh's.
+pixi run --manifest-path "$pkg/../../pixi.toml" -e robocap-cross --frozen aarch64-conda-linux-gnu-strip "$stage/bin/robocap-panel"
+if [[ $panel_only == 0 ]]; then
+    mkdir -p "$stage"/{lib,models,assets}
+    bash "$here/stage-vulkan.sh" "$stage/lib"
+    compgen -G "$models/*.rknn" >/dev/null || { log "no *.rknn in $models: pass --models <dir with the RKNN models> (models/MODELS.md says how they are made)"; exit 1; }
+    cp "$models"/*.rknn "$stage/models/"
+    [[ -f $models/MODELS.md ]] && cp "$models/MODELS.md" "$stage/models/"
+    if [[ -f $display ]]; then cp "$display" "$stage/assets/robocap-live-display.rrd"; else log "warning: no display asset at $display"; fi
+    # Without --rig the cap keeps the rig.json it has; a real deploy checks that it has one.
+    [[ -z $rig ]] && log "no --rig: Cap $CAP keeps its own $CAP_ROOT/rig.json"
+    if [[ -n $rig ]]; then
+        grep -q "\"device\": *\"cap_$CAP\"" "$rig" || { log "$rig is not a cap_$CAP rig"; exit 1; }
+        cp "$rig" "$stage/rig.json"
+    fi
 fi
 (cd "$stage" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
 log "staged $(find "$stage" -type f | wc -l) files, $(du -sh "$stage" | cut -f1), for Cap $CAP ($CAP_HOSTNAME):"
@@ -72,7 +87,7 @@ if [[ $dry_run == 1 ]]; then log "dry run: nothing copied"; exit 0; fi
 
 host=$(cap_ssh hostname)
 [[ $host == "$CAP_HOSTNAME" ]] || { log "the cap answers as '$host', expected $CAP_HOSTNAME; refusing"; exit 1; }
-if [[ -z $rig ]]; then
+if [[ $panel_only == 0 && -z $rig ]]; then
     cap_ssh "test -f $CAP_ROOT/rig.json" || { log "no --rig, and Cap $CAP has no $CAP_ROOT/rig.json: pass --rig <the cap's rig.json>; refusing"; exit 1; }
 fi
 # The caps' /root is small (~14 GB): keep at least 5 GB free after the copy (staged twice briefly).
@@ -90,16 +105,19 @@ set -euo pipefail
 root=$1
 cd "$root/.incoming"
 sha256sum -c SHA256SUMS >/dev/null || { echo "sha256 mismatch on the cap; nothing replaced" >&2; sha256sum -c SHA256SUMS >&2 || true; exit 1; }
-mkdir -p "$root"/{bin,lib,models,assets,scripts,logs,run}
+mkdir -p "$root"/{bin,lib,models,assets,logs,run}
 for file in $(awk '{print $2}' SHA256SUMS); do
     target=$root/${file#./}
     if [[ $file == ./bin/* && -f $target ]]; then cp -p "$target" "$target.prev"; fi
     mkdir -p "$(dirname "$target")"
     cp "$file" "$target.new" && mv -f "$target.new" "$target"
 done
-chmod +x "$root"/bin/* "$root"/scripts/*.sh
+chmod +x "$root"/bin/*
 cd "$root" && sed 's#\./#'"$root"'/#' .incoming/SHA256SUMS | sha256sum -c - | sed 's/^/  verified /'
-cp .incoming/SHA256SUMS "$root/run/SHA256SUMS.deployed"
+# The record of what is deployed: this copy's entries replace the same files' older ones (a --panel-only copy keeps the rest).
+deployed=$root/run/SHA256SUMS.deployed
+{ [[ ! -f $deployed ]] || awk 'NR == FNR { new[$2]; next } !($2 in new)' .incoming/SHA256SUMS "$deployed"; cat .incoming/SHA256SUMS; } > "$deployed.new"
+mv -f "$deployed.new" "$deployed"
 rm -rf "$root/.incoming"
 EOF
 log "deployed to Cap $CAP:$CAP_ROOT"

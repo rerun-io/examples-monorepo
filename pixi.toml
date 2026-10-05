@@ -2773,6 +2773,22 @@ cwd = "packages/slam-rs"
 depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
 description = "Build the ARM catalog replay CLI with dav1d headers and static OpenH264 C++ support"
 
+[feature.robocap-cross.tasks.robocap-live-build-arm]
+cmd = "bash scripts/build-arm.sh"
+cwd = "packages/robocap-live"
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+description = "Build robocap-live and robocap-panel for this host and for the caps (aarch64), and check the cap binary"
+
+[feature.robocap-cross.tasks.robocap-live-deploy]
+cmd = "bash scripts/deploy.sh"
+cwd = "packages/robocap-live"
+description = "Copy robocap-live, robocap-panel, the models and the display asset to a cap: --cap a|b --models <dir> --display <asset.rrd>"
+
+[feature.robocap-cross.tasks.robocap-live-panel]
+cmd = "bash scripts/panel.sh"
+cwd = "packages/robocap-live"
+description = "Deploy, start or stop the web panel on a cap: deploy|start|stop|status|url --cap a|b --cap-address <ip>"
+
 [feature.robocap-cross.tasks.robocap-direct-build]
 cmd = "bash crates/robocap-recorder/scripts/build-arm.sh"
 cwd = "packages/slam-rs"

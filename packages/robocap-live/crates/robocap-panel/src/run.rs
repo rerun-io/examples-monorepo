@@ -1,25 +1,28 @@
 //! The run this panel starts and stops. The start form ([`StartRequest`]) builds the command line; one record ([`RunRecord`], under
-//! [`Run`]'s lock) owns the run's lifecycle: a start reserves it before its checks and, holding it, spawns the handoff and publishes
-//! its session and the run files; a stop reads the session from it; only that session's end frees it.
+//! [`Run`]'s lock) owns the run's lifecycle: a start reserves it before its checks and, holding it, spawns the run supervisor
+//! (`robocap-panel handoff`, see [`crate::handoff`]) and publishes its session and the run files; a stop reads the session from
+//! it; only that session's end frees it.
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::{processes, read_trim};
+use crate::handoff::signal;
+use crate::{Process, read_trim};
 
 /// What the run is doing, for the page's state and buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Idle,
-    /// The panel runs its checks, or handoff-run.sh checks and pauses the vendor recorder; robocap-live is not running yet.
+    /// The panel runs its checks, or the supervisor checks and pauses the vendor recorder; robocap-live is not running yet.
     Starting,
     Streaming,
-    /// Stop was asked for, or the run ended: robocap-live drains, then the handoff restores the vendor recorder (~15 s).
+    /// Stop was asked for, or the run ended: robocap-live drains, then the supervisor restores the vendor recorder (~15 s).
     Stopping,
 }
 
@@ -48,22 +51,19 @@ pub fn phase(session_alive: bool, live_running: bool, ending: bool) -> Phase {
 /// Who holds the run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Owner {
-    /// Not this panel: no run, or one that start-live.sh (or an earlier panel) started; run/live.pid names it.
+    /// Not this panel: no run, or one that an earlier panel started; run/live.pid names it.
     #[default]
     Nobody,
-    /// A start, from before its checks until the handoff is spawned.
-    Starting,
-    /// The handoff this panel spawned: its pid, which is its session's id.
-    Session(u32),
+    /// A start, from before its checks until the supervisor is spawned.
+    Starting { cancel: bool },
+    /// The supervisor this panel spawned: its pid, which is its session's id.
+    Session { pid: u32, stopping: bool },
 }
 
 /// The run's lifecycle: one value under [`Run`]'s lock.
 #[derive(Clone, Debug, Default)]
 pub struct RunRecord {
     pub owner: Owner,
-    /// Stop was asked for: of the starting run (it then launches nothing) or of the run that is going; cleared by the next start
-    /// and by the end of this panel's run.
-    pub stop_requested: bool,
     /// The exit status of the last run this panel started, once it ended.
     pub last_exit: Option<String>,
     /// The form of the last run this panel started ([`StartRequest::to_json`]); a new browser fills its form from it.
@@ -71,13 +71,17 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    pub fn stopping(&self) -> bool {
+        matches!(self.owner, Owner::Starting { cancel: true } | Owner::Session { stopping: true, .. })
+    }
+
     /// The run's session: this panel's (also before run/live.pid is written), else the one in run/live.pid; `None` while a start
     /// runs its checks.
     pub fn session(&self, root: &Path) -> Option<u32> {
         match self.owner {
             Owner::Nobody => run_pid(root),
-            Owner::Starting => None,
-            Owner::Session(session) => Some(session),
+            Owner::Starting { .. } => None,
+            Owner::Session { pid, .. } => Some(pid),
         }
     }
 }
@@ -103,29 +107,40 @@ impl Run {
     /// of an older session changes nothing.
     fn finish(&self, session: u32, status: String) {
         let mut record = self.record();
-        if record.owner == Owner::Session(session) {
+        if matches!(record.owner, Owner::Session { pid, .. } if pid == session) {
             record.owner = Owner::Nobody;
-            record.stop_requested = false;
             record.last_exit = Some(status);
         }
     }
 }
 
-/// The session id in run/live.pid (the panel and start-live.sh both write it).
+/// Start's checks on the cap: any refusal stops the start; warnings go with the started run to the page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Checks {
+    pub refusals: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// The run supervisor's session in run/live.pid (written at every start, so a restarted panel finds the run), while that pid is
+/// still a supervisor: the leader of its own session, started as `<program> handoff ...`. After a reboot or a pid reuse the file
+/// names some other program, which is no run and must never be signalled.
 pub fn run_pid(root: &Path) -> Option<u32> {
-    read_trim(root.join("run/live.pid"))?.parse().ok()
+    let pid: u32 = read_trim(root.join("run/live.pid"))?.parse().ok()?;
+    let session = crate::stat(pid)?.session;
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let second = String::from_utf8_lossy(cmdline.split(|&b| b == 0).nth(1)?).to_string();
+    (session == pid && second.rsplit('/').next() == Some("handoff")).then_some(pid)
 }
 
 /// Whether `pid` runs (a zombie does not).
 pub fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| stat.rsplit(')').next()?.split_whitespace().next().map(str::to_owned))
-        .is_some_and(|state| state != "Z")
+    crate::stat(pid).is_some_and(|stat| stat.state != 'Z')
 }
 
-/// The run's robocap-live processes: its session's programs under `bin/`.
-pub fn live_processes(root: &Path, session: u32) -> Vec<u32> {
+/// The run's robocap-live processes: its session's programs under `bin/`, except the session's leader (the supervisor).
+pub fn live_processes(processes: &[Process], root: &Path, session: u32) -> Vec<u32> {
     let bin = root.join("bin/").display().to_string();
-    processes().into_iter().filter(|p| p.session == session && p.program.starts_with(&bin)).map(|p| p.pid).collect()
+    processes.iter().filter(|p| p.session == session && p.pid != session && p.program.starts_with(&bin)).map(|p| p.pid).collect()
 }
 
 /// The start form: what the live run streams, and for how long.
@@ -259,37 +274,46 @@ fn decode(value: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// Start a run: reserve the record, run `preflight` (refusals as text, empty = go), then, holding the record, spawn the handoff
-/// and publish its session and the run files. The run files are written as scripts/start-live.sh writes them, so scripts/stop.sh
-/// works on the run too.
+// Allow robocap-live's duration stop to drain capture and flush its encoders.
+const SUPERVISOR_MARGIN_S: u32 = 40;
+
+/// Start a run: reserve the record, run `preflight`, then, holding the record, spawn `supervisor` (the program and its first
+/// arguments: `robocap-panel handoff`) with the time limit and the robocap-live command line, and publish its session and the run
+/// files. The reply carries the preflight's warnings.
 ///
 /// # Errors
 ///
 /// The text the page shows: a start or run of this panel's holds the record, a refusal, a stop that came during the checks
 /// (nothing starts), a failed spawn, or a run file that could not be written (the run is then stopped as [`stop`] stops it, and
-/// the handoff restores the vendor recorder).
-pub fn start(run: &Arc<Run>, root: &Path, request: &StartRequest, preflight: impl FnOnce() -> Vec<String>) -> Result<Value, String> {
+/// the supervisor restores the vendor recorder).
+pub fn start(
+    run: &Arc<Run>,
+    root: &Path,
+    supervisor: &[String],
+    request: &StartRequest,
+    preflight: impl FnOnce() -> Checks,
+) -> Result<Value, String> {
     {
         let mut record = run.record();
         if record.owner != Owner::Nobody {
             return Err("a run is already starting or going (stop it first)".into());
         }
-        record.owner = Owner::Starting;
-        record.stop_requested = false;
+        record.owner = Owner::Starting { cancel: false };
     }
-    let refusals = preflight();
+    let Checks { refusals, warnings } = preflight();
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // The handoff script, its time limit, then robocap-live: what is spawned and what run/live.cmd records.
-    let mut argv = vec![root.join("scripts/handoff-run.sh").display().to_string(), (request.duration_s + 40).to_string()];
+    // The supervisor, its time limit, then robocap-live: what is spawned and what run/live.cmd records.
+    let mut argv = supervisor.to_vec();
+    argv.push((request.duration_s + SUPERVISOR_MARGIN_S).to_string());
     argv.extend(request.command(root, stamp));
     let log_path = root.join(format!("logs/rt-{stamp}.log"));
     let mut record = run.record();
-    let spawned = if record.stop_requested {
+    let spawned = if record.stopping() {
         Err("stop was asked for while the run was starting; nothing started".to_string())
     } else if !refusals.is_empty() {
         Err(refusals.join("; "))
     } else {
-        spawn_handoff(root, &argv, &log_path)
+        spawn_supervisor(root, &argv, &log_path)
     };
     let mut child = match spawned {
         Ok(child) => child,
@@ -299,11 +323,12 @@ pub fn start(run: &Arc<Run>, root: &Path, request: &StartRequest, preflight: imp
         }
     };
     let pid = child.id();
-    let quoted = argv.join(" ");
-    record.owner = Owner::Session(pid);
+    let command_line = argv.join(" ");
+    record.owner = Owner::Session { pid, stopping: false };
     record.last_exit = None;
     record.last_request = Some(request.to_json());
-    let run_files = [("run/live.pid", format!("{pid}\n")), ("run/live.log", format!("{}\n", log_path.display())), ("run/live.cmd", format!("{quoted}\n"))];
+    let run_files =
+        [("run/live.pid", format!("{pid}\n")), ("run/live.log", format!("{}\n", log_path.display())), ("run/live.cmd", format!("{command_line}\n"))];
     let written = run_files.iter().try_for_each(|(name, text)| fs::write(root.join(name), text).map_err(|e| format!("{name}: {e}")));
     drop(record);
     let waiter = run.clone();
@@ -315,65 +340,45 @@ pub fn start(run: &Arc<Run>, root: &Path, request: &StartRequest, preflight: imp
         let stopping = if stop(run, root).is_ok() { "it is being stopped" } else { "it has ended" };
         return Err(format!("{error}: the run started without its run files; {stopping}"));
     }
-    Ok(json!({"pid": pid, "log": log_path.display().to_string(), "cmd": quoted}))
+    Ok(json!({"pid": pid, "log": log_path.display().to_string(), "cmd": command_line, "warnings": warnings}))
 }
 
-/// The handoff, detached: setsid (not a group leader, so it does not fork) makes it its own session's leader, with this pid; its
-/// output goes to `log_path`.
-fn spawn_handoff(root: &Path, argv: &[String], log_path: &Path) -> Result<Child, String> {
+/// The supervisor becomes its own session leader before exec, with the same pid;
+/// its output goes to `log_path`.
+fn spawn_supervisor(root: &Path, argv: &[String], log_path: &Path) -> Result<Child, String> {
     fs::create_dir_all(root.join("logs")).and_then(|()| fs::create_dir_all(root.join("run"))).map_err(|e| format!("mkdir: {e}"))?;
     let log = fs::File::create(log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
     let log_err = log.try_clone().map_err(|e| e.to_string())?;
-    Command::new("setsid")
-        .args(argv)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(log_err)
-        .spawn()
-        .map_err(|e| format!("start {}: {e}", argv[0]))
+    let mut command = Command::new(&argv[0]);
+    // SAFETY: setsid is async-signal-safe and the closure touches no shared state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.args(&argv[1..]).current_dir(root).stdin(Stdio::null()).stdout(log).stderr(log_err).spawn().map_err(|e| format!("start {}: {e}", argv[0]))
 }
 
-/// SIGINT to the run's robocap-live (only processes of its session under `bin/`), as scripts/stop.sh does. The run is this
-/// panel's (its session from the record, whether or not run/live.pid was written), else the one in run/live.pid. A stop during a
-/// start's checks is noted, and that start launches nothing; one that comes while the handoff is still starting waits (up to
-/// 60 s) for robocap-live to appear, then signals it the same way.
+/// Stop the run: SIGTERM to its supervisor, which stops robocap-live (SIGINT, then SIGKILL to its group 20 s later) and gives the
+/// cameras back; before it has taken them, it takes nothing. The run is this panel's (its session from the record, whether or not
+/// run/live.pid was written), else the one in run/live.pid. A stop during a start's checks is noted, and that start launches
+/// nothing.
 pub fn stop(run: &Run, root: &Path) -> Result<Value, String> {
-    let session = {
-        let mut record = run.record();
-        if record.owner == Owner::Starting {
-            record.stop_requested = true;
-            return Ok(json!({"signalled": [], "pending": true}));
+    let mut record = run.record();
+    if matches!(record.owner, Owner::Starting { .. }) {
+        record.owner = Owner::Starting { cancel: true };
+        if let Some(pid) = run_pid(root).filter(|&pid| alive(pid)) {
+            signal(pid as i32, libc::SIGTERM)?;
         }
-        let session = record.session(root).filter(|&pid| alive(pid)).ok_or("no run is going")?;
-        record.stop_requested = true;
-        session
-    };
-    let signal = |targets: &[u32]| {
-        for pid in targets {
-            let _ = Command::new("kill").args(["-INT", &pid.to_string()]).status();
-        }
-    };
-    let targets = live_processes(root, session);
-    if !targets.is_empty() {
-        signal(&targets);
-        return Ok(json!({"signalled": targets, "session": session}));
+        return Ok(json!({"pending": true}));
     }
-    let root = root.to_path_buf();
-    std::thread::spawn(move || {
-        for _ in 0..300 {
-            std::thread::sleep(Duration::from_millis(200));
-            if !alive(session) {
-                return;
-            }
-            let targets = live_processes(&root, session);
-            if !targets.is_empty() {
-                signal(&targets);
-                return;
-            }
-        }
-    });
-    Ok(json!({"signalled": [], "pending": true, "session": session}))
+    let session = record.session(root).filter(|&pid| alive(pid)).ok_or("no run is going")?;
+    record.owner = Owner::Session { pid: session, stopping: true };
+    signal(i32::try_from(session).map_err(|e| e.to_string())?, libc::SIGTERM)?;
+    Ok(json!({"session": session}))
 }
 
 #[cfg(test)]
@@ -382,26 +387,58 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Barrier;
     use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    use crate::processes;
 
     use super::*;
 
-    /// handoff-run.sh, faked: it notes the launch, "pauses the vendor recorder" for 1 s, then becomes robocap-live (a sleep named
-    /// `<root>/bin/robocap-live`, with SIGINT at its default even when the test runner ignores it).
-    const FAKE_HANDOFF: &str = "#!/bin/bash\necho $$ >> \"${0%/scripts/*}/launches\"\nsleep 1\nexec env --default-signal=INT bash -c 'exec -a \"$0\" sleep 30' \"$2\"\n";
+    /// The run supervisor, faked as `robocap-panel handoff` behaves: it notes its launch once its SIGTERM handler is set (a SIGTERM
+    /// before that kills it, as it kills the real one before it takes anything) and "checks the vendor recorder" for 1 s (a SIGTERM
+    /// then makes it exit 2 and launch nothing), then notes and runs robocap-live as its child (a sleep named
+    /// `<root>/bin/robocap-live`, with SIGINT at its default even when the test runner ignores it), passes a SIGTERM on as SIGINT,
+    /// and exits with the child's status (128 + the signal).
+    const FAKE_SUPERVISOR: &str = r#"#!/bin/bash
+here=$(dirname "$0"); stop=0; child=
+trap 'stop=1; [ -n "$child" ] && kill -INT "$child"' TERM
+echo $$ >> "$here/launches"
+sleep 1 & wait $!
+[ $stop = 1 ] && exit 2
+echo $$ >> "$here/lives"
+env --default-signal=INT bash -c 'exec -a "$0" sleep 30' "$2" & child=$!
+[ $stop = 1 ] && kill -INT "$child"
+while kill -0 "$child" 2>/dev/null; do wait "$child"; status=$?; done
+exit $status
+"#;
 
-    /// A root with the fake handoff in scripts/; `name` keeps the tests that run at once apart.
-    fn fake_root(name: &str) -> std::io::Result<PathBuf> {
+    /// A root with the fake supervisor at `<root>/handoff` (its command line then reads as a supervisor's); `name` keeps the tests
+    /// that run at once apart.
+    fn fake_root(name: &str) -> std::io::Result<(PathBuf, Vec<String>)> {
         let root = std::env::temp_dir().join(format!("robocap-panel-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("scripts"))?;
-        let handoff = root.join("scripts/handoff-run.sh");
-        fs::write(&handoff, FAKE_HANDOFF)?;
-        fs::set_permissions(&handoff, fs::Permissions::from_mode(0o755))?;
-        Ok(root)
+        fs::create_dir_all(&root)?;
+        let supervisor = root.join("handoff");
+        fs::write(&supervisor, FAKE_SUPERVISOR)?;
+        fs::set_permissions(&supervisor, fs::Permissions::from_mode(0o755))?;
+        Ok((root, vec![supervisor.display().to_string()]))
     }
 
-    fn launches(root: &Path) -> usize {
-        fs::read_to_string(root.join("launches")).map_or(0, |text| text.lines().count())
+    /// Whether the run ended because robocap-live got SIGINT (the supervisor exits with 128 + 2).
+    fn interrupted(record: &RunRecord) -> bool {
+        record.last_exit.as_deref().is_some_and(|e| e.contains("exit status: 130"))
+    }
+
+    /// How many supervisors ran (`launches`), or how many of them launched robocap-live (`lives`).
+    fn count(root: &Path, name: &str) -> usize {
+        fs::read_to_string(root.join(name)).map_or(0, |text| text.lines().count())
+    }
+
+    /// Wait (5 s at most) until the fake supervisor has noted its launch: its SIGTERM handler is set.
+    fn supervisor_up(root: &Path) -> bool {
+        (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            count(root, "launches") > 0
+        })
     }
 
     /// The record once no run holds it (within 10 s).
@@ -473,7 +510,7 @@ mod tests {
     fn the_phase_says_what_the_run_is_doing() {
         // (session alive, robocap-live running, stop requested) -> phase.
         assert_eq!(phase(false, false, false), Phase::Idle);
-        assert_eq!(phase(true, false, false), Phase::Starting, "handoff-run.sh checks and pauses the vendor recorder first");
+        assert_eq!(phase(true, false, false), Phase::Starting, "the supervisor checks and pauses the vendor recorder first");
         assert_eq!(phase(true, true, false), Phase::Streaming);
         assert_eq!(phase(true, true, true), Phase::Stopping);
         assert_eq!(phase(true, false, true), Phase::Stopping, "robocap-live ended; the handoff restores the vendor recorder");
@@ -482,21 +519,21 @@ mod tests {
 
     #[test]
     fn two_starts_at_once_launch_one_run() -> Result<(), Box<dyn std::error::Error>> {
-        let root = fake_root("two-starts")?;
+        let (root, supervisor) = fake_root("two-starts")?;
         let run = Arc::new(Run::default());
         let request = StartRequest::parse("")?;
         let both = Barrier::new(2);
         // Checks that take a while: two starts that only checked run/live.pid would both pass them.
         let slow_checks = || {
             std::thread::sleep(Duration::from_millis(100));
-            Vec::new()
+            Checks::default()
         };
         let results: Vec<Result<Value, String>> = std::thread::scope(|scope| {
             let starts: Vec<_> = (0..2)
                 .map(|_| {
                     scope.spawn(|| {
                         both.wait();
-                        start(&run, &root, &request, slow_checks)
+                        start(&run, &root, &supervisor, &request, slow_checks)
                     })
                 })
                 .collect();
@@ -505,27 +542,28 @@ mod tests {
         let refused: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
         assert_eq!(refused.len(), 1, "{results:?}");
         assert!(refused[0].contains("already starting or going"), "{refused:?}");
+        assert!(supervisor_up(&root));
         stop(&run, &root)?;
         let record = ended(&run)?;
-        assert_eq!(launches(&root), 1, "exactly one handoff ran");
-        assert!(record.last_exit.as_deref().is_some_and(|e| e.contains("signal: 2")), "{record:?}");
+        assert_eq!(count(&root, "launches"), 1, "exactly one supervisor ran");
+        assert!(record.last_exit.is_some(), "{record:?}");
         fs::remove_dir_all(&root)?;
         Ok(())
     }
 
     #[test]
     fn a_stop_during_the_start_checks_launches_nothing() -> Result<(), Box<dyn std::error::Error>> {
-        let root = fake_root("stop-in-checks")?;
+        let (root, supervisor) = fake_root("stop-in-checks")?;
         let run = Arc::new(Run::default());
         let request = StartRequest::parse("")?;
         let (checking, in_checks) = channel();
         let (go, wait_for_go) = channel::<()>();
         let started = std::thread::scope(|scope| {
             let starting = scope.spawn(|| {
-                start(&run, &root, &request, move || {
+                start(&run, &root, &supervisor, &request, move || {
                     let _ = checking.send(());
                     let _ = wait_for_go.recv();
-                    Vec::new()
+                    Checks::default()
                 })
             });
             let noted = in_checks.recv().map_err(|e| e.to_string()).and_then(|()| stop(&run, &root));
@@ -536,35 +574,94 @@ mod tests {
         assert_eq!(noted?["pending"], json!(true));
         assert!(started.as_ref().is_err_and(|e| e.contains("nothing started")), "{started:?}");
         let record = run.snapshot();
-        assert_eq!((record.owner, launches(&root)), (Owner::Nobody, 0));
+        assert_eq!((record.owner, count(&root, "launches")), (Owner::Nobody, 0));
         fs::remove_dir_all(&root)?;
         Ok(())
     }
 
     #[test]
-    fn a_stop_while_the_handoff_starts_signals_robocap_live_once_it_is_up() -> Result<(), Box<dyn std::error::Error>> {
-        let root = fake_root("stop-in-handoff")?;
+    fn a_stop_during_checks_also_stops_an_inherited_run() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, supervisor) = fake_root("inherited-stop-in-checks")?;
+        let old = Arc::new(Run::default());
+        start(&old, &root, &supervisor, &StartRequest::parse("")?, Checks::default)?;
+        assert!(supervisor_up(&root));
         let run = Arc::new(Run::default());
-        let started = start(&run, &root, &StartRequest::parse("")?, Vec::new)?;
+        let result = start(&run, &root, &supervisor, &StartRequest::parse("")?, || {
+            assert!(stop(&run, &root).is_ok());
+            Checks { refusals: vec!["a run is already going".into()], warnings: Vec::new() }
+        });
+        assert!(result.is_err());
+        let finished = ended(&old);
+        if finished.is_err() {
+            stop(&old, &root)?;
+            ended(&old)?;
+        }
+        assert!(finished.is_ok(), "the inherited supervisor must receive the stop");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_stop_before_the_supervisor_takes_the_cap_launches_no_robocap_live() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, supervisor) = fake_root("stop-in-supervisor-checks")?;
+        let run = Arc::new(Run::default());
+        let started = start(&run, &root, &supervisor, &StartRequest::parse("")?, Checks::default)?;
+        assert!(supervisor_up(&root));
         let stopped = stop(&run, &root)?;
-        assert_eq!((stopped["pending"].clone(), stopped["session"].clone()), (json!(true), started["pid"].clone()), "the handoff is still in its pause");
+        assert_eq!(stopped["session"], started["pid"], "the stop went to the supervisor");
         let record = ended(&run)?;
-        assert!(record.last_exit.as_deref().is_some_and(|e| e.contains("signal: 2")), "robocap-live got the SIGINT: {record:?}");
+        assert_eq!(record.last_exit.as_deref(), Some("exit status: 2"), "the supervisor refused: {record:?}");
+        assert_eq!(count(&root, "lives"), 0, "robocap-live never started");
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_stop_during_the_run_interrupts_robocap_live() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, supervisor) = fake_root("stop-in-run")?;
+        let run = Arc::new(Run::default());
+        let started = start(&run, &root, &supervisor, &StartRequest::parse("")?, Checks::default)?;
+        let session = started["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()).ok_or("no session")?;
+        let up = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            !live_processes(&processes(), &root, session).is_empty()
+        });
+        assert!(up, "robocap-live came up within 5 s");
+        stop(&run, &root)?;
+        let record = ended(&run)?;
+        assert!(interrupted(&record), "robocap-live got the SIGINT: {record:?}");
         fs::remove_dir_all(&root)?;
         Ok(())
     }
 
     #[test]
     fn a_run_file_that_cannot_be_written_stops_the_run() -> Result<(), Box<dyn std::error::Error>> {
-        let root = fake_root("no-run-files")?;
+        let (root, supervisor) = fake_root("no-run-files")?;
         fs::create_dir_all(root.join("run/live.pid"))?;
         let run = Arc::new(Run::default());
-        let started = start(&run, &root, &StartRequest::parse("")?, Vec::new);
+        let started = start(&run, &root, &supervisor, &StartRequest::parse("")?, Checks::default);
         assert!(started.as_ref().is_err_and(|e| e.contains("run/live.pid") && e.contains("being stopped")), "{started:?}");
         // The stop found the run through the record alone: run/live.pid never named it.
         let record = ended(&run)?;
-        assert_eq!(launches(&root), 1);
-        assert!(record.last_exit.as_deref().is_some_and(|e| e.contains("signal: 2")), "{record:?}");
+        assert!(record.last_exit.is_some(), "{record:?}");
+        assert_eq!(count(&root, "lives"), 0, "the stop came before robocap-live");
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_run_file_names_no_run() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, _) = fake_root("stale-pid")?;
+        // After a reboot or a pid reuse, run/live.pid names some other program: it is not a run, and Stop must not signal it.
+        let mut other = Command::new("sleep").arg("30").spawn()?;
+        fs::create_dir_all(root.join("run"))?;
+        fs::write(root.join("run/live.pid"), format!("{}\n", other.id()))?;
+        let run = Run::default();
+        assert_eq!(run.snapshot().session(&root), None);
+        assert!(stop(&run, &root).is_err_and(|e| e.contains("no run")));
+        assert!(other.try_wait()?.is_none(), "the other program still runs");
+        other.kill()?;
+        other.wait()?;
         fs::remove_dir_all(&root)?;
         Ok(())
     }
@@ -572,12 +669,12 @@ mod tests {
     #[test]
     fn a_late_end_of_an_older_session_changes_nothing() {
         let run = Run::default();
-        *run.record() = RunRecord { owner: Owner::Session(200), stop_requested: true, ..RunRecord::default() };
+        *run.record() = RunRecord { owner: Owner::Session { pid: 200, stopping: true }, ..RunRecord::default() };
         run.finish(100, "exit status: 0".into());
         let record = run.snapshot();
-        assert_eq!((record.owner, record.stop_requested, record.last_exit), (Owner::Session(200), true, None));
+        assert_eq!((record.owner, record.stopping(), record.last_exit), (Owner::Session { pid: 200, stopping: true }, true, None));
         run.finish(200, "exit status: 1".into());
         let record = run.snapshot();
-        assert_eq!((record.owner, record.stop_requested, record.last_exit.as_deref()), (Owner::Nobody, false, Some("exit status: 1")));
+        assert_eq!((record.owner, record.stopping(), record.last_exit.as_deref()), (Owner::Nobody, false, Some("exit status: 1")));
     }
 }

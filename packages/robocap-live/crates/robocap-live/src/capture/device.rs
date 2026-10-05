@@ -39,7 +39,7 @@ pub fn require_cap() -> Result<Cap, CaptureError> {
         .ok_or_else(|| CaptureError::Device(format!("live capture runs only on Cap A or Cap B; this is {hostname:?} {serial:?}")))
 }
 
-/// Refuse while the vendor recorder can own capture: every `omni-specs.bin` must be a zombie (the handoff script stops its
+/// Refuse while the vendor recorder can own capture: every `omni-specs.bin` must be a zombie (`robocap-panel handoff` stops its
 /// launcher loop and kills it; the dead child stays a zombie until the loop resumes). PR #270's `session::run` check.
 ///
 /// # Errors
@@ -54,7 +54,7 @@ pub fn require_vendor_recorder_stopped() -> Result<(), CaptureError> {
             let status = fs::read_to_string(path.join("status")).unwrap_or_default();
             if !status.lines().any(|line| line.starts_with("State:") && line.contains("Z (zombie)")) {
                 return Err(CaptureError::Device(format!(
-                    "the vendor recorder ({}) still owns capture; run through scripts/handoff-run.sh",
+                    "the vendor recorder ({}) still owns capture; run through the panel's supervisor (robocap-panel handoff)",
                     path.display()
                 )));
             }

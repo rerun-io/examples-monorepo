@@ -3,7 +3,7 @@
 //!
 //! `capture_probe --mode mmap|mmap-noncoherent|dmabuf:/dev/dma_heap/<heap> [--seconds 40] [--hold N] [--buffers 8] [--json out]`
 //!
-//! Runs only on a cap, inside `scripts/handoff-run.sh` (the crate's device checks refuse anywhere else). It opens the six
+//! Runs only on a cap, under `robocap-panel handoff` (the crate's device checks refuse anywhere else). It opens the six
 //! mainpath cameras with the crate's [`Camera`] in the chosen mode, prints the REQBUFS capabilities and whether VIDIOC_EXPBUF and
 //! a mapping of the exported dma-buf work, starts the crate's [`FrameTrigger`] at 30 fps and then:
 //! - `--hold 0` (timing): camera 0's thread runs pinned to an A55 and camera 1's to an A76. Each of their frames times one
