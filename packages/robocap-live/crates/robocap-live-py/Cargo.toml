@@ -1,0 +1,24 @@
+[package]
+name = "robocap-live-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for robocap-live's hands-layer writer, built in place as robocap_live/_core.so."
+
+[lib]
+# -> target/release/lib_core.so, copied to robocap_live/_core.so by the robocap-live-build pixi task. Not a default member of
+# the workspace: the cap build (scripts/build-arm.sh) and the workspace's own cargo build/test/clippy never compile it.
+name = "_core"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+kornia-image = { workspace = true }
+nalgebra = { workspace = true }
+numpy = "0.29"
+# No `extension-module` feature (deprecated in PyO3 0.29): robocap-live-build sets PYO3_BUILD_EXTENSION_MODULE, so a plain
+# `cargo test` links libpython and the binding test can embed Python.
+pyo3 = { version = "0.29", features = ["abi3-py312"] }
+robocap-live = { path = "../robocap-live", features = ["ort"] }
+serde_json = { workspace = true }

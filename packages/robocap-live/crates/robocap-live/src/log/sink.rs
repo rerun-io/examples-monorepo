@@ -1,5 +1,5 @@
 //! The logger as one of the output stage's sinks: the live binary's `--viewer`/`--save` and the hands catalog layer
-//! both log through it.
+//! ([`crate::layer`]) both log through it.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
