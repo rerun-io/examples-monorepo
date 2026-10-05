@@ -4,6 +4,7 @@
 //! Honor padded source rows, such as a 1024-byte decoder stride for a 960-pixel
 //! image (D28). Flat owned buffers support upload without repacking.
 
+use crate::frontend::simd::F32x4;
 use thiserror::Error;
 
 /// Everything that can go wrong building or filling an image.
@@ -242,6 +243,61 @@ impl ImageU16 {
     #[inline]
     fn at(&self, x: usize, y: usize) -> f32 {
         f32::from(self.data[y * self.stride + x])
+    }
+
+    /// Four KLT samples with a two-pixel border. Gather pixels once their whole
+    /// stencil is in bounds, then keep the scalar bilinear operation order in
+    /// each SIMD lane. Invalid lanes return -1; callers mask their gradients.
+    #[inline]
+    pub(crate) fn sample_group<const GRAD: bool>(
+        &self,
+        x: F32x4,
+        y: F32x4,
+    ) -> (F32x4, [F32x4; 2], [bool; 4]) {
+        let ix = x.0.map(|v| v as usize);
+        let iy = y.0.map(|v| v as usize);
+        let valid = std::array::from_fn(|lane| {
+            self.in_bounds(x.0[lane], y.0[lane], 2.0)
+                // Integer checks also cover dimensions beyond f32's exact range.
+                && ix[lane] >= 1 && ix[lane] < self.width.saturating_sub(2)
+                && iy[lane] >= 1 && iy[lane] < self.height.saturating_sub(2)
+        });
+        let dx = x - F32x4(ix.map(|v| v as f32));
+        let dy = y - F32x4(iy.map(|v| v as f32));
+        let ddx = F32x4::splat(1.0) - dx;
+        let ddy = F32x4::splat(1.0) - dy;
+        let weights = [ddx * ddy, ddx * dy, dx * ddy, dx * dy];
+        // Resolve packed storage once for the whole stencil, never per pixel.
+        let pixels = self.data();
+        let pixel = |ox: usize, oy: usize| {
+            F32x4(std::array::from_fn(|lane| {
+                if valid[lane] {
+                    let offset = (iy[lane] - 1 + oy) * self.stride + ix[lane] - 1 + ox;
+                    // SAFETY: valid covers the entire [-1, +2] stencil; image
+                    // construction guarantees stride >= width and stride * height storage.
+                    f32::from(unsafe { *pixels.get_unchecked(offset) })
+                } else {
+                    0.0
+                }
+            }))
+        };
+        let interpolate =
+            |a, b, c, d| weights[0] * a + weights[1] * b + weights[2] * c + weights[3] * d;
+        let p00 = pixel(1, 1);
+        let p01 = pixel(1, 2);
+        let p10 = pixel(2, 1);
+        let p11 = pixel(2, 2);
+        let value = F32x4::select(valid, interpolate(p00, p01, p10, p11), F32x4::splat(-1.0));
+        let gradients = if GRAD {
+            let mx = interpolate(pixel(0, 1), pixel(0, 2), p00, p01);
+            let px = interpolate(p10, p11, pixel(3, 1), pixel(3, 2));
+            let my = interpolate(pixel(1, 0), p00, pixel(2, 0), p10);
+            let py = interpolate(p01, pixel(1, 3), p11, pixel(2, 3));
+            [F32x4::splat(0.5) * (px - mx), F32x4::splat(0.5) * (py - my)]
+        } else {
+            [F32x4::ZERO; 2]
+        };
+        (value, gradients, valid)
     }
 
     /// Floating-point bounds: `border <= x < w - border - 1`, and likewise for y.

@@ -15,6 +15,7 @@
 //! Stable sorting retains scan order among tied scores (D09, trap 2).
 
 mod band;
+mod cells;
 pub use super::cell::{
     CELL_KEY_LIMIT, CellGrid, CellSelect, DetectorConfig, EDGE_THRESHOLD, LOWEST_THRESHOLD_RUNG,
     MAX_CELLS, Masks, NO_CELL_WINNER, Occupancy, Rect, SelectionStatus, cell_select,
@@ -219,12 +220,10 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError>;
 
     /// Pick the winner of every grid cell where the pixels already are, filling
-    /// `out` with one packed key per cell and returning `true`.
+    /// `out` with one packed key per cell and returning [`SelectionStatus::Selected`].
     ///
-    /// The default is `false`: a scanner with no device behind it has nothing to
-    /// gain from the shape, and [`detect_keypoints_with_cells`] then runs its own
-    /// walk. [`CpuCornerScan`] takes the default and stays the reference the GPU
-    /// lane is checked against.
+    /// The default is [`SelectionStatus::Unsupported`], which leaves selection
+    /// to the band walk. CPU and GPU scanners can score once at the last rung.
     ///
     /// `out` is `cells_y * cells_x` keys, row-major over the grid the caller
     /// walks — `(x_stop - x_start) / cell + 1` across and the same down, which
@@ -244,10 +243,12 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// `min_threshold`, which the ladder can step straight past. A caller with a
     /// larger budget per cell must use [`CornerScan::band`].
     ///
-    /// The masks are the caller's: a backend applies `safe_radius` and the edge
-    /// margin, and the caller drops the cells its masks cover.
+    /// A backend applies `safe_radius` and the edge margin. Optional eligibility
+    /// supplies occupancy and whole-cell masks so CPU scanners can skip cells.
+    /// Device scanners may ignore it when selection predates occupancy; the
+    /// caller always filters the returned keys by occupancy and masks.
     ///
-    /// A backend with no device path returns `Unsupported`. A `Selected`
+    /// A backend with no cell-selection path returns `Unsupported`. A `Selected`
     /// result must contain exactly one key per visited cell; malformed lengths
     /// are refused at the detector boundary.
     ///
@@ -260,6 +261,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
         camera: usize,
         image: &ImageU16,
         select: &CellSelect,
+        _eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
     ) -> Result<SelectionStatus, DetectError> {
         let _ = (camera, image, select);
@@ -314,8 +316,8 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
 /// The detector's per-frame working set: the corner scanner plus the buffers
 /// [`detect_keypoints_with_cells`] filters and suppresses in.
 #[derive(Debug)]
-pub struct DetectorScratch {
-    scanner: Box<dyn CornerScan>,
+pub struct DetectorScratch<S: CornerScan + ?Sized = dyn CornerScan> {
+    pub(crate) scanner: Box<S>,
     corners: Vec<FastCorner>,
     /// One cell's FAST scores, local coordinates, zero where there is no
     /// candidate. Kept zero between calls so only the entries a cell writes are
@@ -324,7 +326,7 @@ pub struct DetectorScratch {
     /// Which of a cell's candidates survived suppression, in candidate order.
     keep: Vec<bool>,
     /// Which cells this frame's masks cover whole, row-major over the grid the
-    /// cell loop walks. Only the device path reads it.
+    /// cell loop walks. Only cell selection reads it.
     masked: Vec<bool>,
     /// One packed winner key per cell, as a device backend filled it.
     winners: Vec<u32>,
@@ -336,12 +338,12 @@ impl Default for DetectorScratch {
     }
 }
 
-impl DetectorScratch {
+impl<S: CornerScan + ?Sized> DetectorScratch<S> {
     /// A working set over a caller-supplied corner scanner.
     ///
     /// This is how a GPU backend enters the detector: the scanner is the only
     /// part of it that reads pixels.
-    pub fn with_scanner(scanner: Box<dyn CornerScan>) -> Self {
+    pub fn with_scanner(scanner: Box<S>) -> Self {
         Self {
             scanner,
             corners: Vec::new(),
@@ -352,8 +354,12 @@ impl DetectorScratch {
         }
     }
 
-    /// [`CornerScan::submit_cells`] on the scanner this holds, which is the
-    /// only way to it from outside this module.
+    /// Independent detector scratch for side-camera CPU work.
+    pub fn fork(&self) -> Option<DetectorScratch> {
+        self.scanner.fork().map(DetectorScratch::with_scanner)
+    }
+
+    /// [`CornerScan::submit_cells`] on the scanner this holds.
     ///
     /// # Errors
     ///
@@ -387,7 +393,7 @@ impl DetectorScratch {
 /// Returns typed errors for occupancy overflow, a short count buffer or an
 /// invalid gray image view.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_keypoints_with_cells(
+pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
     image: &ImageU16,
     camera: usize,
     grid: &CellGrid,
@@ -395,7 +401,7 @@ pub fn detect_keypoints_with_cells(
     config: &DetectorConfig,
     masks: &Masks,
     max_corners: usize,
-    scratch: &mut DetectorScratch,
+    scratch: &mut DetectorScratch<S>,
     out: &mut KeypointsData,
 ) -> Result<(), DetectError> {
     out.corners.clear();
@@ -450,7 +456,7 @@ pub fn detect_keypoints_with_cells(
     // this is one less each way than the occupancy matrix's shape.
     let (cells_x, cells_y) = grid.dimensions();
 
-    // The device path: the scanner picks each cell's winner where the pixels
+    // Cell selection: the scanner picks each cell's winner where the pixels
     // already are, and what comes back is one packed key per cell instead of the
     // candidate image. Four things have to hold — a budget of one point per cell,
     // for which the threshold ladder carries no information
@@ -462,7 +468,8 @@ pub fn detect_keypoints_with_cells(
     let shaped: Option<CellSelect> = cell_select(image, grid, config)
         .filter(|_| cell_masks(masks, grid, cells_x, cells_y, masked));
     let selected = if let Some(select) = shaped {
-        scanner.select_cells(camera, image, &select, winners)? == SelectionStatus::Selected
+        scanner.select_cells(camera, image, &select, Some((occupancy, masked)), winners)?
+            == SelectionStatus::Selected
     } else {
         false
     };

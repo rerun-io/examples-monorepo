@@ -513,6 +513,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         camera: usize,
         image: &ImageU16,
         select: &CellSelect,
+        _eligibility: Option<(&crate::frontend::detect::Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
     ) -> Result<SelectionStatus, DetectError> {
         out.clear();

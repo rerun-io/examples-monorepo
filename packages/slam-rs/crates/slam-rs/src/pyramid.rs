@@ -8,6 +8,7 @@
 //! copies into caller buffers, never borrowed device memory.
 //! Sparse KLT gradient sampling avoids constructing unused dense gradient images.
 
+use crate::frontend::parallel::WorkPool;
 use crate::image::{ImageError, ImageU16};
 
 /// The 5-tap Gaussian.
@@ -29,6 +30,22 @@ pub trait PyramidBuilder {
 
     /// Prepare this frameset's uploads after all pyramid allocations.
     fn prepare_images(&mut self, _images: &[ImageU16]) -> Result<(), PyramidError> {
+        Ok(())
+    }
+
+    /// Build allocated cameras, preserving the existing backend's upload ordering.
+    fn build_frames(
+        &mut self,
+        images: &[ImageU16],
+        out: &mut [Self::Pyramid],
+        _pool: &WorkPool,
+    ) -> Result<(), PyramidError> {
+        if Self::PREPARE_IMAGES {
+            self.prepare_images(images)?;
+        }
+        for (camera, (image, pyramid)) in images.iter().zip(out).enumerate() {
+            self.build(camera, image, pyramid)?;
+        }
         Ok(())
     }
 
@@ -76,6 +93,33 @@ pub trait PyramidBuilder {
         height: usize,
         num_levels: usize,
     ) -> Result<Self::Pyramid, PyramidError>;
+}
+
+/// Reuse a frameset's pyramids while their geometry and level count match.
+pub(crate) fn ensure_pyramids<B: PyramidBuilder>(
+    builder: &B,
+    pyramids: &mut Vec<B::Pyramid>,
+    images: &[ImageU16],
+    levels: usize,
+) -> Result<(), PyramidError> {
+    pyramids.truncate(images.len());
+    for (camera, image) in images.iter().enumerate() {
+        let fits = pyramids.get(camera).is_some_and(|pyramid| {
+            pyramid.num_levels() == levels + 1
+                && pyramid.level_size(0).is_some_and(|(width, height, _)| {
+                    width == image.width() && height == image.height()
+                })
+        });
+        if !fits {
+            let pyramid = builder.allocate(image.width(), image.height(), levels)?;
+            if let Some(slot) = pyramids.get_mut(camera) {
+                *slot = pyramid;
+            } else {
+                pyramids.push(pyramid);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What generic frontend code may ask of a pyramid, whatever holds its pixels.
@@ -245,6 +289,7 @@ impl Pyramid for PyramidU16 {
 #[derive(Debug, Clone, Default)]
 pub struct CpuPyramidBuilder {
     scratch: Vec<i32>,
+    camera_scratch: Vec<Vec<i32>>,
 }
 
 impl CpuPyramidBuilder {
@@ -256,6 +301,32 @@ impl CpuPyramidBuilder {
 
 impl PyramidBuilder for CpuPyramidBuilder {
     type Pyramid = PyramidU16;
+
+    fn build_frames(
+        &mut self,
+        images: &[ImageU16],
+        out: &mut [PyramidU16],
+        pool: &WorkPool,
+    ) -> Result<(), PyramidError> {
+        self.camera_scratch.resize_with(images.len(), Vec::new);
+        let build = |(image, (scratch, pyramid)): (&ImageU16, (&mut Vec<i32>, &mut PyramidU16))| {
+            build_cpu(image, pyramid, scratch)
+        };
+        if let Some(result) = pool.install(|| {
+            use rayon::prelude::*;
+            images
+                .par_iter()
+                .zip(self.camera_scratch.par_iter_mut().zip(out.par_iter_mut()))
+                .try_for_each(build)
+        }) {
+            result
+        } else {
+            images
+                .iter()
+                .zip(self.camera_scratch.iter_mut().zip(out.iter_mut()))
+                .try_for_each(build)
+        }
+    }
 
     fn allocate(
         &self,
@@ -276,52 +347,51 @@ impl PyramidBuilder for CpuPyramidBuilder {
         img: &ImageU16,
         out: &mut PyramidU16,
     ) -> Result<(), PyramidError> {
-        let Some(level0) = out.levels.first() else {
-            return Err(PyramidError::GeometryMismatch {
-                expected_width: 0,
-                expected_height: 0,
-                width: img.width(),
-                height: img.height(),
-            });
-        };
-        if level0.width() != img.width() || level0.height() != img.height() {
-            return Err(PyramidError::GeometryMismatch {
-                expected_width: level0.width(),
-                expected_height: level0.height(),
-                width: img.width(),
-                height: img.height(),
-            });
-        }
-
-        // `lvl_internal(0).CopyFrom(other)`. `copy_from` is
-        // the same row-by-row copy, which is what a possibly strided source
-        // needs; the geometry check above makes its resize a no-op.
-        out.levels[0].copy_from(img)?;
-
-        // `for (i = 0; i < num_levels; i++) subsample(lvl(i), lvl_internal(i + 1))`.
-        self.scratch
-            .resize(scratch_len(img.width(), img.height())?, 0);
-        for level in 1..out.levels.len() {
-            let (lower, upper) = out.levels.split_at_mut(level);
-            // `level >= 1`, so `lower` holds level - 1 and `upper` starts at level.
-            let (source, destination) = (&lower[level - 1], &mut upper[0]);
-            subsample(source, destination, &mut self.scratch);
-        }
-        Ok(())
+        build_cpu(img, out, &mut self.scratch)
     }
+}
+
+/// Shared by single-camera builds and the frameset's independent camera tasks.
+fn build_cpu(
+    img: &ImageU16,
+    out: &mut PyramidU16,
+    scratch: &mut Vec<i32>,
+) -> Result<(), PyramidError> {
+    let Some(level0) = out.levels.first() else {
+        return Err(PyramidError::GeometryMismatch {
+            expected_width: 0,
+            expected_height: 0,
+            width: img.width(),
+            height: img.height(),
+        });
+    };
+    if level0.width() != img.width() || level0.height() != img.height() {
+        return Err(PyramidError::GeometryMismatch {
+            expected_width: level0.width(),
+            expected_height: level0.height(),
+            width: img.width(),
+            height: img.height(),
+        });
+    }
+
+    // Copy row by row to support strided source images.
+    out.levels[0].copy_from(img)?;
+
+    scratch.resize(scratch_len(img.width(), img.height())?, 0);
+    for level in 1..out.levels.len() {
+        let (lower, upper) = out.levels.split_at_mut(level);
+        let (source, destination) = (&lower[level - 1], &mut upper[0]);
+        subsample(source, destination, scratch);
+    }
+    Ok(())
 }
 
 /// Scratch elements `subsample` needs at level 0, which is its largest use.
 ///
-/// `ManagedImage<int> tmp(img_sub.h, img.w)` is
-/// `img.w * (img.h / 2)` integers whichever way they are laid out; [`subsample`]
-/// holds them row-major over `dst_height` x `src_width`. A saturating product
-/// would turn an impossible geometry into a `vec!` that aborts the process, so
-/// the overflow and the `isize::MAX`-byte allocation cap are both typed errors.
+/// The vertical and horizontal passes share one row, kept hot in the cache.
+/// Reject rows above the `isize::MAX`-byte allocation cap with a typed error.
 fn scratch_len(width: usize, height: usize) -> Result<usize, PyramidError> {
-    let len: usize = width
-        .checked_mul(height >> 1)
-        .ok_or(PyramidError::ScratchTooLarge { width, height })?;
+    let len: usize = width;
     if len > crate::image::max_elements::<i32>() {
         return Err(PyramidError::ScratchTooLarge { width, height });
     }
@@ -337,7 +407,7 @@ fn border101(x: i64, h: i64) -> i64 {
 }
 
 /// Separable integer Gaussian subsampling.
-/// A row-major `dst_height × src_width` accumulator keeps both passes contiguous.
+/// A single accumulator row keeps both passes contiguous and in cache.
 /// Reflect the vertical pass about source height and the horizontal pass about
 /// source width. Exact integer sums and one final rounding equal direct 5x5 convolution.
 ///
@@ -352,8 +422,7 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
     debug_assert_eq!(dst_width, src_width >> 1);
     debug_assert_eq!(dst_height, src_height >> 1);
 
-    // Vertical convolution,, one accumulator row per
-    // destination row.
+    // Vertical convolution, one accumulator row per destination row.
     for r in 0..dst_height {
         let row2: i64 = 2 * r as i64;
         // `std::abs(2 * r - 2)` and `std::abs(2 * r - 1)`, not `border101`.
@@ -372,7 +441,7 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
             src.row(rows[4]),
         ];
         // `tmp(r, c)`, one contiguous run of `c` rather than one column of it.
-        let band: &mut [i32] = &mut scratch[r * src_width..(r + 1) * src_width];
+        let band: &mut [i32] = &mut scratch[..src_width];
         for c in 0..src_width {
             band[c] = KERNEL[0] * i32::from(row_m2[c])
                 + KERNEL[1] * i32::from(row_m1[c])
@@ -380,13 +449,8 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
                 + KERNEL[3] * i32::from(row_p1[c])
                 + KERNEL[4] * i32::from(row_p2[c]);
         }
-    }
-
-    // Horizontal convolution. is `src_width`, so
-    // the reflection is about the **source** width whichever way `tmp` is laid
-    // out.
-    for r in 0..dst_height {
-        let band: &[i32] = &scratch[r * src_width..(r + 1) * src_width];
+        // Consume the vertical row immediately. Reflection is about the source
+        // width, and rounding still occurs only after both integer passes.
         for (c, pixel) in dst.row_mut(r).iter_mut().enumerate() {
             // Interior five-tap windows are contiguous. Peel low/high border columns to keep
             // reflection arithmetic out of the large interior loop.

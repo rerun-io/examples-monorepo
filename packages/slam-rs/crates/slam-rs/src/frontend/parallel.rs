@@ -98,14 +98,14 @@ impl WorkPool {
 
         let Some(pool) = self.pool.as_ref() else {
             for index in 0..len {
-                let (warp, ok) = body(index);
+                let (warp, flag) = body(index);
                 m00[index] = warp[0];
                 m01[index] = warp[1];
                 m10[index] = warp[2];
                 m11[index] = warp[3];
                 tx[index] = warp[4];
                 ty[index] = warp[5];
-                valid[index] = ok;
+                valid[index] = flag;
             }
             return;
         };
@@ -130,14 +130,14 @@ impl WorkPool {
                 .for_each(|(block, ((((((m00, m01), m10), m11), tx), ty), valid))| {
                     let base: usize = block * chunk;
                     for offset in 0..valid.len() {
-                        let (warp, ok) = body(base + offset);
+                        let (warp, flag) = body(base + offset);
                         m00[offset] = warp[0];
                         m01[offset] = warp[1];
                         m10[offset] = warp[2];
                         m11[offset] = warp[3];
                         tx[offset] = warp[4];
                         ty[offset] = warp[5];
-                        valid[offset] = ok;
+                        valid[offset] = flag;
                     }
                 });
         });

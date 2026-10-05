@@ -161,7 +161,6 @@ pub struct VioConfig {
     /// the jointly solved, state. Deterministic: no timing enters a decision.
     #[serde(rename = "port.keyframe_solve_deferred")]
     pub port_keyframe_solve_deferred: bool,
-
     /// Run the estimator one frameset behind the frontend (M7, VkVIO's overlap).
     ///
     /// Off, [`crate::Vio::track`] runs frameset t's frontend and then its
@@ -174,6 +173,11 @@ pub struct VioConfig {
     /// Deterministic: the lag is structural, no timing enters a decision.
     #[serde(rename = "port.frontend_lag")]
     pub port_frontend_lag: bool,
+    /// Stop a KLT level after a valid update when both the translation norm and
+    /// `abs(theta) * 4` are below this many level pixels. `None` keeps every step.
+    /// Supported by the CPU tracker and fused GPU kernels; must be finite and positive.
+    #[serde(rename = "port.klt_exit_step_px")]
+    pub port_klt_exit_step_px: Option<f32>,
 
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
@@ -287,6 +291,7 @@ impl Default for VioConfig {
             port_frame_update_max_iterations: 0,
             port_keyframe_solve_deferred: false,
             port_frontend_lag: false,
+            port_klt_exit_step_px: None,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
@@ -341,6 +346,31 @@ mod tests {
         let text = r#"{"value0":{"config.not_a_real_field":3}}"#;
         let error = VioConfig::from_json_str(text).unwrap_err();
         assert!(error.to_string().contains("config.not_a_real_field"));
+    }
+
+    #[test]
+    fn klt_exit_is_opt_in_and_round_trips() {
+        for threshold in ["null", "0.01", "0.03", "0.05"] {
+            let text = format!(r#"{{"value0":{{"port.klt_exit_step_px":{threshold}}}}}"#);
+            let config = VioConfig::from_json_str(&text).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&config.to_json_string().unwrap()).unwrap();
+            let expected: serde_json::Value = serde_json::from_str(threshold).unwrap();
+            let actual = &written["value0"]["port.klt_exit_step_px"];
+            if let Some(expected) = expected.as_f64() {
+                assert!((actual.as_f64().unwrap() - expected).abs() < 1e-8);
+            } else {
+                assert!(actual.is_null());
+            }
+        }
+        let defaults: serde_json::Value =
+            serde_json::from_str(&VioConfig::default().to_json_string().unwrap()).unwrap();
+        assert!(
+            defaults["value0"]
+                .get("port.klt_exit_step_px")
+                .unwrap()
+                .is_null()
+        );
     }
 
     const MSDMI_JSON: &str = include_str!("../../../configs/msdmi_config.json");

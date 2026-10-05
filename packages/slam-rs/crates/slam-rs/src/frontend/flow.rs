@@ -41,7 +41,7 @@ use crate::frontend::tracker::{
 };
 use crate::image::ImageU16;
 use crate::lie::Se3;
-use crate::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder};
+use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder};
 use crate::types::KeypointId;
 
 #[derive(Debug, Default)]
@@ -222,6 +222,12 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 {
     /// The config checks that do not depend on the backends.
     fn validate_config(config: &VioConfig) -> Result<(), FrontendError> {
+        if config
+            .port_klt_exit_step_px
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+        {
+            return Err(crate::frontend::tracker::TrackerError::InvalidExitStep.into());
+        }
         if config.optical_flow_type != "frame_to_frame" {
             return Err(FrontendError::UnsupportedFlowType(
                 config.optical_flow_type.clone(),
@@ -341,11 +347,12 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         calibration: &Calibration<f64>,
         options: FrontendOptions,
         builder: B,
-        tracker: T,
+        mut tracker: T,
         scanner: Box<dyn CornerScan>,
         host_pool: WorkPool,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
+        tracker.configure_klt_exit(config.port_klt_exit_step_px)?;
         Self::validate_options(&options)?;
 
         let num_levels: usize = config.optical_flow_levels as usize + 1;
@@ -791,36 +798,14 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// `pyramid->at(i).setFromImage(img, config.optical_flow_levels)`,
     /// with the allocation reused whenever the geometry is unchanged.
     fn build_staging(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
-        let levels: usize = self.config.optical_flow_levels as usize;
-        self.staging.truncate(images.len());
-        for (index, image) in images.iter().enumerate() {
-            let fits: bool = self.staging.get(index).is_some_and(|pyramid| {
-                pyramid.num_levels() == levels + 1
-                    && pyramid
-                        .level_size(0)
-                        .is_some_and(|(w, h, _)| w == image.width() && h == image.height())
-            });
-            if !fits {
-                let fresh: B::Pyramid =
-                    self.pyramid_builder
-                        .allocate(image.width(), image.height(), levels)?;
-                match self.staging.get_mut(index) {
-                    Some(slot) => *slot = fresh,
-                    None => self.staging.push(fresh),
-                }
-            }
-            if !B::PREPARE_IMAGES {
-                self.pyramid_builder
-                    .build(index, image, &mut self.staging[index])?;
-            }
-        }
-        if B::PREPARE_IMAGES {
-            self.pyramid_builder.prepare_images(images)?;
-            for (index, image) in images.iter().enumerate() {
-                self.pyramid_builder
-                    .build(index, image, &mut self.staging[index])?;
-            }
-        }
+        crate::pyramid::ensure_pyramids(
+            &self.pyramid_builder,
+            &mut self.staging,
+            images,
+            self.config.optical_flow_levels as usize,
+        )?;
+        self.pyramid_builder
+            .build_frames(images, &mut self.staging, &self.host_pool)?;
         Ok(())
     }
 }

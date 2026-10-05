@@ -1,20 +1,21 @@
-//! Source patches with the patch index varying fastest in each array.
+//! Source patches in groups of four: `[group][level][row][tap][lane]`.
 
 use nalgebra::Vector2;
 
 use super::{
-    MAX_LEVELS, Pattern, PointsSoA, SourcePatches, TrackerError, WorkPool, check_patch_inputs,
+    MAX_LEVELS, Pattern, PointsSoA, SourcePatches, TrackerError, check_patch_inputs,
     checked_patch_shape,
 };
-use crate::frontend::patch::build_patch;
+use crate::frontend::parallel::WorkPool;
+use crate::frontend::patch::build_patch_group;
 use crate::image::ImageU16;
 use crate::pyramid::{Pyramid, PyramidU16};
 
 /// One camera's source patches for every pyramid level, in structure-of-arrays form.
 ///
-/// The layout puts the **patch index fast-varying** in every array, so a GPU
-/// thread per patch reads consecutive addresses (§12.2). Capacity is fixed at
-/// construction and the per-frame path never allocates.
+/// Four adjacent patches share contiguous taps. All levels of a group are
+/// contiguous, so builds split over point groups and tracking reuses nearby
+/// cache lines. Capacity is fixed; the per-frame path never allocates.
 #[derive(Debug, Clone)]
 pub struct PatchSoA<P: Pattern> {
     pub(super) capacity: usize,
@@ -22,20 +23,20 @@ pub struct PatchSoA<P: Pattern> {
     len: usize,
     /// Source position at level 0, one per patch.
     positions: PointsSoA,
-    /// `data[(level * P::SIZE + tap) * capacity + patch]`.
+    /// `data[((group * num_levels + level) * P::SIZE + tap) * 4 + lane]`.
     pub(super) data: Vec<f32>,
-    /// `h_inv_jt[((level * 3 + row) * P::SIZE + tap) * capacity + patch]`.
+    /// `h_inv_jt[(((group * num_levels + level) * 3 + row) * P::SIZE + tap) * 4 + lane]`.
     pub(super) h_inv_jt: Vec<f32>,
-    /// `valid[level * capacity + patch]`.
+    /// `valid[(group * num_levels + level) * 4 + lane]`.
     valid: Vec<bool>,
-    /// Workers [`SourcePatches::build`] spreads the levels over; `None` builds
+    /// Workers [`SourcePatches::build`] spreads the groups over; `None` builds
     /// on the calling thread.
     pool: Option<WorkPool>,
     pattern: std::marker::PhantomData<P>,
 }
 
 impl<P: Pattern> PatchSoA<P> {
-    /// Build the levels on `pool`'s workers, one level per task. Every level is
+    /// Build point groups on `pool`'s workers. Every group is
     /// its own contiguous block of each array and every patch a pure function
     /// of its position and level, so the values are those of the sequential
     /// build.
@@ -55,7 +56,9 @@ impl<P: Pattern> PatchSoA<P> {
     /// anything is allocated: the products below reach `Vec` as a length, and a
     /// `Vec` too long to exist panics rather than returning (decision D32).
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
-        let (flags, taps): (usize, usize) = checked_patch_shape(capacity, num_levels, P::SIZE)?;
+        checked_patch_shape(capacity, num_levels, P::SIZE)?;
+        let padded_capacity = capacity.div_ceil(4) * 4;
+        let (flags, taps) = checked_patch_shape(padded_capacity, num_levels, P::SIZE)?;
         let jacobians: usize = taps
             .checked_mul(3)
             .ok_or(TrackerError::BufferShapeOverflow {
@@ -94,20 +97,20 @@ impl<P: Pattern> PatchSoA<P> {
     ///
     /// If `level` or `patch` is past the end.
     pub fn valid(&self, level: usize, patch: usize) -> bool {
-        self.valid[level * self.capacity + patch]
+        self.valid[(patch / 4 * self.num_levels + level) * 4 + patch % 4]
     }
 
-    /// Offset of tap 0 of one patch's `data` at one level; taps are `capacity` apart.
+    /// Offset of tap 0 of one patch's data; taps are four floats apart.
     #[inline]
     pub(super) fn data_offset(&self, level: usize, patch: usize) -> usize {
-        level * P::SIZE * self.capacity + patch
+        (patch / 4 * self.num_levels + level) * P::SIZE * 4 + patch % 4
     }
 
     /// Offset of row 0, tap 0 of one patch's `H^-1 J^T`; rows are
-    /// `P::SIZE * capacity` apart and taps `capacity` apart.
+    /// `P::SIZE * 4` apart and taps four floats apart.
     #[inline]
     pub(super) fn jacobian_offset(&self, level: usize, patch: usize) -> usize {
-        level * 3 * P::SIZE * self.capacity + patch
+        (patch / 4 * self.num_levels + level) * 3 * P::SIZE * 4 + patch % 4
     }
 }
 
@@ -118,13 +121,8 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
     ///
     /// One patch per entry of `positions`, at `position / (1 << level)` — the
     /// Source position divided by the pyramid scale.
-    /// [`build_patch`] writes straight into this structure's arrays, so no packed
-    /// per-patch record is ever built (§12.2).
-    ///
-    /// A pure per-patch map. The patch-fast-varying layout has no contiguous
-    /// split by patch, but each level is one contiguous block of every array, so
-    /// with a pool ([`PatchSoA::with_pool`]) the levels are built in parallel;
-    /// without one, on the calling thread.
+    /// [`build_patch_group`] writes directly into these arrays. With a pool,
+    /// groups are built in parallel; otherwise the caller builds them.
     fn build(
         &mut self,
         pyramid: &PyramidU16,
@@ -156,64 +154,67 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
             }
         }
 
-        // One level: patch `index` sits at `index` of the level's block of each
-        // array, taps `capacity` apart, Jacobian rows `P::SIZE * capacity` apart.
-        let capacity: usize = self.capacity;
-        if capacity == 0 {
-            // No patches (count <= capacity), and the per-level chunks below would be zero-sized.
+        if count == 0 {
             return Ok(());
         }
-        let build_level =
-            |level: usize, data: &mut [f32], h_inv_jt: &mut [f32], valid: &mut [bool]| {
-                let Some(image) = images[level] else {
+        let levels: usize = self.num_levels;
+        let build_group =
+            |group: usize, data: &mut [f32], h_inv_jt: &mut [f32], valid: &mut [bool]| {
+                let active: [bool; 4] = std::array::from_fn(|lane| {
+                    let index = group * 4 + lane;
+                    index < count && selected.is_none_or(|flags| flags[index])
+                });
+                if !active.iter().any(|flag| *flag) {
+                    valid.fill(false);
                     return;
-                };
-                // `const Scalar scale = 1 << level`.
-                let scale: f32 = (1u32 << level) as f32;
-                for index in 0..count {
-                    if !selected.is_none_or(|flags| flags[index]) {
-                        valid[index] = false;
-                        continue;
-                    }
-                    let position: Vector2<f32> = positions.get(index) / scale;
-                    let (_mean, ok) = build_patch::<P, ImageU16>(
+                }
+                for level in 0..levels {
+                    let Some(image) = images[level] else { continue };
+                    let scale = (1u32 << level) as f32;
+                    let points = std::array::from_fn(|lane| {
+                        if active[lane] {
+                            positions.get(group * 4 + lane) / scale
+                        } else {
+                            Vector2::new(-100.0, -100.0)
+                        }
+                    });
+                    let (_, ok) = build_patch_group::<P>(
                         image,
-                        &position,
-                        &mut data[index..],
-                        capacity,
-                        &mut h_inv_jt[index..],
-                        capacity,
-                        P::SIZE * capacity,
+                        points,
+                        &mut data[level * 4 * P::SIZE..],
+                        &mut h_inv_jt[level * 12 * P::SIZE..],
                     );
-                    valid[index] = ok;
+                    for lane in 0..4 {
+                        valid[level * 4 + lane] = active[lane] && ok[lane];
+                    }
                 }
             };
-        let levels: usize = self.num_levels;
         let (data_block, jacobian_block): (usize, usize) =
-            (P::SIZE * capacity, 3 * P::SIZE * capacity);
-        let data: &mut [f32] = &mut self.data[..levels * data_block];
-        let h_inv_jt: &mut [f32] = &mut self.h_inv_jt[..levels * jacobian_block];
-        let valid: &mut [bool] = &mut self.valid[..levels * capacity];
+            (levels * P::SIZE * 4, levels * 3 * P::SIZE * 4);
+        let groups = count.div_ceil(4);
+        let data = &mut self.data[..groups * data_block];
+        let h_inv_jt = &mut self.h_inv_jt[..groups * jacobian_block];
+        let valid = &mut self.valid[..groups * levels * 4];
         let parallel: Option<()> = self.pool.as_ref().and_then(|pool| {
             pool.install(|| {
                 use rayon::prelude::*;
                 data.par_chunks_mut(data_block)
                     .zip(h_inv_jt.par_chunks_mut(jacobian_block))
-                    .zip(valid.par_chunks_mut(capacity))
+                    .zip(valid.par_chunks_mut(levels * 4))
                     .enumerate()
-                    .for_each(|(level, ((data, h_inv_jt), valid))| {
-                        build_level(level, data, h_inv_jt, valid)
+                    .for_each(|(group, ((data, h_inv_jt), valid))| {
+                        build_group(group, data, h_inv_jt, valid)
                     });
             })
         });
         if parallel.is_none() {
-            for (level, ((data, h_inv_jt), valid)) in data
+            for (group, ((data, h_inv_jt), valid)) in data
                 .chunks_mut(data_block)
                 .zip(h_inv_jt.chunks_mut(jacobian_block))
-                .zip(valid.chunks_mut(capacity))
+                .zip(valid.chunks_mut(levels * 4))
                 .enumerate()
             {
-                build_level(level, data, h_inv_jt, valid);
+                build_group(group, data, h_inv_jt, valid);
             }
         }
 

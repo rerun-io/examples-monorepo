@@ -113,7 +113,7 @@ def load_slam_config(path: Path = SLAM_CONFIG_PATH) -> SlamConfig:
 
 
 PORT_CONFIG_KEYS: frozenset[str] = frozenset(
-    {"port.redetect_survivor_ratio", "port.frame_update_max_iterations", "port.keyframe_solve_deferred", "port.frontend_lag"}
+    {"port.redetect_survivor_ratio", "port.frame_update_max_iterations", "port.keyframe_solve_deferred", "port.frontend_lag", "port.klt_exit_step_px"}
 )
 """Additional port configuration keys accepted in profile overlays."""
 

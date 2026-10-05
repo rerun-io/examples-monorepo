@@ -77,10 +77,12 @@ impl CornerScan for CountingScan {
         camera: usize,
         image: &ImageU16,
         select: &CellSelect,
+        eligibility: Option<(&slam_rs::frontend::detect::Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
     ) -> Result<slam_rs::frontend::cell::SelectionStatus, DetectError> {
         self.selections.fetch_add(1, Ordering::Relaxed);
-        self.inner.select_cells(camera, image, select, out)
+        self.inner
+            .select_cells(camera, image, select, eligibility, out)
     }
 
     /// Forwarded, not defaulted: the trait's default prepares nothing, so a
@@ -642,7 +644,7 @@ mod batch_lifecycle {
         let mut host: DetectorScratch = DetectorScratch::default();
         let bands = Arc::new(AtomicUsize::new(0));
         let selections = Arc::new(AtomicUsize::new(0));
-        let mut device = DetectorScratch::with_scanner(Box::new(CountingScan {
+        let mut device: DetectorScratch = DetectorScratch::with_scanner(Box::new(CountingScan {
             inner: Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()),
             bands: Arc::clone(&bands),
             selections: Arc::clone(&selections),
@@ -723,7 +725,13 @@ mod batch_lifecycle {
                 .map(|(camera, image)| {
                     let mut keys = Vec::new();
                     scanner
-                        .select_cells(camera, image, &self.selects[camera].unwrap(), &mut keys)
+                        .select_cells(
+                            camera,
+                            image,
+                            &self.selects[camera].unwrap(),
+                            None,
+                            &mut keys,
+                        )
                         .unwrap();
                     assert_eq!(keys.len(), self.cells, "camera {camera}: device selection");
                     keys
@@ -844,23 +852,23 @@ mod batch_lifecycle {
 
         let mut first: Vec<u32> = Vec::new();
         scanner
-            .select_cells(0, &images[0], &select, &mut first)
+            .select_cells(0, &images[0], &select, None, &mut first)
             .unwrap();
         let mut again: Vec<u32> = Vec::new();
         scanner
-            .select_cells(0, &images[1], &select, &mut again)
+            .select_cells(0, &images[1], &select, None, &mut again)
             .unwrap();
         let mut independent = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
         let mut expected = Vec::new();
         independent
-            .select_cells(0, &images[1], &select, &mut expected)
+            .select_cells(0, &images[1], &select, None, &mut expected)
             .unwrap();
         assert_ne!(expected, first, "the second image must have different keys");
         assert_eq!(again, expected, "the second read must scan the new image");
 
         let mut second: Vec<u32> = Vec::new();
         scanner
-            .select_cells(1, &images[1], &select, &mut second)
+            .select_cells(1, &images[1], &select, None, &mut second)
             .unwrap();
         assert_eq!(second.len(), cells);
         assert_ne!(second, first, "camera 1 answered with camera 0's frame");
