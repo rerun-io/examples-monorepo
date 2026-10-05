@@ -205,22 +205,23 @@ def test_readers_reject_non_increasing_device_stamps(tmp_path: Path, reader_name
     from dataforge.datasets import hot3d_source
 
     clock = hot3d_source.LabelClock({10: 10, 20: 20})
-    if reader_name in ("read_hands", "read_mano"):
-        name = "umetrack" if reader_name == "read_hands" else "mano"
-        (tmp_path / f"{name}_hand_pose_trajectory.jsonl").write_text(
-            "\n".join(json.dumps({"timestamp_ns": stamp, "hand_poses": {}}) for stamp in stamps)
-        )
-        source = tmp_path
-    elif reader_name == "read_masks":
-        (tmp_path / "masks").mkdir()
-        (tmp_path / "masks/mask_qa_pass.csv").write_text("timestamp[ns],stream_id,mask\n" + "".join(f"{stamp},1201-1,True\n" for stamp in stamps))
-        source = tmp_path
-    else:
-        source = tmp_path / "headset_trajectory.csv"
-        source.write_text(
-            "object_uid,timestamp[ns],t_wo_x[m],t_wo_y[m],t_wo_z[m],q_wo_w,q_wo_x,q_wo_y,q_wo_z\n"
-            + "".join(f"head,{stamp},0,0,0,1,0,0,0\n" for stamp in stamps)
-        )
+    match reader_name:
+        case "read_hands" | "read_mano":
+            name = "umetrack" if reader_name == "read_hands" else "mano"
+            (tmp_path / f"{name}_hand_pose_trajectory.jsonl").write_text(
+                "\n".join(json.dumps({"timestamp_ns": stamp, "hand_poses": {}}) for stamp in stamps)
+            )
+            source = tmp_path
+        case "read_masks":
+            (tmp_path / "masks").mkdir()
+            (tmp_path / "masks/mask_qa_pass.csv").write_text("timestamp[ns],stream_id,mask\n" + "".join(f"{stamp},1201-1,True\n" for stamp in stamps))
+            source = tmp_path
+        case _:
+            source = tmp_path / "headset_trajectory.csv"
+            source.write_text(
+                "object_uid,timestamp[ns],t_wo_x[m],t_wo_y[m],t_wo_z[m],q_wo_w,q_wo_x,q_wo_y,q_wo_z\n"
+                + "".join(f"head,{stamp},0,0,0,1,0,0,0\n" for stamp in stamps)
+            )
     with pytest.raises(ValueError, match="increasing|duplicate"):
         getattr(hot3d_source, reader_name)(source, clock)
 
