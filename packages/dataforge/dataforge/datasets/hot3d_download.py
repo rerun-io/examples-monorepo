@@ -7,16 +7,11 @@ the manifest ``download`` leaves behind carries names, sizes and sha1sums only.
 """
 
 import fcntl
-import zipfile
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
-from serde import serde
 from serde.json import to_json
 
-from dataforge import transports, writing
+from dataforge import meta_cdn, transports, writing
 from dataforge.datasets.base import RemoteSequence
 from dataforge.datasets.hot3d_source import (
     DEVICES,
@@ -28,10 +23,13 @@ from dataforge.datasets.hot3d_source import (
     required_members,
     sequence_files,
 )
-from dataforge.records import decode, read_json
+from dataforge.meta_cdn import CdnFile, UrlFile
+from dataforge.records import read_json
 
 URL_FILE_HELP: str = "download a fresh URL file from https://www.projectaria.com/datasets/hot3D/ (links expire after about 3 weeks)"
 """How a user gets (or renews) a URL file."""
+SOURCE: meta_cdn.CdnSource = meta_cdn.CdnSource("HOT3D", URL_FILE_HELP)
+"""Names HOT3D in every CDN message."""
 
 FETCHED_TYPES: tuple[str, ...] = ("main_vrs", "ground_truth", "hand_data")
 """Per-sequence data types the converter reads; ``video_main_rgb`` and ``mps_*`` are never fetched."""
@@ -40,65 +38,14 @@ UNREAD_MEMBERS: frozenset[str] = frozenset({"box2d_hands.csv", "box2d_objects.cs
 """Zip members the converter never reads, so they are not extracted."""
 
 
-@serde
-@dataclass(frozen=True, slots=True)
-class CdnFile:
-    """One entry of a HOT3D URL file (third-party format)."""
-
-    filename: str
-    """CDN file name."""
-    sha1sum: str
-    """Hex SHA-1 of the complete file."""
-    file_size_bytes: int
-    """Size of the complete file."""
-    download_url: str = field(repr=False)
-    """Signed CDN URL: a secret, kept out of ``repr`` and every message."""
-
-    def listed(self) -> ListedFile:
-        """The entry without its URL."""
-        return ListedFile(self.filename, self.sha1sum, self.file_size_bytes)
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class SequenceConfig:
-    """The URL file's dataset, release and zip inventory."""
-
-    dataset_name: str
-    """``Hot3DAria``, ``Hot3DQuest`` or ``Hot3DAssets``."""
-    data_groups: dict[str, list[str]]
-    """Files each zip extracts to, by group."""
-    release: str | None = None
-    """Upstream release; the assets file has none."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class UrlFile:
-    """``Hot3D{Aria,Quest,Assets}_download_urls*.json`` as projectaria.com hands it out."""
-
-    sequences: dict[str, dict[str, CdnFile]]
-    """Files per sequence (the assets file has one pseudo-sequence ``assets``), by data type."""
-    sequence_config: SequenceConfig
-    """Release and zip inventory."""
-
-
 def read_url_file(path: Path) -> UrlFile:
-    """Parse a URL file; a decode error names only its type, since pyserde's message quotes the rejected value (a URL)."""
-    return decode(UrlFile, path.read_text(), source=str(path), redact=f"not a HOT3D URL file; {URL_FILE_HELP}")
+    """Parse a HOT3D URL file without ever quoting a URL."""
+    return meta_cdn.read_url_file(path, SOURCE)
 
 
 def url_file_at(path: Path | None, flag: str) -> Path:
     """The URL file a config field names, or the fix when it is unset or absent."""
-    if path is None or not path.is_file():
-        raise FileNotFoundError(f"HOT3D needs {flag} <URL file> (got {path}); {URL_FILE_HELP}")
-    return path
-
-
-def expiry(url: str) -> datetime | None:
-    """When a signed fbcdn URL stops working (its ``oe`` parameter, hex Unix seconds), if it says."""
-    stamps: list[str] = parse_qs(urlparse(url).query).get("oe", [])
-    return datetime.fromtimestamp(int(stamps[0], 16), UTC) if stamps else None
+    return meta_cdn.url_file_at(path, flag, SOURCE)
 
 
 def manifest_of(urls: UrlFile, device: Device) -> Manifest:
@@ -109,7 +56,10 @@ def manifest_of(urls: UrlFile, device: Device) -> Manifest:
     return Manifest(
         release=str(urls.sequence_config.release),
         data_groups={group: [name for name in urls.sequence_config.data_groups[group] if name not in UNREAD_MEMBERS] for group in FETCHED_TYPES[1:]},
-        sequences={name: {kind: files[kind].listed() for kind in FETCHED_TYPES} for name, files in sorted(urls.sequences.items())},
+        sequences={
+            name: {kind: ListedFile(files[kind].filename, files[kind].sha1sum, files[kind].file_size_bytes) for kind in FETCHED_TYPES}
+            for name, files in sorted(urls.sequences.items())
+        },
     )
 
 
@@ -123,65 +73,6 @@ def remote_sequences(manifest: Manifest, device: Device) -> list[RemoteSequence]
         )
         for name, files in manifest.sequences.items()
     ]
-
-
-def fetch_verified(entry: CdnFile, dest: Path) -> None:
-    """Fetch into ``<dest>.part`` (resuming it), check size and sha1, then rename onto ``dest``.
-
-    An expired link fails before any request. A complete ``.part`` whose sha1 is wrong is removed so the next
-    run refetches it; nothing else is ever deleted.
-    """
-    stamp: datetime | None = expiry(entry.download_url)
-    if stamp is not None and stamp <= datetime.now(UTC):
-        raise ValueError(f"the HOT3D URL file's link for {entry.filename} expired on {stamp:%Y-%m-%d %H:%M} UTC; {URL_FILE_HELP}")
-    part: Path = dest.with_name(f"{dest.name}.part")
-    transports.http_fetch(entry.download_url, dest=part, label=f"HOT3D {entry.filename}")
-    size: int = part.stat().st_size
-    if size != entry.file_size_bytes:
-        raise ValueError(f"{part} holds {size} bytes, the URL file lists {entry.file_size_bytes}; rerun to resume")
-    try:
-        transports.publish_verified(part, dest, transports.FileIntegrity(entry.file_size_bytes, "sha1", entry.sha1sum))
-    except transports.IntegrityError:
-        part.unlink()
-        raise ValueError(f"{entry.filename}: sha1 differs from the URL file; removed the download, rerun to refetch") from None
-
-
-def extract(archive: Path, members: list[str], into: Path) -> None:
-    """Write the named members the archive has atomically beneath ``into``, in order, then remove the archive.
-
-    An absent member is not an error here: whether the sequence is complete is discovery's verdict.
-    """
-    with zipfile.ZipFile(archive) as zipped:
-        listed: set[str] = set(zipped.namelist())
-        for name in (name for name in members if name in listed):
-            with writing.atomic_write(into / name) as temp_path, zipped.open(name) as member, temp_path.open("wb") as sink:
-                while block := member.read(transports.CHUNK_BYTES):
-                    sink.write(block)
-    archive.unlink()
-
-
-def fetch_file(entry: CdnFile, dest: Path, report: transports.FetchReport) -> None:
-    """Fetch one plain file unless it is already there at its listed size."""
-    fetched: bool = not (dest.is_file() and dest.stat().st_size == entry.file_size_bytes)
-    if fetched:
-        fetch_verified(entry, dest)
-    report.count(fetched, entry.file_size_bytes)
-
-
-def fetch_zip(entry: CdnFile, members: list[str], required: list[str], into: Path, report: transports.FetchReport) -> None:
-    """Fetch one zip and extract ``members`` unless every ``required`` one is already there.
-
-    A zip left under its final name by an interrupted extraction was verified before its rename, so it is reused.
-    """
-    archive: Path = into / entry.filename
-    if all((into / name).is_file() for name in required):
-        archive.unlink(missing_ok=True)
-        report.count(False, entry.file_size_bytes)
-        return
-    if not (archive.is_file() and archive.stat().st_size == entry.file_size_bytes):
-        fetch_verified(entry, archive)
-        report.count(True, entry.file_size_bytes)
-    extract(archive, members, into)
 
 
 def fetch_assets(root: Path, assets_url_file: Path | None, report: transports.FetchReport) -> None:
@@ -202,7 +93,7 @@ def fetch_assets(root: Path, assets_url_file: Path | None, report: transports.Fe
         members: list[str] = sorted(
             (name for name in urls.sequence_config.data_groups["assets"] if name not in UNREAD_MEMBERS), key=lambda name: name == "instance.json"
         )
-        fetch_zip(urls.sequences["assets"]["assets"], members, members, folder, report)
+        meta_cdn.fetch_zip(urls.sequences["assets"]["assets"], members, members, folder, report, SOURCE)
 
 
 def download(root: Path, device: Device, *, url_file: Path | None, assets_url_file: Path | None, sequences: tuple[str, ...] | None) -> None:
@@ -221,11 +112,11 @@ def download(root: Path, device: Device, *, url_file: Path | None, assets_url_fi
     for name in selected:
         folder: Path = root / device / name
         files: dict[str, CdnFile] = urls.sequences[name]
-        fetch_file(files["main_vrs"], folder / "recording.vrs", report)
+        meta_cdn.fetch_file(files["main_vrs"], folder / "recording.vrs", report, SOURCE)
         # ground_truth first: its metadata.json says whether hand_data is needed (test-split sequences ship none).
         for group in FETCHED_TYPES[1:]:
             metadata: Metadata | None = read_json(folder / "metadata.json", Metadata) if (folder / "metadata.json").is_file() else None
             required: list[str] = [member for member in manifest.data_groups[group] if member in required_members(manifest, metadata)]
-            fetch_zip(files[group], manifest.data_groups[group], required, folder, report)
+            meta_cdn.fetch_zip(files[group], manifest.data_groups[group], required, folder, report, SOURCE)
         print(f"  {name}: done")
     print(f"hot3d-{device}: {len(selected)} sequence(s); {report.summary()} → {root}")
