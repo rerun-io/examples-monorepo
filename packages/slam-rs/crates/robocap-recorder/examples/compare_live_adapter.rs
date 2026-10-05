@@ -137,7 +137,7 @@ fn main() -> Result<()> {
         if let Some(pose) = report.pose {
             let difference = pose
                 .iter()
-                .zip(result.world_from_rig)
+                .zip(result.pose.unwrap().world_from_rig)
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
             max_difference = max_difference.max(difference);
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
                 difference < 1e-5,
                 "first disagreement at frame {frame}, time {}: live={pose:?}, direct={:?}, difference={difference}",
                 report.timestamp_ns,
-                result.world_from_rig
+                result.pose.unwrap().world_from_rig
             );
             compared += 1;
             csv.push_str(&format!(

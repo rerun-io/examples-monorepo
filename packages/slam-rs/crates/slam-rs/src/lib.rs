@@ -6,8 +6,8 @@
 
 mod pipeline;
 pub use pipeline::{
-    Backend, FrontendLane, FrontendTimings, ImageView, PreparedTrack, Vio, VioError, VioResult,
-    VioStatus, check_imu_sample,
+    Backend, FrontendLane, FrontendTimings, ImageView, PreparedTrack, Vio, VioError, VioPose,
+    VioResult, VioStatus, check_imu_sample,
 };
 
 pub mod ba_base;

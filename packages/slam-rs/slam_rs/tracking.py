@@ -147,7 +147,8 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
             break
         replayed += 1
         for _tracked, result in lockstep.push(frameset):
-            pose: Float64[ndarray, " 7"] = result.world_from_rig
+            pose: Float64[ndarray, " 7"] | None = result.world_from_rig
+            assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
             t_ns.append(result.t_ns)
             # The slice is a view onto a 7-float buffer the estimator would
             # otherwise keep alive per pose, so it is copied; `np.roll` already

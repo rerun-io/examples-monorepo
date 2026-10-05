@@ -270,10 +270,10 @@ impl LiveSlam {
                         "input_age_ms": (now_ns - t) as f64 / 1e6,
                         "processing_ms": processing_ms,
                         "took_keyframe": self.vio.last_stats().map(|s| s.took_keyframe),
-                        "pyramid_ns": frontend.pyramid_ns,
-                        "detect_ns": frontend.detect_ns,
-                        "track_ns": frontend.track_ns,
-                        "stereo_ns": frontend.stereo_ns,
+                        "pyramid_ns": frontend.flow.pyramid_ns,
+                        "detect_ns": frontend.flow.detect_ns,
+                        "track_ns": frontend.flow.track_ns,
+                        "stereo_ns": frontend.flow.stereo_ns,
                         "imu_ns": frontend.imu_ns,
                         "predict_ns": stages.map(|s| s.predict_ns),
                         "keyframe_ns": stages.map(|s| s.keyframe_ns),
@@ -297,12 +297,17 @@ impl LiveSlam {
                 && landmarks >= 10
                 && tracked_observations >= 10
                 && optimization_started
-                && result.world_from_rig.iter().all(|v| v.is_finite());
+                && result
+                    .pose
+                    .is_some_and(|pose| pose.world_from_rig.iter().all(|v| v.is_finite()));
             self.last_frame = Some(t);
             self.updates += 1;
             return Ok(Some(SlamReport {
                 timestamp_ns: t,
-                pose: supported.then_some(result.world_from_rig),
+                pose: result
+                    .pose
+                    .filter(|_| supported)
+                    .map(|pose| pose.world_from_rig),
                 status: if result.status == VioStatus::NeedMoreImu {
                     SlamStatus::WaitingForImu
                 } else if !supported {

@@ -36,6 +36,10 @@ pub enum VioStatus {
     NeedMoreImu,
     /// The returned pose is an estimate.
     Tracking,
+    /// The lagged frontend accepted a frame; no estimate is ready yet.
+    Buffered,
+    /// The first keyframe lacked stereo structure; no pose exists yet.
+    NoVisualFeatures,
 }
 
 impl From<slam_rs::VioStatus> for VioStatus {
@@ -43,6 +47,8 @@ impl From<slam_rs::VioStatus> for VioStatus {
         match status {
             slam_rs::VioStatus::NeedMoreImu => Self::NeedMoreImu,
             slam_rs::VioStatus::Tracking => Self::Tracking,
+            slam_rs::VioStatus::Buffered => Self::Buffered,
+            slam_rs::VioStatus::NoVisualFeatures => Self::NoVisualFeatures,
         }
     }
 }
@@ -70,26 +76,38 @@ impl VioResult {
 
     /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`.
     #[getter]
-    fn world_from_rig<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        self.inner.world_from_rig.as_slice().to_pyarray(py)
+    fn world_from_rig<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.inner
+            .pose
+            .as_ref()
+            .map(|pose| pose.world_from_rig.as_slice().to_pyarray(py))
     }
 
     /// Rig velocity in the world frame, m/s.
     #[getter]
-    fn velocity<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        self.inner.velocity.as_slice().to_pyarray(py)
+    fn velocity<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.inner
+            .pose
+            .as_ref()
+            .map(|pose| pose.velocity.as_slice().to_pyarray(py))
     }
 
     /// Gyroscope bias estimate, rad/s.
     #[getter]
-    fn gyro_bias<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        self.inner.gyro_bias.as_slice().to_pyarray(py)
+    fn gyro_bias<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.inner
+            .pose
+            .as_ref()
+            .map(|pose| pose.gyro_bias.as_slice().to_pyarray(py))
     }
 
     /// Accelerometer bias estimate, m/s².
     #[getter]
-    fn accel_bias<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        self.inner.accel_bias.as_slice().to_pyarray(py)
+    fn accel_bias<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.inner
+            .pose
+            .as_ref()
+            .map(|pose| pose.accel_bias.as_slice().to_pyarray(py))
     }
 
     fn __repr__(&self) -> String {
@@ -102,10 +120,10 @@ impl VioResult {
 
 /// The estimator, driven one frameset at a time (D16, D17).
 ///
-/// Offline mode: the frontend and the backend run to completion in the calling
-/// thread, so every `track` result is final and a repeat run over the same input
-/// is bit-identical. The GIL is released around frontend and estimator compute,
-/// so a decoder thread keeps running while the frameset is tracked.
+/// The default runs frontend and estimator in sequence. With `port.frontend_lag`,
+/// each call tracks this frame beside the previous frame's estimate, returning
+/// the previous timestamp. `flush` drains the final result. Both schedules are
+/// deterministic. The GIL is released around frontend and estimator compute.
 #[pyclass(module = "slam_rs._core")]
 pub struct Vio {
     inner: slam_rs::Vio<f32>,
@@ -292,11 +310,20 @@ impl Vio {
             .map_err(PyErr::from)
     }
 
+    /// Drain the final lagged pose once, or return `None` if none is queued.
+    fn flush(&mut self, py: Python<'_>) -> PyResult<Option<VioResult>> {
+        py.detach(|| self.inner.flush())
+            .map(|result| result.map(|inner| VioResult { inner }))
+            .map_err(value_error)
+    }
+
     /// The window, its landmarks and the last measured frame's statistics.
     ///
     /// `None` until a frameset has been measured: before that the window is
     /// empty and there are no statistics to report. Everything is copied, so a
     /// snapshot stays valid across the next `track`.
+    /// With frontend lag, frontend timers describe the newer input images;
+    /// the window and estimator statistics describe the returned pose.
     fn snapshot(&self) -> PyResult<Option<VioSnapshot>> {
         let Some(stats) = self.inner.last_stats() else {
             return Ok(None);
@@ -546,7 +573,9 @@ impl VioSnapshot {
     /// nest — `optimize` covers `linearize`, `solver`, `back_substitution` and
     /// `error`, and `measure` covers `keyframe`, `optimize`, `marginalize` and
     /// state prediction — and the bookkeeping between the phases is nobody's
-    /// stage. `slam_rs/_core.pyi` carries the same contract for Python readers.
+    /// stage. With frontend lag the frontend is one image ahead of the
+    /// estimator, and their work overlaps. `slam_rs/_core.pyi` carries the
+    /// same contract for Python readers.
     #[getter]
     fn timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
         [
@@ -559,10 +588,10 @@ impl VioSnapshot {
             ("predict", self.timings.predict_ns),
             ("keyframe", self.timings.keyframe_ns),
             ("optimize", self.timings.optimize_ns),
-            ("frontend_stereo", self.frontend_timings.stereo_ns),
-            ("frontend_pyramid", self.frontend_timings.pyramid_ns),
-            ("frontend_detect", self.frontend_timings.detect_ns),
-            ("frontend_track", self.frontend_timings.track_ns),
+            ("frontend_stereo", self.frontend_timings.flow.stereo_ns),
+            ("frontend_pyramid", self.frontend_timings.flow.pyramid_ns),
+            ("frontend_detect", self.frontend_timings.flow.detect_ns),
+            ("frontend_track", self.frontend_timings.flow.track_ns),
             ("frontend_imu", self.frontend_timings.imu_ns),
         ]
         .into_iter()

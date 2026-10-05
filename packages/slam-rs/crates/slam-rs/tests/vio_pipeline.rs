@@ -191,13 +191,13 @@ fn fingerprint(vio: &Vio<f32>) -> u64 {
     let mut text: String = format!("{vio:?}");
     // Every wall-clock block comes out: they are measurements of this run's own
     // speed and differ run to run by design, where the fingerprint is what must
-    // not. `FlowTimings` is the frontend's three phases and `FrontendTimings`
-    // the four `Vio` publishes, one of each; `StageTimings` is the estimator's
+    // not. `FlowTimings` appears in the frontend and inside `FrontendTimings`;
+    // remove both inner copies before the outer block. `StageTimings` is the estimator's
     // six on the last measured frame, so it is in the text exactly when a frame
     // has been measured and not at all on a pipeline that has refused every one.
     // Each holds integers only, so its first `}` closes it.
     let blocks: [(&str, usize); 3] = [
-        ("FlowTimings {", 1),
+        ("FlowTimings {", 2),
         ("FrontendTimings {", 1),
         ("StageTimings {", usize::from(vio.last_stats().is_some())),
     ];
@@ -208,14 +208,13 @@ fn fingerprint(vio: &Vio<f32>) -> u64 {
             "`{marker}` is in the Debug output {found} times, not {wanted}: \
              the fingerprint either hashes a wall clock or no longer covers one"
         );
-        if wanted == 0 {
-            continue;
+        for _ in 0..wanted {
+            let start: usize = text.find(marker).unwrap();
+            let length: usize = text[start..].find('}').unwrap_or_else(|| {
+                panic!("`{marker}` is never closed in the Debug output, so its wall clock cannot be cut out")
+            }) + 1;
+            text.replace_range(start..start + length, "<wall clock>");
         }
-        let start: usize = text.find(marker).unwrap();
-        let length: usize = text[start..].find('}').unwrap_or_else(|| {
-            panic!("`{marker}` is never closed in the Debug output, so its wall clock cannot be cut out")
-        }) + 1;
-        text.replace_range(start..start + length, "<wall clock>");
     }
     let mut hasher: std::collections::hash_map::DefaultHasher = Default::default();
     text.hash(&mut hasher);

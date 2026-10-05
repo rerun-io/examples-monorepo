@@ -5,19 +5,25 @@ use crate::Vio;
 use crate::{estimator, frontend, image, imu};
 use serde::{Deserialize, Serialize};
 
-/// Offline status: a measured frame has a state; an uncovered frame needs more IMU.
-/// Initialization happens in the same call that first measures, so no separate
-/// initializing status is exposed.
+/// A measured frame has a state; an uncovered frame needs more IMU. A first
+/// keyframe without enough stereo structure leaves the world uninitialized.
+/// Lag mode buffers its first accepted frame until the next call or [`Vio::flush`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VioStatus {
     /// The frame arrived before the IMU samples that cover it. Nothing moved —
-    /// not the frontend, neither IMU buffer, not the estimator — and the pose on
-    /// the result is the last one, not this frame's: push the missing samples
+    /// not the frontend, neither IMU buffer, not the estimator. No pose is
+    /// returned: push the missing samples
     /// and call `track` again with the same frameset (D17 — no arrival order may
     /// reach the trajectory).
     NeedMoreImu,
     /// The returned pose is an estimate of this frameset's rig pose.
     Tracking,
+    /// The lagged frontend accepted this frameset, but no estimate is ready.
+    /// Do not retry it: submit the next frame or call [`Vio::flush`].
+    Buffered,
+    /// The first keyframe lacked stereo structure. No pose exists yet. This
+    /// frameset was consumed: submit the next one, keeping frontend tracks.
+    NoVisualFeatures,
 }
 
 /// Wall time the frontend lane spent on the last tracked frameset, nanoseconds.
@@ -29,14 +35,8 @@ pub enum VioStatus {
 /// ([`estimator::StageTimings`]). Reported, never compared, like those.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrontendTimings {
-    /// Building this frameset's pyramids, every camera.
-    pub pyramid_ns: u64,
-    /// FAST detection with cells, every camera.
-    pub detect_ns: u64,
-    /// Temporal KLT calls only.
-    pub track_ns: u64,
-    /// Cross-camera matching and epipolar filtering.
-    pub stereo_ns: u64,
+    /// Image preparation, tracking, detection, stereo and selected GPU paths.
+    pub flow: frontend::flow::FlowTimings,
     /// Preintegrating the samples since the previous frameset into the KLT's prediction.
     pub imu_ns: u64,
 }
@@ -63,8 +63,16 @@ pub struct ImageView<'a> {
 pub struct VioResult {
     /// Estimator state for this frame.
     pub status: VioStatus,
-    /// Timestamp of the frameset, in nanoseconds.
+    /// Timestamp of the processed frameset, in nanoseconds. With frontend lag,
+    /// this precedes the input timestamp on `Tracking` and `NoVisualFeatures` results.
     pub t_ns: i64,
+    /// An estimate only for `Tracking`; all other statuses carry no state.
+    pub pose: Option<VioPose>,
+}
+
+/// The pose, velocity and biases estimated for a tracked frameset.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct VioPose {
     /// Rig pose in the world frame, `[tx, ty, tz, qx, qy, qz, qw]`.
     pub world_from_rig: [f64; 7],
     /// Rig velocity in the world frame, m/s.
@@ -154,13 +162,12 @@ pub enum VioError {
     /// The frontend's own preintegration (D24) refused a sample.
     #[error("imu: {0}")]
     Imu(#[from] imu::ImuError),
-    /// The operating system refused the thread for a deferred keyframe's joint
-    /// solve (D84).
-    #[error("the deferred keyframe solve thread did not start: {0}")]
-    DeferredSolveThread(String),
-    /// The thread running a deferred keyframe's joint solve (D84) panicked.
-    #[error("the deferred keyframe solve panicked")]
-    DeferredSolvePanicked,
+    /// The operating system refused the estimator thread (D84 solve or lagged frameset).
+    #[error("the lagged estimator thread did not start: {0}")]
+    EstimatorThread(String),
+    /// The estimator thread (D84 solve or lagged frameset) panicked.
+    #[error("the lagged estimator thread panicked")]
+    EstimatorPanicked,
 }
 
 /// Which frontend backend a [`Vio`] runs.

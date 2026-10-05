@@ -26,9 +26,9 @@ fleet row's lane is named from (:func:`slam_rs.apis.gate.this_lane`).
 class VioStatus:
     """How far the estimator has got.
 
-    Offline mode has exactly these two states: a measured frameset always has a
-    state and an uncovered one never does, so there is no third, "initialising"
-    status to branch on.
+    ``NeedMoreImu`` refuses a frame for retry. ``Tracking`` carries an estimate.
+    ``Buffered`` accepts the first frame in lag mode; submit the next frame or
+    call ``flush()``, without retrying it.
 
     A PyO3 enum, not a ``enum.Enum``: it carries no ``name`` or ``value``, it is
     unhashable, and ``VioStatus(1)`` raises ``TypeError``. It does convert to
@@ -37,6 +37,8 @@ class VioStatus:
 
     NeedMoreImu: ClassVar[VioStatus]
     Tracking: ClassVar[VioStatus]
+    Buffered: ClassVar[VioStatus]
+    NoVisualFeatures: ClassVar[VioStatus]
     __hash__: ClassVar[None]
 
     def __int__(self) -> int: ...
@@ -51,19 +53,22 @@ class VioResult:
     @property
     def t_ns(self) -> int: ...
     @property
-    def world_from_rig(self) -> Float64[ndarray, " 7"]:
-        """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw)."""
+    def world_from_rig(self) -> Float64[ndarray, " 7"] | None:
+        """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw).
+
+        Only ``Tracking`` supplies a pose; every other status returns ``None``.
+        """
 
     @property
-    def velocity(self) -> Float64[ndarray, " 3"]:
+    def velocity(self) -> Float64[ndarray, " 3"] | None:
         """Rig velocity in the world frame, m/s."""
 
     @property
-    def gyro_bias(self) -> Float64[ndarray, " 3"]:
+    def gyro_bias(self) -> Float64[ndarray, " 3"] | None:
         """Gyroscope bias estimate, rad/s."""
 
     @property
-    def accel_bias(self) -> Float64[ndarray, " 3"]:
+    def accel_bias(self) -> Float64[ndarray, " 3"] | None:
         """Accelerometer bias estimate, m/s^2."""
 
     def __repr__(self) -> str: ...
@@ -158,6 +163,8 @@ class VioSnapshot:
         ``predict`` includes that state prediction plus IMU integration before
         ``measure``; its integration portion is outside ``measure``. Timers
         overlap and must not be summed as independent frame costs.
+        With frontend lag, frontend timers describe the newer input images;
+        estimator timers describe the returned pose.
         """
 
     def __repr__(self) -> str: ...
@@ -165,9 +172,9 @@ class VioSnapshot:
 class Vio:
     """The VIO pipeline, driven one frameset at a time.
 
-    Offline mode (D17): the frontend and the backend run to completion in the
-    calling thread, so every result is final and a repeat run over the same
-    input is bit-identical.
+    The default runs frontend and estimator in sequence. ``port.frontend_lag``
+    overlaps this frame's frontend with the previous frame's estimator. Both
+    schedules repeat bit-identically for the same input and configuration.
 
     The refusals are the ones :class:`OpticalFlow` makes — a value the core
     refuses is a ``ValueError``, an object of the wrong type a ``TypeError`` and
@@ -239,6 +246,10 @@ class Vio:
     def track(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> VioResult:
         """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
 
+        With ``port.frontend_lag`` enabled, the first call returns ``Buffered``.
+        Later calls return the previous frame's estimate with its own ``t_ns``.
+        Call ``flush()`` to receive the final pose at the end of the stream.
+
         Raises ``ValueError`` on a bad dtype, rank or layout, on the wrong number
         of images, unless every image is the size the calibration gives its
         camera, and unless ``t_ns`` is strictly after the last accepted frameset.
@@ -246,8 +257,15 @@ class Vio:
         well, never a ``PanicException``.
         """
 
+    def flush(self) -> VioResult | None:
+        """Drain the final lagged pose exactly once and finish any deferred solve."""
+
     def snapshot(self) -> VioSnapshot | None:
-        """The window and the last measured frame, or None before the first one."""
+        """The last measured frame, or None before the first one.
+
+        With frontend lag its timestamp precedes ``flow_frame()``; frontend
+        timers still describe the most recent input images.
+        """
 
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""

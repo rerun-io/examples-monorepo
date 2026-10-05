@@ -169,9 +169,9 @@ pub fn run(frames: &[[Vec<u8>; 4]], vio: &mut Vio<f32>) -> Run {
         if stats.opt_started {
             let truth = position((t_ns - t0) as f64 / 1e9);
             let estimate = Vector3::new(
-                result.world_from_rig[0],
-                result.world_from_rig[1],
-                result.world_from_rig[2],
+                result.pose.unwrap().world_from_rig[0],
+                result.pose.unwrap().world_from_rig[1],
+                result.pose.unwrap().world_from_rig[2],
             );
             out.errors_m.push((estimate - truth).norm());
         }

@@ -5,7 +5,7 @@ mod lane;
 #[cfg(test)]
 mod tests;
 
-pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioResult, VioStatus};
+pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
 
@@ -221,6 +221,15 @@ impl<S: lie::LieScalar> Vio<S> {
         Ok(())
     }
 
+    /// Finish deferred work at stream end; synchronous tracking has no queued result.
+    ///
+    /// # Errors
+    /// The errors from finishing a deferred keyframe.
+    pub fn flush(&mut self) -> Result<Option<VioResult>, VioError> {
+        self.finish_deferred_keyframe()?;
+        Ok(None)
+    }
+
     /// Process one frameset: one image per camera, oldest to newest in time.
     ///
     /// Returns [`VioStatus::NeedMoreImu`] without touching anything — the
@@ -324,11 +333,7 @@ impl<S: lie::LieScalar> Vio<S> {
             self.frontend
                 .process_frame(t_ns, &self.frames, prediction, &self.masks)?;
         }
-        let flow: frontend::flow::FlowTimings = self.frontend.timings();
-        self.frontend_timings.pyramid_ns = flow.pyramid_ns;
-        self.frontend_timings.detect_ns = flow.detect_ns;
-        self.frontend_timings.track_ns = flow.track_ns;
-        self.frontend_timings.stereo_ns = flow.stereo_ns;
+        self.frontend_timings.flow = self.frontend.timings();
         self.last_frame_t_ns = Some(t_ns);
 
         // The estimator reads only the ids and the observed pixels
@@ -374,7 +379,7 @@ impl<S: lie::LieScalar> Vio<S> {
     /// estimator sees this frameset. The two share no state: the frontend's
     /// prediction came from the updated pose before the solve started, and the
     /// solve touches the window alone. A thread the operating system refuses
-    /// is [`VioError::DeferredSolveThread`], before the frontend runs.
+    /// is [`VioError::EstimatorThread`], before the frontend runs.
     fn process_frame_beside_deferred_keyframe(
         &mut self,
         t_ns: i64,
@@ -391,7 +396,7 @@ impl<S: lie::LieScalar> Vio<S> {
             let solver = std::thread::Builder::new()
                 .name("slam-rs-keyframe".to_owned())
                 .spawn_scoped(scope, || estimator.finish_deferred_keyframe())
-                .map_err(|error| VioError::DeferredSolveThread(error.to_string()))?;
+                .map_err(|error| VioError::EstimatorThread(error.to_string()))?;
             let flow: Result<(), frontend::flow::FrontendError> = frontend
                 .process_frame(t_ns, frames, prediction, masks)
                 .map(|_| ());
@@ -399,7 +404,7 @@ impl<S: lie::LieScalar> Vio<S> {
             let solved: Result<Option<estimator::DeferredKeyframeStats<S>>, VioError> =
                 match solver.join() {
                     Ok(result) => result.map_err(VioError::from),
-                    Err(_) => Err(VioError::DeferredSolvePanicked),
+                    Err(_) => Err(VioError::EstimatorPanicked),
                 };
             Ok((flow, solved, duration_ns(mark)))
         })?;
@@ -409,34 +414,22 @@ impl<S: lie::LieScalar> Vio<S> {
         Ok(())
     }
 
-    /// The estimator's newest state as one [`VioResult`], or the identity pose
-    /// before the window has one.
+    /// Only a tracked frameset publishes the estimator state.
     fn result(&self, status: VioStatus, t_ns: i64) -> VioResult {
-        let (world_from_rig, velocity, gyro_bias, accel_bias) = match self.estimator.state() {
-            Some(state) => (
-                pose_to_array(&Isometry3::from_parts(
+        let pose = self
+            .estimator
+            .state()
+            .filter(|_| status == VioStatus::Tracking)
+            .map(|state| VioPose {
+                world_from_rig: pose_to_array(&Isometry3::from_parts(
                     state.t_w_i.translation.map(lie::LieScalar::to_f64).into(),
                     *state.t_w_i.rotation.cast::<f64>().quaternion(),
                 )),
-                state.vel_w_i.map(lie::LieScalar::to_f64).into(),
-                state.bias_gyro.map(lie::LieScalar::to_f64).into(),
-                state.bias_accel.map(lie::LieScalar::to_f64).into(),
-            ),
-            None => (
-                pose_to_array(&Isometry3::identity()),
-                [0.0; 3],
-                [0.0; 3],
-                [0.0; 3],
-            ),
-        };
-        VioResult {
-            status,
-            t_ns,
-            world_from_rig,
-            velocity,
-            gyro_bias,
-            accel_bias,
-        }
+                velocity: state.vel_w_i.map(lie::LieScalar::to_f64).into(),
+                gyro_bias: state.bias_gyro.map(lie::LieScalar::to_f64).into(),
+                accel_bias: state.bias_accel.map(lie::LieScalar::to_f64).into(),
+            });
+        VioResult { status, t_ns, pose }
     }
 
     /// `processImu(curr_t_ns)`.

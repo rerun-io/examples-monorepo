@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::VERSION;
-use approx::assert_abs_diff_eq;
 use proptest::prelude::*;
 
 fn image(bytes: &[u8], width: usize, height: usize) -> ImageView<'_> {
@@ -48,7 +47,7 @@ fn a_frameset_ahead_of_the_imu_needs_more_imu() {
     let result: VioResult = vio.track(1_000, &views).unwrap();
     assert_eq!(result.status, VioStatus::NeedMoreImu);
     assert!(!vio.estimator().is_initialized());
-    assert_abs_diff_eq!(result.world_from_rig[6], 1.0, epsilon = 1e-12);
+    assert!(result.pose.is_none());
     assert_eq!(vio.frontend().frame_counter(), 0);
     // `None` rather than a sentinel: the frontend has seen no frameset.
     assert_eq!(vio.frontend().t_ns(), None);

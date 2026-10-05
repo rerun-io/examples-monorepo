@@ -170,7 +170,7 @@ def test_two_runs_over_the_same_input_agree_exactly(pipeline: PipelineFactory, t
 
     Catalog replay accuracy is covered by the golden ground-truth gate.
     """
-    frames: list[list[UInt8[ndarray, "h w"]]] = [[texture(shift, 0), texture(shift + 1, 0)] for shift in shifts]
+    frames: list[list[UInt8[ndarray, "h w"]]] = [[texture(shift, 0), texture(shift - 2, 0)] for shift in shifts]
     runs: list[list[Float64[ndarray, " 7"]]] = []
     for _ in range(2):
         vio: _core.Vio = pipeline(2)
@@ -179,7 +179,9 @@ def test_two_runs_over_the_same_input_agree_exactly(pipeline: PipelineFactory, t
             t_ns: int = index * FRAME_PERIOD_NS
             samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
             vio.push_imu_batch(samples, *gravity_batch(samples))
-            poses.append(vio.track(t_ns, images).world_from_rig)
+            pose = vio.track(t_ns, images).world_from_rig
+            assert pose is not None
+            poses.append(pose)
         runs.append(poses)
     assert len(runs[0]) == len(frames)
     for index, (first, second) in enumerate(zip(runs[0], runs[1], strict=True)):

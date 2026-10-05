@@ -224,7 +224,8 @@ class VioLogger:
             elapsed_ms: Wall time the ``track`` call took.
         """
         self.framesets += 1
-        pose: Float64[ndarray, " 7"] = result.world_from_rig
+        pose: Float64[ndarray, " 7"] | None = result.world_from_rig
+        assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
         self.estimate_t_ns.append(result.t_ns)
         self.estimate_position_m.append(pose[0:3].copy())
         self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())

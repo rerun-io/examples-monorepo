@@ -306,19 +306,19 @@ impl SlamEstimator {
         let landmarks = stats.map_or(0, |s| s.num_landmarks);
         let tracked: usize = stats.map_or(0, |s| s.connected.iter().sum());
         let optimised = stats.is_some_and(|s| s.opt_started);
-        let finite = result.world_from_rig.iter().all(|v| v.is_finite());
+        let finite = result.pose.is_some_and(|pose| pose.world_from_rig.iter().all(|v| v.is_finite()));
         let frontend = self.vio.frontend_timings();
         let ms = |ns: u64| ns as f64 / 1e6;
         let stages = SlamStages {
-            frontend_ms: ms(frontend.pyramid_ns + frontend.detect_ns + frontend.track_ns + frontend.stereo_ns + frontend.imu_ns),
+            frontend_ms: ms(frontend.flow.pyramid_ns + frontend.flow.detect_ns + frontend.flow.track_ns + frontend.flow.stereo_ns + frontend.imu_ns),
             optimize_ms: stats.map_or(0.0, |s| ms(s.timings.optimize_ns)),
             marginalize_ms: stats.map_or(0.0, |s| ms(s.timings.marginalize_ns)),
             keyframe_ms: stats.map_or(0.0, |s| ms(s.timings.keyframe_ns)),
             keyframe: stats.is_some_and(|s| s.took_keyframe),
-            pyramid_ms: ms(frontend.pyramid_ns),
-            detect_ms: ms(frontend.detect_ns),
-            track_ms: ms(frontend.track_ns),
-            stereo_ms: ms(frontend.stereo_ns),
+            pyramid_ms: ms(frontend.flow.pyramid_ns),
+            detect_ms: ms(frontend.flow.detect_ns),
+            track_ms: ms(frontend.flow.track_ns),
+            stereo_ms: ms(frontend.flow.stereo_ns),
             deferred_ms: self.vio.last_deferred_keyframe().map_or(0.0, |d| ms(d.timings.measure_ns)),
             deferred_wait_ms: ms(self.vio.deferred_wait_ns()),
             keyframe_deferred: stats.is_some_and(|s| s.keyframe_deferred),
@@ -326,9 +326,9 @@ impl SlamEstimator {
         let status = match result.status {
             VioStatus::NeedMoreImu => SlamStatus::WaitingForImu,
             VioStatus::Tracking if landmarks >= 10 && tracked >= 10 && optimised && finite => SlamStatus::Tracking,
-            VioStatus::Tracking => SlamStatus::NoVisualFeatures,
+            VioStatus::Tracking | VioStatus::Buffered | VioStatus::NoVisualFeatures => SlamStatus::NoVisualFeatures,
         };
-        let world_from_rig = if finite { isometry_from_array(&result.world_from_rig) } else { Isometry3::identity() };
+        let world_from_rig = result.pose.filter(|_| finite).map_or_else(Isometry3::identity, |pose| isometry_from_array(&pose.world_from_rig));
         Ok(SlamPose {
             index,
             t_ns,
