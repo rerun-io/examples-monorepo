@@ -21,9 +21,11 @@ use nalgebra::{
     DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix4, Matrix4x2, Matrix4x3,
     Matrix6, Vector2, Vector3, Vector4,
 };
+use rayon::prelude::*;
 
 use crate::calib::Calibration;
 use crate::camera::{CameraEnum, CameraError};
+use crate::frontend::parallel::WorkPool;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
 use crate::lie::{LieScalar, Se3, So3, c};
 use crate::types::{
@@ -483,6 +485,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         &self,
         mut outliers: Option<&mut BTreeMap<LandmarkId, Vec<(TimeCamId, S)>>>,
         outlier_threshold: S,
+        pool: Option<&WorkPool>,
     ) -> Result<(S, usize), BaError> {
         // `host_frames`, sorted here rather than in
         // `unordered_map` order — see the `landmark` module docs.
@@ -494,6 +497,24 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 
         let mut error: S = S::zero();
         let mut num_points: usize = 0;
+        // Outlier collection is a cold, mutating path; preserve its traversal.
+        if outliers.is_none()
+            && let Some(partials) = pool.and_then(|pool| {
+                pool.install(|| {
+                    host_frames
+                        .par_iter()
+                        .map(|&host| self.host_frame_error(host, None, outlier_threshold))
+                        .collect::<Vec<_>>()
+                })
+            })
+        {
+            for partial in partials {
+                let (host_error, host_points) = partial?;
+                error += host_error;
+                num_points += host_points;
+            }
+            return Ok((error, num_points));
+        }
         for &tcid_h in &host_frames {
             let (host_error, host_points) =
                 self.host_frame_error(tcid_h, outliers.as_deref_mut(), outlier_threshold)?;
@@ -1199,7 +1220,7 @@ mod tests {
     fn compute_error_is_zero_without_noise() {
         for text in [MSDMI, MSDMG] {
             let ba: BundleAdjustmentBase<f64> = a_window(text, &synthetic_points(), 0.0);
-            let (error, num_points) = ba.compute_error(None, 0.0).unwrap();
+            let (error, num_points) = ba.compute_error(None, 0.0, None).unwrap();
             assert!(num_points > 0);
             assert_abs_diff_eq!(error, 0.0, epsilon = 1e-18);
         }
@@ -1217,7 +1238,7 @@ mod tests {
     fn compute_error_equals_an_independent_huber_sum() {
         for (noise, want_downweighted) in [(0.2f64, false), (4.0f64, true)] {
             let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), noise);
-            let (error, num_points) = ba.compute_error(None, 0.0).unwrap();
+            let (error, num_points) = ba.compute_error(None, 0.0, None).unwrap();
 
             // Recomputed from the landmarks, without touching `compute_error`'s
             // machinery: project each landmark into each target and apply
@@ -1268,7 +1289,7 @@ mod tests {
     #[test]
     fn the_huber_branch_changes_the_total() {
         let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 4.0);
-        let (error, _) = ba.compute_error(None, 0.0).unwrap();
+        let (error, _) = ba.compute_error(None, 0.0, None).unwrap();
         let mut unweighted: f64 = 0.0;
         for lm in ba.lmdb.landmarks() {
             for (&target, observed) in &lm.obs {
@@ -1291,7 +1312,7 @@ mod tests {
     fn outliers_are_collected_above_the_threshold() {
         let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 0.4);
         let mut outliers: BTreeMap<LandmarkId, Vec<(TimeCamId, f64)>> = BTreeMap::new();
-        let (_, _) = ba.compute_error(Some(&mut outliers), 0.1).unwrap();
+        let (_, _) = ba.compute_error(Some(&mut outliers), 0.1, None).unwrap();
         assert!(!outliers.is_empty());
         for entries in outliers.values() {
             for &(target, flag) in entries {
@@ -1305,8 +1326,32 @@ mod tests {
         }
         // A threshold above every residual collects nothing.
         let mut none: BTreeMap<LandmarkId, Vec<(TimeCamId, f64)>> = BTreeMap::new();
-        ba.compute_error(Some(&mut none), 1e6).unwrap();
+        ba.compute_error(Some(&mut none), 1e6, None).unwrap();
         assert!(none.values().all(|v| v.iter().all(|&(_, f)| f == -2.0)));
+    }
+
+    #[test]
+    fn pooled_host_errors_preserve_bits_and_outliers() {
+        let mut ba = a_window(MSDMI, &synthetic_points(), 0.4);
+        // Populate all four host buckets so the test exercises the ordered fold.
+        for (index, mut landmark) in ba.lmdb.landmarks().to_vec().into_iter().enumerate() {
+            landmark.host_kf_id = tcid((index % 2) as i64, (index / 2) % 2);
+            ba.lmdb.add_landmark(landmark.id, &landmark);
+        }
+        let serial = ba.compute_error(None, 0.0, None).unwrap();
+        let mut serial_outliers = BTreeMap::new();
+        ba.compute_error(Some(&mut serial_outliers), 0.1, None)
+            .unwrap();
+        for threads in [1, 2, 4] {
+            let pool = WorkPool::new(threads).unwrap();
+            let parallel = ba.compute_error(None, 0.0, Some(&pool)).unwrap();
+            assert_eq!(serial.0.to_bits(), parallel.0.to_bits());
+            assert_eq!(serial.1, parallel.1);
+            let mut outliers = BTreeMap::new();
+            ba.compute_error(Some(&mut outliers), 0.1, Some(&pool))
+                .unwrap();
+            assert_eq!(serial_outliers, outliers);
+        }
     }
 
     #[test]
@@ -1349,7 +1394,7 @@ mod tests {
     #[test]
     fn backup_and_restore_undo_a_whole_step() {
         let mut ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 0.2);
-        let (before, _) = ba.compute_error(None, 0.0).unwrap();
+        let (before, _) = ba.compute_error(None, 0.0, None).unwrap();
         ba.backup();
         for state in ba.frame_states.values_mut() {
             state.apply_inc(&crate::types::Vector15::from_element(0.01));
@@ -1366,10 +1411,10 @@ mod tests {
                 lm.inv_dist += 0.01;
             }
         }
-        let (moved, _) = ba.compute_error(None, 0.0).unwrap();
+        let (moved, _) = ba.compute_error(None, 0.0, None).unwrap();
         assert!((moved - before).abs() > 1e-9);
         ba.restore();
-        let (after, _) = ba.compute_error(None, 0.0).unwrap();
+        let (after, _) = ba.compute_error(None, 0.0, None).unwrap();
         assert_abs_diff_eq!(after, before, epsilon = 1e-18);
     }
 

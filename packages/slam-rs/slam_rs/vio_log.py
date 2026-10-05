@@ -223,8 +223,9 @@ class VioLogger:
             frame: The keypoints the estimator's own frontend tracked.
             elapsed_ms: Wall time the ``track`` call took.
         """
+        pose: Float64[ndarray, " 7"] | None = result.world_from_rig
+        assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
         self.framesets += 1
-        pose: Float64[ndarray, " 7"] = result.world_from_rig
         self.estimate_t_ns.append(result.t_ns)
         self.estimate_position_m.append(pose[0:3].copy())
         self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
@@ -431,24 +432,27 @@ class VioStage:
             frameset: The frameset to track, with the samples since the previous one.
         """
         for held, result in self.lockstep.push(frameset):
-            # The rows belong at the frameset's own time, which is the caller's
-            # cursor for all but a retried one.
-            rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
-            # Both are present on a frameset that tracked — the snapshot because it
-            # measured, the keypoints because the frontend accepted it — so a
-            # missing one is a broken invariant, not a rung to skip (D32).
-            snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
-            frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
-            assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
-            assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
-            self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
+            self._log_result(held, result)
+
+    def flush(self) -> None:
+        """Log the last lagged frame before completing paths or exporting poses."""
+        for held, result in self.lockstep.flush():
+            self._log_result(held, result)
+
+    def _log_result(self, held: Frameset, result: _core.VioResult) -> None:
+        """Log a result with the keypoints and timestamp of its own input frame."""
+        rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
+        snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
+        frame: _core.FlowFrame = self.lockstep.flow_frame()
+        assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
+        assert frame.t_ns == result.t_ns
+        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
 
     def refuse_lost_framesets(self) -> None:
         """Stop the run when a frameset never got the inertial samples that cover it.
 
-        Every frameset either produced a pose or is still held (D17); one still
-        held at the end of a segment is a lost frameset, not a count to print,
-        and both tools that drive this stage end on the same rule.
+        Frames waiting for stereo are consumed without a pose. An input still
+        held for IMU at the end is an error; both tools use the same rule.
 
         Raises:
             SystemExit: If any frameset is still held.

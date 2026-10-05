@@ -21,13 +21,13 @@ from numpy import ndarray
 
 from slam_rs.catalog_feed import (
     MSD_RIG,
+    ROBOCAP_RIG,
     RigProfile,
     _frame_nearest_anchor,
     match_framesets,
     pair_accel_onto_gyro,
     select_cameras,
 )
-from slam_rs.config import SlamConfig
 
 
 def camera_name_statics(names: list[str]) -> pa.Table:
@@ -140,9 +140,9 @@ def test_the_pairing_boundary_is_typed() -> None:
 
 
 def test_the_named_cameras_come_back_in_the_callers_order() -> None:
-    """Select RoboCap cameras in settings order: cam_04, cam_00, cam_01, cam_05."""
+    """Select RoboCap cameras in settings order: cam_00, cam_01, cam_04, cam_05."""
     statics: pa.Table = camera_name_statics(["left_front", "right_front", "left_eye", "right_eye", "left", "right"])
-    assert select_cameras(statics, 6, ("left", "left_front", "right_front", "right")) == (4, 0, 1, 5)
+    assert select_cameras(statics, 6, ("left_front", "right_front", "left", "right")) == (0, 1, 4, 5)
     assert select_cameras(statics, 6, None) == (0, 1, 2, 3, 4, 5)
 
 
@@ -178,7 +178,7 @@ def test_the_matcher_reproduces_basalts_median_on_robocaps_first_frameset() -> N
     left_front: Int64[ndarray, " 2"] = np.array([70258633000, 70291955222], dtype=np.int64)
     right_front: Int64[ndarray, " 2"] = np.array([70258662000, 70291984222], dtype=np.int64)
     right: Int64[ndarray, " 2"] = np.array([70258603000, 70291936333], dtype=np.int64)
-    t_ns, frame_index = match_framesets([left, left_front, right_front, right], 1_000_000)
+    t_ns, frame_index = match_framesets([left_front, right_front, left, right], 1_000_000)
 
     assert int(t_ns[0]) == 70258640500
     assert frame_index[0].tolist() == [0, 0, 0, 0]
@@ -345,14 +345,14 @@ def test_the_matcher_needs_a_camera() -> None:
         match_framesets([], 1_000)
 
 
-def test_the_profile_comes_from_the_manifest_not_the_code(settings: SlamConfig) -> None:
-    """The rig profile reads camera, downscale, tolerance and pairing fields from one settings."""
-    profile = RigProfile.from_robocap(settings.robocap)
-    assert profile.camera_names == settings.robocap.camera_names == ("left", "left_front", "right_front", "right")
-    assert profile.downscale == settings.robocap.downscale == 3
-    assert profile.interpolate_accel_onto_gyro is settings.robocap.interpolate_accel_onto_gyro is True
-    assert profile.frameset_tolerance_ns == settings.robocap.frameset_tolerance_ns == 1_000_000
-    assert profile.video_time_is_absolute is settings.robocap.video_time_is_absolute is True
+def test_the_profile_comes_from_the_rust_core() -> None:
+    """The Rust profile supplies the established camera order and clock rules."""
+    profile = ROBOCAP_RIG
+    assert profile.camera_names == ("left_front", "right_front", "left", "right")
+    assert profile.downscale == 3
+    assert profile.interpolate_accel_onto_gyro is True
+    assert profile.frameset_tolerance_ns == 1_000_000
+    assert profile.video_time_is_absolute is True
     # What MSD is, and what every default in the feed means: the other state of
     # each of the five, so the profile is a statement and not a shape.
     assert (
@@ -361,7 +361,7 @@ def test_the_profile_comes_from_the_manifest_not_the_code(settings: SlamConfig) 
     )
 
 
-def test_a_profile_with_no_frames_left_is_refused_on_construction(settings: SlamConfig) -> None:
+def test_a_profile_with_no_frames_left_is_refused_on_construction() -> None:
     """The downscale is checked where it is stated, before a byte is read.
 
     `_build_feed` reads the whole video index off the recording before it builds
@@ -370,4 +370,4 @@ def test_a_profile_with_no_frames_left_is_refused_on_construction(settings: Slam
     with pytest.raises(ValueError, match="downscale must be at least 1; got 0"):
         RigProfile(downscale=0)
     with pytest.raises(ValueError, match="downscale must be at least 1; got -3"):
-        replace(RigProfile.from_robocap(settings.robocap), downscale=-3)
+        replace(ROBOCAP_RIG, downscale=-3)

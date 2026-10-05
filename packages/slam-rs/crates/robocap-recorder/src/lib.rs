@@ -4,9 +4,11 @@
 mod camera;
 mod capture;
 mod device_profile;
+#[cfg(feature = "live-slam")]
+pub use device_profile::slam_luma;
 pub use device_profile::{
     CAMERAS, CameraSpec, DeviceProfile, FRAME_HEIGHT, FRAME_WIDTH, SENSORS, SLAM_CPUS,
-    SLAM_DOWNSCALE, SLAM_PIXELS, STREAMS, SensorChannel, slam_luma,
+    SLAM_DOWNSCALE, SLAM_PIXELS, STREAMS, SensorChannel,
 };
 mod display;
 pub use display::DisplayAssets;
@@ -22,7 +24,6 @@ mod segments;
 #[cfg(feature = "live-slam")]
 pub use live_slam::{
     ImuChannel, LiveSlam, LiveSlamOptions, SLAM_CAMERAS, SlamInput, SlamReport, SlamStatus,
-    fast_profile,
 };
 #[cfg(feature = "live-slam")]
 mod slam_process;

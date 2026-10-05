@@ -4,22 +4,6 @@ use cubecl::prelude::*;
 // Per-frame launchers use launch_unchecked. Stage shape checks establish
 // the binding lengths; each raw binding keeps its handle and element count
 // together. The storage probe alone retains checked launch mode.
-/// Units per cube on the per-patch kernels.
-///
-/// One unit per pattern tap, rounded up to two warps: the largest pattern is 52
-/// taps ([`crate::frontend::patterns::MAX_PATTERN_SIZE`]), so 64 covers every
-/// pattern and the reductions stay inside one cube.
-pub const TAP_UNITS: u32 = 64;
-
-/// [`TAP_UNITS`] as the `#[comptime]` length every per-patch shared array is
-/// declared with.
-///
-/// The nine arrays below are indexed by unit, so raising `TAP_UNITS` for a
-/// pattern larger than 52 taps while they stayed at a literal 64 would have
-/// units 64.. writing past every one of them, under `launch_unchecked` and with
-/// no test that would say so. Off one constant, the coupling is the compiler's.
-pub(crate) const TAP_SLOTS: usize = TAP_UNITS as usize;
-
 /// Units per cube on the per-element bookkeeping kernels.
 pub(crate) const LINEAR_UNITS: u32 = 256;
 
@@ -42,6 +26,9 @@ pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 =
     crate::frontend::tracker::MAX_INCREMENT_INFINITY_NORM;
 /// `Sophus::Constants<float>::epsilon()`.
 pub(crate) const SOPHUS_EPSILON: f32 = <f32 as crate::lie::LieScalar>::SOPHUS_EPSILON;
+
+/// The smallest positive normal pivot, matching the CPU LDLT guard.
+pub(crate) const LDLT_TOLERANCE: f32 = f32::MIN_POSITIVE;
 
 /// A device buffer and the element count the kernel will see in it.
 ///
@@ -98,28 +85,4 @@ pub(crate) fn linear_1d(count: usize) -> (CubeCount, CubeDim) {
         ),
         CubeDim::new_3d(LINEAR_UNITS, 1, 1),
     )
-}
-
-/// The shape every per-patch launcher needs: capacity, taps, levels, count.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PatchShape {
-    /// Patch slots the store was allocated for.
-    pub capacity: usize,
-    /// Pattern taps.
-    pub taps: usize,
-    /// Pyramid levels, which is `optical_flow_levels + 1`.
-    pub num_levels: usize,
-    /// Patches actually filled.
-    pub count: usize,
-}
-
-/// Where a launcher reads positions and the selection flag inside one buffer.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PositionBases {
-    /// Index of patch 0's `x`.
-    pub x: usize,
-    /// Index of patch 0's `y`.
-    pub y: usize,
-    /// Index of patch 0's selection flag, non-zero meaning selected.
-    pub selected: usize,
 }

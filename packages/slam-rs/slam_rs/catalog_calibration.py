@@ -2,21 +2,17 @@
 
 from dataclasses import dataclass
 
-import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
+from slam_rs import _core
 from slam_rs.rig import CameraCalib as CameraCalib
 from slam_rs.rig import CameraModelName as CameraModelName
 from slam_rs.rig import ImuCalib as ImuCalib
 
 CHILD_FROM_PARENT: int = 2
 """``rr.TransformRelation.ChildFromParent``; the only relation the extrinsic inversion is valid for."""
-_MODEL_BY_DISTORTION: dict[str, tuple[CameraModelName, int]] = {"kannala_brandt": ("kb4", 4), "brown_conrady": ("radtan8", 8)}
-"""``simplecv.components.DistortionModel`` string to the model and the number of coefficients it uses."""
-
-
 @dataclass(slots=True, frozen=True)
 class CameraStatics:
     """One camera node's static components, exactly as the catalog stores them.
@@ -85,43 +81,7 @@ def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> Came
             non-zero, the transform relation is not ``ChildFromParent``, or
             ``downscale`` is below one.
     """
-    if downscale < 1:
-        raise ValueError(f"cam_{index:02d}: downscale must be at least 1; got {downscale}")
-    width: int = int(statics.resolution_wh[0])
-    height: int = int(statics.resolution_wh[1])
-    if width // downscale < 1 or height // downscale < 1:
-        raise ValueError(f"cam_{index:02d}: downscale {downscale} leaves nothing of the {width}x{height} frame")
-    if statics.distortion_model not in _MODEL_BY_DISTORTION:
-        raise ValueError(f"cam_{index:02d}: unsupported distortion model {statics.distortion_model!r}, known: {sorted(_MODEL_BY_DISTORTION)}")
-    model: CameraModelName = _MODEL_BY_DISTORTION[statics.distortion_model][0]
-    n_coeffs: int = _MODEL_BY_DISTORTION[statics.distortion_model][1]
-    if statics.distortion_coefficients.shape[0] < n_coeffs:
-        raise ValueError(f"cam_{index:02d}: {model} needs {n_coeffs} coefficients, got {statics.distortion_coefficients.shape[0]}")
-    tail: Float64[ndarray, " n_tail"] = statics.distortion_coefficients[n_coeffs:]
-    # A "kannala_brandt" string does not imply KB4 — Aria's Fisheye624 carries the
-    # same string with eight live coefficients. Reject the tail, never truncate it.
-    if not np.allclose(tail, 0.0):
-        raise ValueError(f"cam_{index:02d}: {model} uses {n_coeffs} coefficients but the tail is non-zero: {tail.tolist()}")
-    if statics.transform_relation != CHILD_FROM_PARENT:
-        raise ValueError(f"cam_{index:02d}: Transform3D relation {statics.transform_relation} is not ChildFromParent({CHILD_FROM_PARENT})")
-    k_matrix: Float64[ndarray, "3 3"] = statics.image_from_camera.reshape(3, 3, order="F")
-    cam_R_imu: Float64[ndarray, "3 3"] = statics.transform_mat3x3.reshape(3, 3, order="F")
-    imu_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    imu_T_cam[:3, :3] = cam_R_imu.T
-    imu_T_cam[:3, 3] = -cam_R_imu.T @ statics.transform_translation
-    return CameraCalib(
-        index=index,
-        width=width // downscale,
-        height=height // downscale,
-        fx=float(k_matrix[0, 0]) / downscale,
-        fy=float(k_matrix[1, 1]) / downscale,
-        cx=scale_principal_point(float(k_matrix[0, 2]), downscale),
-        cy=scale_principal_point(float(k_matrix[1, 2]), downscale),
-        model=model,
-        distortion=statics.distortion_coefficients[:n_coeffs].copy(),
-        distortion_valid_radius=statics.distortion_valid_radius,
-        imu_T_cam=imu_T_cam,
-    )
+    return _core.catalog_camera_calib(index, statics, downscale)
 
 
 def imu_calib(calibration: ImuCalibration, imu_T_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int) -> ImuCalib:
@@ -131,17 +91,4 @@ def imu_calib(calibration: ImuCalibration, imu_T_body: Float64[ndarray, "4 4"], 
     estimator time origin. It must never be applied only to the camera stream.
     Factory per-camera offsets are provenance; ingestion already aligned samples.
     """
-    if (calibration.rate_hz is None or calibration.gyro_noise_density is None
-            or calibration.accel_noise_density is None or calibration.gyro_bias_random_walk is None
-            or calibration.accel_bias_random_walk is None):
-        raise ValueError("missing IMU calibration: require rate_hz, gyro_noise_density, accel_noise_density, "
-                         "gyro_bias_random_walk and accel_bias_random_walk; ingest or backfill the catalog calibration")
-    return ImuCalib(
-        frequency_hz=calibration.rate_hz,
-        gyro_noise_std=calibration.gyro_noise_density,
-        accel_noise_std=calibration.accel_noise_density,
-        gyro_bias_std=calibration.gyro_bias_random_walk,
-        accel_bias_std=calibration.accel_bias_random_walk,
-        cam_time_offset_ns=-applied_time_shift_ns,
-        imu_T_body=imu_T_body,
-    )
+    return _core.catalog_imu_calib(calibration, imu_T_body, applied_time_shift_ns)

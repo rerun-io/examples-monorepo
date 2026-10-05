@@ -33,9 +33,10 @@ def test_a_frame_without_imu_needs_more_imu(pipeline: PipelineFactory, texture: 
     result: _core.VioResult = vio.track(1_000, [texture(0, 0), texture(1, 0)])
     assert result.status == _core.VioStatus.NeedMoreImu
     assert result.t_ns == 1_000
-    assert result.world_from_rig.shape == (7,)
-    assert result.velocity.shape == (3,)
-    np.testing.assert_allclose(result.world_from_rig, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    assert result.world_from_rig is None
+    assert result.velocity is None
+    assert result.gyro_bias is None
+    assert result.accel_bias is None
     # Nothing measured, so there is no window and no statistics to snapshot; and
     # the frontend never ran, so there are no keypoints either.
     assert vio.snapshot() is None
@@ -76,7 +77,7 @@ def test_a_frameset_retried_after_its_imu_tracks_as_if_it_had_it(pipeline: Pipel
     retried: _core.Vio = pipeline(2)
     for index in range(frames):
         t_ns: int = index * FRAME_PERIOD_NS
-        images: list[UInt8[ndarray, "h w"]] = [texture(index, 0), texture(index + 1, 0)]
+        images: list[UInt8[ndarray, "h w"]] = [texture(index, 0), texture(index - 2, 0)]
         samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
         gyro, accel = gravity_batch(samples)
         covered.push_imu_batch(samples, gyro, accel)
@@ -84,7 +85,13 @@ def test_a_frameset_retried_after_its_imu_tracks_as_if_it_had_it(pipeline: Pipel
 
         short: Int64[ndarray, " n_short"] = samples[samples <= t_ns]
         retried.push_imu_batch(short, *gravity_batch(short))
-        assert retried.track(t_ns, images).status == _core.VioStatus.NeedMoreImu
+        refused: _core.VioResult = retried.track(t_ns, images)
+        assert refused.status == _core.VioStatus.NeedMoreImu
+        # A refusal carries no stale estimate, including after the world starts.
+        assert refused.world_from_rig is None
+        assert refused.velocity is None
+        assert refused.gyro_bias is None
+        assert refused.accel_bias is None
         rest: Int64[ndarray, " n_rest"] = samples[samples > t_ns]
         retried.push_imu_batch(rest, *gravity_batch(rest))
         second: _core.VioResult = retried.track(t_ns, images)
@@ -106,7 +113,7 @@ def test_a_refused_frameset_leaves_the_last_accepted_keypoints_alone(pipeline: P
     samples: Int64[ndarray, " n_samples"] = np.arange(0, FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
     gyro, accel = gravity_batch(samples)
     vio.push_imu_batch(samples, gyro, accel)
-    assert vio.track(0, [texture(0, 0), texture(1, 0)]).status == _core.VioStatus.Tracking
+    assert vio.track(0, [texture(0, 0), texture(-2, 0)]).status == _core.VioStatus.Tracking
     accepted: _core.FlowFrame | None = vio.flow_frame()
     assert accepted is not None
 
@@ -135,7 +142,7 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
         samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
         gyro, accel = gravity_batch(samples)
         vio.push_imu_batch(samples, gyro, accel)
-        result: _core.VioResult = vio.track(t_ns, [texture(index, 0), texture(index + 1, 0)])
+        result: _core.VioResult = vio.track(t_ns, [texture(index, 0), texture(index - 2, 0)])
         if result.status == _core.VioStatus.Tracking:
             tracked += 1
             current: _core.VioSnapshot | None = vio.snapshot()
@@ -276,11 +283,15 @@ def test_a_refused_frameset_and_its_retry_are_the_clean_run_bit_for_bit(pipeline
             samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
             gyro, accel = gravity_batch(samples)
             vio.push_imu_batch(samples, gyro, accel)
-            images: list[UInt8[ndarray, "h w"]] = [texture(index, 0), texture(index + 1, 0)]
+            images: list[UInt8[ndarray, "h w"]] = [texture(index, 0), texture(index - 2, 0)]
             if probe:
                 with pytest.raises(ValueError, match=f"the calibration is for {FRAME}x{FRAME} frames"):
                     vio.track(t_ns, [images[0], cropped])
             result: _core.VioResult = vio.track(t_ns, images)
+            assert result.world_from_rig is not None
+            assert result.velocity is not None
+            assert result.gyro_bias is not None
+            assert result.accel_bias is not None
             states.append(np.concatenate([result.world_from_rig, result.velocity, result.gyro_bias, result.accel_bias]))
         runs.append(states)
     for index, (clean, probed) in enumerate(zip(runs[0], runs[1], strict=True)):

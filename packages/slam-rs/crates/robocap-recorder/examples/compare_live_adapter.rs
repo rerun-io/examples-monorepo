@@ -1,8 +1,6 @@
 //! Compare identical calibrated inputs through the live adapter and direct Vio.
 use anyhow::{Result, ensure};
-use robocap_recorder::{
-    ImuChannel, LiveSlam, LiveSlamOptions, SlamInput, SlamReport, fast_profile,
-};
+use robocap_recorder::{ImuChannel, LiveSlam, LiveSlamOptions, SlamInput, SlamReport};
 use serde::Deserialize;
 use slam_rs::{
     ImageView, Vio, calib::Calibration, config::VioConfig, frontend::flow::FrontendOptions,
@@ -32,8 +30,10 @@ fn main() -> Result<()> {
     ensure!(clip.num_cameras == 4, "comparison needs four cameras");
     let calibration =
         Calibration::<f64>::from_json_str(&fs::read_to_string(directory.join("calib.json"))?)?;
-    let mut config = VioConfig::from_json_str(&fs::read_to_string(&args[1])?)?;
-    fast_profile(&mut config);
+    let config = VioConfig::with_overlay(
+        &fs::read_to_string(&args[1])?,
+        include_str!("../../../configs/profiles/fast.json"),
+    )?;
     let mut direct = Vio::<f32>::with_backend(
         config.clone(),
         calibration.clone(),
@@ -137,7 +137,12 @@ fn main() -> Result<()> {
         if let Some(pose) = report.pose {
             let difference = pose
                 .iter()
-                .zip(result.world_from_rig)
+                .zip(
+                    result
+                        .pose
+                        .ok_or_else(|| anyhow::anyhow!("tracking result has no pose"))?
+                        .world_from_rig,
+                )
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
             max_difference = max_difference.max(difference);
@@ -145,7 +150,7 @@ fn main() -> Result<()> {
                 difference < 1e-5,
                 "first disagreement at frame {frame}, time {}: live={pose:?}, direct={:?}, difference={difference}",
                 report.timestamp_ns,
-                result.world_from_rig
+                result.pose.map(|pose| pose.world_from_rig)
             );
             compared += 1;
             csv.push_str(&format!(

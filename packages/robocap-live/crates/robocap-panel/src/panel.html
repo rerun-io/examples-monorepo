@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoboCap live</title>
+<style>
+  :root { --bg:#111418; --card:#1a1f26; --line:#2a313b; --text:#d8dee6; --dim:#8a96a5; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; }
+  .pill { padding:2px 10px; border-radius:10px; font-weight:600; }
+  .run { background:var(--ok); color:#000; } .idle { background:var(--line); } .busy { background:var(--warn); color:#000; }
+  main { display:grid; grid-template-columns:repeat(auto-fill, minmax(330px, 1fr)); gap:12px; padding:12px 16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px; }
+  .wide { grid-column:1 / -1; }
+  .row { display:flex; justify-content:space-between; gap:8px; padding:1px 0; }
+  .row span:first-child { color:var(--dim); }
+  .bar { position:relative; height:14px; background:#0d1014; border-radius:3px; overflow:hidden; margin:2px 0; }
+  .bar i { position:absolute; inset:0 auto 0 0; background:var(--acc); }
+  .bar b { position:absolute; left:6px; top:0; font-size:11px; font-weight:500; }
+  .tiles { display:flex; flex-wrap:wrap; gap:6px; }
+  .tile { background:#0d1014; border-radius:4px; padding:4px 8px; font-family:ui-monospace, monospace; font-size:12px; }
+  label { display:inline-flex; gap:4px; align-items:center; margin:2px 8px 2px 0; }
+  input[type=text], input[type=number], select { background:#0d1014; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 6px; }
+  input[type=text] { width:100%; }
+  button { background:var(--acc); color:#000; border:0; border-radius:4px; padding:6px 14px; font-weight:600; cursor:pointer; margin-right:6px; }
+  button.stop { background:var(--bad); color:#fff; } button:disabled { opacity:.4; cursor:default; }
+  #msg { margin-top:6px; white-space:pre-wrap; } .err { color:var(--bad); } .note { color:var(--warn); }
+  canvas { width:100%; height:48px; background:#0d1014; border-radius:3px; }
+  pre { margin:0; max-height:280px; overflow:auto; font-size:11px; color:var(--dim); white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<header><h1>RoboCap live</h1><span id="who"></span><span id="state" class="pill idle">…</span><span id="since" style="color:var(--dim)"></span></header>
+<main>
+  <section>
+    <h2>Run</h2>
+    <div>Viewer <input type="text" id="viewer" placeholder="rerun+http://<viewer address>:9876/proxy"></div>
+    <div id="cams" style="margin-top:6px">Video </div>
+    <div style="margin-top:4px">
+      <label>SLAM <select id="slam_hz"><option>15</option><option>30</option></select> Hz</label>
+      <label>SLAM lane <select id="slam_lane"><option value="gpu">Mali GPU</option><option value="cpu">CPU</option></select></label>
+      <label>One-frame lag <select id="slam_lag"><option value="auto">Auto (GPU on, CPU off)</option><option value="on">On</option><option value="off">Off</option></select></label>
+      <label>for <input type="number" id="minutes" value="30" min="1" max="120" style="width:60px"> min</label>
+      <label><input type="checkbox" id="hands" checked> hands</label>
+      <label>overlays <select id="hand_overlays" title="fit: the fitted hand in every camera + DetNet's box; debug: + every KeyNet view and DetNet answer; verbose: + relative depths and the predicted pose"><option>fit</option><option>debug</option><option>verbose</option></select></label>
+      <label><input type="checkbox" id="uclamp"> uclamp (faster, hotter)</label>
+    </div>
+    <div style="margin-top:8px"><button id="start">Start</button><button id="stop" class="stop">Stop</button></div>
+    <div id="msg"></div>
+  </section>
+  <section>
+    <h2>Pipeline</h2>
+    <div class="tiles" id="pipe"><span class="tile">no run</span></div>
+    <div id="capture" style="margin-top:6px; color:var(--dim); font-size:12px"></div>
+    <div id="runnote" style="margin-top:6px"></div>
+  </section>
+  <section>
+    <h2>Temperature</h2><div id="temps"></div><canvas id="c_temp"></canvas>
+  </section>
+  <section>
+    <h2>CPU</h2><div id="cpus"></div><div id="freqs" style="margin-top:4px"></div><canvas id="c_cpu"></canvas>
+  </section>
+  <section>
+    <h2>NPU · GPU · DDR · VPU</h2><div id="accel"></div><canvas id="c_npu"></canvas>
+  </section>
+  <section>
+    <h2>Power</h2><div id="power"></div>
+  </section>
+  <section>
+    <h2>Wi-Fi</h2><div id="net"></div><canvas id="c_net"></canvas>
+  </section>
+  <section>
+    <h2>Memory · disk · vendor</h2><div id="sys"></div>
+  </section>
+  <section class="wide"><details><summary>Run log (last 60 lines)</summary><pre id="log"></pre></details></section>
+</main>
+<script>
+const CAMS = ["left_front", "right_front", "left_eye", "right_eye", "left", "right"];
+const $ = id => document.getElementById(id);
+const hist = { temp: [], cpu: [], npu: [], net: [] };
+let prev = null, formLoaded = false, notesPrefix = "";
+
+$("cams").innerHTML += CAMS.map((n, i) => `<label><input type="checkbox" class="cam" value="${i}" checked>${n}</label>`).join("");
+
+const bar = (label, value, max, text, warn, bad) => {
+  const pct = Math.max(0, Math.min(100, 100 * value / max));
+  const color = bad != null && value >= bad ? "var(--bad)" : warn != null && value >= warn ? "var(--warn)" : "var(--acc)";
+  return `<div class="bar"><i style="width:${pct}%;background:${color}"></i><b>${label} ${text}</b></div>`;
+};
+const row = (k, v, cls) => `<div class="row"><span>${k}</span><span class="${cls || ""}">${v ?? "–"}</span></div>`;
+const fmt = (v, d = 1, unit = "") => v == null || Number.isNaN(v) ? "–" : v.toFixed(d) + unit;
+
+function push(series, value) { series.push(value); if (series.length > 300) series.shift(); }
+function chart(id, series, max, color, label) {
+  const c = $(id), ctx = c.getContext("2d"), w = c.width = c.clientWidth * devicePixelRatio, h = c.height = c.clientHeight * devicePixelRatio;
+  ctx.clearRect(0, 0, w, h);
+  const top = Math.max(max, ...series.filter(v => v != null));
+  ctx.strokeStyle = color; ctx.lineWidth = devicePixelRatio; ctx.beginPath();
+  series.forEach((v, i) => { const x = w - (series.length - 1 - i) * w / 300, y = h - (v ?? 0) / top * (h - 4) - 2; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.stroke(); ctx.fillStyle = "#8a96a5"; ctx.font = `${10 * devicePixelRatio}px sans-serif`;
+  ctx.fillText(`${label} (5 min, max ${top.toFixed(0)})`, 4, 12 * devicePixelRatio);
+}
+
+// This browser's last form, else the last run the panel started (its start request, as JSON).
+function loadForm(s) {
+  if (formLoaded) return; formLoaded = true;
+  const saved = JSON.parse(localStorage.getItem("robocap-form") || "null"), last = s.run.request;
+  $("viewer").value = saved?.viewer ?? last?.viewer ?? "";
+  const cams = saved?.cams ?? last?.video_cameras.map(String) ?? ["0", "1", "2", "3", "4", "5"];
+  document.querySelectorAll(".cam").forEach(c => c.checked = cams.includes(c.value));
+  $("slam_hz").value = saved?.slam_hz ?? last?.slam_hz ?? "15";
+  $("slam_lane").value = saved?.slam_lane ?? last?.slam_lane ?? "gpu";
+  $("slam_lag").value = saved?.slam_lag ?? last?.slam_lag ?? "auto";
+  $("hand_overlays").value = saved?.hand_overlays ?? last?.hand_overlays ?? "fit";
+  if (saved) { $("minutes").value = saved.minutes; $("hands").checked = saved.hands; $("uclamp").checked = saved.uclamp; }
+}
+
+function render(s) {
+  loadForm(s);
+  const dt = prev ? s.time - prev.time : 0, L = s.limits;  // the limits start applies
+  $("who").textContent = `${s.host || ""} · ${s.device || "?"}`;
+  const ph = s.run.phase || (s.run.running ? "streaming" : "idle");
+  const st = $("state"); st.textContent = ph.toUpperCase(); st.className = "pill " + (ph === "streaming" ? "run" : ph === "idle" ? "idle" : "busy");
+  $("since").textContent = `up ${fmt(s.uptime_s / 3600, 1)} h`;
+  $("start").disabled = ph !== "idle"; $("stop").disabled = ph === "idle" || ph === "stopping";
+  $("start").title = ph === "stopping" ? "the cap is restoring its vendor recorder (about 15 s)" : ph === "idle" ? "" : "a run is going";
+
+  // Pipeline: robocap-live's 1 Hz line, split at "|".
+  if (ph === "stopping") notesPrefix = `<div class="note">stopping: robocap-live drains, then the cap restores its vendor recorder (about 15 s); Start comes back after that</div>`;
+  else if (ph === "starting") notesPrefix = `<div class="note">starting: the cap pauses its vendor recorder, then robocap-live opens the cameras</div>`;
+  else notesPrefix = "";
+  if (s.run.status) $("pipe").innerHTML = (ph === "streaming" ? "" : `<span class="tile" style="color:var(--warn)">${ph === "idle" ? "last run" : ph}</span>`) + s.run.status.split("|").map(t => `<span class="tile">${t.trim()}</span>`).join("");
+  else $("pipe").innerHTML = `<span class="tile">${s.run.running ? "starting…" : "no run"}</span>`;
+  const live = s.run.live || "";
+  const gaps = live.match(/seq_gaps \[[^\]]*\]/), skew = live.match(/future_skew \d+ dropped \d+ \(max [\d.]+ ms\)/), fsets = live.match(/framesets complete \d+ partial \d+/);
+  $("capture").textContent = [gaps, fsets, skew && "IMU " + skew].filter(Boolean).map(String).join(" · ");
+  const notes = [];
+  if (s.run.error) notes.push(`<div class="err">${s.run.error}</div>`);
+  if (!s.run.running && s.run.handoff) notes.push(`<div style="color:var(--dim)">${s.run.handoff}</div>`);
+  if (s.run.last_exit) notes.push(`<div style="color:var(--dim)">last run exited: ${s.run.last_exit}</div>`);
+  s.busy.forEach(b => notes.push(`<div class="note">${b}</div>`));
+  $("runnote").innerHTML = notesPrefix + notes.join("");
+
+  // Temperatures.
+  const hottest = Math.max(...s.thermal.map(t => t.c));
+  $("temps").innerHTML = s.thermal.map(t => bar(t.name.replace("-thermal", ""), t.c, 90, fmt(t.c, 1, " °C"), L.max_start_temp_c, L.stop_temp_c)).join("");
+  push(hist.temp, hottest); chart("c_temp", hist.temp, 90, "#d29922", `hottest °C (stop at ${L.stop_temp_c})`);
+
+  // CPU: deltas of /proc/stat (user nice system idle iowait irq softirq steal).
+  let total = null;
+  if (prev && prev.cpu.length === s.cpu.length) {
+    const busy = s.cpu.map((c, i) => {
+      const p = prev.cpu[i], sum = a => a.reduce((x, y) => x + y, 0), d = sum(c) - sum(p), idle = (c[3] + c[4]) - (p[3] + p[4]);
+      return d > 0 ? 100 * (d - idle) / d : 0;
+    });
+    $("cpus").innerHTML = busy.map((b, i) => bar(`cpu${i} ${i < 4 ? "A55" : "A76"}`, b, 100, fmt(b, 0, " %"), 80, 95)).join("");
+    total = busy.reduce((a, b) => a + b, 0) / busy.length;
+  }
+  $("freqs").innerHTML = s.cpufreq.map(p => row(`${p.name} (cpu ${p.cpus})`, fmt(p.mhz, 0, " MHz"))).join("");
+  push(hist.cpu, total); chart("c_cpu", hist.cpu, 100, "#58a6ff", "CPU busy % (all cores)");
+
+  // Accelerators.
+  const npu = s.npu.load || [];
+  const vpu = s.vpu.map((v, i) => row(`VPU ${i} clock`, `${fmt(v.mhz, 0, " MHz")} (governor load ${v.load ?? "–"} %, not encoder use)`)).join("");
+  $("accel").innerHTML = npu.map((l, i) => bar(`NPU ${i}`, l, 100, `${l} %`)).join("")
+    + row("NPU clock", `${fmt(s.npu.mhz, 0, " MHz")} · ${fmt(s.npu.mv, 0, " mV")}`)
+    + bar("GPU", s.gpu.load ?? 0, 100, `${s.gpu.load ?? "–"} % · ${fmt(s.gpu.mhz, 0, " MHz")}`)
+    + bar("DDR", s.ddr.load ?? 0, 100, `${s.ddr.load ?? "–"} % · ${fmt(s.ddr.mhz, 0, " MHz")}`) + vpu;
+  push(hist.npu, npu.length ? npu.reduce((a, b) => a + b, 0) / npu.length : null); chart("c_npu", hist.npu, 100, "#3fb950", "NPU load % (mean of cores)");
+
+  // Power.
+  const p = s.power, limitBad = p.input_limit_ma != null && p.input_limit_ma < L.min_input_limit_ma;
+  $("power").innerHTML = row("battery", `${fmt(p.battery_v, 2, " V")} · ${fmt(p.battery_a, 2, " A")}`, p.battery_v != null && p.battery_v < L.min_vbat_v ? "err" : "")
+    + row("USB input", `${fmt(p.input_v, 2, " V")} · ${fmt(p.input_a, 2, " A")} · ${fmt((p.input_v || 0) * (p.input_a || 0), 1, " W")}`)
+    + row("charger", p.status) + row("real input limit", p.input_limit_ma == null ? "–" : `${p.input_limit_ma} mA`, limitBad ? "err" : "")
+    + row("input regulation (IINDPM)", p.iindpm == null ? "–" : p.iindpm ? "yes: battery helping" : "no", p.iindpm ? "note" : "");
+
+  // Wi-Fi: rates from the interface counters.
+  let tx = null, rx = null;
+  if (prev && dt > 0 && s.net.tx_bytes != null && prev.net.tx_bytes != null) { tx = (s.net.tx_bytes - prev.net.tx_bytes) * 8 / dt / 1e6; rx = (s.net.rx_bytes - prev.net.rx_bytes) * 8 / dt / 1e6; }
+  $("net").innerHTML = row("network", `${s.net.ssid || "–"} · ${s.net.freq || "–"} MHz`) + row("signal · link rate", `${s.net.signal || "–"} · ${s.net.tx_bitrate || "–"}`)
+    + row("sending · receiving", `${fmt(tx, 2, " Mbit/s")} · ${fmt(rx, 2, " Mbit/s")}`);
+  push(hist.net, tx); chart("c_net", hist.net, 20, "#58a6ff", "sent Mbit/s");
+
+  // Memory, disk, vendor recorder.
+  const m = s.mem_kb, gib = b => b == null ? null : b / 2 ** 30;
+  $("sys").innerHTML = row("memory available", `${fmt(gib((m.available || 0) * 1024), 1)} / ${fmt(gib((m.total || 0) * 1024), 1)} GiB`)
+    + row("disk free (/)", `${fmt(gib(s.disk.free), 1)} / ${fmt(gib(s.disk.total), 1)} GiB`, s.disk.free != null && s.disk.free < L.min_free_bytes ? "err" : "")
+    + row("vendor recorder", s.vendor.recorder_pid ? `pid ${s.vendor.recorder_pid}` : "not running", "")
+    + row("vendor launcher", s.vendor.launcher_state);
+  prev = s;
+}
+
+async function poll() {
+  try { render(await (await fetch("api/status")).json()); }
+  catch (e) { $("state").textContent = "NO CONNECTION"; $("state").className = "pill idle"; }
+  setTimeout(poll, 1000);
+}
+async function pollLog() {
+  if (document.querySelector("details").open) { try { const t = await (await fetch("api/log")).text(); const pre = $("log"); pre.textContent = t; pre.scrollTop = pre.scrollHeight; } catch (e) {} }
+  setTimeout(pollLog, 3000);
+}
+
+async function post(path, body) {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+  const reply = await response.json();
+  $("msg").className = reply.ok ? "" : "err";
+  $("msg").textContent = reply.ok ? (path.endsWith("start") ? `started: session ${reply.result.pid}`
+    : reply.result.pending ? "stop noted: robocap-live is not up yet; it is stopped as soon as it starts" : `stopping: signalled ${reply.result.signalled}`) : reply.error;
+}
+$("start").onclick = () => {
+  const cams = [...document.querySelectorAll(".cam")].filter(c => c.checked).map(c => c.value);
+  const form = { viewer: $("viewer").value.trim(), cams, slam_hz: $("slam_hz").value, minutes: $("minutes").value, hands: $("hands").checked, uclamp: $("uclamp").checked,
+    hand_overlays: $("hand_overlays").value, slam_lane: $("slam_lane").value, slam_lag: $("slam_lag").value };
+  localStorage.setItem("robocap-form", JSON.stringify(form));
+  const body = new URLSearchParams({ viewer: form.viewer, video_cameras: cams.join(","), slam_hz: form.slam_hz,
+    slam_lane: form.slam_lane, slam_lag: form.slam_lag,
+    duration_s: Math.round(form.minutes * 60), hands: form.hands ? "on" : "off", uclamp: form.uclamp ? "on" : "off", hand_overlays: form.hand_overlays });
+  post("api/start", body.toString());
+};
+$("stop").onclick = () => post("api/stop", "");
+poll(); pollLog();
+</script>
+</body>
+</html>

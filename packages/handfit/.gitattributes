@@ -1,0 +1,4 @@
+# GitHub collapses generated code and fixtures in diffs.
+crates/handfit/src/generated/** linguist-generated
+crates/handfit/tests/fixtures/** linguist-generated
+Cargo.lock linguist-generated

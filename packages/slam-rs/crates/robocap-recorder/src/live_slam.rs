@@ -13,12 +13,12 @@ pub enum ImuChannel {
     Accel,
 }
 
-/// Left, left_front, right_front, right in estimator order.
-pub const SLAM_CAMERAS: [u8; 4] = [4, 0, 1, 5];
+/// Front-left, front-right, left, right in estimator order.
+pub const SLAM_CAMERAS: [u8; 4] = [0, 1, 4, 5];
 
 #[derive(Debug, PartialEq)]
 pub enum SlamInput {
-    /// Camera index in estimator order: left, left-front, right-front, right.
+    /// Camera index in estimator order: left-front, right-front, left, right.
     Frame {
         camera: usize,
         timestamp_ns: i64,
@@ -77,13 +77,6 @@ pub struct LiveSlamOptions {
     pub joint: bool,
 }
 
-/// Apply the recorder's fast estimator schedule (configs/profiles/fast.json).
-pub fn fast_profile(config: &mut VioConfig) {
-    config.vio_max_iterations = 7;
-    config.port_redetect_survivor_ratio = 0.85;
-    config.port_frame_update_max_iterations = 5;
-}
-
 pub struct LiveSlam {
     vio: Vio<f32>,
     resolution: [[u32; 2]; 4],
@@ -103,9 +96,10 @@ impl LiveSlam {
         let calibration = Calibration::<f64>::from_json_str(include_str!(
             "../../../configs/robocap_calib_downscale3.json"
         ))?;
-        let mut config =
-            VioConfig::from_json_str(include_str!("../../../configs/msdmo_config.json"))?;
-        fast_profile(&mut config);
+        let config = VioConfig::with_overlay(
+            include_str!("../../../configs/msdmo_config.json"),
+            include_str!("../../../configs/profiles/fast.json"),
+        )?;
         Self::with_configuration(calibration, config, options)
     }
 
@@ -270,10 +264,10 @@ impl LiveSlam {
                         "input_age_ms": (now_ns - t) as f64 / 1e6,
                         "processing_ms": processing_ms,
                         "took_keyframe": self.vio.last_stats().map(|s| s.took_keyframe),
-                        "pyramid_ns": frontend.pyramid_ns,
-                        "detect_ns": frontend.detect_ns,
-                        "track_ns": frontend.track_ns,
-                        "stereo_ns": frontend.stereo_ns,
+                        "pyramid_ns": frontend.flow.pyramid_ns,
+                        "detect_ns": frontend.flow.detect_ns,
+                        "track_ns": frontend.flow.track_ns,
+                        "stereo_ns": frontend.flow.stereo_ns,
                         "imu_ns": frontend.imu_ns,
                         "predict_ns": stages.map(|s| s.predict_ns),
                         "keyframe_ns": stages.map(|s| s.keyframe_ns),
@@ -294,15 +288,15 @@ impl LiveSlam {
                 .map_or(0, |s| s.connected.iter().sum());
             let optimization_started = self.vio.last_stats().is_some_and(|s| s.opt_started);
             let supported = result.status == VioStatus::Tracking
-                && landmarks >= 10
-                && tracked_observations >= 10
-                && optimization_started
-                && result.world_from_rig.iter().all(|v| v.is_finite());
+                && self.vio.last_stats().is_some_and(|s| s.visually_supported);
             self.last_frame = Some(t);
             self.updates += 1;
             return Ok(Some(SlamReport {
                 timestamp_ns: t,
-                pose: supported.then_some(result.world_from_rig),
+                pose: result
+                    .pose
+                    .filter(|_| supported)
+                    .map(|pose| pose.world_from_rig),
                 status: if result.status == VioStatus::NeedMoreImu {
                     SlamStatus::WaitingForImu
                 } else if !supported {
@@ -318,26 +312,5 @@ impl LiveSlam {
                 updates: self.updates,
             }));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::{Context, Result};
-
-    /// The typed overlay must say exactly what the checked-in profile file says.
-    #[test]
-    fn fast_profile_matches_the_checked_in_profile_file() -> Result<()> {
-        let file: serde_json::Value =
-            serde_json::from_str(include_str!("../../../configs/profiles/fast.json"))?;
-        let mut config = slam_rs::config::VioConfig::from_json_str(include_str!(
-            "../../../configs/msdmo_config.json"
-        ))?;
-        super::fast_profile(&mut config);
-        let written: serde_json::Value = serde_json::from_str(&config.to_json_string()?)?;
-        for (key, value) in file.as_object().context("profile is not an object")? {
-            assert_eq!(&written["value0"][key], value, "{key}");
-        }
-        Ok(())
     }
 }

@@ -59,8 +59,24 @@ def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
     pose["landmarks_2d"] = {"headset0": [None] + [[3.0, 4.0]] * (NUM_LANDMARKS_PER_HAND - 1)}
     frame = from_dict(HandFrame, dict(index=0, agt_frame_id=20, timestamp=1.0, missing_cameras=[], hand_poses={"0": pose, "1": pose}))
     assert frame.hand_poses["0"].landmarks_2d is not None
+    assert frame.hand_poses["0"].landmarks_2d["headset0"] is not None
     assert frame.hand_poses["0"].landmarks_2d["headset0"][0] is None
     assert frame.hand_poses["0"].landmarks_2d["headset0"][1] == [3.0, 4.0]
+
+
+def test_hand_schema_preserves_null_camera_landmarks() -> None:
+    pose: HandPose = from_dict(
+        HandPose,
+        dict(
+            confidence=1.0,
+            joint_angles=None,
+            wrist_rotation=None,
+            wrist_translation=None,
+            landmarks_3d_mm=None,
+            landmarks_2d={"headset1": None},
+        ),
+    )
+    assert pose.landmarks_2d == {"headset1": None}
 
 
 def test_caption_layer_carries_the_searchable_fields(tmp_path: Path) -> None:
@@ -120,7 +136,10 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
         if not chunk.is_static:
             assert set(chunk.timeline_names) == {"video_time", "frame_index"}
     props: dict[str, object] = recording_properties(read_back(target), "hand_pose")
-    assert props["version"] == HAND_POSE_VERSION
+    assert props["version"] == HAND_POSE_VERSION == "v2"
+    assert props["trust_threshold"] == 0.0
+    property_table: pa.Table = read_back(target).reader(index=None, contents="/__properties/**").to_arrow_table()
+    assert property_table.schema.field("property:hand_pose:trust_threshold").type.value_type == pa.float64()
     assert recording_properties(read_back(target), "capture") == {}
     for hand in HAND_SIDES:
         poses: list[HandPose] = [frame.hand_poses[hand.key] for frame in frames]
@@ -370,7 +389,6 @@ def test_fetch_missing_preserves_retained_raw_files(tmp_path: Path, monkeypatch:
     retained: Path = tmp_path / "retained.json"
     retained.write_text("keep")
     dataset: Show3dDataset = Show3dDataset(Show3dConfig(root=tmp_path))
-    dataset.__dict__["commit_sha"] = "test-sha"
     calls: list[list[str]] = []
 
     def fetch(repo_id: str, paths: list[str], *, local_dir: Path, revision: str) -> Path:
@@ -383,7 +401,8 @@ def test_fetch_missing_preserves_retained_raw_files(tmp_path: Path, monkeypatch:
     assert retained.read_text() == "keep"
 
 
-def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_path: Path) -> None:
+@pytest.mark.parametrize("null_camera", [False, True], ids=["absent-camera", "null-camera"])
+def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_path: Path, null_camera: bool) -> None:
     clock: FrameClock = FrameClock(
         RecordingInfo(20, 2, 60.0, {}),
         [FrameInfo(0, 20, 1.0, []), FrameInfo(1, 21, 2.0, [])],
@@ -398,10 +417,10 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     pixels[5] = [10.0, 20.0]
     pixels[6] = [50.0, 60.0]
     pixels[1] = None
-    left: HandPose = HandPose(0.6, None, None, None, landmarks, {"headset0": pixels})
+    left: HandPose = HandPose(0.3, None, None, None, landmarks, {"headset0": pixels, "headset1": None} if null_camera else {"headset0": pixels})
     right: HandPose = HandPose(1.0, None, None, None, landmarks, {"headset1": pixels})
     absent: HandPose = HandPose(0.75, None, None, None, None, None)
-    low: HandPose = HandPose(0.5, None, None, None, landmarks, {"headset0": pixels})  # at the threshold: shipped but not placed
+    low: HandPose = HandPose(0.0, None, None, None, landmarks, {"headset0": pixels})  # at the threshold: shipped but not placed
     frames: list[HandFrame] = [
         HandFrame(0, 20, 1.0, [], {"0": left, "1": right}),
         HandFrame(1, 21, 2.0, [], {"0": low, "1": right}),
@@ -444,9 +463,9 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             np.testing.assert_allclose(points[0, 95], [1.0, 2.0, 3.0])
             np.testing.assert_allclose(points[0, [9, 91]], [[2.0, 4.0, 6.0]] * 2)
             np.testing.assert_allclose(points[0, 92], [3.0, 5.0, 7.0])
-            assert confidence[0, 91:112] == pytest.approx(0.6)
-            assert confidence[0, 9] == pytest.approx(0.6)
-            assert np.isnan(points[1, 91:112]).all()  # confidence 0.5 is not above the README default
+            assert confidence[0, 91:112] == pytest.approx(0.3)
+            assert confidence[0, 9] == pytest.approx(0.3)
+            assert np.isnan(points[1, 91:112]).all()  # confidence zero is hidden
             assert (confidence[1, 91:112] == 0.0).all()
             assert (confidence[:, 112:133] == 1.0).all()
             assert (confidence[:, 10] == 1.0).all()
@@ -454,11 +473,25 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             assert len(colors) == 133
             assert colors[116] == 0x00FF00FF  # 1.0 confidence: green RGBA.
         else:
+            if path == schema.coco133_uv_path(1, 1):
+                assert np.isnan(points[:, 91:112]).all()
+                assert (confidence[:, 91:112] == 0.0).all()
+                assert np.isnan(points[:, 9]).all()
+                assert (confidence[:, 9] == 0.0).all()
             offset: int = 91 if path == schema.coco133_uv_path(1, 0) else 112
             np.testing.assert_allclose(points[0, offset + 4], [30.0, 40.0])
             np.testing.assert_allclose(points[0, offset + 1], [30.0, 40.0])
             assert np.isnan(points[0, offset + 8]).all()  # Null index fingertip.
             assert confidence[0, offset + 8] == 0.0
-            assert confidence[0, offset + 4] == pytest.approx(0.6 if offset == 91 else 1.0)
+            assert confidence[0, offset + 4] == pytest.approx(0.3 if offset == 91 else 1.0)
             assert (confidence[~np.isfinite(points).all(axis=2)] == 0.0).all()
     assert not any(str(chunk.entity_path).endswith(("/landmarks", "/uv")) for chunk in chunks)
+
+    props = recording_properties(read_back(target), "hand_pose")
+    assert props["version"] == HAND_POSE_VERSION == "v2"
+    assert props["trust_threshold"] == 0.0
+    property_table: pa.Table = read_back(target).reader(index=None, contents="/__properties/**").to_arrow_table()
+    assert property_table.schema.field("property:hand_pose:trust_threshold").type.value_type == pa.float64()
+    assert props["coverage_left"] == 0.5
+    assert props["coverage_left_high_conf"] == 0.0
+    assert props["coverage_right"] == props["coverage_right_high_conf"] == 1.0

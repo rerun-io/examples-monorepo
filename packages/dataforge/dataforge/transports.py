@@ -18,6 +18,7 @@ import re
 import sys
 import time
 from collections.abc import Iterable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -80,7 +81,7 @@ def hf_fetch(
     allow_patterns: Sequence[str],
     local_dir: Path,
     repo_type: str = "dataset",
-    revision: str | None = None,
+    revision: str,
 ) -> Path:
     """Fetch a subset of a HuggingFace repo into a plain directory tree.
 
@@ -98,11 +99,12 @@ def hf_fetch(
             sequence fetches nothing (``snapshot_download``'s own semantics).
         local_dir: Destination directory; created by ``snapshot_download``.
         repo_type: ``"dataset"`` (default), ``"model"``, or ``"space"``.
-        revision: Branch, tag, or commit; ``None`` takes the default branch.
+        revision: Full lowercase 40-character commit SHA.
 
     Returns:
         ``local_dir``, so callers can chain the fetch into a glob.
     """
+    require_commit_sha(revision)
     snapshot_download(
         repo_id,
         repo_type=repo_type,
@@ -113,10 +115,28 @@ def hf_fetch(
     return local_dir
 
 
-def hf_fetch_files(repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str) -> Path:
-    """Fetch known dataset paths without listing the Hub repository."""
-    for path in paths:
-        hf_hub_download(repo_id, path, repo_type="dataset", local_dir=str(local_dir), revision=revision)
+def require_commit_sha(revision: str) -> str:
+    """Reject floating Hub revisions before any network call."""
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError(f"{revision!r}: pin a full commit sha, not a branch/tag/short sha")
+    return revision
+
+
+def hf_fetch_files(repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str, workers: int = 16) -> Path:
+    """Fetch pinned paths concurrently; cancel pending work on the first failure."""
+    require_commit_sha(revision)
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if not paths:
+        return local_dir
+    with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
+        futures: list[Future[str]] = [executor.submit(hf_hub_download, repo_id, path, repo_type="dataset", local_dir=str(local_dir), revision=revision) for path in paths]
+        try:
+            for future in as_completed(futures):
+                future.result()
+        finally:
+            for future in futures:
+                future.cancel()
     return local_dir
 
 
@@ -231,6 +251,7 @@ def hf_file_info(entry: RepoFile) -> HfFileInfo:
 
 def hf_lfs_files(repo_id: str, names: Sequence[str], *, revision: str) -> list[HfFileInfo]:
     """The named dataset files at ``revision``, in the order given; each must be an LFS file."""
+    require_commit_sha(revision)
     found: dict[str, HfFileInfo] = {}
     for info in HfApi().get_paths_info(repo_id, list(names), repo_type="dataset", revision=revision):
         if isinstance(info, RepoFile) and info.lfs is not None:
@@ -262,6 +283,7 @@ def hf_fetch_verified(repo_id: str, file: HfFileInfo, *, local_dir: Path, revisi
     huggingface_hub (1.28) does not resume: an interrupted transfer restarts from zero. hf_xet's chunk cache
     (``HF_XET_CACHE``, default ``~/.cache/huggingface/xet``, outside ``local_dir``) can make a quick retry cheap.
     """
+    require_commit_sha(revision)
     dest: Path = local_dir / file.path
     if matches_file(dest, file.integrity):
         return False
@@ -436,11 +458,3 @@ def parse_apache_index(html: str) -> list[IndexEntry]:
         digits: str = size[:-1] if size[-1] in SIZE_SUFFIX_BYTES else size
         listed.append(IndexEntry(name=row["name"], display_bytes=int(float(digits) * multiple)))
     return listed
-
-
-def repo_revision(repo_id: str, revision: str | None = None) -> str | None:
-    """Resolve a branch/tag to the commit sha stamped into every converted rrd.
-
-    Resolve without listing files so a dataset can pin all fetches once per run.
-    """
-    return HfApi().repo_info(repo_id, repo_type="dataset", revision=revision).sha

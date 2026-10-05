@@ -109,7 +109,7 @@ fn replay<S: LieScalar>(
         assert_eq!(result.t_ns, t_ns, "frame {frame}: timestamp");
         if result.status == VioStatus::Tracking {
             tracked += 1;
-            let pose: [f64; 7] = result.world_from_rig;
+            let pose: [f64; 7] = result.pose.unwrap().world_from_rig;
             writeln!(
                 poses,
                 "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?}",

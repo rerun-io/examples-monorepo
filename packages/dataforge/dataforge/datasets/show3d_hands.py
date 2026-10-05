@@ -19,8 +19,8 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import (
 
 from dataforge import hands, logging_toolkit, paths, schema, writing
 from dataforge.datasets.show3d_source import (
-    DEFAULT_CONFIDENCE,
     HAND_POSE_VERSION,
+    HAND_TRUST,
     HEADSET_CAMERAS,
     FrameClock,
     FrameInfo,
@@ -47,13 +47,13 @@ class HandPose:
     """World wrist position in millimetres."""
     landmarks_3d_mm: Float32[ndarray, "21 3"] | None
     """World landmarks in millimetres."""
-    landmarks_2d: dict[str, list[list[float] | None]] | None
-    """Headset pixels, with null entries outside the image."""
+    landmarks_2d: dict[str, list[list[float] | None] | None] | None
+    """Headset pixels, with null cameras for missing landmarks and null points outside the image."""
 
     @property
     def trusted(self) -> bool:
-        """Above the Hub's default threshold; the one place that rule lives."""
-        return self.confidence > DEFAULT_CONFIDENCE
+        """Above zero confidence, as requested for SHOW3D hands."""
+        return self.confidence > HAND_TRUST
 
     def __post_init__(self) -> None:
         if not isfinite(self.confidence):
@@ -61,8 +61,10 @@ class HandPose:
         if (self.wrist_rotation is None) != (self.wrist_translation is None):
             raise ValueError("wrist rotation and translation must be present together")
         for camera, landmarks in (self.landmarks_2d or {}).items():
-            if camera not in {c.source_name for c in HEADSET_CAMERAS} or len(landmarks) != NUM_LANDMARKS_PER_HAND:
+            if camera not in {c.source_name for c in HEADSET_CAMERAS} or (landmarks is not None and len(landmarks) != NUM_LANDMARKS_PER_HAND):
                 raise ValueError("UV landmarks require a headset camera and 21 entries")
+            if landmarks is None:
+                continue
             if any(point is not None and (len(point) != 2 or not all(isfinite(value) for value in point)) for point in landmarks):
                 raise ValueError("UV landmarks must be finite pixel pairs or null")
 
@@ -97,9 +99,9 @@ def read_hand_frames(hand_path: Path, clock: FrameClock) -> list[HandFrame]:
     return selected
 
 
-def high_confidence_coverage(confidence: list[float]) -> float:
-    """Fraction of scene frames whose confidence is strictly greater than 0.5."""
-    return sum(value > 0.5 for value in confidence) / len(confidence)
+def high_confidence_coverage(confidence: list[float], *, threshold: float = 0.5) -> float:
+    """Fraction of scene frames whose confidence is strictly greater than the threshold."""
+    return sum(value > threshold for value in confidence) / len(confidence)
 
 
 def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selected: list[HandFrame], profile_text: str, target: Path) -> None:
@@ -147,6 +149,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 recording, side.name, times_ns=clock.times_ns, frame_indices=clock.frame_indices,
                 confidence=np.asarray(confidence, dtype=np.float64),
             )
+            coverage[f"coverage_{side.name}"] = pa.array([high_confidence_coverage(confidence, threshold=HAND_TRUST)], type=pa.float64())
             coverage[f"coverage_{side.name}_high_conf"] = pa.array([high_confidence_coverage(confidence)], type=pa.float64())
             positions, values = sparse_rows(poses, lambda pose: pose.joint_angles)
             angles: Float32[ndarray, "n 22"] = np.asarray(values, dtype=np.float32).reshape(-1, NUM_JOINTS_PER_HAND)
@@ -161,7 +164,14 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                     recording, schema.hand_wrist_path(side.name), times_ns=clock.times_ns[positions],
                     frame_indices=clock.frame_indices[positions], translations_xyz=translations, quaternions_xyzw=rotations,
                 )
-        recording.send_property(paths.HAND_POSE_LAYER, rr.AnyValues(version=pa.array([HAND_POSE_VERSION], type=pa.string()), **coverage))
+        recording.send_property(
+            paths.HAND_POSE_LAYER,
+            rr.AnyValues(
+                version=pa.array([HAND_POSE_VERSION], type=pa.string()),
+                trust_threshold=pa.array([HAND_TRUST], type=pa.float64()),
+                **coverage,
+            ),
+        )
 
 
 def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames: list[HandFrame], model: HandModelNumpy, target: Path) -> None:
@@ -170,7 +180,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
     The source ships a wrist and joint angles for many frames it marks with confidence 0
     (the tracker lost the hand) and for low-confidence frames whose landmarks float far
     from any hand. Those rows are kept verbatim in ``hand_pose``; this derived layer skins
-    only frames with a wrist and confidence > ``DEFAULT_CONFIDENCE``, and writes an empty
+    only frames with a wrist and confidence > ``HAND_TRUST``, and writes an empty
     vertex row on every other frame so the viewer's latest-at never holds a stale mesh.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:

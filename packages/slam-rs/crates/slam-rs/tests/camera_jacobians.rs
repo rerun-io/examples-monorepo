@@ -599,10 +599,10 @@ fn msd_g2_cam2_does_not_invert_inside_the_safe_radius() {
 /// Pin the selected off-axis unprojection result where fixed Newton iterations
 /// leave a bearing error, independently of the ordinary sensor-domain sweep.
 #[test]
-fn robocap_cam1_inverts_backwards_outside_the_safe_radius() {
+fn robocap_front_left_inverts_backwards_outside_the_safe_radius() {
     let calibration: Calibration<f64> =
         Calibration::from_json_str(common::calibration_text("robocap")).unwrap();
-    let rig: RigCamera<f64> = RigCamera::from_calibration(&calibration).unwrap()[1];
+    let rig: RigCamera<f64> = RigCamera::from_calibration(&calibration).unwrap()[0];
 
     let point: Vector4<f64> = Vector4::new(-9.0, -4.3, 1.5, 1.0);
     let mut proj: Vector2<f64> = Vector2::zeros();

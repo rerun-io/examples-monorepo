@@ -18,11 +18,6 @@ vio_config = "configs/msdmo_config.json"
 
 [robocap]
 device_id = "f408193e6447b3b0"
-camera_names = ["left", "left_front", "right_front", "right"]
-downscale = 3
-frameset_tolerance_ns = 1000000
-interpolate_accel_onto_gyro = true
-video_time_is_absolute = true
 vio_config = "configs/msdmo_config.json"
 calibration = "configs/robocap_calib_downscale3.json"
 

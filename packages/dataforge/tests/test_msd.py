@@ -78,7 +78,7 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
             store.add(REPO_ID, path, bytes(size))
     store.install(monkeypatch, msd, transports)
 
-    discovered: list[tuple[SequenceIdentity, MsdSource]] = MsdDataset(MsdConfig(device="index")).discover()
+    discovered: list[tuple[SequenceIdentity, MsdSource]] = MsdDataset(MsdConfig(device="index", revision=REVISION_SHA)).discover()
     keys: list[str] = [identity.sequence_key for identity, _ in discovered]
     assert keys[:3] == ["MIO_others/MIO09_short_1_updown", "MIO_others/MIO10_short_2_panorama", "MIPB_beat_saber/MIPB08_long"]
     assert discovered[0][0].recording_id == "msd-index__MIO_others__MIO09_short_1_updown"
@@ -94,7 +94,7 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
 def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.MonkeyPatch) -> None:
     store: HubStore = HubStore({REPO_ID: REVISION_SHA})
     store.install(monkeypatch, msd, transports)
-    dataset: MsdDataset = MsdDataset(MsdConfig(device="g2"))
+    dataset: MsdDataset = MsdDataset(MsdConfig(device="g2", revision=REVISION_SHA))
     assert dataset.discover() == []
     assert [call.paths for call in store.calls if call.kind == "list"] == [("M_monado_datasets/MG_reverb_g2/MGO_others",)]
 
@@ -153,16 +153,9 @@ def test_download_fetches_only_the_calibration_and_prints_the_plan(
 def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
-    """A branch name moves under a conversion; a sha cannot.
-
-    ``--revision main`` is only the input: listing a collection on ``main``,
-    fetching an archive on it minutes later and stamping a third answer into the
-    rrd could describe three different trees, and nothing in the rrd would say
-    so. Every hub call takes the resolved sha instead, and it is the sha the
-    recording reports.
-    """
+    """Every Hub call and the recording carry the configured full SHA."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="main"))
+    dataset: MsdDataset = MsdDataset(replace(hub.config, revision=REVISION_SHA))
     identity, source = dataset.discover()[0]
 
     target: Path = dataset.convert(identity, source, force=False)
@@ -173,14 +166,11 @@ def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
 
 
 @pytest.mark.integration
-def test_a_revision_the_hub_resolves_to_nothing_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unpinned_revision_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a sha there is no tree to name, so the conversion has nothing honest to record."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: None)
-    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="no-such-branch"))
-
-    with pytest.raises(RuntimeError, match="no-such-branch"):
-        dataset.discover()
+    with pytest.raises(ValueError, match="no-such-branch"):
+        replace(hub.config, revision="no-such-branch")
 
 
 

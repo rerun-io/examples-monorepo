@@ -16,7 +16,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
 from slam_rs.catalog_calibration import ImuCalib
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, CatalogSegment, Frameset, RigProfile, SegmentFeed, open_segment
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -31,8 +31,8 @@ class Lockstep:
 
     Everything a driver needs to report afterwards is on this value: what was
     pushed, what tracked and how long it took, how many retries it cost, and
-    what is still held. The tracked count is ``len(elapsed_ms)``: the same branch
-    that times a ``track`` call is the one that accepts its pose.
+    what is still held. The tracked count is ``len(elapsed_ms)``: one entry per
+    yielded pose, including the final drain in lag mode.
     """
 
     vio: _core.Vio
@@ -44,7 +44,16 @@ class Lockstep:
     retries: int = 0
     """How many framesets were refused for want of IMU, and so had to be tracked a second time."""
     elapsed_ms: list[float] = field(default_factory=list)
-    """Wall time each ``track`` call that tracked took, in the order they tracked."""
+    """Wall time per yielded pose. Lag mode adds startup frontend time to the
+    final drain; calls waiting for stereo do not yield a pose."""
+    _buffered: Frameset | None = None
+    """The accepted frame still waiting for a lagged estimate."""
+    _buffered_flow: _core.FlowFrame | None = None
+    """Keypoints of that frame, before the next frontend replaces them."""
+    _result_flow: _core.FlowFrame | None = None
+    """Keypoints paired with the last yielded estimate in lag mode."""
+    _startup_ms: float = 0.0
+    """First buffered call's cost, included with the final drain's timing."""
 
     def push(self, frameset: Frameset) -> Iterator[tuple[Frameset, _core.VioResult]]:
         """Push the frameset's inertial samples, then yield everything they now cover.
@@ -94,12 +103,50 @@ class Lockstep:
             started: float = time.monotonic()
             result: _core.VioResult = self.vio.track(held.t_ns, held.images)
             elapsed_ms: float = 1e3 * (time.monotonic() - started)
-            if result.status != _core.VioStatus.Tracking:
+            if result.status == _core.VioStatus.NeedMoreImu:
                 self.retries += 1
                 return
             self.pending.pop(0)
+            if result.status == _core.VioStatus.Buffered:
+                self._buffered = held
+                self._buffered_flow = self.vio.flow_frame()
+                self._startup_ms = elapsed_ms
+                continue
+            completed: Frameset = held
+            if self._buffered is not None:
+                completed = self._buffered
+                self._result_flow = self._buffered_flow
+                self._buffered = held
+                self._buffered_flow = self.vio.flow_frame()
+            assert completed.t_ns == result.t_ns
+            if result.status == _core.VioStatus.NoVisualFeatures:
+                continue
             self.elapsed_ms.append(elapsed_ms)
-            yield held, result
+            yield completed, result
+
+    def flow_frame(self) -> _core.FlowFrame:
+        """Keypoints for the most recently yielded estimate, including lag mode."""
+        frame: _core.FlowFrame | None = self._result_flow if self._result_flow is not None else self.vio.flow_frame()
+        assert frame is not None, "no tracked keypoints before the first accepted frame"
+        return frame
+
+    def flush(self) -> Iterator[tuple[Frameset, _core.VioResult]]:
+        """Yield the final lagged estimate once; uncovered frames remain pending."""
+        started: float = time.monotonic()
+        result: _core.VioResult | None = self.vio.flush()
+        if result is None:
+            return
+        elapsed_ms: float = 1e3 * (time.monotonic() - started) + self._startup_ms
+        held: Frameset | None = self._buffered
+        assert held is not None and held.t_ns == result.t_ns
+        self._result_flow = self._buffered_flow
+        self._buffered = None
+        self._buffered_flow = None
+        self._startup_ms = 0.0
+        if result.status == _core.VioStatus.NoVisualFeatures:
+            return
+        self.elapsed_ms.append(elapsed_ms)
+        yield held, result
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,8 +158,7 @@ class SegmentRun:
     framesets: int
     """Framesets replayed."""
     lost: int
-    """Framesets that never produced a pose: the estimator was still waiting for
-    inertial samples covering them when the clip ended."""
+    """Framesets that produced no pose: waiting for stereo structure or IMU coverage."""
     wall_s: float
     """Wall time the feed loop took: decode plus ``track``, nothing logged."""
     ground_truth: Trajectory
@@ -133,6 +179,15 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
     replayed: int = 0
+
+    def record(result: _core.VioResult) -> None:
+        """Keep one pose without retaining a view of its seven-value buffer."""
+        pose: Float64[ndarray, " 7"] | None = result.world_from_rig
+        assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
+        t_ns.append(result.t_ns)
+        positions.append(pose[0:3].copy())
+        quaternions.append(np.roll(pose[3:7], 1))
+
     # A count is asked of the feed as a time, or it fetches a window nothing here
     # reads. The in-loop breaks still make the cut, because the feed yields to
     # the end of the window that covers `stop_ns`.
@@ -147,25 +202,20 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
             break
         replayed += 1
         for _tracked, result in lockstep.push(frameset):
-            pose: Float64[ndarray, " 7"] = result.world_from_rig
-            t_ns.append(result.t_ns)
-            # The slice is a view onto a 7-float buffer the estimator would
-            # otherwise keep alive per pose, so it is copied; `np.roll` already
-            # returns a new array, so the second copy would be a second one.
-            positions.append(pose[0:3].copy())
-            quaternions.append(np.roll(pose[3:7], 1))
+            record(result)
+    for _tracked, result in lockstep.flush():
+        record(result)
     wall_s: float = time.monotonic() - started
     estimate: Trajectory = Trajectory(
         t_ns=np.array(t_ns, dtype=np.int64),
         position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
         quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
     )
-    # Whatever is still held never got samples covering it, so it produced no
-    # pose: that, and only that, is a lost frameset.
+    # Both an uncovered input and a consumed pre-initialization input lack a pose.
     return SegmentRun(
         estimate=shift_clock(estimate, feed.export_offset_ns),
         framesets=replayed,
-        lost=len(lockstep.pending),
+        lost=replayed - len(t_ns),
         wall_s=wall_s,
         config_sha256=config_sha256,
         ground_truth=shift_clock(feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])), feed.export_offset_ns),
@@ -273,9 +323,9 @@ def run_robocap(
     feed: SegmentFeed
     with open_segment(
         CatalogSegment(catalog or settings.catalog_url, "robocap", session.segment_id),
-        profile=RigProfile.from_robocap(settings.robocap),
+        profile=ROBOCAP_RIG,
         window_s=window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, settings.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
         return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))

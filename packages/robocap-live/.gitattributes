@@ -1,0 +1,5 @@
+# GitHub collapses the lock, the hand assets and the golden fixtures in diffs; the .bin fixtures are raw tensors.
+Cargo.lock linguist-generated
+crates/robocap-live/assets/*.json linguist-generated
+crates/robocap-live/tests/data/** linguist-generated
+crates/robocap-live/tests/data/**/*.bin binary

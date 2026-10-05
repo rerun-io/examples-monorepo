@@ -44,7 +44,7 @@ def frameset(step: int, texture: TextureFactory, sample_t_ns: Int64[ndarray, " n
     Returns:
         The frameset, with gravity along +z on every sample and no ground truth.
     """
-    images: list[UInt8[ndarray, "h w"]] = [texture(step, 0), texture(step + 1, 0)]
+    images: list[UInt8[ndarray, "h w"]] = [texture(step, 0), texture(step - 2, 0)]
     gyro_rad_s, accel_m_s2 = gravity_batch(sample_t_ns)
     return Frameset(
         t_ns=step * FRAME_PERIOD_NS,
@@ -79,8 +79,12 @@ def test_a_held_frameset_tracks_before_the_one_that_unblocked_it(pipeline: Pipel
     covered_poses: list[Float64[ndarray, " 7"]] = []
     held_poses: list[Float64[ndarray, " 7"]] = []
     for step, (whole, split) in enumerate(zip(batches, held_batches, strict=True)):
-        covered_poses.extend(result.world_from_rig for _tracked, result in covered.push(frameset(step, texture, whole)))
-        held_poses.extend(result.world_from_rig for _tracked, result in held.push(frameset(step, texture, split)))
+        for _tracked, result in covered.push(frameset(step, texture, whole)):
+            assert result.world_from_rig is not None
+            covered_poses.append(result.world_from_rig)
+        for _tracked, result in held.push(frameset(step, texture, split)):
+            assert result.world_from_rig is not None
+            held_poses.append(result.world_from_rig)
 
     assert len(covered.elapsed_ms) == len(held.elapsed_ms) == 4
     assert not covered.pending and not held.pending

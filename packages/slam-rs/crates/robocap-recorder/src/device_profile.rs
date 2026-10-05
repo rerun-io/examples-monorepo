@@ -49,12 +49,22 @@ pub const SLAM_CPUS: Range<usize> = 4..8;
 /// Recorded streams: the cameras, then every sensor channel in `SENSORS` order.
 pub const STREAMS: usize = CAMERAS.len() + SENSORS.len();
 
-/// Capture geometry shared by the Rust camera and SLAM paths.
+/// Capture geometry shared by the camera and SLAM paths.
 pub const FRAME_WIDTH: usize = 1920;
 pub const FRAME_HEIGHT: usize = 1080;
 pub const SLAM_DOWNSCALE: usize = 3;
-/// Pixels per downsampled SLAM image.
 pub const SLAM_PIXELS: usize = (FRAME_WIDTH / SLAM_DOWNSCALE) * (FRAME_HEIGHT / SLAM_DOWNSCALE);
+
+/// Area-average the full-resolution NV12 luma plane for the estimator.
+#[cfg(feature = "live-slam")]
+pub fn slam_luma(nv12: &[u8]) -> Result<Vec<u8>> {
+    let mut pixels = vec![0; SLAM_PIXELS];
+    slam_rs::area::resize_area_u8_into::<1>(
+        nv12, (FRAME_WIDTH, FRAME_HEIGHT), FRAME_WIDTH, &mut pixels,
+        (FRAME_WIDTH / SLAM_DOWNSCALE, FRAME_HEIGHT / SLAM_DOWNSCALE),
+    )?;
+    Ok(pixels)
+}
 
 #[derive(Clone, Copy)]
 pub struct SensorChannel {
@@ -166,48 +176,3 @@ pub const CAMERAS: [CameraSpec; 6] = [
         video_entity: "/world/rig_00/cam_05/pinhole/video",
     },
 ];
-
-/// Area-average the full-resolution NV12 luma plane for the estimator.
-pub fn slam_luma(nv12: &[u8]) -> Vec<u8> {
-    let width = FRAME_WIDTH / SLAM_DOWNSCALE;
-    let height = FRAME_HEIGHT / SLAM_DOWNSCALE;
-    let area = (SLAM_DOWNSCALE * SLAM_DOWNSCALE) as u16;
-    let mut pixels = vec![0; width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let mut sum = 0_u16;
-            for dy in 0..SLAM_DOWNSCALE {
-                let at = (y * SLAM_DOWNSCALE + dy) * FRAME_WIDTH + x * SLAM_DOWNSCALE;
-                sum += nv12[at..at + SLAM_DOWNSCALE]
-                    .iter()
-                    .map(|&v| u16::from(v))
-                    .sum::<u16>();
-            }
-            pixels[y * width + x] = ((sum + area / 2) / area) as u8;
-        }
-    }
-    pixels
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn slam_luma_preserves_flat_planes_and_rounds_block_averages() {
-        let mut plane = vec![27; 1920 * 1080];
-        assert_eq!(super::slam_luma(&plane), vec![27; 640 * 360]);
-        for y in 0..1080 {
-            for x in 0..1920 {
-                let k = (x / 3 % 200) as u8;
-                plane[y * 1920 + x] = k + if y % 3 == 0 && x % 3 == 0 { 4 } else { 0 };
-            }
-        }
-        let pixels = super::slam_luma(&plane);
-        assert_eq!(pixels.len(), 640 * 360);
-        for row in pixels.chunks_exact(640) {
-            assert_eq!(row, (0..640).map(|x| (x % 200) as u8).collect::<Vec<_>>());
-        }
-        // One more count crosses the existing nearest-integer threshold.
-        plane[0] = 5;
-        assert_eq!(super::slam_luma(&plane)[0], 1);
-    }
-}

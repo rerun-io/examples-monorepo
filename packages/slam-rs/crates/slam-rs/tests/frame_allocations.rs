@@ -157,11 +157,10 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
 #[test]
 fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
     use slam_rs::gpu::{GpuPyramidBuilder, GpuRuntime, gpu_client};
-    use slam_rs::pyramid::PyramidBuilder;
 
     let image = ImageU16::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
     let mut builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     builder
         .prepare_images(std::slice::from_ref(&image))
         .unwrap();
@@ -279,22 +278,12 @@ fn band_scan_bound(grid: &CellGrid, cameras: usize) -> usize {
     cameras * rows * ladder * (rows_per_band + 1) * 2 + 512
 }
 
-/// What a whole steady-state frame costs, and where that goes.
-///
-/// A frame is **not** allocation-free and is not claimed to be. Every one of
-/// those allocations is kornia's, not the port's, and [`band_scan_bound`] is
-/// where they come from. A *textured* frame here costs a few hundred, because
-/// most cells are full and never ask for a band; the flat frame in the next test
-/// asks for all of them and costs a few thousand.
-///
-/// The next test is the attribution: a frame that finds **no keypoints at all**
-/// costs more than a textured one, so nothing on the port's own per-frame path —
-/// the snapshot, the keypoint arrays, the patch storage — is the source.
-///
-/// Fixing it means an upstream change (a `fast_detect_rect_u8_into` taking a
-/// caller buffer) or forking ~200 lines of kornia; it is recorded rather than
-/// papered over. What this test asserts is the **structural bound**, so a new
-/// per-keypoint or per-patch allocation on the frame path shows up against it.
+/// A steady-state textured frame stays within the band scanner's structural bound.
+/// On aarch64 with kornia NEON enabled, cell selection reuses its score scratch.
+/// Other targets (and aarch64 with KORNIA_FAST_NEON=0) use kornia's band walk,
+/// whose row buffers account for a few hundred allocations on this scene.
+/// This test bounds and reports each frame independently; the flat-frame test
+/// below checks the allocation cost of the selected detector path.
 #[test]
 fn a_steady_state_frame_reports_its_allocation_count() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
@@ -334,18 +323,12 @@ fn a_steady_state_frame_reports_its_allocation_count() {
 
 /// The same frame over a flat image, which yields no keypoints at all.
 ///
-/// If the per-frame allocations came from the keypoints — growing the id, warp
-/// and response arrays, or the snapshot copying them — this would be near zero.
-/// It is not: it is the same order as the textured frame, which is what pins the
-/// cost on the detector's band scans rather than on anything the port owns.
-///
-/// This frame is also the one [`band_scan_bound`] is tight on: no cell ever
-/// fills, so every cell row is scanned at every rung of the ladder and the count
-/// is the whole band term. That is what makes the upper bound here a regression
-/// test and the textured one only a ceiling — a per-cell scan multiplies this
-/// frame's count by the grid's column count and fails.
+/// No cell fills, so the detector visits every cell. On aarch64 with kornia
+/// NEON enabled, reusable cell-selection scratch keeps allocations near zero.
+/// Elsewhere the band walk allocates more than 1,000 row buffers but remains
+/// within [`band_scan_bound`]. Disabling NEON on aarch64 also takes that band path.
 #[test]
-fn a_frame_that_finds_nothing_costs_the_same_order() {
+fn a_flat_frame_has_the_expected_detector_allocation_cost() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
         FrameToFrameOpticalFlow::new(flow_config(), &flow_rig(2), FrontendOptions::default())
             .unwrap();
@@ -374,11 +357,19 @@ fn a_frame_that_finds_nothing_costs_the_same_order() {
             .unwrap();
     });
     println!("flat frame, zero keypoints: {counted:?}");
-    assert!(
-        counted.total() > 1_000,
-        "a frame with no keypoints at all cost only {counted:?}, so the \
-         detector's band scans are not the dominant source after all"
-    );
+    if cfg!(target_arch = "aarch64")
+        && std::env::var("KORNIA_FAST_NEON").map_or(true, |value| value != "0")
+    {
+        assert!(
+            counted.total() <= 16,
+            "cell selection allocated {counted:?}"
+        );
+    } else {
+        assert!(
+            counted.total() > 1000,
+            "expected kornia row-buffer allocations: {counted:?}"
+        );
+    }
     let bound: usize = band_scan_bound(&flow.occupancy_grid(), 2);
     assert!(
         counted.total() <= bound,
@@ -397,83 +388,28 @@ fn a_frame_that_finds_nothing_costs_the_same_order() {
 /// part of the tracking, and then puts everything back.
 #[test]
 fn a_restored_frame_costs_no_more_than_a_successful_one() {
+    use common::flow::{FailingTracker, cpu_tracker};
     use slam_rs::frontend::parallel::WorkPool;
-    use slam_rs::frontend::tracker::{CpuPatchTracker, PatchSoA, PatchTracker, TrackerError};
-    use slam_rs::pyramid::{CpuPyramidBuilder, PyramidU16};
-
-    #[derive(Debug)]
-    struct FailingTracker {
-        inner: CpuPatchTracker<Pattern51>,
-        calls: usize,
-        fail_from: usize,
-    }
-
-    impl PatchTracker for FailingTracker {
-        fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
-            self.inner.batch()
-        }
-        fn batch_mut(&mut self) -> &mut slam_rs::frontend::tracker::TrackBatch {
-            self.inner.batch_mut()
-        }
-
-        type Pattern = Pattern51;
-        type Pyramid = PyramidU16;
-        type Patches = PatchSoA<Pattern51>;
-
-        fn capacity(&self) -> usize {
-            self.inner.capacity()
-        }
-
-        fn num_levels(&self) -> usize {
-            self.inner.num_levels()
-        }
-
-        fn make_patches(&self) -> Result<PatchSoA<Pattern51>, TrackerError> {
-            self.inner.make_patches()
-        }
-
-        fn submit_prepared(
-            &mut self,
-            prev: &PyramidU16,
-            next: &PyramidU16,
-            patches: &PatchSoA<Pattern51>,
-            transforms_in: &FlowTransforms,
-        ) -> Result<usize, TrackerError> {
-            self.calls += 1;
-            if self.calls >= self.fail_from {
-                return Err(TrackerError::CapacityExceeded {
-                    offered: usize::MAX,
-                    capacity: 0,
-                });
-            }
-            self.inner
-                .submit_prepared(prev, next, patches, transforms_in)
-        }
-    }
+    use slam_rs::pyramid::CpuPyramidBuilder;
 
     let options: FrontendOptions = FrontendOptions::default();
     let configuration: VioConfig = flow_config();
-    let inner: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-        options.max_keypoints,
-        configuration.optical_flow_levels as usize + 1,
-        configuration.optical_flow_max_iterations as usize,
-        configuration.optical_flow_max_recovered_dist2,
-        WorkPool::new(options.threads).unwrap(),
-    )
-    .unwrap();
+    let inner = cpu_tracker(&configuration, options.max_keypoints);
     // Frame 1 makes one call and each later frame three, so failing from call 8
     // lets four frames through and then refuses every frame after.
-    let mut flow = FrameToFrameOpticalFlow::with_backends(
+    let mut flow = FrameToFrameOpticalFlow::with_stages(
         configuration,
         &flow_rig(2),
         options,
-        CpuPyramidBuilder::new(),
-        FailingTracker {
-            inner,
-            calls: 0,
-            fail_from: 8,
-        },
-        Box::new(CpuCornerScan::default()),
+        slam_rs::frontend::stages::CpuStages::new(
+            CpuPyramidBuilder::new(),
+            FailingTracker::fail_from(inner, 8),
+            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                CpuCornerScan::default(),
+            )),
+        )
+        .unwrap(),
+        WorkPool::new(1).unwrap(),
     )
     .unwrap();
 
@@ -577,8 +513,8 @@ fn the_dense_reduction_allocates_nothing_after_its_first_call() {
             &inputs,
         )
         .unwrap();
-    lqr.linearize_problem(&estimator, &inputs).unwrap();
-    lqr.perform_qr().unwrap();
+    lqr.linearize_problem(&estimator, &inputs, None).unwrap();
+    lqr.perform_qr(None).unwrap();
 
     let mut workspace: slam_rs::linearize::DenseHbWorkspace<f32> = Default::default();
     // The first call is allowed to allocate, and does: this is where every
@@ -686,7 +622,7 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
             }
         }
         let observations = std::sync::Arc::new(observations);
-        let (outcome, counted) = measure(|| estimator.process_frame(observations).unwrap());
+        let (outcome, counted) = measure(|| estimator.process_frame(observations, None).unwrap());
         let slam_rs::estimator::FrameOutcome::Measured(stats) = outcome else {
             panic!("frame {frame} needs more IMU");
         };

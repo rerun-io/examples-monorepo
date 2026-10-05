@@ -1,0 +1,588 @@
+"""Run the full pipeline (DetNet-F, KeyNet-F, the LM fit, detection-by-tracking) on catalog segments and score it.
+
+Per segment and hand mode it writes, under ``<output-root>/<name>/<hand mode>/``:
+
+- ``<segment>.npz`` + ``<segment>.json``: the ``SegmentTrack`` (``handtrack.results``);
+- ``<segment>.metrics.json``: MKPE, MKA, MKA GT, tracking statistics and DetNet P/R with tracking (``eval.segment``).
+
+With ``detnet_alone`` (the default) the same decode also runs DetNet on every camera of every frame and writes the
+DetNet-alone record and its §5.4 scores under ``<output-root>/<name>/detnet/``.
+
+Known hand: the recording's profile model and its ϕ. Unknown hand (§5.1): track the first ``calibration_frames`` frames
+with the generic model, calibrate ϕ on their stereo observations (``fit.scale.calibrate_scale``), then track the whole
+segment again with the generic model × ϕ.
+"""
+
+import hashlib
+import math
+import os
+import tempfile
+import time
+from contextlib import suppress
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Literal, NamedTuple, TypeAlias
+
+import numpy as np
+import rerun as rr
+import torch
+from beartype.roar import BeartypeException
+from rerun.catalog import DatasetEntry
+from serde import SerdeError, serde
+from serde.json import from_json, to_json
+from simplecv.umetrack_temp.generic_hand_model_torch import HandModelTorch
+
+from handtrack.data.catalog import CATALOG_URL, UMETRACK, DatasetName, SegmentInfo, SplitName, list_segments, select_split
+from handtrack.eval.segment import (
+    DetectionScore,
+    DetNetAloneMetrics,
+    HandScore,
+    PositionScore,
+    SegmentMetrics,
+    TrackingScore,
+    score_detnet_alone,
+    score_track,
+)
+from handtrack.fit.observations import HandObservation
+from handtrack.fit.scale import ScaleCalibration, calibrate_scale, scaled_hand_model
+from handtrack.hand.pose import HandPose, generic_hand_model
+from handtrack.keynet_perspective import PerspectiveKeyNetEstimator
+from handtrack.models.detnet import DetNetF
+from handtrack.models.keynet import KeyNetF, keynet_for_state
+from handtrack.oracle import GroundTruthViews, KeyNetOnTruthBoxes, OracleDetector, OracleKeypoints
+from handtrack.pipeline import SegmentData, TrackerRun, detnet_alone_track, load_weights, read_segment, read_state, run_tracker, segment_track
+from handtrack.reference.results import Calibration
+from handtrack.reference.upstream import PoseStage, load_umetrack
+from handtrack.results import DetectorSource, HandMode, KeypointSource, SegmentTrack, TrackMetadata, save_track
+from handtrack.tracker import Detector, DetNetDetector, KeyNetEstimator, KeypointEstimator, Tracker, TrackerConfig
+from handtrack.umetrack import RigPoseNetwork, UmeTrackEstimator
+
+Domain: TypeAlias = Literal["real", "synthetic"]
+Interaction: TypeAlias = Literal["any", "separate_hand", "hand_hand"]
+DETNET_DIR: str = "detnet"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RunConfig:
+    """Which segments, which networks, which hand modes, and where the outputs go."""
+
+    name: str = "dev"
+    """Run name: outputs go to ``<output-root>/<name>/``."""
+    segments: tuple[str, ...] = ()
+    """Explicit labelled ids from dataset; empty selects split. Domain/interaction filters apply only to UmeTrack."""
+    dataset: DatasetName = UMETRACK
+    """Catalog dataset; SHOW3D uses the two headset cameras on rig 1, HOT3D Quest 3 its two SLAM cameras on rig 0."""
+    split: SplitName = "test"
+    """SHOW3D official test scenes lack labels; use val (held-out training subjects) for scored demo clips. HOT3D has only test."""
+    domain: Domain = "real"
+    interaction: Interaction = "any"
+    max_segments: int | None = None
+    """Keep the first N selected segments (sorted by id)."""
+    shard: int = 0
+    """Process every ``shards``-th selected segment starting at this one (parallel runs split a split this way)."""
+    shards: int = 1
+    max_frames: int | None = None
+    """Track only the first N frames of each segment."""
+    hand_modes: tuple[HandMode, ...] = ("known",)
+    detector: DetectorSource = "detnet"
+    """``oracle``: ground-truth circles instead of DetNet (separates tracker and fit bugs from network quality)."""
+    keypoints: KeypointSource = "keynet"
+    """``oracle``: projected ground-truth keypoints plus noise instead of KeyNet; ``keynet_gt_boxes``: KeyNet on ground-truth crops (diagnostic);
+    ``keynet_perspective``: KeyNet-F trained on perspective crops (``keynet_perspective.PerspectiveKeyNetEstimator``); ``umetrack``: UmeTrack's net."""
+    checkpoints: Path | None = None
+    """Holds ``detnet.weights.pt`` and ``keynet.weights.pt`` (model-only state_dicts) with ``.sha256`` sidecars; required to load a trained
+    network that has no ``--detnet-weights`` / ``--keynet-weights`` override."""
+    detnet_weights: Path | None = None
+    """Override the DetNet file; its .sha256 sidecar is required."""
+    keynet_weights: Path | None = None
+    """Override the KeyNet file; its .sha256 sidecar is required."""
+    oracle_visibility: bool = False
+    """keynet_perspective: replace the network's per-keypoint visibility by the ground truth (in front, in the image, not behind a hand
+    surface): the upper bound of visibility weighting (``tracker.visibility_weights``)."""
+    keynet_detnet_confirmation: bool = False
+    """keynet_perspective: confirm KeyNet's views with DetNet and end drifted tracks, as the UmeTrack stage does."""
+    umetrack_root: Path | None = None
+    """Upstream checkout, loaded lazily; required for keypoints=umetrack."""
+    umetrack_shim: Path | None = None
+    """Existing pytorch3d transforms shim; required for keypoints=umetrack."""
+    umetrack_weights: Path | None = None
+    """Defaults to <umetrack-root>/pretrained_models/pretrained_weights.torch."""
+    umetrack_calibration: Path | None = None
+    """Frozen validation circle-scale Calibration JSON; required for keypoints=umetrack."""
+    random_weights: bool = False
+    """Use randomly initialised networks instead of the checkpoints (plumbing tests only; the numbers mean nothing)."""
+    oracle_noise_px: float = 1.5
+    """Gaussian noise on oracle keypoints, net-frame pixels."""
+    oracle_noise_d_mm: float = 5.0
+    """Gaussian noise on oracle d_rel, millimetres."""
+    detnet_alone: bool = True
+    """Also run DetNet alone on every frame and camera (needs ``detector = detnet``)."""
+    calibration_frames: int = 100
+    """Unknown hand: frames tracked with the generic model to calibrate ϕ (§5.1)."""
+    output_root: Path
+    device: str = "cuda"
+    catalog_url: str = CATALOG_URL
+    seed: int = 0
+    """Oracle noise seed."""
+    tracker: TrackerConfig = field(default_factory=TrackerConfig)
+    """Tracker thresholds and fit settings (defaults: the paper's values plus our recorded choices)."""
+    cpu_threads: int = 1
+    """torch CPU threads: the fit's matrices are tiny, and one thread was the fastest measured (5.2 s vs 6.4 s at 32 for 60 frames)."""
+
+    def __post_init__(self) -> None:
+        if self.keypoints == "umetrack" and self.tracker.refine_shift is not None:
+            raise ValueError("UmeTrack runs once per hand/frame; leave tracker.refine_shift unset")
+
+
+@dataclass(frozen=True, slots=True)
+class Networks:
+    """The two networks (None when replaced by the oracle) and what they are."""
+
+    detnet: DetNetF | None
+    keynet: KeyNetF | None
+    detnet_sha256: str
+    keynet_sha256: str
+
+
+def load_networks(config: RunConfig, device: torch.device) -> Networks:
+    """Load the current checkpoints once per run (or build random nets); fp32, eval mode."""
+    torch.manual_seed(config.seed)
+    detnet: DetNetF | None = None
+    keynet: KeyNetF | None = None
+    detnet_sha256: str = "oracle"
+    keynet_sha256: str = "oracle"
+    if config.detector == "detnet":
+        detnet = DetNetF()
+        detnet_sha256 = "random" if config.random_weights else load_weights(detnet, checkpoint_file(config, config.detnet_weights, "detnet.weights.pt"))
+        detnet = detnet.to(device).eval()
+    if config.keypoints in ("keynet", "keynet_gt_boxes", "keynet_perspective"):
+        if config.random_weights:
+            keynet, keynet_sha256 = KeyNetF(), "random"
+        else:
+            state, keynet_sha256 = read_state(checkpoint_file(config, config.keynet_weights, "keynet.weights.pt"))
+            keynet = keynet_for_state(state)
+            keynet.load_state_dict(state)
+        keynet = keynet.to(device).eval()
+    elif config.keypoints == "umetrack":
+        keynet_sha256 = file_sha256(umetrack_inputs(config).weights)
+    return Networks(detnet, keynet, detnet_sha256, keynet_sha256)
+
+
+def select_segments(config: RunConfig, entry: DatasetEntry) -> tuple[SegmentInfo, ...]:
+    """The configured segments: the given ids, or the split (UmeTrack's filtered by domain and interaction)."""
+    listed: tuple[SegmentInfo, ...] = list_segments(entry, config.dataset)
+    if config.segments:
+        by_id: dict[str, SegmentInfo] = {info.segment_id: info for info in listed}
+        missing: list[str] = [segment for segment in config.segments if segment not in by_id]
+        if missing:
+            raise ValueError(f"labelled segments not found in {config.dataset}: {missing}")
+        chosen: tuple[SegmentInfo, ...] = tuple(by_id[segment] for segment in config.segments)
+    else:
+        chosen = tuple(
+            info for info in select_split(listed, config.split)
+            if config.dataset != UMETRACK or (info.domain == config.domain and config.interaction in ("any", info.interaction))
+        )
+    chosen = chosen if config.max_segments is None else chosen[: config.max_segments]
+    if not chosen:
+        raise ValueError(f"No labelled segments selected in {config.dataset} ({config.split})")
+    return chosen[config.shard :: config.shards]
+
+
+class UmeTrackInputs(NamedTuple):
+    """keypoints=umetrack: the upstream checkout, its shim, the frozen calibration and the pretrained weights."""
+
+    root: Path
+    shim: Path
+    calibration: Path
+    weights: Path
+
+
+def umetrack_inputs(config: RunConfig) -> UmeTrackInputs:
+    """The UmeTrack stage's files; the weights default to the checkout's pretrained file."""
+    root: Path | None = config.umetrack_root
+    shim: Path | None = config.umetrack_shim
+    calibration: Path | None = config.umetrack_calibration
+    if root is None or shim is None or calibration is None:
+        raise ValueError("keypoints=umetrack needs --umetrack-root, --umetrack-shim and --umetrack-calibration")
+    return UmeTrackInputs(root, shim, calibration, config.umetrack_weights or root / "pretrained_models/pretrained_weights.torch")
+
+
+def checkpoint_file(config: RunConfig, override: Path | None, name: str) -> Path:
+    """The override, else ``<checkpoints>/<name>``: a trained network needs one of the two."""
+    if override is not None:
+        return override
+    if config.checkpoints is None:
+        raise ValueError(f"loading {name} needs --checkpoints or its --*-weights override")
+    return config.checkpoints / name
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def metrics_path(directory: Path, segment: str) -> Path:
+    return directory / f"{segment}.metrics.json"
+
+
+def format_number(value: float | None, digits: int = 1) -> str:
+    """A score for a log line or a table cell; an unscored one is a dash."""
+    return "–" if value is None else f"{value:.{digits}f}"
+
+
+def _keypoint_estimator(config: RunConfig, networks: Networks, truth: GroundTruthViews, phi: float,
+                        data: SegmentData, model: HandModelTorch, device: torch.device) -> KeypointEstimator:
+    if config.keypoints == "umetrack":
+        umetrack: UmeTrackInputs = umetrack_inputs(config)
+        calibration: Calibration = read_umetrack_calibration(umetrack.calibration)
+        stage: PoseStage = PoseStage(load_umetrack(umetrack.root, umetrack.shim), None, umetrack.weights, hand_model=model, device=device)
+        return UmeTrackEstimator(RigPoseNetwork(stage, data.rig, data.camera_angles), data.rig, data.letterboxes, phi, calibration.median)
+    if networks.keynet is None:
+        return OracleKeypoints(truth, phi, config.oracle_noise_px, config.oracle_noise_d_mm, config.seed)
+    if config.keypoints == "keynet_perspective":
+        return PerspectiveKeyNetEstimator(networks.keynet, data.rig, data.letterboxes, data.camera_angles, model, phi,
+                                          detnet_confirmation=config.keynet_detnet_confirmation,
+                                          oracle_visible=truth_visible(data) if config.oracle_visibility else None)
+    keynet: KeyNetEstimator = KeyNetEstimator(networks.keynet)
+    return KeyNetOnTruthBoxes(truth, keynet) if config.keypoints == "keynet_gt_boxes" else keynet
+
+
+def truth_visible(data: SegmentData) -> torch.Tensor:
+    """Ground-truth keypoint visibility per timeline row, camera and hand (f c 2 21): in front, inside the image, not hidden."""
+    projection = data.labels.projection
+    size: torch.Tensor = data.rig.image_size.to(projection.pixels.dtype)  # c 2 (width, height)
+    pixels: torch.Tensor = projection.pixels
+    inside: torch.Tensor = (pixels >= -0.5).all(-1) & (pixels < size[None, :, None, None, :] - 0.5).all(-1) & projection.in_front
+    hidden: torch.Tensor = projection.hidden if projection.hidden is not None else torch.zeros_like(inside)
+    return inside & ~hidden
+
+
+def read_umetrack_calibration(path: Path) -> Calibration:
+    """Read the frozen validation calibration; name the missing/invalid file and CLI override."""
+    try:
+        return from_json(Calibration, path.read_text())
+    except (OSError, SerdeError, ValueError) as error:
+        raise ValueError(f"UmeTrack calibration {path}: {error}; supply --umetrack-calibration <calibration.json>") from error
+
+
+PHI_RANGE: tuple[float, float] = (0.75, 1.35)
+"""Our plausibility bounds on a calibrated ϕ: the 53 UmeTrack subjects' profiles span 0.862-1.187 of the generic hand."""
+
+
+@dataclass(frozen=True, slots=True)
+class HandModelChoice:
+    """The model a tracking pass uses and where its ϕ came from."""
+
+    model: HandModelTorch
+    phi: float
+    calibration_blocks: int
+    """Stereo (hand, frame) observations the scale was solved on; 0 for the profile or a fallback."""
+    calibration_note: str
+    """``profile``, ``calibrated``, ``clamped from <ϕ>`` or ``generic fallback: <reason>``."""
+
+
+def calibrate_unknown_hand(
+    config: RunConfig, data: SegmentData, detector: Detector, networks: Networks, truth: GroundTruthViews, device: torch.device
+) -> HandModelChoice:
+    """§5.1 offline protocol: track the first frames with the generic model (ϕ = 1), then calibrate ϕ on their stereo observations.
+
+    Without any stereo observation the generic model is used as it is (ϕ = 1); a ϕ outside ``PHI_RANGE`` is clamped.
+    """
+    generic: HandModelTorch = generic_hand_model()
+    frames: int = min(config.calibration_frames, data.frames)
+    tracker: Tracker = Tracker(data.rig, data.letterboxes, generic, 1.0, detector,
+                              _keypoint_estimator(config, networks, truth, 1.0, data, generic, device), config.tracker)
+    run: TrackerRun = run_tracker(data, tracker, frames, device)
+    hands: list[HandObservation] = []
+    initial: list[HandPose | None] = []
+    for frame in run.frames:
+        for observation, pose in zip(frame.observations, frame.poses, strict=True):
+            if observation is not None and pose is not None:
+                hands.append(observation)
+                initial.append(pose)
+    try:
+        calibration: ScaleCalibration = calibrate_scale(generic, hands, initial)
+    except BeartypeException:
+        raise
+    except ValueError as error:  # no hand seen in stereo in the calibration frames
+        return HandModelChoice(generic, 1.0, 0, f"generic fallback: {error}")
+    if not math.isfinite(calibration.phi):
+        return HandModelChoice(generic, 1.0, 0, f"generic fallback: calibrated phi is {calibration.phi}")
+    phi: float = min(max(calibration.phi, PHI_RANGE[0]), PHI_RANGE[1])
+    note: str = "calibrated" if phi == calibration.phi else f"clamped from {calibration.phi:.4f}"
+    return HandModelChoice(scaled_hand_model(generic, phi), phi, calibration.blocks, note)
+
+
+def _write_detnet_alone(root: Path, data: SegmentData, info: SegmentInfo, networks: Networks, run: TrackerRun, frames: int, identity: str) -> None:
+    """The DetNet-alone record and its §5.4 scores, when ``run`` carries a DetNet-alone pass."""
+    if run.detnet_alone is None:
+        return
+    meta: TrackMetadata = TrackMetadata(
+        segment=info.segment_id,
+        detnet_sha256=networks.detnet_sha256,
+        keynet_sha256="none",
+        hand_mode="known",
+        hand_scale=1.0,
+        timings_s={"decode": run.timings_s["decode"], "detnet_alone": run.timings_s["detnet_alone"]},
+        dataset=info.dataset,
+        kind="detnet_alone",
+        run_identity_sha256=identity,
+    )
+    track: SegmentTrack = detnet_alone_track(data, run.detnet_alone, meta)
+    npz: Path = save_track(track, root / DETNET_DIR)
+    scores: tuple[list[DetectionScore], list[DetectionScore]] = score_detnet_alone(track, data.labels, data.letterboxes)
+    metrics: DetNetAloneMetrics = DetNetAloneMetrics(
+        segment=info.segment_id,
+        domain=info.domain,
+        interaction=info.interaction,
+        frames=frames,
+        detnet_sha256=networks.detnet_sha256,
+        per_camera=scores[0],
+        per_camera_crop=scores[1],
+        track_sha256=file_sha256(npz),
+        run_identity_sha256=identity,
+    )
+    metrics_path(root / DETNET_DIR, info.segment_id).write_text(to_json(metrics))
+
+
+def run_segment(config: RunConfig, entry: DatasetEntry, info: SegmentInfo, networks: Networks, device: torch.device) -> list[SegmentMetrics]:
+    """Track one segment in every configured hand mode, write the records and scores, return the scores."""
+    identity: str = ensure_run_identity(config, networks)
+    start: float = time.perf_counter()
+    data: SegmentData = read_segment(entry, info)
+    read_s: float = time.perf_counter() - start
+    frames: int = data.frames if config.max_frames is None else min(config.max_frames, data.frames)
+    truth: GroundTruthViews = GroundTruthViews.from_labels(data.labels)
+    detnet: DetNetDetector | None = None if networks.detnet is None else DetNetDetector(networks.detnet)
+    detector: Detector = detnet if detnet is not None else OracleDetector(truth)
+    root: Path = config.output_root / config.name
+    scores: list[SegmentMetrics] = []
+    if not config.hand_modes and detnet is not None and config.detnet_alone:
+        _write_detnet_alone(root, data, info, networks, run_tracker(data, None, frames, device, detnet), frames, identity)
+    for index, mode in enumerate(config.hand_modes):
+        mode_start: float = time.perf_counter()
+        calibration_s: float = 0.0
+        if mode == "known":
+            choice: HandModelChoice = HandModelChoice(data.timeline.hand_model, data.timeline.hand_scale, 0, "profile")
+        else:
+            choice = calibrate_unknown_hand(config, data, detector, networks, truth, device)
+            calibration_s = time.perf_counter() - mode_start
+        phi: float = choice.phi
+        tracker: Tracker = Tracker(
+            data.rig, data.letterboxes, choice.model, phi, detector, _keypoint_estimator(config, networks, truth, phi, data, choice.model, device), config.tracker
+        )
+        alone: DetNetDetector | None = detnet if config.detnet_alone and index == 0 else None
+        run: TrackerRun = run_tracker(data, tracker, frames, device, alone)
+        timings: dict[str, float] = {"read": read_s, "calibration": calibration_s, **run.timings_s}
+        meta: TrackMetadata = TrackMetadata(
+            segment=info.segment_id,
+            detnet_sha256=networks.detnet_sha256,
+            keynet_sha256=networks.keynet_sha256,
+            hand_mode=mode,
+            hand_scale=phi,
+            timings_s=timings,
+            dataset=info.dataset,
+            detector=config.detector,
+            keypoints=config.keypoints,
+            run_identity_sha256=identity,
+        )
+        track: SegmentTrack = segment_track(data, run, meta)
+        directory: Path = root / mode
+        npz: Path = save_track(track, directory)
+        if any(frame.visibility is not None or frame.pinch is not None for frame in run.frames):
+            cameras: int = len(data.letterboxes)
+            np.savez_compressed(directory / f"{info.segment_id}.visibility.npz", visibility=np.stack([
+                (frame.visibility if frame.visibility is not None else torch.full((cameras, 2, 21), torch.nan)).numpy() for frame in run.frames]).astype(np.float16),
+                pinch=np.stack([(frame.pinch if frame.pinch is not None else torch.full((cameras, 2), torch.nan)).numpy() for frame in run.frames]).astype(np.float16))
+        scored: tuple[PositionScore, list[HandScore], list[DetectionScore], list[DetectionScore]] = score_track(track, data.labels, data.letterboxes)
+        metrics: SegmentMetrics = SegmentMetrics(
+            segment=info.segment_id,
+            domain=info.domain,
+            interaction=info.interaction,
+            hand_mode=mode,
+            hand_scale=phi,
+            frames=frames,
+            detector=config.detector,
+            keypoints=config.keypoints,
+            detnet_sha256=networks.detnet_sha256,
+            keynet_sha256=networks.keynet_sha256,
+            position=scored[0],
+            hands=scored[1],
+            detnet_with_tracking=scored[2],
+            detnet_with_tracking_crop=scored[3],
+            keynet_views=int(np.isfinite(track.presence).sum()),
+            detnet_runs=int((track.detnet_camera >= 0).sum()),
+            track_sha256=file_sha256(npz),
+            run_identity_sha256=identity,
+            timings_s=timings,
+            calibration_blocks=choice.calibration_blocks,
+            calibration_note=choice.calibration_note,
+        )
+        metrics_path(directory, info.segment_id).write_text(to_json(metrics))
+        scores.append(metrics)
+        _write_detnet_alone(root, data, info, networks, run, frames, identity)
+    return scores
+
+
+def summary_lines(metrics: SegmentMetrics) -> list[str]:
+    """Five lines for a progress log."""
+    lines: list[str] = [
+        f"{metrics.segment} [{metrics.hand_mode}, phi {metrics.hand_scale:.3f} ({metrics.calibration_note}), {metrics.frames} frames, {metrics.detector}/{metrics.keypoints}]",
+        f"  MKPE {format_number(metrics.position.mkpe_mm)} mm, MKA {format_number(metrics.position.mka_mm, 2)} (GT {format_number(metrics.position.mka_gt_mm, 2)}) mm/frame², scored keypoints {metrics.position.keypoints}",
+    ]
+    for hand in metrics.hands:
+        tracking: TrackingScore = hand.tracking
+        lines.append(
+            f"  {hand.side}: MKPE {format_number(hand.position.mkpe_mm)} mm, tracked {tracking.visible_tracked_frames}/{tracking.visible_frames} visible"
+            f" ({format_number(tracking.visible_tracked_fraction, 3)}), acquire {tracking.acquire_frames}, drops {tracking.drop_frames}, tracked w/o hand {tracking.tracked_without_hand}"
+        )
+    lines.append(
+        "  DetNet P/R with tracking per camera: "
+        + ", ".join(f"cam{s.camera} {format_number(s.precision, 2)}/{format_number(s.recall, 2)}" for s in metrics.detnet_with_tracking)
+        + " (in the x1.2 crop: "
+        + ", ".join(f"{format_number(s.precision, 2)}/{format_number(s.recall, 2)}" for s in metrics.detnet_with_tracking_crop)
+        + ")"
+        + f"; {metrics.keynet_views} keypoint views, {metrics.detnet_runs} acquisition DetNet runs, {metrics.timings_s['total']:.1f} s"
+    )
+    return lines
+
+
+def main(config: RunConfig) -> None:
+    ensure_run_identity(config)
+    torch.set_num_threads(config.cpu_threads)
+    device: torch.device = torch.device(config.device)
+    entry: DatasetEntry = rr.catalog.CatalogClient(config.catalog_url).get_dataset(config.dataset)
+    networks: Networks = load_networks(config, device)
+    root: Path = config.output_root / config.name
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.json").write_text(to_json(RunRecord.from_config(config, networks)))
+    for info in select_segments(config, entry):
+        for metrics in run_segment(config, entry, info, networks, device):
+            print("\n".join(summary_lines(metrics)), flush=True)
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class RunRecord:
+    """Run settings, also persisted immutably as ``<run>/identity.json``."""
+
+    name: str
+    segments: list[str]
+    domain: str
+    interaction: str
+    max_segments: int | None
+    max_frames: int | None
+    hand_modes: list[str]
+    detector: str
+    keypoints: str
+    checkpoints: str
+    detnet_sha256: str
+    keynet_sha256: str
+    oracle_noise_px: float
+    oracle_noise_d_mm: float
+    detnet_alone: bool
+    calibration_frames: int
+    extrapolate: bool
+    presence_threshold: float
+    min_keypoint_confidence: float
+    tracker: TrackerConfig
+    """All tracker thresholds and nested fit settings used for this run."""
+
+    seed: int = 0
+    """Network initialization and oracle noise seed."""
+    split: str = "test"
+    """Selection split, or explicit segment selection."""
+    catalog_url: str = CATALOG_URL
+    """Source catalog."""
+    device: str = "cuda"
+    """Compute device."""
+    dataset: str = UMETRACK
+    """Source dataset."""
+    detnet_weights: str = ""
+    """Explicit checkpoint override."""
+    umetrack_root: str = ""
+    """Upstream source checkout."""
+    umetrack_shim: str = ""
+    """Local transforms shim."""
+    umetrack_weights: str = ""
+    """Pretrained pose weights (digest in keynet_sha256 for output compatibility)."""
+    umetrack_calibration_json: str = ""
+    """Exact frozen calibration used, so edits cannot silently reuse a run."""
+
+    @staticmethod
+    def from_config(config: RunConfig, networks: Networks) -> "RunRecord":
+        umetrack: UmeTrackInputs | None = umetrack_inputs(config) if config.keypoints == "umetrack" else None
+        return RunRecord(
+            name=config.name,
+            segments=list(config.segments),
+            domain=config.domain,
+            interaction=config.interaction,
+            max_segments=config.max_segments,
+            max_frames=config.max_frames,
+            hand_modes=list(config.hand_modes),
+            detector=config.detector,
+            keypoints=config.keypoints,
+            checkpoints="" if config.checkpoints is None else str(config.checkpoints),
+            detnet_sha256=networks.detnet_sha256,
+            keynet_sha256=networks.keynet_sha256,
+            oracle_noise_px=config.oracle_noise_px,
+            oracle_noise_d_mm=config.oracle_noise_d_mm,
+            detnet_alone=config.detnet_alone,
+            calibration_frames=config.calibration_frames,
+            extrapolate=config.tracker.extrapolate,
+            presence_threshold=config.tracker.presence_threshold,
+            min_keypoint_confidence=config.tracker.min_keypoint_confidence,
+            tracker=config.tracker,
+            seed=config.seed,
+            split="explicit" if config.segments else config.split,
+            catalog_url=config.catalog_url,
+            device=config.device,
+            dataset=config.dataset,
+            detnet_weights="" if config.detnet_weights is None else str(config.detnet_weights),
+            umetrack_root=str(umetrack.root) if umetrack is not None else "",
+            umetrack_shim=str(umetrack.shim) if umetrack is not None else "",
+            umetrack_weights=str(umetrack.weights) if umetrack is not None else "",
+            umetrack_calibration_json=to_json(read_umetrack_calibration(umetrack.calibration)) if umetrack is not None else "",
+        )
+
+
+def ensure_run_identity(config: RunConfig, networks: Networks | None = None) -> str:
+    """Publish an immutable identity; concurrent shards verify the first writer's complete record."""
+    if networks is None:
+        detnet_sha256: str = "oracle"
+        keynet_sha256: str = "oracle"
+        if config.detector == "detnet":
+            detnet_sha256 = "random" if config.random_weights else file_sha256(checkpoint_file(config, config.detnet_weights, "detnet.weights.pt"))
+        if config.keypoints in ("keynet", "keynet_gt_boxes", "keynet_perspective"):
+            keynet_sha256 = "random" if config.random_weights else file_sha256(checkpoint_file(config, config.keynet_weights, "keynet.weights.pt"))
+        elif config.keypoints == "umetrack":
+            keynet_sha256 = file_sha256(umetrack_inputs(config).weights)
+        networks = Networks(None, None, detnet_sha256, keynet_sha256)
+    record: RunRecord = RunRecord.from_config(config, networks)
+    payload: bytes = to_json(record).encode()
+    path: Path = config.output_root / config.name / "identity.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        created: tuple[int, str] = tempfile.mkstemp(prefix=".identity.", dir=path.parent)
+        temporary: Path = Path(created[1])
+        try:
+            with os.fdopen(created[0], "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            with suppress(FileExistsError):
+                os.link(temporary, path)
+            directory: int = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+    try:
+        existing: RunRecord = from_json(RunRecord, path.read_text())
+    except (SerdeError, ValueError) as error:
+        raise ValueError(f"Invalid run identity {path}: {error}") from error
+    differing: list[str] = [item.name for item in fields(record) if getattr(existing, item.name) != getattr(record, item.name)]
+    if differing:
+        raise ValueError(f"Run identity differs at {path}: {', '.join(differing)}; use a new run directory")
+    return hashlib.sha256(to_json(existing).encode()).hexdigest()

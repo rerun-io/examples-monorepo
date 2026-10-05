@@ -6,7 +6,7 @@
 resolver = "3"
 members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli", "crates/robocap-recorder"]
 # Run the patched dependency's own unit tests as a standalone crate.
-exclude = ["target/patch/cubecl-common-0.11.0-pre.3"]
+exclude = ["target/patch/cubecl-common-0.11.0-pre.3", "target/patch/cubecl-spirv-0.11.0-pre.3"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,9 @@ rust-version = "1.85"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1"
+libc = "0.2"
+cc = "1"
 slam-rs = { path = "crates/slam-rs" }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
@@ -66,9 +69,9 @@ expect_used = "deny"
 # pipeline tests can run in the default suite. Keep the same optimization
 # level for dev and test builds.
 #
-# `2`, not `3`: `.cargo/config.toml` records opt-level 3 crashing rustc's LLVM
-# while compiling faer on aarch64. faer has since left the graph; the override
-# there is kept until an aarch64 host re-tests it, and this level follows it.
+# `2` keeps test builds quick to compile; release builds take `3` on every
+# target (the aarch64 override that held them at 2, for an LLVM crash in faer,
+# is gone with faer).
 [profile.dev]
 opt-level = 2
 
@@ -95,6 +98,9 @@ codegen-units = 1
 # (macOS: use -e slam-rs-osx-dev).
 # Bump: update version + archive sha256 in slam_rs/apis/prepare_patched_deps.py,
 # rebase the patch, update this path and the Pixi patch-test command, run the prepare
-# task, then regenerate Cargo.lock with cargo update -p cubecl-common.
+# task, then regenerate Cargo.lock with cargo update -p cubecl-common -p cubecl-spirv.
 [patch.crates-io]
 cubecl-common = { path = "target/patch/cubecl-common-0.11.0-pre.3" }
+# Source patch: patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch (Mali: shared memory
+# without VK_KHR_workgroup_memory_explicit_layout). Prepared by the same task; bump it the same way.
+cubecl-spirv = { path = "target/patch/cubecl-spirv-0.11.0-pre.3" }

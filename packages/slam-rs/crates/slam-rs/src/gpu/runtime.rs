@@ -1,10 +1,20 @@
 //! Device bring-up, guarded errors, storage validation, and fault injection.
-use super::submission::{self, drained, empty, read_failed};
+use cubecl::prelude::*;
+
+use super::submission::{self, read_failed};
 use super::{GpuRuntime, kernels};
 
 /// What can go wrong bringing up or running a GPU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
+    /// A frame was begun before the previous frame scope ended.
+    #[error("nested GPU frontend frame")]
+    NestedFrame,
+    /// The fused kernel requires working subgroup operations.
+    #[error(
+        "GPU KLT requires working power-of-two subgroups of at least 16 lanes; the subgroup probe failed, use the CPU lane"
+    )]
+    SubgroupRoundTrip,
     /// A device read came back with the wrong number of bytes.
     ///
     /// The one failure mode a CubeCL backend has that a CPU one does not: a
@@ -259,7 +269,7 @@ pub(super) fn guarded<T, E: From<GpuError>>(
 // thread-local stands in for it. It names a site rather than being a bare flag
 // because two questions need asking separately: what a panic inside a guarded
 // region does, and what one inside the storage probe does, the probe being the
-// site that has to be inside the guard for `gpu_backends` to cover the whole of
+// site that has to be inside the guard for `gpu_stages` to cover the whole of
 // what it does. A doc comment cannot sit on a macro invocation.
 #[cfg(test)]
 thread_local! {
@@ -282,14 +292,12 @@ const STORAGE_PROBE: &str = "the storage probe";
 pub(super) const CORNER_SCAN_READ: &str = "the corner scan's read";
 
 /// A fault site: the blocking read's own download. Unlike the sites above this
-/// one is not a panic — [`read_blocking`] turns it into the `ServerError` a
-/// lost device returns — because what it is armed for is the queue accounting
-/// that runs *after* a failed read.
+/// one is not a panic: the download returns a typed device error.
 #[cfg(test)]
 pub(super) const BLOCKING_READ: &str = "the blocking read";
 
 /// Whether a test armed `site`, disarming it. The caller decides what the fault
-/// means; [`fire_if_armed`] panics, [`download`] returns an error.
+/// means; [`fire_if_armed`] panics, [`super::submission::read_with_lookahead`] returns an error.
 #[cfg(test)]
 pub(super) fn armed(site: &'static str) -> bool {
     FAULT.with(|fault| {
@@ -341,7 +349,7 @@ pub(super) fn arm_fault_at(site: &'static str) {
 /// [`GpuError::StorageRoundTrip`] naming the width that did not survive,
 /// [`GpuError::ShortRead`] or [`GpuError::DeviceReadFailed`] from the read back,
 /// and [`GpuError::DeviceLost`] if any of it panics: this is public, so it is a
-/// device operation a caller reaches without going through [`super::gpu_backends`] and
+/// device operation a caller reaches without going through [`super::gpu_stages`] and
 /// its guard, and it carries its own (decision D32).
 #[cfg(feature = "gpu-core")]
 pub fn probe_storage<R: cubecl::prelude::Runtime>(
@@ -362,12 +370,12 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         let width: usize = size_of::<N>() * 8;
         let expected: usize = size_of_val(pattern);
         let source: cubecl::server::Handle = submission::upload(client, N::as_bytes(pattern));
-        let target: cubecl::server::Handle = empty(client, expected);
+        let target: cubecl::server::Handle = client.empty(expected);
         kernels::launch_probe::<N, R>(client, (&source, count), (&target, count), count);
         let bytes = client
             .read_one(target)
             .map_err(|error| read_failed("the storage probe", &error))?;
-        drained(client);
+
         if bytes.len() != expected {
             return Err(GpuError::ShortRead {
                 what: "the storage probe",
@@ -440,3 +448,63 @@ fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime> {
 
 #[cfg(test)]
 mod tests;
+
+#[cube(launch)]
+fn subgroup_probe(out: &mut [u32]) {
+    let lane = UNIT_POS_PLANE;
+    let base = ABSOLUTE_POS * 5usize;
+    out[base] = PLANE_DIM;
+    out[base + 1usize] = plane_sum(lane + 1u32);
+    out[base + 2usize] = plane_broadcast(lane, 3u32);
+    out[base + 3usize] = plane_shuffle_xor(lane, 7u32);
+    out[base + 4usize] = plane_shuffle(lane, (lane / 8u32) * 8u32 + 2u32);
+}
+
+/// Verify the operations and group width used by fused KLT on the actual device.
+pub(super) fn probe_subgroups<R: Runtime>(
+    client: &ComputeClient<R>,
+) -> Result<usize, super::GpuError> {
+    super::guarded(super::GpuError::SubgroupRoundTrip, || {
+        if !client
+            .features()
+            .plane
+            .contains(cubecl::ir::features::Plane::Ops)
+            || client.properties().hardware.plane_size_min < 16
+        {
+            return Err(super::GpuError::SubgroupRoundTrip);
+        }
+        let units = client.properties().hardware.plane_size_max.max(64);
+        let output = client.empty(units as usize * 5 * size_of::<u32>());
+
+        // SAFETY: The probe launches `units` threads and allocates five u32 outputs
+        // per unit.
+        unsafe {
+            subgroup_probe::launch::<R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(units),
+                BufferArg::from_raw_parts(output.clone(), units as usize * 5),
+            );
+        }
+        let bytes = client.read_one(output).map_err(|error| {
+            read_failed("the subgroup probe", &error);
+            GpuError::SubgroupRoundTrip
+        })?;
+
+        let values = u32::from_bytes(&bytes);
+        if values.len() != units as usize * 5 {
+            return Err(super::GpuError::SubgroupRoundTrip);
+        }
+        for (index, value) in values.chunks_exact(5).enumerate() {
+            let size = value[0];
+            if size < 16 || !size.is_power_of_two() {
+                return Err(super::GpuError::SubgroupRoundTrip);
+            }
+            let lane = index as u32 % size;
+            if value != [size, size * (size + 1) / 2, 3, lane ^ 7, lane / 8 * 8 + 2] {
+                return Err(super::GpuError::SubgroupRoundTrip);
+            }
+        }
+        Ok(values[0] as usize)
+    })
+}

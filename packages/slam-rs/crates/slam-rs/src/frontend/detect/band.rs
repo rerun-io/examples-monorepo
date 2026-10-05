@@ -1,5 +1,8 @@
 //! CPU band scans, candidate caching, and host suppression.
-use super::{BandRequest, CornerScan, DetectError, FastCorner};
+use super::cells::CellScores;
+use super::{
+    BandRequest, CellSelect, CornerScan, DetectError, FastCorner, Occupancy, SelectionStatus,
+};
 use crate::image::ImageU16;
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{Rect as KorniaRect, fast_detect_rect_u8};
@@ -30,12 +33,31 @@ const FAST_FILTER_WIDTH: usize = 800;
 /// not an implementation detail, and this is the one place that arithmetic
 /// lives: the CPU sweep gets it from kornia itself, and the GPU kernel and
 /// `tests/fast_model.rs` read it here rather than each spelling it out.
+/// The filter exists only in kornia's SIMD loop. Keep its runtime gate in
+/// sync with kornia-imgproc `features/fast.rs`: NEON unless
+/// `KORNIA_FAST_NEON == "0"` on aarch64, AVX2 on x86_64, otherwise scalar.
+/// The scalar loop has no block filter, even on images at least 800 pixels wide.
 pub fn block_filter_end(width: usize) -> (usize, bool) {
     let blocks: usize = width.saturating_sub(2 * FAST_BORDER) / FAST_FILTER_LANES;
     (
         FAST_BORDER + blocks * FAST_FILTER_LANES,
-        width >= FAST_FILTER_WIDTH,
+        width >= FAST_FILTER_WIDTH && kornia_uses_simd(),
     )
+}
+
+fn kornia_uses_simd() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::env::var("KORNIA_FAST_NEON").map_or(true, |value| value != "0")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        false
+    }
 }
 
 /// `cv::FAST`'s default segment length, `FastFeatureDetector::TYPE_9_16`.
@@ -106,12 +128,17 @@ impl BandCache {
     }
 }
 
-/// CPU [`CornerScan`]: one kornia rectangle sweep per row band and threshold.
-/// Narrow the u16 frame to u8 once per frame; all cells then use zero-copy rectangles.
+/// CPU [`CornerScan`]: score empty cells once when selecting one point per cell.
+/// The band fallback narrows the frame once and uses kornia rectangles.
 /// Rebuilding per band copied the whole frame repeatedly and measured 40.1 ms
 /// against 9.4 ms on MIO07/1500. Write directly into kornia's image storage to
 /// avoid a second full-frame copy; reallocate only when geometry changes.
-#[derive(Default)]
+///
+/// Both paths give the same corners. Cell selection is the default on aarch64
+/// when kornia's NEON path is enabled (`KORNIA_FAST_NEON != "0"`),
+/// where its NEON scorer took MGO07's detection from 11.0 to 4.6 ms on the
+/// RK3588; elsewhere its scalar scorer is slower than kornia's bands (9.6 vs
+/// 2.4 ms on x86_64), so the bands stay the default there.
 pub struct CpuCornerScan {
     /// The narrowed frame, `None` until the first [`CornerScan::scan`], and
     /// reallocated only for a new geometry.
@@ -121,6 +148,30 @@ pub struct CpuCornerScan {
     /// The [`Band`]s this frame has already scanned, in the order they were
     /// first asked for.
     bands: BandCache,
+    cells: CellScores,
+    /// Answer [`CornerScan::select_cells`] (true) or leave selection to the band walk.
+    select_by_cell: bool,
+}
+
+impl Default for CpuCornerScan {
+    fn default() -> Self {
+        Self::with_cell_selection(cfg!(target_arch = "aarch64") && kornia_uses_simd())
+    }
+}
+
+impl CpuCornerScan {
+    /// A scanner that selects per cell (`true`) or always takes the band walk.
+    #[must_use]
+    pub fn with_cell_selection(select_by_cell: bool) -> Self {
+        Self {
+            gray: None,
+            width: 0,
+            height: 0,
+            bands: BandCache::default(),
+            cells: CellScores::default(),
+            select_by_cell,
+        }
+    }
 }
 
 /// `kornia_image::Image` is not `Debug`, so the geometry is what this prints.
@@ -130,11 +181,31 @@ impl std::fmt::Debug for CpuCornerScan {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("bands", &self.bands.len())
+            .field("select_by_cell", &self.select_by_cell)
             .finish()
     }
 }
 
 impl CornerScan for CpuCornerScan {
+    fn fork(&self) -> Option<Box<dyn CornerScan>> {
+        Some(Box::new(Self::with_cell_selection(self.select_by_cell)))
+    }
+
+    fn select_cells(
+        &mut self,
+        _camera: usize,
+        image: &ImageU16,
+        select: &CellSelect,
+        eligibility: Option<(&Occupancy<'_>, &[bool])>,
+        out: &mut Vec<u32>,
+    ) -> Result<SelectionStatus, DetectError> {
+        if !self.select_by_cell || !select.supports(image.width(), image.height()) {
+            return Ok(SelectionStatus::Unsupported);
+        }
+        self.cells.select(image, select, eligibility, out);
+        Ok(SelectionStatus::Selected)
+    }
+
     /// `_camera` is unused: the caller holds the frame and nothing here is
     /// shared between cameras.
     fn scan(&mut self, _camera: usize, image: &ImageU16) -> Result<(), DetectError> {

@@ -1,0 +1,18 @@
+[package]
+name = "handfit-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for the handfit core, built in place as handfit/_core.so."
+
+[lib]
+# -> target/release/lib_core.{so,dylib}, copied to handfit/_core.so by the pixi task.
+name = "_core"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+handfit = { workspace = true }
+numpy = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }

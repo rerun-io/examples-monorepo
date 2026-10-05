@@ -21,6 +21,92 @@ use crate::frontend::se2::AffineCompact2;
 use crate::image::ImageU16;
 use crate::lie::LieScalar;
 
+use crate::frontend::simd::F32x4;
+
+/// Build four independent patches in `[row][tap][lane]` storage.
+/// Each lane follows [`build_patch`]'s scalar operation order. The pivoted
+/// factorization remains scalar because each point can choose different pivots.
+///
+/// # Panics
+/// If data has fewer than `4 * P::SIZE` elements or the factor fewer than `12 * P::SIZE`.
+pub fn build_patch_group<P: Pattern>(
+    source: &ImageU16,
+    positions: [Vector2<f32>; 4],
+    data: &mut [f32],
+    jacobian: &mut [f32],
+) -> ([f32; 4], [bool; 4]) {
+    let mut sum = F32x4::ZERO;
+    let mut count = F32x4::ZERO;
+    let mut grad_sum = [F32x4::ZERO; 3];
+    let row_stride = 4 * P::SIZE;
+    let pos_x = F32x4(positions.map(|p| p.x));
+    let pos_y = F32x4(positions.map(|p| p.y));
+    for (tap, &[x, y]) in P::OFFSETS.iter().take(P::SIZE).enumerate() {
+        let (raw, [gx, gy], valid) =
+            source.sample_group::<true>(pos_x + F32x4::splat(x), pos_y + F32x4::splat(y));
+        let rows = [gx, gy, gx * F32x4::splat(-y) + gy * F32x4::splat(x)];
+        raw.store(&mut data[4 * tap..]);
+        sum = sum + F32x4::select(valid, raw, F32x4::ZERO);
+        count = count + F32x4(valid.map(|ok| if ok { 1.0 } else { 0.0 }));
+        for row in 0..3 {
+            let values = F32x4::select(valid, rows[row], F32x4::ZERO);
+            values.store(&mut jacobian[row * row_stride + 4 * tap..]);
+            // A masked tap must leave even a negative-zero accumulator unchanged.
+            grad_sum[row] = F32x4::select(valid, grad_sum[row] + values, grad_sum[row]);
+        }
+    }
+    let mean = sum / count;
+    let mean_inv = count / sum;
+    let mut h = [[F32x4::ZERO; 3]; 3];
+    for tap in 0..P::SIZE {
+        let raw = F32x4::load(&data[4 * tap..]);
+        let valid = raw.0.map(|value| value >= 0.0);
+        let mut rows = [F32x4::ZERO; 3];
+        for row in 0..3 {
+            let slot = &mut jacobian[row * row_stride + 4 * tap..];
+            rows[row] = F32x4::select(
+                valid,
+                (F32x4::load(slot) - grad_sum[row] * raw / sum) * mean_inv,
+                F32x4::ZERO,
+            );
+            rows[row].store(slot);
+        }
+        F32x4::select(valid, raw * mean_inv, raw).store(&mut data[4 * tap..]);
+        for col in 0..3 {
+            for row in 0..3 {
+                h[row][col] = h[row][col] + rows[col] * rows[row];
+            }
+        }
+    }
+    let inverses: [Matrix3<f32>; 4] = std::array::from_fn(|lane| {
+        ldlt_inverse3(&Matrix3::from_fn(|row, col| h[row][col].0[lane]))
+    });
+    let inverse: [[F32x4; 3]; 3] = std::array::from_fn(|row| {
+        std::array::from_fn(|col| F32x4(inverses.map(|matrix| matrix[(row, col)])))
+    });
+    let mut finite = [true; 4];
+    for tap in 0..P::SIZE {
+        let column: [F32x4; 3] =
+            std::array::from_fn(|row| F32x4::load(&jacobian[row * row_stride + 4 * tap..]));
+        for row in 0..3 {
+            let product = inverse[row][0] * column[0]
+                + inverse[row][1] * column[1]
+                + inverse[row][2] * column[2];
+            product.store(&mut jacobian[row * row_stride + 4 * tap..]);
+            for (lane, ok) in finite.iter_mut().enumerate() {
+                *ok &= product.0[lane].is_finite();
+            }
+        }
+        for lane in 0..4 {
+            finite[lane] &= data[4 * tap + lane].is_finite();
+        }
+    }
+    (
+        mean.0,
+        std::array::from_fn(|lane| mean.0[lane] > f32::EPSILON && finite[lane]),
+    )
+}
+
 /// Two-pixel patch border, keeping taps and their gradient stencils inside the image.
 pub const PATCH_BORDER: f32 = 2.0;
 
@@ -182,7 +268,7 @@ pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
 }
 
 /// Packed f32 patch record used by tests.
-/// Tracking builds directly into strided arrays through the same [`build_patch`].
+/// Tracking uses [`build_patch_group`] with the same per-point operation order.
 /// The record stores source position, normalized taps, cached `H^-1 Jᵀ`, mean
 /// and validity. Negative taps mark invalid samples. Only `P::SIZE` entries of
 /// the maximum-sized buffers are used.
@@ -226,8 +312,8 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     /// `setFromImage`, into this record's packed storage.
     ///
     /// A thin call into [`build_patch`] at stride 1. The tracking path does not
-    /// come through here: it points [`build_patch`] straight at its
-    /// structure-of-arrays, so no packed record is ever built per patch.
+    /// come through here: [`build_patch_group`] writes straight into its
+    /// grouped arrays, so no packed record is ever built per patch.
     pub fn set_from_image<Src: PatchSource<f32>>(&mut self, source: &Src, pos: Vector2<f32>) {
         self.pos = pos;
         let Self {
@@ -279,9 +365,9 @@ impl<P: Pattern> OpticalFlowPatch<P> {
 /// [`OpticalFlowPatch::residual`] over a strided `data` array.
 ///
 /// `stride` is the distance between two taps of the same patch: `1` for the
-/// per-patch struct, and the patch capacity for the SoA the tracker reads
-/// (patch index fast-varying, `cubecl-portability.md` §12.2). One body serves
-/// both so the arithmetic cannot drift apart.
+/// per-patch struct, and `4` for the CPU tracker's grouped patch store. This
+/// scalar body is also the arithmetic reference for the SIMD residual paths.
+/// Both strides preserve the same normalization and tap order.
 ///
 /// # Panics
 ///
@@ -355,6 +441,103 @@ pub fn patch_increment<P: Pattern>(
         increment[r] = sum;
     }
     increment
+}
+
+/// Accumulate the three SE(2) rows in independent vector lanes. Each row still
+/// visits every tap in scalar order; the fourth lane is unused.
+///
+/// # Panics
+/// If factor or residual storage is too short for the pattern and strides.
+pub fn patch_increment_rows<P: Pattern>(
+    factor: &[f32],
+    element_stride: usize,
+    row_stride: usize,
+    residual: &[f32],
+) -> Vector3<f32> {
+    let mut sum = F32x4::ZERO;
+    for (tap, &value) in residual[..P::SIZE].iter().enumerate() {
+        let offset = tap * element_stride;
+        let rows = F32x4([
+            factor[offset],
+            factor[row_stride + offset],
+            factor[2 * row_stride + offset],
+            0.0,
+        ]);
+        sum = sum + rows * F32x4::splat(value);
+    }
+    Vector3::new(sum.0[0], sum.0[1], sum.0[2])
+}
+
+/// Sample four taps of one point at a time. The sum still visits individual
+/// taps in ascending order, so this can serve scalar tracking call sites
+/// without changing their arithmetic or needing adjacent points' guesses.
+///
+/// # Panics
+/// If data or residual storage is too short for the pattern and stride.
+pub fn patch_residual_taps<P: Pattern>(
+    data: &[f32],
+    stride: usize,
+    source: &ImageU16,
+    transform: &AffineCompact2<f32>,
+    residual: &mut [f32],
+) -> bool {
+    let warp = transform.coefficients().map(F32x4::splat);
+    let mut sum = 0.0;
+    let mut count = 0;
+    for base in (0..P::SIZE).step_by(4) {
+        let lanes = (P::SIZE - base).min(4);
+        let taps: [[f32; 2]; 4] = std::array::from_fn(|lane| {
+            if lane < lanes {
+                P::OFFSETS[base + lane]
+            } else {
+                [0.0; 2]
+            }
+        });
+        let x = F32x4(taps.map(|tap| tap[0]));
+        let y = F32x4(taps.map(|tap| tap[1]));
+        let px = warp[0] * x + warp[1] * y + warp[4];
+        let py = warp[2] * x + warp[3] * y + warp[5];
+        let (values, _, valid) = source.sample_group::<false>(px, py);
+        for lane in 0..lanes {
+            residual[base + lane] = values.0[lane];
+            if valid[lane] {
+                sum += values.0[lane];
+                count += 1;
+            }
+        }
+    }
+    if sum < f32::EPSILON {
+        residual[..P::SIZE].fill(0.0);
+        return false;
+    }
+    let mut num_residuals = 0;
+    for base in (0..P::SIZE).step_by(4) {
+        let lanes = (P::SIZE - base).min(4);
+        let values = F32x4(std::array::from_fn(|lane| {
+            if lane < lanes {
+                residual[base + lane]
+            } else {
+                -1.0
+            }
+        }));
+        let stored = F32x4(std::array::from_fn(|lane| {
+            if lane < lanes {
+                data[(base + lane) * stride]
+            } else {
+                -1.0
+            }
+        }));
+        let normalized = F32x4::splat(count as f32) * values / F32x4::splat(sum) - stored;
+        for lane in 0..lanes {
+            if values.0[lane] >= 0.0 && stored.0[lane] >= 0.0 {
+                residual[base + lane] = normalized.0[lane];
+                num_residuals += 1;
+            } else {
+                residual[base + lane] = 0.0;
+            }
+        }
+    }
+    num_residuals > P::SIZE / 2
 }
 
 #[cfg(test)]
@@ -670,7 +853,7 @@ mod tests {
         // The packed record is one patch's *storage*, the same bytes the
         // structure-of-arrays holds in its columns — not a transient. It is over
         // the budget, which is exactly why the tracking path never builds one:
-        // `PatchSoA::build` points `build_patch` at its own arrays instead.
+        // `PatchSoA::build` writes groups straight into its own arrays instead.
         const {
             assert!(size_of::<OpticalFlowPatch<Pattern51>>() > 512);
         };

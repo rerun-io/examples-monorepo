@@ -35,8 +35,12 @@ pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
 pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
 pixi run -e slam-rs slam-rs-gate --tier release    # three longer clips; --tier listed scores the other five
 pixi run -e slam-rs slam-rs-wgpu-build             # the GPU frontend; then --gpu on any tool
+pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment <id> --output-dir <dir>   # a catalog segment's slam_rs layer, on the GPU
 pixi run -e slam-rs python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # your own recording, no catalog
 ```
+
+`slam-rs-catalog-layer` runs on the GPU by default: it builds the wgpu core first and decodes with NVDEC, so it lives in the
+`slam-rs-cuda` environment; it falls back to the CPU only without a GPU adapter, and warns when it does.
 
 The gate prints the ATE beside the baseline and pass or fail; on a host that
 recorded no baseline the speed clause is reported, not gated. `slam-rs-serve`
@@ -131,15 +135,24 @@ those two annotations.
 
 ## Two profiles and two lanes
 
-The **fast profile**, the default, changes the schedule and nothing about the
-arithmetic: it detects only when camera 0 has lost 15 % of its keypoints, and
-solves the whole sliding window at keyframes only, the newest state alone in
-between. `--profile reference` runs the unmodified dataset configuration.
+The **fast profile**, the default, detects only when camera 0 has lost 15 % of
+its keypoints and solves the whole sliding window at keyframes, the newest
+state alone in between. KLT stops each level when its update is below 0.05 pixels.
+`--profile reference` runs the unmodified dataset configuration.
 
-The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu;
-the estimator is one CPU thread in every lane, and ATE does not depend on the
-lane. The decisions behind both, one line each:
+The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu.
+Its estimator runs on one CPU thread; the CPU lane can use its work pool.
+Both lanes are checked against the same trajectory accuracy gates.
+The design decisions are listed in
 [docs/design-notes.md](docs/design-notes.md#decision-references).
+
+The GPU lane uses fused KLT on every device. Each point uses 16 subgroup
+lanes; larger power-of-two subgroups hold multiple point groups. Startup
+checks the required subgroup operations and reports an error naming the
+CPU lane if they are unsupported. Templates stay in registers and both
+tracking directions run in one launch per phase. The fast profile's exit
+threshold works on both lanes.
+Replay summaries count frames using one-wait, lookahead and packed uploads.
 
 ## Data
 

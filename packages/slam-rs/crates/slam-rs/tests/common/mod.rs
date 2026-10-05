@@ -32,12 +32,15 @@ const ROBOCAP: &str = include_str!("../fixtures/robocap_calib.json");
 
 // ── the fixture directory and the two files every VIO lane reads ───────────
 
-/// `crates/slam-rs/tests/fixtures`.
+/// `crates/slam-rs/tests/fixtures`, or portable assets staged for a remote GPU run.
 #[allow(
     dead_code,
     reason = "used by vio_pipeline; other binaries compile a subset"
 )]
 pub fn fixtures() -> PathBuf {
+    if let Some(root) = std::env::var_os("SLAM_RS_TEST_ASSETS") {
+        return PathBuf::from(root).join("fixtures");
+    }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
@@ -50,6 +53,9 @@ pub fn fixtures() -> PathBuf {
     reason = "used by vio_pipeline; other binaries compile a subset"
 )]
 pub fn configs() -> PathBuf {
+    if let Some(root) = std::env::var_os("SLAM_RS_TEST_ASSETS") {
+        return PathBuf::from(root).join("configs");
+    }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs")
 }
 
@@ -686,6 +692,8 @@ pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
         .expect("the geometry the pyramid was allocated for");
     pyramid
 }
+
+pub mod flow;
 
 #[cfg(feature = "gpu-core")]
 pub mod gpu;

@@ -63,7 +63,7 @@ def recorded_snapshot(monkeypatch) -> dict[str, Any]:
 
 
 def test_hf_fetch_lands_files_at_local_dir(tmp_path: Path, recorded_snapshot: dict[str, Any]) -> None:
-    returned: Path = hf_fetch("collabora/monado-slam-datasets", allow_patterns=("MI_valid_01/**",), local_dir=tmp_path)
+    returned: Path = hf_fetch("collabora/monado-slam-datasets", allow_patterns=("MI_valid_01/**",), local_dir=tmp_path, revision="a" * 40)
     assert returned == tmp_path
     # local_dir mode, not the symlinked cache tree: the file sits at <local_dir>/<path-in-repo>.
     assert (tmp_path / "MI_valid_01" / "camera_calibration.json").is_file()
@@ -71,13 +71,13 @@ def test_hf_fetch_lands_files_at_local_dir(tmp_path: Path, recorded_snapshot: di
     assert recorded_snapshot["repo_type"] == "dataset"
     assert recorded_snapshot["allow_patterns"] == ["MI_valid_01/**"]
     assert recorded_snapshot["local_dir"] == str(tmp_path)
-    assert recorded_snapshot["revision"] is None
+    assert recorded_snapshot["revision"] == "a" * 40
 
 
 def test_hf_fetch_passes_the_revision_through(tmp_path: Path, recorded_snapshot: dict[str, Any]) -> None:
-    hf_fetch("collabora/monado-slam-datasets", allow_patterns=("*.json",), local_dir=tmp_path, repo_type="model", revision="refs/pr/1")
+    hf_fetch("collabora/monado-slam-datasets", allow_patterns=("*.json",), local_dir=tmp_path, repo_type="model", revision="b" * 40)
     assert recorded_snapshot["repo_type"] == "model"
-    assert recorded_snapshot["revision"] == "refs/pr/1"
+    assert recorded_snapshot["revision"] == "b" * 40
 
 
 # ── parse_apache_index ────────────────────────────────────────────────────
@@ -365,3 +365,76 @@ def test_a_verified_staged_file_is_published_without_refetching(tmp_path: Path, 
     assert hub.fetched == []
     assert (tmp_path / "models.zip").read_bytes() == hub.files[HUB_REPO, "models.zip"]
     assert not hf_fetch_verified(HUB_REPO, listed("models.zip"), local_dir=tmp_path, revision=HUB_REVISION)
+
+
+@pytest.mark.parametrize("revision", ["main", "abcdef0", "A" * 40, "g" * 40, "refs/pr/1"])
+def test_hf_requires_commit_before_network(revision: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("network called for an unpinned revision")
+
+    monkeypatch.setattr(transports, "hf_hub_download", forbidden)
+    with pytest.raises(ValueError, match="pin a full commit sha"):
+        transports.hf_fetch_files("repo", ["file"], local_dir=tmp_path, revision=revision)
+
+
+def test_hf_parallel_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from threading import Barrier
+
+    barrier = Barrier(4, timeout=3)
+
+    def download(*_args: object, **_kwargs: object) -> None:
+        barrier.wait()
+
+    monkeypatch.setattr(transports, "hf_hub_download", download)
+    assert transports.hf_fetch_files("repo", ["a", "b", "c", "d"], local_dir=tmp_path, revision="a" * 40, workers=4) == tmp_path
+
+
+def test_hf_file_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def download(*_args: object, **_kwargs: object) -> None:
+        raise OSError("download failed")
+
+    monkeypatch.setattr(transports, "hf_hub_download", download)
+    with pytest.raises(OSError, match="download failed"):
+        transports.hf_fetch_files("repo", ["a", "b"], local_dir=tmp_path, revision="a" * 40)
+
+
+def test_dataset_pins() -> None:
+    from dataforge.datasets.msd import REVISION as MSD_REVISION
+    from dataforge.datasets.msd import MsdConfig
+    from dataforge.datasets.show3d import REVISION, Show3dConfig
+    from dataforge.datasets.show3d_mesh_source import MESH_REVISION
+
+    for pin in (REVISION, MSD_REVISION, MESH_REVISION):
+        assert transports.require_commit_sha(pin) == pin
+    assert Show3dConfig().revision == REVISION
+    assert MsdConfig().revision == MSD_REVISION
+
+
+@pytest.mark.parametrize("entry", ["snapshot", "files", "lfs", "verified"])
+def test_all_hf_entry_points_reject_floating_revision(entry: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("network entry reached")
+
+    monkeypatch.setattr(transports, "HfApi", forbidden)
+    monkeypatch.setattr(transports, "snapshot_download", forbidden)
+    monkeypatch.setattr(transports, "hf_hub_download", forbidden)
+    with pytest.raises(ValueError, match="main.*pin a full commit sha"):
+        match entry:
+            case "snapshot":
+                transports.hf_fetch("repo", allow_patterns=[], local_dir=tmp_path, revision="main")
+            case "files":
+                transports.hf_fetch_files("repo", [], local_dir=tmp_path, revision="main")
+            case "lfs":
+                transports.hf_lfs_files("repo", [], revision="main")
+            case "verified":
+                transports.hf_fetch_verified("repo", transports.HfFileInfo("file", 0, None, "hash"), local_dir=tmp_path, revision="main")
+
+
+@pytest.mark.parametrize("revision", ["main", "abcdef0", "A" * 40, "g" * 40, "refs/pr/1"])
+def test_dataset_configs_reject_unpinned_revision(revision: str) -> None:
+    from dataforge.datasets.msd import MsdConfig
+    from dataforge.datasets.show3d import Show3dConfig
+
+    for config in (Show3dConfig, MsdConfig):
+        with pytest.raises(ValueError, match="pin a full commit sha"):
+            config(revision=revision)

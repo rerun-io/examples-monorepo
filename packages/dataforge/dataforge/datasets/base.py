@@ -178,6 +178,12 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         """Identities of every convertible sequence found on disk."""
         return [identity for identity, _ in self.discover()]
 
+    def prefetch(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> None:
+        """Optionally fetch raw inputs on a background thread.
+
+        Must not touch self.timer, recordings, or print per-sequence progress.
+        """
+
     @abstractmethod
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:
         """Write the base (and derived) layer rrds of one sequence; return the base path."""

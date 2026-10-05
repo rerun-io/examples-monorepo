@@ -1,6 +1,6 @@
 //! The GPU [`PyramidBuilder`]: level 0 uploaded, every halving built on device.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use cubecl::prelude::*;
 
@@ -22,24 +22,18 @@ use crate::pyramid::{MIN_SIDE, Pyramid, PyramidError};
 /// allocation alive, so a published entry is readable whatever happens to the
 /// pyramid afterwards.
 #[derive(Debug, Clone)]
-pub struct Level0 {
-    /// The upload buffer, which is the frame and nothing else: `width * height`
-    /// `u16` with a stride equal to the width, the upload being exactly as long
-    /// as the frame. A device copy is what puts the same pixels at the front of
-    /// the pyramid's even allocation.
+pub(super) struct Level0 {
+    /// A view of exactly `width * height` packed `u16` pixels. Frameset builds
+    /// publish the front of each camera's even-arena slot; individual builds
+    /// publish the upload buffer that their level-zero copy reads.
     pub(super) handle: cubecl::server::Handle,
     /// Level 0's width, checked against the frame the scanner was handed.
     pub(super) width: usize,
     /// Level 0's height, checked the same way.
     pub(super) height: usize,
+    pub(super) arena: Option<Arc<FrameArena>>,
+    pub(super) camera: usize,
 }
-
-/// The per-camera level-0 table a builder and a scanner on one client share.
-///
-/// A `Mutex` rather than a `RefCell` because [`crate::frontend::detect::CornerScan`]
-/// is `Send + Sync`; it is taken twice per camera per frameset and never
-/// contended, both stages running on the frontend's own thread.
-pub type Level0Table = Arc<Mutex<Vec<Option<Level0>>>>;
 
 /// One level's place inside a [`GpuPyramid`]'s two buffers.
 ///
@@ -65,10 +59,6 @@ pub(super) struct Level {
 /// to `a` when `l` is even and `b` when it is odd, and no kernel ever reads the
 /// buffer it writes.
 ///
-/// The `meta` buffer beside them carries the level geometry and the sampling
-/// pattern the per-patch kernels read (see `kernels`); it is written once,
-/// when the pyramid is allocated, and never touched per frame.
-///
 /// One configuration the CPU lane accepts and this one does not, left open by
 /// the S25 review and recorded here rather than in a report only:
 /// `optical_flow_levels = 0` builds level 0 alone on the CPU
@@ -84,12 +74,31 @@ pub struct GpuPyramid<R: Runtime> {
     even_len: usize,
     odd: cubecl::server::Handle,
     odd_len: usize,
-    meta: cubecl::server::Handle,
-    meta_len: usize,
+    /// Equal-geometry cameras share storage when built as a frameset. Per-camera
+    /// handles remain views with local metadata for the unchanged tracker.
+    arena: Option<Arc<FrameArena>>,
+    arena_camera: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct FrameArena {
+    pub(super) even: cubecl::server::Handle,
+    pub(super) odd: cubecl::server::Handle,
+    pub(super) strides: [usize; 2],
+    pub(super) cameras: usize,
+}
+
+impl FrameArena {
+    pub(super) fn bindings(&self) -> [kernels::Buffer<'_>; 2] {
+        [
+            (&self.even, self.strides[0] * self.cameras),
+            (&self.odd, self.strides[1] * self.cameras),
+        ]
+    }
 }
 
 impl<R: Runtime> GpuPyramid<R> {
-    /// Allocate levels zero through `num_levels` and write device metadata.
+    /// Allocate levels zero through `num_levels`.
     ///
     /// # Errors
     /// Refuse geometry below the five-tap kernel's reach, zero requested levels,
@@ -99,7 +108,6 @@ impl<R: Runtime> GpuPyramid<R> {
         width: usize,
         height: usize,
         num_levels: usize,
-        pattern: &[[f32; 2]],
     ) -> Result<Self, PyramidError> {
         // A pyramid of level 0 alone leaves the odd buffer with no level in it,
         // and `client.empty(0)` is a zero-sized allocation wgpu rejects at
@@ -150,56 +158,41 @@ impl<R: Runtime> GpuPyramid<R> {
             }
         }
 
-        // The `meta` layout `kernels` documents: four integers per level, then
-        // the pattern taps as their bit patterns. `u32` and not `f32`, because
-        // a base is an index the kernels add to a pixel offset and `f32` holds
-        // only every second integer above 2^24: a 4097x4097 frame puts level 2
-        // at base 16,785,409, which `f32` stores as 16,785,408, and every
-        // level-2 sample then read one pixel early on both lanes with nothing
-        // reporting it (the S25 review). The taps ride in the same buffer as
-        // bits rather than in a second one because both per-patch kernels are at
-        // the six-buffer ceiling `kernels` documents and a seventh binding is a
-        // question on every device the portable lane runs on, while a bitcast is
-        // one instruction on all three of its shader compilers.
-        let mut meta: Vec<u32> = Vec::with_capacity((num_levels + 1) * 4 + pattern.len() * 2);
-        for level in &levels {
-            meta.push(level.base as u32);
-            meta.push(level.width as u32);
-            meta.push(level.height as u32);
-            meta.push(u32::from(level.odd));
-        }
-        for tap in pattern {
-            meta.push(tap[0].to_bits());
-            meta.push(tap[1].to_bits());
-        }
-
         Ok(Self {
             levels,
-            even: super::empty(&client, lengths[0] * size_of::<u16>()),
+            even: client.empty(lengths[0] * size_of::<u16>()),
             even_len: lengths[0],
-            odd: super::empty(&client, lengths[1] * size_of::<u16>()),
+            odd: client.empty(lengths[1] * size_of::<u16>()),
             odd_len: lengths[1],
-            meta: super::submission::upload(&client, u32::as_bytes(&meta)),
-            meta_len: meta.len(),
+            arena: None,
+            arena_camera: 0,
             client,
         })
     }
 
     /// The two pixel buffers and their element counts, as the launchers want them.
-    pub(super) fn buffers(
-        &self,
-    ) -> (
-        &cubecl::server::Handle,
-        usize,
-        &cubecl::server::Handle,
-        usize,
-    ) {
-        (&self.even, self.even_len, &self.odd, self.odd_len)
+    pub(super) fn buffers(&self) -> [kernels::Buffer<'_>; 2] {
+        [(&self.even, self.even_len), (&self.odd, self.odd_len)]
     }
 
-    /// The `meta` buffer and its element count.
-    pub(super) fn meta(&self) -> (&cubecl::server::Handle, usize) {
-        (&self.meta, self.meta_len)
+    /// Shared bindings and absolute level offsets for an all-camera dispatch.
+    pub(super) fn arena(&self) -> Option<&Arc<FrameArena>> {
+        self.arena.as_ref()
+    }
+
+    /// Append exact integer geometry, using arena offsets when supplied.
+    pub(super) fn append_geometry(&self, out: &mut Vec<u32>, arena: Option<&FrameArena>) {
+        for level in &self.levels {
+            out.extend([
+                (level.base
+                    + arena.map_or(0, |arena| {
+                        self.arena_camera * arena.strides[usize::from(level.odd)]
+                    })) as u32,
+                level.width as u32,
+                level.height as u32,
+                u32::from(level.odd),
+            ]);
+        }
     }
 
     /// The handle and element count of the buffer level `level` lives in.
@@ -214,48 +207,32 @@ impl<R: Runtime> GpuPyramid<R> {
 
 /// The GPU [`crate::pyramid::PyramidBuilder`].
 ///
-/// Holds the client, the pattern the per-patch kernels need in every pyramid's
-/// `meta`, and a repack buffer used only by a frame whose stride exceeds its
-/// width — a level never is strided, and one upload of a packed buffer beats
-/// one upload per row.
+/// Holds the client and reusable staging for packed camera
+/// uploads. Frameset builds share even/odd arenas when camera geometry matches.
 pub struct GpuPyramidBuilder<R: Runtime> {
+    launches: super::submission::LaunchList,
     client: ComputeClient<R>,
-    pattern: Vec<[f32; 2]>,
     staging: Vec<u16>,
-    level0: Level0Table,
+    pub(super) level0: Vec<Option<Level0>>,
     prepared: Vec<Option<Level0>>,
+    packed_upload: Option<(usize, cubecl::server::Handle)>,
 }
 
 impl<R: Runtime> GpuPyramidBuilder<R> {
-    /// A builder on `client` for a frontend using `pattern`.
-    pub fn new(client: ComputeClient<R>, pattern: &[[f32; 2]]) -> Self {
+    /// A pyramid builder on `client`.
+    pub fn new(client: ComputeClient<R>, launches: super::submission::LaunchList) -> Self {
         Self {
             client,
-            pattern: pattern.to_vec(),
             staging: Vec::new(),
-            level0: Level0Table::default(),
+            level0: Default::default(),
             prepared: Vec::new(),
+            packed_upload: None,
+            launches,
         }
     }
 
-    /// The client, for the tracker that shares it.
-    pub fn client(&self) -> ComputeClient<R> {
-        self.client.clone()
-    }
-
-    /// The level-0 table this builder publishes into, for the corner scanner
-    /// that reads the same frames — see [`Level0`]. Handed over by
-    /// [`super::gpu_backends`] when it builds the two on one client.
-    pub fn level0_table(&self) -> Level0Table {
-        Arc::clone(&self.level0)
-    }
-}
-
-impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
-    type Pyramid = GpuPyramid<R>;
-    const PREPARE_IMAGES: bool = true;
-
-    fn prepare_images(&mut self, images: &[ImageU16]) -> Result<(), PyramidError> {
+    /// Prepare uploads for individually built camera pyramids.
+    pub fn prepare_images(&mut self, images: &[ImageU16]) -> Result<(), PyramidError> {
         guarded(
             GpuError::DeviceLost {
                 what: "frameset uploads",
@@ -263,17 +240,31 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
             || {
                 self.prepared.resize_with(images.len(), || None);
                 for (slot, image) in self.prepared.iter_mut().zip(images) {
-                    // upload_frame reserves its task here, before any camera builds.
+                    // Upload every camera before building its pyramid.
                     let (handle, _) = super::upload_frame(&self.client, image, &mut self.staging);
                     *slot = Some(Level0 {
                         handle,
                         width: image.width(),
                         height: image.height(),
+                        arena: None,
+                        camera: 0,
                     });
                 }
                 Ok(())
             },
         )
+    }
+}
+
+impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
+    type Pyramid = GpuPyramid<R>;
+    fn build_frames(
+        &mut self,
+        images: &[ImageU16],
+        out: &mut [GpuPyramid<R>],
+        _pool: &crate::frontend::parallel::WorkPool,
+    ) -> Result<(), PyramidError> {
+        self.build_images(images, out)
     }
 
     fn allocate(
@@ -286,15 +277,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
             GpuError::DeviceLost {
                 what: "pyramid allocation",
             },
-            || {
-                GpuPyramid::new(
-                    self.client.clone(),
-                    width,
-                    height,
-                    num_levels,
-                    &self.pattern,
-                )
-            },
+            || GpuPyramid::new(self.client.clone(), width, height, num_levels),
         )
     }
 
@@ -353,26 +336,18 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                     pixels,
                 );
 
-                // Level 0 is now on the device and the detector wants exactly it — the
-                // upload buffer, which is the frame and nothing else. A poisoned lock is
-                // left to fall through: the scanner then uploads its own copy, which is
-                // slower and correct.
-                if let Ok(mut table) = self.level0.lock() {
-                    if table.len() <= camera {
-                        table.resize(camera + 1, None);
-                    }
-                    table[camera] = Some(Level0 {
-                        handle: upload,
-                        width: level0.width,
-                        height: level0.height,
-                    });
-                } else {
-                    log::warn!(
-                        "the shared level-0 table is poisoned: camera {camera} uploads its frame twice from here on"
-                    );
+                if self.level0.len() <= camera {
+                    self.level0.resize(camera + 1, None);
                 }
+                self.level0[camera] = Some(Level0 {
+                    handle: upload,
+                    width: level0.width,
+                    height: level0.height,
+                    arena: None,
+                    camera,
+                });
 
-                // Each launch reserves one task; deeper pyramids split at the queue ceiling.
+                // Build levels in source-before-target order.
                 for level in 1..out.levels.len() {
                     let source: Level = out.levels[level - 1];
                     let target: Level = out.levels[level];
@@ -426,7 +401,7 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
                     .client
                     .read_one(handle.clone())
                     .map_err(|error| super::read_failed("a pyramid level", &error))?;
-                super::drained(&self.client);
+
                 let expected: usize = length * size_of::<u16>();
                 if bytes.len() != expected {
                     return Err(PyramidError::ShortDeviceRead {
@@ -463,9 +438,209 @@ impl<R: Runtime> std::fmt::Debug for GpuPyramid<R> {
 impl<R: Runtime> std::fmt::Debug for GpuPyramidBuilder<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GpuPyramidBuilder")
-            .field("taps", &self.pattern.len())
             .field("staging", &self.staging.len())
-            .field("level0_cameras", &self.level0.lock().map(|t| t.len()).ok())
+            .field("level0_cameras", &self.level0.len())
             .finish()
+    }
+}
+
+pub(super) struct PyramidLaunch {
+    arena: Arc<FrameArena>,
+    levels: Vec<Level>,
+    packed_input: (cubecl::server::Handle, usize),
+}
+
+impl PyramidLaunch {
+    pub(super) fn run<R: Runtime>(self, client: &ComputeClient<R>) {
+        let Self {
+            arena,
+            levels,
+            packed_input,
+        } = self;
+        let strides = arena.strides;
+        let cameras = arena.cameras;
+        let buffers = arena.bindings();
+        for pair in levels.windows(2) {
+            let [source, target] = [pair[0], pair[1]];
+            if source == levels[0] {
+                let (handle, len) = &packed_input;
+                kernels::launch_ingest(
+                    client,
+                    (handle, *len),
+                    buffers[0],
+                    buffers[1],
+                    source.width,
+                    source.height,
+                    strides[1],
+                    cameras,
+                );
+            } else {
+                kernels::launch_subsample_batch(
+                    client,
+                    buffers[usize::from(source.odd)],
+                    buffers[usize::from(target.odd)],
+                    source,
+                    target,
+                    strides[usize::from(source.odd)],
+                    strides[usize::from(target.odd)],
+                    cameras,
+                );
+            }
+        }
+    }
+}
+
+impl<R: Runtime> GpuPyramidBuilder<R> {
+    pub(super) fn build_images(
+        &mut self,
+        images: &[ImageU16],
+        out: &mut [GpuPyramid<R>],
+    ) -> Result<(), PyramidError> {
+        use crate::pyramid::PyramidBuilder;
+        let Some(first) = out.first() else {
+            return Ok(());
+        };
+        let cameras = out.len();
+        let (alignment, limit) = super::submission::binding_limits(&self.client);
+        let alignment = alignment / size_of::<u16>();
+        let strides = [
+            first.even_len.next_multiple_of(alignment),
+            first.odd_len.next_multiple_of(alignment),
+        ];
+        let lengths = strides.map(|stride| stride.saturating_mul(cameras));
+        // Mixed geometry and arenas beyond a binding's limit keep the general
+        // per-camera path. In the common rig every camera has the same shape.
+        let batchable = images.len() == cameras
+            && images.iter().all(|image| image.packed_u8().is_some())
+            && cameras <= kernels::MAX_CUBES_PER_DIM as usize
+            && out.iter().all(|pyramid| pyramid.levels == first.levels)
+            && lengths
+                .iter()
+                .all(|&len| len <= u32::MAX as usize && len <= limit / size_of::<u16>());
+        if !batchable {
+            return guarded(
+                GpuError::DeviceLost {
+                    what: "frameset pyramid",
+                },
+                || {
+                    self.launches.flush(&self.client);
+                    self.prepare_images(images)?;
+                    for (camera, (image, pyramid)) in images.iter().zip(out).enumerate() {
+                        self.build(camera, image, pyramid)?;
+                    }
+                    Ok(())
+                },
+            );
+        }
+        guarded(
+            GpuError::DeviceLost {
+                what: "frameset pyramid",
+            },
+            || {
+                for (image, pyramid) in images.iter().zip(out.iter()) {
+                    let level = pyramid.levels[0];
+                    if image.width() != level.width || image.height() != level.height {
+                        return Err(PyramidError::GeometryMismatch {
+                            expected_width: level.width,
+                            expected_height: level.height,
+                            width: image.width(),
+                            height: image.height(),
+                        });
+                    }
+                }
+                let shared = out[0]
+                    .arena
+                    .as_ref()
+                    .filter(|arena| {
+                        arena.cameras == cameras
+                            && arena.strides == strides
+                            && out.iter().enumerate().all(|(camera, pyramid)| {
+                                pyramid.arena_camera == camera
+                                    && pyramid
+                                        .arena
+                                        .as_ref()
+                                        .is_some_and(|other| Arc::ptr_eq(arena, other))
+                            })
+                    })
+                    .cloned();
+                let arena = match shared {
+                    Some(arena) => arena,
+                    None => {
+                        let arena = Arc::new(FrameArena {
+                            even: self.client.empty(lengths[0] * size_of::<u16>()),
+                            odd: self.client.empty(lengths[1] * size_of::<u16>()),
+                            strides,
+                            cameras,
+                        });
+                        for (camera, pyramid) in out.iter_mut().enumerate() {
+                            let start = camera * strides[0];
+                            pyramid.even = arena
+                                .even
+                                .clone()
+                                .offset_start((start * size_of::<u16>()) as u64)
+                                .offset_end(
+                                    ((lengths[0] - start - pyramid.even_len) * size_of::<u16>())
+                                        as u64,
+                                );
+                            let start = camera * strides[1];
+                            pyramid.odd = arena
+                                .odd
+                                .clone()
+                                .offset_start((start * size_of::<u16>()) as u64)
+                                .offset_end(
+                                    ((lengths[1] - start - pyramid.odd_len) * size_of::<u16>())
+                                        as u64,
+                                );
+                            pyramid.arena = Some(arena.clone());
+                            pyramid.arena_camera = camera;
+                        }
+                        arena
+                    }
+                };
+                self.prepared.clear();
+                // Give CubeCL ownership of the packed allocation: packing into
+                // reusable staging and then copying into Bytes reads every frame
+                // twice on the host. Only the gaps between cameras need zeros.
+                let bytes_per_frame = images[0].width() * images[0].height() * cameras;
+                let bytes = bytes_per_frame.next_multiple_of(4);
+                let mut packed = Vec::with_capacity(bytes);
+                for image in images {
+                    if let Some(pixels) = image.packed_u8() {
+                        packed.extend_from_slice(pixels);
+                    }
+                }
+                packed.resize(bytes, 0);
+                let (_, handle) = match &mut self.packed_upload {
+                    Some(existing) if existing.0 == bytes => existing,
+                    slot => slot.insert((bytes, self.client.empty(bytes))),
+                };
+                self.client
+                    .write(handle, cubecl::bytes::Bytes::from_elems(packed));
+                let packed_input = (handle.clone(), bytes);
+                self.level0.resize(cameras, None);
+                for (camera, pyramid) in out.iter().enumerate() {
+                    let level = pyramid.levels[0];
+                    self.level0[camera] = Some(Level0 {
+                        handle: pyramid.even.clone().offset_end(
+                            ((pyramid.even_len - level.width * level.height) * size_of::<u16>())
+                                as u64,
+                        ),
+                        width: level.width,
+                        height: level.height,
+                        arena: Some(arena.clone()),
+                        camera,
+                    });
+                }
+                self.launches.dispatch(
+                    &self.client,
+                    super::submission::Launch::Pyramid(PyramidLaunch {
+                        arena,
+                        levels: out[0].levels.clone(),
+                        packed_input,
+                    }),
+                );
+                Ok(())
+            },
+        )
     }
 }

@@ -1,0 +1,85 @@
+[project]
+name = "handtrack"
+version = "0.1.0"
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+description = "MEgATrack hand tracking: DetNet-F, KeyNet-F, the LM pose fit and the tracker, trained on catalog-streamed UmeTrack and SHOW3D"
+requires-python = ">=3.12"
+dependencies = [
+    # catalog-common + rerun-prerelease + cuda + simplecv: numpy, scipy, jaxtyping,
+    # rerun-sdk[catalog,dataloader], pyserde, opencv, torch (CUDA), torchcodec, tyro
+    "simplecv",
+    # the hand-profile reader, the entity-path schema and the hand-mesh writer
+    "dataforge",
+    # the native (Rust) pose fit behind TrackerConfig.fit_backend = "native"
+    "handfit",
+]
+
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI
+# namesake); the root manifest installs the same paths editable.
+[tool.uv.sources]
+simplecv = { path = "../simplecv", editable = true }
+dataforge = { path = "../dataforge", editable = true }
+handfit = { path = "../handfit", editable = true }
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["handtrack"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["handtrack", "tests"]
+ignore_names = [
+    # apis.export_nets_onnx (robocap-live nets): ExportReport fields written through serde, and an onnxruntime SessionOptions setting.
+    "torch_version", "onnxruntime_version", "graphs", "intra_op_num_threads",
+    # eval.scorecard: ScoreRow KPI fields (read through serde / dataclasses.asdict) and the scorer entry points the overnight runner calls.
+    "contact_f1", "contact_precision", "contact_recall", "hidden_error_share", "mka", "mka_truth", "mkpe", "mpvpe", "mpvpe_p90",
+    "onset_latency_frames", "onset_precision", "onset_recall", "over100", "over50", "p90", "p95", "pinch_distance_mae", "pinch_f1",
+    "pinch_precision", "pinch_recall", "scored_frames", "read_truth", "frame_scores", "score_hand",
+    # torch.backends.cudnn.benchmark, a torch switch set in apis/train.py.
+    "benchmark",
+    # Upstream fake CPU network methods called by the external HandTracker.
+    "getInputImageSizes", "regress_pose_use_skeleton",
+    # Reference evaluator: retained serialized metrics and run provenance.
+    "circle_samples", "centre_error_px", "radius_error_px",
+    "upstream_weights_sha256", "upstream_source_sha256", "implementation_sha256", "calibration_json",
+    "umetrack_calibration_json",
+    # Tracker: serialized record fields (metrics JSON, SegmentTrack npz keys read by the Rerun layers).
+    "gt_frames", "tracked_frames", "keypoints_2d",
+    # pyserde metadata field of results.TrackMetadata.
+    "timings_s",
+    # Serialized logs and Tyro/source-facing fields consumed outside this package (W3 trainer).
+    "datasets", "segment_ids", "gpu_memory_bytes", "gpu_peak_memory_bytes",
+    "CropKind", "POSITIVE", "DRIFT", "EDGE", "OTHER_HAND", "BACKGROUND",
+    "dataset", "kind", "mesh_vertices", "forward", "cpu_threads",
+    # The catalog stream (A2): report fields written through asdict/JSON, segment metadata, stream API used by trainers.
+    "detnet_images_per_s", "keynet_crops_per_s", "decoded_images_per_s", "main_wait_fraction", "nvdec_percent", "gpu_percent",
+    "gpu_memory_used_mib", "torch_peak_allocated_mib", "query_s_per_segment", "label_s_per_segment", "decode_s_per_segment",
+    "keynet_kind_share", "process_memory_mib", "torch_peak_reserved_mib", "interaction", "num_frames", "images_considered", "images_missing", "images_invalid", "exc",
+    "detnet_ready",
+    # Tyro-facing entry points and config fields.
+    "main",
+    "rr_config",
+    # unittest.mock configures the catalog boundary in export validation tests.
+    "side_effect",
+    # pytest's module-level skip marker.
+    "pytestmark",
+]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
+sort_by_size = true
+min_confidence = 60
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e handtrack-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e handtrack-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"

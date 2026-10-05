@@ -173,6 +173,111 @@ fn check_pipeline<S: LieScalar>() {
     );
 }
 
+#[test]
+fn frontend_lag_returns_estimates_one_call_late() {
+    let mut config = common::config();
+    config.port_frontend_lag = true;
+    let mut vio = Vio::<f32>::new(
+        config,
+        common::calibration(),
+        FrontendOptions {
+            threads: 1,
+            ..FrontendOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(vio.pending_t_ns(), None);
+    let results = drive_the_committed_framesets(&mut vio);
+    assert_eq!(vio.pending_t_ns(), Some(TIMESTAMPS[2]));
+    assert_ne!(results[0].status, VioStatus::Tracking);
+    assert_eq!(results[1].status, VioStatus::Tracking);
+    assert_eq!(results[1].t_ns, TIMESTAMPS[0]);
+    assert_eq!(results[2].t_ns, TIMESTAMPS[1]);
+    assert_eq!(vio.estimator().last_state_t_ns(), TIMESTAMPS[1]);
+    assert_eq!(results[0].status, VioStatus::Buffered);
+    let last = vio.flush().unwrap().unwrap();
+    assert_eq!(last.status, VioStatus::Tracking);
+    assert_eq!(last.t_ns, TIMESTAMPS[2]);
+    assert_eq!(vio.estimator().last_state_t_ns(), TIMESTAMPS[2]);
+    assert_eq!(vio.pending_t_ns(), None);
+    assert_eq!(vio.flush().unwrap(), None);
+}
+
+#[test]
+fn frontend_lag_retries_and_thread_counts_preserve_order_and_results() {
+    fn run<S: LieScalar>(threads: usize, retry: bool) -> Vec<VioResult> {
+        let mut config = common::config();
+        config.port_frontend_lag = true;
+        config.port_frame_update_max_iterations = 5;
+        let mut vio = Vio::<S>::new(
+            config,
+            common::calibration(),
+            FrontendOptions {
+                threads,
+                ..FrontendOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(vio.pending_t_ns(), None);
+        assert_eq!(vio.flush().unwrap(), None);
+        let directory = common::fixtures().join("flow/frames");
+        let mut cursor = 0;
+        let mut results = Vec::new();
+        for (index, &t_ns) in TIMESTAMPS.iter().enumerate() {
+            let rasters: Vec<_> = (0..2)
+                .map(|camera| common::read_pgm(&directory, index.min(2), camera))
+                .collect();
+            let views: Vec<_> = rasters.iter().map(view).collect();
+            if retry {
+                let count = vio.frontend().frame_counter();
+                let previous = vio.estimator().last_state_t_ns();
+                assert_eq!(
+                    vio.track(t_ns, &views).unwrap().status,
+                    VioStatus::NeedMoreImu
+                );
+                assert_eq!(vio.frontend().frame_counter(), count);
+                assert_eq!(vio.estimator().last_state_t_ns(), previous);
+                let bad = [ImageView {
+                    width: 64,
+                    height: 64,
+                    stride: 64,
+                    data: &[0; 4096],
+                }; 2];
+                assert!(vio.track(t_ns, &bad).is_err());
+                assert_eq!(vio.frontend().frame_counter(), count);
+            }
+            while cursor < IMU.len() {
+                let row = &IMU[cursor];
+                vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+                cursor += 1;
+                if row.t_ns > t_ns {
+                    break;
+                }
+            }
+            let result = vio.track(t_ns, &views).unwrap();
+            if index == 0 {
+                assert_eq!(result.status, VioStatus::Buffered);
+                assert!(vio.last_stats().is_none());
+            } else {
+                assert_eq!(result.status, VioStatus::Tracking);
+                assert_eq!(result.t_ns, TIMESTAMPS[index - 1]);
+                assert_eq!(vio.last_stats().unwrap().t_ns, result.t_ns);
+                results.push(result);
+            }
+        }
+        results.push(vio.flush().unwrap().unwrap());
+        assert_eq!(vio.pending_t_ns(), None);
+        assert_eq!(vio.flush().unwrap(), None);
+        assert_eq!(
+            results.iter().map(|result| result.t_ns).collect::<Vec<_>>(),
+            *TIMESTAMPS
+        );
+        results
+    }
+    assert_eq!(run::<f32>(1, false), run::<f32>(4, true));
+    assert_eq!(run::<f64>(1, false), run::<f64>(4, true));
+}
+
 /// Every field of the pipeline as one number.
 ///
 /// `Vio` derives `Debug`, so this reads all of them — the frontend's pyramids,
@@ -191,13 +296,13 @@ fn fingerprint(vio: &Vio<f32>) -> u64 {
     let mut text: String = format!("{vio:?}");
     // Every wall-clock block comes out: they are measurements of this run's own
     // speed and differ run to run by design, where the fingerprint is what must
-    // not. `FlowTimings` is the frontend's three phases and `FrontendTimings`
-    // the four `Vio` publishes, one of each; `StageTimings` is the estimator's
+    // not. `FlowTimings` appears in the frontend and inside `FrontendTimings`;
+    // remove both inner copies before the outer block. `StageTimings` is the estimator's
     // six on the last measured frame, so it is in the text exactly when a frame
     // has been measured and not at all on a pipeline that has refused every one.
     // Each holds integers only, so its first `}` closes it.
     let blocks: [(&str, usize); 3] = [
-        ("FlowTimings {", 1),
+        ("FlowTimings {", 2),
         ("FrontendTimings {", 1),
         ("StageTimings {", usize::from(vio.last_stats().is_some())),
     ];
@@ -208,14 +313,13 @@ fn fingerprint(vio: &Vio<f32>) -> u64 {
             "`{marker}` is in the Debug output {found} times, not {wanted}: \
              the fingerprint either hashes a wall clock or no longer covers one"
         );
-        if wanted == 0 {
-            continue;
+        for _ in 0..wanted {
+            let start: usize = text.find(marker).unwrap();
+            let length: usize = text[start..].find('}').unwrap_or_else(|| {
+                panic!("`{marker}` is never closed in the Debug output, so its wall clock cannot be cut out")
+            }) + 1;
+            text.replace_range(start..start + length, "<wall clock>");
         }
-        let start: usize = text.find(marker).unwrap();
-        let length: usize = text[start..].find('}').unwrap_or_else(|| {
-            panic!("`{marker}` is never closed in the Debug output, so its wall clock cannot be cut out")
-        }) + 1;
-        text.replace_range(start..start + length, "<wall clock>");
     }
     let mut hasher: std::collections::hash_map::DefaultHasher = Default::default();
     text.hash(&mut hasher);

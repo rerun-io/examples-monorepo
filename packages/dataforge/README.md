@@ -303,11 +303,11 @@ The default layout is the shared exo/ego layout (see *Blueprints*): 3D with the
 instruction under it, both headset views in the right column, and the eight back-rig
 cameras along the bottom, face boxes hidden; table cards decode headset0 only.
 
-Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
+Video uses ffmpeg NVDEC → AV1 NVENC with CPU grayscale decode as fallback at 60 fps, GOP 60,
 no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
 [measured table](docs/show3d.md#video-measurement-and-encoder-decision).
 Each recording records the Hub commit it was built from as
-`property:capture:hf_revision`; the corpus run pins one with `--revision`.
+`property:capture:hf_revision`; the config defaults to a pinned commit and `--revision` accepts only a full SHA.
 
 ### Environment variables
 
@@ -316,6 +316,7 @@ Each recording records the Hub commit it was built from as
 | `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds, blueprints and sidecars go; set it for convert **and** register |
 | `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to; the exoego datasets default `--root` to `$DATAFORGE_RAW_ROOT/<dataset command>` (both HOT3D devices share `hot3d`), with source subfolders such as UmeTrack's `raw_data/` inside |
 | `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang. Check yours with `ffmpeg -hide_banner -encoders \| grep av1_nvenc` |
+| `DATAFORGE_NVENC_SLOTS` | `6` | Positive integer limiting machine-wide concurrent dataforge NVENC sessions. Use the same value across simultaneous jobs. |
 
 Paths in `--root`/`--sequence` and the defaults above are relative to
 `packages/dataforge/` (the tasks run there).

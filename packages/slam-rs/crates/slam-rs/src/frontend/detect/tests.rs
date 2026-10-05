@@ -700,6 +700,7 @@ impl CornerScan for MalformedSelection {
         _: usize,
         _: &ImageU16,
         _: &CellSelect,
+        _eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
     ) -> Result<SelectionStatus, DetectError> {
         out.resize(self.0, NO_CELL_WINNER);

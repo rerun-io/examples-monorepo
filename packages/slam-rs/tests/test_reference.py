@@ -11,6 +11,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from slam_rs import _core, reference
+from slam_rs.catalog_feed import ROBOCAP_RIG
 from slam_rs.config import SLAM_CONFIG_PATH, SlamConfig, load_slam_config
 from slam_rs.reference import (
     BENCHMARKS_PATH,
@@ -63,16 +64,16 @@ def test_robocap_carries_s15_and_no_ground_truth(benchmarks: Benchmarks) -> None
 
 def test_robocap_names_the_configuration_the_cpp_ran(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """The four cameras, the downscale, the two rig rules and the two configured JSON files, all present."""
-    assert settings.robocap.camera_names == ("left", "left_front", "right_front", "right")
-    assert settings.robocap.downscale == 3
+    assert ROBOCAP_RIG.camera_names == ("left_front", "right_front", "left", "right")
+    assert ROBOCAP_RIG.downscale == 3
     assert benchmarks.robocap.decode_path == "cpu_gray8_swscale_area_downscale3"
-    # The settings defines frameset tolerance and inertial pairing.
+    # The core defines frameset tolerance and inertial pairing,
     # because the two inertial channels are on their own clocks.
-    assert settings.robocap.frameset_tolerance_ns == 1_000_000
-    assert settings.robocap.interpolate_accel_onto_gyro is True
+    assert ROBOCAP_RIG.frameset_tolerance_ns == 1_000_000
+    assert ROBOCAP_RIG.interpolate_accel_onto_gyro is True
     # The recorder stamps the device clock on the video timeline, so an export
     # adds nothing; MSD's `video_time` is relative to its capture start.
-    assert settings.robocap.video_time_is_absolute is True
+    assert ROBOCAP_RIG.video_time_is_absolute is True
     assert "config.vio_marg_lost_landmarks" in (settings.package_root / settings.robocap.vio_config).read_text()
     assert '"camera_type": "kb4"' in (settings.package_root / settings.robocap.calibration).read_text()
 
@@ -182,9 +183,9 @@ def test_an_unknown_tier_is_rejected(settings: SlamConfig, tmp_path: Path) -> No
 
 def test_a_missing_robocap_key_is_a_typed_error(tmp_path: Path) -> None:
     """The loader promises `ValueError`; direct indexing raised a bare `KeyError`."""
-    broken: Path = tmp_path / "no-downscale.toml"
-    broken.write_text(SLAM_CONFIG_PATH.read_text().replace("downscale = 3\n", "", 1))
-    with pytest.raises(ValueError, match="no-downscale.toml.*downscale"):
+    broken: Path = tmp_path / "no-device.toml"
+    broken.write_text(SLAM_CONFIG_PATH.read_text().replace('device_id = "f408193e6447b3b0"\n', "", 1))
+    with pytest.raises(ValueError, match="no-device.toml.*device_id"):
         load_slam_config(broken)
 
 

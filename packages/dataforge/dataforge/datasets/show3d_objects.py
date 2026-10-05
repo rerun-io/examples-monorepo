@@ -17,7 +17,7 @@ from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPos
 from dataforge.datasets.show3d_hands import HandFrame
 from dataforge.datasets.show3d_mesh_source import MESH_REPO
 from dataforge.datasets.show3d_object_source import ObjectFrame
-from dataforge.datasets.show3d_source import DEFAULT_CONFIDENCE, OBJECT_POSE_VERSION, FrameClock
+from dataforge.datasets.show3d_source import OBJECT_POSE_VERSION, OBJECT_TRUST, FrameClock
 from dataforge.identity import SequenceIdentity
 
 
@@ -126,7 +126,7 @@ def write_object_mesh_layer(
         confidence: Float64[ndarray, "n"] = np.asarray([frame.confidence for frame in frames], dtype=np.float64)
         objects.log_object_mesh(
             recording, alias, times_ns=clock.times_ns, frame_indices=clock.frame_indices, asset=rr.Asset3D(path=mesh), confidence=confidence,
-            posed=np.array([frame.posed for frame in frames], dtype=bool), trust_threshold=DEFAULT_CONFIDENCE
+            posed=np.array([frame.posed for frame in frames], dtype=bool), trust_threshold=OBJECT_TRUST
         )
         recording.send_property(
             "object_mesh", rr.AnyValues(mesh_id=pa.array([mesh_id], type=pa.int64()), mesh_source=pa.array([MESH_REPO], type=pa.string()))

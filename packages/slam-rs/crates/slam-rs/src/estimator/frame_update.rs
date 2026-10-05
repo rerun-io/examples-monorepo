@@ -22,7 +22,8 @@ use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{LieScalar, Se3, eigen_maxi};
 use crate::linearize::{LandmarkBlockOptions, compute_error_weight, linearize_relative_pose};
 use crate::types::{
-    FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId, Vector15,
+    FrameId, LandmarkId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId,
+    Vector15,
 };
 
 /// Which precondition sent a frameset back to the joint solve.
@@ -118,6 +119,9 @@ pub(super) struct FrameUpdateScratch<S: LieScalar> {
     /// The pairs [`linearize_state`] has already evaluated, kept for its
     /// capacity across framesets and cleared at the top of every call.
     rel_poses: Vec<RelPose<S>>,
+    /// Current-frame observations in landmark then camera order. Reused by
+    /// every trial; optimizing the newest state cannot change this index.
+    observations: Vec<(LandmarkId, TimeCamId)>,
 }
 
 impl<S: LieScalar> Default for FrameUpdateScratch<S> {
@@ -132,6 +136,7 @@ impl<S: LieScalar> Default for FrameUpdateScratch<S> {
             solve: DMatrix::zeros(0, 0),
             increment: DVector::zeros(POSE_VEL_BIAS_SIZE),
             rel_poses: Vec::new(),
+            observations: Vec::new(),
         }
     }
 }
@@ -201,6 +206,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             ref mut solve,
             ref mut increment,
             ref mut rel_poses,
+            ref mut observations,
         } = *frame_scratch;
         let Some(meas) = imu_meas.get(&prev_t_ns) else {
             // Unreachable: the same lookup succeeded above and nothing since has
@@ -210,10 +216,20 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         // D11: the trust region has no memory across framesets.
         damping.lambda = S::from_literal(config.vio_lm_lambda_initial);
+        frame_observations(ba, t_ns, observations);
 
         let mark: std::time::Instant = std::time::Instant::now();
         let (mut error_total, _): (S, S) = linearize_state(
-            ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h, b, rel_poses,
+            ba,
+            meas,
+            &imu_lin,
+            prev_t_ns,
+            t_ns,
+            &options,
+            observations,
+            h,
+            b,
+            rel_poses,
         )?;
         timings.linearize_ns += duration_ns(mark);
 
@@ -263,7 +279,16 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
             let mark: std::time::Instant = std::time::Instant::now();
             let (error_after, imu_after): (S, S) = linearize_state(
-                ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h_trial, b_trial, rel_poses,
+                ba,
+                meas,
+                &imu_lin,
+                prev_t_ns,
+                t_ns,
+                &options,
+                observations,
+                h_trial,
+                b_trial,
+                rel_poses,
             )?;
             timings.error_ns += duration_ns(mark);
 
@@ -349,6 +374,24 @@ fn pair_of<S: LieScalar>(
         .map(|pair| (pair.t_t_h, pair.d_rel_d_t))
 }
 
+/// Use the host-to-target adjacency to visit only observations in this frame.
+/// Sorting restores the former landmark-by-camera accumulation order.
+fn frame_observations<S: LieScalar>(
+    ba: &BundleAdjustmentBase<S>,
+    t_ns: FrameId,
+    observations: &mut Vec<(LandmarkId, TimeCamId)>,
+) {
+    observations.clear();
+    let start = TimeCamId::new(t_ns, 0);
+    let end = TimeCamId::new(t_ns, ba.cameras().len());
+    for targets in ba.lmdb.observations().values() {
+        for (&target, landmarks) in targets.range(start..end) {
+            observations.extend(landmarks.iter().map(|&id| (id, target)));
+        }
+    }
+    observations.sort_unstable();
+}
+
 /// Fill `h` and `b` with the newest state's normal equations at its current
 /// value, and return `(the cost there, the IMU factor's share of it)`.
 ///
@@ -367,6 +410,7 @@ fn linearize_state<S: LieScalar>(
     prev_t_ns: FrameId,
     t_ns: FrameId,
     options: &LandmarkBlockOptions<S>,
+    observations: &[(LandmarkId, TimeCamId)],
     h: &mut DMatrix<S>,
     b: &mut DVector<S>,
     rel_poses: &mut Vec<RelPose<S>>,
@@ -385,114 +429,117 @@ fn linearize_state<S: LieScalar>(
     let state_t = ba.get_pose_state_with_lin(t_ns)?;
     let cameras = ba.cameras();
 
-    for lm in ba.lmdb.landmarks() {
-        for cam_id in 0..cameras.len() {
-            let tcid_t: TimeCamId = TimeCamId::new(t_ns, cam_id);
-            let Some(kpt_obs) = lm.obs.get(&tcid_t) else {
-                continue;
-            };
-            let tcid_h: TimeCamId = lm.host_kf_id;
-            let camera =
-                cameras
-                    .get(cam_id)
-                    .ok_or(crate::linearize::LinearizeError::UnknownCamera {
-                        cam_id,
-                        camera_count: cameras.len(),
-                    })?;
+    for &(lm_id, tcid_t) in observations {
+        let lm = ba
+            .lmdb
+            .get_landmark(lm_id)
+            .ok_or(crate::ba_base::BaError::InconsistentLandmark(lm_id))?;
+        let kpt_obs = lm
+            .obs
+            .get(&tcid_t)
+            .ok_or(crate::ba_base::BaError::InconsistentLandmark(lm_id))?;
+        let cam_id = tcid_t.cam_id;
+        let tcid_h: TimeCamId = lm.host_kf_id;
+        let camera =
+            cameras
+                .get(cam_id)
+                .ok_or(crate::linearize::LinearizeError::UnknownCamera {
+                    cam_id,
+                    camera_count: cameras.len(),
+                })?;
 
-            // the Jacobian at the
-            // linearization point, the value at the current state when either
-            // end is frozen. A landmark hosted by this frameset has no pose
-            // Jacobian at all, which is what an identity relative
-            // pose means.
-            let (t_t_h, d_rel_d_t): (Matrix4<S>, Matrix6<S>) = if tcid_h == tcid_t {
-                (Matrix4::identity(), Matrix6::zeros())
-            } else if let Some(hit) = pair_of(rel_poses, tcid_h, cam_id) {
-                // Once per pair per linearization, as
-                // `LinearizationAbsQR::linearize_problem` evaluates its
-                // `rel_pose_pairs` once (`linearize/abs_qr.rs`): no pose moves
-                // inside one call, so every landmark hosted by the same
-                // keyframe camera has the same answer. The window holds at most
-                // `max_kfs` hosts times the rig's cameras, and the landmark and
-                // camera accumulation order is untouched.
-                hit
-            } else {
-                let state_h = ba.get_pose_state_with_lin(tcid_h.frame_id)?;
-                let t_i_c_h: &Se3<S> = ba.calib.t_i_c.get(tcid_h.cam_id).ok_or(
-                    crate::linearize::LinearizeError::UnknownCamera {
-                        cam_id: tcid_h.cam_id,
-                        camera_count: ba.calib.t_i_c.len(),
-                    },
-                )?;
-                let t_i_c_t: &Se3<S> = ba.calib.t_i_c.get(cam_id).ok_or(
-                    crate::linearize::LinearizeError::UnknownCamera {
-                        cam_id,
-                        camera_count: ba.calib.t_i_c.len(),
-                    },
-                )?;
-                let mut d_rel_d_t: Matrix6<S> = Matrix6::zeros();
-                let rel: Se3<S> = linearize_relative_pose(
-                    &state_h,
-                    &state_t,
-                    t_i_c_h,
-                    t_i_c_t,
-                    None,
-                    Some(&mut d_rel_d_t),
-                );
-                let pair: (Matrix4<S>, Matrix6<S>) = (rel.matrix(), d_rel_d_t);
-                rel_poses.push(RelPose {
-                    host: tcid_h,
-                    target_cam: cam_id,
-                    t_t_h: pair.0,
-                    d_rel_d_t: pair.1,
-                });
-                pair
-            };
-
-            let mut res: Vector2<S> = Vector2::zeros();
-            let mut d_res_d_xi: Matrix2x6<S> = Matrix2x6::zeros();
-            let valid: bool = linearize_point(
-                kpt_obs,
-                lm,
-                &t_t_h,
-                camera,
-                &mut res,
-                &mut LinearizePointOut {
-                    d_res_d_xi: Some(&mut d_res_d_xi),
-                    d_res_d_p: None,
-                    proj: None,
+        // the Jacobian at the
+        // linearization point, the value at the current state when either
+        // end is frozen. A landmark hosted by this frameset has no pose
+        // Jacobian at all, which is what an identity relative
+        // pose means.
+        let (t_t_h, d_rel_d_t): (Matrix4<S>, Matrix6<S>) = if tcid_h == tcid_t {
+            (Matrix4::identity(), Matrix6::zeros())
+        } else if let Some(hit) = pair_of(rel_poses, tcid_h, cam_id) {
+            // Once per pair per linearization, as
+            // `LinearizationAbsQR::linearize_problem` evaluates its
+            // `rel_pose_pairs` once (`linearize/abs_qr.rs`): no pose moves
+            // inside one call, so every landmark hosted by the same
+            // keyframe camera has the same answer. The window holds at most
+            // `max_kfs` hosts times the rig's cameras, and the landmark and
+            // camera accumulation order is untouched.
+            hit
+        } else {
+            let state_h = ba.get_pose_state_with_lin(tcid_h.frame_id)?;
+            let t_i_c_h: &Se3<S> = ba.calib.t_i_c.get(tcid_h.cam_id).ok_or(
+                crate::linearize::LinearizeError::UnknownCamera {
+                    cam_id: tcid_h.cam_id,
+                    camera_count: ba.calib.t_i_c.len(),
                 },
+            )?;
+            let t_i_c_t: &Se3<S> = ba.calib.t_i_c.get(cam_id).ok_or(
+                crate::linearize::LinearizeError::UnknownCamera {
+                    cam_id,
+                    camera_count: ba.calib.t_i_c.len(),
+                },
+            )?;
+            let mut d_rel_d_t: Matrix6<S> = Matrix6::zeros();
+            let rel: Se3<S> = linearize_relative_pose(
+                &state_h,
+                &state_t,
+                t_i_c_h,
+                t_i_c_t,
+                None,
+                Some(&mut d_rel_d_t),
             );
-            if options.use_valid_projections_only && !valid {
-                continue;
-            }
-            // zeroed, never fatal.
-            if !d_res_d_xi.iter().all(|v| v.to_f64().is_finite()) {
-                log::warn!(
-                    "d_res_d_xi is not valid in the frame update, lm = {:?}",
-                    lm.id
-                );
-                d_res_d_xi.fill(S::zero());
-            }
+            let pair: (Matrix4<S>, Matrix6<S>) = (rel.matrix(), d_rel_d_t);
+            rel_poses.push(RelPose {
+                host: tcid_h,
+                target_cam: cam_id,
+                t_t_h: pair.0,
+                d_rel_d_t: pair.1,
+            });
+            pair
+        };
 
-            // with the host block dropped: the landmark and its host
-            // are constants here.
-            let res_squared: S = res[0] * res[0] + res[1] * res[1];
-            let (weighted_error, weight) = compute_error_weight(res_squared, options);
-            let sqrt_weight: S = weight.sqrt() / options.obs_std_dev;
-            error += weighted_error / (options.obs_std_dev * options.obs_std_dev);
+        let mut res: Vector2<S> = Vector2::zeros();
+        let mut d_res_d_xi: Matrix2x6<S> = Matrix2x6::zeros();
+        let valid: bool = linearize_point(
+            kpt_obs,
+            lm,
+            &t_t_h,
+            camera,
+            &mut res,
+            &mut LinearizePointOut {
+                d_res_d_xi: Some(&mut d_res_d_xi),
+                d_res_d_p: None,
+                proj: None,
+            },
+        );
+        if options.use_valid_projections_only && !valid {
+            continue;
+        }
+        // zeroed, never fatal.
+        if !d_res_d_xi.iter().all(|v| v.to_f64().is_finite()) {
+            log::warn!(
+                "d_res_d_xi is not valid in the frame update, lm = {:?}",
+                lm.id
+            );
+            d_res_d_xi.fill(S::zero());
+        }
 
-            d_res_d_xi *= sqrt_weight;
-            let jacobian: Matrix2x6<S> = d_res_d_xi * d_rel_d_t;
-            let residual: Vector2<S> = res * sqrt_weight;
-            let jtj: Matrix6<S> = jacobian.transpose() * jacobian;
-            let jtr: Vector6<S> = jacobian.transpose() * residual;
-            for i in 0..POSE_SIZE {
-                for j in 0..POSE_SIZE {
-                    h[(i, j)] += jtj[(i, j)];
-                }
-                b[i] += jtr[i];
+        // with the host block dropped: the landmark and its host
+        // are constants here.
+        let res_squared: S = res[0] * res[0] + res[1] * res[1];
+        let (weighted_error, weight) = compute_error_weight(res_squared, options);
+        let sqrt_weight: S = weight.sqrt() / options.obs_std_dev;
+        error += weighted_error / (options.obs_std_dev * options.obs_std_dev);
+
+        d_res_d_xi *= sqrt_weight;
+        let jacobian: Matrix2x6<S> = d_res_d_xi * d_rel_d_t;
+        let residual: Vector2<S> = res * sqrt_weight;
+        let jtj: Matrix6<S> = jacobian.transpose() * jacobian;
+        let jtr: Vector6<S> = jacobian.transpose() * residual;
+        for i in 0..POSE_SIZE {
+            for j in 0..POSE_SIZE {
+                h[(i, j)] += jtj[(i, j)];
             }
+            b[i] += jtr[i];
         }
     }
 
@@ -946,6 +993,8 @@ mod tests {
             let mut h: DMatrix<f64> = DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE);
             let mut b: DVector<f64> = DVector::zeros(POSE_VEL_BIAS_SIZE);
             let mut rel_poses: Vec<RelPose<f64>> = Vec::new();
+            let mut observations = Vec::new();
+            frame_observations(&vio.ba, CURRENT_T_NS, &mut observations);
             let (total, imu_error) = linearize_state(
                 &vio.ba,
                 &meas,
@@ -953,6 +1002,7 @@ mod tests {
                 PREV_T_NS,
                 CURRENT_T_NS,
                 &options,
+                &observations,
                 &mut h,
                 &mut b,
                 &mut rel_poses,

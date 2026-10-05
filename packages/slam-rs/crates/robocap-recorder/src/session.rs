@@ -90,7 +90,7 @@ fn camera_capture(
                 previous = Some(frame.sequence);
                 #[cfg(feature = "live-slam")]
                 if let Some(index) = SLAM_CAMERAS.iter().position(|&id| id == camera) {
-                    let pixels = slam_luma(&frame.nv12);
+                    let pixels = slam_luma(&frame.nv12)?;
                     slam.submit(SlamInput::Frame {
                         camera: index,
                         timestamp_ns: frame.timestamp_ns,

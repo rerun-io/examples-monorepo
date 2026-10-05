@@ -13,6 +13,7 @@ use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::BaError;
 use slam_rs::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
 use slam_rs::calib::Calibration;
+use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::imu::{ImuLinData, ImuSample, IntegratedImuMeasurement};
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
@@ -324,9 +325,11 @@ fn linearize(problem: &Problem) -> (f64, LinearizationAbsQR<f64>) {
         &inputs,
     )
     .unwrap();
-    let (error, valid) = lqr.linearize_problem(&problem.estimator, &inputs).unwrap();
+    let (error, valid) = lqr
+        .linearize_problem(&problem.estimator, &inputs, None)
+        .unwrap();
     assert!(valid);
-    lqr.perform_qr().unwrap();
+    lqr.perform_qr(None).unwrap();
     (error, lqr)
 }
 
@@ -409,7 +412,7 @@ fn vo_marg_backsubstitute() {
     let inc: DVector<f64> = -h.clone().lu().solve(&b).expect("the system is solvable");
     let l_diff_ref: f64 = l_diff_of(&inc);
 
-    let error_before: f64 = problem.estimator.compute_error(None, 0.0).unwrap().0;
+    let error_before: f64 = problem.estimator.compute_error(None, 0.0, None).unwrap().0;
 
     // The prior borrow has to end before the estimator is mutated.
     let marg: Option<MargLinData<f64>> = problem.marg.clone();
@@ -437,7 +440,7 @@ fn vo_marg_backsubstitute() {
             (0..POSE_SIZE).map(|k| inc[offset + k]),
         ));
     }
-    let error_after: f64 = problem.estimator.compute_error(None, 0.0).unwrap().0;
+    let error_after: f64 = problem.estimator.compute_error(None, 0.0, None).unwrap().0;
     assert!(
         error_after < error_before,
         "error {error_before} -> {error_after}"
@@ -662,6 +665,91 @@ fn the_reductions_are_reproducible() {
     }
     for (a, b) in b_a.iter().zip(b_b.iter()) {
         assert_eq!(a.to_bits(), b.to_bits());
+    }
+}
+
+/// Worker scheduling must preserve each coefficient and the landmark update,
+/// including when only a subset of the database is linearized.
+#[test]
+fn pooled_linearization_preserves_bits() {
+    for threads in [1, 2, 4] {
+        for filtered in [false, true] {
+            let problem = vo_problem_with_marg(6, 0x1234_5678);
+            let used = std::collections::BTreeSet::from([0, 2, 5]);
+            let inputs = LinearizationInputs {
+                marg: problem.marg.as_ref(),
+                used_frames: filtered.then_some(&used),
+                ..Default::default()
+            };
+            let mut serial = LinearizationAbsQR::new(
+                &problem.estimator,
+                &problem.aom,
+                LinearizationOptions::default(),
+                &inputs,
+            )
+            .unwrap();
+            let pool = WorkPool::new(threads).unwrap();
+            let mut pooled = serial.clone();
+            let mut dense = slam_rs::linearize::DenseHbWorkspace::default();
+            // Repeat to exercise clearing and reuse of the per-block buffers.
+            for _ in 0..2 {
+                let (error, valid) = serial
+                    .linearize_problem(&problem.estimator, &inputs, None)
+                    .unwrap();
+                let (parallel_error, parallel_valid) = pooled
+                    .linearize_problem(&problem.estimator, &inputs, Some(&pool))
+                    .unwrap();
+                assert_eq!(error.to_bits(), parallel_error.to_bits());
+                assert_eq!(valid, parallel_valid);
+                serial.perform_qr(None).unwrap();
+                pooled.perform_qr(Some(&pool)).unwrap();
+                let (h, b) = serial.get_dense_h_b(&problem.estimator, &inputs).unwrap();
+                let (ph, pb) = pooled
+                    .get_dense_h_b_into(&problem.estimator, &inputs, &mut dense)
+                    .unwrap();
+                for (expected, actual) in h.iter().chain(b.iter()).zip(ph.iter().chain(pb.iter())) {
+                    assert_eq!(
+                        expected.to_bits(),
+                        actual.to_bits(),
+                        "{threads} workers, filtered={filtered}"
+                    );
+                }
+                let mut rng = Rng::new(123);
+                let inc = DVector::from_iterator(
+                    problem.aom.total_size(),
+                    (0..problem.aom.total_size()).map(|_| rng.symmetric() / 100.0),
+                );
+                let mut serial_ba = problem.estimator.clone();
+                let mut pooled_ba = problem.estimator.clone();
+                let diff = serial
+                    .back_substitute(&mut serial_ba, &inputs, &inc)
+                    .unwrap();
+                let parallel_diff = pooled
+                    .back_substitute(&mut pooled_ba, &inputs, &inc)
+                    .unwrap();
+                assert_eq!(diff.to_bits(), parallel_diff.to_bits());
+                for (expected, actual) in serial_ba
+                    .lmdb
+                    .landmarks()
+                    .iter()
+                    .zip(pooled_ba.lmdb.landmarks())
+                {
+                    for (expected, actual) in expected
+                        .direction
+                        .iter()
+                        .chain(std::iter::once(&expected.inv_dist))
+                        .zip(
+                            actual
+                                .direction
+                                .iter()
+                                .chain(std::iter::once(&actual.inv_dist)),
+                        )
+                    {
+                        assert_eq!(expected.to_bits(), actual.to_bits());
+                    }
+                }
+            }
+        }
     }
 }
 

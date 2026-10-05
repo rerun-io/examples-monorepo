@@ -284,10 +284,11 @@ fn linearize_for_marginalization<S: LieScalar>(
         fixed_frames: inputs.fixed_frames,
     };
     // The linearizer copies Huber threshold and observation deviation from the estimator.
+    // These filtered blocks are too small to repay worker handoff on the RK3588.
     let mut lqr: LinearizationAbsQR<S> =
         LinearizationAbsQR::new(estimator, aom, LinearizationOptions::default(), &lin_inputs)?;
-    let (error, numerically_valid) = lqr.linearize_problem(estimator, &lin_inputs)?;
-    lqr.perform_qr()?;
+    let (error, numerically_valid) = lqr.linearize_problem(estimator, &lin_inputs, None)?;
+    lqr.perform_qr(None)?;
     let (h, b) = lqr.get_dense_q2jp_q2r(estimator, &lin_inputs)?;
     Ok(LinearizedWindow {
         h,

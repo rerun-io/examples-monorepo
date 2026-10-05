@@ -17,6 +17,7 @@ use super::{
     EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, fixed_keyframes, lm_converged,
 };
 use crate::duration_ns;
+use crate::frontend::parallel::WorkPool;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
 use crate::linearize::{
@@ -142,7 +143,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// # Errors
     /// Returns typed errors for prior-order mismatch, invalid linearization,
     /// missing ordering entries and failures from the linearizer.
-    pub(super) fn optimize(&mut self, t_ns: i64) -> Result<SolveOutcome<S>, EstimatorError> {
+    pub(super) fn optimize(
+        &mut self,
+        t_ns: i64,
+        pool: Option<&WorkPool>,
+    ) -> Result<SolveOutcome<S>, EstimatorError> {
         let mut lm: Vec<LmIteration<S>> = Vec::new();
         let mut timings: StageTimings = StageTimings::default();
         // five states have to accumulate before the first
@@ -231,11 +236,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         while it <= config.vio_max_iterations && termination.is_none() {
             let mark: std::time::Instant = std::time::Instant::now();
-            let (error_total, numerically_valid) = lqr.linearize_problem(ba, &inputs)?;
+            let (error_total, numerically_valid) = lqr.linearize_problem(ba, &inputs, pool)?;
             if !numerically_valid {
                 return Err(EstimatorError::NumericallyInvalid { t_ns });
             }
-            lqr.perform_qr()?;
+            lqr.perform_qr(pool)?;
             timings.linearize_ns += duration_ns(mark);
 
             // A rejected trial restores the state and leaves the factors unchanged.
@@ -326,7 +331,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
                 // the true cost at the new state.
                 let mark: std::time::Instant = std::time::Instant::now();
-                let (vision_error, _) = ba.compute_error(None, S::zero())?;
+                let (vision_error, _) = ba.compute_error(None, S::zero(), pool)?;
                 let marg_prior_error: S = ba.compute_marg_prior_error(marg_data)?;
                 let (imu_error, bias_gyro_error, bias_accel_error) = compute_imu_error(
                     &aom,

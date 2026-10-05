@@ -24,15 +24,14 @@ use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
 use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::patch::OpticalFlowPatch;
-use slam_rs::frontend::patterns::{Pattern, Pattern51};
+use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
 };
 use slam_rs::gpu::{
-    GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramid, GpuPyramidBuilder, GpuRuntime,
-    StoreLayout, gpu_client,
+    GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, GpuRuntime,
+    gpu_client,
 };
 use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
@@ -47,6 +46,20 @@ use common::gpu::{
 };
 use common::{cornered_image, grid_positions, texture, textured_image};
 
+fn packed_texture(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
+    let source = textured_image(width, height, dx, dy);
+    let bytes: Vec<u8> = source
+        .data()
+        .iter()
+        .map(|pixel| (pixel >> 8) as u8)
+        .collect();
+    let mut image = ImageU16::default();
+    image
+        .fill_packed_u8_strided(&bytes, width, height, width)
+        .unwrap();
+    image
+}
+
 /// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
 fn both_pyramids(image: &ImageU16) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
     let (width, height): (usize, usize) = (image.width(), image.height());
@@ -56,7 +69,7 @@ fn both_pyramids(image: &ImageU16) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
     cpu_builder.build(0, image, &mut cpu).unwrap();
 
     let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     let mut gpu: GpuPyramid<GpuRuntime> = gpu_builder.allocate(width, height, LEVELS).unwrap();
     gpu_builder.build(0, image, &mut gpu).unwrap();
 
@@ -105,15 +118,46 @@ fn assert_levels_equal(cpu: &PyramidU16, gpu: &GpuPyramid<GpuRuntime>, label: &s
 
 #[test]
 fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
-    let image: ImageU16 = textured_image(960, 960, 0.0, 0.0);
-    let (cpu, gpu) = both_pyramids(&image);
-    assert_levels_equal(&cpu, &gpu, "960x960");
+    for (width, height) in [(960, 960), (640, 480), (517, 193), (64, 64)] {
+        let image: ImageU16 = textured_image(width, height, 0.0, 0.0);
+        let (cpu, gpu) = both_pyramids(&image);
+        assert_levels_equal(&cpu, &gpu, &format!("{width}x{height}"));
+    }
+}
+
+#[test]
+fn batched_gpu_pyramids_keep_every_camera_pixel_exact() {
+    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
+    let mut cpu_builder = CpuPyramidBuilder::new();
+    let pool = WorkPool::new(1).unwrap();
+    for (width, height) in [(640, 480), (517, 193), (65, 67)] {
+        let mut pyramids: Vec<_> = (0..4)
+            .map(|_| builder.allocate(width, height, LEVELS).unwrap())
+            .collect();
+        for frame in 0..2 {
+            let images: Vec<_> = (0..4)
+                .map(|camera| {
+                    packed_texture(width, height, (camera * 7 + frame) as f32, camera as f32)
+                })
+                .collect();
+            builder.build_frames(&images, &mut pyramids, &pool).unwrap();
+            for (camera, image) in images.iter().enumerate() {
+                let mut expected = cpu_builder.allocate(width, height, LEVELS).unwrap();
+                cpu_builder.build(camera, image, &mut expected).unwrap();
+                assert_levels_equal(
+                    &expected,
+                    &pyramids[camera],
+                    &format!("camera {camera}, frame {frame}"),
+                );
+            }
+        }
+    }
 }
 
 #[test]
 fn prepared_gpu_pixels_survive_reusing_the_source_image() {
     let mut image = textured_image(96, 96, 0.0, 0.0);
-    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     let mut pyramid = builder.allocate(96, 96, 1).unwrap();
     let expected = image.clone();
     builder
@@ -138,7 +182,7 @@ fn prepared_gpu_pixels_survive_reusing_the_source_image() {
 /// is refused the way every other unbuildable one is.
 #[test]
 fn a_pyramid_of_one_level_is_refused_rather_than_allocated_empty() {
-    let builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+    let builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     let refused = builder.allocate(64, 48, 0);
     assert!(
         matches!(
@@ -175,7 +219,7 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     let second: ImageU16 = textured_image(128, 96, 7.0, -3.0);
 
     let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     let mut gpu: GpuPyramid<GpuRuntime> = gpu_builder.allocate(128, 96, LEVELS).unwrap();
     gpu_builder.build(0, &first, &mut gpu).unwrap();
     gpu_builder.build(0, &second, &mut gpu).unwrap();
@@ -185,103 +229,6 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     cpu_builder.build(0, &second, &mut cpu).unwrap();
 
     assert_levels_equal(&cpu, &gpu, "the second frame of a reused pyramid");
-}
-
-/// Every patch of every level against the CPU reference, and how many were valid.
-///
-/// Written once because two fixtures need exactly it — the 512x512 tolerance
-/// one and the 4097x4097 one whose level-2 base is past `f32`'s integers — and
-/// a copy each would be two places for the bounds to drift apart in. The
-/// tolerances are the file's, and their reasons are on the assertions.
-fn assert_patches_agree(
-    cpu: &PyramidU16,
-    patches: &GpuPatches<Pattern51, GpuRuntime>,
-    positions: &PointsSoA,
-    label: &str,
-) -> usize {
-    let count: usize = positions.len();
-    let store: Vec<f32> = patches.read_store().unwrap();
-    let layout: StoreLayout = patches.layout();
-
-    let mut valid: usize = 0;
-    let mut worst_data: f32 = 0.0;
-    let mut worst_jacobian: f32 = 0.0;
-    let mut jacobian_scale: f32 = 0.0;
-    let mut level_image: ImageU16 = ImageU16::default();
-    for level in 0..cpu.num_levels() {
-        cpu.copy_level_into(level, &mut level_image).unwrap();
-        let scale: f32 = (1u32 << level) as f32;
-        for patch in 0..count {
-            let reference: OpticalFlowPatch<Pattern51> =
-                OpticalFlowPatch::new(&level_image, positions.get(patch) / scale);
-            assert_eq!(
-                store[layout.valid(level, patch)] != 0.0,
-                reference.valid,
-                "{label}: validity differs at level {level}, patch {patch}"
-            );
-            valid += usize::from(reference.valid);
-            for tap in 0..Pattern51::SIZE {
-                worst_data = worst_data
-                    .max((store[layout.data(level, tap, patch)] - reference.data[tap]).abs());
-                for row in 0..3 {
-                    let expected: f32 = reference.h_se2_inv_j_se2_t[row][tap];
-                    let actual: f32 = store[layout.jacobian(level, row, tap, patch)];
-                    worst_jacobian = worst_jacobian.max((actual - expected).abs());
-                    jacobian_scale = jacobian_scale.max(expected.abs());
-                }
-            }
-        }
-    }
-
-    println!(
-        "{label} patch build: data max-abs-diff {worst_data:.3e}, H^-1 J^T \
-         max-abs-diff {worst_jacobian:.3e} on a largest coefficient of \
-         {jacobian_scale:.3e} ({:.2e} relative), over {count} patches x {} taps \
-         x {} levels, {valid} of them valid",
-        worst_jacobian / jacobian_scale,
-        Pattern51::SIZE,
-        cpu.num_levels()
-    );
-    // The taps are mean-normalised, so `data` sits near 1 and an absolute bound
-    // is a relative one. Fused multiply-add is the whole difference.
-    assert!(
-        worst_data < 1e-5,
-        "{label}: patch data max-abs-diff {worst_data} over {count} patches x {} \
-         taps x {} levels",
-        Pattern51::SIZE,
-        cpu.num_levels()
-    );
-    // `H^-1 J^T` inherits `H`'s conditioning, so the bound is relative to the
-    // largest coefficient the reference produced on this texture.
-    assert!(
-        worst_jacobian < 1e-3 * jacobian_scale,
-        "{label}: H^-1 J^T max-abs-diff {worst_jacobian} against a largest \
-         coefficient of {jacobian_scale} ({:.2e} relative)",
-        worst_jacobian / jacobian_scale
-    );
-    valid
-}
-
-#[test]
-fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
-    let image: ImageU16 = textured_image(512, 512, 0.0, 0.0);
-    let positions: PointsSoA = grid_positions(512);
-    let count: usize = positions.len();
-    assert!(count > 20, "the grid produced only {count} patches");
-
-    let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
-    cpu_builder.build(0, &image, &mut cpu).unwrap();
-
-    let client = gpu_client().unwrap();
-    let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
-    let mut gpu = gpu_builder.allocate(512, 512, LEVELS).unwrap();
-    gpu_builder.build(0, &image, &mut gpu).unwrap();
-
-    let mut patches: GpuPatches<Pattern51, _> =
-        GpuPatches::new(client, MAX_KEYPOINTS, LEVELS + 1).unwrap();
-    patches.build(&gpu, &positions, None).unwrap();
-    assert_patches_agree(&cpu, &patches, &positions, "512x512");
 }
 
 /// [`textured_image`]'s field at 16.8 M pixels, in a fraction of the time.
@@ -356,29 +303,6 @@ fn a_level_base_past_f32_precision_reaches_the_kernels_exactly() {
     }
     let count: usize = positions.len();
 
-    // ── the patch build, which reads the base once per level per patch
-    let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidU16 = cpu_builder.allocate(SIDE, SIDE, LEVELS).unwrap();
-    cpu_builder.build(0, &first, &mut cpu).unwrap();
-    assert_eq!(cpu.level_size(2), Some((1024, 1024, 1024)));
-
-    let client = gpu_client().unwrap();
-    let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
-    let mut gpu = gpu_builder.allocate(SIDE, SIDE, LEVELS).unwrap();
-    gpu_builder.build(0, &first, &mut gpu).unwrap();
-    let mut patches: GpuPatches<Pattern51, _> =
-        GpuPatches::new(client, MAX_KEYPOINTS, LEVELS + 1).unwrap();
-    patches.build(&gpu, &positions, None).unwrap();
-    let valid: usize = assert_patches_agree(&cpu, &patches, &positions, "4097x4097");
-    // A patch that fell out of bounds is `-1` on both lanes and would agree
-    // whatever the base said, so the fixture states that none did.
-    assert_eq!(
-        valid,
-        count * (LEVELS + 1),
-        "the fixture compares {valid} valid patches of {}",
-        count * (LEVELS + 1)
-    );
-
     // ── one KLT step, which reads it once per level per iteration
     let guesses: FlowTransforms = guesses_at(&positions);
     let (cpu_result, gpu_result) = track_both_lanes(SIDE, &first, &second, &positions, &guesses);
@@ -444,7 +368,7 @@ fn track_both_lanes(
 
     // ── the GPU lane
     let client = gpu_client().unwrap();
-    let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
+    let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Default::default());
     let mut gpu_prev = gpu_builder.allocate(size, size, LEVELS).unwrap();
     let mut gpu_next = gpu_builder.allocate(size, size, LEVELS).unwrap();
     gpu_builder.build(0, first, &mut gpu_prev).unwrap();
@@ -456,9 +380,10 @@ fn track_both_lanes(
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
         1,
+        Default::default(),
     )
     .unwrap();
-    let mut gpu_patches: GpuPatches<Pattern51, _> = gpu_tracker.make_patches().unwrap();
+    let mut gpu_patches: GpuPatchSources<Pattern51, _> = gpu_tracker.make_patches().unwrap();
     gpu_patches.build(&gpu_prev, positions, None).unwrap();
     let mut gpu_result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
     gpu_tracker
@@ -747,7 +672,8 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
     for (width, height) in [(960usize, 240usize), (512, 192)] {
         let image: ImageU16 = cornered_image(width, height);
         let mut cpu: CpuCornerScan = CpuCornerScan::default();
-        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+        let mut gpu: GpuCornerScan<_> =
+            GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
         cpu.scan(0, &image).unwrap();
         gpu.scan(0, &image).unwrap();
 
@@ -760,7 +686,8 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
 /// lane returns, rather than caching an empty one and reporting success (D32).
 #[test]
 fn a_gpu_band_before_a_scan_is_refused() {
-    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut gpu: GpuCornerScan<_> =
+        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     assert_eq!(
         gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
         DetectError::NotScanned
@@ -774,7 +701,8 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let first: ImageU16 = cornered_image(512, 128);
     let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
 
-    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut gpu: GpuCornerScan<_> =
+        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     gpu.scan(0, &first).unwrap();
     assert!(
         !gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
@@ -804,11 +732,12 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
 
     // The lane the frontend runs: one builder, one scanner, one client, the
     // level-0 table between them.
-    let mut builder = GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
-    let mut shared: GpuCornerScan<_> = GpuCornerScan::new(client.clone()).unwrap();
-    shared.share_level0(builder.level0_table());
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
+    let mut shared: GpuCornerScan<_> =
+        GpuCornerScan::new(client.clone(), Default::default()).unwrap();
+
     // The lane before this change: the scanner uploads its own copy.
-    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(client).unwrap();
+    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(client, Default::default()).unwrap();
 
     let mut pyramids: Vec<_> = frames
         .iter()
@@ -817,6 +746,7 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     for (camera, frame) in frames.iter().enumerate() {
         builder.build(camera, frame, &mut pyramids[camera]).unwrap();
     }
+    shared.use_level0(&mut builder);
     for (camera, frame) in frames.iter().enumerate() {
         shared.scan(camera, frame).unwrap();
         alone.scan(camera, frame).unwrap();
@@ -1002,7 +932,11 @@ mod absent_gpu {
                 Some(child(
                     NAME,
                     "no-adapter",
-                    &[("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json")],
+                    &[
+                        ("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json"),
+                        // Older Vulkan loaders recognize only the legacy name.
+                        ("VK_ICD_FILENAMES", "/nonexistent/no-such-icd.json"),
+                    ],
                 ))
             },
         );
@@ -1178,7 +1112,7 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
     let points: [&PointsSoA; 2] = [&lane0, &lane1];
 
     let client = gpu_client().unwrap();
-    let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
     let mut prev = builder.allocate(SIZE, SIZE, LEVELS).unwrap();
     let mut next = builder.allocate(SIZE, SIZE, LEVELS).unwrap();
     builder.build(0, &first, &mut prev).unwrap();
@@ -1191,17 +1125,18 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
         2,
+        Default::default(),
     )
     .unwrap();
-    let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
+    let mut patches: GpuPatchSources<Pattern51, _> = tracker.make_patches().unwrap();
 
     // ── one at a time, which is the reference
     let mut alone: Vec<FlowResult> = Vec::new();
     for lane in 0..2 {
         let mut out: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
-        patches.prepare(&prev, points[lane], None).unwrap();
+        patches.build(&prev, points[lane], None).unwrap();
         tracker
-            .track_prepared(&prev, &next, &patches, &guesses[lane], &mut out)
+            .track(&prev, &next, &patches, &guesses[lane], &mut out)
             .unwrap();
         alone.push(out);
     }
@@ -1209,10 +1144,10 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
     // ── both launched, then one download
     let mut passes = Vec::new();
     for lane in 0..2 {
-        patches.prepare(&prev, points[lane], None).unwrap();
+        patches.build(&prev, points[lane], None).unwrap();
         passes.push(
             tracker
-                .submit_prepared(&prev, &next, &patches, &guesses[lane])
+                .submit(&prev, &next, &patches, &guesses[lane])
                 .unwrap(),
         );
     }
@@ -1246,29 +1181,145 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
     );
 }
 
-/// All uploads precede all builds, as in the frontend staging phase.
+/// The fused kernel preserves accepted translations and failure flags,
+/// including a partial final workgroup and camera boundaries inside subgroups.
 #[test]
-fn prepared_pyramids_stay_below_the_runtime_channel_depth() {
-    for levels in [5, 8] {
-        // `allocate` takes the number of halvings: these are six and nine levels.
-        let client = gpu_client().unwrap();
-        let mut builder = GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
-        let images: Vec<_> = (0..8).map(|_| textured_image(960, 960, 0.0, 0.0)).collect();
-        let mut pyramids: Vec<_> = (0..8)
-            .map(|_| builder.allocate(960, 960, levels).unwrap())
-            .collect();
-        client.flush().unwrap();
-        slam_rs::gpu::seam::reset_queue_peak();
-        builder.prepare_images(&images).unwrap();
-        for (camera, (image, pyramid)) in images.iter().zip(&mut pyramids).enumerate() {
-            builder.build(camera, image, pyramid).unwrap();
+fn fused_temporal_batch_matches_cpu() {
+    use slam_rs::frontend::tracker::TrackInput;
+    let client = gpu_client().unwrap();
+    let mut builder = CpuPyramidBuilder::new();
+    let mut pyramids = [Vec::new(), Vec::new()];
+    let mut images = [Vec::new(), Vec::new()];
+    let mut positions = Vec::new();
+    let mut guesses = Vec::new();
+    let mut expected = Vec::new();
+    for camera in 0..4 {
+        for (frame, frame_pyramids) in pyramids.iter_mut().enumerate() {
+            let mut image = packed_texture(512, 512, frame as f32 * 2.75, frame as f32 * -1.5);
+            if camera == 3 {
+                image
+                    .fill_packed_u8_strided(&vec![0; 512 * 512], 512, 512, 512)
+                    .unwrap();
+            }
+            let mut pyramid = builder.allocate(512, 512, LEVELS).unwrap();
+            builder.build(camera, &image, &mut pyramid).unwrap();
+            frame_pyramids.push(pyramid);
+            images[frame].push(image);
         }
-        let peak = slam_rs::gpu::seam::queue_peak();
-        assert!(
-            peak < slam_rs::gpu::CHANNEL_TASKS,
-            "eight cameras / {} levels queued {peak} tasks; leave room for the flush",
-            levels + 1
-        );
-        client.flush().unwrap();
+        let mut points = PointsSoA::with_capacity(33);
+        let mut input = FlowTransforms::with_capacity(33);
+        for i in 0..33 {
+            let point = Vector2::new(90.0 + (i % 6) as f32 * 55.0, 90.0 + (i / 6) as f32 * 55.0);
+            points.push(point);
+            let mut guess = point;
+            if i % 11 == 0 {
+                guess.x = -5.0;
+            }
+            input.push(&AffineCompact2f::at(guess));
+        }
+        let mut tracker = CpuPatchTracker::<Pattern51>::new(
+            33,
+            LEVELS + 1,
+            MAX_ITERATIONS,
+            MAX_RECOVERED_DIST2,
+            WorkPool::new(1).unwrap(),
+        )
+        .unwrap();
+        let mut patches = tracker.make_patches().unwrap();
+        patches.build(&pyramids[0][camera], &points, None).unwrap();
+        let mut result = FlowResult::with_capacity(33);
+        tracker
+            .track(
+                &pyramids[0][camera],
+                &pyramids[1][camera],
+                &patches,
+                &input,
+                &mut result,
+            )
+            .unwrap();
+        expected.push(result);
+        positions.push(points);
+        guesses.push(input);
+    }
+    assert!(
+        expected
+            .iter()
+            .take(3)
+            .all(|r| (0..33).filter(|&i| r.is_valid(i)).count() >= 25)
+    );
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
+    let mut gpu_pyramids: Vec<Vec<_>> = images
+        .iter()
+        .map(|frame| {
+            frame
+                .iter()
+                .map(|image| {
+                    builder
+                        .allocate(image.width(), image.height(), LEVELS)
+                        .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    for frame in 0..2 {
+        builder
+            .build_frames(
+                &images[frame],
+                &mut gpu_pyramids[frame],
+                &WorkPool::new(1).unwrap(),
+            )
+            .unwrap();
+    }
+    let mut tracker = GpuPatchTracker::<Pattern51, _>::new(
+        client,
+        33,
+        LEVELS + 1,
+        MAX_ITERATIONS,
+        MAX_RECOVERED_DIST2,
+        4,
+        Default::default(),
+    )
+    .unwrap();
+    let mut patches = tracker.make_patches().unwrap();
+    let mut inputs: Vec<_> = positions
+        .into_iter()
+        .zip(guesses)
+        .enumerate()
+        .map(|(camera, (positions, guesses))| TrackInput {
+            source: camera,
+            destination: camera,
+            positions,
+            guesses,
+            ..Default::default()
+        })
+        .collect();
+    tracker
+        .submit_batch(
+            &gpu_pyramids[0],
+            &gpu_pyramids[1],
+            &mut inputs,
+            &mut patches,
+            true,
+        )
+        .unwrap();
+    tracker.collect().unwrap();
+    for (camera, input) in inputs.iter().enumerate() {
+        let actual = tracker.result(input.result);
+        let cpu = &expected[camera];
+        for point in 0..33 {
+            assert_eq!(
+                actual.is_valid(point),
+                cpu.is_valid(point),
+                "camera {camera}, point {point}"
+            );
+            if cpu.is_valid(point) {
+                let delta = actual.transform(point).translation - cpu.transform(point).translation;
+                assert!(
+                    delta.norm() < LANE_POSITION_BOUND,
+                    "camera {camera}, point {point}, error {}",
+                    delta.norm()
+                );
+            }
+        }
     }
 }

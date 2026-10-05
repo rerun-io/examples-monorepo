@@ -16,12 +16,14 @@ re-exports every name here so a converter has one import to make.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import functools
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -76,8 +78,8 @@ def remux_prefix(source: Path, target: Path, count: int) -> None:
 
 
 @contextlib.contextmanager
-def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceTimer) -> Iterator[Iterator[Path]]:
-    """Encode with three workers; yield clips in submission order while later jobs run.
+def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceTimer, *, workers: int = 3) -> Iterator[Iterator[Path]]:
+    """Encode with the requested workers; yield clips in submission order while later jobs run.
 
     Each clip is deleted when the caller requests the next one, so at most one finished clip waits on disk
     for logging. Cleanup waits for encoders and removes every leftover, including on failure.
@@ -93,7 +95,7 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
 
     started: float = perf_counter()
     try:
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures: list[Future[None]] = [executor.submit(encode, job) for _, job in jobs]
 
             def ready() -> Iterator[Path]:
@@ -195,14 +197,14 @@ def resolve_ffmpeg() -> Path:
     return Path(found)
 
 
-@functools.lru_cache
+@functools.cache
 def require_av1_nvenc(ffmpeg: Path) -> None:
     """Refuse an ffmpeg that cannot encode AV1 on the GPU, before any frame is read.
 
     Checked up front because the alternative failure is a software AV1 encode
     that takes hours on a full sequence and looks like a hang. Cached per binary
     path: a batch run asks once per camera and the answer cannot change under it.
-    Only the *pass* is cached — ``lru_cache`` stores no entry for a call that
+    Only the *pass* is cached — ``cache`` stores no entry for a call that
     raised, so a rejected binary is re-interrogated (and re-rejected) every time.
 
     Args:
@@ -212,6 +214,58 @@ def require_av1_nvenc(ffmpeg: Path) -> None:
     if "av1_nvenc" in listed.stdout:
         return
     raise RuntimeError(f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg")
+
+
+NVENC_SLOT_DIR: Path = Path("/tmp/dataforge-nvenc")
+"""Shared flock files; all dataforge processes on the machine use the same directory."""
+
+
+@contextlib.contextmanager
+def nvenc_slot() -> Iterator[int]:
+    """Yield a locked fd for ffmpeg to inherit; release explicitly after the child exits."""
+    value: str = os.environ.get("DATAFORGE_NVENC_SLOTS", "6")
+    try:
+        slots: int = int(value)
+    except ValueError:
+        raise ValueError(f"DATAFORGE_NVENC_SLOTS must be a positive int, got {value!r}") from None
+    if slots <= 0:
+        raise ValueError(f"DATAFORGE_NVENC_SLOTS must be a positive int, got {value!r}")
+    NVENC_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    started: float = time.monotonic()
+    warned: bool = False
+    while True:
+        for index in range(slots):
+            with (NVENC_SLOT_DIR / f"slot-{index}.lock").open("a+b") as slot:
+                try:
+                    fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                try:
+                    yield slot.fileno()
+                finally:
+                    fcntl.flock(slot, fcntl.LOCK_UN)
+                return
+        if not warned and time.monotonic() - started > 60.0:
+            print("NVENC: waiting more than 60 s for a dataforge encoder slot", flush=True)
+            warned = True
+        time.sleep(0.2)
+
+
+def nvenc_session_failure(stderr: str) -> bool:
+    """Driver session-limit messages that need an encode retry, never a decode fallback."""
+    return any(message in stderr for message in ("OpenEncodeSessionEx failed", "incompatible client key"))
+
+
+def run_nvenc(run: Callable[[int], subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
+    """Run an encoder in a shared slot; on a session-limit failure release it, back off 2-32 s and retry."""
+    for delay in (2.0, 4.0, 8.0, 16.0, 32.0):
+        with nvenc_slot() as fd:
+            result: subprocess.CompletedProcess[str] = run(fd)
+        if result.returncode == 0 or not nvenc_session_failure(result.stderr):
+            return result
+        time.sleep(delay)
+    with nvenc_slot() as fd:
+        return run(fd)
 
 
 def _nvenc_args(*, gop: int, cq: int) -> list[str]:
@@ -234,12 +288,15 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
-def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int, crop: tuple[int, int, int, int] | None = None) -> int:
+def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int, crop: tuple[int, int, int, int] | None = None, decode: Literal["cpu", "cuda"] = "cpu") -> int:
     """Decode a file to gray and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     Optional crop is (width, height, x, y), applied before grayscale conversion.
+    CUDA decode keeps even-sized grayscale sources on the GPU without CPU filters.
+    A crop always uses CPU decode. Other NVDEC failures fall back to CPU; session
+    failures retry the same command and never trigger that fallback.
     """
     if frames <= 0:
         raise ValueError("frames must be positive")
@@ -248,31 +305,25 @@ def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: in
     crop_filter: str = "" if crop is None else "crop=" + ":".join(str(value) for value in crop) + ","
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
-    command: list[str] = [
-        str(binary),
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-r",
-        str(fps),
-        "-i",
-        str(source),
-        "-map",
-        "0:v:0",
-        "-an",
-        "-vf",
-        f"{crop_filter}format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}",
-        "-fps_mode",
-        "passthrough",
-        *_nvenc_args(gop=gop, cq=cq),
-        "-frames:v",
-        str(frames),
-        str(output),
-    ]
-    result: subprocess.CompletedProcess[str] = subprocess.run(command, capture_output=True, text=True, check=False)
+    def run(*, cuda: bool) -> subprocess.CompletedProcess[str]:
+        command: list[str] = [
+            str(binary), "-hide_banner", "-loglevel", "error", "-y",
+            *(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] if cuda else []),
+            "-r", str(fps), "-i", str(source), "-map", "0:v:0", "-an",
+            *([] if cuda else ["-vf", f"{crop_filter}format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}"]),
+            "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq),
+            "-frames:v", str(frames), str(output),
+        ]
+        return run_nvenc(lambda fd: subprocess.run(command, pass_fds=(fd,), capture_output=True, text=True, check=False))
+
+    cuda: bool = decode == "cuda" and crop is None
+    result: subprocess.CompletedProcess[str] = run(cuda=cuda)
+    if cuda and result.returncode and not nvenc_session_failure(result.stderr):
+        tail: str = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no stderr"
+        print(f"{source}: NVDEC path failed ({tail}); CPU decode")
+        result = run(cuda=False)
     if result.returncode:
-        raise RuntimeError(f"ffmpeg exited {result.returncode} while transcoding {source}:\n{result.stderr}")
+        raise RuntimeError(f"ffmpeg exited {result.returncode} while transcoding {source}:\n{result.stderr[-4000:]}")
     written: int = mp4_frame_count(output)
     if written != frames:
         raise ValueError(f"{output} holds {written} samples, expected {frames}")
@@ -356,23 +407,25 @@ def encode_frames_to_mp4(
     ]
     complaints: list[bytes] = []
     fed: int = 0
-    process: subprocess.Popen[bytes] = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    assert process.stdin is not None and process.stderr is not None
-    drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
-    drain.start()
-    try:
-        for frame in frames:
-            process.stdin.write(frame)
-            fed += 1
-    except BrokenPipeError:
-        pass  # ffmpeg already died; its stderr below says why
-    finally:
-        # Closing flushes, so an encoder that already died would raise here and
-        # mask the RuntimeError below that carries its stderr.
-        with contextlib.suppress(BrokenPipeError):
-            process.stdin.close()
-        returncode: int = process.wait()
-        drain.join()
+    # One slot, no retry: a pipe consumes its frames once, so a session refused by an outside process fails the sequence.
+    with nvenc_slot() as fd:
+        process: subprocess.Popen[bytes] = subprocess.Popen(command, pass_fds=(fd,), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        assert process.stdin is not None and process.stderr is not None
+        drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
+        drain.start()
+        try:
+            for frame in frames:
+                process.stdin.write(frame)
+                fed += 1
+        except BrokenPipeError:
+            pass  # ffmpeg already died; its stderr below says why
+        finally:
+            # Closing flushes, so an encoder that already died would raise here and
+            # mask the RuntimeError below that carries its stderr.
+            with contextlib.suppress(BrokenPipeError):
+                process.stdin.close()
+            returncode: int = process.wait()
+            drain.join()
     if returncode != 0:
         stderr_text: str = b"".join(complaints).decode(errors="replace").strip()
         raise RuntimeError(f"ffmpeg exited {returncode} while encoding {output.name} after {fed} frames:\n{stderr_text}")

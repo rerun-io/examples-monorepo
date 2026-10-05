@@ -94,13 +94,18 @@ fn finishing_never_replaces_a_recording_created_by_another_writer() -> anyhow::R
 #[test]
 fn storage_failure_is_reported_and_never_published_as_complete() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let status = std::process::Command::new(std::env::current_exe()?)
+    // The child's output goes through pipes: its 4 KiB RLIMIT_FSIZE also limits writes to a stdout that is a regular file,
+    // so a test run logged to a file would fail on the child's own report.
+    let output = std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", "write_limit_child", "--ignored", "--nocapture"])
         .env("ROBOCAP_WRITE_LIMIT_DIRECTORY", directory.path())
-        .status()?;
+        .output()?;
     assert!(
-        status.success(),
-        "isolated storage-failure check failed: {status}"
+        output.status.success(),
+        "isolated storage-failure check failed: {}\n{}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     assert!(!directory.path().join("segment-0001.rrd").exists());
     assert!(directory.path().join("segment-0001.rrd.partial").exists());

@@ -11,7 +11,7 @@ from numpy import ndarray
 from serde import serde
 
 from dataforge.datasets.show3d_calibration import validate_transform
-from dataforge.datasets.show3d_source import DEFAULT_CONFIDENCE, FrameClock, FrameInfo
+from dataforge.datasets.show3d_source import OBJECT_TRUST, FrameClock, FrameInfo
 from dataforge.records import read_json
 
 
@@ -45,7 +45,7 @@ class ObjectFrame(FrameInfo):
     @property
     def trusted(self) -> bool:
         """Posed and above the Hub's default threshold; the one place that rule lives for objects."""
-        return self.confidence > DEFAULT_CONFIDENCE
+        return self.confidence > OBJECT_TRUST
 
     def __post_init__(self) -> None:
         if not isfinite(self.confidence) or self.confidence < 0.0:

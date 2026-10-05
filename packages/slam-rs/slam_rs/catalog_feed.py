@@ -62,6 +62,7 @@ from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframe
 from simplecv.catalog_video_codec import CatalogCodecName, wrap_mp4
 from simplecv.imu_calibration import ImuCalibration
 
+from slam_rs import _core
 from slam_rs.catalog_calibration import (
     CHILD_FROM_PARENT as CHILD_FROM_PARENT,
 )
@@ -96,7 +97,6 @@ from slam_rs.catalog_timing import (
 from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
-from slam_rs.config import RobocapConfig
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -246,28 +246,11 @@ class RigProfile:
         if self.frameset_tolerance_ns < 0:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
 
-    @classmethod
-    def from_robocap(cls, reference: RobocapConfig) -> "RigProfile":
-        """Read the RoboCap rig selection, downscale, clock and pairing rules from slam.toml.
-
-        Args:
-            reference: The runtime ``[robocap]`` table, which is where the five
-                departures from MSD are written down.
-
-        Returns:
-            The profile the probe and both fleet tools open the rig with.
-        """
-        return cls(
-            camera_names=reference.camera_names,
-            downscale=reference.downscale,
-            interpolate_accel_onto_gyro=reference.interpolate_accel_onto_gyro,
-            frameset_tolerance_ns=reference.frameset_tolerance_ns,
-            video_time_is_absolute=reference.video_time_is_absolute,
-        )
-
-
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
+
+ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
+"""RoboCap selection, downscale and clock rules from the Rust core."""
 
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
@@ -858,19 +841,10 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
         streams[sensor] = (row_t_ns[valid], values)
     gyro_t_ns: Int64[ndarray, " n_samples"] = streams["gyro"][0]
     accel_t_ns: Int64[ndarray, " n_samples"] = streams["accel"][0]
-    if gyro_t_ns.size and not bool(np.all(np.diff(gyro_t_ns) > 0)):
-        raise ValueError(f"{segment_id}: IMU timestamps are not strictly increasing")
-    # MSD logs both sensors on identical timestamps, so pairing is an assertion.
-    # RoboCap's two channels run on their own clocks (10,745 gyro against 10,751
-    # accel on session 15), so interpolate accelerometer values
-    # onto the gyroscope's timestamps; the core only ever sees the paired form.
-    if not interpolate_accel:
-        if not np.array_equal(gyro_t_ns, accel_t_ns):
-            raise ValueError(
-                f"{segment_id}: {len(gyro_t_ns)} gyro and {len(accel_t_ns)} accel samples are not on identical timestamps; pair them before feeding"
-            )
-        return ImuStream(t_ns=gyro_t_ns, gyro_rad_s=streams["gyro"][1], accel_m_s2=streams["accel"][1])
-    return pair_accel_onto_gyro(gyro_t_ns, streams["gyro"][1], accel_t_ns, streams["accel"][1])
+    try:
+        return _core.catalog_pair_imu(gyro_t_ns, streams["gyro"][1], accel_t_ns, streams["accel"][1], interpolate_accel)
+    except ValueError as error:
+        raise ValueError(f"{segment_id}: {error}") from error
 
 
 def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:

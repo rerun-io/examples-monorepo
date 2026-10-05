@@ -148,6 +148,36 @@ pub struct VioConfig {
     /// trials. `configs/profiles/fast.json` selects this schedule through the `port.` key.
     #[serde(rename = "port.frame_update_max_iterations")]
     pub port_frame_update_max_iterations: i32,
+    /// Defer a keyframe's joint solve beside the next frameset's frontend (D84).
+    ///
+    /// Off solves a keyframe frameset's window before the frameset returns. On,
+    /// and with [`Self::port_frame_update_max_iterations`] above zero, a
+    /// keyframe frameset first gets the newest-state update every other
+    /// frameset gets, returns that pose, and leaves triangulation, the joint
+    /// solve and the marginalization pending; [`crate::Vio::track`] runs them on
+    /// a second thread while the next frameset's frontend runs, and the
+    /// estimator finishes them before it touches the window again. The
+    /// frontend's prediction for that next frameset comes from the updated, not
+    /// the jointly solved, state. Deterministic: no timing enters a decision.
+    #[serde(rename = "port.keyframe_solve_deferred")]
+    pub port_keyframe_solve_deferred: bool,
+    /// Run the estimator one frameset behind the frontend (M7, VkVIO's overlap).
+    ///
+    /// Off, [`crate::Vio::track`] runs frameset t's frontend and then its
+    /// estimator, and returns t's pose. On, it runs frameset t's frontend on
+    /// the calling thread while frameset t-1's estimator runs on a second
+    /// thread, and returns t-1's pose; [`crate::Vio::flush`] returns the last
+    /// one. The frontend's prediction for t then starts from the newest state
+    /// it has, t-2's, propagated over [t-2, t] by its own IMU preintegration,
+    /// and the depth guess it reprojects with is one frameset older too.
+    /// Deterministic: the lag is structural, no timing enters a decision.
+    #[serde(rename = "port.frontend_lag")]
+    pub port_frontend_lag: bool,
+    /// Stop a KLT level after a valid update when both the translation norm and
+    /// `abs(theta) * 4` are below this many level pixels. `None` keeps every step.
+    /// Supported by the CPU tracker and fused GPU kernels; must be finite and positive.
+    #[serde(rename = "port.klt_exit_step_px")]
+    pub port_klt_exit_step_px: Option<f32>,
 
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
@@ -259,6 +289,9 @@ impl Default for VioConfig {
 
             port_redetect_survivor_ratio: 0.0,
             port_frame_update_max_iterations: 0,
+            port_keyframe_solve_deferred: false,
+            port_frontend_lag: false,
+            port_klt_exit_step_px: None,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
@@ -296,6 +329,15 @@ impl VioConfig {
         Ok(wrapper.value0)
     }
 
+    /// Apply a flat profile overlay to a wrapped config, validating keys and values.
+    pub fn with_overlay(base: &str, overlay: &str) -> Result<Self, ConfigError> {
+        let mut document: Value0<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(base)?;
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(overlay)?;
+        document.value0.extend(fields);
+        Self::from_json_str(&serde_json::to_string(&document)?)
+    }
+
     /// Write configuration JSON with its `value0` wrapper.
     pub fn to_json_string(&self) -> Result<String, ConfigError> {
         Ok(serde_json::to_string_pretty(&Value0 { value0: self })?)
@@ -313,6 +355,54 @@ mod tests {
         let text = r#"{"value0":{"config.not_a_real_field":3}}"#;
         let error = VioConfig::from_json_str(text).unwrap_err();
         assert!(error.to_string().contains("config.not_a_real_field"));
+    }
+
+    #[test]
+    fn overlays_use_the_config_schema_and_preserve_other_fields() {
+        let config = VioConfig::with_overlay(
+            MSDMO_JSON,
+            include_str!("../../../configs/profiles/fast.json"),
+        )
+        .unwrap();
+        assert_eq!(config.port_klt_exit_step_px, Some(0.05));
+        assert_eq!(config.optical_flow_image_safe_radius, 388.0);
+        assert!(
+            VioConfig::with_overlay(r#"{"value0":{}}"#, r#"{"port.frontend_lag":true}"#)
+                .unwrap()
+                .port_frontend_lag
+        );
+        for overlay in [
+            r#"{"port.typo":true}"#,
+            r#"{"port.frontend_lag":"yes"}"#,
+            "[]",
+        ] {
+            assert!(VioConfig::with_overlay(MSDMO_JSON, overlay).is_err());
+        }
+    }
+
+    #[test]
+    fn klt_exit_is_opt_in_and_round_trips() {
+        for threshold in ["null", "0.01", "0.03", "0.05"] {
+            let text = format!(r#"{{"value0":{{"port.klt_exit_step_px":{threshold}}}}}"#);
+            let config = VioConfig::from_json_str(&text).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&config.to_json_string().unwrap()).unwrap();
+            let expected: serde_json::Value = serde_json::from_str(threshold).unwrap();
+            let actual = &written["value0"]["port.klt_exit_step_px"];
+            if let Some(expected) = expected.as_f64() {
+                assert!((actual.as_f64().unwrap() - expected).abs() < 1e-8);
+            } else {
+                assert!(actual.is_null());
+            }
+        }
+        let defaults: serde_json::Value =
+            serde_json::from_str(&VioConfig::default().to_json_string().unwrap()).unwrap();
+        assert!(
+            defaults["value0"]
+                .get("port.klt_exit_step_px")
+                .unwrap()
+                .is_null()
+        );
     }
 
     const MSDMI_JSON: &str = include_str!("../../../configs/msdmi_config.json");
@@ -363,6 +453,14 @@ mod tests {
         assert_eq!(normalised, index);
     }
 
+    #[test]
+    fn removed_gpu_kernel_selector_is_rejected() {
+        assert!(
+            VioConfig::from_json_str(r#"{"value0":{"port.gpu_klt_kernel":"butterfly16"}}"#)
+                .is_err()
+        );
+    }
+
     /// Even disabled port knobs are written explicitly.
     #[test]
     fn the_port_knobs_are_written_in_every_shipped_config() {
@@ -372,6 +470,8 @@ mod tests {
                 serde_json::from_str(&config.to_json_string().unwrap()).unwrap();
             assert_eq!(written["value0"]["port.redetect_survivor_ratio"], 0.0);
             assert_eq!(written["value0"]["port.frame_update_max_iterations"], 0);
+            assert_eq!(written["value0"]["port.keyframe_solve_deferred"], false);
+            assert_eq!(written["value0"]["port.frontend_lag"], false);
         }
     }
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from functools import cached_property
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -46,6 +45,7 @@ from dataforge.records import read_json
 from dataforge.umetrack_hands import HandProfileDoc, read_hand_profile
 from dataforge.writing import TableField, TableFields
 
+REVISION: str = "903e6bc94faa91ae209b5f4efe32ec9033b7e80f"
 REPO_ID: str = "facebook/show3d-dataset"
 SCENE_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0))
 """The full layout's eye on the back rig frame."""
@@ -112,8 +112,11 @@ class Show3dConfig(DataforgeDatasetConfig):
     """Prioritize scenes with an object-pose annotation."""
     keep_raw: bool = False
     """Keep source MP4s after success; small sidecars are always kept."""
-    revision: str | None = None
-    """Hub branch, tag or commit; resolved once per run to a commit SHA."""
+    revision: str = REVISION
+    """Pinned Hub commit; a deliberate override must be a full lowercase commit SHA."""
+
+    def __post_init__(self) -> None:
+        transports.require_commit_sha(self.revision)
 
 
 class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
@@ -129,20 +132,12 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
     )
     """SHOW3D publication and loading order."""
 
-    @cached_property
-    def commit_sha(self) -> str:
-        """Resolve the one Hub commit read by every fetch in this run."""
-        resolved: str | None = transports.repo_revision(REPO_ID, self.config.revision)
-        if resolved is None:
-            raise RuntimeError(f"{REPO_ID} resolved no commit sha for {self.config.revision or 'the default branch'}")
-        return resolved
-
     def download(self) -> None:
         transports.hf_fetch(
             REPO_ID,
             allow_patterns=["dataset_index_train.parquet", "dataset_index_test.parquet", "hand_pose/hand_profiles/*/profile_umetrack.json"],
             local_dir=self.config.root,
-            revision=self.commit_sha,
+            revision=self.config.revision,
         )
         download_meshes(self.config.root)
         sources: list[tuple[SequenceIdentity, IndexRow]] = self.discover()
@@ -195,13 +190,13 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         """Fetch absent raw inputs once; force applies only to published layers."""
         missing: list[str] = [name for name in files if not (self.config.root / name).is_file()]
         if missing:
-            transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.commit_sha)
+            transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.config.revision)
 
-    def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
+    def wanted_layers(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> dict[str, bool]:
+        """Layers selected by availability and existing outputs."""
         targets: dict[str, Path] = self.targets(identity)
-        alias: str = source.object_alias
-        mesh: str | None = mesh_name(alias)
-        wants: dict[str, bool] = {
+        mesh: str | None = mesh_name(source.object_alias)
+        return {
             paths.BASE_LAYER: not writing.should_skip(targets[paths.BASE_LAYER], force=force),
             paths.HAND_POSE_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force),
             paths.CAPTIONS_LAYER: source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force),
@@ -209,10 +204,9 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             paths.OBJECT_MESH_LAYER: source.has_object_pose and mesh is not None and not writing.should_skip(targets[paths.OBJECT_MESH_LAYER], force=force),
             paths.HAND_MESH_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_MESH_LAYER], force=force),
         }
-        if wants[paths.OBJECT_POSE_LAYER] and mesh is None:
-            print(f"{identity.sequence_key}: no object_mesh: alias {alias!r} has no HOT3D mesh mapping")
-        if not any(wants.values()):
-            return targets[paths.BASE_LAYER]
+
+    def planned_files(self, identity: SequenceIdentity, source: IndexRow, *, wants: dict[str, bool]) -> list[str]:
+        """Sorted union of raw inputs for the selected layers."""
         key: str = identity.sequence_key
         files: set[str] = set(base_files(source, key) if wants[paths.BASE_LAYER] else [])
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or (wants[paths.OBJECT_POSE_LAYER] and source.has_hand_pose):
@@ -223,8 +217,25 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             files.update([*metadata_files(key), object_pose_file(key)])
         if wants[paths.OBJECT_POSE_LAYER]:
             files.update(calibration_file(key, camera) for camera in HEADSET_CAMERAS)
+        return sorted(files)
+
+    def prefetch(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> None:
+        """Fetch on a background thread; must not touch self.timer, recordings, or print per-sequence progress."""
+        wants: dict[str, bool] = self.wanted_layers(identity, source, force=force)
+        self.fetch_missing(self.planned_files(identity, source, wants=wants))
+
+    def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
+        targets: dict[str, Path] = self.targets(identity)
+        alias: str = source.object_alias
+        mesh: str | None = mesh_name(alias)
+        wants: dict[str, bool] = self.wanted_layers(identity, source, force=force)
+        if wants[paths.OBJECT_POSE_LAYER] and mesh is None:
+            print(f"{identity.sequence_key}: no object_mesh: alias {alias!r} has no HOT3D mesh mapping")
+        if not any(wants.values()):
+            return targets[paths.BASE_LAYER]
+        key: str = identity.sequence_key
         with self.timer.stage("fetch"):
-            self.fetch_missing(sorted(files))
+            self.fetch_missing(self.planned_files(identity, source, wants=wants))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
         scene: Scene | None = None
@@ -240,7 +251,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                         index=source,
                         timer=self.timer,
                         work_dir=work,
-                        hf_revision=self.commit_sha,
+                        hf_revision=self.config.revision,
                         default_blueprint=self.default_blueprint(),
                     )
             finally:
@@ -335,8 +346,8 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         subject: TableField = TableField("property:episode:subject_id", "subject")
         split: TableField = TableField("property:episode:split", "split")
         coverage: tuple[TableField, ...] = (
-            TableField("property:hand_pose:coverage_left_high_conf", "left hand coverage"),
-            TableField("property:hand_pose:coverage_right_high_conf", "right hand coverage"),
+            TableField("property:hand_pose:coverage_left", "left hand coverage"),
+            TableField("property:hand_pose:coverage_right", "right hand coverage"),
             TableField("property:object_pose:coverage", "object coverage"),
         )
         return TableFields(cards=(action, obj, caption, subject, split), table=(action, obj, subject, split, *coverage, caption))

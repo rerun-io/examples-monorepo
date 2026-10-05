@@ -9,7 +9,7 @@ import torch
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
+from slam_rs.catalog_feed import ROBOCAP_RIG, CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun, drive
@@ -40,7 +40,7 @@ def main(config: Config) -> None:
     settings: SlamConfig = load_slam_config()
     dataset_name: str = config.segment.split("__", 1)[0]
     is_robocap: bool = dataset_name == "robocap"
-    rig_profile: RigProfile = RigProfile.from_robocap(settings.robocap) if is_robocap else RigProfile()
+    rig_profile: RigProfile = ROBOCAP_RIG if is_robocap else RigProfile()
     catalog_url: str = config.catalog or settings.catalog_url
     # One manifest query resolves the dataset handle that open_segment and the final register share.
     segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]
@@ -52,6 +52,8 @@ def main(config: Config) -> None:
     if config.decode_device == "cuda" and not cuda_available:
         raise ValueError("CUDA decoding requires an available NVIDIA GPU and the slam-rs-cuda environment")
     decode_device: Literal["cpu", "cuda"] = "cuda" if config.decode_device == "cuda" or (config.decode_device == "auto" and cuda_available) else "cpu"
+    if decode_device == "cpu" and config.decode_device == "auto":
+        print("WARNING: decoding on the CPU: no CUDA device in this environment (the slam-rs-cuda environment decodes with NVDEC)", flush=True)
     print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
@@ -61,6 +63,9 @@ def main(config: Config) -> None:
         calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
         flow: _core.VioConfig = _core.VioConfig.from_json(config_text)
         use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
+        if config.backend == "auto" and _core.gpu_backend is None:
+            print("WARNING: tracking on the CPU: this slam_rs._core has no GPU frontend (run slam-rs-wgpu-build; the "
+                  "slam-rs-catalog-layer task does it first)", flush=True)
         vio: _core.Vio
         try:
             vio = _core.Vio(calibration, flow, gpu=use_gpu)

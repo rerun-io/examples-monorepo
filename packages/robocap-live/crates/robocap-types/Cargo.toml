@@ -1,0 +1,12 @@
+[package]
+name = "robocap-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The RoboCap's data types (frameset, IMU sample, source event, SLAM pose) with no runtime, device or estimator."
+
+[dependencies]
+kornia-image = { workspace = true }
+nalgebra = { workspace = true }
+serde = { workspace = true }

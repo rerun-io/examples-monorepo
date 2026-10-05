@@ -10,6 +10,8 @@ from tomllib import TOMLDecodeError
 from serde import SerdeError, coerce, field, serde
 from serde.toml import from_toml
 
+from slam_rs import _core
+
 SLAM_CONFIG_PATH: Path = Path(__file__).resolve().parents[1] / "slam.toml"
 """Checked-in runtime settings, beside the package."""
 
@@ -31,24 +33,14 @@ class DatasetProperties:
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class RobocapConfig:
-    """RoboCap camera selection, clock rules and estimator files."""
+    """RoboCap device and estimator files; Rust owns the rig facts."""
 
     device_id: str
     """The device whose sessions the catalog holds: segment ids are ``robocap__<device_id>__<session_id>``."""
-    camera_names: tuple[str, ...]
-    """The cameras the reference ran, by their ``name`` static, in the calibration's own order."""
-    downscale: int
-    """Integer factor the reference reader downscaled both frames and intrinsics by."""
-    frameset_tolerance_ns: int
-    """How far a camera's frame may sit from the anchor camera's and still be the same capture."""
-    interpolate_accel_onto_gyro: bool
-    """Whether the accelerometer has to be interpolated onto the gyroscope's timestamps."""
-    video_time_is_absolute: bool
-    """Whether ``video_time`` is already the device clock the reference trajectories are on."""
     vio_config: str
     """VIO configuration selected for replay, relative to the package root."""
     calibration: str
-    """Rig calibration selected for replay, at :attr:`downscale`, relative to the package root."""
+    """Rig calibration selected for replay, at the core rig profile's downscale, relative to the package root."""
 
 
 @serde(type_check=coerce, deny_unknown_fields=True)
@@ -90,7 +82,6 @@ class SlamConfig:
 
         Raises:
             ValueError: If the configuration has no such dataset.
-            KeyError: If an overlay key is absent from the vendored config.
         """
         return self._config_text(self.dataset(dataset_name).vio_config, profile)
 
@@ -122,10 +113,6 @@ def load_slam_config(path: Path = SLAM_CONFIG_PATH) -> SlamConfig:
     return replace(parsed, package_root=path.parent, catalog_url=os.environ.get(CATALOG_URL_ENV, parsed.catalog_url))
 
 
-PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio", "port.frame_update_max_iterations"})
-"""Additional port configuration keys accepted in profile overlays."""
-
-
 def config_text_sha256(text: str) -> str:
     """Identify the resolved configuration without changing its serialization.
 
@@ -150,8 +137,7 @@ def profiled_config_text(path: Path, profile: str = "reference", profiles: Path 
         Config JSON with the overlay applied.
 
     Raises:
-        KeyError: If an overlay key is neither in the base value0 namespace nor
-            one of :data:`PORT_CONFIG_KEYS`.
+        ValueError: If Rust rejects the config, an overlay key, or its value.
     """
     text: str = path.read_text()
     overlay: dict = json.loads((profiles / f"{profile}.json").read_text())
@@ -159,8 +145,7 @@ def profiled_config_text(path: Path, profile: str = "reference", profiles: Path 
         return text
     document: dict = json.loads(text)
     values: dict = document["value0"]
-    for key in overlay:
-        if key not in values and key not in PORT_CONFIG_KEYS:
-            raise KeyError(key)
     values.update(overlay)
-    return json.dumps(document)
+    resolved: str = json.dumps(document)
+    _core.VioConfig.from_json(resolved)
+    return resolved
