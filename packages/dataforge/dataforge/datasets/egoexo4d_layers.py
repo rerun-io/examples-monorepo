@@ -4,8 +4,8 @@ Rig 0 is the wearer's Aria (moving, device frame, the closed-loop trajectory as 
 RGB, SLAM left/right and the eye-tracking camera; rigs 1..N are the localized GoPros, static, in
 ``gopro_calibs.csv`` order. Every stream logs on the take clock (Aria RGB capture time) at 30 Hz.
 
-Base also writes two sidecars, so the derived layers never read the raw take: ``frames.npz`` (frame times and
-the device pose at each) and ``cameras.json`` (the GoPro rows and the Aria calibration document).
+Right after base is published the dataset writes one sidecar, ``take.npz``, so the derived layers never read the raw take:
+the frame times, the device pose at each, and the camera record (GoPro rows, Aria calibration document) as JSON.
 """
 
 from collections.abc import Callable, Iterator
@@ -31,9 +31,9 @@ from dataforge.datasets.egoexo4d_body import HmFit, coco133_from_openpose67
 from dataforge.datasets.egoexo4d_source import FPS, KB4, GoproCalib, Take, stored_size
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_dense_pose_track, log_rig_node, log_video_stream
-from dataforge.records import read_json
+from dataforge.records import decode
 from dataforge.timing import SequenceTimer
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, mp4_frame_count, parallel_clips, transcode_mp4, work_dir
 
 EGO_RIG: int = 0
 """The Aria; fixed at 0 so the blueprint can name it whatever the number of GoPros."""
@@ -43,8 +43,8 @@ FISHEYE624: str = "FISHEYE624"
 """``camera_model`` of the Aria projections; the camera nodes log its Fisheye62 reduction, as hot3d's do."""
 IMAGE_ROTATION_CW_DEG: int = 90
 """Ego-Exo4D's Aria MP4s are a quarter turn clockwise from the sensor readout; the calibration is turned to match."""
-FRAMES_SIDECAR: str = "frames.npz"
-CAMERAS_SIDECAR: str = "cameras.json"
+SIDECAR: str = "take.npz"
+"""One file, so the clock, poses and cameras of a take always come from the same base."""
 
 
 class AriaStream(NamedTuple):
@@ -87,14 +87,14 @@ class CamerasSidecar:
 
     def aria_cameras(self) -> dict[str, Fisheye624Parameters]:
         """Each calibrated Aria camera in the stored (rotated) orientation; ``rig_T_cam`` is ``device_T_camera``."""
-        device: aria.DeviceCalibration = aria.DeviceCalibration.from_json(self.aria_calib_json, CAMERAS_SIDECAR)
+        device: aria.DeviceCalibration = aria.DeviceCalibration.from_json(self.aria_calib_json, SIDECAR)
         return {label: logged_calibration(device.camera(label), width, height) for label, (width, height) in self.aria_sizes.items()}
 
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class FrameSidecar:
-    """``frames.npz``: the take clock and the Aria pose on it."""
+    """The take clock and the Aria pose on it."""
 
     times_ns: Int64[ndarray, "n"]
     """Take clock, ns."""
@@ -127,7 +127,9 @@ class BaseInputs:
     calib_json: str
     """The Aria VRS ``calib_json`` tag."""
     frames: FrameSidecar
-    """Take clock and the Aria pose at each frame."""
+    """Take clock and the Aria pose at each frame (a preview's first frames)."""
+    take_frames: int
+    """Frames in the take; every source video must hold exactly this many."""
     clock_filled: int
     """Frames whose timesync stamp was missing and repeats the previous one."""
 
@@ -213,6 +215,10 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
     for rig, calib in enumerate(inputs.gopros, start=1):
         log_rig_node(recording, rig, reference=None, num_cameras=1, name=calib.cam_uid, kind="exo")
 
+    for slot in slots:  # -frames:v would silently cut a longer source, which is then deleted
+        count: int = mp4_frame_count(slot.source)
+        if count != inputs.take_frames:
+            raise ValueError(f"{slot.source}: {count} frames, the take's timesync rows give {inputs.take_frames}")
     resolutions: list[str] = []
     with work_dir("egoexo4d-") as work:
         clips: list[Path] = [work / f"rig_{slot.rig:02d}_cam_{slot.cam:02d}.mp4" for slot in slots]
@@ -231,6 +237,7 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         identity,
         num_frames=len(times),
         num_cameras=len(slots),
+        source_num_frames=inputs.take_frames,
         clock_source=f"timesync.csv {take.aria}_{aria.RGB_STREAM_ID}_capture_timestamp_ns (Aria device clock), rows timesync_start_idx..timesync_end_idx-1",
         clock_filled_frames=inputs.clock_filled,
         source_resolution=pa.array(resolutions),
@@ -251,25 +258,25 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
     return CamerasSidecar(gopros=inputs.gopros, aria_calib_json=inputs.calib_json, aria_sizes=aria_sizes)
 
 
-def write_sidecars(directory: Path, cameras: CamerasSidecar, frames: FrameSidecar) -> None:
-    """Write both sidecars, each atomically."""
-    with writing.atomic_write(directory / FRAMES_SIDECAR) as staged, staged.open("wb") as stream:
-        np.savez(stream, times_ns=frames.times_ns, world_T_device=frames.world_T_device)
-    with writing.atomic_write(directory / CAMERAS_SIDECAR) as staged:
-        staged.write_text(to_json(cameras))
+def write_sidecar(path: Path, cameras: CamerasSidecar, frames: FrameSidecar) -> None:
+    """Publish the take's sidecar atomically; call it after base is published (``read_sidecar`` relies on the order)."""
+    with writing.atomic_write(path) as staged, staged.open("wb") as stream:
+        np.savez(stream, times_ns=frames.times_ns, world_T_device=frames.world_T_device, cameras_json=np.array(to_json(cameras)))
 
 
-def read_sidecars(directory: Path) -> tuple[FrameSidecar, CamerasSidecar]:
-    """Both sidecars base wrote; a missing one names the base layer that has to run first."""
-    for name in (FRAMES_SIDECAR, CAMERAS_SIDECAR):
-        if not (directory / name).is_file():
-            raise FileNotFoundError(f"{directory / name} is missing: convert the base layer first (--force rebuilds it from the raw take)")
-    with np.load(directory / FRAMES_SIDECAR, allow_pickle=False) as npz:
+def read_sidecar(path: Path, base: Path) -> tuple[FrameSidecar, CamerasSidecar]:
+    """The sidecar of the base at ``base``; one written before that base (a rebuild that failed in between) is refused."""
+    if not path.is_file():
+        raise FileNotFoundError(f"{path} is missing: convert the base layer first (--force rebuilds it from the raw take)")
+    if path.stat().st_mtime_ns < base.stat().st_mtime_ns:
+        raise ValueError(f"{path} predates {base}, so it may describe an older base: reconvert base with --force")
+    with np.load(path, allow_pickle=False) as npz:
         try:
-            frames: FrameSidecar = from_dict(FrameSidecar, {name: npz[name] for name in npz.files})
+            frames: FrameSidecar = from_dict(FrameSidecar, {"times_ns": npz["times_ns"], "world_T_device": npz["world_T_device"]})
         except SerdeError as error:
-            raise ValueError(f"{directory / FRAMES_SIDECAR}: {error}") from error
-    return frames, read_json(directory / CAMERAS_SIDECAR, CamerasSidecar)
+            raise ValueError(f"{path}: {error}") from error
+        cameras: CamerasSidecar = decode(CamerasSidecar, str(npz["cameras_json"]), source=f"{path}:cameras_json")
+    return frames, cameras
 
 
 def write_projections(recording: rr.RecordingStream, fit: HmFit, frames: FrameSidecar, cameras: CamerasSidecar, rows: Int64[ndarray, "t"]) -> None:

@@ -14,7 +14,7 @@ from dataforge import paths, schema
 from dataforge.datasets.egoexo4d import Egoexo4dConfig, Egoexo4dDataset
 from dataforge.datasets.egoexo4d_body import BODY_MESH_STRIDE, HM_FILE, SMPLH_FILE, SMPLX_FILE
 from dataforge.datasets.egoexo4d_download import ManifestPath
-from dataforge.datasets.egoexo4d_layers import CAMERAS_SIDECAR, EGO_RIG, FRAMES_SIDECAR
+from dataforge.datasets.egoexo4d_layers import EGO_RIG, SIDECAR, CamerasSidecar, FrameSidecar, read_sidecar, write_sidecar
 from dataforge.datasets.egoexo4d_source import Take
 
 TAKE: str = "cmu_bike02_4"
@@ -158,7 +158,7 @@ def test_convert_writes_four_layers_and_prunes_the_take(tmp_path: Path, nvenc_ff
     mesh = [chunk for chunk in read_chunks(targets["body_mesh"]) if str(chunk.entity_path) == schema.body_path("mesh") and not chunk.is_static]
     assert sum(chunk.num_rows for chunk in mesh) == len(range(0, FRAMES, BODY_MESH_STRIDE))
     sidecars: Path = tmp_path / "out" / "sidecars" / identity.recording_id
-    assert (sidecars / FRAMES_SIDECAR).is_file() and (sidecars / CAMERAS_SIDECAR).is_file()
+    assert (sidecars / SIDECAR).is_file()
     assert not any((root / path).exists() for path in take_files)  # raw pruned after base
     assert (root / "hm" / TAKE / HM_FILE).is_file()  # the fit stays
 
@@ -167,3 +167,41 @@ def test_convert_writes_four_layers_and_prunes_the_take(tmp_path: Path, nvenc_ff
         targets[layer].unlink()
     dataset.convert(identity, take, force=False)
     assert all(target.is_file() for target in targets.values())
+
+
+@pytest.mark.integration
+def test_a_source_longer_than_the_take_fails_before_anything_is_published(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """-frames:v would cut the extra frames and the prune would delete the originals: the count check refuses first."""
+    for name in (SMPLH_FILE, SMPLX_FILE):
+        raw_asset("Ego-Exo4D-HM body model (dataforge-download egoexo4d)", MODEL_ROOT / name)
+    root: Path = tmp_path / "raw"
+    take_files: list[str] = synthetic_take(root, nvenc_ffmpeg)
+    entry = json.loads((root / "takes.json").read_text())
+    entry[0]["timesync_end_idx"] -= 1  # the timesync rows now cover one frame less than the videos hold
+    (root / "takes.json").write_text(json.dumps(entry))
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    monkeypatch.setattr(Egoexo4dDataset, "fetch_take", lambda self, take: None)
+    monkeypatch.setattr(Egoexo4dDataset, "take_files", lambda self, take: [ManifestPath(f"s3://x/{path}", path) for path in take_files])
+    dataset = Egoexo4dConfig(root=root).setup()
+    ((identity, take),) = dataset.discover()
+    with pytest.raises(ValueError, match=f"{FRAMES} frames, the take's timesync rows give {FRAMES - 1}"):
+        dataset.convert(identity, take, force=False)
+    assert not any(target.exists() for target in dataset.targets(identity).values())
+    assert all((root / path).exists() for path in take_files)
+
+
+def test_a_sidecar_older_than_its_base_is_refused(tmp_path: Path) -> None:
+    sidecar: Path = tmp_path / SIDECAR
+    base: Path = tmp_path / "base.rrd"
+    frames = FrameSidecar(np.arange(3, dtype=np.int64), np.tile(np.eye(4), (3, 1, 1)))
+    cameras = CamerasSidecar(gopros=[], aria_calib_json="{}", aria_sizes={"camera-rgb": (1408, 1408)})
+    base.write_bytes(b"base")
+    write_sidecar(sidecar, cameras, frames)
+    read_frames, read_cameras = read_sidecar(sidecar, base)
+    np.testing.assert_array_equal(read_frames.times_ns, frames.times_ns)
+    assert read_cameras == cameras
+    os.utime(base, ns=(sidecar.stat().st_mtime_ns + 1, sidecar.stat().st_mtime_ns + 1))  # base rebuilt, sidecar not
+    with pytest.raises(ValueError, match="predates"):
+        read_sidecar(sidecar, base)

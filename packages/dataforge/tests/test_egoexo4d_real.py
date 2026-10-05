@@ -17,7 +17,7 @@ from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge import paths
 from dataforge.datasets.egoexo4d_download import fit_path
-from dataforge.datasets.egoexo4d_layers import CAMERAS_SIDECAR, read_sidecars
+from dataforge.datasets.egoexo4d_layers import SIDECAR, read_sidecar
 from dataforge.identity import SequenceIdentity
 
 TAKE: str = os.environ.get("DATAFORGE_EGOEXO4D_TAKE", "cmu_bike02_4")
@@ -26,10 +26,10 @@ RAW_ROOT: Path = Path(os.environ.get("DATAFORGE_EGOEXO4D_ROOT", str(paths.raw_ro
 
 @pytest.mark.golden
 def test_gopro_calibration_reproduces_the_fit_cameras() -> None:
-    sidecars: Path = paths.sidecar_path(paths.output_root(), SequenceIdentity("egoexo4d", (TAKE,)), CAMERAS_SIDECAR).parent
-    raw_asset(f"egoexo4d base sidecar of {TAKE} (dataforge-convert egoexo4d)", sidecars / CAMERAS_SIDECAR)
+    identity = SequenceIdentity("egoexo4d", (TAKE,))
+    sidecar: Path = raw_asset(f"egoexo4d sidecar of {TAKE} (dataforge-convert egoexo4d)", paths.sidecar_path(paths.output_root(), identity, SIDECAR))
     fit: Path = raw_asset(f"Ego-Exo4D-HM fit of {TAKE} (dataforge-download egoexo4d)", fit_path(RAW_ROOT, TAKE))
-    _, cameras = read_sidecars(sidecars)
+    _, cameras = read_sidecar(sidecar, paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity))
     with np.load(fit) as npz:
         cam_R, cam_t, intrins = npz["cam_R"][1:, 0], npz["cam_t"][1:, 0], npz["intrins"][1:, 0]  # view 0 copies view 1
         joints3d, joints2d, valid = npz["joints3d"][0], npz["joints2d"], npz["valid"][0] == 1

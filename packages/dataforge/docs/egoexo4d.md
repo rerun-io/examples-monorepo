@@ -35,7 +35,7 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
   (`takes.json`, `captures.json`) and the selected fits into `<root>/hm/<take>/`.
 - `convert` fetches each take's files from the release manifests, exactly what base reads: the frame-aligned videos of every
   GoPro and of the Aria's four streams (`takes`), `closed_loop_trajectory.csv` and `gopro_calibs.csv` (`take_trajectory`),
-  the image-less VRS for the Aria calibration (`take_vrs_noimagestream`), and the capture's `timesync.csv` (`captures`).
+  the image-less VRS for the Aria calibration (`take_vrs_noimagestream`, path from its manifest), and the capture's `timesync.csv` (`captures`).
   `prefetch` fetches the next take while one converts. A file lands under `<root>/.dataforge-staging` and is renamed into place
   only at the manifest's size.
 - Right after base is written the take files are deleted (`--keep-raw` keeps them). The fits, models, metadata and base's
@@ -71,13 +71,16 @@ the HM fit is row `timesync_start_idx + i`; `frame_index` is `i`. The trajectory
 
 ## Layers and entities
 
-- **base**: the cameras and videos above, the Aria pose, capture and episode properties. Sidecars
-  `<output_root>/sidecars/<recording_id>/frames.npz` (`times_ns`, `world_T_device` per frame) and `cameras.json` (GoPro rows, the
-  Aria `calib_json`, stored Aria stream sizes).
+- **base**: the cameras and videos above, the Aria pose, capture and episode properties (`source_num_frames`: every source video must
+  hold exactly the take's frame count, or base refuses before anything is published or deleted). Right after base is published,
+  one sidecar `<output_root>/sidecars/<recording_id>/take.npz` (`times_ns`, `world_T_device` per frame, and the camera record as
+  JSON: GoPro rows, the Aria `calib_json`, stored Aria stream sizes). Derived layers refuse a sidecar older than base, and a new
+  base rebuilds every derived layer.
 - **body_pose**: raw SMPL-H parameters (`hand_pose` = 45 PCA coefficients per hand in SMPL-X's MANO basis, mean added), `valid`,
   and `coco133_xyz`: body 0–16 and feet 17–22 from BODY_25 (neck and mid-hip have no slot), hands 91–132, face empty. No shipped
   confidence, so 1.0; frames with `valid == 0` are NaN with confidence 0.
-- **body_mesh**: SMPL-H male mesh every third frame (10 Hz display layer), from SLAHMR's model (shape basis padded to 300 columns so
+- **body_mesh**: SMPL-H male mesh every third frame (10 Hz display layer) plus every frame where `valid` changes (so an invalid
+  stretch between stride frames still clears the mesh), from SLAHMR's model (shape basis padded to 300 columns so
   `smplx` keeps 16 betas). Its regressed joints match the shipped `joints3d` to 1e-6 m (`test_smplh_reproduces_shipped_joints`).
 - **projections**: `coco133_xyz` through each GoPro's KB4 lens (OpenCV fisheye; checked against `cv2.fisheye.projectPoints`) and
   each calibrated Aria camera's FISHEYE624, at `<pinhole>/coco133_uv_projected`. No measured 2D.
@@ -103,5 +106,6 @@ Checked only against public format docs and synthetic takes until the first real
 
 - the timesync end bound (the sources disagree; the HM convention is used) and that every video has the take's frame count;
 - that the Aria MP4s, SLAM and eye streams included, are quarter-turned from the sensor and the RGB MP4 is 1408×1408;
-- that every MP4's frame count equals the HM fit's (a mismatch is printed and the shorter one is converted);
+- that every MP4's frame count equals the timesync rows (base refuses otherwise) and the HM fit's (a fit mismatch is printed and
+  the shorter one is converted);
 - the 3D eye framing on real GoPro layouts (the card eye sits too far back on the synthetic take).

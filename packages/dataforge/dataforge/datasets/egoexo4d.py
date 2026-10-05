@@ -28,14 +28,14 @@ from dataforge.datasets.egoexo4d_layers import (
     ARIA_STREAMS,
     EGO_RIG,
     EXO_SLOTS,
-    FRAMES_SIDECAR,
+    SIDECAR,
     BaseInputs,
     CamerasSidecar,
     FrameSidecar,
-    read_sidecars,
+    read_sidecar,
     write_base,
     write_projections,
-    write_sidecars,
+    write_sidecar,
 )
 from dataforge.datasets.egoexo4d_source import FPS, Take, TakeClock, localized, read_gopro_calibs, read_take_clock, read_takes
 from dataforge.identity import SequenceIdentity
@@ -178,36 +178,40 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
         take_dir: Path = self.config.root / take.root_dir
         clock: TakeClock = read_take_clock(self.config.root / "captures" / take.capture.capture_name / "timesync.csv", take)
         times: Int64[ndarray, "n"] = clock.times_ns[: self.config.frame_limit]
-        (vrs_path,) = take_dir.glob("*noimagestreams.vrs")
+        (vrs,) = [path for path in self.take_files(take) if path.relative_path.endswith(".vrs")]
         return BaseInputs(
             take=take,
             root=self.config.root,
             gopros=localized(read_gopro_calibs(take_dir / "trajectory/gopro_calibs.csv")),
-            calib_json=VrsFile(vrs_path).file_tags["calib_json"],
+            calib_json=VrsFile(self.config.root / vrs.relative_path).file_tags["calib_json"],
             frames=FrameSidecar(times, aria.read_trajectory(take_dir / "trajectory/closed_loop_trajectory.csv").at(times)),
+            take_frames=len(clock.times_ns),
             clock_filled=clock.filled,
         )
 
     def convert(self, identity: SequenceIdentity, source: Take, *, force: bool) -> Path:
-        """Base first (fetch, encode, sidecars, prune the take), then the fit's layers from the sidecars."""
+        """Base first (fetch, encode, publish, sidecar, prune the take), then the fit's layers from the sidecar."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
+        base: Path = targets[paths.BASE_LAYER]
+        if paths.BASE_LAYER in pending:
+            pending = list(targets)  # every derived layer is stamped on base's clock: a new base rebuilds them all
         if paths.BODY_MESH_LAYER in pending and self.model is None:
             self.model = SmplhModel(self.config.models)  # fails on a missing model before any fetch or encode
-        # A preview (frame_limit) has its own output root, and so its own sidecars.
-        sidecar_root: Path = targets[paths.BASE_LAYER].parents[1]
-        frames_path: Path = paths.sidecar_path(sidecar_root, identity, FRAMES_SIDECAR)
+        sidecar: Path = paths.sidecar_path(base.parents[1], identity, SIDECAR)  # a preview's root holds its own sidecar
         if paths.BASE_LAYER in pending:
             with self.timer.stage("fetch"):
                 self.fetch_take(source)
                 inputs: BaseInputs = self.base_inputs(source)
-
-            def write(recording: rr.RecordingStream) -> None:
-                cameras: CamerasSidecar = write_base(recording, identity, inputs, self.timer)
-                write_sidecars(frames_path.parent, cameras, inputs.frames)
-
-            self.write_layers(identity, targets, [paths.BASE_LAYER], {paths.BASE_LAYER: write})
+            written: list[CamerasSidecar] = []
+            self.write_layers(
+                identity,
+                targets,
+                [paths.BASE_LAYER],
+                {paths.BASE_LAYER: lambda recording: written.append(write_base(recording, identity, inputs, self.timer))},
+            )
+            write_sidecar(sidecar, written[0], inputs.frames)
             if not self.config.keep_raw:
                 for path in self.take_files(source):
                     (self.config.root / path.relative_path).unlink(missing_ok=True)
@@ -216,7 +220,7 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
         @cache
         def fit_rows() -> tuple[FrameSidecar, CamerasSidecar, HmFit, Int64[ndarray, "t"]]:
             """The sidecars, the fit, and the frames both cover; read once, after base."""
-            frames, cameras = read_sidecars(frames_path.parent)
+            frames, cameras = read_sidecar(sidecar, base)
             fit: HmFit = read_fit(fit_path(self.config.root, source.take_name))
             count: int = min(len(fit.trans), len(frames.times_ns))
             if len(fit.trans) != len(frames.times_ns) and self.config.frame_limit is None:

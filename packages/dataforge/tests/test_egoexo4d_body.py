@@ -117,13 +117,15 @@ def test_body_mesh_layer_is_10hz_with_empty_invalid_rows(tmp_path: Path) -> None
     raw_asset("SMPL-X neutral model (dataforge-download egoexo4d)", MODEL_ROOT / SMPLX_FILE)
     fit: HmFit = read_fit(FIT)
     invalid: np.ndarray = fit.valid.copy()
-    invalid[6] = False
+    invalid[[1, 2, 6]] = False  # 1-2 lie between stride frames: their start and end still get rows
     fit = HmFit(**{**{name: getattr(fit, name) for name in HmFit.__dataclass_fields__}, "valid": invalid})
     times, frames = frame_clock(12)
     target: Path = tmp_path / "body_mesh.rrd"
     with writing.atomic_recording(target, recording_id="egoexo4d__cmu_bike02_4", default_blueprint=None, send_properties=False) as recording:
         write_body_mesh(recording, SmplhModel(MODEL_ROOT), fit, times, frames)
     mesh = [chunk for chunk in read_chunks(target) if str(chunk.entity_path) == schema.body_path("mesh") and not chunk.is_static]
-    assert sum(chunk.num_rows for chunk in mesh) == len(range(0, 12, BODY_MESH_STRIDE))
-    vertices = column_rows(read_back(target), f"{schema.body_path('mesh')}:Mesh3D:vertex_positions").column(1).to_pylist()
-    assert [len(row) for row in vertices] == [6890, 6890, 0, 6890]  # frames 0, 3, 6 (invalid), 9
+    assert BODY_MESH_STRIDE == 3
+    table = column_rows(read_back(target), f"{schema.body_path('mesh')}:Mesh3D:vertex_positions")
+    assert sum(chunk.num_rows for chunk in mesh) == table.num_rows == 6
+    # frames 0, 1 (turns invalid), 3 (valid again, on the stride), 6 (invalid, on the stride), 7 (valid again), 9
+    assert [len(row) for row in table.column(1).to_pylist()] == [6890, 0, 6890, 0, 6890, 6890]

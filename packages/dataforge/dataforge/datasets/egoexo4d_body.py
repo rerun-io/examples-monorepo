@@ -191,10 +191,15 @@ def write_body_pose(recording: rr.RecordingStream, fit: HmFit, times: Int64[ndar
 
 
 def write_body_mesh(recording: rr.RecordingStream, model: SmplhModel, fit: HmFit, times: Int64[ndarray, "t"], frames: Int64[ndarray, "t"]) -> None:
-    """The posed mesh every BODY_MESH_STRIDE-th frame; invalid frames are empty rows."""
+    """The posed mesh every BODY_MESH_STRIDE-th frame and wherever validity changes; invalid frames are empty rows.
+
+    The change rows keep a stale mesh from showing through an invalid stretch that starts or ends between two stride frames.
+    """
     path: str = schema.body_path("mesh")
     meshes.log_mesh_static(recording, path, albedo_factor=BODY_ALBEDO)
-    kept: Int64[ndarray, "k"] = np.flatnonzero(frames % BODY_MESH_STRIDE == 0)
+    valid: Bool[ndarray, "t"] = fit.valid[frames]
+    changed: Bool[ndarray, "t"] = np.concatenate([[False], valid[1:] != valid[:-1]])
+    kept: Int64[ndarray, "k"] = np.flatnonzero((frames % BODY_MESH_STRIDE == 0) | changed)
     for start in range(0, len(kept), MESH_BATCH_ROWS):
         rows: Int64[ndarray, "b"] = kept[start : start + MESH_BATCH_ROWS]
         trusted: Bool[ndarray, "b"] = fit.valid[frames[rows]]
