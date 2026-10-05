@@ -194,15 +194,16 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
             """Every pose-fed layer from one pass over the pose CSVs, batch by batch."""
             layer_writers: dict[str, Callable[[list[PoseRow], Int64[np.ndarray, "n"], Int64[np.ndarray, "n"]], None]] = {}
             for layer, recording in recordings.items():
-                if layer in (paths.HAND_POSE_LAYER, paths.BODY_POSE_LAYER):
-                    start_parameters(recording, layer_specs[layer])
-                    layer_writers[layer] = partial(write_hand_pose if layer == paths.HAND_POSE_LAYER else write_pose, recording, specs=layer_specs[layer])
-                elif layer in (paths.HAND_MESH_LAYER, paths.BODY_MESH_LAYER):
-                    assert writer is not None
-                    writer.start(recording, layer_specs[layer])
-                    layer_writers[layer] = partial(writer.write, recording, specs=layer_specs[layer])
-                else:
-                    layer_writers[layer] = partial(write_projections, recording, cameras)
+                match layer:
+                    case paths.HAND_POSE_LAYER | paths.BODY_POSE_LAYER:
+                        start_parameters(recording, layer_specs[layer])
+                        layer_writers[layer] = partial(write_hand_pose if layer == paths.HAND_POSE_LAYER else write_pose, recording, specs=layer_specs[layer])
+                    case paths.HAND_MESH_LAYER | paths.BODY_MESH_LAYER:
+                        assert writer is not None
+                        writer.start(recording, layer_specs[layer])
+                        layer_writers[layer] = partial(writer.write, recording, specs=layer_specs[layer])
+                    case _:
+                        layer_writers[layer] = partial(write_projections, recording, cameras)
             batches = iter(pose_batches(pose / "pose_3d", len(times), total=source_count))
             start: int = 0
             while True:
