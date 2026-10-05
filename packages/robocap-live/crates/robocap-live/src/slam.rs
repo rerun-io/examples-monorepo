@@ -1,7 +1,7 @@
 //! slam-rs VIO on the four SLAM cameras (`[0, 1, 4, 5]` = left_front, right_front, left, right) at 640x360 + IMU0, set up as
 //! PR #270's live adapter (`robocap-recorder/src/live_slam.rs` at 271ce643) with the cap's factory calibration
 //! ([`crate::capture::Cap::slam_calibration`], chosen by the rig's `device`), [`MSDMO_CONFIG`] with a [`SlamProfile`] overlay
-//! (`live` by default), and the CPU frontend with [`SlamConfig::frontend_threads`] threads.
+//! (`live` by default). Aarch64 defaults to the Mali GPU with one-frame lag; hosts default to CPU without lag.
 //!
 //! # Frames and conventions
 //!
@@ -28,7 +28,7 @@ use nalgebra::Isometry3;
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
-use slam_rs::{ImageView, Vio, VioResult, VioStatus};
+use slam_rs::{Backend, ImageView, Vio, VioResult, VioStatus};
 
 use crate::frame::{ImuSample, SLAM_CAMERAS, SMALL_SIZE, isometry_from_array};
 
@@ -65,19 +65,47 @@ pub enum SlamMode {
     Reference,
 }
 
+/// SLAM frontend lane. GPU initialization failure falls back to CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlamLane {
+    /// CPU frontend, synchronous unless explicitly overridden.
+    Cpu,
+    /// Vulkan frontend, one-frame lag unless explicitly overridden.
+    Gpu,
+}
+
+impl Default for SlamLane {
+    fn default() -> Self {
+        if cfg!(target_arch = "aarch64") { Self::Gpu } else { Self::Cpu }
+    }
+}
+
+impl SlamLane {
+    /// Default workers within the two SLAM cores. Two CPU workers on one cpufreq policy measured 1.8x faster than one.
+    pub fn threads(self) -> usize {
+        match self {
+            Self::Cpu => 2,
+            Self::Gpu => 1,
+        }
+    }
+}
+
 /// A longer gap between accepted framesets starts a new world.
 pub const RESET_GAP_NS: i64 = 3_000_000_000;
 
 /// Settings of the SLAM stage.
 #[derive(Clone, Debug)]
 pub struct SlamConfig {
+    /// Frontend lane; CPU fallback uses its own defaults unless overridden.
+    pub lane: SlamLane,
     /// Target rate: a frameset is selected when it is at least one period (minus [`SlamConfig::rate_tolerance_ns`]) after the
     /// last selected one.
     pub hz: f64,
     /// Slack on the period, so 30 Hz takes every frameset of a 30 fps stream with jitter.
     pub rate_tolerance_ns: i64,
-    /// slam-rs frontend threads.
-    pub frontend_threads: usize,
+    /// Frontend workers; `None` uses the actual lane's default.
+    pub frontend_threads: Option<usize>,
     /// The VIO profile ([`SlamProfile::Live`] by default).
     pub profile: SlamProfile,
     /// VIO configuration keys set after the profile, e.g. `("config.optical_flow_max_iterations", 4)`.
@@ -89,9 +117,10 @@ pub struct SlamConfig {
 impl Default for SlamConfig {
     fn default() -> Self {
         Self {
+            lane: SlamLane::default(),
             hz: 30.0,
             rate_tolerance_ns: 4_000_000,
-            frontend_threads: 2,
+            frontend_threads: None,
             profile: SlamProfile::Live,
             overrides: Vec::new(),
             calibration: CAP_A_CALIBRATION.to_string(),
@@ -146,6 +175,45 @@ pub struct SlamEstimator {
 }
 
 impl SlamEstimator {
+    /// Build after CPU pinning. A failed GPU start logs one warning, then uses the CPU defaults and the same overrides.
+    ///
+    /// # Errors
+    /// Invalid calibration/configuration, or failure to start the CPU fallback.
+    pub fn new(settings: &SlamConfig) -> Result<Self, SlamError> {
+        let calibration = Calibration::<f64>::from_json_str(&settings.calibration).map_err(|e| SlamError::Config(e.to_string()))?;
+        let build = |lane: SlamLane| {
+            let lag = lane == SlamLane::Gpu;
+            let mut overrides = vec![("port.frontend_lag".into(), serde_json::Value::Bool(lag))];
+            overrides.extend(settings.overrides.clone());
+            let backend = match lane {
+                SlamLane::Cpu => Backend::Cpu,
+                SlamLane::Gpu => Backend::Gpu,
+            };
+            Self::with_backend(
+                calibration.clone(),
+                profile_config(settings.profile, &overrides)?,
+                settings.frontend_threads.unwrap_or_else(|| lane.threads()),
+                backend,
+            )
+        };
+        if settings.lane == SlamLane::Gpu {
+            match build(SlamLane::Gpu) {
+                Ok(slam) => return Ok(slam),
+                Err(SlamError::Vio(error)) => eprintln!("robocap-live: WARNING: SLAM GPU initialization failed ({error}); falling back to CPU"),
+                Err(error) => return Err(error),
+            }
+        }
+        build(SlamLane::Cpu)
+    }
+
+    /// The lane actually in use (after fallback).
+    pub fn lane(&self) -> SlamLane {
+        match self.vio.backend() {
+            Backend::Cpu => SlamLane::Cpu,
+            Backend::Gpu => SlamLane::Gpu,
+        }
+    }
+
     /// Whether this estimator delays publication by one accepted frameset.
     pub fn frontend_lag(&self) -> bool {
         self.config.port_frontend_lag
@@ -191,12 +259,16 @@ impl SlamEstimator {
     ///
     /// [`SlamError`] when slam-rs refuses them or the rig is not four 640x360 cameras.
     pub fn with_configuration(calibration: Calibration<f64>, config: VioConfig, threads: usize) -> Result<Self, SlamError> {
+        Self::with_backend(calibration, config, threads, Backend::Cpu)
+    }
+
+    fn with_backend(calibration: Calibration<f64>, config: VioConfig, threads: usize, backend: Backend) -> Result<Self, SlamError> {
         if calibration.resolution.len() != SLAM_CAMERAS.len()
             || calibration.resolution.iter().any(|r| r[0] as usize != SMALL_SIZE.width || r[1] as usize != SMALL_SIZE.height)
         {
             return Err(SlamError::Config(format!("expected four 640x360 cameras, got {:?}", calibration.resolution)));
         }
-        let vio = Self::build(&calibration, &config, threads)?;
+        let vio = Self::build(&calibration, &config, threads, backend)?;
         Ok(Self {
             vio,
             calibration,
@@ -211,9 +283,9 @@ impl SlamEstimator {
         })
     }
 
-    fn build(calibration: &Calibration<f64>, config: &VioConfig, threads: usize) -> Result<Vio<f32>, SlamError> {
+    fn build(calibration: &Calibration<f64>, config: &VioConfig, threads: usize, backend: Backend) -> Result<Vio<f32>, SlamError> {
         let options = FrontendOptions { threads, ..Default::default() };
-        Ok(Vio::with_backend(config.clone(), calibration.clone(), options, slam_rs::Backend::Cpu)?)
+        Ok(Vio::with_backend(config.clone(), calibration.clone(), options, backend)?)
     }
 
     /// Restart the estimator (a new world from the next frameset).
@@ -223,7 +295,7 @@ impl SlamEstimator {
     /// [`SlamError`] if slam-rs refuses the (unchanged) configuration.
     pub fn reset(&mut self) -> Result<(), SlamError> {
         self.pending = None;
-        self.vio = Self::build(&self.calibration, &self.config, self.threads)?;
+        self.vio = Self::build(&self.calibration, &self.config, self.threads, self.vio.backend())?;
         self.last_compute_ms = 0.0;
         self.last_stages = SlamStages::default();
         self.resets += 1;
@@ -257,6 +329,20 @@ impl SlamEstimator {
     ///
     /// [`SlamError::Input`] for a wrong image size; [`SlamError::Vio`] when slam-rs fails (the caller resets).
     pub fn track(&mut self, index: u64, t_ns: i64, images: [&Image<u8, 1>; 4]) -> Result<Option<SlamPose>, SlamError> {
+        self.track_with_lookahead(index, t_ns, images, None)
+    }
+
+    /// Track with an optional queued next selected frameset. The hint need not have IMU coverage and may later be dropped.
+    ///
+    /// # Errors
+    /// As for [`Self::track`]. After any error the caller must [`Self::reset`] before submitting another frame.
+    pub fn track_with_lookahead(
+        &mut self,
+        index: u64,
+        t_ns: i64,
+        images: [&Image<u8, 1>; 4],
+        lookahead: Option<(i64, [&Image<u8, 1>; 4])>,
+    ) -> Result<Option<SlamPose>, SlamError> {
         if images.iter().any(|image| image.size() != SMALL_SIZE) {
             return Err(SlamError::Input("SLAM images must be 640x360".into()));
         }
@@ -264,8 +350,9 @@ impl SlamEstimator {
             ImageView { width: image.width(), height: image.height(), stride: image.width(), data: image.as_slice() }
         }
         let views = images.map(view);
+        let next_views = lookahead.map(|(t, images)| (t, images.map(view)));
         let started = Instant::now();
-        let result = self.vio.track(t_ns, &views)?;
+        let result = self.vio.track_with_lookahead(t_ns, &views, next_views.as_ref().map(|(t, next)| (*t, &next[..])))?;
         self.last_compute_ms = started.elapsed().as_secs_f64() * 1e3;
         if result.status == VioStatus::NeedMoreImu {
             self.last_stages = SlamStages::default();
@@ -408,6 +495,26 @@ mod tests {
         // IMU refusal must not reserve an index that could get attached to a later estimate.
         assert!(slam.track(500, 3_000_000_000, [&image; 4])?.is_none());
         assert!(slam.vio.pending_t_ns().is_none());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "gpu-wgpu"))]
+    #[test]
+    fn unavailable_gpu_falls_back_to_cpu_defaults_but_preserves_explicit_lag() -> Result<(), SlamError> {
+        let mut settings = SlamConfig { lane: SlamLane::Gpu, ..Default::default() };
+        let fallback = SlamEstimator::new(&settings)?;
+        assert_eq!(fallback.lane(), SlamLane::Cpu);
+        assert!(!fallback.frontend_lag());
+        assert_eq!(fallback.threads(), 2);
+        settings.overrides.push(parse_override("port.frontend_lag=true")?);
+        settings.frontend_threads = Some(1);
+        let explicit = SlamEstimator::new(&settings)?;
+        assert!(explicit.frontend_lag());
+        assert_eq!(explicit.threads(), 1);
+        settings.overrides.push(parse_override("port.frontend_lag=false")?);
+        assert!(!SlamEstimator::new(&settings)?.frontend_lag());
+        settings.overrides.push(parse_override("port.frontend_lag=true")?);
+        assert!(SlamEstimator::new(&settings)?.frontend_lag());
         Ok(())
     }
 

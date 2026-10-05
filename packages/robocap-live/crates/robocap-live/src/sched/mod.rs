@@ -30,7 +30,7 @@ use crate::downsample::{SmallImagePool, SmallImages, small_images};
 use crate::frame::{Frameset, ImuSample, NUM_CAMERAS};
 use crate::hands::{HandFrameResult, HandInputs, HandTracking, HandsError};
 use crate::nets::{HandNets, NetsError};
-use crate::slam::{ReferencePoses, SlamConfig, SlamMode, SlamPose, SlamStatus};
+use crate::slam::{ReferencePoses, SlamConfig, SlamLane, SlamMode, SlamPose, SlamStatus};
 use crate::source::{FrameSource, SourceError, SourceEvent};
 
 mod queue;
@@ -162,6 +162,12 @@ pub struct RunSummary {
     pub source_fps: f64,
     /// SLAM steps per second.
     pub slam_hz: f64,
+    /// Actual SLAM lane after startup fallback; `None` when SLAM is off or uses reference poses.
+    pub slam_lane: Option<SlamLane>,
+    /// Actual one-frame lag setting, when SLAM runs.
+    pub slam_frontend_lag: Option<bool>,
+    /// Actual frontend worker count, when SLAM runs.
+    pub slam_threads: Option<usize>,
     /// The run's event counters.
     #[serde(flatten)]
     pub counters: Counters,
@@ -714,6 +720,9 @@ fn summary(shared: &Shared, monitored: Monitored) -> RunSummary {
             framesets,
             source_fps: per_second(framesets),
             slam_hz: per_second(s.total[Stage::Slam as usize].len()),
+            slam_lane: s.slam_lane,
+            slam_frontend_lag: s.slam_frontend_lag,
+            slam_threads: s.slam_threads,
             counters: s.counters.clone(),
             stages: STAGES
                 .iter()

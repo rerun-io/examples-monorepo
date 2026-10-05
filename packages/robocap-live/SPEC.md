@@ -56,6 +56,53 @@ The layer holds only the hand entities (`/world/hands/{side}/{keypoints,mesh}`, 
 pixels, the skeleton's `AnnotationContext` on `/world`) and no recording properties; its recording id is the segment id and its
 times are the catalog's `video_time`.
 
+## SLAM lane, lag and pose time
+
+`--slam-lane gpu|cpu` defaults to GPU on aarch64 and CPU on other hosts. Cap builds enable `robocap-live/gpu-wgpu`.
+GPU startup failure emits a warning and falls back to CPU. The startup line and summary fields `slam_lane`, `slam_frontend_lag`
+and `slam_threads` report the actual lane, lag and worker count; those fields are null when SLAM is off or uses reference poses.
+GPU defaults to one worker and `port.frontend_lag=true`; CPU defaults to two workers and lag off. `--slam-threads` accepts
+one or two workers; the existing cap affinity keeps SLAM and the threads it creates on cores 6–7.
+`--slam-set port.frontend_lag=true|false` overrides the lane default, including after fallback. The panel offers GPU/CPU and
+auto/on/off lag. `start-live.sh --slam-lag auto|true|false` offers the same selection; auto sends no lag override.
+
+SLAM consumes the front-left, front-right, left and right cameras, in that order (rig indices `[0, 1, 4, 5]`). The embedded
+Cap A and Cap B Basalt calibrations use the same order. The front stereo pair gives camera 0 overlapping views for initial
+triangulation; the six-camera capture and hand-tracking order is unchanged.
+
+The [slam-rs estimator](../slam-rs/README.md) defines when visual tracking starts; until then no usable pose is published.
+
+With lag, the first accepted frameset buffers without a pose. Each later call returns the previous accepted frameset's pose.
+SLAM matches the result timestamp to a pending input record, preserving that input's index even after rate skips or drops.
+An already queued next selected frameset supplies an optional GPU lookahead hint; the SLAM stage never waits for a hint.
+EOF and normal stop drain the queues and flush the last result before the pose store closes. A world is reset only on a
+backwards input timestamp, a gap **greater than 3 seconds** between accepted inputs, or an estimator error. Shorter gaps,
+including exactly 3 seconds, keep the world. Backwards time is checked before rate selection can reject the frame.
+Time boundaries first flush the valid pending old-world pose. Failed track/flush calls discard pending estimates. Every reset
+emits one stderr line with its reset count and cause: backwards timestamps, gap in milliseconds, or estimator error text.
+Pose progress and world boundaries use monotonic source frameset indices, so rewound timestamps cannot reuse old-world poses.
+Queued readers of earlier frames retain their published poses, with lag either on or off.
+
+IMU is read only through the current frame's coverage (a sample strictly after its timestamp). Without coverage, live mode
+waits up to the IMU timeout; lossless mode waits for samples or EOF. An uncovered frame is skipped and counted in
+`slam_imu_timeouts`; it does not by itself reset SLAM. On backwards time, the previous world's queued IMU tail is discarded
+until sample timestamps return to the earlier range. A first sample just after the new frame supplies coverage as usual.
+Internal IMU sample spacing has no separate reset threshold.
+Replay loops keep monotonically increasing output timestamps and insert a 3.5-second gap to start a new world.
+
+- **Live/realtime:** progress advances when SLAM consumes or skips the input. Hands use the newest usable pose at or before
+  their timestamp, subject to `--hands-wait-ms`. They do not wait an extra frameset for a lagged pose.
+- **Lossless/offline:** progress cannot pass an accepted input until its pose is published or flushed. Hands and output use
+  that frame's own estimate, including an estimate that has not yet reached visual tracking. A rate/input skip holds the last
+  pose. Before a lossless skip, SLAM flushes any pending estimate so bounded queues cannot stall waiting for the next selected
+  input. A missing catalog reference is also a skip; it holds the last real reference, never an identity placeholder.
+
+Pose indices, timestamps, visual-support counts and keyframe flags describe the returned estimate. `compute_ms` describes
+the track/flush call that produced it; with lag the frontend timers therefore describe the *next* submitted input. Estimator
+and frontend work overlap, so their times must not be added. Flush has zero frontend time. Summary `slam` rate and timings
+count track calls, including the buffered first call; `slam_flush` records drain work separately. Counters `slam_buffered`
+and `slam_lookahead` expose buffering and supplied hints. A supplied hint may be discarded if its queued frame later changes.
+
 ## Runtime: the `--record` JSONL
 
 `--record <file>` writes one JSON object per frameset (`RecordLine` in `src/sched/record.rs` is normative):

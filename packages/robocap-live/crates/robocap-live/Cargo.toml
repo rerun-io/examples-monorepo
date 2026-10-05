@@ -40,6 +40,8 @@ cc = "1"
 # Cap B.
 [features]
 default = []
+# Cap builds use Vulkan through slam-rs (loader opened at runtime, never linked).
+gpu-wgpu = ["slam-rs/gpu-wgpu"]
 # ONNX Runtime backend for HandNets (hosts: CUDA where there is an NVIDIA GPU, CPU elsewhere).
 ort = ["dep:ort"]
 

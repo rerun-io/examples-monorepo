@@ -50,6 +50,10 @@ fn lossless_lag_publishes_each_frames_own_pose_including_eof_and_stop() -> Resul
             assert_eq!(row.pose.map(|p| (p.index, p.t_ns)), Some((row.index, row.t_ns)), "lag={lag}, stop={stop_early}: {row:?}");
         }
         assert_eq!(summary.counters.slam_failures, 0);
+        assert_eq!(summary.slam_lane, Some(SlamLane::Cpu));
+        assert_eq!(summary.slam_frontend_lag, Some(lag));
+        assert_eq!(summary.slam_threads, Some(2));
+        assert_eq!(summary.counters.slam_lookahead, 0, "CPU does not consume lookahead hints");
         assert_eq!(summary.counters.slam_buffered, u64::from(lag));
         assert_eq!(summary.counters.slam_status.values().sum::<u64>() as usize, summary.stages["slam"].count);
         assert_eq!(summary.stages["slam_flush"].count, usize::from(lag));
@@ -220,7 +224,7 @@ fn test_config(lossless: bool, slam_mode: SlamMode, reference: ReferencePoses, h
     PipelineConfig {
         lossless,
         slam_mode,
-        slam: SlamConfig::default(),
+        slam: SlamConfig { lane: SlamLane::Cpu, frontend_threads: Some(2), ..Default::default() },
         reference: Some(reference),
         hands: Some(hands),
         hands_wait: Duration::from_millis(5),

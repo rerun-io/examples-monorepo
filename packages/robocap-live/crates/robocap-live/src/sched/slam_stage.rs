@@ -5,13 +5,19 @@ use std::time::{Duration, Instant};
 
 use crate::downsample::SmallImages;
 use crate::frame::{ImuSample, SLAM_CAMERAS};
-use crate::slam::{RateSelector, SlamConfig, SlamEstimator, SlamPose, SlamStatus};
+use crate::slam::{RateSelector, SlamConfig, SlamEstimator, SlamLane, SlamPose, SlamStatus};
 
 use super::{SchedError, Shared, Stage, stage_error};
 
 /// The SLAM stage (A76): rate selection, IMU coverage, `Vio::track`, and the poses published for hands and output.
 pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config: SlamConfig, lossless: bool, imu_wait: Duration) -> Result<(), SchedError> {
-    let mut slam = SlamEstimator::with_profile(&config.calibration, config.frontend_threads, config.profile, &config.overrides).map_err(|e| stage_error("slam", e))?;
+    let mut slam = SlamEstimator::new(&config).map_err(|e| stage_error("slam", e))?;
+    eprintln!("robocap-live: SLAM lane {:?}, frontend_lag={}, threads={}", slam.lane(), slam.frontend_lag(), slam.threads());
+    shared.stats.with(|s| {
+        s.slam_lane = Some(slam.lane());
+        s.slam_frontend_lag = Some(slam.frontend_lag());
+        s.slam_threads = Some(slam.threads());
+    });
     let mut selector = RateSelector::new(config.hz, config.rate_tolerance_ns);
     let mut last_t: Option<i64> = None;
     let mut imu_rewind: Option<i64> = None;
@@ -71,7 +77,20 @@ pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config
         }
         selector.selected(t);
         last_t = Some(t);
-        let pose = match slam.track(index, t, images) {
+        // Snapshot only an already queued, selected, complete frameset. No wait and no IMU requirement for a hint.
+        let next = if slam.lane() == SlamLane::Gpu {
+            shared.slam.peek_matching(|next| {
+                let next_t = next.frameset.t_ns;
+                selector.due(next_t) && next_t > t && next_t - t <= crate::slam::RESET_GAP_NS
+            })
+        } else {
+            None
+        };
+        let lookahead = next.as_ref().and_then(|next| Some((next.frameset.t_ns, slam_images(&next.small)?)));
+        if lookahead.is_some() {
+            stats.with(|s| s.counters.slam_lookahead += 1);
+        }
+        let pose = match slam.track_with_lookahead(index, t, images, lookahead) {
             Ok(pose) => pose,
             Err(error) => {
                 stats.with(|s| s.counters.slam_failures += 1);

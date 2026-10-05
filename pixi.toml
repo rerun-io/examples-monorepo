@@ -2523,10 +2523,13 @@ cmd = "bash -c 'test \"$(ls data/msd-rrd/{base,gt,sensor_metadata}/*.rrd 2>/dev/
 cwd = "packages/slam-rs"
 description = "Download every MSD recording (about 15.5 GB)"
 
-[feature.slam-rs.tasks.slam-rs-catalog-layer]
+# A catalog run belongs on the GPU: the wgpu frontend (built first, so no CPU-only core left by a test run is used) and NVDEC
+# decode, which only the slam-rs-cuda environments carry. Without a GPU adapter it falls back to the CPU and says so.
+[feature.slam-rs-nvdec.tasks.slam-rs-catalog-layer]
+depends-on = ["slam-rs-wgpu-build"]
 cmd = "python tools/apps/catalog_layer.py"
 cwd = "packages/slam-rs"
-description = "Run catalog VIO and replace its slam_rs pose layer (fast profile, GPU when available)"
+description = "Run catalog VIO on the GPU (wgpu frontend, NVDEC decode) and replace its slam_rs pose layer (fast profile)"
 
 [feature.slam-rs.tasks.slam-rs-import-imu-calibration]
 cmd = "python tools/import_imu_calibration.py"

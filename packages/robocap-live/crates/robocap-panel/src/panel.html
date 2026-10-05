@@ -42,6 +42,8 @@
     <div id="cams" style="margin-top:6px">Video </div>
     <div style="margin-top:4px">
       <label>SLAM <select id="slam_hz"><option>15</option><option>30</option></select> Hz</label>
+      <label>SLAM lane <select id="slam_lane"><option value="gpu">Mali GPU</option><option value="cpu">CPU</option></select></label>
+      <label>One-frame lag <select id="slam_lag"><option value="auto">Auto (GPU on, CPU off)</option><option value="on">On</option><option value="off">Off</option></select></label>
       <label>for <input type="number" id="minutes" value="30" min="1" max="120" style="width:60px"> min</label>
       <label><input type="checkbox" id="hands" checked> hands</label>
       <label>overlays <select id="hand_overlays" title="fit: the fitted hand in every camera + DetNet's box; debug: + every KeyNet view and DetNet answer; verbose: + relative depths and the predicted pose"><option>fit</option><option>debug</option><option>verbose</option></select></label>
@@ -111,6 +113,8 @@ function loadForm(s) {
   const cams = saved?.cams ?? last?.video_cameras.map(String) ?? ["0", "1", "2", "3", "4", "5"];
   document.querySelectorAll(".cam").forEach(c => c.checked = cams.includes(c.value));
   $("slam_hz").value = saved?.slam_hz ?? last?.slam_hz ?? "15";
+  $("slam_lane").value = saved?.slam_lane ?? last?.slam_lane ?? "gpu";
+  $("slam_lag").value = saved?.slam_lag ?? last?.slam_lag ?? "auto";
   $("hand_overlays").value = saved?.hand_overlays ?? last?.hand_overlays ?? "fit";
   if (saved) { $("minutes").value = saved.minutes; $("hands").checked = saved.hands; $("uclamp").checked = saved.uclamp; }
 }
@@ -211,9 +215,10 @@ async function post(path, body) {
 $("start").onclick = () => {
   const cams = [...document.querySelectorAll(".cam")].filter(c => c.checked).map(c => c.value);
   const form = { viewer: $("viewer").value.trim(), cams, slam_hz: $("slam_hz").value, minutes: $("minutes").value, hands: $("hands").checked, uclamp: $("uclamp").checked,
-    hand_overlays: $("hand_overlays").value };
+    hand_overlays: $("hand_overlays").value, slam_lane: $("slam_lane").value, slam_lag: $("slam_lag").value };
   localStorage.setItem("robocap-form", JSON.stringify(form));
   const body = new URLSearchParams({ viewer: form.viewer, video_cameras: cams.join(","), slam_hz: form.slam_hz,
+    slam_lane: form.slam_lane, slam_lag: form.slam_lag,
     duration_s: Math.round(form.minutes * 60), hands: form.hands ? "on" : "off", uclamp: form.uclamp ? "on" : "off", hand_overlays: form.hand_overlays });
   post("api/start", body.toString());
 };

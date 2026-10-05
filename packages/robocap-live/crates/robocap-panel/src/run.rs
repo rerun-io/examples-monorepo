@@ -139,6 +139,8 @@ pub struct StartRequest {
     /// `--hand-overlays`: fit, debug or verbose (each level costs more of the Wi-Fi link).
     hand_overlays: &'static str,
     slam_hz: u32,
+    slam_lane: &'static str,
+    slam_lag: &'static str,
     /// uclamp.min 1024 for SLAM and hands (faster, hotter); off = the kernel's default.
     uclamp: bool,
     duration_s: u32,
@@ -176,18 +178,19 @@ impl StartRequest {
             if range.contains(&value) { Ok(value) } else { Err(format!("{name}: {value} is outside {}-{}", range.start(), range.end())) }
         };
         let flag = |name: &str, default: bool| field(name).map_or(default, |v| v == "on" || v == "1" || v == "true");
-        let hand_overlays = match field("hand_overlays").filter(|v| !v.is_empty()).as_deref().unwrap_or("fit") {
-            "fit" => "fit",
-            "debug" => "debug",
-            "verbose" => "verbose",
-            other => return Err(format!("hand_overlays: {other:?} is not fit, debug or verbose")),
+        let choice = |name: &str, default: &'static str, allowed: &'static [&'static str]| {
+            let value = field(name).filter(|v| !v.is_empty());
+            let value = value.as_deref().unwrap_or(default);
+            allowed.iter().copied().find(|&v| v == value).ok_or_else(|| format!("{name}: {value:?} is not one of {}", allowed.join(", ")))
         };
         Ok(Self {
             viewer,
             video_cameras,
             hands: flag("hands", true),
-            hand_overlays,
+            hand_overlays: choice("hand_overlays", "fit", &["fit", "debug", "verbose"])?,
             slam_hz: number("slam_hz", 15, 1..=30)?,
+            slam_lane: choice("slam_lane", "gpu", &["gpu", "cpu"])?,
+            slam_lag: choice("slam_lag", "auto", &["auto", "on", "off"])?,
             uclamp: flag("uclamp", false),
             duration_s: number("duration_s", 1800, 10..=7200)?,
         })
@@ -201,6 +204,8 @@ impl StartRequest {
             "hands": self.hands,
             "hand_overlays": self.hand_overlays,
             "slam_hz": self.slam_hz,
+            "slam_lane": self.slam_lane,
+            "slam_lag": self.slam_lag,
             "uclamp": self.uclamp,
             "duration_s": self.duration_s,
         })
@@ -222,6 +227,10 @@ impl StartRequest {
             command.extend(["--video".into(), "h264".into(), "--video-cameras".into(), list.join(",")]);
         }
         command.extend(["--display".into(), at("assets/robocap-live-display.rrd"), "--slam-hz".into(), self.slam_hz.to_string()]);
+        command.extend(["--slam-lane".into(), self.slam_lane.into()]);
+        if self.slam_lag != "auto" {
+            command.extend(["--slam-set".into(), format!("port.frontend_lag={}", self.slam_lag == "on")]);
+        }
         let uclamp = if self.uclamp { "1024" } else { "none" };
         command.extend(["--slam-uclamp".into(), uclamp.into(), "--hands-uclamp".into(), uclamp.into()]);
         command.extend(["--duration".into(), self.duration_s.to_string(), "--summary-json".into(), at(&format!("logs/rt-{stamp}.json"))]);
@@ -413,14 +422,14 @@ mod tests {
         assert_eq!(request.viewer, "rerun+http://198.51.100.7:9876/proxy");
         assert_eq!((request.video_cameras.clone(), request.slam_hz, request.duration_s, request.hands, request.uclamp), (vec![0, 1, 5], 30, 600, true, false));
         let form = json!({"viewer": "rerun+http://198.51.100.7:9876/proxy", "video_cameras": [0, 1, 5], "hands": true, "hand_overlays": "fit",
-            "slam_hz": 30, "uclamp": false, "duration_s": 600});
+            "slam_hz": 30, "slam_lane": "gpu", "slam_lag": "auto", "uclamp": false, "duration_s": 600});
         assert_eq!(request.to_json(), form, "the page refills its form from these names");
         let command = request.command(Path::new("/root/robocap-live"), 7).join(" ");
         assert_eq!(
             command,
             "/root/robocap-live/bin/robocap-live --source live --rig /root/robocap-live/rig.json --nets rknn /root/robocap-live/models --hands on \
              --hand-overlays fit --viewer rerun+http://198.51.100.7:9876/proxy --video h264 --video-cameras 0,1,5 --display /root/robocap-live/assets/robocap-live-display.rrd \
-             --slam-hz 30 --slam-uclamp none --hands-uclamp none --duration 600 --summary-json /root/robocap-live/logs/rt-7.json"
+             --slam-hz 30 --slam-lane gpu --slam-uclamp none --hands-uclamp none --duration 600 --summary-json /root/robocap-live/logs/rt-7.json"
         );
         assert!(StartRequest::parse("viewer=rerun%2Bhttp%3A%2F%2Fx%3B%20rm%20-rf%20%2F%3A9876%2Fproxy").is_err(), "a shell in the host");
         assert!(StartRequest::parse("video_cameras=0,6").is_err());
@@ -441,6 +450,22 @@ mod tests {
         assert!(default.contains(" --hand-overlays fit "), "the live default: {default}");
         assert!(StartRequest::parse("hand_overlays=all").is_err());
         assert!(StartRequest::parse("hand_overlays=fit%3B%20reboot").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_start_form_selects_the_slam_lane_and_lag() -> Result<(), String> {
+        let default = StartRequest::parse("")?.command(Path::new("/r"), 1).join(" ");
+        assert!(default.contains(" --slam-lane gpu "));
+        assert!(!default.contains("--slam-set"), "auto lets the actual lane choose, including CPU fallback");
+        let cpu = StartRequest::parse("slam_lane=cpu&slam_lag=on")?.command(Path::new("/r"), 1).join(" ");
+        assert!(cpu.contains(" --slam-lane cpu --slam-set port.frontend_lag=true "));
+        let sync = StartRequest::parse("slam_lane=gpu&slam_lag=off")?.command(Path::new("/r"), 1).join(" ");
+        assert!(sync.contains(" --slam-set port.frontend_lag=false "));
+        assert!(StartRequest::parse("slam_lane=other").is_err());
+        assert!(StartRequest::parse("slam_lag=maybe").is_err());
+        let empty = StartRequest::parse("hand_overlays=&slam_lane=&slam_lag=")?;
+        assert_eq!((empty.hand_overlays, empty.slam_lane, empty.slam_lag), ("fit", "gpu", "auto"));
         Ok(())
     }
 

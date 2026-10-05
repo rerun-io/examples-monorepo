@@ -100,6 +100,14 @@ impl<T> StageQueue<T> {
         lock(&self.state).dropped
     }
 
+    /// Clone the first queued item that matches without removing it or waiting for more input.
+    /// A drop-oldest producer may replace it later; SLAM treats it only as a lookahead hint.
+    pub fn peek_matching(&self, matches: impl Fn(&T) -> bool) -> Option<T>
+    where
+        T: Clone,
+    {
+        lock(&self.state).items.iter().find(|item| matches(item)).cloned()
+    }
 }
 
 struct PoseState {
@@ -302,4 +310,16 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn lookahead_peeks_a_selected_frame_without_consuming_it() {
+        let queue = StageQueue::new(3, QueuePolicy::DropOldest);
+        for t in [1, 2, 3] {
+            queue.push(t);
+        }
+        assert_eq!(queue.peek_matching(|&t| t >= 2), Some(2));
+        assert_eq!(queue.pop(), Some(1));
+        assert_eq!(queue.pop(), Some(2));
+        assert_eq!(queue.pop(), Some(3));
+        assert_eq!(queue.peek_matching(|_| true), None);
+    }
 }

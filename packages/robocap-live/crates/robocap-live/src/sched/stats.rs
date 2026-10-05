@@ -118,6 +118,8 @@ pub struct Counters {
     pub slam_imu_timeouts: u64,
     /// IMU samples SLAM dropped because they did not follow the previous one.
     pub slam_imu_unordered: u64,
+    /// Track calls that supplied a queued next-frame hint (the GPU may discard a stale hint).
+    pub slam_lookahead: u64,
     /// Accepted first frames buffered without a pose, including after a reset or flush.
     pub slam_buffered: u64,
     /// slam-rs errors (each one resets).
@@ -142,6 +144,9 @@ pub struct Counters {
 
 #[derive(Default)]
 pub(super) struct StatsInner {
+    pub(super) slam_lane: Option<crate::slam::SlamLane>,
+    pub(super) slam_frontend_lag: Option<bool>,
+    pub(super) slam_threads: Option<usize>,
     pub(super) window: [Vec<f64>; STAGES.len()],
     pub(super) total: [Vec<f64>; STAGES.len()],
     pub(super) counters: Counters,

@@ -24,7 +24,7 @@ use robocap_live::log::video::{EncoderConfig, EncoderKind};
 use robocap_live::log::{Logger, LoggerConfig, LoggerSink, VideoMode};
 use robocap_live::nets::{HandNets, NetsError, NoNets};
 use robocap_live::sched::{self, FramesetSink, HandsStage, PipelineConfig, RecordWriter};
-use robocap_live::slam::{ReferencePoses, SlamConfig, SlamMode, SlamProfile, parse_override};
+use robocap_live::slam::{ReferencePoses, SlamConfig, SlamLane, SlamMode, SlamProfile, parse_override};
 use robocap_live::source::FrameSource;
 use robocap_live::source::replay::{ReplayConfig, ReplaySource, read_reference_poses};
 
@@ -196,10 +196,12 @@ struct Cli {
     /// `--rig` file, which must be the identified cap's; in replay, the dump's `rig.json`).
     #[arg(long)]
     slam_calibration: Option<PathBuf>,
-    /// slam-rs frontend threads (2 on the 2 cores of one cpufreq policy measured 1.8x faster than 4 over two policies, whose
-    /// cores schedutil then keeps at 408 MHz).
-    #[arg(long, default_value_t = 2)]
-    slam_threads: usize,
+    /// SLAM frontend (aarch64: gpu, other hosts: cpu). GPU startup failure falls back to CPU.
+    #[arg(long, value_enum, default_value_t = SlamLane::default())]
+    slam_lane: SlamLane,
+    /// SLAM workers within its two cores (1 on GPU, 2 on CPU).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=2))]
+    slam_threads: Option<u8>,
     /// Cameras the hands may use.
     #[arg(long, default_value = "0,1,2,3,4,5")]
     hand_cameras: Cameras,
@@ -533,13 +535,12 @@ fn main() -> Result<()> {
         sinks.push(Box::new(LoggerSink::new(logger)));
     }
 
-    let slam_overrides =
-        cli.slam_set.iter().map(|setting| parse_override(setting).with_context(|| format!("--slam-set {setting}"))).collect::<Result<Vec<_>>>()?;
     let mut slam = SlamConfig {
+        lane: cli.slam_lane,
         hz: cli.slam_hz,
-        frontend_threads: cli.slam_threads,
+        frontend_threads: cli.slam_threads.map(usize::from),
         profile: cli.slam_profile,
-        overrides: slam_overrides,
+        overrides: cli.slam_set.iter().map(|setting| parse_override(setting).with_context(|| format!("--slam-set {setting}"))).collect::<Result<_>>()?,
         ..SlamConfig::default()
     };
     if slam_mode == SlamMode::On {
@@ -583,10 +584,9 @@ fn main() -> Result<()> {
         ..PipelineConfig::default()
     };
     eprintln!(
-        "robocap-live: slam {:?} at {} Hz ({} threads on {:?}, uclamp {}), downsample {} threads on {:?}, hands on {:?} (uclamp {}), other stages on {:?}, {}",
+        "robocap-live: slam {:?} at {} Hz (on {:?}, uclamp {}), downsample {} threads on {:?}, hands on {:?} (uclamp {}), other stages on {:?}, {}",
         slam_mode,
         cli.slam_hz,
-        cli.slam_threads,
         cpus_big,
         cli.slam_uclamp,
         cli.downsample_threads,
