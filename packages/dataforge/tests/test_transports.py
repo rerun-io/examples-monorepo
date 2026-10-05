@@ -419,14 +419,15 @@ def test_all_hf_entry_points_reject_floating_revision(entry: str, tmp_path: Path
     monkeypatch.setattr(transports, "snapshot_download", forbidden)
     monkeypatch.setattr(transports, "hf_hub_download", forbidden)
     with pytest.raises(ValueError, match="main.*pin a full commit sha"):
-        if entry == "snapshot":
-            transports.hf_fetch("repo", allow_patterns=[], local_dir=tmp_path, revision="main")
-        elif entry == "files":
-            transports.hf_fetch_files("repo", [], local_dir=tmp_path, revision="main")
-        elif entry == "lfs":
-            transports.hf_lfs_files("repo", [], revision="main")
-        else:
-            transports.hf_fetch_verified("repo", transports.HfFileInfo("file", 0, None, "hash"), local_dir=tmp_path, revision="main")
+        match entry:
+            case "snapshot":
+                transports.hf_fetch("repo", allow_patterns=[], local_dir=tmp_path, revision="main")
+            case "files":
+                transports.hf_fetch_files("repo", [], local_dir=tmp_path, revision="main")
+            case "lfs":
+                transports.hf_lfs_files("repo", [], revision="main")
+            case "verified":
+                transports.hf_fetch_verified("repo", transports.HfFileInfo("file", 0, None, "hash"), local_dir=tmp_path, revision="main")
 
 
 @pytest.mark.parametrize("revision", ["main", "abcdef0", "A" * 40, "g" * 40, "refs/pr/1"])
