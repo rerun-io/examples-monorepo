@@ -3,8 +3,10 @@ from typing import Literal
 
 import numpy as np
 from einops import rearrange
-from jaxtyping import Float
+from jaxtyping import Float, Float64
 from numpy import ndarray
+
+from simplecv.se3 import SE3
 
 
 @dataclass
@@ -237,6 +239,50 @@ class Fisheye62Parameters:
     def compute_projection_matrix(self) -> None:
         # Compute the projection matrix using k_matrix and world_T_cam
         self.projection_matrix: Float[ndarray, "3 4"] = self.intrinsics.k_matrix @ self.extrinsics.cam_T_world[:3, :]
+
+
+@dataclass(frozen=True, slots=True)
+class Fisheye624Parameters:
+    """Project Aria's FISHEYE624 camera: Fisheye62 plus four thin-prism terms, and its field of view.
+
+    projectaria-tools calls the model ``FisheyeRadTanThinPrism``: six radial
+    Kannala–Brandt terms, two tangential and four thin-prism terms, with one
+    focal length for both axes. ``simplecv.sensors.camera.fisheye624`` projects
+    and unprojects through it.
+    """
+
+    name: str
+    """Sensor label, e.g. ``"camera-slam-left"``."""
+    width: int
+    """Image width in pixels."""
+    height: int
+    """Image height in pixels."""
+    params: Float64[ndarray, "15"]
+    """``[f, cx, cy, k1..k6, p1, p2, s1..s4]``, projectaria-tools' own order."""
+    rig_T_cam: SE3
+    """Camera pose in the rig (Aria: device) frame."""
+    max_solid_angle: float
+    """Half-angle in radians of the cone a point must lie in to project."""
+    valid_radius: float | None = None
+    """Pixel radius about the principal point that a projection must fall inside, if the sensor has one."""
+
+    def to_fisheye62(self, rig_T_cam: Float64[ndarray, "4 4"] | None = None) -> Fisheye62Parameters:
+        """Drop the thin-prism terms and the field of view, for consumers of simplecv's Fisheye62 camera.
+
+        Extrinsics are stored as ``world_R_cam``/``world_t_cam`` holding ``rig_T_cam``:
+        this camera's own unless another pose (the same camera in another rig frame) is given.
+        """
+        if rig_T_cam is None:
+            rig_T_cam = self.rig_T_cam.matrix()
+        f, cx, cy, k1, k2, k3, k4, k5, k6, p1, p2 = (float(value) for value in self.params[:11])
+        return Fisheye62Parameters(
+            name=self.name,
+            extrinsics=Extrinsics(world_R_cam=rig_T_cam[:3, :3].copy(), world_t_cam=rig_T_cam[:3, 3].copy()),
+            intrinsics=Intrinsics.from_focal_principal_point(
+                camera_conventions="RDF", fl_x=f, fl_y=f, cx=cx, cy=cy, width=self.width, height=self.height
+            ),
+            distortion=KannalaBrandtDistortion(k1=k1, k2=k2, k3=k3, k4=k4, k5=k5, k6=k6, p1=p1, p2=p2),
+        )
 
 
 def to_homogeneous(

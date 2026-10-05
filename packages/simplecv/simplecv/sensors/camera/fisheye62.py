@@ -4,11 +4,11 @@ from collections.abc import Sequence
 
 import numpy as np
 from einops import rearrange
-from jaxtyping import Float
+from jaxtyping import Bool, Complex128, Float, Float64
 from numpy import ndarray
 
-from simplecv.camera_parameters import Fisheye62Parameters, KannalaBrandtDistortion, apply_radial_tangential_distortion
-from simplecv.sensors.camera.base_camera import filter_out_of_bounds, world_to_cam_batched
+from simplecv.camera_parameters import Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, apply_radial_tangential_distortion
+from simplecv.sensors.camera.base_camera import filter_out_of_bounds, pixels_in_image, world_to_cam_batched
 
 
 def arctan_cam_to_image_batched(
@@ -243,3 +243,38 @@ def project_kannala_brandt_diagonal(
         uv_batch=uv[:, None, :, :], xyz_cam_batch=xyz_cam[:, None, :, :], h=h, w=w
     )[:, 0, :, :]
     return uv_filtered
+
+
+def project_fisheye62(xyz_cam: Float64[ndarray, "n 3"], camera: Fisheye62Parameters) -> Float64[ndarray, "n 2"]:
+    """Project Float64[n,3] camera metres to Float64[n,2] pixels, bounded by the lens's monotonic field of view.
+
+    The first radial derivative root bounds the monotonic field of view: past it the
+    polynomial folds and a ray can land back inside the image. Call once per camera
+    with all frames flattened, so its bound is computed only once. Invalid inputs,
+    rear rays (``z <= 0``), folded rays and pixels outside ``[0, W) x [0, H)`` become NaN.
+
+    Raises:
+        ValueError: ``camera`` carries no KannalaBrandt distortion.
+    """
+    lens: KannalaBrandtDistortion | None = camera.distortion
+    if lens is None:
+        raise ValueError(f"{camera.name}: project_fisheye62 needs a KannalaBrandt distortion")
+    radial: tuple[float, ...] = (lens.k1, lens.k2, lens.k3, lens.k4, lens.k5, lens.k6)
+    # The derivative is a degree-six polynomial in theta squared.
+    roots: Complex128[ndarray, "r"] = np.polynomial.polynomial.polyroots(
+        [1.0, *((2 * i + 1) * k for i, k in enumerate(radial, 1))]
+    ).astype(np.complex128)
+    bounds: list[float] = [float(np.sqrt(root.real)) for root in roots if abs(root.imag) < 1e-10 and 0 < root.real <= (np.pi / 2) ** 2]
+    theta_max: float = min(bounds, default=float(np.pi / 2))
+    radius: Float64[ndarray, "n"] = np.hypot(xyz_cam[:, 0], xyz_cam[:, 1])
+    theta: Float64[ndarray, "n"] = np.arctan2(radius, xyz_cam[:, 2])
+    valid: Bool[ndarray, "n"] = np.isfinite(xyz_cam).all(axis=1) & (xyz_cam[:, 2] > 0) & (theta < theta_max)
+    scale: Float64[ndarray, "n"] = np.divide(theta, radius, out=np.zeros_like(theta), where=radius > 0)
+    normalized: Float64[ndarray, "n 2"] = xyz_cam[:, :2] * scale[:, None]
+    normalized[~valid] = 0.0
+    distorted: Float64[ndarray, "n 2"] = apply_radial_tangential_distortion(lens, normalized)
+    intrinsics: Intrinsics = camera.intrinsics
+    pixels: Float64[ndarray, "n 2"] = distorted * [intrinsics.fl_x, intrinsics.fl_y] + [intrinsics.cx, intrinsics.cy]
+    valid &= pixels_in_image(pixels, intrinsics.width, intrinsics.height)
+    pixels[~valid] = np.nan
+    return pixels

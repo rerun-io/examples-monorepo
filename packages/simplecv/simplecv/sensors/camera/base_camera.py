@@ -2,7 +2,7 @@
 
 import numpy as np
 from einops import rearrange
-from jaxtyping import Float
+from jaxtyping import Bool, Float
 from numpy import ndarray
 
 
@@ -44,6 +44,13 @@ def cam_to_world_batched(
     xyz_cam: Float[ndarray, "n_frames n_views n_points 3"],
 ) -> Float[ndarray, "n_frames n_views n_points 3"]:
     raise NotImplementedError("cam_to_world_batched is not implemented yet.")
+
+
+def pixels_in_image(pixels: Float[ndarray, "n 2"], width: int, height: int) -> Bool[ndarray, "n"]:
+    """Finite pixels inside ``[0, width) x [0, height)``; the image-bounds rule of the dataforge projections layer."""
+    return (
+        np.isfinite(pixels).all(axis=1) & (pixels[:, 0] >= 0) & (pixels[:, 0] < width) & (pixels[:, 1] >= 0) & (pixels[:, 1] < height)
+    )
 
 
 def filter_out_of_bounds(

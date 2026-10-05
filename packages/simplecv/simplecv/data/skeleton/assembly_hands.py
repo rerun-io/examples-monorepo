@@ -1,7 +1,7 @@
 from typing import Final
 
 import numpy as np
-from jaxtyping import Float32
+from jaxtyping import Bool, Float32
 from numpy import ndarray
 
 HAND_LINKS = (
@@ -138,4 +138,23 @@ def assembly21_to_coco133(
         coco_133[113, :3] = right_thumb_base
         coco_133[113, 3] = np.float32(1.0)
 
+    return coco_133
+
+
+def assembly21_to_coco133_batch(
+    kpts_lr: Float32[ndarray, "n 2 21 d"],
+) -> Float32[ndarray, "n 133 d"]:
+    """
+    Convert n frames of Assembly-Hands (L,R) positions → COCO-WholeBody 133 positions.
+
+    Slot for slot the positions of ``assembly21_to_coco133`` for any coordinate count d:
+    uncovered slots are NaN, and each thumb base is the wrist↔CMC midpoint only when
+    neither joint has a NaN coordinate. No confidence column is returned.
+    """
+    coco_133: Float32[ndarray, "n 133 d"] = np.full((len(kpts_lr), 133, kpts_lr.shape[-1]), np.nan, dtype=np.float32)
+    for hand, mapping in enumerate((_ASM2COCO, _ASM2COCO_R)):
+        for asm_id, coco_ids in mapping.items():
+            coco_133[:, coco_ids, :] = kpts_lr[:, hand, asm_id, None, :]
+        thumb_base_valid: Bool[ndarray, "n"] = ~np.isnan(kpts_lr[:, hand, [5, 6], :]).any(axis=(1, 2))
+        coco_133[thumb_base_valid, 92 + 21 * hand] = (kpts_lr[thumb_base_valid, hand, 5] + kpts_lr[thumb_base_valid, hand, 6]) * np.float32(0.5)
     return coco_133
