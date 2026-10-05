@@ -22,7 +22,6 @@ mod segments;
 #[cfg(feature = "live-slam")]
 pub use live_slam::{
     ImuChannel, LiveSlam, LiveSlamOptions, SLAM_CAMERAS, SlamInput, SlamReport, SlamStatus,
-    fast_profile,
 };
 #[cfg(feature = "live-slam")]
 mod slam_process;

@@ -329,6 +329,15 @@ impl VioConfig {
         Ok(wrapper.value0)
     }
 
+    /// Apply a flat profile overlay to a wrapped config, validating keys and values.
+    pub fn with_overlay(base: &str, overlay: &str) -> Result<Self, ConfigError> {
+        let mut document: Value0<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(base)?;
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(overlay)?;
+        document.value0.extend(fields);
+        Self::from_json_str(&serde_json::to_string(&document)?)
+    }
+
     /// Write configuration JSON with its `value0` wrapper.
     pub fn to_json_string(&self) -> Result<String, ConfigError> {
         Ok(serde_json::to_string_pretty(&Value0 { value0: self })?)
@@ -346,6 +355,29 @@ mod tests {
         let text = r#"{"value0":{"config.not_a_real_field":3}}"#;
         let error = VioConfig::from_json_str(text).unwrap_err();
         assert!(error.to_string().contains("config.not_a_real_field"));
+    }
+
+    #[test]
+    fn overlays_use_the_config_schema_and_preserve_other_fields() {
+        let config = VioConfig::with_overlay(
+            MSDMO_JSON,
+            include_str!("../../../configs/profiles/fast.json"),
+        )
+        .unwrap();
+        assert_eq!(config.port_klt_exit_step_px, None);
+        assert_eq!(config.optical_flow_image_safe_radius, 388.0);
+        assert!(
+            VioConfig::with_overlay(r#"{"value0":{}}"#, r#"{"port.frontend_lag":true}"#)
+                .unwrap()
+                .port_frontend_lag
+        );
+        for overlay in [
+            r#"{"port.typo":true}"#,
+            r#"{"port.frontend_lag":"yes"}"#,
+            "[]",
+        ] {
+            assert!(VioConfig::with_overlay(MSDMO_JSON, overlay).is_err());
+        }
     }
 
     #[test]

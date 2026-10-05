@@ -1,4 +1,4 @@
-"""Config profiles preserve the reference contract without constructing Rust objects."""
+"""Profile overlays use the Rust schema without changing resolved config bytes."""
 
 import json
 from dataclasses import replace
@@ -6,7 +6,27 @@ from pathlib import Path
 
 import pytest
 
-from slam_rs.config import PORT_CONFIG_KEYS, DatasetProperties, SlamConfig, load_slam_config
+from slam_rs.config import DatasetProperties, SlamConfig, load_slam_config
+
+
+def test_rust_defaulted_keys_are_valid_profile_overlays(tmp_path: Path) -> None:
+    """A Rust schema field need not be repeated in each dataset config."""
+    from slam_rs.config import profiled_config_text
+
+    base: Path = tmp_path / "base.json"
+    base.write_text('{"value0":{}}')
+    (tmp_path / "custom.json").write_text('{"port.klt_exit_step_px":0.05}')
+    assert json.loads(profiled_config_text(base, "custom", tmp_path)) == {"value0": {"port.klt_exit_step_px": 0.05}}
+
+
+def test_profile_values_are_validated_by_rust(tmp_path: Path) -> None:
+    from slam_rs.config import profiled_config_text
+
+    base: Path = tmp_path / "base.json"
+    base.write_text('{"value0":{}}')
+    (tmp_path / "custom.json").write_text('{"port.frontend_lag":"yes"}')
+    with pytest.raises(ValueError):
+        profiled_config_text(base, "custom", tmp_path)
 
 
 def test_reference_profile_preserves_vendored_text() -> None:
@@ -15,7 +35,7 @@ def test_reference_profile_preserves_vendored_text() -> None:
         assert settings.vio_config_text(dataset.name) == (settings.package_root / dataset.vio_config).read_text()
 
 
-def test_fast_profile_changes_only_the_lm_cap_and_the_two_port_gates() -> None:
+def test_fast_profile_changes_only_its_declared_keys() -> None:
     """The fast profile changes only its three declared keys.
 
     The port-prefixed keys select demand-based detection (D75) and the
@@ -29,7 +49,7 @@ def test_fast_profile_changes_only_the_lm_cap_and_the_two_port_gates() -> None:
         assert reference["value0"].pop("config.vio_max_iterations") == 7
         assert fast["value0"].pop("port.redetect_survivor_ratio") == 0.85
         assert fast["value0"].pop("port.frame_update_max_iterations") == 5
-        assert not (set(reference["value0"]) & PORT_CONFIG_KEYS)
+        assert all(key.startswith("config.") for key in reference["value0"])
         assert fast == reference
 
 
@@ -38,7 +58,6 @@ def test_no_vendored_config_carries_a_port_key() -> None:
     settings: SlamConfig = load_slam_config()
     for dataset in settings.datasets:
         values: dict = json.loads((settings.package_root / dataset.vio_config).read_text())["value0"]
-        assert not (set(values) & PORT_CONFIG_KEYS), dataset.name
         assert all(key.startswith("config.") for key in values), dataset.name
 
 
@@ -52,8 +71,7 @@ def test_no_vendored_config_carries_a_port_key() -> None:
 def test_an_unknown_overlay_key_is_rejected(tmp_path: Path, overlay: str, rejected: str) -> None:
     """Neither namespace is an escape hatch for a typo.
 
-    ``port.`` is an allowlist rather than an open namespace (D75), and a
-    ``config.`` key the Rust schema does not carry is refused the same way: a
+    Both namespaces belong to the Rust schema: a
     misspelled knob names itself instead of silently doing nothing.
     """
     settings: SlamConfig = load_slam_config()
@@ -64,5 +82,5 @@ def test_an_unknown_overlay_key_is_rejected(tmp_path: Path, overlay: str, reject
     profiles: Path = tmp_path / "configs/profiles"
     profiles.mkdir()
     (profiles / "fast.json").write_text(overlay)
-    with pytest.raises(KeyError, match=rejected):
+    with pytest.raises(ValueError, match=rejected):
         replace(settings, package_root=tmp_path).vio_config_text(dataset.name, profile="fast")

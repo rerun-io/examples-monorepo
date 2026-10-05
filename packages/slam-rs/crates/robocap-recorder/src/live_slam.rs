@@ -77,13 +77,6 @@ pub struct LiveSlamOptions {
     pub joint: bool,
 }
 
-/// Apply the recorder's fast estimator schedule (configs/profiles/fast.json).
-pub fn fast_profile(config: &mut VioConfig) {
-    config.vio_max_iterations = 7;
-    config.port_redetect_survivor_ratio = 0.85;
-    config.port_frame_update_max_iterations = 5;
-}
-
 pub struct LiveSlam {
     vio: Vio<f32>,
     resolution: [[u32; 2]; 4],
@@ -103,9 +96,10 @@ impl LiveSlam {
         let calibration = Calibration::<f64>::from_json_str(include_str!(
             "../../../configs/robocap_calib_downscale3.json"
         ))?;
-        let mut config =
-            VioConfig::from_json_str(include_str!("../../../configs/msdmo_config.json"))?;
-        fast_profile(&mut config);
+        let config = VioConfig::with_overlay(
+            include_str!("../../../configs/msdmo_config.json"),
+            include_str!("../../../configs/profiles/fast.json"),
+        )?;
         Self::with_configuration(calibration, config, options)
     }
 
@@ -318,26 +312,5 @@ impl LiveSlam {
                 updates: self.updates,
             }));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::{Context, Result};
-
-    /// The typed overlay must say exactly what the checked-in profile file says.
-    #[test]
-    fn fast_profile_matches_the_checked_in_profile_file() -> Result<()> {
-        let file: serde_json::Value =
-            serde_json::from_str(include_str!("../../../configs/profiles/fast.json"))?;
-        let mut config = slam_rs::config::VioConfig::from_json_str(include_str!(
-            "../../../configs/msdmo_config.json"
-        ))?;
-        super::fast_profile(&mut config);
-        let written: serde_json::Value = serde_json::from_str(&config.to_json_string()?)?;
-        for (key, value) in file.as_object().context("profile is not an object")? {
-            assert_eq!(&written["value0"][key], value, "{key}");
-        }
-        Ok(())
     }
 }
