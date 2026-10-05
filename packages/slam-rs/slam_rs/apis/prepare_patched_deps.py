@@ -33,6 +33,12 @@ PATCHED_CRATES: tuple[PatchedCrate, ...] = (
         '4d40f7451ab096a127c58b03d76b6d30f4fc757ac13d8e2f17ed5bb20ffda4bc',
         'patches/cubecl-common-0.11.0-pre.3-channel-park.patch',
     ),
+    PatchedCrate(
+        'cubecl-spirv',
+        '0.11.0-pre.3',
+        'a4763912d17cbdd93c63b7e0d5450ffa1881bbcfbba4576adbb94a23854cccaf',
+        'patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch',
+    ),
 )
 
 

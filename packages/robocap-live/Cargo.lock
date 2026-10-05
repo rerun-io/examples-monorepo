@@ -5963,3 +5963,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[patch.unused]]
 name = "cubecl-common"
 version = "0.11.0-pre.3"
+
+[[patch.unused]]
+name = "cubecl-spirv"
+version = "0.11.0-pre.3"

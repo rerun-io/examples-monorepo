@@ -6,7 +6,7 @@
 resolver = "3"
 members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli", "crates/robocap-recorder"]
 # Run the patched dependency's own unit tests as a standalone crate.
-exclude = ["target/patch/cubecl-common-0.11.0-pre.3"]
+exclude = ["target/patch/cubecl-common-0.11.0-pre.3", "target/patch/cubecl-spirv-0.11.0-pre.3"]
 
 [workspace.package]
 version = "0.1.0"
@@ -95,6 +95,9 @@ codegen-units = 1
 # (macOS: use -e slam-rs-osx-dev).
 # Bump: update version + archive sha256 in slam_rs/apis/prepare_patched_deps.py,
 # rebase the patch, update this path and the Pixi patch-test command, run the prepare
-# task, then regenerate Cargo.lock with cargo update -p cubecl-common.
+# task, then regenerate Cargo.lock with cargo update -p cubecl-common -p cubecl-spirv.
 [patch.crates-io]
 cubecl-common = { path = "target/patch/cubecl-common-0.11.0-pre.3" }
+# Source patch: patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch (Mali: shared memory
+# without VK_KHR_workgroup_memory_explicit_layout). Prepared by the same task; bump it the same way.
+cubecl-spirv = { path = "target/patch/cubecl-spirv-0.11.0-pre.3" }
