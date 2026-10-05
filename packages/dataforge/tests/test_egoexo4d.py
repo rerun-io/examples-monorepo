@@ -1,0 +1,169 @@
+"""Ego-Exo4D end to end on a synthetic take laid out as the egoexo CLI writes it (real HM fit, real Aria calibration)."""
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import pytest
+from conftest import FIXTURES, raw_asset, read_chunks, vrs_file
+
+from dataforge import paths, schema
+from dataforge.datasets.egoexo4d import Egoexo4dConfig, Egoexo4dDataset
+from dataforge.datasets.egoexo4d_body import BODY_MESH_STRIDE, HM_FILE, SMPLH_FILE, SMPLX_FILE
+from dataforge.datasets.egoexo4d_download import ManifestPath
+from dataforge.datasets.egoexo4d_layers import CAMERAS_SIDECAR, EGO_RIG, FRAMES_SIDECAR
+from dataforge.datasets.egoexo4d_source import Take
+
+TAKE: str = "cmu_bike02_4"
+FRAMES: int = 12
+MODEL_ROOT: Path = Path(os.environ.get("DATAFORGE_EGOEXO4D_MODEL_ROOT", str(paths.raw_root() / "egoexo4d")))
+GOPRO_HEADER: str = (
+    "cam_uid,graph_uid,tx_world_cam,ty_world_cam,tz_world_cam,qx_world_cam,qy_world_cam,qz_world_cam,qw_world_cam,image_width,image_height,"
+    "intrinsics_type,intrinsics_0,intrinsics_1,intrinsics_2,intrinsics_3,intrinsics_4,intrinsics_5,intrinsics_6,intrinsics_7,"
+    "start_frame_idx,end_frame_idx,quality"
+)
+
+
+def write_video(ffmpeg: Path, path: Path, size: str, *, gray: bool) -> None:
+    """A 12-frame H.264 clip with B-frames, as the release encodes its frame-aligned videos."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    source: str = f"testsrc2=size={size}:rate=30" + (",format=gray" if gray else "")
+    subprocess.run(
+        [
+            str(ffmpeg),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            source,
+            "-frames:v",
+            str(FRAMES),
+            "-c:v",
+            "libx264",
+            "-bf",
+            "2",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+    )
+
+
+def synthetic_take(root: Path, ffmpeg: Path) -> list[str]:
+    """Lay out one take; return the take files a real manifest would list for it."""
+    take_dir: Path = root / "takes" / TAKE
+    videos: dict[str, tuple[str, bool]] = {
+        "cam01.mp4": ("3840x2160", False),
+        "cam02.mp4": ("3840x2160", False),
+        "aria01_214-1.mp4": ("1408x1408", False),
+        "aria01_1201-1.mp4": ("480x640", True),
+        "aria01_1201-2.mp4": ("480x640", True),
+        "aria01_211-1.mp4": ("640x240", True),
+    }
+    for name, (size, gray) in videos.items():
+        write_video(ffmpeg, take_dir / "frame_aligned_videos" / name, size, gray=gray)
+    entry = {
+        "take_name": TAKE,
+        "take_uid": "take-uid",
+        "root_dir": f"takes/{TAKE}",
+        "capture_uid": "capture-uid",
+        "timesync_start_idx": 3,
+        "timesync_end_idx": 3 + FRAMES,
+        "task_name": "Fix a flat",
+        "parent_task_name": "Bike Repair",
+        "university_name": "cmu",
+        "capture": {"capture_name": "cmu_bike02", "cameras": [{"cam_id": "cam01", "is_ego": False}, {"cam_id": "aria01", "is_ego": True}]},
+        "frame_aligned_videos": {
+            "cam01": {"0": {"relative_path": "frame_aligned_videos/cam01.mp4", "readable_stream_id": "0"}},
+            "cam02": {"0": {"relative_path": "frame_aligned_videos/cam02.mp4", "readable_stream_id": "0"}},
+            "aria01": {
+                stream: {"relative_path": f"frame_aligned_videos/aria01_{stream_id}.mp4", "readable_stream_id": stream}
+                for stream, stream_id in (("rgb", "214-1"), ("slam-left", "1201-1"), ("slam-right", "1201-2"), ("et", "211-1"))
+            },
+        },
+    }
+    (root / "takes.json").write_text(json.dumps([entry]))
+    times: np.ndarray = 5_000_000_000 + np.arange(FRAMES + 6, dtype=np.int64) * 33_333_333
+    capture: Path = root / "captures/cmu_bike02/timesync.csv"
+    capture.parent.mkdir(parents=True)
+    capture.write_text("cam01_pts,aria01_214-1_capture_timestamp_ns\n" + "".join(f"{i},{stamp}\n" for i, stamp in enumerate(times)))
+    trajectory: Path = take_dir / "trajectory"
+    trajectory.mkdir(parents=True)
+    # GoPros on a 3 m ring around the origin looking at it; the Aria walks along x at 1.6 m.
+    rows: list[str] = []
+    for index, angle in enumerate((0.0, np.pi / 2)):
+        from scipy.spatial.transform import Rotation
+
+        position = np.array([3 * np.cos(angle), 3 * np.sin(angle), 1.2])
+        forward = -position / np.linalg.norm(position)
+        right = np.cross(forward, [0.0, 0.0, 1.0])
+        right /= np.linalg.norm(right)
+        down = np.cross(forward, right)
+        quaternion = Rotation.from_matrix(np.column_stack([right, down, forward])).as_quat()
+        rows.append(
+            f"cam{index + 1:02d},g,{position[0]},{position[1]},{position[2]},{quaternion[0]},{quaternion[1]},{quaternion[2]},{quaternion[3]},3840,2160,"
+            "KANNALABRANDTK3,1761.27,1761.27,1920,1080,0.0369,0.0571,-0.0571,0.0184,-1,-1,1"
+        )
+    rows.append("cam03,g,0,0,0,0,0,0,1,3840,2160,KANNALABRANDTK3,1700,1700,1920,1080,0.03,0.05,-0.05,0.01,-1,-1,0")
+    (trajectory / "gopro_calibs.csv").write_text("\n".join([GOPRO_HEADER, *rows]) + "\n")
+    stamps_us: np.ndarray = np.arange(int(times[0] // 1000) - 2000, int(times[-1] // 1000) + 2000, 1000)
+    lines: list[str] = [
+        "graph_uid,tracking_timestamp_us,utc_timestamp_ns,tx_world_device,ty_world_device,tz_world_device,qx_world_device,qy_world_device,qz_world_device,qw_world_device"
+    ]
+    lines += [f"g,{stamp},-1,{(stamp - stamps_us[0]) * 1e-6},0.0,1.6,0,0,0,1" for stamp in stamps_us]
+    (trajectory / "closed_loop_trajectory.csv").write_text("\n".join(lines) + "\n")
+    calib_json: str = (FIXTURES / "aria/gen1-hot3d-P0015_179e1b84-calib.json").read_text()
+    (take_dir / "aria01_noimagestreams.vrs").write_bytes(vrs_file({214: {}}, [], file_tags={"calib_json": calib_json}))
+    fit: Path = root / "hm" / TAKE / HM_FILE
+    fit.parent.mkdir(parents=True)
+    shutil.copy(FIXTURES / "egoexo4d/cmu_bike02_4-first12.npz", fit)
+    for name in (SMPLH_FILE, SMPLX_FILE):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(MODEL_ROOT / name, root / name)
+    return [f"takes/{TAKE}/frame_aligned_videos/{name}" for name in videos] + [
+        f"takes/{TAKE}/trajectory/gopro_calibs.csv",
+        f"takes/{TAKE}/trajectory/closed_loop_trajectory.csv",
+        f"takes/{TAKE}/aria01_noimagestreams.vrs",
+    ]
+
+
+@pytest.mark.integration
+def test_convert_writes_four_layers_and_prunes_the_take(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (SMPLH_FILE, SMPLX_FILE):
+        raw_asset("Ego-Exo4D-HM body model (dataforge-download egoexo4d)", MODEL_ROOT / name)
+    root: Path = tmp_path / "raw"
+    take_files: list[str] = synthetic_take(root, nvenc_ffmpeg)
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    monkeypatch.setattr(Egoexo4dDataset, "fetch_take", lambda self, take: None)
+    monkeypatch.setattr(Egoexo4dDataset, "take_files", lambda self, take: [ManifestPath(f"s3://x/{path}", path) for path in take_files])
+    dataset = Egoexo4dConfig(root=root).setup()
+    ((identity, take),) = dataset.discover()
+    assert isinstance(take, Take) and identity.recording_id == f"egoexo4d__{TAKE}"
+    dataset.convert(identity, take, force=False)
+
+    targets = dataset.targets(identity)
+    assert all(target.is_file() for target in targets.values())
+    base = read_chunks(targets["base"])
+    samples = {str(chunk.entity_path): chunk.num_rows for chunk in base if "VideoStream:sample" in chunk.to_record_batch().schema.names}
+    expected = [schema.video_path(rig, 0) for rig in (1, 2)] + [schema.video_path(EGO_RIG, cam) for cam in range(4)]
+    assert sorted(samples) == sorted(expected)  # the unlocalized cam03 is left out
+    assert set(samples.values()) == {FRAMES}
+    projections = {str(chunk.entity_path) for chunk in read_chunks(targets["projections"]) if not chunk.is_static}
+    assert projections == {schema.coco133_uv_projected_path(rig, cam) for rig, cam in ((1, 0), (2, 0), (EGO_RIG, 0), (EGO_RIG, 1), (EGO_RIG, 2))}
+    mesh = [chunk for chunk in read_chunks(targets["body_mesh"]) if str(chunk.entity_path) == schema.body_path("mesh") and not chunk.is_static]
+    assert sum(chunk.num_rows for chunk in mesh) == len(range(0, FRAMES, BODY_MESH_STRIDE))
+    sidecars: Path = tmp_path / "out" / "sidecars" / identity.recording_id
+    assert (sidecars / FRAMES_SIDECAR).is_file() and (sidecars / CAMERAS_SIDECAR).is_file()
+    assert not any((root / path).exists() for path in take_files)  # raw pruned after base
+    assert (root / "hm" / TAKE / HM_FILE).is_file()  # the fit stays
+
+    # Derived layers rebuild from the sidecars alone, with the raw take gone.
+    for layer in ("body_pose", "body_mesh", "projections"):
+        targets[layer].unlink()
+    dataset.convert(identity, take, force=False)
+    assert all(target.is_file() for target in targets.values())

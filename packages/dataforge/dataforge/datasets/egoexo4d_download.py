@@ -101,7 +101,9 @@ class Release:
         if part not in self.manifests:
             path: str = f"{RELEASE}/{part}/manifest.json"
             try:
-                text: str = self.fs.cat_file(path).decode()
+                with self.fs.open(path, "rb") as stream:
+                    data: bytes | str = stream.read()
+                text: str = data.decode() if isinstance(data, bytes) else data
             except PermissionError as error:
                 raise PermissionError(
                     f"{path}: access denied for AWS profile {self.profile!r}; put the Ego-Exo4D licence keys in that profile (https://ego4ddataset.com)"

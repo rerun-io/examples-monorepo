@@ -46,7 +46,9 @@ MESH_BATCH_ROWS: int = 64
 BODY_ALBEDO: tuple[int, int, int, int] = (160, 190, 200, 110)
 """Body mesh RGBA, as EPFL's SMPL body."""
 
-OPENPOSE67_SOURCE: Int64[ndarray, "k"] = np.array([0, 16, 15, 18, 17, 5, 2, 6, 3, 7, 4, 12, 9, 13, 10, 14, 11, 19, 20, 21, 22, 23, 24, *range(25, 67)])
+OPENPOSE67_SOURCE: Int64[ndarray, "k"] = np.array(
+    [0, 16, 15, 18, 17, 5, 2, 6, 3, 7, 4, 12, 9, 13, 10, 14, 11, 19, 20, 21, 22, 23, 24, *range(25, 67)]
+)
 """Release keypoints (OpenPose BODY_25, left hand 21, right hand 21) that have a COCO-133 slot; neck (1) and mid-hip (8) do not."""
 OPENPOSE67_DESTINATION: Int64[ndarray, "k"] = np.array([*range(23), *LEFT_HAND_IDX, *RIGHT_HAND_IDX])
 """COCO-133 slot of each ``OPENPOSE67_SOURCE`` keypoint: body 0-16, feet 17-22, hands 91-132. The face (23-90) stays empty."""
@@ -155,7 +157,8 @@ class SmplhModel:
         for start in range(0, len(rows), self.chunk_frames):
             batch: Int64[ndarray, "c"] = rows[start : start + self.chunk_frames]
             inputs: dict[str, torch.Tensor] = {
-                name: torch.from_numpy(np.ascontiguousarray(getattr(fit, name)[batch])) for name in ("betas", "root_orient", "pose_body", "hand_pose", "trans")
+                name: torch.from_numpy(np.ascontiguousarray(getattr(fit, name)[batch]))
+                for name in ("betas", "root_orient", "pose_body", "hand_pose", "trans")
             }
             with torch.no_grad():
                 output = self.layer(
