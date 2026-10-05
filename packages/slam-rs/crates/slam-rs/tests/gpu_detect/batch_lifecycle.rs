@@ -1,5 +1,67 @@
 use super::*;
 
+/// Shared-arena selection must keep each camera's exact keys and the fused
+/// launch count, including side-camera batches and a later frameset.
+#[test]
+fn packed_camera_selection_is_exact_in_one_dispatch() {
+    use slam_rs::frontend::parallel::WorkPool;
+    use slam_rs::gpu::GpuPyramidBuilder;
+    use slam_rs::pyramid::PyramidBuilder;
+
+    let client = gpu_client().unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
+    let mut scanner = GpuCornerScan::new(client, Default::default()).unwrap();
+
+    let pool = WorkPool::new(1).unwrap();
+    let mut cpu = CpuCornerScan::with_cell_selection(true);
+    let mut state = 0x8912_ab34u32;
+    for (width, height, cell) in [(640, 480, 50), (517, 193, 37)] {
+        let mut pyramids: Vec<_> = (0..4)
+            .map(|_| builder.allocate(width, height, 3).unwrap())
+            .collect();
+        let select = CellSelect {
+            grid: CellGrid::new(width, height, cell).unwrap(),
+            threshold: 5,
+            safe_radius: 0.0,
+        };
+        for _ in 0..2 {
+            let images: Vec<_> = (0..4)
+                .map(|_| {
+                    let mut bytes = vec![0; (width + 13) * height];
+                    for byte in &mut bytes {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        *byte = (state >> 24) as u8;
+                    }
+                    let mut image = ImageU16::default();
+                    image
+                        .fill_packed_u8_strided(&bytes, width, height, width + 13)
+                        .unwrap();
+                    image
+                })
+                .collect();
+            builder.build_frames(&images, &mut pyramids, &pool).unwrap();
+            scanner.use_level0(&mut builder);
+            for (first, end) in [(0, 1), (1, 4), (0, 4)] {
+                let selects: Vec<_> = (0..4)
+                    .map(|camera| (first..end).contains(&camera).then_some(select))
+                    .collect();
+                scanner.submit_cells(&images, &selects).unwrap();
+                scanner.take_cells().unwrap();
+                for (camera, image) in images.iter().enumerate().take(end).skip(first) {
+                    let mut got = Vec::new();
+                    let mut want = Vec::new();
+                    scanner
+                        .select_cells(camera, image, &select, None, &mut got)
+                        .unwrap();
+                    cpu.select_cells(camera, image, &select, None, &mut want)
+                        .unwrap();
+                    assert_eq!(got, want, "camera {camera}, batch {first}..{end}");
+                }
+            }
+        }
+    }
+}
+
 /// One scanner, four camera slots.
 ///
 /// The device path keeps a key buffer per camera beside the three the band path
@@ -14,7 +76,7 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
     let bands = Arc::new(AtomicUsize::new(0));
     let selections = Arc::new(AtomicUsize::new(0));
     let mut device: DetectorScratch = DetectorScratch::with_scanner(Box::new(CountingScan {
-        inner: Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()),
+        inner: Box::new(GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap()),
         bands: Arc::clone(&bands),
         selections: Arc::clone(&selections),
     }));
@@ -107,12 +169,6 @@ impl SelectionFixture {
             })
             .collect()
     }
-
-    fn batch_keys(&self, scanner: &mut dyn CornerScan) -> Vec<Vec<u32>> {
-        scanner.submit_cells(&self.images, &self.selects).unwrap();
-        scanner.take_cells().unwrap();
-        self.keys(scanner)
-    }
 }
 
 /// The batched preparation answers exactly what the per-camera call does.
@@ -129,7 +185,8 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
     let images = &fixture.images;
     let selects = &fixture.selects;
 
-    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut scanner: GpuCornerScan<_> =
+        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     let alone = fixture.keys(&mut scanner);
 
     scanner.submit_cells(images, selects).unwrap();
@@ -148,53 +205,6 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
 /// reads for itself when nothing was delivered; so what is asserted is that the
 /// scanner made no read of its own, and that the keys are still the ones its
 /// own download would have given.
-#[test]
-fn the_tracker_download_carries_the_scanner_keys() {
-    let fixture = SelectionFixture::new([common::mio10_frame(0, 0), common::mio10_frame(1, 1)]);
-    let images = &fixture.images;
-    let selects = &fixture.selects;
-
-    // What the scanner answers when it downloads for itself: no relay wired.
-    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
-    let want = fixture.batch_keys(&mut alone);
-
-    // And the same two cameras with the tracker's `collect` in between.
-    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
-    let mut tracker: GpuPatchTracker<Pattern51, _> =
-        GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
-    scanner.share_reads(&mut tracker);
-
-    scanner.submit_cells(images, selects).unwrap();
-    let before = slam_rs::gpu::seam::snapshot();
-    tracker.collect().unwrap();
-    scanner.take_cells().unwrap();
-    let reads = slam_rs::gpu::seam::snapshot().delta(before);
-    assert_eq!(reads.read_track.calls, 1);
-    assert_eq!(reads.read_detect.calls, 0);
-    assert_eq!(fixture.keys(&mut scanner), want, "through the relay");
-}
-
-/// Reusing a scanner discards the prior delivered generation.
-#[test]
-fn a_retry_uses_only_the_new_generation() {
-    let first = SelectionFixture::new([common::mio10_frame(0, 0), common::mio10_frame(1, 1)]);
-    let second = SelectionFixture::new([common::mio10_frame(2, 1), common::mio10_frame(2, 0)]);
-    let mut alone = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
-    let want = second.batch_keys(&mut alone);
-    let mut scanner = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
-    let mut tracker: GpuPatchTracker<Pattern51, _> =
-        GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
-    scanner.share_reads(&mut tracker);
-    scanner.submit_cells(&first.images, &first.selects).unwrap();
-    tracker.collect().unwrap();
-    scanner
-        .submit_cells(&second.images, &second.selects)
-        .unwrap();
-    tracker.collect().unwrap();
-    scanner.take_cells().unwrap();
-    assert_eq!(second.keys(&mut scanner), want);
-}
-
 /// A prepared selection is spent by the call that reads it, and a camera the
 /// batch skipped still answers for itself.
 ///
@@ -212,7 +222,8 @@ fn a_prepared_selection_is_spent_once() {
     let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
         * ((grid.y_stop - grid.y_start) / grid.cell + 1);
 
-    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut scanner: GpuCornerScan<_> =
+        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     // Only camera 0 is offered, so camera 1 has nothing prepared for it.
     scanner
         .submit_cells(&images, &[Some(select), None])
@@ -227,7 +238,7 @@ fn a_prepared_selection_is_spent_once() {
     scanner
         .select_cells(0, &images[1], &select, None, &mut again)
         .unwrap();
-    let mut independent = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut independent = GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     let mut expected = Vec::new();
     independent
         .select_cells(0, &images[1], &select, None, &mut expected)

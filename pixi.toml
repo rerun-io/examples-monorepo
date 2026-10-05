@@ -2572,7 +2572,9 @@ description = "Prepare checksummed Cargo dependencies with local patches"
 
 [feature.slam-rs.tasks.slam-rs-build]
 depends-on = ["slam-rs-patch-deps"]
-cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
+# The CPU core and the GPU core (slam-rs-wgpu-build) share slam_rs/_core.so: each task that needs one installs it first, and
+# the install is a rename, so a running process keeps the file it loaded. Separate target dirs make the switch a copy, not a rebuild.
+cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/patches/**",
@@ -2673,9 +2675,9 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # binaries one after another, which is what keeps both deterministic.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
 depends-on = ["slam-rs-wgpu-build"]
-cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_seam_bench -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu && python -m pytest -q -m slow tests/test_metal_python_host.py"
+cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu -- --nocapture && python -m pytest -q -ra -m integration tests/test_metal_python_host.py"
 cwd = "packages/slam-rs"
-description = "Run workspace tests with wgpu, checking that all five GPU integration binaries contain tests"
+description = "Run workspace tests with wgpu, checking that all four GPU integration binaries contain tests"
 
 [feature.slam-rs.tasks.slam-rs-wgpu-doc]
 depends-on = ["slam-rs-patch-deps"]
@@ -2687,7 +2689,7 @@ description = "Build wgpu Rust documentation with warnings denied"
 # wgpu, the only GPU runtime (D70).
 [feature.slam-rs.tasks.slam-rs-wgpu-build]
 depends-on = ["slam-rs-patch-deps"]
-cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
+cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu --target-dir target/wgpu && cp target/wgpu/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/patches/**",

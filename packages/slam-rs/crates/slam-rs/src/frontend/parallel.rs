@@ -68,6 +68,28 @@ impl WorkPool {
         self.pool.as_ref().map(|pool| pool.install(f))
     }
 
+    /// Run a fallible, independent operation on each indexed slice entry.
+    /// The one-worker path never enters Rayon.
+    pub(crate) fn try_for_each_mut<T: Send, E: Send>(
+        &self,
+        items: &mut [T],
+        body: impl Fn(usize, &mut T) -> Result<(), E> + Sync + Send,
+    ) -> Result<(), E> {
+        if let Some(pool) = &self.pool {
+            pool.install(|| {
+                items
+                    .par_iter_mut()
+                    .enumerate()
+                    .try_for_each(|(index, item)| body(index, item))
+            })
+        } else {
+            items
+                .iter_mut()
+                .enumerate()
+                .try_for_each(|(index, item)| body(index, item))
+        }
+    }
+
     /// Apply `body` to every index of the shortest input, writing the warp it
     /// returns into six flat coefficient arrays and its flag into `valid`.
     ///

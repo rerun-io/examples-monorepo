@@ -292,16 +292,21 @@ fn a_frameset_that_does_not_follow_the_last_one_is_refused() {
 fn a_budget_larger_than_the_tracker_is_refused() {
     let config: VioConfig = config();
     let tracker: CpuPatchTracker<Pattern51> = cpu_tracker(&config, 4);
-    let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
+    let error = FrameToFrameOpticalFlow::<Pattern51, _>::with_stages(
         config,
         &rig(2),
         FrontendOptions {
             max_keypoints: 8,
             ..FrontendOptions::default()
         },
-        CpuPyramidBuilder::new(),
-        tracker,
-        Box::new(CpuCornerScan::default()),
+        slam_rs::frontend::stages::CpuStages::new(
+            CpuPyramidBuilder::new(),
+            tracker,
+            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                CpuCornerScan::default(),
+            )),
+        )
+        .unwrap(),
         WorkPool::new(1).unwrap(),
     )
     .unwrap_err();
@@ -357,7 +362,7 @@ fn a_camera_smaller_than_a_cell_is_refused() {
 /// Both sides of the guard are exercised: a `u32::MAX - 1` frame on a
 /// one-pixel grid asks for a product that still fits a `usize`, and a
 /// `u32::MAX` one asks for exactly 2^64, which leaves it. Both constructors
-/// are checked, because `with_backends` takes a tracker that is already
+/// are checked, because `with_stages` takes a tracker that is already
 /// built and so runs no check of `new`'s.
 #[test]
 fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
@@ -382,13 +387,18 @@ fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
 
         let tracker: CpuPatchTracker<Pattern51> =
             cpu_tracker(&fine, FrontendOptions::default().max_keypoints);
-        let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
+        let error = FrameToFrameOpticalFlow::<Pattern51, _>::with_stages(
             fine,
             &vast,
             FrontendOptions::default(),
-            CpuPyramidBuilder::new(),
-            tracker,
-            Box::new(CpuCornerScan::default()),
+            slam_rs::frontend::stages::CpuStages::new(
+                CpuPyramidBuilder::new(),
+                tracker,
+                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                    CpuCornerScan::default(),
+                )),
+            )
+            .unwrap(),
             WorkPool::new(1).unwrap(),
         )
         .unwrap_err();

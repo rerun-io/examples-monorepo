@@ -142,6 +142,13 @@ Both lanes are checked against the same trajectory accuracy gates.
 The design decisions are listed in
 [docs/design-notes.md](docs/design-notes.md#decision-references).
 
+The GPU lane uses fused KLT on every device. Each point uses 16 subgroup
+lanes; larger power-of-two subgroups hold multiple point groups. Startup
+checks the required subgroup operations and reports an error naming the
+CPU lane if they are unsupported. Templates stay in registers and both
+tracking directions run in one launch per phase. The opt-in exit threshold
+works on both lanes.
+
 ## Data
 
 The library reads one thing: a recording in the `exoego:v2` rig schema. One base

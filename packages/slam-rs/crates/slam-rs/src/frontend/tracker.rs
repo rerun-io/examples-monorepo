@@ -13,11 +13,11 @@
 //! the tracker receives guesses and recovers their source-position offsets.
 
 mod cpu;
-pub use cpu::CpuPatchTracker;
 mod patch_soa;
+pub use cpu::CpuPatchTracker;
 mod storage;
 pub use patch_soa::PatchSoA;
-pub use storage::{FlowTransforms, PointsSoA};
+pub use storage::{FlowTransforms, PointsSoA, TrackInput};
 
 use nalgebra::Vector2;
 
@@ -57,10 +57,6 @@ pub enum TrackerError {
     /// A convergence threshold must be finite and positive.
     #[error("port.klt_exit_step_px must be finite and positive, or null")]
     InvalidExitStep,
-    /// The existing GPU tracker does not implement convergence exit.
-    #[error("this tracker does not support port.klt_exit_step_px")]
-    UnsupportedExit,
-
     /// More keypoints were offered than the preallocated buffers hold.
     #[error("{offered} keypoints do not fit the tracker's capacity of {capacity}")]
     CapacityExceeded {
@@ -92,7 +88,7 @@ pub enum TrackerError {
     /// A GPU backend refused to come up.
     ///
     /// Carried here rather than returned separately because
-    /// `FrameToFrameOpticalFlow::with_backends` takes an already-built tracker,
+    /// `FrameToFrameOpticalFlow::with_stages` takes an already-built tracker,
     /// so the construction of a device backend has one error path (decision D32).
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
@@ -212,7 +208,7 @@ pub(crate) fn check_track_inputs(
 /// `flags` is one entry per (level, patch) and `taps` is `flags * P::SIZE`; each
 /// constructor forms its own last product from them, which is the part the two
 /// lanes do differently (the CPU one wants three Jacobian arrays, the GPU one
-/// folds `4 * taps + flags` into a single buffer). The ceilings and the
+/// stores point coordinates and samples templates in registers). The ceilings and the
 /// `checked_mul` ladder are the part that must not drift.
 ///
 /// # Errors
@@ -296,17 +292,6 @@ pub(crate) fn check_patch_inputs(
 /// GPU wants as one kernel, and the tracker consumes the result.
 #[allow(clippy::len_without_is_empty)]
 pub trait SourcePatches {
-    /// Prepare source storage before tracker inputs are uploaded. A synchronous
-    /// backend builds immediately; a device tracker may defer the patch kernel.
-    fn prepare(
-        &mut self,
-        pyramid: &Self::Pyramid,
-        positions: &PointsSoA,
-        selected: Option<&[bool]>,
-    ) -> Result<(), TrackerError> {
-        self.build(pyramid, positions, selected)
-    }
-
     /// The pyramid representation these patches are sampled from.
     type Pyramid: Pyramid;
 
@@ -474,11 +459,15 @@ impl TrackBatch {
     /// Reserve a reusable result slot for a synchronous backend.
     pub fn submit_slot(&mut self, capacity: usize) -> (usize, &mut FlowResult) {
         let pass = self.submitted;
-        if pass == self.slots.len() {
+        self.submitted += 1;
+        (pass, self.slot_mut(pass, capacity))
+    }
+
+    pub(crate) fn slot_mut(&mut self, lane: usize, capacity: usize) -> &mut FlowResult {
+        if lane == self.slots.len() {
             self.slots.push(FlowResult::with_capacity(capacity));
         }
-        self.submitted += 1;
-        (pass, &mut self.slots[pass])
+        &mut self.slots[lane]
     }
 
     /// Slot `pass` remains readable until the next submission reuses it.
@@ -493,30 +482,8 @@ impl TrackBatch {
 /// concrete pyramid or patch storage, so the CPU implementation here and a later
 /// CubeCL one can be swapped without touching the driver (§12.1).
 pub trait PatchTracker {
-    /// Configure opt-in convergence exit, refusing backends that do not implement it.
-    ///
-    /// # Errors
-    /// A non-default threshold is unsupported by the existing GPU tracker.
-    fn configure_klt_exit(&mut self, threshold: Option<f32>) -> Result<(), TrackerError> {
-        if threshold.is_some() {
-            return Err(TrackerError::UnsupportedExit);
-        }
-        Ok(())
-    }
-
-    /// Track source patches prepared by [`SourcePatches::prepare`].
-    /// Device implementations can upload all inputs before launching the source
-    /// patch kernel; synchronous implementations keep their ordinary path.
-    fn track_prepared(
-        &mut self,
-        prev: &Self::Pyramid,
-        next: &Self::Pyramid,
-        patches: &Self::Patches,
-        transforms_in: &FlowTransforms,
-        out: &mut FlowResult,
-    ) -> Result<(), TrackerError> {
-        self.track(prev, next, patches, transforms_in, out)
-    }
+    /// Set the per-level convergence threshold validated by the frontend.
+    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>);
 
     /// Reusable result storage owned by this backend.
     fn batch(&self) -> &TrackBatch;
@@ -528,13 +495,34 @@ pub trait PatchTracker {
     ///
     /// # Errors
     /// As [`PatchTracker::track`], plus a backend's pass capacity limit.
-    fn submit_prepared(
+    fn submit(
         &mut self,
         prev: &Self::Pyramid,
         next: &Self::Pyramid,
         patches: &Self::Patches,
         transforms_in: &FlowTransforms,
     ) -> Result<usize, TrackerError>;
+
+    /// Submit all cameras of one phase, retaining camera order for results.
+    /// Temporal calls use each camera's previous pyramid. Matching calls use
+    /// the same camera-zero templates for every destination. The default keeps
+    /// device launch/collect batching; CPU trackers can run each phase jointly.
+    ///
+    /// For template reuse, pass the last committed temporal batch's `next` as
+    /// `prev`; newly matched points use the matching batch's destination pyramid.
+    /// Call [`Self::discard`] after any failed or abandoned batch, including in
+    /// wrappers that forward submission. The CPU cache also checks the source
+    /// pyramid's build generation, so a different or rebuilt `prev` is a miss.
+    fn submit_batch(
+        &mut self,
+        prev: &[Self::Pyramid],
+        next: &[Self::Pyramid],
+        inputs: &mut [TrackInput],
+        patches: &mut Self::Patches,
+        temporal: bool,
+    ) -> Result<(), TrackerError> {
+        submit_each(self, prev, next, inputs, patches, temporal)
+    }
 
     /// Read a result by the slot returned from submission, after collection.
     fn result(&self, pass: usize) -> &FlowResult {
@@ -578,7 +566,7 @@ pub trait PatchTracker {
         transforms_in: &FlowTransforms,
         out: &mut FlowResult,
     ) -> Result<(), TrackerError> {
-        let pass = self.submit_prepared(prev, next, patches, transforms_in)?;
+        let pass = self.submit(prev, next, patches, transforms_in)?;
         self.collect()?;
         out.clone_from(self.result(pass));
         Ok(())
@@ -599,4 +587,27 @@ pub trait PatchTracker {
     /// [`TrackerError`] when the storage cannot be sized — the same shape checks
     /// the tracker's own constructor made.
     fn make_patches(&self) -> Result<Self::Patches, TrackerError>;
+}
+
+/// Default camera-order submission, also used by the GPU's mixed-arena fallback.
+pub(crate) fn submit_each<T: PatchTracker + ?Sized>(
+    tracker: &mut T,
+    prev: &[T::Pyramid],
+    next: &[T::Pyramid],
+    inputs: &mut [TrackInput],
+    patches: &mut T::Patches,
+    temporal: bool,
+) -> Result<(), TrackerError> {
+    for (index, input) in inputs.iter_mut().enumerate() {
+        if temporal || index == 0 {
+            patches.build(&prev[input.source], &input.positions, None)?;
+        }
+        input.result = tracker.submit(
+            &prev[input.source],
+            &next[input.destination],
+            patches,
+            &input.guesses,
+        )?;
+    }
+    Ok(())
 }

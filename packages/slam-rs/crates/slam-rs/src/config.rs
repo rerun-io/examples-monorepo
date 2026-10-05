@@ -421,6 +421,14 @@ mod tests {
         assert_eq!(normalised, index);
     }
 
+    #[test]
+    fn removed_gpu_kernel_selector_is_rejected() {
+        assert!(
+            VioConfig::from_json_str(r#"{"value0":{"port.gpu_klt_kernel":"butterfly16"}}"#)
+                .is_err()
+        );
+    }
+
     /// Even disabled port knobs are written explicitly.
     #[test]
     fn the_port_knobs_are_written_in_every_shipped_config() {

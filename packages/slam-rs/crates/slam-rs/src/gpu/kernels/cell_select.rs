@@ -18,8 +18,6 @@ const SELECT_DIM_X: usize = 32;
 const SELECT_DIM_Y: usize = 8;
 /// Units per cube, and the length of the shared reduction array.
 const SELECT_SLOTS: usize = SELECT_DIM_X * SELECT_DIM_Y;
-/// Halvings a 256-slot tree reduction takes.
-const SELECT_STEPS: usize = 8;
 
 /// The FAST ring radius, off the CPU detector's own constant.
 const SELECT_MARGIN: usize = crate::frontend::detect::FAST_BORDER;
@@ -35,11 +33,53 @@ const SELECT_EDGE: f32 = crate::frontend::detect::EDGE_THRESHOLD;
 const KEY_SCORE_SHIFT: u32 = crate::frontend::cell::KEY_SCORE_SHIFT;
 /// Where the packed key keeps the row.
 const KEY_ROW_SHIFT: u32 = crate::frontend::cell::KEY_ROW_SHIFT;
-/// `NO_CELL_WINNER`, which the kernel spells as a literal below because the
-/// `#[cube]` macro keeps a *named* integer constant comptime and the local it
-/// initialises is then assigned from the runtime reduction. This is what pins
-/// the literal to the constant.
-const _: () = assert!(crate::frontend::detect::NO_CELL_WINNER == 4_294_967_295);
+pub(super) const NO_WINNER: u32 = crate::frontend::detect::NO_CELL_WINNER;
+
+/// Admission and packed total order shared by both FAST cell kernels.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn cell_key(
+    x: usize,
+    y: usize,
+    score: u32,
+    edge_x: f32,
+    edge_y: f32,
+    safe_radius: f32,
+    centre_x: f32,
+    centre_y: f32,
+) -> u32 {
+    let fx = f32::cast_from(x);
+    let fy = f32::cast_from(y);
+    let dx = fx - centre_x;
+    let dy = fy - centre_y;
+    let distance = f32::sqrt(dx * dx + dy * dy);
+    let mut key = NO_WINNER.runtime();
+    if !(safe_radius != 0.0f32 && distance >= safe_radius)
+        && fx >= SELECT_EDGE
+        && fx < edge_x
+        && fy >= SELECT_EDGE
+        && fy < edge_y
+    {
+        key = ((255u32 - score) << KEY_SCORE_SHIFT)
+            | (u32::cast_from(y) << KEY_ROW_SHIFT)
+            | u32::cast_from(x);
+    }
+    key
+}
+
+/// Reduce a power-of-two shared array, with a cube-uniform barrier per step.
+#[cube]
+pub(super) fn min_tree(shared: &mut Shared<[u32]>, unit: usize, #[comptime] slots: usize) {
+    sync_cube();
+    #[unroll]
+    for step in 0..comptime!(slots.ilog2() as usize) {
+        let stride = slots >> (step + 1usize);
+        if unit < stride {
+            shared[unit] = min(shared[unit], shared[unit + stride]);
+        }
+        sync_cube();
+    }
+}
 
 /// One in-window candidate's score, or zero.
 ///
@@ -149,8 +189,7 @@ fn fast_cell_select_kernel(
     let edge_x = f32::cast_from(width) - SELECT_EDGE - 1.0f32;
     let edge_y = f32::cast_from(height) - SELECT_EDGE - 1.0f32;
 
-    // `NO_CELL_WINNER`; see the assertion beside `KEY_ROW_SHIFT`.
-    let mut key = 4_294_967_295u32;
+    let mut key = NO_WINNER.runtime();
     // CubeCL 0.11 emits C++ lambdas for `while` conditions. wgpu's MSL
     // passthrough leaves the language version unset, which
     // can reject lambdas in Python even when the Rust test executable works.
@@ -278,25 +317,10 @@ fn fast_cell_select_kernel(
                     ),
                 );
                 if score > rival {
-                    let fx = f32::cast_from(x);
-                    let fy = f32::cast_from(y);
-                    let dx = fx - centre_x;
-                    let dy = fy - centre_y;
-                    // Use sqrt of the sum of squares, not hypot.
-                    let distance = f32::sqrt(dx * dx + dy * dy);
-                    let mut inside = true;
-                    if safe_radius != 0.0f32 && distance >= safe_radius {
-                        inside = false;
-                    }
-                    if fx < SELECT_EDGE || fx >= edge_x || fy < SELECT_EDGE || fy >= edge_y {
-                        inside = false;
-                    }
-                    if inside {
-                        let candidate = ((255u32 - score) << KEY_SCORE_SHIFT)
-                            | (u32::cast_from(y) << KEY_ROW_SHIFT)
-                            | u32::cast_from(x);
-                        key = min(key, candidate);
-                    }
+                    key = min(
+                        key,
+                        cell_key(x, y, score, edge_x, edge_y, safe_radius, centre_x, centre_y),
+                    );
                 }
             }
         }
@@ -307,19 +331,7 @@ fn fast_cell_select_kernel(
     // use — and every barrier is cube-uniform.
     let mut reduce = Shared::<[u32]>::new_slice(SELECT_SLOTS);
     reduce[unit] = key;
-    sync_cube();
-    #[unroll]
-    for step in 0..SELECT_STEPS {
-        // Comptime, and it has to be: a `let mut` seeded from a constant is a
-        // const variable inside `#[cube]` and `stride /= 2` on one panics the
-        // expansion on cubecl's own thread — which reaches the caller as a
-        // buffer of zeros, not as an error.
-        let stride = SELECT_SLOTS >> (step + 1usize);
-        if unit < stride {
-            reduce[unit] = min(reduce[unit], reduce[unit + stride]);
-        }
-        sync_cube();
-    }
+    min_tree(&mut reduce, unit, SELECT_SLOTS);
     if unit == 0usize {
         best[row * cells_x + column] = reduce[0usize];
     }
@@ -353,6 +365,46 @@ pub(crate) struct CellSelectGeometry {
     pub centre_y: f32,
 }
 
+impl CellSelectGeometry {
+    pub fn new(
+        width: usize,
+        height: usize,
+        select: &crate::frontend::detect::CellSelect,
+    ) -> Option<Self> {
+        let grid = &select.grid;
+        let (cells_x, cells_y) = grid.dimensions();
+        if !select.supports(width, height)
+            || cells_x > super::MAX_CUBES_PER_DIM as usize
+            || cells_y > super::MAX_CUBES_PER_DIM as usize
+        {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            cell: grid.cell,
+            x_start: grid.x_start,
+            y_start: grid.y_start,
+            cells_x,
+            cells_y,
+            threshold: select.threshold.clamp(0, 255) as u32,
+            safe_radius: select.safe_radius,
+            centre_x: (width / 2) as f32,
+            centre_y: (height / 2) as f32,
+        })
+    }
+}
+
+pub(crate) fn uses_cell_kernel<R: Runtime>(
+    cell: usize,
+    width: usize,
+    client: &ComputeClient<R>,
+) -> bool {
+    (12..=64).contains(&cell)
+        && !crate::frontend::detect::block_filter_end(width).1
+        && super::cell_shared_bytes(cell) <= client.properties().hardware.max_shared_memory_size
+}
+
 /// One packed winner key per grid cell, from the candidate image.
 pub(crate) fn launch_fast_cell_select<R: Runtime>(
     client: &ComputeClient<R>,
@@ -360,7 +412,6 @@ pub(crate) fn launch_fast_cell_select<R: Runtime>(
     best: Buffer<'_>,
     geometry: CellSelectGeometry,
 ) {
-    super::super::submission::launch(client);
     unsafe {
         fast_cell_select_kernel::launch_unchecked::<R>(
             client,

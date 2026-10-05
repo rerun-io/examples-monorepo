@@ -17,6 +17,8 @@ mod detection;
 mod error;
 mod tracking;
 
+use super::stages::{CpuStages, FrameExecutor, FrameStages};
+
 pub use data::{FlowFrame, FlowTimings, FrontendOptions, Keypoints, NO_RESPONSE, PosePrediction};
 pub use error::FrontendError;
 pub use tracking::project_between_cams;
@@ -31,35 +33,26 @@ use crate::camera::RigCamera;
 use crate::config::VioConfig;
 use crate::duration_ns;
 use crate::frontend::detect::{
-    CellGrid, CellSelect, CornerScan, CpuCornerScan, DetectorConfig, DetectorScratch,
-    KeypointsData, LOWEST_THRESHOLD_RUNG, MAX_CELLS, Masks, cell_select,
+    CellGrid, CellSelect, CpuCornerScan, DetectorConfig, DetectorScratch, KeypointsData,
+    LOWEST_THRESHOLD_RUNG, MAX_CELLS, Masks, cell_select,
 };
 use crate::frontend::parallel::{MAX_THREADS, WorkPool};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
-    CpuPatchTracker, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, PointsSoA,
+    CpuPatchTracker, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, TrackInput,
 };
 use crate::image::ImageU16;
 use crate::lie::Se3;
-use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder};
+use crate::pyramid::CpuPyramidBuilder;
 use crate::types::KeypointId;
 
-#[derive(Debug, Default)]
-struct TrackPass {
-    result: usize,
-    destination: usize,
-    ids: Vec<KeypointId>,
-    offered: Vec<usize>,
-}
-
 /// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
-/// [`FrameToFrameOpticalFlow::with_backends`] selects implementations without
+/// [`FrameToFrameOpticalFlow::with_stages`] selects implementations without
 /// exposing a concrete pyramid in the driver's public signatures.
 #[derive(Debug)]
 pub struct FrameToFrameOpticalFlow<
     P: Pattern,
-    B: PyramidBuilder = CpuPyramidBuilder,
-    T: PatchTracker<Pattern = P, Pyramid = B::Pyramid> = CpuPatchTracker<P>,
+    F: FrameStages<Tracker: PatchTracker<Pattern = P>> = CpuStages<CpuPatchTracker<P>>,
 > {
     config: VioConfig,
     options: FrontendOptions,
@@ -93,54 +86,29 @@ pub struct FrameToFrameOpticalFlow<
     /// Masks for this frame, grown by `cam0OverlapCellsMasksForCam`.
     masks: Vec<Masks>,
 
-    pyramid_builder: B,
-    /// The last **committed** frame's pyramids, one per camera.
-    ///
-    /// While a frame is in flight this is the *previous* frame, and `staging`
-    /// holds the one being processed; the two swap only once every step has
-    /// succeeded. See [`FrameToFrameOpticalFlow::process_frame`].
-    pyramid: Vec<B::Pyramid>,
-    /// The frame in flight.
-    staging: Vec<B::Pyramid>,
-    tracker: T,
-    patches: T::Patches,
+    stages: F,
     /// The source keypoint ids of each lane of the batch in flight, in map order
     ///
     /// Per lane rather than per call because a batch's passes are all launched
     /// before any of them is read, and mapping a tracked slot back to its
     /// keypoint needs this after the download.
-    passes: Vec<TrackPass>,
-    /// The source warps of the pass being submitted, in the same order (
-    /// ). One buffer for the batch: a temporal pass overwrites it before
-    /// the next one, and every stereo pass of a frameset tracks the same
-    /// camera-0 keypoints, so they share one copy of it.
-    source: FlowTransforms,
-    /// The source positions the forward patches are built at.
-    positions: PointsSoA,
-    /// `transform_2` once the depth guess has been applied.
-    guesses: FlowTransforms,
+    passes: Vec<TrackInput>,
     /// The ids that survived, in ascending source order, with their warps.
     tracked_ids: Vec<KeypointId>,
     /// The warps of [`FrameToFrameOpticalFlow::tracked_ids`].
     tracked: FlowTransforms,
-    detector: DetectorScratch,
     /// The device cell selection each camera can take, or `None` where its shape
     /// cannot ([`cell_select`]); rebuilt at the top of every frameset, before
     /// anything about it has been decided.
     cell_selects: Vec<Option<CellSelect>>,
-    /// [`FrameToFrameOpticalFlow::cell_selects`] narrowed to the cameras one
-    /// phase launches: camera 0 before the temporal tracks, the rest behind the
-    /// cross-camera matches, so each set rides a download that was happening
-    /// anyway (D78). A field rather than a local because it is rebuilt twice a
-    /// frameset and this module allocates once.
-    cell_selects_now: Vec<Option<CellSelect>>,
     detected: Vec<KeypointsData>,
     /// Independent scanners for side-camera work, only when the selected
     /// backend supports it. Otherwise all cameras use `detector` serially.
-    side_detectors: Option<Vec<DetectorScratch>>,
-    /// The host workers the side cameras' detection runs on with
-    /// `side_detectors`; a one-worker pool keeps it on the caller. See
-    /// [`FrameToFrameOpticalFlow::with_backends`].
+    side_detectors: Option<Vec<DetectorScratch<F::Scanner>>>,
+    /// Hosts all of `process_frame`, including pyramid builds and detection.
+    /// Backends must not depend on worker identity. A one-worker pool keeps
+    /// work on the caller. See
+    /// [`FrameToFrameOpticalFlow::with_stages`].
     host_pool: WorkPool,
     /// The keypoints `addPointsForCamera(0)` produced, to be matched onward.
     new_cam0: Keypoints,
@@ -171,7 +139,12 @@ struct FrameState {
     last_detect_count: usize,
 }
 
-impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P>> {
+impl<P: Pattern> FrameToFrameOpticalFlow<P> {
+    /// Workers shared by the CPU stages and the synchronous estimator.
+    pub(crate) fn pool(&self) -> &WorkPool {
+        &self.host_pool
+    }
+
     /// `FrameToFrameOpticalFlow(conf, cal)`
     /// on the CPU backends.
     ///
@@ -205,25 +178,21 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
             config.optical_flow_max_recovered_dist2,
             pool.clone(),
         )?;
-        Self::with_backends(
+        Self::with_stages(
             config,
             calibration,
             options,
-            CpuPyramidBuilder::new(),
-            tracker,
-            Box::new(CpuCornerScan::default()),
+            CpuStages::new(
+                CpuPyramidBuilder::new(),
+                tracker,
+                DetectorScratch::with_scanner(Box::new(CpuCornerScan::default())),
+            )?,
             pool,
         )
     }
 }
 
-impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Pyramid>>
-    FrameToFrameOpticalFlow<P, B, T>
-{
-    pub(crate) fn pool(&self) -> &WorkPool {
-        &self.host_pool
-    }
-
+impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
     /// The config checks that do not depend on the backends.
     fn validate_config(config: &VioConfig) -> Result<(), FrontendError> {
         if config
@@ -293,7 +262,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     }
 
     /// Validate caller-supplied frontend options independently of the selected backend.
-    /// A prebuilt tracker passed to `with_backends` does not run `PatchSoA::new`, so
+    /// A prebuilt tracker passed to `with_stages` does not run `PatchSoA::new`, so
     /// the frontend must enforce its own bounds at this seam.
     fn validate_options(options: &FrontendOptions) -> Result<(), FrontendError> {
         // rayon spawns exactly what it is asked for, so an unbounded `threads`
@@ -321,43 +290,19 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 
     /// Build a frontend on caller-supplied stages.
     ///
-    /// This is the seam a GPU backend enters through: `builder` and `tracker` are
-    /// any pair whose pyramid types agree, the patch storage comes from the
-    /// tracker itself, and `scanner` is the detector's corner stage — the three
-    /// are independent, so a backend may replace any subset of them.
-    ///
-    /// `scanner` is a trait object where the other two are type parameters, and
-    /// that asymmetry is deliberate rather than a leftover: a third parameter
-    /// would have to be spelled at every `FrameToFrameOpticalFlow<..>` in the
-    /// crate and in both [`crate::FrontendLane`] arms, and the scanner is
-    /// entered once per camera per frameset — the ~1.8 k `band` calls inside a
-    /// frame go through [`DetectorScratch`], not through this seam. The price
-    /// is that [`CornerScan`] must be `Send + Sync` and `DetectorScratch` hand-
-    /// writes `Default`.
-    ///
-    /// The side cameras' detection runs on `host_pool`'s workers when `scanner`
-    /// forks independent side scanners; a one-worker pool keeps it on the
-    /// caller. [`FrameToFrameOpticalFlow::new`] passes the CPU tracker's pool,
-    /// the GPU lane a one-worker pool. The detections do not depend on it.
-    ///
-    /// # Errors
-    ///
-    /// As [`FrameToFrameOpticalFlow::new`], plus
-    /// [`FrontendError::BudgetExceedsCapacity`] and
-    /// [`FrontendError::LevelMismatch`] when the backends were built for a
-    /// different shape than the config asks for.
-    pub fn with_backends(
+    /// Construct the flow with its frame-stage owner and host worker pool.
+    pub fn with_stages(
         config: VioConfig,
         calibration: &Calibration<f64>,
         options: FrontendOptions,
-        builder: B,
-        mut tracker: T,
-        scanner: Box<dyn CornerScan>,
+        mut stages: F,
         host_pool: WorkPool,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
-        tracker.configure_klt_exit(config.port_klt_exit_step_px)?;
         Self::validate_options(&options)?;
+
+        let tracker = stages.tracker_mut();
+        tracker.set_klt_exit_step_px(config.port_klt_exit_step_px);
 
         let num_levels: usize = config.optical_flow_levels as usize + 1;
         if tracker.num_levels() != num_levels {
@@ -433,30 +378,18 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
         let occupancy_grid: CellGrid = detection_grids[0];
 
-        let side_detectors: Option<Vec<DetectorScratch>> = (1..num_cams)
-            .map(|_| scanner.fork().map(DetectorScratch::with_scanner))
-            .collect();
-        let patches: T::Patches = tracker.make_patches()?;
+        let side_detectors = stages.side_detectors(num_cams);
         Ok(Self {
             depth_guess: config.optical_flow_matching_default_depth,
-            patches,
-            tracker,
+            stages,
             cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
             masks: vec![Masks::default(); num_cams],
-            pyramid: Vec::new(),
-            staging: Vec::new(),
             snapshot: FrameState::default(),
             timings: FlowTimings::default(),
-            pyramid_builder: builder,
-            passes: (0..num_cams).map(|_| TrackPass::default()).collect(),
-            source: FlowTransforms::default(),
-            positions: PointsSoA::default(),
-            guesses: FlowTransforms::default(),
+            passes: (0..num_cams).map(|_| TrackInput::default()).collect(),
             tracked_ids: Vec::new(),
             tracked: FlowTransforms::default(),
-            detector: DetectorScratch::with_scanner(scanner),
             cell_selects: vec![None; num_cams],
-            cell_selects_now: vec![None; num_cams],
             detected: (0..num_cams).map(|_| KeypointsData::default()).collect(),
             side_detectors,
             host_pool,
@@ -643,17 +576,42 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         images: &[ImageU16],
         prediction: &PosePrediction,
         masks: &[Masks],
-    ) -> Result<&FlowFrame, FrontendError> {
+    ) -> Result<&FlowFrame, FrontendError>
+    where
+        F: Send,
+    {
+        if let Some(executor) = self.stages.executor() {
+            executor.run(|| self.process_frame_inner(t_ns, images, prediction, masks))?;
+            return Ok(&self.frame);
+        }
+        let pool = self.host_pool.clone();
+        match pool.install(|| self.process_frame_inner(t_ns, images, prediction, masks)) {
+            Some(result) => result?,
+            None => self.process_frame_inner(t_ns, images, prediction, masks)?,
+        }
+        Ok(&self.frame)
+    }
+
+    fn process_frame_inner(
+        &mut self,
+        t_ns: i64,
+        images: &[ImageU16],
+        prediction: &PosePrediction,
+        masks: &[Masks],
+    ) -> Result<(), FrontendError> {
         self.check_frameset(
             t_ns,
             images.iter().map(|image| (image.width(), image.height())),
         )?;
 
-        // The frame in flight, built where nothing else can see it.
         self.timings = FlowTimings::default();
-        let mark: std::time::Instant = std::time::Instant::now();
-        self.build_staging(images)?;
-        self.timings.pyramid_ns = duration_ns(mark);
+        self.stages.prepare(
+            t_ns,
+            images,
+            self.config.optical_flow_levels as usize,
+            &self.host_pool,
+            &mut self.timings,
+        )?;
 
         // What the passes below mutate, kept so they can be undone.
         let mut snapshot: FrameState = std::mem::take(&mut self.snapshot);
@@ -663,12 +621,12 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         snapshot.last_detect_count = self.last_detect_count;
 
         let outcome: Result<(), FrontendError> = self.run_passes(images, prediction, masks);
+        let outcome = outcome.and_then(|()| self.stages.finish());
 
         match &outcome {
             Ok(()) => {
                 // Commit: the frame in flight becomes the committed one, and the
                 // set it displaces is next frame's staging buffer.
-                std::mem::swap(&mut self.pyramid, &mut self.staging);
                 self.t_ns = Some(t_ns);
                 self.frame.t_ns = Some(t_ns);
                 self.frame_counter += 1;
@@ -679,7 +637,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             Err(_) => {
                 // A frameset refused between the launches and the download
                 // leaves a batch in flight; the next one starts empty.
-                self.tracker.discard();
+                self.stages.discard();
                 self.frame.cameras.clone_from(&snapshot.cameras);
                 self.cells.clone_from(&snapshot.cells);
                 self.last_keypoint_id = snapshot.last_keypoint_id;
@@ -688,7 +646,23 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
         self.snapshot = snapshot;
         outcome?;
-        Ok(&self.frame)
+        Ok(())
+    }
+
+    fn update_cell_selects(&mut self, images: &[ImageU16]) {
+        let config: DetectorConfig = self.detector_config();
+        let Self {
+            cell_selects,
+            detection_grids,
+            ..
+        } = self;
+        for ((slot, image), grid) in cell_selects
+            .iter_mut()
+            .zip(images)
+            .zip(detection_grids.iter())
+        {
+            *slot = cell_select(image, grid, &config);
+        }
     }
 
     /// Steps 4 to 7 of `processFrame`, against `staging` as the current frame.
@@ -720,30 +694,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // synchronising read, 0.12 ms of host time on this lane. Camera 0 alone
         // because it is the only camera the match needs before it launches; the
         // others go behind the matches, where another download is waiting.
-        let config: DetectorConfig = self.detector_config();
-        let Self {
-            cell_selects,
-            detection_grids,
-            ..
-        } = self;
-        for ((slot, image), grid) in cell_selects
-            .iter_mut()
-            .zip(images)
-            .zip(detection_grids.iter())
-        {
-            *slot = cell_select(image, grid, &config);
-        }
-        let mark: std::time::Instant = std::time::Instant::now();
-        self.cell_selects_now.clear();
-        self.cell_selects_now.resize(images.len(), None);
-        if let (Some(slot), Some(select)) = (
-            self.cell_selects_now.first_mut(),
-            self.cell_selects.first().copied(),
-        ) {
-            *slot = select;
-        }
-        self.detector.submit_cells(images, &self.cell_selects_now)?;
-        self.timings.detect_ns += duration_ns(mark);
+        self.update_cell_selects(images);
+        self.stages
+            .prepare_detection(images, &self.cell_selects, &mut self.timings)?;
 
         if self.t_ns.is_none() {
             for keypoints in &mut self.frame.cameras {
@@ -759,16 +712,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             // own two pyramids and writes only its own lane, so batching moves
             // no arithmetic — it removes the per-camera wait, which on the GPU
             // lane is the frameset's dominant host cost (D77).
-            let t_i1: Se3<f32> = prediction.t_w_i_previous;
-            let t_i2: Se3<f32> = prediction.t_w_i_current;
             let mark: std::time::Instant = std::time::Instant::now();
-            for camera in 0..num_cams {
-                let t_c1: Se3<f32> = t_i1 * self.calib.t_i_c[camera];
-                let t_c2: Se3<f32> = t_i2 * self.calib.t_i_c[camera];
-                let t_c1_c2: Se3<f32> = t_c1.inverse() * t_c2;
-                self.submit_camera(camera, &t_c1_c2)?;
-            }
-            self.tracker.collect()?;
+            self.prepare_tracks(Some(prediction));
+            self.stages.temporal(&mut self.passes, &mut self.timings)?;
             self.timings.track_ns += duration_ns(mark);
             for camera in 0..num_cams {
                 self.finish_camera(camera);
@@ -784,7 +730,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // reads them itself, which is the read the detector used to make on
         // every frameset.
         let mark: std::time::Instant = std::time::Instant::now();
-        self.detector.take_cells()?;
+        self.stages.detector().take_cells()?;
         self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {
@@ -794,22 +740,6 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         let mark: std::time::Instant = std::time::Instant::now();
         self.filter_points();
         self.timings.stereo_ns += duration_ns(mark);
-        Ok(())
-    }
-
-    /// Build this frame's pyramids into the staging set, touching nothing else.
-    ///
-    /// `pyramid->at(i).setFromImage(img, config.optical_flow_levels)`,
-    /// with the allocation reused whenever the geometry is unchanged.
-    fn build_staging(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
-        crate::pyramid::ensure_pyramids(
-            &self.pyramid_builder,
-            &mut self.staging,
-            images,
-            self.config.optical_flow_levels as usize,
-        )?;
-        self.pyramid_builder
-            .build_frames(images, &mut self.staging, &self.host_pool)?;
         Ok(())
     }
 }

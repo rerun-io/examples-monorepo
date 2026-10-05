@@ -11,6 +11,9 @@ use nalgebra::{Matrix2, Vector3};
 
 /// The CPU tracker: `trackPoints` with the same arithmetic and a fixed thread budget.
 ///
+/// Template reuse follows [`PatchTracker::submit_batch`]'s caller rules: carry
+/// committed pyramids forward and discard failed or abandoned batches. Cache
+/// hits require the id, position bits, and source pyramid build generation.
 #[derive(Debug)]
 pub struct CpuPatchTracker<P: Pattern> {
     capacity: usize,
@@ -28,6 +31,60 @@ pub struct CpuPatchTracker<P: Pattern> {
     /// The positions the backward patches are built at.
     backward_positions: PointsSoA,
     batch: TrackBatch,
+    /// Temporal source templates and the last backward templates per camera.
+    cameras: Vec<CpuCameraBuffers<P>>,
+    temporal: Vec<CpuBackwardCache<P>>,
+    /// Stereo backward templates for newly detected ids in the same frame.
+    /// Those ids are disjoint from the temporal cache's surviving ids.
+    stereo: Vec<CpuBackwardCache<P>>,
+    offsets: Vec<usize>,
+    batch_result: FlowResult,
+}
+
+#[derive(Debug)]
+struct CpuBackwardCache<P: Pattern> {
+    patches: PatchSoA<P>,
+    generation: crate::pyramid::PyramidGeneration,
+    ids: Vec<crate::types::KeypointId>,
+    positions: PointsSoA,
+    valid: Vec<bool>,
+}
+
+impl<P: Pattern> CpuBackwardCache<P> {
+    fn build_backward(
+        &mut self,
+        pyramid: &PyramidU16,
+        input: &TrackInput,
+        forward: &FlowTransforms,
+        forward_valid: &[bool],
+        start: usize,
+    ) -> Result<(), TrackerError> {
+        let count = input.guesses.len();
+        self.positions.resize(count);
+        for index in 0..count {
+            self.positions
+                .set(index, forward.translation(start + index));
+        }
+        self.patches
+            .build(pyramid, &self.positions, Some(forward_valid))?;
+        self.ids.clone_from(&input.ids);
+        self.generation = pyramid.generation();
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TemplateSource {
+    Built,
+    Temporal(usize),
+    Stereo(usize),
+}
+
+#[derive(Debug)]
+struct CpuCameraBuffers<P: Pattern> {
+    source: PatchSoA<P>,
+    build: Vec<bool>,
+    sources: Vec<TemplateSource>,
 }
 
 impl<P: Pattern> CpuPatchTracker<P> {
@@ -68,17 +125,17 @@ impl<P: Pattern> CpuPatchTracker<P> {
             forward_valid: vec![false; capacity],
             backward_positions,
             batch: TrackBatch::default(),
+            cameras: Vec::new(),
+            temporal: Vec::new(),
+            stereo: Vec::new(),
+            offsets: Vec::new(),
+            batch_result: FlowResult::default(),
         })
     }
 
     /// Workers the tracking passes run on.
     pub fn threads(&self) -> usize {
         self.pool.threads()
-    }
-
-    /// Stop KLT after applying an update below this threshold; None keeps fixed iterations.
-    pub fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) {
-        self.exit_step_px = threshold;
     }
 
     fn steps(&self) -> TrackingSteps {
@@ -92,9 +149,8 @@ impl<P: Pattern> CpuPatchTracker<P> {
 }
 
 impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
-    fn configure_klt_exit(&mut self, threshold: Option<f32>) -> Result<(), TrackerError> {
-        self.set_klt_exit_step_px(threshold);
-        Ok(())
+    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) {
+        self.exit_step_px = threshold;
     }
 
     fn batch(&self) -> &TrackBatch {
@@ -120,7 +176,7 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         Ok(PatchSoA::new(self.capacity, self.num_levels)?.with_pool(self.pool.clone()))
     }
 
-    fn submit_prepared(
+    fn submit(
         &mut self,
         prev: &Self::Pyramid,
         next: &Self::Pyramid,
@@ -130,19 +186,313 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         let capacity = self.capacity();
         let batch = self.batch_mut();
         let pass = batch.submitted;
-        if pass == batch.slots.len() {
-            batch.slots.push(FlowResult::with_capacity(capacity));
-        }
-        let mut result = std::mem::take(&mut batch.slots[pass]);
+        let mut result = std::mem::take(batch.slot_mut(pass, capacity));
         let outcome = self.track_into(prev, next, patches, transforms_in, &mut result);
         self.batch_mut().slots[pass] = result;
         outcome?;
         self.batch_mut().submitted += 1;
         Ok(pass)
     }
+
+    fn discard(&mut self) {
+        self.batch.submitted = 0;
+        // A refused frame may have replaced some backward stores. Rebuild from
+        // the committed pyramids on retry instead of reusing uncommitted data.
+        for camera in self.temporal.iter_mut().chain(&mut self.stereo) {
+            camera.ids.clear();
+        }
+    }
+
+    fn submit_batch(
+        &mut self,
+        prev: &[PyramidU16],
+        next: &[PyramidU16],
+        inputs: &mut [TrackInput],
+        patches: &mut PatchSoA<P>,
+        temporal: bool,
+    ) -> Result<(), TrackerError> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        self.validate_batch(prev, next, inputs, temporal)?;
+        while self.cameras.len() < next.len() {
+            self.cameras.push(CpuCameraBuffers {
+                source: self.make_patches()?,
+                build: Vec::new(),
+                sources: Vec::new(),
+            });
+            self.temporal.push(CpuBackwardCache {
+                patches: self.make_patches()?,
+                generation: crate::pyramid::PyramidGeneration::default(),
+                ids: Vec::new(),
+                positions: PointsSoA::default(),
+                valid: Vec::new(),
+            });
+            self.stereo.push(CpuBackwardCache {
+                patches: self.make_patches()?,
+                generation: crate::pyramid::PyramidGeneration::default(),
+                ids: Vec::new(),
+                positions: PointsSoA::default(),
+                valid: Vec::new(),
+            });
+        }
+        self.offsets.clear();
+        self.offsets.push(0);
+        let mut total = 0;
+        for input in inputs.iter() {
+            total += input.guesses.len();
+            self.offsets.push(total);
+        }
+        self.forward.resize(total);
+        self.forward_valid.resize(total, false);
+        self.batch_result.reset(total);
+
+        self.prepare_sources(prev, inputs, patches, temporal)?;
+
+        let steps = self.steps();
+        let offsets = &self.offsets;
+        let cameras = &self.cameras;
+        let source = |camera: usize, index: usize| {
+            if temporal {
+                match cameras[camera].sources[index] {
+                    TemplateSource::Built => (&cameras[camera].source, index),
+                    TemplateSource::Temporal(column) => (&self.temporal[camera].patches, column),
+                    TemplateSource::Stereo(column) => (&self.stereo[camera].patches, column),
+                }
+            } else {
+                (&*patches, index)
+            }
+        };
+        // One point range across all cameras. Empty lanes have equal offsets;
+        // partition_point skips them without scheduling empty work.
+        self.pool.for_each_warp(
+            self.forward.coefficients_prefix_mut(total),
+            &mut self.forward_valid[..total],
+            |slot| {
+                let camera = offsets.partition_point(|&start| start <= slot) - 1;
+                let index = slot - offsets[camera];
+                let input = &inputs[camera];
+                let (patches, column) = source(camera, index);
+                steps.forward_slot(
+                    patches,
+                    column,
+                    &next[input.destination],
+                    input.guesses.get(index),
+                )
+            },
+        );
+
+        if temporal {
+            // Forward reads are complete; consume the one-frame stereo cache.
+            for cache in &mut self.stereo {
+                cache.ids.clear();
+            }
+        }
+
+        // Build all backward stores before the backward KLT region starts.
+        let forward = &self.forward;
+        let forward_valid = &self.forward_valid;
+        let caches = if temporal {
+            &mut self.temporal[..inputs.len()]
+        } else {
+            &mut self.stereo[1..1 + inputs.len()]
+        };
+        self.pool.try_for_each_mut(caches, |camera, cache| {
+            let input = &inputs[camera];
+            let start = offsets[camera];
+            cache.build_backward(
+                &next[input.destination],
+                input,
+                forward,
+                &forward_valid[start..start + input.guesses.len()],
+                start,
+            )
+        })?;
+
+        let (valid, transforms) = self.batch_result.parts_mut();
+        self.pool.for_each_warp(
+            transforms.coefficients_prefix_mut(total),
+            &mut valid[..total],
+            |slot| {
+                let camera = offsets.partition_point(|&start| start <= slot) - 1;
+                let index = slot - offsets[camera];
+                let input = &inputs[camera];
+                let backward = if temporal {
+                    &self.temporal[camera].patches
+                } else {
+                    &self.stereo[input.destination].patches
+                };
+                steps.backward_slot(
+                    backward,
+                    index,
+                    &prev[input.source],
+                    input.positions.get(index),
+                    input.guesses.translation(index),
+                    (forward.get(slot), forward_valid[slot]),
+                )
+            },
+        );
+        // Publish in camera order, independent of which worker finished first.
+        for (camera, input) in inputs.iter_mut().enumerate() {
+            let (pass, result) = self.batch.submit_slot(self.capacity);
+            input.result = pass;
+            result.reset(input.guesses.len());
+            let cache = if temporal {
+                &mut self.temporal[camera]
+            } else {
+                &mut self.stereo[input.destination]
+            };
+            cache.valid.resize(input.guesses.len(), false);
+            for index in 0..input.guesses.len() {
+                let slot = offsets[camera] + index;
+                let valid = self.batch_result.is_valid(slot);
+                cache.valid[index] = valid;
+                result.set_track(index, valid, &forward.get(slot));
+            }
+            result.finish(input.guesses.len());
+        }
+        if !temporal {
+            // Camera zero's detections become next frame's temporal sources.
+            let input = &inputs[0];
+            let cache = &mut self.stereo[input.source];
+            std::mem::swap(&mut cache.patches, patches);
+            cache.generation = prev[input.source].generation();
+            cache.ids.clone_from(&input.ids);
+            cache.positions.clone_from(&input.positions);
+            cache.valid.clear();
+            cache.valid.resize(input.positions.len(), true);
+        }
+        Ok(())
+    }
 }
 
 impl<P: Pattern> CpuPatchTracker<P> {
+    fn validate_batch(
+        &self,
+        prev: &[PyramidU16],
+        next: &[PyramidU16],
+        inputs: &[TrackInput],
+        temporal: bool,
+    ) -> Result<(), TrackerError> {
+        // Validate the whole batch before modifying either cache. Source and
+        // destination indices come from the driver, but are checked at this
+        // public boundary just like the ordinary single-pass inputs.
+        for (camera, input) in inputs.iter().enumerate() {
+            let destination = camera + usize::from(!temporal);
+            let source = if temporal { camera } else { 0 };
+            for (actual, expected, name) in [
+                (input.source, source, "source camera"),
+                (input.destination, destination, "destination camera"),
+            ] {
+                if actual != expected {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: name,
+                        first: actual,
+                        second_name: "camera in batch order",
+                        second: expected,
+                    });
+                }
+            }
+            for (index, len, name) in [
+                (input.source, prev.len(), "source camera"),
+                (input.destination, next.len(), "destination camera"),
+            ] {
+                if index >= len {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: name,
+                        first: index,
+                        second_name: "cameras",
+                        second: len,
+                    });
+                }
+            }
+            check_track_inputs(
+                input.guesses.len(),
+                input.positions.len(),
+                self.num_levels,
+                prev[input.source].num_levels(),
+                next[input.destination].num_levels(),
+                self.capacity,
+                self.num_levels,
+            )?;
+            if input.ids.len() != input.positions.len() {
+                return Err(TrackerError::LengthMismatch {
+                    first_name: "keypoint ids",
+                    first: input.ids.len(),
+                    second_name: "positions",
+                    second: input.positions.len(),
+                });
+            }
+            if !temporal {
+                if input.positions.len() != inputs[0].positions.len() {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: "patches",
+                        first: inputs[0].positions.len(),
+                        second_name: "transforms",
+                        second: input.guesses.len(),
+                    });
+                }
+                debug_assert_eq!(input.ids, inputs[0].ids);
+                debug_assert_eq!(input.positions, inputs[0].positions);
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_sources(
+        &mut self,
+        prev: &[PyramidU16],
+        inputs: &[TrackInput],
+        patches: &mut PatchSoA<P>,
+        temporal: bool,
+    ) -> Result<(), TrackerError> {
+        // Forward sources: retain surviving columns in their cache stores, and
+        // sample detections with no matching template. The cache key is id,
+        // position bits, and the committed source pyramid's build generation.
+        if temporal {
+            let prepare = |camera: usize, buffers: &mut CpuCameraBuffers<P>| {
+                let input = &inputs[camera];
+                let temporal = &self.temporal[input.destination];
+                let stereo = &self.stereo[input.destination];
+                buffers.build.clear();
+                buffers.sources.clear();
+                for (slot, id) in input.ids.iter().enumerate() {
+                    let position = input.positions.get(slot);
+                    let cached = |cache: &CpuBackwardCache<P>| {
+                        if cache.generation != prev[input.source].generation() {
+                            return None;
+                        }
+                        cache.ids.binary_search(id).ok().filter(|&column| {
+                            let old = cache.patches.position(column);
+                            cache.valid[column]
+                                && old.x.to_bits() == position.x.to_bits()
+                                && old.y.to_bits() == position.y.to_bits()
+                        })
+                    };
+                    if let Some(column) = cached(temporal) {
+                        buffers.sources.push(TemplateSource::Temporal(column));
+                        buffers.build.push(false);
+                    } else if let Some(column) = cached(stereo) {
+                        buffers.sources.push(TemplateSource::Stereo(column));
+                        buffers.build.push(false);
+                    } else {
+                        buffers.sources.push(TemplateSource::Built);
+                        buffers.build.push(true);
+                    }
+                }
+                buffers
+                    .source
+                    .build(&prev[input.source], &input.positions, Some(&buffers.build))
+            };
+            self.pool
+                .try_for_each_mut(&mut self.cameras[..inputs.len()], prepare)?;
+        } else {
+            patches.build(&prev[inputs[0].source], &inputs[0].positions, None)?;
+        }
+
+        Ok(())
+    }
+
     fn track_into(
         &mut self,
         prev: &PyramidU16,

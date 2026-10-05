@@ -2,7 +2,7 @@
 
 #[cfg(doc)]
 use crate::Vio;
-#[cfg(feature = "gpu-core")]
+#[cfg(feature = "gpu-wgpu")]
 use crate::gpu;
 use crate::{Backend, VioError, calib, config, frontend, image};
 
@@ -20,12 +20,11 @@ pub enum FrontendLane {
     /// The CPU pyramid builder and patch tracker.
     Cpu(frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>),
     /// The CubeCL pyramid builder and patch tracker.
-    #[cfg(feature = "gpu-core")]
+    #[cfg(feature = "gpu-wgpu")]
     Gpu(
         frontend::flow::FrameToFrameOpticalFlow<
             frontend::patterns::Pattern51,
-            gpu::LanePyramidBuilder,
-            gpu::LanePatchTracker<frontend::patterns::Pattern51>,
+            gpu::GpuStages<frontend::patterns::Pattern51, gpu::GpuRuntime>,
         >,
     ),
 }
@@ -35,17 +34,18 @@ macro_rules! on_lane {
     ($lane:expr, |$flow:ident| $body:expr) => {
         match $lane {
             FrontendLane::Cpu($flow) => $body,
-            #[cfg(feature = "gpu-core")]
+            #[cfg(feature = "gpu-wgpu")]
             FrontendLane::Gpu($flow) => $body,
         }
     };
 }
 
 impl FrontendLane {
-    pub(crate) fn cpu_pool(&self) -> Option<frontend::parallel::WorkPool> {
+    /// Share the CPU frontend's workers with the synchronous estimator.
+    pub(super) fn cpu_pool(&self) -> Option<frontend::parallel::WorkPool> {
         match self {
             Self::Cpu(flow) => Some(flow.pool().clone()),
-            #[cfg(feature = "gpu-core")]
+            #[cfg(feature = "gpu-wgpu")]
             Self::Gpu(_) => None,
         }
     }
@@ -56,7 +56,7 @@ impl FrontendLane {
     pub fn backend(&self) -> Backend {
         match self {
             Self::Cpu(_) => Backend::Cpu,
-            #[cfg(feature = "gpu-core")]
+            #[cfg(feature = "gpu-wgpu")]
             Self::Gpu(_) => Backend::Gpu,
         }
     }
@@ -153,7 +153,7 @@ impl FrontendLane {
 ///
 /// The CPU arm is `FrameToFrameOpticalFlow::new`. The GPU arm makes the two
 /// CubeCL stage backends on one shared client and hands them to
-/// `with_backends`, which is the whole of what selecting a backend costs.
+/// `with_stages`, which is the whole of what selecting a backend costs.
 pub(super) fn build_frontend(
     config: &config::VioConfig,
     calibration: &calib::Calibration<f64>,
@@ -164,7 +164,7 @@ pub(super) fn build_frontend(
     // buffers, checked here rather than after the cast: the GPU arm's
     // `optical_flow_levels as usize + 1` panics on `-1` in a debug build and
     // wraps to zero in a release one, either way before
-    // `FrameToFrameOpticalFlow::with_backends` can run the frontend's own
+    // `FrameToFrameOpticalFlow::with_stages` can run the frontend's own
     // refusal. Both arms return that refusal now, on the same field and value,
     // and no device is constructed for a config no backend can run.
     for (field, value) in [
@@ -183,10 +183,10 @@ pub(super) fn build_frontend(
         Backend::Cpu => Ok(FrontendLane::Cpu(
             frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), calibration, options)?,
         )),
-        #[cfg(feature = "gpu-core")]
+        #[cfg(feature = "gpu-wgpu")]
         Backend::Gpu => {
             let num_levels: usize = config.optical_flow_levels as usize + 1;
-            let (pyramid, tracker, scanner) = gpu::gpu_backends::<frontend::patterns::Pattern51>(
+            let stages = gpu::gpu_stages::<frontend::patterns::Pattern51>(
                 options.max_keypoints,
                 num_levels,
                 config.optical_flow_max_iterations as usize,
@@ -198,18 +198,16 @@ pub(super) fn build_frontend(
             let host_pool = frontend::parallel::WorkPool::new(1)
                 .map_err(|_| frontend::flow::FrontendError::ThreadPool { threads: 1 })?;
             Ok(FrontendLane::Gpu(
-                frontend::flow::FrameToFrameOpticalFlow::with_backends(
+                frontend::flow::FrameToFrameOpticalFlow::with_stages(
                     config.clone(),
                     calibration,
                     options,
-                    pyramid,
-                    tracker,
-                    scanner,
+                    stages,
                     host_pool,
                 )?,
             ))
         }
-        #[cfg(not(feature = "gpu-core"))]
+        #[cfg(not(feature = "gpu-wgpu"))]
         Backend::Gpu => Err(VioError::GpuUnavailable),
     }
 }

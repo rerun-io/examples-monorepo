@@ -16,4 +16,5 @@ pub mod patch;
 pub mod patterns;
 pub mod se2;
 pub(crate) mod simd;
+pub mod stages;
 pub mod tracker;

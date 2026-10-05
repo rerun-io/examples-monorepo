@@ -209,3 +209,112 @@ fn a_backend_error_after_the_first_camera_is_undone_too() {
     assert_eq!(faulty.frame(), clean.frame());
     assert_eq!(faulty.last_keypoint_id(), clean.last_keypoint_id());
 }
+
+#[derive(Debug)]
+struct RefuseAfterTracking {
+    inner: slam_rs::frontend::detect::CpuCornerScan,
+    refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl slam_rs::frontend::detect::CornerScan for RefuseAfterTracking {
+    fn scan(
+        &mut self,
+        camera: usize,
+        image: &ImageU16,
+    ) -> Result<(), slam_rs::frontend::detect::DetectError> {
+        self.inner.scan(camera, image)
+    }
+
+    fn band(
+        &mut self,
+        request: slam_rs::frontend::detect::BandRequest,
+    ) -> Result<&[slam_rs::frontend::detect::FastCorner], slam_rs::frontend::detect::DetectError>
+    {
+        self.inner.band(request)
+    }
+
+    fn take_cells(&mut self) -> Result<(), slam_rs::frontend::detect::DetectError> {
+        if self.refuse.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Err(slam_rs::frontend::detect::DetectError::NotScanned)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The failure arrives after all CPU backward stores have been overwritten.
+/// A retry must track against the last committed image, with rebuilt templates.
+#[test]
+fn a_refused_frame_does_not_leave_uncommitted_backward_templates_in_the_cache() {
+    use slam_rs::frontend::parallel::WorkPool;
+    use slam_rs::frontend::tracker::CpuPatchTracker;
+    use slam_rs::pyramid::CpuPyramidBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for threads in [1, 4] {
+        let config = common::flow_config();
+        let options = FrontendOptions {
+            threads,
+            ..FrontendOptions::default()
+        };
+        let pool = WorkPool::new(threads).unwrap();
+        let tracker = CpuPatchTracker::<Pattern51>::new(
+            options.max_keypoints,
+            config.optical_flow_levels as usize + 1,
+            config.optical_flow_max_iterations as usize,
+            config.optical_flow_max_recovered_dist2,
+            pool.clone(),
+        )
+        .unwrap();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let mut faulty = FrameToFrameOpticalFlow::with_stages(
+            config,
+            &common::flow_rig(2),
+            options,
+            slam_rs::frontend::stages::CpuStages::new(
+                CpuPyramidBuilder::new(),
+                tracker,
+                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                    RefuseAfterTracking {
+                        inner: Default::default(),
+                        refuse: refuse.clone(),
+                    },
+                )),
+            )
+            .unwrap(),
+            pool,
+        )
+        .unwrap();
+        let mut clean: FrameToFrameOpticalFlow<Pattern51> = frontend(2, options);
+        for step in 0..6 {
+            let images = [dotted_image(step), dotted_image(step + 1)];
+            if step == 2 {
+                let committed = faulty.frame().clone();
+                refuse.store(true, Ordering::SeqCst);
+                assert!(
+                    faulty
+                        .process_frame(step.into(), &images, &PosePrediction::default(), &[])
+                        .is_err()
+                );
+                assert_eq!(faulty.frame(), &committed);
+            } else {
+                clean
+                    .process_frame(step.into(), &images, &PosePrediction::default(), &[])
+                    .unwrap();
+                faulty
+                    .process_frame(step.into(), &images, &PosePrediction::default(), &[])
+                    .unwrap();
+                assert_eq!(
+                    faulty.frame(),
+                    clean.frame(),
+                    "frame {step}, threads {threads}"
+                );
+                assert_eq!(faulty.last_keypoint_id(), clean.last_keypoint_id());
+                for camera in 0..2 {
+                    assert_eq!(faulty.cell_counts(camera), clean.cell_counts(camera));
+                }
+            }
+        }
+    }
+}

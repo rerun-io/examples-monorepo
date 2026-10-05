@@ -51,10 +51,28 @@ pub fn cpu_tracker(config: &VioConfig, capacity: usize) -> CpuPatchTracker<Patte
 pub struct FailingTracker {
     inner: CpuPatchTracker<Pattern51>,
     calls: std::cell::Cell<usize>,
-    fail_on: usize,
+    failures: std::ops::RangeInclusive<usize>,
+}
+
+impl FailingTracker {
+    #[allow(
+        dead_code,
+        reason = "used by frame_allocations; other binaries compile a subset"
+    )]
+    pub fn fail_from(inner: CpuPatchTracker<Pattern51>, call: usize) -> Self {
+        Self {
+            inner,
+            calls: std::cell::Cell::new(0),
+            failures: call..=usize::MAX,
+        }
+    }
 }
 
 impl PatchTracker for FailingTracker {
+    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) {
+        self.inner.set_klt_exit_step_px(threshold)
+    }
+
     fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
         self.inner.batch()
     }
@@ -78,7 +96,7 @@ impl PatchTracker for FailingTracker {
         self.inner.make_patches()
     }
 
-    fn submit_prepared(
+    fn submit(
         &mut self,
         prev: &PyramidU16,
         next: &PyramidU16,
@@ -86,14 +104,13 @@ impl PatchTracker for FailingTracker {
         transforms_in: &FlowTransforms,
     ) -> Result<usize, TrackerError> {
         self.calls.set(self.calls.get() + 1);
-        if self.calls.get() == self.fail_on {
+        if self.failures.contains(&self.calls.get()) {
             return Err(TrackerError::CapacityExceeded {
                 offered: usize::MAX,
                 capacity: 0,
             });
         }
-        self.inner
-            .submit_prepared(prev, next, patches, transforms_in)
+        self.inner.submit(prev, next, patches, transforms_in)
     }
 }
 
@@ -104,7 +121,7 @@ impl PatchTracker for FailingTracker {
 )]
 pub fn failing_frontend(
     fail_on: usize,
-) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
+) -> FrameToFrameOpticalFlow<Pattern51, slam_rs::frontend::stages::CpuStages<FailingTracker>> {
     failing_frontend_with_ratio(fail_on, 0.0)
 }
 
@@ -116,24 +133,29 @@ pub fn failing_frontend(
 pub fn failing_frontend_with_ratio(
     fail_on: usize,
     ratio: f32,
-) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
+) -> FrameToFrameOpticalFlow<Pattern51, slam_rs::frontend::stages::CpuStages<FailingTracker>> {
     let config = VioConfig {
         port_redetect_survivor_ratio: ratio,
         ..config()
     };
     let options: FrontendOptions = FrontendOptions::default();
     let inner: CpuPatchTracker<Pattern51> = cpu_tracker(&config, options.max_keypoints);
-    FrameToFrameOpticalFlow::with_backends(
+    FrameToFrameOpticalFlow::with_stages(
         config,
         &rig(2),
         options,
-        CpuPyramidBuilder::new(),
-        FailingTracker {
-            inner,
-            calls: std::cell::Cell::new(0),
-            fail_on,
-        },
-        Box::new(CpuCornerScan::default()),
+        slam_rs::frontend::stages::CpuStages::new(
+            CpuPyramidBuilder::new(),
+            FailingTracker {
+                inner,
+                calls: std::cell::Cell::new(0),
+                failures: fail_on..=fail_on,
+            },
+            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                CpuCornerScan::default(),
+            )),
+        )
+        .unwrap(),
         WorkPool::new(1).unwrap(),
     )
     .unwrap()

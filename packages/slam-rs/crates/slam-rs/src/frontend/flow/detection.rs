@@ -9,16 +9,14 @@ use crate::frontend::detect::{
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
+use crate::frontend::stages::FrameStages;
 use crate::frontend::tracker::PatchTracker;
 use crate::image::ImageU16;
 use crate::lie::Se3;
-use crate::pyramid::PyramidBuilder;
 use crate::types::KeypointId;
 use nalgebra::{Matrix4, Vector2, Vector4};
 
-impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Pyramid>>
-    FrameToFrameOpticalFlow<P, B, T>
-{
+impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
     /// `updateCellCounts` : rebuild one camera's occupancy from scratch.
     pub(super) fn update_cell_counts(&mut self, camera: usize) {
         self.cells[camera].fill(0);
@@ -75,7 +73,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         let config = self.detector_config();
         let mark = std::time::Instant::now();
         let Self {
-            detector,
+            stages,
             side_detectors,
             detected,
             frame,
@@ -86,33 +84,35 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             masks,
             ..
         } = self;
+        let detector = stages.detector();
         let occupancy_grid: &CellGrid = occupancy_grid;
-        let detect = |camera: usize, scratch: &mut DetectorScratch, out: &mut KeypointsData| {
-            out.corners.clear();
-            out.responses.clear();
-            let budget = options
-                .max_keypoints
-                .saturating_sub(frame.cameras[camera].len());
-            if budget == 0 {
-                return Ok(());
-            }
-            // Level 0 is the unchanged input image, including on the device lane.
-            detect_keypoints_with_cells(
-                &images[camera],
-                camera,
-                &detection_grids[camera],
-                &Occupancy {
-                    counts: &cells[camera],
-                    rows: occupancy_grid.rows,
-                    columns: occupancy_grid.columns,
-                },
-                &config,
-                &masks[camera],
-                budget,
-                scratch,
-                out,
-            )
-        };
+        let detect =
+            |camera: usize, scratch: &mut DetectorScratch<F::Scanner>, out: &mut KeypointsData| {
+                out.corners.clear();
+                out.responses.clear();
+                let budget = options
+                    .max_keypoints
+                    .saturating_sub(frame.cameras[camera].len());
+                if budget == 0 {
+                    return Ok(());
+                }
+                // Level 0 is the unchanged input image, including on the device lane.
+                detect_keypoints_with_cells(
+                    &images[camera],
+                    camera,
+                    &detection_grids[camera],
+                    &Occupancy {
+                        counts: &cells[camera],
+                        rows: occupancy_grid.rows,
+                        columns: occupancy_grid.columns,
+                    },
+                    &config,
+                    &masks[camera],
+                    budget,
+                    scratch,
+                    out,
+                )
+            };
         let parallel =
             side_pool
                 .as_ref()
@@ -271,51 +271,22 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // One batch again: camera *i*'s match reads camera 0's new keypoints and
         // writes camera *i* alone, so the whole rig is launched before any of it
         // is downloaded.
-        let mark: std::time::Instant = std::time::Instant::now();
         if self.cameras.len() > 1 {
-            // Every match in this batch tracks the *same* keypoints — camera
-            // 0's new ones — into a different destination, and
-            // `submit_track_points` only reads the source warps, so the copy
-            // happens once here rather than once per camera.
-            self.source.clone_from(&self.new_cam0.transforms);
+            self.prepare_tracks(None);
         }
-        for camera in 1..self.cameras.len() {
-            let lane: usize = camera;
-            self.passes[lane].ids.clear();
-            self.passes[lane].ids.extend_from_slice(&self.new_cam0.ids);
-            let t_c0_ci: Se3<f32> = self.calib.t_i_c[0].inverse() * self.calib.t_i_c[camera];
-            self.submit_track_points(lane, 0, camera, &t_c0_ci, false)?;
-        }
-        self.timings.stereo_ns += duration_ns(mark);
-
-        // The other cameras' selections, launched behind the matches so the
-        // match download carries them too. Only the non-overlap pass below
-        // reads them, so a config without it launches nothing here.
-        let tail: bool = self.cameras.len() > 1 && self.config.optical_flow_detection_nonoverlap;
-        if tail {
-            let mark: std::time::Instant = std::time::Instant::now();
-            self.cell_selects_now.clear();
-            self.cell_selects_now.resize(images.len(), None);
-            for camera in 1..self.cell_selects_now.len().min(self.cell_selects.len()) {
-                self.cell_selects_now[camera] = self.cell_selects[camera];
-            }
-            self.detector.submit_cells(images, &self.cell_selects_now)?;
-            self.timings.detect_ns += duration_ns(mark);
-        }
-
-        let mark: std::time::Instant = std::time::Instant::now();
-        if self.cameras.len() > 1 {
-            self.tracker.collect()?;
-        }
+        self.stages.stereo(
+            &mut self.passes[1..],
+            images,
+            &self.cell_selects,
+            self.config.optical_flow_detection_nonoverlap,
+            &mut self.timings,
+        )?;
+        let mark = std::time::Instant::now();
         for camera in 1..self.cameras.len() {
             self.finish_track_points(camera);
             self.add_keypoints(camera);
         }
         self.timings.stereo_ns += duration_ns(mark);
-
-        let mark: std::time::Instant = std::time::Instant::now();
-        self.detector.take_cells()?;
-        self.timings.detect_ns += duration_ns(mark);
 
         // `if (!config.optical_flow_detection_nonoverlap) continue;`.
         if self.config.optical_flow_detection_nonoverlap {

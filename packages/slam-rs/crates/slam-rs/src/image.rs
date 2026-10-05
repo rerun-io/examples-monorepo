@@ -3,6 +3,8 @@
 //! (D08). Row strides count u16 elements internally and bytes on input.
 //! Honor padded source rows, such as a 1024-byte decoder stride for a 960-pixel
 //! image (D28). Flat owned buffers support upload without repacking.
+//! GPU ingestion can retain dense bytes and defer host widening until a CPU
+//! consumer requests u16 pixels; all pixel accessors keep the same values.
 
 use crate::frontend::simd::F32x4;
 use thiserror::Error;
@@ -50,15 +52,34 @@ pub enum ImageError {
     },
 }
 
-/// An owned flat u16 image with explicit width, height and row stride.
-/// This layout can be uploaded as one buffer without per-frame repacking.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// An owned grayscale image with u16 pixel access and explicit row stride.
+/// GPU byte input is widened lazily; mutable access materializes u16 storage.
+#[derive(Debug, Clone, Default)]
 pub struct ImageU16 {
     data: Vec<u16>,
+    // GPU ingestion keeps bytes until a CPU consumer actually requests pixels.
+    #[cfg(feature = "gpu-core")]
+    // Boxed so CPU images stay small: the pyramid and KLT loops touch these structs.
+    #[expect(
+        clippy::type_complexity,
+        reason = "packed storage remains until the frame-input API migration"
+    )]
+    packed: Option<Box<(Vec<u8>, std::sync::OnceLock<Vec<u16>>)>>,
     width: usize,
     height: usize,
     stride: usize,
 }
+
+impl PartialEq for ImageU16 {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.stride == other.stride
+            && self.data() == other.data()
+    }
+}
+
+impl Eq for ImageU16 {}
 
 impl ImageU16 {
     /// A zero-filled image with a dense row stride.
@@ -86,6 +107,8 @@ impl ImageU16 {
         let len: usize = checked_pixel_len(width, height, stride)?;
         Ok(Self {
             data: vec![0; len],
+            #[cfg(feature = "gpu-core")]
+            packed: None,
             width,
             height,
             stride,
@@ -133,6 +156,10 @@ impl ImageU16 {
             });
         }
         let len: usize = checked_pixel_len(width, height, width)?;
+        #[cfg(feature = "gpu-core")]
+        {
+            self.packed = None;
+        }
         // `resize` only allocates when `len` exceeds the current capacity, so a
         // steady stream of same-sized frames never touches the allocator.
         self.data.resize(len, 0);
@@ -151,6 +178,63 @@ impl ImageU16 {
         Ok(())
     }
 
+    /// Own byte input without widening it on the host. GPU pyramid builders
+    /// consume [`Self::packed_u8`]; ordinary image reads still return `u8 << 8`.
+    /// CPU fallback pixels are materialized once, only when read.
+    ///
+    /// # Errors
+    /// As [`Self::fill_from_u8_strided`].
+    #[cfg(feature = "gpu-core")]
+    pub fn fill_packed_u8_strided(
+        &mut self,
+        bytes: &[u8],
+        width: usize,
+        height: usize,
+        stride_bytes: usize,
+    ) -> Result<(), ImageError> {
+        let source_len = checked_len(width, height, stride_bytes)?;
+        if bytes.len() < source_len {
+            return Err(ImageError::ShortBuffer {
+                height,
+                stride: stride_bytes,
+                len: bytes.len(),
+            });
+        }
+        let len = checked_pixel_len(width, height, width)?;
+        let (packed, widened) = &mut **self.packed.get_or_insert_with(Default::default);
+        packed.clear();
+        packed.reserve(len);
+        for row in 0..height {
+            packed.extend_from_slice(&bytes[row * stride_bytes..row * stride_bytes + width]);
+        }
+        widened.take();
+        self.width = width;
+        self.height = height;
+        self.stride = width;
+        Ok(())
+    }
+
+    /// Dense original byte pixels, when this image came through GPU ingestion.
+    /// A mutable pixel access invalidates them before it returns.
+    #[cfg(feature = "gpu-core")]
+    pub fn packed_u8(&self) -> Option<&[u8]> {
+        self.packed.as_deref().map(|(bytes, _)| bytes.as_slice())
+    }
+
+    #[cfg(feature = "gpu-core")]
+    fn materialize(&mut self) {
+        if let Some(packed) = self.packed.take() {
+            let (bytes, widened) = *packed;
+            if let Some(pixels) = widened.into_inner() {
+                self.data = pixels;
+            } else {
+                self.data.clear();
+                self.data
+                    .extend(bytes.into_iter().map(|value| u16::from(value) << 8));
+            }
+        }
+    }
+
     /// Copy `source` into this image, reusing the buffer.
     ///
     /// The result is dense (`stride == width`) whatever `source`'s stride is,
@@ -167,6 +251,10 @@ impl ImageU16 {
         let width: usize = source.width;
         let height: usize = source.height;
         let len: usize = checked_pixel_len(width, height, width)?;
+        #[cfg(feature = "gpu-core")]
+        {
+            self.packed = None;
+        }
         self.data.resize(len, 0);
         self.width = width;
         self.height = height;
@@ -174,7 +262,7 @@ impl ImageU16 {
         for row in 0..height {
             // Both slices are in range: `source` upholds `stride * height`, and
             // `data.len() == width * height`.
-            let from: &[u16] = &source.data[row * source.stride..row * source.stride + width];
+            let from: &[u16] = source.row(row);
             self.data[row * width..row * width + width].copy_from_slice(from);
         }
         Ok(())
@@ -197,6 +285,11 @@ impl ImageU16 {
 
     /// The whole buffer, `stride * height` pixels long.
     pub fn data(&self) -> &[u16] {
+        #[cfg(feature = "gpu-core")]
+        if let Some((bytes, widened)) = self.packed.as_deref() {
+            return widened
+                .get_or_init(|| bytes.iter().map(|&value| u16::from(value) << 8).collect());
+        }
         &self.data
     }
 
@@ -207,7 +300,7 @@ impl ImageU16 {
     /// If `y >= height`. Callers on the frontend path index rows they have
     /// already bounds-checked; this is the checked accessor for everyone else.
     pub fn row(&self, y: usize) -> &[u16] {
-        &self.data[y * self.stride..y * self.stride + self.width]
+        &self.data()[y * self.stride..y * self.stride + self.width]
     }
 
     /// One row, `width` pixels long, mutably.
@@ -217,13 +310,15 @@ impl ImageU16 {
     /// If `y >= height`. Callers on the frontend path index rows they have
     /// already bounds-checked; this is the checked accessor for everyone else.
     pub fn row_mut(&mut self, y: usize) -> &mut [u16] {
+        #[cfg(feature = "gpu-core")]
+        self.materialize();
         &mut self.data[y * self.stride..y * self.stride + self.width]
     }
 
     /// The pixel at `(x, y)`, or `None` outside the image.
     pub fn get(&self, x: usize, y: usize) -> Option<u16> {
         if x < self.width && y < self.height {
-            Some(self.data[y * self.stride + x])
+            Some(self.data()[y * self.stride + x])
         } else {
             None
         }
@@ -232,17 +327,10 @@ impl ImageU16 {
     /// Write the pixel at `(x, y)`; a coordinate outside the image is ignored.
     pub fn set(&mut self, x: usize, y: usize, value: u16) {
         if x < self.width && y < self.height {
+            #[cfg(feature = "gpu-core")]
+            self.materialize();
             self.data[y * self.stride + x] = value;
         }
-    }
-
-    /// Read a pixel after validating `x < width && y < height`.
-    ///
-    /// # Panics
-    /// If the resulting slice index is outside storage.
-    #[inline]
-    fn at(&self, x: usize, y: usize) -> f32 {
-        f32::from(self.data[y * self.stride + x])
     }
 
     /// Four KLT samples with a two-pixel border. Gather pixels once their whole
@@ -323,6 +411,8 @@ impl ImageU16 {
 
         let ix: usize = x as usize;
         let iy: usize = y as usize;
+        let pixels = self.data();
+        let at = |px: usize, py: usize| f32::from(pixels[py * self.stride + px]);
 
         let dx: f32 = x - ix as f32;
         let dy: f32 = y - iy as f32;
@@ -330,10 +420,10 @@ impl ImageU16 {
         let ddx: f32 = 1.0 - dx;
         let ddy: f32 = 1.0 - dy;
 
-        ddx * ddy * self.at(ix, iy)
-            + ddx * dy * self.at(ix, iy + 1)
-            + dx * ddy * self.at(ix + 1, iy)
-            + dx * dy * self.at(ix + 1, iy + 1)
+        ddx * ddy * at(ix, iy)
+            + ddx * dy * at(ix, iy + 1)
+            + dx * ddy * at(ix + 1, iy)
+            + dx * dy * at(ix + 1, iy + 1)
     }
 
     /// Bilinear value and unit-spacing central differences of the bilinear surface.
@@ -352,6 +442,8 @@ impl ImageU16 {
 
         let ix: usize = x as usize;
         let iy: usize = y as usize;
+        let pixels = self.data();
+        let at = |px: usize, py: usize| f32::from(pixels[py * self.stride + px]);
 
         let dx: f32 = x - ix as f32;
         let dy: f32 = y - iy as f32;
@@ -359,34 +451,34 @@ impl ImageU16 {
         let ddx: f32 = 1.0 - dx;
         let ddy: f32 = 1.0 - dy;
 
-        let px0y0: f32 = self.at(ix, iy);
-        let px1y0: f32 = self.at(ix + 1, iy);
-        let px0y1: f32 = self.at(ix, iy + 1);
-        let px1y1: f32 = self.at(ix + 1, iy + 1);
+        let px0y0: f32 = at(ix, iy);
+        let px1y0: f32 = at(ix + 1, iy);
+        let px0y1: f32 = at(ix, iy + 1);
+        let px1y1: f32 = at(ix + 1, iy + 1);
 
         let value: f32 = ddx * ddy * px0y0 + ddx * dy * px0y1 + dx * ddy * px1y0 + dx * dy * px1y1;
 
-        let pxm1y0: f32 = self.at(ix - 1, iy);
-        let pxm1y1: f32 = self.at(ix - 1, iy + 1);
+        let pxm1y0: f32 = at(ix - 1, iy);
+        let pxm1y1: f32 = at(ix - 1, iy + 1);
 
         let res_mx: f32 =
             ddx * ddy * pxm1y0 + ddx * dy * pxm1y1 + dx * ddy * px0y0 + dx * dy * px0y1;
 
-        let px2y0: f32 = self.at(ix + 2, iy);
-        let px2y1: f32 = self.at(ix + 2, iy + 1);
+        let px2y0: f32 = at(ix + 2, iy);
+        let px2y1: f32 = at(ix + 2, iy + 1);
 
         let res_px: f32 = ddx * ddy * px1y0 + ddx * dy * px1y1 + dx * ddy * px2y0 + dx * dy * px2y1;
 
         let grad_x: f32 = 0.5 * (res_px - res_mx);
 
-        let px0ym1: f32 = self.at(ix, iy - 1);
-        let px1ym1: f32 = self.at(ix + 1, iy - 1);
+        let px0ym1: f32 = at(ix, iy - 1);
+        let px1ym1: f32 = at(ix + 1, iy - 1);
 
         let res_my: f32 =
             ddx * ddy * px0ym1 + ddx * dy * px0y0 + dx * ddy * px1ym1 + dx * dy * px1y0;
 
-        let px0y2: f32 = self.at(ix, iy + 2);
-        let px1y2: f32 = self.at(ix + 1, iy + 2);
+        let px0y2: f32 = at(ix, iy + 2);
+        let px1y2: f32 = at(ix + 1, iy + 2);
 
         let res_py: f32 = ddx * ddy * px0y1 + ddx * dy * px0y2 + dx * ddy * px1y1 + dx * dy * px1y2;
 
@@ -475,6 +567,54 @@ mod tests {
         let bytes: [u8; 4] = [0, 1, 128, 255];
         let image: ImageU16 = ImageU16::from_u8_strided(&bytes, 4, 1, 4).unwrap();
         assert_eq!(image.data(), &[0, 256, 32_768, 65_280]);
+    }
+
+    #[cfg(feature = "gpu-core")]
+    #[test]
+    fn packed_refilled_images_support_public_sampling() {
+        // Keep an old u16 buffer so a broken release accessor reads stale data,
+        // rather than invoking undefined behavior while reporting this failure.
+        let mut image = ImageU16::from_u8_strided(&[99; 25], 5, 5, 5).unwrap();
+        let first: Vec<u8> = (0..5)
+            .flat_map(|y| (0..6).map(move |x| x + 2 * y))
+            .collect();
+        image.fill_packed_u8_strided(&first, 5, 5, 6).unwrap();
+        assert_eq!(image.interp(1.25, 1.5), 1088.0);
+        assert_eq!(image.interp_grad(1.25, 1.5), (1088.0, [256.0, 512.0]));
+
+        let second: Vec<u8> = (0..5)
+            .flat_map(|y| (0..6).map(move |x| 20 + 3 * x + 4 * y))
+            .collect();
+        image.fill_packed_u8_strided(&second, 5, 5, 6).unwrap();
+        assert_eq!(image.interp(1.25, 1.5), 7616.0);
+        assert_eq!(image.interp_grad(1.25, 1.5), (7616.0, [768.0, 1024.0]));
+    }
+
+    #[cfg(feature = "gpu-core")]
+    #[test]
+    fn packed_input_keeps_exact_pixels_through_reads_mutation_and_refills() {
+        let mut image = ImageU16::default();
+        image
+            .fill_packed_u8_strided(&[1, 255, 99, 128, 0, 99], 2, 2, 3)
+            .unwrap();
+        assert_eq!(image.packed_u8(), Some([1, 255, 128, 0].as_slice()));
+        assert_eq!(image.get(1, 0), Some(65280));
+        assert_eq!(image.row(1), &[32768, 0]);
+        assert_eq!(image.data(), &[256, 65280, 32768, 0]);
+        let mut copy = ImageU16::default();
+        copy.copy_from(&image).unwrap();
+        assert_eq!(copy, image);
+        image.row_mut(1)[1] = 123;
+        assert_eq!(image.packed_u8(), None);
+        assert_eq!(image.get(1, 1), Some(123));
+        image.fill_packed_u8_strided(&[2, 3], 2, 1, 2).unwrap();
+        assert_eq!(image.data(), &[512, 768]);
+        image.set(0, 0, 777);
+        assert_eq!(image.data(), &[777, 768]);
+        image.fill_packed_u8_strided(&[4, 5], 2, 1, 2).unwrap();
+        image.fill_from_u8_strided(&[6, 7], 2, 1, 2).unwrap();
+        assert_eq!(image.packed_u8(), None);
+        assert_eq!(image.data(), &[1536, 1792]);
     }
 
     #[test]

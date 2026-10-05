@@ -49,7 +49,8 @@ fn band(y: usize) -> BandRequest {
 /// any scan returns.
 #[test]
 fn a_failed_scan_leaves_no_band_readable() {
-    let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut scanner: GpuCornerScan<GpuRuntime> =
+        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     scanner.scan(0, &dotted_image(512, 128)).unwrap();
     assert!(
         !scanner.band(band(3)).unwrap().is_empty(),
@@ -74,7 +75,8 @@ fn a_failed_scan_leaves_no_band_readable() {
 /// runs off the end of the buffer.
 #[test]
 fn a_failed_scan_that_changes_the_geometry_does_not_panic() {
-    let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut scanner: GpuCornerScan<GpuRuntime> =
+        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     scanner.scan(0, &dotted_image(512, 128)).unwrap();
 
     arm_fault_at(CORNER_SCAN_READ);
@@ -97,7 +99,7 @@ fn selection_failures_invalidate_the_batch_and_allow_retry() {
     let grid = CellGrid::new(512, 128, 50).unwrap();
     let selection = cell_select(&images[0], &grid, &config).unwrap();
     let selects = [Some(selection), Some(selection)];
-    let mut scanner = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut scanner = GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     for site in ["selection camera submitted", super::super::BLOCKING_READ] {
         if site == "selection camera submitted" {
             arm_fault_at(site);

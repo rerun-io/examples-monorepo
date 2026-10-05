@@ -10,6 +10,7 @@
 
 use crate::frontend::parallel::WorkPool;
 use crate::image::{ImageError, ImageU16};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The 5-tap Gaussian.
 const KERNEL: [i32; 5] = [1, 4, 6, 4, 1];
@@ -25,29 +26,14 @@ pub(crate) const MIN_SIDE: usize = 3;
 /// signature. The output is a `&mut` parameter, never a return value, so the
 /// caller owns the allocation and the per-frame path never allocates.
 pub trait PyramidBuilder {
-    /// Whether images are uploaded together before any pyramid dispatch.
-    const PREPARE_IMAGES: bool = false;
-
-    /// Prepare this frameset's uploads after all pyramid allocations.
-    fn prepare_images(&mut self, _images: &[ImageU16]) -> Result<(), PyramidError> {
-        Ok(())
-    }
-
-    /// Build allocated cameras, preserving the existing backend's upload ordering.
+    /// Build a frameset after allocating all its pyramids. Device backends keep
+    /// their upload-before-dispatch ordering; CPU builders can split by camera.
     fn build_frames(
         &mut self,
         images: &[ImageU16],
         out: &mut [Self::Pyramid],
-        _pool: &WorkPool,
-    ) -> Result<(), PyramidError> {
-        if Self::PREPARE_IMAGES {
-            self.prepare_images(images)?;
-        }
-        for (camera, (image, pyramid)) in images.iter().zip(out).enumerate() {
-            self.build(camera, image, pyramid)?;
-        }
-        Ok(())
-    }
+        pool: &WorkPool,
+    ) -> Result<(), PyramidError>;
 
     /// The pyramid representation this builder fills.
     ///
@@ -223,10 +209,34 @@ pub enum PyramidError {
 }
 
 /// One camera's pyramid: level 0 plus `num_levels` halvings, each a flat buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PyramidU16 {
     levels: Vec<ImageU16>,
+    /// Unique across builds, including different allocations and builders.
+    /// Clones keep the generation until either copy is rebuilt.
+    generation: PyramidGeneration,
 }
+
+/// Opaque cache identity, not part of the pyramid's numerical state.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PyramidGeneration(u64);
+
+impl std::fmt::Debug for PyramidGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Like an allocation address, the process-wide counter differs across
+        // otherwise identical runs. Keep numerical state dumps deterministic.
+        f.write_str("PyramidGeneration")
+    }
+}
+
+// Equality describes pixels, not the build history used by template caches.
+impl PartialEq for PyramidU16 {
+    fn eq(&self, other: &Self) -> bool {
+        self.levels == other.levels
+    }
+}
+
+impl Eq for PyramidU16 {}
 
 impl PyramidU16 {
     /// Allocate zero-filled levels; three reductions give levels zero through three.
@@ -253,7 +263,14 @@ impl PyramidU16 {
             // Level dimensions are original dimensions shifted right by the level index.
             levels.push(ImageU16::zeros(width >> level, height >> level)?);
         }
-        Ok(Self { levels })
+        Ok(Self {
+            levels,
+            generation: PyramidGeneration::default(),
+        })
+    }
+
+    pub(crate) fn generation(&self) -> PyramidGeneration {
+        self.generation
     }
 
     /// Level `level`, or `None` past the top.
@@ -373,6 +390,17 @@ fn build_cpu(
             height: img.height(),
         });
     }
+
+    // Invalidate templates before any pixels change, even if a later step fails.
+    // A per-pyramid counter would alias unrelated images built equally often.
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+    out.generation = PyramidGeneration(
+        NEXT_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .unwrap_or_else(|_| panic!("pyramid build generation exhausted")),
+    );
 
     // Copy row by row to support strided source images.
     out.levels[0].copy_from(img)?;

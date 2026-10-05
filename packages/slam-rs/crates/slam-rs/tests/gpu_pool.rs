@@ -3,11 +3,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use slam_rs::frontend::detect::CornerScan;
-use slam_rs::frontend::patterns::{Pattern, Pattern51};
+use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::tracker::{
     FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,
 };
-use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramidBuilder, gpu_client};
+use slam_rs::gpu::{
+    GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramidBuilder, gpu_client,
+};
 use slam_rs::image::ImageU16;
 use slam_rs::pyramid::PyramidBuilder;
 
@@ -18,6 +20,28 @@ use common::gpu::{
 };
 use common::{cornered_image, grid_positions};
 
+/// Four fused camera lanes fit in a 4 MiB point-buffer budget. The legacy
+/// backward templates alone exceed 9 MiB at this capacity and must not exist.
+#[test]
+fn fused_tracker_fits_the_point_buffer_budget() {
+    let client = gpu_client().unwrap();
+    let before = client.memory_usage().unwrap().bytes_in_use;
+    let tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
+        client.clone(),
+        3000,
+        4,
+        MAX_ITERATIONS,
+        MAX_RECOVERED_DIST2,
+        4,
+        Default::default(),
+    )
+    .unwrap();
+    let held = client.memory_usage().unwrap().bytes_in_use - before;
+    println!("fused tracker holds {held} bytes");
+    assert!(held < 4 * 1024 * 1024, "fused tracker holds {held} bytes");
+    drop(tracker);
+}
+
 /// The whole GPU path keeps CubeCL's pool bounded: it plateaus and holds flat.
 ///
 /// **Bounded pool growth, not zero device allocations** — the distinction
@@ -27,7 +51,7 @@ use common::{cornered_image, grid_positions};
 /// forms, and `empty`; there is no write into an existing handle), so three
 /// allocations are unavoidably per-frame: the frame upload per camera
 /// (`GpuPyramidBuilder::build`), the positions buffer per patch build
-/// (`GpuPatches::upload_staging`) and the transform buffer per tracking call
+/// (`GpuPatchSources::upload_staging`) and the transform buffer per tracking call
 /// (`GpuPatchTracker::track`). What the design can promise is that the pool
 /// they come out of stops growing, and that is what this measures.
 ///
@@ -56,9 +80,10 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
     const IN_USE_CEILING: u64 = 32 * 1024 * 1024;
 
     let client = gpu_client().unwrap();
-    let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
-    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone()).unwrap();
-    scanner.share_level0(builder.level0_table());
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
+    let mut scanner: GpuCornerScan<_> =
+        GpuCornerScan::new(client.clone(), Default::default()).unwrap();
+
     let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
         MAX_KEYPOINTS,
@@ -66,9 +91,10 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
         1,
+        Default::default(),
     )
     .unwrap();
-    let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
+    let mut patches: GpuPatchSources<Pattern51, _> = tracker.make_patches().unwrap();
     let mut result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
 
     // Two cameras of the same geometry, as a stereo rig is: the mixed-geometry
@@ -92,6 +118,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
     for frame_index in 0..FRAMES {
         for (camera, frame) in frames.iter().enumerate() {
             builder.build(camera, frame, &mut pyramids[camera]).unwrap();
+            scanner.use_level0(&mut builder);
             scanner.scan(camera, frame).unwrap();
             // One band, so the download and the host-side walk run too.
             scanner.band(band_at(0, 0, 3, 44, 20)).unwrap();

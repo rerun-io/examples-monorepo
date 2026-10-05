@@ -1,11 +1,13 @@
 //! The GPU [`CornerScan`]: FAST-9 scores and kornia's local-maximum filter on
 //! the device, one download per frame, every rung of the ladder derived from it.
 
+pub(super) mod batch;
+
 use cubecl::prelude::*;
 use kornia_imgproc::features::FastCorner;
 
 use super::kernels::{self, MASK_BITS, RING_BIAS};
-use super::pyramid::{Level0, Level0Table};
+use super::pyramid::Level0;
 use super::{GpuError, guarded};
 use crate::frontend::cell::SelectionStatus;
 use crate::frontend::detect::{
@@ -13,6 +15,14 @@ use crate::frontend::detect::{
     FAST_RING_ROW, block_filter_end, opencv_corner_score,
 };
 use crate::image::ImageU16;
+
+#[derive(Default)]
+enum SelectionReads {
+    #[default]
+    Empty,
+    Pending(Vec<cubecl::server::Handle>),
+    Ready(Vec<cubecl::bytes::Bytes>),
+}
 
 /// The three device buffers one frame geometry needs, kept between frames.
 struct ScanBuffers {
@@ -74,6 +84,7 @@ struct CameraWorkspace {
 /// it replaced — a kernel that was exact and not faster. The report carries both
 /// rows.
 pub struct GpuCornerScan<R: Runtime> {
+    launches: super::submission::LaunchList,
     client: ComputeClient<R>,
     /// The biased ring, uploaded once.
     ring: cubecl::server::Handle,
@@ -82,7 +93,7 @@ pub struct GpuCornerScan<R: Runtime> {
     /// score kernel reads it and this stage uploads nothing at all; otherwise
     /// — a scanner with no builder beside it, which is how the tolerance tests
     /// drive it — the frame goes up here.
-    level0: Level0Table,
+    level0: Vec<Option<Level0>>,
     /// Frames this scanner has uploaded itself, which the shared level-0 path
     /// is meant to keep at zero.
     uploads: usize,
@@ -93,7 +104,10 @@ pub struct GpuCornerScan<R: Runtime> {
     packed: Vec<u16>,
     /// Reusable allocations and explicit selection readiness, indexed by camera.
     cameras: Vec<CameraWorkspace>,
-    reads: super::selection_batch::Producer,
+    batch: Option<batch::BatchScanBuffers>,
+    /// Byte stride of a packed selection read; None is the general per-camera path.
+    selection_stride: Option<usize>,
+    reads: SelectionReads,
     /// Times the three device buffers have been allocated, which a rig of one
     /// geometry keeps at one.
     buffer_allocations: usize,
@@ -128,7 +142,10 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// # Errors
     ///
     /// [`GpuError::DeviceLost`] when the upload panics instead of returning.
-    pub fn new(client: ComputeClient<R>) -> Result<Self, GpuError> {
+    pub fn new(
+        client: ComputeClient<R>,
+        launches: super::submission::LaunchList,
+    ) -> Result<Self, GpuError> {
         guarded(
             GpuError::DeviceLost {
                 what: "corner scan setup",
@@ -141,12 +158,15 @@ impl<R: Runtime> GpuCornerScan<R> {
                     }
                 }
                 Ok(Self {
+                    launches,
                     ring: super::submission::upload(&client, u32::as_bytes(&ring)),
-                    level0: Level0Table::default(),
+                    level0: Vec::new(),
                     uploads: 0,
                     packed: Vec::new(),
                     cameras: Vec::new(),
-                    reads: super::selection_batch::endpoints().0,
+                    batch: None,
+                    selection_stride: None,
+                    reads: SelectionReads::Empty,
                     buffer_allocations: 0,
                     kept: None,
                     mask: None,
@@ -160,41 +180,34 @@ impl<R: Runtime> GpuCornerScan<R> {
         )
     }
 
-    /// Read level 0 out of `table` rather than uploading the frame.
-    ///
-    /// Wired by [`super::gpu_backends`], which builds the scanner and the
-    /// pyramid builder on one client: they are handed the same pixels, so
-    /// sharing them is the difference between one upload per camera per
-    /// frameset and two.
-    pub fn share_level0(&mut self, table: Level0Table) {
-        self.level0 = table;
+    /// Take the builder's published level-zero views after building the frame.
+    /// Both stages must use the same client. Reuse the two table allocations.
+    pub fn use_level0(&mut self, builder: &mut super::GpuPyramidBuilder<R>) {
+        self.level0.clear();
+        std::mem::swap(&mut self.level0, &mut builder.level0);
     }
 
-    /// Carry this scanner's keys in a tracker's download on the same client.
-    ///
-    /// The private endpoints cannot be cloned or shared with another scanner.
-    ///
-    /// # Panics
-    /// Panics if the tracker belongs to another device client.
-    pub fn share_reads<P: crate::frontend::patterns::Pattern>(
-        &mut self,
-        tracker: &mut super::GpuPatchTracker<P, R>,
-    ) {
-        assert!(tracker.uses_client(&self.client));
-        let (producer, consumer) = super::selection_batch::endpoints();
-        self.reads = producer;
-        tracker.share_reads(consumer);
+    pub(super) fn take_staged(&mut self) -> Option<Vec<cubecl::server::Handle>> {
+        match &mut self.reads {
+            SelectionReads::Pending(handles) => Some(std::mem::take(handles)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn deliver(&mut self, bytes: Vec<cubecl::bytes::Bytes>) {
+        self.reads = SelectionReads::Ready(bytes);
     }
 
     fn abort_selection(&mut self) {
-        self.reads.abort();
+        self.reads = SelectionReads::Empty;
+        self.selection_stride = None;
         for camera in &mut self.cameras {
             camera.selection = Selection::Empty;
         }
     }
 
     /// Frames this scanner uploaded itself. Zero once
-    /// [`GpuCornerScan::share_level0`] is wired to a builder that runs first.
+    /// [`GpuCornerScan::use_level0`] is wired to a builder that runs first.
     pub fn frame_uploads(&self) -> usize {
         self.uploads
     }
@@ -219,15 +232,11 @@ impl<R: Runtime> GpuCornerScan<R> {
         // with two sources inside one call is how they come apart.
         let (width, height): (usize, usize) = (image.width(), image.height());
         let pixels: usize = width * height;
-        let locked = self.level0.lock();
-        if locked.is_err() {
-            log::warn!(
-                "the shared level-0 table is poisoned: camera {camera} uploads its frame twice from here on"
-            );
-        }
-        let shared: Option<Level0> = locked
-            .ok()
-            .and_then(|table| table.get(camera).cloned().flatten())
+        let shared = self
+            .level0
+            .get(camera)
+            .cloned()
+            .flatten()
             .filter(|level0| level0.width == width && level0.height == height);
         if let Some(level0) = shared {
             return (level0.handle, pixels);
@@ -252,15 +261,17 @@ impl<R: Runtime> GpuCornerScan<R> {
         image: &ImageU16,
         select: &CellSelect,
     ) -> Option<(cubecl::server::Handle, usize)> {
-        let grid: &crate::frontend::detect::CellGrid = &select.grid;
-        let (cells_x, cells_y) = grid.dimensions();
-        let ceiling: usize = kernels::MAX_CUBES_PER_DIM as usize;
-        if cells_x > ceiling || cells_y > ceiling {
-            return None;
-        }
-        let cells: usize = cells_x * cells_y;
-        let (width, height): (usize, usize) = (image.width(), image.height());
-        let handles: ScanHandles = self.candidates(camera, image);
+        // A sparse or mixed-grid selection uses the immediate per-camera path.
+        // Its level-zero input may still be in the frame's deferred dispatches.
+        self.launches.flush(&self.client);
+        let geometry = kernels::CellSelectGeometry::new(image.width(), image.height(), select)?;
+        let cells = geometry.cells_x * geometry.cells_y;
+        let fused = kernels::uses_cell_kernel(select.grid.cell, image.width(), &self.client);
+        let handles = if fused {
+            None
+        } else {
+            Some(self.candidates(camera, image))
+        };
 
         if self.cameras.len() <= camera {
             self.cameras
@@ -272,32 +283,27 @@ impl<R: Runtime> GpuCornerScan<R> {
             Some(existing) if fits => existing.clone(),
             slot => {
                 self.buffer_allocations += 1;
-                slot.insert((super::empty(&self.client, cells * size_of::<u32>()), cells))
+                slot.insert((self.client.empty(cells * size_of::<u32>()), cells))
                     .clone()
             }
         };
 
-        kernels::launch_fast_cell_select::<R>(
-            &self.client,
-            (&handles.kept, handles.pixels),
-            (&best, best_len),
-            kernels::CellSelectGeometry {
-                width,
-                height,
-                cell: grid.cell,
-                x_start: grid.x_start,
-                y_start: grid.y_start,
-                cells_x,
-                cells_y,
-                // The score is a `u8`, so a rung at or over 255 admits nothing
-                // and one under zero is every candidate.
-                threshold: select.threshold.clamp(0, 255) as u32,
-                safe_radius: select.safe_radius,
-                // `img_raw.w / 2` is an integer halving.
-                centre_x: (width / 2) as f32,
-                centre_y: (height / 2) as f32,
-            },
-        );
+        if let Some(handles) = handles {
+            kernels::launch_fast_cell_select::<R>(
+                &self.client,
+                (&handles.kept, handles.pixels),
+                (&best, best_len),
+                geometry,
+            );
+        } else {
+            let (frame, pixels) = self.frame(camera, image);
+            kernels::launch_fast_cell::<R>(
+                &self.client,
+                (&frame, pixels),
+                (&best, best_len),
+                geometry,
+            );
+        }
         Some((best, cells))
     }
 
@@ -309,6 +315,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// a scanner that refuses a band rather than one that answers with the last
     /// frame's corners under this frame's width (decision D32).
     fn candidates(&mut self, camera: usize, image: &ImageU16) -> ScanHandles {
+        self.launches.flush(&self.client);
         self.bands.clear();
         self.kept = None;
         self.mask = None;
@@ -332,9 +339,9 @@ impl<R: Runtime> GpuCornerScan<R> {
             slot => {
                 self.buffer_allocations += 1;
                 slot.insert(ScanBuffers {
-                    score: super::empty(&self.client, pixels),
-                    kept: super::empty(&self.client, pixels),
-                    mask: super::empty(&self.client, mask_len * size_of::<u32>()),
+                    score: self.client.empty(pixels),
+                    kept: self.client.empty(pixels),
+                    mask: self.client.empty(mask_len * size_of::<u32>()),
                     pixels,
                     mask_len,
                 })
@@ -375,7 +382,7 @@ impl<R: Runtime> GpuCornerScan<R> {
 }
 
 /// A downloaded key buffer as `u32`, refused when it is not the grid's length.
-fn checked_keys(keys: &cubecl::bytes::Bytes, cells: usize) -> Result<&[u32], DetectError> {
+fn checked_keys(keys: &[u8], cells: usize) -> Result<&[u32], DetectError> {
     let expected: usize = cells * size_of::<u32>();
     if keys.len() != expected {
         return Err(super::GpuError::ShortRead {
@@ -453,9 +460,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 // One read for both, so one synchronisation for the frame.
                 let reads: Vec<cubecl::bytes::Bytes> = super::read_blocking(
                     &self.client,
+                    &self.launches,
                     vec![handles.kept, handles.mask],
                     "the candidate image and its bitmask",
-                    &super::seam::READ_DETECT,
                 )?;
                 // One buffer per handle, in the order they were asked for; anything else
                 // is the runtime breaking its own contract rather than short data.
@@ -502,9 +509,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     /// non-maxima against the same zero rim `suppress_non_maxima` sees, applies
     /// `safe_radius` and the edge margin, and reduces the survivors under the
     /// host's own total order. What comes back is 361 x 4 B on the 960x960 index
-    /// rig. The band path stays for the shapes the trait's contract excludes and
-    /// for [`CpuCornerScan`](crate::frontend::detect::CpuCornerScan), which is
-    /// the reference the equality tests measure this against.
+    /// rig. The band path stays for the shapes the trait's contract excludes.
+    /// Equality tests compare both CPU and GPU cell selectors with a band-only
+    /// wrapper around [`CpuCornerScan`](crate::frontend::detect::CpuCornerScan).
     ///
     /// `out` is left empty — and the frame untouched — when the grid needs more
     /// cubes in one dispatch dimension than a WebGPU implementation must allow.
@@ -513,10 +520,13 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         camera: usize,
         image: &ImageU16,
         select: &CellSelect,
-        _eligibility: Option<(&crate::frontend::detect::Occupancy<'_>, &[bool])>,
+        _eligibility: Option<(&crate::frontend::cell::Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
     ) -> Result<SelectionStatus, DetectError> {
         out.clear();
+        if !select.supports(image.width(), image.height()) {
+            return Ok(SelectionStatus::Unsupported);
+        }
         // Spent, not read twice: an entry left behind would answer a later
         // frameset with this one's corners.
         if let Some(workspace) = self.cameras.get_mut(camera) {
@@ -540,9 +550,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
 
                 let reads: Vec<cubecl::bytes::Bytes> = super::read_blocking(
                     &self.client,
+                    &self.launches,
                     vec![best],
                     "the cell winner keys",
-                    &super::seam::READ_DETECT,
                 )?;
                 let Ok([keys]) = <[cubecl::bytes::Bytes; 1]>::try_from(reads) else {
                     return Err(super::GpuError::DeviceReadFailed {
@@ -560,8 +570,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     }
 
     /// The named cameras' selections launched together and downloaded by
-    /// nobody: the handles go on the relay, and whichever stage reads next
-    /// carries them (D78).
+    /// nobody: the frame owner carries their handles with its next read (D78).
     ///
     /// On this lane the wait is what a frameset pays for, not the 1.4 kB each
     /// camera brings back, so this stage's whole job is to be launched early
@@ -579,6 +588,10 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 what: "corner cell selection",
             },
             || {
+                if let Some(handle) = self.launch_selection_batch(images, selects) {
+                    self.reads = SelectionReads::Pending(vec![handle]);
+                    return Ok(());
+                }
                 let mut handles = Vec::new();
                 for (camera, image) in images.iter().enumerate() {
                     let Some(select) = selects.get(camera).copied().flatten() else {
@@ -591,7 +604,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                         super::fire_if_armed("selection camera submitted");
                     }
                 }
-                self.reads.stage(handles);
+                self.reads = SelectionReads::Pending(handles);
                 Ok(())
             },
         );
@@ -607,11 +620,10 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 what: "corner cell selection",
             },
             || {
-                use super::selection_batch::TransferResult;
-                let reads = match self.reads.take() {
-                    TransferResult::Empty => return Ok(()),
-                    TransferResult::Ready(bytes) => bytes,
-                    TransferResult::Pending(handles)
+                let reads = match std::mem::take(&mut self.reads) {
+                    SelectionReads::Empty => return Ok(()),
+                    SelectionReads::Ready(bytes) => bytes,
+                    SelectionReads::Pending(handles)
                         if handles.is_empty()
                             && !self.cameras.iter().any(|camera| {
                                 matches!(camera.selection, Selection::Pending(_))
@@ -619,14 +631,14 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     {
                         return Ok(());
                     }
-                    TransferResult::Pending(handles) => {
+                    SelectionReads::Pending(handles) => {
                         #[cfg(test)]
                         super::fire_if_armed(super::CORNER_SCAN_READ);
                         super::read_blocking(
                             &self.client,
+                            &self.launches,
                             handles,
                             "the cell winner keys",
-                            &super::seam::READ_DETECT,
                         )?
                     }
                 };
@@ -634,21 +646,47 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     .cameras
                     .iter()
                     .filter(|camera| matches!(camera.selection, Selection::Pending(_)));
-                if pending.clone().count() != reads.len() {
+                let cells = |camera: &CameraWorkspace| {
+                    if let Selection::Pending(select) = camera.selection {
+                        let (x, y) = select.grid.dimensions();
+                        x * y
+                    } else {
+                        0
+                    }
+                };
+                let keys: Vec<&[u8]> = if let Some(stride) = self.selection_stride {
+                    if reads.len() != 1 || reads[0].len() != pending.clone().count() * stride {
+                        return Err(GpuError::DeviceReadFailed {
+                            what: "the packed cell winner buffer",
+                        }
+                        .into());
+                    }
+                    pending
+                        .clone()
+                        .enumerate()
+                        .map(|(index, camera)| {
+                            &reads[0]
+                                [index * stride..index * stride + cells(camera) * size_of::<u32>()]
+                        })
+                        .collect()
+                } else {
+                    reads.iter().map(|bytes| bytes.as_ref()).collect()
+                };
+                if pending.clone().count() != keys.len() {
                     return Err(super::GpuError::DeviceReadFailed {
                         what: "the cell winner buffers",
                     }
                     .into());
                 }
                 // Validate the whole batch before publishing any camera as ready.
-                for (camera, keys) in pending.zip(&reads) {
-                    checked_keys(keys, camera.keys.as_ref().map_or(0, |(_, cells)| *cells))?;
+                for (camera, keys) in pending.zip(&keys) {
+                    checked_keys(keys, cells(camera))?;
                 }
                 for (camera, keys) in self
                     .cameras
                     .iter_mut()
                     .filter(|camera| matches!(camera.selection, Selection::Pending(_)))
-                    .zip(&reads)
+                    .zip(&keys)
                 {
                     camera.host_keys.clear();
                     camera.host_keys.extend_from_slice(u32::from_bytes(keys));

@@ -52,7 +52,7 @@ fn fast_score_kernel(
     // device: uploading the `u16` frame and shifting here costs 0.9 MB more over
     // the bus and saves a whole-frame pass on the host, which measured the
     // larger of the two.
-    let center = u32::cast_from(frame[slot]) >> 8u32;
+    let center = u32::cast_from(frame[y * width + x]) >> 8u32;
     // `#[unroll]` on all three loops below, and not for the sake of this card.
     // `dark` and `bright` are indexed dynamically (`dark[(k + i) % 16]`) from
     // loops with comptime bounds, so a rolled kernel cannot keep them in
@@ -177,7 +177,7 @@ pub(crate) fn launch_fast_score<R: Runtime>(
     margin: usize,
 ) {
     let (cubes, units) = tile_2d(width, height);
-    super::super::submission::launch(client);
+
     unsafe {
         fast_score_kernel::launch_unchecked::<R>(
             client,
@@ -206,7 +206,7 @@ pub(crate) fn launch_fast_localmax<R: Runtime>(
     use_filter: bool,
 ) {
     let (cubes, units) = tile_2d(width, height);
-    super::super::submission::launch(client);
+
     unsafe {
         fast_localmax_kernel::launch_unchecked::<R>(
             client,
@@ -262,7 +262,7 @@ pub(crate) fn launch_fast_mask<R: Runtime>(
     words: usize,
 ) {
     let (cubes, units) = tile_2d(words, height);
-    super::super::submission::launch(client);
+
     unsafe {
         fast_mask_kernel::launch_unchecked::<R>(
             client,

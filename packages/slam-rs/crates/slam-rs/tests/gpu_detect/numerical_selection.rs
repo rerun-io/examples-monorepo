@@ -1,8 +1,164 @@
 use super::*;
 
+/// Run this binary both with and without KORNIA_FAST_NEON=0 on aarch64.
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn default_cell_selection_follows_kornias_neon_gate() {
+    use slam_rs::frontend::detect::SelectionStatus;
+    let image = ImageU16::zeros(64, 64).unwrap();
+    let select = CellSelect {
+        grid: CellGrid::new(64, 64, 32).unwrap(),
+        threshold: 5,
+        safe_radius: 0.0,
+    };
+    let expected = if std::env::var("KORNIA_FAST_NEON").map_or(true, |value| value != "0") {
+        SelectionStatus::Selected
+    } else {
+        SelectionStatus::Unsupported
+    };
+    assert_eq!(
+        CpuCornerScan::default()
+            .select_cells(0, &image, &select, None, &mut Vec::new())
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn cell_selection_refuses_unrepresentable_keys_and_thresholds() {
+    use slam_rs::frontend::detect::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
+    for (width, height, threshold) in [
+        (CELL_KEY_LIMIT, 64, 5),
+        (64, CELL_KEY_LIMIT, 5),
+        (64, 64, LOWEST_THRESHOLD_RUNG - 1),
+    ] {
+        let image = ImageU16::zeros(width, height).unwrap();
+        let grid = CellGrid::new(width, height, 32).unwrap();
+        let select = CellSelect {
+            grid,
+            threshold,
+            safe_radius: 0.0,
+        };
+        let counts = vec![0; grid.rows * grid.columns];
+        let occupancy = Occupancy {
+            counts: &counts,
+            rows: grid.rows,
+            columns: grid.columns,
+        };
+        let masked = vec![false; grid.dimensions().0 * grid.dimensions().1];
+        let mut scanner = CpuCornerScan::with_cell_selection(true);
+        let mut keys = Vec::new();
+        assert_eq!(
+            scanner
+                .select_cells(0, &image, &select, None, &mut keys)
+                .unwrap(),
+            SelectionStatus::Unsupported
+        );
+        assert_eq!(
+            scanner
+                .select_cells(0, &image, &select, Some((&occupancy, &masked)), &mut keys)
+                .unwrap(),
+            SelectionStatus::Unsupported
+        );
+    }
+}
+
+#[test]
+fn cell_selection_matches_the_band_walk_on_random_strided_images() {
+    let mut state = 0x8912_ab34u32;
+    for (width, height, cell) in [
+        (97, 83, 7),
+        (128, 95, 17),
+        (157, 97, 21),
+        (167, 97, 22),
+        (181, 97, 23),
+        (640, 123, 50),
+        (799, 129, 37),
+        (800, 129, 50),
+        (817, 127, 60),
+        (960, 129, 50),
+    ] {
+        let mut image = ImageU16::zeros_with_stride(width, height, width + 13).unwrap();
+        for y in 0..height {
+            for x in 0..width {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                image.set(x, y, (state >> 16) as u16);
+            }
+        }
+        let grid = CellGrid::new(width, height, cell).unwrap();
+        let counts: Vec<i32> = (0..grid.rows * grid.columns)
+            .map(|i| i32::from(i % 5 == 0))
+            .collect();
+        let masks = Masks {
+            masks: grid
+                .cells()
+                .enumerate()
+                .filter(|(i, _)| i % 3 == 0)
+                .map(|(_, (column, row))| Rect {
+                    x: (grid.x_start + column * cell) as f32,
+                    y: (grid.y_start + row * cell) as f32,
+                    w: cell as f32,
+                    h: cell as f32,
+                })
+                .collect(),
+        };
+        for threshold in [1, 5, 10, 40, 127, 254, 255, 300] {
+            detection_agrees(
+                DetectionCase {
+                    image: &image,
+                    grid: &grid,
+                    counts: &counts,
+                    config: &DetectorConfig {
+                        min_threshold: threshold,
+                        max_threshold: threshold,
+                        ..detector_config(0.0)
+                    },
+                    masks: &masks,
+                    budget: 4096,
+                    label: &format!("random {width}x{height}, cell {cell}, threshold {threshold}"),
+                },
+                ExpectedPath::CellSelection,
+            );
+        }
+    }
+}
+
+#[test]
+fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
+    let mut image = ImageU16::zeros(100, 100).unwrap();
+    for y in 0..100 {
+        for x in 0..100 {
+            image.set(x, y, 128 << 8);
+        }
+    }
+    for (x, y) in [(35, 35), (65, 35), (35, 65)] {
+        image.set(x, y, 0);
+    }
+    let grid = CellGrid::new(100, 100, 100).unwrap();
+    let counts = vec![0; grid.rows * grid.columns];
+    let detect = |image: &ImageU16| {
+        detect_with(
+            Box::new(CpuCornerScan::with_cell_selection(true)),
+            image,
+            &grid,
+            &counts,
+            &detector_config(0.0),
+            &Masks::default(),
+            1,
+        )
+    };
+    let tied = detect(&image);
+    assert_eq!(tied.corners, [[35.0, 35.0]]);
+    assert_eq!(tied.responses, [127.0]);
+    image.set(36, 35, 0);
+    let plateau = detect(&image);
+    assert_eq!(plateau.corners, [[65.0, 35.0]]);
+    assert_eq!(plateau.responses, [127.0]);
+}
+
 /// Every cell of a real MIO10 frameset, both cameras, empty and half full.
 #[test]
-fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
+fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
     let config: DetectorConfig = detector_config(472.0);
     for camera in 0..2 {
         let image: ImageU16 = common::mio10_frame(0, camera);
@@ -52,7 +208,7 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
 
 /// The gates the kernel took over, one at a time, and the budget the host keeps.
 #[test]
-fn the_gpu_cell_selection_applies_the_same_gates() {
+fn the_cell_selection_applies_the_same_gates() {
     let image: ImageU16 = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
@@ -158,11 +314,13 @@ fn the_gpu_cell_selection_applies_the_same_gates() {
 /// is not a whole number of cells moves the grid's own start, both of which
 /// change the candidate set the selection reads.
 #[test]
-fn the_gpu_cell_selection_matches_the_host_walk_on_uneven_frames() {
+fn the_cell_selection_matches_the_host_walk_on_uneven_frames() {
     for (width, height, cell) in [
         (960usize, 240usize, 50usize),
         (512, 192, 32),
         (517, 193, 50),
+        (640, 480, 50),
+        (641, 479, 64),
     ] {
         let image: ImageU16 = cornered_image(width, height);
         let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
@@ -225,7 +383,7 @@ fn caller_grid(
 /// `width - EDGE_THRESHOLD - 1`, so no corner can come out of them on either
 /// lane whatever the clamp does.
 #[test]
-fn the_gpu_cell_selection_matches_the_host_walk_on_overhanging_cells() {
+fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
     let (width, height, cell): (usize, usize, usize) = (200, 150, 50);
     let image: ImageU16 = cornered_image(width, height);
 
@@ -283,7 +441,7 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_overhanging_cells() {
 /// asserting it finds strictly more corners is what stops this from passing
 /// vacuously.
 #[test]
-fn the_gpu_cell_selection_stops_at_the_last_rung_the_walk_visits() {
+fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
     let image: ImageU16 = common::mio10_frame(0, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
@@ -304,7 +462,7 @@ fn the_gpu_cell_selection_stops_at_the_last_rung_the_walk_visits() {
         };
         assert_eq!(threshold_rungs(&at_the_minimum).last(), Some(min_threshold));
         let admitted: usize = detect_with(
-            Box::new(CpuCornerScan::default()),
+            Box::new(CpuCornerScan::with_cell_selection(true)),
             &image,
             &grid,
             &counts,
@@ -340,7 +498,7 @@ fn the_gpu_cell_selection_stops_at_the_last_rung_the_walk_visits() {
 /// A frame a packed key cannot name takes the band walk.
 ///
 /// The key keeps twelve bits each for the row and the column, so
-/// [`CELL_KEY_LIMIT`] pixels on a side is where the device path has to give up
+/// [`CELL_KEY_LIMIT`] pixels on a side is where cell selection has to give up
 /// rather than lose a coordinate. The guard is on the frame, not on the grid, so
 /// a wide short frame is enough to reach it.
 #[test]

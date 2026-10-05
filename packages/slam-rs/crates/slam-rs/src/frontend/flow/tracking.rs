@@ -1,35 +1,81 @@
 //! Tracking pass submission, collection, and camera geometry.
 
-use super::{FrameToFrameOpticalFlow, FrontendError, Keypoints, NO_RESPONSE};
+use super::{FrameToFrameOpticalFlow, NO_RESPONSE, PosePrediction};
 use crate::camera::RigCamera;
 use crate::config::MatchingGuessType;
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
-use crate::frontend::tracker::{PatchTracker, SourcePatches};
+use crate::frontend::stages::FrameStages;
+use crate::frontend::tracker::{PatchTracker, TrackInput};
 use crate::lie::{Se3, So3};
-use crate::pyramid::PyramidBuilder;
 use nalgebra::{Matrix4, Vector2, Vector3, Vector4};
 
-impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Pyramid>>
-    FrameToFrameOpticalFlow<P, B, T>
-{
-    /// One camera's frame-to-frame track launched into its own lane:
-    /// `trackPoints(..., cam, cam)` up to the download.
-    pub(super) fn submit_camera(
-        &mut self,
-        camera: usize,
-        t_c1_c2: &Se3<f32>,
-    ) -> Result<(), FrontendError> {
-        // Source and destination are the same slot, so the
-        // ids and warps are copied out first — and the slot is only cleared once
-        // the track has succeeded, so a refused frame does not lose the camera's
-        // keypoints.
-        self.passes[camera].ids.clear();
-        let source: &Keypoints = &self.frame.cameras[camera];
-        self.passes[camera].ids.extend_from_slice(&source.ids);
-        self.source.clone_from(&source.transforms);
-
-        self.submit_track_points(camera, camera, camera, t_c1_c2, true)
+impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
+    /// Mask and predict every camera's inputs independently, then submit them
+    /// together. `None` selects camera-zero stereo matches of new detections.
+    pub(super) fn prepare_tracks(&mut self, prediction: Option<&PosePrediction>) {
+        let Self {
+            passes,
+            config,
+            cameras,
+            calib,
+            frame,
+            new_cam0,
+            masks,
+            depth_guess,
+            host_pool,
+            ..
+        } = self;
+        let first = usize::from(prediction.is_none());
+        let use_depth = prediction.is_some()
+            || config.optical_flow_matching_guess_type != MatchingGuessType::SamePixel;
+        let prepare = |(index, pass): (usize, &mut TrackInput)| {
+            let camera = first + index;
+            let (source, cam1, t_c1_c2) = match prediction {
+                Some(prediction) => {
+                    let t_c1 = prediction.t_w_i_previous * calib.t_i_c[camera];
+                    let t_c2 = prediction.t_w_i_current * calib.t_i_c[camera];
+                    (&frame.cameras[camera], camera, t_c1.inverse() * t_c2)
+                }
+                None => (
+                    &*new_cam0,
+                    0,
+                    calib.t_i_c[0].inverse() * calib.t_i_c[camera],
+                ),
+            };
+            pass.source = cam1;
+            pass.destination = camera;
+            pass.ids.clear();
+            pass.positions.clear();
+            pass.guesses.clear();
+            for (index, id) in source.ids.iter().enumerate() {
+                let transform = source.transforms.get(index);
+                let position = transform.translation;
+                if masks[cam1].in_bounds(position.x, position.y) {
+                    continue;
+                }
+                let translation = if use_depth {
+                    project_between_cams(cameras, &position, *depth_guess, &t_c1_c2, cam1, camera).1
+                } else {
+                    position
+                };
+                pass.ids.push(*id);
+                pass.positions.push(position);
+                pass.guesses.push(&AffineCompact2f {
+                    linear: transform.linear,
+                    translation,
+                });
+            }
+        };
+        if host_pool
+            .install(|| {
+                use rayon::prelude::*;
+                passes[first..].par_iter_mut().enumerate().for_each(prepare);
+            })
+            .is_none()
+        {
+            passes[first..].iter_mut().enumerate().for_each(prepare);
+        }
     }
 
     /// The tail of `trackPoints` for one camera, once its lane has arrived.
@@ -43,74 +89,6 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
     }
 
-    /// The launching half of `trackPoints` : the mask test, the
-    /// guesses, the patch build and the tracker's own kernels, into `lane`.
-    ///
-    /// Reads the pass source IDs and shared source warps, then records its
-    /// offered-index map and the result slot returned by the tracker. Split from [`FrameToFrameOpticalFlow::finish_track_points`]
-    /// because `trackPoints` serves two purposes — carrying a camera's own
-    /// keypoints forward in time, and matching camera 0's new keypoints into
-    /// camera *i* — and both run every camera of the frameset before reading any
-    /// of them.
-    pub(super) fn submit_track_points(
-        &mut self,
-        lane: usize,
-        cam1: usize,
-        cam2: usize,
-        t_c1_c2: &Se3<f32>,
-        tracking: bool,
-    ) -> Result<(), FrontendError> {
-        // `use_depth = tracking || (matching && guess_type != SAME_PIXEL)`.
-        let use_depth: bool = tracking
-            || self.config.optical_flow_matching_guess_type != MatchingGuessType::SamePixel;
-        let depth: f32 = self.depth_guess;
-
-        self.passes[lane].offered.clear();
-        self.positions.clear();
-        self.guesses.clear();
-
-        for index in 0..self.source.len() {
-            let transform_1: AffineCompact2f = self.source.get(index);
-            let t1: Vector2<f32> = transform_1.translation;
-            // `if (masks1.inBounds(t1.x(), t1.y())) continue;`.
-            if self.masks[cam1].in_bounds(t1.x, t1.y) {
-                continue;
-            }
-            // `off = t2 - t2_guess` with `t2 == t1`, then `t2 -= off`
-            // so the guess is simply `t2_guess`.
-            let translation: Vector2<f32> = if use_depth {
-                project_between_cams(&self.cameras, &t1, depth, t_c1_c2, cam1, cam2).1
-            } else {
-                t1
-            };
-            self.passes[lane].offered.push(index);
-            self.positions.push(t1);
-            self.guesses.push(&AffineCompact2f {
-                linear: transform_1.linear,
-                translation,
-            });
-        }
-
-        // The forward source patches come from the previous frame when tracking
-        // and from this frame's camera 0 when matching. This
-        // frame is `staging` until the call commits.
-        let source_pyramid: &B::Pyramid = if tracking {
-            &self.pyramid[cam1]
-        } else {
-            &self.staging[cam1]
-        };
-        self.patches
-            .prepare(source_pyramid, &self.positions, None)?;
-        self.passes[lane].destination = cam2;
-        self.passes[lane].result = self.tracker.submit_prepared(
-            source_pyramid,
-            &self.staging[cam2],
-            &self.patches,
-            &self.guesses,
-        )?;
-        Ok(())
-    }
-
     /// The reading half of `trackPoints`: `masks2` over one collected lane,
     /// leaving the survivors in `tracked_ids` and `tracked`.
     pub(super) fn finish_track_points(&mut self, lane: usize) {
@@ -118,7 +96,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.tracked.clear();
         let pass = &self.passes[lane];
         let cam2 = pass.destination;
-        let result = self.tracker.result(pass.result);
+        let result = self.stages.tracker().result(pass.result);
         for slot in result.tracked() {
             let slot: usize = *slot as usize;
             let transform: AffineCompact2f = result.transform(slot);
@@ -126,8 +104,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             if self.masks[cam2].in_bounds(transform.translation.x, transform.translation.y) {
                 continue;
             }
-            self.tracked_ids
-                .push(self.passes[lane].ids[self.passes[lane].offered[slot]]);
+            self.tracked_ids.push(pass.ids[slot]);
             self.tracked.push(&transform);
         }
     }

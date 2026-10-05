@@ -263,6 +263,69 @@ fn two_runs_of_the_same_input_produce_the_same_frame() {
     assert_eq!(frames[0], frames[1]);
 }
 
+/// The serial adapter takes PatchTracker's default submission path and rebuilds
+/// every source template. It is independent of the CPU batch/cache path.
+#[test]
+fn cached_batches_match_rebuilding_through_masks_losses_and_redetection() {
+    for threads in [1, 4] {
+        let mut rebuilt = common::flow::failing_frontend(usize::MAX);
+        let mut cached: FrameToFrameOpticalFlow<Pattern51> = frontend(
+            2,
+            FrontendOptions {
+                threads,
+                ..FrontendOptions::default()
+            },
+        );
+        for step in 0..30 {
+            let images = [
+                dotted_image(step % 5),
+                if step % 7 == 3 {
+                    ImageU16::zeros(WIDTH, HEIGHT).unwrap()
+                } else {
+                    dotted_image((step + 1) % 5)
+                },
+            ];
+            let masks = [
+                Masks::default(),
+                Masks {
+                    masks: if step % 4 == 1 {
+                        vec![Rect {
+                            x: 20.0,
+                            y: 20.0,
+                            w: 70.0,
+                            h: 100.0,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                },
+            ];
+            let prediction = PosePrediction {
+                t_w_i_current: Se3::new(
+                    So3::exp(&Vector3::new(0.0, 0.001, 0.0)),
+                    Vector3::new(0.001, 0.0, 0.0),
+                ),
+                ..PosePrediction::default()
+            };
+            rebuilt
+                .process_frame(i64::from(step), &images, &prediction, &masks)
+                .unwrap();
+            cached
+                .process_frame(i64::from(step), &images, &prediction, &masks)
+                .unwrap();
+            assert_eq!(
+                cached.frame(),
+                rebuilt.frame(),
+                "frame {step}, threads {threads}"
+            );
+            assert_eq!(cached.last_keypoint_id(), rebuilt.last_keypoint_id());
+            for camera in 0..2 {
+                assert_eq!(cached.cell_counts(camera), rebuilt.cell_counts(camera));
+            }
+        }
+    }
+}
+
 /// Single-camera rigs skip stereo passes (trap 17).
 #[test]
 fn a_single_camera_rig_detects_and_skips_matching() {
@@ -504,16 +567,19 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
         )
         .unwrap();
         let cameras = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut flow = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
+        let mut flow = FrameToFrameOpticalFlow::<Pattern51, _>::with_stages(
             config,
             &calibration,
             options,
-            CpuPyramidBuilder::new(),
-            tracker,
-            Box::new(EmptyScan {
-                independent,
-                cameras: cameras.clone(),
-            }),
+            slam_rs::frontend::stages::CpuStages::new(
+                CpuPyramidBuilder::new(),
+                tracker,
+                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(EmptyScan {
+                    independent,
+                    cameras: cameras.clone(),
+                })),
+            )
+            .unwrap(),
             pool,
         )
         .unwrap();

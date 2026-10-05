@@ -157,11 +157,10 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
 #[test]
 fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
     use slam_rs::gpu::{GpuPyramidBuilder, GpuRuntime, gpu_client};
-    use slam_rs::pyramid::PyramidBuilder;
 
     let image = ImageU16::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
     let mut builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     builder
         .prepare_images(std::slice::from_ref(&image))
         .unwrap();
@@ -389,83 +388,27 @@ fn a_flat_frame_has_the_expected_detector_allocation_cost() {
 /// part of the tracking, and then puts everything back.
 #[test]
 fn a_restored_frame_costs_no_more_than_a_successful_one() {
+    use common::flow::{FailingTracker, cpu_tracker};
     use slam_rs::frontend::parallel::WorkPool;
-    use slam_rs::frontend::tracker::{CpuPatchTracker, PatchSoA, PatchTracker, TrackerError};
-    use slam_rs::pyramid::{CpuPyramidBuilder, PyramidU16};
-
-    #[derive(Debug)]
-    struct FailingTracker {
-        inner: CpuPatchTracker<Pattern51>,
-        calls: usize,
-        fail_from: usize,
-    }
-
-    impl PatchTracker for FailingTracker {
-        fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
-            self.inner.batch()
-        }
-        fn batch_mut(&mut self) -> &mut slam_rs::frontend::tracker::TrackBatch {
-            self.inner.batch_mut()
-        }
-
-        type Pattern = Pattern51;
-        type Pyramid = PyramidU16;
-        type Patches = PatchSoA<Pattern51>;
-
-        fn capacity(&self) -> usize {
-            self.inner.capacity()
-        }
-
-        fn num_levels(&self) -> usize {
-            self.inner.num_levels()
-        }
-
-        fn make_patches(&self) -> Result<PatchSoA<Pattern51>, TrackerError> {
-            self.inner.make_patches()
-        }
-
-        fn submit_prepared(
-            &mut self,
-            prev: &PyramidU16,
-            next: &PyramidU16,
-            patches: &PatchSoA<Pattern51>,
-            transforms_in: &FlowTransforms,
-        ) -> Result<usize, TrackerError> {
-            self.calls += 1;
-            if self.calls >= self.fail_from {
-                return Err(TrackerError::CapacityExceeded {
-                    offered: usize::MAX,
-                    capacity: 0,
-                });
-            }
-            self.inner
-                .submit_prepared(prev, next, patches, transforms_in)
-        }
-    }
+    use slam_rs::pyramid::CpuPyramidBuilder;
 
     let options: FrontendOptions = FrontendOptions::default();
     let configuration: VioConfig = flow_config();
-    let inner: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-        options.max_keypoints,
-        configuration.optical_flow_levels as usize + 1,
-        configuration.optical_flow_max_iterations as usize,
-        configuration.optical_flow_max_recovered_dist2,
-        WorkPool::new(options.threads).unwrap(),
-    )
-    .unwrap();
+    let inner = cpu_tracker(&configuration, options.max_keypoints);
     // Frame 1 makes one call and each later frame three, so failing from call 8
     // lets four frames through and then refuses every frame after.
-    let mut flow = FrameToFrameOpticalFlow::with_backends(
+    let mut flow = FrameToFrameOpticalFlow::with_stages(
         configuration,
         &flow_rig(2),
         options,
-        CpuPyramidBuilder::new(),
-        FailingTracker {
-            inner,
-            calls: 0,
-            fail_from: 8,
-        },
-        Box::new(CpuCornerScan::default()),
+        slam_rs::frontend::stages::CpuStages::new(
+            CpuPyramidBuilder::new(),
+            FailingTracker::fail_from(inner, 8),
+            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                CpuCornerScan::default(),
+            )),
+        )
+        .unwrap(),
         WorkPool::new(1).unwrap(),
     )
     .unwrap();
