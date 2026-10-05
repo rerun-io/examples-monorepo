@@ -97,15 +97,7 @@ pub fn relative_distances(points_cam: &[Vector3<f64>; NUM_LANDMARKS], phi: f64) 
 
 /// torch's `nan_to_num` for f32: NaN -> 0, +inf -> f32::MAX, -inf -> f32::MIN.
 pub fn nan_to_num(value: f32) -> f32 {
-    if value.is_nan() {
-        0.0
-    } else if value == f32::INFINITY {
-        f32::MAX
-    } else if value == f32::NEG_INFINITY {
-        f32::MIN
-    } else {
-        value
-    }
+    if value.is_nan() { 0.0 } else { value.clamp(f32::MIN, f32::MAX) }
 }
 
 /// `keypoint_input`: KeyNet's 63-value keypoint prior.
@@ -170,6 +162,14 @@ mod tests {
         let d = decode_distance(&distance).unwrap_or([0.0; 21]);
         assert!(d.iter().all(|mm| (mm - 40.0).abs() < 1e-2), "{d:?}");
         assert!(decode_heatmaps(&heatmaps[1..]).is_none() && decode_distance(&distance[1..]).is_none());
+    }
+
+    #[test]
+    fn nan_to_num_matches_torch() {
+        let cases = [(f32::NAN, 0.0), (f32::INFINITY, f32::MAX), (f32::NEG_INFINITY, f32::MIN), (-0.0, -0.0), (1.5, 1.5), (f32::MAX, f32::MAX)];
+        for (value, expected) in cases {
+            assert_eq!(nan_to_num(value).to_bits(), expected.to_bits(), "{value}");
+        }
     }
 
     #[test]
