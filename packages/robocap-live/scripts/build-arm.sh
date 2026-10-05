@@ -40,13 +40,20 @@ fi
 
 if (( arm )); then
     echo "== cap (aarch64) release build"
-    cargo build --release --target aarch64-unknown-linux-gnu --bins "${examples[@]}"
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-} -C link-arg=-Wl,--enable-new-dtags,-rpath,\$ORIGIN/../lib"
+    cargo build --release --target aarch64-unknown-linux-gnu --features robocap-live/gpu-wgpu --bins "${examples[@]}"
     binary=target/aarch64-unknown-linux-gnu/release/robocap-live
     readelf=aarch64-conda-linux-gnu-readelf
     objdump=aarch64-conda-linux-gnu-objdump
+    runpath=$($readelf -d "$binary" | awk '/RUNPATH/ {print $NF}' | tr -d '[]')
+    echo "RUNPATH: $runpath"
+    case :$runpath: in
+        *':$ORIGIN/../lib:'*) ;;
+        *) echo 'FAIL: missing $ORIGIN/../lib RUNPATH' >&2; exit 1 ;;
+    esac
     needed=$($readelf -d "$binary" | awk '/NEEDED/ {print $5}' | tr -d '[]' | tr '\n' ' ')
     echo "NEEDED: $needed"
-    if grep -Eqi 'gst|rknn|rga' <<<"$needed"; then echo "FAIL: links GStreamer/RKNN/RGA" >&2; exit 1; fi
+    if grep -Eqi 'gst|rknn|rga|vulkan' <<<"$needed"; then echo "FAIL: links GStreamer/RKNN/RGA/Vulkan (must be dlopened)" >&2; exit 1; fi
     floor=$($objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
     echo "glibc floor: $floor"
     if [[ $(printf '%s\nGLIBC_2.34\n' "$floor" | sort -V | tail -1) != GLIBC_2.34 ]]; then echo "FAIL: needs $floor > GLIBC_2.34" >&2; exit 1; fi

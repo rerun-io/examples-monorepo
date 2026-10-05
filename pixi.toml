@@ -3367,6 +3367,11 @@ python = "3.12.*"
 rust = "1.98.*"
 tyro = ">=0.9.1,<0.10"
 
+# The Vulkan loader robocap-live ships beside its cap binary: the caps' firmware has the Mali ICD but no system loader
+# (only Chromium's private copy), and wgpu dlopens libvulkan.so.1. scripts/stage-vulkan.sh takes it from this locked package.
+[feature.robocap-live.target.linux-aarch64.dependencies]
+libvulkan-loader = "==1.4.357.0"
+
 [feature.robocap-live.pypi-dependencies]
 robocap-live = { path = "packages/robocap-live", editable = true }
 

@@ -16,6 +16,7 @@
 #                      (--viewer <rerun+http://host:port/proxy> | --viewer-host <ssh host> --viewer-if <interface> --cap-address <ip>)
 #                      [--seconds 600] [--long] [--replay <dump dir on the cap>] [--save] [--port 9876]
 #                      [--headless-viewer] [--no-viewer-start] [--video-cameras 0,1] [--uclamp] [--print] [--force]
+#                      [--slam-lane gpu|cpu] [--slam-lag auto|true|false]
 #                      [-- <program> <args>...]
 #   --log-dir      required: this host's log of the guard run goes to <dir>/start-live-<cap>-<time>.log
 #   --viewer       the viewer URL the cap streams to, used as is (no viewer is started or looked up)
@@ -44,6 +45,8 @@ seconds=600
 long=0
 video_cameras=0,1
 uclamp=0
+slam_lane=gpu
+slam_lag=auto
 replay=
 save=0
 port=9876
@@ -77,12 +80,16 @@ while [[ $# -gt 0 ]]; do
         --long) long=1 ;;
         --video-cameras) video_cameras=$2; shift ;;
         --uclamp) uclamp=1 ;;
+        --slam-lane) slam_lane=$2; shift ;;
+        --slam-lag) slam_lag=$2; shift ;;
         --) shift; custom=("$@"); break ;;
         -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "start-live.sh: unknown argument $1" >&2; exit 2 ;;
     esac
     shift
 done
+case $slam_lane in gpu|cpu) ;; *) echo '--slam-lane must be gpu or cpu' >&2; exit 2 ;; esac
+case $slam_lag in auto|true|false) ;; *) echo '--slam-lag must be auto, true or false' >&2; exit 2 ;; esac
 # shellcheck source=cap-env.sh
 source "$here/cap-env.sh"
 CAP_ROOT=${root_override:-$CAP_ROOT}
@@ -169,7 +176,8 @@ else
     command=("$CAP_ROOT/bin/robocap-live")
     if [[ -n $replay ]]; then command+=(--source replay "$replay" --realtime --loop --preload); else command+=(--source live --rig "$CAP_ROOT/rig.json"); fi
     command+=(--nets rknn "$CAP_ROOT/models" --hands on --viewer "$viewer" --video h264 --video-cameras "$video_cameras"
-        --display "$CAP_ROOT/assets/robocap-live-display.rrd" --duration "$seconds")
+        --display "$CAP_ROOT/assets/robocap-live-display.rrd" --duration "$seconds" --slam-lane "$slam_lane")
+    [[ $slam_lag == auto ]] || command+=(--slam-set "port.frontend_lag=$slam_lag")
     if [[ $uclamp == 1 ]]; then command+=(--slam-uclamp 1024 --hands-uclamp 1024); else command+=(--slam-uclamp none --hands-uclamp none); fi
     [[ $save == 1 ]] && command+=(--save "$save_path")
 fi

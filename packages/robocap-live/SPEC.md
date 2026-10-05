@@ -103,6 +103,17 @@ and frontend work overlap, so their times must not be added. Flush has zero fron
 count track calls, including the buffered first call; `slam_flush` records drain work separately. Counters `slam_buffered`
 and `slam_lookahead` expose buffering and supplied hints. A supplied hint may be discarded if its queued frame later changes.
 
+## Shipping the Vulkan loader
+
+The cap does not have a system Vulkan loader. Deploy `lib/libvulkan.so.1` beside `bin/`; keep the cap's own Mali ICD.
+The loader is the conda-forge `libvulkan-loader` package that `pixi.lock` pins for the robocap-live environment on linux-aarch64
+(declared in `pixi.toml`, `feature.robocap-live.target.linux-aarch64`). `scripts/stage-vulkan.sh` reads that package's URL and
+sha256 from the lock, downloads it once into `~/.cache/robocap-live/vulkan`, verifies the sha256, checks glibc <= 2.34
+and direct shared-library dependencies, then copies the loader and a provenance note (package URL and package checksum).
+`deploy.sh` includes these files in its checksum-verified staging tree.
+The aarch64 binary's `$ORIGIN/../lib` RUNPATH finds the loader for every launcher; `build-arm.sh` checks that path.
+Vulkan is opened at runtime; the cap build still refuses a Vulkan, GStreamer, RKNN or RGA link dependency.
+
 ## Runtime: the `--record` JSONL
 
 `--record <file>` writes one JSON object per frameset (`RecordLine` in `src/sched/record.rs` is normative):

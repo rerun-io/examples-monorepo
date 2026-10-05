@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copy robocap-live to a cap: the aarch64 binary, the RKNN models, the display asset and the handoff script go to
-# /root/robocap-live/{bin,models,assets,scripts}, as one tar over ssh (cap-env.sh's cap_ssh), checked by sha256 on the cap before
+# /root/robocap-live/{bin,lib,models,assets,scripts}, as one tar over ssh (cap-env.sh's cap_ssh), checked by sha256 on the cap before
 # anything replaces the files in place. The previous binary is kept as bin/<name>.prev. Nothing else is touched.
 #
 # Usage: deploy.sh --cap a|b --models <dir> --display <asset.rrd> [--rig <rig.json>] [--root /root/robocap-live]
@@ -47,7 +47,8 @@ log() { echo "[deploy $(date +%H:%M:%S)] $*" >&2; }
 
 stage=$(mktemp -d /tmp/robocap-live-deploy.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage"/{bin,models,assets,scripts}
+mkdir -p "$stage"/{bin,lib,models,assets,scripts}
+bash "$here/stage-vulkan.sh" "$stage/lib"
 for file in "$binary" "${extras[@]}"; do
     [[ -f $file ]] || { log "missing $file"; exit 1; }
     file -b "$file" | grep -q "ARM aarch64" || { log "$file is not an aarch64 executable: $(file -b "$file")"; exit 1; }
@@ -89,7 +90,7 @@ set -euo pipefail
 root=$1
 cd "$root/.incoming"
 sha256sum -c SHA256SUMS >/dev/null || { echo "sha256 mismatch on the cap; nothing replaced" >&2; sha256sum -c SHA256SUMS >&2 || true; exit 1; }
-mkdir -p "$root"/{bin,models,assets,scripts,logs,run}
+mkdir -p "$root"/{bin,lib,models,assets,scripts,logs,run}
 for file in $(awk '{print $2}' SHA256SUMS); do
     target=$root/${file#./}
     if [[ $file == ./bin/* && -f $target ]]; then cp -p "$target" "$target.prev"; fi
