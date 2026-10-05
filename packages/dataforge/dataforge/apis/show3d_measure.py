@@ -21,7 +21,7 @@ from dataforge import archives, paths, writing
 from dataforge.datasets.show3d_source import CAMERAS, RecordingInfo, validate_component
 from dataforge.logging_toolkit import log_video_stream
 from dataforge.records import read_json
-from dataforge.video_encoding import AV1_GOP, transcode_mp4_gray
+from dataforge.video_encoding import AV1_GOP, transcode_mp4
 
 
 @dataclass
@@ -128,7 +128,7 @@ def main(config: Config) -> None:
                     for entity, source in videos.items():
                         clip: Path = work / f"{source.stem}-{mode}.mp4"
                         try:
-                            transcode_mp4_gray(source, clip, fps=int(info.fps), gop=AV1_GOP, cq=cq, frames=info.num_frames)
+                            transcode_mp4(source, clip, fps=int(info.fps), gop=AV1_GOP, cq=cq, frames=info.num_frames, gray=True)
                             log_video_stream(recording, clip, entity)
                         finally:
                             clip.unlink(missing_ok=True)

@@ -288,29 +288,49 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
-def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int, crop: tuple[int, int, int, int] | None = None, decode: Literal["cpu", "cuda"] = "cpu") -> int:
-    """Decode a file to gray and encode AV1 directly in ffmpeg, checking sample count.
+def transcode_mp4(
+    source: Path,
+    output: Path,
+    *,
+    gop: int,
+    cq: int,
+    fps: int,
+    frames: int,
+    gray: bool,
+    size: tuple[int, int] | None = None,
+    crop: tuple[int, int, int, int] | None = None,
+    decode: Literal["cpu", "cuda"] = "cpu",
+) -> int:
+    """Decode a file and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
-    Optional crop is (width, height, x, y), applied before grayscale conversion.
-    CUDA decode keeps even-sized grayscale sources on the GPU without CPU filters.
-    A crop always uses CPU decode. Other NVDEC failures fall back to CPU; session
-    failures retry the same command and never trigger that fallback.
+    gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
+    which for a gray source carry neutral chroma. size (width, height) rescales, on the GPU
+    under CUDA decode. Optional crop is (width, height, x, y), applied first, and always
+    uses CPU decode. Other NVDEC failures fall back to CPU; session failures retry the same
+    command and never trigger that fallback.
     """
     if frames <= 0:
         raise ValueError("frames must be positive")
     if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
-    crop_filter: str = "" if crop is None else "crop=" + ":".join(str(value) for value in crop) + ","
+    cpu_filters: list[str] = [
+        *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),
+        *([] if size is None else [f"scale={size[0]}:{size[1]}"]),
+        *(["format=gray"] if gray else []),
+        EVEN_DIMENSION_AND_PIXEL_FORMAT,
+    ]
+    cuda_filters: list[str] = [] if size is None else [f"scale_cuda={size[0]}:{size[1]}"]
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     def run(*, cuda: bool) -> subprocess.CompletedProcess[str]:
+        filters: list[str] = cuda_filters if cuda else cpu_filters
         command: list[str] = [
             str(binary), "-hide_banner", "-loglevel", "error", "-y",
             *(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] if cuda else []),
             "-r", str(fps), "-i", str(source), "-map", "0:v:0", "-an",
-            *([] if cuda else ["-vf", f"{crop_filter}format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}"]),
+            *(["-vf", ",".join(filters)] if filters else []),
             "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq),
             "-frames:v", str(frames), str(output),
         ]
