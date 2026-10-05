@@ -36,6 +36,9 @@ pub enum FrameOutcome<S: LieScalar> {
     /// IMU coverage does not extend past this frameset. Nothing was consumed and
     /// the window is unchanged, so the caller can add samples and retry (D17).
     NeedMoreImu,
+    /// The first keyframe hosted fewer than ten landmarks. The frontend may
+    /// advance, but no estimator state exists; try the next frameset.
+    NoVisualFeatures,
     /// The frame was measured. The statistics are per frame and are the input
     /// to the S9 Rerun rung.
     Measured(Box<FrameStats<S>>),
@@ -97,6 +100,8 @@ pub struct FrameStats<S: LieScalar> {
     /// `opt_started` after this frameset: false until five states
     /// have accumulated, true from the first linearization on.
     pub opt_started: bool,
+    /// A finite optimized pose with enough landmarks and tracked observations to publish.
+    pub visually_supported: bool,
     /// One entry per LM step, accepted or rejected, in order.
     pub lm: Vec<LmIteration<S>>,
     /// Why the LM loop stopped.

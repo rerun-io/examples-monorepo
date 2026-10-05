@@ -40,10 +40,12 @@ pub(crate) enum Stage {
     SlamTrack,
     /// Of `SlamFrontend`: stereo matching.
     SlamStereo,
+    /// Final pending estimator work, excluded from the track-call rate.
+    SlamFlush,
 }
 
 /// Every stage with its name in the run summary (`stages`, `stage_fps`), in declaration order.
-pub(super) const STAGES: [(Stage, &str); 15] = [
+pub(super) const STAGES: [(Stage, &str); 16] = [
     (Stage::Source, "source"),
     (Stage::Downsample, "downsample"),
     (Stage::Slam, "slam"),
@@ -59,6 +61,7 @@ pub(super) const STAGES: [(Stage, &str); 15] = [
     (Stage::SlamDetect, "slam_detect"),
     (Stage::SlamTrack, "slam_track"),
     (Stage::SlamStereo, "slam_stereo"),
+    (Stage::SlamFlush, "slam_flush"),
 ];
 
 // A stage's row in STAGES is its discriminant (checked at compile time).
@@ -115,6 +118,8 @@ pub struct Counters {
     pub slam_imu_timeouts: u64,
     /// IMU samples SLAM dropped because they did not follow the previous one.
     pub slam_imu_unordered: u64,
+    /// Accepted first frames buffered without a pose, including after a reset or flush.
+    pub slam_buffered: u64,
     /// slam-rs errors (each one resets).
     pub slam_failures: u64,
     /// Estimator restarts (gaps and failures).

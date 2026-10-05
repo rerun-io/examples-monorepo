@@ -1,6 +1,7 @@
-//! Synchronous Vio sequencing and deferred-solver ownership.
+//! Vio sequencing, optional frontend lag, and deferred-solver ownership.
 
 mod boundary;
+mod lag;
 mod lane;
 #[cfg(test)]
 mod tests;
@@ -12,12 +13,14 @@ use lane::build_frontend;
 use crate::{calib, config, duration_ns, estimator, frontend, image, imu, lie, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 
-/// Synchronous frameset pipeline (D17, D24).
+/// Frameset pipeline with optional one-frame estimator lag (D17, D24, M7).
 /// First preintegrate for the frontend prediction, run optical flow, then run
 /// the estimator's independent preintegrator, measurement, optimization and
 /// marginalization. Feed back the newest state and average scene depth.
 /// The two preintegrators remain independent. No timing or queue dropping enters
 /// a decision. The frontend uses f32; the estimator scalar is selectable.
+/// With `port.frontend_lag`, frontend(t) runs beside estimator(t-1); results
+/// carry t-1's timestamp. Drain the final result with [`Self::flush`].
 #[derive(Debug)]
 pub struct Vio<S: lie::LieScalar = f32> {
     frontend: FrontendLane,
@@ -49,10 +52,13 @@ pub struct Vio<S: lie::LieScalar = f32> {
     /// The deferred keyframe (D84) the last `track` finished beside its
     /// frontend, if it finished one.
     last_deferred: Option<Box<estimator::DeferredKeyframeStats<S>>>,
-    /// How long the last `track` waited for that solve after its own frontend
-    /// was done, nanoseconds; zero when nothing was pending.
-    deferred_wait_ns: u64,
+    /// One frameset waiting for the estimator when frontend lag is enabled.
+    pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
+    /// Estimator wall time and exposed join wait on the last overlapping call.
+    overlap_timings: lag::OverlapTimings,
 }
+
+pub use lag::OverlapTimings;
 
 /// A validated frameset whose pixels are owned by the pipeline.
 ///
@@ -126,7 +132,8 @@ impl<S: lie::LieScalar> Vio<S> {
             last_stats: None,
             frontend_timings: FrontendTimings::default(),
             last_deferred: None,
-            deferred_wait_ns: 0,
+            pending_observations: None,
+            overlap_timings: lag::OverlapTimings::default(),
         })
     }
 
@@ -169,15 +176,21 @@ impl<S: lie::LieScalar> Vio<S> {
         self.last_deferred.as_deref()
     }
 
-    /// How long the last `track` waited, after its own frontend was done, for
-    /// the deferred keyframe solve running beside it, nanoseconds.
+    /// Timestamp of the frameset still held by the lagged estimator.
+    pub fn pending_t_ns(&self) -> Option<i64> {
+        self.pending_observations.as_ref().map(|frame| frame.t_ns)
+    }
+
+    /// Time waiting for estimator work after the frontend, in nanoseconds.
+    /// Includes both D84 and one-frame lag; equal to `overlap_timings().wait_ns`.
     pub fn deferred_wait_ns(&self) -> u64 {
-        self.deferred_wait_ns
+        self.overlap_timings.wait_ns
     }
 
     /// Finish a pending deferred keyframe (D84) now, on this thread. The next
     /// `track` would do it anyway; call this before reading the window through
     /// [`Self::estimator`] or at the end of a stream.
+    /// In lag mode use [`Self::flush`] to also estimate the queued frameset.
     ///
     /// # Errors
     ///
@@ -221,16 +234,11 @@ impl<S: lie::LieScalar> Vio<S> {
         Ok(())
     }
 
-    /// Finish deferred work at stream end; synchronous tracking has no queued result.
-    ///
-    /// # Errors
-    /// The errors from finishing a deferred keyframe.
-    pub fn flush(&mut self) -> Result<Option<VioResult>, VioError> {
-        self.finish_deferred_keyframe()?;
-        Ok(None)
-    }
-
     /// Process one frameset: one image per camera, oldest to newest in time.
+    ///
+    /// With `port.frontend_lag`, the first accepted frame returns
+    /// [`VioStatus::Buffered`]. Later calls return the previous frame's pose and
+    /// timestamp. Call [`Self::flush`] at stream end to receive the final pose.
     ///
     /// Returns [`VioStatus::NeedMoreImu`] without touching anything — the
     /// frontend, both IMU buffers, the estimator — when the buffered IMU does
@@ -292,6 +300,9 @@ impl<S: lie::LieScalar> Vio<S> {
         // Before the first estimated state, both prediction poses are identity.
         let mark: std::time::Instant = std::time::Instant::now();
         let prediction: frontend::flow::PosePrediction = match self.latest_state {
+            Some(latest) if self.frontend.config().port_frontend_lag => {
+                self.lagged_prediction(t_ns, &latest)?
+            }
             Some(latest) => {
                 let pim: imu::IntegratedImuMeasurement<f64> =
                     self.frontend_preintegrate(t_ns, &latest)?;
@@ -302,12 +313,17 @@ impl<S: lie::LieScalar> Vio<S> {
                     t_w_i_current: predicted.t_w_i.cast(),
                 }
             }
-            None => frontend::flow::PosePrediction::default(),
+            None => {
+                // Waiting for stereo can take arbitrarily many frames. Keep
+                // only the interval a lagged first state could still need.
+                let keep_after = self.last_frame_t_ns.unwrap_or(t_ns);
+                self.drop_frontend_imu_through(keep_after);
+                frontend::flow::PosePrediction::default()
+            }
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        // the `u8 << 8` widening the whole frontend
-        // assumes, into buffers that are reused frame to frame.
+        // Widen into reusable image buffers on both lanes.
         self.frames
             .resize_with(images.len(), image::ImageU16::default);
         for (frame, view) in self.frames.iter_mut().zip(images.iter()) {
@@ -326,13 +342,7 @@ impl<S: lie::LieScalar> Vio<S> {
         prediction: &frontend::flow::PosePrediction,
     ) -> Result<VioResult, VioError> {
         self.last_deferred = None;
-        self.deferred_wait_ns = 0;
-        if self.estimator.has_deferred_keyframe() {
-            self.process_frame_beside_deferred_keyframe(t_ns, prediction)?;
-        } else {
-            self.frontend
-                .process_frame(t_ns, &self.frames, prediction, &self.masks)?;
-        }
+        let lagged_outcome = self.process_frame_beside_estimator(t_ns, prediction)?;
         self.frontend_timings.flow = self.frontend.timings();
         self.last_frame_t_ns = Some(t_ns);
 
@@ -353,15 +363,34 @@ impl<S: lie::LieScalar> Vio<S> {
                 slot.insert(*id, warp.translation);
             }
         }
-        let outcome: estimator::FrameOutcome<S> = self
-            .estimator
-            .process_frame(std::sync::Arc::new(observations))?;
+        let observations = std::sync::Arc::new(observations);
+        let (result_t_ns, outcome) = if self.frontend.config().port_frontend_lag {
+            self.pending_observations = Some(observations);
+            let Some(completed) = lagged_outcome else {
+                return Ok(self.result(VioStatus::Buffered, t_ns));
+            };
+            completed
+        } else {
+            (t_ns, self.estimator.process_frame(observations)?)
+        };
 
+        self.accept_outcome(result_t_ns, outcome)
+    }
+
+    fn accept_outcome(
+        &mut self,
+        t_ns: i64,
+        outcome: estimator::FrameOutcome<S>,
+    ) -> Result<VioResult, VioError> {
         // The estimator initialises inside the same `process_frame` that
         // measures, so a `Measured` outcome always has a state and
         // the outcome alone decides the status.
         let status: VioStatus = match outcome {
             estimator::FrameOutcome::NeedMoreImu => VioStatus::NeedMoreImu,
+            estimator::FrameOutcome::NoVisualFeatures => {
+                self.last_stats = None;
+                VioStatus::NoVisualFeatures
+            }
             estimator::FrameOutcome::Measured(stats) => {
                 self.last_stats = Some(stats);
                 // Return the newest state, then the depth feedback.
@@ -372,46 +401,6 @@ impl<S: lie::LieScalar> Vio<S> {
         };
 
         Ok(self.result(status, t_ns))
-    }
-
-    /// This frameset's frontend on the calling thread and the previous
-    /// keyframe's deferred joint solve (D84) on a second one, joined before the
-    /// estimator sees this frameset. The two share no state: the frontend's
-    /// prediction came from the updated pose before the solve started, and the
-    /// solve touches the window alone. A thread the operating system refuses
-    /// is [`VioError::EstimatorThread`], before the frontend runs.
-    fn process_frame_beside_deferred_keyframe(
-        &mut self,
-        t_ns: i64,
-        prediction: &frontend::flow::PosePrediction,
-    ) -> Result<(), VioError> {
-        let Self {
-            frontend,
-            estimator,
-            frames,
-            masks,
-            ..
-        } = self;
-        let (flow, solved, wait_ns) = std::thread::scope(|scope| -> Result<_, VioError> {
-            let solver = std::thread::Builder::new()
-                .name("slam-rs-keyframe".to_owned())
-                .spawn_scoped(scope, || estimator.finish_deferred_keyframe())
-                .map_err(|error| VioError::EstimatorThread(error.to_string()))?;
-            let flow: Result<(), frontend::flow::FrontendError> = frontend
-                .process_frame(t_ns, frames, prediction, masks)
-                .map(|_| ());
-            let mark: std::time::Instant = std::time::Instant::now();
-            let solved: Result<Option<estimator::DeferredKeyframeStats<S>>, VioError> =
-                match solver.join() {
-                    Ok(result) => result.map_err(VioError::from),
-                    Err(_) => Err(VioError::EstimatorPanicked),
-                };
-            Ok((flow, solved, duration_ns(mark)))
-        })?;
-        self.deferred_wait_ns = wait_ns;
-        self.last_deferred = solved?.map(Box::new);
-        flow?;
-        Ok(())
     }
 
     /// Only a tracked frameset publishes the estimator state.
@@ -468,8 +457,22 @@ impl<S: lie::LieScalar> Vio<S> {
 
     /// One sample off the frontend's buffer, calibrated in `f32` and cast back
     /// to `f64`.
+    fn drop_frontend_imu_through(&mut self, t_ns: i64) {
+        while self
+            .frontend_imu
+            .front()
+            .is_some_and(|sample| sample.t_ns <= t_ns)
+        {
+            self.frontend_imu.pop_front();
+        }
+    }
+
     fn frontend_pop(&mut self) -> Option<imu::Popped<f64>> {
         let sample: imu::ImuSample = self.frontend_imu.pop_front()?;
+        Some(self.calibrated(&sample))
+    }
+
+    fn calibrated(&self, sample: &imu::ImuSample) -> imu::Popped<f64> {
         let accel: Vector3<f32> = self
             .calib_f32
             .calib_accel_bias
@@ -478,7 +481,7 @@ impl<S: lie::LieScalar> Vio<S> {
             .calib_f32
             .calib_gyro_bias
             .calibrated(&sample.gyro.cast());
-        Some((sample.t_ns, gyro.cast(), accel.cast()))
+        (sample.t_ns, gyro.cast(), accel.cast())
     }
 
     /// `opt_flow_state_queue->push(data)`.

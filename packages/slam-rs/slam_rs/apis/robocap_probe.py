@@ -112,6 +112,7 @@ def main(config: Config) -> None:
             replayed += 1
             log_frameset_inputs(feed, frameset, mode)
             stage.run(frameset)
+        stage.flush()
         elapsed: float = time.monotonic() - started
         stage.logger.log_complete_paths()
 

@@ -86,9 +86,7 @@ pub enum SourceEvent {
 /// What one SLAM step produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlamStatus {
-    /// The IMU did not cover the frameset in time.
-    WaitingForImu,
-    /// The estimator ran, but the pose lacks visual support (PR #270's rule: tracking, >= 10 landmarks, >= 10 tracked
+    /// The world has not started, or the pose lacks visual support (PR #270's rule: tracking, >= 10 landmarks, >= 10 tracked
     /// observations, optimisation started, finite).
     NoVisualFeatures,
     /// A visually supported pose.
@@ -105,7 +103,6 @@ impl SlamStatus {
     /// A short name for logs and the record.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::WaitingForImu => "waiting_for_imu",
             Self::NoVisualFeatures => "no_visual_features",
             Self::Tracking => "tracking",
             Self::Failed => "failed",
@@ -128,7 +125,7 @@ pub struct SlamPose {
     pub ok: bool,
     /// What the estimator decided.
     pub status: SlamStatus,
-    /// Wall time of `Vio::track`, milliseconds (0 when it did not run).
+    /// Wall time of the call that returned this pose, ms (0 without SLAM); see [`SlamStages`].
     pub compute_ms: f64,
     /// Landmarks in the window.
     pub landmarks: usize,
@@ -136,8 +133,7 @@ pub struct SlamPose {
     pub tracked: usize,
     /// Whether the window optimisation has started (5 states).
     pub optimised: bool,
-    /// Where `compute_ms` went: the frontend (pyramids, detection, KLT, stereo, IMU prediction), the LM optimisation, the
-    /// marginalisation, ms; and whether this frameset became a keyframe.
+    /// Timings of the call that returned this pose; see [`SlamStages`].
     pub stages: SlamStages,
     /// Estimator restarts so far.
     pub resets: u64,
@@ -162,7 +158,9 @@ impl SlamPose {
     }
 }
 
-/// Where one `Vio::track` spent its time, milliseconds.
+/// Work performed by one track/flush call, ms. With lag, frontend work belongs to the next submitted frameset,
+/// while estimator work and keyframe flags belong to the returned pose. These stages overlap and must not be summed.
+/// Flush does only estimator work, with zero frontend time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct SlamStages {
     /// The frontend: pyramids + FAST + KLT + stereo + the IMU prediction.

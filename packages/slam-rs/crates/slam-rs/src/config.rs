@@ -162,6 +162,19 @@ pub struct VioConfig {
     #[serde(rename = "port.keyframe_solve_deferred")]
     pub port_keyframe_solve_deferred: bool,
 
+    /// Run the estimator one frameset behind the frontend (M7, VkVIO's overlap).
+    ///
+    /// Off, [`crate::Vio::track`] runs frameset t's frontend and then its
+    /// estimator, and returns t's pose. On, it runs frameset t's frontend on
+    /// the calling thread while frameset t-1's estimator runs on a second
+    /// thread, and returns t-1's pose; [`crate::Vio::flush`] returns the last
+    /// one. The frontend's prediction for t then starts from the newest state
+    /// it has, t-2's, propagated over [t-2, t] by its own IMU preintegration,
+    /// and the depth guess it reprojects with is one frameset older too.
+    /// Deterministic: the lag is structural, no timing enters a decision.
+    #[serde(rename = "port.frontend_lag")]
+    pub port_frontend_lag: bool,
+
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
     #[serde(rename = "config.vio_linearization_type")]
@@ -273,6 +286,7 @@ impl Default for VioConfig {
             port_redetect_survivor_ratio: 0.0,
             port_frame_update_max_iterations: 0,
             port_keyframe_solve_deferred: false,
+            port_frontend_lag: false,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
@@ -387,6 +401,7 @@ mod tests {
             assert_eq!(written["value0"]["port.redetect_survivor_ratio"], 0.0);
             assert_eq!(written["value0"]["port.frame_update_max_iterations"], 0);
             assert_eq!(written["value0"]["port.keyframe_solve_deferred"], false);
+            assert_eq!(written["value0"]["port.frontend_lag"], false);
         }
     }
 

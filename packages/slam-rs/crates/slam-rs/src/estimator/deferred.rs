@@ -44,13 +44,6 @@ pub(super) struct DeferredKeyframe {
     pub(super) lost_landmarks: BTreeSet<LandmarkId>,
 }
 
-/// D84 defers a keyframe's joint solve only when the window already holds this
-/// many landmarks and the frameset observes this many of them: the frame
-/// update's pose then has visual support of its own (PR #270's live rule), and
-/// the cold start — where the keyframe's new landmarks are the support — keeps
-/// the synchronous solve.
-pub(super) const DEFER_MIN_SUPPORT: usize = 10;
-
 impl<S: LieScalar> SqrtKeypointVio<S> {
     /// Every landmark `frame` did not see, in any camera, when
     /// `vio_marg_lost_landmarks` asks for them; empty otherwise.

@@ -287,6 +287,8 @@ def run_lane(lane: Lane, round_index: int, framesets: Framesets, config: _core.V
         )
         for _held, _result in lockstep.push(frameset):
             pass
+    for _held, _result in lockstep.flush():
+        pass
     wall_s: float = time.monotonic() - started
     sampler.stop.set()
     sampler.join(timeout=1.0)

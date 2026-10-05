@@ -210,10 +210,21 @@ fn an_imu_sample_behind_the_pending_one_is_dropped() {
 #[test]
 fn an_unconnected_keypoint_missing_from_its_own_frameset_is_refused() {
     let mut estimator: SqrtKeypointVio<f32> = estimator();
-    estimator.push_imu(sample(10));
-    estimator
-        .process_frame(Arc::new(FlowObservations::new(5, 2)))
-        .unwrap();
+    // This triangulation-error probe needs a host pose. A blank frameset no
+    // longer initializes a world, so supply that precondition directly.
+    estimator.ba.frame_states.insert(
+        5,
+        PoseVelBiasStateWithLin::new(
+            PoseVelBiasState::new(
+                5,
+                Se3::identity(),
+                Vector3::zeros(),
+                Vector3::zeros(),
+                Vector3::zeros(),
+            ),
+            true,
+        ),
+    );
 
     let frame: FlowObservations = FlowObservations::new(5, 2);
     let unconnected: Vec<BTreeSet<KeypointId>> =

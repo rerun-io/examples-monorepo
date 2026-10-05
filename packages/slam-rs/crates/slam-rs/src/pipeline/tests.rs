@@ -15,15 +15,12 @@ fn image(bytes: &[u8], width: usize, height: usize) -> ImageView<'_> {
 
 /// MSDMI configuration named by the package manifest.
 const MSDMI_CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
+const MSDMI_CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
 
 fn pipeline() -> Vio<f32> {
-    let directory: std::path::PathBuf =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let config: config::VioConfig = config::VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
-    let calibration: calib::Calibration<f64> = calib::Calibration::from_json_str(
-        &std::fs::read_to_string(directory.join("msdmi_calib.json")).unwrap(),
-    )
-    .unwrap();
+    let calibration: calib::Calibration<f64> =
+        calib::Calibration::from_json_str(MSDMI_CALIB).unwrap();
     Vio::new(
         config,
         calibration,
@@ -63,14 +60,10 @@ fn a_frameset_ahead_of_the_imu_needs_more_imu() {
 /// construction rather than silently ignored.
 #[test]
 fn realtime_frame_dropping_is_refused() {
-    let directory: std::path::PathBuf =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut config: config::VioConfig = config::VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
     config.vio_enforce_realtime = true;
-    let calibration: calib::Calibration<f64> = calib::Calibration::from_json_str(
-        &std::fs::read_to_string(directory.join("msdmi_calib.json")).unwrap(),
-    )
-    .unwrap();
+    let calibration: calib::Calibration<f64> =
+        calib::Calibration::from_json_str(MSDMI_CALIB).unwrap();
     assert_eq!(
         Vio::<f32>::new(
             config,

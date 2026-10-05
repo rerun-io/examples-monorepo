@@ -137,6 +137,8 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         if stage is not None:
             stage.run(frameset)
 
+    if isinstance(stage, VioStage):
+        stage.flush()
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
     if stage is not None:

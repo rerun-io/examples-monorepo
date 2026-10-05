@@ -111,7 +111,7 @@ def drive(
         # Camera 1 is the scene shifted one pixel along the baseline, so the
         # stereo pass matches: a shift across it matches nothing and camera 1
         # would carry no keypoint at all.
-        result: _core.VioResult = vio.track(t_ns, [texture(step, 0), texture(step + 1, 0)])
+        result: _core.VioResult = vio.track(t_ns, [texture(step, 0), texture(step - 2, 0)])
         if result.status != _core.VioStatus.Tracking:
             continue
         snapshot: _core.VioSnapshot | None = vio.snapshot()

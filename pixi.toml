@@ -2606,9 +2606,19 @@ description = "Run the patched CubeCL channel park tests"
 
 [feature.slam-rs.tasks.slam-rs-rust-test]
 depends-on = ["slam-rs-patch-test"]
-cmd = "cargo test --workspace"
+cmd = "cargo test --locked --offline --workspace -- --nocapture"
 cwd = "packages/slam-rs"
 description = "Run the Rust test suite (unit tests + proptest)"
+
+[feature.slam-rs.tasks.slam-rs-recorder-test]
+depends-on = ["slam-rs-patch-deps"]
+cmd = "cargo test --locked --offline -p robocap-recorder --features live-slam -- --nocapture"
+cwd = "packages/slam-rs"
+description = "Run the recorder's live SLAM adapter tests without capture hardware"
+
+[feature.slam-rs.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test"]
+description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
 
 [feature.slam-rs.tasks.slam-rs-fmt]
 cmd = "cargo fmt --all"
@@ -2624,19 +2634,19 @@ description = "Print the version reported by the compiled core"
 # Python tests import slam_rs._core, so every tier needs the build first;
 # these shadow the generic test tasks from the dev feature.
 [feature.slam-rs.tasks.tests]
-cmd = "pytest -q"
+cmd = "pytest -q -ra"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package unit tests"
 
 [feature.slam-rs.tasks.tests-integration]
-cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+cmd = "sh -c 'pytest -q -ra -m integration \"$@\" || test $? -eq 5' _"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package integration tests"
 
 [feature.slam-rs.tasks.tests-golden]
-cmd = "sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+cmd = "sh -c 'pytest -q -ra -m golden \"$@\" || test $? -eq 5' _"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package golden reference tests"

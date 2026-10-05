@@ -294,12 +294,7 @@ impl LiveSlam {
                 .map_or(0, |s| s.connected.iter().sum());
             let optimization_started = self.vio.last_stats().is_some_and(|s| s.opt_started);
             let supported = result.status == VioStatus::Tracking
-                && landmarks >= 10
-                && tracked_observations >= 10
-                && optimization_started
-                && result
-                    .pose
-                    .is_some_and(|pose| pose.world_from_rig.iter().all(|v| v.is_finite()));
+                && self.vio.last_stats().is_some_and(|s| s.visually_supported);
             self.last_frame = Some(t);
             self.updates += 1;
             return Ok(Some(SlamReport {

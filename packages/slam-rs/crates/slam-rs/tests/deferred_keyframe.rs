@@ -19,6 +19,71 @@ fn rms(values: &[f64]) -> f64 {
 }
 
 #[test]
+fn frontend_lag_and_deferred_keyframes_drain_in_order() {
+    let mut config = config(true);
+    config.port_frontend_lag = true;
+    let mut vio = api::Vio::<f32>::new(
+        config,
+        calibration(),
+        api::frontend::flow::FrontendOptions {
+            threads: 4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let t0 = 1_000_000_000;
+    let mut imu_t = t0 - 100_000_000;
+    let mut deferred_t = None;
+    let mut solved = 0;
+    let mut results = Vec::new();
+    for index in 0..FRAMES {
+        let t_ns = t0 + index * FRAME_NS;
+        while imu_t <= t_ns + 5_000_000 {
+            let t_s = ((imu_t - t0) as f64 / 1e9).max(0.0);
+            let accel = acceleration(t_s) + nalgebra::Vector3::new(0.0, 0.0, 9.81);
+            vio.push_imu(imu_t, [0.0; 3], accel.into()).unwrap();
+            imu_t += 5_000_000;
+        }
+        let frames: [Vec<u8>; 4] =
+            std::array::from_fn(|camera| render((t_ns - t0) as f64 / 1e9, camera));
+        let views: Vec<_> = frames
+            .iter()
+            .map(|data| api::ImageView {
+                data,
+                width: 640,
+                height: 360,
+                stride: 640,
+            })
+            .collect();
+        let result = vio.track(t_ns, &views).unwrap();
+        if index == 0 {
+            assert_eq!(result.status, api::VioStatus::Buffered);
+            continue;
+        }
+        assert_eq!(result.t_ns, t_ns - FRAME_NS);
+        assert_eq!(
+            vio.last_deferred_keyframe().map(|stats| stats.t_ns),
+            deferred_t
+        );
+        solved += usize::from(vio.last_deferred_keyframe().is_some());
+        let stats = vio.last_stats().unwrap();
+        deferred_t = stats.keyframe_deferred.then_some(result.t_ns);
+        results.push(result);
+    }
+    results.push(vio.flush().unwrap().unwrap());
+    assert_eq!(results.len(), FRAMES as usize);
+    assert_eq!(results.last().unwrap().t_ns, t0 + (FRAMES - 1) * FRAME_NS);
+    assert!(solved >= 3, "only {solved} deferred solves");
+    assert!(!vio.estimator().has_deferred_keyframe());
+    assert_eq!(vio.flush().unwrap(), None);
+    for result in results {
+        let truth = position((result.t_ns - t0) as f64 / 1e9);
+        let estimate = nalgebra::Vector3::from_row_slice(&result.pose.unwrap().world_from_rig[..3]);
+        assert!((estimate - truth).norm() < 0.10);
+    }
+}
+
+#[test]
 fn a_deferred_keyframe_solve_is_reported_next_deterministic_and_as_accurate() {
     let frames: Vec<[Vec<u8>; 4]> = (0..FRAMES)
         .map(|index| {

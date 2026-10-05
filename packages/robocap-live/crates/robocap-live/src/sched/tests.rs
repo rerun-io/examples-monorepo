@@ -5,6 +5,216 @@ use crate::hands::HandOutput;
 use crate::nets::{DetNetRaw, KeyNetRaw, NetFrame, NetsError};
 use crate::source::replay::{ReplayConfig, ReplaySource, read_reference_poses};
 
+/// Observe the public output seam: frameset identity, assigned pose identity and whether it was flushed.
+#[derive(Clone, Copy, Debug)]
+struct PoseRow {
+    index: u64,
+    t_ns: i64,
+    pose: Option<SlamPose>,
+}
+
+struct PoseSink {
+    rows: Arc<Mutex<Vec<PoseRow>>>,
+    stop_at: Option<(u64, Arc<AtomicBool>)>,
+}
+
+impl FramesetSink for PoseSink {
+    fn frameset(&mut self, record: &OutputRecord<'_>) -> Result<(), SinkError> {
+        lock(&self.rows).push(PoseRow { index: record.frameset.index, t_ns: record.frameset.t_ns, pose: record.pose.copied() });
+        if let Some((index, stop)) = &self.stop_at {
+            if record.frameset.index >= *index {
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn lossless_lag_publishes_each_frames_own_pose_including_eof_and_stop() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-lag-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump(&dir, 18)?;
+    // Paced replay with blocking queues proves that the stop path drains the final accepted frameset too.
+    for (lag, stop_early) in [(false, false), (true, false), (true, true)] {
+        let stop = Arc::new(AtomicBool::new(false));
+        let source = ReplaySource::open(&dir, ReplayConfig { realtime: stop_early, ..Default::default() }, stop.clone())?;
+        let (summary, rows) = lossless_slam_run(source, lag, 30.0, stop, stop_early.then_some(5))?;
+        assert!(rows.len() >= 6);
+        if !stop_early {
+            assert_eq!(rows.len(), 18);
+        }
+        for row in rows.iter() {
+            assert_eq!(row.pose.map(|p| (p.index, p.t_ns)), Some((row.index, row.t_ns)), "lag={lag}, stop={stop_early}: {row:?}");
+        }
+        assert_eq!(summary.counters.slam_failures, 0);
+        assert_eq!(summary.counters.slam_buffered, u64::from(lag));
+        assert_eq!(summary.counters.slam_status.values().sum::<u64>() as usize, summary.stages["slam"].count);
+        assert_eq!(summary.stages["slam_flush"].count, usize::from(lag));
+        if lag {
+            assert_eq!(rows.last().and_then(|r| r.pose).map(|p| p.stages.frontend_ms), Some(0.0));
+        }
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn lossless_lag_with_sparse_selection_and_missing_cameras_does_not_stall() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-lag-skips-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump_with(&dir, 18, &|index, camera| index == 1 && camera == 4)?;
+    for hz in [30.0, 1.0] {
+        let stop = Arc::new(AtomicBool::new(false));
+        let source = ReplaySource::open(&dir, ReplayConfig::default(), stop.clone())?;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(lossless_slam_run(source, true, hz, stop, None));
+        });
+        let (summary, rows) = rx.recv_timeout(Duration::from_secs(10))??;
+        assert_eq!(summary.framesets, 18);
+        assert_eq!(rows.len(), 18);
+        assert_eq!(rows[0].pose.map(|p| p.index), Some(0));
+        assert_eq!(rows[17].pose.map(|p| p.index), Some(if hz == 30.0 { 17 } else { 0 }));
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+struct EditedReplay<F>(ReplaySource, F);
+
+impl<F: FnMut(SourceEvent) -> Option<SourceEvent> + Send> FrameSource for EditedReplay<F> {
+    fn rig(&self) -> &crate::frame::Rig { self.0.rig() }
+    fn next_event(&mut self) -> Result<Option<SourceEvent>, SourceError> {
+        while let Some(event) = self.0.next_event()? {
+            if let Some(event) = (self.1)(event) { return Ok(Some(event)); }
+        }
+        Ok(None)
+    }
+}
+
+fn lossless_slam_run(source: impl FrameSource + 'static, lag: bool, hz: f64, stop: Arc<AtomicBool>, stop_at: Option<u64>) -> Result<(RunSummary, Vec<PoseRow>), SchedError> {
+    let hands = HandsStage { tracker: Box::new(EchoTracker), nets: Box::new(NoNets), nets_factory: None };
+    let mut config = test_config(true, SlamMode::On, ReferencePoses::new(Vec::new(), 0, None), hands);
+    config.slam.hz = hz;
+    config.slam.overrides.push(crate::slam::parse_override(&format!("port.frontend_lag={lag}")).expect("boolean override"));
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let sink = PoseSink { rows: rows.clone(), stop_at: stop_at.map(|index| (index, stop.clone())) };
+    let summary = run(Box::new(source), config, vec![Box::new(sink)], stop)?;
+    let rows = lock(&rows).clone();
+    Ok((summary, rows))
+}
+
+#[test]
+fn time_jumps_keep_or_reset_the_world_and_flush_pending_poses() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-time-jump-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump(&dir, 18)?;
+    // The preceding frame is 33,333,333 ns before the first shifted frame: test exactly 3 s as well as either side.
+    for (jump_ns, resets) in [(500_000_000, 0), (2_966_666_667, 0), (3_000_000_000, 1), (-1_000_000_000, 1)] {
+        for lag in [false, true] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let source = EditedReplay(ReplaySource::open(&dir, ReplayConfig::default(), stop.clone())?, move |mut event| {
+                let t = match &mut event { SourceEvent::Imu(sample) => &mut sample.t_ns, SourceEvent::Frameset(frame) => &mut frame.t_ns };
+                if *t >= 1_299_999_997 { *t += jump_ns; }
+                Some(event)
+            });
+            let (summary, rows) = lossless_slam_run(source, lag, 30.0, stop, None)?;
+            assert_eq!((summary.counters.slam_resets, summary.counters.slam_failures, summary.counters.slam_imu_timeouts), (resets, 0, 0));
+                assert_eq!(rows.len(), 18);
+            for row in rows.iter() {
+                assert_eq!(row.pose.map(|p| (p.index, p.t_ns)), Some((row.index, row.t_ns)), "jump={jump_ns} lag={lag}: {row:?}");
+                assert_eq!(row.pose.map(|p| p.resets), Some(if row.index >= 9 { resets } else { 0 }), "{row:?}");
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn frame_gaps_up_to_three_seconds_with_continuous_imu_keep_the_world() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-frame-gap-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump(&dir, 105)?;
+    for next_index in [18, 33, 54, 98] {
+        let stop = Arc::new(AtomicBool::new(false));
+        let source = EditedReplay(ReplaySource::open(&dir, ReplayConfig::default(), stop.clone())?, move |event| {
+            if matches!(&event, SourceEvent::Frameset(frame) if (9..next_index).contains(&frame.index)) { None } else { Some(event) }
+        });
+        let (summary, rows) = lossless_slam_run(source, true, 30.0, stop, None)?;
+        assert_eq!((summary.counters.slam_resets, summary.counters.slam_failures, summary.counters.slam_imu_timeouts), (0, 0, 0));
+        assert_eq!(rows.len(), 105 - (next_index as usize - 9));
+        for row in rows.iter() {
+            assert_eq!(row.pose.map(|p| (p.index, p.t_ns, p.resets)), Some((row.index, row.t_ns, 0)), "{row:?}");
+        }
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn replay_loops_still_start_new_worlds() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-loop-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump(&dir, 18)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    // Stop at the first IMU sample after frameset 23, not from the sink: a stop between a frameset and the sample that covers
+    // it leaves that frameset without IMU, which the SLAM stage counts as a timeout.
+    let (source_stop, mut last_t) = (stop.clone(), None::<i64>);
+    let looping = ReplaySource::open(&dir, ReplayConfig { looping: true, ..Default::default() }, stop.clone())?;
+    let source = EditedReplay(looping, move |event| {
+        match &event {
+            SourceEvent::Frameset(frame) if frame.index == 23 => last_t = Some(frame.t_ns),
+            SourceEvent::Imu(sample) if last_t.is_some_and(|t| sample.t_ns > t) => source_stop.store(true, Ordering::Relaxed),
+            _ => {}
+        }
+        Some(event)
+    });
+    let (summary, rows) = lossless_slam_run(source, true, 30.0, stop, None)?;
+    assert!(summary.counters.slam_resets >= 1);
+    assert_eq!(rows.last().map(|row| row.index), Some(23));
+    assert_eq!((summary.counters.slam_failures, summary.counters.slam_imu_timeouts), (0, 0));
+    for row in rows.iter() {
+        assert_eq!(row.pose.map(|p| (p.index, p.t_ns, p.resets)), Some((row.index, row.t_ns, row.index / 18)), "{row:?}");
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn absent_imu_coverage_skips_frames_without_resetting() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-no-imu-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump(&dir, 3)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let source = EditedReplay(ReplaySource::open(&dir, ReplayConfig::default(), stop.clone())?, |event| {
+        if matches!(event, SourceEvent::Imu(_)) { None } else { Some(event) }
+    });
+    let (summary, rows) = lossless_slam_run(source, false, 30.0, stop, None)?;
+    assert_eq!((summary.counters.slam_resets, summary.counters.slam_failures, summary.counters.slam_imu_timeouts), (0, 0, 3));
+    assert_eq!(summary.stages["slam"].count, 0);
+    assert!(rows.iter().all(|row| row.pose.is_none()));
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn repeated_estimator_errors_reset_each_failed_world() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-sched-errors-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump(&dir, 18)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let source = EditedReplay(ReplaySource::open(&dir, ReplayConfig::default(), stop.clone())?, |mut event| {
+        if let SourceEvent::Frameset(frame) = &mut event { frame.t_ns = 1_000_000_000; }
+        Some(event)
+    });
+    let (summary, rows) = lossless_slam_run(source, true, 0.0, stop, None)?;
+    assert_eq!((summary.counters.slam_resets, summary.counters.slam_failures, summary.counters.slam_imu_timeouts), (9, 9, 0));
+    assert_eq!(rows.len(), 18);
+    for row in rows.iter().filter(|row| row.index % 2 == 1) {
+        assert_eq!(row.pose.map(|p| (p.index, p.status, p.resets)), Some((row.index, SlamStatus::Failed, row.index.div_ceil(2))));
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
 /// A test pipeline: no pinning, no frequency hints, no per-second lines.
 fn test_config(lossless: bool, slam_mode: SlamMode, reference: ReferencePoses, hands: HandsStage) -> PipelineConfig {
     PipelineConfig {
@@ -247,6 +457,8 @@ fn a_lossless_replay_with_reference_poses_reaches_every_stage_and_the_record() -
     assert_eq!(lines[3]["hands"][0]["landmarks"][0][0], 3.0, "hands got the pose of their own frameset");
     assert_eq!(lines[3]["slam_status"], "reference");
     assert_eq!(lines[1]["index"], 1);
+    assert_eq!(lines[1]["slam_index"], 1);
+    assert_eq!(lines[1]["slam_t_ns"], lines[1]["t_ns"], "the record states whose pose it used");
     std::fs::remove_dir_all(&dir)?;
     Ok(())
 }

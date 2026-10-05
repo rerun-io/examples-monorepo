@@ -11,8 +11,9 @@
 //! Two queue policies:
 //! - **realtime** (live, or `--realtime` replay): every queue is latest-wins: when a stage is behind, the oldest waiting item
 //!   is dropped and counted, so no stage ever stalls the source. SLAM takes the newest frameset (and the rate cap);
+//!   pose progress follows consumption, so lag does not make hands wait an extra frameset;
 //! - **lossless** (replay as fast as possible): queues block instead, every frameset goes through every stage, SLAM selects
-//!   framesets by their timestamps only, and hands wait for SLAM to pass their frameset: the run is deterministic.
+//!   framesets by their timestamps only, and hands wait for publication of their frameset's estimate, including the final flush.
 //!
 //! Every stage records its wall time per frameset; a one-line summary is printed every second and a final summary at the end.
 
@@ -26,19 +27,21 @@ use nalgebra::Isometry3;
 use serde::Serialize;
 
 use crate::downsample::{SmallImagePool, SmallImages, small_images};
-use crate::frame::{Frameset, ImuSample, NUM_CAMERAS, SLAM_CAMERAS};
+use crate::frame::{Frameset, ImuSample, NUM_CAMERAS};
 use crate::hands::{HandFrameResult, HandInputs, HandTracking, HandsError};
 use crate::nets::{HandNets, NetsError};
-use crate::slam::{RateSelector, ReferencePoses, SlamConfig, SlamEstimator, SlamMode, SlamPose, SlamStatus};
+use crate::slam::{ReferencePoses, SlamConfig, SlamMode, SlamPose, SlamStatus};
 use crate::source::{FrameSource, SourceError, SourceEvent};
 
 mod queue;
 mod record;
+mod slam_stage;
 mod stats;
 mod system;
 
 use queue::{PoseStore, QueuePolicy, StageQueue, lock};
 pub use record::{FrameTimings, FramesetSink, OutputRecord, RecordWriter, SinkError};
+use slam_stage::slam_loop;
 use stats::{STAGES, Stage, Stats};
 pub use stats::{Counters, Summary};
 use system::{CoreCpu, ThreadCpu};
@@ -270,7 +273,7 @@ pub fn run(
     let depth = |realtime: usize| if lossless { 4 } else { realtime };
     let shared = Arc::new(Shared {
         stats: Stats::default(),
-        poses: PoseStore::default(),
+        poses: PoseStore::new(lossless),
         ds: StageQueue::new(2, policy),
         slam: StageQueue::new(depth(1), policy),
         hands: StageQueue::new(depth(1), policy),
@@ -352,7 +355,9 @@ fn start_stages(
     })?);
     let stage = shared.clone();
     let duration = config.duration;
-    handles.push(spawn_stage("rl-source", config.cpus_little.clone(), None, shared, move || source_loop(&stage, source, slam_on.then_some(imu_tx), duration))?);
+    handles.push(spawn_stage("rl-source", config.cpus_little.clone(), None, shared, move || {
+        source_loop(&stage, source, slam_on.then_some(imu_tx), duration)
+    })?);
     Ok(())
 }
 
@@ -376,7 +381,7 @@ fn hands_loop(shared: &Shared, stage: HandsStage, pose_wait: Option<Duration>) -
                 Err(error) => eprintln!("robocap-live: hands: rebuilding the networks failed: {error} (retrying in 1 s)"),
             }
         }
-        let (pose, waited) = shared.poses.pose_for(item.frameset.t_ns, pose_wait);
+        let (pose, waited) = shared.poses.pose_for(item.frameset.index, pose_wait);
         shared.stats.record(Stage::PoseWait, waited.as_secs_f64() * 1e3);
         let world_from_rig = pose.map_or_else(Isometry3::identity, |p| p.world_from_rig);
         let full: [Option<&crate::frame::CameraFrame>; NUM_CAMERAS] = std::array::from_fn(|c| item.frameset.cameras[c].as_ref());
@@ -434,7 +439,7 @@ fn output_loop(shared: &Shared, mut sinks: Vec<Box<dyn FramesetSink>>, lossless:
         last_index = Some(item.frameset.index);
         let HandsOutcome { pose, hands, mut timings } = outcome.unwrap_or_else(|| {
             // It skipped the hands stage: the output stage is its pose consumer.
-            let (pose, waited) = shared.poses.pose_for(item.frameset.t_ns, pose_wait);
+            let (pose, waited) = shared.poses.pose_for(item.frameset.index, pose_wait);
             let mut timings = FrameTimings::downsampled(item.downsample_ms);
             timings.set_pose(pose.as_ref(), item.frameset.index, waited);
             HandsOutcome { pose, hands: None, timings }
@@ -480,9 +485,13 @@ fn downsample_loop(
             }
             SlamMode::Off => shared.poses.publish(SlamPose::untracked(item.frameset.index, item.frameset.t_ns, SlamStatus::Off)),
             SlamMode::Reference => {
-                let untracked = SlamPose::untracked(item.frameset.index, item.frameset.t_ns, SlamStatus::Reference);
-                let pose = reference.and_then(|r| r.at(item.frameset.t_ns));
-                shared.poses.publish(pose.map_or(untracked, |world_from_rig| SlamPose { world_from_rig, ok: true, ..untracked }));
+                if let Some(world_from_rig) = reference.and_then(|r| r.at(item.frameset.t_ns)) {
+                    let untracked = SlamPose::untracked(item.frameset.index, item.frameset.t_ns, SlamStatus::Reference);
+                    shared.poses.publish(SlamPose { world_from_rig, ok: true, ..untracked });
+                } else {
+                    // An absent catalog pose is a skip, not an identity estimate of this frame. Hold the last reference.
+                    shared.poses.progress(item.frameset.index);
+                }
             }
         }
         if hands_on {
@@ -555,8 +564,8 @@ struct Monitored {
     power: Vec<PowerSample>,
 }
 
-/// One line per second until every stage has finished; on a stop (a signal, the source's `--duration`, a stage failure) close every
-/// queue, and give up on stages still running [`SHUTDOWN_GRACE`] later.
+/// One line per second until every stage finishes. A stop drains input; a failure closes all queues.
+/// At the shutdown deadline, close all queues to wake remaining waiters and report stuck stages.
 fn monitor(shared: &Shared, handles: &[thread::JoinHandle<()>], config: &PipelineConfig, hands_on: bool) -> Monitored {
     let mut thread_cpu = ThreadCpu::default();
     let mut core_cpu = CoreCpu::default();
@@ -565,14 +574,23 @@ fn monitor(shared: &Shared, handles: &[thread::JoinHandle<()>], config: &Pipelin
     let mut monitored = Monitored { stuck: false, cpu_totals: Vec::new(), thread_totals: Default::default(), samples: 0, power: Vec::new() };
     let mut last_print = Instant::now();
     let mut stop_seen: Option<Instant> = None;
+    let mut aborted = false;
     while handles.iter().any(|h| !h.is_finished()) {
         thread::sleep(Duration::from_millis(50));
         if shared.stop.load(Ordering::Relaxed) {
-            let seen = *stop_seen.get_or_insert_with(|| {
+            if !aborted && lock(&shared.failed).is_some() {
                 shared.close_all();
+                aborted = true;
+                stop_seen = Some(Instant::now());
+            }
+            let seen = *stop_seen.get_or_insert_with(|| {
+                // A normal stop ends input, then lets SLAM drain/flush before hands and output finish.
+                // A stage failure needs the abort path to wake producers blocked behind that failed consumer.
+                shared.ds.close();
                 Instant::now()
             });
             if seen.elapsed() > SHUTDOWN_GRACE {
+                shared.close_all();
                 let alive: Vec<String> = handles.iter().filter(|h| !h.is_finished()).map(|h| h.thread().name().unwrap_or("?").to_owned()).collect();
                 eprintln!("robocap-live: stages {alive:?} did not end {} s after the stop; leaving them", SHUTDOWN_GRACE.as_secs());
                 monitored.stuck = true;
@@ -694,91 +712,6 @@ fn summary(shared: &Shared, monitored: Monitored) -> RunSummary {
         summary.thread_cpu_pct = monitored.thread_totals.into_iter().map(|(k, v)| (k, (v / samples * 10.0).round() / 10.0)).collect();
     }
     summary
-}
-
-/// The SLAM stage (A76): rate selection, IMU coverage, `Vio::track`, and the poses published for hands and output.
-fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config: SlamConfig, lossless: bool, imu_wait: Duration) -> Result<(), SchedError> {
-    let mut slam =
-        SlamEstimator::with_profile(&config.calibration, config.frontend_threads, config.profile, &config.overrides).map_err(|e| stage_error("slam", e))?;
-    let mut selector = RateSelector::new(config.hz, config.rate_tolerance_ns);
-    let mut last_t: Option<i64> = None;
-    let mut imu_open = true;
-    let push = |slam: &mut SlamEstimator, sample: ImuSample| slam.push_imu(&sample).map_err(|e| stage_error("slam", e));
-    let (stats, poses) = (&shared.stats, &shared.poses);
-    while let Some(item) = shared.slam.pop() {
-        let (index, t) = (item.frameset.index, item.frameset.t_ns);
-        while let Ok(sample) = imu.try_recv() {
-            push(&mut slam, sample)?;
-        }
-        if !selector.due(t) {
-            stats.with(|s| s.counters.slam_rate_skipped += 1);
-            poses.progress(t);
-            continue;
-        }
-        let cameras: Option<Vec<&kornia_image::Image<u8, 1>>> = SLAM_CAMERAS.iter().map(|&c| item.small[c].as_deref()).collect();
-        let Some(cameras) = cameras else {
-            stats.with(|s| s.counters.slam_missing_cameras += 1);
-            poses.progress(t);
-            continue;
-        };
-        if last_t.is_some_and(|last| t - last > config.reset_gap_ns) {
-            slam.reset().map_err(|e| stage_error("slam", e))?;
-            stats.with(|s| s.counters.slam_resets += 1);
-        }
-        let deadline = Instant::now() + imu_wait;
-        while !slam.imu_covers(t) && imu_open {
-            let next = if lossless {
-                imu.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-            } else {
-                imu.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            };
-            match next {
-                Ok(sample) => push(&mut slam, sample)?,
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => imu_open = false,
-            }
-        }
-        if !slam.imu_covers(t) {
-            stats.with(|s| s.counters.slam_imu_timeouts += 1);
-            poses.progress(t);
-            continue;
-        }
-        selector.selected(t);
-        last_t = Some(t);
-        let images = [cameras[0], cameras[1], cameras[2], cameras[3]];
-        let pose = match slam.track(index, t, images) {
-            Ok(pose) => pose,
-            Err(error) => {
-                shared.count_and_report(|c| &mut c.slam_failures, 5, 0, |_| format!("slam frameset {index}: {error}; resetting"));
-                slam.reset().map_err(|e| stage_error("slam", e))?;
-                stats.with(|s| s.counters.slam_resets += 1);
-                SlamPose { resets: slam.resets, ..SlamPose::untracked(index, t, SlamStatus::Failed) }
-            }
-        };
-        stats.record(Stage::Slam, pose.compute_ms);
-        if pose.compute_ms > 0.0 {
-            stats.record(Stage::SlamFrontend, pose.stages.frontend_ms);
-            stats.record(Stage::SlamOptimize, pose.stages.optimize_ms);
-            stats.record(Stage::SlamMarginalize, pose.stages.marginalize_ms);
-            stats.record(Stage::SlamPyramid, pose.stages.pyramid_ms);
-            stats.record(Stage::SlamDetect, pose.stages.detect_ms);
-            stats.record(Stage::SlamTrack, pose.stages.track_ms);
-            stats.record(Stage::SlamStereo, pose.stages.stereo_ms);
-            if pose.stages.keyframe {
-                stats.record(Stage::SlamKeyframe, pose.compute_ms);
-            }
-        }
-        stats.with(|s| {
-            *s.counters.slam_status.entry(pose.status.as_str()).or_default() += 1;
-            if pose.ok {
-                s.counters.slam_ok += 1;
-                s.slam_ok_window += 1;
-            }
-            s.counters.slam_imu_unordered = slam.imu_unordered;
-        });
-        poses.publish(pose);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

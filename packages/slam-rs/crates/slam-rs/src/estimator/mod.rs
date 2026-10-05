@@ -59,8 +59,8 @@ use crate::types::{
 pub use error::{EstimatorError, WindowRole};
 pub use report::{FlowObservations, FrameOutcome, FrameStats, StageTimings};
 
+use deferred::DeferredKeyframe;
 pub use deferred::DeferredKeyframeStats;
-use deferred::{DEFER_MIN_SUPPORT, DeferredKeyframe};
 pub use frame_update::{FrameUpdateDecline, FrameUpdateOutcome};
 use frame_update::{FrameUpdateResult, FrameUpdateScratch};
 use optimize::OptimizeScratch;
@@ -83,6 +83,9 @@ struct LmDamping<S: LieScalar> {
 
 /// The compile-time Nielsen escalation constants, both 2.0.
 const VEE_FACTOR: f64 = 2.0;
+
+/// Minimum landmark support for a world start or a deferred keyframe solve.
+pub(crate) const MIN_LANDMARK_SUPPORT: usize = 10;
 
 impl<S: LieScalar> LmDamping<S> {
     /// Nielsen's update after an accepted step.
@@ -493,7 +496,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     }
 
     /// Process one frameset synchronously.
-    /// Initialize from the first accelerometer sample if needed, then preintegrate
+    /// Initialize from the first accelerometer sample only when the first
+    /// keyframe hosts at least ten stereo landmarks; otherwise consume the
+    /// frameset without a state. Once initialized, preintegrate
     /// `(prev_t, curr_t]` using the previous state's biases and call `measure`.
     /// Return [`FrameOutcome::NeedMoreImu`] without mutation when coverage does not
     /// extend past the frameset. Arrival order must not affect decisions (D17).
@@ -546,7 +551,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         let mut meas: Option<IntegratedImuMeasurement<S>> = None;
 
-        if !self.initialized {
+        let initializing = !self.initialized;
+        if initializing {
             // skip forward to the frameset, then take that sample's
             // accelerometer reading as the whole initialization.
             //
@@ -567,7 +573,13 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             // zero velocity, zero translation, and the rotation that
             // takes the measured acceleration onto +Z.
             let vel_w_i_init: Vector3<S> = Vector3::zeros();
-            self.t_w_i_init = Se3::new(gravity_from_first_accel(&accel), Vector3::zeros());
+            let initial_pose = Se3::new(gravity_from_first_accel(&accel), Vector3::zeros());
+            if self.count_initial_landmarks(&frame, initial_pose)? < MIN_LANDMARK_SUPPORT {
+                self.frame_count += 1;
+                self.prev_frame = Some(frame);
+                return Ok(FrameOutcome::NoVisualFeatures);
+            }
+            self.t_w_i_init = initial_pose;
 
             self.last_state_t_ns = frame.t_ns;
             self.imu_meas.insert(
@@ -627,6 +639,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let integration_ns: u64 = duration_ns(predict_started);
         let mut stats: FrameStats<S> = self.measure(Arc::clone(&frame), meas)?;
         stats.timings.predict_ns += integration_ns;
+        if initializing {
+            log::info!(
+                "slam-rs: world started at frameset {} (t_ns={}), landmarks={}",
+                self.frame_count - 1,
+                frame.t_ns,
+                stats.num_points_added
+            );
+        }
         // and only on success.
         self.prev_frame = Some(frame);
         Ok(FrameOutcome::Measured(Box::new(stats)))
@@ -759,8 +779,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             && self.config.port_keyframe_solve_deferred
             && self.config.port_frame_update_max_iterations > 0
             && self.opt_started
-            && self.ba.lmdb.num_landmarks() >= DEFER_MIN_SUPPORT
-            && connected.iter().sum::<usize>() >= DEFER_MIN_SUPPORT
+            && self.ba.lmdb.num_landmarks() >= MIN_LANDMARK_SUPPORT
+            && connected.iter().sum::<usize>() >= MIN_LANDMARK_SUPPORT
         {
             let optimize_started = std::time::Instant::now();
             self.frame_update(frame.t_ns)?
@@ -859,6 +879,19 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         // read off the window the two stages above left behind.
         Ok(FrameStats {
             t_ns: frame.t_ns,
+            visually_supported: self.ba.lmdb.num_landmarks() >= MIN_LANDMARK_SUPPORT
+                && connected.iter().sum::<usize>() >= MIN_LANDMARK_SUPPORT
+                && self.opt_started
+                && self.state().is_some_and(|state| {
+                    state.t_w_i.translation.iter().all(|v| v.is_finite())
+                        && state
+                            .t_w_i
+                            .rotation
+                            .quaternion()
+                            .coords
+                            .iter()
+                            .all(|v| v.is_finite())
+                }),
             connected,
             unconnected,
             took_keyframe,

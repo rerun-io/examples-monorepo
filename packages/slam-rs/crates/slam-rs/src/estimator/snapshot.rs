@@ -59,7 +59,7 @@ pub struct SnapshotLandmark<S: LieScalar> {
 ///
 /// `getAllPosesMap`, `get_current_points` and the `VioVisualizationData` fields
 ///  collapsed into one value the caller reads once per frame. The
-/// core logs nothing itself (D03).
+/// core emits no visualization data itself (D03).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowSnapshot<S: LieScalar> {
     /// Frameset timestamp of the newest state.

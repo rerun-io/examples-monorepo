@@ -26,7 +26,32 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         frame: &FlowObservations,
         unconnected_obs: &[BTreeSet<KeypointId>],
     ) -> Result<usize, EstimatorError> {
+        self.triangulate(frame, unconnected_obs, None)
+    }
+
+    /// Count first-frame stereo landmarks before creating any window state.
+    /// Use the same pair ordering and arithmetic as committed triangulation.
+    pub(super) fn count_initial_landmarks(
+        &mut self,
+        frame: &FlowObservations,
+        pose: Se3<S>,
+    ) -> Result<usize, EstimatorError> {
+        let unconnected: Vec<_> = frame
+            .cameras
+            .iter()
+            .map(|pixels| pixels.keys().copied().collect())
+            .collect();
+        self.triangulate(frame, &unconnected, Some(pose))
+    }
+
+    fn triangulate(
+        &mut self,
+        frame: &FlowObservations,
+        unconnected_obs: &[BTreeSet<KeypointId>],
+        initial_pose: Option<Se3<S>>,
+    ) -> Result<usize, EstimatorError> {
         debug_assert_eq!(unconnected_obs.len(), self.ba.calib.t_i_c.len());
+        let mut initial_ids = BTreeSet::new();
         // the squared threshold is formed in `double` and cast, so the
         // `f32` instantiation compares against `(float)(0.05 * 0.05)`.
         let min_triang_distance2: S = S::from_literal(
@@ -35,11 +60,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let mut num_points_added: usize = 0;
         // 's `T_i0_inv`: the host is this frameset, for every landmark
         // and every pair.
-        let t_i0_inv: Se3<S> = self
-            .ba
-            .get_pose_state_with_lin(frame.t_ns)?
-            .pose()
-            .inverse();
+        let host_pose = match initial_pose {
+            Some(pose) => pose,
+            None => *self.ba.get_pose_state_with_lin(frame.t_ns)?.pose(),
+        };
+        let t_i0_inv = host_pose.inverse();
 
         for (cam_id, ids) in unconnected_obs.iter().enumerate() {
             let tcidl: TimeCamId = TimeCamId::new(frame.t_ns, cam_id);
@@ -50,7 +75,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 let lm_id: LandmarkId = LandmarkId::from(*kpt_id);
                 // another camera of this frameset may have hosted it
                 // already.
-                if self.ba.lmdb.landmark_exists(lm_id) {
+                if self.ba.lmdb.landmark_exists(lm_id) || initial_ids.contains(&lm_id) {
                     continue;
                 }
                 // 's `.at(lm_id)`: `measure` took this id out of
@@ -66,11 +91,16 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
                 // Visit every image of this id in the live window in `TimeCamId` order.
                 let mut kp_obs: BTreeMap<TimeCamId, Vector2<S>> = BTreeMap::new();
-                for (other_t_ns, other) in &self.prev_opt_flow_res {
+                for other in self
+                    .prev_opt_flow_res
+                    .values()
+                    .map(|other| &**other)
+                    .chain(initial_pose.map(|_| frame))
+                {
                     for (other_cam, keypoints) in other.cameras.iter().enumerate() {
                         if let Some(pixel) = keypoints.get(kpt_id) {
                             kp_obs.insert(
-                                TimeCamId::new(*other_t_ns, other_cam),
+                                TimeCamId::new(other.t_ns, other_cam),
                                 cast_pixel::<S>(pixel),
                             );
                         }
@@ -90,8 +120,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                         continue;
                     }
 
-                    let other_pose: Se3<S> =
-                        *self.ba.get_pose_state_with_lin(tcido.frame_id)?.pose();
+                    let other_pose = match initial_pose {
+                        Some(pose) => pose,
+                        None => *self.ba.get_pose_state_with_lin(tcido.frame_id)?.pose(),
+                    };
                     let t_i0_i1: Se3<S> = t_i0_inv * other_pose;
                     let t_0_1: Se3<S> = t_i_c0_inv * t_i0_i1 * self.ba.calib.t_i_c[tcido.cam_id];
 
@@ -128,8 +160,15 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
 
                 if let Some(landmark) = accepted {
-                    self.ba.lmdb.add_landmark(lm_id, &landmark);
                     num_points_added += 1;
+                    if initial_pose.is_some() {
+                        if num_points_added >= super::MIN_LANDMARK_SUPPORT {
+                            return Ok(num_points_added);
+                        }
+                        initial_ids.insert(lm_id);
+                        continue;
+                    }
+                    self.ba.lmdb.add_landmark(lm_id, &landmark);
                     for (tcido, pixel) in &kp_obs {
                         self.ba.lmdb.add_observation(*tcido, lm_id, *pixel)?;
                     }

@@ -50,7 +50,7 @@ pub fn config(deferred: bool) -> VioConfig {
 }
 
 /// The rig's true position (world = initial rig frame: gravity along -z, no rotation).
-fn position(t_s: f64) -> Vector3<f64> {
+pub fn position(t_s: f64) -> Vector3<f64> {
     let axis = |k: usize| {
         let w = 2.0 * std::f64::consts::PI / PERIOD_S[k];
         AMPLITUDE_M[k] * (1.0 - (w * t_s).cos())
@@ -59,7 +59,7 @@ fn position(t_s: f64) -> Vector3<f64> {
 }
 
 /// The rig's true acceleration, world frame.
-fn acceleration(t_s: f64) -> Vector3<f64> {
+pub fn acceleration(t_s: f64) -> Vector3<f64> {
     let axis = |k: usize| {
         let w = 2.0 * std::f64::consts::PI / PERIOD_S[k];
         AMPLITUDE_M[k] * w * w * (w * t_s).cos()

@@ -14,6 +14,7 @@
 //! runtime's `--slam-set` keys, `--cpus` its CPU lists. `--profile` picks the VIO profile the `--set` keys apply on top of
 //! (default `live`, the runtime's).
 
+use slam_rs::replay::{feed_imu_through, percentile};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -164,24 +165,12 @@ fn quantiles(values: &[f64]) -> serde_json::Value {
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
-    let q = |p: f64| sorted[((sorted.len() - 1) as f64 * p).round() as usize];
+    let q = |p: f64| percentile(&sorted, p);
     serde_json::json!({
         "count": sorted.len(),
         "mean": sorted.iter().sum::<f64>() / sorted.len() as f64,
         "p50": q(0.5), "p95": q(0.95), "p99": q(0.99), "max": q(1.0),
     })
-}
-
-/// Feed every IMU sample up to and including the first one past `t_ns`.
-fn feed_imu(imu: &[ImuSample], next: &mut usize, t_ns: i64, mut push: impl FnMut(&ImuSample) -> Result<(), Error>) -> Result<(), Error> {
-    while let Some(sample) = imu.get(*next) {
-        push(sample)?;
-        *next += 1;
-        if sample.t_ns > t_ns {
-            break;
-        }
-    }
-    Ok(())
 }
 
 fn run(args: &Args, calibration: &str, frames: &[Frame], imu: &[ImuSample]) -> Result<(Vec<SlamPose>, f64), Error> {
@@ -190,9 +179,14 @@ fn run(args: &Args, calibration: &str, frames: &[Frame], imu: &[ImuSample]) -> R
     let started = Instant::now();
     let mut slam = SlamEstimator::with_profile(calibration, args.threads, args.profile, &args.overrides)?;
     for frame in frames {
-        feed_imu(imu, &mut next_imu, frame.t_ns, |s| Ok(slam.push_imu(s)?))?;
+        feed_imu_through(imu, &mut next_imu, frame.t_ns, |s| s.t_ns, |s| slam.push_imu(s))?;
         let images = [&*frame.images[0], &*frame.images[1], &*frame.images[2], &*frame.images[3]];
-        poses.push(slam.track(frame.index, frame.t_ns, images)?);
+        if let Some(pose) = slam.track(frame.index, frame.t_ns, images)? {
+            poses.push(pose);
+        }
+    }
+    if let Some(pose) = slam.flush()? {
+        poses.push(pose);
     }
     Ok((poses, started.elapsed().as_secs_f64()))
 }

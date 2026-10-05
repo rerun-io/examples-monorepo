@@ -10,9 +10,13 @@
 //!   `world_from_rig` is directly `world_from_rig` for `/world/rig_00` and for the hands' rig extrinsics (`Rig::cam_from_rig`).
 //! - slam-rs's world frame: z opposite gravity (the first accel sample at or after the first frameset is rotated onto +z by
 //!   the minimal rotation, so yaw is the IMU's heading then), origin at the rig position at initialisation, metres. After a
-//!   reset (a gap of [`SlamConfig::reset_gap_ns`] in time, e.g. a replay loop) a new world starts.
+//!   reset (backwards time, a gap longer than [`RESET_GAP_NS`], or an estimator error) a new world starts.
 //! - Times are integer nanoseconds on one clock for frames and IMU (CLOCK_MONOTONIC live; the dump's times in replay); the
 //!   calibration's `cam_time_offset_ns` is 0.
+
+mod reference;
+
+pub use reference::ReferencePoses;
 
 use std::time::Instant;
 
@@ -21,9 +25,9 @@ use nalgebra::Isometry3;
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
-use slam_rs::{ImageView, Vio, VioStatus};
+use slam_rs::{ImageView, Vio, VioResult, VioStatus};
 
-use crate::frame::{ImuSample, SLAM_CAMERAS, SMALL_SIZE, isometry_from_array, isometry_from_matrix};
+use crate::frame::{ImuSample, SLAM_CAMERAS, SMALL_SIZE, isometry_from_array};
 
 /// Cap A's 4-camera calibration at 640x360 (Basalt JSON, KB4, `T_imu_cam`), as PR #270 embeds it.
 pub const CAP_A_CALIBRATION: &str = include_str!("../../../../slam-rs/configs/robocap_calib_downscale3.json");
@@ -58,6 +62,9 @@ pub enum SlamMode {
     Reference,
 }
 
+/// A longer gap between accepted framesets starts a new world.
+pub const RESET_GAP_NS: i64 = 3_000_000_000;
+
 /// Settings of the SLAM stage.
 #[derive(Clone, Debug)]
 pub struct SlamConfig {
@@ -68,8 +75,6 @@ pub struct SlamConfig {
     pub rate_tolerance_ns: i64,
     /// slam-rs frontend threads.
     pub frontend_threads: usize,
-    /// A gap this long between selected framesets restarts the estimator (new world).
-    pub reset_gap_ns: i64,
     /// The VIO profile ([`SlamProfile::Live`] by default).
     pub profile: SlamProfile,
     /// VIO configuration keys set after the profile, e.g. `("config.optical_flow_max_iterations", 4)`.
@@ -84,7 +89,6 @@ impl Default for SlamConfig {
             hz: 30.0,
             rate_tolerance_ns: 4_000_000,
             frontend_threads: 2,
-            reset_gap_ns: 250_000_000,
             profile: SlamProfile::Live,
             overrides: Vec::new(),
             calibration: CAP_A_CALIBRATION.to_string(),
@@ -126,8 +130,14 @@ pub struct SlamEstimator {
     calibration: Calibration<f64>,
     config: VioConfig,
     threads: usize,
+    /// Source identity of the one accepted frame waiting in the core's lag slot.
+    pending: Option<u64>,
+    last_compute_ms: f64,
+    last_stages: SlamStages,
     /// IMU samples dropped because they did not follow the previous one.
     pub imu_unordered: u64,
+    /// Accepted frames buffered without returning a pose.
+    pub buffered: u64,
     /// Estimator restarts.
     pub resets: u64,
 }
@@ -214,6 +224,26 @@ fn profile_config(profile: SlamProfile, overrides: &[(String, serde_json::Value)
 }
 
 impl SlamEstimator {
+    /// Whether this estimator delays publication by one accepted frameset.
+    pub fn frontend_lag(&self) -> bool {
+        self.config.port_frontend_lag
+    }
+
+    /// Frontend workers actually configured, including after fallback.
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Source index of the oldest accepted frame whose pose is still pending.
+    pub fn pending_index(&self) -> Option<u64> {
+        self.pending
+    }
+
+    /// Wall time and stages of the last track/flush call, including buffering; see [`SlamStages`].
+    pub fn last_call(&self) -> (f64, SlamStages) {
+        (self.last_compute_ms, self.last_stages)
+    }
+
     /// A 4-camera 640x360 Basalt calibration (`calibration_json`, e.g. [`CAP_A_CALIBRATION`]) with [`MSDMO_CONFIG`], then
     /// `profile`'s overlay, then `overrides` (keys as in the Basalt JSON's `value0`, e.g. `config.optical_flow_max_iterations` or
     /// `port.keyframe_solve_deferred`; a bare key is a `config.` one, and `config.port.X` is read as `port.X`), with `threads`
@@ -245,7 +275,18 @@ impl SlamEstimator {
             return Err(SlamError::Config(format!("expected four 640x360 cameras, got {:?}", calibration.resolution)));
         }
         let vio = Self::build(&calibration, &config, threads)?;
-        Ok(Self { vio, calibration, config, threads, imu_unordered: 0, resets: 0 })
+        Ok(Self {
+            vio,
+            calibration,
+            config,
+            threads,
+            pending: None,
+            last_compute_ms: 0.0,
+            last_stages: SlamStages::default(),
+            imu_unordered: 0,
+            buffered: 0,
+            resets: 0,
+        })
     }
 
     fn build(calibration: &Calibration<f64>, config: &VioConfig, threads: usize) -> Result<Vio<f32>, SlamError> {
@@ -259,7 +300,10 @@ impl SlamEstimator {
     ///
     /// [`SlamError`] if slam-rs refuses the (unchanged) configuration.
     pub fn reset(&mut self) -> Result<(), SlamError> {
+        self.pending = None;
         self.vio = Self::build(&self.calibration, &self.config, self.threads)?;
+        self.last_compute_ms = 0.0;
+        self.last_stages = SlamStages::default();
         self.resets += 1;
         Ok(())
     }
@@ -284,32 +328,61 @@ impl SlamEstimator {
         self.vio.last_imu_t_ns().is_some_and(|last| last > t_ns)
     }
 
-    /// Track one frameset: `images` are the 640x360 small images of cameras `[4, 0, 1, 5]`, in that order.
+    /// Track one frameset: `images` are cameras `[4, 0, 1, 5]` at 640x360. Returns no pose on buffering or IMU refusal.
+    /// With lag, the returned pose belongs to the previous accepted input, identified by its own index and timestamp.
     ///
     /// # Errors
     ///
     /// [`SlamError::Input`] for a wrong image size; [`SlamError::Vio`] when slam-rs fails (the caller resets).
-    pub fn track(&mut self, index: u64, t_ns: i64, images: [&Image<u8, 1>; 4]) -> Result<SlamPose, SlamError> {
+    pub fn track(&mut self, index: u64, t_ns: i64, images: [&Image<u8, 1>; 4]) -> Result<Option<SlamPose>, SlamError> {
         if images.iter().any(|image| image.size() != SMALL_SIZE) {
             return Err(SlamError::Input("SLAM images must be 640x360".into()));
         }
-        let views: [ImageView<'_>; 4] = images.map(|image| ImageView {
-            width: image.width(),
-            height: image.height(),
-            stride: image.width(),
-            data: image.as_slice(),
-        });
+        fn view(image: &Image<u8, 1>) -> ImageView<'_> {
+            ImageView { width: image.width(), height: image.height(), stride: image.width(), data: image.as_slice() }
+        }
+        let views = images.map(view);
         let started = Instant::now();
         let result = self.vio.track(t_ns, &views)?;
-        let compute_ms = started.elapsed().as_secs_f64() * 1e3;
-        let stats = self.vio.last_stats();
-        let landmarks = stats.map_or(0, |s| s.num_landmarks);
-        let tracked: usize = stats.map_or(0, |s| s.connected.iter().sum());
-        let optimised = stats.is_some_and(|s| s.opt_started);
-        let finite = result.pose.is_some_and(|pose| pose.world_from_rig.iter().all(|v| v.is_finite()));
-        let frontend = self.vio.frontend_timings();
+        self.last_compute_ms = started.elapsed().as_secs_f64() * 1e3;
+        if result.status == VioStatus::NeedMoreImu {
+            self.last_stages = SlamStages::default();
+            return Ok(None);
+        }
+        self.last_stages = self.call_stages(false, result.status == VioStatus::Tracking);
+        if result.status == VioStatus::Buffered {
+            self.buffered += 1;
+        }
+        let completed_index = self.pending.take().unwrap_or(index);
+        if self.vio.pending_t_ns().is_some() {
+            self.pending = Some(index);
+        }
+        Ok(self.pose(completed_index, result))
+    }
+
+    /// Publish the last accepted pose exactly once, including on stream end or stop.
+    ///
+    /// # Errors
+    /// The estimator failed; reset before further input.
+    pub fn flush(&mut self) -> Result<Option<SlamPose>, SlamError> {
+        let started = Instant::now();
+        let result = self.vio.flush()?;
+        self.last_compute_ms = started.elapsed().as_secs_f64() * 1e3;
+        self.last_stages = self.call_stages(true, result.is_some());
+        match result {
+            Some(result) => {
+                let index = self.pending.take().ok_or_else(|| SlamError::Input("SLAM flush has no pending input".into()))?;
+                Ok(self.pose(index, result))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn call_stages(&self, flushing: bool, estimated: bool) -> SlamStages {
+        let stats = if estimated { self.vio.last_stats() } else { None };
+        let frontend = if flushing { Default::default() } else { self.vio.frontend_timings() };
         let ms = |ns: u64| ns as f64 / 1e6;
-        let stages = SlamStages {
+        SlamStages {
             frontend_ms: ms(frontend.flow.pyramid_ns + frontend.flow.detect_ns + frontend.flow.track_ns + frontend.flow.stereo_ns + frontend.imu_ns),
             optimize_ms: stats.map_or(0.0, |s| ms(s.timings.optimize_ns)),
             marginalize_ms: stats.map_or(0.0, |s| ms(s.timings.marginalize_ns)),
@@ -322,59 +395,42 @@ impl SlamEstimator {
             deferred_ms: self.vio.last_deferred_keyframe().map_or(0.0, |d| ms(d.timings.measure_ns)),
             deferred_wait_ms: ms(self.vio.deferred_wait_ns()),
             keyframe_deferred: stats.is_some_and(|s| s.keyframe_deferred),
+        }
+    }
+
+    fn pose(&self, index: u64, result: VioResult) -> Option<SlamPose> {
+        if matches!(result.status, VioStatus::Buffered | VioStatus::NeedMoreImu) {
+            return None;
+        }
+        let t_ns = result.t_ns;
+        let Some(estimate) = result.pose else {
+            return Some(SlamPose {
+                compute_ms: self.last_compute_ms,
+                stages: self.last_stages,
+                resets: self.resets,
+                ..SlamPose::untracked(index, t_ns, SlamStatus::NoVisualFeatures)
+            });
         };
-        let status = match result.status {
-            VioStatus::NeedMoreImu => SlamStatus::WaitingForImu,
-            VioStatus::Tracking if landmarks >= 10 && tracked >= 10 && optimised && finite => SlamStatus::Tracking,
-            VioStatus::Tracking | VioStatus::Buffered | VioStatus::NoVisualFeatures => SlamStatus::NoVisualFeatures,
-        };
-        let world_from_rig = result.pose.filter(|_| finite).map_or_else(Isometry3::identity, |pose| isometry_from_array(&pose.world_from_rig));
-        Ok(SlamPose {
+        let stats = self.vio.last_stats();
+        let landmarks = stats.map_or(0, |s| s.num_landmarks);
+        let tracked: usize = stats.map_or(0, |s| s.connected.iter().sum());
+        let optimised = stats.is_some_and(|s| s.opt_started);
+        let finite = estimate.world_from_rig.iter().all(|v| v.is_finite());
+        let status = if stats.is_some_and(|s| s.visually_supported) { SlamStatus::Tracking } else { SlamStatus::NoVisualFeatures };
+        let world_from_rig = if finite { isometry_from_array(&estimate.world_from_rig) } else { Isometry3::identity() };
+        Some(SlamPose {
             index,
             t_ns,
             world_from_rig,
             ok: status == SlamStatus::Tracking,
             status,
-            compute_ms,
+            compute_ms: self.last_compute_ms,
             landmarks,
             tracked,
             optimised,
-            stages,
+            stages: self.last_stages,
             resets: self.resets,
         })
-    }
-}
-
-/// Looks up the dump's reference poses by time (`--slam reference`), undoing a replay loop's time shift.
-pub struct ReferencePoses {
-    poses: Vec<(i64, [f64; 16])>,
-    first_t_ns: i64,
-    span_ns: Option<i64>,
-}
-
-impl ReferencePoses {
-    /// `poses` from `read_reference_poses`; `first_t_ns` and `span_ns` from the replay (loop shift = k * span).
-    pub fn new(mut poses: Vec<(i64, [f64; 16])>, first_t_ns: i64, span_ns: Option<i64>) -> Self {
-        // Framesets without a reference pose carry NaN rows in the dump (s66-full: 7 of 1362): drop them.
-        poses.retain(|(_, matrix)| matrix.iter().all(|v| v.is_finite()));
-        poses.sort_by_key(|(t, _)| *t);
-        Self { poses, first_t_ns, span_ns }
-    }
-
-    /// The reference pose within 2 ms of `t_ns`, if any.
-    pub fn at(&self, t_ns: i64) -> Option<Isometry3<f64>> {
-        let t = match self.span_ns {
-            Some(span) if span > 0 && t_ns >= self.first_t_ns => self.first_t_ns + (t_ns - self.first_t_ns) % span,
-            _ => t_ns,
-        };
-        let at = self.poses.partition_point(|(pose_t, _)| *pose_t < t);
-        [at.checked_sub(1), Some(at)]
-            .into_iter()
-            .flatten()
-            .filter_map(|i| self.poses.get(i))
-            .filter(|(pose_t, _)| (pose_t - t).abs() <= 2_000_000)
-            .min_by_key(|(pose_t, _)| (pose_t - t).abs())
-            .and_then(|(_, matrix)| isometry_from_matrix(matrix))
     }
 }
 
@@ -385,6 +441,53 @@ mod tests {
     use slam_rs::lie::{Se3, So3};
 
     use super::*;
+
+    #[test]
+    fn lag_buffers_then_returns_the_previous_frame_and_flushes_once() -> Result<(), Box<dyn std::error::Error>> {
+        let mut slam = SlamEstimator::with_profile(CAP_A_CALIBRATION, 1, SlamProfile::Live, &[parse_override("port.frontend_lag=true")?])?;
+        let image = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
+        for tick in 0..50 {
+            slam.push_imu(&ImuSample { t_ns: 1_000_000_000 + tick * 5_000_000, gyro: [0.0; 3], accel: [0.0, 0.0, 9.81] })?;
+        }
+        assert!(slam.track(7, 1_010_000_000, [&image; 4])?.is_none());
+        assert_eq!(slam.vio.pending_t_ns(), Some(1_010_000_000));
+        assert_eq!(slam.buffered, 1);
+        let previous = slam.track(19, 1_040_000_000, [&image; 4])?.ok_or("no previous pose")?;
+        assert_eq!((previous.index, previous.t_ns), (7, 1_010_000_000));
+        assert_eq!(previous.status, SlamStatus::NoVisualFeatures);
+        assert!(!previous.ok && !previous.optimised);
+        assert!(slam.vio.estimator().state().is_none(), "blank input must not create a world");
+        assert_eq!(slam.vio.pending_t_ns(), Some(1_040_000_000));
+        let last = slam.flush()?.ok_or("no final pose")?;
+        assert_eq!((last.index, last.t_ns), (19, 1_040_000_000));
+        assert_eq!(last.status, SlamStatus::NoVisualFeatures);
+        assert!(slam.vio.estimator().state().is_none());
+        assert_eq!(last.stages.frontend_ms, 0.0, "flush does no frontend work");
+        assert!(slam.flush()?.is_none());
+        assert!(slam.vio.pending_t_ns().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn lag_reset_after_a_refused_frame_drops_the_old_pending_pose() -> Result<(), Box<dyn std::error::Error>> {
+        let mut slam = SlamEstimator::with_profile(CAP_A_CALIBRATION, 1, SlamProfile::Live, &[parse_override("port.frontend_lag=true")?])?;
+        let image = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
+        for first in [1_000_000_000, 2_000_000_000] {
+            for tick in 0..20 {
+                slam.push_imu(&ImuSample { t_ns: first + tick * 5_000_000, gyro: [0.0; 3], accel: [0.0, 0.0, 9.81] })?;
+            }
+            assert!(slam.track(42, first + 10_000_000, [&image; 4])?.is_none());
+            assert!(slam.track(99, first + 10_000_000, [&image; 4]).is_err(), "duplicate timestamp is refused");
+            slam.reset()?;
+            assert!(slam.vio.pending_t_ns().is_none());
+            assert!(slam.flush()?.is_none(), "neither the old nor refused frame may be published after reset");
+        }
+        assert_eq!(slam.resets, 2);
+        // IMU refusal must not reserve an index that could get attached to a later estimate.
+        assert!(slam.track(500, 3_000_000_000, [&image; 4])?.is_none());
+        assert!(slam.vio.pending_t_ns().is_none());
+        Ok(())
+    }
 
     /// Each profile is its overlay over MSDMO_CONFIG; live30 is live with a 70 px grid; the names round-trip.
     #[test]
@@ -426,7 +529,10 @@ mod tests {
         for key in ["config.optical_flow_max_iterations", "optical_flow_max_iterations"] {
             assert_eq!(profile_config(SlamProfile::Live, &four(key))?.optical_flow_max_iterations, 4, "{key}");
         }
-        assert!(matches!(SlamEstimator::with_profile(CAP_A_CALIBRATION, 1, SlamProfile::Live, &off("config.no_such_key")), Err(SlamError::Config(_))));
+        assert!(matches!(
+            SlamEstimator::with_profile(CAP_A_CALIBRATION, 1, SlamProfile::Live, &off("config.no_such_key")),
+            Err(SlamError::Config(_))
+        ));
         Ok(())
     }
 
@@ -457,7 +563,8 @@ mod tests {
             m[3] = x;
             m
         };
-        let reference = ReferencePoses::new(vec![(1_000, pose(1.0)), (34_000_000, pose(2.0)), (60_000_000, [f64::NAN; 16])], 1_000, Some(100_000_000));
+        let reference =
+            ReferencePoses::new(vec![(1_000, pose(1.0)), (34_000_000, pose(2.0)), (60_000_000, [f64::NAN; 16])], 1_000, Some(100_000_000));
         let x = |t: i64| reference.at(t).map(|p| p.translation.x);
         assert_eq!(x(1_500_000), Some(1.0));
         assert_eq!(x(34_000_000 + 100_000_000 + 1_000_000), Some(2.0));
@@ -505,13 +612,12 @@ mod tests {
     /// cameras 8 cm apart, a stationary IMU; the estimator must stay within 2 cm of its origin.
     #[test]
     fn a_known_stationary_textured_rig_stays_at_its_origin() -> Result<(), Box<dyn std::error::Error>> {
+        let blank = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
         let mut calibration = Calibration::<f64>::from_json_str(CAP_A_CALIBRATION)?;
         for camera in 0..4 {
             calibration.t_i_c[camera] = Se3::new(So3::identity(), [camera as f64 * 0.08, 0.0, 0.0].into());
             calibration.intrinsics[camera] = CameraModel::Pinhole(PinholeParams { fx: 300.0, fy: 300.0, cx: 320.0, cy: 180.0 });
         }
-        let config = VioConfig::from_json_str(MSDMO_CONFIG)?;
-        let mut slam = SlamEstimator::with_configuration(calibration, config, 4)?;
         let images: Vec<Image<u8, 1>> = (0..4usize)
             .map(|camera| {
                 let pixels = (0..640 * 360)
@@ -525,24 +631,39 @@ mod tests {
                 Image::new(SMALL_SIZE, pixels)
             })
             .collect::<Result<_, _>>()?;
-        let mut poses = Vec::new();
-        let mut index = 0;
-        for tick in 0..=1200_i64 {
-            let t = 1_000_000_000 + tick * 5_000_000;
-            slam.push_imu(&ImuSample { t_ns: t, gyro: [0.0; 3], accel: [0.0, 0.0, 9.81] })?;
-            if tick % 14 == 8 {
-                let frame_t = t - 6_000_000;
-                assert!(slam.imu_covers(frame_t));
-                let pose = slam.track(index, frame_t, [&images[0], &images[1], &images[2], &images[3]])?;
-                index += 1;
-                if pose.ok {
-                    poses.push(pose.world_from_rig.translation.vector.norm());
+        for lag in [false, true] {
+            let mut config = VioConfig::from_json_str(MSDMO_CONFIG)?;
+            config.port_frontend_lag = lag;
+            let mut slam = SlamEstimator::with_configuration(calibration.clone(), config, 2)?;
+            let mut poses = Vec::new();
+            let mut submitted = Vec::new();
+            for tick in 0..=1200_i64 {
+                let t = 1_000_000_000 + tick * 5_000_000;
+                slam.push_imu(&ImuSample { t_ns: t, gyro: [0.0; 3], accel: [0.0, 0.0, 9.81] })?;
+                if tick % 14 == 8 {
+                    let frame_t = t - 6_000_000;
+                    let index = submitted.len() as u64 * 3; // Source indices can have holes after rate selection/drops.
+                    let views = if submitted.len() < 3 { [&blank; 4] } else { [&images[0], &images[1], &images[2], &images[3]] };
+                    assert!(slam.imu_covers(frame_t));
+                    submitted.push((index, frame_t));
+                    if let Some(pose) = slam.track(index, frame_t, views)? {
+                        assert_eq!((pose.index, pose.t_ns), submitted[poses.len()]);
+                        poses.push(pose);
+                    }
+                    assert_eq!(poses.len(), submitted.len() - usize::from(lag));
                 }
             }
+            if let Some(pose) = slam.flush()? {
+                poses.push(pose);
+            }
+            assert_eq!(poses.iter().map(|p| (p.index, p.t_ns)).collect::<Vec<_>>(), submitted);
+            assert!(poses[..3].iter().all(|p| !p.ok && p.landmarks == 0 && p.status == SlamStatus::NoVisualFeatures));
+            assert!(poses[3].landmarks >= 10, "the first textured frame starts the world with its own index");
+            let supported: Vec<_> = poses.iter().filter(|p| p.ok).collect();
+            assert!(supported.len() > 60, "lag={lag}: insufficient visually supported poses: {}", supported.len());
+            let largest = supported.iter().map(|p| p.world_from_rig.translation.vector.norm()).fold(0.0f64, f64::max);
+            assert!(largest < 0.02, "lag={lag}: stationary rig moved {largest} m");
         }
-        assert!(poses.len() > 60, "insufficient visually supported poses: {}", poses.len());
-        let largest = poses.iter().cloned().fold(0.0f64, f64::max);
-        assert!(largest < 0.02, "stationary rig moved {largest} m");
         Ok(())
     }
 }

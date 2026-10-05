@@ -6,13 +6,14 @@
 
 mod pipeline;
 pub use pipeline::{
-    Backend, FrontendLane, FrontendTimings, ImageView, PreparedTrack, Vio, VioError, VioPose,
-    VioResult, VioStatus, check_imu_sample,
+    Backend, FrontendLane, FrontendTimings, ImageView, OverlapTimings, PreparedTrack, Vio,
+    VioError, VioPose, VioResult, VioStatus, check_imu_sample,
 };
 
 pub mod ba_base;
 pub mod calib;
 pub mod camera;
+pub mod catalog_timing;
 pub mod config;
 pub mod estimator;
 pub mod frontend;
@@ -35,6 +36,7 @@ pub mod lie;
 pub mod linearize;
 pub mod marg;
 pub mod pyramid;
+pub mod replay;
 pub mod types;
 
 /// Version of the core, as declared in `crates/slam-rs/Cargo.toml`.

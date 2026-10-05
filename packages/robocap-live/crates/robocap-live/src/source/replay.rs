@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use super::{FrameSource, SourceError, SourceEvent};
 use crate::frame::{DumpMeta, FULL_SIZE, FrameError, FrameReader, Frameset, ImuSample, Rig, read_imu};
 
-/// Time inserted between the end of one loop and the start of the next.
-pub const LOOP_GAP_NS: i64 = 500_000_000;
+/// Time inserted between loops; exceeds the default SLAM world reset limit of 3 s.
+pub const LOOP_GAP_NS: i64 = crate::slam::RESET_GAP_NS + 500_000_000;
 /// Bytes of one `reference_world_from_rig.bin` record: `i64 t_ns` + 16 `f64` (row-major).
 pub const REFERENCE_RECORD_BYTES: usize = 8 + 16 * 8;
 

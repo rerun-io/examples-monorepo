@@ -18,7 +18,7 @@ use crate::slam::SlamPose;
 pub struct FrameTimings {
     /// Small images of the frameset.
     pub downsample_ms: f64,
-    /// `Vio::track` of the pose used, when it was this frameset's own.
+    /// The call that produced this frameset's own pose; see [`crate::slam::SlamStages`].
     pub slam_ms: f64,
     /// Of `slam_ms`: the frontend.
     pub slam_frontend_ms: f64,
@@ -155,6 +155,8 @@ struct RecordHand {
 struct RecordLine<'a> {
     index: u64,
     t_ns: i64,
+    slam_index: Option<u64>,
+    slam_t_ns: Option<i64>,
     world_from_rig: [f64; 16],
     slam_ok: bool,
     slam_status: &'a str,
@@ -210,6 +212,8 @@ impl FramesetSink for RecordWriter {
         let line = RecordLine {
             index: record.frameset.index,
             t_ns: record.frameset.t_ns,
+            slam_index: record.pose.map(|pose| pose.index),
+            slam_t_ns: record.pose.map(|pose| pose.t_ns),
             world_from_rig: matrix_from_isometry(&record.world_from_rig()),
             slam_ok: record.pose.is_some_and(|pose| pose.ok),
             slam_status: record.pose.map_or("none", |pose| pose.status.as_str()),
