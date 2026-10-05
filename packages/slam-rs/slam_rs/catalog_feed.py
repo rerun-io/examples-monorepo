@@ -246,13 +246,12 @@ class RigProfile:
         if self.frameset_tolerance_ns < 0:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
 
-
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
 
-
 ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
 """RoboCap selection, downscale and clock rules from the Rust core."""
+
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
     """Every non-null value of a temporal component column, flat and float64.
@@ -842,19 +841,10 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
         streams[sensor] = (row_t_ns[valid], values)
     gyro_t_ns: Int64[ndarray, " n_samples"] = streams["gyro"][0]
     accel_t_ns: Int64[ndarray, " n_samples"] = streams["accel"][0]
-    if gyro_t_ns.size and not bool(np.all(np.diff(gyro_t_ns) > 0)):
-        raise ValueError(f"{segment_id}: IMU timestamps are not strictly increasing")
-    # MSD logs both sensors on identical timestamps, so pairing is an assertion.
-    # RoboCap's two channels run on their own clocks (10,745 gyro against 10,751
-    # accel on session 15), so interpolate accelerometer values
-    # onto the gyroscope's timestamps; the core only ever sees the paired form.
-    if not interpolate_accel:
-        if not np.array_equal(gyro_t_ns, accel_t_ns):
-            raise ValueError(
-                f"{segment_id}: {len(gyro_t_ns)} gyro and {len(accel_t_ns)} accel samples are not on identical timestamps; pair them before feeding"
-            )
-        return ImuStream(t_ns=gyro_t_ns, gyro_rad_s=streams["gyro"][1], accel_m_s2=streams["accel"][1])
-    return pair_accel_onto_gyro(gyro_t_ns, streams["gyro"][1], accel_t_ns, streams["accel"][1])
+    try:
+        return _core.catalog_pair_imu(gyro_t_ns, streams["gyro"][1], accel_t_ns, streams["accel"][1], interpolate_accel)
+    except ValueError as error:
+        raise ValueError(f"{segment_id}: {error}") from error
 
 
 def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:

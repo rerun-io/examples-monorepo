@@ -9,6 +9,7 @@
 //! can be stored with different portrait orientations (D30).
 
 use std::collections::BTreeMap;
+pub mod catalog;
 
 use nalgebra::{Matrix3, Vector3};
 use serde::de::DeserializeOwned;

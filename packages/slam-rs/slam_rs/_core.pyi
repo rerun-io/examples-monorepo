@@ -9,8 +9,11 @@ from typing import ClassVar, Literal
 
 from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
+from simplecv.imu_calibration import ImuCalibration
 
+from slam_rs.catalog_calibration import CameraStatics
 from slam_rs.catalog_feed import RigProfile
+from slam_rs.catalog_timing import ImuStream
 from slam_rs.rig import CameraCalib, ImuCalib
 
 __version__: str
@@ -436,6 +439,13 @@ class OpticalFlow:
         """
 
     def __repr__(self) -> str: ...
+
+
+def catalog_camera_calib(index: int, statics: CameraStatics, downscale: int) -> CameraCalib: ...
+def catalog_imu_calib(calibration: ImuCalibration, imu_t_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int) -> ImuCalib: ...
+def catalog_frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, anchor_t_ns: int, tolerance_ns: int) -> tuple[int | None, int]: ...
+def catalog_match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], tolerance_ns: int) -> tuple[Int64[ndarray, " n_framesets"], Int64[ndarray, "n_framesets n_cameras"]]: ...
+def catalog_pair_imu(gyro_t_ns: Int64[ndarray, " n_gyro"], gyro_rad_s: Float64[ndarray, "n_gyro 3"], accel_t_ns: Int64[ndarray, " n_accel"], accel_m_s2: Float64[ndarray, "n_accel 3"], interpolate: bool) -> ImuStream: ...
 
 
 def catalog_rig_profile(dataset: str) -> "RigProfile":
