@@ -13,18 +13,27 @@ identity `aria_gen2_pilot__<seq>`. Properties: `property:capture:source_resoluti
 
 ## Get the raw data
 
-The CDN URLs in `AriaGen2PilotDataset_download_urls.json` have expired;
-`download()` never fetches. It verifies each discovered `video.vrs` against the manifest's `main_vrs`
-size and SHA-1 and prints the count.
+Download `AriaGen2PilotDataset_download_urls.json` from
+https://www.projectaria.com/datasets/gen2pilot/ (its signed links expire after about a month; a fresh file lists the
+same bytes), then:
+
+```bash
+pixi run -e dataforge dataforge-download aria_gen2_pilot --url-file <URL file>                       # all 12 (~35 GB)
+pixi run -e dataforge dataforge-download aria_gen2_pilot --url-file <URL file> --sequences clean_0  # one
+pixi run -e dataforge dataforge-download --list-remote aria_gen2_pilot --url-file <URL file>        # JSON lines
+pixi run -e dataforge dataforge-download aria_gen2_pilot                                            # verify only
+```
+
+`download` writes `AriaGen2PilotDataset_manifest.json` (sizes and SHA-1s, no URLs) and fetches only what the
+converter reads, into the official layout: the main VRS as `<seq>/video.vrs`, `closed_loop_trajectory.csv` from the
+`mps_slam_trajectories` zip into `<seq>/mps/slam/`, `hand_tracking_results.csv` from the `mps_hand_tracking` zip into
+`<seq>/mps/hand_tracking/`. Each file is SHA-1-checked as it lands; a rerun resumes and skips what is there. Never
+fetched: the preview mp4, depth, SLAM points, MPS artifacts, scene, hand-object interaction, diarization, heart rate.
+Without `--url-file`, `download` verifies each discovered `video.vrs` against the manifest's size and SHA-1.
 
 The default raw root is `$DATAFORGE_RAW_ROOT/aria_gen2_pilot` (`DATAFORGE_RAW_ROOT`
 defaulting to `data/raw`), as for every dataset; `--root` points at any directory with the
-release layout. The release lives on the NAS at `/mnt/nas/datasets/aria-gen2-pilot`, but over
-NFS the VRS files read as mode 000 (Synology ACL), so stage a subset on local disk, for example:
-
-```bash
-dataforge-convert aria_gen2_pilot --root /home/pablo/exoego-data/aria_gen2_pilot/raw --sequences clean_0
-```
+release layout. The release also lives on the NAS at `/mnt/nas/datasets/aria-gen2-pilot`.
 
 The converter reads only `<seq>/video.vrs` and `<seq>/mps/`. Raw roots are
 read-only: the converter refuses an output or work root beneath the raw root
