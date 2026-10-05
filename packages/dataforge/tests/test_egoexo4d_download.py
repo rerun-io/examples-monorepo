@@ -1,7 +1,7 @@
 """Ego-Exo4D release access against an in-memory S3: manifests, per-take file selection, size-checked fetch."""
 
-import io
 import json
+import threading
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,10 +36,10 @@ class FakeS3:
         self.objects: dict[str, bytes] = objects
         self.denied: bool = denied
 
-    def open(self, path: str, mode: str) -> io.BytesIO:
+    def read_text(self, path: str) -> str:
         if self.denied:
             raise PermissionError("Access Denied")
-        return io.BytesIO(self.objects[path])
+        return self.objects[path].decode()
 
     def size(self, path: str) -> int:
         return len(self.objects[path])
@@ -49,7 +49,10 @@ class FakeS3:
 
 
 def entry(uid: str, paths: list[tuple[str, int]]) -> dict[str, object]:
-    return {"uid": uid, "paths": [{"source_path": f"s3://bucket/{path}", "relative_path": path, "size": size, "checksum": None} for path, size in paths]}
+    return {
+        "uid": uid,
+        "paths": [{"source_path": f"s3://bucket/{path}", "relative_path": path, "size": size, "checksum": None} for path, size in paths],
+    }
 
 
 def release(objects: dict[str, bytes], manifests: dict[str, list[dict[str, object]]], *, denied: bool = False) -> Release:
@@ -59,6 +62,7 @@ def release(objects: dict[str, bytes], manifests: dict[str, list[dict[str, objec
     result.profile = "egoexo4d"
     result.fs = cast(Any, FakeS3(objects, denied=denied))
     result.manifests = {}
+    result.lock = threading.Lock()
     return result
 
 
@@ -67,7 +71,13 @@ def test_take_files_select_what_base_reads(tmp_path: Path) -> None:
     manifests = {
         "takes": [entry("take-uid", [(f"takes/cmu_bike02_4/frame_aligned_videos/{name}", 10) for name in videos])],
         "take_trajectory": [
-            entry("take-uid", [(f"takes/cmu_bike02_4/trajectory/{name}", 5) for name in ("closed_loop_trajectory.csv", "gopro_calibs.csv", "online_calibration.jsonl")])
+            entry(
+                "take-uid",
+                [
+                    (f"takes/cmu_bike02_4/trajectory/{name}", 5)
+                    for name in ("closed_loop_trajectory.csv", "gopro_calibs.csv", "online_calibration.jsonl")
+                ],
+            )
         ],
         "take_vrs_noimagestream": [entry("take-uid", [("takes/cmu_bike02_4/aria01_noimagestreams.vrs", 7)])],
         "captures": [entry("capture-uid", [("captures/cmu_bike02/timesync.csv", 3), ("captures/cmu_bike02/post_surveys.csv", 3)])],
@@ -76,14 +86,17 @@ def test_take_files_select_what_base_reads(tmp_path: Path) -> None:
     take = read_takes(tmp_path / "takes.json")["cmu_bike02_4"]
     dataset: Egoexo4dDataset = Egoexo4dDataset(Egoexo4dConfig(root=tmp_path))
     dataset.release = release({}, manifests)
-    files = [path.relative_path for path in dataset.take_files(take)]
-    assert files == [
+    take_files = [
         *(f"takes/cmu_bike02_4/frame_aligned_videos/{name}" for name in videos[:5]),
         "takes/cmu_bike02_4/trajectory/closed_loop_trajectory.csv",
         "takes/cmu_bike02_4/trajectory/gopro_calibs.csv",
         "takes/cmu_bike02_4/aria01_noimagestreams.vrs",
     ]
-    assert [path.relative_path for path in dataset.timesync(take)] == ["captures/cmu_bike02/timesync.csv"]
+    assert [path.relative_path for path in dataset.take_files(take)] == take_files
+    fetched: list[str] = []
+    dataset.release.fetch = lambda path, root: fetched.append(path.relative_path) or True  # type: ignore[method-assign]
+    dataset.fetch_take(take)
+    assert sorted(fetched) == sorted([*take_files, "captures/cmu_bike02/timesync.csv"])  # the capture's other files stay remote
 
 
 def test_fetch_lands_whole_files_once(tmp_path: Path) -> None:

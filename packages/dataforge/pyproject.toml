@@ -79,7 +79,6 @@ ignore_names = [
     # Ego-Exo4D-HM fit fields and takes.json fields, read through getattr and pyserde.
     "root_orient",
     "pose_body",
-    "readable_stream_id",
     # Timing record fields serialized by pyserde.
     "converter_version",
     "host",

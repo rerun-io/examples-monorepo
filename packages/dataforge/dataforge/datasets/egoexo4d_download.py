@@ -6,6 +6,7 @@ take or capture uid with its size, so dataforge fetches exactly the files a take
 else, verified by size, into the layout the CLI writes (``<root>/<relative_path>``).
 """
 
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +15,10 @@ from typing import Literal, TypeAlias
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import RepoFile
 from serde import serde
-from serde.json import from_json
 
 from dataforge import transports
 from dataforge.datasets.egoexo4d_body import HM_FILE, HM_REPO, HM_REVISION, MODEL_REPO, MODEL_REVISION, SMPLH_FILE, SMPLX_FILE
+from dataforge.records import decode
 from dataforge.transports import FileIntegrity, HfFileInfo
 
 RELEASE: str = "s3://ego4d-consortium-sharing/egoexo-public/v2"
@@ -43,11 +44,6 @@ def fit_path(root: Path, take: str) -> Path:
     return root / HM_DIR / take / HM_FILE
 
 
-def fetch_fit(root: Path, file: HfFileInfo) -> bool:
-    """Fetch one take's fit to ``root/hm`` unless it is already there, verified by its LFS sha256."""
-    return transports.hf_fetch_verified(HM_REPO, file, local_dir=root / HM_DIR, revision=HM_REVISION)
-
-
 def fetch_models(model_root: Path) -> int:
     """Fetch the SMPL-H male and SMPL-X neutral models unless already in place; return how many were fetched.
 
@@ -71,8 +67,6 @@ class ManifestPath:
     """Destination under the download root (``takes/<take_name>/frame_aligned_videos/cam01.mp4``)."""
     size: int | None = None
     """Bytes, when the manifest records them."""
-    views: list[str] | None = None
-    """``ego`` / ``exo`` for view-specific files."""
 
 
 @serde
@@ -87,29 +81,30 @@ class ManifestEntry:
 
 
 class Release:
-    """Read access to the Ego-Exo4D release through one AWS profile (the licence keys)."""
+    """Read access to the Ego-Exo4D release through one AWS profile (the licence keys); safe to share across threads."""
 
     def __init__(self, profile: str) -> None:
-        import s3fs
+        import s3fs  # simplecv declares it; only the release needs it
 
         self.profile: str = profile
         self.fs = s3fs.S3FileSystem(profile=profile)
         self.manifests: dict[str, dict[str, ManifestEntry]] = {}
+        self.lock = threading.Lock()  # threading.Lock is a factory, not a type beartype can check
 
     def manifest(self, part: Part) -> dict[str, ManifestEntry]:
-        """One part's manifest keyed by uid, read once per process."""
-        if part not in self.manifests:
-            path: str = f"{RELEASE}/{part}/manifest.json"
-            try:
-                with self.fs.open(path, "rb") as stream:
-                    data: bytes | str = stream.read()
-                text: str = data.decode() if isinstance(data, bytes) else data
-            except PermissionError as error:
-                raise PermissionError(
-                    f"{path}: access denied for AWS profile {self.profile!r}; put the Ego-Exo4D licence keys in that profile (https://ego4ddataset.com)"
-                ) from error
-            self.manifests[part] = {entry.uid: entry for entry in from_json(list[ManifestEntry], text)}
-        return self.manifests[part]
+        """One part's manifest keyed by uid, read once per process (convert and its prefetch thread share it)."""
+        with self.lock:
+            if part not in self.manifests:
+                path: str = f"{RELEASE}/{part}/manifest.json"
+                try:
+                    text = self.fs.read_text(path)
+                    assert isinstance(text, str)  # fsspec's stubs widen read_text to bytes | str
+                except PermissionError as error:
+                    raise PermissionError(
+                        f"{path}: access denied for AWS profile {self.profile!r}; put the Ego-Exo4D licence keys in that profile (https://ego4ddataset.com)"
+                    ) from error
+                self.manifests[part] = {entry.uid: entry for entry in decode(list[ManifestEntry], text, source=path)}
+            return self.manifests[part]
 
     def fetch(self, file: ManifestPath, root: Path) -> bool:
         """Fetch one listed file to ``root/<relative_path>`` unless it already has the listed size; return whether bytes moved.

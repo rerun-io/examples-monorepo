@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
+from dataforge import aria
 from dataforge.datasets.egoexo4d_source import (
     Take,
     localized,
     read_gopro_calibs,
     read_take_clock,
     read_takes,
-    read_trajectory,
     stored_size,
 )
 
@@ -107,7 +107,9 @@ def test_take_clock_reads_rows_start_to_end_and_fills_gaps(tmp_path: Path) -> No
     stamps = ["100", "133", "166", "", "233", "266", "300"]
     path.write_text("cam01_pts,aria01_214-1_capture_timestamp_ns\n" + "\n".join(f"{i},{stamp}" for i, stamp in enumerate(stamps)) + "\n")
     take = read_takes_entry(tmp_path, take_entry(timesync_start_idx=2, timesync_end_idx=6))
-    np.testing.assert_array_equal(read_take_clock(path, take), [166, 166, 233, 266])
+    clock = read_take_clock(path, take)
+    np.testing.assert_array_equal(clock.times_ns, [166, 166, 233, 266])
+    assert clock.filled == 1
     late = read_takes_entry(tmp_path, take_entry(timesync_start_idx=3, timesync_end_idx=5))
     with pytest.raises(ValueError, match="first frame"):
         read_take_clock(path, late)
@@ -122,14 +124,13 @@ def read_takes_entry(tmp_path: Path, entry: dict[str, object]) -> Take:
     return read_takes(path)["cmu_bike01_2"]
 
 
-def test_trajectory_nearest_pose_and_gaps(tmp_path: Path) -> None:
+def test_trajectory_reads_the_mps_sample(tmp_path: Path) -> None:
+    """The shared MPS reader (``aria.read_trajectory``) on Project Aria's closed-loop sample; poses interpolate inside 2 ms."""
     path: Path = tmp_path / "closed_loop_trajectory.csv"
     path.write_text(TRAJECTORY)
-    trajectory = read_trajectory(path)
+    trajectory = aria.read_trajectory(path)
     np.testing.assert_array_equal(trajectory.times_ns, [149202610000, 149203459000])
-    np.testing.assert_allclose(trajectory.world_T_device[0, :3, 3], [0.000292, -0.006405, 0.000467])
-    assert np.linalg.det(trajectory.world_T_device[0, :3, :3]) == pytest.approx(1.0)
-    poses = trajectory.at(np.array([149202700000, 149203400000, 149203459000 + 6_000_000], dtype=np.int64))
-    np.testing.assert_array_equal(poses[0], trajectory.world_T_device[0])
-    np.testing.assert_array_equal(poses[1], trajectory.world_T_device[1])
-    assert np.isnan(poses[2]).all()
+    np.testing.assert_allclose(trajectory.poses[0, :3, 3], [0.000292, -0.006405, 0.000467])
+    poses = trajectory.at(np.array([149202610000, 149203000000, 149203459000 + 6_000_000], dtype=np.int64))
+    np.testing.assert_array_equal(poses[0], trajectory.poses[0])
+    assert np.isfinite(poses[1]).all() and np.isnan(poses[2]).all()

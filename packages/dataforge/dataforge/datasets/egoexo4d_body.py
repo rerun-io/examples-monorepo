@@ -9,7 +9,6 @@ coefficients, and hands as 45 PCA coefficients per side in SMPL-X's MANO basis w
 
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import NamedTuple
 
 import numpy as np
 import pyarrow as pa
@@ -19,6 +18,7 @@ from jaxtyping import Bool, Float32, Int8, Int64, UInt32
 from numpy import ndarray
 from serde import SerdeError, from_dict, serde
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
+from simplecv.ops.smplx.smplx_torch import SmplxForwardResult
 
 from dataforge import hands, meshes, schema
 from dataforge.logging_toolkit import frame_index_column, time_column
@@ -114,17 +114,10 @@ def coco133_from_openpose67(joints: Float32[ndarray, "t 67 3"]) -> Float32[ndarr
     return coco
 
 
-class SmplhOutput(NamedTuple):
-    """Posed vertices and regressed joints (52 SMPL-H joints + 21 smplx vertex-selector keypoints), world metres."""
-
-    vertices: Float32[ndarray, "k 6890 3"]
-    joints: Float32[ndarray, "k 73 3"]
-
-
 class SmplhModel:
     """The SMPL-H male model SLAHMR fit, built from the two model files under ``model_root``."""
 
-    def __init__(self, model_root: Path, *, chunk_frames: int = 512) -> None:
+    def __init__(self, model_root: Path) -> None:
         import smplx
         from smplx.utils import Struct
 
@@ -147,33 +140,27 @@ class SmplhModel:
             num_pca_comps=HAND_PCA_COMPONENTS,
             flat_hand_mean=False,
         )
-        self.chunk_frames: int = chunk_frames
         self.faces: UInt32[ndarray, "13776 3"] = np.asarray(self.layer.faces, dtype=np.uint32)
 
-    def forward(self, fit: HmFit, rows: Int64[ndarray, "k"]) -> SmplhOutput:
-        """Pose ``rows`` of ``fit`` in frame chunks; each row uses its own betas."""
-        vertices: list[Float32[ndarray, "c 6890 3"]] = []
-        joints: list[Float32[ndarray, "c 73 3"]] = []
-        for start in range(0, len(rows), self.chunk_frames):
-            batch: Int64[ndarray, "c"] = rows[start : start + self.chunk_frames]
-            inputs: dict[str, torch.Tensor] = {
-                name: torch.from_numpy(np.ascontiguousarray(getattr(fit, name)[batch]))
-                for name in ("betas", "root_orient", "pose_body", "hand_pose", "trans")
-            }
-            with torch.no_grad():
-                output = self.layer(
-                    betas=inputs["betas"],
-                    global_orient=inputs["root_orient"],
-                    body_pose=inputs["pose_body"],
-                    left_hand_pose=inputs["hand_pose"][:, :HAND_PCA_COMPONENTS],
-                    right_hand_pose=inputs["hand_pose"][:, HAND_PCA_COMPONENTS:],
-                    transl=inputs["trans"],
-                )
-            vertices.append(output.vertices.numpy())
-            joints.append(output.joints.numpy())
-        if not vertices:
-            return SmplhOutput(np.empty((0, 6890, 3), dtype=np.float32), np.empty((0, 73, 3), dtype=np.float32))
-        return SmplhOutput(np.concatenate(vertices), np.concatenate(joints))
+    def forward(self, fit: HmFit, rows: Int64[ndarray, "k"]) -> SmplxForwardResult:
+        """Pose ``rows`` of ``fit`` (one mesh batch), each with its own betas.
+
+        Joints are SMPL-H's 52 plus smplx's 21 vertex-selector keypoints; both outputs are world metres.
+        """
+        inputs: dict[str, torch.Tensor] = {
+            name: torch.from_numpy(np.ascontiguousarray(getattr(fit, name)[rows]))
+            for name in ("betas", "root_orient", "pose_body", "hand_pose", "trans")
+        }
+        with torch.no_grad():
+            output = self.layer(
+                betas=inputs["betas"],
+                global_orient=inputs["root_orient"],
+                body_pose=inputs["pose_body"],
+                left_hand_pose=inputs["hand_pose"][:, :HAND_PCA_COMPONENTS],
+                right_hand_pose=inputs["hand_pose"][:, HAND_PCA_COMPONENTS:],
+                transl=inputs["trans"],
+            )
+        return SmplxForwardResult(vertices=output.vertices.numpy(), joints=output.joints.numpy())
 
 
 def write_body_pose(recording: rr.RecordingStream, fit: HmFit, times: Int64[ndarray, "t"], frames: Int64[ndarray, "t"]) -> None:
@@ -216,7 +203,7 @@ def write_body_mesh(recording: rr.RecordingStream, model: SmplhModel, fit: HmFit
             path,
             times_ns=times[rows],
             frame_indices=frames[rows],
-            vertices=model.forward(fit, frames[rows][trusted]).vertices,
+            vertices=model.forward(fit, frames[rows][trusted]).vertices if trusted.any() else np.empty((0, 6890, 3), dtype=np.float32),
             trusted=trusted.tolist(),
             topology=model.faces,
         )

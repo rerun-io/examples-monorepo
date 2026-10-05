@@ -15,13 +15,16 @@ formats live in ``datasets/lamaria_source.py``.
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, TypeAlias
 
 import numpy as np
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 from serde import field, serde
 from simplecv.camera_parameters import Fisheye624Parameters
 from simplecv.se3 import SE3
@@ -320,6 +323,34 @@ def project_to_calibration(
     return pixels
 
 
+def project_frames(
+    calibration: Fisheye624Parameters,
+    world_T_device: Float64[ndarray, "n 4 4"],
+    positions: Float32[ndarray, "n 133 3"],
+) -> Float32[ndarray, "n 133 2"]:
+    """``project_to_calibration`` for every frame at once, for corpus-scale layers.
+
+    The same pixels to rounding: the batched transform sums in another order, so the last bits differ from the
+    per-joint loop, which hot3d and aria_gen2_pilot keep for their byte-identical parity baselines.
+
+    Args:
+        calibration: Full lens model in the logged image orientation; ``rig_T_cam`` is ``device_T_camera``.
+        world_T_device: Float64[ndarray, "n 4 4"] poses, NaN when missing.
+        positions: Float32[ndarray, "n 133 3"] world metres, NaN when missing.
+
+    Returns:
+        Float32[ndarray, "n 133 2"] pixels, NaN for missing, rear and out-of-view joints.
+    """
+    cam_T_world: Float64[ndarray, "n 4 4"] = np.linalg.inv(world_T_device @ calibration.rig_T_cam.matrix())
+    local: Float64[ndarray, "p 3"] = (
+        np.einsum("nij,nkj->nki", cam_T_world[:, :3, :3], positions.astype(np.float64)) + cam_T_world[:, None, :3, 3]
+    ).reshape(-1, 3)
+    pixels: Float64[ndarray, "p 2"] = np.full((len(local), 2), np.nan)
+    usable: Bool[ndarray, "p"] = np.isfinite(local).all(axis=1) & (local[:, 2] > 0.0)
+    pixels[usable] = fisheye624.project(calibration, local[usable])
+    return pixels.reshape(*positions.shape[:2], 2).astype(np.float32)
+
+
 # ── streams ───────────────────────────────────────────────────────────────
 
 
@@ -397,3 +428,93 @@ def read_imu(vrs: VrsFile, stream_id: AriaStreamId, *, stop_ns: int | None = Non
         ImuChannel(times_ns=times_ns, values_xyz=records.gyro_radsec[valid].astype(np.float64)),
         ImuChannel(times_ns=times_ns, values_xyz=records.accel_msec2[valid].astype(np.float64)),
     )
+
+
+# ── MPS trajectories ──────────────────────────────────────────────────────
+
+QUATERNION_NORM_TOLERANCE: float = 1e-5
+"""MPS prints six decimals: wrist quaternions sit up to 1.2e-6 off unit norm, trajectory ones ~1e-9."""
+
+
+def numeric_columns(path: Path, columns: list[str]) -> Float64[ndarray, "n c"]:
+    """Read selected CSV stream columns; no dataset-owned JSON copy is made."""
+    with path.open() as stream:
+        header: list[str] = next(csv.reader(stream))
+        try:
+            selected: list[int] = [header.index(name) for name in columns]
+            values: Float64[ndarray, "n c"] = np.loadtxt(stream, delimiter=",", usecols=selected, ndmin=2, dtype=np.float64)
+            for index, name in enumerate(columns):
+                if name == "tracking_timestamp_us":
+                    stamps: Float64[ndarray, "n"] = values[:, index]
+                    if not np.isfinite(stamps).all() or np.any(stamps != np.floor(stamps)):
+                        raise ValueError("tracking_timestamp_us must contain finite integers")
+                elif name.endswith("_tracking_confidence") and not np.isfinite(values[:, index]).all():
+                    raise ValueError(f"{name} must be finite")
+            return values
+        except ValueError as error:
+            raise ValueError(f"{path}: {error}") from error
+
+
+def poses_from_columns(values: Float64[ndarray, "n 7"]) -> Float64[ndarray, "n 4 4"]:
+    """Translation and xyzw quaternion to SE(3); a non-finite or non-unit row is missing (NaN), never renormalised into a pose."""
+    valid: Bool[ndarray, "n"] = np.isfinite(values).all(axis=1)
+    valid[valid] = np.abs(np.linalg.norm(values[valid, 3:], axis=1) - 1.0) <= QUATERNION_NORM_TOLERANCE
+    result: Float64[ndarray, "n 4 4"] = np.full((len(values), 4, 4), np.nan)
+    result[valid] = np.eye(4)
+    result[valid, :3, :3] = Rotation.from_quat(values[valid, 3:]).as_matrix() if valid.any() else np.empty((0, 3, 3))
+    result[valid, :3, 3] = values[valid, :3]
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class Trajectory:
+    """Every native closed-loop row, including its shipped quality score."""
+
+    times_ns: Int64[ndarray, "n"]
+    """Device microseconds converted to nanoseconds."""
+    poses: Float64[ndarray, "n 4 4"]
+    """World-from-device matrices; rows ``poses_from_columns`` rejected are NaN."""
+    quality: Float64[ndarray, "n"]
+    """Shipped quality, including 0.0 and 0.5."""
+
+    def __post_init__(self) -> None:
+        if len(self.times_ns) != len(self.poses) or len(self.times_ns) != len(self.quality):
+            raise ValueError("trajectory columns differ in length")
+        if not len(self.times_ns) or np.any(np.diff(self.times_ns) <= 0):
+            raise ValueError("trajectory timestamps must be nonempty and strictly increasing")
+
+    def at(self, times_ns: Int64[ndarray, "m"]) -> Float64[ndarray, "m 4 4"]:
+        """Slerp/lerp inside valid <=2 ms brackets; never extrapolate or clamp."""
+        result: Float64[ndarray, "m 4 4"] = np.full((len(times_ns), 4, 4), np.nan)
+        right: Int64[ndarray, "m"] = np.searchsorted(self.times_ns, times_ns)
+        bounded: Int64[ndarray, "m"] = np.minimum(right, len(self.times_ns) - 1)
+        exact: Bool[ndarray, "m"] = (right < len(self.times_ns)) & (self.times_ns[bounded] == times_ns)
+        result[exact] = self.poses[bounded[exact]]
+        between: Int64[ndarray, "k"] = np.flatnonzero((~exact) & (right > 0) & (right < len(self.times_ns)))
+        high: Int64[ndarray, "k"] = right[between]
+        low: Int64[ndarray, "k"] = high - 1
+        gaps: Int64[ndarray, "k"] = self.times_ns[high] - self.times_ns[low]
+        good: Bool[ndarray, "k"] = (
+            (gaps <= 2_000_000) & np.isfinite(self.poses[low]).all(axis=(1, 2)) & np.isfinite(self.poses[high]).all(axis=(1, 2))
+        )
+        between, low, high = between[good], low[good], high[good]
+        if len(between):
+            fraction: Float64[ndarray, "k"] = (times_ns[between] - self.times_ns[low]) / gaps[good]
+            start: Rotation = Rotation.from_matrix(self.poses[low, :3, :3])
+            end: Rotation = Rotation.from_matrix(self.poses[high, :3, :3])
+            result[between] = np.eye(4)
+            result[between, :3, :3] = (start * Rotation.from_rotvec((start.inv() * end).as_rotvec() * fraction[:, None])).as_matrix()
+            result[between, :3, 3] = self.poses[low, :3, 3] * (1.0 - fraction[:, None]) + self.poses[high, :3, 3] * fraction[:, None]
+        return result
+
+
+def read_trajectory(path: Path) -> Trajectory:
+    """Keep every closed-loop row; quality does not change pose availability."""
+    columns: list[str] = [
+        "tracking_timestamp_us",
+        *[f"t{axis}_world_device" for axis in "xyz"],
+        *[f"q{axis}_world_device" for axis in "xyzw"],
+        "quality_score",
+    ]
+    values: Float64[ndarray, "n 9"] = numeric_columns(path, columns)
+    return Trajectory(values[:, 0].astype(np.int64) * 1000, poses_from_columns(values[:, 1:8]), values[:, 8])

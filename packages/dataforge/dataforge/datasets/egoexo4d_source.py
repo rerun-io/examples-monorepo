@@ -9,6 +9,7 @@ public docs (docs.ego-exo4d-data.org) and projectaria-tools' MPS readers.
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pyarrow as pa
@@ -19,6 +20,7 @@ from scipy.spatial.transform import Rotation
 from serde import SerdeError, coerce, from_dict, serde
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
+from dataforge import aria
 from dataforge.records import read_json
 
 FPS: int = 30
@@ -27,8 +29,6 @@ EXO_SIZE: tuple[int, int] = (1920, 1080)
 """Stored size of a landscape GoPro (native 3840x2160): the size the HM fits were made at."""
 KB4: str = "kb4"
 """``camera_model`` of the GoPros: OpenCV fisheye, gopro_calibs' ``KANNALABRANDTK3`` (four radial terms)."""
-POSE_GAP_NS: int = 5_000_000
-"""Largest gap between a frame and its nearest 1 kHz trajectory sample before the pose counts as missing."""
 
 
 @serde
@@ -38,8 +38,6 @@ class AlignedVideo:
 
     relative_path: str
     """Path under the take's ``root_dir``."""
-    readable_stream_id: str
-    """``0`` for a GoPro; ``rgb``, ``slam-left``, ``slam-right`` or ``et`` for an Aria."""
 
 
 @serde
@@ -84,7 +82,7 @@ class Take:
     capture: TakeCapture
     """The capture and its devices."""
     frame_aligned_videos: dict[str, dict[str, AlignedVideo]]
-    """Streams by camera id, then readable stream id."""
+    """Streams by camera id, then readable stream id (``0`` for a GoPro; ``rgb``, ``slam-left``, ``slam-right``, ``et``)."""
     task_name: str | None = None
     """Task, e.g. ``Remove a Wheel``."""
     parent_task_name: str | None = None
@@ -212,13 +210,22 @@ def take_rows(take: Take) -> range:
     return range(take.timesync_start_idx, take.timesync_end_idx)
 
 
-def read_take_clock(path: Path, take: Take) -> Int64[ndarray, "n"]:
+class TakeClock(NamedTuple):
+    """The take's frame times and how many of them repeat an earlier stamp."""
+
+    times_ns: Int64[ndarray, "n"]
+    """Aria RGB capture time of each frame (device clock), a missing stamp replaced by the last one."""
+    filled: int
+    """Frames whose stamp was missing."""
+
+
+def read_take_clock(path: Path, take: Take) -> TakeClock:
     """The take's frame times: the Aria RGB capture timestamps (device clock, ns), gaps forward-filled.
 
     Raises:
         ValueError: The column is missing, the first frame has no timestamp, or the rows run past the file.
     """
-    column: str = f"{take.aria}_214-1_capture_timestamp_ns"
+    column: str = f"{take.aria}_{aria.RGB_STREAM_ID}_capture_timestamp_ns"
     table: pa.Table = pacsv.read_csv(path, convert_options=pacsv.ConvertOptions(include_columns=[column], column_types={column: pa.float64()}))
     rows: range = take_rows(take)
     if rows.stop > table.num_rows:
@@ -228,38 +235,4 @@ def read_take_clock(path: Path, take: Take) -> Int64[ndarray, "n"]:
     if not present[0]:
         raise ValueError(f"{path}: take {take.take_name} has no {column} on its first frame")
     filled: Int64[ndarray, "n"] = np.maximum.accumulate(np.where(present, np.arange(len(stamps)), 0))
-    return stamps[filled].astype(np.int64)
-
-
-@dataclass(frozen=True, slots=True)
-class Trajectory:
-    """The headset's closed-loop MPS trajectory (~1 kHz, device clock)."""
-
-    times_ns: Int64[ndarray, "m"]
-    """``tracking_timestamp_us`` in nanoseconds, increasing."""
-    world_T_device: Float64[ndarray, "m 4 4"]
-    """Device-to-world poses."""
-
-    def at(self, times_ns: Int64[ndarray, "n"]) -> Float64[ndarray, "n 4 4"]:
-        """The nearest sample to each time; NaN where none lies within ``POSE_GAP_NS``."""
-        right: Int64[ndarray, "n"] = np.clip(np.searchsorted(self.times_ns, times_ns), 1, len(self.times_ns) - 1)
-        nearest: Int64[ndarray, "n"] = np.where(times_ns - self.times_ns[right - 1] <= self.times_ns[right] - times_ns, right - 1, right)
-        poses: Float64[ndarray, "n 4 4"] = self.world_T_device[nearest].copy()
-        poses[np.abs(self.times_ns[nearest] - times_ns) > POSE_GAP_NS] = np.nan
-        return poses
-
-
-def read_trajectory(path: Path) -> Trajectory:
-    """``closed_loop_trajectory.csv``: device time and ``T_world_device`` (quaternion x, y, z, w)."""
-    names: list[str] = ["tracking_timestamp_us", *(f"{axis}_world_device" for axis in ("tx", "ty", "tz", "qx", "qy", "qz", "qw"))]
-    table: pa.Table = pacsv.read_csv(path, convert_options=pacsv.ConvertOptions(include_columns=names))
-    if table.num_rows < 2:
-        raise ValueError(f"{path}: {table.num_rows} trajectory rows")
-    times_ns: Int64[ndarray, "m"] = table.column("tracking_timestamp_us").to_numpy().astype(np.int64) * 1000
-    if np.any(np.diff(times_ns) <= 0):
-        raise ValueError(f"{path}: tracking_timestamp_us is not increasing")
-    values: Float64[ndarray, "m 7"] = np.stack([table.column(name).to_numpy().astype(np.float64) for name in names[1:]], axis=1)
-    poses: Float64[ndarray, "m 4 4"] = np.tile(np.eye(4), (table.num_rows, 1, 1))
-    poses[:, :3, :3] = Rotation.from_quat(values[:, 3:]).as_matrix()
-    poses[:, :3, 3] = values[:, :3]
-    return Trajectory(times_ns, poses)
+    return TakeClock(stamps[filled].astype(np.int64), int((~present).sum()))

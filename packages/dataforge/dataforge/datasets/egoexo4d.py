@@ -7,7 +7,8 @@ as an AWS profile) and deleted once base is written, unless ``keep_raw``; the fi
 release metadata and base's small sidecars stay. See ``docs/egoexo4d.md``.
 """
 
-import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -19,10 +20,10 @@ import rerun.blueprint as rrb
 from jaxtyping import Int64
 from numpy import ndarray
 
-from dataforge import blueprints, paths, schema, writing
+from dataforge import aria, blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig, RemoteSequence
-from dataforge.datasets.egoexo4d_body import HmFit, SmplhModel, read_fit, write_body_mesh, write_body_pose
-from dataforge.datasets.egoexo4d_download import ManifestEntry, ManifestPath, Release, fetch_fit, fetch_models, fit_path, hm_fits
+from dataforge.datasets.egoexo4d_body import HM_REPO, HM_REVISION, HmFit, SmplhModel, read_fit, write_body_mesh, write_body_pose
+from dataforge.datasets.egoexo4d_download import HM_DIR, ManifestPath, Release, fetch_models, fit_path, hm_fits
 from dataforge.datasets.egoexo4d_layers import (
     ARIA_STREAMS,
     EGO_RIG,
@@ -36,18 +37,19 @@ from dataforge.datasets.egoexo4d_layers import (
     write_projections,
     write_sidecars,
 )
-from dataforge.datasets.egoexo4d_source import Take, localized, read_gopro_calibs, read_take_clock, read_takes, read_trajectory
+from dataforge.datasets.egoexo4d_source import FPS, Take, TakeClock, localized, read_gopro_calibs, read_take_clock, read_takes
 from dataforge.identity import SequenceIdentity
-from dataforge.transports import FetchReport
+from dataforge.transports import FetchReport, HfFileInfo
 from dataforge.vrs import VrsFile
 
 TRAJECTORY_FILES: tuple[str, ...] = ("closed_loop_trajectory.csv", "gopro_calibs.csv")
 """The files of a take's ``trajectory/`` the base layer reads (the part also ships point-cloud summaries, calibration logs …)."""
+FETCH_WORKERS: int = 8
+"""Concurrent S3 transfers per take; the 4K GoPro MP4s are most of its bytes."""
 SCENE_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((0.0, -1.2, -1.5), (0.0, 0.3, 3.0), (0.0, -1.0, 0.0))
 """Eye behind and above GoPro 1, looking along its axis, in its (RDF) frame: the take's world frame has an arbitrary
 origin, but GoPro 1 always faces the activity."""
-
-UNCALIBRATED: list[str] = [f"- {schema.cam_path(EGO_RIG, cam)}/**" for cam, (_, _, label, _) in enumerate(ARIA_STREAMS) if label is None]
+UNCALIBRATED: list[str] = [f"- {schema.cam_path(EGO_RIG, cam)}/**" for cam, stream in enumerate(ARIA_STREAMS) if stream.label is None]
 """3D-view exclusions of the eye-tracking camera: its video has no pinhole, so a 3D view cannot place it."""
 
 
@@ -84,38 +86,63 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
     def __init__(self, config: Egoexo4dConfig) -> None:
         super().__init__(config)
         self.release: Release | None = None
+        self.release_lock = threading.Lock()  # threading.Lock is a factory, not a type beartype can check
         self.model: SmplhModel | None = None
 
     def open_release(self) -> Release:
-        """The S3 release, opened on first use so verbs that need no take files never ask for keys."""
-        if self.release is None:
-            self.release = Release(self.config.aws_profile)
-        return self.release
+        """The S3 release, opened on first use (by convert or its prefetch thread) so verbs that need no take files never ask for keys."""
+        with self.release_lock:
+            if self.release is None:
+                self.release = Release(self.config.aws_profile)
+            return self.release
 
     def take_files(self, take: Take) -> list[ManifestPath]:
         """Every release file only this take's conversion reads: frame-aligned videos, two trajectory files, the image-less VRS."""
         release: Release = self.open_release()
-        videos: list[ManifestPath] = [
-            path
-            for path in release.manifest("takes")[take.take_uid].paths
-            if "/frame_aligned_videos/" in path.relative_path and path.relative_path.endswith(".mp4")
-        ]
-        wanted: set[str] = {take.video(take.aria, stream) for stream, _, _, _ in ARIA_STREAMS}
+        wanted: set[str] = {take.video(take.aria, stream.readable) for stream in ARIA_STREAMS}
         wanted |= {take.video(cam_id, "0") for cam_id in take.frame_aligned_videos if cam_id.startswith("cam")}
-        trajectory: ManifestEntry = release.manifest("take_trajectory")[take.take_uid]
-        vrs: ManifestEntry = release.manifest("take_vrs_noimagestream")[take.take_uid]
         return [
-            *(path for path in videos if path.relative_path in wanted),
-            *(path for path in trajectory.paths if Path(path.relative_path).name in TRAJECTORY_FILES),
-            *vrs.paths,
+            *(path for path in release.manifest("takes")[take.take_uid].paths if path.relative_path in wanted),
+            *(path for path in release.manifest("take_trajectory")[take.take_uid].paths if Path(path.relative_path).name in TRAJECTORY_FILES),
+            *release.manifest("take_vrs_noimagestream")[take.take_uid].paths,
         ]
 
-    def timesync(self, take: Take) -> list[ManifestPath]:
-        """The capture's ``timesync.csv``, shared by every take of the capture."""
-        return [path for path in self.open_release().manifest("captures")[take.capture_uid].paths if path.relative_path.endswith("/timesync.csv")]
+    def remote_sequences(self) -> list[RemoteSequence]:
+        """Every take with an HM fit, sized by its fit and its take files; needs the metadata and the keys."""
+        fits: dict[str, HfFileInfo] = hm_fits()
+        takes: dict[str, Take] = read_takes(self.config.root / "takes.json")
+        result: list[RemoteSequence] = []
+        for name in sorted(set(fits) & set(takes)):
+            files: list[ManifestPath] = self.take_files(takes[name])
+            result.append(
+                RemoteSequence(name, fits[name].size_bytes + sum(path.size or 0 for path in files), tuple(path.relative_path for path in files))
+            )
+        return result
 
-    def covered(self) -> dict[str, Take]:
-        """Takes that have an HM fit and a takes.json entry, in name order, narrowed to ``sequences``."""
+    def download(self) -> None:
+        """Fetch the body models, the release metadata and the selected takes' fits; take files come at convert."""
+        report: FetchReport = FetchReport()
+        fetched_models: int = fetch_models(self.config.models)
+        release: Release = self.open_release()
+        for path in release.manifest("metadata")["takes"].paths + release.manifest("metadata")["captures"].paths:
+            report.count(release.fetch(path, self.config.root), path.size or 0)
+        fits: dict[str, HfFileInfo] = hm_fits()
+        names: list[str] = sorted(fits) if self.config.sequences is None else list(self.config.sequences)
+        unknown: list[str] = sorted(set(names) - set(fits))
+        if unknown:
+            raise ValueError(f"egoexo4d: the HM release has no fit for {unknown}")
+
+        def fetch(name: str) -> bool:
+            return transports.hf_fetch_verified(HM_REPO, fits[name], local_dir=self.config.root / HM_DIR, revision=HM_REVISION)
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            for name, fetched in zip(names, executor.map(fetch, names), strict=True):
+                report.count(fetched, fits[name].size_bytes)
+        print(f"egoexo4d download: {len(names)} fits, {fetched_models} body models fetched; {report.summary()}")
+        print("  convert fetches each take's videos, trajectory and VRS from the release and deletes them after base")
+
+    def discover(self) -> list[tuple[SequenceIdentity, Take]]:
+        """Takes that have a local HM fit and a takes.json entry, in name order, narrowed to ``sequences``."""
         takes_json: Path = self.config.root / "takes.json"
         if not takes_json.is_file():
             raise FileNotFoundError(
@@ -130,44 +157,16 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
                     f"egoexo4d: no local HM fit or takes.json entry for {sorted(missing)}; run dataforge-download egoexo4d --sequences ..."
                 )
             names = [name for name in names if name in self.config.sequences]
-        return {name: takes[name] for name in names}
-
-    def remote_sequences(self) -> list[RemoteSequence]:
-        """Every take with an HM fit, sized by its fit and its take files; needs the metadata and the keys."""
-        fits = hm_fits()
-        takes: dict[str, Take] = read_takes(self.config.root / "takes.json")
-        result: list[RemoteSequence] = []
-        for name in sorted(set(fits) & set(takes)):
-            files: list[ManifestPath] = self.take_files(takes[name])
-            size: int = fits[name].size_bytes + sum(path.size or 0 for path in files)
-            result.append(RemoteSequence(name, size, tuple(path.relative_path for path in files)))
-        return result
-
-    def download(self) -> None:
-        """Fetch the body models, the release metadata and the selected takes' fits; take files come at convert."""
-        report: FetchReport = FetchReport()
-        fetched_models: int = fetch_models(self.config.models)
-        release: Release = self.open_release()
-        for path in release.manifest("metadata")["takes"].paths + release.manifest("metadata")["captures"].paths:
-            report.count(release.fetch(path, self.config.root), path.size or 0)
-        fits = hm_fits()
-        names: list[str] = sorted(fits) if self.config.sequences is None else list(self.config.sequences)
-        unknown: list[str] = sorted(set(names) - set(fits))
-        if unknown:
-            raise ValueError(f"egoexo4d: the HM release has no fit for {unknown}")
-        for name in names:
-            report.count(fetch_fit(self.config.root, fits[name]), fits[name].size_bytes)
-        print(f"egoexo4d download: {len(names)} fits, {fetched_models} body models fetched; {report.summary()}")
-        print("  convert fetches each take's videos, trajectory and VRS from the release and deletes them after base")
-
-    def discover(self) -> list[tuple[SequenceIdentity, Take]]:
-        return [(SequenceIdentity(self.config.command, (name,)), take) for name, take in self.covered().items()]
+        return [(SequenceIdentity(self.config.command, (name,)), takes[name]) for name in names]
 
     def fetch_take(self, take: Take) -> None:
-        """Fetch the take's files and its capture's timesync unless already present."""
+        """Fetch the take's files and its capture's timesync.csv, concurrently, unless already present."""
         release: Release = self.open_release()
-        for path in [*self.take_files(take), *self.timesync(take)]:
-            release.fetch(path, self.config.root)
+        timesync: list[ManifestPath] = [
+            path for path in release.manifest("captures")[take.capture_uid].paths if path.relative_path.endswith("/timesync.csv")
+        ]
+        with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as executor:
+            list(executor.map(lambda path: release.fetch(path, self.config.root), [*self.take_files(take), *timesync]))
 
     def prefetch(self, identity: SequenceIdentity, source: Take, *, force: bool) -> None:
         """Fetch the next take's raw files while this one converts; only base reads them."""
@@ -176,45 +175,48 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
 
     def base_inputs(self, take: Take) -> BaseInputs:
         """Read the raw take: localized GoPros, the clock, the Aria pose at each frame and its calibration."""
-        root: Path = self.config.root
-        take_dir: Path = root / take.root_dir
-        times: Int64[ndarray, "n"] = read_take_clock(root / "captures" / take.capture.capture_name / "timesync.csv", take)[: self.config.frame_limit]
+        take_dir: Path = self.config.root / take.root_dir
+        clock: TakeClock = read_take_clock(self.config.root / "captures" / take.capture.capture_name / "timesync.csv", take)
+        times: Int64[ndarray, "n"] = clock.times_ns[: self.config.frame_limit]
         (vrs_path,) = take_dir.glob("*noimagestreams.vrs")
         return BaseInputs(
             take=take,
-            root=root,
+            root=self.config.root,
             gopros=localized(read_gopro_calibs(take_dir / "trajectory/gopro_calibs.csv")),
             calib_json=VrsFile(vrs_path).file_tags["calib_json"],
-            times_ns=times,
-            world_T_device=read_trajectory(take_dir / "trajectory/closed_loop_trajectory.csv").at(times),
+            frames=FrameSidecar(times, aria.read_trajectory(take_dir / "trajectory/closed_loop_trajectory.csv").at(times)),
+            clock_filled=clock.filled,
         )
 
     def convert(self, identity: SequenceIdentity, source: Take, *, force: bool) -> Path:
+        """Base first (fetch, encode, sidecars, prune the take), then the fit's layers from the sidecars."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
-        sidecars: Path = paths.sidecar_path(targets[paths.BASE_LAYER].parent.parent, identity, FRAMES_SIDECAR).parent
-        work: Path = self.config.root / "work" / identity.recording_id
-        base: bool = paths.BASE_LAYER in pending
-        inputs: BaseInputs | None = None
-        if base:
+        if paths.BODY_MESH_LAYER in pending and self.model is None:
+            self.model = SmplhModel(self.config.models)  # fails on a missing model before any fetch or encode
+        # A preview (frame_limit) has its own output root, and so its own sidecars.
+        sidecar_root: Path = targets[paths.BASE_LAYER].parents[1]
+        frames_path: Path = paths.sidecar_path(sidecar_root, identity, FRAMES_SIDECAR)
+        if paths.BASE_LAYER in pending:
             with self.timer.stage("fetch"):
                 self.fetch_take(source)
-                inputs = self.base_inputs(source)
+                inputs: BaseInputs = self.base_inputs(source)
 
-        def write(recording: rr.RecordingStream) -> None:
-            assert inputs is not None
-            work.mkdir(parents=True, exist_ok=True)
-            try:
-                cameras: CamerasSidecar = write_base(recording, identity, inputs, self.timer, work)
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
-            write_sidecars(sidecars, cameras, inputs.times_ns, inputs.world_T_device)
+            def write(recording: rr.RecordingStream) -> None:
+                cameras: CamerasSidecar = write_base(recording, identity, inputs, self.timer)
+                write_sidecars(frames_path.parent, cameras, inputs.frames)
+
+            self.write_layers(identity, targets, [paths.BASE_LAYER], {paths.BASE_LAYER: write})
+            if not self.config.keep_raw:
+                for path in self.take_files(source):
+                    (self.config.root / path.relative_path).unlink(missing_ok=True)
+            self.timer.capture_s = len(inputs.frames.times_ns) / FPS
 
         @cache
         def fit_rows() -> tuple[FrameSidecar, CamerasSidecar, HmFit, Int64[ndarray, "t"]]:
             """The sidecars, the fit, and the frames both cover; read once, after base."""
-            frames, cameras = read_sidecars(sidecars)
+            frames, cameras = read_sidecars(frames_path.parent)
             fit: HmFit = read_fit(fit_path(self.config.root, source.take_name))
             count: int = min(len(fit.trans), len(frames.times_ns))
             if len(fit.trans) != len(frames.times_ns) and self.config.frame_limit is None:
@@ -227,37 +229,34 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
 
         def body_mesh(recording: rr.RecordingStream) -> None:
             frames, _, fit, rows = fit_rows()
-            if self.model is None:
-                self.model = SmplhModel(self.config.models)
+            assert self.model is not None
             write_body_mesh(recording, self.model, fit, frames.times_ns[rows], rows)
 
         def projections(recording: rr.RecordingStream) -> None:
             frames, cameras, fit, rows = fit_rows()
             write_projections(recording, fit, frames, cameras, rows)
 
+        derived: list[str] = [layer for layer in pending if layer != paths.BASE_LAYER]
         self.write_layers(
-            identity,
-            targets,
-            pending,
-            {paths.BASE_LAYER: write, paths.BODY_POSE_LAYER: body_pose, paths.BODY_MESH_LAYER: body_mesh, paths.PROJECTIONS_LAYER: projections},
+            identity, targets, derived, {paths.BODY_POSE_LAYER: body_pose, paths.BODY_MESH_LAYER: body_mesh, paths.PROJECTIONS_LAYER: projections}
         )
-        frames, _, _, rows = fit_rows()
-        self.timer.capture_s = float(frames.times_ns[rows[-1]] - frames.times_ns[0]) / 1e9 + 1 / 30
-        if base and not self.config.keep_raw:
-            for path in self.take_files(source):
-                (self.config.root / path.relative_path).unlink(missing_ok=True)
+        if paths.BASE_LAYER not in pending:
+            self.timer.capture_s = len(fit_rows()[0].times_ns) / FPS
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Scene from behind GoPro 1; the Aria's cameras in a column; the GoPros along the bottom (lens-projected keypoints)."""
         projected: list[str] = [f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in range(1, EXO_SLOTS + 1)]
         projected += [f"- {schema.coco133_uv_projected_path(EGO_RIG, cam)}" for cam in range(len(ARIA_STREAMS))]
-        projected += UNCALIBRATED
         return blueprints.exoego_blueprint(
             rrb.Spatial3DView(
-                name="Scene", origin=schema.cam_path(1, 0), contents=["+ /world/**", *projected], eye_controls=SCENE_EYE, line_grid=False
+                name="Scene",
+                origin=schema.cam_path(1, 0),
+                contents=["+ /world/**", *projected, *UNCALIBRATED],
+                eye_controls=SCENE_EYE,
+                line_grid=False,
             ),
-            ego_panes=[blueprints.camera_view(label or "camera-et", EGO_RIG, cam) for cam, (_, _, label, _) in enumerate(ARIA_STREAMS)],
+            ego_panes=[blueprints.camera_view(stream.label or "camera-et", EGO_RIG, cam) for cam, stream in enumerate(ARIA_STREAMS)],
             exo_panes=[blueprints.camera_view(f"GoPro {rig}", rig, 0) for rig in range(1, EXO_SLOTS + 1)],
         )
 

@@ -113,9 +113,9 @@ def synthetic_take(root: Path, ffmpeg: Path) -> list[str]:
     (trajectory / "gopro_calibs.csv").write_text("\n".join([GOPRO_HEADER, *rows]) + "\n")
     stamps_us: np.ndarray = np.arange(int(times[0] // 1000) - 2000, int(times[-1] // 1000) + 2000, 1000)
     lines: list[str] = [
-        "graph_uid,tracking_timestamp_us,utc_timestamp_ns,tx_world_device,ty_world_device,tz_world_device,qx_world_device,qy_world_device,qz_world_device,qw_world_device"
+        "graph_uid,tracking_timestamp_us,utc_timestamp_ns,tx_world_device,ty_world_device,tz_world_device,qx_world_device,qy_world_device,qz_world_device,qw_world_device,quality_score"
     ]
-    lines += [f"g,{stamp},-1,{(stamp - stamps_us[0]) * 1e-6},0.0,1.6,0,0,0,1" for stamp in stamps_us]
+    lines += [f"g,{stamp},-1,{(stamp - stamps_us[0]) * 1e-6},0.0,1.6,0,0,0,1,1.0" for stamp in stamps_us]
     (trajectory / "closed_loop_trajectory.csv").write_text("\n".join(lines) + "\n")
     calib_json: str = (FIXTURES / "aria/gen1-hot3d-P0015_179e1b84-calib.json").read_text()
     (take_dir / "aria01_noimagestreams.vrs").write_bytes(vrs_file({214: {}}, [], file_tags={"calib_json": calib_json}))
