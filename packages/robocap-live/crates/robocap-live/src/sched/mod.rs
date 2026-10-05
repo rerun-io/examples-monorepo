@@ -127,6 +127,30 @@ pub struct PipelineConfig {
     pub print_every_second: bool,
 }
 
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            lossless: false,
+            slam_mode: SlamMode::Off,
+            slam: SlamConfig::default(),
+            reference: None,
+            hands: None,
+            hands_wait: Duration::ZERO,
+            imu_wait: Duration::from_millis(50),
+            small_cameras: None,
+            downsample_threads: 2,
+            cpus_big: None,
+            cpus_little: None,
+            cpus_downsample: None,
+            cpus_hands: None,
+            slam_uclamp_min: None,
+            hands_uclamp_min: None,
+            duration: None,
+            print_every_second: false,
+        }
+    }
+}
+
 /// Final numbers of a run.
 #[derive(Debug, Default, Serialize)]
 pub struct RunSummary {

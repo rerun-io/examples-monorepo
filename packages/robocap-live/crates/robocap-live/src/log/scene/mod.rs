@@ -34,7 +34,7 @@ use nalgebra::Isometry3;
 use rerun::RecordingStream;
 
 use super::{LogCounters, LogError};
-use crate::frame::{NUM_CAMERAS, Rig, SMALL_SIZE};
+use crate::frame::{FULL_SIZE, NUM_CAMERAS, Rig, SMALL_SIZE};
 use crate::hands::letterbox::BarLetterbox;
 use crate::sched::FrameTimings;
 use crate::frame::isometry_from_matrix;
@@ -258,15 +258,33 @@ fn rgb(c: [u8; 3]) -> rerun::Color {
     rerun::Color::from_rgb(c[0], c[1], c[2])
 }
 
-/// Log the static scene: world axes and the hand classes, the six cameras (pose in the rig, pinhole at the 640x360 video size),
-/// the video codec when `h264` is set, and every per-entity constant the frameset rows then leave out.
+/// What a logger writes. A catalog layer sits on a segment beside the dataset's own layers, so it carries only what it adds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Content {
+    /// The whole scene: rig, cameras, video, SLAM pose and trajectory, hands, timings.
+    #[default]
+    Full,
+    /// Only the hands (3D landmarks, the mesh, the camera-pane overlays) and the skeleton classes that draw them. The catalog
+    /// segment's `base` layer holds the cameras and their full-resolution pinholes and `slam_rs` the rig pose, so the pane overlays
+    /// are logged in full-resolution pixels ([`Content::pane_scale`]) and nothing else here is logged.
+    HandsLayer,
+}
+
+impl Content {
+    /// The factor from the 640x360 pane pixels the overlays are made in to the pixels of the pinhole they are logged under.
+    pub fn pane_scale(self) -> f32 {
+        match self {
+            Self::Full => 1.0,
+            Self::HandsLayer => FULL_SIZE.width as f32 / SMALL_SIZE.width as f32,
+        }
+    }
+}
+
+/// Log the hand classes, pane styles and 3D hand styles shared by both contents.
 ///
 /// # Errors
-///
 /// The SDK's error if a component fails to serialise.
-pub fn log_static_scene(rec: &RecordingStream, rig: &Rig, h264: bool) -> Result<(), rerun::RecordingStreamError> {
-    rec.log_static(TIMINGS_PATH, &rerun::SeriesLines::new().with_names(TIMING_SERIES))?;
-    rec.log_static("/world", &rerun::ViewCoordinates::RIGHT_HAND_Z_UP())?;
+pub fn log_static_hands(rec: &RecordingStream, rig: &Rig) -> Result<(), rerun::RecordingStreamError> {
     let connections = rerun::encodings::KeypointPair::vec_from(HAND_CONNECTIONS);
     let class = |id: u16, label: &str, color: [u8; 3]| rerun::encodings::ClassDescription {
         info: rerun::encodings::AnnotationInfo { id, label: Some(label.into()), color: Some(rerun::encodings::Rgba32::from_rgb(color[0], color[1], color[2])) },
@@ -275,22 +293,7 @@ pub fn log_static_scene(rec: &RecordingStream, rig: &Rig, h264: bool) -> Result<
     };
     let classes = [class(0, SIDES[0], HAND_COLORS[0]), class(1, SIDES[1], HAND_COLORS[1]), class(PREDICTED_CLASS, "predicted", PREDICTED_COLOR)];
     rec.log_static("/world", &rerun::AnnotationContext::new(classes))?;
-    // The cap's own axes, so its pose reads at room scale (the cap mesh rides in the display asset when it is readable).
-    rec.log_static(format!("{RIG_PATH}/axes"), &rerun::TransformAxes3D::new(RIG_AXIS_LENGTH))?;
-    for (camera, cam) in rig.cameras.iter().enumerate().take(NUM_CAMERAS) {
-        rec.log_static(cam_path(camera), &transform_from_isometry(&rig_from_cam(&cam.cam_from_rig)))?;
-        let scale = small_scale(rig, camera);
-        let principal = small_from_full([cam.principal[0] as f32, cam.principal[1] as f32], scale);
-        let (fx, fy) = (cam.focal[0] as f32 * scale[0], cam.focal[1] as f32 * scale[1]);
-        // Column-major image_from_camera.
-        let pinhole = rerun::Pinhole::new([[fx, 0.0, 0.0], [0.0, fy, 0.0], [principal[0], principal[1], 1.0]])
-            .with_resolution([SMALL_SIZE.width as f32, SMALL_SIZE.height as f32])
-            .with_camera_xyz(rerun::components::ViewCoordinates::RDF)
-            .with_image_plane_distance(IMAGE_PLANE_DISTANCE);
-        rec.log_static(pinhole_path(camera), &pinhole)?;
-        if h264 {
-            rec.log_static(video_path(camera), &rerun::VideoStream::new(rerun::components::VideoCodec::H264))?;
-        }
+    for camera in 0..rig.cameras.len().min(NUM_CAMERAS) {
         // Only what never changes is static: a static component wins over every logged row of it (keypoint ids, colours and
         // labels vary per frameset here).
         for side in 0..2 {
@@ -308,6 +311,32 @@ pub fn log_static_scene(rec: &RecordingStream, rig: &Rig, h264: bool) -> Result<
         let points = rerun::Points3D::update_fields().with_class_ids([side as u16]).with_keypoint_ids(0..21u16).with_radii([0.005]).with_show_labels(false);
         rec.log_static(hand3d_path(side), &points)?;
         rec.log_static(mesh_path(side), &rerun::Mesh3D::update_fields().with_albedo_factor(rerun::Rgba32::from_unmultiplied_rgba(r, g, b, a)))?;
+    }
+    Ok(())
+}
+
+/// Log the full scene's camera geometry, world axes, video codecs and time series.
+///
+/// # Errors
+/// The SDK's error if a component fails to serialise.
+pub fn log_static_scene(rec: &RecordingStream, rig: &Rig, h264: bool) -> Result<(), rerun::RecordingStreamError> {
+    rec.log_static(TIMINGS_PATH, &rerun::SeriesLines::new().with_names(TIMING_SERIES))?;
+    rec.log_static("/world", &rerun::ViewCoordinates::RIGHT_HAND_Z_UP())?;
+    rec.log_static(format!("{RIG_PATH}/axes"), &rerun::TransformAxes3D::new(RIG_AXIS_LENGTH))?;
+    for (camera, cam) in rig.cameras.iter().enumerate().take(NUM_CAMERAS) {
+        rec.log_static(cam_path(camera), &transform_from_isometry(&rig_from_cam(&cam.cam_from_rig)))?;
+        let scale = small_scale(rig, camera);
+        let principal = small_from_full([cam.principal[0] as f32, cam.principal[1] as f32], scale);
+        let (fx, fy) = (cam.focal[0] as f32 * scale[0], cam.focal[1] as f32 * scale[1]);
+        // Column-major image_from_camera.
+        let pinhole = rerun::Pinhole::new([[fx, 0.0, 0.0], [0.0, fy, 0.0], [principal[0], principal[1], 1.0]])
+            .with_resolution([SMALL_SIZE.width as f32, SMALL_SIZE.height as f32])
+            .with_camera_xyz(rerun::components::ViewCoordinates::RDF)
+            .with_image_plane_distance(IMAGE_PLANE_DISTANCE);
+        rec.log_static(pinhole_path(camera), &pinhole)?;
+        if h264 {
+            rec.log_static(video_path(camera), &rerun::VideoStream::new(rerun::components::VideoCodec::H264))?;
+        }
     }
     for path in [format!("{RUN_PATH}/trajectory"), format!("{RUN_PATH}/trail")] {
         rec.log_static(path, &rerun::LineStrips3D::update_fields().with_colors([rgb(TRAJECTORY_COLOR)]).with_radii([0.004]))?;

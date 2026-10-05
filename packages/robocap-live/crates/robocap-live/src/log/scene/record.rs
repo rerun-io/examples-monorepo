@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rerun::RecordingStream;
 
 use super::{
-    COUNTERS_PATH, CROP_LABEL_HALF_SIZE, FPS_PATH, LOG_STATUS_PATH, Layer, RIG_PATH, RUN_PATH, SLAM_STATUS_PATH, SceneSnapshot, TIMELINE,
+    COUNTERS_PATH, CROP_LABEL_HALF_SIZE, Content, FPS_PATH, LOG_STATUS_PATH, Layer, RIG_PATH, RUN_PATH, SLAM_STATUS_PATH, SceneSnapshot, TIMELINE,
     TIMINGS_PATH, confidence_rgb, hand3d_path, mesh_path, pane_path, rgb, transform_from_isometry,
 };
 use crate::frame::{NUM_CAMERAS, SMALL_SIZE};
@@ -193,19 +193,17 @@ fn relative_depth_component(d_rel_mm: &[f32; 21]) -> rerun::SerializedComponentB
 /// # Errors
 ///
 /// The SDK's error if a component fails to serialise.
-pub fn write_record(rec: &RecordingStream, record: &FrameRecord<'_>) -> Result<(), rerun::RecordingStreamError> {
+pub fn write_record(rec: &RecordingStream, record: &FrameRecord<'_>, content: Content) -> Result<(), rerun::RecordingStreamError> {
+    rec.set_time(TIMELINE, rerun::TimeCell::from_duration_nanos(record.scene.t_ns));
+    write_hands(rec, record, content.pane_scale())?;
+    if content == Content::Full {
+        write_scene(rec, record)?;
+    }
+    Ok(())
+}
+
+fn write_hands(rec: &RecordingStream, record: &FrameRecord<'_>, k: f32) -> Result<(), rerun::RecordingStreamError> {
     let scene = record.scene;
-    rec.set_time(TIMELINE, rerun::TimeCell::from_duration_nanos(scene.t_ns));
-    if let Some(pose) = &scene.pose {
-        rec.log(RIG_PATH, &transform_from_isometry(pose))?;
-    } else if record.pose_lost {
-        rec.log(RIG_PATH, &rerun::Transform3D::clear_fields())?;
-    }
-    if let Some(edge) = scene.edge {
-        let line = rerun::LineStrips3D::update_fields().with_strips([edge.to_vec()]);
-        rec.log(format!("{RUN_PATH}/trajectory"), &line)?;
-        rec.log(format!("{RUN_PATH}/trail"), &line)?;
-    }
     for (side, hand) in record.hands.iter().enumerate() {
         match hand {
             Hand3d::Draw { points, mesh, triangles } => {
@@ -225,15 +223,17 @@ pub fn write_record(rec: &RecordingStream, record: &FrameRecord<'_>) -> Result<(
             Hand3d::Keep => {}
         }
     }
+    // The overlays are made in 640x360 pane pixels; a layer logs them under the base layer's full-resolution pinholes.
+    let px = |p: [f32; 2]| [p[0] * k, p[1] * k];
     for item in &scene.panes {
         let path = pane_path(item.camera, item.side, item.layer);
         match &item.draw {
             PaneDraw::Skeleton { points, keypoint_ids } => {
-                rec.log(path, &rerun::Points2D::update_fields().with_positions(points.iter().copied()).with_keypoint_ids(keypoint_ids.iter().copied()))?;
+                rec.log(path, &rerun::Points2D::update_fields().with_positions(points.iter().copied().map(px)).with_keypoint_ids(keypoint_ids.iter().copied()))?;
             }
             PaneDraw::KeyNet { points, confidence, d_rel_mm } => {
                 let dots = rerun::Points2D::update_fields()
-                    .with_positions(points.iter().copied())
+                    .with_positions(points.iter().copied().map(px))
                     .with_colors(confidence.iter().map(|&c| rgb(confidence_rgb(c))));
                 let [confidences, average] = confidence_components(confidence);
                 match d_rel_mm {
@@ -249,21 +249,36 @@ pub fn write_record(rec: &RecordingStream, record: &FrameRecord<'_>) -> Result<(
                 // outline's top-left corner instead, kept inside the image (a crop at the edge reaches past it).
                 let corner = points.iter().copied().min_by(|a, b| (a[0] + a[1]).total_cmp(&(b[0] + b[1]))).unwrap_or_default();
                 let [half_w, half_h] = CROP_LABEL_HALF_SIZE;
-                let corner = [corner[0].clamp(half_w, SMALL_SIZE.width as f32 - half_w), corner[1].clamp(half_h, SMALL_SIZE.height as f32 - half_h)];
+                let corner = px([corner[0].clamp(half_w, SMALL_SIZE.width as f32 - half_w), corner[1].clamp(half_h, SMALL_SIZE.height as f32 - half_h)]);
                 let strip = rerun::LineStrips2D::update_fields()
-                    .with_strips([points.clone(), vec![corner, corner]])
+                    .with_strips([points.iter().copied().map(px).collect(), vec![corner, corner]])
                     .with_colors([rgb(*color)])
                     .with_labels(["", label.as_str()]);
                 rec.log(path, &strip)?;
             }
             PaneDraw::Box { center, half, color, label } => {
-                let boxes = rerun::Boxes2D::update_fields().with_centers([*center]).with_half_sizes([*half]).with_colors([rgb(*color)]).with_labels([label.as_str()]);
+                let boxes = rerun::Boxes2D::update_fields().with_centers([px(*center)]).with_half_sizes([px(*half)]).with_colors([rgb(*color)]).with_labels([label.as_str()]);
                 rec.log(path, &boxes)?;
             }
         }
     }
     for &(camera, side, layer) in &record.pane_clears {
         rec.log(pane_path(camera, side, layer), &rerun::Clear::flat())?;
+    }
+    Ok(())
+}
+
+fn write_scene(rec: &RecordingStream, record: &FrameRecord<'_>) -> Result<(), rerun::RecordingStreamError> {
+    let scene = record.scene;
+    if let Some(pose) = &scene.pose {
+        rec.log(RIG_PATH, &transform_from_isometry(pose))?;
+    } else if record.pose_lost {
+        rec.log(RIG_PATH, &rerun::Transform3D::clear_fields())?;
+    }
+    if let Some(edge) = scene.edge {
+        let line = rerun::LineStrips3D::update_fields().with_strips([edge.to_vec()]);
+        rec.log(format!("{RUN_PATH}/trajectory"), &line)?;
+        rec.log(format!("{RUN_PATH}/trail"), &line)?;
     }
     if let Some(values) = &scene.timings {
         rec.log(TIMINGS_PATH, &rerun::Scalars::new(values.iter().copied()))?;

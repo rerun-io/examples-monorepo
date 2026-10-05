@@ -225,16 +225,7 @@ fn test_config(lossless: bool, slam_mode: SlamMode, reference: ReferencePoses, h
         hands: Some(hands),
         hands_wait: Duration::from_millis(5),
         imu_wait: Duration::from_millis(20),
-        small_cameras: None,
-        downsample_threads: 2,
-        cpus_big: None,
-        cpus_little: None,
-        cpus_downsample: None,
-        cpus_hands: None,
-        slam_uclamp_min: None,
-        hands_uclamp_min: None,
-        duration: None,
-        print_every_second: false,
+        ..PipelineConfig::default()
     }
 }
 

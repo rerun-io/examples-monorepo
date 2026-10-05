@@ -19,10 +19,11 @@ pub mod scene;
 pub mod video;
 
 mod preview;
+mod sink;
 mod worker;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -40,6 +41,7 @@ use crate::frame::{Luma, NUM_CAMERAS, Rig, SMALL_SIZE};
 use crate::hands::HandFrameResult;
 use display::{APPLICATION_ID, DisplayAssets, DisplayError};
 use preview::{PreviewQueue, PreviewSender};
+pub use sink::LoggerSink;
 use scene::{DeliveredState, RecordState};
 use worker::{FrameItem, SaveSlot, VideoSink, Worker};
 use video::{EncoderConfig, EncoderStats, H264Encoder, VideoError};
@@ -105,8 +107,11 @@ pub struct LoggerConfig {
     pub recording_id: Option<String>,
     /// `video_time` = `t_ns - origin`; `None` = the first frameset's `t_ns` (a live session starts at 0).
     pub time_origin_ns: Option<i64>,
-    /// Framesets the worker may lag behind before `log_frameset` drops.
+    /// Framesets the worker may lag behind before `log_frameset` drops (or, [`LoggerConfig::lossless`], waits).
     pub input_queue: usize,
+    /// `log_frameset` waits for the worker instead of dropping a frameset: an offline catalog layer must hold every frameset,
+    /// and nothing upstream of it runs in real time.
+    pub lossless: bool,
     /// Items (video samples, images, frame records) the preview may lag behind before it drops.
     pub preview_queue: usize,
     /// Bytes the preview stream's SDK pipeline may buffer before it pushes back (bounds the latency after a stall).
@@ -120,6 +125,8 @@ pub struct LoggerConfig {
     pub save_min_free_bytes: u64,
     /// How much of the hand pipeline the camera panes show (more costs more of the preview link).
     pub hand_overlays: scene::HandOverlays,
+    /// The whole scene, or only the hands for a catalog layer ([`scene::Content`]).
+    pub content: scene::Content,
 }
 
 impl Default for LoggerConfig {
@@ -133,12 +140,14 @@ impl Default for LoggerConfig {
             recording_id: None,
             time_origin_ns: None,
             input_queue: 4,
+            lossless: false,
             preview_queue: 256,
             preview_max_bytes_in_flight: 4 * 1024 * 1024,
             preview_flush: rerun::log::ChunkBatcherConfig::LOW_LATENCY.flush_tick,
             video_cameras: (0..NUM_CAMERAS).collect(),
             save_min_free_bytes: 4 * 1024 * 1024 * 1024,
             hand_overlays: scene::HandOverlays::default(),
+            content: scene::Content::Full,
         }
     }
 }
@@ -254,12 +263,16 @@ struct Prelude {
     rig: Rig,
     h264: bool,
     display: Option<DisplayAssets>,
+    content: scene::Content,
 }
 
 impl Prelude {
     fn send(&self, rec: &RecordingStream) -> Result<(), LogError> {
-        scene::log_static_scene(rec, &self.rig, self.h264)?;
-        if let Some(display) = &self.display {
+        scene::log_static_hands(rec, &self.rig)?;
+        if self.content == scene::Content::Full {
+            scene::log_static_scene(rec, &self.rig, self.h264)?;
+        }
+        if let Some(display) = self.display.as_ref() {
             display.send(rec)?;
         }
         Ok(())
@@ -306,6 +319,7 @@ pub struct Logger {
     started: Instant,
     time_origin_ns: Option<i64>,
     recording_id: String,
+    lossless: bool,
 }
 
 impl Logger {
@@ -328,7 +342,7 @@ impl Logger {
             format!("robocap-live-{seconds}")
         });
         let display = options.display.as_deref().map(DisplayAssets::load).transpose()?;
-        let prelude = Arc::new(Prelude { rig: rig.clone(), h264: options.video == VideoMode::H264, display });
+        let prelude = Arc::new(Prelude { rig: rig.clone(), h264: options.video == VideoMode::H264, display, content: options.content });
         let counters = Arc::new(LogCounters::default());
         let started = Instant::now();
         let shutdown = Arc::new(Shutdown::default());
@@ -346,7 +360,12 @@ impl Logger {
                     None
                 }
                 _ => {
-                    let rec = rerun::RecordingStreamBuilder::new(APPLICATION_ID).recording_id(recording_id.clone()).save(path)?;
+                    // A catalog layer carries no recording properties: registered beside the segment's base layer, its
+                    // RecordingInfo (start time, name) would replace the segment's.
+                    let rec = rerun::RecordingStreamBuilder::new(APPLICATION_ID)
+                        .recording_id(recording_id.clone())
+                        .send_properties(options.content == scene::Content::Full)
+                        .save(path)?;
                     rec.set_log_time_enabled(false);
                     prelude.send(&rec)?;
                     Some(rec)
@@ -407,6 +426,7 @@ impl Logger {
             counters: counters.clone(),
             state: RecordState::new(rig, options.hand_overlays),
             delivered: DeliveredState::default(),
+            content: options.content,
             notice: None,
             fps_window: Default::default(),
             last_worker_ms: 0.0,
@@ -415,7 +435,17 @@ impl Logger {
             .name("log-worker".into())
             .spawn(move || worker.run(rx))
             .map_err(|e| LogError::Invalid(format!("worker thread: {e}")))?;
-        Ok(Self { input: Some(input), worker: Some(worker), preview, shutdown, counters, started, time_origin_ns: options.time_origin_ns, recording_id })
+        Ok(Self {
+            input: Some(input),
+            worker: Some(worker),
+            preview,
+            shutdown,
+            counters,
+            started,
+            time_origin_ns: options.time_origin_ns,
+            recording_id,
+            lossless: options.lossless,
+        })
     }
 
     /// The recording id both streams use.
@@ -423,7 +453,8 @@ impl Logger {
         &self.recording_id
     }
 
-    /// Hand one frameset to the logger. Never blocks: if the worker is behind, the frameset is dropped and counted.
+    /// Hand one frameset to the logger. Never blocks: if the worker is behind, the frameset is dropped and counted. A
+    /// [`LoggerConfig::lossless`] logger waits for the worker instead.
     ///
     /// # Errors
     ///
@@ -441,6 +472,9 @@ impl Logger {
             received: Instant::now(),
         };
         let Some(input) = &self.input else { return Err(LogError::WorkerGone) };
+        if self.lossless {
+            return input.send(item).map_err(|_| LogError::WorkerGone);
+        }
         match input.try_send(item) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {

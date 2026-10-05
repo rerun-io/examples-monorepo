@@ -188,6 +188,48 @@ fn save_hands(name: &str, frames: u64, hand_overlays: scene::HandOverlays) -> Re
 }
 
 #[test]
+fn a_hands_layer_saves_only_the_hands_and_no_recording_properties_and_drops_nothing() -> Result<(), LogError> {
+    let save = temp_dir("hands-layer").join("out.rrd");
+    // A one-frameset queue: a lossless logger waits for its worker instead of dropping.
+    let options = LoggerConfig {
+        save: Some(save.clone()),
+        video: VideoMode::Off,
+        hand_overlays: scene::HandOverlays::Debug,
+        recording_id: Some("segment".into()),
+        time_origin_ns: Some(0),
+        content: scene::Content::HandsLayer,
+        lossless: true,
+        input_queue: 1,
+        ..LoggerConfig::default()
+    };
+    let mut logger = Logger::new(&test_rig(), options)?;
+    for frame in 0..40 {
+        let result = hands(frame);
+        let timings = FrameTimings::downsampled(1.0);
+        let pose = Isometry3::identity();
+        logger.log_frameset(&FrameLog {
+            t_ns: 1_000_000_000 + frame as i64 * 33_333_333,
+            small: [None; NUM_CAMERAS],
+            world_from_rig: Some(&pose),
+            slam_status: "reference",
+            hands: Some(&result),
+            timings: &timings,
+        })?;
+    }
+    let (stats, _) = logger.finish()?;
+    assert_eq!((stats.framesets_in, stats.framesets_dropped), (40, 0));
+    let components = components_per_entity(&save);
+    let foreign: Vec<&String> =
+        components.keys().filter(|entity| !(entity.starts_with("/world/hands/") || entity.contains("/pinhole/hands/") || *entity == "/world")).collect();
+    assert!(foreign.is_empty(), "a layer holds only the hands: {foreign:?}");
+    assert_eq!(components.get("/world").map(|names| names.iter().map(String::as_str).collect::<Vec<_>>()), Some(vec!["AnnotationContext:context"]));
+    let rows = rows_per_entity(&save);
+    assert_eq!(rows.get("/world/rig_00/cam_02/pinhole/hands/left/keynet"), Some(&40), "{rows:?}");
+    assert!(rows.get("/world/hands/left/keypoints").is_some_and(|&n| n == 40), "{rows:?}");
+    Ok(())
+}
+
+#[test]
 fn debug_overlays_save_keynet_dots_with_simplecvs_confidence_components_and_crop_outlines() -> Result<(), LogError> {
     let save = save_hands("debug-overlays", 5, scene::HandOverlays::Debug)?;
     let rows = rows_per_entity(&save);
@@ -474,7 +516,8 @@ fn logger_stopped_for_low_disk(save: RecordingStream, path: PathBuf) -> Result<L
         shutdown: shutdown.clone(), finalizer: None, video: VideoMode::Off,
         video_cameras: Vec::new(), encoders: Vec::new(), save: Arc::new(Mutex::new(Some(save))), save_path: Some(path),
         save_min_free_bytes: 0, last_disk_check: Instant::now(), preview: None, counters: counters.clone(),
-        state: RecordState::default(), delivered: DeliveredState::default(), notice: None,
+        state: RecordState::default(), delivered: DeliveredState::default(),
+        content: scene::Content::Full, notice: None,
         fps_window: Default::default(), last_worker_ms: 0.0,
     };
     // Saving has already started. Simulate the next filesystem check crossing its configured floor.
@@ -489,7 +532,7 @@ fn logger_stopped_for_low_disk(save: RecordingStream, path: PathBuf) -> Result<L
     let (input, rx) = sync_channel(1);
     Ok(Logger {
         input: Some(input), worker: Some(std::thread::spawn(move || worker.run(rx))), preview: None, shutdown, counters,
-        started: Instant::now(), time_origin_ns: None, recording_id: "low-disk".into(),
+        started: Instant::now(), time_origin_ns: None, recording_id: "low-disk".into(), lossless: false,
     })
 }
 

@@ -102,6 +102,7 @@ pub(super) struct Worker {
     pub(super) counters: Arc<LogCounters>,
     pub(super) state: RecordState,
     pub(super) delivered: DeliveredState,
+    pub(super) content: scene::Content,
     pub(super) notice: Option<String>,
     pub(super) fps_window: VecDeque<Instant>,
     pub(super) last_worker_ms: f64,
@@ -200,7 +201,7 @@ impl Worker {
         }
         let snapshot = Arc::new(SceneSnapshot { notice: self.notice.clone(), ..prepared });
         with_save(&self.save, |save| {
-            if let Err(error) = scene::write_record(save, &self.delivered.record(&snapshot)) {
+            if let Err(error) = scene::write_record(save, &self.delivered.record(&snapshot), self.content) {
                 self.counters.error("save record", &error);
             }
         });
