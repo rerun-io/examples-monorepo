@@ -157,6 +157,10 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
     rr.log("/", annotation_context(), static=True, recording=recording)
     device: aria.DeviceCalibration = aria.DeviceCalibration.from_json(inputs.calib_json, f"{take.take_name} calib_json")
     aria_sizes: dict[str, tuple[int, int]] = {}
+    # The viewer fits its eye to the layout (a kitchen, a soccer pitch), so a GoPro frustum keeps one on-screen size only if it
+    # grows with the layout.
+    centers_xy: Float64[ndarray, "c 2"] = np.array([calib.world_T_cam[:2, 3] for calib in inputs.gopros])
+    frustum_m: float = max(0.1, 0.05 * float(np.linalg.norm(centers_xy - centers_xy.mean(axis=0), axis=1).max()))
 
     def log_aria(cam: int, stream: AriaStream, width: int, height: int) -> str:
         if stream.label is None:  # both eye cameras in one frame: no single calibration, so no pinhole
@@ -189,7 +193,7 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         )
 
     def log_gopro(rig: int, calib: GoproCalib, size: tuple[int, int], width: int, height: int) -> str:
-        log_camera_node(recording, rig, 0, calib.camera(*size), name=calib.cam_uid, kind="rgb", image_plane_distance=0.1, camera_model=KB4)
+        log_camera_node(recording, rig, 0, calib.camera(*size), name=calib.cam_uid, kind="rgb", image_plane_distance=frustum_m, camera_model=KB4)
         return log_camera_source(
             recording,
             rig,

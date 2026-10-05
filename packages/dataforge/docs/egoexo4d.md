@@ -86,8 +86,10 @@ the HM fit is row `timesync_start_idx + i`; `frame_index` is `i`. The trajectory
 - **projections**: `coco133_xyz` through each GoPro's KB4 lens (OpenCV fisheye; checked against `cv2.fisheye.projectPoints`) and
   each calibrated Aria camera's FISHEYE624, at `<pinhole>/coco133_uv_projected`. No measured 2D.
 - Fisheye rule: every camera pane shows the video and the projections only; the mesh is in the 3D view.
-- Default blueprint: the scene from behind GoPro 1 (origin `rig_01/cam_00`), the four Aria panes in a column, GoPros 1–5 along the
-  bottom. Table card: the scene without video beside GoPro 1.
+- Default blueprint: the scene, the four Aria panes in a column, GoPros 1–5 along the bottom. Table card: the scene without video
+  beside GoPro 1. Both 3D views are rooted at `/world` (gravity-aligned, z up) with an orbital eye the viewer fits to the scene, so
+  a kitchen and a soccer pitch both frame. GoPro frustums are 5 % of the layout's radius (at least 0.1 m), so they keep one
+  on-screen size.
 
 ## Differences from simplecv
 
@@ -108,5 +110,7 @@ Checked only against public format docs and synthetic takes until the first real
 - the timesync end bound (the sources disagree; the HM convention is used) and that every video has the take's frame count;
 - that the Aria MP4s, SLAM and eye streams included, are quarter-turned from the sensor and the RGB MP4 is 1408×1408;
 - that every MP4's frame count equals the timesync rows (base refuses otherwise) and the HM fit's (a fit mismatch is printed and
-  the shorter one is converted);
-- the 3D eye framing on real GoPro layouts (the card eye sits too far back on the synthetic take).
+  the shorter one is converted).
+
+Source faults kept as shipped: `unc_soccer_09-21-23_01_7`'s GoPro 1 is 7 m below the pitch, looking up (its pose in the HM fit is
+the same).

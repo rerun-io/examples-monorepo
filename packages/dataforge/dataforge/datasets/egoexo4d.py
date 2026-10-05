@@ -46,9 +46,9 @@ TRAJECTORY_FILES: tuple[str, ...] = ("closed_loop_trajectory.csv", "gopro_calibs
 """The files of a take's ``trajectory/`` the base layer reads (the part also ships point-cloud summaries, calibration logs …)."""
 FETCH_WORKERS: int = 8
 """Concurrent S3 transfers per take; the 4K GoPro MP4s are most of its bytes."""
-SCENE_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((0.0, -1.2, -1.5), (0.0, 0.3, 3.0), (0.0, -1.0, 0.0))
-"""Eye behind and above GoPro 1, looking along its axis, in its (RDF) frame: the take's world frame has an arbitrary
-origin, but GoPro 1 always faces the activity."""
+SCENE_EYE: rrb.EyeControls3D = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital)
+"""Orbital, placed by the viewer to fit the scene in the gravity-aligned world: no fixed pose frames both a kitchen and a soccer
+pitch, and one rooted at a GoPro inherits its tilt (down to -65 degrees on the piano takes)."""
 UNCALIBRATED: list[str] = [f"- {schema.cam_path(EGO_RIG, cam)}/**" for cam, stream in enumerate(ARIA_STREAMS) if stream.label is None]
 """3D-view exclusions of the eye-tracking camera: its video has no pinhole, so a 3D view cannot place it."""
 
@@ -257,13 +257,13 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """Scene from behind GoPro 1; the Aria's cameras in a column; the GoPros along the bottom (lens-projected keypoints)."""
+        """Scene, z up; the Aria's cameras in a column; the GoPros along the bottom (lens-projected keypoints)."""
         projected: list[str] = [f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in range(1, EXO_SLOTS + 1)]
         projected += [f"- {schema.coco133_uv_projected_path(EGO_RIG, cam)}" for cam in range(len(ARIA_STREAMS))]
         return blueprints.exoego_blueprint(
             rrb.Spatial3DView(
                 name="Scene",
-                origin=schema.cam_path(1, 0),
+                origin="/world",
                 contents=["+ /world/**", *projected, *UNCALIBRATED],
                 eye_controls=SCENE_EYE,
                 line_grid=False,
@@ -278,7 +278,7 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
         return blueprints.exoego_table_blueprint(
             rrb.Spatial3DView(
                 name="Scene",
-                origin=schema.cam_path(1, 0),
+                origin="/world",
                 contents=[
                     "+ /world/**",
                     *(f"- {schema.coco133_uv_projected_path(rig, cam)}" for rig, cam in slots),
