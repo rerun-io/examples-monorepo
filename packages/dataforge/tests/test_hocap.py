@@ -240,6 +240,18 @@ def test_textured_obj_preserves_uv_seams(tmp_path: Path) -> None:
     assert any("Scalars:scalars" in b.schema.names for b in batches)
 
 
+@pytest.mark.parametrize(
+    "obj, message",
+    [("v 0 0\n", "short OBJ v record"), ("vt 0\n", "short OBJ vt record"), ("f 1/1/1 2/2/2 3/3/3 4/4/4\n", "non-triangular OBJ face")],
+)
+def test_textured_obj_rejects_short_records_and_polygons(tmp_path: Path, obj: str, message: str) -> None:
+    with ZipFile(tmp_path / "models.zip", "w") as archive:
+        archive.writestr("models/a/textured_mesh.obj", obj)
+        archive.writestr("models/a/textured_mesh.mtl", "map_Kd textured_mesh_0.png\n")
+        with pytest.raises(ValueError, match=message):
+            textured_glb(archive, "a")
+
+
 def test_blueprints_have_nine_cameras_and_table_excludes_other_video() -> None:
 
     dataset = HocapConfig().setup()

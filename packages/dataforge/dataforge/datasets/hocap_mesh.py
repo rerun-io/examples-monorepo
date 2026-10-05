@@ -26,23 +26,24 @@ def textured_glb(archive: ZipFile, object_id: str) -> bytes:
     uv: list[list[float]] = []
     corners: list[tuple[int, int, int]] = []
     for line in archive.read(f"{prefix}/textured_mesh.obj").decode().splitlines():
-        fields: list[str] = line.split()
-        if not fields:
-            continue
-        if fields[0] == "v":
-            vertices.append([float(value) for value in fields[1:4]])
-        elif fields[0] == "vn":
-            normals.append([float(value) for value in fields[1:4]])
-        elif fields[0] == "vt":
-            uv.append([float(fields[1]), 1.0 - float(fields[2])])
-        elif fields[0] == "f":
-            if len(fields) != 4:
+        match line.split():
+            case ["v", x, y, z, *_]:
+                vertices.append([float(x), float(y), float(z)])
+            case ["vn", x, y, z, *_]:
+                normals.append([float(x), float(y), float(z)])
+            case ["vt", u, v, *_]:
+                uv.append([float(u), 1.0 - float(v)])
+            case ["f", a, b, c]:
+                for field in (a, b, c):
+                    indices: list[int] = [int(value) - 1 for value in field.split("/")]
+                    if len(indices) != 3 or min(indices) < 0:
+                        raise ValueError(f"{prefix}: expected positive v/vt/vn face indices")
+                    corners.append((indices[0], indices[1], indices[2]))
+            case ["f", *_]:
                 raise ValueError(f"{prefix}: non-triangular OBJ face")
-            for field in fields[1:]:
-                indices: list[int] = [int(value) - 1 for value in field.split("/")]
-                if len(indices) != 3 or min(indices) < 0:
-                    raise ValueError(f"{prefix}: expected positive v/vt/vn face indices")
-                corners.append((indices[0], indices[1], indices[2]))
+            case [("v" | "vn" | "vt") as kind, *_]:
+                # A skipped record would shift every later index.
+                raise ValueError(f"{prefix}: short OBJ {kind} record")
     if not corners:
         raise ValueError(f"{prefix}: empty mesh")
     corner_indices: Int64[ndarray, "c 3"] = np.asarray(corners, dtype=np.int64)
