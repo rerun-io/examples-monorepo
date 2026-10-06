@@ -10,3 +10,4 @@ description = "Hand-pose LM fit core: hand model, Fisheye62/pinhole projection, 
 nalgebra = { workspace = true }
 thiserror = { workspace = true }
 kornia-staging-3d = { path = "../../../kornia-staging/crates/kornia-staging-3d", default-features = false }
+kornia-staging-algebra = { path = "../../../kornia-staging/crates/kornia-staging-algebra" }

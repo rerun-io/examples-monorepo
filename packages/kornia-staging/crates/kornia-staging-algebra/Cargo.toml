@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "damped_solve"
 harness = false
+
+[[bench]]
+name = "levenberg_marquardt"
+harness = false

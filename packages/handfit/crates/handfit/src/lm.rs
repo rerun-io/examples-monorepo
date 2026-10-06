@@ -5,12 +5,11 @@ use crate::{
         rigid_landmarks, JacobianRows, Residual, View, Views,
     },
 };
+use kornia_staging_algebra::optim::solvers::{marquardt_scaling, nielsen_damping};
 use nalgebra::{SMatrix, SVector, SymmetricEigen};
 
 /// The damping grows by this factor after each rejected step in a row (reset on acceptance).
 pub(crate) const DAMPING_GROWTH: f64 = 2.0;
-/// The smallest factor an accepted step scales the damping by.
-const MIN_DAMPING_FACTOR: f64 = 1.0 / 3.0;
 /// Damping above this ends the loop with an undamped stationarity test.
 pub(crate) const MAX_DAMPING: f64 = 1e10;
 
@@ -225,15 +224,14 @@ fn equations<const N: usize>(
             h.column_mut(k).fill(0.0);
         }
     }
-    let floor = 1e-9 * h.diagonal().max().max(1e-12);
-    let d = SVector::<f64, N>::from_fn(|i, _| {
+    let mut diagonal = h.diagonal();
+    marquardt_scaling(&mut diagonal, Default::default());
+    for i in 0..N {
         if mask[i] == 0.0 {
-            1.0
-        } else {
-            h[(i, i)].max(floor)
+            diagonal[i] = 1.0;
         }
-    });
-    (h, g, mask, d)
+    }
+    (h, g, mask, diagonal)
 }
 
 /// The 26-coordinate tangent step of an `N`-coordinate one (held fingers do not move).
@@ -254,13 +252,7 @@ pub(crate) fn predicted_reduction<const N: usize>(
     for k in 6..N.min(26) {
         effective[k] = candidate.angles[k - 6] - pose.angles[k - 6];
     }
-    -(2.0 * g.dot(&effective) + effective.dot(&(h * effective)))
-}
-
-/// Nielsen's damping update after an accepted step: the actual over the predicted reduction sets the factor.
-pub(crate) fn nielsen_damping(damping: f64, reduction: f64, predicted: f64) -> f64 {
-    let ratio = reduction / predicted.max(1e-30);
-    damping * (1.0 - (2.0 * ratio - 1.0).powi(3)).max(MIN_DAMPING_FACTOR)
+    kornia_staging_algebra::optim::solvers::predicted_reduction(&effective, h, g)
 }
 
 /// The warm fit of one hand: an LM solve from `prior`, with the temporal prior pulling towards it (handtrack `fit_hand`).
@@ -439,7 +431,11 @@ macro_rules! dense {
     ($n:literal) => {
         impl Dense<$n> for SMatrix<f64, $n, $n> {
             fn solve_damped(self, rhs: &SVector<f64, $n>) -> Option<SVector<f64, $n>> {
-                cholesky_solve(&self, rhs).or_else(|| self.lu().solve(rhs))
+                cholesky_solve(&self, rhs).or_else(|| {
+                    self.lu()
+                        .solve(rhs)
+                        .filter(|step| step.iter().all(|v| v.is_finite()))
+                })
             }
             fn eigenpairs(self) -> (SVector<f64, $n>, SMatrix<f64, $n, $n>) {
                 let eigen = SymmetricEigen::new(self);
@@ -539,12 +535,16 @@ where
     };
     let mut converged = false;
     if energy.is_finite() {
-        for _ in 0..config.max_iterations {
+        'iterations: for _ in 0..config.max_iterations {
             let linear = *normal.get_or_insert_with(|| normal_equations(&pose));
             let (h, g, mask, d) = equations(&pose, &linear, limits);
             let mut system = h;
             for i in 0..N {
                 system[(i, i)] += damping * d[i] + (1.0 - mask[i]);
+                if !system[(i, i)].is_finite() {
+                    termination = Termination::NonFinite;
+                    break 'iterations;
+                }
             }
             let Some(step) = system.solve_damped(&(-g)) else {
                 termination = Termination::NonFinite;
@@ -567,7 +567,7 @@ where
                 current = new_residual;
                 normal = None;
                 energy = new_energy;
-                damping = nielsen_damping(damping, reduction, predicted);
+                damping = nielsen_damping(damping, reduction, predicted, Default::default());
                 growth = DAMPING_GROWTH;
                 if small {
                     converged = true;
@@ -611,5 +611,34 @@ where
         iterations,
         converged,
         termination,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infinite_normal_diagonal_stops_before_applying_a_step() {
+        let pose = Pose {
+            rotation: nalgebra::Matrix3::identity(),
+            translation: nalgebra::Vector3::zeros(),
+            angles: SVector::zeros(),
+        };
+        let outcome = iterate::<6>(
+            &Config::default(),
+            pose,
+            &SMatrix::zeros(),
+            &|_| Residual::repeat(1.0),
+            &mut |_| {
+                (
+                    SMatrix::from_diagonal(&SVector::repeat(f64::INFINITY)),
+                    SVector::repeat(1.0),
+                )
+            },
+        );
+        assert_eq!(outcome.termination, Termination::NonFinite);
+        assert_eq!(outcome.iterations, 0);
+        assert!(outcome.pose.translation.iter().all(|v| *v == 0.0));
     }
 }

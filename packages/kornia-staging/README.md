@@ -105,3 +105,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Householder QR and scaled Givens with slice storage and scratch | slam-rs `qr.rs` | kornia-rs / kornia-algebra / linalg::qr | staged | - |
 | Rank-aware square-root marginalization | slam-rs `marg/helper.rs` | kornia-rs / kornia-algebra / optim::solvers | staged | - |
 | One scaled dense damped solve attempt | slam-rs estimator/optimize.rs | kornia-rs / kornia-algebra / optim::solvers | staged | - |
+| LM extension functions: Marquardt scaling, Nielsen damping and quadratic prediction, for the existing upstream solver | handfit `lm.rs`, `scale.rs` | kornia-rs / kornia-algebra / optim::solvers | staged | - |

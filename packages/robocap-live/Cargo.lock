@@ -2361,6 +2361,7 @@ name = "handfit"
 version = "0.1.0"
 dependencies = [
  "kornia-staging-3d",
+ "kornia-staging-algebra",
  "nalgebra",
  "thiserror",
 ]
