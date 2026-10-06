@@ -2581,10 +2581,13 @@ dependencies = [
  "cubecl-wgpu",
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
  "kornia-staging-algebra",
  "kornia-staging-imgproc",
  "log",
  "nalgebra",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "wgpu",
 ]

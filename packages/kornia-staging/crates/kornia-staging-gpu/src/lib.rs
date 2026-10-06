@@ -27,6 +27,7 @@ pub mod features;
 
 pub mod optical_flow;
 
+pub mod camera;
 
 #[cfg(test)]
 mod fault;

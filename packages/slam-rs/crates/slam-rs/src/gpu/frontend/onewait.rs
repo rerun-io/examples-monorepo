@@ -1,19 +1,21 @@
 //! Device selection connects temporal KLT to stereo without an intermediate read.
 
-use kornia_staging_gpu::runtime::GpuError;
+use crate::camera::SlamCamera;
 use crate::gpu::kernels::onewait::{CAMERA_PARAMS_START, PER_CAMERA_PARAMS};
 use cubecl::prelude::*;
 
 use super::GpuStages;
-use kornia_staging_3d::camera::CameraModelKind;
 use crate::config::MatchingGuessType;
 use crate::frontend::flow::FrontendError;
 use crate::frontend::stages::StereoContext;
-use kornia_staging_gpu::runtime::guarded;
-use crate::gpu::{ kernels, pyramid::GpuPyramid, submission};
+use crate::gpu::{kernels, pyramid::GpuPyramid, submission};
+use kornia_staging_3d::camera::CameraModelKind;
+use kornia_staging_gpu::camera::Brown8;
 use kornia_staging_gpu::optical_flow::{
-    FUSED_RUNS, FusedLaunch, FusedKltPlan, RUN_SOURCE_X, RUN_SOURCE_Y,
+    FUSED_RUNS, FusedKltPlan, FusedLaunch, RUN_SOURCE_X, RUN_SOURCE_Y,
 };
+use kornia_staging_gpu::runtime::GpuError;
+use kornia_staging_gpu::runtime::guarded;
 use kornia_staging_imgproc::features::{CellGrid, CellSelect};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::{TrackPhase, PatchTracker};
@@ -33,6 +35,8 @@ pub(super) struct OneWait<P: Pattern, R: Runtime> {
     plan: FusedKltPlan<P, R>,
     grid: CellGrid,
     cameras: usize,
+    camera_models: Vec<SlamCamera<f32>>,
+    device_cameras: Vec<Brown8>,
     cells: usize,
     pub(super) phase: Phase,
 }
@@ -66,7 +70,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             || !selects.iter().all(|other| *other == Some(select))
             || !cameras
                 .iter()
-                .all(|camera| matches!(camera.model.inner, CameraModelKind::BrownConrady(_)))
+                .all(|camera| matches!(&camera.model.inner, CameraModelKind::BrownConrady(model) if Brown8::from_brown_conrady(model).is_some()))
         {
             return Ok(false);
         }
@@ -86,12 +90,24 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         let fits = self.one_wait.as_ref().is_some_and(|state| {
             state.grid == select.grid
                 && state.cameras == cameras.len()
+                && state
+                    .camera_models
+                    .iter()
+                    .zip(cameras)
+                    .all(|(a, b)| *a == b.model)
         });
         let state = match &mut self.one_wait {
             Some(existing) if fits => existing,
             slot => {
                 let plan = self.tracker.plan_like(cells, lanes)?;
                 let io = plan.result_handle(cells * lanes)?;
+                let device_cameras = cameras
+                    .iter()
+                    .map(|camera| {
+                        let CameraModelKind::BrownConrady(model) = &camera.model.inner else { unreachable!("Brown8 eligibility checked"); };
+                        Brown8::from_brown_conrady(model).ok_or(crate::camera::CameraError::InvalidCalibration)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 slot.insert(guarded(
                     GpuError::DeviceLost {
                         what: "stereo allocation",
@@ -108,6 +124,8 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                             plan,
                             grid: select.grid,
                             cameras: cameras.len(),
+                            camera_models: cameras.iter().map(|camera| camera.model).collect(),
+                            device_cameras,
                             cells,
                             phase: Phase::Off,
                         })
@@ -126,18 +144,14 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 0.0
             },
         ];
-        if let CameraModelKind::BrownConrady(camera) = cameras[0].model.inner {
-            params.extend(camera.params()[..12].iter());
-        }
+        params.extend(state.device_cameras[0].device_parameters());
         let mut pairs = Vec::with_capacity(lanes);
         for camera in 1..cameras.len() {
             // Match the host's two inversions and quaternion action exactly.
             let transform = (calib.t_i_c[0].inverse() * calib.t_i_c[camera]).inverse();
             params.extend(transform.rotation.quaternion_xyzw());
             params.extend(transform.translation.iter());
-            if let CameraModelKind::BrownConrady(model) = cameras[camera].model.inner {
-                params.extend(model.params()[..12].iter());
-            }
+            params.extend(state.device_cameras[camera].device_parameters());
             pairs.push((&pyramids[0], &pyramids[camera]));
         }
 
@@ -370,3 +384,4 @@ impl StereoLaunch {
         }
     }
 }
+

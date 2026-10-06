@@ -1,20 +1,25 @@
 //! Exact cell order and bounded stereo input preparation on the device.
 //!
 //! Parameters: depth, survivor ratio, last detection count, point capacity,
-//! reprojection flag, camera-zero radtan8 intrinsics (12 values), then each
-//! destination's quaternion xyzw, translation xyz and 12 intrinsics.
+//! reprojection flag, camera-zero Brown8 parameters (13 values), then each
+//! destination's quaternion xyzw, translation xyz and 13 Brown8 parameters.
 //! Selected points: live count followed by interleaved x,y in column-major
 //! cell order. Stereo slots retain the fused kernel's ten-float point layout.
-use kornia_staging_gpu::optical_flow::{FUSED_RUNS, RUN_CAMERA, RUN_SOURCE_X, RUN_SOURCE_Y, RUN_TARGET_X, RUN_TARGET_Y, RUN_VALID, RUN_WARP};
+use kornia_staging_gpu::{
+    camera::{BROWN8_PARAMETERS, brown8},
+    optical_flow::{
+        FUSED_RUNS, RUN_CAMERA, RUN_SOURCE_X, RUN_SOURCE_Y, RUN_TARGET_X, RUN_TARGET_Y, RUN_VALID,
+        RUN_WARP,
+    },
+};
 use kornia_staging_imgproc::features::backend::NO_CELL_WINNER;
 
 const KEY_ROW_SHIFT: u32 = kornia_staging_imgproc::features::backend::KEY_ROW_SHIFT;
 const KEY_FIELD_MASK: u32 = kornia_staging_imgproc::features::backend::KEY_FIELD_MASK;
 
 pub(crate) const PARAM_HEADER: usize = 5;
-pub(crate) const RADTAN8_PARAMS: usize = 12;
-pub(crate) const PER_CAMERA_PARAMS: usize = 7 + RADTAN8_PARAMS;
-pub(crate) const CAMERA_PARAMS_START: usize = PARAM_HEADER + RADTAN8_PARAMS;
+pub(crate) const PER_CAMERA_PARAMS: usize = 7 + BROWN8_PARAMETERS;
+pub(crate) const CAMERA_PARAMS_START: usize = PARAM_HEADER + BROWN8_PARAMETERS;
 
 use cubecl::prelude::*;
 use kornia_staging_gpu::kernels::finite::is_finite;
@@ -41,10 +46,10 @@ pub(crate) fn occupancy(
     let mut present = 0u32;
     for point in 0..count {
         let base = point * FUSED_RUNS;
-        if temporal[base + 6usize] != 0.0f32 {
+        if temporal[base + RUN_VALID] != 0.0f32 {
             survivors += 1u32;
-            let x = temporal[base + 4usize];
-            let y = temporal[base + 5usize];
+            let x = temporal[base + RUN_TARGET_X];
+            let y = temporal[base + RUN_TARGET_Y];
             if x >= f32::cast_from(x_start)
                 && y >= f32::cast_from(y_start)
                 && x < f32::cast_from(x_start + columns * cell)
@@ -101,57 +106,6 @@ pub(crate) fn select(
     selected[0usize] = f32::cast_from(added);
 }
 
-#[cube]
-fn distort(
-    params: &[f32],
-    base: usize,
-    x: f32,
-    y: f32,
-    result: &mut Array<f32>,
-    #[comptime] jacobian: bool,
-) {
-    let k1 = params[base + 4usize];
-    let k2 = params[base + 5usize];
-    let p1 = params[base + 6usize];
-    let p2 = params[base + 7usize];
-    let k3 = params[base + 8usize];
-    let k4 = params[base + 9usize];
-    let k5 = params[base + 10usize];
-    let k6 = params[base + 11usize];
-    let rp2 = x * x + y * y;
-    let cdist = (1.0f32 + rp2 * (k1 + rp2 * (k2 + rp2 * k3)))
-        / (1.0f32 + rp2 * (k4 + rp2 * (k5 + rp2 * k6)));
-    let dx = 2.0f32 * p1 * x * y + p2 * (rp2 + 2.0f32 * x * x);
-    let dy = 2.0f32 * p2 * x * y + p1 * (rp2 + 2.0f32 * y * y);
-    result[0usize] = x * cdist + dx;
-    result[1usize] = y * cdist + dy;
-    if jacobian {
-        let v0 = x * x;
-        let v1 = y * y;
-        let v2 = v0 + v1;
-        let v3 = k6 * v2;
-        let v4 = k4 + v2 * (k5 + v3);
-        let v5 = v2 * v4 + 1.0f32;
-        let v6 = v5 * v5;
-        let v7 = 1.0f32 / v6;
-        let v8 = p1 * y;
-        let v9 = p2 * x;
-        let v10 = 2.0f32 * v6;
-        let v11 = k3 * v2;
-        let v12 = k1 + v2 * (k2 + v11);
-        let v13 = v12 * v2 + 1.0f32;
-        let v14 = v13 * (v2 * (k5 + 2.0f32 * v3) + v4);
-        let v15 = 2.0f32 * v14;
-        let v16 = v12 + v2 * (k2 + 2.0f32 * v11);
-        let v17 = 2.0f32 * v16;
-        let v18 = x * y;
-        let v19 = 2.0f32 * v7 * (-v14 * v18 + v16 * v18 * v5 + v6 * (p1 * x + p2 * y));
-        result[2usize] = v7 * (-v0 * v15 + v10 * (v8 + 3.0f32 * v9) + v5 * (v0 * v17 + v13));
-        result[3usize] = v19;
-        result[4usize] = v7 * (-v1 * v15 + v10 * (3.0f32 * v8 + v9) + v5 * (v1 * v17 + v13));
-    }
-}
-
 #[cube(launch_unchecked)]
 pub(crate) fn stereo_inputs(
     selected: &[f32],
@@ -174,32 +128,19 @@ pub(crate) fn stereo_inputs(
     }
     let sx = selected[1usize + 2usize * index];
     let sy = selected[2usize + 2usize * index];
+    // Source coordinates identify every record, including rejected candidates.
+    io[base + RUN_SOURCE_X] = sx;
+    io[base + RUN_SOURCE_Y] = sy;
     let mut guess_x = sx;
     let mut guess_y = sy;
     if params[4usize] != 0.0f32 {
-        let mx = (sx - params[PARAM_HEADER + 2usize]) / params[PARAM_HEADER];
-        let my = (sy - params[PARAM_HEADER + 3usize]) / params[PARAM_HEADER + 1usize];
-        let mut x = mx;
-        let mut y = my;
-        let mut d = Array::<f32>::new(5usize);
-        for _iteration in 0..5usize {
-            distort(params, PARAM_HEADER, x, y, &mut d, true);
-            let rx = d[0usize] - mx;
-            let ry = d[1usize] - my;
-            let det = d[2usize] * d[4usize] - d[3usize] * d[3usize];
-            let inv = 1.0f32 / det;
-            let ix = d[4usize] * inv * rx + -d[3usize] * inv * ry;
-            let iy = -d[3usize] * inv * rx + d[2usize] * inv * ry;
-            x -= ix;
-            y -= iy;
-            if f32::sqrt(rx * rx + ry * ry) < 0.0031622776f32 {
-                break;
-            }
+        let mut bearing = Array::<f32>::new(3usize);
+        if brown8::unproject(params, PARAM_HEADER, sx, sy, &mut bearing) != brown8::VALID {
+            terminate!();
         }
-        let norm_inv = 1.0f32 / f32::sqrt(x * x + y * y + 1.0f32);
-        let px = x * norm_inv * params[0usize];
-        let py = y * norm_inv * params[0usize];
-        let pz = norm_inv * params[0usize];
+        let px = bearing[0usize] * params[0usize];
+        let py = bearing[1usize] * params[0usize];
+        let pz = bearing[2usize] * params[0usize];
         let c = CAMERA_PARAMS_START + camera * PER_CAMERA_PARAMS;
         let qx = params[c];
         let qy = params[c + 1usize];
@@ -213,9 +154,12 @@ pub(crate) fn stereo_inputs(
         let vx = (px * a + qx * b) + (qy * pz - qz * py) * w + params[c + 4usize];
         let vy = (py * a + qy * b) + (qz * px - qx * pz) * w + params[c + 5usize];
         let vz = (pz * a + qz * b) + (qx * py - qy * px) * w + params[c + 6usize];
-        distort(params, c + 7usize, vx / vz, vy / vz, &mut d, false);
-        guess_x = params[c + 7usize] * d[0usize] + params[c + 9usize];
-        guess_y = params[c + 8usize] * d[1usize] + params[c + 10usize];
+        let mut pixel = Array::<f32>::new(2usize);
+        if brown8::project(params, c + 7usize, vx, vy, vz, &mut pixel) != brown8::VALID {
+            terminate!();
+        }
+        guess_x = pixel[0usize];
+        guess_y = pixel[1usize];
     }
     io[base + RUN_WARP] = 1.0f32;
     io[base + RUN_WARP + 1usize] = 0.0f32;
@@ -224,6 +168,72 @@ pub(crate) fn stereo_inputs(
     io[base + RUN_TARGET_X] = guess_x;
     io[base + RUN_TARGET_Y] = guess_y;
     io[base + RUN_VALID] = 1.0f32;
-    io[base + RUN_SOURCE_X] = sx;
-    io[base + RUN_SOURCE_Y] = sy;
+}
+
+#[cfg(all(test, feature = "gpu-wgpu"))]
+mod tests {
+    use super::*;
+    use kornia_staging_gpu::{
+        runtime::{GpuError, gpu_client},
+        transfer::{read_buffers, upload},
+    };
+
+    #[test]
+    fn stereo_inputs_reject_invalid_camera_rays_before_tracking() -> Result<(), GpuError> {
+        let client = gpu_client()?;
+        for (depth, k1, pixel, source_radius, target_radius, valid) in [
+            (0.001, 0.0, 0.0, 0.0, 0.0, false),
+            (1.0, -1.0, 1.0, 0.0, 0.0, false),
+            (1.0, 0.0, f32::NAN, 0.0, 0.0, false),
+            (1.0, 0.0, 2.0, 1.0, 0.0, false),
+            (1.0, 0.0, 2.0, 0.0, 1.0, false),
+            (1.0, 0.0, 0.5, 1.0, 1.0, true),
+        ] {
+            let mut params = vec![0.0f32; CAMERA_PARAMS_START + PER_CAMERA_PARAMS];
+            params[0] = depth;
+            params[4] = 1.0;
+            params[PARAM_HEADER] = 1.0;
+            params[PARAM_HEADER + 1] = 1.0;
+            params[PARAM_HEADER + 4] = k1;
+            params[PARAM_HEADER + 12] = source_radius;
+            params[CAMERA_PARAMS_START + 3] = 1.0;
+            params[CAMERA_PARAMS_START + 7] = 1.0;
+            params[CAMERA_PARAMS_START + 8] = 1.0;
+            params[CAMERA_PARAMS_START + 19] = target_radius;
+            let selected = upload(&client, f32::as_bytes(&[1.0, pixel, 0.0]))?;
+            let params_handle = upload(&client, f32::as_bytes(&params))?;
+            let io = upload(&client, f32::as_bytes(&[0.0; FUSED_RUNS]))?;
+            // SAFETY: One selected point, one camera and complete parameter/output records.
+            unsafe {
+                stereo_inputs::launch_unchecked::<kornia_staging_gpu::GpuRuntime>(
+                    &client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(1),
+                    BufferArg::from_raw_parts(selected, 3),
+                    BufferArg::from_raw_parts(params_handle, params.len()),
+                    BufferArg::from_raw_parts(io.clone(), FUSED_RUNS),
+                    1,
+                    1,
+                );
+            }
+            let read = read_buffers(&client, vec![io], "stereo refusal")?;
+            let values = f32::from_bytes(&read[0]);
+            assert_eq!(
+                values[6],
+                if valid { 1.0 } else { 0.0 },
+                "depth={depth}, k1={k1}, pixel={pixel}"
+            );
+            if valid {
+                approx::assert_abs_diff_eq!(values[4], pixel, epsilon = 1e-3);
+            }
+            assert!(values[..7].iter().all(|value| value.is_finite()));
+            assert_eq!(
+                values[7].to_bits(),
+                pixel.to_bits(),
+                "refused records must preserve source order"
+            );
+            assert_eq!(values[8], 0.0);
+        }
+        Ok(())
+    }
 }

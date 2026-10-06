@@ -23,6 +23,7 @@ cubecl.workspace = true
 cubecl-environment.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-algebra.workspace = true
+kornia-staging-3d.workspace = true
 thiserror.workspace = true
 log.workspace = true
 wgpu = { workspace = true, optional = true }
@@ -36,6 +37,8 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
+serde.workspace = true
+serde_json.workspace = true
 nalgebra.workspace = true
 approx.workspace = true
 criterion.workspace = true
@@ -57,5 +60,10 @@ required-features = ["wgpu"]
 
 [[bench]]
 name = "transfer"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "camera"
 harness = false
 required-features = ["wgpu"]
