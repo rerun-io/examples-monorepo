@@ -104,11 +104,12 @@ The PLY importer owns its native defaults and descriptors.
 
 ## Training recordings
 
-`gsplat-train` consumes Brush's `create_process_with_device` stream. The sole
-vendored dependency is the approved temporary `vendor/brush-process` observer patch:
+`gsplat-train` consumes Brush's `create_process_with_device` stream. It uses
+Brush 1388f74c + packages/brush-src/patches/brush-1388f74c-process-observer.patch:
 it exposes existing loss, learning-rate, and refinement values without changing
-training math, config merging, evaluation, or export. Its patch is stored beside
-it. Remove this adapter when upstream exposes the observations.
+training math, config merging, evaluation, or export. Pixi builds the `brush-src` source package with this patch, and environment activation
+links its installed source tree at `target/brush-src` for Cargo's path overrides.
+The reference Brush CLI uses an unpatched upstream workspace.
 
 Training passes tensor handles to a separate logging thread before advancing the
 stream. Readback and encoding occur there. Scales use exp, rotations change from

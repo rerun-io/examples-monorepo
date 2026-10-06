@@ -53,7 +53,11 @@ fn main() {
             p["version"].as_str().unwrap(),
             p.get("source")
                 .and_then(|s| s.as_str())
-                .unwrap_or("workspace")
+                .unwrap_or(if name == "brush-render" {
+                    "Brush 1388f74c + packages/brush-src/patches/brush-1388f74c-process-observer.patch"
+                } else {
+                    "workspace"
+                })
         ));
     }
     let manifest: toml::Value =

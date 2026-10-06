@@ -1388,7 +1388,6 @@ dependencies = [
 [[package]]
 name = "brush-async"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "js-sys",
  "tokio",
@@ -1399,7 +1398,6 @@ dependencies = [
 [[package]]
 name = "brush-cube"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "burn",
  "burn-cubecl",
@@ -1413,7 +1411,6 @@ dependencies = [
 [[package]]
 name = "brush-dataset"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "brush-async",
  "brush-render",
@@ -1439,7 +1436,6 @@ dependencies = [
 [[package]]
 name = "brush-loss"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "brush-cube",
  "burn",
@@ -1479,7 +1475,6 @@ dependencies = [
 [[package]]
 name = "brush-render"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "brush-cube",
  "brush-scan",
@@ -1500,7 +1495,6 @@ dependencies = [
 [[package]]
 name = "brush-rerun"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "anyhow",
  "brush-dataset",
@@ -1519,7 +1513,6 @@ dependencies = [
 [[package]]
 name = "brush-scan"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "brush-cube",
  "burn",
@@ -1531,7 +1524,6 @@ dependencies = [
 [[package]]
 name = "brush-serde"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "async-fn-stream",
  "brush-async",
@@ -1550,7 +1542,6 @@ dependencies = [
 [[package]]
 name = "brush-serde-macros"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1560,7 +1551,6 @@ dependencies = [
 [[package]]
 name = "brush-sort"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "brush-cube",
  "brush-scan",
@@ -1574,7 +1564,6 @@ dependencies = [
 [[package]]
 name = "brush-train"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "anyhow",
  "ball-tree",
@@ -1600,7 +1589,6 @@ dependencies = [
 [[package]]
 name = "brush-vfs"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "async_zip",
  "brush-async",
@@ -2499,7 +2487,6 @@ dependencies = [
 [[package]]
 name = "colmap-reader"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "brush-async",
  "glam",
@@ -7327,7 +7314,6 @@ dependencies = [
 [[package]]
 name = "lpips"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "burn",
  "image",
@@ -13482,7 +13468,6 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 [[package]]
 name = "rrfd"
 version = "1.0.0"
-source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
 dependencies = [
  "bytes",
  "futures-channel",

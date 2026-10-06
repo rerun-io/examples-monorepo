@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# Keep path-patched dependencies in Brush's own workspace for inherited package metadata.
+exclude = ["target/brush-src"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -30,6 +32,30 @@ brush-dataset = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74
 lto = "thin"
 codegen-units = 16
 
-# Observer-only event additions; see vendor/brush-process/README.md.
+# Brush 1388f74c + packages/brush-src/patches/brush-1388f74c-process-observer.patch.
+# Pixi builds brush-src from the pinned upstream recipe and applies the source patch.
+# Environment activation links target/brush-src to the installed source tree once;
+# keeping that link stable avoids rebuilding Brush when switching prod/dev envs.
+# Bare Cargo/rust-analyzer: activate a gsplat environment once per fresh checkout.
+# CARGO_TARGET_DIR does not move this manifest-relative source link.
+# Bump: update packages/brush-src/recipe.yaml's rev, rebase its observer patch,
+# update the upstream revisions above, then re-lock/install the Pixi environment.
+# Resolve Cargo offline, retaining the locked Burn/CubeCL revisions; review the diff.
+# The reference brush-cli cargo install uses its own unpatched upstream workspace.
 [patch.'https://github.com/ArthurBrussee/brush']
-brush-process = { path = "vendor/brush-process" }
+brush-async = { path = "target/brush-src/crates/brush-async" }
+brush-cube = { path = "target/brush-src/crates/brush-cube" }
+brush-dataset = { path = "target/brush-src/crates/brush-dataset" }
+brush-loss = { path = "target/brush-src/crates/brush-loss" }
+brush-process = { path = "target/brush-src/crates/brush-process" }
+brush-render = { path = "target/brush-src/crates/brush-render" }
+brush-rerun = { path = "target/brush-src/crates/brush-rerun" }
+brush-scan = { path = "target/brush-src/crates/brush-scan" }
+brush-serde = { path = "target/brush-src/crates/brush-serde" }
+brush-serde-macros = { path = "target/brush-src/crates/brush-serde-macros" }
+brush-sort = { path = "target/brush-src/crates/brush-sort" }
+brush-train = { path = "target/brush-src/crates/brush-train" }
+brush-vfs = { path = "target/brush-src/crates/brush-vfs" }
+colmap-reader = { path = "target/brush-src/crates/colmap-reader" }
+lpips = { path = "target/brush-src/crates/lpips" }
+rrfd = { path = "target/brush-src/crates/rrfd" }

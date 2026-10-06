@@ -1934,6 +1934,7 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.gsplat-rust-renderer.dependencies]
+brush-src = { path = "packages/brush-src" }
 python = "3.12.*"
 # Pinned Rerun and Brush crates share this Rust toolchain.
 rust = "1.98.*"
@@ -1981,8 +1982,12 @@ plyfile = ">=1.1,<2"
 rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }
 
+[feature.gsplat-rust-renderer.activation]
+scripts = ["packages/gsplat-rust-renderer/activate.sh"]
+
 [feature.gsplat-rust-renderer.activation.env]
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
+PYREFLY_TARGET = "gsplat_rust_renderer tools tests"
 CARGO_PROFILE_DEV_DEBUG = "0"
 CARGO_PROFILE_TEST_DEBUG = "0"
 CARGO_INCREMENTAL = "0"
