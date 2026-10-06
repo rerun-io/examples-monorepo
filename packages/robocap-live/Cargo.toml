@@ -16,12 +16,11 @@ publish = false
 [workspace.dependencies]
 anyhow = "1"
 handfit = { path = "../handfit/crates/handfit" }
-# kornia-rs first, at slam-rs's pinned revision (7 commits behind the v0.2.0 release) so slam-rs and this crate share one Image type.
-# Moving both to crates.io 0.2.0 together comes before any kornia-slam dependency (it builds on 0.2.0). See UPSTREAM.md.
-kornia-3d = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
-kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
-kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
-kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
+# Match slam-rs on crates.io kornia 0.2 so both consumers share one Image type. See UPSTREAM.md.
+kornia-3d = { version = "0.2", default-features = false }
+kornia-algebra = { version = "0.2", default-features = false }
+kornia-image = { version = "0.2", default-features = false }
+kornia-imgproc = { version = "0.2", default-features = false }
 nalgebra = "0.35"
 robocap-types = { path = "crates/robocap-types" }
 serde = { version = "1", features = ["derive"] }

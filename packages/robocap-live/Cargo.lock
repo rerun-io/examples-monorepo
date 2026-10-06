@@ -3299,8 +3299,9 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
 name = "kornia-3d"
-version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?rev=e2148e864a1b63a8fe094b89175273ef08823183#e2148e864a1b63a8fe094b89175273ef08823183"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e75de04f82c685342ee3e3c1cfdd4f86e918751a360b9cfdb02f5218e5d2f6f"
 dependencies = [
  "bincode",
  "faer",
@@ -3318,8 +3319,9 @@ dependencies = [
 
 [[package]]
 name = "kornia-algebra"
-version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?rev=e2148e864a1b63a8fe094b89175273ef08823183#e2148e864a1b63a8fe094b89175273ef08823183"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38badefbffb6b402e956af3908ea1658438e692502db5d7f01d9798f63e1a3af"
 dependencies = [
  "glam 0.33.11",
  "nalgebra",
@@ -3329,8 +3331,9 @@ dependencies = [
 
 [[package]]
 name = "kornia-image"
-version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?rev=e2148e864a1b63a8fe094b89175273ef08823183#e2148e864a1b63a8fe094b89175273ef08823183"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7baeb89055e61de6ca0580e9dd04893052ff4da619836f993dd7ec998b4a128b"
 dependencies = [
  "kornia-tensor",
  "num-traits",
@@ -3340,8 +3343,9 @@ dependencies = [
 
 [[package]]
 name = "kornia-imgproc"
-version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?rev=e2148e864a1b63a8fe094b89175273ef08823183#e2148e864a1b63a8fe094b89175273ef08823183"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eeca083d17c225e16b40dde8153d00e846a655c9d250e8690ce6a9ee22070cb"
 dependencies = [
  "kornia-algebra",
  "kornia-image",
@@ -3354,8 +3358,9 @@ dependencies = [
 
 [[package]]
 name = "kornia-tensor"
-version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?rev=e2148e864a1b63a8fe094b89175273ef08823183#e2148e864a1b63a8fe094b89175273ef08823183"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e7dc445092435019b0fe1599c95ab4c23aa17f1a8a092403c08765cf059d06a"
 dependencies = [
  "num-traits",
  "rayon",
