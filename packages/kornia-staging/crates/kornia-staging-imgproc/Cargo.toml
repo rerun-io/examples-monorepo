@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+test-oracles = []
+
 [dependencies]
+nalgebra.workspace = true
+kornia-staging-algebra.workspace = true
 thiserror.workspace = true
 kornia-imgproc.workspace = true
 kornia-image.workspace = true
@@ -34,3 +39,8 @@ harness = false
 [[bench]]
 name = "cells"
 harness = false
+
+[[bench]]
+name = "patch_se2"
+harness = false
+required-features = ["test-oracles"]

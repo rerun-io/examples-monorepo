@@ -18,13 +18,20 @@ use crate::{Backend, ImageView, VioError, calib, config, frontend, image};
 #[derive(Debug)]
 pub enum FrontendLane {
     /// The CPU pyramid builder and patch tracker.
-    Cpu(frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>),
+    Cpu(
+        frontend::flow::FrameToFrameOpticalFlow<
+            kornia_staging_imgproc::optical_flow::patch_se2::Pattern51,
+        >,
+    ),
     /// The CubeCL pyramid builder and patch tracker.
     #[cfg(feature = "gpu-wgpu")]
     Gpu(
         frontend::flow::FrameToFrameOpticalFlow<
-            frontend::patterns::Pattern51,
-            gpu::GpuStages<frontend::patterns::Pattern51, gpu::GpuRuntime>,
+            kornia_staging_imgproc::optical_flow::patch_se2::Pattern51,
+            gpu::GpuStages<
+                kornia_staging_imgproc::optical_flow::patch_se2::Pattern51,
+                gpu::GpuRuntime,
+            >,
         >,
     ),
 }
@@ -225,14 +232,15 @@ pub(super) fn build_frontend(
         #[cfg(feature = "gpu-wgpu")]
         Backend::Gpu => {
             let num_levels: usize = config.optical_flow_levels as usize + 1;
-            let stages = gpu::gpu_stages::<frontend::patterns::Pattern51>(
-                options.max_keypoints,
-                num_levels,
-                config.optical_flow_max_iterations as usize,
-                config.optical_flow_max_recovered_dist2,
-                calibration.intrinsics.len(),
-            )
-            .map_err(frontend::flow::FrontendError::from)?;
+            let stages =
+                gpu::gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(
+                    options.max_keypoints,
+                    num_levels,
+                    config.optical_flow_max_iterations as usize,
+                    config.optical_flow_max_recovered_dist2,
+                    calibration.intrinsics.len(),
+                )
+                .map_err(frontend::flow::FrontendError::from)?;
             // One worker: the side cameras' detection stays on the caller.
             let host_pool = frontend::parallel::WorkPool::new(1)
                 .map_err(|_| frontend::flow::FrontendError::ThreadPool { threads: 1 })?;

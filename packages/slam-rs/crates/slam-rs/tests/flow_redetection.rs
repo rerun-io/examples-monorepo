@@ -4,9 +4,9 @@
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{MaskRect, Masks};
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::*;
-use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::types::KeypointId;
 
 mod common;

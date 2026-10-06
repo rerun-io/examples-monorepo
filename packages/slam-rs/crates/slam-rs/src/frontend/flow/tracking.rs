@@ -3,14 +3,17 @@
 use super::{FrameToFrameOpticalFlow, NO_RESPONSE, PosePrediction};
 use crate::camera::RigCamera;
 use crate::config::MatchingGuessType;
-use crate::frontend::patterns::Pattern;
-use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::stages::FrameStages;
 use crate::frontend::tracker::{PatchTracker, TrackInput};
 use crate::lie::{Se3, So3};
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use nalgebra::{Matrix4, Vector2, Vector3, Vector4};
 
-impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
+impl<
+    P: crate::frontend::patterns::ConfiguredPattern,
+    F: FrameStages<Tracker: PatchTracker<Pattern = P>>,
+> FrameToFrameOpticalFlow<P, F>
+{
     /// Mask and predict every camera's inputs independently, then submit them
     /// together. `None` selects camera-zero stereo matches of new detections.
     pub(super) fn prepare_tracks(&mut self, prediction: Option<&PosePrediction>) {
@@ -50,7 +53,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
             pass.guesses.clear();
             for (index, id) in source.ids.iter().enumerate() {
                 let transform = source.transforms.get(index);
-                let position = transform.translation;
+                let position = Vector2::from(transform.translation);
                 if masks[cam1].in_bounds(position.x, position.y) {
                     continue;
                 }
@@ -77,7 +80,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
                 pass.positions.push(position);
                 pass.guesses.push(&AffineCompact2f {
                     linear: transform.linear,
-                    translation,
+                    translation: translation.into(),
                 });
             }
         };
@@ -115,7 +118,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
             let slot: usize = *slot as usize;
             let transform: AffineCompact2f = result.transform(slot);
             // `if (masks2.inBounds(t2.x(), t2.y())) continue;`.
-            if self.masks[cam2].in_bounds(transform.translation.x, transform.translation.y) {
+            if self.masks[cam2].in_bounds(transform.translation[0], transform.translation[1]) {
                 continue;
             }
             self.tracked_ids.push(pass.ids[slot]);
@@ -185,8 +188,8 @@ mod tests {
     use kornia_staging_3d::camera::{CameraModelKind, KannalaBrandt4};
     use crate::config::VioConfig;
     use crate::frontend::flow::FrontendOptions;
-    use crate::frontend::patterns::Pattern51;
     use crate::types::KeypointId;
+    use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
     use nalgebra::Matrix2;
 
     #[test]
@@ -210,21 +213,15 @@ mod tests {
             flow.frame.cameras[0].set(
                 KeypointId(id),
                 &AffineCompact2f {
-                    linear: Matrix2::identity(),
-                    translation: Vector2::new(x, 480.0),
+                    linear: Matrix2::identity().into(),
+                    translation: Vector2::new(x, 480.0).into(),
                 },
                 NO_RESPONSE,
             );
         }
         flow.prepare_tracks(Some(&PosePrediction::default()));
         assert_eq!(flow.passes[0].ids, vec![KeypointId(1), KeypointId(2)]);
-        assert_eq!(
-            flow.passes[0].guesses.get(1).translation,
-            Vector2::repeat(-1.0e6)
-        );
-        assert_eq!(
-            flow.passes[0].guesses.get(0).translation,
-            Vector2::new(480.0, 480.0)
-        );
+        assert_eq!(flow.passes[0].guesses.get(1).translation, [-1.0e6; 2]);
+        assert_eq!(flow.passes[0].guesses.get(0).translation, [480.0, 480.0]);
     }
 }

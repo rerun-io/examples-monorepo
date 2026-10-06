@@ -11,11 +11,11 @@ use super::kernels::klt_fused::{
 use super::patches::GpuPatchSources;
 use super::pyramid::GpuPyramid;
 use super::{GpuError, guarded};
-use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
     FlowTransforms, PatchTracker, SourcePatches, TrackInput, TrackerError, check_track_inputs,
 };
 use crate::pyramid::Pyramid;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 
 pub(super) struct FusedLaunch {
     pub(super) buffers: [(cubecl::server::Handle, usize); 4],
@@ -116,6 +116,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 what: "tracker allocation",
             },
             || {
+                kornia_staging_imgproc::optical_flow::patch_se2::validate_pattern::<P>()?;
                 crate::frontend::tracker::checked_patch_shape(capacity, num_levels, P::SIZE)?;
                 super::runtime::probe_subgroups(&client)?;
 

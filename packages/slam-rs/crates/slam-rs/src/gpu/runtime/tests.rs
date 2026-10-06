@@ -86,7 +86,8 @@ fn a_panic_inside_a_stage_is_a_typed_error() {
 fn a_panic_after_the_client_is_built_is_a_typed_error() {
     arm_fault_at(GUARDED_REGION);
     let outer: crate::frontend::tracker::TrackerError =
-        gpu_stages::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap_err();
+        gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(64, 3, 5, 4.0, 2)
+            .unwrap_err();
     assert!(
         matches!(
             outer,
@@ -99,7 +100,9 @@ fn a_panic_after_the_client_is_built_is_a_typed_error() {
         .unwrap()
         .exclusive(|| {
             arm_fault_at(STORAGE_PROBE);
-            gpu_stages::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2)
+            gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(
+                64, 3, 5, 4.0, 2,
+            )
         })
         .unwrap()
         .unwrap_err();
@@ -115,7 +118,8 @@ fn a_panic_after_the_client_is_built_is_a_typed_error() {
 
     // And the same call with nothing armed builds the three backends, so
     // what the lines above measure is the guards.
-    gpu_stages::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap();
+    gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(64, 3, 5, 4.0, 2)
+        .unwrap();
 }
 
 /// A panic in an exported constructor is a typed error, not an unwind.
@@ -129,8 +133,8 @@ fn a_panic_after_the_client_is_built_is_a_typed_error() {
 /// D32).
 #[test]
 fn a_panic_in_an_exported_constructor_is_a_typed_error() {
-    use crate::frontend::patterns::Pattern51;
     use crate::frontend::tracker::TrackerError;
+    use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 
     let client = gpu_client().unwrap();
 

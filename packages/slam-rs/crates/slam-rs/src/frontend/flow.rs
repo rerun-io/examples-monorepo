@@ -33,7 +33,6 @@ use crate::camera::RigCamera;
 use crate::config::VioConfig;
 use crate::duration_ns;
 use crate::frontend::parallel::{MAX_THREADS, WorkPool};
-use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
     CpuPatchTracker, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, TrackInput,
 };
@@ -51,7 +50,7 @@ use kornia_staging_imgproc::features::{
 /// exposing a concrete pyramid in the driver's public signatures.
 #[derive(Debug)]
 pub struct FrameToFrameOpticalFlow<
-    P: Pattern,
+    P: crate::frontend::patterns::ConfiguredPattern,
     F: FrameStages<Tracker: PatchTracker<Pattern = P>> = CpuStages<CpuPatchTracker<P>>,
 > {
     config: VioConfig,
@@ -140,7 +139,9 @@ struct FrameState {
 }
 
 #[cfg(feature = "gpu-wgpu")]
-impl<P: Pattern> FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, crate::gpu::GpuRuntime>> {
+impl<P: crate::frontend::patterns::ConfiguredPattern>
+    FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, crate::gpu::GpuRuntime>>
+{
     pub(crate) fn discard_lookahead(&mut self) {
         self.stages.discard_lookahead();
     }
@@ -161,7 +162,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, crate::gpu:
     }
 }
 
-impl<P: Pattern> FrameToFrameOpticalFlow<P> {
+impl<P: crate::frontend::patterns::ConfiguredPattern> FrameToFrameOpticalFlow<P> {
     /// Workers shared by the CPU stages and the synchronous estimator.
     pub(crate) fn pool(&self) -> &WorkPool {
         &self.host_pool
@@ -214,7 +215,11 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     }
 }
 
-impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
+impl<
+    P: crate::frontend::patterns::ConfiguredPattern,
+    F: FrameStages<Tracker: PatchTracker<Pattern = P>>,
+> FrameToFrameOpticalFlow<P, F>
+{
     /// The config checks that do not depend on the backends.
     fn validate_config(config: &VioConfig) -> Result<(), FrontendError> {
         if config

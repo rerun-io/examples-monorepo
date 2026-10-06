@@ -426,8 +426,9 @@ impl<S: Scalar> Vio<S> {
             .zip(self.frontend.frame().cameras.iter())
         {
             for (index, id) in keypoints.ids.iter().enumerate() {
-                let warp: frontend::se2::AffineCompact2f = keypoints.transform(index);
-                slot.insert(*id, warp.translation);
+                let warp: kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f =
+                    keypoints.transform(index);
+                slot.insert(*id, warp.translation.into());
             }
         }
         let observations = std::sync::Arc::new(observations);

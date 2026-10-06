@@ -7,9 +7,9 @@ use super::{
     checked_patch_shape,
 };
 use crate::frontend::parallel::WorkPool;
-use crate::frontend::patch::build_patch_group;
 use crate::pyramid::{Pyramid, PyramidU16};
 use kornia_image::Image;
+use kornia_staging_imgproc::optical_flow::patch_se2::build_patch_group;
 
 /// One camera's source patches for every pyramid level, in structure-of-arrays form.
 ///
@@ -56,6 +56,7 @@ impl<P: Pattern> PatchSoA<P> {
     /// anything is allocated: the products below reach `Vec` as a length, and a
     /// `Vec` too long to exist panics rather than returning (decision D32).
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
+        kornia_staging_imgproc::optical_flow::patch_se2::validate_pattern::<P>()?;
         checked_patch_shape(capacity, num_levels, P::SIZE)?;
         let padded_capacity = capacity.div_ceil(4) * 4;
         let (flags, taps) = checked_patch_shape(padded_capacity, num_levels, P::SIZE)?;
@@ -180,7 +181,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                     });
                     let (_, ok) = build_patch_group::<P>(
                         image,
-                        points,
+                        points.map(Into::into),
                         &mut data[level * 4 * P::SIZE..],
                         &mut h_inv_jt[level * 12 * P::SIZE..],
                     );

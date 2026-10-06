@@ -8,11 +8,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::{Pattern, Pattern51};
 use nalgebra::{Matrix2, Vector2};
 use proptest::prelude::*;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::patterns::{Pattern, Pattern51};
-use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::*;
 use slam_rs::pyramid::PyramidU16;
 
@@ -68,7 +68,7 @@ fn finite_out_of_image_guesses_are_rejected_without_losing_source_slots() {
     let mut scene = fixture(0.0, 0.0, levels);
     let count = scene.positions.len();
     let mut rejected = scene.transforms.get(0);
-    rejected.translation = Vector2::repeat(-1.0e6);
+    rejected.translation = [-1.0e6; 2];
     scene.transforms.set(0, &rejected);
     let mut tracker = tracker(count, levels, 1);
     let mut result = FlowResult::with_capacity(count);
@@ -84,112 +84,6 @@ fn finite_out_of_image_guesses_are_rejected_without_losing_source_slots() {
     assert!(!result.is_valid(0));
     assert!(!result.tracked().is_empty());
     assert_eq!(scene.positions.len(), scene.transforms.len());
-}
-
-/// Compare the public scalar and four-point patch operations at the bit level.
-fn assert_group_bits<P: Pattern>(image: &Image<u16, 1>, positions: [Vector2<f32>; 4], angle: f32) {
-    use nalgebra::Vector3;
-    use slam_rs::frontend::patch::{
-        OpticalFlowPatch, build_patch_group, patch_increment, patch_increment_rows,
-        patch_residual_taps,
-    };
-    use slam_rs::frontend::patterns::MAX_PATTERN_SIZE;
-    use slam_rs::frontend::se2::se2_exp;
-    let mut data = vec![0.0; 4 * P::SIZE];
-    let mut jacobian = vec![0.0; 12 * P::SIZE];
-    let (means, valid) = build_patch_group::<P>(image, positions, &mut data, &mut jacobian);
-    let transforms = positions.map(|pos| {
-        let mut transform = se2_exp(&Vector3::new(0.0, 0.0, angle));
-        transform.translation = pos + Vector2::new(0.21, -0.37);
-        transform
-    });
-    for lane in 0..4 {
-        let scalar = OpticalFlowPatch::<P>::new(image, positions[lane]);
-        assert_eq!(valid[lane], scalar.valid, "lane {lane}");
-        assert_eq!(means[lane].to_bits(), scalar.mean.to_bits());
-        for tap in 0..P::SIZE {
-            assert_eq!(
-                data[4 * tap + lane].to_bits(),
-                scalar.data[tap].to_bits(),
-                "data lane {lane}, tap {tap}"
-            );
-            for row in 0..3 {
-                assert_eq!(
-                    jacobian[4 * (row * P::SIZE + tap) + lane].to_bits(),
-                    scalar.h_se2_inv_j_se2_t[row][tap].to_bits(),
-                    "factor lane {lane}, row {row}, tap {tap}"
-                );
-            }
-        }
-        let mut residual = [0.0; MAX_PATTERN_SIZE];
-        let survived = scalar.residual(image, &transforms[lane], &mut residual);
-        let mut tap_residual = [0.0; MAX_PATTERN_SIZE];
-        assert_eq!(
-            survived,
-            patch_residual_taps::<P>(
-                &data[lane..],
-                4,
-                image,
-                &transforms[lane],
-                &mut tap_residual
-            )
-        );
-        assert_eq!(residual.map(f32::to_bits), tap_residual.map(f32::to_bits));
-        let increment = patch_increment::<P>(
-            scalar.h_se2_inv_j_se2_t.as_flattened(),
-            1,
-            MAX_PATTERN_SIZE,
-            &residual,
-        );
-        let row_increment = patch_increment_rows::<P>(&jacobian[lane..], 4, 4 * P::SIZE, &residual);
-        assert_eq!(row_increment.map(f32::to_bits), increment.map(f32::to_bits));
-    }
-}
-
-/// SIMD lanes must retain the scalar tap order, including partial border patches.
-#[test]
-fn four_patch_builds_match_scalar_bits() {
-    use slam_rs::frontend::patterns::Pattern52;
-    let mut image = slam_rs::image::from_u8_strided(&vec![0; 87 * 64], 80, 64, 87).unwrap();
-    let mut state = 0x7d91_230bu32;
-    let mut random = || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        state
-    };
-    for y in 0..64 {
-        for x in 0..80 {
-            image.set_pixel(x, y, 0, (random() >> 16) as u16).unwrap();
-        }
-    }
-    for _ in 0..256 {
-        let positions = std::array::from_fn(|_| {
-            Vector2::new(
-                (random() % 84_000) as f32 / 1000.0 - 2.0,
-                (random() % 68_000) as f32 / 1000.0 - 2.0,
-            )
-        });
-        let angle = (random() % 600) as f32 / 1000.0 - 0.3;
-        assert_group_bits::<Pattern51>(&image, positions, angle);
-        assert_group_bits::<Pattern52>(&image, positions, angle);
-    }
-}
-
-#[test]
-fn four_patch_degenerate_and_invalid_lanes_match_scalar_bits() {
-    let mut image = slam_rs::image::from_u8_strided(&vec![0; 87 * 64], 80, 64, 87).unwrap();
-    let positions = [
-        Vector2::new(32.25, 30.5),
-        Vector2::new(2.0, 2.0),
-        Vector2::new(-100.0, -100.0),
-        Vector2::new(f32::NAN, f32::INFINITY),
-    ];
-    assert_group_bits::<Pattern51>(&image, positions, 0.0);
-    for y in 0..64 {
-        for x in 0..80 {
-            image.set_pixel(x, y, 0, 12_345).unwrap();
-        }
-    }
-    assert_group_bits::<Pattern51>(&image, positions, -0.0);
 }
 
 /// A band-limited texture: twelve plane waves with wavelengths between 16
@@ -338,7 +232,7 @@ fn submit_batch_rebuilds_templates_when_the_previous_pyramid_changes() {
         assert_eq!(result.len(), ids.len());
         let mut positions = PointsSoA::default();
         for index in 0..ids.len() {
-            positions.push(result.transform(index).translation);
+            positions.push(result.transform(index).translation.into());
         }
 
         let image = shifted_image(160, 160, 31.0, -23.0);
@@ -445,7 +339,8 @@ fn an_integer_shift_is_recovered() {
     );
     for index in out.tracked() {
         let index: usize = *index as usize;
-        let moved: Vector2<f32> = out.transform(index).translation - scene.positions.get(index);
+        let moved: Vector2<f32> =
+            Vector2::from(out.transform(index).translation) - scene.positions.get(index);
         // An integer shift moves the samples themselves, so the two
         // bilinear reconstructions are exact translates of each other and
         // the residual's fixed point is the true shift.
@@ -480,7 +375,8 @@ fn sub_pixel_shift_error(dx: f32, dy: f32) -> (f32, f32, usize, usize) {
     let mut errors: Vec<f32> = Vec::new();
     for index in out.tracked() {
         let index: usize = *index as usize;
-        let moved: Vector2<f32> = out.transform(index).translation - scene.positions.get(index);
+        let moved: Vector2<f32> =
+            Vector2::from(out.transform(index).translation) - scene.positions.get(index);
         errors.push((moved.x - dx).abs().max((moved.y - dy).abs()));
     }
     errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -819,8 +715,8 @@ fn flow_transforms_round_trip_through_the_soa_arrays() {
     let warps: [AffineCompact2f; 3] = [
         AffineCompact2f::at(Vector2::new(1.0, 2.0)),
         AffineCompact2f {
-            linear: Matrix2::new(0.5, -0.25, 0.25, 0.5),
-            translation: Vector2::new(-3.0, 4.5),
+            linear: Matrix2::new(0.5, -0.25, 0.25, 0.5).into(),
+            translation: Vector2::new(-3.0, 4.5).into(),
         },
         AffineCompact2f::identity(),
     ];
@@ -830,7 +726,10 @@ fn flow_transforms_round_trip_through_the_soa_arrays() {
     assert_eq!(transforms.len(), 3);
     for (index, warp) in warps.iter().enumerate() {
         assert_eq!(transforms.get(index), *warp);
-        assert_eq!(transforms.translation(index), warp.translation);
+        assert_eq!(
+            transforms.translation(index),
+            Vector2::from(warp.translation)
+        );
         assert_eq!(transforms.coefficients(index), warp.coefficients());
     }
     // One coefficient of every warp is contiguous, which is the point.
@@ -955,8 +854,8 @@ fn the_flow_result_writing_surface_compacts_what_it_is_given() {
     out.finish(5);
 
     assert_eq!(out.tracked(), &[1, 4]);
-    assert_eq!(out.transform(1).translation, Vector2::new(3.0, 4.0));
-    assert_eq!(out.transform(4).translation, Vector2::new(-1.0, 0.5));
+    assert_eq!(out.transform(1).translation, [3.0, 4.0]);
+    assert_eq!(out.transform(4).translation, [-1.0, 0.5]);
     assert!(!out.is_valid(0));
     assert!(!out.is_valid(2));
 

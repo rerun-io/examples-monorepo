@@ -35,7 +35,7 @@ pub use track::GpuPatchTracker;
 pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 
 /// Construct the frame-stage owner on the selected device.
-pub fn gpu_stages<P: crate::frontend::patterns::Pattern>(
+pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
     capacity: usize,
     num_levels: usize,
     max_iterations: usize,

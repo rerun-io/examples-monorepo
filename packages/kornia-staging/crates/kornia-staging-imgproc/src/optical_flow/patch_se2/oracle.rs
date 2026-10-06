@@ -1,115 +1,12 @@
-//! Mean-normalized patches and cached inverse-compositional SE(2) factors.
-//!
-//! Sampling computes raw taps and gradients, then applies the derivative of the
-//! normalization factor. Build `H = JᵀJ` in tap order using rank-one updates,
-//! invert the 3x3 factor with guarded pivoted LDLT, then apply it to each stored
-//! Jacobian column. The product-rule correction is required for the right warp.
-//!
-//! [`build_patch`] writes into caller storage with explicit strides, serving
-//! both packed test records and the tracker's structure-of-arrays layout.
-//! The largest temporary is a 3x3 matrix plus a 3-vector, avoiding a full patch
-//! Jacobian in per-thread GPU storage. Residual sampling warps one tap at a time,
-//! avoiding a transient transformed-pattern matrix.
-
-use kornia_staging_algebra::Scalar;
+//! Scalar reference implementation for patch tests and benchmarks.
 use std::marker::PhantomData;
-
-use nalgebra::{Matrix3, Vector2, Vector3};
-
-use crate::frontend::ldlt::ldlt_inverse3;
-use crate::frontend::patterns::{MAX_PATTERN_SIZE, Pattern};
-use crate::frontend::se2::AffineCompact2;
+use nalgebra::{Matrix3, Vector3};
+use super::ldlt::ldlt_inverse3;
+use super::patterns::{validate_pattern, PatchError, Pattern, MAX_PATTERN_SIZE};
+use super::se2::AffineCompact2;
+use super::patch::PATCH_BORDER;
 use kornia_image::Image;
-
-use crate::frontend::simd::F32x4;
-
-/// Build four independent patches in `[row][tap][lane]` storage.
-/// Each lane follows [`build_patch`]'s scalar operation order. The pivoted
-/// factorization remains scalar because each point can choose different pivots.
-///
-/// # Panics
-/// If data has fewer than `4 * P::SIZE` elements or the factor fewer than `12 * P::SIZE`.
-pub fn build_patch_group<P: Pattern>(
-    source: &Image<u16, 1>,
-    positions: [Vector2<f32>; 4],
-    data: &mut [f32],
-    jacobian: &mut [f32],
-) -> ([f32; 4], [bool; 4]) {
-    let mut sum = F32x4::ZERO;
-    let mut count = F32x4::ZERO;
-    let mut grad_sum = [F32x4::ZERO; 3];
-    let row_stride = 4 * P::SIZE;
-    let pos_x = F32x4(positions.map(|p| p.x));
-    let pos_y = F32x4(positions.map(|p| p.y));
-    for (tap, &[x, y]) in P::OFFSETS.iter().take(P::SIZE).enumerate() {
-        let (raw, [gx, gy], valid) =
-            sample_group::<true>(source, pos_x + F32x4::splat(x), pos_y + F32x4::splat(y));
-        let rows = [gx, gy, gx * F32x4::splat(-y) + gy * F32x4::splat(x)];
-        raw.store(&mut data[4 * tap..]);
-        sum = sum + F32x4::select(valid, raw, F32x4::ZERO);
-        count = count + F32x4(valid.map(|ok| if ok { 1.0 } else { 0.0 }));
-        for row in 0..3 {
-            let values = F32x4::select(valid, rows[row], F32x4::ZERO);
-            values.store(&mut jacobian[row * row_stride + 4 * tap..]);
-            // A masked tap must leave even a negative-zero accumulator unchanged.
-            grad_sum[row] = F32x4::select(valid, grad_sum[row] + values, grad_sum[row]);
-        }
-    }
-    let mean = sum / count;
-    let mean_inv = count / sum;
-    let mut h = [[F32x4::ZERO; 3]; 3];
-    for tap in 0..P::SIZE {
-        let raw = F32x4::load(&data[4 * tap..]);
-        let valid = raw.0.map(|value| value >= 0.0);
-        let mut rows = [F32x4::ZERO; 3];
-        for row in 0..3 {
-            let slot = &mut jacobian[row * row_stride + 4 * tap..];
-            rows[row] = F32x4::select(
-                valid,
-                (F32x4::load(slot) - grad_sum[row] * raw / sum) * mean_inv,
-                F32x4::ZERO,
-            );
-            rows[row].store(slot);
-        }
-        F32x4::select(valid, raw * mean_inv, raw).store(&mut data[4 * tap..]);
-        for col in 0..3 {
-            for row in 0..3 {
-                h[row][col] = h[row][col] + rows[col] * rows[row];
-            }
-        }
-    }
-    let inverses: [Matrix3<f32>; 4] = std::array::from_fn(|lane| {
-        ldlt_inverse3(&Matrix3::from_fn(|row, col| h[row][col].0[lane]))
-    });
-    let inverse: [[F32x4; 3]; 3] = std::array::from_fn(|row| {
-        std::array::from_fn(|col| F32x4(inverses.map(|matrix| matrix[(row, col)])))
-    });
-    let mut finite = [true; 4];
-    for tap in 0..P::SIZE {
-        let column: [F32x4; 3] =
-            std::array::from_fn(|row| F32x4::load(&jacobian[row * row_stride + 4 * tap..]));
-        for row in 0..3 {
-            let product = inverse[row][0] * column[0]
-                + inverse[row][1] * column[1]
-                + inverse[row][2] * column[2];
-            product.store(&mut jacobian[row * row_stride + 4 * tap..]);
-            for (lane, ok) in finite.iter_mut().enumerate() {
-                *ok &= product.0[lane].is_finite();
-            }
-        }
-        for lane in 0..4 {
-            finite[lane] &= data[4 * tap + lane].is_finite();
-        }
-    }
-    (
-        mean.0,
-        std::array::from_fn(|lane| mean.0[lane] > f32::EPSILON && finite[lane]),
-    )
-}
-
-/// Two-pixel patch border, keeping taps and their gradient stencils inside the image.
-pub const PATCH_BORDER: f32 = 2.0;
-
+use kornia_staging_algebra::Scalar;
 /// A patch sampling source. Tests can supply analytic functions in place of images.
 /// Static dispatch avoids per-tap virtual calls.
 pub trait PatchSource<S: Scalar> {
@@ -126,20 +23,27 @@ pub trait PatchSource<S: Scalar> {
 impl PatchSource<f32> for Image<u16, 1> {
     #[inline]
     fn in_bounds(&self, x: f32, y: f32, border: f32) -> bool {
-        kornia_staging_imgproc::interpolation::in_bounds_u16(self, x, y, border)
+        crate::interpolation::in_bounds_u16(self, x, y, border)
     }
 
     #[inline]
     fn interp(&self, x: f32, y: f32) -> f32 {
-        kornia_staging_imgproc::interpolation::sample_bilinear_u16(self, x, y)
+        crate::interpolation::sample_bilinear_u16(self, x, y)
     }
 
     #[inline]
     fn interp_grad(&self, x: f32, y: f32) -> (f32, [f32; 2]) {
-        kornia_staging_imgproc::interpolation::sample_bilinear_with_gradient_u16(self, x, y)
+        crate::interpolation::sample_bilinear_with_gradient_u16(self, x, y)
     }
 }
 
+/// # Arguments
+/// `source` and `pos` specify sampling; data and Jacobian strides address one tap and one row in the supplied buffers.
+///
+/// # Preconditions
+/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
+/// Strides and buffers must cover every addressed element.
+///
 /// Write a strided transposed SE(2) sampling Jacobian.
 /// `data[i * data_stride]` is tap i; row/element strides address the three Jacobian rows.
 ///
@@ -155,7 +59,7 @@ impl PatchSource<f32> for Image<u16, 1> {
 #[allow(clippy::too_many_arguments)]
 pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
     source: &Src,
-    pos: &Vector2<S>,
+    pos: &[S; 2],
     data: &mut [S],
     data_stride: usize,
     jacobian_transpose: &mut [S],
@@ -170,11 +74,21 @@ pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
     for i in 0..P::SIZE {
         let tap_x: S = S::from_literal(f64::from(P::OFFSETS[i][0]));
         let tap_y: S = S::from_literal(f64::from(P::OFFSETS[i][1]));
-        let px: S = pos.x + tap_x;
-        let py: S = pos.y + tap_y;
+        let px: S = pos[0] + tap_x;
+        let py: S = pos[1] + tap_y;
 
         if source.in_bounds(px, py, border) {
             let (value, grad): (S, [S; 2]) = source.interp_grad(px, py);
+            if !value.is_finite() || !grad.iter().all(|v| v.is_finite()) {
+                for tap in 0..P::SIZE {
+                    data[tap * data_stride] = S::zero();
+                    for row in 0..3 {
+                        jacobian_transpose[row * jt_row_stride + tap * jt_element_stride] =
+                            S::zero();
+                    }
+                }
+                return (S::zero(), 0);
+            }
             data[i * data_stride] = value;
             sum += value;
             // `valGrad.tail<2>().transpose() * Jw_se2` with
@@ -190,6 +104,14 @@ pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
         }
     }
 
+    if num_valid_points == 0 || sum == S::zero() || !sum.is_finite() {
+        for i in 0..P::SIZE {
+            for r in 0..3 {
+                jacobian_transpose[r * jt_row_stride + i * jt_element_stride] = S::zero();
+            }
+        }
+        return (S::zero(), num_valid_points);
+    }
     let mean: S = sum / S::from_literal(num_valid_points as f64);
     let mean_inv: S = S::from_literal(num_valid_points as f64) / sum;
 
@@ -212,6 +134,13 @@ pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
     (mean, num_valid_points)
 }
 
+/// # Arguments
+/// `source` and `pos` specify sampling; data and Jacobian strides address one tap and one row in the supplied buffers.
+///
+/// # Preconditions
+/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
+/// Strides and buffers must cover every addressed element.
+///
 /// Build a patch factor in caller storage at the supplied strides.
 /// On return the Jacobian buffer contains `H^-1 Jᵀ`, formed by tap-ordered
 /// rank-one updates, guarded 3x3 LDLT and column-wise multiplication.
@@ -222,7 +151,7 @@ pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
 /// If either array is too short for the pattern and strides.
 pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
     source: &Src,
-    pos: &Vector2<f32>,
+    pos: &[f32; 2],
     data: &mut [f32],
     data_stride: usize,
     jacobian_transpose: &mut [f32],
@@ -275,7 +204,7 @@ pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OpticalFlowPatch<P: Pattern> {
     /// `pos`, the centre this patch was sampled at, in the level's pixel frame.
-    pub pos: Vector2<f32>,
+    pub pos: [f32; 2],
     /// `data`: mean-normalised taps; negative marks a tap that was out of bounds.
     pub data: [f32; MAX_PATTERN_SIZE],
     /// `H_se2_inv_J_se2_T` (3xP), row `r`, tap `i`.
@@ -291,7 +220,7 @@ pub struct OpticalFlowPatch<P: Pattern> {
 impl<P: Pattern> Default for OpticalFlowPatch<P> {
     fn default() -> Self {
         Self {
-            pos: Vector2::zeros(),
+            pos: [0.0; 2],
             data: [0.0; MAX_PATTERN_SIZE],
             h_se2_inv_j_se2_t: [[0.0; MAX_PATTERN_SIZE]; 3],
             mean: 0.0,
@@ -302,11 +231,32 @@ impl<P: Pattern> Default for OpticalFlowPatch<P> {
 }
 
 impl<P: Pattern> OpticalFlowPatch<P> {
-    /// `OpticalFlowPatch(img, pos)` : build a patch in one step.
-    pub fn new<Src: PatchSource<f32>>(source: &Src, pos: Vector2<f32>) -> Self {
+    /// Build a mean-normalized patch with a cached inverse Hessian.
+    ///
+    /// # Arguments
+    /// * `source` - image or analytic sampling source.
+    /// * `pos` - finite centre in source pixels.
+    ///
+    /// # Errors
+    /// Returns an error for invalid pattern geometry or a non-finite centre.
+    /// Textureless and out-of-bounds patches succeed with `valid == false`.
+    ///
+    /// ```
+    /// use kornia_image::{Image, ImageSize};
+    /// use kornia_staging_imgproc::optical_flow::patch_se2::{OpticalFlowPatch, Pattern51};
+    /// let image = Image::<u16,1>::from_size_val(ImageSize { width: 32, height: 32 }, 0)?;
+    /// let patch = OpticalFlowPatch::<Pattern51>::new(&image, [16.0,16.0])?;
+    /// assert!(!patch.valid);
+    /// assert_eq!(patch.mean, 0.0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn new<Src: PatchSource<f32>>(
+        source: &Src,
+        pos: impl Into<[f32; 2]>,
+    ) -> Result<Self, PatchError> {
         let mut patch: Self = Self::default();
-        patch.set_from_image(source, pos);
-        patch
+        patch.set_from_image(source, pos)?;
+        Ok(patch)
     }
 
     /// `setFromImage`, into this record's packed storage.
@@ -314,7 +264,23 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     /// A thin call into [`build_patch`] at stride 1. The tracking path does not
     /// come through here: [`build_patch_group`] writes straight into its
     /// grouped arrays, so no packed record is ever built per patch.
-    pub fn set_from_image<Src: PatchSource<f32>>(&mut self, source: &Src, pos: Vector2<f32>) {
+    ///
+    /// # Arguments
+    /// * `source` - image or analytic sampling source.
+    /// * `pos` - finite centre in source pixels.
+    ///
+    /// # Errors
+    /// Returns an error for invalid patterns or non-finite centres, leaving this record unchanged.
+    pub fn set_from_image<Src: PatchSource<f32>>(
+        &mut self,
+        source: &Src,
+        pos: impl Into<[f32; 2]>,
+    ) -> Result<(), PatchError> {
+        validate_pattern::<P>()?;
+        let pos = pos.into();
+        if !pos.iter().all(|v| v.is_finite()) {
+            return Err(PatchError::NonFinitePosition);
+        }
         self.pos = pos;
         let Self {
             data,
@@ -332,6 +298,7 @@ impl<P: Pattern> OpticalFlowPatch<P> {
         );
         self.mean = mean;
         self.valid = valid;
+        Ok(())
     }
 
     /// `residual`, with the warp applied per tap.
@@ -362,6 +329,13 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     }
 }
 
+/// # Arguments
+/// `data` contains source taps at `stride`; `source` and `transform` specify target sampling; `residual` holds `P::SIZE` outputs.
+///
+/// # Preconditions
+/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
+/// Strides and buffers must cover every addressed element.
+///
 /// [`OpticalFlowPatch::residual`] over a strided `data` array.
 ///
 /// `stride` is the distance between two taps of the same patch: `1` for the
@@ -397,7 +371,7 @@ pub fn patch_residual<P: Pattern, Src: PatchSource<f32>>(
         }
     }
 
-    if sum < f32::EPSILON {
+    if !sum.is_finite() || sum < f32::EPSILON {
         residual[..P::SIZE].fill(0.0);
         return false;
     }
@@ -418,6 +392,13 @@ pub fn patch_residual<P: Pattern, Src: PatchSource<f32>>(
     num_residuals > P::SIZE / 2
 }
 
+/// # Arguments
+/// `h_inv_jt` stores the inverse factor at element/row strides; `residual` holds `P::SIZE` values.
+///
+/// # Preconditions
+/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
+/// Strides and buffers must cover every addressed element.
+///
 /// Multiply a strided 3xP factor by the residual, without a leading minus.
 /// The same routine reads packed and structure-of-arrays storage. Sum taps in
 /// ascending order for determinism (D31).
@@ -430,7 +411,7 @@ pub fn patch_increment<P: Pattern>(
     element_stride: usize,
     row_stride: usize,
     residual: &[f32],
-) -> Vector3<f32> {
+) -> [f32; 3] {
     let mut increment: Vector3<f32> = Vector3::zeros();
     for r in 0..3 {
         let base: usize = r * row_stride;
@@ -440,164 +421,13 @@ pub fn patch_increment<P: Pattern>(
         }
         increment[r] = sum;
     }
-    increment
-}
-
-/// Accumulate the three SE(2) rows in independent vector lanes. Each row still
-/// visits every tap in scalar order; the fourth lane is unused.
-///
-/// # Panics
-/// If factor or residual storage is too short for the pattern and strides.
-pub fn patch_increment_rows<P: Pattern>(
-    factor: &[f32],
-    element_stride: usize,
-    row_stride: usize,
-    residual: &[f32],
-) -> Vector3<f32> {
-    let mut sum = F32x4::ZERO;
-    for (tap, &value) in residual[..P::SIZE].iter().enumerate() {
-        let offset = tap * element_stride;
-        let rows = F32x4([
-            factor[offset],
-            factor[row_stride + offset],
-            factor[2 * row_stride + offset],
-            0.0,
-        ]);
-        sum = sum + rows * F32x4::splat(value);
-    }
-    Vector3::new(sum.0[0], sum.0[1], sum.0[2])
-}
-
-/// Sample four taps of one point at a time. The sum still visits individual
-/// taps in ascending order, so this can serve scalar tracking call sites
-/// without changing their arithmetic or needing adjacent points' guesses.
-///
-/// # Panics
-/// If data or residual storage is too short for the pattern and stride.
-pub fn patch_residual_taps<P: Pattern>(
-    data: &[f32],
-    stride: usize,
-    source: &Image<u16, 1>,
-    transform: &AffineCompact2<f32>,
-    residual: &mut [f32],
-) -> bool {
-    let warp = transform.coefficients().map(F32x4::splat);
-    let mut sum = 0.0;
-    let mut count = 0;
-    for base in (0..P::SIZE).step_by(4) {
-        let lanes = (P::SIZE - base).min(4);
-        let taps: [[f32; 2]; 4] = std::array::from_fn(|lane| {
-            if lane < lanes {
-                P::OFFSETS[base + lane]
-            } else {
-                [0.0; 2]
-            }
-        });
-        let x = F32x4(taps.map(|tap| tap[0]));
-        let y = F32x4(taps.map(|tap| tap[1]));
-        let px = warp[0] * x + warp[1] * y + warp[4];
-        let py = warp[2] * x + warp[3] * y + warp[5];
-        let (values, _, valid) = sample_group::<false>(source, px, py);
-        for lane in 0..lanes {
-            residual[base + lane] = values.0[lane];
-            if valid[lane] {
-                sum += values.0[lane];
-                count += 1;
-            }
-        }
-    }
-    if sum < f32::EPSILON {
-        residual[..P::SIZE].fill(0.0);
-        return false;
-    }
-    let mut num_residuals = 0;
-    for base in (0..P::SIZE).step_by(4) {
-        let lanes = (P::SIZE - base).min(4);
-        let values = F32x4(std::array::from_fn(|lane| {
-            if lane < lanes {
-                residual[base + lane]
-            } else {
-                -1.0
-            }
-        }));
-        let stored = F32x4(std::array::from_fn(|lane| {
-            if lane < lanes {
-                data[(base + lane) * stride]
-            } else {
-                -1.0
-            }
-        }));
-        let normalized = F32x4::splat(count as f32) * values / F32x4::splat(sum) - stored;
-        for lane in 0..lanes {
-            if values.0[lane] >= 0.0 && stored.0[lane] >= 0.0 {
-                residual[base + lane] = normalized.0[lane];
-                num_residuals += 1;
-            } else {
-                residual[base + lane] = 0.0;
-            }
-        }
-    }
-    num_residuals > P::SIZE / 2
-}
-
-/// Four KLT samples with a two-pixel border. Gather pixels once their whole
-/// stencil is in bounds, then keep the scalar bilinear operation order in
-/// each SIMD lane. Invalid lanes return -1; callers mask their gradients.
-#[inline]
-pub(crate) fn sample_group<const GRAD: bool>(
-    image: &Image<u16, 1>,
-    x: F32x4,
-    y: F32x4,
-) -> (F32x4, [F32x4; 2], [bool; 4]) {
-    let ix = x.0.map(|v| v as usize);
-    let iy = y.0.map(|v| v as usize);
-    let valid = std::array::from_fn(|lane| {
-        kornia_staging_imgproc::interpolation::in_bounds_u16(image, x.0[lane], y.0[lane], 2.0)
-            // Integer checks also cover dimensions beyond f32's exact range.
-            && ix[lane] >= 1 && ix[lane] < image.width().saturating_sub(2)
-            && iy[lane] >= 1 && iy[lane] < image.height().saturating_sub(2)
-    });
-    let dx = x - F32x4(ix.map(|v| v as f32));
-    let dy = y - F32x4(iy.map(|v| v as f32));
-    let ddx = F32x4::splat(1.0) - dx;
-    let ddy = F32x4::splat(1.0) - dy;
-    let weights = [ddx * ddy, ddx * dy, dx * ddy, dx * dy];
-    // Borrow dense pixels once for the whole stencil.
-    let pixels = image.as_slice();
-    let pixel = |ox: usize, oy: usize| {
-        F32x4(std::array::from_fn(|lane| {
-            if valid[lane] {
-                let offset = (iy[lane] - 1 + oy) * image.width() + ix[lane] - 1 + ox;
-                // SAFETY: valid covers the entire [-1, +2] stencil; image
-                // construction guarantees width * height contiguous storage.
-                f32::from(unsafe { *pixels.get_unchecked(offset) })
-            } else {
-                0.0
-            }
-        }))
-    };
-    let interpolate =
-        |a, b, c, d| weights[0] * a + weights[1] * b + weights[2] * c + weights[3] * d;
-    let p00 = pixel(1, 1);
-    let p01 = pixel(1, 2);
-    let p10 = pixel(2, 1);
-    let p11 = pixel(2, 2);
-    let value = F32x4::select(valid, interpolate(p00, p01, p10, p11), F32x4::splat(-1.0));
-    let gradients = if GRAD {
-        let mx = interpolate(pixel(0, 1), pixel(0, 2), p00, p01);
-        let px = interpolate(p10, p11, pixel(3, 1), pixel(3, 2));
-        let my = interpolate(pixel(1, 0), p00, pixel(2, 0), p10);
-        let py = interpolate(p01, pixel(1, 3), p11, pixel(2, 3));
-        [F32x4::splat(0.5) * (px - mx), F32x4::splat(0.5) * (py - my)]
-    } else {
-        [F32x4::ZERO; 2]
-    };
-    (value, gradients, valid)
+    increment.into()
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use crate::optical_flow::patch_se2::build_patch_group;
 
     /// Test sampling without Jacobians, optionally through an SE(2) warp.
     /// Mark out-of-bounds taps negative, then normalize by the valid-tap mean.
@@ -609,7 +439,7 @@ mod tests {
     #[allow(clippy::needless_range_loop)]
     fn set_data<P: Pattern, S: Scalar, Src: PatchSource<S>>(
         source: &Src,
-        pos: &Vector2<S>,
+        pos: &[S; 2],
         se2: Option<&AffineCompact2<S>>,
         data: &mut [S],
     ) -> (S, usize) {
@@ -626,8 +456,8 @@ mod tests {
                 Some(warp) => warp.warp_tap(tap),
                 None => tap,
             };
-            let px: S = pos.x + warped[0];
-            let py: S = pos.y + warped[1];
+            let px: S = pos[0] + warped[0];
+            let py: S = pos[1] + warped[1];
 
             if source.in_bounds(px, py, border) {
                 let value: S = source.interp(px, py);
@@ -647,10 +477,11 @@ mod tests {
         (mean, num_valid_points)
     }
 
+    use super::super::patterns::{Pattern51, Pattern52};
+    use super::super::se2::se2_exp;
     use super::*;
-    use crate::frontend::patterns::{Pattern51, Pattern52};
-    use crate::frontend::se2::se2_exp;
     use approx::assert_abs_diff_eq;
+    use nalgebra::Vector2;
 
     /// `sin(x/100 + y/20)`, always in bounds,
     /// with the analytic value and gradient.
@@ -708,7 +539,7 @@ mod tests {
         let mut jacobian: [f64; 3 * MAX_PATTERN_SIZE] = [0.0; 3 * MAX_PATTERN_SIZE];
         let (mean_jac, valid_jac) = set_data_jac_se2::<Pattern52, f64, SmoothFunction>(
             &image,
-            &point,
+            point.as_ref(),
             &mut data_jac,
             1,
             &mut jacobian,
@@ -718,7 +549,7 @@ mod tests {
 
         let mut data: [f64; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
         let (mean, valid) =
-            set_data::<Pattern52, f64, SmoothFunction>(&image, &point, None, &mut data);
+            set_data::<Pattern52, f64, SmoothFunction>(&image, point.as_ref(), None, &mut data);
 
         assert_eq!(valid_jac, Pattern52::SIZE);
         assert_eq!(valid, Pattern52::SIZE);
@@ -740,7 +571,7 @@ mod tests {
         let mut jacobian: [f64; 3 * MAX_PATTERN_SIZE] = [0.0; 3 * MAX_PATTERN_SIZE];
         set_data_jac_se2::<Pattern52, f64, SmoothFunction>(
             &image,
-            &point,
+            point.as_ref(),
             &mut data,
             1,
             &mut jacobian,
@@ -759,14 +590,14 @@ mod tests {
             let mut minus: [f64; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
             set_data::<Pattern52, f64, SmoothFunction>(
                 &image,
-                &point,
-                Some(&se2_exp(&plus_tangent)),
+                point.as_ref(),
+                Some(&se2_exp(plus_tangent.as_ref())),
                 &mut plus,
             );
             set_data::<Pattern52, f64, SmoothFunction>(
                 &image,
-                &point,
-                Some(&se2_exp(&minus_tangent)),
+                point.as_ref(),
+                Some(&se2_exp(minus_tangent.as_ref())),
                 &mut minus,
             );
 
@@ -784,7 +615,8 @@ mod tests {
     /// A synthetic textured image: a smooth ramp plus a sinusoid, so every patch
     /// has gradient in both directions and `H_se2` is well conditioned.
     fn textured_image(width: usize, height: usize) -> Image<u16, 1> {
-        let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
+        let mut image: Image<u16, 1> =
+            Image::from_size_val(kornia_image::ImageSize { width, height }, 0).unwrap();
         for y in 0..height {
             for x in 0..width {
                 let fx: f64 = x as f64;
@@ -802,7 +634,7 @@ mod tests {
     fn a_textured_patch_is_valid_and_its_residual_against_itself_is_zero() {
         let image: Image<u16, 1> = textured_image(64, 64);
         let patch: OpticalFlowPatch<Pattern51> =
-            OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
+            OpticalFlowPatch::new(&image, [32.0, 32.0]).unwrap();
         assert!(patch.valid);
         assert!(patch.mean > 0.0);
 
@@ -818,22 +650,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nonfinite_samples_do_not_reach_the_solver() {
+        struct BadSource;
+        impl PatchSource<f32> for BadSource {
+            fn in_bounds(&self, _: f32, _: f32, _: f32) -> bool {
+                true
+            }
+            fn interp(&self, _: f32, _: f32) -> f32 {
+                f32::NAN
+            }
+            fn interp_grad(&self, _: f32, _: f32) -> (f32, [f32; 2]) {
+                (1.0, [f32::INFINITY, 0.0])
+            }
+        }
+        let patch = OpticalFlowPatch::<Pattern51>::new(&BadSource, [0.0, 0.0]).unwrap();
+        assert!(!patch.valid);
+        assert!(patch
+            .h_se2_inv_j_se2_t
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite()));
+        let mut residual = [1.0; MAX_PATTERN_SIZE];
+        assert!(!patch.residual(&BadSource, &AffineCompact2::identity(), &mut residual));
+        assert!(residual.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn patch_constructor_rejects_invalid_geometry() {
+        #[derive(Clone, Copy)]
+        struct Empty;
+        impl Pattern for Empty {
+            const SIZE: usize = 0;
+            const OFFSETS: &'static [[f32; 2]] = &[];
+        }
+        let image = textured_image(64, 64);
+        assert!(OpticalFlowPatch::<Empty>::new(&image, [32.0, 32.0]).is_err());
+        assert!(OpticalFlowPatch::<Pattern51>::new(&image, [f32::NAN, 32.0]).is_err());
+    }
+
     /// an all-black patch has mean zero, so it is not valid.
     #[test]
     fn an_all_black_patch_is_not_valid() {
-        let image: Image<u16, 1> = crate::image::zeros(64, 64).unwrap();
+        let image: Image<u16, 1> = Image::from_size_val(
+            kornia_image::ImageSize {
+                width: 64,
+                height: 64,
+            },
+            0,
+        )
+        .unwrap();
         let patch: OpticalFlowPatch<Pattern51> =
-            OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
+            OpticalFlowPatch::new(&image, [32.0, 32.0]).unwrap();
         assert!(!patch.valid);
+        assert!(patch.mean.is_finite());
+        assert!(patch.data.iter().all(|v| v.is_finite()));
+        assert!(patch
+            .h_se2_inv_j_se2_t
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite()));
+        let mut data = [0.0; 4 * MAX_PATTERN_SIZE];
+        let mut factors = [0.0; 12 * MAX_PATTERN_SIZE];
+        let (means, valid) =
+            build_patch_group::<Pattern51>(&image, [[32.0, 32.0]; 4], &mut data, &mut factors);
+        assert_eq!(valid, [false; 4]);
+        assert!(means
+            .iter()
+            .chain(data.iter())
+            .chain(factors.iter())
+            .all(|v| v.is_finite()));
     }
 
     /// a residual against an all-black target zeroes and fails.
     #[test]
     fn a_residual_against_black_fails_and_zeroes() {
         let image: Image<u16, 1> = textured_image(64, 64);
-        let black: Image<u16, 1> = crate::image::zeros(64, 64).unwrap();
+        let black: Image<u16, 1> = Image::from_size_val(
+            kornia_image::ImageSize {
+                width: 64,
+                height: 64,
+            },
+            0,
+        )
+        .unwrap();
         let patch: OpticalFlowPatch<Pattern51> =
-            OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
+            OpticalFlowPatch::new(&image, [32.0, 32.0]).unwrap();
 
         let mut residual: [f32; MAX_PATTERN_SIZE] = [1.0; MAX_PATTERN_SIZE];
         let survived: bool = patch.residual(
@@ -851,7 +753,7 @@ mod tests {
     fn a_residual_with_half_the_pattern_outside_is_rejected() {
         let image: Image<u16, 1> = textured_image(64, 64);
         let patch: OpticalFlowPatch<Pattern51> =
-            OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
+            OpticalFlowPatch::new(&image, [32.0, 32.0]).unwrap();
 
         let mut residual: [f32; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
         let survived: bool = patch.residual(
@@ -868,12 +770,8 @@ mod tests {
     fn out_of_bounds_taps_stay_negative() {
         let image: Image<u16, 1> = textured_image(64, 64);
         let mut data: [f32; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
-        let (mean, valid) = set_data::<Pattern51, f32, Image<u16, 1>>(
-            &image,
-            &Vector2::new(4.0, 32.0),
-            None,
-            &mut data,
-        );
+        let (mean, valid) =
+            set_data::<Pattern51, f32, Image<u16, 1>>(&image, &[4.0, 32.0], None, &mut data);
         assert!(mean > 0.0);
         assert!(valid < Pattern51::SIZE);
         assert!(data.iter().take(Pattern51::SIZE).any(|value| *value < 0.0));

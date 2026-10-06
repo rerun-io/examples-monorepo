@@ -4,11 +4,11 @@
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{CpuCornerScan, LOWEST_THRESHOLD_RUNG, MAX_CELLS};
+use kornia_staging_imgproc::optical_flow::patch_se2::{Pattern51, Pattern52};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::parallel::{MAX_THREADS, WorkPool};
-use slam_rs::frontend::patterns::{Pattern51, Pattern52};
 use slam_rs::frontend::tracker::{CpuPatchTracker, MAX_CAPACITY, MAX_LEVELS};
 use slam_rs::pyramid::CpuPyramidBuilder;
 

@@ -1,7 +1,7 @@
 //! Shared fixtures for GPU integration binaries.
 
 use kornia_staging_imgproc::features::BandRequest;
-use slam_rs::frontend::se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{FlowTransforms, PointsSoA};
 
 /// One band of a 50-pixel cell grid, keyed the way

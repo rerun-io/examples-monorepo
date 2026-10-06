@@ -4,7 +4,7 @@
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CornerScan;
-use slam_rs::frontend::patterns::Pattern51;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use slam_rs::frontend::tracker::{
     FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,
 };

@@ -2,10 +2,10 @@
 //! CPU tracker, and a tracker that fails on a chosen call.
 
 use kornia_staging_imgproc::features::CpuCornerScan;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::{FrameToFrameOpticalFlow, FrontendOptions};
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowTransforms, PatchSoA, PatchTracker, TrackerError,
 };

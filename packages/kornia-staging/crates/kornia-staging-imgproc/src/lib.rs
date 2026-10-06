@@ -21,3 +21,6 @@ pub mod color;
 
 /// Gaussian image pyramids.
 pub mod pyramid;
+
+/// Sparse optical flow.
+pub mod optical_flow;

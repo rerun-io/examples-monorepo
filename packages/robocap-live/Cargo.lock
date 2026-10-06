@@ -3008,6 +3008,8 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-algebra",
+ "nalgebra",
  "rayon",
  "thiserror",
 ]

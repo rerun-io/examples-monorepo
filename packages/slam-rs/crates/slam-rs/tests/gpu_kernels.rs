@@ -23,10 +23,10 @@ use cubecl::frontend::CompilationArg;
 use kornia_image::Image;
 use kornia_imgproc::features::FastCorner;
 use kornia_staging_imgproc::features::{BandRequest, CornerScan, CpuCornerScan, DetectError};
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use nalgebra::Vector2;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
 };
@@ -413,7 +413,8 @@ fn assert_lanes_agree(cpu: &FlowResult, gpu: &FlowResult, count: usize, label: &
             gpu.is_valid(index)
         );
         if cpu.is_valid(index) {
-            let difference = cpu.transform(index).translation - gpu.transform(index).translation;
+            let difference = Vector2::from(cpu.transform(index).translation)
+                - Vector2::from(gpu.transform(index).translation);
             worst = worst.max(difference.norm());
         }
     }
@@ -448,13 +449,15 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     for index in 0..count {
         if gpu_result.is_valid(index) {
             tracked += 1;
-            let moved = gpu_result.transform(index).translation - positions.get(index);
+            let moved =
+                Vector2::from(gpu_result.transform(index).translation) - positions.get(index);
             worst_shift = worst_shift
                 .max((moved.x - SHIFT).abs())
                 .max((moved.y + 1.5).abs());
         }
         if cpu_result.is_valid(index) {
-            let moved = cpu_result.transform(index).translation - positions.get(index);
+            let moved =
+                Vector2::from(cpu_result.transform(index).translation) - positions.get(index);
             worst_cpu_shift = worst_cpu_shift
                 .max((moved.x - SHIFT).abs())
                 .max((moved.y + 1.5).abs());
@@ -1322,7 +1325,8 @@ fn fused_temporal_batch_matches_cpu() {
                 "camera {camera}, point {point}"
             );
             if cpu.is_valid(point) {
-                let delta = actual.transform(point).translation - cpu.transform(point).translation;
+                let delta = Vector2::from(actual.transform(point).translation)
+                    - Vector2::from(cpu.transform(point).translation);
                 assert!(
                     delta.norm() < LANE_POSITION_BOUND,
                     "camera {camera}, point {point}, error {}",

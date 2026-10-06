@@ -4,11 +4,11 @@ use cubecl::prelude::Runtime;
 use nalgebra::Vector2;
 
 use super::pyramid::GpuPyramid;
-use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
     PointsSoA, SourcePatches, TrackerError, check_patch_inputs, checked_patch_shape,
 };
 use crate::pyramid::Pyramid;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 
 /// Host-side inputs for tracking against separately allocated pyramids.
 /// The shared-arena path reads its positions directly from `TrackInput`.
@@ -23,6 +23,7 @@ pub struct GpuPatchSources<P: Pattern, R: Runtime> {
 
 impl<P: Pattern, R: Runtime> GpuPatchSources<P, R> {
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
+        kornia_staging_imgproc::optical_flow::patch_se2::validate_pattern::<P>()?;
         checked_patch_shape(capacity, num_levels, P::SIZE)?;
         Ok(Self {
             capacity,

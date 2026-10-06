@@ -12,13 +12,13 @@
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{BandRequest, CornerScan, DetectError, FastCorner};
 use kornia_staging_imgproc::features::{CellGrid, MaskRect, Masks};
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use nalgebra::{Matrix4, Vector3};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::CpuPatchTracker;
 use slam_rs::lie::{Se3, So3};
 use slam_rs::pyramid::CpuPyramidBuilder;
@@ -157,7 +157,7 @@ fn tracking_carries_keypoints_across_a_shifted_frame() {
             continue;
         }
         let moved: AffineCompact2f = flow.frame().cameras[0].get(id).unwrap();
-        assert!(moved.translation.x.is_finite());
+        assert!(moved.translation[0].is_finite());
     }
 }
 
@@ -210,7 +210,7 @@ fn four_cpu_cameras_produce_the_same_frames_and_ids_at_one_and_four_threads() {
 
     let mut calibration = rig(4);
     for (camera, pose) in calibration.t_i_c.iter_mut().enumerate() {
-        pose.translation.x = camera as f64 * 4.0;
+        pose.translation[0] = camera as f64 * 4.0;
     }
     let make = |threads| {
         FrameToFrameOpticalFlow::new(
@@ -545,7 +545,7 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
         let mut calibration = rig(4);
         for (camera, pose) in calibration.t_i_c.iter_mut().enumerate() {
             // Side cameras have unmasked cells outside camera 0's view.
-            pose.translation.x = camera as f64 * 4.0;
+            pose.translation[0] = camera as f64 * 4.0;
         }
         let config = VioConfig {
             optical_flow_detection_nonoverlap: true,

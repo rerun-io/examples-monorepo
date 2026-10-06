@@ -30,7 +30,11 @@ impl F32x4 {
     #[inline]
     pub fn select(mask: [bool; 4], yes: Self, no: Self) -> Self {
         Self(std::array::from_fn(|lane| {
-            if mask[lane] { yes.0[lane] } else { no.0[lane] }
+            if mask[lane] {
+                yes.0[lane]
+            } else {
+                no.0[lane]
+            }
         }))
     }
 }
@@ -40,6 +44,7 @@ macro_rules! binary_op {
         impl $trait for F32x4 {
             type Output = Self;
             #[inline]
+            #[allow(unsafe_code)] // ISA baseline on each selected architecture.
             fn $method(self, rhs: Self) -> Self {
                 #[cfg(target_arch = "aarch64")]
                 {

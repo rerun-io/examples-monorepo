@@ -3,8 +3,6 @@
 use super::{FrameToFrameOpticalFlow, FrontendError, project_between_cams};
 use crate::duration_ns;
 use crate::frontend::parallel::WorkPool;
-use crate::frontend::patterns::Pattern;
-use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::stages::FrameStages;
 use crate::frontend::tracker::PatchTracker;
 use crate::lie::Se3;
@@ -14,9 +12,14 @@ use kornia_staging_imgproc::features::{
     CellGrid, DetectorConfig, DetectorScratch, KeypointsData, MaskRect, Masks, Occupancy,
     detect_keypoints_with_cells,
 };
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use nalgebra::{Matrix4, Vector2, Vector4};
 
-impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
+impl<
+    P: crate::frontend::patterns::ConfiguredPattern,
+    F: FrameStages<Tracker: PatchTracker<Pattern = P>>,
+> FrameToFrameOpticalFlow<P, F>
+{
     /// `updateCellCounts` : rebuild one camera's occupancy from scratch.
     pub(super) fn update_cell_counts(&mut self, camera: usize) {
         self.cells[camera].fill(0);
@@ -35,7 +38,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
     fn bump_cell(&mut self, camera: usize, transform: &AffineCompact2f) {
         let (row, column) = self
             .occupancy_grid
-            .cell_of(transform.translation.x, transform.translation.y);
+            .cell_of(transform.translation[0], transform.translation[1]);
         self.cells[camera][row * self.occupancy_grid.columns + column] += 1;
     }
 
@@ -46,7 +49,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
         };
         let (row, column) = self
             .occupancy_grid
-            .cell_of(transform.translation.x, transform.translation.y);
+            .cell_of(transform.translation[0], transform.translation[1]);
         self.cells[camera][row * self.occupancy_grid.columns + column] -= 1;
     }
 
@@ -321,7 +324,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
             let mut p3d1: Vector4<f32> = Vector4::zeros();
             let ok0: bool = self.cameras[0]
                 .model
-                .unproject(&in_cam0.translation, &mut p3d0);
+                .unproject(&in_cam0.translation.into(), &mut p3d0);
             let ok1: bool = self.cameras[camera].model.unproject(&proj1, &mut p3d1);
 
             if ok0 && ok1 {

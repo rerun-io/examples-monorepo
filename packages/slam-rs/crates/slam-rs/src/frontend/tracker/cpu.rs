@@ -2,11 +2,11 @@
 
 use super::*;
 use crate::frontend::parallel::WorkPool;
-use crate::frontend::patch::{patch_increment_rows, patch_residual_taps};
-use crate::frontend::patterns::MAX_PATTERN_SIZE;
-use crate::frontend::se2::se2_exp;
 use crate::pyramid::PyramidU16;
 use kornia_image::Image;
+use kornia_staging_imgproc::optical_flow::patch_se2::MAX_PATTERN_SIZE;
+use kornia_staging_imgproc::optical_flow::patch_se2::se2_exp;
+use kornia_staging_imgproc::optical_flow::patch_se2::{patch_increment_rows, patch_residual_taps};
 use nalgebra::{Matrix2, Vector3};
 
 /// The CPU tracker: `trackPoints` with the same arithmetic and a fixed thread budget.
@@ -465,8 +465,8 @@ impl<P: Pattern> CpuPatchTracker<P> {
                         cache.ids.binary_search(id).ok().filter(|&column| {
                             let old = cache.patches.position(column);
                             cache.valid[column]
-                                && old.x.to_bits() == position.x.to_bits()
-                                && old.y.to_bits() == position.y.to_bits()
+                                && old.x.to_bits() == position[0].to_bits()
+                                && old.y.to_bits() == position[1].to_bits()
                         })
                     };
                     if let Some(column) = cached(temporal) {
@@ -592,15 +592,15 @@ impl TrackingSteps {
     ) -> ([f32; 6], bool) {
         let (width, height) = level0_size(target);
         let position = guess.translation;
-        if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
+        if position[0] < 0.0 || position[1] < 0.0 || position[0] >= width || position[1] >= height {
             return (AffineCompact2f::identity().coefficients(), false);
         }
         let (tracked, ok) = track_point::<P>(
             patches,
             index,
             target,
-            guess.linear,
-            position,
+            guess.linear.into(),
+            position.into(),
             self.num_levels,
             self.max_iterations,
             self.exit_step_px,
@@ -623,12 +623,12 @@ impl TrackingSteps {
         }
         // `off = source position - guess`; `t1_recovered += off`.
         let offset = source - guess;
-        let recovered_guess = forward.translation + offset;
+        let recovered_guess = Vector2::from(forward.translation) + offset;
         let (recovered, ok) = track_point::<P>(
             patches,
             index,
             target,
-            forward.linear,
+            forward.linear.into(),
             recovered_guess,
             self.num_levels,
             self.max_iterations,
@@ -637,7 +637,7 @@ impl TrackingSteps {
         if !ok {
             return (kept, false);
         }
-        let dist2 = (source - recovered.translation).norm_squared();
+        let dist2 = (source - Vector2::from(recovered.translation)).norm_squared();
         (kept, dist2 < self.max_recovered_dist2)
     }
 }
@@ -675,8 +675,8 @@ fn track_point<P: Pattern>(
     exit_step_px: Option<f32>,
 ) -> (AffineCompact2f, bool) {
     let mut transform: AffineCompact2f = AffineCompact2f {
-        linear: Matrix2::identity(),
-        translation: guess,
+        linear: Matrix2::identity().into(),
+        translation: guess.into(),
     };
     let mut patch_valid: bool = true;
 
@@ -686,7 +686,7 @@ fn track_point<P: Pattern>(
             continue;
         }
         let scale: f32 = (1u32 << level) as f32;
-        transform.translation /= scale;
+        transform.translation = (Vector2::from(transform.translation) / scale).into();
 
         patch_valid &= patches.valid(level, index);
         if patch_valid && let Some(image) = target.level(level) {
@@ -701,10 +701,10 @@ fn track_point<P: Pattern>(
             );
         }
 
-        transform.translation *= scale;
+        transform.translation = (Vector2::from(transform.translation) * scale).into();
     }
 
-    transform.linear = old_linear * transform.linear;
+    transform.linear = (old_linear * Matrix2::from(transform.linear)).into();
     (transform, patch_valid)
 }
 
@@ -746,12 +746,12 @@ fn track_point_at_level<P: Pattern>(
         );
 
         if patch_valid {
-            let increment: Vector3<f32> = -patch_increment_rows::<P>(
+            let increment: Vector3<f32> = -Vector3::from(patch_increment_rows::<P>(
                 &patches.h_inv_jt[jacobian_offset..],
                 element_stride,
                 row_stride,
                 &residual,
-            );
+            ));
 
             patch_valid &= increment.iter().all(|value| value.is_finite());
             // Fold absolute coefficients from element zero, retaining a left-hand NaN.
@@ -765,11 +765,11 @@ fn track_point_at_level<P: Pattern>(
             patch_valid &= infinity_norm < MAX_INCREMENT_INFINITY_NORM;
 
             if patch_valid {
-                *transform = transform.compose(&se2_exp(&increment));
+                *transform = transform.compose(&se2_exp(increment.as_ref()));
                 patch_valid &= kornia_staging_imgproc::interpolation::in_bounds_u16(
                     image,
-                    transform.translation.x,
-                    transform.translation.y,
+                    transform.translation[0],
+                    transform.translation[1],
                     FILTER_MARGIN,
                 );
                 // Keep the accepted update and all existing validity checks.

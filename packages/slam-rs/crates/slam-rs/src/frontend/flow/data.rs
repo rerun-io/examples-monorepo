@@ -2,10 +2,10 @@
 
 #[cfg(doc)]
 use super::FrameToFrameOpticalFlow;
-use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::tracker::FlowTransforms;
 use crate::lie::Se3;
 use crate::types::KeypointId;
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 
 /// Sentinel response `-1` for a keypoint without a detector score.
 pub const NO_RESPONSE: f32 = -1.0;

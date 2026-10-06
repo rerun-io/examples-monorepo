@@ -8,7 +8,6 @@ use super::{
 };
 use crate::frontend::flow::{FlowTimings, FrontendError};
 use crate::frontend::parallel::WorkPool;
-use crate::frontend::patterns::Pattern;
 use crate::frontend::stages::{FrameStages, StereoContext};
 use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
 use crate::pyramid::ensure_pyramids;
@@ -16,6 +15,7 @@ use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameInput {

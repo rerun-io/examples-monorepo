@@ -46,12 +46,12 @@ use std::cell::Cell;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{CellGrid, CpuCornerScan};
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
 };
-use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::FlowTransforms;
 
 mod common;
@@ -619,7 +619,7 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
         let mut observations = slam_rs::estimator::FlowObservations::new(t_ns, cameras.len());
         for (slot, keypoints) in observations.cameras.iter_mut().zip(cameras) {
             for (index, id) in keypoints.ids.iter().enumerate() {
-                slot.insert(*id, keypoints.transform(index).translation);
+                slot.insert(*id, keypoints.transform(index).translation.into());
             }
         }
         let observations = std::sync::Arc::new(observations);

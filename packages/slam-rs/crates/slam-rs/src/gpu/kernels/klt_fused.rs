@@ -110,14 +110,15 @@ pub(crate) fn decode_point(
     out: &mut crate::frontend::tracker::FlowResult,
     index: usize,
 ) {
-    let transform = crate::frontend::se2::AffineCompact2f {
+    let transform = kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f {
         linear: nalgebra::Matrix2::new(
             values[RUN_WARP],
             values[RUN_WARP + 1],
             values[RUN_WARP + 2],
             values[RUN_WARP + 3],
-        ),
-        translation: nalgebra::Vector2::new(values[RUN_WARP + 4], values[RUN_WARP + 5]),
+        )
+        .into(),
+        translation: nalgebra::Vector2::new(values[RUN_WARP + 4], values[RUN_WARP + 5]).into(),
     };
     out.set_track(index, values[RUN_VALID] != 0.0, &transform);
 }

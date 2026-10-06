@@ -2,10 +2,10 @@
 //! and [`FlowTransforms`] (warps), each coordinate in its own flat array with
 //! the keypoint index varying fastest.
 
-use nalgebra::{Matrix2, Vector2};
+use nalgebra::Vector2;
 
-use crate::frontend::se2::AffineCompact2f;
 use crate::types::KeypointId;
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 
 /// One camera's inputs and output slot in a submitted tracking batch.
 /// IDs and positions are in the same order as the initial guesses.
@@ -197,12 +197,12 @@ impl FlowTransforms {
 
     /// Append one warp.
     pub fn push(&mut self, warp: &AffineCompact2f) {
-        self.m00.push(warp.linear[(0, 0)]);
-        self.m01.push(warp.linear[(0, 1)]);
-        self.m10.push(warp.linear[(1, 0)]);
-        self.m11.push(warp.linear[(1, 1)]);
-        self.tx.push(warp.translation.x);
-        self.ty.push(warp.translation.y);
+        self.m00.push(warp.linear[0][0]);
+        self.m01.push(warp.linear[1][0]);
+        self.m10.push(warp.linear[0][1]);
+        self.m11.push(warp.linear[1][1]);
+        self.tx.push(warp.translation[0]);
+        self.ty.push(warp.translation[1]);
     }
 
     /// Insert one warp at `index`, shifting the rest up.
@@ -211,12 +211,12 @@ impl FlowTransforms {
     ///
     /// If `index` is past the end.
     pub fn insert(&mut self, index: usize, warp: &AffineCompact2f) {
-        self.m00.insert(index, warp.linear[(0, 0)]);
-        self.m01.insert(index, warp.linear[(0, 1)]);
-        self.m10.insert(index, warp.linear[(1, 0)]);
-        self.m11.insert(index, warp.linear[(1, 1)]);
-        self.tx.insert(index, warp.translation.x);
-        self.ty.insert(index, warp.translation.y);
+        self.m00.insert(index, warp.linear[0][0]);
+        self.m01.insert(index, warp.linear[1][0]);
+        self.m10.insert(index, warp.linear[0][1]);
+        self.m11.insert(index, warp.linear[1][1]);
+        self.tx.insert(index, warp.translation[0]);
+        self.ty.insert(index, warp.translation[1]);
     }
 
     /// Remove the warp at `index`, shifting the rest down.
@@ -239,12 +239,12 @@ impl FlowTransforms {
     ///
     /// If `index` is past the end.
     pub fn set(&mut self, index: usize, warp: &AffineCompact2f) {
-        self.m00[index] = warp.linear[(0, 0)];
-        self.m01[index] = warp.linear[(0, 1)];
-        self.m10[index] = warp.linear[(1, 0)];
-        self.m11[index] = warp.linear[(1, 1)];
-        self.tx[index] = warp.translation.x;
-        self.ty[index] = warp.translation.y;
+        self.m00[index] = warp.linear[0][0];
+        self.m01[index] = warp.linear[1][0];
+        self.m10[index] = warp.linear[0][1];
+        self.m11[index] = warp.linear[1][1];
+        self.tx[index] = warp.translation[0];
+        self.ty[index] = warp.translation[1];
     }
 
     /// The warp at `index`, reassembled.
@@ -254,13 +254,11 @@ impl FlowTransforms {
     /// If `index` is past the end.
     pub fn get(&self, index: usize) -> AffineCompact2f {
         AffineCompact2f {
-            linear: Matrix2::new(
-                self.m00[index],
-                self.m01[index],
-                self.m10[index],
-                self.m11[index],
-            ),
-            translation: Vector2::new(self.tx[index], self.ty[index]),
+            linear: [
+                [self.m00[index], self.m10[index]],
+                [self.m01[index], self.m11[index]],
+            ],
+            translation: [self.tx[index], self.ty[index]],
         }
     }
 

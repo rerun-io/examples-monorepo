@@ -1,10 +1,10 @@
 //! Cached templates must track exactly like templates rebuilt at the same positions.
 #![allow(clippy::unwrap_used)]
 
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use nalgebra::Vector2;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowResult, PatchTracker, PointsSoA, SourcePatches, TrackInput,
 };
@@ -68,7 +68,7 @@ fn cached_templates_track_like_rebuilt_templates_with_new_points_between_them() 
             let mut old_positions = PointsSoA::default();
             for index in 0..first.positions.len() {
                 old_positions.push(if temporal {
-                    result.transform(index).translation
+                    result.transform(index).translation.into()
                 } else {
                     first.positions.get(index)
                 });

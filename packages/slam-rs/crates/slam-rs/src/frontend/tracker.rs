@@ -21,9 +21,9 @@ pub use storage::{FlowTransforms, PointsSoA, TrackInput};
 
 use nalgebra::Vector2;
 
-use crate::frontend::patterns::Pattern;
-use crate::frontend::se2::AffineCompact2f;
 use crate::pyramid::Pyramid;
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 
 /// Upper bound for a valid increment.
 ///
@@ -54,6 +54,9 @@ pub const MAX_LEVELS: usize = 24;
 /// worker inside the released-GIL region aborts the process (decision D32).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TrackerError {
+    /// Invalid sampling pattern geometry.
+    #[error(transparent)]
+    Patch(#[from] kornia_staging_imgproc::optical_flow::patch_se2::PatchError),
     /// A convergence threshold must be finite and positive.
     #[error("port.klt_exit_step_px must be finite and positive, or null")]
     InvalidExitStep,

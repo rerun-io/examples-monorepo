@@ -5,10 +5,10 @@ use std::sync::Arc;
 use cubecl::prelude::*;
 
 use super::{FUSED_RUNS, FusedLaunch, GpuPatchTracker, stage_points};
-use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{TrackInput, TrackerError, check_track_inputs};
 use crate::gpu::{GpuError, guarded, pyramid::GpuPyramid, submission};
 use crate::pyramid::Pyramid;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     pub(super) fn submit_packed(
