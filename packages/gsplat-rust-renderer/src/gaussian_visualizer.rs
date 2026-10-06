@@ -412,8 +412,12 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         for (data_result, instruction) in query.iter_visualizer_instruction_for(Self::identifier())
         {
             // ── Step 1: Query components from the data store ──────────
-            let results =
-                data_result.query_archetype_with_history::<Gaussians3D>(ctx, query, instruction, None);
+            let results = data_result.query_archetype_with_history::<Gaussians3D>(
+                ctx,
+                query,
+                instruction,
+                None,
+            );
             let results = VisualizerInstructionQueryResults::new(instruction, &results, &output);
 
             let centers = results.iter_required(Gaussians3D::descriptor_centers().component);

@@ -1,0 +1,15 @@
+[package]
+name = "gsplat-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+brush-render.workspace = true
+brush-serde.workspace = true
+burn.workspace = true
+image.workspace = true
+glam.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+lpips.workspace = true

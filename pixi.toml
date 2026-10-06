@@ -2259,17 +2259,17 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Launch the Rerun viewer with Gaussian splat visualization"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-fmt]
-cmd = "cargo fmt --all"
+cmd = "cargo fmt --all -- --check"
 cwd = "packages/gsplat-rust-renderer"
 description = "Format Rust code"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-clippy]
-cmd = "cargo clippy --all-targets -- -D warnings"
+cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
 cwd = "packages/gsplat-rust-renderer"
 description = "Run clippy on Rust code"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-rust-test]
-cmd = "cargo test"
+cmd = "cargo test --locked --workspace"
 cwd = "packages/gsplat-rust-renderer"
 description = "Run Rust test suite"
 
