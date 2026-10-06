@@ -16,6 +16,7 @@
 //! (decision D31). This keeps the floating-point sum deterministic.
 
 use kornia_staging_algebra::Scalar;
+use kornia_staging_slam::sqrt_ba::PriorLinearization;
 use std::collections::BTreeMap;
 
 use kornia_staging_slam::factors::{LinearizePointOut, compute_rel_pose, irls_huber_cost};
@@ -502,33 +503,7 @@ impl<S: Scalar> BundleAdjustmentBase<S> {
 
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
 
-        // Only square-root priors are supported (D68).
-        let rows: usize = mld.h.nrows();
-        // `H_delta = mld.H * delta`, reused by both `b` and the error.
-        let mut h_delta: DVector<S> = DVector::zeros(rows);
-        for i in 0..rows {
-            let mut acc: S = S::zero();
-            for j in 0..marg_size {
-                acc += mld.h[(i, j)] * delta[j];
-            }
-            h_delta[i] = acc;
-        }
-        for i in 0..marg_size {
-            for j in 0..marg_size {
-                let mut acc: S = S::zero();
-                for k in 0..rows {
-                    acc += mld.h[(k, i)] * mld.h[(k, j)];
-                }
-                abs_h[(i, j)] += acc;
-            }
-            let mut acc: S = S::zero();
-            for k in 0..rows {
-                acc += mld.h[(k, i)] * (mld.b[k] + h_delta[k]);
-            }
-            abs_b[i] += acc;
-        }
-        // `delta^T H^T (0.5 H delta + b)`.
-        Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
+        Ok(marg_prior(mld, &delta)?.add_dense(abs_h, abs_b))
     }
 
     /// The prior's cost at the current state, `computeMargPriorError`
@@ -537,19 +512,9 @@ impl<S: Scalar> BundleAdjustmentBase<S> {
     /// touching `H` or `b`; the constant `0.5 rᵀr` is dropped for the same
     /// reason, so this can be negative.
     pub fn compute_marg_prior_error(&self, mld: &MargLinData<S>) -> Result<S, BaError> {
-        let marg_size: usize = mld.order.total_size();
         Self::check_marg_prior_shape(mld)?;
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
-        let rows: usize = mld.h.nrows();
-        let mut h_delta: DVector<S> = DVector::zeros(rows);
-        for i in 0..rows {
-            let mut acc: S = S::zero();
-            for j in 0..marg_size {
-                acc += mld.h[(i, j)] * delta[j];
-            }
-            h_delta[i] = acc;
-        }
-        Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
+        Ok(marg_prior(mld, &delta)?.error())
     }
 
     /// The prior's contribution to the predicted cost change:
@@ -570,19 +535,7 @@ impl<S: Scalar> BundleAdjustmentBase<S> {
         }
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
 
-        let rows: usize = mld.h.nrows();
-        let mut l_diff: S = S::zero();
-        for k in 0..rows {
-            let mut b_jdelta: S = S::zero();
-            let mut j_inc: S = S::zero();
-            for j in 0..marg_size {
-                b_jdelta += mld.h[(k, j)] * delta[j];
-                j_inc += mld.h[(k, j)] * marg_pose_inc[j];
-            }
-            b_jdelta += mld.b[k];
-            l_diff -= j_inc * (b_jdelta + c::<S>(0.5) * j_inc);
-        }
-        Ok(l_diff)
+        Ok(marg_prior(mld, &delta)?.model_cost_change(marg_pose_inc))
     }
 
     /// Save every state and every landmark parameter, `backup`
@@ -610,16 +563,14 @@ impl<S: Scalar> BundleAdjustmentBase<S> {
     }
 }
 
-/// Evaluate the prior cost as `lhsᵀ (0.5 h_delta + b)`.
-/// The fixed left fold keeps repeated calls deterministic.
-fn prior_error<S: Scalar>(
-    lhs: &DVector<S>,
-    h_delta: &DVector<S>,
-    b: &DVector<S>,
-    n: usize,
-) -> S {
-    (0..n).fold(S::zero(), |acc, i| {
-        acc + lhs[i] * (c::<S>(0.5) * h_delta[i] + b[i])
+/// Borrow the numerical prior after the caller checks its window ordering.
+pub(crate) fn marg_prior<'a, S: Scalar>(
+    mld: &'a MargLinData<S>,
+    delta: &'a DVector<S>,
+) -> Result<PriorLinearization<'a, S>, BaError> {
+    PriorLinearization::new(&mld.h, &mld.b, delta).map_err(|_| BaError::MargPriorSize {
+        cols: mld.h.ncols(),
+        total_size: delta.len(),
     })
 }
 

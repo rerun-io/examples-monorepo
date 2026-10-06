@@ -4,20 +4,20 @@
 //! while updating the window without self-referential storage.
 
 use kornia_staging_algebra::Scalar;
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use std::collections::{BTreeMap, BTreeSet};
 
+use kornia_staging_slam::sqrt_ba::{eliminate_blocks, linearize_blocks};
 use nalgebra::{DMatrix, DVector, Matrix4, Matrix6};
-use rayon::prelude::*;
 
-use crate::ba_base::BundleAdjustmentBase;
+use crate::ba_base::{BundleAdjustmentBase, marg_prior};
 use crate::frontend::parallel::WorkPool;
+use crate::imu::{ImuBlock, ImuLinData};
 use crate::landmark::Landmark;
 use crate::lie::{Se3};
 use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
-use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin, linearize_relative_pose};
+use crate::linearize::{DenseSystem, LinearizeError, RelPoseLin, linearize_relative_pose};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
-use crate::imu::{ImuBlock, ImuLinData};
-use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 
 /// `LinearizationBase<Scalar, POSE_SIZE>::Options`,
 /// without the `linearization_type` field: only `ABS_QR` is ported (decision D13).
@@ -91,10 +91,8 @@ pub struct LinearizationAbsQR<S: Scalar> {
     landmark_ids: Vec<LandmarkId>,
     /// `landmark_blocks`, parallel to `landmark_ids`.
     landmark_blocks: Vec<LandmarkBlock<S>>,
-    /// `landmark_block_idx` : the prefix sum of `numQ2rows()`.
-    landmark_block_idx: Vec<usize>,
-    /// `num_rows_Q2r`.
-    num_rows_q2r: usize,
+    landmark_offsets: Vec<usize>,
+    landmark_rows: usize,
     /// `relative_pose_lin` as a dense table, so the blocks hold an
     /// index rather than a pointer. The `(host, target)` -> slot map that
     /// builds it is a local in [`Self::new`]: nothing needs it once the blocks
@@ -170,11 +168,11 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         }
 
         assert_eq!(landmark_blocks.len(), landmark_ids.len());
-        let mut landmark_block_idx: Vec<usize> = Vec::with_capacity(landmark_blocks.len());
-        let mut num_rows_q2r: usize = 0;
+        let mut landmark_offsets = Vec::with_capacity(landmark_blocks.len());
+        let mut landmark_rows = 0usize;
         for block in &landmark_blocks {
-            landmark_block_idx.push(num_rows_q2r);
-            num_rows_q2r = num_rows_q2r
+            landmark_offsets.push(landmark_rows);
+            landmark_rows = landmark_rows
                 .checked_add(block.num_q2rows())
                 .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
         }
@@ -219,8 +217,8 @@ impl<S: Scalar> LinearizationAbsQR<S> {
             options,
             landmark_ids,
             landmark_blocks,
-            landmark_block_idx,
-            num_rows_q2r,
+            landmark_offsets,
+            landmark_rows,
             rel_pose_pairs,
             rel_pose_lin,
             imu_meta,
@@ -305,8 +303,8 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
         let ids: &[LandmarkId] = &self.landmark_ids;
         let rel_pose_lin: &[RelPoseLin<S>] = &self.rel_pose_lin;
-        let mut numerically_valid: bool = true;
-        let linearize = |(block, &lm_id): (&mut LandmarkBlock<S>, &LandmarkId)| {
+        let linearize = |index: usize, block: &mut LandmarkBlock<S>| {
+            let lm_id = ids[index];
             let lm: &Landmark<S> = estimator
                 .lmdb
                 .get_landmark(lm_id)
@@ -315,29 +313,8 @@ impl<S: Scalar> LinearizationAbsQR<S> {
                 block.linearize_landmark(lm, rel_pose_lin, cameras, &lb_options)?;
             Ok::<_, LinearizeError>((contribution, !block.is_numerical_failure()))
         };
-        let partials = pool.and_then(|pool| {
-            pool.install(|| {
-                blocks
-                    .par_iter_mut()
-                    .zip(ids)
-                    .map(linearize)
-                    .collect::<Vec<_>>()
-            })
-        });
-        let mut error = S::zero();
-        if let Some(partials) = partials {
-            for partial in partials {
-                let (contribution, valid) = partial?;
-                error += contribution;
-                numerically_valid &= valid;
-            }
-        } else {
-            for pair in blocks.iter_mut().zip(ids) {
-                let (contribution, valid) = linearize(pair)?;
-                error += contribution;
-                numerically_valid &= valid;
-            }
-        }
+        let (mut error, numerically_valid) =
+            linearize_blocks(blocks, pool.and_then(WorkPool::thread_pool), linearize)?;
 
         // 3a. the IMU blocks.
         self.imu_blocks.clear();
@@ -355,7 +332,8 @@ impl<S: Scalar> LinearizationAbsQR<S> {
                         end: meta.end_t,
                     },
                 )?;
-                let block: ImuBlock<S> = ImuBlock::linearize(meas, &imu.lin_data, start_state, end_state);
+                let block: ImuBlock<S> =
+                    ImuBlock::linearize(meas, &imu.lin_data, start_state, end_state);
                 error += block.error;
                 self.imu_blocks.push(block);
             }
@@ -372,23 +350,11 @@ impl<S: Scalar> LinearizationAbsQR<S> {
     /// `performQR()` : eliminate every block's landmark columns.
     pub fn perform_qr(&mut self, pool: Option<&WorkPool>) -> Result<(), LinearizeError> {
         let options: LandmarkBlockOptions<S> = self.options.lb_options;
-        if let Some(results) = pool.and_then(|pool| {
-            pool.install(|| {
-                self.landmark_blocks
-                    .par_iter_mut()
-                    .map(|block| block.perform_qr(&options))
-                    .collect::<Vec<_>>()
-            })
-        }) {
-            for result in results {
-                result?;
-            }
-            return Ok(());
-        }
-        for block in &mut self.landmark_blocks {
-            block.perform_qr(&options)?;
-        }
-        Ok(())
+        eliminate_blocks(
+            &mut self.landmark_blocks,
+            pool.and_then(WorkPool::thread_pool),
+            |block| block.perform_qr(&options),
+        )
     }
 
     /// Build the dense reduced camera system with a reusable accumulator.
@@ -399,7 +365,7 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         estimator: &BundleAdjustmentBase<S>,
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(DMatrix<S>, DVector<S>), LinearizeError> {
-        let mut workspace: DenseHbWorkspace<S> = DenseHbWorkspace::default();
+        let mut workspace: DenseSystem<S> = DenseSystem::default();
         self.get_dense_h_b_into(estimator, inputs, &mut workspace)?;
         // The workspace is this call's own, so the assembled system moves out of
         // it rather than being copied: the borrow above ends with the statement.
@@ -415,19 +381,14 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         &self,
         estimator: &BundleAdjustmentBase<S>,
         inputs: &LinearizationInputs<'_, S>,
-        workspace: &'w mut DenseHbWorkspace<S>,
+        workspace: &'w mut DenseSystem<S>,
     ) -> Result<(&'w mut DMatrix<S>, &'w mut DVector<S>), LinearizeError> {
         let opt_size: usize = self.aom.total_size();
         let (h, b) = workspace.reduce(opt_size, &self.landmark_blocks)?;
 
         // `add_dense_H_b_imu`.
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.add_dense_h_b(
-                meta.start_idx,
-                meta.end_idx,
-                h,
-                b,
-            );
+            block.add_dense_h_b(meta.start_idx, meta.end_idx, h, b);
         }
 
         // `add_dense_H_b_marg_prior`. 's pose-damping
@@ -447,37 +408,31 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         estimator: &BundleAdjustmentBase<S>,
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(DMatrix<S>, DVector<S>), LinearizeError> {
-        let poses_size: usize = self.aom.total_size();
-        let mut total_size: usize = self.num_rows_q2r;
-
-        let imu_start_idx: usize = total_size;
-        total_size += self.imu_meta.len() * POSE_VEL_BIAS_SIZE;
-
-        let marg_start_idx: usize = total_size;
-        if let Some(marg) = inputs.marg {
-            total_size += marg.h.nrows();
-        }
+        let poses_size = self.aom.total_size();
+        let imu_start_idx = self.landmark_rows;
+        let marg_start_idx = self
+            .imu_meta
+            .len()
+            .checked_mul(POSE_VEL_BIAS_SIZE)
+            .and_then(|n| imu_start_idx.checked_add(n))
+            .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
+        let total_size = marg_start_idx
+            .checked_add(inputs.marg.map_or(0, |m| m.h.nrows()))
+            .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
+        total_size
+            .checked_mul(poses_size)
+            .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
 
         let mut q2jp: DMatrix<S> = DMatrix::zeros(total_size, poses_size);
         let mut q2r: DVector<S> = DVector::zeros(total_size);
 
-        for (block, &start) in self
-            .landmark_blocks
-            .iter()
-            .zip(self.landmark_block_idx.iter())
-        {
+        for (block, &start) in self.landmark_blocks.iter().zip(&self.landmark_offsets) {
             block.get_dense_q2jp_q2r(&mut q2jp, &mut q2r, start)?;
         }
 
         let mut start_idx: usize = imu_start_idx;
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.add_dense_q2jp_q2r(
-                meta.start_idx,
-                meta.end_idx,
-                start_idx,
-                &mut q2jp,
-                &mut q2r,
-            );
+            block.add_dense_q2jp_q2r(meta.start_idx, meta.end_idx, start_idx, &mut q2jp, &mut q2r);
             start_idx += POSE_VEL_BIAS_SIZE;
         }
 
@@ -488,17 +443,7 @@ impl<S: Scalar> LinearizationAbsQR<S> {
             // square-root exports to avoid attaching one frame's columns to another.
             estimator.check_marg_prior_order(marg, &self.aom)?;
             let delta: DVector<S> = estimator.compute_delta(&marg.order)?;
-            let (marg_rows, marg_cols) = (marg.h.nrows(), marg.h.ncols());
-            for i in 0..marg_rows {
-                for j in 0..marg_cols {
-                    q2jp[(marg_start_idx + i, j)] = marg.h[(i, j)];
-                }
-                let mut acc: S = S::zero();
-                for j in 0..marg_cols {
-                    acc += marg.h[(i, j)] * delta[j];
-                }
-                q2r[marg_start_idx + i] = acc + marg.b[i];
-            }
+            marg_prior(marg, &delta)?.write_stacked(&mut q2jp, &mut q2r, marg_start_idx);
         }
 
         Ok((q2jp, q2r))
@@ -540,12 +485,7 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         }
 
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.back_substitute(
-                meta.start_idx,
-                meta.end_idx,
-                pose_inc,
-                &mut l_diff,
-            );
+            block.back_substitute(meta.start_idx, meta.end_idx, pose_inc, &mut l_diff);
         }
 
         if let Some(marg) = inputs.marg {

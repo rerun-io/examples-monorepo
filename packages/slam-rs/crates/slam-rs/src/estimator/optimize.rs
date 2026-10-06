@@ -26,7 +26,7 @@ use crate::frontend::parallel::WorkPool;
 use crate::imu::ImuLinData;
 use crate::lie::{eigen_maxi};
 use crate::linearize::{
-    DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+    DenseSystem, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
 };
 use crate::types::{
     AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
@@ -47,7 +47,7 @@ const MAX_SOLVE_ATTEMPTS: u32 = 3;
 #[derive(Debug, Clone)]
 pub(super) struct OptimizeScratch<S: Scalar> {
     /// The dense accumulator and per-landmark transpose scratch.
-    pub(super) dense: DenseHbWorkspace<S>,
+    pub(super) dense: DenseSystem<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
     /// The increment [`damped_solve`] writes and the loop then negates.
     pub(super) increment: DVector<S>,
@@ -59,7 +59,7 @@ impl<S: Scalar> Default for OptimizeScratch<S> {
     /// not.
     fn default() -> Self {
         Self {
-            dense: DenseHbWorkspace::default(),
+            dense: DenseSystem::default(),
             increment: DVector::zeros(0),
         }
     }

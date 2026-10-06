@@ -109,3 +109,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Nanosecond midpoint preintegrator; proposal to reconcile with upstream PreintegratedImu | slam-rs `imu/preintegration.rs` | kornia-slam / kornia-sensors / imu | staged | - |
 | Hosted reprojection, relative pose and pixel-space IRLS Huber weighting (not RobustLoss::rho) | slam-rs `ba_base.rs` | kornia-slam / kornia-slam / factors | staged | - |
 | Per-landmark Householder/Givens elimination and back-substitution | slam-rs `linearize/landmark_block.rs` | kornia-slam / kornia-slam / sqrt_ba | staged | - |
+| Absolute-QR assembly and deterministic dense reduction | `slam-rs/linearize/{abs_qr,dense_hb}.rs`, `ba_base.rs` prior kernels | kornia-slam / kornia-slam / `sqrt_ba` | staged | - |

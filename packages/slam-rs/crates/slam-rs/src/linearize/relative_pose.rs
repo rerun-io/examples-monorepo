@@ -35,3 +35,41 @@ pub(crate) fn linearize_relative_pose<S: Scalar>(
     }
     t_t_h
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::{Vector3, Vector6};
+    #[test]
+    fn frozen_jacobians_and_current_transform_are_separate() {
+        let identity = Se3::<f64>::identity();
+        let extrinsic = Se3 {
+            translation: Vector3::new(0.1, 0.0, 0.0),
+            ..identity
+        };
+        let mut host = PoseStateWithLin::new(0, identity, true);
+        host.apply_inc(&Vector6::new(1.0, 2.0, 3.0, 0.0, 0.0, 0.0));
+        let target = PoseStateWithLin::new(0, identity, false);
+        let mut expected_j = Matrix6::zeros();
+        compute_rel_pose(
+            &identity,
+            &extrinsic,
+            &identity,
+            &identity,
+            Some(&mut expected_j),
+            None,
+        );
+        let expected = compute_rel_pose(host.pose(), &extrinsic, &identity, &identity, None, None);
+        let mut actual_j = Matrix6::zeros();
+        let actual = linearize_relative_pose(
+            &host,
+            &target,
+            &extrinsic,
+            &identity,
+            Some(&mut actual_j),
+            None,
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(actual_j, expected_j);
+    }
+}

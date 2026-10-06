@@ -692,7 +692,7 @@ fn pooled_linearization_preserves_bits() {
             .unwrap();
             let pool = WorkPool::new(threads).unwrap();
             let mut pooled = serial.clone();
-            let mut dense = slam_rs::linearize::DenseHbWorkspace::default();
+            let mut dense = slam_rs::linearize::DenseSystem::default();
             // Repeat to exercise clearing and reuse of the per-block buffers.
             for _ in 0..2 {
                 let (error, valid) = serial

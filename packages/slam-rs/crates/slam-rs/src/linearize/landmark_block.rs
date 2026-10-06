@@ -3,6 +3,7 @@
 //! support back-substitution; remaining rows form the reduced camera system.
 
 use kornia_staging_algebra::Scalar;
+use kornia_staging_slam::sqrt_ba::DenseBlock;
 use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Vector2};
 
 use crate::ba_base::linearize_point;
@@ -37,39 +38,6 @@ impl<S: Scalar> Default for LandmarkBlockOptions<S> {
             huber_parameter: S::zero(),
             obs_std_dev: S::one(),
         }
-    }
-}
-
-/// How many coefficients of one row of `H` are accumulated at a time.
-///
-/// The accumulator is a fixed-size array rather than a slice of the scratch
-/// buffer for two reasons, and both decide whether the loop vectorises: its
-/// length is a constant, so the body unrolls with no runtime trip count and no
-/// scalar tail, and it is a local, so the compiler can see that writing it
-/// cannot change the row it is reading. Written against `Q2Jp` — two pose
-/// blocks of six columns plus the residual on the median frame — eight is one
-/// SSE pair and holds a whole pose block plus its neighbour.
-const LANES: usize = 8;
-
-/// The buffer [`LandmarkBlock::add_dense_h_b`] works in, reused across blocks.
-///
-/// `H += Q2Jp^T Q2Jp` is a dot product per coefficient down two columns of
-/// `storage`, and an `f32` sum cannot be reassociated, so the reduction over
-/// rows has to stay sequential. Holding one accumulator per **column** instead
-/// of one per coefficient turns the inner loop into `acc[j] += t * row[j]`,
-/// which each accumulator still walks in row order — the same additions in the
-/// same order — and which vectorises, where the dot product does not.
-#[derive(Debug, Clone)]
-pub struct DenseHbScratch<S: Scalar> {
-    /// The `Q2` rows of `storage` over the written columns then the residual,
-    /// row-major so one row is contiguous, and padded to a whole number of
-    /// [`LANES`] with `+0.0`.
-    rows: Vec<S>,
-}
-
-impl<S: Scalar> Default for DenseHbScratch<S> {
-    fn default() -> Self {
-        Self { rows: Vec::new() }
     }
 }
 
@@ -529,164 +497,25 @@ impl<S: Scalar> LandmarkBlock<S> {
                 found: q2jp.nrows().min(q2r.nrows()),
             });
         }
-        for r in 0..rows {
-            q2r[start_idx + r] = self.storage[(3 + r, self.qr.residual_column())];
-            for k in 0..self.qr.pose_columns() {
-                q2jp[(start_idx + r, k)] = self.storage[(3 + r, k)];
-            }
-        }
+        self.dense_block()
+            .write_stacked_unchecked(q2jp, q2r, start_idx);
         Ok(())
     }
 
-    /// The pose columns `Self::add_dense_h_b_active` writes; see the field.
+    /// The observed pose columns.
     pub fn active_cols(&self) -> &[usize] {
         self.qr.active_columns()
     }
 
     /// Every pose column of the dense system, `0..padding_idx`: what
-    /// [`Self::add_dense_h_b`] writes.
+    /// a full dense contraction writes.
     pub fn pose_columns(&self) -> std::ops::Range<usize> {
         0..self.qr.pose_columns()
     }
 
-    /// Add `Q₂J_pᵀ Q₂J_p` and `Q₂J_pᵀ Q₂r` at full width.
-    /// Every column before padding is written, including non-finite propagation.
-    pub fn add_dense_h_b(
-        &self,
-        h: &mut DMatrix<S>,
-        b: &mut DVector<S>,
-        scratch: &mut DenseHbScratch<S>,
-    ) -> Result<(), LinearizeError> {
-        self.check_dense_h_b_size(h, b)?;
-        // The cold path — the tests and the reduction's non-finite fallback —
-        // so the column list is built here rather than kept in `scratch`.
-        let columns: Vec<usize> = self.pose_columns().collect();
-        self.add_dense_h_b_over(&columns, h, b, scratch);
-        Ok(())
-    }
-
-    /// Use sparse writeback only when skipping inactive columns preserves every value,
-    /// including NaNs and signed zero (D32).
-    pub(crate) fn active_writeback_is_exact(&self) -> bool {
-        let rows: usize = self.num_q2rows();
-        let mut active = self.qr.active_columns().iter().copied().peekable();
-        for column in self.pose_columns() {
-            if active.next_if_eq(&column).is_some() {
-                for r in 0..rows {
-                    if !self.storage[(3 + r, column)].to_f64().is_finite() {
-                        return false;
-                    }
-                }
-            } else {
-                // `-0.0 == 0.0`, which is what this wants: either zero makes
-                // every product `±0.0`.
-                for r in 0..rows {
-                    if self.storage[(3 + r, column)] != S::zero() {
-                        return false;
-                    }
-                }
-            }
-        }
-        // The residual column, the other factor of `b`.
-        (0..rows).all(|r| {
-            self.storage[(3 + r, self.qr.residual_column())]
-                .to_f64()
-                .is_finite()
-        })
-    }
-
-    /// Refuse a destination that is too small with a typed error.
-    pub(super) fn check_dense_h_b_size(
-        &self,
-        h: &DMatrix<S>,
-        b: &DVector<S>,
-    ) -> Result<(), LinearizeError> {
-        if h.nrows() < self.qr.pose_columns()
-            || h.ncols() < self.qr.pose_columns()
-            || b.nrows() < self.qr.pose_columns()
-        {
-            return Err(LinearizeError::StackedSystemSize {
-                expected: self.qr.pose_columns(),
-                found: h.nrows().min(b.nrows()),
-            });
-        }
-        Ok(())
-    }
-
-    /// The sum itself, over `columns` — ascending, inside `0..padding_idx`.
-    fn add_dense_h_b_over(
-        &self,
-        columns: &[usize],
-        h: &mut DMatrix<S>,
-        b: &mut DVector<S>,
-        scratch: &mut DenseHbScratch<S>,
-    ) {
-        self.dense_h_b_over(columns, scratch, |i, j, value| {
-            if let Some(j) = j {
-                h[(i, j)] += value;
-            } else {
-                b[i] += value;
-            }
-        });
-    }
-
-    /// Compute raw coefficients without adding an intermediate zero. Both the
-    /// serial accumulator and parallel partials use this exact row order.
-    fn dense_h_b_over(
-        &self,
-        columns: &[usize],
-        scratch: &mut DenseHbScratch<S>,
-        mut write: impl FnMut(usize, Option<usize>, S),
-    ) {
-        let rows: usize = self.num_q2rows();
-        let live: usize = columns.len();
-        // `[ the columns | the residual ]`, one contiguous row per `Q2` row;
-        // see [`DenseHbScratch`] for why the transpose is worth its copy. The
-        // row is padded to a whole number of [`LANES`] so every chunk below is
-        // a full one; the padding is `+0.0`, contributes `factor * 0.0` to a
-        // coefficient nothing reads, and is never written back.
-        let width: usize = live + 1;
-        let stride: usize = width.div_ceil(LANES) * LANES;
-        scratch.rows.clear();
-        scratch.rows.resize(rows * stride, S::zero());
-        for (slot, &column) in columns.iter().enumerate() {
-            for r in 0..rows {
-                scratch.rows[r * stride + slot] = self.storage[(3 + r, column)];
-            }
-        }
-        for r in 0..rows {
-            scratch.rows[r * stride + live] = self.storage[(3 + r, self.qr.residual_column())];
-        }
-
-        let transposed: &[S] = &scratch.rows;
-        for (slot, &i) in columns.iter().enumerate() {
-            for lo in (0..stride).step_by(LANES) {
-                // One row of `H` over `LANES` of its columns. Every coefficient
-                // still sums over the `Q2` rows in ascending row order — `r` is
-                // the loop below and each lane is touched once per row — so
-                // this is the same sum as one accumulator per column was, in
-                // the same order, over `LANES` columns at a time.
-                let mut partial: [S; LANES] = [S::zero(); LANES];
-                for r in 0..rows {
-                    let row: &[S] = &transposed[(r * stride)..((r + 1) * stride)];
-                    let factor: S = row[slot];
-                    let source: &[S] = &row[lo..(lo + LANES)];
-                    for (accumulator, &value) in partial.iter_mut().zip(source.iter()) {
-                        *accumulator += factor * value;
-                    }
-                }
-                let end: usize = (lo + LANES).min(width);
-                for (offset, &value) in partial.iter().enumerate().take(end - lo) {
-                    let j: usize = lo + offset;
-                    if j < live {
-                        write(i, Some(columns[j]), value);
-                    } else {
-                        // `j == live`: the residual column.
-                        write(i, None, value);
-                    }
-                }
-            }
-        }
+    /// Borrow numerical storage without copying the landmark or its state.
+    pub(super) fn dense_block(&self) -> DenseBlock<'_, S> {
+        DenseBlock::new(&self.qr, self.storage.as_slice())
     }
 
     /// Stored row count minus the three reserved damping rows; includes the `Q₁` rows.
@@ -772,6 +601,34 @@ mod tests {
         Some(usize::from(target.cam_id == 1))
     }
 
+    #[test]
+    fn stacked_matrix_and_residual_can_have_different_capacities() {
+        let (aom, lm, rel) = fixture(2);
+        let mut block = LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
+        block
+            .linearize_landmark(&lm, &rel, &cameras(), &options())
+            .unwrap();
+        block.perform_qr(&options()).unwrap();
+        let rows = block.num_q2rows();
+        for extra in [0, 2] {
+            let mut j = DMatrix::zeros(rows + extra, aom.total_size());
+            let mut r = DVector::zeros(rows + 2 - extra);
+            block.get_dense_q2jp_q2r(&mut j, &mut r, 0).unwrap();
+            for row in 0..rows {
+                for col in 0..aom.total_size() {
+                    assert_eq!(
+                        j[(row, col)].to_bits(),
+                        block.storage[(row + 3, col)].to_bits()
+                    );
+                }
+                assert_eq!(
+                    r[row].to_bits(),
+                    block.storage[(row + 3, block.qr.residual_column())].to_bits()
+                );
+            }
+        }
+    }
+
     fn cameras() -> Vec<SlamCamera<f64>> {
         let model: BasaltCamera<f64> = BasaltCamera::Kb4(Kb4Params {
             fx: 379.045,
@@ -844,11 +701,16 @@ mod tests {
     fn assert_dense_h_b_is_the_full_loop(block: &LandmarkBlock<f64>) {
         let mut h: DMatrix<f64> = DMatrix::zeros(block.qr.pose_columns(), block.qr.pose_columns());
         let mut b: DVector<f64> = DVector::zeros(block.qr.pose_columns());
-        block.add_dense_h_b_over(
+        block.dense_block().coefficients_unchecked(
             block.active_cols(),
-            &mut h,
-            &mut b,
-            &mut DenseHbScratch::default(),
+            &mut kornia_staging_slam::sqrt_ba::DenseHbWorkspace::default(),
+            |i, j, value| {
+                if let Some(j) = j {
+                    h[(i, j)] += value;
+                } else {
+                    b[i] += value;
+                }
+            },
         );
         let rows: usize = block.num_q2rows();
         for i in 0..block.qr.pose_columns() {
@@ -892,9 +754,11 @@ mod tests {
         let n: usize = block.qr.pose_columns();
         let mut h: DMatrix<f64> = DMatrix::from_element(n, n, -0.0);
         let mut b: DVector<f64> = DVector::from_element(n, -0.0);
-        block
-            .add_dense_h_b(&mut h, &mut b, &mut DenseHbScratch::default())
-            .unwrap();
+        block.dense_block().add_full_unchecked(
+            &mut h,
+            &mut b,
+            &mut kornia_staging_slam::sqrt_ba::DenseHbWorkspace::default(),
+        );
 
         for i in 0..n {
             for j in 0..n {
@@ -931,7 +795,7 @@ mod tests {
         block.perform_qr(&options()).unwrap();
 
         assert!(
-            !block.active_writeback_is_exact(),
+            !block.dense_block().active_writeback_is_exact(),
             "a NaN block must not take the skip"
         );
         let spread: bool = (POSE_SIZE..block.qr.pose_columns()).any(|column| {
@@ -1218,7 +1082,12 @@ mod tests {
         aom.push(0, usize::MAX / 2 - (usize::MAX / 2) % 4).unwrap();
         let err = LandmarkBlock::<f64>::allocate(lm.id, &lm, &index, &aom, false).unwrap_err();
         assert!(
-            matches!(err, LinearizeError::SqrtBa(kornia_staging_slam::sqrt_ba::SqrtBaError::BlockTooLarge { .. })),
+            matches!(
+                err,
+                LinearizeError::SqrtBa(
+                    kornia_staging_slam::sqrt_ba::SqrtBaError::BlockTooLarge { .. }
+                )
+            ),
             "{err:?}"
         );
     }

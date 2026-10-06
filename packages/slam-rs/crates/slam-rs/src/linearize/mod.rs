@@ -14,9 +14,9 @@ mod relative_pose;
 pub(crate) use relative_pose::linearize_relative_pose;
 
 pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-pub use dense_hb::DenseHbWorkspace;
+pub use dense_hb::DenseSystem;
 pub use landmark_block::{
-    DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
+    LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
 };
 
 use nalgebra::{Matrix4, Matrix6};

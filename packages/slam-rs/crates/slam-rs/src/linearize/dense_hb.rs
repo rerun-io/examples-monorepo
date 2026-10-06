@@ -1,142 +1,45 @@
-//! Reusable storage for deterministic dense landmark reduction.
-
+//! Consumer-owned nalgebra buffers over the staged deterministic reducer.
 use kornia_staging_algebra::Scalar;
+use super::{LinearizeError, landmark_block::LandmarkBlock};
+use kornia_staging_slam::sqrt_ba::DenseHbWorkspace;
 use nalgebra::{DMatrix, DVector};
-
-use super::LinearizeError;
-use super::landmark_block::{DenseHbScratch, LandmarkBlock};
-
-/// Dense accumulator, reset to positive zero before each assembly.
+/// Retains nalgebra buffers required by the estimator's solve and fixed-frame policy.
 #[derive(Debug, Clone)]
-struct DensePartial<S: Scalar> {
+pub struct DenseSystem<S: Scalar> {
     h: DMatrix<S>,
     b: DVector<S>,
+    numerical: DenseHbWorkspace<S>,
 }
-
-impl<S: Scalar> DensePartial<S> {
-    fn zeros(n: usize) -> Self {
-        Self {
-            h: DMatrix::zeros(n, n),
-            b: DVector::zeros(n),
-        }
-    }
-
-    /// Clear the full system: IMU, prior and fixed-keyframe writes also use it.
-    fn reset_sized(&mut self, n: usize) {
-        if self.b.nrows() == n {
-            self.h.fill(S::zero());
-            self.b.fill(S::zero());
-        } else {
-            *self = Self::zeros(n);
-        }
-    }
-
-    /// Compute one triangle while preserving row and landmark addition order.
-    fn accumulate_symmetric(
-        &mut self,
-        block: &LandmarkBlock<S>,
-        scratch: &mut DenseHbScratch<S>,
-        rows: &mut Vec<S>,
-    ) -> Result<(), LinearizeError> {
-        const LANES: usize = 8;
-        block.check_dense_h_b_size(&self.h, &self.b)?;
-        if !block.active_writeback_is_exact() {
-            return block.add_dense_h_b(&mut self.h, &mut self.b, scratch);
-        }
-        let columns = block.active_cols();
-        let live = columns.len();
-        let count = block.num_q2rows();
-        let stride = (live + 1).div_ceil(LANES) * LANES;
-        rows.clear();
-        rows.resize(count * stride, S::zero());
-        let storage = block.storage();
-        for (slot, &column) in columns.iter().enumerate() {
-            for row in 0..count {
-                rows[row * stride + slot] = storage[(row + 3, column)];
-            }
-        }
-        let residual = block.layout().4;
-        for row in 0..count {
-            rows[row * stride + live] = storage[(row + 3, residual)];
-        }
-        for (slot, &i) in columns.iter().enumerate() {
-            for lo in ((slot / LANES * LANES)..stride).step_by(LANES) {
-                let mut partial = [S::zero(); LANES];
-                for row in rows.chunks_exact(stride) {
-                    let factor = row[slot];
-                    for (sum, &value) in partial.iter_mut().zip(&row[lo..lo + LANES]) {
-                        *sum += factor * value;
-                    }
-                }
-                for (offset, value) in partial.into_iter().enumerate() {
-                    let j = lo + offset;
-                    if j < slot {
-                        continue;
-                    }
-                    if j < live {
-                        let column = columns[j];
-                        self.h[(i, column)] += value;
-                        if j != slot {
-                            self.h[(column, i)] += value;
-                        }
-                    } else if j == live {
-                        self.b[i] += value;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Reusable dense accumulator and row scratch for serial symmetric assembly.
-/// Blocks scatter in their existing order. Buffers resize with the window
-/// ordering and are cleared before each assembly.
-#[derive(Debug, Clone)]
-pub struct DenseHbWorkspace<S: Scalar> {
-    /// What the reduction accumulates into and the caller reads.
-    accumulator: DensePartial<S>,
-    /// One transpose buffer reused across blocks on the serial path.
-    leaf: DenseHbScratch<S>,
-    /// Row-major active columns plus residual, reused across landmarks.
-    rows: Vec<S>,
-}
-
-impl<S: Scalar> Default for DenseHbWorkspace<S> {
+impl<S: Scalar> Default for DenseSystem<S> {
     fn default() -> Self {
         Self {
-            accumulator: DensePartial::zeros(0),
-            leaf: DenseHbScratch::default(),
-            rows: Vec::new(),
+            h: DMatrix::zeros(0, 0),
+            b: DVector::zeros(0),
+            numerical: DenseHbWorkspace::default(),
         }
     }
 }
-
-impl<S: Scalar> DenseHbWorkspace<S> {
-    /// Accumulate landmark blocks in their existing order.
+impl<S: Scalar> DenseSystem<S> {
     pub(super) fn reduce(
         &mut self,
-        opt_size: usize,
+        n: usize,
         blocks: &[LandmarkBlock<S>],
     ) -> Result<(&mut DMatrix<S>, &mut DVector<S>), LinearizeError> {
-        self.accumulator.reset_sized(opt_size);
-        for block in blocks {
-            self.accumulator
-                .accumulate_symmetric(block, &mut self.leaf, &mut self.rows)?;
+        if self.b.len() != n {
+            self.h = DMatrix::zeros(n, n);
+            self.b = DVector::zeros(n);
         }
-        let accumulator = &mut self.accumulator;
-        let DensePartial { h, b, .. } = accumulator;
-
-        Ok((h, b))
+        self.numerical.reduce_into(
+            blocks.iter().map(LandmarkBlock::dense_block),
+            &mut self.h,
+            &mut self.b,
+        )?;
+        Ok((&mut self.h, &mut self.b))
     }
-
-    /// Move the assembled system out without copying its buffers.
     pub(super) fn into_result(self) -> (DMatrix<S>, DVector<S>) {
-        let DensePartial { h, b, .. } = self.accumulator;
-        (h, b)
+        (self.h, self.b)
     }
 }
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -150,6 +53,7 @@ mod tests {
     use crate::linearize::{LandmarkBlockOptions, RelPoseLin};
     use crate::types::POSE_SIZE;
     use crate::types::{AbsOrderMap, LandmarkId, TimeCamId};
+    use kornia_staging_slam::sqrt_ba::DenseHbWorkspace;
     use nalgebra::{Matrix4, Matrix6};
     use nalgebra::{Vector2, Vector3};
 
@@ -161,7 +65,7 @@ mod tests {
         let mut h = DMatrix::zeros(n, n);
         let mut b = DVector::zeros(n);
         for block in blocks {
-            let columns: Vec<_> = if block.active_writeback_is_exact() {
+            let columns: Vec<_> = if block.dense_block().active_writeback_is_exact() {
                 block.active_cols().to_vec()
             } else {
                 block.pose_columns().collect()
@@ -221,7 +125,11 @@ mod tests {
                 let model = SlamCamera::from_model(&calibration.intrinsics[cam]).unwrap();
                 let mut pixel = Vector2::zeros();
                 let mut jac = nalgebra::Matrix2x4::zeros();
-                assert!(model.project_point(&nalgebra::Vector4::new(p.x, p.y, p.z, 1.0), &mut pixel, Some(&mut jac)));
+                assert!(model.project_point(
+                    &nalgebra::Vector4::new(p.x, p.y, p.z, 1.0),
+                    &mut pixel,
+                    Some(&mut jac)
+                ));
                 pixels.insert(KeypointId(id), pixel.cast());
             }
         }
@@ -261,7 +169,7 @@ mod tests {
                 .unwrap();
             linearizer.perform_qr(None).unwrap();
             let (h, b) = reference_reduce(order.total_size(), linearizer.landmark_blocks());
-            let mut workspace = DenseHbWorkspace::default();
+            let mut workspace = DenseSystem::default();
             let (actual_h, actual_b) = workspace
                 .reduce(order.total_size(), linearizer.landmark_blocks())
                 .unwrap();
@@ -346,10 +254,10 @@ mod tests {
         let block = a_block_carrying_a_nan();
         let expected = block.pose_columns().len();
         let found = expected - 1;
-        let mut workspace = DenseHbWorkspace::default();
+        let mut workspace = DenseSystem::default();
         assert!(matches!(
             workspace.reduce(found, &[block]),
-            Err(LinearizeError::StackedSystemSize { expected: e, found: f })
+            Err(LinearizeError::SqrtBa(kornia_staging_slam::sqrt_ba::SqrtBaError::SystemSize { expected: e, found: f }))
                 if e == expected && f == found
         ));
     }
@@ -359,11 +267,13 @@ mod tests {
     fn a_non_finite_block_is_reduced_at_full_width() {
         let block: LandmarkBlock<f64> = a_block_carrying_a_nan();
         let n: usize = block.pose_columns().len();
-        let mut scratch: DenseHbScratch<f64> = DenseHbScratch::default();
+        let mut scratch: DenseHbWorkspace<f64> = DenseHbWorkspace::default();
 
         let mut h: DMatrix<f64> = DMatrix::zeros(n, n);
         let mut b: DVector<f64> = DVector::zeros(n);
-        block.add_dense_h_b(&mut h, &mut b, &mut scratch).unwrap();
+        block
+            .dense_block()
+            .add_full_unchecked(&mut h, &mut b, &mut scratch);
         assert!(
             h.iter().any(|value| value.is_nan()),
             "the fixture was supposed to carry a NaN into H"
@@ -373,32 +283,24 @@ mod tests {
             "and past the columns the block observes"
         );
 
-        let mut partial: DensePartial<f64> = DensePartial::zeros(n);
-        partial
-            .accumulate_symmetric(&block, &mut scratch, &mut Vec::new())
-            .unwrap();
-        for i in 0..n {
-            for j in 0..n {
-                assert_eq!(
-                    partial.h[(i, j)].to_bits(),
-                    h[(i, j)].to_bits(),
-                    "H({i}, {j})"
-                );
-            }
-            assert_eq!(partial.b[i].to_bits(), b[i].to_bits(), "b({i})");
+        let mut partial = DenseSystem::default();
+        let (actual_h, actual_b) = partial.reduce(n, std::slice::from_ref(&block)).unwrap();
+        for (actual, expected) in actual_h
+            .iter()
+            .chain(actual_b.iter())
+            .zip(h.iter().chain(b.iter()))
+        {
+            assert_eq!(actual.to_bits(), expected.to_bits());
         }
-
-        partial.reset_sized(partial.b.nrows());
+        let (cleared_h, cleared_b) = partial.reduce(n, &[]).unwrap();
         assert!(
-            partial
-                .h
+            cleared_h
                 .iter()
-                .chain(partial.b.iter())
-                .all(|value| value.to_bits() == 0.0f64.to_bits()),
-            "the reset left a coefficient behind"
+                .chain(cleared_b.iter())
+                .all(|v| v.to_bits() == 0.0f64.to_bits())
         );
 
-        let mut workspace = DenseHbWorkspace::default();
+        let mut workspace = DenseSystem::default();
         let (parallel_h, parallel_b) = workspace.reduce(n, &[block]).unwrap();
         for (expected, actual) in h
             .iter()

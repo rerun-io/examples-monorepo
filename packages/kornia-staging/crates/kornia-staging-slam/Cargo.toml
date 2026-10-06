@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "landmark_qr"
 harness = false
+
+[[bench]]
+name = "assembly"
+harness = false

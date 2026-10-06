@@ -1,6 +1,12 @@
 //! Square-root landmark elimination and deterministic absolute-system assembly.
+mod assembly;
+mod dense;
 mod landmark_qr;
+mod prior;
+pub use assembly::{eliminate_blocks, linearize_blocks};
+pub use dense::{DenseBlock, DenseHbWorkspace};
 pub use landmark_qr::{BackSubstitution, LandmarkQr};
+pub use prior::PriorLinearization;
 
 /// An invalid packed buffer or landmark layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
