@@ -19,6 +19,7 @@ cubecl-wgpu = "=0.11.0-pre.3"
 wgpu = { version = "30", default-features = false }
 log = "0.4"
 kornia-staging-3d = { path = "crates/kornia-staging-3d" }
+openh264 = { version = "=0.9.8", default-features = false, features = ["source"] }
 kornia-staging-imgproc = { path = "crates/kornia-staging-imgproc" }
 cc = "1"
 libc = "0.2"

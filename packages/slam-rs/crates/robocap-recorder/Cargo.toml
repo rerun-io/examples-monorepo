@@ -10,7 +10,7 @@ live-slam = ["dep:slam-rs"]
 
 [dependencies]
 kornia-image.workspace = true
-kornia-staging-io.workspace = true
+kornia-staging-io = { workspace = true, features = ["v4l"] }
 kornia-staging-sensor-iio.workspace = true
 kornia-staging-imgproc.workspace = true
 anyhow = { workspace = true }

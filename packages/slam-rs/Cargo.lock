@@ -3227,8 +3227,10 @@ dependencies = [
 name = "kornia-staging-io"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "kornia-image",
  "libc",
+ "openh264",
  "thiserror",
 ]
 
@@ -6735,11 +6737,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
- "cc",
  "clap",
+ "kornia-image",
  "kornia-staging-imgproc",
- "libc",
- "openh264",
+ "kornia-staging-io",
  "re_chunk 0.38.1",
  "re_log_encoding 0.38.1",
  "re_protos 0.38.1",
