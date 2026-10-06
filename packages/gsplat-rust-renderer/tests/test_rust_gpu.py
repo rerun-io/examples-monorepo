@@ -8,20 +8,24 @@ import pytest
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("suite", "name", "assets"),
+    ("package", "suite", "name", "assets"),
     [
-        ("evaluation", "brush_quantization_premultiplication_and_identity", ()),
-        ("evaluation", "evaluator_lpips_matches_reference", ()),
-        ("evaluation", "float_parity_preserves_highlights_and_detects_alpha", ()),
-        ("evaluation", "float_ssim_agrees_with_brush_on_byte_exact_inputs", ()),
-        ("evaluation", "lego_float_evaluation_matches_brush_eval_stats", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_GT")),
-        ("renderers", "all_renderers_nonblack_and_brush_identity", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS")),
-        ("renderers", "independent_brush_renders_have_exact_identity_on_one_splat", ()),
-        ("renderers", "old_core_renders_at_4k", ()),
-        ("renderers", "garden_colmap_projects_observed_points", ("GSPLAT_TEST_COLMAP",)),
+        ("gsplat-eval", "evaluation", "brush_quantization_premultiplication_and_identity", ()),
+        ("gsplat-eval", "evaluation", "evaluator_lpips_matches_reference", ()),
+        ("gsplat-eval", "evaluation", "float_parity_preserves_highlights_and_detects_alpha", ()),
+        ("gsplat-eval", "evaluation", "float_ssim_agrees_with_brush_on_byte_exact_inputs", ()),
+        ("gsplat-eval", "evaluation", "lego_float_evaluation_matches_brush_eval_stats", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_GT")),
+        ("gsplat-bench", "renderers", "all_renderers_nonblack_and_brush_identity", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS")),
+        ("gsplat-bench", "renderers", "independent_brush_renders_have_exact_identity_on_one_splat", ()),
+        ("gsplat-bench", "renderers", "old_core_renders_at_4k", ()),
+        ("gsplat-bench", "renderers", "garden_colmap_projects_observed_points", ("GSPLAT_TEST_COLMAP",)),
+        ("gsplat-core", None, "primitive_tests::inclusive_scan_crosses_recursive_block_boundaries", ()),
+        ("gsplat-core", None, "primitive_tests::radix_sort_is_stable_for_duplicates_and_partial_blocks", ()),
+        ("gsplat-core", None, "primitive_tests::radix_sort_crosses_the_70m_reduced_histogram_boundary", ()),
+        ("gsplat-core", "render", "centered_gaussian_has_analytic_color_alpha_and_background", ()),
     ],
 )
-def test_rust_gpu_contract(suite: str, name: str, assets: tuple[str, ...]) -> None:
+def test_rust_gpu_contract(package: str, suite: str | None, name: str, assets: tuple[str, ...]) -> None:
     """Missing external assets are pytest skips; Rust failures remain failures."""
     root: Path = Path(__file__).resolve().parents[1]
     environment: dict[str, str] = dict(os.environ)
@@ -38,11 +42,15 @@ def test_rust_gpu_contract(suite: str, name: str, assets: tuple[str, ...]) -> No
         environment[key] = str(path)
     environment["CARGO_PROFILE_DEV_DEBUG"] = "0"
     environment["CARGO_PROFILE_TEST_DEBUG"] = "0"
+    environment["CARGO_INCREMENTAL"] = "0"
+    selection: list[str] = ["--lib"] if suite is None else ["--test", suite]
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        ["cargo", "test", "--locked", "--workspace", "--test", suite, name, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1"],
+        ["cargo", "test", "--locked", "--package", package, *selection, name, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1"],
         cwd=root, env=environment, text=True, capture_output=True, check=False,
     )
     print(result.stdout)
     print(result.stderr)
+    if result.returncode == 0 and "SKIP:" in result.stderr:
+        pytest.skip(result.stderr.split("SKIP:", 1)[1].splitlines()[0].strip())
     assert result.returncode == 0, f"Rust integration contract failed: {suite}::{name}"
     assert "1 passed" in result.stdout, f"Rust test selection was empty: {suite}::{name}"

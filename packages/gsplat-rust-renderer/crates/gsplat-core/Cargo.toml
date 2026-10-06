@@ -1,0 +1,14 @@
+[package]
+name = "gsplat-core"
+version = "0.1.0"
+edition = "2024"
+description = "WebGPU Gaussian splat forward rendering without a tensor runtime"
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
