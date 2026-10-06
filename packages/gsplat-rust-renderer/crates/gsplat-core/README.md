@@ -15,6 +15,11 @@ SH coefficients. Shape errors fail at upload. Numerical invalidity follows
 Brush's per-splat GPU culling policy. SH degrees zero through four are supported.
 Cameras use right/down/forward coordinates and camera-to-world poses.
 `center_uv` is the principal point divided by image dimensions.
+Pinhole, KannalaBrandt4, rational RadialTangential8, and ThinPrismFisheye
+models share the projection stages. Fisheye culling stops at the lens's first
+fold; radial Jacobians use Brush's per-axis and radial clamp bounds.
+`specialize_camera` selects fixed WGSL overrides instead of the uniform lens
+switch, using the same shader source. Both paths accept every camera model.
 
 `render(&mut encoder, &camera, &options, target)` writes to a caller-owned
 float RGBA buffer, packed RGBA8 buffer, or rgba8unorm storage texture.
@@ -44,3 +49,9 @@ uses an orbit. Optional `GSPLAT_TEST_SIZE`, `GSPLAT_PARITY_VIEWS`, and
 `GSPLAT_TEST_OUTPUT` control the viewport, view count, and saved pixel evidence.
 Its direct float comparison is diagnostic; the shared benchmark's RGB8 export
 plus Brush evaluator is the cross-renderer reporting convention.
+
+`RenderOptions::render_mode` selects the default 0.3 covariance blur or the
+0.1 mip blur with determinant opacity compensation. Supply the mode parsed
+from PLY metadata at the loading boundary. An optional per-splat `min_scale`
+adds the 3D scale floor and mass compensation. `splat_scale` is a positive
+uniform multiplier applied before that floor; uploaded parameters stay intact.

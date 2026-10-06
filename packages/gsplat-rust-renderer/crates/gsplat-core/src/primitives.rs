@@ -44,8 +44,8 @@ impl Scan {
         }
         Self {
             device: device.clone(),
-            scan: pipeline(device, &source, "scan"),
-            add: pipeline(device, &source, "add_offsets"),
+            scan: pipeline(device, &source, "scan", &[]),
+            add: pipeline(device, &source, "add_offsets", &[]),
             levels,
         }
     }
@@ -126,7 +126,7 @@ impl RadixSort {
                 "scan_add",
                 "scatter",
             ]
-            .map(|entry| pipeline(device, &source, entry)),
+            .map(|entry| pipeline(device, &source, entry, &[])),
             temporary_keys: storage(device, "sort keys", u64::from(capacity) * 4),
             temporary_values: storage(device, "sort values", u64::from(capacity) * 4),
             histogram: storage(device, "sort histogram", u64::from(blocks) * 16 * 4),

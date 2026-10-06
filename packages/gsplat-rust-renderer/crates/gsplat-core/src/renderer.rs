@@ -3,7 +3,7 @@ use crate::gpu::{bind, dispatch, pipeline, storage};
 use crate::primitives::{RadixSort, Scan};
 use crate::{Camera, Capabilities, Error, FrameStats, RenderOptions, Splats, Target};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec2};
+use glam::Mat4;
 use wgpu::util::DeviceExt as _;
 
 #[repr(C)]
@@ -17,6 +17,10 @@ struct Uniforms {
     scene: [u32; 4],
     background: [f32; 4],
     options: [f32; 4],
+    coeff0: [f32; 4],
+    coeff1: [f32; 4],
+    lens: [u32; 4],
+    camera_limits: [f32; 4],
 }
 struct Scene {
     transforms: wgpu::Buffer,
@@ -49,8 +53,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     caps: Capabilities,
-    project: wgpu::ComputePipeline,
-    visible: wgpu::ComputePipeline,
+    projection: [[wgpu::ComputePipeline; 2]; 5],
     gather: wgpu::ComputePipeline,
     map: wgpu::ComputePipeline,
     offsets: wgpu::ComputePipeline,
@@ -73,20 +76,33 @@ impl Renderer {
                 .min(actual.max_storage_buffer_bytes),
         };
         let common = include_str!("../shaders/render_common.wgsl");
-        let projection = format!("{common}\n{}", include_str!("../shaders/project.wgsl"));
+        let projection = format!(
+            "{common}\n{}\n{}",
+            include_str!("../shaders/camera.wgsl"),
+            include_str!("../shaders/project.wgsl")
+        );
         let mapping = format!("{common}\n{}", include_str!("../shaders/map.wgsl"));
         let raster = format!("{common}\n{}", include_str!("../shaders/raster.wgsl"));
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
             caps,
-            project: pipeline(device, &projection, "project_forward"),
-            visible: pipeline(device, &projection, "project_visible"),
-            gather: pipeline(device, &mapping, "gather"),
-            map: pipeline(device, &mapping, "map_tiles"),
-            offsets: pipeline(device, &mapping, "tile_offsets"),
+            projection: std::array::from_fn(|i| {
+                let kind = if i == 4 { u32::MAX } else { i as u32 };
+                ["project_forward", "project_visible"].map(|entry| {
+                    pipeline(
+                        device,
+                        &projection,
+                        entry,
+                        &[("CAMERA_MODEL", f64::from(kind))],
+                    )
+                })
+            }),
+            gather: pipeline(device, &mapping, "gather", &[]),
+            map: pipeline(device, &mapping, "map_tiles", &[]),
+            offsets: pipeline(device, &mapping, "tile_offsets", &[]),
             raster: ["raster_float", "raster_packed", "raster_texture"]
-                .map(|entry| pipeline(device, &raster, entry)),
+                .map(|entry| pipeline(device, &raster, entry, &[])),
             counts: storage(device, "visible and intersection counts", 8),
             readback: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("frame counts readback"),
@@ -173,8 +189,9 @@ impl Renderer {
             || !camera.position.is_finite()
             || !camera.rotation.is_finite()
             || !camera.center_uv.is_finite()
-            || !(camera.fov_x > 0.0 && camera.fov_x < std::f64::consts::PI)
-            || !(camera.fov_y > 0.0 && camera.fov_y < std::f64::consts::PI)
+            || !(camera.fov_x > 0.0 && camera.fov_x < std::f64::consts::TAU)
+            || !(camera.fov_y > 0.0 && camera.fov_y < std::f64::consts::TAU)
+            || !camera.model.coefficients().iter().all(|x| x.is_finite())
             || !options.background.is_finite()
             || !options.splat_scale.is_finite()
             || options.splat_scale <= 0.0
@@ -186,13 +203,16 @@ impl Renderer {
             .as_ref()
             .ok_or(Error::Input("upload splats before rendering"))?;
         let tiles = glam::UVec2::new(camera.size.x.div_ceil(16), camera.size.y.div_ceil(16));
-        let focal = Vec2::new(
-            (f64::from(camera.size.x) / (2.0 * (camera.fov_x / 2.0).tan())) as f32,
-            (f64::from(camera.size.y) / (2.0 * (camera.fov_y / 2.0).tan())) as f32,
-        );
+        let focal = camera.focal();
         let center = camera.center_uv * camera.size.as_vec2();
-        let lo = (-0.15 * camera.size.as_vec2() - center) / focal;
-        let hi = (1.15 * camera.size.as_vec2() - center) / focal;
+        let (clamps, radial_limit) = camera.clamp_limits();
+        let coefficients = camera.model.coefficients();
+        let projection_index = if options.specialize_camera {
+            camera.model.kind() as usize
+        } else {
+            4
+        };
+        let [project, visible] = &self.projection[projection_index];
         let mut uniforms = Uniforms {
             view: Mat4::from(
                 glam::Affine3A::from_rotation_translation(camera.rotation, camera.position)
@@ -201,7 +221,7 @@ impl Renderer {
             .to_cols_array_2d(),
             camera: camera.position.extend(0.0).to_array(),
             pinhole: [focal.x, focal.y, center.x, center.y],
-            clamp_limits: [lo.x, lo.y, hi.x, hi.y],
+            clamp_limits: clamps.to_array(),
             image: [camera.size.x, camera.size.y, tiles.x, tiles.y],
             scene: [scene.n, scene.degree, (scene.degree + 1).pow(2), 0],
             background: options.background.extend(0.0).to_array(),
@@ -211,6 +231,10 @@ impl Renderer {
                 f32::from(scene.has_min_scale),
                 0.0,
             ],
+            coeff0: coefficients[..4].try_into().expect("four coefficients"),
+            coeff1: coefficients[4..].try_into().expect("four coefficients"),
+            lens: [camera.model.kind(), 0, 0, 0],
+            camera_limits: [camera.half_max_render_fov(), radial_limit, 0.0, 0.0],
         };
         let uniform = self
             .device
@@ -223,7 +247,7 @@ impl Renderer {
         projection.clear_buffer(&self.counts, 0, None);
         let group = bind(
             &self.device,
-            &self.project,
+            project,
             &[
                 (0, &uniform),
                 (1, &scene.transforms),
@@ -235,12 +259,7 @@ impl Renderer {
                 (7, &scene.hits),
             ],
         );
-        dispatch(
-            &mut projection,
-            &self.project,
-            &group,
-            scene.n.div_ceil(256),
-        );
+        dispatch(&mut projection, project, &group, scene.n.div_ceil(256));
         projection.copy_buffer_to_buffer(&self.counts, 0, &self.readback, 0, 8);
         self.queue.submit([projection.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -324,7 +343,7 @@ impl Renderer {
         scene.scan.encode(encoder, &scene.gathered, &self.counts);
         let group = bind(
             &self.device,
-            &self.visible,
+            visible,
             &[
                 (0, &uniform),
                 (1, &scene.transforms),
@@ -336,7 +355,7 @@ impl Renderer {
                 (9, &scene.sh),
             ],
         );
-        dispatch(encoder, &self.visible, &group, counts[0].div_ceil(256));
+        dispatch(encoder, visible, &group, counts[0].div_ceil(256));
         let group = bind(
             &self.device,
             &self.map,

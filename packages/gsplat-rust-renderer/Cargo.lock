@@ -6005,6 +6005,7 @@ dependencies = [
  "clap",
  "colmap-reader",
  "glam",
+ "gsplat-core",
  "gsplat-eval",
  "gsplat-rust-renderer",
  "image",

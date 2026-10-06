@@ -16,6 +16,7 @@ pub struct Splats {
 /// Camera pose is camera-to-world. Principal point is normalized by image size.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
+    pub model: crate::CameraModel,
     pub position: Vec3,
     pub rotation: Quat,
     pub fov_x: f64,
@@ -38,6 +39,8 @@ pub struct RenderOptions {
     pub render_mode: RenderMode,
     /// Positive multiplier, applied as a log-scale offset before the 3D floor.
     pub splat_scale: f32,
+    /// Specialize the projection shader by lens model. False keeps a uniform switch.
+    pub specialize_camera: bool,
 }
 impl Default for RenderOptions {
     fn default() -> Self {
@@ -45,6 +48,7 @@ impl Default for RenderOptions {
             background: Vec3::ZERO,
             render_mode: RenderMode::Default,
             splat_scale: 1.0,
+            specialize_camera: false,
         }
     }
 }

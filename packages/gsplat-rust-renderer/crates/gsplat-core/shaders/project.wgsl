@@ -14,7 +14,12 @@ fn project(id: u32) -> Projection {
     let mean = vec3f(transforms[base],transforms[base+1u],transforms[base+2u]);
     let point = (u.view*vec4f(mean,1.0)).xyz;
     var result: Projection;
-    if !finite3(point) || point.z > 1e10 || point.z < 0.01 { return result; }
+    if !finite3(point) || point.z > 1e10 { return result; }
+    if camera_kind()==0u {
+        if point.z < 0.01 { return result; }
+    } else {
+        if atan2(length(point.xy),point.z)>u.camera_limits.x { return result; }
+    }
     var scale = exp(vec3f(transforms[base+7u],transforms[base+8u],transforms[base+9u])+u.options.x);
     if !finite3(scale) { return result; }
     let qraw = vec4f(transforms[base+3u],transforms[base+4u],transforms[base+5u],transforms[base+6u]);
@@ -35,11 +40,9 @@ fn project(id: u32) -> Projection {
                           vec3f(2.0*(x*z+w*y),2.0*(y*z-w*x),1.0-2.0*(x*x+y*y)));
     let vr = mat3x3f(u.view[0].xyz,u.view[1].xyz,u.view[2].xyz)*rotation;
     let ns = mat3x3f(vr[0]*scale.x,vr[1]*scale.y,vr[2]*scale.z);
-    let inv_z = 1.0/point.z;
-    let d = u.pinhole.xy*inv_z;
-    let clamped = clamp(point.xy*inv_z,u.clamp_limits.xy,u.clamp_limits.zw);
-    let jx = vec3f(d.x,0.0,-d.x*clamped.x);
-    let jy = vec3f(0.0,d.y,-d.y*clamped.y);
+    let lens=project_camera(point);
+    let jx=lens.jx;
+    let jy=lens.jy;
     let v0 = vec3f(dot(jx,ns[0]),dot(jx,ns[1]),dot(jx,ns[2]));
     let v1 = vec3f(dot(jy,ns[0]),dot(jy,ns[1]),dot(jy,ns[2]));
     var cov = vec3f(dot(v0,v0),dot(v0,v1),dot(v1,v1));
@@ -59,7 +62,7 @@ fn project(id: u32) -> Projection {
     let conic = vec3f(cov.z,-cov.y,cov.x)*select(0.0,1.0/det,det>0.0);
     let extent = bbox_extent(conic,log(opacity*255.0));
     if !(extent.x >= 0.0 && extent.y >= 0.0) { return result; }
-    let xy = u.pinhole.xy*point.xy*inv_z+u.pinhole.zw;
+    let xy = lens.xy;
     if !(all(xy+extent>vec2f(0.0)) && all(xy-extent<vec2f(u.image.xy))) { return result; }
     result = Projection(true,xy,conic,opacity,point.z,mean);
     return result;

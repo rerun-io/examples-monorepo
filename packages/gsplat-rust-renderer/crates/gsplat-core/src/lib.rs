@@ -1,11 +1,11 @@
 //! GPU-resident Gaussian splat rendering. Algorithms follow Brush 1388f74c.
 
+mod camera;
 mod gpu;
-#[cfg(test)]
-mod primitive_tests;
 mod primitives;
 mod renderer;
 mod types;
+pub use camera::CameraModel;
 pub use renderer::Renderer;
 pub use types::{Camera, Capabilities, FrameStats, RenderMode, RenderOptions, Splats, Target};
 
@@ -25,3 +25,6 @@ pub enum Error {
     #[error("GPU count readback: {0}")]
     Readback(String),
 }
+
+#[cfg(test)]
+mod primitive_tests;

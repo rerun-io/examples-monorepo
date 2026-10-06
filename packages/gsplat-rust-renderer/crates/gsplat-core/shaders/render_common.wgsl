@@ -7,6 +7,10 @@ struct Uniforms {
     scene: vec4u, // splats, SH degree, coefficients, intersection capacity
     background: vec4f,
     options: vec4f,
+    coeff0: vec4f,
+    coeff1: vec4f,
+    lens: vec4u,
+    camera_limits: vec4f,
 }
 struct Splat { x:f32, y:f32, cx:f32, cy:f32, cz:f32, opacity:f32, r:f32, g:f32, b:f32 }
 @group(0) @binding(0) var<uniform> u: Uniforms;

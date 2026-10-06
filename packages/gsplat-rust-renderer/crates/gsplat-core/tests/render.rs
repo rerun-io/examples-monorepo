@@ -26,6 +26,7 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
         })
         .unwrap();
     let camera = Camera {
+        model: gsplat_core::CameraModel::Pinhole,
         position: Vec3::ZERO,
         rotation: Quat::IDENTITY,
         fov_x: 1.0,

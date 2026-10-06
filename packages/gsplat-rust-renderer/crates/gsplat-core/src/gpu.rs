@@ -19,7 +19,12 @@ pub(crate) fn uniform(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::UNIFORM,
     })
 }
-pub(crate) fn pipeline(device: &wgpu::Device, source: &str, entry: &str) -> wgpu::ComputePipeline {
+pub(crate) fn pipeline(
+    device: &wgpu::Device,
+    source: &str,
+    entry: &str,
+    constants: &[(&str, f64)],
+) -> wgpu::ComputePipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(entry),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -29,7 +34,10 @@ pub(crate) fn pipeline(device: &wgpu::Device, source: &str, entry: &str) -> wgpu
         layout: None,
         module: &module,
         entry_point: Some(entry),
-        compilation_options: Default::default(),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants,
+            ..Default::default()
+        },
         cache: None,
     })
 }

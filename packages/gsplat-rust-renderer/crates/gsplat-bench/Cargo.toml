@@ -25,3 +25,6 @@ re_types_core = "=0.38.1"
 macaw = "0.30"
 
 colmap-reader = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
+
+[dev-dependencies]
+gsplat-core = { path = "../gsplat-core" }
