@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use nalgebra::{DMatrix, DVector};
 
 use crate::marg::MargError;
-use crate::qr::{apply_householder_on_the_left, make_householder};
+use kornia_staging_algebra::linalg::qr::{apply_householder_unchecked, make_householder_unchecked};
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
@@ -104,20 +104,29 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: Scalar>(
         let remaining_cols: usize = cols - k - 1;
 
         // Reflect this column; the resulting diagonal determines its rank.
-        let (h_coeff, beta) = make_householder(&q2jp, k, base, remaining_rows, &mut essential);
+        let (h_coeff, beta) = make_householder_unchecked(
+            &q2jp.as_slice()[k * rows + base..(k + 1) * rows],
+            &mut essential,
+        );
 
         if beta.abs() > rank_threshold {
             q2jp[(base, k)] = beta;
             // the reflection acts on the trailing block that starts at row
             // `base`, column `k + 1`.
-            apply_householder_on_the_left(
-                q2jp.view_mut((base, k + 1), (remaining_rows, remaining_cols)),
+            apply_householder_unchecked(
+                &mut q2jp.as_mut_slice()[((k + 1) * rows + base).min(rows * cols)..],
+                remaining_rows,
+                remaining_cols,
+                rows,
                 &essential[..remaining_rows],
                 h_coeff,
             );
             // the same reflection on the residual, in lockstep.
-            apply_householder_on_the_left(
-                q2r.rows_mut(base, remaining_rows),
+            apply_householder_unchecked(
+                &mut q2r.as_mut_slice()[base..],
+                remaining_rows,
+                1,
+                rows,
                 &essential[..remaining_rows],
                 h_coeff,
             );

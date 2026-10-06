@@ -10,8 +10,10 @@ use crate::camera::SlamCamera;
 use crate::landmark::Landmark;
 use crate::lie::{c};
 use crate::linearize::{LinearizeError, RelPoseLin};
-use crate::qr::{apply_householder_on_the_left, make_givens, make_householder};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
+use kornia_staging_algebra::linalg::qr::{
+    Givens, apply_householder_unchecked, make_householder_unchecked,
+};
 
 /// `LandmarkBlock<Scalar>::Options`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -494,11 +496,9 @@ impl<S: Scalar> LandmarkBlock<S> {
             if remaining_rows == 0 {
                 continue;
             }
-            let (tau, _beta) = make_householder(
-                &self.storage,
-                self.lm_idx + k,
-                k,
-                remaining_rows,
+            let (tau, _beta) = make_householder_unchecked(
+                &self.storage.as_slice()[(self.lm_idx + k) * self.num_rows + k
+                    ..(self.lm_idx + k) * self.num_rows + k + remaining_rows],
                 &mut self.work_essential,
             );
             let axis = &self.work_essential[..remaining_rows];
@@ -511,8 +511,11 @@ impl<S: Scalar> LandmarkBlock<S> {
                     .copied()
                     .chain(self.lm_idx..self.num_cols)
                 {
-                    apply_householder_on_the_left(
-                        self.storage.view_mut((k, column), (remaining_rows, 1)),
+                    apply_householder_unchecked(
+                        &mut self.storage.as_mut_slice()[column * self.num_rows + k..],
+                        remaining_rows,
+                        1,
+                        self.num_rows,
                         axis,
                         tau,
                     );
@@ -520,9 +523,11 @@ impl<S: Scalar> LandmarkBlock<S> {
             } else {
                 // Non-finite axes must propagate through the unobserved columns.
                 self.qr_full_width = true;
-                apply_householder_on_the_left(
-                    self.storage
-                        .view_mut((k, 0), (remaining_rows, self.num_cols)),
+                apply_householder_unchecked(
+                    &mut self.storage.as_mut_slice()[k..],
+                    remaining_rows,
+                    self.num_cols,
+                    self.num_rows,
                     axis,
                     tau,
                 );
@@ -539,11 +544,15 @@ impl<S: Scalar> LandmarkBlock<S> {
         for n in 0..3 {
             let mut m: usize = self.num_rows - 4;
             while m > n {
-                let rot: nalgebra::linalg::givens::GivensRotation<S> = make_givens(
+                let rot = Givens::cancel_y(
                     self.storage[(m - 1, self.lm_idx + n)],
                     self.storage[(m, self.lm_idx + n)],
                 );
-                rot.rotate(&mut self.storage.fixed_rows_mut::<2>(m - 1));
+                rot.apply_unchecked(
+                    &mut self.storage.as_mut_slice()[m - 1..],
+                    self.num_cols,
+                    self.num_rows,
+                );
                 m -= 1;
             }
         }

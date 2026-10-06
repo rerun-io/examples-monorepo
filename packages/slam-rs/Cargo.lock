@@ -3183,6 +3183,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-algebra",
  "nalgebra",
+ "thiserror",
 ]
 
 [[package]]

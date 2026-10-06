@@ -1,46 +1,129 @@
-//! In-place orthogonal transforms over column-major landmark and prior storage.
-use kornia_staging_algebra::Scalar;
-use nalgebra::linalg::{givens::GivensRotation, householder::reflection_axis_mut};
-use nalgebra::{
-    DMatrix, DVectorView, DVectorViewMut, Dim, Dyn, Matrix, Reflection, StorageMut, Unit, Vector2,
-};
+//! Orthogonal transforms over column-major buffers, with caller-owned scratch.
 
-/// Build a unit reflection axis in caller-owned scratch, returning (active, beta).
-/// Keeping the full axis lets nalgebra apply the reflection directly to views.
-pub(crate) fn make_householder<S: Scalar>(
-    storage: &DMatrix<S>,
-    col: usize,
-    start: usize,
-    len: usize,
-    axis: &mut [S],
-) -> (bool, S) {
+use crate::Scalar;
+use nalgebra::{DVectorView, DVectorViewMut};
+
+/// Build a unit Householder axis with the original two normalization passes.
+///
+/// # Arguments
+/// `column` is a nonempty contiguous column segment; `axis` is caller scratch
+/// with at least that many elements. Returns `(active, signed_diagonal)`.
+///
+/// ```
+/// use kornia_staging_algebra::linalg::qr::{make_householder_unchecked, apply_householder_unchecked};
+/// let mut column = [3.0f64, 4.0];
+/// let mut axis = [0.0; 2];
+/// let (active, beta) = make_householder_unchecked(&column, &mut axis);
+/// apply_householder_unchecked(&mut column, 2, 1, 2, &axis, active);
+/// assert!((column[0] - beta).abs() < 1e-12);
+/// assert!(column[1].abs() < 1e-12);
+/// ```
+///
+/// # Panics
+/// Panics if `column` is empty or scratch is too short. The caller validates
+/// dimensions once at its matrix boundary; this kernel does not repeat validation.
+#[inline]
+pub fn make_householder_unchecked<S: Scalar>(column: &[S], axis: &mut [S]) -> (bool, S) {
+    let len = column.len();
+    axis[..len].copy_from_slice(column);
     let mut axis = DVectorViewMut::from_slice(&mut axis[..len], len);
-    axis.copy_from(&storage.column(col).rows(start, len));
-    let (beta, active) = reflection_axis_mut(&mut axis);
-    (active, beta)
+    let squared_norm = axis.norm_squared();
+    let norm = squared_norm.sqrt();
+    let (modulus, sign) = axis[0].to_exp();
+    let signed_norm = sign * norm;
+    let factor = (squared_norm + modulus * norm) * S::from_literal(2.0);
+    axis[0] += signed_norm;
+    if factor != S::zero() {
+        axis.unscale_mut(factor.sqrt());
+        let _ = axis.normalize_mut();
+        (true, -signed_norm)
+    } else {
+        (false, signed_norm)
+    }
 }
 
-/// Reflect a mutable matrix or vector view. The axis is unit length when active.
-pub(crate) fn apply_householder_on_the_left<S: Scalar, C: Dim, T: StorageMut<S, Dyn, C>>(
-    mut view: Matrix<S, Dyn, C, T>,
+/// Reflect a strided column-major submatrix on the left, without allocating.
+///
+/// # Arguments
+/// `matrix` starts at the submatrix's top left; `rows` and `cols` select its
+/// shape and `stride` is the parent row count. `axis[..rows]` is a unit axis
+/// from [`make_householder_unchecked`]. An inactive reflection does no work.
+///
+/// # Panics
+/// Panics on insufficient matrix/axis storage. The caller must establish
+/// `stride >= rows` and sufficient storage at its matrix boundary.
+#[inline]
+pub fn apply_householder_unchecked<S: Scalar>(
+    matrix: &mut [S],
+    rows: usize,
+    cols: usize,
+    stride: usize,
     axis: &[S],
     active: bool,
 ) {
     if active {
-        let rows = view.nrows();
         let axis = DVectorView::from_slice(&axis[..rows], rows);
-        Reflection::new(Unit::new_unchecked(axis), S::zero()).reflect(&mut view);
+        for col in 0..cols {
+            let start = col * stride;
+            let mut column = DVectorViewMut::from_slice(&mut matrix[start..start + rows], rows);
+            let factor = axis.dotc(&column) * S::from_literal(-2.0);
+            column.axpy(factor, &axis, S::one());
+        }
     }
 }
 
-/// Scale before constructing the rotation to avoid squaring large coefficients.
-pub(crate) fn make_givens<S: Scalar>(p: S, q: S) -> GivensRotation<S> {
-    let scale = p.abs().max(q.abs());
-    if scale == S::zero() {
-        GivensRotation::identity()
-    } else {
-        GivensRotation::cancel_y(&Vector2::new(p / scale, q / scale))
-            .map_or_else(GivensRotation::identity, |(rotation, _)| rotation)
+/// A scaled two-row Givens rotation; coefficients follow `[c, -s; s, c]`.
+#[derive(Debug, Clone, Copy)]
+pub struct Givens<S: Scalar> {
+    c: S,
+    s: S,
+}
+
+impl<S: Scalar> Givens<S> {
+    /// Construct a rotation cancelling `q` from `[p, q]`, scaling before squaring.
+    /// Zero inputs produce the identity; non-finite inputs propagate.
+    #[inline]
+    pub fn cancel_y(p: S, q: S) -> Self {
+        let scale = p.abs().max(q.abs());
+        if scale == S::zero() {
+            return Self {
+                c: S::one(),
+                s: S::zero(),
+            };
+        }
+        let p = p / scale;
+        let q = q / scale;
+        if q == S::zero() {
+            return Self {
+                c: S::one(),
+                s: S::zero(),
+            };
+        }
+        let (modulus, sign) = p.to_exp();
+        let denom = (modulus * modulus + q * q).sqrt();
+        Self {
+            c: modulus / denom,
+            s: -q / (sign * denom),
+        }
+    }
+
+    /// Rotate two adjacent rows of a column-major submatrix in place.
+    ///
+    /// # Arguments
+    /// `matrix` starts at the first row, `cols` is its column count, and `stride`
+    /// is the parent row count (at least two).
+    ///
+    /// # Panics
+    /// Panics if the buffer cannot hold the selected rows and columns.
+    #[inline]
+    pub fn apply_unchecked(&self, matrix: &mut [S], cols: usize, stride: usize) {
+        for col in 0..cols {
+            let start = col * stride;
+            let a = matrix[start];
+            let b = matrix[start + 1];
+            matrix[start] = a * self.c - self.s * b;
+            matrix[start + 1] = self.s * a + b * self.c;
+        }
     }
 }
 
@@ -48,8 +131,66 @@ pub(crate) fn make_givens<S: Scalar>(p: S, q: S) -> GivensRotation<S> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use nalgebra::DVector;
+    use nalgebra::{DMatrix, DVector};
     use proptest::prelude::*;
+
+    #[test]
+    fn transforms_preserve_reference_bits_in_both_precisions() {
+        fn check<S: Scalar>() {
+            use nalgebra::linalg::{givens::GivensRotation, householder::reflection_axis_mut};
+            use nalgebra::{DMatrix, DVector, Reflection, Unit, Vector2};
+            for rows in [1, 2, 3, 4, 7, 8, 17, 32] {
+                let input = DVector::from_iterator(
+                    rows,
+                    (0..rows).map(|i| S::from_literal((i as f64 + 0.7).sin())),
+                );
+                let mut reference_axis = input.clone();
+                let (beta, active) = reflection_axis_mut(&mut reference_axis);
+                let mut axis = vec![S::zero(); rows];
+                let result = make_householder_unchecked(input.as_slice(), &mut axis);
+                assert_eq!(result, (active, beta));
+                assert_eq!(axis, reference_axis.as_slice());
+                let mut reference = DMatrix::from_fn(rows, 5, |r, c| {
+                    S::from_literal((r as f64 + c as f64 * 0.3).cos())
+                });
+                let mut actual = reference.clone();
+                if active {
+                    Reflection::new(Unit::new_unchecked(reference_axis), S::zero())
+                        .reflect(&mut reference);
+                }
+                apply_householder_unchecked(actual.as_mut_slice(), rows, 5, rows, &axis, active);
+                for (a, b) in actual.iter().zip(reference.iter()) {
+                    assert_eq!(a.to_f64().to_bits(), b.to_f64().to_bits());
+                }
+            }
+            for (p, q) in [
+                (0.0, 0.0),
+                (-0.0, 1.0),
+                (3.0, 4.0),
+                (-3.0, 4.0),
+                (1e30, -1e30),
+            ] {
+                let p = S::from_literal(p);
+                let q = S::from_literal(q);
+                let scale = p.abs().max(q.abs());
+                let rotation = if scale == S::zero() {
+                    GivensRotation::identity()
+                } else {
+                    GivensRotation::cancel_y(&Vector2::new(p / scale, q / scale))
+                        .map_or_else(GivensRotation::identity, |(r, _)| r)
+                };
+                let mut reference = DMatrix::from_row_slice(2, 2, &[p, q, q, p]);
+                let mut actual = reference.clone();
+                rotation.rotate(&mut reference.fixed_rows_mut::<2>(0));
+                Givens::cancel_y(p, q).apply_unchecked(actual.as_mut_slice(), 2, 2);
+                for (a, b) in actual.iter().zip(reference.iter()) {
+                    assert_eq!(a.to_f64().to_bits(), b.to_f64().to_bits());
+                }
+            }
+        }
+        check::<f32>();
+        check::<f64>();
+    }
 
     proptest! {
         #[test]
@@ -60,8 +201,8 @@ mod tests {
             let mut a = DMatrix::from_row_slice(7, 6, &values);
             let before = a.clone();
             let mut axis = [0.0; 4];
-            let (active, beta) = make_householder(&a, 2, start, 4, &mut axis);
-            apply_householder_on_the_left(a.view_mut((start, 2), (4, 3)), &axis, active);
+            let (active, beta) = make_householder_unchecked(&a.as_slice()[14 + start..18 + start], &mut axis);
+            apply_householder_unchecked(&mut a.as_mut_slice()[2 * 7 + start..], 4, 3, 7, &axis, active);
             for i in 0..7 {
                 for j in 0..6 {
                     if !(start..start + 4).contains(&i) || !(2..5).contains(&j) {
@@ -74,31 +215,18 @@ mod tests {
                 prop_assert!(a[(i, 2)].abs() < 1e-12);
             }
             let mut residual = before.column(2).into_owned();
-            apply_householder_on_the_left(residual.rows_mut(start, 4), &axis, active);
+            apply_householder_unchecked(&mut residual.as_mut_slice()[start..], 4, 1, 7, &axis, active);
             prop_assert!((residual - a.column(2)).norm() < 1e-12);
         }
 
         #[test]
         fn givens_cancels_the_lower_coefficient(p in -100.0f64..100.0, q in -100.0f64..100.0) {
-            let rotation = make_givens(p, q);
+            let rotation = Givens::cancel_y(p, q);
             let mut a = DMatrix::from_row_slice(2, 1, &[p, q]);
-            rotation.rotate(&mut a.fixed_rows_mut::<2>(0));
+            rotation.apply_unchecked(a.as_mut_slice(), 1, 2);
             prop_assert!(a[(1, 0)].abs() < 1e-12);
             prop_assert!((a.norm() - p.hypot(q)).abs() < 1e-12);
         }
-    }
-
-    // Test-only driver; production callers own their scratch and validated views.
-    fn reflect_column<S: Scalar>(
-        storage: &mut DMatrix<S>,
-        col: usize,
-        start: usize,
-        len: usize,
-    ) {
-        let mut axis = vec![S::zero(); len];
-        let (active, _) = make_householder(storage, col, start, len, &mut axis);
-        let cols = storage.ncols();
-        apply_householder_on_the_left(storage.view_mut((start, 0), (len, cols)), &axis, active);
     }
 
     proptest! {
@@ -112,7 +240,9 @@ mod tests {
             augmented.columns_mut(0, 4).copy_from(&a);
             augmented.columns_mut(4, 6).copy_from(&DMatrix::identity(6, 6));
             for col in 0..4 {
-                reflect_column(&mut augmented, col, col, 6 - col);
+                let mut axis = [0.0; 6];
+                let (active, _) = make_householder_unchecked(&augmented.as_slice()[col * 6 + col..(col + 1) * 6], &mut axis);
+                apply_householder_unchecked(&mut augmented.as_mut_slice()[col..], 6 - col, 10, 6, &axis, active);
             }
             let r = augmented.columns(0, 4);
             let qt = augmented.columns(4, 6);
@@ -153,9 +283,6 @@ mod tests {
                 j.set_column(2, &col4);
             }
 
-            // The port has no standalone QR — the landmark block eliminates exactly
-            // three columns — so the reflections are driven here the way
-            // `performQRHouseholder` drives them.
             let r_qr: DMatrix<f64> = householder_r(&j);
             let ata: DMatrix<f64> = j.transpose() * &j;
 
@@ -196,8 +323,22 @@ mod tests {
         let rows: usize = j.nrows();
         let cols: usize = j.ncols();
         let mut work: DMatrix<f64> = j.clone();
-        for k in 0..cols {
-            reflect_column(&mut work, k, k, rows - k);
+        let mut scratch = vec![0.0; rows];
+        for k in 0..rows.min(cols) {
+            let offset = k * rows + k;
+            let len = rows - k;
+            let (active, beta) =
+                make_householder_unchecked(&work.as_slice()[offset..offset + len], &mut scratch);
+            apply_householder_unchecked(
+                &mut work.as_mut_slice()[offset..],
+                len,
+                cols - k,
+                rows,
+                &scratch,
+                active,
+            );
+            work[(k, k)] = beta;
+            work.as_mut_slice()[offset + 1..offset + len].fill(0.0);
         }
         let mut r: DMatrix<f64> = DMatrix::zeros(cols, cols);
         for row in 0..cols {
@@ -239,9 +380,9 @@ mod tests {
                     let mut rank = 0;
                     for col in 0..4 {
                         let rows = 5 - rank;
-                        let (active, beta) = make_householder(&storage, col, rank, rows, &mut axis);
+                        let (active, beta) = make_householder_unchecked(&storage.as_slice()[col * 5 + rank..(col + 1) * 5], &mut axis);
                         if beta.abs() > threshold {
-                            apply_householder_on_the_left(storage.view_mut((rank, col), (rows, 5 - col)), &axis, active);
+                            apply_householder_unchecked(&mut storage.as_mut_slice()[col * 5 + rank..], rows, 5 - col, 5, &axis, active);
                             rank += 1;
                         }
                     }

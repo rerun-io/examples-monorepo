@@ -3002,6 +3002,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-algebra",
  "nalgebra",
+ "thiserror",
 ]
 
 [[package]]
@@ -3035,14 +3036,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kornia-staging-slam"
-version = "0.1.0"
-dependencies = [
- "kornia-staging-imgproc",
- "rayon",
-]
-
-[[package]]
 name = "kornia-staging-io"
 version = "0.1.0"
 dependencies = [
@@ -3066,6 +3059,14 @@ dependencies = [
  "kornia-algebra",
  "kornia-image",
  "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-slam"
+version = "0.1.0"
+dependencies = [
+ "kornia-staging-imgproc",
+ "rayon",
 ]
 
 [[package]]

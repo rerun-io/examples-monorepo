@@ -102,3 +102,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | H.264/AV1 packets to borrowed luma planes with explicit limited/full/unknown range | slam-rs-cli decode.rs + native/dav1d.c | kornia-rs / kornia-io::video | staged | - |
 | N-camera body rig and IMU corrections | slam-rs calib.rs, robocap-live frame.rs | kornia-slam / kornia-sensors::rig | deferred: no consumer reads it | - |
 | Runtime frames, IMU combiner and timestamp matcher | `robocap-types`, `robocap-live/{source,capture}` + `robocap-recorder/live_slam.rs` | kornia-slam `kornia-sensors` (`imu` module and frame exports) | staged | - |
+| Householder QR and scaled Givens with slice storage and scratch | slam-rs `qr.rs` | kornia-rs / kornia-algebra / linalg::qr | staged | - |
