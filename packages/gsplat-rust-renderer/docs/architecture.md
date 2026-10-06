@@ -1,128 +1,151 @@
 # Architecture
 
+Six workspace crates share the scene and camera contracts. Brush is pinned to
+`1388f74c6fe0236f68ee4915564bf00e9d2e3747`; recording and viewer APIs use Rerun
+0.38.1. The earlier `src/gsplat_core` and its shaders have been removed.
+
 | Crate | Responsibility |
 |---|---|
-| `gsplat-core` | Raw-wgpu projection, sorting, rasterization; native array conversion; shared Scene and independent ViewState |
-| `gsplat-viewer` | Rerun queries, runtime blueprint defaults, GPU cache, camera and composite |
-| `gsplat-render` | PLY and camera input, PNG output, persistent renderer |
-| `gsplat-bench` | Shared cameras/settings, parity, archetype loss and synchronized timing |
-| `gsplat-eval` | Image metrics |
+| `gsplat-core` | Raw wgpu/WGSL forward renderer, immutable scene uploads, per-view scratch |
+| `gsplat-render` | PLY loading through Brush, camera loading, standalone PNG rendering |
+| `gsplat-eval` | Brush/published PSNR and SSIM, optional VGG LPIPS, typed reports |
+| `gsplat-bench` | Brush/core/native comparisons, float scoring, synchronized measurements |
+| `gsplat-viewer` | Rerun native-archetype query, shared compute rendering, scene composition |
+| `gsplat-train` | In-process Brush training, asynchronous native Rerun observations |
 
-The core does not depend on Rerun. Its [API notes](../crates/gsplat-core/README.md)
-and the [viewer usage](../crates/gsplat-viewer/README.md) cover the public entry points.
-The root is a virtual Cargo workspace. The legacy core and `ours-old` backend
-were removed after baseline collection.
+## Data flow
 
-## Native data and runtime selection
+```mermaid
+flowchart LR
+    PLY[PLY] --> Load[Brush scene loader]
+    Load --> Core[gsplat-core]
+    Cameras[NeRF / COLMAP / CameraSpec] --> Core
+    Core --> PNG[Standalone PNG]
+    PNG --> Eval[gsplat-eval]
+    Data[Training dataset] --> Train[Brush training stream]
+    Train --> RRD[Native GaussianSplats3D RRD]
+    PLY --> Import[Rerun native PLY importer]
+    Import --> RRD
+    RRD --> Stock[Stock Rerun]
+    RRD --> Viewer[Custom viewer]
+    Viewer --> Core
+```
 
-Python `splats_from_ply` returns `rr.GaussianSplats3D`. It follows Rerun 0.38.1's
-Rust PLY conversion rules: f32 exp/sigmoid, normalized xyzw quaternions,
-clamped RGB/alpha rounded with +0.5, and coefficient-major 15×3 f16 SH.
-Short optional component arrays repeat their last value. Core conversion widens
-SH, derives DC from RGBA8, and applies inverse opacity/scale activations.
-Missing SH uses degree zero; requested degrees are capped at three.
+Python provides downloads, initialization, CLI configuration, camera/image logging,
+and process orchestration. It does not implement PLY decoding or image metrics.
+The PLY logger uses Rerun's importer and chunk reader, renames the native entity to
+`/world/splats`, and computes center percentiles for framing. Static PLY scenes keep
+their path across file names. Training snapshots retain their iteration timeline; synthetic relog checks retain
+their explicit static updates. `scene_io.py` retains the typed NeRF metadata and image compositing needed
+by the camera logger; the shared Rust camera loader serves rendering and evaluation.
 
-Both native and compute visualizers remain registered. A public ViewContextSystem
-checks the active blueprint's `ActiveVisualizers` component. If no explicit
-selection exists, it replaces the native instruction type with compute, preserves
-other visualizers, and writes the instruction plus active IDs through public
-blueprint APIs. Compute skips heuristic-only instructions until that write applies,
-so the first frame does not draw both. Explicit native, compute, or empty selections
-are left alone. Runtime writes belong to this viewer's active blueprint, not the
-recording. No Rerun crate is patched or vendored.
+## Scene and view lifetime
 
-`ComputeGaussianSplats3D:render_mode` is a Text property on the visualizer
-instruction. A separate mode query keeps it out of the scene upload signature.
-`default` and `mip` select the per-view core mode. Python rejects an explicit
-`--render-mode` without `--compute`; stock viewers do not use this property.
+`gsplat-core::Renderer` owns device-lifetime pipelines. A scene upload holds the
+splat attributes; several views share that upload. Each `ViewState` owns its scratch,
+uniform slots, sort capacity, output, and feedback. Camera movement does not upload
+the scene again. GPU feedback reports capacity overflow; the caller grows capacity
+and rerenders before accepting a frame.
 
-## GPU lifetime and composition
+The custom viewer queries native `GaussianSplats3D` components and transforms,
+identifies changes by resolved query rows, and shares scene uploads across views.
+Optional component removal, relogging, resizing, and render-mode changes invalidate
+the appropriate resources. The renderer uses the eye committed by the spatial view;
+the public Rerun hook can introduce a one-frame eye delay. It does not guess an eye
+before one exists.
 
-One signature-keyed, store-owned cache holds uploaded Scenes and small bounds/count
-metadata. The signature hashes resolved native component row IDs and mappings,
-plus actual blueprint values where Rerun clears the source row ID. It excludes
-unrelated view defaults such as the eye and background. CPU float arrays exist only during conversion/upload. Camera and mode
-changes reuse the scene. Each view/instance has a ViewState and its own target;
-pipelines live for the device lifetime. Unused views expire after one unused frame; shared scenes allow one extra
-frame for blueprint activation. Relogged attributes change the signature. `GSPLAT_UPLOAD_PROBE=1` prints
-one count line per upload for integration checks.
+Recordings without overrides remain portable: this viewer chooses
+`ComputeGaussianSplats3D`, stock Rerun chooses its native visualizer. An explicit
+native selection stays native. Explicit compute selection requires this custom
+viewer; stock 0.38.1 provides no warning for an unknown visualizer, so the Python
+helper emits that warning when making the selection. Compute mode can be `default` or `mip`, stored in the blueprint.
 
-Initial intersections are capped at 1,048,576. GPU feedback grows capacity and
-requests another frame on overflow. Pending state comes from the core; errors
-invalidate the last render and are reported per instruction. Resize retains the
-previous composite until feedback confirms a completed replacement.
+## GPU pipeline
 
-The optional `TextureDepth` target adds alpha-weighted expected positive camera
-depth, using existing sorted depth keys. Normal float/packed/texture targets keep
-their original raster path. The viewer unpremultiplies display RGB, converts to
-linear, re-premultiplies, and outputs reverse-Z fragment depth against native
-opaque content. Expected depth gives soft edges a continuous representative
-depth; it is an approximation for mixtures straddling an opaque surface.
+The GPU performs visibility, sorting, projection, and rasterization. The timed
+stage boundaries are:
 
-Each uploaded scene stores a conservative AABB (centers plus three maximum-axis
-scales). Instance transforms map its eight corners. Public EyeControls3D fallback
-providers combine these bounds with native geometry for default/reset framing.
-Rerun's private per-entity bounds/picking output remains unavailable: compute
-picking, hover, outlines and focus-entity bounds remain gaps. The previous-frame
-eye limitation and cross-entity ordering are listed in the viewer README.
+| Stage | Work |
+|---|---|
+| `project_forward` | Cull/project candidates and prepare indirect dispatch |
+| `depth_sort` | Sort visible splats by depth |
+| `gather_scan` | Gather visible data and scan intersection counts |
+| `project_visible` | Project covariance, evaluate SH, compute tile coverage |
+| `map_intersections` | Emit tile/splat pairs |
+| `tile_sort` | Sort live intersections by tile |
+| `tile_offsets` | Build each tile's range |
+| `rasterize` | Blend sorted splats front to back |
 
-## Device and validation
+Cameras support pinhole, KB4, RT8, and thin-prism distortion. Mip mode applies
+covariance filtering and scale compensation. The standalone path can read unclipped
+float RGBA or packed output; PNG export clips and rounds to 8-bit RGB. The viewer
+composites the display-referred premultiplied color and optional depth through
+Rerun's renderer. Tests cover black and white backgrounds, opaque foreground/rear
+geometry, fixed-camera agreement, and analytic calibration. Compute picking, hover, selection outlines, and per-entity focus bounds are not
+implemented. Expected depth is an approximation for overlapping depth mixtures.
+Entities are not jointly depth-sorted; each instance requires a full render.
 
-Headed eframe and headless kittest share Rerun's adapter selector and core device
-helpers: full `adapter.limits()`, required `SUBGROUP`, and optional `TIMESTAMP_QUERY`.
-Startup reports the adapter name when subgroup/compute requirements are missing.
-Texture limits are never reduced below stock Rerun's adapter limits.
+Kernels stay within eight storage buffers per stage, at most 256 threads per
+workgroup, and 65,535 dispatch groups per axis through 2D dispatch. The optional
+depth kernel needs 10,256 bytes of shared memory. Device checks fail with a clear
+capability error. Native rendering requires subgroups and sufficient storage limits.
+A browser build is not supplied: registry wgpu 30 lacks the needed WebGPU subgroup
+mapping. No third-party backport is vendored. A future browser path must enable WGSL
+subgroups only on its WebGPU backend; native Naga rejects that directive.
 
-Unit tests cover conversion and selection. GPU tests cover optional expected
-depth and tiny transforms. Viewer tests poll fresh screenshots until pixels settle;
-black and white fixed-eye pairs check color, and native/compute recordings check
-selection. `probe` is an opt-in feature for complete-frame timing including GPU
-completion; screenshot readback occurs after the samples.
+## Native format and precision
+
+The Rerun boundary carries float32 centers/scales, normalized XYZW rotations,
+RGBA8 DC color and opacity, and coefficient-major RGB spherical harmonics in f16.
+Degree 4 is truncated at this boundary. Brush tensors and the core float comparison
+retain their higher-precision representation. Native-archetype PSNR therefore measures
+a different loss from float-core parity; do not compare the two as equivalent gates.
+The PLY importer owns its native defaults and descriptors.
 
 ## Training recordings
 
-`crates/gsplat-train` drives Brush's pinned `create_process_with_device` stream.
-The local observer adapter exposes the existing loss/LR/refine values without
-changing training math, loading, config merge, evaluation or exports. It emits
-step events every five steps and at the final step. Refine statistics come
-from refine events, not sampled step events. The temporary adapter and complete
-patch live in `vendor/brush-process`; remove it when Brush exposes these stats.
+`gsplat-train` consumes Brush's `create_process_with_device` stream. The sole
+vendored dependency is the approved temporary `vendor/brush-process` observer patch:
+it exposes existing loss, learning-rate, and refinement values without changing
+training math, config merging, evaluation, or export. Its patch is stored beside
+it. Remove this adapter when upstream exposes the observations.
 
-The trainer captures tensor handles from the current splat slot before advancing
-the stream. A separate logging thread reads them asynchronously, folds Brush's
-minimum-scale filter as its exporter does, and logs native `GaussianSplats3D`.
-Scales use exp, WXYZ rotations become normalized XYZW, DC/opacity become RGBA8,
-and higher SH uses coefficient-major 15-by-3 f16 values. Degree 4 is truncated
-only at this logging boundary. Snapshots retain step 50, every 1,000 steps, and
-the final step by default; only the final snapshot carries higher SH.
-`--snapshot-first` changes the first retained step. Brush's
-`--rerun-log-splats-every` changes the periodic cadence. These and
-`--rerun-log-train-stats-every` accept positive multiples of five; the latter
-keeps Brush's 50-step default. Console progress is independent at 100 steps.
-`--rerun-max-img-size` controls eval thumbnails (default 512); camera thumbnails
-are capped at 256. Images use JPEG quality 85. The legacy `--rerun-enabled` and
-unsupported distribution flag are rejected explicitly, including merged config.
-Brush's own Rerun logger stays disabled.
+Training passes tensor handles to a separate logging thread before advancing the
+stream. Readback and encoding occur there. Scales use exp, rotations change from
+WXYZ to XYZW, and Brush's minimum-scale filter is folded as in its exporter.
+Observations arrive every five steps; snapshots default to step 50, each 1,000 steps,
+and the final step. Only the final snapshot includes higher SH. Override the first
+snapshot with `--snapshot-first` and cadence with `--rerun-log-splats-every`; intervals
+must be positive multiples of five. Stats keep Brush's 50-step default.
 
-All dynamic data uses `iterations`. Scalars include loss, step milliseconds,
-splat counts, learning rates, refine statistics, sampled GPU memory and Brush's
-EvalResult PSNR/SSIM. Cameras use Pinhole + Transform3D and small JPEG thumbnails;
-distorted camera models are explicitly documented as pinhole approximations.
-Four fixed eval views are rendered only at Brush's eval steps, at thumbnail
-resolution on the logging thread. They use a black background; GT is
-premultiplied with Brush's packed-image conversion. All snapshot and scalar
-readbacks run asynchronously on that thread. A logging failure emits a warning
-and does not abort training; sink flushing has a two-second timeout. A live
-sink must connect during a bounded check before training; an unavailable sink
-is disabled with a warning to avoid the SDK's unconnected queue backpressure.
+All dynamic data uses `iterations`. The dashboard includes the scene, cameras,
+four fixed GT/render pairs, loss, throughput, splat counts, learning rates,
+refinement statistics, sampled GPU memory, and Brush evaluation PSNR/SSIM. Eval
+thumbnails use a black background and premultiplied GT. Distorted cameras appear as
+pinhole approximations. JPEG thumbnails bound recording size. `--video` adds a
+spinning eye and a flat metrics row; the eye follows Brush's estimated scene axis.
 
-The Rust blueprint places a 3D scene and four eval pairs above metric tabs.
-`--video` adds a spinning eye and a flat Loss/PSNR/SSIM/Splats row. Brush's
-estimated axis is a model-rotation target from -Y. Apply that rotation's inverse
-to -Y for the eye up and nearest world ViewCoordinates, so the spin follows the
-unrotated scene. The default has no visualizer override and opens in
-stock Rerun. `--compute-visualizer` explicitly selects `ComputeGaussianSplats3D`
-for a compatible custom viewer; it cannot be combined with stock `--spawn`.
-`--connect` and `--save`
-fan out through Rerun's sinks, so live and saved recordings contain the same data.
+`--save` and `--connect` fan out identical data. An unavailable live sink is disabled
+after a bounded connection check. Recording failures warn without stopping training;
+flushes have a two-second timeout. No sink means no logging work. Brush's legacy
+Rerun logger remains disabled; its transitive 0.36 dependency does not produce the
+0.38.1 recording. `--compute-visualizer` is optional and cannot use stock `--spawn`.
 
+## Evaluation and evidence
+
+The Rust evaluator pairs strict relative paths and averages per-view scores. Published
+metrics use the checkpoint's 8-bit convention; Brush metrics and float training scores
+use their declared convention. Optional LPIPS uses Brush's VGG model. Python reads typed
+reports and keeps full-split render orchestration only.
+
+The test tiers separate synthetic CPU logic, GPU/assets/viewer integration, and
+stored-reference/pixel goldens. The nine float-core parity cases compare against
+Brush, while eight published fixtures cover 1,600 images. Full render-quality tests
+also rerender all 200 views per Blender scene. The viewer's native path has its own
+loss, calibration, color, relog, and depth tests. Missing assets are explicit skips.
+
+Current renderer and training measurements, source revisions, and evidence paths are
+in the [README](../README.md). Benchmark wall time includes GPU completion; optional
+timestamp attribution runs separately. Do not mix diagnostic profiling with the
+wall-time lane. Admission samples the GPU and host load; repeat stability is reported
+rather than inferred from one frame. See the [benchmark notes](../crates/gsplat-bench/README.md).

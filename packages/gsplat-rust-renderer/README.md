@@ -1,135 +1,116 @@
 # gsplat-rust-renderer
 
-`gsplat-rust-renderer` adds a tile-based, GPU compute Gaussian-splat visualizer to the [Rerun](https://rerun.io) desktop viewer. Python logs Rerun 0.38.1's native `GaussianSplats3D` archetype; Rust renders it with wgpu on Metal or Vulkan. The same GPU core also powers a standalone PNG renderer, so no CUDA is required.
+Train, render, measure, and view Gaussian splats with one shared GPU renderer.
+Rust runs pinned [Brush](https://github.com/ArthurBrussee/brush) training in process;
+Rerun recordings use native `GaussianSplats3D` and open in either viewer.
 
-<p align="center">
-  <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Rerun-0.38.1-0b82f9" alt="Rerun badge">
-  </a>
-  <a title="Pixi" href="https://pixi.sh/latest/" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
-  </a>
-  <a title="Rust" href="https://www.rust-lang.org/" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Rust-1.98-dea584" alt="Rust badge">
-  </a>
-</p>
+![Rerun 0.38.1](https://img.shields.io/badge/Rerun-0.38.1-0b82f9)
+![Pixi](https://img.shields.io/badge/Install%20with-Pixi-16A34A)
 
-<p align="center">
-</p>
+Requires Pixi and a supported Vulkan or Metal GPU with subgroups. Run commands
+from the repository root. Builds disable incremental compilation and debug symbols
+through the package environment. Use the prod environment for long training runs.
 
-
-## Requirements
-
-- [Pixi](https://pixi.sh/latest/#installation)
-- Apple Silicon with Metal, or Linux with Vulkan
-- Enough local storage for build artifacts, datasets, and recordings
-
-Run every command below from the repository root. Rust and Python Rerun packages are pinned together at `0.38.1`; do not update one side independently.
-
-## Install and build
-
-Install the development environment and build the custom viewer:
+## View Lego
 
 ```bash
 pixi install -e gsplat-rust-renderer-dev --frozen
-pixi run -e gsplat-rust-renderer-dev --frozen cargo build --release --bin gsplat-rust-renderer --manifest-path packages/gsplat-rust-renderer/Cargo.toml
-```
-
-## Download the Lego example
-
-Download the NeRF-synthetic dataset and pretrained 3DGS-MCMC checkpoint. Both commands are idempotent.
-
-```bash
-pixi run -e gsplat-rust-renderer-dev --frozen python -m gsplat_rust_renderer.nerfbaselines data lego
-pixi run -e gsplat-rust-renderer-dev --frozen python -m gsplat_rust_renderer.nerfbaselines pretrained lego
-```
-
-## Quickstart: view a pretrained splat
-
-Start the custom viewer in one terminal:
-
-```bash
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-download pretrained lego
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-viewer
+# In another terminal:
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-log-ply
 ```
 
-Then log the pretrained PLY, all train/test cameras, and their ground-truth image planes from a second terminal:
+Use `gsplat-rust-renderer-log-scene` to add the dataset cameras and image grid.
+The custom viewer listens on port 9876 and selects compute rendering automatically.
+The same native recording opens in stock Rerun without a visualizer override.
+`--compute --render-mode mip` explicitly selects the custom renderer. In a shell
+without a display, add `--rr-config.headless` to Python logging commands; save with
+`--rr-config.save scene.rrd`. The custom viewer also supports `--headless`.
+
+![Pretrained Lego in the custom viewer](docs/media/pretrained-lego.png)
+
+## Train
 
 ```bash
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-log-scene
-```
-
-The viewer listens on `127.0.0.1:9876`. Recordings need no visualizer override: this viewer selects `ComputeGaussianSplats3D` automatically, while stock Rerun 0.38.1 draws native splats. Use `--compute` only for an explicit compute selection or render-mode override. See the [viewer registration notes](crates/gsplat-viewer/README.md).
-
-<p align="center">
-  <img src="docs/media/pretrained-lego.png" width="560" alt="Pretrained Lego checkpoint prediction">
-</p>
-
-The image above is a real prediction bundled with the downloaded checkpoint.
-
-## Brush training
-
-The native trainer runs pinned Brush in process. See [Training recordings](docs/architecture.md#training-recordings) for the logging contract and dashboard layout.
-
-```bash
-# Prepare the local seed-42 initialization (training also runs this automatically).
-pixi run -e gsplat-rust-renderer --frozen gsplat-rust-renderer-prepare-nerf-init lego
-# Scene, step count, and mode; modes are record, live, and video.
-pixi run -e gsplat-rust-renderer --frozen gsplat-rust-renderer-train lego 30000 record
 pixi run -e gsplat-rust-renderer --frozen gsplat-rust-renderer-train lego 7000 video
+# Other modes: record, live. Other supported scenes include truck and train.
 ```
 
-Scenes include the eight Blender scenes, Truck, and Train. Outputs go to
-`data/brush-runs/<scene>/<iterations>/<mode>/` inside the package. Each 30k run
-exports a 7k checkpoint and its final model. Live mode connects to a viewer
-already listening on port 9876. Pass extra Brush flags after `--`.
+The task prepares a seed-42 initialization and saves checkpoints and `training.rrd`
+under `packages/gsplat-rust-renderer/data/brush-runs/lego/7000/video/`. Live mode also
+connects to port 9876. Extra Brush flags follow `--`. A 30,000-step run exports at
+7,000 steps as well as the final step. Direct `gsplat-train` runs without a sink
+skip all recording work. `gsplat-brush-cli-build` builds the pinned upstream CLI
+locally for reference runs.
 
-Blender inputs are derived under `data/nerf-synthetic-init/`; set
-`GSPLAT_NERF_INIT_ROOT` only to use an existing derived dataset elsewhere.
-Both trainers must read the same initialized dataset for comparisons.
+![Lego training progression](docs/media/training-progression.png)
+![Recorded training dashboard](docs/media/training-dashboard.gif)
 
-```bash
-# Build the pinned upstream reference locally in .brush/bin/brush-cli.
-pixi run -e gsplat-rust-renderer --frozen gsplat-brush-cli-build
-# Score all test cameras from unclipped float renders using the bench library.
-pixi run -e gsplat-rust-renderer --frozen gsplat-train-score \
-  --ply /path/to/export_7000.ply --dataset /path/to/lego --out /path/to/score.json
-```
+On the RTX 5090, the final quiet-host 7k comparison measured 163.82 steps/s for
+stock Brush, 165.04 with recording off, and 165.84 with recording on. This shows no
+observed recording slowdown in that set; the small difference is not evidence of
+a speedup. Source: `~/gsplat-modern-work/results/w3-5090/final/comparison-quiet.json`
+(six ordered runs, Brush `1388f74c`, trainer `f1dac638`). Mean test PSNR across the
+two scored runs was 32.8540 dB versus stock 32.8720 dB, from
+`~/gsplat-modern-work/results/w3-5090/final/{on,stock}-r{1,2}/eval-float.json`.
 
-`gsplat-train-build` builds the native binary; `target/release/gsplat-train --help`
-lists Brush options. With no `--save`, `--connect`, or `--spawn`, all logging is off.
-
-## Full-split PSNR/SSIM evaluation
-
-First validate the metric implementation against the eight downloaded checkpoints; then render and score every 200-image Blender test split:
+## Render and evaluate
 
 ```bash
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-render \
+  --ply /path/to/scene.ply --camera /path/to/transforms_test.json \
+  --output-dir /tmp/gsplat-renders --width 800 --height 800
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-eval dirs \
+  --render /tmp/gsplat-renders --gt /path/to/gt --convention published --out /tmp/metrics.json
+# Download and score all eight bundled splits; then render and score them:
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-evaluate-checkpoints
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-evaluate
 ```
 
-The second task reuses one standalone GPU process per scene and writes `packages/gsplat-rust-renderer/data/evaluation/metrics.json`. For reference, the downloaded Lego checkpoint reports PSNR `35.74852`, SSIM `0.98415`, and LPIPS `0.01062` across 200 test images.
+Rust owns PSNR/SSIM. `published` matches the 8-bit checkpoint convention;
+`brush` uses Brush's convention. `gsplat-train-score` scores unclipped float renders
+of an exported PLY against all dataset test cameras. Add `--lpips` to `gsplat-eval`
+for Brush's VGG LPIPS model.
 
-## Development
+![Recorded ground truth and render pairs](docs/media/eval-pairs.png)
 
-Run the package gates from the repository root:
+## Benchmark
 
 ```bash
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
-  pixi run -e gsplat-rust-renderer-dev --frozen gate
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-bench speed \
+  --impl ours,brush --ply /path/to/scene.ply --path orbit:600 \
+  --res 1920x1080 --out /tmp/gsplat-speed.json
 ```
 
-The integration lane includes a 200-step training recording check. `GSPLAT_LEGO`
-can override its default initialized dataset at
-`packages/gsplat-rust-renderer/data/nerf-synthetic-init/lego`. The golden lane compares the
-pretrained Lego conversion against Rerun’s PLY loader; `GSPLAT_TEST_PLY` selects
-the checkpoint. Missing assets produce explicit skips.
+The harness synchronizes GPU completion and records admission, warmup, rotated
+repeats, and stability. These RTX 5090 results are milliseconds (median / p95),
+not viewer FPS:
 
-## Architecture
+| Scene | Resolution | Shared core | Brush |
+|---|---|---:|---:|
+| Lego | 1920×1080 | 1.476 / 1.884 | 1.950 / 2.256 |
+| Lego | 3840×2160 | 2.672 / 3.124 | 3.233 / 3.859 |
+| Garden | 1920×1080 | 4.107 / 4.904 | 4.681 / 5.591 |
+| Garden | 3840×2160 | 10.542 / 14.175 | 11.579 / 16.222 |
 
-The system has two front ends—Rerun viewer and standalone renderer—over one GPU pipeline. See [docs/architecture.md](docs/architecture.md) for the wire contract, camera/cache lifecycle, compute stages, training-recording layouts, and file map.
+Sources: `~/gsplat-modern-work/results/w1-5090/final-5f5bc3a2/{lego,garden}-{1920x1080,3840x2160}.json`.
+Each cell is the median of three repeat medians/p95s from the final core revision.
+See [benchmark conventions](crates/gsplat-bench/README.md) before comparing hosts.
 
-## Acknowledgements
+## Gates
 
-- [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) — Kerbl et al., SIGGRAPH 2023
-- [Brush](https://github.com/ArthurBrussee/brush) — the tile-based compute renderer and trainer that inspired this pipeline
-- [Rerun](https://rerun.io) — the data model, viewer, blueprints, and custom-visualizer API
+```bash
+pixi run -e gsplat-rust-renderer-dev --frozen gate
+pixi run -e gsplat-rust-renderer-dev --frozen tests-golden
+pixi run -e ci --frozen ci
+```
+
+`gate` covers lint, types, dead code, Rust unit tests and GPU/viewer integration.
+The golden lane checks float parity against Brush, all 1,600 bundled images,
+standalone render quality, analytic calibration, and viewer pixels. Missing assets
+are reported as skips; inspect that report before claiming a complete gate.
+`GSPLAT_MODERN_DATA`, `GSPLAT_TEST_PLY`, and `GSPLAT_LEGO` select local assets.
+See [architecture](docs/architecture.md) for formats, GPU limits, and known viewer
+constraints. Media here comes from the integrated code; capture details are in
+[media provenance](docs/media/README.md).
