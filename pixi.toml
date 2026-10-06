@@ -3405,6 +3405,28 @@ PYREFLY_TARGET = "robocap_live tools/apps tests"
 depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
 cmd = "PYO3_BUILD_EXTENSION_MODULE=1 cargo build --release -p robocap-live-py && cp target/release/lib_core.so robocap_live/_core.so.new && mv robocap_live/_core.so.new robocap_live/_core.so"
 cwd = "packages/robocap-live"
+inputs = [
+    "packages/robocap-live/Cargo.toml",
+    "packages/robocap-live/Cargo.lock",
+    "packages/robocap-live/crates/*/Cargo.toml",
+    "packages/robocap-live/crates/*/build.rs",
+    "packages/robocap-live/crates/*/src/**",
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**",
+    "packages/handfit/Cargo.toml",
+    "packages/handfit/Cargo.lock",
+    "packages/handfit/crates/*/Cargo.toml",
+    "packages/handfit/crates/*/build.rs",
+    "packages/handfit/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
+]
 description = "Build the Rust hands-layer core and install robocap_live._core in place"
 
 # The binding's test embeds this environment's Python: libpython from its lib dir, the standard library from its prefix.

@@ -20,12 +20,15 @@ use std::time::{Duration, Instant};
 
 use kornia_image::Image;
 use robocap_live::downsample::resize_area_u8;
-use robocap_live::frame::{CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, Luma, NUM_CAMERAS, Rig, SMALL_SIZE, write_small_dump};
+use robocap_live::frame::isometry_from_matrix;
+use robocap_live::frame::{
+    CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, Luma, NUM_CAMERAS, Rig,
+    SMALL_SIZE, write_small_dump,
+};
 use robocap_live::hands::{HandFrameResult, HandOutput};
 use robocap_live::log::video::{EncoderConfig, EncoderKind};
 use robocap_live::log::{FrameLog, Logger, LoggerConfig, VideoMode};
 use robocap_live::sched::FrameTimings;
-use robocap_live::frame::isometry_from_matrix;
 use serde::Deserialize;
 
 type Error = Box<dyn std::error::Error>;
@@ -107,7 +110,12 @@ fn parse_args() -> Result<Args, Error> {
             "--fps" => args.fps = value()?.parse()?,
             "--no-log" => args.log = false,
             "--write-small" => args.write_small = Some(value()?.into()),
-            "--video-cameras" => args.video_cameras = value()?.split(',').map(str::parse).collect::<Result<_, _>>()?,
+            "--video-cameras" => {
+                args.video_cameras = value()?
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()?
+            }
             "--flush-ms" => args.flush_ms = value()?.parse()?,
             other => return Err(format!("unknown flag {other}").into()),
         }
@@ -126,12 +134,19 @@ fn area3(full: &Image<u8, 1>) -> Result<Luma, Error> {
 }
 
 fn hand_result(line: &RecordLine) -> HandFrameResult {
-    let mut result = HandFrameResult { scale: line.scale.unwrap_or_default(), scale_final: true, ..HandFrameResult::default() };
+    let mut result = HandFrameResult {
+        scale: line.scale.unwrap_or_default(),
+        scale_final: true,
+        ..HandFrameResult::default()
+    };
     for (slot, hand) in result.hands.iter_mut().zip(&line.hands) {
         *slot = HandOutput {
             tracked: hand.tracked,
             reported: hand.reported,
-            landmarks_world: hand.landmarks.as_ref().and_then(|l| <[[f64; 3]; 21]>::try_from(l.as_slice()).ok()),
+            landmarks_world: hand
+                .landmarks
+                .as_ref()
+                .and_then(|l| <[[f64; 3]; 21]>::try_from(l.as_slice()).ok()),
             ..HandOutput::default()
         };
     }
@@ -160,26 +175,49 @@ fn main() -> Result<(), Error> {
         None => BTreeMap::new(),
     };
     let meta = DumpMeta::load(&args.dump)?;
-    let size = kornia_image::ImageSize { width: meta.width as usize, height: meta.height as usize };
+    let size = kornia_image::ImageSize {
+        width: meta.width as usize,
+        height: meta.height as usize,
+    };
     let already_small = size == SMALL_SIZE;
     if !already_small && size != FULL_SIZE {
-        return Err(format!("dump frames are {size:?}; expected {FULL_SIZE:?} or {SMALL_SIZE:?}").into());
+        return Err(
+            format!("dump frames are {size:?}; expected {FULL_SIZE:?} or {SMALL_SIZE:?}").into(),
+        );
     }
     let load_start = Instant::now();
     let mut reader = FrameReader::open(&args.dump.join("frames.bin"), size)?;
     let mut frames = Vec::new();
     while frames.len() < args.frames {
-        let Some(frameset) = reader.next_frameset()? else { break };
+        let Some(frameset) = reader.next_frameset()? else {
+            break;
+        };
         let mut small: [Option<Luma>; NUM_CAMERAS] = Default::default();
         for (slot, camera) in small.iter_mut().zip(frameset.cameras.iter()) {
             if let Some(camera) = camera {
-                *slot = Some(if already_small { camera.full.clone() } else { area3(&camera.full)? });
+                *slot = Some(if already_small {
+                    camera.full.clone()
+                } else {
+                    area3(&camera.full)?
+                });
             }
         }
-        let cam_t_ns = std::array::from_fn(|c| frameset.cameras[c].as_ref().map_or(0, |f| f.meta.pts_ns));
-        frames.push(Frame { index: frameset.index, t_ns: frameset.t_ns, cam_t_ns, small });
+        let cam_t_ns =
+            std::array::from_fn(|c| frameset.cameras[c].as_ref().map_or(0, |f| f.meta.pts_ns));
+        frames.push(Frame {
+            index: frameset.index,
+            t_ns: frameset.t_ns,
+            cam_t_ns,
+            small,
+        });
     }
-    eprintln!("loaded {} framesets (downsampled to {}x{}) in {:.1} s", frames.len(), SMALL_SIZE.width, SMALL_SIZE.height, load_start.elapsed().as_secs_f64());
+    eprintln!(
+        "loaded {} framesets (downsampled to {}x{}) in {:.1} s",
+        frames.len(),
+        SMALL_SIZE.width,
+        SMALL_SIZE.height,
+        load_start.elapsed().as_secs_f64()
+    );
     if frames.is_empty() {
         return Err("the dump has no framesets".into());
     }
@@ -188,10 +226,23 @@ fn main() -> Result<(), Error> {
             index: frame.index,
             t_ns: frame.t_ns,
             cameras: std::array::from_fn(|c| {
-                frame.small[c].as_ref().map(|full| CameraFrame { meta: FrameMeta { seq: frame.index, pts_ns: frame.cam_t_ns[c], source_id: c as u32, turned_180: false }, full: full.clone() })
+                frame.small[c].as_ref().map(|full| CameraFrame {
+                    meta: FrameMeta {
+                        seq: frame.index,
+                        pts_ns: frame.cam_t_ns[c],
+                        source_id: c as u32,
+                        turned_180: false,
+                    },
+                    full: full.clone(),
+                })
             }),
         });
-        let written = write_small_dump(&args.dump, out, framesets, "area /3 to 640x360 by log_replay --write-small")?;
+        let written = write_small_dump(
+            &args.dump,
+            out,
+            framesets,
+            "area /3 to 640x360 by log_replay --write-small",
+        )?;
         println!("wrote {written} framesets to {}", out.display());
         return Ok(());
     }
@@ -206,7 +257,11 @@ fn main() -> Result<(), Error> {
         preview_flush: Duration::from_millis(args.flush_ms),
         ..LoggerConfig::default()
     };
-    let mut logger = if args.log { Some(Logger::new(&rig, options)?) } else { None };
+    let mut logger = if args.log {
+        Some(Logger::new(&rig, options)?)
+    } else {
+        None
+    };
     if let Some(logger) = &logger {
         eprintln!("recording id {}", logger.recording_id());
     }
@@ -214,7 +269,8 @@ fn main() -> Result<(), Error> {
     let period = Duration::from_secs_f64(1.0 / args.fps);
     let clip_ns = frames.last().map_or(0, |f| f.t_ns) - frames[0].t_ns + (1e9 / args.fps) as i64;
     let start = Instant::now();
-    let (mut calls, mut call_total, mut call_max, mut late) = (0u64, Duration::ZERO, Duration::ZERO, 0u64);
+    let (mut calls, mut call_total, mut call_max, mut late) =
+        (0u64, Duration::ZERO, Duration::ZERO, 0u64);
     let mut last_report = Instant::now();
     for lap in 0..args.loops {
         for (n, frame) in frames.iter().enumerate() {
@@ -226,9 +282,16 @@ fn main() -> Result<(), Error> {
                 late += 1;
             }
             let record = records.get(&frame.index);
-            let pose = record.and_then(|r| r.world_from_rig.as_deref()).and_then(|m| <&[f64; 16]>::try_from(m).ok()).and_then(isometry_from_matrix);
+            let pose = record
+                .and_then(|r| r.world_from_rig.as_deref())
+                .and_then(|m| <&[f64; 16]>::try_from(m).ok())
+                .and_then(isometry_from_matrix);
             let hands = record.map(hand_result);
-            let get = |name: &str| record.and_then(|r| r.timings_ms.get(name).copied().flatten()).unwrap_or(f64::NAN);
+            let get = |name: &str| {
+                record
+                    .and_then(|r| r.timings_ms.get(name).copied().flatten())
+                    .unwrap_or(f64::NAN)
+            };
             let timings = FrameTimings {
                 slam_ms: get("slam_ms"),
                 pose_wait_ms: get("pose_wait_ms"),
@@ -246,7 +309,9 @@ fn main() -> Result<(), Error> {
                 Some(_) => "lost (reference)",
                 None => "no record",
             };
-            let Some(logger) = logger.as_mut() else { continue };
+            let Some(logger) = logger.as_mut() else {
+                continue;
+            };
             let t_ns = frame.t_ns + lap as i64 * clip_ns;
             let call = Instant::now();
             logger.log_frameset(&FrameLog {
@@ -263,7 +328,11 @@ fn main() -> Result<(), Error> {
             call_max = call_max.max(took);
             if last_report.elapsed() > Duration::from_secs(5) {
                 last_report = Instant::now();
-                eprintln!("{:.0} s: {:?}", start.elapsed().as_secs_f64(), logger.stats());
+                eprintln!(
+                    "{:.0} s: {:?}",
+                    start.elapsed().as_secs_f64(),
+                    logger.stats()
+                );
             }
         }
     }
@@ -281,7 +350,11 @@ fn main() -> Result<(), Error> {
         let (stats, encoders) = logger.finish()?;
         println!("{stats:?}");
         let bits = stats.preview_payload_bytes as f64 * 8.0 / stats.elapsed_s.max(1e-9) / 1e6;
-        println!("preview payload {bits:.2} Mbit/s; video {:.2} Mbit/s over {} samples", stats.video_bytes as f64 * 8.0 / wall / 1e6, stats.video_samples);
+        println!(
+            "preview payload {bits:.2} Mbit/s; video {:.2} Mbit/s over {} samples",
+            stats.video_bytes as f64 * 8.0 / wall / 1e6,
+            stats.video_samples
+        );
         for (camera, e) in encoders.iter().enumerate() {
             println!(
                 "encoder {camera}: {} in, {} out, {:.2} Mbit/s, CPU {:.1}% of a core",

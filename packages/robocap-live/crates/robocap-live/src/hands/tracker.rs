@@ -26,23 +26,23 @@
 
 use std::time::Instant;
 
-use handfit::nalgebra::{Matrix3, Matrix4, Vector2, Vector3};
 use handfit::cold::initial_pose_parallel;
+use handfit::nalgebra::{Matrix3, Matrix4, Vector2, Vector3};
 use handfit::{Config, JacobianMode, Model, Pose, View, fit};
 use nalgebra::Isometry3;
 
 use super::camera::{RigCameraModel, f32_round, fit_view, world_matrix};
-use super::circles::min_enclosing_circle;
 use super::detect::Detections;
 use super::estimator::{KeypointEstimate, ViewRequest};
 use super::model::{GenericHandModel, landmarks_world, mirror, pose_f32, pose_finite};
 use super::scale::{CalibrationBlock, LiveScale, ScaleOutcome};
 use super::{
-    CropSource, DetNetHit, HandFrameResult, HandInputs, HandOutput, HandTimings, HandTracking, HandsConfig, HandsError, KeyNetView, LEFT, RIGHT,
-    ScaleMode, ViewOutcome,
+    CropSource, DetNetHit, HandFrameResult, HandInputs, HandOutput, HandTimings, HandTracking,
+    HandsConfig, HandsError, KeyNetView, LEFT, RIGHT, ScaleMode, ViewOutcome,
 };
 use crate::frame::{CameraFrame, Luma, NUM_CAMERAS, Rig};
 use crate::nets::{HandNets, NUM_LANDMARKS};
+use crate::hands::circles::min_enclosing_circle;
 
 /// The tracker's thresholds: the fields of handtrack's `TrackerConfig` that `ROBUST_TRACKER_CONFIG` uses or sets.
 /// [`TrackerConfig::robust`] (the [`Default`]) is `ROBUST_TRACKER_CONFIG` exactly; [`TrackerConfig::handtrack_default`] is
@@ -141,7 +141,12 @@ pub trait Perception: Send {
     /// # Errors
     ///
     /// Any backend or input error.
-    fn detect(&mut self, nets: &mut dyn HandNets, cameras: &[usize], small: &[&Luma]) -> Result<Vec<Detections>, HandsError>;
+    fn detect(
+        &mut self,
+        nets: &mut dyn HandNets,
+        cameras: &[usize],
+        small: &[&Luma],
+    ) -> Result<Vec<Detections>, HandsError>;
 
     /// KeyNet on `views` (one batched call), in order, and the milliseconds of the call spent cutting crops (0 when not measured).
     ///
@@ -162,7 +167,10 @@ pub trait Perception: Send {
 
 /// A finite circle as a view's `circle_net` (`None` when any value is not finite).
 fn circle_net(circle: [f64; 3]) -> Option<[f32; 3]> {
-    circle.iter().all(|x| x.is_finite()).then(|| circle.map(|x| x as f32))
+    circle
+        .iter()
+        .all(|x| x.is_finite())
+        .then(|| circle.map(|x| x as f32))
 }
 
 /// θ̂ = θ(t−1) + gain·(θ(t−1) − θ(t−2)) (handtrack `hand.pose.extrapolate`): the rotation step D = R(t−1)·R(t−2)ᵀ scaled towards the
@@ -205,7 +213,9 @@ fn keypoint_spread_px(views: &[ViewObservation]) -> f64 {
         }
         centre = [centre[0] / sum, centre[1] / sum];
         for i in 0..NUM_LANDMARKS {
-            total += view.weights[i] * ((view.keypoints_px[i][0] - centre[0]).powi(2) + (view.keypoints_px[i][1] - centre[1]).powi(2));
+            total += view.weights[i]
+                * ((view.keypoints_px[i][0] - centre[0]).powi(2)
+                    + (view.keypoints_px[i][1] - centre[1]).powi(2));
         }
         weighted += sum;
     }
@@ -307,33 +317,78 @@ impl Tracker {
     ///
     /// [`HandsError::Invalid`] for an empty or out-of-range camera list, an unsupported camera, `max_views` outside 1..=2 or a
     /// non-positive fixed scale; [`HandsError::Model`] when the hand model asset is broken.
-    pub fn new(rig: &Rig, hands: &HandsConfig, config: TrackerConfig, mut perception: Box<dyn Perception>) -> Result<Self, HandsError> {
+    pub fn new(
+        rig: &Rig,
+        hands: &HandsConfig,
+        config: TrackerConfig,
+        mut perception: Box<dyn Perception>,
+    ) -> Result<Self, HandsError> {
         if hands.detnet_groups == 0 {
-            return Err(HandsError::Invalid("detnet_groups must be at least 1".into()));
+            return Err(HandsError::Invalid(
+                "detnet_groups must be at least 1".into(),
+            ));
         }
         if !(1..=2).contains(&hands.max_views) {
-            return Err(HandsError::Invalid(format!("max_views must be between 1 and 2, got {}", hands.max_views)));
+            return Err(HandsError::Invalid(format!(
+                "max_views must be between 1 and 2, got {}",
+                hands.max_views
+            )));
         }
-        if hands.cameras.is_empty() || hands.cameras.iter().any(|&c| c >= rig.cameras.len() || c >= NUM_CAMERAS) {
-            return Err(HandsError::Invalid(format!("hand cameras {:?} do not fit a rig of {} cameras", hands.cameras, rig.cameras.len())));
+        if hands.cameras.is_empty()
+            || hands
+                .cameras
+                .iter()
+                .any(|&c| c >= rig.cameras.len() || c >= NUM_CAMERAS)
+        {
+            return Err(HandsError::Invalid(format!(
+                "hand cameras {:?} do not fit a rig of {} cameras",
+                hands.cameras,
+                rig.cameras.len()
+            )));
         }
         let mut active = hands.cameras.clone();
         active.sort_unstable();
         active.dedup();
-        let mut detnet_cameras = hands.detnet_cameras.clone().unwrap_or_else(|| active.clone());
+        let mut detnet_cameras = hands
+            .detnet_cameras
+            .clone()
+            .unwrap_or_else(|| active.clone());
         detnet_cameras.sort_unstable();
         detnet_cameras.dedup();
-        if detnet_cameras.is_empty() || detnet_cameras.iter().any(|&c| c >= rig.cameras.len() || c >= NUM_CAMERAS) {
-            return Err(HandsError::Invalid(format!("DetNet cameras {detnet_cameras:?} do not fit a rig of {} cameras", rig.cameras.len())));
+        if detnet_cameras.is_empty()
+            || detnet_cameras
+                .iter()
+                .any(|&c| c >= rig.cameras.len() || c >= NUM_CAMERAS)
+        {
+            return Err(HandsError::Invalid(format!(
+                "DetNet cameras {detnet_cameras:?} do not fit a rig of {} cameras",
+                rig.cameras.len()
+            )));
         }
-        let cameras: Vec<RigCameraModel> =
-            rig.cameras.iter().map(RigCameraModel::from_rig_camera).collect::<Result<_, _>>().map_err(|error| HandsError::Invalid(error.to_string()))?;
-        if active.iter().map(|&c| cameras[c].fit.distortion.is_some()).collect::<std::collections::HashSet<_>>().len() > 1 {
-            return Err(HandsError::Invalid("the hand cameras mix pinhole and Fisheye62 lenses".into()));
+        let cameras: Vec<RigCameraModel> = rig
+            .cameras
+            .iter()
+            .map(RigCameraModel::from_rig_camera)
+            .collect::<Result<_, _>>()
+            .map_err(|error| HandsError::Invalid(error.to_string()))?;
+        if active
+            .iter()
+            .map(|&c| cameras[c].fit.distortion.is_some())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1
+        {
+            return Err(HandsError::Invalid(
+                "the hand cameras mix pinhole and Fisheye62 lenses".into(),
+            ));
         }
         let (phi, scale) = match hands.scale {
             ScaleMode::Fixed(phi) if phi.is_finite() && phi > 0.0 => (phi, LiveScale::fixed()),
-            ScaleMode::Fixed(phi) => return Err(HandsError::Invalid(format!("hand scale {phi} must be positive"))),
+            ScaleMode::Fixed(phi) => {
+                return Err(HandsError::Invalid(format!(
+                    "hand scale {phi} must be positive"
+                )));
+            }
             ScaleMode::Auto { seconds } => (1.0, LiveScale::auto(seconds, hands.scale_wait)),
         };
         let generic = GenericHandModel::load()?;
@@ -394,7 +449,12 @@ impl Tracker {
     }
 
     /// The pose's keypoints in every active camera with an image (handtrack `_project`).
-    fn project(&self, landmarks: &[[f64; 3]; NUM_LANDMARKS], world: &Matrix4<f64>, available: &[bool; NUM_CAMERAS]) -> [Option<CameraProjection>; NUM_CAMERAS] {
+    fn project(
+        &self,
+        landmarks: &[[f64; 3]; NUM_LANDMARKS],
+        world: &Matrix4<f64>,
+        available: &[bool; NUM_CAMERAS],
+    ) -> [Option<CameraProjection>; NUM_CAMERAS] {
         let mut out = [None; NUM_CAMERAS];
         for &c in &self.active {
             if !available[c] {
@@ -417,18 +477,35 @@ impl Tracker {
                     front.push([net.x, net.y]);
                 }
             }
-            out[c] = Some(CameraProjection { inside, circle: min_enclosing_circle(&front).map(|circle| circle.to_array()) });
+            out[c] = Some(CameraProjection {
+                inside,
+                circle: min_enclosing_circle(&front).map(|circle| circle.to_array()),
+            });
         }
         out
     }
 
     /// Boxes from θ̂ in every camera that sees it and the KeyNet views; drops a hand that no camera sees (handtrack `_plan_tracked`).
-    fn plan_tracked(&mut self, side: usize, world: &Matrix4<f64>, available: &[bool; NUM_CAMERAS]) -> Vec<ViewRequest> {
+    fn plan_tracked(
+        &mut self,
+        side: usize,
+        world: &Matrix4<f64>,
+        available: &[bool; NUM_CAMERAS],
+    ) -> Vec<ViewRequest> {
         let history = &self.history[side];
-        let Some(previous) = history.previous.as_ref() else { return Vec::new() };
+        let Some(previous) = history.previous.as_ref() else {
+            return Vec::new();
+        };
         let guess: Pose = match history.before.as_ref() {
-            Some(before) if self.config.extrapolate && history.age > self.config.extrapolate_min_age => {
-                extrapolate(previous, before, self.config.extrapolation_gain, self.config.extrapolation_max_step_m)
+            Some(before)
+                if self.config.extrapolate && history.age > self.config.extrapolate_min_age =>
+            {
+                extrapolate(
+                    previous,
+                    before,
+                    self.config.extrapolation_gain,
+                    self.config.extrapolation_max_step_m,
+                )
             }
             _ => previous.clone(),
         };
@@ -437,7 +514,15 @@ impl Tracker {
         let mut order: Vec<(usize, usize, [f64; 3])> = self
             .active
             .iter()
-            .filter_map(|&c| projection[c].and_then(|p| if p.inside > 0 { p.circle.map(|circle| (c, p.inside, circle)) } else { None }))
+            .filter_map(|&c| {
+                projection[c].and_then(|p| {
+                    if p.inside > 0 {
+                        p.circle.map(|circle| (c, p.inside, circle))
+                    } else {
+                        None
+                    }
+                })
+            })
             .collect();
         order.sort_by_key(|&(c, inside, _)| (std::cmp::Reverse(inside), c));
         if order.is_empty() {
@@ -460,7 +545,11 @@ impl Tracker {
     /// DetNet on this frameset's group of DetNet cameras (those with an image); each untracked hand gets a view in each camera that
     /// reports it, the most probable first, at most `max_views` (handtrack `_detect` / `_detect_all`), and its `detnet_hits`. The
     /// result's `detnet_camera` is the camera of the strongest detection (else the first camera DetNet ran on).
-    fn detect(&mut self, step: &mut Step<'_>, untracked: &[usize]) -> Result<Vec<ViewRequest>, HandsError> {
+    fn detect(
+        &mut self,
+        step: &mut Step<'_>,
+        untracked: &[usize],
+    ) -> Result<Vec<ViewRequest>, HandsError> {
         let groups = self.hands.detnet_groups.clamp(1, self.detnet_cameras.len());
         let group = self.next_detnet % groups;
         self.next_detnet = (self.next_detnet + 1) % groups;
@@ -480,7 +569,11 @@ impl Tracker {
         }
         let detections = self.perception.detect(step.nets, &cameras, &images)?;
         if detections.len() != cameras.len() {
-            return Err(HandsError::Invalid(format!("DetNet answered {} of {} cameras", detections.len(), cameras.len())));
+            return Err(HandsError::Invalid(format!(
+                "DetNet answered {} of {} cameras",
+                detections.len(),
+                cameras.len()
+            )));
         }
         let probability = |k: usize, side: usize| f64::from(detections[k].probability[side]);
         let mut views = Vec::new();
@@ -516,13 +609,23 @@ impl Tracker {
         Ok(views)
     }
 
-    fn estimate(&mut self, step: &mut Step<'_>, plans: &[ViewRequest]) -> Result<Vec<KeypointEstimate>, HandsError> {
+    fn estimate(
+        &mut self,
+        step: &mut Step<'_>,
+        plans: &[ViewRequest],
+    ) -> Result<Vec<KeypointEstimate>, HandsError> {
         let begin = Instant::now();
-        let (estimates, crops) = self.perception.estimate(step.nets, &step.inputs.full, step.world_from_rig, plans)?;
+        let (estimates, crops) =
+            self.perception
+                .estimate(step.nets, &step.inputs.full, step.world_from_rig, plans)?;
         step.timings.crops_ms += crops;
         step.timings.keynet_ms += begin.elapsed().as_secs_f64() * 1e3 - crops;
         if estimates.len() != plans.len() {
-            return Err(HandsError::Invalid(format!("the estimator answered {} of {} views", estimates.len(), plans.len())));
+            return Err(HandsError::Invalid(format!(
+                "the estimator answered {} of {} views",
+                estimates.len(),
+                plans.len()
+            )));
         }
         Ok(estimates)
     }
@@ -530,7 +633,9 @@ impl Tracker {
     /// 1 per keypoint, or 0 where the planning pose projects it outside this camera's image (handtrack `_clear`, `mask_out_of_image`).
     fn clear(&self, view: &ViewRequest, world: &Matrix4<f64>) -> [f64; NUM_LANDMARKS] {
         let mut clear = [1.0; NUM_LANDMARKS];
-        let Some(landmarks) = view.planning_pose_landmarks_world.as_ref() else { return clear };
+        let Some(landmarks) = view.planning_pose_landmarks_world.as_ref() else {
+            return clear;
+        };
         if !self.config.mask_out_of_image {
             return clear;
         }
@@ -553,7 +658,12 @@ impl Tracker {
     }
 
     /// KeyNet's answer as the fit's observation of `view` (handtrack `_seen` and `_weights`).
-    fn seen(&self, view: &ViewRequest, estimate: &KeypointEstimate, world: &Matrix4<f64>) -> ViewObservation {
+    fn seen(
+        &self,
+        view: &ViewRequest,
+        estimate: &KeypointEstimate,
+        world: &Matrix4<f64>,
+    ) -> ViewObservation {
         let clear = self.clear(view, world);
         let weights: [f64; NUM_LANDMARKS] = std::array::from_fn(|i| {
             let usable = f64::from(estimate.confidence[i]) >= self.config.min_keypoint_confidence
@@ -571,14 +681,24 @@ impl Tracker {
 
     /// KeyNet on `views`; the hands with at least one view above the presence threshold, and the hands whose every view fell below
     /// it (handtrack `_observe`, without the UmeTrack estimator's DetNet confirmation).
-    fn observe(&mut self, step: &mut Step<'_>, views: &[ViewRequest]) -> Result<(Vec<HandObservation>, Vec<usize>), HandsError> {
+    fn observe(
+        &mut self,
+        step: &mut Step<'_>,
+        views: &[ViewRequest],
+    ) -> Result<(Vec<HandObservation>, Vec<usize>), HandsError> {
         let estimates = self.estimate(step, views)?;
         let world = &step.world;
         let mut hands = Vec::new();
         let mut rejected = Vec::new();
         for side in [LEFT, RIGHT] {
-            let mine: Vec<usize> = (0..views.len()).filter(|&i| views[i].side == side).collect();
-            let mut good: Vec<usize> = mine.iter().copied().filter(|&i| f64::from(estimates[i].presence) >= self.config.presence_threshold).collect();
+            let mine: Vec<usize> = (0..views.len())
+                .filter(|&i| views[i].side == side)
+                .collect();
+            let mut good: Vec<usize> = mine
+                .iter()
+                .copied()
+                .filter(|&i| f64::from(estimates[i].presence) >= self.config.presence_threshold)
+                .collect();
             let history = &mut self.history[side];
             if self.config.end_on_view_rejection && history.previous.is_some() && mine.len() >= 2 {
                 if good.len() == 1 {
@@ -599,7 +719,9 @@ impl Tracker {
                     d_rel_mm: estimates[i].d_rel_mm,
                     presence: estimates[i].presence,
                     pinch: estimates[i].pinch,
-                    outcome: if f64::from(estimates[i].presence) < self.config.presence_threshold || estimates[i].presence.is_nan() {
+                    outcome: if f64::from(estimates[i].presence) < self.config.presence_threshold
+                        || estimates[i].presence.is_nan()
+                    {
                         ViewOutcome::LowPresence
                     } else if good.contains(&i) {
                         ViewOutcome::Fitted
@@ -614,7 +736,13 @@ impl Tracker {
                 rejected.push(side);
             }
             if !good.is_empty() {
-                hands.push(HandObservation { side, views: good.iter().map(|&i| self.seen(&views[i], &estimates[i], world)).collect() });
+                hands.push(HandObservation {
+                    side,
+                    views: good
+                        .iter()
+                        .map(|&i| self.seen(&views[i], &estimates[i], world))
+                        .collect(),
+                });
             }
         }
         Ok((hands, rejected))
@@ -623,8 +751,14 @@ impl Tracker {
     /// One `acquire_recrop` pass: acquisition views whose KeyNet presence passes get the enclosing circle of KeyNet's keypoints
     /// (source [`CropSource::Recrop`]).
     /// Only KeyNet runs here: the presence rules of [`Self::observe`] change state only for tracked hands, and these are not.
-    fn recrop_acquisitions(&mut self, step: &mut Step<'_>, mut views: Vec<ViewRequest>) -> Result<Vec<ViewRequest>, HandsError> {
-        let fresh: Vec<usize> = (0..views.len()).filter(|&i| views[i].planning_pose_landmarks_world.is_none()).collect();
+    fn recrop_acquisitions(
+        &mut self,
+        step: &mut Step<'_>,
+        mut views: Vec<ViewRequest>,
+    ) -> Result<Vec<ViewRequest>, HandsError> {
+        let fresh: Vec<usize> = (0..views.len())
+            .filter(|&i| views[i].planning_pose_landmarks_world.is_none())
+            .collect();
         if fresh.is_empty() {
             return Ok(views);
         }
@@ -632,10 +766,14 @@ impl Tracker {
         let estimates = self.estimate(step, &subset)?;
         for (estimate, &index) in estimates.iter().zip(&fresh) {
             let presence = f64::from(estimate.presence);
-            if !presence.is_finite() || presence < self.config.presence_threshold || !estimate.points_net.iter().flatten().all(|x| x.is_finite()) {
+            if !presence.is_finite()
+                || presence < self.config.presence_threshold
+                || !estimate.points_net.iter().flatten().all(|x| x.is_finite())
+            {
                 continue;
             }
-            let points_net: [[f64; 2]; NUM_LANDMARKS] = estimate.points_net.map(|p| p.map(f64::from));
+            let points_net: [[f64; 2]; NUM_LANDMARKS] =
+                estimate.points_net.map(|p| p.map(f64::from));
             if let Some(circle) = min_enclosing_circle(&points_net).map(|circle| circle.to_array())
                 && circle.iter().all(|x| x.is_finite())
             {
@@ -648,30 +786,70 @@ impl Tracker {
 
     /// handfit Views of a hand, the inputs rounded to float32 as handfit's Python binding receives them.
     fn fit_views(&self, hand: &HandObservation, world: &Matrix4<f64>) -> Vec<View> {
-        hand.views.iter().map(|view| fit_view(&self.cameras[view.camera], world, &view.keypoints_px, &view.weights, &view.d_rel_mm)).collect()
+        hand.views
+            .iter()
+            .map(|view| {
+                fit_view(
+                    &self.cameras[view.camera],
+                    world,
+                    &view.keypoints_px,
+                    &view.weights,
+                    &view.d_rel_mm,
+                )
+            })
+            .collect()
     }
 
     /// The native fit of each hand: warm from θ(t−1) for a tracked hand, handfit's cold start for an acquisition (handtrack `_fit`).
     /// [`HandsError::Invalid`] when handfit refuses a hand's views (more than two; `max_views` keeps them to two).
-    fn fit_hands(&self, views: &[Vec<View>], hands: &[HandObservation]) -> Result<Vec<FitAnswer>, HandsError> {
-        let config = Config { phi: self.phi, ..self.config.fit.clone() };
+    fn fit_hands(
+        &self,
+        views: &[Vec<View>],
+        hands: &[HandObservation],
+    ) -> Result<Vec<FitAnswer>, HandsError> {
+        let config = Config {
+            phi: self.phi,
+            ..self.config.fit.clone()
+        };
         hands
             .iter()
             .zip(views)
             .map(|(hand, views)| {
                 let result = match self.history[hand.side].previous.as_ref() {
-                    Some(prior) => fit(&self.model, &config, prior, mirror(hand.side), views, JacobianMode::Analytic),
-                    None => initial_pose_parallel(&self.model, &config, mirror(hand.side), views, JacobianMode::Analytic, self.hands.acquire_threads),
+                    Some(prior) => fit(
+                        &self.model,
+                        &config,
+                        prior,
+                        mirror(hand.side),
+                        views,
+                        JacobianMode::Analytic,
+                    ),
+                    None => initial_pose_parallel(
+                        &self.model,
+                        &config,
+                        mirror(hand.side),
+                        views,
+                        JacobianMode::Analytic,
+                        self.hands.acquire_threads,
+                    ),
                 };
                 let result = result.map_err(|e| HandsError::Invalid(format!("hand fit: {e}")))?;
-                Ok(FitAnswer { pose: pose_f32(&result.pose), e_2d: f32_round(result.energies[0]), converged: result.converged })
+                Ok(FitAnswer {
+                    pose: pose_f32(&result.pose),
+                    e_2d: f32_round(result.energies[0]),
+                    converged: result.converged,
+                })
             })
             .collect()
     }
 
     /// KeyNet on every view, the presence rules, the fit of the hands that remain and the acceptance gates (handtrack
     /// `_keypoints_and_fit`).
-    fn keypoints_and_fit(&mut self, step: &mut Step<'_>, mut views: Vec<ViewRequest>) -> Result<(), HandsError> {
+    fn keypoints_and_fit(
+        &mut self,
+        step: &mut Step<'_>,
+        mut views: Vec<ViewRequest>,
+    ) -> Result<(), HandsError> {
         for _ in 0..self.config.acquire_recrop {
             views = self.recrop_acquisitions(step, views)?;
         }
@@ -684,7 +862,10 @@ impl Tracker {
             return Ok(());
         }
         let begin = Instant::now();
-        let fit_views: Vec<Vec<View>> = hands.iter().map(|hand| self.fit_views(hand, world)).collect();
+        let fit_views: Vec<Vec<View>> = hands
+            .iter()
+            .map(|hand| self.fit_views(hand, world))
+            .collect();
         let answers = self.fit_hands(&fit_views, &hands)?;
         step.timings.fit_ms += begin.elapsed().as_secs_f64() * 1e3;
         let headset = world.fixed_view::<3, 1>(0, 3).into_owned();
@@ -692,20 +873,41 @@ impl Tracker {
             let side = hand.side;
             let reach = (answer.pose.translation - headset).norm();
             let acquiring = self.history[side].previous.is_none();
-            let weighted: f64 = hand.views.iter().map(|v| v.weights.iter().sum::<f64>()).sum();
-            let rms = if answer.e_2d.is_finite() { (answer.e_2d / weighted.max(1.0)).sqrt() } else { f64::INFINITY };
-            let relative_limit = self.config.acquire_max_relative_rms * keypoint_spread_px(&hand.views);
+            let weighted: f64 = hand
+                .views
+                .iter()
+                .map(|v| v.weights.iter().sum::<f64>())
+                .sum();
+            let rms = if answer.e_2d.is_finite() {
+                (answer.e_2d / weighted.max(1.0)).sqrt()
+            } else {
+                f64::INFINITY
+            };
+            let relative_limit =
+                self.config.acquire_max_relative_rms * keypoint_spread_px(&hand.views);
             let rejection = if acquiring && rms > self.config.acquire_max_rms_px {
-                Some(ViewOutcome::FitResidual { rms_px: rms as f32, limit_px: self.config.acquire_max_rms_px as f32 })
+                Some(ViewOutcome::FitResidual {
+                    rms_px: rms as f32,
+                    limit_px: self.config.acquire_max_rms_px as f32,
+                })
             } else if acquiring && rms > relative_limit {
-                Some(ViewOutcome::FitResidual { rms_px: rms as f32, limit_px: relative_limit as f32 })
-            } else if (acquiring && !answer.converged) || !pose_finite(&answer.pose) || reach > self.config.max_reach_m {
+                Some(ViewOutcome::FitResidual {
+                    rms_px: rms as f32,
+                    limit_px: relative_limit as f32,
+                })
+            } else if (acquiring && !answer.converged)
+                || !pose_finite(&answer.pose)
+                || reach > self.config.max_reach_m
+            {
                 Some(ViewOutcome::FitFailed)
             } else {
                 None
             };
             if let Some(outcome) = rejection {
-                for view in step.out.keynet_views[side].iter_mut().filter(|v| v.outcome == ViewOutcome::Fitted) {
+                for view in step.out.keynet_views[side]
+                    .iter_mut()
+                    .filter(|v| v.outcome == ViewOutcome::Fitted)
+                {
                     view.outcome = outcome;
                 }
                 self.drop_track(side);
@@ -722,14 +924,21 @@ impl Tracker {
                 continue; // tentative: tracked internally, not reported yet
             }
             step.out.reported[side] = true;
-            step.out.calibration.push(CalibrationBlock { mirror: mirror(side), views, initial: answer.pose });
+            step.out.calibration.push(CalibrationBlock {
+                mirror: mirror(side),
+                views,
+                initial: answer.pose,
+            });
         }
         Ok(())
     }
 
     /// The live calibration's bookkeeping after a frameset; switch to its phi when it finished.
     fn advance_scale(&mut self, t_ns: i64, blocks: Vec<CalibrationBlock>) {
-        if let Some(outcome) = self.scale.advance(t_ns, blocks, self.generic.model(), self.phi) {
+        if let Some(outcome) = self
+            .scale
+            .advance(t_ns, blocks, self.generic.model(), self.phi)
+        {
             self.set_scale(&outcome);
         }
     }
@@ -746,18 +955,35 @@ impl Tracker {
     /// # Errors
     ///
     /// Errors of the perception backends.
-    pub fn track(&mut self, inputs: &HandInputs<'_>, world_from_rig: &Isometry3<f64>, nets: &mut dyn HandNets) -> Result<HandFrameResult, HandsError> {
+    pub fn track(
+        &mut self,
+        inputs: &HandInputs<'_>,
+        world_from_rig: &Isometry3<f64>,
+        nets: &mut dyn HandNets,
+    ) -> Result<HandFrameResult, HandsError> {
         let start = Instant::now();
         let world = world_matrix(world_from_rig);
-        let mut step = Step { nets, inputs, world_from_rig, world, out: FrameOutput::default(), timings: HandTimings::default() };
+        let mut step = Step {
+            nets,
+            inputs,
+            world_from_rig,
+            world,
+            out: FrameOutput::default(),
+            timings: HandTimings::default(),
+        };
         if world.iter().all(|x| x.is_finite()) {
             let available: [bool; NUM_CAMERAS] = std::array::from_fn(|c| inputs.full[c].is_some());
-            let untracked: Vec<usize> = [LEFT, RIGHT].into_iter().filter(|&side| self.history[side].previous.is_none()).collect();
+            let untracked: Vec<usize> = [LEFT, RIGHT]
+                .into_iter()
+                .filter(|&side| self.history[side].previous.is_none())
+                .collect();
             let mut views = Vec::new();
             for side in [LEFT, RIGHT] {
                 if self.history[side].previous.is_some() {
                     let planned = self.plan_tracked(side, &world, &available);
-                    step.out.predicted[side] = planned.first().and_then(|view| view.planning_pose_landmarks_world);
+                    step.out.predicted[side] = planned
+                        .first()
+                        .and_then(|view| view.planning_pose_landmarks_world);
                     views.extend(planned);
                 }
             }
@@ -773,14 +999,24 @@ impl Tracker {
             self.drop_track(LEFT);
             self.drop_track(RIGHT);
         }
-        let Step { mut out, mut timings, .. } = step;
+        let Step {
+            mut out,
+            mut timings,
+            ..
+        } = step;
         let blocks = std::mem::take(&mut out.calibration);
         self.advance_scale(inputs.t_ns, blocks);
         let hands: [HandOutput; 2] = std::array::from_fn(|side| {
             let pose = self.history[side].previous.as_ref();
             let hits = std::mem::take(&mut out.detnet_hits[side]);
             // The hand's strongest accepted detection, ties to the lower camera (for display).
-            let strongest = hits.iter().filter(|hit| hit.accepted).reduce(|best, hit| if hit.probability > best.probability { hit } else { best });
+            let strongest = hits.iter().filter(|hit| hit.accepted).reduce(|best, hit| {
+                if hit.probability > best.probability {
+                    hit
+                } else {
+                    best
+                }
+            });
             HandOutput {
                 tracked: pose.is_some(),
                 reported: out.reported[side],
@@ -807,7 +1043,12 @@ impl Tracker {
 }
 
 impl HandTracking for Tracker {
-    fn step(&mut self, inputs: &HandInputs<'_>, world_from_rig: &Isometry3<f64>, nets: &mut dyn HandNets) -> Result<HandFrameResult, HandsError> {
+    fn step(
+        &mut self,
+        inputs: &HandInputs<'_>,
+        world_from_rig: &Isometry3<f64>,
+        nets: &mut dyn HandNets,
+    ) -> Result<HandFrameResult, HandsError> {
         self.track(inputs, world_from_rig, nets)
     }
 }

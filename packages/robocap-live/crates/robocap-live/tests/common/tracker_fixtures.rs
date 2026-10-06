@@ -11,10 +11,13 @@ use std::sync::{Arc, Mutex};
 
 use handfit::Pose;
 use kornia_image::Image;
-use nalgebra::{Isometry3, Matrix3, Matrix4, Rotation3, SVector, Translation3, UnitQuaternion, Vector3};
+use robocap_live::hands::circles::min_enclosing_circle;
+use nalgebra::{
+    Isometry3, Matrix3, Matrix4, Rotation3, SVector, Translation3, UnitQuaternion, Vector3,
+};
+use robocap_live::frame::isometry_from_matrix;
 use robocap_live::frame::{CameraFrame, Luma, NUM_CAMERAS, Rig};
 use robocap_live::hands::camera::{RigCameraModel, fit_view, in_front, rig_models};
-use robocap_live::hands::circles::min_enclosing_circle;
 use robocap_live::hands::detect::{Detections, detect};
 use robocap_live::hands::estimator::{KeypointEstimate, PerspectiveKeyNet, ViewRequest};
 use robocap_live::hands::heatmaps::{DISTANCE_RANGE_MM, crop_to_heatmap, relative_distances};
@@ -25,9 +28,9 @@ use robocap_live::hands::tracker::Perception;
 use robocap_live::hands::{HandsError, LEFT, RIGHT};
 use robocap_live::nets::golden::f32_values;
 use robocap_live::nets::{
-    CROP_LEN, DISTANCE_BINS, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HEATMAP_SIDE, HandNets, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
+    CROP_LEN, DISTANCE_BINS, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HEATMAP_SIDE, HandNets,
+    KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
 };
-use robocap_live::frame::isometry_from_matrix;
 use serde::Deserialize;
 
 pub type Error = Box<dyn std::error::Error>;
@@ -135,9 +138,18 @@ pub fn golden() -> Result<Golden, Error> {
         || detections.len() != record.frames * NUM_CAMERAS * DETECTION_VALUES
     {
         let (format, frames) = (&record.format, record.frames);
-        return Err(format!("golden {format}: {} estimate and {} detection values for {frames} frames", estimates.len(), detections.len()).into());
+        return Err(format!(
+            "golden {format}: {} estimate and {} detection values for {frames} frames",
+            estimates.len(),
+            detections.len()
+        )
+        .into());
     }
-    Ok(Golden { record, estimates, detections })
+    Ok(Golden {
+        record,
+        estimates,
+        detections,
+    })
 }
 
 impl Golden {
@@ -161,7 +173,10 @@ impl Golden {
     pub fn detection(&self, frame: usize, camera: usize) -> Detections {
         let start = (frame * NUM_CAMERAS + camera) * DETECTION_VALUES;
         let row = &self.detections[start..start + DETECTION_VALUES];
-        Detections { circle_net: [[row[0], row[1], row[2]], [row[3], row[4], row[5]]], probability: [row[6], row[7]] }
+        Detections {
+            circle_net: [[row[0], row[1], row[2]], [row[3], row[4], row[5]]],
+            probability: [row[6], row[7]],
+        }
     }
 
     /// The headset pose of a frame as the runtime hands it over (an isometry), NaN when lost.
@@ -169,7 +184,12 @@ impl Golden {
         self.record.world_from_rig[frame]
             .as_ref()
             .and_then(isometry_from_matrix)
-            .unwrap_or_else(|| Isometry3::from_parts(Translation3::new(f64::NAN, f64::NAN, f64::NAN), UnitQuaternion::identity()))
+            .unwrap_or_else(|| {
+                Isometry3::from_parts(
+                    Translation3::new(f64::NAN, f64::NAN, f64::NAN),
+                    UnitQuaternion::identity(),
+                )
+            })
     }
 
     /// The headset pose of a frame as the 4x4 Python recorded.
@@ -182,13 +202,21 @@ impl Golden {
         let cameras: Vec<RigCameraModel> = rig_models(&self.record.rig)?;
         let mut blocks = Vec::new();
         for hand in &self.record.calibration.hands {
-            let world = self.matrix(hand.frame).ok_or("an observation on a frame without a headset pose")?;
+            let world = self
+                .matrix(hand.frame)
+                .ok_or("an observation on a frame without a headset pose")?;
             let views = hand
                 .views
                 .iter()
                 .map(|view| {
                     let estimate = self.estimate(hand.frame, view.camera, hand.side);
-                    fit_view(&cameras[view.camera], &world, &estimate.points_px.map(|p| p.map(f64::from)), &view.weights, &estimate.d_rel_mm.map(f64::from))
+                    fit_view(
+                        &cameras[view.camera],
+                        &world,
+                        &estimate.points_px.map(|p| p.map(f64::from)),
+                        &view.weights,
+                        &estimate.d_rel_mm.map(f64::from),
+                    )
                 })
                 .collect();
             let initial = Pose {
@@ -196,7 +224,11 @@ impl Golden {
                 translation: Vector3::from_column_slice(&hand.initial.translation),
                 angles: SVector::<f64, 22>::from_column_slice(&hand.initial.joint_angles),
             };
-            blocks.push(CalibrationBlock { mirror: if hand.side == 0 { 1.0 } else { -1.0 }, views, initial });
+            blocks.push(CalibrationBlock {
+                mirror: if hand.side == 0 { 1.0 } else { -1.0 },
+                views,
+                initial,
+            });
         }
         Ok(blocks)
     }
@@ -226,11 +258,23 @@ pub struct TablePerception {
 }
 
 impl Perception for TablePerception {
-    fn detect(&mut self, _nets: &mut dyn HandNets, cameras: &[usize], _small: &[&Luma]) -> Result<Vec<Detections>, HandsError> {
-        let mut log = self.log.lock().map_err(|_| HandsError::Invalid("log poisoned".into()))?;
+    fn detect(
+        &mut self,
+        _nets: &mut dyn HandNets,
+        cameras: &[usize],
+        _small: &[&Luma],
+    ) -> Result<Vec<Detections>, HandsError> {
+        let mut log = self
+            .log
+            .lock()
+            .map_err(|_| HandsError::Invalid("log poisoned".into()))?;
         let frame = log.frame;
-        log.detnet.extend(cameras.iter().map(|&camera| (frame, camera)));
-        Ok(cameras.iter().map(|&camera| self.golden.detection(frame, camera)).collect())
+        log.detnet
+            .extend(cameras.iter().map(|&camera| (frame, camera)));
+        Ok(cameras
+            .iter()
+            .map(|&camera| self.golden.detection(frame, camera))
+            .collect())
     }
 
     fn estimate(
@@ -240,7 +284,10 @@ impl Perception for TablePerception {
         _world_from_rig: &Isometry3<f64>,
         views: &[ViewRequest],
     ) -> Result<(Vec<KeypointEstimate>, f64), HandsError> {
-        let mut log = self.log.lock().map_err(|_| HandsError::Invalid("log poisoned".into()))?;
+        let mut log = self
+            .log
+            .lock()
+            .map_err(|_| HandsError::Invalid("log poisoned".into()))?;
         let frame = log.frame;
         log.keynet.push((
             frame,
@@ -254,7 +301,13 @@ impl Perception for TablePerception {
                 })
                 .collect(),
         ));
-        Ok((views.iter().map(|v| self.golden.estimate(frame, v.camera, v.side)).collect(), 0.0))
+        Ok((
+            views
+                .iter()
+                .map(|v| self.golden.estimate(frame, v.camera, v.side))
+                .collect(),
+            0.0,
+        ))
     }
 
     fn set_phi(&mut self, _phi: f64) {}
@@ -265,10 +318,20 @@ pub struct NoNets;
 
 impl HandNets for NoNets {
     fn detnet(&mut self, _frames: &[NetFrame<'_>]) -> Result<Vec<DetNetRaw>, NetsError> {
-        Err(NetsError::Run { net: "detnet", message: "not with the table perception".into() })
+        Err(NetsError::Run {
+            net: "detnet",
+            message: "not with the table perception".into(),
+        })
     }
-    fn keynet(&mut self, _crops: &[&[f32]], _keypoints: &[[f32; 3 * NUM_LANDMARKS]]) -> Result<Vec<KeyNetRaw>, NetsError> {
-        Err(NetsError::Run { net: "keynet", message: "not with the table perception".into() })
+    fn keynet(
+        &mut self,
+        _crops: &[&[f32]],
+        _keypoints: &[[f32; 3 * NUM_LANDMARKS]],
+    ) -> Result<Vec<KeyNetRaw>, NetsError> {
+        Err(NetsError::Run {
+            net: "keynet",
+            message: "not with the table perception".into(),
+        })
     }
     fn describe(&self) -> String {
         "none".into()
@@ -280,15 +343,31 @@ impl HandNets for NoNets {
 pub fn scene_landmarks(right_hidden: bool) -> Result<[[[f64; 3]; NUM_LANDMARKS]; 2], Error> {
     let generic = GenericHandModel::load()?;
     let truth = generic.scaled(TRUE_PHI);
-    let rotation = |axis: usize, angle: f64| Rotation3::from_axis_angle(&[Vector3::x_axis(), Vector3::y_axis(), Vector3::z_axis()][axis], angle).into_inner();
+    let rotation = |axis: usize, angle: f64| {
+        Rotation3::from_axis_angle(
+            &[Vector3::x_axis(), Vector3::y_axis(), Vector3::z_axis()][axis],
+            angle,
+        )
+        .into_inner()
+    };
     Ok(std::array::from_fn(|side| {
         let sign = if side == LEFT { -1.0 } else { 1.0 };
         let limits = generic.model().limits;
-        let translation = if side == RIGHT && right_hidden { Vector3::new(0.0, 0.0, -1.0) } else { Vector3::new(sign * 0.11, 0.24, 0.30) };
+        let translation = if side == RIGHT && right_hidden {
+            Vector3::new(0.0, 0.0, -1.0)
+        } else {
+            Vector3::new(sign * 0.11, 0.24, 0.30)
+        };
         let pose = Pose {
             rotation: rotation(1, -0.35 * sign) * rotation(0, 1.2),
             translation,
-            angles: SVector::from_fn(|j, _| if j < 20 { limits[(j, 0)] + 0.3 * (limits[(j, 1)] - limits[(j, 0)]) } else { 0.0 }),
+            angles: SVector::from_fn(|j, _| {
+                if j < 20 {
+                    limits[(j, 0)] + 0.3 * (limits[(j, 1)] - limits[(j, 0)])
+                } else {
+                    0.0
+                }
+            }),
         };
         landmarks_world(&truth, &pose, side)
     }))
@@ -300,7 +379,10 @@ fn render_heatmaps(points_crop: &[[f64; 2]; NUM_LANDMARKS]) -> Vec<f32> {
     let side = HEATMAP_SIDE;
     let mut out = vec![0.0f32; HEATMAP_LEN];
     for (landmark, point) in points_crop.iter().enumerate() {
-        let (cx, cy) = (crop_to_heatmap(point[0] as f32), crop_to_heatmap(point[1] as f32));
+        let (cx, cy) = (
+            crop_to_heatmap(point[0] as f32),
+            crop_to_heatmap(point[1] as f32),
+        );
         for y in 0..side {
             let gy = (-((y as f32 - cy).powi(2)) / (2.0 * HEATMAP_SIGMA * HEATMAP_SIGMA)).exp();
             for x in 0..side {
@@ -316,7 +398,8 @@ fn render_heatmaps(points_crop: &[[f64; 2]; NUM_LANDMARKS]) -> Vec<f32> {
 fn render_distance(d_rel_mm: &[f64; NUM_LANDMARKS]) -> Vec<f32> {
     let mut out = vec![0.0f32; DISTANCE_LEN];
     for (landmark, d) in d_rel_mm.iter().enumerate() {
-        let centre = ((*d as f32).clamp(-DISTANCE_RANGE_MM, DISTANCE_RANGE_MM) + DISTANCE_RANGE_MM) * ((DISTANCE_BINS as f32 - 1.0) / (2.0 * DISTANCE_RANGE_MM));
+        let centre = ((*d as f32).clamp(-DISTANCE_RANGE_MM, DISTANCE_RANGE_MM) + DISTANCE_RANGE_MM)
+            * ((DISTANCE_BINS as f32 - 1.0) / (2.0 * DISTANCE_RANGE_MM));
         for bin in 0..DISTANCE_BINS {
             out[landmark * DISTANCE_BINS + bin] = (-0.5 * (bin as f32 - centre).powi(2)).exp();
         }
@@ -340,21 +423,51 @@ pub struct QueuedNets {
 
 impl HandNets for QueuedNets {
     fn detnet(&mut self, frames: &[NetFrame<'_>]) -> Result<Vec<DetNetRaw>, NetsError> {
-        let mut queue = self.queue.lock().map_err(|_| NetsError::Run { net: "detnet", message: "poisoned".into() })?;
+        let mut queue = self.queue.lock().map_err(|_| NetsError::Run {
+            net: "detnet",
+            message: "poisoned".into(),
+        })?;
         if frames.iter().any(|f| f.rows().is_err()) {
-            return Err(NetsError::Input { net: "detnet", message: "not a 640x480 net frame".into() });
+            return Err(NetsError::Input {
+                net: "detnet",
+                message: "not a 640x480 net frame".into(),
+            });
         }
         queue.detnet_calls += frames.len();
-        (0..frames.len()).map(|_| queue.detnet.pop_front().ok_or(NetsError::Run { net: "detnet", message: "nothing queued".into() })).collect()
+        (0..frames.len())
+            .map(|_| {
+                queue.detnet.pop_front().ok_or(NetsError::Run {
+                    net: "detnet",
+                    message: "nothing queued".into(),
+                })
+            })
+            .collect()
     }
 
-    fn keynet(&mut self, crops: &[&[f32]], keypoints: &[[f32; 3 * NUM_LANDMARKS]]) -> Result<Vec<KeyNetRaw>, NetsError> {
-        let mut queue = self.queue.lock().map_err(|_| NetsError::Run { net: "keynet", message: "poisoned".into() })?;
+    fn keynet(
+        &mut self,
+        crops: &[&[f32]],
+        keypoints: &[[f32; 3 * NUM_LANDMARKS]],
+    ) -> Result<Vec<KeyNetRaw>, NetsError> {
+        let mut queue = self.queue.lock().map_err(|_| NetsError::Run {
+            net: "keynet",
+            message: "poisoned".into(),
+        })?;
         if crops.len() != keypoints.len() || crops.iter().any(|c| c.len() != CROP_LEN) {
-            return Err(NetsError::Input { net: "keynet", message: "bad crops".into() });
+            return Err(NetsError::Input {
+                net: "keynet",
+                message: "bad crops".into(),
+            });
         }
         queue.keynet_crops += crops.len();
-        (0..crops.len()).map(|_| queue.keynet.pop_front().ok_or(NetsError::Run { net: "keynet", message: "nothing queued".into() })).collect()
+        (0..crops.len())
+            .map(|_| {
+                queue.keynet.pop_front().ok_or(NetsError::Run {
+                    net: "keynet",
+                    message: "nothing queued".into(),
+                })
+            })
+            .collect()
     }
 
     fn describe(&self) -> String {
@@ -371,13 +484,23 @@ pub struct Truth {
 
 impl Truth {
     pub fn new(rig: &Rig, landmarks: [[[f64; 3]; NUM_LANDMARKS]; 2]) -> Result<Self, Error> {
-        Ok(Self { models: rig_models(rig)?, letterbox: BarLetterbox::robocap(), landmarks })
+        Ok(Self {
+            models: rig_models(rig)?,
+            letterbox: BarLetterbox::robocap(),
+            landmarks,
+        })
     }
 
-    fn points_cam(&self, camera: usize, side: usize, world_from_rig: &Isometry3<f64>) -> [Vector3<f64>; NUM_LANDMARKS] {
+    fn points_cam(
+        &self,
+        camera: usize,
+        side: usize,
+        world_from_rig: &Isometry3<f64>,
+    ) -> [Vector3<f64>; NUM_LANDMARKS] {
         std::array::from_fn(|i| {
             let p = self.landmarks[side][i];
-            self.models[camera].cam_from_world_point(world_from_rig, &Vector3::new(p[0], p[1], p[2]))
+            self.models[camera]
+                .cam_from_world_point(world_from_rig, &Vector3::new(p[0], p[1], p[2]))
         })
     }
 }
@@ -393,7 +516,11 @@ impl RenderedPerception {
     /// Queue DetNet's raw output for `camera`: each hand that shows at least 12 keypoints, as the circle around them.
     fn render_detnet(&self, camera: usize) -> Result<(), HandsError> {
         let world = Isometry3::identity();
-        let mut raw = DetNetRaw { center: [[0.0; 2]; 2], radius: [0.0; 2], presence_logit: [-4.0; 2] };
+        let mut raw = DetNetRaw {
+            center: [[0.0; 2]; 2],
+            radius: [0.0; 2],
+            presence_logit: [-4.0; 2],
+        };
         for side in [LEFT, RIGHT] {
             let points = self.truth.points_cam(camera, side, &world);
             let mut net = Vec::new();
@@ -411,13 +538,22 @@ impl RenderedPerception {
                 raw.presence_logit[side] = 4.0;
             }
         }
-        self.queue.lock().map_err(|_| HandsError::Invalid("poisoned".into()))?.detnet.push_back(raw);
+        self.queue
+            .lock()
+            .map_err(|_| HandsError::Invalid("poisoned".into()))?
+            .detnet
+            .push_back(raw);
         Ok(())
     }
 }
 
 impl Perception for RenderedPerception {
-    fn detect(&mut self, nets: &mut dyn HandNets, cameras: &[usize], small: &[&Luma]) -> Result<Vec<Detections>, HandsError> {
+    fn detect(
+        &mut self,
+        nets: &mut dyn HandNets,
+        cameras: &[usize],
+        small: &[&Luma],
+    ) -> Result<Vec<Detections>, HandsError> {
         for &camera in cameras {
             self.render_detnet(camera)?;
         }
@@ -441,14 +577,21 @@ impl Perception for RenderedPerception {
                 let (p, _) = plan.crop.to_crop(&points[i]);
                 [p.x, p.y]
             });
-            let inside = uv.iter().filter(|p| p.iter().all(|x| (0.0..96.0).contains(x))).count();
+            let inside = uv
+                .iter()
+                .filter(|p| p.iter().all(|x| (0.0..96.0).contains(x)))
+                .count();
             let raw = KeyNetRaw {
                 heatmaps: render_heatmaps(&uv),
                 distance: render_distance(&relative_distances(&points, TRUE_PHI)),
                 presence_logit: if inside >= 15 { 4.0 } else { -4.0 },
                 pinch_logit: Some(-3.0),
             };
-            self.queue.lock().map_err(|_| HandsError::Invalid("poisoned".into()))?.keynet.push_back(raw);
+            self.queue
+                .lock()
+                .map_err(|_| HandsError::Invalid("poisoned".into()))?
+                .keynet
+                .push_back(raw);
         }
         self.estimator.estimate(nets, full, world, requests)
     }
