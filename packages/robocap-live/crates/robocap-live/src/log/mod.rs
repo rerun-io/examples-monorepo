@@ -44,11 +44,17 @@ use preview::{PreviewQueue, PreviewSender};
 pub use sink::LoggerSink;
 use scene::{DeliveredState, RecordState};
 use worker::{FrameItem, SaveSlot, VideoSink, Worker};
-use video::{EncoderConfig, EncoderStats, H264Encoder, VideoError};
+use kornia_staging_io::video::{EncoderConfig, VideoError};
+use video::{EncoderReport, VideoSample};
+use worker::EncoderState;
+use kornia_staging_io::video::H264Encoder;
 
 /// Errors of the logger.
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
+    /// Unknown application encoder preset.
+    #[error("encoder {0:?}: expected mpp, x264 or openh264")]
+    Encoder(String),
     /// The Rerun SDK refused a stream or a component.
     #[error("rerun: {0}")]
     Rerun(#[from] rerun::RecordingStreamError),
@@ -135,7 +141,7 @@ impl Default for LoggerConfig {
             viewer: None,
             save: None,
             video: VideoMode::H264,
-            encoder: EncoderConfig::mpp(SMALL_SIZE, 30, 1_000_000, 30),
+            encoder: video::mpp(SMALL_SIZE, 30, 1_000_000, 30).expect("valid fixed preview geometry"),
             display: None,
             recording_id: None,
             time_origin_ns: None,
@@ -312,7 +318,7 @@ impl Shutdown {
 /// The live logger.
 pub struct Logger {
     input: Option<SyncSender<FrameItem>>,
-    worker: Option<JoinHandle<Result<Vec<EncoderStats>, LogError>>>,
+    worker: Option<JoinHandle<Result<Vec<EncoderReport>, LogError>>>,
     preview: Option<JoinHandle<()>>,
     shutdown: Arc<Shutdown>,
     counters: Arc<LogCounters>,
@@ -403,11 +409,16 @@ impl Logger {
         if let Some(&camera) = options.video_cameras.iter().find(|&&c| c >= NUM_CAMERAS) {
             return Err(LogError::Invalid(format!("video camera {camera}: there are {NUM_CAMERAS} cameras")));
         }
-        let mut encoders: Vec<Option<H264Encoder>> = (0..NUM_CAMERAS).map(|_| None).collect();
+        let mut encoders: Vec<Option<EncoderState>> = (0..NUM_CAMERAS).map(|_| None).collect();
         if options.video == VideoMode::H264 {
             for (camera, slot) in encoders.iter_mut().enumerate().filter(|(camera, _)| options.video_cameras.contains(camera)) {
                 let mut sink = VideoSink { save: save.clone(), preview: preview_queue.clone(), counters: counters.clone(), seq: 0 };
-                *slot = Some(H264Encoder::spawn(camera, &options.encoder, move |sample| sink.send(sample))?);
+                *slot = Some(EncoderState {
+                    encoder: H264Encoder::spawn(&options.encoder, move |sample| sink.send(VideoSample {
+                        camera, t_ns: sample.timestamp_ns, data: sample.unit.data.into(), keyframe: sample.unit.keyframe,
+                    }))?,
+                    cpu_seconds: 0.0,
+                });
             }
         }
 
@@ -496,7 +507,7 @@ impl Logger {
     /// # Errors
     ///
     /// The worker's first error, if it stopped on one.
-    pub fn finish(mut self) -> Result<(LogStats, Vec<EncoderStats>), LogError> {
+    pub fn finish(mut self) -> Result<(LogStats, Vec<EncoderReport>), LogError> {
         let deadline = self.shutdown.deadline();
         drop(self.input.take());
         let encoders = if let Some(worker) = self.worker.take() {
@@ -530,6 +541,6 @@ impl Drop for Logger {
 }
 
 /// Encoder per-camera CPU, as a share of one core over the encoder's life (for reports).
-pub fn encoder_cpu_percent(stats: &EncoderStats) -> f64 {
-    if stats.wall_seconds > 0.0 { 100.0 * stats.cpu_seconds / stats.wall_seconds } else { 0.0 }
+pub fn encoder_cpu_percent(stats: &EncoderReport) -> f64 {
+    if stats.stats.wall_seconds > 0.0 { 100.0 * stats.cpu_seconds / stats.stats.wall_seconds } else { 0.0 }
 }

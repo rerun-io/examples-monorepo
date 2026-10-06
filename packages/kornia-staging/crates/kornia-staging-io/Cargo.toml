@@ -8,6 +8,7 @@ publish.workspace = true
 [features]
 default = []
 v4l = ["dep:libc"]
+encoder = ["dep:libc"]
 
 [lints]
 workspace = true
@@ -18,3 +19,6 @@ thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+kornia-tensor.workspace = true

@@ -26,7 +26,7 @@ use robocap_live::frame::{
     SMALL_SIZE, write_small_dump,
 };
 use robocap_live::hands::{HandFrameResult, HandOutput};
-use robocap_live::log::video::{EncoderConfig, EncoderKind};
+use robocap_live::log::video::{EncoderKind, encoder_config};
 use robocap_live::log::{FrameLog, Logger, LoggerConfig, VideoMode};
 use robocap_live::sched::FrameTimings;
 use serde::Deserialize;
@@ -251,7 +251,7 @@ fn main() -> Result<(), Error> {
         viewer: args.viewer.clone(),
         save: args.save.clone(),
         video: args.video,
-        encoder: EncoderConfig::for_kind(args.encoder, SMALL_SIZE, 30, args.bps, 30),
+        encoder: encoder_config(args.encoder, SMALL_SIZE, 30, args.bps, 30)?,
         display: args.display.clone(),
         video_cameras: args.video_cameras.clone(),
         preview_flush: Duration::from_millis(args.flush_ms),
@@ -358,9 +358,9 @@ fn main() -> Result<(), Error> {
         for (camera, e) in encoders.iter().enumerate() {
             println!(
                 "encoder {camera}: {} in, {} out, {:.2} Mbit/s, CPU {:.1}% of a core",
-                e.frames_in,
-                e.samples_out,
-                e.bytes_out as f64 * 8.0 / e.wall_seconds.max(1e-9) / 1e6,
+                e.stats.frames_in,
+                e.stats.samples_out,
+                e.stats.bytes_out as f64 * 8.0 / e.stats.wall_seconds.max(1e-9) / 1e6,
                 robocap_live::log::encoder_cpu_percent(e)
             );
         }

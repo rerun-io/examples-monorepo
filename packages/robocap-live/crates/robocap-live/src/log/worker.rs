@@ -13,7 +13,8 @@ use rerun::RecordingStream;
 use super::{LogCounters, LogError, Shutdown, VideoMode, free_bytes, scene};
 use super::preview::{PreviewItem, PreviewQueue};
 use super::scene::{DeliveredState, RecordState, SceneSnapshot};
-use super::video::{EncodedSample, EncoderStats, H264Encoder};
+use super::video::{VideoSample, EncoderReport, process_cpu_seconds};
+use kornia_staging_io::video::H264Encoder;
 use crate::sched::FrameTimings;
 use crate::frame::{Luma, NUM_CAMERAS};
 use crate::hands::HandFrameResult;
@@ -50,9 +51,9 @@ pub(super) struct VideoSink {
 }
 
 impl VideoSink {
-    pub(super) fn send(&mut self, sample: EncodedSample) {
+    pub(super) fn send(&mut self, sample: VideoSample) {
         LogCounters::add(&self.counters.video_samples, 1);
-        LogCounters::add(&self.counters.video_bytes, sample.unit.data.len() as u64);
+        LogCounters::add(&self.counters.video_bytes, sample.data.len() as u64);
         with_save(&self.save, |save| log_video_sample(save, &sample));
         let Some(queue) = &self.preview else { return };
         queue.offer(PreviewItem::Video { seq: self.seq, sample });
@@ -60,10 +61,10 @@ impl VideoSink {
     }
 }
 
-pub(super) fn log_video_sample(rec: &RecordingStream, sample: &EncodedSample) {
+pub(super) fn log_video_sample(rec: &RecordingStream, sample: &VideoSample) {
     rec.set_time(scene::TIMELINE, rerun::TimeCell::from_duration_nanos(sample.t_ns));
     // A clone of the shared blob: no bytes are copied (the save stream and the preview log the same buffer).
-    let video = rerun::VideoStream::update_fields().with_sample(sample.unit.data.clone()).with_is_keyframe(sample.unit.keyframe);
+    let video = rerun::VideoStream::update_fields().with_sample(sample.data.clone()).with_is_keyframe(sample.keyframe);
     // Serialisation of a byte blob cannot fail in practice; a failure is dropped with the sample.
     let _ = rec.log(scene::video_path(sample.camera), &video);
 }
@@ -88,12 +89,17 @@ pub(super) fn luma_blob(luma: &Luma) -> rerun::datatypes::Blob {
     buffer.into()
 }
 
+pub(super) struct EncoderState {
+    pub(super) encoder: H264Encoder,
+    pub(super) cpu_seconds: f64,
+}
+
 pub(super) struct Worker {
     pub(super) shutdown: Arc<Shutdown>,
     pub(super) finalizer: Option<JoinHandle<Result<(), LogError>>>,
     pub(super) video: VideoMode,
     pub(super) video_cameras: Vec<usize>,
-    pub(super) encoders: Vec<Option<H264Encoder>>,
+    pub(super) encoders: Vec<Option<EncoderState>>,
     pub(super) save: SaveSlot,
     pub(super) save_path: Option<PathBuf>,
     pub(super) save_min_free_bytes: u64,
@@ -111,7 +117,7 @@ pub(super) struct Worker {
 const FPS_WINDOW: usize = 30;
 
 impl Worker {
-    pub(super) fn run(mut self, rx: Receiver<FrameItem>) -> Result<Vec<EncoderStats>, LogError> {
+    pub(super) fn run(mut self, rx: Receiver<FrameItem>) -> Result<Vec<EncoderReport>, LogError> {
         while let Ok(item) = rx.recv() {
             let start = Instant::now();
             self.frameset(item)?;
@@ -124,13 +130,19 @@ impl Worker {
         let deadline = self.shutdown.deadline();
         // Closing all inputs first lets all cameras flush concurrently, under the same deadline.
         for encoder in self.encoders.iter_mut().flatten() {
-            encoder.close_input();
+            if let Some(seconds) = process_cpu_seconds(encoder.encoder.process_id()) {
+                encoder.cpu_seconds = seconds;
+            }
+            encoder.encoder.close_input();
         }
         let mut stats = Vec::new();
         for (camera, encoder) in self.encoders.drain(..).enumerate() {
             if let Some(encoder) = encoder {
-                match encoder.finish_until(deadline) {
-                    Ok(s) => stats.push(s),
+                let mut cpu_seconds = encoder.cpu_seconds;
+                match encoder.encoder.finish(deadline, |pid| {
+                    if let Some(seconds) = process_cpu_seconds(pid) { cpu_seconds = seconds; }
+                }) {
+                    Ok(stats_) => stats.push(EncoderReport { stats: stats_, cpu_seconds }),
                     Err(error) => self.counters.error(&format!("encoder {camera} finish"), &error),
                 }
             }
@@ -158,10 +170,16 @@ impl Worker {
             VideoMode::H264 => {
                 for (camera, image) in item.small.iter().enumerate() {
                     let (Some(image), Some(encoder)) = (image, self.encoders[camera].as_mut()) else { continue };
-                    if let Err(error) = encoder.push(item.t_ns, image) {
+                    if let Err(error) = encoder.encoder.push(item.t_ns, image) {
                         // A failed encoder stops its camera's video; the rest of the logging goes on.
                         self.counters.error(&format!("camera {camera} encoder"), &error);
                         self.encoders[camera] = None;
+                    } else {
+                        if encoder.encoder.frames_in() % 30 == 0
+                            && let Some(seconds) = process_cpu_seconds(encoder.encoder.process_id())
+                            {
+                                encoder.cpu_seconds = seconds;
+                            }
                     }
                 }
             }

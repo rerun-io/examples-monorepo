@@ -12,7 +12,7 @@ use nalgebra::Isometry3;
 
 use super::*;
 use super::preview::{KeyGate, PreviewItem};
-use super::video::{AccessUnit, EncodedSample};
+use super::video::VideoSample;
 use crate::sched::FrameTimings;
 use crate::frame::{CAMERA_NAMES, RigCamera};
 use crate::hands::perspective::CropCamera;
@@ -91,9 +91,9 @@ fn detected(hand: &mut HandOutput, camera: usize) {
 fn host_encoder() -> Option<EncoderConfig> {
     let has = |program: &str, args: &[&str]| Command::new(program).args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if has("gst-inspect-1.0", &["openh264enc"]) {
-        Some(EncoderConfig::openh264(SMALL_SIZE, 30, 1_000_000, 10))
+        video::openh264(SMALL_SIZE, 30, 1_000_000, 10).ok()
     } else if has("ffmpeg", &["-hide_banner", "-h", "encoder=libx264"]) {
-        Some(EncoderConfig::x264(SMALL_SIZE, 30, 1_000_000, 10))
+        video::x264(SMALL_SIZE, 30, 1_000_000, 10).ok()
     } else {
         None
     }
@@ -258,7 +258,7 @@ fn debug_overlays_save_keynet_dots_with_simplecvs_confidence_components_and_crop
 fn a_saved_recording_holds_scene_video_pose_trajectory_hands_and_timings() -> Result<(), LogError> {
     let (video, encoder) = match host_encoder() {
         Some(encoder) => (VideoMode::H264, encoder),
-        None => (VideoMode::Raw, EncoderConfig::mpp(SMALL_SIZE, 30, 1_000_000, 30)),
+        None => (VideoMode::Raw, video::mpp(SMALL_SIZE, 30, 1_000_000, 30)?),
     };
     let dir = temp_dir("save");
     let save = dir.join("out.rrd");
@@ -351,13 +351,13 @@ fn a_gap_in_a_cameras_preview_samples_withholds_them_until_its_next_keyframe() {
     let mut readers: Vec<VideoSink> =
         (0..2).map(|_| VideoSink { save: Arc::new(Mutex::new(None)), preview: Some(queue.clone()), counters: counters.clone(), seq: 0 }).collect();
     let mut send = |camera: usize, keyframe: bool| {
-        readers[camera].send(EncodedSample { camera, t_ns: 0, unit: AccessUnit { data: vec![0u8; 16].into(), keyframe } });
+        readers[camera].send(VideoSample { camera, t_ns: 0, data: vec![0u8; 16].into(), keyframe });
     };
     // The sender takes what is queued; the samples that reach the viewer, as (camera, seq).
     let deliver = |gate: &mut KeyGate| -> Vec<(usize, u64)> {
         rx.try_iter()
             .filter_map(|item| match item {
-                PreviewItem::Video { seq, sample } => gate.admit(sample.camera, seq, sample.unit.keyframe).then_some((sample.camera, seq)),
+                PreviewItem::Video { seq, sample } => gate.admit(sample.camera, seq, sample.keyframe).then_some((sample.camera, seq)),
                 _ => None,
             })
             .collect()
@@ -586,7 +586,7 @@ fn logged_images_and_video_samples_reach_rerun_without_a_copy() -> Result<(), Bo
     drop(image);
     assert_eq!(Arc::strong_count(&luma), 1, "the buffer releases the image when Rerun drops it");
     // An access unit: the save stream's and the preview's samples share the splitter's allocation.
-    let unit = AccessUnit { data: vec![7u8; 4096].into(), keyframe: true };
+    let unit = VideoSample { camera: 0, t_ns: 0, data: vec![7u8; 4096].into(), keyframe: true };
     let shared: *const u8 = unit.data.as_ptr();
     for _sink in ["save", "preview"] {
         let video = rerun::VideoStream::update_fields().with_sample(unit.data.clone()).with_is_keyframe(unit.keyframe);

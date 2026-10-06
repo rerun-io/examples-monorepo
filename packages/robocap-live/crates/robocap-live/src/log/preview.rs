@@ -12,14 +12,14 @@ use rerun::sink::{GrpcSinkConnectionState, LogSink};
 use super::{LogCounters, LogError, Prelude, Shutdown, scene};
 use super::display::APPLICATION_ID;
 use super::scene::{DeliveredState, SceneSnapshot};
-use super::video::EncodedSample;
+use super::video::VideoSample;
 use super::worker::{log_image, log_video_sample};
 use crate::frame::{Luma, NUM_CAMERAS};
 
 /// What travels to the preview sender.
 pub(super) enum PreviewItem {
     /// An access unit; `seq` numbers the camera's samples from 0, so the sender sees one the queue dropped.
-    Video { seq: u64, sample: EncodedSample },
+    Video { seq: u64, sample: VideoSample },
     Image { camera: usize, t_ns: i64, luma: Luma },
     Frame(Arc<SceneSnapshot>),
 }
@@ -183,11 +183,11 @@ impl PreviewSender {
             let Some((rec, _)) = &connection else { continue };
             let result = match &item {
                 PreviewItem::Video { seq, sample } => {
-                    if !gate.admit(sample.camera, *seq, sample.unit.keyframe) {
+                    if !gate.admit(sample.camera, *seq, sample.keyframe) {
                         LogCounters::add(&self.counters.preview_gated, 1);
                         continue;
                     }
-                    LogCounters::add(&self.counters.preview_payload_bytes, sample.unit.data.len() as u64);
+                    LogCounters::add(&self.counters.preview_payload_bytes, sample.data.len() as u64);
                     log_video_sample(rec, sample);
                     Ok(())
                 }

@@ -20,7 +20,7 @@ use clap::{Parser, ValueEnum};
 use robocap_live::capture::Cap;
 use robocap_live::frame::{NUM_CAMERAS, SMALL_SIZE};
 use robocap_live::hands::{self, HandsConfig, ScaleMode};
-use robocap_live::log::video::{EncoderConfig, EncoderKind};
+use robocap_live::log::video::{EncoderKind, encoder_config};
 use robocap_live::log::{Logger, LoggerConfig, LoggerSink, VideoMode};
 use robocap_live::nets::{HandNets, NetsError, NoNets};
 use robocap_live::sched::{self, FramesetSink, HandsStage, PipelineConfig, RecordWriter};
@@ -509,7 +509,7 @@ fn main() -> Result<()> {
         sinks.push(Box::new(RecordWriter::create(path)?));
     }
     if cli.viewer.is_some() || cli.save.is_some() {
-        let encoder = EncoderConfig::for_kind(cli.encoder, SMALL_SIZE, 30, cli.video_bps, 30);
+        let encoder = encoder_config(cli.encoder, SMALL_SIZE, 30, cli.video_bps, 30)?;
         let Cameras(video_cameras) = cli.video_cameras.clone();
         let options = LoggerConfig {
             viewer: cli.viewer.clone(),

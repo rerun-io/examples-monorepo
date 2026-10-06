@@ -31,7 +31,6 @@ Module paths mirror the destination module paths.
 | kornia-staging-3d | kornia-rs / kornia-3d |
 | kornia-staging-algebra | kornia-rs / kornia-algebra |
 | kornia-staging-io | kornia-rs / kornia-io |
-| kornia-staging-sensors | kornia-slam / kornia-sensors |
 | kornia-staging-slam | kornia-slam |
 | kornia-staging-sensor-iio | sensor-rt / proposed sensor-iio |
 | kornia-staging-gpu | proposed kornia-gpu |
@@ -98,3 +97,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Brown8 GPU projection and robust damped inverse with CPU validity rules | slam-rs `gpu/kernels/onewait.rs`; staged CPU camera | proposed kornia-gpu / `camera` | staged | - |
 | IIO scan decoder and configurable Linux RAII buffer owner | robocap-recorder `iio.rs`, `device.rs`; robocap-live `capture/iio.rs`, `capture/device.rs` | sensor-rt / sensor-iio | staged | - |
 | Rust MPLANE capture (no C), clock flags, leased MMAP planes and copied/borrowed luma | robocap-live `capture/camera.rs`, `v4l2_mplane.c`; robocap-recorder `camera.rs`, `native/camera.c` (C cores ported to Rust) | kornia-rs / kornia-io / v4l::mplane | staged | - |
+| Annex-B splitter and subprocess H.264 encoder | robocap-live log/video.rs | kornia-rs / kornia-io::video | staged; upstream fit open: overlaps kornia_io gstreamer::VideoWriter; Pablo decides at landing (D6) | - |
