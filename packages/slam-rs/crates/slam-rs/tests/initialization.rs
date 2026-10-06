@@ -1,13 +1,13 @@
 //! A world needs metric stereo structure before it can publish a state.
 #![allow(clippy::unwrap_used)]
 
+use kornia_staging_algebra::Scalar;
 use std::sync::Arc;
 
 use nalgebra::{Matrix2x4, Vector2, Vector3, Vector4};
 use slam_rs::camera::SlamCamera;
 use slam_rs::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
 use slam_rs::imu::ImuSample;
-use slam_rs::lie::LieScalar;
 use slam_rs::types::KeypointId;
 use slam_rs::{Backend, ImageView, Vio, VioStatus};
 
@@ -44,7 +44,7 @@ fn nine_landmarks_wait_and_ten_start_with_fresh_imu_and_prior() {
     check_threshold::<f64>();
 }
 
-fn check_threshold<S: LieScalar>() {
+fn check_threshold<S: Scalar>() {
     let make = || {
         SqrtKeypointVio::<S>::with_default_gravity(common::calibration().cast(), common::config())
             .unwrap()

@@ -9,13 +9,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_staging_algebra::Scalar;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use slam_rs::calib::Calibration;
 use slam_rs::frontend::flow::FrontendOptions;
-use slam_rs::lie::LieScalar;
 use slam_rs::{ImageView, Vio, VioResult, VioStatus};
 
 mod common;
@@ -49,7 +49,7 @@ fn read_imu(path: &Path) -> Vec<ImuRow> {
 
 /// Replay one scalar lane and write trajectory and optional per-frame decisions.
 /// IMU input may be preloaded or delivered per frame to check arrival-order independence.
-fn replay<S: LieScalar>(
+fn replay<S: Scalar>(
     clip: &Clip,
     directory: &Path,
     imu: &[ImuRow],

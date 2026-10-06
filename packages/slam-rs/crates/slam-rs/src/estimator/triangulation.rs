@@ -1,15 +1,16 @@
 //! Initialize landmarks from unconnected observations in the window.
 
+use kornia_staging_algebra::Scalar;
 use super::{EstimatorError, FlowObservations, SqrtKeypointVio, cast_pixel};
 use crate::ba_base::triangulate;
 use crate::camera::SlamCamera;
 use crate::landmark::{Landmark, StereographicParam};
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{Se3};
 use crate::types::{KeypointId, LandmarkId, TimeCamId};
 use nalgebra::{Vector2, Vector3, Vector4};
 use std::collections::{BTreeMap, BTreeSet};
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// Triangulate unconnected observations into landmarks hosted by this frameset.
     ///
     /// Gather all observations of each id in the live window and try second views

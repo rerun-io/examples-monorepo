@@ -1,22 +1,24 @@
 //! IMU integration, prediction, bias Jacobians and covariance whitening.
 
+use kornia_staging_algebra::Scalar;
+use kornia_staging_algebra::lie::{left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3};
 use super::{Matrix9, Matrix9x3, Matrix9x6};
 use crate::calib::Calibration;
 use kornia_staging_algebra::linalg::ldlt::ldlt_in_place;
 use crate::lie::{
-    LieScalar, So3, c, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3,
+    So3, c,
 };
 use crate::types::{POSE_VEL_SIZE, PoseVelState, Vector9};
 use nalgebra::{Matrix3, Vector3};
 
 /// A `Vector3<f64>` in the measurement's scalar type.
 #[inline]
-fn cast3<S: LieScalar>(v: &Vector3<f64>) -> Vector3<S> {
+fn cast3<S: Scalar>(v: &Vector3<f64>) -> Vector3<S> {
     Vector3::new(c::<S>(v.x), c::<S>(v.y), c::<S>(v.z))
 }
 
 /// Gravity in the world frame.
-pub fn gravity<S: LieScalar>() -> Vector3<S> {
+pub fn gravity<S: Scalar>() -> Vector3<S> {
     Vector3::new(S::zero(), S::zero(), c::<S>(-9.81))
 }
 
@@ -36,14 +38,14 @@ pub struct ImuSample {
 /// Diagonal noise covariances: square continuous-time densities after multiplying
 /// by `sqrt(imu_update_rate)` to obtain discrete-time densities.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImuNoise<S: LieScalar> {
+pub struct ImuNoise<S: Scalar> {
     /// Diagonal of the accelerometer noise covariance.
     pub accel_cov: Vector3<S>,
     /// Diagonal of the gyroscope noise covariance.
     pub gyro_cov: Vector3<S>,
 }
 
-impl<S: LieScalar> ImuNoise<S> {
+impl<S: Scalar> ImuNoise<S> {
     /// The noise the estimator builds from a calibration
     pub fn from_calibration(calib: &Calibration<S>) -> Self {
         Self {
@@ -107,7 +109,7 @@ pub enum ImuError {
 /// The three Jacobians of one propagation step
 /// (`F`, `A` and `G` at ).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PropagationJacobians<S: LieScalar> {
+pub struct PropagationJacobians<S: Scalar> {
     /// `F = ∂next/∂curr`, Paper 1 Eq. (13)'s `J_f^s`.
     pub d_next_d_curr: Matrix9<S>,
     /// `A = ∂next/∂accel`, Paper 1 Eq. (13)'s `J_f^a`.
@@ -118,7 +120,7 @@ pub struct PropagationJacobians<S: LieScalar> {
 
 /// The residual's Jacobians.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImuResidualJacobians<S: LieScalar> {
+pub struct ImuResidualJacobians<S: Scalar> {
     /// `∂r/∂state0`.
     pub d_res_d_state0: Matrix9<S>,
     /// `∂r/∂state1`.
@@ -131,7 +133,7 @@ pub struct ImuResidualJacobians<S: LieScalar> {
 /// A pseudo-measurement from consecutive IMU samples.
 /// Delta time is elapsed nanoseconds from [`Self::get_start_t_ns`], not absolute time.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct IntegratedImuMeasurement<S: LieScalar> {
+pub struct IntegratedImuMeasurement<S: Scalar> {
     start_t_ns: i64,
     delta_state: PoseVelState<S>,
     cov: Matrix9<S>,
@@ -141,7 +143,7 @@ pub struct IntegratedImuMeasurement<S: LieScalar> {
     bias_accel_lin: Vector3<S>,
 }
 
-impl<S: LieScalar> Default for IntegratedImuMeasurement<S> {
+impl<S: Scalar> Default for IntegratedImuMeasurement<S> {
     /// everything zero, start time zero.
     fn default() -> Self {
         Self::new(0, &Vector3::zeros(), &Vector3::zeros())
@@ -152,7 +154,7 @@ impl<S: LieScalar> Default for IntegratedImuMeasurement<S> {
 /// accel)`, the shape `accumulate_to` carries its pending sample in.
 pub type Popped<S> = (i64, Vector3<S>, Vector3<S>);
 
-impl<S: LieScalar> IntegratedImuMeasurement<S> {
+impl<S: Scalar> IntegratedImuMeasurement<S> {
     /// An empty measurement starting at `start_t_ns`, linearized about the two
     /// biases.
     pub fn new(start_t_ns: i64, bias_gyro: &Vector3<S>, bias_accel: &Vector3<S>) -> Self {
@@ -610,7 +612,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         // rank-deficient covariance actually produces, see [`ldlt_in_place`] —
         // zeroes its row rather than taking the square root of a negative.
         for i in 0..POSE_VEL_SIZE {
-            let scale: S = if mat[(i, i)] < S::min_positive() {
+            let scale: S = if mat[(i, i)] < S::MIN_POSITIVE_NORMAL {
                 S::zero()
             } else {
                 S::one() / mat[(i, i)].sqrt()
@@ -639,7 +641,7 @@ static ANTIPARALLEL_WARNING: std::sync::Once = std::sync::Once::new();
 /// observable. Near antiparallel inputs use a cross-product axis orthogonal
 /// to both directions; for exactly antiparallel inputs an arbitrary orthogonal
 /// axis resolves the unobservable yaw. Zero and non-finite samples return identity.
-pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
+pub fn gravity_from_first_accel<S: Scalar>(accel: &Vector3<S>) -> So3<S> {
     let norm: S = accel.norm();
     if !norm.is_finite() || norm <= S::zero() {
         return So3::identity();
@@ -648,7 +650,7 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     let v1: Vector3<S> = Vector3::new(S::zero(), S::zero(), S::one());
     let dot: S = v1.dot(&v0); // `:695`
 
-    if dot < c::<S>(-1.0) + S::eigen_dummy_precision() {
+    if dot < c::<S>(-1.0) + eigen_dummy_precision::<S>() {
         // Report this ambiguous initial orientation once per process.
         ANTIPARALLEL_WARNING.call_once(|| {
             log::warn!(
@@ -685,7 +687,7 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
 
 /// A unit vector orthogonal to both inputs, using their cross product.
 /// For parallel inputs, project the least-aligned canonical axis off v1.
-fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Vector3<S> {
+fn axis_orthogonal_to_both<S: Scalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Vector3<S> {
     let cross: Vector3<S> = v0.cross(v1);
     let norm: S = cross.norm();
     if norm > S::zero() {
@@ -705,6 +707,11 @@ fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Ve
     } else {
         basis
     }
+}
+
+
+fn eigen_dummy_precision<S: Scalar>() -> S {
+    S::from_literal(if std::mem::size_of::<S>() == 4 { 1e-5 } else { 1e-12 })
 }
 
 #[cfg(test)]

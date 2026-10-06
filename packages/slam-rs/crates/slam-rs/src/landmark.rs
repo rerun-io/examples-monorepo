@@ -7,23 +7,24 @@
 //! an id-sorted vector with an id-to-index map, supporting contiguous access.
 //! Insertion and removal rebuild index entries affected by the shift.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use nalgebra::{Matrix2x4, Matrix4x2, Vector2, Vector4};
 
-use crate::lie::{LieScalar, c};
+use crate::lie::{c};
 use crate::types::{FrameId, LandmarkId, TimeCamId};
 
 /// Two-parameter stereographic chart on the unit sphere.
 /// It is smooth and bijective except at the projection point, permitting additive
 /// direction increments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct StereographicParam<S: LieScalar> {
+pub struct StereographicParam<S: Scalar> {
     _scalar: PhantomData<S>,
 }
 
-impl<S: LieScalar> StereographicParam<S> {
+impl<S: Scalar> StereographicParam<S> {
     /// Project as `[x, y] / (z + |p|)`, ignoring the homogeneous fourth component.
     #[inline]
     pub fn project(p3d: &Vector4<S>) -> Vector2<S> {
@@ -122,7 +123,7 @@ impl<S: LieScalar> StereographicParam<S> {
 
 /// One landmark: three optimised parameters, a host image, and its observations
 #[derive(Debug, Clone, PartialEq)]
-pub struct Landmark<S: LieScalar> {
+pub struct Landmark<S: Scalar> {
     /// Stereographic direction in the host camera frame, `direction`.
     pub direction: Vector2<S>,
     /// Inverse distance along that direction, `inv_dist`. Never negative: the
@@ -138,7 +139,7 @@ pub struct Landmark<S: LieScalar> {
     backup_inv_dist: S,
 }
 
-impl<S: LieScalar> Landmark<S> {
+impl<S: Scalar> Landmark<S> {
     /// A landmark with no observations yet.
     ///
     /// The four fields here are exactly the four `addLandmark` copies
@@ -188,20 +189,20 @@ const MIN_NUM_OBS: usize = 2;
 /// own `obs` maps — an empty target set drops the target, an empty target map
 /// drops the host.
 #[derive(Debug, Clone)]
-pub struct LandmarkDatabase<S: LieScalar> {
+pub struct LandmarkDatabase<S: Scalar> {
     /// Sorted by `LandmarkId`; `index` maps an id to a position here.
     kpts: Vec<Landmark<S>>,
     index: BTreeMap<LandmarkId, usize>,
     observations: BTreeMap<TimeCamId, BTreeMap<TimeCamId, BTreeSet<LandmarkId>>>,
 }
 
-impl<S: LieScalar> Default for LandmarkDatabase<S> {
+impl<S: Scalar> Default for LandmarkDatabase<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: LieScalar> LandmarkDatabase<S> {
+impl<S: Scalar> LandmarkDatabase<S> {
     /// An empty database.
     pub fn new() -> Self {
         Self {
@@ -498,7 +499,7 @@ fn detach_one(
 }
 
 /// The same for every target of one landmark, `removeLandmarkHelper`
-fn detach_landmark<S: LieScalar>(
+fn detach_landmark<S: Scalar>(
     observations: &mut BTreeMap<TimeCamId, BTreeMap<TimeCamId, BTreeSet<LandmarkId>>>,
     host: TimeCamId,
     obs: &BTreeMap<TimeCamId, Vector2<S>>,

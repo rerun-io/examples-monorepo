@@ -11,6 +11,7 @@
 //! Jacobian in per-thread GPU storage. Residual sampling warps one tap at a time,
 //! avoiding a transient transformed-pattern matrix.
 
+use kornia_staging_algebra::Scalar;
 use std::marker::PhantomData;
 
 use nalgebra::{Matrix3, Vector2, Vector3};
@@ -19,7 +20,6 @@ use crate::frontend::ldlt::ldlt_inverse3;
 use crate::frontend::patterns::{MAX_PATTERN_SIZE, Pattern};
 use crate::frontend::se2::AffineCompact2;
 use crate::image::ImageU16;
-use crate::lie::LieScalar;
 
 use crate::frontend::simd::F32x4;
 
@@ -112,7 +112,7 @@ pub const PATCH_BORDER: f32 = 2.0;
 
 /// A patch sampling source. Tests can supply analytic functions in place of images.
 /// Static dispatch avoids per-tap virtual calls.
-pub trait PatchSource<S: LieScalar> {
+pub trait PatchSource<S: Scalar> {
     /// `img.InBounds(p, border)`.
     fn in_bounds(&self, x: S, y: S, border: S) -> bool;
 
@@ -153,7 +153,7 @@ impl PatchSource<f32> for ImageU16 {
 /// # Panics
 /// If either array is too short for the pattern and strides.
 #[allow(clippy::too_many_arguments)]
-pub fn set_data_jac_se2<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
+pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
     source: &Src,
     pos: &Vector2<S>,
     data: &mut [S],
@@ -552,7 +552,7 @@ mod tests {
     /// # Panics
     /// If `data` is shorter than `P::SIZE`.
     #[allow(clippy::needless_range_loop)]
-    fn set_data<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
+    fn set_data<P: Pattern, S: Scalar, Src: PatchSource<S>>(
         source: &Src,
         pos: &Vector2<S>,
         se2: Option<&AffineCompact2<S>>,

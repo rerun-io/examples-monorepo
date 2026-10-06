@@ -15,6 +15,7 @@
 //! Error accumulation uses a fixed-order fold over host-frame partial results
 //! (decision D31). This keeps the floating-point sum deterministic.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::BTreeMap;
 
 use nalgebra::{
@@ -27,7 +28,7 @@ use crate::calib::Calibration;
 use crate::camera::{SlamCamera, CameraError};
 use crate::frontend::parallel::WorkPool;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
-use crate::lie::{LieScalar, Se3, So3, c};
+use crate::lie::{Se3, So3, c};
 use crate::types::{
     AbsOrderMap, CamId, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE,
     PoseStateWithLin, PoseVelBiasStateWithLin, TimeCamId,
@@ -100,7 +101,7 @@ pub enum BaError {
 ///
 /// The composition is decoupled: rotation is a product, while translation is
 /// `R_t^-1 (t_h - t_t)`. Its Jacobians use the decoupled, left-multiplied increment.
-pub fn compute_rel_pose<S: LieScalar>(
+pub fn compute_rel_pose<S: Scalar>(
     t_w_i_h: &Se3<S>,
     t_i_c_h: &Se3<S>,
     t_w_i_t: &Se3<S>,
@@ -147,7 +148,7 @@ pub fn compute_rel_pose<S: LieScalar>(
 /// Borrowed fixed-size matrices let callers request only the outputs they need
 /// without allocation.
 #[derive(Debug)]
-pub struct LinearizePointOut<'a, S: LieScalar> {
+pub struct LinearizePointOut<'a, S: Scalar> {
     /// `d_res_d_xi` (2x6): the residual against the relative-pose increment.
     pub d_res_d_xi: Option<&'a mut Matrix2x6<S>>,
     /// `d_res_d_p` (2x3): the residual against `[direction(2), inv_dist]`.
@@ -156,7 +157,7 @@ pub struct LinearizePointOut<'a, S: LieScalar> {
     pub proj: Option<&'a mut Vector4<S>>,
 }
 
-impl<S: LieScalar> Default for LinearizePointOut<'_, S> {
+impl<S: Scalar> Default for LinearizePointOut<'_, S> {
     /// Request only the residual.
     fn default() -> Self {
         Self {
@@ -173,7 +174,7 @@ impl<S: LieScalar> Default for LinearizePointOut<'_, S> {
 /// `[unproject(direction), inv_dist]`. See the module docs for the sign convention.
 /// Returns `false` if the camera rejects the point or the pixel is non-finite.
 /// In that case the caller must ignore `res`, which may still have been written.
-pub fn linearize_point<S: LieScalar>(
+pub fn linearize_point<S: Scalar>(
     kpt_obs: &Vector2<S>,
     kpt_pos: &Landmark<S>,
     t_t_h: &Matrix4<S>,
@@ -255,7 +256,7 @@ const SVD_MAX_ITERATIONS: usize = 64;
 /// farther than 1/3 m. Exactly parallel bearings are refused before decomposition.
 /// The SVD runs in f64 even for f32 inputs to reduce cancellation. Invalid inputs,
 /// non-convergence and vectors without a spatial direction return `None`.
-pub fn triangulate<S: LieScalar>(
+pub fn triangulate<S: Scalar>(
     f0: &Vector3<S>,
     f1: &Vector3<S>,
     t_0_1: &Se3<S>,
@@ -350,7 +351,7 @@ pub fn triangulate<S: LieScalar>(
 /// the unscaled residual. Reassociating to scale the dot product changes rounding
 /// and can change the LM acceptance test near its threshold.
 #[inline]
-pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
+pub fn huber_cost<S: Scalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
     let huber_weight: S = if e < huber_thresh {
         S::one()
     } else {
@@ -374,7 +375,7 @@ pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std
 /// landmarks hosted by live keyframes. A frame is in exactly one of the two
 /// maps; [`Self::get_pose_state_with_lin`] hides which.
 #[derive(Debug, Clone)]
-pub struct BundleAdjustmentBase<S: LieScalar> {
+pub struct BundleAdjustmentBase<S: Scalar> {
     /// Full states, newest frames.
     pub frame_states: BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
     /// Pose-only blocks, keyframes.
@@ -394,7 +395,7 @@ pub struct BundleAdjustmentBase<S: LieScalar> {
     cameras: Vec<SlamCamera<S>>,
 }
 
-impl<S: LieScalar> BundleAdjustmentBase<S> {
+impl<S: Scalar> BundleAdjustmentBase<S> {
     /// An empty window over one calibration.
     pub fn new(calib: Calibration<S>, obs_std_dev: S, huber_thresh: S) -> Result<Self, BaError> {
         let cameras: Vec<SlamCamera<S>> = calib
@@ -856,7 +857,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 
 /// Evaluate the prior cost as `lhsᵀ (0.5 h_delta + b)`.
 /// The fixed left fold keeps repeated calls deterministic.
-fn prior_error<S: LieScalar>(
+fn prior_error<S: Scalar>(
     lhs: &DVector<S>,
     h_delta: &DVector<S>,
     b: &DVector<S>,

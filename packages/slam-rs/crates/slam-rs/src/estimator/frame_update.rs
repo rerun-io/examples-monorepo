@@ -12,6 +12,7 @@
 //! negated increment and Nielsen update follow the window loop. With no landmark
 //! elimination, predicted decrease is `−(inc·b + ½ incᵀ H inc)` directly.
 
+use kornia_staging_algebra::Scalar;
 use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
 use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
@@ -19,7 +20,7 @@ use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
 use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
 use crate::duration_ns;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
-use crate::lie::{LieScalar, Se3, eigen_maxi};
+use crate::lie::{Se3, eigen_maxi};
 use crate::linearize::{LandmarkBlockOptions, compute_error_weight, linearize_relative_pose};
 use crate::types::{
     FrameId, LandmarkId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId,
@@ -87,7 +88,7 @@ impl FrameUpdateOutcome {
 /// The host is a landmark's `host_kf_id`; the target frame is the newest state,
 /// so the camera id is all that distinguishes one target from another.
 #[derive(Debug, Clone, Copy)]
-struct RelPose<S: LieScalar> {
+struct RelPose<S: Scalar> {
     host: TimeCamId,
     target_cam: usize,
     t_t_h: Matrix4<S>,
@@ -102,7 +103,7 @@ struct RelPose<S: LieScalar> {
 /// allocation and not the arithmetic, and the loop runs two or three times a
 /// frame on six framesets in seven.
 #[derive(Debug, Clone)]
-pub(super) struct FrameUpdateScratch<S: LieScalar> {
+pub(super) struct FrameUpdateScratch<S: Scalar> {
     /// The normal equations at the point the loop is standing on.
     h: DMatrix<S>,
     /// See [`Self::h`].
@@ -124,7 +125,7 @@ pub(super) struct FrameUpdateScratch<S: LieScalar> {
     observations: Vec<(LandmarkId, TimeCamId)>,
 }
 
-impl<S: LieScalar> Default for FrameUpdateScratch<S> {
+impl<S: Scalar> Default for FrameUpdateScratch<S> {
     /// Buffers at their final size: unlike the window's, this system's shape is
     /// a compile-time constant.
     fn default() -> Self {
@@ -141,7 +142,7 @@ impl<S: LieScalar> Default for FrameUpdateScratch<S> {
     }
 }
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// Solve the newest state against fixed landmarks and its IMU factor.
     ///
     /// `Err(FrameUpdateDecline)` means the frameset is not one this can serve —
@@ -363,7 +364,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 /// A linear scan and a copy out: the entries are two fixed-size matrices, the
 /// list is a handful long, and a map would cost a hash or a tree walk per
 /// observation to answer the same question.
-fn pair_of<S: LieScalar>(
+fn pair_of<S: Scalar>(
     pairs: &[RelPose<S>],
     host: TimeCamId,
     target_cam: usize,
@@ -376,7 +377,7 @@ fn pair_of<S: LieScalar>(
 
 /// Use the host-to-target adjacency to visit only observations in this frame.
 /// Sorting restores the former landmark-by-camera accumulation order.
-fn frame_observations<S: LieScalar>(
+fn frame_observations<S: Scalar>(
     ba: &BundleAdjustmentBase<S>,
     t_ns: FrameId,
     observations: &mut Vec<(LandmarkId, TimeCamId)>,
@@ -403,7 +404,7 @@ fn frame_observations<S: LieScalar>(
 /// The 15 unknowns are the state's own: pose in 0-5, velocity in 6-8, gyro bias
 /// in 9-11 and accel bias in 12-14 (`PoseVelBiasState::apply_inc`).
 #[expect(clippy::too_many_arguments, reason = "every buffer is the caller's")]
-fn linearize_state<S: LieScalar>(
+fn linearize_state<S: Scalar>(
     ba: &BundleAdjustmentBase<S>,
     meas: &IntegratedImuMeasurement<S>,
     imu_lin: &ImuLinData<S>,

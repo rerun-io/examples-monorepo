@@ -1,10 +1,11 @@
 //! Homogeneous SLAM camera policy over staged calibration models.
 
+use kornia_staging_algebra::Scalar;
 use kornia_staging_3d::camera as staged;
 use nalgebra::{Matrix2x4, Vector2, Vector4};
 
 use crate::calib::{BasaltCamera, Calibration};
-use crate::lie::{LieScalar, c};
+use crate::lie::{c};
 
 /// Something a camera model cannot do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -30,12 +31,12 @@ pub enum CameraError {
 
 /// Homogeneous SLAM projection policy over a validated staged lens.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SlamCamera<S: LieScalar> {
+pub struct SlamCamera<S: Scalar> {
     /// The staged calibration and projection model.
     pub inner: staged::CameraModelKind<S>,
 }
 
-impl<S: LieScalar> SlamCamera<S> {
+impl<S: Scalar> SlamCamera<S> {
     /// Build from a parsed calibration entry.
     pub fn from_model(model: &BasaltCamera<S>) -> Result<Self, CameraError> {
         match model.to_staged() {
@@ -125,14 +126,14 @@ impl<S: LieScalar> SlamCamera<S> {
 /// A projection model and its camera's own image size.
 /// Per-camera resolutions support rigs whose stored orientations differ (D30).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RigCamera<S: LieScalar> {
+pub struct RigCamera<S: Scalar> {
     /// The projection model.
     pub model: SlamCamera<S>,
     /// `[width, height]` in pixels.
     pub resolution: [u32; 2],
 }
 
-impl<S: LieScalar> RigCamera<S> {
+impl<S: Scalar> RigCamera<S> {
     /// Build one camera per entry of a parsed calibration.
     pub fn from_calibration(calibration: &Calibration<S>) -> Result<Vec<Self>, CameraError> {
         if calibration.intrinsics.len() != calibration.resolution.len() {
@@ -185,21 +186,21 @@ mod tests {
 
     use super::*;
     use nalgebra::SVector;
-    fn pinhole<S: LieScalar>(
+    fn pinhole<S: Scalar>(
         params: SVector<S, 4>,
     ) -> Result<SlamCamera<S>, staged::InvalidCalibration> {
         Ok(SlamCamera {
             inner: staged::CameraModelKind::Pinhole(staged::Pinhole::new(params.into())?),
         })
     }
-    fn kb4<S: LieScalar>(
+    fn kb4<S: Scalar>(
         params: SVector<S, 8>,
     ) -> Result<SlamCamera<S>, staged::InvalidCalibration> {
         Ok(SlamCamera {
             inner: staged::CameraModelKind::Kb4(staged::KannalaBrandt4::new(params.into())?),
         })
     }
-    fn brown<S: LieScalar>(
+    fn brown<S: Scalar>(
         params: SVector<S, 12>,
         radius: S,
     ) -> Result<SlamCamera<S>, staged::InvalidCalibration> {
@@ -215,7 +216,7 @@ mod tests {
     use approx::assert_abs_diff_eq;
 
     /// `KannalaBrandtCamera4::getTestProjections()`.
-    fn kb4_test_camera<S: LieScalar>() -> SlamCamera<S> {
+    fn kb4_test_camera<S: Scalar>() -> SlamCamera<S> {
         kb4(SVector::<S, 8>::from([
             c(379.045),
             c(379.008),

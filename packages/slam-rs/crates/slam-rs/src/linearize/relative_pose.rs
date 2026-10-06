@@ -1,9 +1,10 @@
 //! Relative-pose preparation shared by the window and frame linearizers.
 
+use kornia_staging_algebra::Scalar;
 use nalgebra::Matrix6;
 
 use crate::ba_base::compute_rel_pose;
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{Se3};
 use crate::types::PoseStateWithLin;
 
 /// Jacobians at the linearization point, then only the transform at the current
@@ -13,7 +14,7 @@ use crate::types::PoseStateWithLin;
 /// is identity and their Jacobians are zero, with no `compute_rel_pose` call.
 /// Pair caches and fixed-frame Jacobian masking also belong to the callers.
 /// The frame update requests only the target Jacobian.
-pub(crate) fn linearize_relative_pose<S: LieScalar>(
+pub(crate) fn linearize_relative_pose<S: Scalar>(
     state_h: &PoseStateWithLin<S>,
     state_t: &PoseStateWithLin<S>,
     t_i_c_h: &Se3<S>,

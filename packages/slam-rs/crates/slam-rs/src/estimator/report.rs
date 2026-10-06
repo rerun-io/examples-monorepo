@@ -1,9 +1,9 @@
 //! Observation input and per-frame results reported by the estimator.
 
+use kornia_staging_algebra::Scalar;
 #[cfg(doc)]
 use super::SqrtKeypointVio;
 use super::{FrameUpdateOutcome, LmIteration, LmTermination, MarginalizationStats};
-use crate::lie::LieScalar;
 use crate::types::{FrameId, KeypointId};
 use nalgebra::Vector2;
 use std::collections::BTreeMap;
@@ -32,7 +32,7 @@ impl FlowObservations {
 
 /// What one `process_frame` call did.
 #[derive(Debug, Clone, PartialEq)]
-pub enum FrameOutcome<S: LieScalar> {
+pub enum FrameOutcome<S: Scalar> {
     /// IMU coverage does not extend past this frameset. Nothing was consumed and
     /// the window is unchanged, so the caller can add samples and retry (D17).
     NeedMoreImu,
@@ -71,7 +71,7 @@ pub struct StageTimings {
 
 /// Everything one frame decided, in one value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FrameStats<S: LieScalar> {
+pub struct FrameStats<S: Scalar> {
     /// Frameset timestamp.
     pub t_ns: i64,
     /// `connected[cam]`, observations of landmarks the window already hosts.

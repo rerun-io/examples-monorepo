@@ -12,13 +12,14 @@
 //! DSO-derived distance score. Its self-distance term makes proximity to the
 //! newest keyframe dominate the second pass (D22).
 
+use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::Vector3;
 
 use super::{EstimatorError, SqrtKeypointVio, WindowRole, duration_ns, fixed_keyframes};
 use crate::config::KeyframeMargCriteria;
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{Se3};
 use crate::marg::{
     MarginalizeInputs, MarginalizeOptions, MarginalizeSchedule, marginalize as marginalize_window,
 };
@@ -88,7 +89,7 @@ pub(super) struct MarginalizationOutcome {
     pub elapsed_ns: u64,
 }
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// Move the newest keyframe outside the ordinary budget when requested.
     /// Long-term keyframes are never eviction candidates. Consume the request even
     /// when no keyframe can be moved.

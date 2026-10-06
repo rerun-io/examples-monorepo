@@ -1,15 +1,15 @@
 //! Shipped-calibration round trips and the homogeneous SLAM point-Jacobian boundary.
 #![allow(clippy::unwrap_used, clippy::excessive_precision)]
+use kornia_staging_algebra::Scalar;
 use kornia_staging_3d::camera::{CameraModelKind, Pinhole};
 use nalgebra::{Matrix2x4, Vector2, Vector4};
 use proptest::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
 use slam_rs::calib::Calibration;
 use slam_rs::camera::{SlamCamera, RigCamera};
-use slam_rs::lie::LieScalar;
 mod common;
 
-trait TestConstants: LieScalar + Serialize + DeserializeOwned {}
+trait TestConstants: Scalar + Serialize + DeserializeOwned {}
 impl TestConstants for f32 {}
 impl TestConstants for f64 {}
 
@@ -55,7 +55,7 @@ fn shipped_radtan8<S: TestConstants>() -> Vec<(SlamCamera<S>, RigCamera<S>, f64)
 fn f32_pixel_bound(value: f64, principal_point: f64) -> f64 {
     8.0 * f64::from(f32::EPSILON) * (value.abs() + principal_point.abs())
 }
-fn on_sensor<S: LieScalar>(
+fn on_sensor<S: Scalar>(
     rig: &RigCamera<S>,
     safe_radius: f64,
 ) -> impl Fn(&Vector2<S>) -> bool + use<'_, S> {

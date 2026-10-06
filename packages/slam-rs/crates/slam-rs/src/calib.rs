@@ -8,6 +8,7 @@
 //! NaNs (D32). Each camera retains its own resolution because msd-g2 cameras
 //! can be stored with different portrait orientations (D30).
 
+use kornia_staging_algebra::Scalar;
 use std::collections::BTreeMap;
 pub mod catalog;
 
@@ -15,7 +16,7 @@ use nalgebra::{Matrix3, Vector3};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::lie::{LieScalar, Se3, So3};
+use crate::lie::{Se3, So3};
 
 /// Something that went wrong reading a calibration.
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +95,7 @@ struct PoseJson<S> {
     qw: S,
 }
 
-impl<S: LieScalar> PoseJson<S> {
+impl<S: Scalar> PoseJson<S> {
     fn to_se3(self, index: usize) -> Result<Se3<S>, CalibError> {
         let rotation: So3<S> = So3::from_quaternion_xyzw(self.qx, self.qy, self.qz, self.qw)
             .ok_or(CalibError::DegenerateQuaternion { index })?;
@@ -349,7 +350,7 @@ pub struct CalibAccelBias<S> {
     pub params: [S; 9],
 }
 
-impl<S: LieScalar> Default for CalibAccelBias<S> {
+impl<S: Scalar> Default for CalibAccelBias<S> {
     fn default() -> Self {
         Self {
             params: [S::zero(); 9],
@@ -357,7 +358,7 @@ impl<S: LieScalar> Default for CalibAccelBias<S> {
     }
 }
 
-impl<S: LieScalar> CalibAccelBias<S> {
+impl<S: Scalar> CalibAccelBias<S> {
     /// The bias and the scale matrix.
     ///
     /// The scale is lower triangular: column 0 is `(s1, s2, s3)`, then
@@ -400,7 +401,7 @@ pub struct CalibGyroBias<S> {
     pub params: [S; 12],
 }
 
-impl<S: LieScalar> Default for CalibGyroBias<S> {
+impl<S: Scalar> Default for CalibGyroBias<S> {
     fn default() -> Self {
         Self {
             params: [S::zero(); 12],
@@ -408,7 +409,7 @@ impl<S: LieScalar> Default for CalibGyroBias<S> {
     }
 }
 
-impl<S: LieScalar> CalibGyroBias<S> {
+impl<S: Scalar> CalibGyroBias<S> {
     /// The bias and the scale matrix.
     ///
     /// Column-major: `(s1, s2, s3)`, `(s4, s5, s6)`, `(s7, s8, s9)`. Unlike the
@@ -460,7 +461,7 @@ pub struct VignetteSpline<S> {
 
 /// The camera-IMU calibration.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Calibration<S: LieScalar> {
+pub struct Calibration<S: Scalar> {
     /// Camera pose in the IMU frame, one per camera: `p_i = T_i_c p_c`.
     pub t_i_c: Vec<Se3<S>>,
     /// Projection model, one per camera.
@@ -492,8 +493,8 @@ pub struct Calibration<S: LieScalar> {
 /// The wire form: what cereal actually writes, before the quaternions are
 /// normalized and the lists checked against each other.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, bound = "S: LieScalar + Serialize + DeserializeOwned")]
-struct CalibrationJson<S: LieScalar> {
+#[serde(default, bound = "S: Scalar + Serialize + DeserializeOwned")]
+struct CalibrationJson<S: Scalar> {
     #[serde(rename = "T_imu_cam")]
     t_imu_cam: Vec<PoseJson<S>>,
     intrinsics: Vec<BasaltCamera<S>>,
@@ -515,7 +516,7 @@ struct CalibrationJson<S: LieScalar> {
     unknown: BTreeMap<String, serde_json::Value>,
 }
 
-impl<S: LieScalar> Default for CalibrationJson<S> {
+impl<S: Scalar> Default for CalibrationJson<S> {
     /// Default calibration values, overridden by fields present in a file.
     fn default() -> Self {
         Self {
@@ -536,7 +537,7 @@ impl<S: LieScalar> Default for CalibrationJson<S> {
     }
 }
 
-impl<S: LieScalar> Default for Calibration<S> {
+impl<S: Scalar> Default for Calibration<S> {
     fn default() -> Self {
         Self {
             t_i_c: Vec::new(),
@@ -611,7 +612,7 @@ pub struct ImuParts<S> {
     pub cam_time_offset_ns: i64,
 }
 
-impl<S: LieScalar + Serialize + DeserializeOwned> Calibration<S> {
+impl<S: Scalar + Serialize + DeserializeOwned> Calibration<S> {
     /// Read a calibration JSON file.
     /// Unknown keys are collected and logged: mocap blocks and descriptive comments
     /// need not be part of the VIO calibration struct.
@@ -680,7 +681,7 @@ impl<S: LieScalar + Serialize + DeserializeOwned> Calibration<S> {
     }
 }
 
-impl<S: LieScalar> Calibration<S> {
+impl<S: Scalar> Calibration<S> {
     /// Number of cameras on the rig.
     pub fn camera_count(&self) -> usize {
         self.intrinsics.len()
@@ -689,7 +690,7 @@ impl<S: LieScalar> Calibration<S> {
     /// Convert the whole rig to another scalar type.
     /// JSON is read as f64 and the frontend uses an f32 calibration (D05).
     /// Unknown fields are carried across unchanged.
-    pub fn cast<T: LieScalar>(&self) -> Calibration<T> {
+    pub fn cast<T: Scalar>(&self) -> Calibration<T> {
         let convert = |value: S| -> T { T::from_literal(value.to_f64()) };
         let convert3 = |value: &Vector3<S>| -> Vector3<T> {
             Vector3::new(convert(value.x), convert(value.y), convert(value.z))
@@ -772,7 +773,7 @@ impl<S: LieScalar> Calibration<S> {
 /// A valid rotation must be orthogonal and have a positive determinant.
 /// Orthogonality alone accepts reflections, which cannot be represented by a
 /// rotation quaternion without losing the input geometry.
-fn pose_from_row_major<S: LieScalar>(m: &[S; 16], index: usize) -> Result<Se3<S>, CalibError> {
+fn pose_from_row_major<S: Scalar>(m: &[S; 16], index: usize) -> Result<Se3<S>, CalibError> {
     let rotation: Matrix3<S> = Matrix3::new(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
     let residual: Matrix3<S> = rotation.transpose() * rotation - Matrix3::identity();
     // Catalog extrinsics arrive as float32 promoted to f64, so the tolerance has
@@ -796,7 +797,7 @@ fn pose_from_row_major<S: LieScalar>(m: &[S; 16], index: usize) -> Result<Se3<S>
 }
 
 /// One camera model from a name and a coefficient list.
-fn camera_model_from_parts<S: LieScalar>(
+fn camera_model_from_parts<S: Scalar>(
     camera: &CameraParts<S>,
     index: usize,
 ) -> Result<BasaltCamera<S>, CalibError> {

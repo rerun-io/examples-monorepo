@@ -1,7 +1,8 @@
 //! Whitened IMU factor assembly and exports over a pair of states.
 
+use kornia_staging_algebra::Scalar;
 use super::{ImuResidualJacobians, IntegratedImuMeasurement, Matrix9, Matrix15x30};
-use crate::lie::{LieScalar, c};
+use crate::lie::{c};
 use crate::types::{POSE_VEL_BIAS_SIZE, POSE_VEL_SIZE, PoseVelBiasStateWithLin, Vector9, Vector15};
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
@@ -12,7 +13,7 @@ const BIAS_ACCEL_OFFSET: usize = POSE_VEL_SIZE + 3;
 
 /// Linearization inputs for an IMU factor.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImuLinData<S: LieScalar> {
+pub struct ImuLinData<S: Scalar> {
     /// Gravity in the world frame.
     pub g: Vector3<S>,
     /// `1 / gyro_bias_std`, the square-root weight of the gyro random walk
@@ -25,7 +26,7 @@ pub struct ImuLinData<S: LieScalar> {
 /// Rows 0–8 are preintegration, 9–11 gyro-bias random walk, and 12–14
 /// accelerometer-bias random walk. Start-state columns precede end-state columns.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImuBlock<S: LieScalar> {
+pub struct ImuBlock<S: Scalar> {
     /// `Jp`.
     pub jp: Matrix15x30<S>,
     /// `r`.
@@ -34,7 +35,7 @@ pub struct ImuBlock<S: LieScalar> {
     pub error: S,
 }
 
-impl<S: LieScalar> ImuBlock<S> {
+impl<S: Scalar> ImuBlock<S> {
     /// `ImuBlock::linearizeImu`.
     ///
     /// The residual is evaluated at the *linearized* states together with its

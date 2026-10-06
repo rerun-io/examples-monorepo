@@ -1,5 +1,5 @@
 //! In-place orthogonal transforms over column-major landmark and prior storage.
-use crate::lie::LieScalar;
+use kornia_staging_algebra::Scalar;
 use nalgebra::linalg::{givens::GivensRotation, householder::reflection_axis_mut};
 use nalgebra::{
     DMatrix, DVectorView, DVectorViewMut, Dim, Dyn, Matrix, Reflection, StorageMut, Unit, Vector2,
@@ -7,7 +7,7 @@ use nalgebra::{
 
 /// Build a unit reflection axis in caller-owned scratch, returning (active, beta).
 /// Keeping the full axis lets nalgebra apply the reflection directly to views.
-pub(crate) fn make_householder<S: LieScalar>(
+pub(crate) fn make_householder<S: Scalar>(
     storage: &DMatrix<S>,
     col: usize,
     start: usize,
@@ -21,7 +21,7 @@ pub(crate) fn make_householder<S: LieScalar>(
 }
 
 /// Reflect a mutable matrix or vector view. The axis is unit length when active.
-pub(crate) fn apply_householder_on_the_left<S: LieScalar, C: Dim, T: StorageMut<S, Dyn, C>>(
+pub(crate) fn apply_householder_on_the_left<S: Scalar, C: Dim, T: StorageMut<S, Dyn, C>>(
     mut view: Matrix<S, Dyn, C, T>,
     axis: &[S],
     active: bool,
@@ -34,7 +34,7 @@ pub(crate) fn apply_householder_on_the_left<S: LieScalar, C: Dim, T: StorageMut<
 }
 
 /// Scale before constructing the rotation to avoid squaring large coefficients.
-pub(crate) fn make_givens<S: LieScalar>(p: S, q: S) -> GivensRotation<S> {
+pub(crate) fn make_givens<S: Scalar>(p: S, q: S) -> GivensRotation<S> {
     let scale = p.abs().max(q.abs());
     if scale == S::zero() {
         GivensRotation::identity()
@@ -89,7 +89,7 @@ mod tests {
     }
 
     // Test-only driver; production callers own their scratch and validated views.
-    fn reflect_column<S: LieScalar>(
+    fn reflect_column<S: Scalar>(
         storage: &mut DMatrix<S>,
         col: usize,
         start: usize,

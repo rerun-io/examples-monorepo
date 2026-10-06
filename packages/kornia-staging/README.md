@@ -71,3 +71,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |
 | Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |
 | Pivoted fixed-size LDLT | slam-rs `ldlt.rs` | kornia-rs / kornia-algebra / linalg::ldlt | staged | - |
+| Lie precision and update extensions (proposes the documented Sophus Taylor branches upstream) | slam-rs `lie.rs` | kornia-rs / kornia-algebra / lie | staged | - |

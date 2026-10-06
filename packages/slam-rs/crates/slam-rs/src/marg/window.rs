@@ -6,13 +6,13 @@
 //! Convert the helper's residual back to delta-independent form by subtracting
 //! `H * delta` (trap 8); omitting either step causes silent drift.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector};
 
 use crate::ba_base::{BaError, BundleAdjustmentBase};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement};
-use crate::lie::LieScalar;
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 use crate::marg::helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 use crate::marg::{MargError, ScheduleSet};
@@ -48,7 +48,7 @@ pub struct MarginalizeOptions {
 
 /// Everything `marginalize()` needs besides the window itself.
 #[derive(Debug)]
-pub struct MarginalizeInputs<'a, S: LieScalar> {
+pub struct MarginalizeInputs<'a, S: Scalar> {
     /// What the schedule decided.
     pub schedule: &'a MarginalizeSchedule,
     /// Gravity and the two bias random-walk weights; `None` for a visual-only
@@ -65,7 +65,7 @@ pub struct MarginalizeInputs<'a, S: LieScalar> {
 
 /// What one marginalization produced besides the updated prior.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MarginalizeOutput<S: LieScalar> {
+pub struct MarginalizeOutput<S: Scalar> {
     /// `aom` : the ordering the marginalization linearized over.
     pub aom: AbsOrderMap,
     /// `idx_to_keep`.
@@ -81,7 +81,7 @@ pub struct MarginalizeOutput<S: LieScalar> {
 /// Order all poses by timestamp, then states through `last_state_to_marg`.
 /// The prior must be an exact prefix at the same offsets; otherwise the two
 /// systems assign different variables to the same columns.
-fn build_absolute_ordering<S: LieScalar>(
+fn build_absolute_ordering<S: Scalar>(
     estimator: &BundleAdjustmentBase<S>,
     marg_data: &MargLinData<S>,
     last_state_to_marg: FrameId,
@@ -187,7 +187,7 @@ fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Resul
 /// Construct the surviving prior ordering before mutation from
 /// `(frame_poses ∪ states_to_marg_vel_bias) \ poses_to_marg` in sorted order.
 /// This lets width validation fail without changing the prior or window.
-fn new_prior_ordering<S: LieScalar>(
+fn new_prior_ordering<S: Scalar>(
     estimator: &BundleAdjustmentBase<S>,
     schedule: &MarginalizeSchedule,
 ) -> Result<AbsOrderMap, MargError> {
@@ -210,7 +210,7 @@ fn new_prior_ordering<S: LieScalar>(
 /// Demoted states carry their first six delta entries and frozen flag, so their
 /// precondition can be checked before demotion. The one full-state block is
 /// `last_state_to_marg`, which is checked unfrozen and will be frozen next.
-fn check_prior_blocks_linearized<S: LieScalar>(
+fn check_prior_blocks_linearized<S: Scalar>(
     estimator: &BundleAdjustmentBase<S>,
     marg_order_new: &AbsOrderMap,
 ) -> Result<(), MargError> {
@@ -268,7 +268,7 @@ fn split_indices(
 /// stacked square-root system.
 ///
 /// Only square-root priors exist, so this always exports `Q2Jp` and `Q2r` (D68).
-fn linearize_for_marginalization<S: LieScalar>(
+fn linearize_for_marginalization<S: Scalar>(
     estimator: &BundleAdjustmentBase<S>,
     aom: &AbsOrderMap,
     prior: &MargLinData<S>,
@@ -299,7 +299,7 @@ fn linearize_for_marginalization<S: LieScalar>(
 }
 
 /// What one pass of produced.
-struct LinearizedWindow<S: LieScalar> {
+struct LinearizedWindow<S: Scalar> {
     /// `Q2Jp_or_H`.
     h: DMatrix<S>,
     /// `Q2r_or_b`.
@@ -315,7 +315,7 @@ struct LinearizedWindow<S: LieScalar> {
 /// Freeze `last_state_to_marg` before computing delta so its new prior delta is zero.
 /// Construct the surviving ordering from the schedule before mutation, allowing
 /// width and frozen-state checks to fail without a partial window update.
-pub fn marginalize<S: LieScalar>(
+pub fn marginalize<S: Scalar>(
     estimator: &mut BundleAdjustmentBase<S>,
     marg_data: &mut MargLinData<S>,
     imu_meas: &mut BTreeMap<i64, IntegratedImuMeasurement<S>>,
@@ -461,7 +461,7 @@ pub fn marginalize<S: LieScalar>(
 /// width check above matched `h` against. Clamping the extents instead would
 /// turn a shape that does not close into a *partial* re-anchoring, which is a
 /// prior that is quietly wrong rather than one that is refused.
-fn subtract_h_delta<S: LieScalar>(b: &mut DVector<S>, h: &DMatrix<S>, delta: &DVector<S>) {
+fn subtract_h_delta<S: Scalar>(b: &mut DVector<S>, h: &DMatrix<S>, delta: &DVector<S>) {
     debug_assert_eq!(b.nrows(), h.nrows());
     debug_assert_eq!(delta.nrows(), h.ncols());
     for i in 0..h.nrows() {

@@ -5,6 +5,7 @@
 //! Damping belongs to the dense solve; landmark/pose damping and Jacobian scaling
 //! are absent. Landmark reductions use fixed order independent of Rayon width.
 
+use kornia_staging_algebra::Scalar;
 mod abs_qr;
 mod dense_hb;
 mod landmark_block;
@@ -21,7 +22,6 @@ pub use landmark_block::{
 use nalgebra::{Matrix4, Matrix6};
 
 use crate::ba_base::BaError;
-use crate::lie::LieScalar;
 use crate::types::{CamId, FrameId, LandmarkId};
 
 /// `RelPoseLin<Scalar>` : one (host, target) pair's
@@ -31,7 +31,7 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// Hoisted per pair rather than per observation, because every landmark hosted
 /// in the same image and seen in the same image shares it
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RelPoseLin<S: LieScalar> {
+pub struct RelPoseLin<S: Scalar> {
     /// `T_t_h`, as a 4x4 so the residual can multiply the homogeneous
     /// landmark straight through.
     pub t_t_h: Matrix4<S>,
@@ -41,7 +41,7 @@ pub struct RelPoseLin<S: LieScalar> {
     pub d_rel_d_t: Matrix6<S>,
 }
 
-impl<S: LieScalar> Default for RelPoseLin<S> {
+impl<S: Scalar> Default for RelPoseLin<S> {
     /// `RelPoseLin()`'s in-class initialisers: all three zero.
     fn default() -> Self {
         Self {

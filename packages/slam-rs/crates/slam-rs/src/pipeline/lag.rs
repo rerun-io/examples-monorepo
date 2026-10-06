@@ -1,7 +1,8 @@
 //! One-frame-lag frontend/estimator scheduling (M7).
 
+use kornia_staging_algebra::Scalar;
 use super::{Vio, VioError, VioResult};
-use crate::{duration_ns, estimator, frontend, imu, lie, types};
+use crate::{duration_ns, estimator, frontend, imu, types};
 
 /// Wall times for the estimator running beside the frontend, in nanoseconds.
 /// These overlap the frontend timers and must not be added to them.
@@ -13,7 +14,7 @@ pub struct OverlapTimings {
     pub wait_ns: u64,
 }
 
-impl<S: lie::LieScalar> Vio<S> {
+impl<S: Scalar> Vio<S> {
     /// Timings for the last estimator work beside the frontend; zero at startup.
     pub fn overlap_timings(&self) -> OverlapTimings {
         self.overlap_timings
