@@ -244,7 +244,9 @@ pub fn pack_sh_coefficients(cloud: &RenderGaussianCloud) -> Vec<[f32; 4]> {
         .as_ref()
         .map(|sh| {
             sh.coefficients
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|coeff| [coeff[0], coeff[1], coeff[2], 0.0])
                 .collect()
         })
