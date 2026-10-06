@@ -10,9 +10,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_staging_sensors::imu::{CombinedImuSample, IntegratedImuMeasurement};
+use kornia_staging_slam::factors::LinearizePointOut;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::BaError;
-use slam_rs::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
+use slam_rs::ba_base::{BundleAdjustmentBase, linearize_point};
 use slam_rs::calib::Calibration;
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::imu::ImuLinData;
@@ -197,7 +198,7 @@ fn dense_schur_reference(
             } else {
                 let mut d_h = nalgebra::Matrix6::zeros();
                 let mut d_t = nalgebra::Matrix6::zeros();
-                let lin: Se3<f64> = slam_rs::ba_base::compute_rel_pose(
+                let lin: Se3<f64> = kornia_staging_slam::factors::compute_rel_pose(
                     state_h.pose_lin(),
                     &t_i_c_h,
                     state_t.pose_lin(),
@@ -206,7 +207,7 @@ fn dense_schur_reference(
                     Some(&mut d_t),
                 );
                 let value: Se3<f64> = if state_h.is_linearized() || state_t.is_linearized() {
-                    slam_rs::ba_base::compute_rel_pose(
+                    kornia_staging_slam::factors::compute_rel_pose(
                         state_h.pose(),
                         &t_i_c_h,
                         state_t.pose(),

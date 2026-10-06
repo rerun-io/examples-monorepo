@@ -2650,10 +2650,13 @@ dependencies = [
  "approx",
  "criterion",
  "kornia-image",
+ "kornia-staging-3d",
+ "kornia-staging-algebra",
  "kornia-staging-imgproc",
  "nalgebra",
  "proptest",
  "rayon",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

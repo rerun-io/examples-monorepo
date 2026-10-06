@@ -5,7 +5,8 @@
 use kornia_staging_algebra::Scalar;
 use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3};
 
-use crate::ba_base::{LinearizePointOut, linearize_point};
+use crate::ba_base::linearize_point;
+use kornia_staging_slam::factors::LinearizePointOut;
 use crate::camera::SlamCamera;
 use crate::landmark::Landmark;
 use crate::lie::{c};

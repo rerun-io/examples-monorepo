@@ -8,11 +8,14 @@ publish.workspace = true
 [dependencies]
 kornia-staging-imgproc.workspace = true
 rayon.workspace = true
+kornia-staging-algebra.workspace = true
+kornia-staging-3d.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 kornia-image.workspace = true
-nalgebra.workspace = true
 proptest.workspace = true
 approx.workspace = true
 
@@ -21,4 +24,8 @@ workspace = true
 
 [[bench]]
 name = "patch_tracker"
+harness = false
+
+[[bench]]
+name = "factors"
 harness = false

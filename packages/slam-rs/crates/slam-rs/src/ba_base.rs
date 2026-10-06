@@ -18,17 +18,15 @@
 use kornia_staging_algebra::Scalar;
 use std::collections::BTreeMap;
 
-use nalgebra::{
-    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix4, Matrix4x2, Matrix4x3,
-    Matrix6, Vector2, Vector3, Vector4,
-};
+use kornia_staging_slam::factors::{LinearizePointOut, compute_rel_pose, irls_huber_cost};
+use nalgebra::{DMatrix, DVector, Matrix4, Vector2, Vector4};
 use rayon::prelude::*;
 
 use crate::calib::Calibration;
 use crate::camera::{SlamCamera, CameraError};
 use crate::frontend::parallel::WorkPool;
-use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
-use crate::lie::{Se3, So3, c};
+use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError};
+use crate::lie::{Se3, c};
 use crate::types::{
     AbsOrderMap, CamId, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE,
     PoseStateWithLin, PoseVelBiasStateWithLin, TimeCamId,
@@ -95,85 +93,13 @@ pub enum BaError {
     Landmark(#[from] LandmarkError),
 }
 
-// ─── the relative pose, hoisted per (host, target) pair ────────────────────
-
-/// The host-camera to target-camera transform and its two 6x6 Jacobians.
-///
-/// The composition is decoupled: rotation is a product, while translation is
-/// `R_t^-1 (t_h - t_t)`. Its Jacobians use the decoupled, left-multiplied increment.
-pub fn compute_rel_pose<S: Scalar>(
-    t_w_i_h: &Se3<S>,
-    t_i_c_h: &Se3<S>,
-    t_w_i_t: &Se3<S>,
-    t_i_c_t: &Se3<S>,
-    d_rel_d_h: Option<&mut Matrix6<S>>,
-    d_rel_d_t: Option<&mut Matrix6<S>>,
-) -> Se3<S> {
-    let tmp2: Se3<S> = t_i_c_t.inverse();
-
-    // `T_t_i_h_i`.
-    let t_t_i_h_i: Se3<S> = Se3::new(
-        t_w_i_t.rotation.inverse() * t_w_i_h.rotation,
-        t_w_i_t.rotation.inverse() * (t_w_i_h.translation - t_w_i_t.translation),
-    );
-
-    let tmp: Se3<S> = tmp2 * t_t_i_h_i;
-    let res: Se3<S> = tmp * *t_i_c_h;
-
-    if let Some(out) = d_rel_d_h {
-        // `RR = blkdiag(R, R)` with `R = T_w_i_h.so3().inverse().matrix()`
-        let r: Matrix3<S> = t_w_i_h.rotation.inverse().matrix();
-        let mut rr: Matrix6<S> = Matrix6::zeros();
-        rr.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
-        rr.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
-        *out = tmp.adjoint() * rr;
-    }
-
-    if let Some(out) = d_rel_d_t {
-        // `-T_i_c_t.inverse().Adj() * RR`.
-        let r: Matrix3<S> = t_w_i_t.rotation.inverse().matrix();
-        let mut rr: Matrix6<S> = Matrix6::zeros();
-        rr.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
-        rr.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
-        *out = -(tmp2.adjoint() * rr);
-    }
-
-    res
-}
-
-// ─── the reprojection residual ─────────────────────────────────────────────
-
-/// Optional outputs of [`linearize_point`] besides the residual.
-///
-/// Borrowed fixed-size matrices let callers request only the outputs they need
-/// without allocation.
-#[derive(Debug)]
-pub struct LinearizePointOut<'a, S: Scalar> {
-    /// `d_res_d_xi` (2x6): the residual against the relative-pose increment.
-    pub d_res_d_xi: Option<&'a mut Matrix2x6<S>>,
-    /// `d_res_d_p` (2x3): the residual against `[direction(2), inv_dist]`.
-    pub d_res_d_p: Option<&'a mut Matrix2x3<S>>,
-    /// `proj` (4): `[u, v, inv_depth_in_target, unused]`, for visualisation.
-    pub proj: Option<&'a mut Vector4<S>>,
-}
-
-impl<S: Scalar> Default for LinearizePointOut<'_, S> {
-    /// Request only the residual.
-    fn default() -> Self {
-        Self {
-            d_res_d_xi: None,
-            d_res_d_p: None,
-            proj: None,
-        }
-    }
-}
-
 /// One observation's residual and optional Jacobians.
 ///
 /// The residual is `pi(T_t_h * q) - z`, where `q` is the homogeneous landmark
 /// `[unproject(direction), inv_dist]`. See the module docs for the sign convention.
 /// Returns `false` if the camera rejects the point or the pixel is non-finite.
 /// In that case the caller must ignore `res`, which may still have been written.
+#[inline]
 pub fn linearize_point<S: Scalar>(
     kpt_obs: &Vector2<S>,
     kpt_pos: &Landmark<S>,
@@ -182,86 +108,16 @@ pub fn linearize_point<S: Scalar>(
     res: &mut Vector2<S>,
     out: &mut LinearizePointOut<'_, S>,
 ) -> bool {
-    // `StereographicParam::unproject(direction, &Jup)` then the inverse distance
-    // into the homogeneous slot.
-    let mut jup: Matrix4x2<S> = Matrix4x2::zeros();
-    let mut p_h_3d: Vector4<S> =
-        StereographicParam::unproject_with_jacobian(&kpt_pos.direction, &mut jup);
-    p_h_3d[3] = kpt_pos.inv_dist;
-
-    let p_t_3d: Vector4<S> = t_t_h * p_h_3d;
-
-    let mut jp: Matrix2x4<S> = Matrix2x4::zeros();
-    let valid: bool = cam.project_point(&p_t_3d, res, Some(&mut jp));
-
-    if !valid {
-        return false;
-    }
-
-    if let Some(proj) = out.proj.as_deref_mut() {
-        // Store the projection and inverse depth before subtracting the observation.
-        proj[0] = res[0];
-        proj[1] = res[1];
-        proj[2] = p_t_3d[3] / p_t_3d.fixed_rows::<3>(0).norm();
-    }
-
-    // `res -= kpt_obs` — the flipped sign.
-    *res -= kpt_obs;
-
-    if let Some(d_res_d_xi) = out.d_res_d_xi.as_deref_mut() {
-        // `d_point_d_xi` (4x6). The inverse-distance
-        // scaling on the translation columns is what the homogeneous `q` costs.
-        let mut d_point_d_xi: nalgebra::Matrix4x6<S> = nalgebra::Matrix4x6::zeros();
-        let mut ident: Matrix3<S> = Matrix3::identity();
-        ident *= kpt_pos.inv_dist;
-        d_point_d_xi.fixed_view_mut::<3, 3>(0, 0).copy_from(&ident);
-        d_point_d_xi
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-So3::hat(&Vector3::new(p_t_3d[0], p_t_3d[1], p_t_3d[2]))));
-        // `row(3).setZero()` — already zero from the constructor.
-        *d_res_d_xi = jp * d_point_d_xi;
-    }
-
-    if let Some(d_res_d_p) = out.d_res_d_p.as_deref_mut() {
-        // `Jpp` (4x3).
-        let mut jpp: Matrix4x3<S> = Matrix4x3::zeros();
-        let top: nalgebra::Matrix3x4<S> = t_t_h.fixed_view::<3, 4>(0, 0).into_owned();
-        jpp.fixed_view_mut::<3, 2>(0, 0).copy_from(&(top * jup));
-        jpp.set_column(2, &t_t_h.column(3));
-        *d_res_d_p = jp * jpp;
-    }
-
-    true
-}
-
-// ─── the Huber-weighted cost of one observation ───────────────────────────
-
-/// The robust weight and cost of one observation, accumulated in fixed order.
-///
-/// ```text
-/// huber_weight = e < huber_thresh ? 1 : huber_thresh / e
-/// obs_weight   = huber_weight / (obs_std_dev * obs_std_dev)
-/// cost         = 0.5 * (2 - huber_weight) * obs_weight * res^T * res
-/// ```
-///
-/// `e` is the norm in raw pixels. Huber weighting precedes noise scaling, so
-/// 1 px at a 0.5 px deviation is a 2-sigma threshold.
-/// The scalar factor multiplies each row coefficient before contraction with
-/// the unscaled residual. Reassociating to scale the dot product changes rounding
-/// and can change the LM acceptance test near its threshold.
-#[inline]
-pub fn huber_cost<S: Scalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
-    let huber_weight: S = if e < huber_thresh {
-        S::one()
-    } else {
-        huber_thresh / e
-    };
-    let obs_weight: S = huber_weight / (obs_std_dev * obs_std_dev);
-    // `Scalar(0.5) * (2 - huber_weight) * obs_weight` folds left into one
-    // scalar, which then scales the row.
-    let factor: S = c::<S>(0.5) * (c::<S>(2.0) - huber_weight) * obs_weight;
-    let cost: S = (factor * res.x) * res.x + (factor * res.y) * res.y;
-    (huber_weight, cost)
+    kornia_staging_slam::factors::linearize_point(
+        kpt_obs,
+        &kpt_pos.direction,
+        kpt_pos.inv_dist,
+        t_t_h,
+        &cam.inner,
+        res,
+        out,
+    )
+    .is_ok()
 }
 
 // ─── the sliding-window state ──────────────────────────────────────────────
@@ -471,7 +327,7 @@ impl<S: Scalar> BundleAdjustmentBase<S> {
                         let flag: S = if same_image { c::<S>(-2.0) } else { e };
                         map.entry(kpt_id).or_default().push((tcid_t, flag));
                     }
-                    let (_, cost) = huber_cost(&res, e, self.huber_thresh, self.obs_std_dev);
+                    let (_, cost) = irls_huber_cost(&res, e, self.huber_thresh, self.obs_std_dev);
                     local_error += cost;
                     num_points += 1;
                 } else if let Some(map) = outliers.as_deref_mut() {
@@ -773,8 +629,9 @@ mod tests {
 
     use super::*;
     use crate::types::{PoseVelBiasState, TimeCamId};
+    use crate::{landmark::StereographicParam, lie::So3};
     use approx::assert_abs_diff_eq;
-    use nalgebra::Vector6;
+    use nalgebra::{Matrix2x3, Matrix2x6, Matrix6, Vector3, Vector6};
 
     const MSDMI: &str = include_str!("../tests/fixtures/msdmi_calib.json");
     const MSDMG: &str = include_str!("../tests/fixtures/msdmg_calib.json");
@@ -918,7 +775,10 @@ mod tests {
             p_trans[3] = kpt_pos.inv_dist;
             p_trans = t_t_h * p_trans;
             let mut kpt_obs: Vector2<f64> = Vector2::zeros();
-            assert!(cam.project_point(&p_trans, &mut kpt_obs, None), "{name}: observation");
+            assert!(
+                cam.project_point(&p_trans, &mut kpt_obs, None),
+                "{name}: observation"
+            );
 
             let mut res: Vector2<f64> = Vector2::zeros();
             let mut d_res_d_xi: Matrix2x6<f64> = Matrix2x6::zeros();
@@ -1087,7 +947,11 @@ mod tests {
                     let mut q: Vector4<f64> = StereographicParam::unproject(&lm.direction);
                     q[3] = lm.inv_dist;
                     let mut pixel: Vector2<f64> = Vector2::zeros();
-                    assert!(ba.cameras()[target.cam_id].project_point(&(t_t_h * q), &mut pixel, None));
+                    assert!(ba.cameras()[target.cam_id].project_point(
+                        &(t_t_h * q),
+                        &mut pixel,
+                        None
+                    ));
                     let r: Vector2<f64> = pixel - observed;
                     let e: f64 = r.norm();
                     largest = largest.max(e);
@@ -1306,47 +1170,6 @@ mod tests {
                 size: usize::MAX - POSE_VEL_BIAS_SIZE
             })
         );
-    }
-
-    /// The Huber cost by hand, on residuals chosen so every intermediate is
-    /// exactly representable in both precisions — no fixture, no port
-    /// arithmetic reused.
-    ///
-    /// Above the threshold: `res = [3, 4]`, `e = 5`, `huber_thresh = 2.5`,
-    /// `obs_std_dev = 0.5`, so `hw = 0.5`, `ow = 0.5 / 0.25 = 2`,
-    /// `factor = 0.5 * 1.5 * 2 = 1.5` and `cost = 1.5*9 + 1.5*16 = 37.5`.
-    ///
-    /// Below it: `res = [0.5, 0.5]`, `e = sqrt(0.5) < 1`, so `hw = 1`,
-    /// `ow = 4`, `factor = 2` and `cost = 2 * 0.5 = 1`.
-    #[test]
-    fn the_huber_cost_matches_a_hand_computation() {
-        let above: Vector2<f64> = Vector2::new(3.0, 4.0);
-        let (weight, cost) = huber_cost(&above, above.norm(), 2.5, 0.5);
-        assert_eq!(weight, 0.5);
-        assert_eq!(cost, 37.5);
-
-        let above32: Vector2<f32> = Vector2::new(3.0, 4.0);
-        let (weight32, cost32) = huber_cost(&above32, above32.norm(), 2.5, 0.5);
-        assert_eq!(weight32, 0.5);
-        assert_eq!(cost32, 37.5);
-
-        let below: Vector2<f64> = Vector2::new(0.5, 0.5);
-        let (weight, cost) = huber_cost(&below, below.norm(), 1.0, 0.5);
-        assert_eq!(weight, 1.0);
-        assert_eq!(cost, 1.0);
-
-        let below32: Vector2<f32> = Vector2::new(0.5, 0.5);
-        let (weight32, cost32) = huber_cost(&below32, below32.norm(), 1.0, 0.5);
-        assert_eq!(weight32, 1.0);
-        assert_eq!(cost32, 1.0);
-
-        // The threshold is on the raw pixel norm, before `1/sigma`
-        // (papers-part2 §13 ): a residual of exactly the threshold is *not*
-        // downweighted only because the comparison is strict `<`.
-        let at: Vector2<f64> = Vector2::new(1.0, 0.0);
-        assert_eq!(huber_cost(&at, at.norm(), 1.0, 0.5).0, 1.0);
-        let just_over: Vector2<f64> = Vector2::new(1.0 + f64::EPSILON, 0.0);
-        assert!(huber_cost(&just_over, just_over.norm(), 1.0, 0.5).0 < 1.0);
     }
 
     /// The three marginalization-prior helpers agree with each other and with

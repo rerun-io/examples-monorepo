@@ -1,9 +1,11 @@
 //! Landmark residual and estimator Jacobian properties.
 #![allow(clippy::unwrap_used)]
 
+use kornia_staging_slam::factors::LinearizePointOut;
+use kornia_staging_slam::factors::irls_huber_cost;
 use nalgebra::{Matrix2x3, Matrix2x6, Vector2, Vector3, Vector6};
 use proptest::prelude::*;
-use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point};
+use slam_rs::ba_base::linearize_point;
 use slam_rs::calib::Calibration;
 use slam_rs::camera::SlamCamera;
 use slam_rs::landmark::Landmark;
@@ -64,13 +66,13 @@ proptest! {
     }
 
     #[test]
-    fn huber_cost_has_the_closed_form_on_both_sides(
+    fn irls_huber_cost_has_the_closed_form_on_both_sides(
         threshold in 0.1f64..5.0, sigma in 0.1f64..3.0,
         angle in -3.0f64..3.0, ratio in 0.01f64..0.99,
     ) {
         for magnitude in [threshold * ratio, threshold, threshold / ratio] {
             let residual = Vector2::new(angle.cos(), angle.sin()) * magnitude;
-            let (_, cost) = huber_cost(&residual, residual.norm(), threshold, sigma);
+            let (_, cost) = irls_huber_cost(&residual, residual.norm(), threshold, sigma);
             let expected = if magnitude <= threshold { 0.5 * magnitude.powi(2) } else { threshold * (magnitude - 0.5 * threshold) } / sigma.powi(2);
             prop_assert!((cost - expected).abs() < 1e-12 * expected.max(1.0));
         }

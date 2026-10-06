@@ -107,3 +107,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | One scaled dense damped solve attempt | slam-rs estimator/optimize.rs | kornia-rs / kornia-algebra / optim::solvers | staged | - |
 | LM extension functions: Marquardt scaling, Nielsen damping and quadratic prediction, for the existing upstream solver | handfit `lm.rs`, `scale.rs` | kornia-rs / kornia-algebra / optim::solvers | staged | - |
 | Nanosecond midpoint preintegrator; proposal to reconcile with upstream PreintegratedImu | slam-rs `imu/preintegration.rs` | kornia-slam / kornia-sensors / imu | staged | - |
+| Hosted reprojection, relative pose and pixel-space IRLS Huber weighting (not RobustLoss::rho) | slam-rs `ba_base.rs` | kornia-slam / kornia-slam / factors | staged | - |

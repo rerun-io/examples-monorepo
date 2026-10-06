@@ -3,9 +3,9 @@
 use kornia_staging_algebra::Scalar;
 use nalgebra::Matrix6;
 
-use crate::ba_base::compute_rel_pose;
 use crate::lie::{Se3};
 use crate::types::PoseStateWithLin;
+use kornia_staging_slam::factors::compute_rel_pose;
 
 /// Jacobians at the linearization point, then only the transform at the current
 /// state when either end is frozen.

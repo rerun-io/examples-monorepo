@@ -3068,8 +3068,12 @@ dependencies = [
 name = "kornia-staging-slam"
 version = "0.1.0"
 dependencies = [
+ "kornia-staging-3d",
+ "kornia-staging-algebra",
  "kornia-staging-imgproc",
+ "nalgebra",
  "rayon",
+ "thiserror",
 ]
 
 [[package]]

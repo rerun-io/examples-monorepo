@@ -20,7 +20,7 @@ use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
 use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
 use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
-use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
+use crate::ba_base::{BundleAdjustmentBase, linearize_point};
 use crate::duration_ns;
 use crate::imu::{ImuBlock, ImuLinData};
 use crate::lie::{Se3, eigen_maxi};
@@ -29,7 +29,7 @@ use crate::types::{
     FrameId, LandmarkId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId,
     Vector15,
 };
-
+use kornia_staging_slam::factors::LinearizePointOut;
 
 /// Which precondition sent a frameset back to the joint solve.
 ///
@@ -584,7 +584,6 @@ mod tests {
     use nalgebra::{Vector3, Vector4};
 
     use super::*;
-    use crate::ba_base::compute_rel_pose;
     use crate::calib::Calibration;
     use crate::camera::SlamCamera;
     use crate::config::VioConfig;
@@ -592,7 +591,7 @@ mod tests {
     use crate::lie::So3;
     use crate::types::{LandmarkId, PoseStateWithLin, PoseVelBiasState};
     use kornia_staging_sensors::imu::ImuNoise;
-
+    use kornia_staging_slam::factors::compute_rel_pose;
 
     const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
     const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
