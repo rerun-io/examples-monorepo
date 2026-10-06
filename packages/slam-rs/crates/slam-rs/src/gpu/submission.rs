@@ -13,17 +13,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
         self,
         body: impl FnOnce() -> Result<(), crate::frontend::flow::FrontendError> + Send,
     ) -> Result<(), crate::frontend::flow::FrontendError> {
-        let result = kornia_staging_gpu::runtime::guarded(
-            GpuError::DeviceLost {
-                what: "frontend dispatch",
-            },
-            || {
-                self.client
-                    .exclusive(body)
-                    .map_err(|error| read_failed("frontend dispatch", &error))
-            },
-        );
-        result.map_err(crate::frontend::flow::FrontendError::from)?
+        kornia_staging_gpu::transfer::execute_exclusive(&self.client, "frontend dispatch", body)
     }
 }
 
@@ -173,9 +163,5 @@ pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
     if super::runtime::armed(super::runtime::BLOCKING_READ) {
         return Err(GpuError::DeviceReadFailed { what });
     }
-    // `read_async` sends the copy and submits it before returning the future.
-    // Work queued now goes in a later submission, independent of this copy.
-    let pending = client.read_async(handles);
-    after_copy()?;
-    cubecl::future::reader::read_sync(pending).map_err(|error| read_failed(what, &error))
+    kornia_staging_gpu::transfer::read_with_lookahead(client, handles, what, after_copy)
 }

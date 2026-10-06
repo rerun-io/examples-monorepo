@@ -26,3 +26,7 @@ pub mod pyramid;
 pub mod features;
 
 pub mod optical_flow;
+
+
+#[cfg(test)]
+mod fault;

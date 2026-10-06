@@ -112,16 +112,11 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         selects: &[Option<CellSelect>],
     ) -> Result<(), VioError> {
         if self.next.is_none() {
-            self.next = Some(
-                self.client
-                    .exclusive(|| GpuFrame::new(self.client.clone(), &self.launches))
-                    .map_err(|error| {
-                        FrontendError::from(submission::read_failed(
-                            "lookahead construction",
-                            &error,
-                        ))
-                    })??,
-            );
+            self.next = Some(kornia_staging_gpu::transfer::execute_exclusive(
+                &self.client,
+                "lookahead construction",
+                || GpuFrame::new(self.client.clone(), &self.launches),
+            )?);
         }
         if let Some(next) = &mut self.next {
             std::mem::swap(&mut next.images, images);

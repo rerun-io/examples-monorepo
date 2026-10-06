@@ -19,6 +19,7 @@ bytes.workspace = true
 kornia-image.workspace = true
 kornia-imgproc.workspace = true
 cubecl.workspace = true
+# Enables shared-bytes for zero-copy bytes::Bytes uploads.
 cubecl-environment.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-algebra.workspace = true
@@ -51,5 +52,10 @@ required-features = ["wgpu"]
 
 [[bench]]
 name = "optical_flow"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "transfer"
 harness = false
 required-features = ["wgpu"]

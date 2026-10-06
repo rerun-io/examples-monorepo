@@ -6,7 +6,7 @@ use cubecl::prelude::*;
 
 use super::kernels;
 use crate::runtime::{guarded, GpuError};
-use crate::transfer::{binding_limits, read_failed, upload};
+use crate::transfer::{binding_limits, read_failed, upload_inner};
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::pyramid::PyramidPlanError;
 use std::mem::size_of;
@@ -307,7 +307,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
                 self.prepared.resize_with(images.len(), || None);
                 for (slot, image) in self.prepared.iter_mut().zip(images) {
                     // Upload every camera before building its pyramid.
-                    let handle = upload(&self.client, u16::as_bytes(image.as_slice()));
+                    let handle = upload_inner(&self.client, u16::as_bytes(image.as_slice()));
                     *slot = Some(Level0 {
                         handle,
                         width: image.width(),
@@ -385,7 +385,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
                             (frame.handle, frame.width * frame.height)
                         }
                         _ => (
-                            upload(&out.client, u16::as_bytes(img.as_slice())),
+                            upload_inner(&out.client, u16::as_bytes(img.as_slice())),
                             img.as_slice().len(),
                         ),
                     };

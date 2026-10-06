@@ -94,3 +94,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Persistent u16 GPU pyramids | slam-rs `gpu/pyramid.rs`, `gpu/kernels/pyramid.rs` | proposed kornia-gpu / `pyramid` | staged | - |
 | GPU FAST scan and packed cell selection | slam-rs `gpu/detect`, FAST and cell kernels | proposed kornia-gpu / `features` | staged | - |
 | Fused forward/backward SE(2) KLT, persistent dispatch storage and finite/trig helpers | slam-rs `gpu/kernels/klt_fused.rs`, reusable parts of `gpu/track*` | proposed kornia-gpu / `optical_flow` | staged | - |
+| Checked GPU transfers, readback lookahead and exclusive execution | slam-rs `gpu/submission.rs` (generic part) | proposed kornia-gpu / `transfer` | staged | - |

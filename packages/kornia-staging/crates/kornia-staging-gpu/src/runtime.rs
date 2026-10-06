@@ -10,26 +10,6 @@ use crate::GpuRuntime;
 /// What can go wrong bringing up or running a GPU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
-    /// Cell submissions require a batch started by the scanner.
-    #[error("begin a cell-selection batch before submitting cameras")]
-    BatchNotBegun,
-    /// Camera submissions must be in range, unique and ascending.
-    #[error("camera {camera} is out of range or out of order for this batch")]
-    InvalidBatchCamera {
-        /// Rejected camera index.
-        camera: usize,
-    },
-    /// A batch has different input and output counts.
-    #[error("batch has {inputs} inputs but {outputs} outputs")]
-    BatchSizeMismatch {
-        /// Number of inputs.
-        inputs: usize,
-        /// Number of outputs.
-        outputs: usize,
-    },
-    /// A frame was begun before the previous frame scope ended.
-    #[error("nested GPU frontend frame")]
-    NestedFrame,
     /// The fused kernel requires working subgroup operations.
     #[error(
         "GPU KLT requires working power-of-two subgroups of at least 16 lanes; the subgroup probe failed, use the CPU lane"
@@ -54,20 +34,11 @@ pub enum GpuError {
     /// A GPU stage panicked instead of returning an error.
     #[error(
         "the GPU {what} failed on the device; the log carries the runtime's own \
-         message, and the CPU frontend runs without a GPU"
+         message"
     )]
     DeviceLost {
         /// Which stage was running.
         what: &'static str,
-    },
-    /// A pyramid buffer is longer than the `u32` its device metadata carries.
-    #[error(
-        "a pyramid buffer of {pixels} pixels is past the u32 its device metadata \
-         carries, so the kernels could not index it"
-    )]
-    BufferTooLong {
-        /// Pixels the buffer would have held.
-        pixels: usize,
     },
     /// The runtime cannot store an element width the kernels bind.
     #[error(
@@ -85,7 +56,7 @@ pub enum GpuError {
     /// No wgpu adapter for the backend this build runs on.
     #[error(
         "wgpu found no {backend} adapter on this host: install a {backend} driver, \
-         or run the CPU frontend, which needs no adapter"
+         or select a different graphics backend"
     )]
     NoAdapter {
         /// The graphics backend cubecl-wgpu would have used.
@@ -93,13 +64,10 @@ pub enum GpuError {
     },
     /// Constructing the CubeCL client panicked.
     #[error(
-        "building the {runtime} client panicked; the log carries the runtime's own \
-         message, and the CPU frontend runs without a GPU"
+        "building the wgpu client panicked; the log carries the runtime's own \
+         message"
     )]
-    ClientPanicked {
-        /// Which runtime was being built.
-        runtime: &'static str,
-    },
+    ClientPanicked,
 }
 
 /// Construct the default wgpu client after a fallible adapter probe.
@@ -114,19 +82,17 @@ pub enum GpuError {
 pub fn gpu_client() -> Result<cubecl::prelude::ComputeClient<GpuRuntime>, GpuError> {
     static CLIENT: std::sync::OnceLock<Result<ComputeClient<GpuRuntime>, GpuError>> =
         std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        guarded(GpuError::ClientPanicked { runtime: RUNTIME_NAME }, || {
-            probe_availability()?;
-            Ok(wgpu_client())
+    CLIENT
+        .get_or_init(|| {
+            guarded(GpuError::ClientPanicked, || {
+                probe_availability()?;
+                Ok(wgpu_client())
+            })
         })
-    }).clone()
+        .clone()
 }
 
-/// What this build's lane is called in an error a user reads.
-#[cfg(feature = "wgpu")]
-pub const RUNTIME_NAME: &str = "wgpu";
-
-/// The same runtime as the name a machine reads: the portable lane's.
+/// Portable compute backend name.
 #[cfg(feature = "wgpu")]
 pub const BACKEND_NAME: &str = "wgpu";
 
@@ -203,7 +169,7 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         let count: usize = pattern.len();
         let width: usize = size_of::<N>() * 8;
         let expected: usize = size_of_val(pattern);
-        let source: cubecl::server::Handle = transfer::upload(client, N::as_bytes(pattern));
+        let source: cubecl::server::Handle = transfer::upload_inner(client, N::as_bytes(pattern));
         let target: cubecl::server::Handle = client.empty(expected);
         kernels::launch_probe::<N, R>(client, (&source, count), (&target, count), count);
         let bytes = client
@@ -239,11 +205,7 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         },
         || {
             #[cfg(test)]
-            PROBE_FAULT.with(|fault| {
-                if fault.replace(false) {
-                    panic!("the device is gone");
-                }
-            });
+            crate::fault::fire("storage probe");
 
             const COUNT: usize = 256;
             // Patterns whose every byte differs from its neighbours, so a
@@ -347,11 +309,6 @@ pub fn probe_subgroups<R: Runtime>(client: &ComputeClient<R>) -> Result<usize, G
 static PROBE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
-thread_local! {
-    static PROBE_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(feature = "wgpu")]
@@ -378,7 +335,7 @@ mod tests {
     #[test]
     fn a_panic_in_the_public_storage_probe_is_a_typed_error() {
         let client = gpu_client().unwrap();
-        PROBE_FAULT.with(|fault| fault.set(true));
+        crate::fault::arm("storage probe");
         assert_eq!(
             probe_storage(&client),
             Err(GpuError::DeviceLost {

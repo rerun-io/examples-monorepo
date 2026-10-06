@@ -37,7 +37,7 @@ pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
     cameras: usize,
 ) -> Result<GpuStages<P, GpuRuntime>, crate::frontend::flow::FrontendError> {
     let client = gpu_client()?;
-    kornia_staging_gpu::runtime::guarded(kornia_staging_gpu::runtime::GpuError::DeviceLost { what: "frontend construction" }, || {
+    kornia_staging_gpu::transfer::execute_exclusive(&client, "frontend construction", || {
         probe_storage(&client)?;
         let launches = LaunchList::default();
         let tracker = GpuPatchTracker::new(

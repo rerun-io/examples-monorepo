@@ -222,3 +222,78 @@ fn flushing_an_unstarted_world_reports_no_pose_once() {
     assert!(vio.estimator().state().is_none());
     assert!(vio.flush().unwrap().is_none());
 }
+
+/// End-to-end equality includes delayed output, stereo redetection and buffered frames.
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_lookahead_preserves_every_output_with_and_without_frontend_lag() {
+    let directory = common::shared_frames();
+    let images: Vec<_> = (0..2)
+        .map(|camera| common::read_pgm(&directory, 0, camera))
+        .collect();
+    let blank = vec![0; images[0].pixels.len()];
+    for lag in [false, true] {
+        let mut reference = None;
+        for lookahead in [false, true] {
+            let mut config = common::config();
+            config.port_frontend_lag = lag;
+            config.port_keyframe_solve_deferred = true;
+            config.port_frame_update_max_iterations = 5;
+            let mut vio = Vio::<f32>::with_backend(
+                config,
+                common::calibration(),
+                Default::default(),
+                Backend::Gpu,
+            )
+            .unwrap();
+            for n in 0..100 {
+                vio.push_imu(n * 5_000_000, [0.0; 3], [0.0, 0.0, 9.81])
+                    .unwrap();
+            }
+            let mut results = Vec::new();
+            let views = |index: usize| {
+                images
+                    .iter()
+                    .map(|image| ImageView {
+                        width: image.width,
+                        height: image.height,
+                        stride: image.width,
+                        data: if index < 3 { &blank } else { &image.pixels },
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for index in 0..10 {
+                let current = views(index);
+                let next = views(index + 1);
+                let timestamp = index as i64 * 20_000_000;
+                let result = vio
+                    .track_with_lookahead(
+                        timestamp,
+                        &current,
+                        lookahead.then_some((timestamp + 20_000_000, next.as_slice())),
+                    )
+                    .unwrap();
+                if result.status != VioStatus::Buffered {
+                    results.push(result);
+                }
+            }
+            results.extend(vio.flush().unwrap());
+            assert!(vio.flush().unwrap().is_none());
+            assert_eq!(results.len(), 10);
+            assert!(
+                results
+                    .iter()
+                    .any(|result| result.status == VioStatus::Tracking)
+            );
+            if lookahead {
+                assert!(vio.frontend_timings().flow.gpu_lookahead);
+            }
+            if let Some(expected) = &reference {
+                assert_eq!(&results, expected, "frontend lag={lag}");
+            } else {
+                reference = Some(results);
+            }
+        }
+    }
+}

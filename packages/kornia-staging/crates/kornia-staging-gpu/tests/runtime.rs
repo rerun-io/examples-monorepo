@@ -17,7 +17,7 @@ fn the_runtime_stores_every_element_width_the_kernels_bind() {
 ///
 /// A missing adapter must not raise `pyo3_runtime.PanicException`, even though
 /// CubeCL unwraps its own bring-up on its worker thread and the process's
-/// documented contract is a `ValueError` and never a Rust panic (decision D32).
+/// documented contract is a `ValueError` and never a Rust panic.
 /// It cannot be tested in-process — a client is a per-process singleton and the
 /// environment is read once — so each case re-runs *this test binary* with one
 /// variable changed and reads what the child printed.
@@ -160,7 +160,7 @@ mod absent_gpu {
         // typed error, and without the quiet panic hook the one clue about a
         // case no probe anticipated is still printed rather than swallowed.
         assert_absent_gpu_case(
-            kornia_staging_gpu::runtime::GpuError::ClientPanicked { runtime: "wgpu" },
+            kornia_staging_gpu::runtime::GpuError::ClientPanicked,
             "CHILD building the wgpu client panicked",
             true,
             || {

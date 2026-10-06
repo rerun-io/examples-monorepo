@@ -267,7 +267,8 @@ fn owned_selection_delivery_is_atomic_and_cancellation_retains_buffers() {
     let mut pending = scanner.take_staged().unwrap();
     assert_eq!(pending.entries, vec![(0, policy), (1, policy)]);
     let mut bytes =
-        crate::transfer::read_buffers(&client, pending.take_handles(), "test keys").unwrap();
+        crate::transfer::read_inner(&client, pending.take_handles(), "test keys", || Ok(()))
+            .unwrap();
     bytes.pop(); // A later camera fails; the first must not be published.
     scanner.deliver(pending, bytes).unwrap();
     assert!(scanner.take_cells().is_err());
@@ -303,9 +304,13 @@ fn cancelled_selection_delivery_cannot_publish_or_replace_a_new_batch() {
         submit_cells(&mut scanner, &images, &selects).unwrap();
         let allocations = scanner.buffer_allocations();
         let mut cancelled = scanner.take_staged().unwrap();
-        let bytes =
-            crate::transfer::read_buffers(&client, cancelled.take_handles(), "cancelled test keys")
-                .unwrap();
+        let bytes = crate::transfer::read_inner(
+            &client,
+            cancelled.take_handles(),
+            "cancelled test keys",
+            || Ok(()),
+        )
+        .unwrap();
         scanner.abort_selection();
         if start_new_batch {
             scanner.begin_cells(1).unwrap();

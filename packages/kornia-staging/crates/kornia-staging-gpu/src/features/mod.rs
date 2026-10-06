@@ -241,7 +241,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                     }
                 }
                 Ok(Self {
-                    ring: crate::transfer::upload(&client, u32::as_bytes(&ring)),
+                    ring: crate::transfer::upload_inner(&client, u32::as_bytes(&ring)),
                     level0: Vec::new(),
                     uploads: 0,
                     cameras: Vec::new(),
@@ -375,7 +375,7 @@ impl<R: Runtime> GpuCornerScan<R> {
             ScanInput::Dense(image) => {
                 self.uploads += 1;
                 Ok((
-                    crate::transfer::upload(&self.client, u16::as_bytes(image.as_slice())),
+                    crate::transfer::upload_inner(&self.client, u16::as_bytes(image.as_slice())),
                     pixels,
                 ))
             }
@@ -610,10 +610,11 @@ impl<R: Runtime> GpuCornerScan<R> {
                 fire_if_armed(CORNER_SCAN_READ);
 
                 // One read for both, so one synchronisation for the frame.
-                let reads: Vec<cubecl::bytes::Bytes> = read_buffers(
+                let reads: Vec<cubecl::bytes::Bytes> = crate::transfer::read_inner(
                     &self.client,
                     vec![handles.kept, handles.mask],
                     "the candidate image and its bitmask",
+                    || Ok(()),
                 )?;
                 // One buffer per handle, in the order they were asked for; anything else
                 // is the runtime breaking its own contract rather than short data.
@@ -695,8 +696,12 @@ impl<R: Runtime> GpuCornerScan<R> {
                 #[cfg(all(test, feature = "wgpu"))]
                 fire_if_armed(CORNER_SCAN_READ);
 
-                let reads: Vec<cubecl::bytes::Bytes> =
-                    read_buffers(&self.client, vec![best], "the cell winner keys")?;
+                let reads: Vec<cubecl::bytes::Bytes> = crate::transfer::read_inner(
+                    &self.client,
+                    vec![best],
+                    "the cell winner keys",
+                    || Ok(()),
+                )?;
                 let Ok([keys]) = <[cubecl::bytes::Bytes; 1]>::try_from(reads) else {
                     return Err(GpuError::DeviceReadFailed {
                         what: "the cell winner buffer",
@@ -831,10 +836,11 @@ impl<R: Runtime> GpuCornerScan<R> {
                         }
                         #[cfg(all(test, feature = "wgpu"))]
                         fire_if_armed(CORNER_SCAN_READ);
-                        let bytes = read_buffers(
+                        let bytes = crate::transfer::read_inner(
                             &self.client,
                             selection.take_handles(),
                             "the cell winner keys",
+                            || Ok(()),
                         )?;
                         (selection, bytes)
                     }
@@ -957,39 +963,7 @@ impl<R: Runtime> std::fmt::Debug for GpuCornerScan<R> {
 #[cfg(all(test, feature = "wgpu"))]
 mod tests;
 
-fn read_buffers<R: Runtime>(
-    client: &ComputeClient<R>,
-    handles: Vec<cubecl::server::Handle>,
-    what: &'static str,
-) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
-    #[cfg(all(test, feature = "wgpu"))]
-    if armed("blocking read") {
-        return Err(GpuError::DeviceReadFailed { what });
-    }
-    crate::transfer::read_buffers(client, handles, what)
-}
 #[cfg(all(test, feature = "wgpu"))]
-thread_local! { static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+use crate::fault::{arm as arm_fault_at, fire as fire_if_armed};
 #[cfg(all(test, feature = "wgpu"))]
 const CORNER_SCAN_READ: &str = "the corner scan's read";
-#[cfg(all(test, feature = "wgpu"))]
-fn arm_fault_at(site: &'static str) {
-    FAULT.with(|fault| fault.set(Some(site)));
-}
-#[cfg(all(test, feature = "wgpu"))]
-fn armed(site: &'static str) -> bool {
-    FAULT.with(|fault| {
-        if fault.get() == Some(site) {
-            fault.set(None);
-            true
-        } else {
-            false
-        }
-    })
-}
-#[cfg(all(test, feature = "wgpu"))]
-fn fire_if_armed(site: &'static str) {
-    if armed(site) {
-        panic!("the device is gone");
-    }
-}
