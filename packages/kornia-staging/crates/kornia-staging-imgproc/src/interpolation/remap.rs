@@ -3,14 +3,15 @@
 //! kornia-imgproc has `remap` (f32 to f32) and `remap_u8` (u8 to u8, Q10); neither samples a u8 frame into a normalised f32
 //! network input without a full-frame conversion or a quantisation. This one does both in one pass and matches PyTorch's
 //! `grid_sample(mode="bilinear", padding_mode="zeros", align_corners=False)` when the maps hold pixel-centre coordinates:
-//! each of the four taps outside the image contributes zero. Target upstream: kornia-imgproc `interpolation::remap`.
+//! each of the four taps outside the image contributes zero.
 
 use kornia_image::{Image, ImageError};
 
 /// Sample `src` at `(map_x, map_y)` (pixel centres at integers) with bilinear weights, multiply by `scale` and write `dst`.
 ///
 /// Taps outside the image contribute zero, so pixels within one pixel outside the border fade to zero and non-finite map
-/// entries give zero.
+/// entries give zero. Non-finite scale values follow IEEE arithmetic for in-bounds
+/// samples; coordinates outside the source remain zero.
 ///
 /// # Arguments
 ///
@@ -26,33 +27,54 @@ use kornia_image::{Image, ImageError};
 ///
 /// # Errors
 ///
-/// `ImageError::InvalidImageSize` when the maps and `dst` differ in size.
+/// `ImageError::InvalidImageSize` when the maps and `dst` differ in size;
+/// `UnsupportedDevice` for non-host-accessible storage; `UnsupportedChannelCount` for zero channels.
 ///
 /// # Example
 ///
 /// ```
 /// use kornia_image::{Image, ImageSize};
-/// use robocap_live::kornia_ext::remap::remap_f32_from_u8;
+/// use kornia_staging_imgproc::interpolation::remap_f32_from_u8_zero_border;
 /// let size = ImageSize { width: 2, height: 1 };
 /// let src = Image::<u8, 1>::new(size, vec![0, 255]).unwrap();
 /// let map_x = Image::<f32, 1>::new(ImageSize { width: 1, height: 1 }, vec![0.5]).unwrap();
 /// let map_y = Image::<f32, 1>::new(ImageSize { width: 1, height: 1 }, vec![0.0]).unwrap();
 /// let mut dst = Image::<f32, 1>::from_size_val(ImageSize { width: 1, height: 1 }, 0.0).unwrap();
-/// remap_f32_from_u8(&src, &mut dst, &map_x, &map_y, 1.0 / 255.0).unwrap();
+/// remap_f32_from_u8_zero_border(&src, &mut dst, &map_x, &map_y, 1.0 / 255.0).unwrap();
 /// assert!((dst.as_slice()[0] - 0.5).abs() < 1e-6);
 /// ```
-pub fn remap_f32_from_u8<const C: usize>(
+pub fn remap_f32_from_u8_zero_border<const C: usize>(
     src: &Image<u8, C>,
     dst: &mut Image<f32, C>,
     map_x: &Image<f32, 1>,
     map_y: &Image<f32, 1>,
     scale: f32,
 ) -> Result<(), ImageError> {
+    if !src.storage.domain().is_host_accessible()
+        || !dst.storage.domain().is_host_accessible()
+        || !map_x.storage.domain().is_host_accessible()
+        || !map_y.storage.domain().is_host_accessible()
+    {
+        return Err(ImageError::UnsupportedDevice);
+    }
+    if C == 0 {
+        return Err(ImageError::UnsupportedChannelCount(C));
+    }
     if map_x.size() != map_y.size() {
-        return Err(ImageError::InvalidImageSize(map_x.cols(), map_x.rows(), map_y.cols(), map_y.rows()));
+        return Err(ImageError::InvalidImageSize(
+            map_x.cols(),
+            map_x.rows(),
+            map_y.cols(),
+            map_y.rows(),
+        ));
     }
     if dst.size() != map_x.size() {
-        return Err(ImageError::InvalidImageSize(dst.cols(), dst.rows(), map_x.cols(), map_x.rows()));
+        return Err(ImageError::InvalidImageSize(
+            dst.cols(),
+            dst.rows(),
+            map_x.cols(),
+            map_x.rows(),
+        ));
     }
     let (width, height) = (src.cols(), src.rows());
     let data = src.as_slice();
@@ -65,7 +87,14 @@ pub fn remap_f32_from_u8<const C: usize>(
             f32::from(data[(y as usize * width + x as usize) * C + channel])
         }
     };
-    for ((out, &x), &y) in dst.as_slice_mut().as_chunks_mut::<C>().0.iter_mut().zip(map_x.as_slice()).zip(map_y.as_slice()) {
+    for ((out, &x), &y) in dst
+        .as_slice_mut()
+        .as_chunks_mut::<C>()
+        .0
+        .iter_mut()
+        .zip(map_x.as_slice())
+        .zip(map_y.as_slice())
+    {
         // Far outside (or NaN, which fails every comparison): all four taps are zero.
         if !(x > -1.0 && y > -1.0 && x < w && y < h) {
             out.fill(0.0);
@@ -74,21 +103,33 @@ pub fn remap_f32_from_u8<const C: usize>(
         let (x0, y0) = (x.floor(), y.floor());
         let (wx, wy) = (x - x0, y - y0);
         // grid_sample's weights: nw = (1-wx)(1-wy), ne = wx(1-wy), sw = (1-wx)wy, se = wx wy; the scale folds into them.
-        let (nw, ne, sw, se) = ((1.0 - wx) * (1.0 - wy) * scale, wx * (1.0 - wy) * scale, (1.0 - wx) * wy * scale, wx * wy * scale);
+        let (nw, ne, sw, se) = (
+            (1.0 - wx) * (1.0 - wy) * scale,
+            wx * (1.0 - wy) * scale,
+            (1.0 - wx) * wy * scale,
+            wx * wy * scale,
+        );
         let (ix, iy) = (x0 as isize, y0 as isize);
         if ix >= 0 && iy >= 0 && (ix as usize) + 1 < width && (iy as usize) + 1 < height {
             let top = (iy as usize * width + ix as usize) * C;
             let bottom = top + width * C;
-            if let (Some(upper), Some(lower)) = (data.get(top..top + 2 * C), data.get(bottom..bottom + 2 * C)) {
+            if let (Some(upper), Some(lower)) =
+                (data.get(top..top + 2 * C), data.get(bottom..bottom + 2 * C))
+            {
                 for (channel, value) in out.iter_mut().enumerate() {
-                    *value = nw * f32::from(upper[channel]) + ne * f32::from(upper[C + channel]) + sw * f32::from(lower[channel])
+                    *value = nw * f32::from(upper[channel])
+                        + ne * f32::from(upper[C + channel])
+                        + sw * f32::from(lower[channel])
                         + se * f32::from(lower[C + channel]);
                 }
                 continue;
             }
         }
         for (channel, value) in out.iter_mut().enumerate() {
-            *value = nw * tap(ix, iy, channel) + ne * tap(ix + 1, iy, channel) + sw * tap(ix, iy + 1, channel) + se * tap(ix + 1, iy + 1, channel);
+            *value = nw * tap(ix, iy, channel)
+                + ne * tap(ix + 1, iy, channel)
+                + sw * tap(ix, iy + 1, channel)
+                + se * tap(ix + 1, iy + 1, channel);
         }
     }
     Ok(())
@@ -99,7 +140,11 @@ mod tests {
     use super::*;
     use kornia_image::ImageSize;
 
-    fn image<T: Clone>(width: usize, height: usize, data: Vec<T>) -> Result<Image<T, 1>, ImageError> {
+    fn image<T: Clone>(
+        width: usize,
+        height: usize,
+        data: Vec<T>,
+    ) -> Result<Image<T, 1>, ImageError> {
         Image::new(ImageSize { width, height }, data)
     }
 
@@ -109,7 +154,7 @@ mod tests {
         let map_x = image(3, 1, vec![0.0f32, 1.5, 0.25])?;
         let map_y = image(3, 1, vec![0.0f32, 0.5, 1.0])?;
         let mut dst = image(3, 1, vec![0f32; 3])?;
-        remap_f32_from_u8(&src, &mut dst, &map_x, &map_y, 0.5)?;
+        remap_f32_from_u8_zero_border(&src, &mut dst, &map_x, &map_y, 0.5)?;
         assert_eq!(dst.as_slice(), &[0.0, 0.5 * 30.0, 0.5 * 32.5]);
         Ok(())
     }
@@ -121,7 +166,7 @@ mod tests {
         let map_x = image(4, 1, vec![-0.5f32, 1.5, -1.0, f32::NAN])?;
         let map_y = image(4, 1, vec![0.0f32, 0.0, 0.0, 0.0])?;
         let mut dst = image(4, 1, vec![1f32; 4])?;
-        remap_f32_from_u8(&src, &mut dst, &map_x, &map_y, 1.0)?;
+        remap_f32_from_u8_zero_border(&src, &mut dst, &map_x, &map_y, 1.0)?;
         assert_eq!(dst.as_slice(), &[50.0, 50.0, 0.0, 0.0]);
         Ok(())
     }
@@ -131,7 +176,7 @@ mod tests {
         let src = image(2, 2, vec![0u8; 4])?;
         let map = image(2, 1, vec![0f32; 2])?;
         let mut dst = image(1, 1, vec![0f32])?;
-        assert!(remap_f32_from_u8(&src, &mut dst, &map, &map, 1.0).is_err());
+        assert!(remap_f32_from_u8_zero_border(&src, &mut dst, &map, &map, 1.0).is_err());
         Ok(())
     }
 }

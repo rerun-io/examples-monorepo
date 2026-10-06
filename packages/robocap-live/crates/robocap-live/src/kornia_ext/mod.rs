@@ -3,4 +3,6 @@
 #![deny(missing_docs)]
 
 pub mod heatmap;
-pub mod remap;
+/// Scaled zero-border remapping, retained for existing clients.
+pub mod remap {
+}

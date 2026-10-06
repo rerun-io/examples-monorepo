@@ -14,8 +14,7 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   validation, attribute save/restore), accel interpolated onto gyro stamps into combined `ImuMeasurement`-shaped samples, and a
   clock guard. Adapted from PR #270.
 - `src/capture/matcher.rs` -> kornia-sensors / sensor-rt: timestamp-tolerance multi-camera frameset assembly.
-- `src/kornia_ext/remap.rs` remap_f32_from_u8 -> kornia-imgproc `interpolation::remap`: u8 source to scaled f32 output (e.g. a [0, 1]
-  network input) in one pass, zero padding per tap, matching torch `grid_sample(bilinear, zeros, align_corners=False)`.
+- Scaled zero-border remap is staged in `kornia-staging-imgproc::interpolation::remap`; see [the staging tracker](../kornia-staging/README.md).
 - `src/kornia_ext/heatmap.rs` argmax_first / refine_peak_log_quadratic / decode_peak_2d -> kornia-imgproc `features` (or
   kornia-tensor-ops): separable log-quadratic sub-pixel heatmap peak decoding (exact for sampled Gaussians).
 - `src/hands/letterbox.rs` BarLetterbox -> kornia-imgproc `preprocess`: the mono letterbox with its public pixel-centre maps
