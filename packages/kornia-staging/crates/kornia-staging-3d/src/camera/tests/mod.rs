@@ -1,6 +1,14 @@
 use super::*;
 use approx::assert_relative_eq;
 
+#[derive(serde::Deserialize)]
+struct ProjectionFixture {
+    intrinsics: [f64; 4],
+    distortion: Vec<f64>,
+    points: Vec<[f64; 3]>,
+    pixels: Vec<[f64; 2]>,
+}
+
 // Public derivative and round-trip seams from slam-rs/tests/camera_jacobians.rs.
 fn sweep<
     S: Scalar,
@@ -120,5 +128,6 @@ fn right_front() -> KannalaBrandt4<f64> {
     .expect("valid camera calibration")
 }
 
+mod brown;
 mod kb4;
 mod pinhole;

@@ -14,6 +14,8 @@
 //! ```
 
 mod angular;
+mod brown;
+pub use brown::BrownConrady;
 mod kb4;
 mod pinhole;
 pub use kb4::KannalaBrandt4;
@@ -158,6 +160,8 @@ pub trait CameraModel<S: Scalar>: Copy {
 pub enum CameraModelKind<S: Scalar> {
     /// Perspective camera.
     Pinhole(Pinhole<S>),
+    /// Rational Brown camera, including prism and tilt.
+    BrownConrady(BrownConrady<S>),
     /// Four-term angular camera.
     Kb4(KannalaBrandt4<S>),
 }
@@ -168,6 +172,7 @@ impl<S: Scalar> CameraModelKind<S> {
     pub fn project(&self, point: [S; 3]) -> Result<[S; 2], ProjectionReject> {
         match self {
             Self::Pinhole(v) => v.project(point),
+            Self::BrownConrady(v) => v.project(point),
             Self::Kb4(v) => v.project(point),
         }
     }
@@ -175,6 +180,7 @@ impl<S: Scalar> CameraModelKind<S> {
     pub fn project_unchecked(&self, point: [S; 3]) -> [S; 2] {
         match self {
             Self::Pinhole(v) => v.project_unchecked(point),
+            Self::BrownConrady(v) => v.project_unchecked(point),
             Self::Kb4(v) => v.project_unchecked(point),
         }
     }
@@ -188,6 +194,7 @@ impl<S: Scalar> CameraModelKind<S> {
     ) -> ([S; 2], Result<(), ProjectionReject>) {
         match self {
             Self::Pinhole(v) => v.project_with_status(point, jacobian, None),
+            Self::BrownConrady(v) => v.project_with_status(point, jacobian, None),
             Self::Kb4(v) => v.project_with_status(point, jacobian, None),
         }
     }
@@ -197,6 +204,7 @@ impl<S: Scalar> CameraModelKind<S> {
     pub fn unproject(&self, pixel: [S; 2]) -> Result<[S; 3], UnprojectError> {
         match self {
             Self::Pinhole(v) => v.unproject(pixel),
+            Self::BrownConrady(v) => v.unproject(pixel),
             Self::Kb4(v) => v.unproject(pixel),
         }
     }
@@ -288,6 +296,59 @@ fn inverse_jacobians<S: Scalar, const N: usize>(
 
 #[cfg(test)]
 mod tests;
+
+// Damped Newton on the full two-dimensional distortion. Every accepted step
+// reduces the residual, and success requires the residual, not the step, to be small.
+fn newton2<S: Scalar>(
+    target: [S; 2],
+    distort: impl Fn([S; 2], &mut [[S; 2]; 2]) -> [S; 2],
+) -> Result<[S; 2], UnprojectError> {
+    let mut xy = target;
+    // Reuse the accepted line-search value and Jacobian on the next iteration.
+    let mut j = [[S::zero(); 2]; 2];
+    let mut value = distort(xy, &mut j);
+    for _ in 0..80 {
+        if !finite(value) {
+            return Err(UnprojectError::NonFinite);
+        }
+        let residual = [value[0] - target[0], value[1] - target[1]];
+        let norm = residual[0].abs().max(residual[1].abs());
+        if norm <= inverse_epsilon::<S>() * (S::one() + target[0].abs().max(target[1].abs())) {
+            return Ok(xy);
+        }
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        if !det.is_finite() || det == S::zero() {
+            return Err(UnprojectError::Singular);
+        }
+        let step = [
+            (j[1][1] * residual[0] - j[0][1] * residual[1]) / det,
+            (-j[1][0] * residual[0] + j[0][0] * residual[1]) / det,
+        ];
+        let mut scale = S::one();
+        let mut accepted = false;
+        for _ in 0..20 {
+            let candidate = [xy[0] - scale * step[0], xy[1] - scale * step[1]];
+            // Further halvings cannot change a candidate that already rounds to xy.
+            if candidate == xy {
+                break;
+            }
+            value = distort(candidate, &mut j);
+            let next = (value[0] - target[0])
+                .abs()
+                .max((value[1] - target[1]).abs());
+            if finite(value) && next < norm {
+                xy = candidate;
+                accepted = true;
+                break;
+            }
+            scale *= c::<S>(0.5);
+        }
+        if !accepted {
+            return Err(UnprojectError::NoConvergence);
+        }
+    }
+    Err(UnprojectError::NoConvergence)
+}
 
 /// Residual tolerance for camera inverse solves in normalized coordinates.
 /// The sealed scalar set contains only f32 and f64; this policy belongs to cameras.
