@@ -29,3 +29,7 @@ harness = false
 [[bench]]
 name = "marginalization"
 harness = false
+
+[[bench]]
+name = "damped_solve"
+harness = false

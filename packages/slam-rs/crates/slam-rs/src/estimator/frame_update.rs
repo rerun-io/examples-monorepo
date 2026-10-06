@@ -15,16 +15,16 @@
 use kornia_staging_algebra::Scalar;
 use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
-use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
-use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
-use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
+use super::optimize::{damped_solve, LmIteration, LmTermination, SolveOutcome};
+use super::{lm_converged, EstimatorError, SqrtKeypointVio, StageTimings};
+use crate::ba_base::{linearize_point, BundleAdjustmentBase, LinearizePointOut};
 use crate::duration_ns;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{Se3, eigen_maxi};
 use crate::linearize::{LandmarkBlockOptions, compute_error_weight, linearize_relative_pose};
 use crate::types::{
-    FrameId, LandmarkId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId,
-    Vector15,
+    FrameId, LandmarkId, PoseVelBiasStateWithLin, TimeCamId, Vector15, POSE_SIZE,
+    POSE_VEL_BIAS_SIZE,
 };
 
 /// Which precondition sent a frameset back to the joint solve.
@@ -114,7 +114,6 @@ pub(super) struct FrameUpdateScratch<S: Scalar> {
     /// See [`Self::h_trial`].
     b_trial: DVector<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
-    solve: DMatrix<f64>,
     /// The increment [`damped_solve`] writes and the loop then negates.
     increment: DVector<S>,
     /// The pairs [`linearize_state`] has already evaluated, kept for its
@@ -134,7 +133,6 @@ impl<S: Scalar> Default for FrameUpdateScratch<S> {
             b: DVector::zeros(POSE_VEL_BIAS_SIZE),
             h_trial: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
             b_trial: DVector::zeros(POSE_VEL_BIAS_SIZE),
-            solve: DMatrix::zeros(0, 0),
             increment: DVector::zeros(POSE_VEL_BIAS_SIZE),
             rel_poses: Vec::new(),
             observations: Vec::new(),
@@ -204,7 +202,6 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             ref mut b,
             ref mut h_trial,
             ref mut b_trial,
-            ref mut solve,
             ref mut increment,
             ref mut rel_poses,
             ref mut observations,
@@ -239,12 +236,9 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         let mut backtrack: i32 = 0;
         while it <= config.port_frame_update_max_iterations && termination.is_none() {
             let mark: std::time::Instant = std::time::Instant::now();
-            let (inc_valid, solve_attempts): (bool, u32) =
-                damped_solve(h, b, damping, solve, increment);
+            let (inc_valid, solve_attempts): (bool, u32) = damped_solve(h, b, damping, increment);
             if !inc_valid {
-                log::warn!(
-                    "frame {t_ns} ns: the frame update's increment is still not finite after {solve_attempts} damped solves"
-                );
+                return Err(EstimatorError::NumericallyInvalid { t_ns });
             }
             timings.solver_ns += duration_ns(mark);
 
@@ -772,6 +766,34 @@ mod tests {
     /// (2.0e6 -> 9.1e-2 -> 5.3e-9 -> 3.6e-17): 2.1e-13 m, 3.6e-15 rad and
     /// 1.9e-11 m/s.
     const CONVERGENCE_TOLERANCE: f64 = 1e-9;
+
+    #[test]
+    fn failed_steps_are_refused_before_state_mutation() {
+        for joint in [false, true] {
+            let (mut vio, _) = a_window(2);
+            // Force exhausted solve attempts after construction; production
+            // configuration validation normally excludes this input.
+            vio.config.vio_lm_lambda_initial = f64::NAN;
+            if joint {
+                vio.marg_data.order.push(HOST_T_NS, POSE_SIZE).unwrap();
+                vio.marg_data.h = DMatrix::zeros(0, POSE_SIZE);
+                vio.marg_data.b = DVector::zeros(0);
+            }
+            let states = vio.ba.frame_states.clone();
+            let poses = vio.ba.frame_poses.clone();
+            let result = if joint {
+                vio.optimize(CURRENT_T_NS, None).map(|_| ())
+            } else {
+                vio.frame_update(CURRENT_T_NS).map(|_| ())
+            };
+            assert_eq!(
+                result.unwrap_err(),
+                EstimatorError::NumericallyInvalid { t_ns: CURRENT_T_NS }
+            );
+            assert_eq!(vio.ba.frame_states, states);
+            assert_eq!(vio.ba.frame_poses, poses);
+        }
+    }
 
     /// The known answer: a state pushed off a zero-cost minimum comes back to it.
     ///
