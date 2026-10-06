@@ -1,0 +1,20 @@
+[package]
+name = "gsplat-render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gsplat-core = { path = "../gsplat-core", features = ["serde"] }
+brush-serde.workspace = true
+brush-render.workspace = true
+colmap-reader = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+image.workspace = true
+clap.workspace = true
+anyhow.workspace = true

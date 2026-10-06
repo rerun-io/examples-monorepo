@@ -39,10 +39,6 @@ name = "gsplat-rust-renderer"
 path = "src/main.rs"
 required-features = ["viewer"]
 
-[[bin]]
-name = "gsplat-render"
-path = "src/render_cli.rs"
-
 [features]
 default = ["viewer"]
 viewer = [

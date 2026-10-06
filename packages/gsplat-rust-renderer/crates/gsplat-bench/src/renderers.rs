@@ -1,4 +1,5 @@
 //! Loading and pixel transfers are separate from the synchronized speed lane.
+use crate::settings::RenderSettings;
 use crate::{
     Error, Result,
     camera::{CameraModel, CameraSpec, opengl_to_opencv},
@@ -8,7 +9,6 @@ use brush_render::{
     TextureMode,
     gaussian_splats::{SplatRenderMode, Splats},
 };
-use brush_serde::import::SplatData;
 use burn::tensor::{Device, Tensor};
 use glam::{Mat4, Vec2, Vec3};
 use gsplat_lib::gsplat_core::{
@@ -16,7 +16,6 @@ use gsplat_lib::gsplat_core::{
     RenderShCoefficients,
 };
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 mod native;
 pub use native::Native;
 
@@ -24,6 +23,7 @@ pub use native::Native;
 #[serde(rename_all = "kebab-case")]
 pub enum Implementation {
     Brush,
+    Ours,
     OursOld,
     Native,
 }
@@ -50,6 +50,8 @@ impl From<wgpu::AdapterInfo> for Adapter {
 pub struct Counts {
     pub visible: Option<u32>,
     pub intersections: Option<u32>,
+    #[serde(default)]
+    pub overflow_events: Option<u32>,
 }
 
 #[allow(async_fn_in_trait)]
@@ -65,39 +67,7 @@ pub trait RenderEngine {
     }
 }
 
-pub struct Scene {
-    pub data: SplatData,
-    pub mode: SplatRenderMode,
-    pub center: Vec3,
-    pub extent: f32,
-}
-impl Scene {
-    pub async fn load(path: &Path) -> Result<Self> {
-        let loaded =
-            brush_serde::import::load_splat_from_ply(tokio::fs::File::open(path).await?, None)
-                .await
-                .map_err(|e| Error::Invalid(e.to_string()))?;
-        if loaded.data.num_splats() == 0 {
-            return Err(Error::Invalid("empty splat cloud".into()));
-        }
-        let mut min = Vec3::splat(f32::INFINITY);
-        let mut max = Vec3::splat(f32::NEG_INFINITY);
-        for p in loaded.data.means.as_chunks::<3>().0.iter() {
-            let p = Vec3::from_slice(p);
-            if !p.is_finite() {
-                return Err(Error::Invalid("nonfinite splat center".into()));
-            }
-            min = min.min(p);
-            max = max.max(p);
-        }
-        Ok(Self {
-            data: loaded.data,
-            mode: loaded.meta.render_mode.unwrap_or(SplatRenderMode::Default),
-            center: (min + max) * 0.5,
-            extent: (max - min).length() * 0.5,
-        })
-    }
-}
+pub use gsplat_render::Scene;
 
 pub struct Brush {
     splats: Splats,
@@ -105,9 +75,10 @@ pub struct Brush {
     adapter: Adapter,
     output: Option<Tensor<3>>,
     packed: bool,
+    splat_scale: f32,
 }
 impl Brush {
-    pub async fn new(scene: &Scene) -> Self {
+    pub async fn new(scene: &Scene, settings: &RenderSettings) -> Self {
         use burn::backend::wgpu::{
             RuntimeOptions, WgpuDevice, graphics::AutoGraphicsApi, init_setup_async,
         };
@@ -127,8 +98,23 @@ impl Brush {
             .await
             .clone();
         let device = burn::backend::wgpu::WgpuDevice::default().into();
+        let mode = match settings.mode(scene.mode) {
+            gsplat_core::RenderMode::Default => SplatRenderMode::Default,
+            gsplat_core::RenderMode::Mip => SplatRenderMode::Mip,
+        };
+        let mut splats = scene.data.clone().into_splats(&device, mode);
+        if let Some(floor) = settings.min_scale {
+            splats = splats.with_min_scale(Tensor::from_data(
+                burn::tensor::TensorData::new(
+                    vec![floor; scene.data.num_splats()],
+                    [scene.data.num_splats()],
+                ),
+                &device,
+            ));
+        }
         Self {
-            splats: scene.data.clone().into_splats(&device, scene.mode),
+            splats,
+            splat_scale: settings.splat_scale,
             device,
             adapter,
             output: None,
@@ -143,7 +129,7 @@ impl RenderEngine for Brush {
             &camera.brush_camera(),
             glam::uvec2(camera.width, camera.height),
             Vec3::ZERO,
-            None,
+            Some(self.splat_scale),
             if parity {
                 TextureMode::Float
             } else {
@@ -156,6 +142,7 @@ impl RenderEngine for Brush {
         Ok(Counts {
             visible: Some(aux.num_visible),
             intersections: Some(aux.num_intersections),
+            overflow_events: Some(0),
         })
     }
     fn finish(&self) -> Result<()> {
@@ -406,3 +393,56 @@ impl RenderEngine for Old {
         self.ctx.adapter_info.clone().into()
     }
 }
+
+impl RenderEngine for gsplat_render::Renderer {
+    async fn render(&mut self, camera: &CameraSpec, parity: bool) -> Result<Counts> {
+        let stats = gsplat_render::Renderer::render(
+            self,
+            camera,
+            if parity {
+                gsplat_render::Output::Float
+            } else {
+                gsplat_render::Output::Packed
+            },
+        )?;
+        Ok(Counts {
+            visible: Some(stats.visible),
+            intersections: Some(stats.intersections),
+            overflow_events: Some(stats.overflow_events),
+        })
+    }
+    fn finish(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn read_rgba_f32(&mut self) -> Result<Vec<f32>> {
+        Ok(self.read_rgba(gsplat_render::Output::Float)?)
+    }
+    fn adapter(&self) -> Adapter {
+        self.adapter.clone().into()
+    }
+}
+
+/// Construct the shared renderer with the benchmark's recorded controls.
+pub async fn ours(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    settings: &RenderSettings,
+) -> Result<gsplat_render::Renderer> {
+    let mut splats = gsplat_render::raw_splats(&scene.data)?;
+    if let Some(floor) = settings.min_scale {
+        splats.min_scale = Some(vec![floor; scene.data.num_splats()]);
+    }
+    let mut renderer = gsplat_render::Renderer::new(
+        &splats,
+        settings.mode(scene.mode),
+        glam::UVec2::new(width, height),
+        settings.initial_capacity,
+    )
+    .await?;
+    renderer.options = settings.options();
+    Ok(renderer)
+}
+
+#[cfg(test)]
+mod coverage;

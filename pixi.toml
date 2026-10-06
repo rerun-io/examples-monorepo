@@ -2228,12 +2228,12 @@ description = "Train Gaussian splats on nerfbaselines chair scene (30K steps)"
 
 # ── Standalone render CLI ────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-render]
-cmd = "cargo run --release --no-default-features --bin gsplat-render --"
+cmd = "cargo run --release -p gsplat-render --"
 cwd = "packages/gsplat-rust-renderer"
 description = "Render a PLY at a NeRF camera position to PNG (no Rerun needed)"
 
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-render]
-cmd = "cargo build --release --no-default-features --bin gsplat-render"
+cmd = "cargo build --release -p gsplat-render"
 cwd = "packages/gsplat-rust-renderer"
 description = "Build the standalone no-Rerun renderer"
 

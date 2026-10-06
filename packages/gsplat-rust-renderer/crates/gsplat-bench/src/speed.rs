@@ -7,6 +7,7 @@ use gsplat_bench::{
     renderers::{
         Adapter, Brush, Counts, Implementation, Native, Old, RenderEngine, Scene, StageTiming,
     },
+    settings::RenderSettings,
     statistics::{Statistics, median, summarize},
 };
 use gsplat_eval::{Evaluator, RenderMetrics, Versions};
@@ -23,11 +24,13 @@ pub struct SpeedArgs {
         long = "impl",
         value_enum,
         value_delimiter = ',',
-        default_value = "brush,ours-old,native"
+        default_value = "brush,ours,ours-old,native"
     )]
     pub implementations: Vec<Implementation>,
     #[command(flatten)]
     pub camera: CameraArgs,
+    #[command(flatten)]
+    settings: RenderSettings,
     #[arg(long, default_value_t = 120)]
     warmup: usize,
     #[arg(long, default_value_t = 600)]
@@ -82,6 +85,7 @@ struct BackendReport {
 #[serde(deny_unknown_fields)]
 struct SpeedReport {
     complete: bool,
+    settings: RenderSettings,
     ply: PathBuf,
     splats: usize,
     cameras: Vec<CameraSpec>,
@@ -258,15 +262,29 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
     let scene = Scene::load(&a.camera.ply).await?;
     let cameras = cameras(&a.camera, &scene).await?;
     let mut brush = None;
+    let mut ours = None;
     let mut old = None;
     let mut native = None;
     let mut reports = Vec::new();
     for kind in &a.implementations {
+        gsplat_bench::settings::validate_backend(&a.settings, *kind, scene.mode)?;
         let start = Instant::now();
         let report = match kind {
             Implementation::Brush => {
-                let r = brush.insert(Brush::new(&scene).await);
+                let r = brush.insert(Brush::new(&scene, &a.settings).await);
                 initialize(r, &cameras[0], start, *kind, "Brush Packed", a.repeats).await?
+            }
+            Implementation::Ours => {
+                let r = ours.insert(
+                    gsplat_bench::renderers::ours(
+                        &scene,
+                        cameras[0].width,
+                        cameras[0].height,
+                        &a.settings,
+                    )
+                    .await?,
+                );
+                initialize(r, &cameras[0], start, *kind, "Packed RGBA8", a.repeats).await?
             }
             Implementation::OursOld => {
                 let r = old.insert(Old::new(&scene, cameras[0].width, cameras[0].height)?);
@@ -289,6 +307,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
     }
     let mut suite = SpeedReport {
         complete: false,
+        settings: a.settings,
         ply: a.camera.ply.clone(),
         splats: scene.data.num_splats(),
         cameras,
@@ -334,6 +353,18 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                     Implementation::Brush => {
                         repeat(
                             brush.as_mut().unwrap(),
+                            &suite.cameras,
+                            &a,
+                            index,
+                            attempt,
+                            order,
+                            admission_deadline,
+                        )
+                        .await?
+                    }
+                    Implementation::Ours => {
+                        repeat(
+                            ours.as_mut().unwrap(),
                             &suite.cameras,
                             &a,
                             index,
@@ -400,16 +431,20 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
         )?);
         report.lane1 = match report.implementation {
+            Implementation::Ours => ours.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::Brush => brush.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::OursOld => old.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::Native => native.as_mut().unwrap().stages(&suite.cameras[0]).await?,
         };
     }
-    let mut oracle = Brush::new(&scene).await;
+    let mut oracle = Brush::new(&scene, &a.settings).await;
     for report in &mut suite.backends {
         report.camera_checks = match report.implementation {
             Implementation::Brush => {
                 check_cameras(brush.as_mut().unwrap(), &mut oracle, &suite.cameras, true).await?
+            }
+            Implementation::Ours => {
+                check_cameras(ours.as_mut().unwrap(), &mut oracle, &suite.cameras, true).await?
             }
             Implementation::OursOld => {
                 check_cameras(old.as_mut().unwrap(), &mut oracle, &suite.cameras, false).await?

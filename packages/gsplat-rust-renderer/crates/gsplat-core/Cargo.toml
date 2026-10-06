@@ -4,11 +4,15 @@ version = "0.1.0"
 edition = "2024"
 description = "WebGPU Gaussian splat forward rendering without a tensor runtime"
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 bytemuck.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster.workspace = true

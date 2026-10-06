@@ -5,6 +5,8 @@ use std::f64::consts::PI;
 
 /// Distortion coefficient order matches Brush. Fisheye models use angular projection.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub enum CameraModel {
     #[default]
     Pinhole,

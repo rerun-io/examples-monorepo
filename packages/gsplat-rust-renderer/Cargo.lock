@@ -6007,6 +6007,7 @@ dependencies = [
  "glam",
  "gsplat-core",
  "gsplat-eval",
+ "gsplat-render",
  "gsplat-rust-renderer",
  "image",
  "macaw",
@@ -6028,6 +6029,7 @@ dependencies = [
  "glam",
  "naga",
  "pollster 0.4.0",
+ "serde",
  "thiserror 2.0.20",
  "wgpu",
 ]
@@ -6052,6 +6054,26 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "gsplat-render"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brush-render",
+ "brush-serde",
+ "bytemuck",
+ "clap",
+ "colmap-reader",
+ "glam",
+ "gsplat-core",
+ "image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "wgpu",
 ]
 
 [[package]]

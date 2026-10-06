@@ -16,7 +16,7 @@ fn one_splat(log_scale: f32) -> Scene {
             sh_coeffs: Some(vec![0.1, 0.2, 0.3]),
             raw_opacities: Some(vec![0.0]),
         },
-        mode: brush_render::gaussian_splats::SplatRenderMode::Default,
+        mode: gsplat_core::RenderMode::Default,
         center: Vec3::ZERO,
         extent: 1.0,
     }
@@ -52,12 +52,14 @@ async fn all_renderers_nonblack_and_brush_identity() {
     let cameras =
         PathBuf::from(std::env::var("GSPLAT_TEST_CAMERAS").expect("missing GSPLAT_TEST_CAMERAS"));
     let scene = Scene::load(&ply).await.unwrap();
-    let mut camera = camera::test_views(&cameras).unwrap()[0].resized(256, 256);
+    let mut camera = camera::load_frames(&cameras, None).await.unwrap()[0]
+        .camera
+        .resized(256, 256);
     // Exercise principal-point mapping away from the image centre.
     camera.cx -= 13.0;
     camera.cy += 9.0;
     camera.validate().unwrap();
-    let mut brush = Brush::new(&scene).await;
+    let mut brush = Brush::new(&scene, &Default::default()).await;
     let reference = capture(&mut brush, &camera).await;
     brush.render(&camera, false).await.unwrap();
     brush.finish().unwrap();
@@ -68,6 +70,16 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .unwrap();
     println!("Brush Packed versus Float: {packed_score:?}");
     assert!(packed_score.minimum_psnr() > 35.0);
+    let mut ours = gsplat_bench::renderers::ours(&scene, 256, 256, &Default::default())
+        .await
+        .unwrap();
+    let pixels = capture(&mut ours, &camera).await;
+    let score = Evaluator::new(false)
+        .evaluate_renders(&pixels, &reference, 256, 256)
+        .await
+        .unwrap();
+    println!("ours off-centre float parity: {score:?}");
+    assert!(score.minimum_psnr() >= 40.0);
     let mut old = Old::new(&scene, 256, 256).unwrap();
     let pixels = capture(&mut old, &camera).await;
     let evaluator = Evaluator::new(false);
@@ -96,7 +108,7 @@ async fn all_renderers_nonblack_and_brush_identity() {
         native_score.alpha_psnr > 20.0,
         "native screenshot must retain scene alpha"
     );
-    let mut second = Brush::new(&scene).await;
+    let mut second = Brush::new(&scene, &Default::default()).await;
     let pixels = capture(&mut second, &camera).await;
     let repeat = evaluator
         .evaluate_renders(&pixels, &reference, 256, 256)
@@ -110,8 +122,8 @@ async fn all_renderers_nonblack_and_brush_identity() {
 async fn independent_brush_renders_have_exact_identity_on_one_splat() {
     let scene = one_splat(-1.5);
     let camera = CameraSpec::from_nerf(Mat4::from_translation(Vec3::Z * 3.0), 0.8, 64, 64);
-    let mut a = Brush::new(&scene).await;
-    let mut b = Brush::new(&scene).await;
+    let mut a = Brush::new(&scene, &Default::default()).await;
+    let mut b = Brush::new(&scene, &Default::default()).await;
     let a = capture(&mut a, &camera).await;
     let b = capture(&mut b, &camera).await;
     assert_eq!(a, b);
@@ -137,7 +149,12 @@ async fn garden_colmap_projects_observed_points() {
     let path = PathBuf::from(
         std::env::var("GSPLAT_TEST_COLMAP").expect("missing garden GSPLAT_TEST_COLMAP"),
     );
-    let cameras = camera::colmap_views(&path).await.unwrap();
+    let cameras: Vec<_> = camera::load_frames(&path, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|frame| frame.camera)
+        .collect();
     assert_eq!(cameras.len(), 185);
     let mut images = colmap_reader::read_images(
         BufReader::new(

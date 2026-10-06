@@ -37,10 +37,15 @@ impl Default for Versions {
                     )
                 })
                 .collect(),
-            environment: ["BURN_DEVICE", "CUBECL_WGPU_MAX_TASKS", "WGPU_BACKEND"]
-                .into_iter()
-                .map(|name| (name.into(), std::env::var(name).ok()))
-                .collect(),
+            environment: [
+                "BURN_DEVICE",
+                "CUBECL_WGPU_MAX_TASKS",
+                "WGPU_BACKEND",
+                "WGPU_VALIDATION_INDIRECT_CALL",
+            ]
+            .into_iter()
+            .map(|name| (name.into(), std::env::var(name).ok()))
+            .collect(),
         }
     }
 }

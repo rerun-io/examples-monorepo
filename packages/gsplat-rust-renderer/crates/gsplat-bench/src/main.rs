@@ -6,6 +6,7 @@ use glam::{Mat4, Vec2};
 use gsplat_bench::{
     camera::{self, CameraPath, CameraSpec},
     renderers::{Adapter, Brush, Implementation, Native, Old, RenderEngine, Scene},
+    settings::RenderSettings,
 };
 use gsplat_eval::{Evaluator, Metrics, Versions, ViewMetrics};
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,8 @@ struct ParityArgs {
     oracle: Oracle,
     #[command(flatten)]
     camera: CameraArgs,
+    #[command(flatten)]
+    settings: RenderSettings,
     #[arg(long)]
     out: PathBuf,
     #[arg(long)]
@@ -114,9 +117,12 @@ async fn cameras(args: &CameraArgs, scene: &Scene) -> Result<Vec<CameraSpec>> {
             }
             path
         }
-        CameraPath::TestViews(p) => camera::test_views(p)?,
+        CameraPath::TestViews(p) | CameraPath::Colmap(p) => camera::load_frames(p, None)
+            .await?
+            .into_iter()
+            .map(|frame| frame.camera)
+            .collect(),
         CameraPath::Specs(p) => serde_json::from_slice::<Vec<CameraSpec>>(&std::fs::read(p)?)?,
-        CameraPath::Colmap(p) => camera::colmap_views(p).await?,
     };
     if let Some((w, h)) = size {
         path = path.into_iter().map(|c| c.resized(w, h)).collect();
@@ -152,6 +158,7 @@ struct ParityReport {
     implementation: Implementation,
     oracle: Oracle,
     image_boundary: String,
+    settings: RenderSettings,
     ply: PathBuf,
     splats: usize,
     cameras: Vec<CameraSpec>,
@@ -210,7 +217,7 @@ async fn parity<R: RenderEngine>(
     cameras: Vec<CameraSpec>,
     mut renderer: R,
 ) -> Result<()> {
-    let mut oracle = Brush::new(&scene).await;
+    let mut oracle = Brush::new(&scene, &a.settings).await;
     let evaluator = Evaluator::new(false);
     let mut views = Vec::new();
     let mut worst: Vec<Evidence> = Vec::new();
@@ -274,10 +281,11 @@ async fn parity<R: RenderEngine>(
     let mean = gsplat_eval::mean(&views.iter().map(|v| v.metrics.clone()).collect::<Vec<_>>());
     let mean_alpha_psnr = views.iter().map(|v| v.alpha_psnr).sum::<f64>() / views.len() as f64;
     let mean_white_psnr = views.iter().map(|v| v.white_psnr).sum::<f64>() / views.len() as f64;
-    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:a.oracle,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; old/native intrinsically use RGBA8 targets".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
+    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:a.oracle,settings:a.settings,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; old/native intrinsically use RGBA8 targets".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
 }
 async fn run_parity(a: ParityArgs) -> Result<()> {
     let scene = Scene::load(&a.camera.ply).await?;
+    gsplat_bench::settings::validate_backend(&a.settings, a.implementation, scene.mode)?;
     let mut cameras = cameras(&a.camera, &scene).await?;
     if let Some(n) = a.limit {
         ensure!(n > 0, "limit must be positive");
@@ -285,7 +293,17 @@ async fn run_parity(a: ParityArgs) -> Result<()> {
     }
     match a.implementation {
         Implementation::Brush => {
-            let r = Brush::new(&scene).await;
+            let r = Brush::new(&scene, &a.settings).await;
+            parity(a, scene, cameras, r).await
+        }
+        Implementation::Ours => {
+            let r = gsplat_bench::renderers::ours(
+                &scene,
+                cameras[0].width,
+                cameras[0].height,
+                &a.settings,
+            )
+            .await?;
             parity(a, scene, cameras, r).await
         }
         Implementation::OursOld => {
@@ -372,7 +390,7 @@ mod tests {
                 sh_coeffs: None,
                 raw_opacities: None,
             },
-            mode: brush_render::gaussian_splats::SplatRenderMode::Default,
+            mode: gsplat_core::RenderMode::Default,
             center: glam::Vec3::ZERO,
             extent: 1.0,
         };

@@ -8,6 +8,7 @@ use re_renderer::{
 };
 use re_sdk_types::archetypes::GaussianSplats3D;
 use re_types_core::FromArrow as _;
+use std::path::Path;
 
 pub struct Native {
     ctx: RenderContext,

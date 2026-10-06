@@ -1,10 +1,13 @@
 //! Reproducible camera, renderer, and measurement boundaries for splat benchmarks.
 pub mod camera;
 pub mod renderers;
+pub mod settings;
 pub mod statistics;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Render(#[from] gsplat_render::Error),
     #[error("{0}")]
     Invalid(String),
     #[error("unsupported: {0}")]
