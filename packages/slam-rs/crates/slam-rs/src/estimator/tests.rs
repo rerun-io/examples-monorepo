@@ -16,11 +16,11 @@ fn estimator() -> SqrtKeypointVio<f32> {
 }
 
 /// A sample the initialization can take a gravity direction from.
-fn sample(t_ns: i64) -> ImuSample {
-    ImuSample {
-        t_ns,
-        gyro: Vector3::zeros(),
-        accel: Vector3::new(0.0, 0.0, 9.81),
+fn sample(t_ns: i64) -> CombinedImuSample {
+    CombinedImuSample {
+        timestamp_ns: t_ns,
+        gyro: [0.0; 3].into(),
+        accel: [0.0, 0.0, 9.81].into(),
     }
 }
 
@@ -198,7 +198,7 @@ fn an_imu_sample_behind_the_pending_one_is_dropped() {
     // A sample that does follow the pending one is still accepted.
     estimator.push_imu(sample(12));
     assert_eq!(
-        estimator.imu_queue.back().map(|s| s.t_ns),
+        estimator.imu_queue.back().map(|s| s.timestamp_ns),
         Some(12),
         "the ordering check rejected a sample that does follow"
     );

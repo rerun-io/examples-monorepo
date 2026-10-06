@@ -27,6 +27,7 @@
 //! for a fresh map and fixed block size, but still uses a typed result (D32).
 
 use kornia_staging_algebra::Scalar;
+use kornia_staging_sensors::imu::{CombinedImuSample, IntegratedImuMeasurement, NavState};
 mod deferred;
 mod error;
 mod frame_update;
@@ -48,15 +49,13 @@ use crate::calib::Calibration;
 use crate::config::{LinearizationType, VioConfig};
 use crate::duration_ns;
 use crate::frontend::parallel::WorkPool;
-use crate::imu::{
-    ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, Popped, gravity,
-    gravity_from_first_accel,
-};
+use crate::imu::{ImuLinData, Popped, gravity, gravity_from_first_accel};
 use crate::lie::{Se3, eigen_maxi};
 use crate::types::{
     AbsOrderMap, FrameId, KeypointId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE,
-    PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, TimeCamId,
+    PoseVelBiasState, PoseVelBiasStateWithLin, TimeCamId,
 };
+use kornia_staging_sensors::imu::ImuNoise;
 
 pub use error::{EstimatorError, WindowRole};
 pub use report::{FlowObservations, FrameOutcome, FrameStats, StageTimings};
@@ -190,9 +189,9 @@ pub struct SqrtKeypointVio<S: Scalar> {
 
     /// `imu_data_queue`, unbounded here: Offline mode
     /// never drops a sample and never blocks (D17, D24).
-    imu_queue: VecDeque<ImuSample>,
+    imu_queue: VecDeque<CombinedImuSample>,
     /// The calibrated sample already popped from the queue, retained across frames.
-    pending: Option<(i64, Vector3<S>, Vector3<S>)>,
+    pending: Option<Popped<S>>,
     /// The newest timestamp [`Self::push_imu`] has accepted, whether that
     /// sample is still in [`Self::imu_queue`] or has already moved into
     /// [`Self::pending`]. The queue alone cannot answer that: once its last
@@ -334,7 +333,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
 
         validate_scalars(&calibration, &config)?;
 
-        let noise: ImuNoise<S> = ImuNoise::from_calibration(&calibration);
+        let noise: ImuNoise<S> = crate::imu::noise_from_calibration(&calibration)?;
         let gyro_bias_sqrt_weight: Vector3<S> = calibration.gyro_bias_std.map(|v| S::one() / v);
         let accel_bias_sqrt_weight: Vector3<S> = calibration.accel_bias_std.map(|v| S::one() / v);
 
@@ -425,13 +424,13 @@ impl<S: Scalar> SqrtKeypointVio<S> {
     /// That timestamp includes the pending sample even when the queue is empty.
     /// Direct callers have older samples dropped; [`Vio::push_imu`](crate::Vio::push_imu)
     /// refuses them with a typed error. Static bias calibration occurs when popping.
-    pub fn push_imu(&mut self, sample: ImuSample) {
+    pub fn push_imu(&mut self, sample: CombinedImuSample) {
         if let Some(newest) = self.newest_imu_t_ns
-            && sample.t_ns <= newest
+            && sample.timestamp_ns <= newest
         {
             return;
         }
-        self.newest_imu_t_ns = Some(sample.t_ns);
+        self.newest_imu_t_ns = Some(sample.timestamp_ns);
         self.imu_queue.push_back(sample);
     }
 
@@ -629,7 +628,8 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             let noise: ImuNoise<S> = self.noise;
             let pending: Option<Popped<S>> = self.pending.take();
             let (skip_past_ns, until_ns): (i64, i64) = (prev.t_ns, frame.t_ns);
-            self.pending = pim.accumulate_to(
+            self.pending = crate::imu::accumulate_to(
+                &mut pim,
                 pending,
                 || self.pop_calibrated(),
                 skip_past_ns,
@@ -657,12 +657,12 @@ impl<S: Scalar> SqrtKeypointVio<S> {
 
     /// Pop an IMU sample, cast it to the estimator scalar, then apply static bias
     /// calibration in that scalar.
-    fn pop_calibrated(&mut self) -> Option<(i64, Vector3<S>, Vector3<S>)> {
-        let sample: ImuSample = self.imu_queue.pop_front()?;
-        let gyro: Vector3<S> = sample.gyro.map(S::from_literal);
-        let accel: Vector3<S> = sample.accel.map(S::from_literal);
+    fn pop_calibrated(&mut self) -> Option<Popped<S>> {
+        let sample: CombinedImuSample = self.imu_queue.pop_front()?;
+        let gyro: Vector3<S> = Vector3::from(sample.gyro.to_array().map(S::from_literal));
+        let accel: Vector3<S> = Vector3::from(sample.accel.to_array().map(S::from_literal));
         Some((
-            sample.t_ns,
+            sample.timestamp_ns,
             self.ba.calib.calib_gyro_bias.calibrated(&gyro),
             self.ba.calib.calib_accel_bias.calibrated(&accel),
         ))
@@ -702,7 +702,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
                         });
                     }
                 };
-            let predicted: PoseVelState<S> = pim.predict_state(&previous.pose_vel_state(), &self.g);
+            let predicted: NavState<S> = pim.predict_state(&previous.pose_vel_state(), &self.g);
             let next_state: PoseVelBiasState<S> = PoseVelBiasState::new(
                 frame.t_ns,
                 predicted.t_w_i,
@@ -719,7 +719,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             self.frame_idx
                 .insert(self.last_state_t_ns, self.frame_count);
             self.frame_count += 1;
-            self.imu_meas.insert(pim.get_start_t_ns(), pim);
+            self.imu_meas.insert(pim.start_timestamp_ns(), pim);
         }
 
         let predict_ns: u64 = duration_ns(started);

@@ -3249,6 +3249,8 @@ version = "0.1.0"
 dependencies = [
  "kornia-algebra",
  "kornia-image",
+ "kornia-staging-algebra",
+ "nalgebra",
  "thiserror",
 ]
 
@@ -6733,6 +6735,7 @@ dependencies = [
  "kornia-staging-gpu",
  "kornia-staging-imgproc",
  "kornia-staging-slam",
+ "kornia-staging-sensors",
  "log",
  "nalgebra",
  "proptest",

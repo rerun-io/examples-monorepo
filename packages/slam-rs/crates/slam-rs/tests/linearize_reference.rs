@@ -9,12 +9,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_staging_sensors::imu::{CombinedImuSample, IntegratedImuMeasurement};
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::BaError;
 use slam_rs::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
 use slam_rs::calib::Calibration;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::imu::{ImuLinData, ImuSample, IntegratedImuMeasurement};
+use slam_rs::imu::ImuLinData;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::linearize::{
@@ -796,16 +797,15 @@ fn an_imu_factor_over_pose_sized_slots_is_refused() {
     let mut meas: IntegratedImuMeasurement<f64> =
         IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
     meas.integrate(
-        &ImuSample {
-            t_ns: 1,
-            gyro: Vector3::new(0.01, -0.02, 0.03),
-            accel: Vector3::new(0.0, 0.0, 9.81),
+        &CombinedImuSample {
+            timestamp_ns: 1,
+            gyro: kornia_algebra::Vec3F64::new(0.01, -0.02, 0.03),
+            accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
         },
-        &noise,
-        &noise,
+        &kornia_staging_sensors::imu::ImuNoise::new(noise, noise).unwrap(),
     )
     .unwrap();
-    assert_eq!(meas.get_dt_ns(), 1);
+    assert_eq!(meas.dt_ns(), 1);
 
     let problem: Problem = vo_problem(2, 0x4444_5555);
     assert_eq!(problem.aom.get(0), Some((0, POSE_SIZE)));

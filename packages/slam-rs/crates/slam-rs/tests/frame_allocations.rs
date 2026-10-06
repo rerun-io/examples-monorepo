@@ -573,8 +573,8 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
     .unwrap();
     for row in common::IMU.iter() {
         vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
-        estimator.push_imu(slam_rs::imu::ImuSample {
-            t_ns: row.t_ns,
+        estimator.push_imu(kornia_staging_sensors::imu::CombinedImuSample {
+            timestamp_ns: row.t_ns,
             gyro: row.gyro.into(),
             accel: row.accel.into(),
         });

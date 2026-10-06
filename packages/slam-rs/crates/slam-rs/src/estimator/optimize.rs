@@ -10,24 +10,27 @@
 //! pose increment.
 
 use kornia_staging_algebra::Scalar;
+#[cfg(test)]
+use kornia_staging_sensors::imu::CombinedImuSample;
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use std::collections::BTreeMap;
 
 use kornia_staging_algebra::optim::solvers::solve_scaled_damped;
 use nalgebra::{DMatrix, DVector, Vector3};
 
 use super::{
-    fixed_keyframes, lm_converged, EstimatorError, LmDamping, SqrtKeypointVio, StageTimings,
+    EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, fixed_keyframes, lm_converged,
 };
 use crate::duration_ns;
 use crate::frontend::parallel::WorkPool;
-use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
+use crate::imu::ImuLinData;
 use crate::lie::{eigen_maxi};
 use crate::linearize::{
     DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
 };
 use crate::types::{
-    AbsOrderMap, FrameId, PoseVelBiasState, PoseVelBiasStateWithLin, Vector15, Vector9, POSE_SIZE,
-    POSE_VEL_BIAS_SIZE,
+    AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
+    Vector9, Vector15,
 };
 
 /// `max_num_iter` for the damped solve.
@@ -108,11 +111,11 @@ pub struct LmIteration<S: Scalar> {
     pub error_after: S,
     /// `computeError`'s reprojection cost after the increment.
     pub vision_error: S,
-    /// `computeImuError`'s `imu_error`.
+    /// `computeSensorError`'s `imu_error`.
     pub imu_error: S,
-    /// `computeImuError`'s `bg_error`.
+    /// `computeSensorError`'s `bg_error`.
     pub bias_gyro_error: S,
-    /// `computeImuError`'s `ba_error`.
+    /// `computeSensorError`'s `ba_error`.
     pub bias_accel_error: S,
     /// `computeMargPriorError` after the increment.
     pub marg_prior_error: S,
@@ -335,7 +338,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
                     imu_meas,
                     &gyro_bias_weight,
                     &accel_bias_weight,
-                    &imu_lin.g,
+                    &Vector3::from(imu_lin.g),
                 )?;
                 // `vision += ((imu + bg) + ba)`, in that association.
                 let vision_and_inertial: S =
@@ -438,11 +441,11 @@ fn compute_imu_error<S: Scalar>(
     let mut ba_error: S = S::zero();
 
     for meas in imu_meas.values() {
-        if meas.get_dt_ns() == 0 {
+        if meas.dt_ns() == 0 {
             continue;
         }
-        let start_t: i64 = meas.get_start_t_ns();
-        let end_t: i64 = start_t + meas.get_dt_ns();
+        let start_t: i64 = meas.start_timestamp_ns();
+        let end_t: i64 = start_t + meas.dt_ns();
         if !aom.contains(start_t) || !aom.contains(end_t) {
             continue;
         }
@@ -465,14 +468,14 @@ fn compute_imu_error<S: Scalar>(
 
         let start: &PoseVelBiasState<S> = start_state.state();
         let end: &PoseVelBiasState<S> = end_state.state();
-        let res: Vector9<S> = meas.residual(
+        let res: Vector9<S> = Vector9::from(meas.residual(
             &start.pose_vel_state(),
             g,
             &end.pose_vel_state(),
             &start.bias_gyro,
             &start.bias_accel,
-        );
-        let cov_inv: Matrix9<S> = meas.get_cov_inv();
+        ));
+        let cov_inv = meas.cov_inv();
         // Compute half the residual quadratic form.
         let mut row: [S; 9] = [S::zero(); 9];
         for (j, slot) in row.iter_mut().enumerate() {
@@ -489,7 +492,7 @@ fn compute_imu_error<S: Scalar>(
         imu_error += S::from_literal(0.5) * quadratic;
 
         // `dt` in seconds, formed as `int64 · Scalar(1e-9)`.
-        let dt: S = S::from_literal(meas.get_dt_ns() as f64) * S::from_literal(1e-9);
+        let dt: S = S::from_literal(meas.dt_ns() as f64) * S::from_literal(1e-9);
         let res_bg: Vector3<S> = start.bias_gyro - end.bias_gyro;
         let gyro_dt: Vector3<S> = gyro_bias_weight / dt;
         let mut bg: S = S::zero();
@@ -516,11 +519,11 @@ mod tests {
     use crate::estimator::VEE_FACTOR;
 
     use super::*;
-    use crate::imu::ImuSample;
+
     use crate::lie::Se3;
     use crate::types::PoseVelBiasState;
 
-    /// `computeImuError` reads both endpoints with `.at()`.
+    /// `computeSensorError` reads both endpoints with `.at()`.
     /// Skipping a factor whose state is gone understates the true cost and can
     /// flip the LM accept test, so the port refuses instead.
     ///
@@ -539,13 +542,12 @@ mod tests {
             IntegratedImuMeasurement::new(0, &zero, &zero);
         let cov: Vector3<f64> = Vector3::from_element(1e-6);
         meas.integrate(
-            &ImuSample {
-                t_ns: 100,
-                gyro: zero,
-                accel: Vector3::new(0.0, 0.0, 9.81),
+            &CombinedImuSample {
+                timestamp_ns: 100,
+                gyro: kornia_algebra::Vec3F64::ZERO,
+                accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
             },
-            &cov,
-            &cov,
+            &kornia_staging_sensors::imu::ImuNoise::new(cov, cov).unwrap(),
         )
         .unwrap();
         let imu_meas: BTreeMap<i64, IntegratedImuMeasurement<f64>> = BTreeMap::from([(0, meas)]);
@@ -587,15 +589,17 @@ mod tests {
                 ),
             ),
         ]);
-        assert!(compute_imu_error(
-            &aom,
-            &both,
-            &imu_meas,
-            &weight,
-            &weight,
-            &Vector3::new(0.0, 0.0, -9.81),
-        )
-        .is_ok());
+        assert!(
+            compute_imu_error(
+                &aom,
+                &both,
+                &imu_meas,
+                &weight,
+                &weight,
+                &Vector3::new(0.0, 0.0, -9.81),
+            )
+            .is_ok()
+        );
     }
 
     /// `lambda`, `min_lambda`, `max_lambda`, `lambda_vee` as `optimize` starts a

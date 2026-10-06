@@ -4,10 +4,10 @@
 use kornia_staging_algebra::Scalar;
 use std::sync::Arc;
 
+use kornia_staging_sensors::imu::CombinedImuSample;
 use nalgebra::{Matrix2x4, Vector2, Vector3, Vector4};
 use slam_rs::camera::SlamCamera;
 use slam_rs::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
-use slam_rs::imu::ImuSample;
 use slam_rs::types::KeypointId;
 use slam_rs::{Backend, ImageView, Vio, VioStatus};
 
@@ -52,14 +52,15 @@ fn check_threshold<S: Scalar>() {
     let mut waiting = make();
     let mut fresh = make();
     for n in 0..=30 {
-        let sample = ImuSample {
-            t_ns: n * 5_000_000,
-            gyro: Vector3::zeros(),
-            accel: if n < 10 {
-                Vector3::new(2.0, 0.0, 9.0)
+        let sample = CombinedImuSample {
+            timestamp_ns: n * 5_000_000,
+            gyro: kornia_algebra::Vec3F64::ZERO,
+            accel: (if n < 10 {
+                [2.0, 0.0, 9.0]
             } else {
-                Vector3::new(0.0, 0.0, 9.81)
-            },
+                [0.0, 0.0, 9.81]
+            })
+            .into(),
         };
         waiting.push_imu(sample);
         fresh.push_imu(sample);

@@ -226,10 +226,10 @@ mod tests {
             }
         }
         for n in 0..=65 {
-            let imu = crate::imu::ImuSample {
-                t_ns: n * 5_000_000,
-                gyro: Vector3::zeros(),
-                accel: Vector3::new(0.0, 0.0, 9.81),
+            let imu = kornia_staging_sensors::imu::CombinedImuSample {
+                timestamp_ns: n * 5_000_000,
+                gyro: kornia_algebra::Vec3F64::ZERO,
+                accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
             };
             candidate.push_imu(imu);
         }

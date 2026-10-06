@@ -7,20 +7,19 @@
 //! `H * delta` (trap 8); omitting either step causes silent drift.
 
 use kornia_staging_algebra::Scalar;
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector};
 
 use crate::ba_base::{BaError, BundleAdjustmentBase};
-use crate::imu::{ImuLinData, IntegratedImuMeasurement};
+use crate::imu::ImuLinData;
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 use crate::marg::{MargError, ScheduleSet};
 use crate::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
 };
-use kornia_staging_algebra::optim::solvers::{
-    ReducedSystem, marginalize as marginalize_system,
-};
+use kornia_staging_algebra::optim::solvers::{ReducedSystem, marginalize as marginalize_system};
 
 /// Scheduled removals: poses, their hosted keyframes, full states, and state
 /// velocity/bias blocks. Pose removals and the two state sets are disjoint;
@@ -357,8 +356,8 @@ pub fn marginalize<S: Scalar>(
         measurements: imu_meas
             .iter()
             .filter(|(_, meas)| {
-                let start_t: i64 = meas.get_start_t_ns();
-                let end_t: i64 = start_t + meas.get_dt_ns();
+                let start_t: i64 = meas.start_timestamp_ns();
+                let end_t: i64 = start_t + meas.dt_ns();
                 aom.contains(start_t) && aom.contains(end_t)
             })
             .map(|(start_t, meas)| (*start_t, meas))
@@ -377,12 +376,7 @@ pub fn marginalize<S: Scalar>(
         });
     }
 
-    let reduced: ReducedSystem<S> = marginalize_system(
-        live.h,
-        live.b,
-        &idx_to_keep,
-        &idx_to_marg,
-    )?;
+    let reduced: ReducedSystem<S> = marginalize_system(live.h, live.b, &idx_to_keep, &idx_to_marg)?;
 
     // The linearization is done with the window; everything from here mutates.
     drop(imu_input);

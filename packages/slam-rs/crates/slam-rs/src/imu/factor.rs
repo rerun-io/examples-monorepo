@@ -1,10 +1,14 @@
 //! Whitened IMU factor assembly and exports over a pair of states.
 
 use kornia_staging_algebra::Scalar;
-use super::{ImuResidualJacobians, IntegratedImuMeasurement, Matrix9, Matrix15x30};
+use kornia_staging_sensors::imu::{ImuResidualJacobians, IntegratedImuMeasurement};
+
+use nalgebra::SMatrix;
+type Matrix9<S> = SMatrix<S, 9, 9>;
+type Matrix15x30<S> = SMatrix<S, 15, 30>;
 use crate::lie::{c};
 use crate::types::{POSE_VEL_BIAS_SIZE, POSE_VEL_SIZE, PoseVelBiasStateWithLin, Vector9, Vector15};
-use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 
 /// Where the gyroscope bias starts inside a 15-vector state block: the `+9` of
 const BIAS_GYRO_OFFSET: usize = POSE_VEL_SIZE;
@@ -75,7 +79,7 @@ impl<S: Scalar> ImuBlock<S> {
             );
         }
 
-        let sqrt_cov_inv: Matrix9<S> = meas.get_cov_inv_sqrt();
+        let sqrt_cov_inv: Matrix9<S> = meas.cov_inv_sqrt();
         let mut jp: Matrix15x30<S> = Matrix15x30::zeros();
         let mut r: Vector15<S> = Vector15::zeros();
 
@@ -89,7 +93,7 @@ impl<S: Scalar> ImuBlock<S> {
             .copy_from(&(sqrt_cov_inv * jacobians.d_res_d_bias)); // `:57-58`
         r.fixed_rows_mut::<9>(0).copy_from(&(sqrt_cov_inv * res)); // `:60`
 
-        let dt: S = c::<S>(meas.get_dt_ns() as f64) * c::<S>(1e-9); // `:63`
+        let dt: S = c::<S>(meas.dt_ns() as f64) * c::<S>(1e-9); // `:63`
         let sqrt_dt: S = dt.sqrt();
 
         let gyro_bias_weight_dt: Vector3<S> = lin_data.gyro_bias_weight_sqrt / sqrt_dt;

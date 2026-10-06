@@ -9,10 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::{BaError, BundleAdjustmentBase};
 use slam_rs::calib::Calibration;
-use slam_rs::imu::IntegratedImuMeasurement;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::marg::{

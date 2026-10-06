@@ -11,12 +11,13 @@ use rayon::prelude::*;
 
 use crate::ba_base::BundleAdjustmentBase;
 use crate::frontend::parallel::WorkPool;
-use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{Se3};
 use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
 use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin, linearize_relative_pose};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
+use crate::imu::{ImuBlock, ImuLinData};
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 
 /// `LinearizationBase<Scalar, POSE_SIZE>::Options`,
 /// without the `linearization_type` field: only `ABS_QR` is ported (decision D13).
@@ -183,10 +184,10 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         let mut imu_meta: Vec<ImuMeta> = Vec::new();
         if let Some(imu) = inputs.imu {
             for (start_t, meas) in &imu.measurements {
-                let end_t: i64 = start_t.checked_add(meas.get_dt_ns()).ok_or(
+                let end_t: i64 = start_t.checked_add(meas.dt_ns()).ok_or(
                     LinearizeError::ImuIntervalOverflow {
                         start: *start_t,
-                        dt_ns: meas.get_dt_ns(),
+                        dt_ns: meas.dt_ns(),
                     },
                 )?;
                 let (start_idx, start_size) =
@@ -354,8 +355,7 @@ impl<S: Scalar> LinearizationAbsQR<S> {
                         end: meta.end_t,
                     },
                 )?;
-                let block: ImuBlock<S> =
-                    ImuBlock::linearize(meas, &imu.lin_data, start_state, end_state);
+                let block: ImuBlock<S> = ImuBlock::linearize(meas, &imu.lin_data, start_state, end_state);
                 error += block.error;
                 self.imu_blocks.push(block);
             }
@@ -422,7 +422,12 @@ impl<S: Scalar> LinearizationAbsQR<S> {
 
         // `add_dense_H_b_imu`.
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.add_dense_h_b(meta.start_idx, meta.end_idx, h, b);
+            block.add_dense_h_b(
+                meta.start_idx,
+                meta.end_idx,
+                h,
+                b,
+            );
         }
 
         // `add_dense_H_b_marg_prior`. 's pose-damping
@@ -466,7 +471,13 @@ impl<S: Scalar> LinearizationAbsQR<S> {
 
         let mut start_idx: usize = imu_start_idx;
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.add_dense_q2jp_q2r(meta.start_idx, meta.end_idx, start_idx, &mut q2jp, &mut q2r);
+            block.add_dense_q2jp_q2r(
+                meta.start_idx,
+                meta.end_idx,
+                start_idx,
+                &mut q2jp,
+                &mut q2r,
+            );
             start_idx += POSE_VEL_BIAS_SIZE;
         }
 
@@ -529,7 +540,12 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         }
 
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.back_substitute(meta.start_idx, meta.end_idx, pose_inc, &mut l_diff);
+            block.back_substitute(
+                meta.start_idx,
+                meta.end_idx,
+                pose_inc,
+                &mut l_diff,
+            );
         }
 
         if let Some(marg) = inputs.marg {

@@ -81,7 +81,7 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |
 | Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |
 | Pivoted fixed-size LDLT | slam-rs `ldlt.rs` | kornia-rs / kornia-algebra / linalg::ldlt | staged | - |
-| Lie precision and update extensions (proposes the documented Sophus Taylor branches upstream) | slam-rs `lie.rs` | kornia-rs / kornia-algebra / lie | staged | - |
+| RigidTransform/Rotation3, Lie precision and update extensions (Sophus Taylor branches) | slam-rs `lie.rs` | kornia-rs / kornia-algebra / lie | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
 | Strided u8-shift8 ingestion and sparse u16 bilinear values/gradients (dense conversion uses upstream cast_and_scale) | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Floor-halved integer u16 Gaussian downsampling and reusable PyramidPlanU16 | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
@@ -106,3 +106,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Rank-aware square-root marginalization | slam-rs `marg/helper.rs` | kornia-rs / kornia-algebra / optim::solvers | staged | - |
 | One scaled dense damped solve attempt | slam-rs estimator/optimize.rs | kornia-rs / kornia-algebra / optim::solvers | staged | - |
 | LM extension functions: Marquardt scaling, Nielsen damping and quadratic prediction, for the existing upstream solver | handfit `lm.rs`, `scale.rs` | kornia-rs / kornia-algebra / optim::solvers | staged | - |
+| Nanosecond midpoint preintegrator; proposal to reconcile with upstream PreintegratedImu | slam-rs `imu/preintegration.rs` | kornia-slam / kornia-sensors / imu | staged | - |

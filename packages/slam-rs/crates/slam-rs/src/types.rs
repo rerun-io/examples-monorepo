@@ -223,65 +223,7 @@ impl<S: Scalar> PoseState<S> {
     }
 }
 
-/// Pose and world-frame velocity at a timestamp.
-/// Preintegrated delta states use elapsed nanoseconds instead of absolute time.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PoseVelState<S: Scalar> {
-    /// Timestamp of the state, in nanoseconds.
-    pub t_ns: i64,
-    /// Pose of the IMU (rig) frame in the world frame.
-    pub t_w_i: Se3<S>,
-    /// Linear velocity in the world frame, m/s.
-    pub vel_w_i: Vector3<S>,
-}
-
-impl<S: Scalar> Default for PoseVelState<S> {
-    fn default() -> Self {
-        Self {
-            t_ns: 0,
-            t_w_i: Se3::identity(),
-            vel_w_i: Vector3::zeros(),
-        }
-    }
-}
-
-impl<S: Scalar> PoseVelState<S> {
-    /// A pose-velocity state from its parts.
-    pub fn new(t_ns: i64, t_w_i: Se3<S>, vel_w_i: Vector3<S>) -> Self {
-        Self {
-            t_ns,
-            t_w_i,
-            vel_w_i,
-        }
-    }
-
-    /// Apply a 9-vector increment, `PoseVelState::applyInc`.
-    ///
-    /// The layout is `[trans(3), rot(3), vel(3)]`; the pose goes through
-    /// [`Se3::apply_inc`] and the velocity is added.
-    pub fn apply_inc(&mut self, inc: &Vector9<S>) {
-        self.t_w_i.apply_inc(&inc.fixed_rows::<6>(0).into_owned());
-        self.vel_w_i += inc.fixed_rows::<3>(6);
-    }
-
-    /// The increment that takes `self` to `other`, `PoseVelState::diff`
-    /// the inverse of [`PoseVelState::apply_inc`].
-    ///
-    /// No production caller: the estimator's states are 15-dof and use
-    /// [`PoseVelBiasState::diff`]. This is the 9-dof one, and it is what the
-    /// preintegration's finite-difference tests measure their Jacobians with —
-    /// the residual they check is `delta_state.diff(propagated)`.
-    pub fn diff(&self, other: &Self) -> Vector9<S> {
-        let mut res: Vector9<S> = Vector9::zeros();
-        res.fixed_rows_mut::<3>(0)
-            .copy_from(&(other.t_w_i.translation - self.t_w_i.translation));
-        res.fixed_rows_mut::<3>(3)
-            .copy_from(&(other.t_w_i.rotation * self.t_w_i.rotation.inverse()).log());
-        res.fixed_rows_mut::<3>(6)
-            .copy_from(&(other.vel_w_i - self.vel_w_i));
-        res
-    }
-}
+use kornia_staging_sensors::imu::NavState;
 
 /// Pose, velocity and the two IMU biases at a timestamp
 /// the block the estimator actually optimizes.
@@ -335,8 +277,8 @@ impl<S: Scalar> PoseVelBiasState<S> {
     }
 
     /// Copy the pose and velocity portion of the full state.
-    pub fn pose_vel_state(&self) -> PoseVelState<S> {
-        PoseVelState::new(self.t_ns, self.t_w_i, self.vel_w_i)
+    pub fn pose_vel_state(&self) -> NavState<S> {
+        NavState::new(self.t_ns, self.t_w_i, self.vel_w_i)
     }
 
     /// Apply a 15-vector increment, `PoseVelBiasState::applyInc`

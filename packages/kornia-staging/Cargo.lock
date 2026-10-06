@@ -2634,8 +2634,12 @@ name = "kornia-staging-sensors"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "criterion",
  "kornia-algebra",
  "kornia-image",
+ "kornia-staging-algebra",
+ "nalgebra",
+ "proptest",
  "thiserror 2.0.21",
 ]
 

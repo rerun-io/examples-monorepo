@@ -2,7 +2,7 @@
 
 #[cfg(doc)]
 use crate::Vio;
-use crate::{estimator, frontend, image, imu};
+use crate::{estimator, frontend, image};
 use serde::{Deserialize, Serialize};
 
 /// A measured frame has a state; an uncovered frame needs more IMU. A first
@@ -161,7 +161,10 @@ pub enum VioError {
     Image(#[from] image::IngestError),
     /// The frontend's own preintegration (D24) refused a sample.
     #[error("imu: {0}")]
-    Imu(#[from] imu::ImuError),
+    Imu(#[from] kornia_staging_sensors::SensorError),
+    /// Frame-boundary IMU accumulation failed.
+    #[error(transparent)]
+    Accumulate(#[from] crate::imu::AccumulateError),
     /// The operating system refused the estimator thread (D84 solve or lagged frameset).
     #[error("the lagged estimator thread did not start: {0}")]
     EstimatorThread(String),
