@@ -85,3 +85,26 @@ def test_logging_blueprint_defaults_and_mode_validation() -> None:
     with pytest.raises(ValueError, match="--compute"):
         scene_blueprint({}, 1, render_mode="default")
 
+
+@pytest.mark.integration
+def test_python_recording_is_decoded_by_shared_core(tmp_path: Path) -> None:
+    """Exercise Python -> RRD -> native Arrow -> core, including f16 SH descriptors."""
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(["cargo", "build", "--locked", "-p", "gsplat-bench"], cwd=root, check=True, timeout=1200)
+    ply = tmp_path / "tiny.ply"
+    _write_synthetic_ply(ply)
+    recording = rr.RecordingStream("native-roundtrip")
+    rrd = tmp_path / "native.rrd"
+    recording.save(rrd)
+    recording.log("splats", splats_from_ply(ply), static=True)
+    recording.flush(timeout_sec=30.0)
+    recording.disconnect()
+    result = subprocess.run(
+        [str(root / "target/debug/gsplat-bench"), "parity", "--impl", "ours-archetype", "--oracle", "ours", "--ply", str(ply),
+         "--archetype-rrd", str(rrd), "--path", "orbit:1", "--res", "32x32", "--out", str(tmp_path / "parity.json")],
+        check=False, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "view 0:" in result.stderr + result.stdout

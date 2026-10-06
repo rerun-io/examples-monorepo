@@ -370,6 +370,10 @@ async fn check_cameras<R: RenderEngine>(
 
 pub async fn run(a: SpeedArgs) -> Result<()> {
     ensure!(
+        !a.implementations.contains(&Implementation::OursArchetype),
+        "ours-archetype is a parity-only quantization lane"
+    );
+    ensure!(
         a.repeats >= 3 && a.min_seconds.is_finite() && a.min_seconds >= 10.0,
         "need >=3 repeats and >=10 measured seconds"
     );
@@ -394,6 +398,9 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             Implementation::Brush => {
                 let r = brush.insert(Brush::new(&scene, &a.settings).await);
                 initialize(r, &cameras[0], start, *kind, "Brush Packed", a.repeats).await?
+            }
+            Implementation::OursArchetype => {
+                unreachable!("parity-only implementation rejected above")
             }
             Implementation::Ours => {
                 let r = ours.insert(
@@ -483,6 +490,9 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                         )
                         .await?
                     }
+                    Implementation::OursArchetype => {
+                        unreachable!("parity-only implementation rejected above")
+                    }
                     Implementation::Ours => {
                         repeat(
                             ours.as_mut().unwrap(),
@@ -552,6 +562,9 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
         )?);
         report.lane1 = match report.implementation {
+            Implementation::OursArchetype => {
+                unreachable!("parity-only implementation rejected above")
+            }
             Implementation::Ours => ours.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::Brush => brush.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::OursOld => old.as_mut().unwrap().stages(&suite.cameras[0]).await?,
@@ -611,6 +624,9 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
         report.camera_checks = match report.implementation {
             Implementation::Brush => {
                 check_cameras(brush.as_mut().unwrap(), &mut oracle, &suite.cameras, true).await?
+            }
+            Implementation::OursArchetype => {
+                unreachable!("parity-only implementation rejected above")
             }
             Implementation::Ours => {
                 check_cameras(ours.as_mut().unwrap(), &mut oracle, &suite.cameras, true).await?

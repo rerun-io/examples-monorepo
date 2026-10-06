@@ -6,6 +6,8 @@ pub enum CameraPath {
     TestViews(std::path::PathBuf),
     Specs(std::path::PathBuf),
     Colmap(std::path::PathBuf),
+    /// Mip-NeRF 360 holdout: every eighth image after sorting filenames.
+    ColmapTest(std::path::PathBuf),
 }
 impl std::str::FromStr for CameraPath {
     type Err = String;
@@ -15,7 +17,7 @@ impl std::str::FromStr for CameraPath {
         }
         let (kind, path) = value
             .split_once(':')
-            .ok_or("path must be orbit:N, held, test-views:FILE, specs:FILE, or colmap:DIR")?;
+            .ok_or("path must be orbit:N, held, test-views:FILE, specs:FILE, colmap:DIR, or colmap-test:DIR")?;
         if path.is_empty() {
             return Err("camera path payload is empty".into());
         }
@@ -33,6 +35,7 @@ impl std::str::FromStr for CameraPath {
             "test-views" => Ok(Self::TestViews(path.into())),
             "specs" => Ok(Self::Specs(path.into())),
             "colmap" => Ok(Self::Colmap(path.into())),
+            "colmap-test" => Ok(Self::ColmapTest(path.into())),
             _ => Err(format!("unknown camera path prefix {kind:?}")),
         }
     }
@@ -47,6 +50,7 @@ mod tests {
             "orbit:300".parse::<CameraPath>().unwrap(),
             CameraPath::Orbit(300)
         ));
+        assert!("colmap-test:scene/sparse/0".parse::<CameraPath>().is_ok());
         for invalid in ["orbit300", "orbit:0", "orbit:-1", "colmap:", "testview:x"] {
             assert!(invalid.parse::<CameraPath>().is_err(), "{invalid}");
         }

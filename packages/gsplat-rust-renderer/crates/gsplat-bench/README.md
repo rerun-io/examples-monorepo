@@ -30,7 +30,8 @@ Archive builds may set `GSPLAT_SOURCE_SHA`; absent Git and override, provenance 
 
 CameraSpec uses row-major world-from-camera, OpenCV +x right/+y down/+z forward.
 Paths: `orbit:N`, `held`, `test-views:FILE`, `colmap:SPARSE_DIR` (binary COLMAP),
-or `specs:FILE` (strict CameraSpec JSON array). `--res native` retains input size.
+`colmap-test:SPARSE_DIR` (filename-sorted every-eighth-image holdout), or
+`specs:FILE` (strict CameraSpec JSON array). `--res native` retains input size.
 Orbit framing accepts `--center x y z`, `--radius x y`, `--elevation z`, and `--orbit-up x y z` (default +Z).
 
 Lane 2 waits for each frame's GPU completion without pixel transfer. Separate
@@ -53,6 +54,17 @@ Parity scores in-memory RGBA floats: RGB on black, alpha, and RGB over white.
 Old/native targets are intrinsically byte formats; Brush Float remains unclipped.
 Worst-five EXRs preserve scored values; PNGs are previews, never metric inputs.
 `--save-images DIR` retains every scored pair. Unsupported old/native lenses fail.
+
+`parity --impl ours-archetype` measures native archetype input loss. It reads the
+PLY through Rerun's `GaussianSplats3D` (RGBA8 and f16 SH), then uses the viewer's
+conversion and the shared compute renderer. Add `--archetype-rrd recording.rrd`
+to read the actual Python tool output (one complete native splat row) instead.
+Its default oracle is `ours` with
+the original f32 PLY; `--oracle brush` is also available. Reports include mean
+and minimum RGB PSNR. For the staged datasets, use
+`--path test-views:transforms_test.json` for all 200 Lego views and
+`--path colmap-test:sparse/0 --res 1297x840` for Garden's images_4 test split.
+This implementation is available only for parity, not speed runs.
 
 `pixi run -e gsplat-rust-renderer-dev --frozen gate` includes Rust and GPU checks.
 `tests-integration` reports missing external fixtures as skips; set

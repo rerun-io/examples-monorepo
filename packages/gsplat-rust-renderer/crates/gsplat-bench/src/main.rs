@@ -45,13 +45,17 @@ pub struct CameraArgs {
 #[serde(rename_all = "lowercase")]
 enum Oracle {
     Brush,
+    Ours,
 }
 #[derive(clap::Args)]
 struct ParityArgs {
+    /// Read the actual native archetype logged by Python (one complete splat row).
+    #[arg(long)]
+    archetype_rrd: Option<PathBuf>,
     #[arg(long = "impl", value_enum)]
     implementation: Implementation,
-    #[arg(long, value_enum, default_value = "brush")]
-    oracle: Oracle,
+    #[arg(long, value_enum)]
+    oracle: Option<Oracle>,
     #[command(flatten)]
     camera: CameraArgs,
     #[command(flatten)]
@@ -125,6 +129,11 @@ async fn cameras(args: &CameraArgs, scene: &Scene) -> Result<Vec<CameraSpec>> {
             .map(|frame| frame.camera)
             .collect(),
         CameraPath::Specs(p) => serde_json::from_slice::<Vec<CameraSpec>>(&std::fs::read(p)?)?,
+        CameraPath::ColmapTest(p) => {
+            let mut frames = camera::load_frames(p, None).await?;
+            frames.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+            frames.into_iter().step_by(8).map(|f| f.camera).collect()
+        }
     };
     if let Some((w, h)) = size {
         path = path.into_iter().map(|c| c.resized(w, h)).collect();
@@ -169,6 +178,7 @@ struct ParityReport {
     versions: Versions,
     views: Vec<ParityView>,
     mean: Metrics,
+    min_rgb_psnr: f64,
     mean_alpha_psnr: f64,
     mean_white_psnr: f64,
     worst_five: Vec<ParityView>,
@@ -185,10 +195,11 @@ fn save_pair(
     reference: &[f32],
     w: u32,
     h: u32,
+    oracle_label: &str,
 ) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     // EXR retains the scored values; PNGs are display-only previews of the same samples.
-    for (suffix, pixels) in [("render", ours), ("brush", reference)] {
+    for (suffix, pixels) in [("render", ours), (oracle_label, reference)] {
         let image = gsplat_bench::parity_image(pixels.to_vec(), w, h)?;
         image.save(dir.join(format!("{name}-{suffix}.exr")))?;
         image
@@ -213,13 +224,18 @@ fn save_pair(
         .save(dir.join(format!("{name}-diff4.png")))?;
     Ok(())
 }
-async fn parity<R: RenderEngine>(
+async fn parity<R: RenderEngine, O: RenderEngine>(
     a: ParityArgs,
     scene: Scene,
     cameras: Vec<CameraSpec>,
     mut renderer: R,
+    mut oracle: O,
+    oracle_kind: Oracle,
 ) -> Result<()> {
-    let mut oracle = Brush::new(&scene, &a.settings).await;
+    let oracle_label = match oracle_kind {
+        Oracle::Brush => "brush",
+        Oracle::Ours => "ours-f32",
+    };
     let evaluator = Evaluator::new(false);
     let mut views = Vec::new();
     let mut worst: Vec<Evidence> = Vec::new();
@@ -256,6 +272,7 @@ async fn parity<R: RenderEngine>(
                 &reference,
                 c.width,
                 c.height,
+                oracle_label,
             )?;
         }
         views.push(view.clone());
@@ -277,15 +294,50 @@ async fn parity<R: RenderEngine>(
                 &e.reference,
                 cameras[0].width,
                 cameras[0].height,
+                oracle_label,
             )?;
         }
     }
     let mean = gsplat_eval::mean(&views.iter().map(|v| v.metrics.clone()).collect::<Vec<_>>());
     let mean_alpha_psnr = views.iter().map(|v| v.alpha_psnr).sum::<f64>() / views.len() as f64;
     let mean_white_psnr = views.iter().map(|v| v.white_psnr).sum::<f64>() / views.len() as f64;
-    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:a.oracle,settings:a.settings,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; old/native intrinsically use RGBA8 targets".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
+    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:oracle_kind,settings:a.settings,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; old/native intrinsically use RGBA8 targets".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),min_rgb_psnr:views.iter().map(|v| v.metrics.psnr).fold(f64::INFINITY,f64::min),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
+}
+async fn with_oracle<R: RenderEngine>(
+    a: ParityArgs,
+    scene: Scene,
+    cameras: Vec<CameraSpec>,
+    renderer: R,
+) -> Result<()> {
+    let kind = a
+        .oracle
+        .unwrap_or(if a.implementation == Implementation::OursArchetype {
+            Oracle::Ours
+        } else {
+            Oracle::Brush
+        });
+    match kind {
+        Oracle::Brush => {
+            let oracle = Brush::new(&scene, &a.settings).await;
+            parity(a, scene, cameras, renderer, oracle, kind).await
+        }
+        Oracle::Ours => {
+            let oracle = gsplat_bench::renderers::ours(
+                &scene,
+                cameras[0].width,
+                cameras[0].height,
+                &a.settings,
+            )
+            .await?;
+            parity(a, scene, cameras, renderer, oracle, kind).await
+        }
+    }
 }
 async fn run_parity(a: ParityArgs) -> Result<()> {
+    ensure!(
+        a.archetype_rrd.is_none() || a.implementation == Implementation::OursArchetype,
+        "--archetype-rrd requires --impl ours-archetype"
+    );
     let scene = Scene::load(&a.camera.ply).await?;
     gsplat_bench::settings::validate_backend(&a.settings, a.implementation, scene.mode)?;
     let mut cameras = cameras(&a.camera, &scene).await?;
@@ -296,25 +348,48 @@ async fn run_parity(a: ParityArgs) -> Result<()> {
     match a.implementation {
         Implementation::Brush => {
             let r = Brush::new(&scene, &a.settings).await;
-            parity(a, scene, cameras, r).await
+            with_oracle(a, scene, cameras, r).await
         }
-        Implementation::Ours => {
-            let r = gsplat_bench::renderers::ours(
-                &scene,
-                cameras[0].width,
-                cameras[0].height,
-                &a.settings,
-            )
-            .await?;
-            parity(a, scene, cameras, r).await
+        Implementation::Ours | Implementation::OursArchetype => {
+            let r = if a.implementation == Implementation::OursArchetype {
+                let mut splats = gsplat_bench::renderers::archetype_splats(
+                    a.archetype_rrd.as_deref().unwrap_or(&a.camera.ply),
+                )?;
+                ensure!(
+                    splats.transforms.len() == scene.data.num_splats(),
+                    "PLY loaders disagree on count"
+                );
+                splats.min_scale = a
+                    .settings
+                    .min_scale
+                    .map(|floor| vec![floor; splats.transforms.len()]);
+                let mut r = gsplat_render::Renderer::new(
+                    &splats,
+                    a.settings.mode(scene.mode),
+                    glam::uvec2(cameras[0].width, cameras[0].height),
+                    a.settings.initial_capacity,
+                )
+                .await?;
+                r.options = a.settings.options();
+                r
+            } else {
+                gsplat_bench::renderers::ours(
+                    &scene,
+                    cameras[0].width,
+                    cameras[0].height,
+                    &a.settings,
+                )
+                .await?
+            };
+            with_oracle(a, scene, cameras, r).await
         }
         Implementation::OursOld => {
             let r = Old::new(&scene, cameras[0].width, cameras[0].height)?;
-            parity(a, scene, cameras, r).await
+            with_oracle(a, scene, cameras, r).await
         }
         Implementation::Native => {
             let r = Native::new(&a.camera.ply, scene.data.num_splats()).await?;
-            parity(a, scene, cameras, r).await
+            with_oracle(a, scene, cameras, r).await
         }
     }
 }

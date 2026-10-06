@@ -16,7 +16,9 @@ use gsplat_lib::gsplat_core::{
     RenderShCoefficients,
 };
 use serde::{Deserialize, Serialize};
+mod archetype;
 mod native;
+pub use archetype::archetype_splats;
 pub use native::Native;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
@@ -24,6 +26,7 @@ pub use native::Native;
 pub enum Implementation {
     Brush,
     Ours,
+    OursArchetype,
     OursOld,
     Native,
 }
