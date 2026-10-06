@@ -15,8 +15,7 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   clock guard. Adapted from PR #270.
 - `src/capture/matcher.rs` -> kornia-sensors / sensor-rt: timestamp-tolerance multi-camera frameset assembly.
 - Scaled zero-border remap is staged in `kornia-staging-imgproc::interpolation::remap`; see [the staging tracker](../kornia-staging/README.md).
-- `src/kornia_ext/heatmap.rs` argmax_first / refine_peak_log_quadratic / decode_peak_2d -> kornia-imgproc `features` (or
-  kornia-tensor-ops): separable log-quadratic sub-pixel heatmap peak decoding (exact for sampled Gaussians).
+- Heatmap peaks are staged in `kornia-staging-imgproc::features::heatmap`; see [the staging tracker](../kornia-staging/README.md).
 - `src/hands/letterbox.rs` BarLetterbox -> kornia-imgproc `preprocess`: the mono letterbox with its public pixel-centre maps
   (`to_net`/`from_net`), built on `spatial_padding`.
 - `src/hands/circles.rs` min_enclosing_circle -> kornia-imgproc (contours/features): OpenCV's `minEnclosingCircle` (Welzl, f64,
@@ -24,9 +23,6 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
 - `src/nets/rknn/api.rs` RknnRuntime / RknnModel -> kornia-rs `examples/rknn` (beside `examples/onnx`), or a small kornia runtime
   crate: a dlopened RKNN 2.x C-API binding (one context per NPU core, u8/f16/f32 inputs, float outputs into caller buffers,
   typed errors, rknn_destroy on drop). kornia has no inference crate, so this stays ours until one exists.
-- 4x4 pooling is staged in `kornia-staging-imgproc::resize`; see [the staging tracker](../kornia-staging/README.md).
-- `src/hands/heatmaps.rs` decode_heatmaps (one decoder for the tracker and the golden comparison) -> kornia-tensor-ops / kornia-imgproc features: per-channel heatmap arg-max with a
-  separable log-quadratic sub-pixel refinement (handtrack's decode_heatmaps).
 - `src/log/video.rs` `AccessUnitSplitter` + `H264Encoder` -> kornia-io (gstreamer / video): a hardware H.264 video sink that does not
   link GStreamer. kornia-io's GStreamer `VideoWriter` links libgstreamer, which the cap binary must not (SPEC: no GStreamer at build
   time); this runs `gst-launch-1.0 filesrc location=/dev/stdin ! queue ! mpph264enc ! h264parse ! fdsink` (any encoder element) as a

@@ -2,7 +2,6 @@
 //! tests) so they can be upstreamed. Each module is listed in `packages/robocap-live/UPSTREAM.md` with its target crate.
 #![deny(missing_docs)]
 
-pub mod heatmap;
 /// Scaled zero-border remapping, retained for existing clients.
 pub mod remap {
 }

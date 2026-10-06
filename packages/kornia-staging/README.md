@@ -68,3 +68,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Integer area resize | slam-rs `area.rs`, `area/kernels.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | Scaled zero-border bilinear remap | robocap-live `kornia_ext/remap.rs` | kornia-rs / kornia-imgproc / interpolation::remap | staged | - |
+| Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |

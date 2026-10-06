@@ -7,4 +7,6 @@ pub mod resize;
 /// Image interpolation.
 pub mod interpolation;
 
+/// Feature extraction and decoding.
+pub mod features;
 
