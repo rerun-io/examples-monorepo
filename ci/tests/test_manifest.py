@@ -12,6 +12,8 @@ MANIFEST: dict = tomllib.loads((REPO_ROOT / "pixi.toml").read_text())
 # new package"). Vendored dependencies such as sam2-streaming have a pyproject but no feature;
 # test_workspace_sources.py covers those.
 RUNNABLE_PACKAGES: list[Path] = sorted(REPO_ROOT / "packages" / name for name in MANIFEST["feature"] if (REPO_ROOT / "packages" / name).is_dir())
+# Rust-only workspaces have environments, but no Python tooling configuration.
+RUNNABLE_PYTHON_PACKAGES: list[Path] = [package_dir for package_dir in RUNNABLE_PACKAGES if (package_dir / "pyproject.toml").is_file()]
 
 
 def test_every_feature_declares_platforms() -> None:
@@ -27,7 +29,7 @@ def pyrefly() -> tuple[dict, set[Path]]:
     return config, included
 
 
-@pytest.mark.parametrize("package_dir", RUNNABLE_PACKAGES, ids=lambda package_dir: package_dir.name)
+@pytest.mark.parametrize("package_dir", RUNNABLE_PYTHON_PACKAGES, ids=lambda package_dir: package_dir.name)
 def test_runnable_packages_are_registered_with_pyrefly(package_dir: Path, pyrefly: tuple[dict, set[Path]]) -> None:
     config, included = pyrefly
     problems: list[str] = []
@@ -64,7 +66,7 @@ def test_package_features_have_prod_and_dev_environments() -> None:
     assert not problems, "Package environment inconsistencies:\n" + "\n".join(problems)
 
 
-@pytest.mark.parametrize("package_dir", RUNNABLE_PACKAGES, ids=lambda package_dir: package_dir.name)
+@pytest.mark.parametrize("package_dir", RUNNABLE_PYTHON_PACKAGES, ids=lambda package_dir: package_dir.name)
 def test_runnable_packages_configure_test_tiers(package_dir: Path) -> None:
     config: dict = tomllib.loads((package_dir / "pyproject.toml").read_text())
     options: dict = config.get("tool", {}).get("pytest", {}).get("ini_options", {})

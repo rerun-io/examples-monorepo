@@ -136,6 +136,7 @@ packages/gsplat-rust-renderer/examples/*.ply
 
 # slam-rs (the in-place PyO3 extension is also covered by the global *.so)
 packages/slam-rs/target/
+packages/kornia-staging/target/
 packages/slam-rs/slam_rs/_core.so
 
 # robocap-live (its Cargo target is ignored by the package's own .gitignore)
