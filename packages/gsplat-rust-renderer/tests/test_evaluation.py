@@ -12,9 +12,10 @@ from gsplat_rust_renderer.apis.evaluate_nerfbaselines import Config, quality_gua
 from gsplat_rust_renderer.evaluation import (
     evaluate_checkpoint_predictions,
     evaluate_prediction_directory,
+    evaluate_predictions_against_checkpoint,
     render_test_split,
 )
-from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES, scene_pretrained_dir
+from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES, scene_data_dir, scene_ply_path, scene_pretrained_dir
 
 
 def test_evaluation_delegates_published_metrics_to_rust(tmp_path: Path) -> None:
@@ -130,3 +131,21 @@ def test_hotdog_checkpoint_predictions_match_published_full_split() -> None:
     assert result.image_count == 200
     np.testing.assert_allclose(result.measured_psnr, result.published_psnr, atol=5e-6)
     np.testing.assert_allclose(result.measured_ssim, result.published_ssim, atol=5e-6)
+
+
+@pytest.mark.golden
+@pytest.mark.parametrize("scene", BLENDER_SCENES)
+def test_standalone_render_matches_published_quality(scene: str, tmp_path: Path) -> None:
+    """Gate the real standalone renderer over every 200-view Blender test split."""
+    checkpoint: Path = scene_pretrained_dir(scene)
+    camera: Path = scene_data_dir(scene) / "transforms_test.json"
+    ply: Path = scene_ply_path(scene)
+    for asset in (ply, camera, checkpoint / "results.json", checkpoint / "predictions/gt-color"):
+        if not asset.exists():
+            pytest.skip(f"Required standalone quality asset missing: {asset}")
+    binary: Path = Path("target/release/gsplat-render").resolve()
+    assert binary.is_file(), "Build the standalone renderer with tests-golden"
+    render_test_split(render_binary=binary, ply_path=ply, camera_path=camera, output_dir=tmp_path, width=800, height=800)
+    result = evaluate_predictions_against_checkpoint(tmp_path, checkpoint)
+    assert result.image_count == 200
+    assert quality_guard_failures([result], Config()) == []
