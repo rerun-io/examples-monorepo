@@ -2,7 +2,7 @@
 
 use super::{Matrix9, Matrix9x3, Matrix9x6};
 use crate::calib::Calibration;
-use crate::ldlt::ldlt_in_place;
+use kornia_staging_algebra::linalg::ldlt::ldlt_in_place;
 use crate::lie::{
     LieScalar, So3, c, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3,
 };
@@ -585,7 +585,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     /// a generalized inverse through congruence, not a Moore-Penrose inverse.
     pub fn get_cov_inv_sqrt(&self) -> Matrix9<S> {
         let mut mat: Matrix9<S> = self.cov;
-        let transpositions: [usize; POSE_VEL_SIZE] = ldlt_in_place(&mut mat);
+        let transpositions: [usize; POSE_VEL_SIZE] = ldlt_in_place(&mut mat.data.0);
 
         // Apply the pivot permutation to the identity before solving with L.
         let mut m: Matrix9<S> = Matrix9::identity();

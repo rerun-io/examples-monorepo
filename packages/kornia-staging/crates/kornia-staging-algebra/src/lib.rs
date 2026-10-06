@@ -3,3 +3,5 @@
 
 mod scalar;
 pub use scalar::Scalar;
+/// Linear algebra kernels.
+pub mod linalg;

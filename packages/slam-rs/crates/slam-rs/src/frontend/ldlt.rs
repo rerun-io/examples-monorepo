@@ -12,7 +12,7 @@ use nalgebra::Matrix3;
 /// Singular diagonal pivots contribute zero in the factor coordinates.
 pub fn ldlt_inverse3(a: &Matrix3<f32>) -> Matrix3<f32> {
     let mut mat = *a;
-    let transpositions = crate::ldlt::ldlt_in_place(&mut mat);
+    let transpositions = kornia_staging_algebra::linalg::ldlt::ldlt_in_place(&mut mat.data.0);
     let mut result: Matrix3<f32> = Matrix3::identity();
     ldlt_solve3(&mat, &transpositions, &mut result);
     result

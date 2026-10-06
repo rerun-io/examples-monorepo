@@ -17,3 +17,6 @@ criterion.workspace = true
 [lints]
 workspace = true
 
+[[bench]]
+name = "ldlt"
+harness = false
