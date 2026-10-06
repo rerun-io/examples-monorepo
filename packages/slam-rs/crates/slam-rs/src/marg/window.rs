@@ -14,10 +14,12 @@ use nalgebra::{DMatrix, DVector};
 use crate::ba_base::{BaError, BundleAdjustmentBase};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-use crate::marg::helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 use crate::marg::{MargError, ScheduleSet};
 use crate::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
+};
+use kornia_staging_algebra::optim::solvers::{
+    ReducedSystem, marginalize as marginalize_system,
 };
 
 /// Scheduled removals: poses, their hosted keyframes, full states, and state
@@ -375,8 +377,12 @@ pub fn marginalize<S: Scalar>(
         });
     }
 
-    let reduced: ReducedSystem<S> =
-        marginalize_helper_sqrt_to_sqrt(live.h, live.b, &idx_to_keep, &idx_to_marg)?;
+    let reduced: ReducedSystem<S> = marginalize_system(
+        live.h,
+        live.b,
+        &idx_to_keep,
+        &idx_to_marg,
+    )?;
 
     // The linearization is done with the window; everything from here mutates.
     drop(imu_input);

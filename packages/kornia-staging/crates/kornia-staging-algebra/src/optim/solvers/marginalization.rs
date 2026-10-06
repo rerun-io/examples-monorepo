@@ -1,37 +1,74 @@
 //! Eliminate marginalized variables from a square-root system.
-//! [`marginalize_helper_sqrt_to_sqrt`] consumes matrices by value and produces
+//! [`marginalize`] consumes dynamic matrices by value and produces
 //! the prior Jacobian and residual. Put marginalized columns first, then sweep
 //! QR left to right; rows below their rank constrain only kept variables.
-//! Only square-root marginalization is supported (D68).
+//! Only square-root marginalization is supported.
 
-use kornia_staging_algebra::Scalar;
 use std::collections::BTreeSet;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::marg::MargError;
-use kornia_staging_algebra::linalg::qr::{apply_householder_unchecked, make_householder_unchecked};
+use crate::Scalar;
+
+use crate::linalg::qr::{apply_householder_unchecked, make_householder_unchecked};
+
+/// Invalid square-root system dimensions or column partition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MarginalizationError {
+    /// Kept and marginalized counts do not cover the system.
+    #[error("{keep} kept plus {marg} marginalized indices do not cover {total} columns")]
+    IndexCountMismatch {
+        /// Size of `idx_to_keep`.
+        keep: usize,
+        /// Size of `idx_to_marg`.
+        marg: usize,
+        /// Columns of the system.
+        total: usize,
+    },
+    /// An index names a nonexistent system column.
+    #[error("index {index} is out of range for a system of {total} columns")]
+    IndexOutOfRange {
+        /// The offending index.
+        index: usize,
+        /// Columns of the system.
+        total: usize,
+    },
+    /// An index is in both sets, which would double-count a column.
+    #[error("index {index} is both kept and marginalized")]
+    IndexInBothSets {
+        /// The offending index.
+        index: usize,
+    },
+    /// The residual length differs from the Jacobian row count.
+    #[error("the system has {rows} rows and the right-hand side {rhs}")]
+    RhsLengthMismatch {
+        /// Rows of the matrix.
+        rows: usize,
+        /// Rows of the vector.
+        rhs: usize,
+    },
+}
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedSystem<S: Scalar> {
-    /// `marg_sqrt_H` (`J_m`).
+    /// Prior Jacobian over kept columns.
     pub h: DMatrix<S>,
-    /// `marg_sqrt_b` (`r_m`).
+    /// Prior residual, with one entry per Jacobian row.
     pub b: DVector<S>,
 }
 
-/// Validate complete, disjoint, in-range keep/marginalize index sets (D32).
+/// Validate complete, disjoint, in-range keep/marginalize index sets.
 fn check_indices(
     idx_to_keep: &BTreeSet<usize>,
     idx_to_marg: &BTreeSet<usize>,
     total: usize,
-) -> Result<(usize, usize), MargError> {
+) -> Result<(usize, usize), MarginalizationError> {
     let keep_size: usize = idx_to_keep.len();
     let marg_size: usize = idx_to_marg.len();
     if keep_size + marg_size != total {
-        return Err(MargError::IndexCountMismatch {
+        return Err(MarginalizationError::IndexCountMismatch {
             keep: keep_size,
             marg: marg_size,
             total,
@@ -39,14 +76,14 @@ fn check_indices(
     }
     for index in idx_to_keep.iter().chain(idx_to_marg.iter()) {
         if *index >= total {
-            return Err(MargError::IndexOutOfRange {
+            return Err(MarginalizationError::IndexOutOfRange {
                 index: *index,
                 total,
             });
         }
     }
     if let Some(index) = idx_to_keep.intersection(idx_to_marg).next() {
-        return Err(MargError::IndexInBothSets { index: *index });
+        return Err(MarginalizationError::IndexInBothSets { index: *index });
     }
     Ok((keep_size, marg_size))
 }
@@ -64,17 +101,36 @@ fn check_indices(
 /// The rank policy uses the absolute threshold `sqrt(epsilon)` on `beta`.
 /// It therefore depends on the units of the scaled problem. A rejected
 /// column is zeroed without advancing the rank.
-pub fn marginalize_helper_sqrt_to_sqrt<S: Scalar>(
+///
+/// # Arguments
+/// The Jacobian and residual are consumed by value. Column permutation allocates
+/// a reordered matrix before elimination.
+/// The sorted sets partition all columns. Marginalized columns come first,
+/// then kept columns, each in ascending order.
+///
+/// # Errors
+/// Returns [`MarginalizationError`] for invalid shapes, incomplete partitions,
+/// out-of-range indices, or overlapping sets.
+///
+/// ```
+/// use kornia_staging_algebra::optim::solvers::marginalize;
+/// use nalgebra::{DMatrix, DVector};
+/// let prior = marginalize(DMatrix::from_vec(2, 2, vec![1.0f64, 0.0, 0.0, 2.0]), DVector::from_vec(vec![3.0, 4.0]),
+///     &[1].into_iter().collect(), &[0].into_iter().collect())?;
+/// assert_eq!(prior.h.shape(), (1, 1));
+/// assert!((prior.h[0].abs() - 2.0).abs() < 1e-12);
+/// # Ok::<(), kornia_staging_algebra::optim::solvers::MarginalizationError>(())
+/// ```
+pub fn marginalize<S: Scalar>(
     mut q2jp: DMatrix<S>,
     mut q2r: DVector<S>,
     idx_to_keep: &BTreeSet<usize>,
     idx_to_marg: &BTreeSet<usize>,
-) -> Result<ReducedSystem<S>, MargError> {
-    let rows: usize = q2jp.nrows();
-    let cols: usize = q2jp.ncols();
+) -> Result<ReducedSystem<S>, MarginalizationError> {
+    let (rows, cols) = q2jp.shape();
     let (keep_size, marg_size) = check_indices(idx_to_keep, idx_to_marg, cols)?;
     if q2r.nrows() != rows {
-        return Err(MargError::RhsLengthMismatch {
+        return Err(MarginalizationError::RhsLengthMismatch {
             rows,
             rhs: q2r.nrows(),
         });
@@ -175,6 +231,60 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn empty_and_exhausted_systems_keep_one_zero_row() {
+        for (rows, j, r) in [(0, vec![], vec![]), (1, vec![1.0f64, 0.0], vec![5.0])] {
+            let result = super::marginalize(
+                DMatrix::from_vec(rows, 2, j),
+                DVector::from_vec(r),
+                &[1].into_iter().collect(),
+                &[0].into_iter().collect(),
+            )
+            .unwrap();
+            assert_eq!(result.h.shape(), (1, 1));
+            assert_eq!(result.h.as_slice(), [0.0]);
+            assert_eq!(result.b.as_slice(), [0.0]);
+        }
+    }
+
+    #[test]
+    fn interleaved_partition_retains_sorted_kept_columns() {
+        let result = super::marginalize(
+            DMatrix::from_vec(3, 3, vec![2.0f64, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0]),
+            DVector::from_vec(vec![4.0, 6.0, 8.0]),
+            &[0, 2].into_iter().collect(),
+            &[1].into_iter().collect(),
+        )
+        .unwrap();
+        let j = result.h;
+        let r = result.b;
+        approx::assert_relative_eq!(
+            j.transpose() * &j,
+            DMatrix::from_diagonal(&DVector::from_vec(vec![4.0, 16.0])),
+            epsilon = 1e-12
+        );
+        approx::assert_relative_eq!(
+            j.transpose() * r,
+            DVector::from_vec(vec![8.0, 32.0]),
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn known_rank_exhaustion_behavior_is_preserved() {
+        // Open numerical issue: rank exhausts before the last marginalized column,
+        // leaving marginal rank at zero and retaining a spurious kept constraint.
+        let prior = marginalize(
+            DMatrix::from_row_slice(1, 3, &[1.0f64, 0.0, 2.0]),
+            DVector::repeat(1, 1.0),
+            &[2].into_iter().collect(),
+            &[0, 1].into_iter().collect(),
+        )
+        .unwrap();
+        assert_eq!(prior.h.as_slice(), &[-2.0]);
+        assert_eq!(prior.b.as_slice(), &[-1.0]);
+    }
+
     // Generate distance from the threshold, so shrinking cannot cross it.
     macro_rules! rank_boundary_properties {
         ($name:ident, $scalar:ty) => {
@@ -192,7 +302,7 @@ mod tests {
                     j[(2, 4)] = 3.0;
                     j[(2, 5)] = 6.0;
                     let r = DVector::from_vec(vec![1.0, residual as $scalar, 2.0, 0.0, 0.0, 0.0]);
-                    let reduced = marginalize_helper_sqrt_to_sqrt(j, r, &(2..6).collect(), &(0..2).collect()).unwrap();
+                    let reduced = marginalize(j, r, &(2..6).collect(), &(0..2).collect()).unwrap();
                     prop_assert_eq!(reduced.h.nrows(), 1 + usize::from(above));
                     let h = reduced.h.transpose() * &reduced.h;
                     let b = reduced.h.transpose() * &reduced.b;
@@ -265,7 +375,7 @@ mod tests {
             let (keep_set, marg_set) = index_sets(&keep, &marg);
 
             let reduced =
-                marginalize_helper_sqrt_to_sqrt(j.clone(), r.clone(), &keep_set, &marg_set)
+                marginalize(j.clone(), r.clone(), &keep_set, &marg_set)
                     .unwrap();
 
             let h: DMatrix<f64> = j.transpose() * &j;
@@ -292,8 +402,8 @@ mod tests {
         let r: DVector<f64> = DVector::zeros(4);
         let (keep, marg) = index_sets(&[0, 1], &[2]);
         assert_eq!(
-            marginalize_helper_sqrt_to_sqrt(j.clone(), r.clone(), &keep, &marg),
-            Err(MargError::IndexCountMismatch {
+            marginalize(j.clone(), r.clone(), &keep, &marg),
+            Err(MarginalizationError::IndexCountMismatch {
                 keep: 2,
                 marg: 1,
                 total: 4
@@ -302,20 +412,20 @@ mod tests {
 
         let (keep, marg) = index_sets(&[0, 1, 2], &[2]);
         assert_eq!(
-            marginalize_helper_sqrt_to_sqrt(j.clone(), r.clone(), &keep, &marg),
-            Err(MargError::IndexInBothSets { index: 2 })
+            marginalize(j.clone(), r.clone(), &keep, &marg),
+            Err(MarginalizationError::IndexInBothSets { index: 2 })
         );
 
         let (keep, marg) = index_sets(&[0, 1, 9], &[2]);
         assert_eq!(
-            marginalize_helper_sqrt_to_sqrt(j.clone(), r.clone(), &keep, &marg),
-            Err(MargError::IndexOutOfRange { index: 9, total: 4 })
+            marginalize(j.clone(), r.clone(), &keep, &marg),
+            Err(MarginalizationError::IndexOutOfRange { index: 9, total: 4 })
         );
 
         let (keep, marg) = index_sets(&[0, 1, 2], &[3]);
         assert_eq!(
-            marginalize_helper_sqrt_to_sqrt(j, DVector::zeros(3), &keep, &marg),
-            Err(MargError::RhsLengthMismatch { rows: 4, rhs: 3 })
+            marginalize(j, DVector::zeros(3), &keep, &marg),
+            Err(MarginalizationError::RhsLengthMismatch { rows: 4, rhs: 3 })
         );
     }
 
@@ -326,7 +436,7 @@ mod tests {
         let r: DVector<f64> = DVector::from_fn(5, |i, _| (i as f64).cos());
         let keep: BTreeSet<usize> = (0..3).collect();
         let marg: BTreeSet<usize> = BTreeSet::new();
-        let reduced = marginalize_helper_sqrt_to_sqrt(j.clone(), r.clone(), &keep, &marg).unwrap();
+        let reduced = marginalize(j.clone(), r.clone(), &keep, &marg).unwrap();
         let got: DMatrix<f64> = reduced.h.transpose() * &reduced.h;
         let want: DMatrix<f64> = j.transpose() * &j;
         for i in 0..3 {
@@ -347,7 +457,7 @@ mod tests {
         let r: DVector<f64> = DVector::from_fn(6, |i, _| (i as f64 + 0.5).cos());
         let keep: BTreeSet<usize> = [2, 3].into_iter().collect();
         let marg: BTreeSet<usize> = [0, 1].into_iter().collect();
-        let reduced = marginalize_helper_sqrt_to_sqrt(j, r, &keep, &marg).unwrap();
+        let reduced = marginalize(j, r, &keep, &marg).unwrap();
         // Column 3 of the original is column 1 of the kept block, and it is
         // zero, so the prior says nothing about it.
         for i in 0..reduced.h.nrows() {

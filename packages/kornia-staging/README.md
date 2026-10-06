@@ -103,3 +103,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | N-camera body rig and IMU corrections | slam-rs calib.rs, robocap-live frame.rs | kornia-slam / kornia-sensors::rig | deferred: no consumer reads it | - |
 | Runtime frames, IMU combiner and timestamp matcher | `robocap-types`, `robocap-live/{source,capture}` + `robocap-recorder/live_slam.rs` | kornia-slam `kornia-sensors` (`imu` module and frame exports) | staged | - |
 | Householder QR and scaled Givens with slice storage and scratch | slam-rs `qr.rs` | kornia-rs / kornia-algebra / linalg::qr | staged | - |
+| Rank-aware square-root marginalization | slam-rs `marg/helper.rs` | kornia-rs / kornia-algebra / optim::solvers | staged | - |

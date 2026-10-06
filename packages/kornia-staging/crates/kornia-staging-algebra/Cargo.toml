@@ -25,3 +25,7 @@ harness = false
 [[bench]]
 name = "qr"
 harness = false
+
+[[bench]]
+name = "marginalization"
+harness = false
