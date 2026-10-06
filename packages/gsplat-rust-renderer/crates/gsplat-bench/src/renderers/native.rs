@@ -1,6 +1,11 @@
 //! Rerun 0.38.1 native viewer path: public PLY conversion, per-frame builder,
 //! cached CPU back-to-front sort, and per-frame uploads.
 use super::*;
+use crate::{
+    camera::{CameraModel, opengl_to_opencv},
+    wait,
+};
+use glam::Vec2;
 use re_renderer::view_builder::{Projection, TargetConfiguration, ViewBuilder};
 use re_renderer::{
     GaussianShCoefficient, GaussianSplatBuilder, RenderConfig, RenderContext, Rgba, Rgba32Unmul,

@@ -5,7 +5,7 @@ Run the binary in `target/release/` from this package directory:
 
 ```sh
 taskset -c 8-15,24-31 target/release/gsplat-bench speed \
-  --impl brush,ours,ours-old,native --ply scene.ply --path orbit:300 \
+  --impl brush,ours,native --ply scene.ply --path orbit:300 \
   --res 1920x1080 --out speed.json
 target/release/gsplat-bench parity --impl ours --oracle brush \
   --ply scene.ply --path test-views:transforms_test.json --out parity.json
@@ -51,9 +51,9 @@ and preceding readback latency. It is a diagnostic with logging overhead. Async
 count and completion waits need not call blocking `Device::poll`, so the poll
 count alone is not a synchronization count.
 Parity scores in-memory RGBA floats: RGB on black, alpha, and RGB over white.
-Old/native targets are intrinsically byte formats; Brush Float remains unclipped.
+Native targets are intrinsically byte formats; Brush Float remains unclipped.
 Worst-five EXRs preserve scored values; PNGs are previews, never metric inputs.
-`--save-images DIR` retains every scored pair. Unsupported old/native lenses fail.
+`--save-images DIR` retains every scored pair. Unsupported native lenses fail.
 
 `parity --impl ours-archetype` measures native archetype input loss. It reads the
 PLY through Rerun's `GaussianSplats3D` (RGBA8 and f16 SH), then uses the viewer's
@@ -70,3 +70,6 @@ This implementation is available only for parity, not speed runs.
 `tests-integration` reports missing external fixtures as skips; set
 `GSPLAT_TEST_PLY`, `GSPLAT_TEST_CAMERAS`, `GSPLAT_TEST_GT`, and `GSPLAT_TEST_COLMAP`
 to use staged Lego and garden assets. JSON reports carry build and lock provenance.
+
+The retired `ours-old` implementation was removed after baseline collection.
+Recorded baseline JSONs remain valid historical evidence.

@@ -2,7 +2,7 @@
 use glam::{Mat4, Vec3};
 use gsplat_bench::{
     camera::{self, CameraSpec},
-    renderers::{Brush, Native, Old, RenderEngine, Scene},
+    renderers::{Brush, Native, RenderEngine, Scene},
 };
 use gsplat_eval::Evaluator;
 use std::path::PathBuf;
@@ -87,22 +87,11 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .expect("ours GPU stage timings");
     assert_eq!(stages.len(), 8);
     assert!(stages.iter().all(|s| s.ms.is_finite() && s.ms > 0.0));
-    let mut old = Old::new(&scene, 256, 256).unwrap();
-    let pixels = capture(&mut old, &camera).await;
-    let evaluator = Evaluator::new(false);
-    let old_score = evaluator
-        .evaluate_renders(&pixels, &reference, 256, 256)
-        .await
-        .unwrap();
-    println!("old off-centre parity: {old_score:?}");
-    assert!(old_score.rgb.psnr > 35.0);
-    let stages = old.stages(&camera).await.unwrap().unwrap();
-    assert_eq!(stages.len(), 6);
-    assert!(stages.iter().all(|s| s.ms > 0.0));
     let stages = brush.stages(&camera).await.unwrap().unwrap();
     assert_eq!(stages.len(), 1);
     assert!(stages[0].ms > 0.0);
     println!("Brush device window: {} ms", stages[0].ms);
+    let evaluator = Evaluator::new(false);
     let mut native = Native::new(&ply, scene.data.num_splats()).await.unwrap();
     let pixels = capture(&mut native, &camera).await;
     let native_score = evaluator
@@ -140,14 +129,6 @@ async fn independent_brush_renders_have_exact_identity_on_one_splat() {
         .unwrap();
     assert!((score.minimum_psnr() - 100.0).abs() < 1e-4);
     assert!((score.rgb.ssim - 1.0).abs() < 1e-5);
-}
-#[tokio::test]
-#[ignore = "integration: GPU 4K target"]
-async fn old_core_renders_at_4k() {
-    let scene = one_splat(-6.0);
-    let camera = CameraSpec::from_nerf(Mat4::from_translation(Vec3::Z * 3.0), 0.8, 3840, 2160);
-    let mut renderer = Old::new(&scene, 3840, 2160).unwrap();
-    capture(&mut renderer, &camera).await;
 }
 #[tokio::test]
 #[ignore = "integration: garden sparse/0 assets; tests-integration handles skips"]

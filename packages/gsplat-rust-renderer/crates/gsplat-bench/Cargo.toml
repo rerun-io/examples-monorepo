@@ -12,7 +12,6 @@ burn.workspace = true
 image.workspace = true
 glam.workspace = true
 tokio.workspace = true
-gsplat-rust-renderer = { path = "../..", default-features = false }
 gsplat-eval = { path = "../gsplat-eval" }
 anyhow.workspace = true
 clap.workspace = true

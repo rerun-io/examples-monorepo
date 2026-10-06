@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/*"]
+members = ["crates/*"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -25,28 +25,6 @@ brush-dataset = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74
 
 # Burn and CubeCL are pinned to Brush revisions in Cargo.lock.
 # Rerun 0.38.1 pins wasm-bindgen =0.2.126, requiring registry wgpu 30.0.0.
-[package]
-name = "gsplat-rust-renderer"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-name = "gsplat_lib"
-path = "src/lib.rs"
-
-
-[dependencies]
-anyhow.workspace = true
-bytemuck.workspace = true
-clap.workspace = true
-glam.workspace = true
-image.workspace = true
-ply-rs = "0.1"
-pollster.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-wgpu.workspace = true
-
 # Match Brush: thin LTO; codegen-units keeps Cargo's release default (16).
 [profile.release]
 lto = "thin"

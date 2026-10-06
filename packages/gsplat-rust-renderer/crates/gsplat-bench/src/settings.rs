@@ -7,12 +7,10 @@ pub fn validate_backend(
     metadata: gsplat_core::RenderMode,
 ) -> crate::Result<()> {
     settings.validate()?;
-    if matches!(
-        kind,
-        crate::renderers::Implementation::OursOld | crate::renderers::Implementation::Native
-    ) && (settings.mode(metadata) != gsplat_core::RenderMode::Default
-        || settings.splat_scale != 1.0
-        || settings.min_scale.is_some())
+    if matches!(kind, crate::renderers::Implementation::Native)
+        && (settings.mode(metadata) != gsplat_core::RenderMode::Default
+            || settings.splat_scale != 1.0
+            || settings.min_scale.is_some())
     {
         return Err(crate::Error::Unsupported(
             "render-mode, scale, or floor controls for this reference renderer".into(),

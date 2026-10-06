@@ -10,7 +10,8 @@
 
 The core does not depend on Rerun. Its [API notes](../crates/gsplat-core/README.md)
 and the [viewer usage](../crates/gsplat-viewer/README.md) cover the public entry points.
-The legacy core remains available to the baseline benchmark until its removal item.
+The root is a virtual Cargo workspace. The legacy core and `ours-old` backend
+were removed after baseline collection.
 
 ## Native data and runtime selection
 
@@ -75,7 +76,8 @@ Texture limits are never reduced below stock Rerun's adapter limits.
 Unit tests cover conversion and selection. GPU tests cover optional expected
 depth and tiny transforms. Viewer tests poll fresh screenshots until pixels settle;
 black and white fixed-eye pairs check color, and native/compute recordings check
-selection.
+selection. `probe` is an opt-in feature for complete-frame timing including GPU
+completion; screenshot readback occurs after the samples.
 
 ## Training recordings
 

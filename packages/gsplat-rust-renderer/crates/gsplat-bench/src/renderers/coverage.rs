@@ -1,5 +1,7 @@
 //! Synthetic contracts for branches absent from the stored SH3 scenes.
 use super::*;
+use crate::camera::CameraModel;
+use glam::Mat4;
 
 fn synthetic_scene(degree: u32) -> Scene {
     let n = 12;

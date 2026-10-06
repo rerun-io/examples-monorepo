@@ -4,9 +4,7 @@ use anyhow::{Result, ensure};
 use clap::Args;
 use gsplat_bench::{
     camera::CameraSpec,
-    renderers::{
-        Adapter, Brush, Counts, Implementation, Native, Old, RenderEngine, Scene, StageTiming,
-    },
+    renderers::{Adapter, Brush, Counts, Implementation, Native, RenderEngine, Scene, StageTiming},
     settings::RenderSettings,
     statistics::{Statistics, median, summarize},
 };
@@ -26,7 +24,7 @@ pub struct SpeedArgs {
         long = "impl",
         value_enum,
         value_delimiter = ',',
-        default_value = "brush,ours,ours-old,native"
+        default_value = "brush,ours,native"
     )]
     pub implementations: Vec<Implementation>,
     #[command(flatten)]
@@ -352,7 +350,6 @@ async fn check_cameras<R: RenderEngine>(
     for (index, c) in cameras.iter().enumerate().step_by(30) {
         renderer.render(c, !packed).await?;
         renderer.finish()?;
-        // Old's readback checks the raw intersection count against capacity.
         let pixels = renderer.read_rgba_f32().await?;
         oracle.render(c, true).await?;
         oracle.finish()?;
@@ -388,7 +385,6 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
     let cameras = cameras(&a.camera, &scene).await?;
     let mut brush = None;
     let mut ours = None;
-    let mut old = None;
     let mut native = None;
     let mut reports = Vec::new();
     for kind in &a.implementations {
@@ -413,10 +409,6 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                     .await?,
                 );
                 initialize(r, &cameras[0], start, *kind, "Packed RGBA8", a.repeats).await?
-            }
-            Implementation::OursOld => {
-                let r = old.insert(Old::new(&scene, cameras[0].width, cameras[0].height)?);
-                initialize(r, &cameras[0], start, *kind, "RGBA8Unorm", a.repeats).await?
             }
             Implementation::Native => {
                 let r = native.insert(Native::new(&a.camera.ply, scene.data.num_splats()).await?);
@@ -505,18 +497,6 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                         )
                         .await?
                     }
-                    Implementation::OursOld => {
-                        repeat(
-                            old.as_mut().unwrap(),
-                            &suite.cameras,
-                            &a,
-                            index,
-                            attempt,
-                            order,
-                            admission_deadline,
-                        )
-                        .await?
-                    }
                     Implementation::Native => {
                         repeat(
                             native.as_mut().unwrap(),
@@ -567,7 +547,6 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             }
             Implementation::Ours => ours.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::Brush => brush.as_mut().unwrap().stages(&suite.cameras[0]).await?,
-            Implementation::OursOld => old.as_mut().unwrap().stages(&suite.cameras[0]).await?,
             Implementation::Native => native.as_mut().unwrap().stages(&suite.cameras[0]).await?,
         };
     }
@@ -630,9 +609,6 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             }
             Implementation::Ours => {
                 check_cameras(ours.as_mut().unwrap(), &mut oracle, &suite.cameras, true).await?
-            }
-            Implementation::OursOld => {
-                check_cameras(old.as_mut().unwrap(), &mut oracle, &suite.cameras, false).await?
             }
             Implementation::Native => {
                 check_cameras(native.as_mut().unwrap(), &mut oracle, &suite.cameras, false).await?

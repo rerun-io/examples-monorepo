@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use glam::{Mat4, Vec2};
 use gsplat_bench::{
     camera::{self, CameraPath, CameraSpec},
-    renderers::{Adapter, Brush, Implementation, Native, Old, RenderEngine, Scene},
+    renderers::{Adapter, Brush, Implementation, Native, RenderEngine, Scene},
     settings::RenderSettings,
 };
 use gsplat_eval::{Evaluator, Metrics, Versions, ViewMetrics};
@@ -301,7 +301,7 @@ async fn parity<R: RenderEngine, O: RenderEngine>(
     let mean = gsplat_eval::mean(&views.iter().map(|v| v.metrics.clone()).collect::<Vec<_>>());
     let mean_alpha_psnr = views.iter().map(|v| v.alpha_psnr).sum::<f64>() / views.len() as f64;
     let mean_white_psnr = views.iter().map(|v| v.white_psnr).sum::<f64>() / views.len() as f64;
-    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:oracle_kind,settings:a.settings,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; old/native intrinsically use RGBA8 targets".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),min_rgb_psnr:views.iter().map(|v| v.metrics.psnr).fold(f64::INFINITY,f64::min),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
+    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:oracle_kind,settings:a.settings,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; native intrinsically uses an RGBA8 target".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),min_rgb_psnr:views.iter().map(|v| v.metrics.psnr).fold(f64::INFINITY,f64::min),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
 }
 async fn with_oracle<R: RenderEngine>(
     a: ParityArgs,
@@ -383,10 +383,6 @@ async fn run_parity(a: ParityArgs) -> Result<()> {
             };
             with_oracle(a, scene, cameras, r).await
         }
-        Implementation::OursOld => {
-            let r = Old::new(&scene, cameras[0].width, cameras[0].height)?;
-            with_oracle(a, scene, cameras, r).await
-        }
         Implementation::Native => {
             let r = Native::new(&a.camera.ply, scene.data.num_splats()).await?;
             with_oracle(a, scene, cameras, r).await
@@ -445,6 +441,24 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+    #[test]
+    fn cli_rejects_retired_renderer() {
+        for command in ["speed", "parity"] {
+            assert!(
+                Args::try_parse_from([
+                    "bench",
+                    command,
+                    "--impl",
+                    "ours-old",
+                    "--ply",
+                    "scene.ply",
+                    "--out",
+                    "result.json"
+                ])
+                .is_err()
+            );
+        }
     }
     #[tokio::test]
     async fn orbit_up_places_cameras_above_the_scene_and_looks_at_focus() {
