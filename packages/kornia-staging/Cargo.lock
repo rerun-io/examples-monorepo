@@ -2584,6 +2584,7 @@ dependencies = [
  "kornia-staging-algebra",
  "kornia-staging-imgproc",
  "log",
+ "nalgebra",
  "thiserror 2.0.21",
  "wgpu",
 ]

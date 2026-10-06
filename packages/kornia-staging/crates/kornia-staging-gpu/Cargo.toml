@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = []
 # Separate buffers avoid CubeCL's shared-page alignment using uniform limits
@@ -32,6 +35,7 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
+nalgebra.workspace = true
 approx.workspace = true
 criterion.workspace = true
 
@@ -42,5 +46,10 @@ required-features = ["wgpu"]
 
 [[bench]]
 name = "features"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "optical_flow"
 harness = false
 required-features = ["wgpu"]

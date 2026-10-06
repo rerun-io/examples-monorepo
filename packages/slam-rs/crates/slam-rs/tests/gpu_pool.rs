@@ -2,12 +2,12 @@
 #![cfg(feature = "gpu-core")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use kornia_staging_gpu::runtime::gpu_client;
 use kornia_image::Image;
+use kornia_staging_gpu::runtime::gpu_client;
 use kornia_staging_imgproc::features::CornerScan;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
-use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
 use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowTransforms, PointsSoA};
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
 use slam_rs::gpu::{GpuPatchSources, GpuPatchTracker};
 
 mod common;

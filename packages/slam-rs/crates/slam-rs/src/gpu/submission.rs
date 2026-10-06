@@ -13,7 +13,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
         self,
         body: impl FnOnce() -> Result<(), crate::frontend::flow::FrontendError> + Send,
     ) -> Result<(), crate::frontend::flow::FrontendError> {
-        let result = super::guarded(
+        let result = kornia_staging_gpu::runtime::guarded(
             GpuError::DeviceLost {
                 what: "frontend dispatch",
             },
@@ -31,7 +31,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
 pub(super) enum Launch {
     Pyramid(kornia_staging_gpu::pyramid::PyramidLaunch),
     Corners(kornia_staging_gpu::features::CornerLaunch),
-    Klt(super::track::FusedLaunch),
+    Klt(kornia_staging_gpu::optical_flow::FusedLaunch),
     Stereo(super::frontend::onewait::StereoLaunch),
 }
 
@@ -43,7 +43,8 @@ impl Launch {
             Self::Pyramid(launch) => unsafe { launch.run(client) },
             // SAFETY: The frame queues this work after its pyramid on the same client stream.
             Self::Corners(launch) => unsafe { launch.run(client) },
-            Self::Klt(launch) => launch.run(client),
+            // SAFETY: The frame runs validated KLT work on its preparation stream.
+            Self::Klt(launch) => unsafe { launch.run(client) },
             Self::Stereo(launch) => launch.run(client),
         }
     }
@@ -61,10 +62,10 @@ struct LaunchState {
 pub struct LaunchList(std::sync::Arc<std::sync::Mutex<LaunchState>>);
 
 impl LaunchList {
-    pub(super) fn begin(&self) -> Result<FrameBatch, GpuError> {
+    pub(super) fn begin(&self) -> Result<FrameBatch, crate::frontend::flow::FrontendError> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if state.active {
-            return Err(GpuError::NestedFrame);
+            return Err(crate::frontend::flow::FrontendError::NestedGpuFrame);
         }
         state.active = true;
         Ok(FrameBatch(self.clone()))
@@ -74,14 +75,23 @@ impl LaunchList {
         &self,
         client: &cubecl::prelude::ComputeClient<R>,
         launch: Launch,
-    ) {
+    ) -> Result<(), GpuError> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if state.active {
             state.commands.push(launch);
         } else {
             drop(state);
-            launch.run(client);
+            kornia_staging_gpu::runtime::guarded(
+                GpuError::DeviceLost {
+                    what: "queued launch",
+                },
+                || {
+                    launch.run(client);
+                    Ok(())
+                },
+            )?;
         }
+        Ok(())
     }
 
     pub(super) fn clear(&self) {
@@ -103,9 +113,7 @@ impl LaunchList {
     pub(super) fn flush<R: cubecl::prelude::Runtime>(
         &self,
         client: &cubecl::prelude::ComputeClient<R>,
-    ) {
-        #[cfg(test)]
-        super::runtime::fire_if_armed("queued launch");
+    ) -> Result<(), GpuError> {
         let commands = std::mem::take(
             &mut self
                 .0
@@ -113,9 +121,19 @@ impl LaunchList {
                 .unwrap_or_else(|error| error.into_inner())
                 .commands,
         );
-        for command in commands {
-            command.run(client);
-        }
+        kornia_staging_gpu::runtime::guarded(
+            GpuError::DeviceLost {
+                what: "queued launch",
+            },
+            || {
+                #[cfg(test)]
+                super::runtime::fire_if_armed("queued launch");
+                for command in commands {
+                    command.run(client);
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -127,15 +145,7 @@ impl FrameBatch {
         self,
         client: &cubecl::prelude::ComputeClient<R>,
     ) -> Result<(), crate::frontend::flow::FrontendError> {
-        super::guarded(
-            GpuError::DeviceLost {
-                what: "frame dispatch",
-            },
-            || {
-                self.0.flush(client);
-                Ok(())
-            },
-        )
+        self.0.flush(client).map_err(Into::into)
     }
 }
 
@@ -149,17 +159,6 @@ impl Drop for FrameBatch {
 
 pub(super) use kornia_staging_gpu::transfer::read_failed;
 
-/// Download every handle together and map device errors at one boundary.
-#[cfg(feature = "gpu-core")]
-pub(super) fn read_blocking<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    launches: &LaunchList,
-    handles: Vec<cubecl::server::Handle>,
-    what: &'static str,
-) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
-    read_with_lookahead(client, launches, handles, what, || Ok(()))
-}
-
 /// Submit the current readback, then queue independent work before its wait.
 #[cfg(feature = "gpu-core")]
 pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
@@ -169,7 +168,7 @@ pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
     what: &'static str,
     after_copy: impl FnOnce() -> Result<(), GpuError>,
 ) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
-    launches.flush(client);
+    launches.flush(client)?;
     #[cfg(test)]
     if super::runtime::armed(super::runtime::BLOCKING_READ) {
         return Err(GpuError::DeviceReadFailed { what });

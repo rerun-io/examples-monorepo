@@ -669,7 +669,6 @@ impl<R: Runtime> GpuCornerScan<R> {
         camera: usize,
         image: ScanInput<'_>,
         select: &CellSelect,
-        _eligibility: Option<(&kornia_staging_imgproc::features::Occupancy<'_>, &[bool])>,
         out: &mut Vec<Option<FastCorner>>,
     ) -> Result<SelectionStatus, ScanError> {
         out.clear();
@@ -913,7 +912,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         _eligibility: Option<(&kornia_staging_imgproc::features::Occupancy<'_>, &[bool])>,
         out: &mut Vec<Option<FastCorner>>,
     ) -> Result<SelectionStatus, Self::Error> {
-        self.select_input(camera, ScanInput::Dense(image), select, _eligibility, out)
+        self.select_input(camera, ScanInput::Dense(image), select, out)
     }
     fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], ScanError> {
         // The same refusal the CPU lane returns, and asked in the same place: a

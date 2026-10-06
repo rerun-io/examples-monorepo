@@ -8,7 +8,6 @@
 //! arenas; other rigs retain independent per-camera bindings.
 
 mod detect;
-mod finite;
 mod kernels;
 mod patches;
 mod pyramid;
@@ -16,17 +15,11 @@ mod submission;
 pub use submission::LaunchList;
 #[cfg(test)]
 mod runtime;
-use kornia_staging_gpu::runtime::RUNTIME_NAME;
-#[cfg(not(test))]
-use kornia_staging_gpu::runtime::guarded;
+use kornia_staging_gpu::runtime::gpu_client;
 use kornia_staging_gpu::runtime::probe_storage;
-use kornia_staging_gpu::runtime::{GpuError, gpu_client};
-#[cfg(test)]
-use runtime::guarded;
 mod frontend;
 pub use frontend::GpuStages;
 mod track;
-mod trig;
 
 pub use detect::GpuCornerScan;
 pub use patches::GpuPatchSources;
@@ -43,28 +36,19 @@ pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
     max_recovered_dist2: f32,
     cameras: usize,
 ) -> Result<GpuStages<P, GpuRuntime>, crate::frontend::flow::FrontendError> {
-    guarded(
-        GpuError::ClientPanicked {
-            runtime: RUNTIME_NAME,
-        },
-        || {
-            let client = gpu_client()?;
-            client
-                .exclusive(|| {
-                    probe_storage(&client)?;
-                    let launches = LaunchList::default();
-                    let tracker = GpuPatchTracker::new(
-                        client.clone(),
-                        capacity,
-                        num_levels,
-                        max_iterations,
-                        max_recovered_dist2,
-                        cameras,
-                        launches.clone(),
-                    )?;
-                    GpuStages::new(client.clone(), tracker, launches)
-                })
-                .map_err(|error| submission::read_failed("frontend construction", &error))?
-        },
-    )
+    let client = gpu_client()?;
+    kornia_staging_gpu::runtime::guarded(kornia_staging_gpu::runtime::GpuError::DeviceLost { what: "frontend construction" }, || {
+        probe_storage(&client)?;
+        let launches = LaunchList::default();
+        let tracker = GpuPatchTracker::new(
+            client.clone(),
+            capacity,
+            num_levels,
+            max_iterations,
+            max_recovered_dist2,
+            cameras,
+            launches.clone(),
+        )?;
+        GpuStages::new(client.clone(), tracker, launches)
+    })
 }

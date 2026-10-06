@@ -1,5 +1,4 @@
 //! Frontend scheduling and lazy input adapters for staged GPU feature extraction.
-use super::guarded;
 use crate::frontend::{
     detect::FrameCornerScan,
     flow::FrontendError,
@@ -24,40 +23,11 @@ impl<R: Runtime> GpuCornerScan<R> {
         client: ComputeClient<R>,
         launches: super::submission::LaunchList,
     ) -> Result<Self, GpuError> {
-        guarded(
-            GpuError::DeviceLost {
-                what: "corner scan setup",
-            },
-            || {
-                Ok(Self {
-                    inner: DeviceScan::new(client.clone())?,
-                    client,
-                    launches,
-                })
-            },
-        )
-    }
-    pub fn use_level0(&mut self, builder: &mut super::GpuPyramidBuilder<R>) {
-        self.inner.use_level0(&mut builder.inner);
-    }
-    pub fn frame_uploads(&self) -> usize {
-        self.inner.frame_uploads()
-    }
-    pub fn buffer_allocations(&self) -> usize {
-        self.inner.buffer_allocations()
-    }
-    pub(super) fn staged_handles(&self) -> Option<&[cubecl::server::Handle]> {
-        self.inner.staged_handles()
-    }
-    pub(super) fn take_staged(&mut self) -> Option<kornia_staging_gpu::features::PendingSelection> {
-        self.inner.take_staged()
-    }
-    pub(super) fn deliver(
-        &mut self,
-        selection: kornia_staging_gpu::features::PendingSelection,
-        bytes: Vec<cubecl::bytes::Bytes>,
-    ) -> Result<(), ScanError> {
-        self.inner.deliver(selection, bytes)
+        Ok(Self {
+            inner: DeviceScan::new(client.clone())?,
+            client,
+            launches,
+        })
     }
     fn with_input<T>(
         &mut self,
@@ -77,35 +47,23 @@ impl<R: Runtime> GpuCornerScan<R> {
 impl<R: Runtime> FrameCornerScan for GpuCornerScan<R> {
     fn scan_frame(&mut self, camera: usize, image: FrameImage<'_>) -> Result<(), FrontendError> {
         self.inner.abort_scan();
-        guarded(
-            GpuError::DeviceLost {
-                what: "corner scan",
-            },
-            || {
-                self.launches.flush(&self.client);
-                self.with_input(camera, image, |scan, input| scan.scan_input(camera, input))
-            },
-        )
+        self.launches.flush(&self.client)?;
+        self.with_input(camera, image, |scan, input| scan.scan_input(camera, input))
     }
     fn select_frame(
         &mut self,
         camera: usize,
         image: FrameImage<'_>,
         select: &CellSelect,
-        eligibility: Option<(&Occupancy<'_>, &[bool])>,
+        _eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<Option<FastCorner>>,
     ) -> Result<SelectionStatus, FrontendError> {
-        let outcome = guarded(
-            GpuError::DeviceLost {
-                what: "corner cell selection",
-            },
-            || {
-                self.launches.flush(&self.client);
-                self.with_input(camera, image, |scan, input| {
-                    scan.select_input(camera, input, select, eligibility, out)
-                })
-            },
-        );
+        let outcome = (|| {
+            self.launches.flush(&self.client)?;
+            self.with_input(camera, image, |scan, input| {
+                scan.select_input(camera, input, select, out)
+            })
+        })();
         if outcome.is_err() {
             self.inner.abort_scan();
             self.inner.abort_selection();
@@ -118,46 +76,34 @@ impl<R: Runtime> FrameCornerScan for GpuCornerScan<R> {
         images: FrameImages<'_>,
         selects: &[Option<CellSelect>],
     ) -> Result<(), FrontendError> {
-        self.inner.begin_cells(images.len())?;
-        let outcome = guarded(
-            GpuError::DeviceLost {
-                what: "corner cell selection",
-            },
-            || {
-                if let Some(work) = self
-                    .inner
-                    .prepare_batch(images.iter().map(|image| image.size()), selects)?
-                {
-                    self.launches
-                        .dispatch(&self.client, super::submission::Launch::Corners(work));
+        let client = &self.client;
+        let launches = &self.launches;
+        self.inner.submit_cells(
+            images.iter().map(|image| image.size()),
+            selects,
+            |scan, camera, select| {
+                launches.flush(client)?;
+                let image = images.get(camera);
+                if scan.has_level0(camera, image.size()) {
+                    scan.submit_input(camera, ScanInput::Uploaded(image.size()), select)?;
                 } else {
-                    self.launches.flush(&self.client);
-                    for (camera, image) in images.iter().enumerate() {
-                        if let Some(select) = selects.get(camera).copied().flatten() {
-                            self.with_input(camera, image, |scan, input| {
-                                scan.submit_input(camera, input, &select)
-                            })?;
-                        }
-                    }
+                    image.with_dense(|image| {
+                        scan.submit_input(camera, ScanInput::Dense(image), select)
+                    })??;
                 }
                 Ok(())
             },
-        );
-        if outcome.is_err() {
-            self.inner.abort_selection();
-        }
-        outcome
+            |work| {
+                launches.dispatch(client, super::submission::Launch::Corners(work))?;
+                Ok(())
+            },
+        )
     }
     fn take_cells(&mut self) -> Result<(), FrontendError> {
-        let outcome = guarded(
-            GpuError::DeviceLost {
-                what: "corner cell selection",
-            },
-            || {
-                self.launches.flush(&self.client);
-                self.inner.take_cells().map_err(Into::into)
-            },
-        );
+        let outcome = (|| {
+            self.launches.flush(&self.client)?;
+            self.inner.take_cells().map_err(Into::into)
+        })();
         if outcome.is_err() {
             self.inner.abort_selection();
         }

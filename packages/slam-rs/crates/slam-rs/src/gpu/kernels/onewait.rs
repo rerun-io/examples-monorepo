@@ -5,7 +5,7 @@
 //! destination's quaternion xyzw, translation xyz and 12 intrinsics.
 //! Selected points: live count followed by interleaved x,y in column-major
 //! cell order. Stereo slots retain the fused kernel's ten-float point layout.
-use super::klt_fused::FUSED_RUNS;
+use kornia_staging_gpu::optical_flow::{FUSED_RUNS, RUN_CAMERA, RUN_SOURCE_X, RUN_SOURCE_Y, RUN_TARGET_X, RUN_TARGET_Y, RUN_VALID, RUN_WARP};
 use kornia_staging_imgproc::features::backend::NO_CELL_WINNER;
 
 const KEY_ROW_SHIFT: u32 = kornia_staging_imgproc::features::backend::KEY_ROW_SHIFT;
@@ -16,8 +16,8 @@ pub(crate) const RADTAN8_PARAMS: usize = 12;
 pub(crate) const PER_CAMERA_PARAMS: usize = 7 + RADTAN8_PARAMS;
 pub(crate) const CAMERA_PARAMS_START: usize = PARAM_HEADER + RADTAN8_PARAMS;
 
-use crate::gpu::finite::is_finite;
 use cubecl::prelude::*;
+use kornia_staging_gpu::kernels::finite::is_finite;
 
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
@@ -167,8 +167,8 @@ pub(crate) fn stereo_inputs(
     let camera = point / cells;
     let index = point % cells;
     let base = point * FUSED_RUNS;
-    io[base + 6usize] = 0.0f32;
-    io[base + 9usize] = f32::cast_from(camera);
+    io[base + RUN_VALID] = 0.0f32;
+    io[base + RUN_CAMERA] = f32::cast_from(camera);
     if index >= usize::cast_from(selected[0usize]) {
         terminate!();
     }
@@ -217,13 +217,13 @@ pub(crate) fn stereo_inputs(
         guess_x = params[c + 7usize] * d[0usize] + params[c + 9usize];
         guess_y = params[c + 8usize] * d[1usize] + params[c + 10usize];
     }
-    io[base] = 1.0f32;
-    io[base + 1usize] = 0.0f32;
-    io[base + 2usize] = 0.0f32;
-    io[base + 3usize] = 1.0f32;
-    io[base + 4usize] = guess_x;
-    io[base + 5usize] = guess_y;
-    io[base + 6usize] = 1.0f32;
-    io[base + 7usize] = sx;
-    io[base + 8usize] = sy;
+    io[base + RUN_WARP] = 1.0f32;
+    io[base + RUN_WARP + 1usize] = 0.0f32;
+    io[base + RUN_WARP + 2usize] = 0.0f32;
+    io[base + RUN_WARP + 3usize] = 1.0f32;
+    io[base + RUN_TARGET_X] = guess_x;
+    io[base + RUN_TARGET_Y] = guess_y;
+    io[base + RUN_VALID] = 1.0f32;
+    io[base + RUN_SOURCE_X] = sx;
+    io[base + RUN_SOURCE_Y] = sy;
 }

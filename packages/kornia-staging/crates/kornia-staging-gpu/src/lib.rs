@@ -10,6 +10,10 @@
 //! # }
 //! # Ok::<(), kornia_staging_gpu::runtime::GpuError>(())
 //! ```
+// CubeCL launches require raw device bindings with checked host geometry.
+#![allow(unsafe_code)]
+#![deny(missing_docs)]
+
 pub mod kernels;
 pub mod runtime;
 pub mod transfer;
@@ -20,3 +24,5 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 pub mod pyramid;
 
 pub mod features;
+
+pub mod optical_flow;

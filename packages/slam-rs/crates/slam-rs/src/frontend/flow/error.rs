@@ -24,6 +24,11 @@ pub enum FrontendError {
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
     GpuScan(#[from] kornia_staging_gpu::features::ScanError),
+    /// A frame scope was entered before the prior scope ended.
+    #[cfg(feature = "gpu-core")]
+    #[error("nested GPU frontend frame")]
+    NestedGpuFrame,
+
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]
     NoCameras,

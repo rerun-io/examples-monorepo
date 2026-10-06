@@ -9,7 +9,7 @@ use cubecl::prelude::*;
 
 /// `Image<u16, 1>::in_bounds`.
 #[cube]
-pub fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bool {
+pub(crate) fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bool {
     border <= x
         && x < (f32::cast_from(width) - border - 1.0f32)
         && border <= y
@@ -18,13 +18,13 @@ pub fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bo
 
 /// One pixel of a level, as `f32`.
 #[cube]
-pub fn at(image: &[u16], base: usize, stride: usize, x: usize, y: usize) -> f32 {
+pub(crate) fn at(image: &[u16], base: usize, stride: usize, x: usize, y: usize) -> f32 {
     f32::cast_from(image[base + y * stride + x])
 }
 
 /// Bilinear sampling with the CPU implementation's multiplication grouping and sum order.
 #[cube]
-pub fn interp(image: &[u16], base: usize, stride: usize, x: f32, y: f32) -> f32 {
+pub(crate) fn interp(image: &[u16], base: usize, stride: usize, x: f32, y: f32) -> f32 {
     let ix = usize::cast_from(x);
     let iy = usize::cast_from(y);
     let dx = x - f32::cast_from(ix);

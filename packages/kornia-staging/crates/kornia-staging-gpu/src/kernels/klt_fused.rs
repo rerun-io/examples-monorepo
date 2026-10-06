@@ -1,32 +1,56 @@
 //! Register-resident KLT: one 16-lane group per point, both passes.
-use super::super::{finite::is_finite, trig};
 use super::layout::*;
 use super::sampling::{at, in_bounds, interp};
+use super::{finite::is_finite, trig};
 use cubecl::prelude::*;
 
 /// Point-major input/output record: warp (6), validity, source (2), camera.
-pub(crate) const FUSED_RUNS: usize = 10;
-const RUN_WARP: usize = 0;
-const RUN_VALID: usize = 6;
-const RUN_SOURCE_X: usize = 7;
-const RUN_SOURCE_Y: usize = 8;
-const RUN_CAMERA: usize = 9;
+pub const FUSED_RUNS: usize = 10;
+/// First warp coefficient.
+pub const RUN_WARP: usize = 0;
+/// Validity flag.
+pub const RUN_VALID: usize = 6;
+/// Source x coordinate.
+pub const RUN_SOURCE_X: usize = 7;
+/// Source y coordinate.
+pub const RUN_SOURCE_Y: usize = 8;
+/// Camera pair index.
+pub const RUN_CAMERA: usize = 9;
+
+/// Destination x coordinate.
+pub const RUN_TARGET_X: usize = 4;
+/// Destination y coordinate.
+pub const RUN_TARGET_Y: usize = 5;
 
 /// Camera source/target geometry followed by the shared pattern offsets.
+#[inline]
 pub(crate) const fn meta_len(levels: usize, cameras: usize, taps: usize) -> usize {
     2 * levels * 4 * cameras + taps * 2
 }
 
+/// Validated fused-dispatch parameters. Low-level callers uphold the launch safety contract.
 #[derive(Clone, Copy)]
 pub(crate) struct FusedParams {
+    /// Pyramid levels including full resolution.
     pub levels: usize,
+    /// Sampling-pattern coordinates.
     pub taps: usize,
+    /// Maximum iterations per level.
     pub iterations: usize,
+    /// Squared recovery-distance threshold.
     pub max_dist2: f32,
+    /// Optional positive finite convergence threshold.
     pub exit_step_px: Option<f32>,
 }
 
-pub(crate) fn launch_fused<R: Runtime>(
+/// Enqueue the fused kernel using externally prepared bindings.
+///
+/// # Safety
+/// Images, geometry, pattern coordinates and point records must match `params`.
+/// All lengths and camera indices must fit the bindings. Parameters must pass
+/// CPU tracking validation; use one client stream without concurrent accesses.
+/// `count` must be in 1..=262140, the portable single-row dispatch limit.
+pub(crate) unsafe fn launch_fused<R: Runtime>(
     client: &ComputeClient<R>,
     images: [(&cubecl::server::Handle, usize); 4],
     meta: (&cubecl::server::Handle, usize),
@@ -60,21 +84,23 @@ pub(crate) fn launch_fused<R: Runtime>(
     }
 }
 
-#[derive(Clone)]
+/// Persistent metadata upload, rewritten only when its contents change.
 pub(crate) struct CachedU32Upload {
     host: Vec<u32>,
+    /// Device allocation shared by prepared launches.
     pub handle: cubecl::server::Handle,
 }
 
 impl CachedU32Upload {
-    pub fn new<R: Runtime>(client: &ComputeClient<R>, capacity: usize) -> Self {
+    // Allocation shape and multiplication are checked by KltBuffers::new.
+    pub(crate) fn new<R: Runtime>(client: &ComputeClient<R>, capacity: usize) -> Self {
         Self {
             host: Vec::with_capacity(capacity),
             handle: client.empty(capacity * size_of::<u32>()),
         }
     }
 
-    pub fn update<R: Runtime>(&mut self, client: &ComputeClient<R>, values: &[u32]) {
+    pub(crate) fn update<R: Runtime>(&mut self, client: &ComputeClient<R>, values: &[u32]) {
         if self.host != values {
             client.write(
                 &self.handle,
@@ -85,11 +111,14 @@ impl CachedU32Upload {
         }
     }
 
+    /// Uploaded word count.
     pub fn len(&self) -> usize {
         self.host.len()
     }
 }
 
+/// Encode one warp, validity flag, source position and camera index.
+#[inline]
 pub(crate) fn encode_point(
     warp: [f32; 6],
     valid: f32,
@@ -105,20 +134,22 @@ pub(crate) fn encode_point(
     values
 }
 
+/// Decode one kernel result into an already sized output slot.
+///
+/// # Panics
+/// If `values` has fewer than FUSED_RUNS entries or `out` lacks `index`.
+#[inline]
 pub(crate) fn decode_point(
     values: &[f32],
     out: &mut kornia_staging_imgproc::optical_flow::patch_tracker::FlowResult,
     index: usize,
 ) {
     let transform = kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f {
-        linear: nalgebra::Matrix2::new(
-            values[RUN_WARP],
-            values[RUN_WARP + 1],
-            values[RUN_WARP + 2],
-            values[RUN_WARP + 3],
-        )
-        .into(),
-        translation: nalgebra::Vector2::new(values[RUN_WARP + 4], values[RUN_WARP + 5]).into(),
+        linear: [
+            [values[RUN_WARP], values[RUN_WARP + 2]],
+            [values[RUN_WARP + 1], values[RUN_WARP + 3]],
+        ],
+        translation: [values[RUN_WARP + 4], values[RUN_WARP + 5]],
     };
     out.set_track(index, values[RUN_VALID] != 0.0, &transform);
 }
@@ -364,15 +395,15 @@ fn precondition(
     }
 }
 
-/// Metadata: [camera][source/target][level][base,width,height,parity], then taps.
-/// In/out: point-major [m00,m01,m10,m11,guess_x,guess_y,selected,source_x,source_y,camera].
+/// Metadata: `[camera][source/target][level][base,width,height,parity]`, then taps.
+/// In/out: point-major `[m00,m01,m10,m11,guess_x,guess_y,selected,source_x,source_y,camera]`.
 #[cube(launch_unchecked)]
 #[allow(
     clippy::too_many_arguments,
     clippy::neg_cmp_op_on_partial_ord,
     clippy::collapsible_if // Keep the compile-time exit switch outside the runtime condition.
 )]
-pub(crate) fn fused_kernel(
+fn fused_kernel(
     prev_a: &[u16],
     prev_b: &[u16],
     next_a: &[u16],

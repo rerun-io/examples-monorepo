@@ -93,7 +93,7 @@ pub(crate) struct Level {
     /// Row count.
     pub height: usize,
     /// `false` for buffer `a`, `true` for buffer `b`; the level index's parity.
-    pub odd: bool,
+    pub(crate) odd: bool,
 }
 
 /// One camera's pyramid, resident on the device.
@@ -123,18 +123,18 @@ pub struct GpuPyramid<R: Runtime> {
 #[derive(Debug)]
 pub struct FrameArena {
     /// Even-level storage for every camera.
-    pub even: cubecl::server::Handle,
+    pub(crate) even: cubecl::server::Handle,
     /// Odd-level storage for every camera.
-    pub odd: cubecl::server::Handle,
+    pub(crate) odd: cubecl::server::Handle,
     /// Pixel stride between cameras in each allocation.
-    pub strides: [usize; 2],
+    pub(crate) strides: [usize; 2],
     /// Number of camera slots.
-    pub cameras: usize,
+    pub(crate) cameras: usize,
 }
 
 impl FrameArena {
     /// Both allocations and their u16 element counts.
-    pub fn bindings(&self) -> [kernels::Buffer<'_>; 2] {
+    pub(crate) fn bindings(&self) -> [kernels::Buffer<'_>; 2] {
         [
             (&self.even, self.strides[0] * self.cameras),
             (&self.odd, self.strides[1] * self.cameras),
@@ -213,7 +213,7 @@ impl<R: Runtime> GpuPyramid<R> {
     }
 
     /// The two pixel buffers and their element counts, as the launchers want them.
-    pub fn buffers(&self) -> [kernels::Buffer<'_>; 2] {
+    pub(crate) fn buffers(&self) -> [kernels::Buffer<'_>; 2] {
         [(&self.even, self.even_len), (&self.odd, self.odd_len)]
     }
 
@@ -222,9 +222,13 @@ impl<R: Runtime> GpuPyramid<R> {
         self.arena.as_ref()
     }
 
-    /// Append exact integer geometry, using arena offsets when supplied.
-    pub fn append_geometry(&self, out: &mut Vec<u32>, arena: Option<&FrameArena>) {
-        for level in &self.levels {
+    pub(crate) fn append_geometry_levels(
+        &self,
+        out: &mut Vec<u32>,
+        arena: Option<&FrameArena>,
+        levels: usize,
+    ) {
+        for level in self.levels.iter().take(levels) {
             out.extend([
                 (level.base
                     + arena.map_or(0, |arena| {

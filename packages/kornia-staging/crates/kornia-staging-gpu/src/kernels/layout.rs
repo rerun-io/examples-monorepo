@@ -5,31 +5,31 @@ use cubecl::prelude::*;
 // the binding lengths; each raw binding keeps its handle and element count
 // together. The storage probe alone retains checked launch mode.
 /// Units per cube on the per-element bookkeeping kernels.
-pub const LINEAR_UNITS: u32 = 256;
+pub(crate) const LINEAR_UNITS: u32 = 256;
 
 /// Cube width on the pyramid kernel, the 32x8 tile the kernel comparison test
 /// settled on.
-pub const TILE_W: u32 = 32;
+pub(crate) const TILE_W: u32 = 32;
 /// Cube height on the pyramid kernel.
-pub const TILE_H: u32 = 8;
+pub(crate) const TILE_H: u32 = 8;
 
 // The four numbers below are the CPU lane's own, aliased rather than
 // re-declared: a kernel that drifted from its reference by a constant would
 // still compile, and `FILTER_LANES` below already shows the shape.
 /// `border` on every patch tap, `PATCH_BORDER`.
-pub const PATCH_BORDER: f32 = kornia_staging_imgproc::optical_flow::patch_se2::PATCH_BORDER;
+pub(crate) const PATCH_BORDER: f32 = kornia_staging_imgproc::optical_flow::patch_se2::PATCH_BORDER;
 /// `const int filter_margin = 2`.
-pub const FILTER_MARGIN: f32 =
+pub(crate) const FILTER_MARGIN: f32 =
     kornia_staging_imgproc::optical_flow::patch_tracker::limits::FILTER_MARGIN;
 /// Upper bound for a valid increment, aliased from the CPU tracker so both
 /// lanes share one number.
-pub const MAX_INCREMENT_INFINITY_NORM: f32 =
+pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 =
     kornia_staging_imgproc::optical_flow::patch_tracker::limits::MAX_INCREMENT_INFINITY_NORM;
 /// `Sophus::Constants<float>::epsilon()`.
-pub const SOPHUS_EPSILON: f32 = <f32 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
+pub(crate) const SOPHUS_EPSILON: f32 = <f32 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
 
 /// The smallest positive normal pivot, matching the CPU LDLT guard.
-pub const LDLT_TOLERANCE: f32 = f32::MIN_POSITIVE;
+pub(crate) const LDLT_TOLERANCE: f32 = f32::MIN_POSITIVE;
 
 /// A device buffer and the element count the kernel will see in it.
 ///
@@ -37,7 +37,7 @@ pub const LDLT_TOLERANCE: f32 = f32::MIN_POSITIVE;
 /// which take exactly this: the count is a promise `BufferArg::from_raw_parts`
 /// cannot check, so keeping it beside the handle is what makes the promise
 /// visible at the call site.
-pub type Buffer<'a> = (&'a cubecl::server::Handle, usize);
+pub(crate) type Buffer<'a> = (&'a cubecl::server::Handle, usize);
 
 /// The dispatch every image-shaped kernel uses: one unit per pixel, over
 /// [`TILE_W`] x [`TILE_H`] tiles.
@@ -45,7 +45,7 @@ pub type Buffer<'a> = (&'a cubecl::server::Handle, usize);
 /// Two-dimensional cube dims with `ABSOLUTE_POS_X`/`_Y` rather than a linear
 /// index and a `div`/`mod`, which is the layout the kernel comparison
 /// measurement settled on.
-pub fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
+pub(crate) fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
     (
         CubeCount::Static(
             (width as u32).div_ceil(TILE_W),
@@ -62,7 +62,7 @@ pub fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
 /// wgpu reports its adapter's own `max_compute_workgroups_per_dimension` and on
 /// every adapter measured that is exactly this floor, so the portable lane
 /// treats it as the limit rather than as a minimum.
-pub const MAX_CUBES_PER_DIM: u32 = 65_535;
+pub(crate) const MAX_CUBES_PER_DIM: u32 = 65_535;
 
 /// The dispatch every per-element bookkeeping kernel uses: one unit per element,
 /// found through `ABSOLUTE_POS`.
@@ -76,7 +76,7 @@ pub const MAX_CUBES_PER_DIM: u32 = 65_535;
 /// row is a continuation of the first and the mapping is the same dense
 /// enumeration either way. Anything under the ceiling — every shipped frame and
 /// every keypoint buffer — still dispatches exactly one row, unchanged.
-pub fn linear_1d(count: usize) -> (CubeCount, CubeDim) {
+pub(crate) fn linear_1d(count: usize) -> (CubeCount, CubeDim) {
     let cubes: u32 = (count as u32).div_ceil(LINEAR_UNITS);
     (
         CubeCount::Static(

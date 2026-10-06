@@ -1,15 +1,15 @@
 //! Consumer scheduling and input adapters for the staged GPU pyramid.
 use kornia_staging_gpu::runtime::GpuError;
-use super::{ guarded};
 impl From<GpuError> for PyramidError {
-    fn from(error: GpuError) -> Self { Self::Gpu(error.into()) }
+    fn from(error: GpuError) -> Self {
+        Self::Gpu(error.into())
+    }
 }
 
 use crate::frontend::input::{FrameImages, PackedImages};
 use crate::pyramid::{Pyramid, PyramidBuilder, PyramidError};
 use cubecl::prelude::*;
 use kornia_image::{Image, ImageSize};
-pub(super) use kornia_staging_gpu::pyramid::FrameArena;
 pub use kornia_staging_gpu::pyramid::GpuPyramid;
 
 /// Schedule persistent device pyramids with the frontend frame queue.
@@ -26,23 +26,13 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
             launches,
         }
     }
-    pub fn prepare_images(&mut self, images: &[Image<u16, 1>]) -> Result<(), PyramidError> {
-        self.inner.prepare_images(images).map_err(Into::into)
-    }
     pub(super) fn build_images(
         &mut self,
         images: &[Image<u16, 1>],
         out: &mut [GpuPyramid<R>],
     ) -> Result<(), PyramidError> {
-        guarded(
-            GpuError::DeviceLost {
-                what: "frameset pyramid",
-            },
-            || {
-                self.launches.flush(&self.client);
-                self.inner.build_images(images, out).map_err(Into::into)
-            },
-        )
+        self.launches.flush(&self.client)?;
+        self.inner.build_images(images, out).map_err(Into::into)
     }
 }
 impl<R: Runtime> GpuPyramidBuilder<R> {
@@ -59,9 +49,9 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
         )? {
             Some(launch) => self
                 .launches
-                .dispatch(&self.client, super::submission::Launch::Pyramid(launch)),
+                .dispatch(&self.client, super::submission::Launch::Pyramid(launch))?,
             None => {
-                self.launches.flush(&self.client);
+                self.launches.flush(&self.client)?;
                 for (camera, (image, pyramid)) in images.iter().zip(out).enumerate() {
                     image.with_dense(|image| self.build(camera, image, pyramid))??;
                 }
@@ -78,16 +68,9 @@ impl<R: Runtime> PyramidBuilder for GpuPyramidBuilder<R> {
         height: usize,
         num_levels: usize,
     ) -> Result<Self::Pyramid, PyramidError> {
-        guarded(
-            GpuError::DeviceLost {
-                what: "pyramid allocation",
-            },
-            || {
-                self.inner
-                    .allocate(width, height, num_levels)
-                    .map_err(Into::into)
-            },
-        )
+        self.inner
+            .allocate(width, height, num_levels)
+            .map_err(Into::into)
     }
     fn build(
         &mut self,
@@ -95,12 +78,7 @@ impl<R: Runtime> PyramidBuilder for GpuPyramidBuilder<R> {
         image: &Image<u16, 1>,
         out: &mut Self::Pyramid,
     ) -> Result<(), PyramidError> {
-        guarded(
-            GpuError::DeviceLost {
-                what: "pyramid build",
-            },
-            || self.inner.build(camera, image, out).map_err(Into::into),
-        )
+        self.inner.build(camera, image, out).map_err(Into::into)
     }
     fn build_frames(
         &mut self,
@@ -119,12 +97,7 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
         self.level_size(level)
     }
     fn copy_level_into(&self, level: usize, out: &mut Image<u16, 1>) -> Result<(), PyramidError> {
-        guarded(
-            GpuError::DeviceLost {
-                what: "a pyramid level read",
-            },
-            || self.read_level_into(level, out).map_err(Into::into),
-        )
+        self.read_level_into(level, out).map_err(Into::into)
     }
 }
 #[cfg(all(test, feature = "gpu-wgpu"))]
@@ -159,7 +132,7 @@ mod tests {
             .map(|_| builder.allocate(65, 49, 2).unwrap())
             .collect();
         builder.build_packed(&packed, &mut pyramids).unwrap();
-        builder.launches.flush(&client);
+        builder.launches.flush(&client).unwrap();
         for (camera, pyramid) in pyramids.iter().enumerate() {
             assert!(pyramid.arena().is_some());
             let mut level0 = crate::image::empty();
