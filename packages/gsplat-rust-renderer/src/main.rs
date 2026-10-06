@@ -168,6 +168,12 @@ fn create_app(
             .expect("tokio runtime should exist"),
     );
 
+    // Rerun 0.38 requires registration before the first renderer() lookup.
+    viewer.with_render_ctx_mut(|ctx| {
+        ctx.renderers_mut()
+            .register::<gsplat_lib::gaussian_renderer::GaussianRenderer>();
+    });
+
     // ── Register the custom Gaussian splat visualizer ─────────────────
     // `extend_view_class` adds our visualizer to the existing
     // Spatial3DView.  Any entity that matches the Gaussians3D
