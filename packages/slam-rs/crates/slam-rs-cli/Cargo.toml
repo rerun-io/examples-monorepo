@@ -16,6 +16,7 @@ catalog = ["dep:anyhow", "dep:arrow", "dep:re_protos", "dep:re_log_encoding", "d
 gpu-wgpu = ["slam-rs/gpu-wgpu"]
 
 [dependencies]
+kornia-staging-imgproc.workspace = true
 slam-rs = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/kornia-staging-3d", "crates/kornia-staging-algebra"]
-default-members = ["crates/kornia-staging-3d", "crates/kornia-staging-algebra"]
+members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra"]
+default-members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra"]
 
 [workspace.package]
 version = "0.1.0"

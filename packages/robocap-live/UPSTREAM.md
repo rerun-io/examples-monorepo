@@ -6,10 +6,7 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   types with integer-ns time; a raw multi-camera replay format.
 - `src/source/mod.rs` FrameSource (rig, next_event) -> kornia-slam: an N-camera + IMU source trait (its roadmap item
   "multi-camera rigs, ported from slam-rs").
-- `src/downsample.rs` `resize_area_u8` -> kornia-imgproc `resize`: exact integer-factor box (area) downscale for any `C`, rayon over
-  row chunks, NEON `vld3q_u8` kernel for the 3x3 mono case with software prefetch (the A55 prefetcher does not follow three
-  interleaved row streams). kornia has no Area mode; at 1080p -> 360p on an RK3588 A55 it runs 1.27 ms vs `resize_fast_mono_aa`
-  bicubic+aa 57 ms / bilinear 5.5 ms (bilinear at an exact /3 is point sampling). Needs an OpenCV `INTER_AREA` parity test.
+- Integer area resize is staged in `kornia-staging-imgproc::resize::area`; see [the staging tracker](../kornia-staging/README.md).
 - `src/capture/v4l2_mplane.c` + `capture/camera.rs` -> kornia-io `v4l`: multi-planar (`VIDEO_CAPTURE_MPLANE`) NV12 capture with
   `V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC` checked and the luma plane copied out; kornia-io's `V4lVideoCapture` is single-planar only
   and drops the buffer flags. Adapted from PR #270.

@@ -1,3 +1,4 @@
+#![cfg_attr(target_arch = "aarch64", allow(unsafe_code))] // NEON kernels check bounds before vector loads/stores.
 //! Row kernels of [`super::resize_area_u8`]: a NEON path for the 3x3 mono case on aarch64, scalar elsewhere.
 
 /// One output row of the generic box downscale. `block` holds the `ky` input rows (stride `src_stride`).
@@ -9,7 +10,7 @@ pub(super) fn area_row_generic<const C: usize>(
     out: &mut [u8],
 ) {
     let area = (kx * ky) as u32;
-    for (x, pixel) in out.as_chunks_mut::<{ C }>().0.iter_mut().enumerate() {
+    for (x, pixel) in out.as_chunks_mut::<C>().0.iter_mut().enumerate() {
         for (channel, value) in pixel.iter_mut().enumerate() {
             let mut sum = 0u32;
             for dy in 0..ky {

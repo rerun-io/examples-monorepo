@@ -15,6 +15,7 @@ publish = false
 
 [workspace.dependencies]
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d", features = ["virtual-camera"] }
+kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }
 anyhow = "1"
 handfit = { path = "../handfit/crates/handfit" }
 # Match slam-rs on crates.io kornia 0.2 so both consumers share one Image type. See UPSTREAM.md.

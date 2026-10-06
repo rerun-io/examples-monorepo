@@ -60,7 +60,13 @@ pub(super) fn decode<'a>(
                 "output buffer disagrees with calibration"
             );
             if profile.downscale > 1 {
-                slam_rs::area::resize_area_u8_into::<1>(y, (w, h), stride, gray, (width, height))?;
+                kornia_staging_imgproc::resize::resize_area_u8_into::<1>(
+                    y,
+                    (w, h),
+                    stride,
+                    gray,
+                    (width, height),
+                )?;
             } else {
                 for (source, row) in y.chunks(stride).take(h).zip(gray.chunks_exact_mut(width)) {
                     if full_range {
