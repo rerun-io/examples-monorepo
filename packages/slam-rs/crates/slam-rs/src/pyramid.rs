@@ -13,8 +13,7 @@ use crate::image::ImageError;
 use kornia_image::Image;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The 5-tap Gaussian.
-const KERNEL: [i32; 5] = [1, 4, 6, 4, 1];
+use kornia_staging_imgproc::pyramid::{PyrDownU16Scratch, pyrdown_u16_unchecked};
 
 /// Minimum filter side length: the first output reaches source index two.
 /// Refuse smaller geometry at construction (D32).
@@ -311,8 +310,8 @@ impl Pyramid for PyramidU16 {
 /// CPU pyramid builder with reusable i32 filtering scratch storage.
 #[derive(Debug, Clone, Default)]
 pub struct CpuPyramidBuilder {
-    scratch: Vec<i32>,
-    camera_scratch: Vec<Vec<i32>>,
+    scratch: PyrDownU16Scratch,
+    camera_scratch: Vec<PyrDownU16Scratch>,
 }
 
 impl CpuPyramidBuilder {
@@ -331,11 +330,12 @@ impl PyramidBuilder for CpuPyramidBuilder {
         out: &mut [PyramidU16],
         pool: &WorkPool,
     ) -> Result<(), PyramidError> {
-        self.camera_scratch.resize_with(images.len(), Vec::new);
-        let build =
-            |(image, (scratch, pyramid)): (&Image<u16, 1>, (&mut Vec<i32>, &mut PyramidU16))| {
-                build_cpu(image, pyramid, scratch)
-            };
+        self.camera_scratch
+            .resize_with(images.len(), PyrDownU16Scratch::default);
+        let build = |(image, (scratch, pyramid)): (
+            &Image<u16, 1>,
+            (&mut PyrDownU16Scratch, &mut PyramidU16),
+        )| { build_cpu(image, pyramid, scratch) };
         if let Some(result) = pool.install(|| {
             use rayon::prelude::*;
             images
@@ -379,7 +379,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
 fn build_cpu(
     img: &Image<u16, 1>,
     out: &mut PyramidU16,
-    scratch: &mut Vec<i32>,
+    scratch: &mut PyrDownU16Scratch,
 ) -> Result<(), PyramidError> {
     let Some(level0) = out.levels.first() else {
         return Err(PyramidError::GeometryMismatch {
@@ -412,122 +412,18 @@ fn build_cpu(
     // Reuse the dense level-zero allocation.
     crate::image::copy_image(img, &mut out.levels[0])?;
 
-    scratch.resize(scratch_len(img.width(), img.height())?, 0);
+    scratch
+        .prepare(img.width())
+        .map_err(|_| PyramidError::ScratchTooLarge {
+            width: img.width(),
+            height: img.height(),
+        })?;
     for level in 1..out.levels.len() {
         let (lower, upper) = out.levels.split_at_mut(level);
         let (source, destination) = (&lower[level - 1], &mut upper[0]);
-        subsample(source, destination, scratch);
+        pyrdown_u16_unchecked(source, destination, scratch);
     }
     Ok(())
-}
-
-/// Scratch elements `subsample` needs at level 0, which is its largest use.
-///
-/// The vertical and horizontal passes share one row, kept hot in the cache.
-/// Reject rows above the `isize::MAX`-byte allocation cap with a typed error.
-fn scratch_len(width: usize, height: usize) -> Result<usize, PyramidError> {
-    let len: usize = width;
-    if len > crate::image::max_elements::<i32>() {
-        return Err(PyramidError::ScratchTooLarge { width, height });
-    }
-    Ok(len)
-}
-
-/// High-end reflect-101: `h - 1 - |h - 1 - x|` for non-negative x.
-/// Negative indices instead reflect with absolute value; the formulas are not
-/// interchangeable outside their domains (trap 3).
-#[inline]
-fn border101(x: i64, h: i64) -> i64 {
-    h - 1 - (h - 1 - x).abs()
-}
-
-/// Separable integer Gaussian subsampling.
-/// A single accumulator row keeps both passes contiguous and in cache.
-/// Reflect the vertical pass about source height and the horizontal pass about
-/// source width. Exact integer sums and one final rounding equal direct 5x5 convolution.
-///
-/// # Panics
-/// If source sides are below [`MIN_SIDE`], destination is not half-size, or scratch
-/// is short. Construction and builder checks establish these preconditions.
-fn subsample(src: &Image<u16, 1>, dst: &mut Image<u16, 1>, scratch: &mut [i32]) {
-    let src_width: usize = src.width();
-    let src_height: usize = src.height();
-    let dst_width: usize = dst.width();
-    let dst_height: usize = dst.height();
-    debug_assert_eq!(dst_width, src_width >> 1);
-    debug_assert_eq!(dst_height, src_height >> 1);
-
-    // Vertical convolution, one accumulator row per destination row.
-    for r in 0..dst_height {
-        let row2: i64 = 2 * r as i64;
-        // `std::abs(2 * r - 2)` and `std::abs(2 * r - 1)`, not `border101`.
-        let rows: [usize; 5] = [
-            (row2 - 2).unsigned_abs() as usize,
-            (row2 - 1).unsigned_abs() as usize,
-            row2 as usize,
-            border101(row2 + 1, src_height as i64) as usize,
-            border101(row2 + 2, src_height as i64) as usize,
-        ];
-        let [row_m2, row_m1, row_0, row_p1, row_p2]: [&[u16]; 5] = [
-            &src.as_slice()[(rows[0]) * src.width()..((rows[0]) + 1) * src.width()],
-            &src.as_slice()[(rows[1]) * src.width()..((rows[1]) + 1) * src.width()],
-            &src.as_slice()[(rows[2]) * src.width()..((rows[2]) + 1) * src.width()],
-            &src.as_slice()[(rows[3]) * src.width()..((rows[3]) + 1) * src.width()],
-            &src.as_slice()[(rows[4]) * src.width()..((rows[4]) + 1) * src.width()],
-        ];
-        // `tmp(r, c)`, one contiguous run of `c` rather than one column of it.
-        let band: &mut [i32] = &mut scratch[..src_width];
-        for c in 0..src_width {
-            band[c] = KERNEL[0] * i32::from(row_m2[c])
-                + KERNEL[1] * i32::from(row_m1[c])
-                + KERNEL[2] * i32::from(row_0[c])
-                + KERNEL[3] * i32::from(row_p1[c])
-                + KERNEL[4] * i32::from(row_p2[c]);
-        }
-        // Consume the vertical row immediately. Reflection is about the source
-        // width, and rounding still occurs only after both integer passes.
-        for (c, pixel) in {
-            let width = dst.width();
-            &mut dst.as_slice_mut()[(r) * width..((r) + 1) * width]
-        }
-        .iter_mut()
-        .enumerate()
-        {
-            // Interior five-tap windows are contiguous. Peel low/high border columns to keep
-            // reflection arithmetic out of the large interior loop.
-            let value: i32 = match (2 * c)
-                .checked_sub(2)
-                .and_then(|first| band.get(first..)?.first_chunk::<5>())
-            {
-                Some(window) => {
-                    KERNEL[0] * window[0]
-                        + KERNEL[1] * window[1]
-                        + KERNEL[2] * window[2]
-                        + KERNEL[3] * window[3]
-                        + KERNEL[4] * window[4]
-                }
-                None => {
-                    let col2: i64 = 2 * c as i64;
-                    let columns: [usize; 5] = [
-                        (col2 - 2).unsigned_abs() as usize,
-                        (col2 - 1).unsigned_abs() as usize,
-                        col2 as usize,
-                        border101(col2 + 1, src_width as i64) as usize,
-                        border101(col2 + 2, src_width as i64) as usize,
-                    ];
-                    KERNEL[0] * band[columns[0]]
-                        + KERNEL[1] * band[columns[1]]
-                        + KERNEL[2] * band[columns[2]]
-                        + KERNEL[3] * band[columns[3]]
-                        + KERNEL[4] * band[columns[4]]
-                }
-            };
-            // `T val = ((val_int + (1 << 7)) >> 8)`. The
-            // accumulator peaks at 65535 * 16 * 16, so the shift lands back in
-            // `u16` exactly and the cast never truncates.
-            *pixel = ((value + (1 << 7)) >> 8) as u16;
-        }
-    }
 }
 
 impl std::fmt::Debug for PyramidU16 {
@@ -551,51 +447,6 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-
-    use proptest::prelude::*;
-
-    /// Independent reflect-101 implementation that repeatedly mirrors into `[0, n)`.
-    fn reflect101_naive(mut index: i64, n: i64) -> i64 {
-        assert!(n >= 2, "reflect-101 needs at least two samples");
-        loop {
-            if index < 0 {
-                index = -index;
-            } else if index >= n {
-                index = 2 * (n - 1) - index;
-            } else {
-                return index;
-            }
-        }
-    }
-
-    /// Independent direct 5x5 convolution with reflect-101 borders and one final rounding.
-    fn subsample_naive(src: &Image<u16, 1>) -> Image<u16, 1> {
-        let width: usize = src.width() >> 1;
-        let height: usize = src.height() >> 1;
-        let mut dst: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
-        for r in 0..height {
-            for c in 0..width {
-                let mut sum: i64 = 0;
-                for (dy, ky) in KERNEL.iter().enumerate() {
-                    let y: i64 =
-                        reflect101_naive(2 * r as i64 + dy as i64 - 2, src.height() as i64);
-                    for (dx, kx) in KERNEL.iter().enumerate() {
-                        let x: i64 =
-                            reflect101_naive(2 * c as i64 + dx as i64 - 2, src.width() as i64);
-                        let pixel: i64 = i64::from(
-                            src.get_pixel(x as usize, y as usize, 0)
-                                .copied()
-                                .ok()
-                                .unwrap(),
-                        );
-                        sum += i64::from(*ky) * i64::from(*kx) * pixel;
-                    }
-                }
-                dst.set_pixel(c, r, 0, ((sum + 128) >> 8) as u16).unwrap();
-            }
-        }
-        dst
-    }
 
     fn random_image(width: usize, height: usize, seed: u64) -> Image<u16, 1> {
         let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
@@ -725,28 +576,6 @@ mod tests {
         );
     }
 
-    /// A frame size whose scratch buffer cannot be allocated is an error, not
-    /// an abort. `usize::MAX * 2` wraps; `max_elements::<i32>() + 1` fits a
-    /// `usize` but not one allocation. Neither reaches the `vec!` `build` sizes.
-    #[test]
-    fn an_unallocatable_scratch_is_an_error_not_an_abort() {
-        assert_eq!(
-            scratch_len(usize::MAX, 4).err(),
-            Some(PyramidError::ScratchTooLarge {
-                width: usize::MAX,
-                height: 4
-            })
-        );
-        let too_wide: usize = crate::image::max_elements::<i32>() + 1;
-        assert_eq!(
-            scratch_len(too_wide, 2).err(),
-            Some(PyramidError::ScratchTooLarge {
-                width: too_wide,
-                height: 2
-            })
-        );
-    }
-
     #[test]
     fn a_frame_of_the_wrong_size_is_refused() {
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(32, 24, 2).unwrap();
@@ -766,8 +595,8 @@ mod tests {
     fn rebuilding_allocates_nothing() {
         let image: Image<u16, 1> = random_image(96, 64, 5);
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(96, 64, 3).unwrap();
-        // `new`'s scratch is empty; the first `build` sizes it, and the pointers
-        // are captured after that build, so this still measures re-use.
+        // The first build allocates each level; later builds must retain its storage.
+        // Scratch reuse is also covered by the staged kernel tests.
         let mut builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
         builder.build(0, &image, &mut pyramid).unwrap();
         let pointers: Vec<*const u16> = each_level(&pyramid)
@@ -778,8 +607,6 @@ mod tests {
             .iter()
             .map(|level| level.as_slice().len())
             .collect();
-        let scratch: *const i32 = builder.scratch.as_ptr();
-        let scratch_capacity: usize = builder.scratch.capacity();
         for seed in 6..12 {
             builder
                 .build(0, &random_image(96, 64, seed), &mut pyramid)
@@ -797,144 +624,5 @@ mod tests {
                 .map(|level| level.as_slice().len())
                 .collect::<Vec<usize>>()
         );
-        assert_eq!(builder.scratch.as_ptr(), scratch, "the scratch moved");
-        assert_eq!(builder.scratch.capacity(), scratch_capacity);
-    }
-
-    #[test]
-    fn border101_matches_the_naive_reflection_over_its_whole_domain() {
-        for n in 2i64..24 {
-            // Check high-end reflection on `[0, 2*(n-1)]` and absolute-value reflection below
-            // zero against the independent implementation (trap 3).
-            for x in 0..=2 * (n - 1) {
-                assert_eq!(
-                    border101(x, n),
-                    reflect101_naive(x, n),
-                    "border101({x}, {n})"
-                );
-            }
-            for x in -(n - 1)..0 {
-                assert_eq!(x.abs(), reflect101_naive(x, n), "abs({x}) for n = {n}");
-                assert_ne!(
-                    border101(x, n),
-                    reflect101_naive(x, n),
-                    "border101({x}, {n})"
-                );
-            }
-        }
-    }
-
-    /// Compare with kornia's independent integer pyramid filter.
-    /// Both use `[1,4,6,4,1]`, reflect-101 and one rounding `(sum + 128) >> 8`.
-    /// Use unshifted values 0–255: filtering widened `v << 8` and narrowing afterwards
-    /// rounds at a different magnitude and need not agree. Even dimensions avoid
-    /// kornia's ceil-half versus this crate's floor-half geometry difference.
-    #[test]
-    fn subsample_matches_kornia_pyrdown_u8_on_byte_valued_pixels() {
-        use kornia_image::{Image, ImageSize};
-
-        for (width, height, seed) in [(16usize, 12usize, 11u64), (64, 64, 12), (34, 18, 13)] {
-            let bytes: Vec<u8> = {
-                let mut state: u64 = seed | 1;
-                (0..width * height)
-                    .map(|_| {
-                        state = state
-                            .wrapping_mul(6_364_136_223_846_793_005)
-                            .wrapping_add(1);
-                        (state >> 33) as u8
-                    })
-                    .collect()
-            };
-
-            let source: Image<u8, 1> =
-                Image::new(ImageSize { width, height }, bytes.clone()).unwrap();
-            let mut kornia_out: Image<u8, 1> = Image::from_size_val(
-                ImageSize {
-                    width: width / 2,
-                    height: height / 2,
-                },
-                0u8,
-            )
-            .unwrap();
-            kornia_imgproc::pyramid::pyrdown_u8(&source, &mut kornia_out).unwrap();
-
-            // Our own subsample over the same values, held in `u16` with no shift.
-            let mut ours: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
-            for (y, row) in bytes.chunks_exact(width).enumerate() {
-                for (pixel, byte) in {
-                    let width = ours.width();
-                    &mut ours.as_slice_mut()[(y) * width..((y) + 1) * width]
-                }
-                .iter_mut()
-                .zip(row)
-                {
-                    *pixel = u16::from(*byte);
-                }
-            }
-            let mut got: Image<u16, 1> = crate::image::zeros(width / 2, height / 2).unwrap();
-            let mut scratch: Vec<i32> = vec![0; scratch_len(width, height).unwrap()];
-            subsample(&ours, &mut got, &mut scratch);
-
-            let expected: Vec<u16> = kornia_out
-                .as_slice()
-                .iter()
-                .map(|byte| u16::from(*byte))
-                .collect();
-            assert_eq!(got.as_slice(), expected.as_slice(), "{width}x{height}");
-        }
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(24))]
-
-        /// The separable, `abs`/`border101` implementation with its
-        /// row-major accumulator and a direct 5x5 convolution with true
-        /// reflect-101 borders agree bit for bit, on even and odd sizes alike.
-        #[test]
-        fn subsample_matches_a_naive_5x5_convolution(
-            width in 3usize..40,
-            height in 3usize..40,
-            seed in any::<u64>(),
-        ) {
-            let image: Image<u16, 1> = random_image(width, height, seed);
-            let expected: Image<u16, 1> = subsample_naive(&image);
-            let mut got: Image<u16, 1> = crate::image::zeros(width >> 1, height >> 1).unwrap();
-            let mut scratch: Vec<i32> = vec![0; scratch_len(width, height).unwrap()];
-            subsample(&image, &mut got, &mut scratch);
-            prop_assert_eq!(got.as_slice(), expected.as_slice());
-        }
-
-        /// Every level of a whole pyramid, not just the first subsample.
-        #[test]
-        fn every_pyramid_level_matches_the_naive_reference(
-            width in 24usize..70,
-            height in 24usize..70,
-            seed in any::<u64>(),
-        ) {
-            let image: Image<u16, 1> = random_image(width, height, seed);
-            let pyramid: PyramidU16 = build(&image, 3);
-            let mut expected: Image<u16, 1> = image.clone();
-            for level in 1..pyramid.num_levels() {
-                expected = subsample_naive(&expected);
-                prop_assert_eq!(pyramid.level(level).unwrap().as_slice(), expected.as_slice());
-            }
-        }
-
-        /// A subsampled level never exceeds the source's range: the kernel is a
-        /// normalized average, so it cannot overshoot and cannot wrap the cast.
-        #[test]
-        fn subsample_stays_inside_the_source_range(
-            width in 3usize..40,
-            height in 3usize..40,
-            seed in any::<u64>(),
-        ) {
-            let image: Image<u16, 1> = random_image(width, height, seed);
-            let pyramid: PyramidU16 = build(&image, 1);
-            let low: u16 = *image.as_slice().iter().min().unwrap();
-            let high: u16 = *image.as_slice().iter().max().unwrap();
-            for pixel in pyramid.level(1).unwrap().as_slice() {
-                prop_assert!(*pixel >= low && *pixel <= high);
-            }
-        }
     }
 }

@@ -18,3 +18,6 @@ pub mod contours;
 
 /// Pixel depth and color conversions.
 pub mod color;
+
+/// Gaussian image pyramids.
+pub mod pyramid;

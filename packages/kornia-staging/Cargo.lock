@@ -922,6 +922,7 @@ dependencies = [
  "approx",
  "criterion",
  "kornia-image",
+ "kornia-imgproc",
  "proptest",
  "rayon",
 ]
