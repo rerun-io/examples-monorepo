@@ -15,6 +15,8 @@
 
 mod angular;
 mod brown;
+#[cfg(feature = "serde")]
+pub mod formats;
 pub use brown::BrownConrady;
 mod fisheye624;
 pub use fisheye624::Fisheye624;

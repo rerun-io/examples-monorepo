@@ -63,3 +63,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Camera trait, pinhole, robust KB4; ProjectionReject extends upstream with OutsideDomain/NonFinite | slam-rs camera.rs; robocap-live kornia_ext/fisheye.rs | kornia-rs / kornia-3d / camera | staged | - |
 | Brown4/5/8/12/14, analytic derivatives and robust inverse | slam-rs radtan8; simplecv Brown–Conrady | kornia-rs / kornia-3d / camera | staged | - |
 | Fisheye624 / Fisheye62, analytic derivatives and robust inverse | simplecv fisheye624.py; handfit SymForce test oracles | kornia-rs / kornia-3d / camera | staged | - |
+| Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
