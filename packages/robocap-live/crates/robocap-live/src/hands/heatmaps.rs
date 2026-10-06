@@ -71,7 +71,7 @@ pub fn decode_distance(distance: &[f32]) -> Option<[f32; NUM_LANDMARKS]> {
     }
     let step = 2.0 * DISTANCE_RANGE_MM / (DISTANCE_BINS as f32 - 1.0);
     let mut out = [0f32; NUM_LANDMARKS];
-    for (landmark, bins) in distance.chunks_exact(DISTANCE_BINS).enumerate() {
+    for (landmark, bins) in distance.as_chunks::<{ DISTANCE_BINS }>().0.iter().enumerate() {
         let peak = argmax_first(bins)?;
         let index = refine_peak_log_quadratic(bins, peak).clamp(0.0, DISTANCE_BINS as f32 - 1.0);
         out[landmark] = index * step - DISTANCE_RANGE_MM;

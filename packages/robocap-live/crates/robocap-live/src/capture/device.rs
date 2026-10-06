@@ -160,7 +160,7 @@ impl IioDevice {
         if count == 0 || count % SCAN_BYTES != 0 {
             return Err(CaptureError::Device(format!("iio:device{}: read {count} bytes, not whole scans", self.index)));
         }
-        for packet in self.scratch[..count].chunks_exact(SCAN_BYTES) {
+        for packet in self.scratch[..count].as_chunks::<SCAN_BYTES>().0 {
             out.push(self.layout.decode(packet)?);
         }
         Ok(())

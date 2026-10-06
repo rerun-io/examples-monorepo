@@ -324,7 +324,7 @@ fn perspective_keynet_matches_handtrack_end_to_end() -> TestResult {
     let manifest = manifest()?;
     let keynet = &manifest["keynet"];
     let crop_bytes = std::fs::read(data_dir().join("crops_u16.bin"))?;
-    let crops_all: Vec<f32> = crop_bytes.chunks_exact(2).map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / 65535.0).collect();
+    let crops_all: Vec<f32> = crop_bytes.as_chunks::<2>().0.iter().map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / 65535.0).collect();
     let raw_all = f32_file("keynet_raw_f32.bin")?;
     let raw_width = HEATMAP_LEN + DISTANCE_LEN + 2;
     let mut estimator = PerspectiveKeyNet::new(&rig()?, num(&manifest["phi"]))?;

@@ -86,7 +86,7 @@ pub fn read_reference_poses(dir: &Path) -> Result<Vec<(i64, [f64; 16])>, SourceE
         return Err(invalid(format!("{}: {} bytes is not whole {REFERENCE_RECORD_BYTES}-byte records", path.display(), bytes.len())));
     }
     let mut poses = Vec::with_capacity(bytes.len() / REFERENCE_RECORD_BYTES);
-    for record in bytes.chunks_exact(REFERENCE_RECORD_BYTES) {
+    for record in bytes.as_chunks::<{ REFERENCE_RECORD_BYTES }>().0.iter() {
         let word = |at: usize| {
             let mut out = [0u8; 8];
             out.copy_from_slice(&record[at..at + 8]);

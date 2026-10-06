@@ -7,3 +7,32 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+kornia-staging-algebra.workspace = true
+kornia-3d = { workspace = true, optional = true }
+kornia-algebra.workspace = true
+kornia-image = { workspace = true, optional = true }
+thiserror.workspace = true
+nalgebra.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+proptest.workspace = true
+approx.workspace = true
+serde_json.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "cameras"
+harness = false
+
+[features]
+default = []
+virtual-camera = ["dep:kornia-image"]
+kornia-3d-interop = ["dep:kornia-3d"]
+serde = ["dep:serde"]
+
+[dependencies.serde]
+workspace = true
+optional = true

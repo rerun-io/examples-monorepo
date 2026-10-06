@@ -220,9 +220,9 @@ fn heldout(nets: &mut dyn HandNets, dir: &Path, out: &Path) -> BenchResult<()> {
     std::fs::create_dir_all(out)?;
     let frames_path: PathBuf = dir.join("detnet_frames_u8.bin");
     let frames: Vec<Vec<u8>> = if frames_path.exists() {
-        std::fs::read(&frames_path)?.chunks_exact(DETNET_WIDTH * DETNET_HEIGHT).map(<[u8]>::to_vec).collect()
+        std::fs::read(&frames_path)?.as_chunks::<{ DETNET_WIDTH * DETNET_HEIGHT }>().0.iter().map(|row| row.to_vec()).collect()
     } else {
-        std::fs::read(dir.join("detnet_pooled_u8.bin"))?.chunks_exact(POOLED_WIDTH * POOLED_HEIGHT).map(expand_pooled).collect()
+        std::fs::read(dir.join("detnet_pooled_u8.bin"))?.as_chunks::<{ POOLED_WIDTH * POOLED_HEIGHT }>().0.iter().map(|row| expand_pooled(row)).collect()
     };
     let mut detnet_rows: Vec<u8> = Vec::new();
     let mut detnet_us: Vec<f64> = Vec::new();
@@ -242,14 +242,14 @@ fn heldout(nets: &mut dyn HandNets, dir: &Path, out: &Path) -> BenchResult<()> {
     let crops_f32_path: PathBuf = dir.join("keynet_crops_f32.bin");
     let crop_len: usize = KEYNET_CROP * KEYNET_CROP;
     let crops: Vec<Vec<f32>> = if crops_f32_path.exists() {
-        read_f32(&crops_f32_path)?.chunks_exact(crop_len).map(<[f32]>::to_vec).collect()
+        read_f32(&crops_f32_path)?.chunks_exact(crop_len).map(|row| row.to_vec()).collect()
     } else {
         std::fs::read(dir.join("keynet_crops_u8.bin"))?.chunks_exact(crop_len).map(|crop| crop.iter().map(|&v| f32::from(v) / 255.0).collect()).collect()
     };
     let priors: Vec<f32> = read_f32(&dir.join("keynet_keypoints_f32.bin"))?;
     let mut keynet_rows: Vec<u8> = Vec::new();
     let mut keynet_us: Vec<f64> = Vec::new();
-    for (i, (crop, prior)) in crops.iter().zip(priors.chunks_exact(63)).enumerate() {
+    for (i, (crop, prior)) in crops.iter().zip(priors.as_chunks::<63>().0.iter()).enumerate() {
         if i % 200 == 0 {
             check_temperature()?;
         }

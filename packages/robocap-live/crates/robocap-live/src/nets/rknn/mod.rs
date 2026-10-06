@@ -129,7 +129,7 @@ impl PooledInput {
     /// [`NetsError::Input`] when the frame does not fit the 640x480 net frame or its rows are not on block boundaries.
     pub fn fill(&mut self, frame: &NetFrame<'_>) -> Result<InputData<'_>, NetsError> {
         let rows: usize = frame.rows()?;
-        if frame.top % 4 != 0 || rows % 4 != 0 {
+        if !frame.top.is_multiple_of(4) || !rows.is_multiple_of(4) {
             let message: String = format!("rows {}..{} are not on 4-row pooling blocks", frame.top, frame.top + rows);
             return Err(NetsError::Input { net: "detnet", message });
         }
@@ -235,7 +235,7 @@ pub fn f16_bytes_from_f32(values: &[f32], scale: f32, dst: &mut [u8]) -> Result<
     if dst.len() != values.len() * 2 {
         return Err(NetsError::Input { net: "rknn", message: format!("f16_bytes_from_f32: {} values into {} bytes", values.len(), dst.len()) });
     }
-    for (out, &value) in dst.chunks_exact_mut(2).zip(values) {
+    for (out, &value) in dst.as_chunks_mut::<2>().0.iter_mut().zip(values) {
         out.copy_from_slice(&half::f16::from_f32(value * scale).to_bits().to_le_bytes());
     }
     Ok(())

@@ -82,7 +82,7 @@ fn ingest_kernel(
         if c < dst_width && raw_row <= 2usize * dst_height + 2usize {
             let source_row = reflect_high(reflect_low(raw_row, 2usize), height);
             let base = src_base + source_row * width;
-            if comptime!(width % 4 == 0) && c > 0usize && c + 1usize < dst_width {
+            if comptime!(width.is_multiple_of(4)) && c > 0usize && c + 1usize < dst_width {
                 // Five adjacent bytes span two words. Two coalesced loads
                 // replace five scalar byte loads on the load/store-bound Mali.
                 let start = base + col2 - 2usize;
@@ -108,7 +108,7 @@ fn ingest_kernel(
         horizontal[sy * SUBSAMPLE_W + x] = value;
     }
     if c < dst_width && r < dst_height {
-        if comptime!(width % 4 == 0 && height % 2 == 0) {
+        if comptime!(width.is_multiple_of(4) && height.is_multiple_of(2)) {
             #[unroll]
             for row in 0..2usize {
                 let slot = (2usize * r + row) * width + col2;

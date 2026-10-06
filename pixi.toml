@@ -3466,12 +3466,12 @@ cwd = "packages/kornia-staging"
 description = "Check Rust formatting"
 
 [feature.kornia-staging.tasks.kornia-staging-clippy]
-cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cmd = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo clippy --locked --workspace --all-targets --no-default-features -- -D warnings"
 cwd = "packages/kornia-staging"
 description = "Check all Rust targets with warnings denied"
 
 [feature.kornia-staging.tasks.kornia-staging-test]
-cmd = "cargo test --locked --workspace"
+cmd = "cargo test --locked --workspace --all-features && cargo test --locked --workspace --no-default-features"
 cwd = "packages/kornia-staging"
 description = "Run Rust workspace tests and doctests"
 

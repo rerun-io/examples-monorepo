@@ -406,7 +406,7 @@ pub fn read_imu(path: &Path) -> Result<Vec<ImuSample>, FrameError> {
     if bytes.len() % IMU_RECORD_BYTES != 0 {
         return Err(invalid(format!("{}: {} bytes is not a whole number of {IMU_RECORD_BYTES}-byte records", path.display(), bytes.len())));
     }
-    Ok(bytes.chunks_exact(IMU_RECORD_BYTES).map(|chunk| {
+    Ok(bytes.as_chunks::<IMU_RECORD_BYTES>().0.iter().map(|chunk| {
         let mut record = [0u8; IMU_RECORD_BYTES];
         record.copy_from_slice(chunk);
         imu_from_bytes(&record)

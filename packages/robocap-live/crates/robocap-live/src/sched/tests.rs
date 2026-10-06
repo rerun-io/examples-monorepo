@@ -21,11 +21,10 @@ struct PoseSink {
 impl FramesetSink for PoseSink {
     fn frameset(&mut self, record: &OutputRecord<'_>) -> Result<(), SinkError> {
         lock(&self.rows).push(PoseRow { index: record.frameset.index, t_ns: record.frameset.t_ns, pose: record.pose.copied() });
-        if let Some((index, stop)) = &self.stop_at {
-            if record.frameset.index >= *index {
+        if let Some((index, stop)) = &self.stop_at
+            && record.frameset.index >= *index {
                 stop.store(true, Ordering::Relaxed);
             }
-        }
         Ok(())
     }
     fn finish(&mut self) -> Result<(), SinkError> {

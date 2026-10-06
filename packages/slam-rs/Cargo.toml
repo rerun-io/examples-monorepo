@@ -11,7 +11,7 @@ exclude = ["target/patch/cubecl-common-0.11.0-pre.3", "target/patch/cubecl-spirv
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]

@@ -210,11 +210,11 @@ impl RecordState {
             }
         }
         self.hands(&mut snapshot, hands, pose);
-        if n % TIMINGS_EVERY == 0 {
+        if n.is_multiple_of(TIMINGS_EVERY) {
             snapshot.timings = Some(signals.timings);
             snapshot.fps = signals.fps;
         }
-        if n % COUNTERS_EVERY == 0 {
+        if n.is_multiple_of(COUNTERS_EVERY) {
             snapshot.counters = Some(signals.counters);
         }
         snapshot

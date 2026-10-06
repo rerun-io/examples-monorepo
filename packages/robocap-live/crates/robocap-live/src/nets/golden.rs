@@ -51,7 +51,7 @@ fn read(path: &Path) -> Result<Vec<u8>, NetsError> {
 ///
 /// The values; `None` when the length is not a multiple of 4.
 pub fn f32_values(bytes: &[u8]) -> Option<Vec<f32>> {
-    (bytes.len() % 4 == 0).then(|| bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    bytes.len().is_multiple_of(4).then(|| bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
 }
 
 fn floats(path: &Path) -> Result<Vec<f32>, NetsError> {
@@ -68,7 +68,7 @@ fn invalid(path: &Path, message: String) -> NetsError {
 pub fn expand_pooled(pooled: &[u8]) -> Vec<u8> {
     let width: usize = DETNET_WIDTH / 4;
     let mut frame: Vec<u8> = vec![0; DETNET_WIDTH * DETNET_HEIGHT];
-    for (y, row) in frame.chunks_exact_mut(DETNET_WIDTH).enumerate() {
+    for (y, row) in frame.as_chunks_mut::<DETNET_WIDTH>().0.iter_mut().enumerate() {
         for (x, value) in row.iter_mut().enumerate() {
             *value = pooled[(y / 4) * width + x / 4];
         }
@@ -79,7 +79,7 @@ pub fn expand_pooled(pooled: &[u8]) -> Vec<u8> {
 /// Splits raw KeyNet output rows (f32 [k, 7184]) into [`KeyNetRaw`]s.
 pub fn keynet_from_rows(values: &[f32]) -> Vec<KeyNetRaw> {
     values
-        .chunks_exact(KEYNET_OUT_LEN)
+        .as_chunks::<KEYNET_OUT_LEN>().0.iter()
         .map(|row| KeyNetRaw {
             heatmaps: row[..HEATMAP_LEN].to_vec(),
             distance: row[HEATMAP_LEN..HEATMAP_LEN + DISTANCE_LEN].to_vec(),
@@ -92,7 +92,7 @@ pub fn keynet_from_rows(values: &[f32]) -> Vec<KeyNetRaw> {
 /// Splits raw DetNet output rows (f32 [k, 8]) into [`DetNetRaw`]s.
 pub fn detnet_from_rows(values: &[f32]) -> Vec<DetNetRaw> {
     values
-        .chunks_exact(8)
+        .as_chunks::<8>().0.iter()
         .map(|r| DetNetRaw { center: [[r[0], r[1]], [r[2], r[3]]], radius: [r[4], r[5]], presence_logit: [r[6], r[7]] })
         .collect()
 }
@@ -135,12 +135,12 @@ impl Golden {
             return Err(invalid(dir, "KeyNet golden file sizes do not agree".into()));
         }
         Ok(Self {
-            detnet_pooled: pooled.chunks_exact(POOLED_LEN).map(<[u8]>::to_vec).collect(),
+            detnet_pooled: pooled.as_chunks::<POOLED_LEN>().0.iter().map(|row| row.to_vec()).collect(),
             detnet_out: detnet_from_rows(&detnet_out),
-            keynet_crops: crops.chunks_exact(CROP_LEN).map(|crop| crop.iter().map(|&v| f32::from(v) / 255.0).collect()).collect(),
-            keynet_keypoints: priors.chunks_exact(63).map(|p| std::array::from_fn(|i| p[i])).collect(),
+            keynet_crops: crops.as_chunks::<CROP_LEN>().0.iter().map(|crop| crop.iter().map(|&v| f32::from(v) / 255.0).collect()).collect(),
+            keynet_keypoints: priors.as_chunks::<63>().0.iter().map(|p| std::array::from_fn(|i| p[i])).collect(),
             keynet_out: keynet_from_rows(&keynet_out),
-            keynet_points: points.chunks_exact(42).map(|p| std::array::from_fn(|k| [p[2 * k], p[2 * k + 1]])).collect(),
+            keynet_points: points.as_chunks::<42>().0.iter().map(|p| std::array::from_fn(|k| [p[2 * k], p[2 * k + 1]])).collect(),
         })
     }
 

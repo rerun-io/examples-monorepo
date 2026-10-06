@@ -42,7 +42,7 @@ fn rows<const N: usize>(array: &PyReadonlyArray2<'_, f64>, name: &str, count: us
     }
     // Fortran order passes as_slice() too, with its values running down the columns.
     let values: &[f64] = array.as_slice().ok().filter(|_| array.is_c_contiguous()).ok_or_else(|| value_error(format!("{name} must be C-contiguous")))?;
-    Ok(values.chunks_exact(N).map(|row| std::array::from_fn(|i| row[i])).collect())
+    Ok(values.as_chunks::<N>().0.iter().map(|row| std::array::from_fn(|i| row[i])).collect())
 }
 
 /// Copy row-major 4x4 matrices after validating their dtype, shape and layout.
@@ -54,7 +54,7 @@ fn matrices(array: &Bound<'_, PyAny>, name: &str, count: usize) -> PyResult<Vec<
     }
     let values = poses.as_slice().ok().filter(|_| poses.is_c_contiguous())
         .ok_or_else(|| value_error(format!("{name} must be C-contiguous")))?;
-    Ok(values.chunks_exact(16).map(|row| std::array::from_fn(|i| row[i])).collect())
+    Ok(values.as_chunks::<16>().0.iter().map(|row| std::array::from_fn(|i| row[i])).collect())
 }
 
 /// The six calibrated cameras of a RoboCap rig, in `CAMERA_NAMES` order.

@@ -9,14 +9,14 @@ use kornia_image::ImageError;
 fn block_sums(src: &[u8], width: usize, out_row: usize, sums: &mut [u16]) {
     sums.fill(0);
     for row in src[out_row * 4 * width..(out_row * 4 + 4) * width].chunks_exact(width) {
-        for (sum, block) in sums.iter_mut().zip(row.chunks_exact(4)) {
+        for (sum, block) in sums.iter_mut().zip(row.as_chunks::<4>().0.iter()) {
             *sum += u16::from(block[0]) + u16::from(block[1]) + u16::from(block[2]) + u16::from(block[3]);
         }
     }
 }
 
 fn check(src: usize, width: usize, height: usize, dst: usize) -> Result<(), ImageError> {
-    if width == 0 || height == 0 || width % 4 != 0 || height % 4 != 0 || src != width * height || dst != (width / 4) * (height / 4) {
+    if width == 0 || height == 0 || !width.is_multiple_of(4) || !height.is_multiple_of(4) || src != width * height || dst != (width / 4) * (height / 4) {
         return Err(ImageError::InvalidImageSize(width, height, width / 4, height / 4));
     }
     Ok(())

@@ -536,13 +536,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         }
         // Spent, not read twice: an entry left behind would answer a later
         // frameset with this one's corners.
-        if let Some(workspace) = self.cameras.get_mut(camera) {
-            if matches!(std::mem::take(&mut workspace.selection), Selection::Ready(ready) if ready == *select)
+        if let Some(workspace) = self.cameras.get_mut(camera)
+            && matches!(std::mem::take(&mut workspace.selection), Selection::Ready(ready) if ready == *select)
             {
                 out.extend_from_slice(&workspace.host_keys);
                 return Ok(SelectionStatus::Selected);
             }
-        }
         guarded(
             GpuError::DeviceLost {
                 what: "corner cell selection",

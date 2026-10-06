@@ -495,13 +495,12 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
             continue;
         }
         if selected {
-            if !masked[row * cells_x + column] {
-                if let Some((point, score)) = decode_key(winners[row * cells_x + column]) {
+            if !masked[row * cells_x + column]
+                && let Some((point, score)) = decode_key(winners[row * cells_x + column]) {
                     out.corners.push(point);
                     out.responses
                         .push(opencv_corner_score(score as f32 / 255.0));
                 }
-            }
             continue;
         }
         let x = grid.x_start + column * grid.cell;

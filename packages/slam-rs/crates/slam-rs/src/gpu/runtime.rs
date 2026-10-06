@@ -495,13 +495,13 @@ pub(super) fn probe_subgroups<R: Runtime>(
         if values.len() != units as usize * 5 {
             return Err(super::GpuError::SubgroupRoundTrip);
         }
-        for (index, value) in values.chunks_exact(5).enumerate() {
+        for (index, value) in values.as_chunks::<5>().0.iter().enumerate() {
             let size = value[0];
             if size < 16 || !size.is_power_of_two() {
                 return Err(super::GpuError::SubgroupRoundTrip);
             }
             let lane = index as u32 % size;
-            if value != [size, size * (size + 1) / 2, 3, lane ^ 7, lane / 8 * 8 + 2] {
+            if *value != [size, size * (size + 1) / 2, 3, lane ^ 7, lane / 8 * 8 + 2] {
                 return Err(super::GpuError::SubgroupRoundTrip);
             }
         }

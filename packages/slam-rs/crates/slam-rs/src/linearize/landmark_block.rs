@@ -256,7 +256,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             .checked_add(1)
             .ok_or(LinearizeError::LayoutOverflow)?;
         // The padded column count must be a multiple of four.
-        if num_cols % 4 != 0 {
+        if !num_cols.is_multiple_of(4) {
             return Err(LinearizeError::UnalignedBlock { num_cols });
         }
         // `storage.resize(num_rows, num_cols)`. Each dimension being
