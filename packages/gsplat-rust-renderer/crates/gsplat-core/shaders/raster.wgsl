@@ -12,8 +12,8 @@ var<workgroup> num_done: atomic<u32>;
 var<workgroup> done_snapshot: u32;
 fn compact_bits(v: u32) -> u32 {
     var x = v & 0x55u;
-    x =(x |(x >> 1u)) & 0x33u;
-    return(x |(x >> 2u)) & 0x0fu;
+    x = (x | (x >> 1u)) & 0x33u;
+    return (x | (x >> 2u)) & 0x0fu;
 }
 
 fn pixel(tile: u32, lid: u32) -> vec2u {
@@ -26,22 +26,22 @@ fn raster(tile: u32, lid: u32) -> vec4f {
     if lid == 0u {
         range_lo = offsets[tile * 2u];
         range_hi = offsets[tile * 2u + 1u];
-        atomicStore(& num_done, 0u);
+        atomicStore(&num_done, 0u);
     }
-    let lo = workgroupUniformLoad(& range_lo);
-    let hi = workgroupUniformLoad(& range_hi);
+    let lo = workgroupUniformLoad(&range_lo);
+    let hi = workgroupUniformLoad(&range_hi);
     var transmittance = 1.0;
     var color = vec3f(0.0);
     var done = !inside;
     if done {
-        atomicAdd(& num_done, 1u);
+        atomicAdd(&num_done, 1u);
     }
     for (var start = lo; start < hi; start += 256u) {
         workgroupBarrier();
         if lid == 0u {
-            done_snapshot = atomicLoad(& num_done);
+            done_snapshot = atomicLoad(&num_done);
         }
-        if workgroupUniformLoad(& done_snapshot) >= 256u {
+        if workgroupUniformLoad(&done_snapshot) >= 256u {
             break;
         }
         let remaining = min(256u, hi - start);
@@ -50,22 +50,22 @@ fn raster(tile: u32, lid: u32) -> vec4f {
         }
         workgroupBarrier();
         let was_done = done;
-        for (var t = 0u; ! done && t < remaining; t ++) {
+        for (var t = 0u; ! done && t < remaining; t++) {
             let p = batch[t];
             let s = sigma(vec2f(pix) + 0.5, vec2f(p.x, p.y), vec3f(p.cx, p.cy, p.cz));
             let alpha = min(0.999, p.opacity * exp(-s));
             if s >= 0.0 && alpha >= 1.0 / 255.0 {
-                let next = transmittance *(1.0 - alpha);
+                let next = transmittance * (1.0 - alpha);
                 if next <= 1e-4 {
                     done = true;
                 } else {
-                    color += max(vec3f(p.r, p.g, p.b), vec3f(0.0)) *(alpha * transmittance);
+                    color += max(vec3f(p.r, p.g, p.b), vec3f(0.0)) * (alpha * transmittance);
                     transmittance = next;
                 }
             }
         }
         if ! was_done && done {
-            atomicAdd(& num_done, 1u);
+            atomicAdd(&num_done, 1u);
         }
     }
     return vec4f(color + transmittance * u.background.xyz, 1.0 - transmittance);
@@ -92,7 +92,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
     let pix = pixel(tile, lid);
     if all(pix < u.image.xy) {
         let v = vec4u(clamp(rgba * 255.0, vec4f(0.0), vec4f(255.0)));
-        out_packed[pix.x + pix.y * u.image.x] = v.x |(v.y << 8u) |(v.z << 16u) |(v.w << 24u);
+        out_packed[pix.x + pix.y * u.image.x] = v.x | (v.y << 8u) | (v.z << 16u) | (v.w << 24u);
     }
 }
 

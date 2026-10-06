@@ -6010,6 +6010,7 @@ dependencies = [
  "gsplat-render",
  "gsplat-rust-renderer",
  "image",
+ "log",
  "macaw",
  "re_renderer",
  "re_sdk_types",
@@ -6019,6 +6020,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wgpu",
+ "wgpu-core",
 ]
 
 [[package]]

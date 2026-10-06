@@ -14,15 +14,15 @@ struct Params {
 var<workgroup> length: u32;
 @compute @workgroup_size(256) fn scan(@builtin(workgroup_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32, @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) width: u32) {
     if lid == 0u {
-        length =(min(count[params.count_index], params.capacity) + params.divisor - 1u) / params.divisor;
+        length = (min(count[params.count_index], params.capacity) + params.divisor - 1u) / params.divisor;
     }
-    let n = workgroupUniformLoad(& length);
+    let n = workgroupUniformLoad(&length);
     let block = gid.x + gid.y * groups.x;
     let base = block * 1024u;
     if base >= n {
         return;
     }
-    for (var j = 0u; j < 4u; j ++) {
+    for (var j = 0u; j < 4u; j++) {
         let lin = j * 256u + lid;
         var v = 0u;
         if base + lin < n {
@@ -33,7 +33,7 @@ var<workgroup> length: u32;
     workgroupBarrier();
     let total = block_scan(0u, true, lid, lane, width);
     workgroupBarrier();
-    for (var j = 0u; j < 4u; j ++) {
+    for (var j = 0u; j < 4u; j++) {
         let lin = j * 256u + lid;
         if base + lin < n {
             output[base + lin] = lds[lds_index(lin)];
@@ -45,8 +45,8 @@ var<workgroup> length: u32;
 }
 
 @compute @workgroup_size(256) fn add_offsets(@builtin(workgroup_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let idx =(gid.x + gid.y * groups.x) * 256u + lid;
-    let n =(min(count[params.count_index], params.capacity) + params.divisor - 1u) / params.divisor;
+    let idx = (gid.x + gid.y * groups.x) * 256u + lid;
+    let n = (min(count[params.count_index], params.capacity) + params.divisor - 1u) / params.divisor;
     if idx < n && idx >= 1024u {
         output[idx] += input[idx / 1024u - 1u];
     }

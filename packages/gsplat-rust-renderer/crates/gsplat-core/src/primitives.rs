@@ -72,11 +72,20 @@ impl Scan {
             dispatches: Dispatches::new(device, &kernels.prepare, count, &plans),
         }
     }
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, kernels: &Kernels) {
-        self.dispatches.prepare(encoder, &kernels.prepare);
+    pub fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        kernels: &Kernels,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        self.dispatches.prepare(encoder, &kernels.prepare, None);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gsplat scan"),
+            timestamp_writes,
+        });
         for (i, groups) in self.groups.iter().enumerate() {
-            self.dispatches.dispatch(
-                encoder,
+            self.dispatches.dispatch_in_pass(
+                &mut pass,
                 i as u32 * 2,
                 &kernels.scan[0],
                 groups[0].as_ref().unwrap(),
@@ -84,8 +93,12 @@ impl Scan {
         }
         for (i, groups) in self.groups.iter().enumerate().rev() {
             if let Some(group) = &groups[1] {
-                self.dispatches
-                    .dispatch(encoder, i as u32 * 2 + 1, &kernels.scan[1], group);
+                self.dispatches.dispatch_in_pass(
+                    &mut pass,
+                    i as u32 * 2 + 1,
+                    &kernels.scan[1],
+                    group,
+                );
             }
         }
     }
@@ -175,19 +188,32 @@ impl RadixSort {
             ),
         }
     }
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, kernels: &Kernels, bits: u32) {
+    pub fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        kernels: &Kernels,
+        bits: u32,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         assert!((1..=32).contains(&bits));
-        self.dispatches.prepare(encoder, &kernels.prepare);
+        self.dispatches.prepare(encoder, &kernels.prepare, None);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("gsplat radix sort"),
+            timestamp_writes,
+        });
         for groups in &self.groups[..bits.div_ceil(4) as usize] {
             for (stage, plan) in [Some(0), Some(1), None, Some(1), Some(0)]
                 .into_iter()
                 .enumerate()
             {
                 if let Some(plan) = plan {
-                    self.dispatches
-                        .dispatch(encoder, plan, &kernels.sort[stage], &groups[stage]);
+                    self.dispatches.dispatch_in_pass(
+                        &mut pass,
+                        plan,
+                        &kernels.sort[stage],
+                        &groups[stage],
+                    );
                 } else {
-                    let mut pass = encoder.begin_compute_pass(&Default::default());
                     pass.set_pipeline(&kernels.sort[stage]);
                     pass.set_bind_group(0, &groups[stage], &[]);
                     pass.dispatch_workgroups(1, 1, 1);

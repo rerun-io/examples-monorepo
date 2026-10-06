@@ -3,11 +3,57 @@ use crate::kernels::Kernels;
 use crate::primitives::{RadixSort, Scan};
 use crate::test_utils::{gpu, read, upload};
 
+// Start each primitive with nonzero shared memory. CPU-reference comparisons
+// must still pass when pipeline compilation omits workgroup zero initialization.
+fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
+    use crate::gpu::{module, pipeline};
+    let mut kernels = Kernels::new(device);
+    let sources = crate::kernels::sources();
+    let poison_scan = "
+        if lid < 64u { partials[lid] = 0xdeadbeefu; }
+        if lid == 0u { cube_total = 0xdeadbeefu; length = 0xdeadbeefu; }
+        for (var j = 0u; j < 4u; j++) { lds[j * 256u + lid] = 0xdeadbeefu; }
+        workgroupBarrier();
+    ";
+    let scan = sources[3].replacen(
+        "    if lid == 0u {\n        length =",
+        &format!("{poison_scan}\n    if lid == 0u {{\n        length ="),
+        1,
+    );
+    let scan = module(device, &scan);
+    kernels.scan = ["scan", "add_offsets"].map(|entry| pipeline(device, &scan, entry));
+    let sort = sources[4].replace(
+        "    let n = sort_length(lid);",
+        &format!(
+            "{poison_scan}
+            local_keys[lid] = 0xdeadbeefu;
+            local_values[lid] = 0xdeadbeefu;
+            if lid < 16u {{
+                atomicStore(&histogram[lid], 0xdeadbeefu);
+                bin_offsets[lid] = 0xdeadbeefu;
+                bin_prefix[lid] = 0xdeadbeefu;
+            }}
+            workgroupBarrier();
+            let n = sort_length(lid);"
+        ),
+    );
+    let sort = module(device, &sort);
+    kernels.sort = [
+        "count_keys",
+        "reduce_counts",
+        "scan_counts",
+        "scan_add",
+        "scatter",
+    ]
+    .map(|entry| pipeline(device, &sort, entry));
+    kernels
+}
+
 #[test]
 #[ignore = "integration: GPU"]
 fn inclusive_scan_crosses_recursive_block_boundaries() {
     let (device, queue) = gpu();
-    let kernels = Kernels::new(&device);
+    let kernels = poisoned_kernels(&device);
     for n in [0, 1, 1023, 1024, 1025, 1_048_577] {
         let input: Vec<u32> = (0..n).map(|i| (i % 7) as u32).collect();
         let expected: Vec<u32> = input
@@ -21,7 +67,7 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
         let count = upload(&device, &[n as u32, 0]);
         let scan = Scan::new(&device, &kernels, n as u32, 0, &values, &count);
         let mut encoder = device.create_command_encoder(&Default::default());
-        scan.encode(&mut encoder, &kernels);
+        scan.encode(&mut encoder, &kernels, None);
         queue.submit([encoder.finish()]);
         assert_eq!(
             read::<u32>(&device, &queue, scan.output(), n),
@@ -35,7 +81,7 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
 #[ignore = "integration: GPU"]
 fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
     let (device, queue) = gpu();
-    let kernels = Kernels::new(&device);
+    let kernels = poisoned_kernels(&device);
     for n in [1u32, 255, 256, 257, 1023, 1024, 1025, 65537, 1_048_577] {
         let input: Vec<u32> = (0..n)
             .map(|i| i.wrapping_mul(1664525).wrapping_add(1013904223) % 65537)
@@ -55,7 +101,7 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
                 bytemuck::cast_slice(&(0..n).collect::<Vec<_>>()),
             );
             let mut encoder = device.create_command_encoder(&Default::default());
-            sort.encode(&mut encoder, &kernels, bits);
+            sort.encode(&mut encoder, &kernels, bits, None);
             queue.submit([encoder.finish()]);
             let (keys, values) = sort.output(bits);
             assert_eq!(
@@ -78,7 +124,7 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
 #[ignore = "integration: GPU"]
 fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
     let (device, queue) = gpu();
-    let kernels = Kernels::new(&device);
+    let kernels = poisoned_kernels(&device);
     let capacity = 1_048_577u32;
     let input: Vec<u32> = (0..capacity)
         .map(|i| i.wrapping_mul(1664525) % 17)
@@ -94,8 +140,8 @@ fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
         queue.write_buffer(&values, 0, bytemuck::cast_slice(&ids));
         queue.write_buffer(&count, 4, bytemuck::bytes_of(&n));
         let mut encoder = device.create_command_encoder(&Default::default());
-        scan.encode(&mut encoder, &kernels);
-        sort.encode(&mut encoder, &kernels, 8);
+        scan.encode(&mut encoder, &kernels, None);
+        sort.encode(&mut encoder, &kernels, 8, None);
         queue.submit([encoder.finish()]);
         let expected_scan: Vec<u32> = input[..n as usize]
             .iter()
@@ -135,7 +181,7 @@ fn radix_sort_crosses_the_70m_reduced_histogram_boundary() {
     let count = upload(&device, &[n, 0]);
     let sort = RadixSort::new(&device, &kernels, n, 0, &keys, &values, &count);
     let mut encoder = device.create_command_encoder(&Default::default());
-    sort.encode(&mut encoder, &kernels, 4);
+    sort.encode(&mut encoder, &kernels, 4, None);
     queue.submit([encoder.finish()]);
     let result = read::<u32>(&device, &queue, sort.output(4).1, n as usize);
     let mut expected = (0..n).collect::<Vec<_>>();

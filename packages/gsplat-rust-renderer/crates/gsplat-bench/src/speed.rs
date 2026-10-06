@@ -16,6 +16,8 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+#[path = "api_counts.rs"]
+mod api_counts;
 #[path = "host.rs"]
 mod host;
 #[derive(Args)]
@@ -39,6 +41,9 @@ pub struct SpeedArgs {
     min_seconds: f64,
     #[arg(long, default_value_t = 3)]
     repeats: usize,
+    /// Replay selected wall-time frames with GPU timers, outside the timed lane.
+    #[arg(long)]
+    profile_orbit: bool,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -48,6 +53,43 @@ struct Frame {
     camera: usize,
     ms: f64,
     counts: Counts,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFrame {
+    camera: usize,
+    stages: Vec<StageTiming>,
+    api_counts: api_counts::Counts,
+}
+fn summarize_gpu_frames(frames: &[ProfileFrame]) -> Result<Statistics> {
+    ensure!(
+        frames.iter().all(|frame| !frame.stages.is_empty()
+            && frame
+                .stages
+                .iter()
+                .all(|stage| stage.ms.is_finite() && stage.ms >= 0.0)),
+        "GPU profiles require nonempty, finite, nonnegative stage timings"
+    );
+    Ok(summarize(
+        &frames
+            .iter()
+            .map(|frame| frame.stages.iter().map(|stage| stage.ms).sum())
+            .collect::<Vec<_>>(),
+    )?)
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileRepeat {
+    repeat: usize,
+    attempt: usize,
+    order: usize,
+    frames: Vec<ProfileFrame>,
+    statistics: Statistics,
+    warmup_frames: usize,
+    warmup_seconds: f64,
+    loaded_host: bool,
+    before: Vec<host::HostSample>,
+    after: host::HostSample,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +104,7 @@ struct Repeat {
     measured_seconds: f64,
     loaded_host: bool,
     quiet_host_verified: bool,
+    desktop_baseline_gpu_pct: Option<f64>,
     before: Vec<host::HostSample>,
     after: host::HostSample,
 }
@@ -79,6 +122,10 @@ struct BackendReport {
     stable_within_five_percent: bool,
     pooled: Option<Statistics>,
     lane1: Option<Vec<StageTiming>>,
+    #[serde(default)]
+    gpu_profiles: Vec<ProfileRepeat>,
+    #[serde(default)]
+    gpu_median_of_repeat_medians_ms: Option<f64>,
     camera_checks: Vec<CameraCheck>,
 }
 #[derive(Serialize, Deserialize)]
@@ -97,6 +144,80 @@ struct SpeedReport {
     repeat_count: usize,
     backends: Vec<BackendReport>,
 }
+async fn warmup<R: RenderEngine>(
+    renderer: &mut R,
+    cameras: &[CameraSpec],
+    minimum_frames: usize,
+) -> Result<(usize, f64)> {
+    let start = Instant::now();
+    let mut frames = 0;
+    loop {
+        for camera in cameras {
+            renderer.render(camera, false).await?;
+            renderer.finish()?;
+            frames += 1;
+        }
+        if frames >= minimum_frames && start.elapsed().as_secs_f64() >= 5.0 {
+            return Ok((frames, start.elapsed().as_secs_f64()));
+        }
+    }
+}
+async fn profile_repeat<R: RenderEngine>(
+    renderer: &mut R,
+    cameras: &[CameraSpec],
+    selected: &Repeat,
+    order: usize,
+    admission_deadline: Instant,
+) -> Result<ProfileRepeat> {
+    eprintln!(
+        "GPU profile repeat {}: quiet-host admission",
+        selected.repeat + 1
+    );
+    let (before, loaded_host) = host::wait_quiet(admission_deadline)?;
+    let (warmup_frames, warmup_seconds) = warmup(renderer, cameras, cameras.len()).await?;
+    let mut frames = Vec::with_capacity(selected.frames.len());
+    for frame in &selected.frames {
+        // Count the normal render separately. Disable logging again before
+        // GPU timing, whose extra query-resolution submit is diagnostic work.
+        let observation = api_counts::Observation::begin();
+        renderer.render(&cameras[frame.camera], false).await?;
+        renderer.finish()?;
+        let api_counts = observation.finish();
+        ensure!(
+            api_counts.queue_submits > 0,
+            "wgpu submit events unavailable"
+        );
+        let stages = renderer
+            .stages(&cameras[frame.camera])
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("GPU stage timestamps unavailable"))?;
+        frames.push(ProfileFrame {
+            camera: frame.camera,
+            stages,
+            api_counts,
+        });
+    }
+    let after = host::sample()?;
+    let statistics = summarize_gpu_frames(&frames)?;
+    eprintln!(
+        "GPU profile repeat {}: median {:.4} ms, {} matched frames",
+        selected.repeat + 1,
+        statistics.median_ms,
+        frames.len()
+    );
+    Ok(ProfileRepeat {
+        repeat: selected.repeat,
+        attempt: selected.attempt,
+        order,
+        frames,
+        statistics,
+        warmup_frames,
+        warmup_seconds,
+        loaded_host,
+        before,
+        after,
+    })
+}
 async fn repeat<R: RenderEngine>(
     renderer: &mut R,
     cameras: &[CameraSpec],
@@ -112,19 +233,7 @@ async fn repeat<R: RenderEngine>(
         attempt + 1
     );
     let (before, loaded_host) = host::wait_quiet(admission_deadline)?;
-    let start = Instant::now();
-    let mut warmup_frames = 0;
-    loop {
-        for c in cameras {
-            renderer.render(c, false).await?;
-            renderer.finish()?;
-            warmup_frames += 1;
-        }
-        if warmup_frames >= a.warmup && start.elapsed().as_secs_f64() >= 5.0 {
-            break;
-        }
-    }
-    let warmup_seconds = start.elapsed().as_secs_f64();
+    let (warmup_frames, warmup_seconds) = warmup(renderer, cameras, a.warmup).await?;
     let start = Instant::now();
     let mut frames = Vec::new();
     loop {
@@ -155,6 +264,15 @@ async fn repeat<R: RenderEngine>(
         statistics.p95_ms,
         frames.len()
     );
+    let desktop_baseline_gpu_pct = if cfg!(target_os = "macos") {
+        let percentages: Vec<_> = before
+            .iter()
+            .filter_map(|sample| sample.gpu_percent.map(f64::from))
+            .collect();
+        (!percentages.is_empty()).then(|| median(&percentages))
+    } else {
+        None
+    };
     Ok(Repeat {
         repeat: index,
         attempt,
@@ -166,6 +284,7 @@ async fn repeat<R: RenderEngine>(
         measured_seconds,
         loaded_host,
         quiet_host_verified: before.iter().all(host::HostSample::quiet_verified),
+        desktop_baseline_gpu_pct,
         before,
         after,
     })
@@ -192,6 +311,8 @@ async fn initialize<R: RenderEngine>(
         stable_within_five_percent: false,
         pooled: None,
         lane1: None,
+        gpu_profiles: Vec::new(),
+        gpu_median_of_repeat_medians_ms: None,
         camera_checks: Vec::new(),
     })
 }
@@ -437,6 +558,54 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             Implementation::Native => native.as_mut().unwrap().stages(&suite.cameras[0]).await?,
         };
     }
+    if a.profile_orbit {
+        api_counts::install()?;
+        for index in 0..a.repeats {
+            for order in 0..suite.backends.len() {
+                let position = (index + order) % suite.backends.len();
+                let report = &mut suite.backends[position];
+                let selected = &report.attempts[report.selected_attempts[index]];
+                eprintln!(
+                    "{:?}: GPU profile round {}, position {}",
+                    report.implementation,
+                    index + 1,
+                    order + 1
+                );
+                let profile = match report.implementation {
+                    Implementation::Ours => {
+                        profile_repeat(
+                            ours.as_mut().unwrap(),
+                            &suite.cameras,
+                            selected,
+                            order,
+                            admission_deadline,
+                        )
+                        .await?
+                    }
+                    Implementation::Brush => {
+                        profile_repeat(
+                            brush.as_mut().unwrap(),
+                            &suite.cameras,
+                            selected,
+                            order,
+                            admission_deadline,
+                        )
+                        .await?
+                    }
+                    _ => continue,
+                };
+                report.gpu_profiles.push(profile);
+                report.gpu_median_of_repeat_medians_ms = Some(median(
+                    &report
+                        .gpu_profiles
+                        .iter()
+                        .map(|p| p.statistics.median_ms)
+                        .collect::<Vec<_>>(),
+                ));
+                write_json(&a.out, &suite)?;
+            }
+        }
+    }
     let mut oracle = Brush::new(&scene, &a.settings).await;
     for report in &mut suite.backends {
         report.camera_checks = match report.implementation {
@@ -456,4 +625,38 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
     }
     suite.complete = true;
     write_json(&a.out, &suite)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gpu_summary_sums_each_frame_before_taking_the_median() {
+        let frames = [[1.0, 100.0], [100.0, 1.0], [50.0, 50.0]]
+            .into_iter()
+            .enumerate()
+            .map(|(camera, times)| ProfileFrame {
+                camera,
+                api_counts: api_counts::Counts::default(),
+                stages: times
+                    .into_iter()
+                    .enumerate()
+                    .map(|(stage, ms)| StageTiming {
+                        name: format!("stage{stage}"),
+                        ms,
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(summarize_gpu_frames(&frames).unwrap().median_ms, 101.0);
+        assert!(summarize_gpu_frames(&[]).is_err());
+        assert!(
+            summarize_gpu_frames(&[ProfileFrame {
+                camera: 0,
+                stages: vec![],
+                api_counts: api_counts::Counts::default()
+            }])
+            .is_err()
+        );
+    }
 }

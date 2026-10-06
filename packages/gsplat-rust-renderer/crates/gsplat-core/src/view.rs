@@ -48,7 +48,7 @@ impl TargetHandle {
 pub(crate) struct FrameSlot {
     pub uniform: wgpu::Buffer,
     pub readback: wgpu::Buffer,
-    pub projection: [[wgpu::BindGroup; 2]; 5],
+    pub projection: [wgpu::BindGroup; 2],
     pub mapping: [wgpu::BindGroup; 2],
     pub raster: Option<(TargetHandle, wgpu::BindGroup)>,
     pub receiver: Option<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
@@ -74,6 +74,7 @@ pub struct ViewState {
     pub(crate) pending: VecDeque<usize>,
     pub(crate) required_capacity: u32,
     pub(crate) limit: u64,
+    pub(crate) timestamp_queries: Option<wgpu::QuerySet>,
     overflow_events: u32,
 }
 impl ViewState {
@@ -115,38 +116,36 @@ impl ViewState {
         let offsets = storage(device, "tile ranges", 8);
         let frames = std::array::from_fn(|_| {
             let uniform = uniform(device, &vec![0; uniform_words]);
-            let projection = std::array::from_fn(|model| {
-                [
-                    bind(
-                        device,
-                        &kernels.projection[model][0],
-                        &[
-                            (0, uniform.as_entire_binding()),
-                            (1, scene.transforms.as_entire_binding()),
-                            (2, scene.opacity.as_entire_binding()),
-                            (3, scene.min_scale.as_entire_binding()),
-                            (4, ids.as_entire_binding()),
-                            (5, depths.as_entire_binding()),
-                            (6, counts.as_entire_binding()),
-                            (7, hits.as_entire_binding()),
-                        ],
-                    ),
-                    bind(
-                        device,
-                        &kernels.projection[model][1],
-                        &[
-                            (0, uniform.as_entire_binding()),
-                            (1, scene.transforms.as_entire_binding()),
-                            (2, scene.opacity.as_entire_binding()),
-                            (3, scene.min_scale.as_entire_binding()),
-                            (4, ids.as_entire_binding()),
-                            (6, counts.as_entire_binding()),
-                            (8, projected.as_entire_binding()),
-                            (9, scene.sh.as_entire_binding()),
-                        ],
-                    ),
-                ]
-            });
+            let projection = [
+                bind(
+                    device,
+                    &kernels.projection[0],
+                    &[
+                        (0, uniform.as_entire_binding()),
+                        (1, scene.transforms.as_entire_binding()),
+                        (2, scene.opacity.as_entire_binding()),
+                        (3, scene.min_scale.as_entire_binding()),
+                        (4, ids.as_entire_binding()),
+                        (5, depths.as_entire_binding()),
+                        (6, counts.as_entire_binding()),
+                        (7, hits.as_entire_binding()),
+                    ],
+                ),
+                bind(
+                    device,
+                    &kernels.projection[1],
+                    &[
+                        (0, uniform.as_entire_binding()),
+                        (1, scene.transforms.as_entire_binding()),
+                        (2, scene.opacity.as_entire_binding()),
+                        (3, scene.min_scale.as_entire_binding()),
+                        (4, ids.as_entire_binding()),
+                        (6, counts.as_entire_binding()),
+                        (8, projected.as_entire_binding()),
+                        (9, scene.sh.as_entire_binding()),
+                    ],
+                ),
+            ];
             let mapping = Self::mapping(
                 device,
                 kernels,
@@ -199,6 +198,7 @@ impl ViewState {
             pending: VecDeque::new(),
             required_capacity: capacity,
             limit,
+            timestamp_queries: None,
             overflow_events: 0,
         })
     }
@@ -359,6 +359,23 @@ impl ViewState {
             });
         }
         Ok(latest)
+    }
+    /// Diagnostic timestamps need ten slots; wait for completion before resolving on Metal.
+    pub fn set_timestamp_queries(&mut self, queries: Option<wgpu::QuerySet>) -> Result<(), Error> {
+        if let Some(q) = &queries
+            && (!self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+                || !matches!(q.ty(), wgpu::QueryType::Timestamp)
+                || q.count() < 10)
+        {
+            return Err(Error::Input(
+                "stage profiling requires TIMESTAMP_QUERY and ten timestamp slots",
+            ));
+        }
+        self.timestamp_queries = queries;
+        Ok(())
     }
 }
 

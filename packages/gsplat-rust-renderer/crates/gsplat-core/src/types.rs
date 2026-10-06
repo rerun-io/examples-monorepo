@@ -38,15 +38,12 @@ pub struct RenderOptions {
     pub background: Vec3,
     /// Positive multiplier, applied as a log-scale offset before the 3D floor.
     pub splat_scale: f32,
-    /// Specialize the projection shader by lens model. False keeps a uniform switch.
-    pub specialize_camera: bool,
 }
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             background: Vec3::ZERO,
             splat_scale: 1.0,
-            specialize_camera: false,
         }
     }
 }

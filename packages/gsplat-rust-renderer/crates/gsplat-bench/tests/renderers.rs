@@ -80,6 +80,13 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .unwrap();
     println!("ours off-centre float parity: {score:?}");
     assert!(score.minimum_psnr() >= 40.0);
+    let stages = ours
+        .stages(&camera)
+        .await
+        .unwrap()
+        .expect("ours GPU stage timings");
+    assert_eq!(stages.len(), 8);
+    assert!(stages.iter().all(|s| s.ms.is_finite() && s.ms > 0.0));
     let mut old = Old::new(&scene, 256, 256).unwrap();
     let pixels = capture(&mut old, &camera).await;
     let evaluator = Evaluator::new(false);

@@ -107,6 +107,67 @@ pub struct Renderer {
     size: UVec2,
 }
 impl Renderer {
+    /// GPU stage durations from a separate packed-output diagnostic frame.
+    /// Pixel transfers and timestamp resolution never enter the benchmark loop.
+    pub fn stage_ms(&mut self, camera: &CameraSpec) -> Result<Option<[f64; 8]>> {
+        if !self
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            return Ok(None);
+        }
+        let query = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("gsplat stage times"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 10,
+        });
+        self.view.set_timestamp_queries(Some(query.clone()))?;
+        let rendered = self.render(camera, Output::Packed);
+        self.view.set_timestamp_queries(None)?;
+        rendered?;
+        // Metal counter samples must complete before a later blit resolves them.
+        // This extra synchronization is outside the measured frame-time loop.
+        self.finish()?;
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stage timestamps"),
+            size: 80,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stage timestamp readback"),
+            size: 80,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.resolve_query_set(&query, 0..10, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 80);
+        self.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        read.map_async(wgpu::MapMode::Read, .., move |r| {
+            let _ = tx.send(r);
+        });
+        self.finish()?;
+        rx.recv()
+            .map_err(|e| Error::Gpu(e.to_string()))?
+            .map_err(|e| Error::Gpu(e.to_string()))?;
+        let data = read
+            .get_mapped_range(..)
+            .map_err(|e| Error::Gpu(e.to_string()))?;
+        let ticks: &[u64] = bytemuck::cast_slice(&data);
+        if ticks[9] <= ticks[0] || ticks.windows(2).any(|pair| pair[1] < pair[0]) {
+            return Err(Error::Gpu(format!(
+                "invalid GPU stage timestamps: {ticks:?}"
+            )));
+        }
+        let period = f64::from(self.queue.get_timestamp_period()) / 1e6;
+        Ok(Some(std::array::from_fn(|i| {
+            (ticks[gsplat_core::STAGE_QUERIES[i].1] - ticks[gsplat_core::STAGE_QUERIES[i].0]) as f64
+                * period
+        })))
+    }
     pub async fn new(
         splats: &Splats,
         mode: RenderMode,

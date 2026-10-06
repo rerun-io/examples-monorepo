@@ -90,13 +90,21 @@ pub fn cpuset() -> Result<String> {
         .into())
 }
 impl HostSample {
-    // Missing macOS telemetry is not evidence of a busy or an idle host.
+    // macOS admission includes its measured desktop GPU baseline.
     fn admissible(&self) -> bool {
-        self.gpu_percent.is_none_or(|gpu| gpu < 5)
-            && self
-                .load_average_1m
-                .zip(self.logical_cores)
-                .is_none_or(|(load, cores)| load < cores as f64 * 0.25)
+        #[cfg(target_os = "macos")]
+        {
+            self.gpu_percent.is_some_and(|gpu| gpu <= 20)
+                && self.load_average_1m.is_some_and(|load| load < 4.0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.gpu_percent.is_none_or(|gpu| gpu < 5)
+                && self
+                    .load_average_1m
+                    .zip(self.logical_cores)
+                    .is_none_or(|(load, cores)| load < cores as f64 * 0.25)
+        }
     }
     pub fn quiet_verified(&self) -> bool {
         self.gpu_percent.is_some()
@@ -239,9 +247,9 @@ mod tests {
         );
     }
     #[test]
-    fn unavailable_mac_samplers_record_null_and_allow_admission() {
+    fn unavailable_mac_samplers_record_null_without_claiming_quiet() {
         let sample = macos_sample(None, None, None);
-        assert!(sample.admissible());
+        assert_eq!(sample.admissible(), !cfg!(target_os = "macos"));
         assert!(!sample.quiet_verified());
         let json = serde_json::to_value(sample).unwrap();
         assert!(
@@ -263,7 +271,26 @@ mod tests {
         assert_eq!(sample.load_average_1m, Some(1.25));
         assert_eq!(sample.logical_cores, Some(10));
         assert_eq!(sample.gpu_percent, Some(7));
-        assert!(!sample.admissible());
+        assert_eq!(sample.admissible(), cfg!(target_os = "macos"));
+        assert_eq!(sample.quiet_verified(), cfg!(target_os = "macos"));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_desktop_admission_requires_measured_gpu_and_load_below_thresholds() {
+        let mut sample = macos_sample(Some("{ 3.99 2.0 1.0 }"), Some("10"), None);
+        sample.gpu_percent = Some(15);
+        assert!(sample.quiet_verified());
+        sample.gpu_percent = Some(20);
+        assert!(sample.quiet_verified());
+        sample.gpu_percent = Some(21);
         assert!(!sample.quiet_verified());
+        sample.gpu_percent = Some(20);
+        sample.load_average_1m = Some(4.0);
+        assert!(!sample.quiet_verified());
+        sample.load_average_1m = None;
+        assert!(!sample.admissible());
+        sample.load_average_1m = Some(1.0);
+        sample.gpu_percent = None;
+        assert!(!sample.admissible());
     }
 }

@@ -21,6 +21,17 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
         )
         .unwrap();
     let mut view = renderer.create_view(&scene, 64).unwrap();
+    let queries = device
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+        .then(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("render contract timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 10,
+            })
+        });
+    view.set_timestamp_queries(queries.clone()).unwrap();
     let camera = Camera {
         model: CameraModel::Pinhole,
         position: Vec3::ZERO,
@@ -76,6 +87,25 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+        if let Some(queries) = &queries {
+            let resolved = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 80,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.resolve_query_set(queries, 0..10, &resolved, 0);
+            queue.submit([encoder.finish()]);
+            let ticks = common::read::<u64>(&device, &queue, &resolved, 10);
+            assert!(ticks[0] > 0 && ticks[9] > ticks[0]);
+            assert!(ticks.windows(2).all(|pair| pair[1] >= pair[0]), "{ticks:?}");
+            let total: u64 = gsplat_core::STAGE_QUERIES
+                .iter()
+                .map(|&(start, end)| ticks[end] - ticks[start])
+                .sum();
+            assert_eq!(total, ticks[9] - ticks[0]);
+        }
     }
     let rgba = common::read::<[f32; 4]>(&device, &queue, &float, 33 * 33);
     for (actual, expected) in rgba[16 * 33 + 16].iter().zip([0.35, 0.45, 0.55, 0.5]) {

@@ -22,6 +22,7 @@ import pytest
         ("gsplat-bench", None, "renderers::coverage::fisheye_keeps_visible_splats_behind_the_camera", ()),
         ("gsplat-bench", None, "renderers::coverage::eight_k_sorts_five_digits_and_dispatches_beyond_65535_tiles", ()),
         ("gsplat-bench", "renderers", "garden_colmap_projects_observed_points", ("GSPLAT_TEST_COLMAP",)),
+        ("gsplat-bench", "bin:gsplat-bench", "speed::api_counts::tests::observes_real_submits_waits_and_mapped_readback", ()),
         ("gsplat-core", None, "primitive_tests::gpu_counts_cross_recursive_boundaries_and_reuse_scratch", ()),
         ("gsplat-core", None, "primitive_tests::inclusive_scan_crosses_recursive_block_boundaries", ()),
         ("gsplat-core", None, "primitive_tests::radix_sort_is_stable_for_duplicates_and_partial_blocks", ()),
@@ -52,6 +53,8 @@ def test_rust_gpu_contract(package: str, suite: str | None, name: str, assets: t
     environment["CARGO_PROFILE_TEST_DEBUG"] = "0"
     environment["CARGO_INCREMENTAL"] = "0"
     selection: list[str] = ["--lib"] if suite is None else ["--test", suite]
+    if suite == "bin:gsplat-bench":
+        selection = ["--bin", "gsplat-bench"]
     result: subprocess.CompletedProcess[str] = subprocess.run(
         ["cargo", "test", "--locked", "--package", package, *selection, name, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1"],
         cwd=root, env=environment, text=True, capture_output=True, check=False,

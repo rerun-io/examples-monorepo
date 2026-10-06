@@ -29,7 +29,7 @@ fn cube_scan(value: u32, lid: u32, lane: u32, width: u32) -> vec2u {
     } else {
         if lid == 0u {
             var acc = 0u;
-            for (var i = 0u; i < planes; i ++) {
+            for (var i = 0u; i < planes; i++) {
                 let v = partials[i];
                 partials[i] = acc;
                 acc += v;
@@ -42,19 +42,19 @@ fn cube_scan(value: u32, lid: u32, lane: u32, width: u32) -> vec2u {
 }
 
 fn lds_index(lin: u32) -> u32 {
-    return(lin % 4u) * 256u + lin / 4u;
+    return (lin % 4u) * 256u + lin / 4u;
 }
 
 fn block_scan(base: u32, inclusive: bool, lid: u32, lane: u32, width: u32) -> u32 {
     var sum = 0u;
-    for (var j = 0u; j < 4u; j ++) {
+    for (var j = 0u; j < 4u; j++) {
         let idx = j * 256u + lid;
         let v = lds[idx];
         lds[idx] = sum + select(0u, v, inclusive);
         sum += v;
     }
     let offsets = cube_scan(sum, lid, lane, width);
-    for (var j = 0u; j < 4u; j ++) {
+    for (var j = 0u; j < 4u; j++) {
         lds[j * 256u + lid] += base + offsets.x;
     }
     return offsets.y;

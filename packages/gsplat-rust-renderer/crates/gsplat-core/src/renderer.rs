@@ -6,6 +6,28 @@ use crate::{Camera, Error, RenderMode, RenderOptions, Scene, Splats, Target, Vie
 use bytemuck::{Pod, Zeroable};
 use std::sync::{Arc, mpsc};
 
+pub const STAGE_NAMES: [&str; 8] = [
+    "project_forward",
+    "depth_sort",
+    "gather_scan",
+    "project_visible",
+    "map_intersections",
+    "tile_sort",
+    "tile_offsets",
+    "rasterize",
+];
+/// Contiguous GPU intervals; projection includes indirect-dispatch preparation.
+pub const STAGE_QUERIES: [(usize, usize); 8] = [
+    (0, 2),
+    (2, 3),
+    (3, 4),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),
+    (8, 9),
+];
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
@@ -73,7 +95,6 @@ impl Renderer {
             size_of::<Uniforms>() / 4,
         )
     }
-
     /// Encode without submission or CPU waits. Submit, then poll this view's feedback.
     /// Overflow leaves the target intact; rerender after feedback requests more capacity.
     pub fn render(
@@ -155,11 +176,6 @@ impl Renderer {
         let center = camera.center_uv * camera.size.as_vec2();
         let (clamps, radial_limit) = camera.clamp_limits();
         let coefficients = camera.model.coefficients();
-        let model = if options.specialize_camera {
-            camera.model.kind() as usize
-        } else {
-            4
-        };
         let uniforms = Uniforms {
             view: camera.world_to_local().to_cols_array_2d(),
             camera: camera.position.extend(0.0).to_array(),
@@ -212,34 +228,62 @@ impl Renderer {
             };
             frame.raster = Some((handle, group));
         }
+        let queries = view.timestamp_queries.as_ref();
+        let timestamps = |start, end| {
+            queries.map(|query_set| wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: start,
+                end_of_pass_write_index: Some(end),
+            })
+        };
         encoder.clear_buffer(&view.counts, 0, None);
         dispatch(
             encoder,
-            &self.kernels.projection[model][0],
-            &frame.projection[model][0],
+            &self.kernels.projection[0],
+            &frame.projection[0],
             scene.n.div_ceil(256),
+            timestamps(Some(0), 1),
         );
-        view.dispatches.prepare(encoder, &self.kernels.prepare);
-        view.depth_sort.encode(encoder, &self.kernels, 32);
         view.dispatches
-            .dispatch(encoder, 0, &self.kernels.mapping[0], &view.gather);
-        view.scan.encode(encoder, &self.kernels);
+            .prepare(encoder, &self.kernels.prepare, timestamps(None, 2));
+        view.depth_sort
+            .encode(encoder, &self.kernels, 32, timestamps(None, 3));
+        view.dispatches
+            .dispatch(encoder, 0, &self.kernels.mapping[0], &view.gather, None);
+        view.scan
+            .encode(encoder, &self.kernels, timestamps(None, 4));
         view.dispatches.dispatch(
             encoder,
             0,
-            &self.kernels.projection[model][1],
-            &frame.projection[model][1],
+            &self.kernels.projection[1],
+            &frame.projection[1],
+            timestamps(None, 5),
         );
-        view.dispatches
-            .dispatch(encoder, 0, &self.kernels.mapping[1], &frame.mapping[0]);
+        view.dispatches.dispatch(
+            encoder,
+            0,
+            &self.kernels.mapping[1],
+            &frame.mapping[0],
+            timestamps(None, 6),
+        );
         view.intersections
             .sort
-            .encode(encoder, &self.kernels, view.bits);
+            .encode(encoder, &self.kernels, view.bits, timestamps(None, 7));
         encoder.clear_buffer(&view.offsets, 0, None);
-        view.dispatches
-            .dispatch(encoder, 1, &self.kernels.mapping[2], &frame.mapping[1]);
-        view.dispatches
-            .dispatch(encoder, 2, raster, &frame.raster.as_ref().unwrap().1);
+        view.dispatches.dispatch(
+            encoder,
+            1,
+            &self.kernels.mapping[2],
+            &frame.mapping[1],
+            timestamps(None, 8),
+        );
+        view.dispatches.dispatch(
+            encoder,
+            2,
+            raster,
+            &frame.raster.as_ref().unwrap().1,
+            timestamps(None, 9),
+        );
         encoder.copy_buffer_to_buffer(&view.counts, 0, &frame.readback, 0, 8);
         let (tx, rx) = mpsc::channel();
         encoder.map_buffer_on_submit(&frame.readback, wgpu::MapMode::Read, .., move |result| {
@@ -249,5 +293,18 @@ impl Renderer {
         frame.capacity = view.intersections.capacity;
         view.pending.push_back(index);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stage_sum_covers_the_full_gpu_window() {
+        let ticks = [100u64, 120, 125, 190, 210, 230, 280, 360, 380, 450];
+        let stage_total: u64 = super::STAGE_QUERIES
+            .iter()
+            .map(|&(start, end)| ticks[end] - ticks[start])
+            .sum();
+        assert_eq!(stage_total, ticks[9] - ticks[0]);
     }
 }

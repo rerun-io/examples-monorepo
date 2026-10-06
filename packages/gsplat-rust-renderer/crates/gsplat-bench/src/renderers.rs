@@ -395,6 +395,19 @@ impl RenderEngine for Old {
 }
 
 impl RenderEngine for gsplat_render::Renderer {
+    async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
+        Ok(self.stage_ms(camera)?.map(|times| {
+            gsplat_core::STAGE_NAMES
+                .into_iter()
+                .zip(times)
+                .map(|(name, ms)| StageTiming {
+                    name: name.into(),
+                    ms,
+                })
+                .collect()
+        }))
+    }
+
     async fn render(&mut self, camera: &CameraSpec, parity: bool) -> Result<Counts> {
         let stats = gsplat_render::Renderer::render(
             self,

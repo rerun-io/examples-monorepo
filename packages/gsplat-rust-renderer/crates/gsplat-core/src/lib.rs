@@ -14,7 +14,7 @@ mod scene;
 mod types;
 mod view;
 pub use camera::CameraModel;
-pub use renderer::Renderer;
+pub use renderer::{Renderer, STAGE_NAMES, STAGE_QUERIES};
 pub use scene::Scene;
 pub use types::{Camera, FrameStats, RenderMode, RenderOptions, Splats, Target};
 pub use view::ViewState;

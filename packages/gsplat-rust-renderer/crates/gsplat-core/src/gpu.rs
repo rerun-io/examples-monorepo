@@ -29,7 +29,6 @@ pub(crate) fn pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
     entry: &str,
-    constants: &[(&str, f64)],
 ) -> wgpu::ComputePipeline {
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(entry),
@@ -37,7 +36,10 @@ pub(crate) fn pipeline(
         module,
         entry_point: Some(entry),
         compilation_options: wgpu::PipelineCompilationOptions {
-            constants,
+            // Scan/sort initialize their scratch before barriers; raster writes
+            // each live batch element and its counters before any shared read.
+            // Primitive CPU-reference tests poison shared memory to enforce this.
+            zero_initialize_workgroup_memory: false,
             ..Default::default()
         },
         cache: None,
@@ -65,11 +67,16 @@ pub(crate) fn dispatch(
     pipeline: &wgpu::ComputePipeline,
     group: &wgpu::BindGroup,
     groups: u32,
+    timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
 ) {
-    if groups == 0 {
+    if groups == 0 && timestamp_writes.is_none() {
         return;
     }
-    let mut pass = encoder.begin_compute_pass(&Default::default());
+    let groups = groups.max(1);
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: None,
+        timestamp_writes,
+    });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, group, &[]);
     let x = groups.min(65535);
@@ -116,8 +123,19 @@ impl Dispatches {
         assert_eq!(plans.len(), self.len as usize);
         queue.write_buffer(&self.plans, 0, bytemuck::cast_slice(plans));
     }
-    pub fn prepare(&self, encoder: &mut wgpu::CommandEncoder, kernel: &wgpu::ComputePipeline) {
-        dispatch(encoder, kernel, &self.group, self.len.div_ceil(64));
+    pub fn prepare(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        kernel: &wgpu::ComputePipeline,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        dispatch(
+            encoder,
+            kernel,
+            &self.group,
+            self.len.div_ceil(64),
+            timestamp_writes,
+        );
     }
     pub fn dispatch(
         &self,
@@ -125,8 +143,12 @@ impl Dispatches {
         index: u32,
         pipeline: &wgpu::ComputePipeline,
         group: &wgpu::BindGroup,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes,
+        });
         self.dispatch_in_pass(&mut pass, index, pipeline, group);
     }
     pub fn dispatch_in_pass(
@@ -155,18 +177,17 @@ mod tests {
             "{}\n@compute @workgroup_size(1) fn test_counter() {{ add_intersections(8u); }}",
             include_str!("../shaders/counts.wgsl")
         );
-        let kernel = pipeline(&device, &module(&device, &source), "test_counter", &[]);
+        let kernel = pipeline(&device, &module(&device, &source), "test_counter");
         let group = bind(&device, &kernel, &[(6, counts.as_entire_binding())]);
         let prepare = pipeline(
             &device,
             &module(&device, include_str!("../shaders/dispatch.wgsl")),
             "prepare",
-            &[],
         );
         let dispatches = Dispatches::new(&device, &prepare, &counts, &[[u32::MAX, 16, 1, 0]]);
         let mut encoder = device.create_command_encoder(&Default::default());
-        dispatch(&mut encoder, &kernel, &group, 1);
-        dispatches.prepare(&mut encoder, &prepare);
+        dispatch(&mut encoder, &kernel, &group, 1, None);
+        dispatches.prepare(&mut encoder, &prepare, None);
         queue.submit([encoder.finish()]);
         assert_eq!(read::<u32>(&device, &queue, &counts, 2), [0x8000_0000, 3]);
         assert_eq!(

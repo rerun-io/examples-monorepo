@@ -20,7 +20,7 @@ pub(crate) fn sources() -> [String; 6] {
 }
 
 pub(crate) struct Kernels {
-    pub projection: [[wgpu::ComputePipeline; 2]; 5],
+    pub projection: [wgpu::ComputePipeline; 2],
     pub mapping: [wgpu::ComputePipeline; 3],
     pub raster: [wgpu::ComputePipeline; 3],
     pub scan: [wgpu::ComputePipeline; 2],
@@ -32,22 +32,13 @@ impl Kernels {
         let [projection, mapping, raster, scan, sort, prepare] =
             sources().map(|s| module(device, &s));
         Self {
-            projection: std::array::from_fn(|i| {
-                let kind = if i == 4 { u32::MAX } else { i as u32 };
-                ["project_forward", "project_visible"].map(|entry| {
-                    pipeline(
-                        device,
-                        &projection,
-                        entry,
-                        &[("CAMERA_MODEL", f64::from(kind))],
-                    )
-                })
-            }),
+            projection: ["project_forward", "project_visible"]
+                .map(|entry| pipeline(device, &projection, entry)),
             mapping: ["gather", "map_tiles", "tile_offsets"]
-                .map(|entry| pipeline(device, &mapping, entry, &[])),
+                .map(|entry| pipeline(device, &mapping, entry)),
             raster: ["raster_float", "raster_packed", "raster_texture"]
-                .map(|entry| pipeline(device, &raster, entry, &[])),
-            scan: ["scan", "add_offsets"].map(|entry| pipeline(device, &scan, entry, &[])),
+                .map(|entry| pipeline(device, &raster, entry)),
+            scan: ["scan", "add_offsets"].map(|entry| pipeline(device, &scan, entry)),
             sort: [
                 "count_keys",
                 "reduce_counts",
@@ -55,8 +46,8 @@ impl Kernels {
                 "scan_add",
                 "scatter",
             ]
-            .map(|entry| pipeline(device, &sort, entry, &[])),
-            prepare: pipeline(device, &prepare, "prepare", &[]),
+            .map(|entry| pipeline(device, &sort, entry)),
+            prepare: pipeline(device, &prepare, "prepare"),
         }
     }
 }

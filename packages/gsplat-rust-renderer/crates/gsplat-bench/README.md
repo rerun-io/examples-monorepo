@@ -5,9 +5,9 @@ Run the binary in `target/release/` from this package directory:
 
 ```sh
 taskset -c 8-15,24-31 target/release/gsplat-bench speed \
-  --impl brush,ours-old,native --ply scene.ply --path orbit:300 \
+  --impl brush,ours,ours-old,native --ply scene.ply --path orbit:300 \
   --res 1920x1080 --out speed.json
-target/release/gsplat-bench parity --impl ours-old --oracle brush \
+target/release/gsplat-bench parity --impl ours --oracle brush \
   --ply scene.ply --path test-views:transforms_test.json --out parity.json
 ```
 
@@ -21,9 +21,10 @@ for a full path and five seconds, then measures whole passes for at least two
 passes and ten seconds. Implementation order rotates each repeat. Outlying
 repeats get at most two retries; all attempts remain in JSON. Headline statistics
 are median of repeat medians and median of repeat p95s; pooled values are secondary.
-On macOS, sysctl supplies load/core counts and ioreg supplies GPU utilization when
-available; unsupported counters are null and affinity is unpinned. Missing telemetry
-does not block admission, but `quiet_host_verified` is false.
+On macOS, sysctl supplies load/core counts and ioreg supplies GPU utilization.
+Admission requires ten samples with GPU utilization at most 20% and one-minute
+load below 4; missing telemetry blocks admission. Affinity is unpinned and
+`desktop_baseline_gpu_pct` records the measured desktop GPU baseline.
 Archive builds may set `GSPLAT_SOURCE_SHA`; absent Git and override, provenance is
 `unknown`. Checkout builds otherwise record `git describe --always --dirty`.
 
@@ -33,7 +34,21 @@ or `specs:FILE` (strict CameraSpec JSON array). `--res native` retains input siz
 Orbit framing accepts `--center x y z`, `--radius x y`, `--elevation z`, and `--orbit-up x y z` (default +Z).
 
 Lane 2 waits for each frame's GPU completion without pixel transfer. Separate
-lane-1 diagnostics use device timestamps for Brush and six stages of ours-old.
+lane-1 diagnostics use device timestamps for Brush, eight stages of ours, and six
+stages of ours-old. Add `--profile-orbit` to replay the exact camera sequence from
+each selected wall-time repeat for ours and Brush, after separate admission and
+warmup. The GPU headline takes each frame's stage sum before taking medians.
+Core timestamps bracket actual compute passes. Brush's `TimingMethod::Device`
+spans its first through last pass, including the mid-frame host count-readback
+gap; it does not measure pure active-kernel time.
+
+Each profile frame also records queue submits and blocking device polls from a
+separate normal render with API event counting enabled. Logging is disabled for
+wall and GPU timing. `readback_to_submit_ms` measures the host interval from the
+last mapped count-buffer access to the next submit; it excludes the submit call
+and preceding readback latency. It is a diagnostic with logging overhead. Async
+count and completion waits need not call blocking `Device::poll`, so the poll
+count alone is not a synchronization count.
 Parity scores in-memory RGBA floats: RGB on black, alpha, and RGB over white.
 Old/native targets are intrinsically byte formats; Brush Float remains unclipped.
 Worst-five EXRs preserve scored values; PNGs are previews, never metric inputs.
