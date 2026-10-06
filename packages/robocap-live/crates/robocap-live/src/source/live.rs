@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use super::{FrameSource, SourceError, SourceEvent};
 use crate::capture::camera::{Camera, CaptureMode, CaptureStream, LumaFrame};
-use crate::capture::device::{FrameTrigger, IioDevice, monotonic_ns, require_cap, require_vendor_recorder_stopped};
-use crate::capture::iio::{IioScan, MotionKind};
+use crate::capture::device::{FrameTrigger, ImuDevice, monotonic_ns, require_cap, require_vendor_recorder_stopped};
+use crate::capture::iio::MotionKind;
+use kornia_staging_sensor_iio::IioScan;
 use crate::capture::imu::{ClockCheck, ClockGuard, ImuCombiner};
 use crate::capture::matcher::FramesetMatcher;
 use crate::capture::{
@@ -154,8 +155,8 @@ impl LiveSource {
         for path in CAMERA_DEVICES {
             cameras.push(Camera::open(path).map_err(device_error)?);
         }
-        let gyro = IioDevice::start(IMU0_GYRO_IIO, MotionKind::Gyro).map_err(device_error)?;
-        let accel = IioDevice::start(IMU0_ACCEL_IIO, MotionKind::Accel).map_err(device_error)?;
+        let gyro = ImuDevice::start(IMU0_GYRO_IIO, MotionKind::Gyro).map_err(device_error)?;
+        let accel = ImuDevice::start(IMU0_ACCEL_IIO, MotionKind::Accel).map_err(device_error)?;
         for (device, expected) in [(&gyro, GYRO_SCALE), (&accel, ACCEL_SCALE)] {
             if (device.scale - expected).abs() > 1e-9 {
                 eprintln!("robocap-live: iio:device{} scale {} differs from PR #270's {expected}", device.index, device.scale);
@@ -379,7 +380,7 @@ fn camera_thread(
 /// passes the clock guard: future skew is counted (and kept or dropped), a wrong clock or a backlog ends the run.
 fn iio_thread(
     kind: MotionKind,
-    mut device: IioDevice,
+    mut device: ImuDevice,
     tx: &mpsc::Sender<CaptureEvent>,
     shared: &Shared,
     stop: &AtomicBool,
@@ -395,7 +396,7 @@ fn iio_thread(
     let mut read = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         read.clear();
-        let now = match device.read_scans(100, &mut read).and_then(|()| monotonic_ns()) {
+        let now = match device.owner.read_scans(&mut read).map_err(CaptureError::from).and_then(|()| monotonic_ns()) {
             Ok(now) => now,
             Err(error) => return fault(error.to_string()),
         };

@@ -9,6 +9,7 @@ gstreamer-capture = ["dep:gstreamer", "dep:gstreamer-app"]
 live-slam = ["dep:slam-rs"]
 
 [dependencies]
+kornia-staging-sensor-iio.workspace = true
 kornia-staging-imgproc.workspace = true
 anyhow = { workspace = true }
 arrow-array = "58.3"

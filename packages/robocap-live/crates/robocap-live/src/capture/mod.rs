@@ -23,6 +23,9 @@ use serde::Deserialize;
 /// Errors of device capture.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
+    /// Shared IIO decoder or buffer-owner failure.
+    #[error(transparent)]
+    Iio(#[from] kornia_staging_sensor_iio::IioError),
     /// A system call or file access failed.
     #[error("{what}: {source}")]
     Io {

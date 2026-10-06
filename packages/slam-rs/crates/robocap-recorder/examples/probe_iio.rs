@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use robocap_recorder::{IioDevice, monotonic_ns};
+use robocap_recorder::{monotonic_ns, start_imu};
 use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
@@ -10,13 +10,16 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let mut devices = (1..=7).map(IioDevice::start).collect::<Result<Vec<_>>>()?;
+    let mut devices = (1..=7).map(start_imu).collect::<Result<Vec<_>>>()?;
     let mut counts = [0; 7];
     let mut previous = [None; 7];
     let start = Instant::now();
+    let mut scans = Vec::new();
     while start.elapsed() < Duration::from_secs(10) {
         for (index, device) in devices.iter_mut().enumerate() {
-            for sample in device.read_scans()? {
+            scans.clear();
+            device.read_scans(&mut scans)?;
+            for sample in &scans {
                 let age = monotonic_ns()? - sample.timestamp_ns;
                 ensure!(
                     (0..500_000_000).contains(&age),

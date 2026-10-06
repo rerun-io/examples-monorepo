@@ -1,7 +1,7 @@
 use crate::{
     CAMERAS, Camera, CaptureIdentity, CapturedBuffer, DeviceProfile, FRAME_HEIGHT, FRAME_WIDTH,
-    FrameTrigger, IioDevice, MotionKind, MotionSample, SENSORS, STREAMS, SamplePipeline,
-    SegmentedWriter, SensorChannel, VideoSample, monotonic_ns,
+    FrameTrigger, MotionKind, MotionSample, SENSORS, STREAMS, SamplePipeline, SegmentedWriter,
+    SensorChannel, VideoSample, monotonic_ns, start_imu,
 };
 #[cfg(feature = "live-slam")]
 use crate::{ImuChannel, SLAM_CAMERAS, SlamInput, SlamProcess, SlamSender, slam_luma};
@@ -128,7 +128,7 @@ fn camera_capture(
 
 fn sensor_capture(
     channel: SensorChannel,
-    mut device: IioDevice,
+    mut device: kornia_staging_sensor_iio::IioDevice,
     tx: mpsc::SyncSender<Event>,
     stop: &'static AtomicBool,
     #[cfg(feature = "live-slam")] slam: SlamSender,
@@ -148,8 +148,11 @@ fn sensor_capture(
     };
     let mut sequence = 0;
     tx.send(Event::Ready)?;
+    let mut scans = Vec::new();
     while !stop.load(Ordering::Relaxed) {
-        for sample in device.read_scans()? {
+        scans.clear();
+        device.read_scans(&mut scans)?;
+        for sample in &scans {
             let age = monotonic_ns()? - sample.timestamp_ns;
             ensure!(
                 (0..1_000_000_000).contains(&age),
@@ -229,7 +232,7 @@ pub fn run(directory: PathBuf, seconds: u64, stop: &'static AtomicBool) -> Resul
     let mut writer = SegmentedWriter::create(&directory, identity, 600_000_000_000, display)?;
     let devices = SENSORS
         .iter()
-        .map(|channel| IioDevice::start(channel.iio_index))
+        .map(|channel| start_imu(channel.iio_index))
         .collect::<Result<Vec<_>>>()?;
     #[cfg(feature = "live-slam")]
     let mut slam = SlamProcess::spawn(&std::env::current_exe()?)?;

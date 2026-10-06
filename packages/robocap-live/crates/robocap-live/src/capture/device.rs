@@ -4,13 +4,13 @@
 //! Adapted from PR #270's `robocap-recorder/src/{device.rs, device_profile.rs, session.rs}` (271ce643).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use super::iio::{IioScan, IioScanLayout, MotionKind, SCAN_BYTES, read_attribute};
+use super::iio::MotionKind;
 use super::{Cap, CaptureError};
+use kornia_staging_sensor_iio::{DeviceConfig, ScanProfile, read_attribute};
 
 /// CLOCK_MONOTONIC now, nanoseconds.
 ///
@@ -18,10 +18,15 @@ use super::{Cap, CaptureError};
 ///
 /// [`CaptureError::Io`] if the clock cannot be read.
 pub fn monotonic_ns() -> Result<i64, CaptureError> {
-    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: a writable timespec and a clock id Linux supports.
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
-        return Err(CaptureError::last_os_error("clock_gettime(CLOCK_MONOTONIC)"));
+        return Err(CaptureError::last_os_error(
+            "clock_gettime(CLOCK_MONOTONIC)",
+        ));
     }
     Ok(time.tv_sec * 1_000_000_000 + time.tv_nsec)
 }
@@ -35,8 +40,11 @@ pub fn require_cap() -> Result<Cap, CaptureError> {
     let hostname = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
     let serial = fs::read_to_string("/proc/device-tree/serial-number").unwrap_or_default();
     let (hostname, serial) = (hostname.trim(), serial.trim_end_matches('\0').trim());
-    Cap::identify(hostname, serial)
-        .ok_or_else(|| CaptureError::Device(format!("live capture runs only on Cap A or Cap B; this is {hostname:?} {serial:?}")))
+    Cap::identify(hostname, serial).ok_or_else(|| {
+        CaptureError::Device(format!(
+            "live capture runs only on Cap A or Cap B; this is {hostname:?} {serial:?}"
+        ))
+    })
 }
 
 /// Refuse while the vendor recorder can own capture: every `omni-specs.bin` must be a zombie (`robocap-panel handoff` stops its
@@ -46,13 +54,21 @@ pub fn require_cap() -> Result<Cap, CaptureError> {
 ///
 /// [`CaptureError::Device`] when a live vendor recorder exists.
 pub fn require_vendor_recorder_stopped() -> Result<(), CaptureError> {
-    let entries = fs::read_dir("/proc").map_err(|source| CaptureError::Io { what: "read /proc".into(), source })?;
+    let entries = fs::read_dir("/proc").map_err(|source| CaptureError::Io {
+        what: "read /proc".into(),
+        source,
+    })?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(name) = fs::read_to_string(path.join("comm")) else { continue };
+        let Ok(name) = fs::read_to_string(path.join("comm")) else {
+            continue;
+        };
         if name.trim() == "omni-specs.bin" {
             let status = fs::read_to_string(path.join("status")).unwrap_or_default();
-            if !status.lines().any(|line| line.starts_with("State:") && line.contains("Z (zombie)")) {
+            if !status
+                .lines()
+                .any(|line| line.starts_with("State:") && line.contains("Z (zombie)"))
+            {
                 return Err(CaptureError::Device(format!(
                     "the vendor recorder ({}) still owns capture; run through the panel's supervisor (robocap-panel handoff)",
                     path.display()
@@ -63,117 +79,60 @@ pub fn require_vendor_recorder_stopped() -> Result<(), CaptureError> {
     Ok(())
 }
 
-/// Exclusive owner of one IIO buffer. Saves each attribute it changes and restores them in reverse order on drop.
-pub struct IioDevice {
-    file: File,
-    layout: IioScanLayout,
-    saved: Vec<(PathBuf, String)>,
-    scratch: Vec<u8>,
-    /// SI units per count (sysfs `<prefix>_scale`).
+/// Read a positive finite SI-per-count scale before capture can feed IMU maths.
+///
+/// # Errors
+/// Returns an attribute error for malformed, nonpositive or nonfinite scales.
+pub fn read_scale(path: &std::path::Path) -> Result<f64, CaptureError> {
+    let text = read_attribute(path)?;
+    let value = text
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0);
+    value.ok_or_else(|| CaptureError::Attribute {
+        path: path.to_owned(),
+        message: format!("invalid positive finite scale: {text}"),
+    })
+}
+
+/// RoboCap's IIO profile and SI scale, backed by the shared buffer owner.
+pub struct ImuDevice {
+    /// Shared owner; callers reuse their scan storage.
+    pub owner: kornia_staging_sensor_iio::IioDevice,
+    /// SI units per raw count.
     pub scale: f64,
-    /// IIO device index.
+    /// Device index in the cap profile.
     pub index: u8,
 }
 
-impl IioDevice {
-    /// Configure and enable `iio:device{index}` as PR #270 does: require `buffer/enable == 0`, open `/dev/iio:deviceN`
-    /// non-blocking, `current_timestamp_clock = monotonic`, enable x/y/z + timestamp + temp, `sampling_frequency = 200`,
-    /// `buffer/length = 4096`, `buffer/watermark = 1`, then `buffer/enable = 1`.
+impl ImuDevice {
+    /// Start an IMU at the cap's 200 Hz rate and restore configuration on release.
     ///
     /// # Errors
-    ///
-    /// [`CaptureError`] when the buffer is already owned, an attribute cannot be set, or the layout is not the expected one.
-    /// Attributes already changed are restored when the half-built owner drops.
+    /// Returns a capture error for an invalid scale, busy device or unsupported layout.
     pub fn start(index: u8, kind: MotionKind) -> Result<Self, CaptureError> {
         let root = PathBuf::from(format!("/sys/bus/iio/devices/iio:device{index}"));
-        let name = read_attribute(&root.join("name"))?;
-        if name != kind.driver_name() {
-            return Err(CaptureError::Device(format!("iio:device{index} is {name}, expected {}", kind.driver_name())));
-        }
-        if read_attribute(&root.join("buffer/enable"))? != "0" {
-            return Err(CaptureError::Device(format!("iio:device{index}: buffer already enabled (owned by someone else)")));
-        }
-        let node = format!("/dev/iio:device{index}");
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&node)
-            .map_err(|source| CaptureError::Io { what: format!("open {node}"), source })?;
-        let prefix = kind.prefix();
-        let scale_text = read_attribute(&root.join(format!("{prefix}_scale")))?;
-        let scale: f64 = scale_text
-            .parse()
-            .map_err(|_| CaptureError::Attribute { path: root.join(format!("{prefix}_scale")), message: format!("not a number: {scale_text}") })?;
-        let placeholder = IioScanLayout { clock: String::new(), temperature: false, kind };
-        let mut owner = Self { file, layout: placeholder, saved: Vec::new(), scratch: vec![0; SCAN_BYTES * 256], scale, index };
-        owner.set(&root.join("current_timestamp_clock"), "monotonic")?;
-        for axis in ["x", "y", "z"] {
-            owner.set(&root.join(format!("scan_elements/{prefix}_{axis}_en")), "1")?;
-        }
-        owner.set(&root.join("scan_elements/in_timestamp_en"), "1")?;
-        owner.set(&root.join("scan_elements/in_temp_en"), "1")?;
-        owner.set(&root.join("sampling_frequency"), "200")?;
-        owner.set(&root.join("buffer/length"), "4096")?;
-        owner.set(&root.join("buffer/watermark"), "1")?;
-        let layout = IioScanLayout::read(&root)?;
-        if layout.clock != "monotonic" {
-            return Err(CaptureError::Device(format!("iio:device{index} refused the monotonic clock ({})", layout.clock)));
-        }
-        owner.layout = layout;
-        owner.set(&root.join("buffer/enable"), "1")?;
-        Ok(owner)
-    }
-
-    fn set(&mut self, path: &Path, value: &str) -> Result<(), CaptureError> {
-        let original = read_attribute(path)?;
-        self.saved.push((path.to_path_buf(), original));
-        fs::write(path, value).map_err(|error| CaptureError::Attribute { path: path.to_path_buf(), message: format!("write {value:?}: {error}") })
-    }
-
-    /// Wait up to `timeout_ms` for scans and decode all that are buffered (empty on a timeout).
-    ///
-    /// # Errors
-    ///
-    /// [`CaptureError`] on a poll/read fault or a partial scan.
-    pub fn read_scans(&mut self, timeout_ms: i32, out: &mut Vec<IioScan>) -> Result<(), CaptureError> {
-        let mut fd = libc::pollfd { fd: self.file.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        // SAFETY: one valid pollfd, borrowed for the call.
-        let ready = unsafe { libc::poll(&mut fd, 1, timeout_ms) };
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                return Ok(());
-            }
-            return Err(CaptureError::Io { what: format!("poll iio:device{}", self.index), source: error });
-        }
-        if ready == 0 {
-            return Ok(());
-        }
-        if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            return Err(CaptureError::Device(format!("iio:device{} descriptor fault (revents {:#x})", self.index, fd.revents)));
-        }
-        let count = match self.file.read(&mut self.scratch) {
-            Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
-            Err(source) => return Err(CaptureError::Io { what: format!("read iio:device{}", self.index), source }),
-        };
-        if count == 0 || count % SCAN_BYTES != 0 {
-            return Err(CaptureError::Device(format!("iio:device{}: read {count} bytes, not whole scans", self.index)));
-        }
-        for packet in self.scratch[..count].as_chunks::<SCAN_BYTES>().0 {
-            out.push(self.layout.decode(packet)?);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for IioDevice {
-    fn drop(&mut self) {
-        for (path, original) in self.saved.iter().rev() {
-            if let Err(error) = fs::write(path, original) {
-                eprintln!("robocap-live: IIO restore failed for {}: {error}", path.display());
-            }
-        }
+        let path = root.join(format!("{}_scale", kind.prefix()));
+        let scale = read_scale(&path)?;
+        let owner = kornia_staging_sensor_iio::IioDevice::start(DeviceConfig {
+            sysfs: root,
+            node: PathBuf::from(format!("/dev/iio:device{index}")),
+            profile: ScanProfile::new(
+                kind.driver_name(),
+                kind.prefix(),
+                Some("in_temp"),
+            )?,
+            rate_hz: Some(200),
+            buffer_scans: 4096,
+            watermark: 1,
+            read_scans: 256,
+            timeout_ms: 100,
+        })?;
+        Ok(Self {
+            owner,
+            scale,
+            index,
+        })
     }
 }
 
@@ -193,7 +152,10 @@ impl FrameTrigger {
             .write(true)
             .custom_flags(libc::O_CLOEXEC)
             .open("/dev/frame_trigger")
-            .map_err(|source| CaptureError::Io { what: "open /dev/frame_trigger".into(), source })?;
+            .map_err(|source| CaptureError::Io {
+                what: "open /dev/frame_trigger".into(),
+                source,
+            })?;
         // SAFETY: our own descriptor; the stop request has no payload.
         if unsafe { libc::ioctl(file.as_raw_fd(), 0x7401 as _) } != 0 {
             return Err(CaptureError::last_os_error("stop the frame trigger"));
@@ -225,7 +187,27 @@ impl Drop for FrameTrigger {
     fn drop(&mut self) {
         // SAFETY: a live descriptor; stop has no payload.
         if unsafe { libc::ioctl(self.0.as_raw_fd(), 0x7401 as _) } != 0 {
-            eprintln!("robocap-live: frame trigger stop failed: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "robocap-live: frame trigger stop failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn invalid_scale_never_reaches_imu_math() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!("robocap-scale-{}", std::process::id()));
+        for invalid in ["NaN", "inf", "-inf", "0", "-1", "oops"] {
+            fs::write(&path, invalid)?;
+            assert!(read_scale(&path).is_err(), "{invalid}");
+        }
+        fs::write(&path, "0.001197101")?;
+        assert_eq!(read_scale(&path)?, 0.001197101);
+        fs::remove_file(path)?;
+        Ok(())
     }
 }

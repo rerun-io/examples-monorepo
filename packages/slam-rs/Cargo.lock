@@ -3224,6 +3224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-sensor-iio"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-tensor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6260,6 +6268,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "kornia-staging-imgproc",
+ "kornia-staging-sensor-iio",
  "libc",
  "re_build_info 0.37.0",
  "re_log_encoding 0.37.0",
