@@ -190,14 +190,20 @@ fn run_headless(
     // 1s idle tick — keeps animations and incoming gRPC data feeling snappy
     // while still letting an idle viewer sleep most of the time.
     let repaint_signal: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
+    #[cfg(feature = "probe")]
+    let probe_state = Arc::new(std::sync::OnceLock::new());
 
     let mut harness = {
         let repaint_signal = repaint_signal.clone();
+        #[cfg(feature = "probe")]
+        let probe_state = probe_state.clone();
         egui_kittest::Harness::<re_viewer::App>::builder()
             .with_size(size)
             .with_step_dt(1.0 / 60.0)
             .wgpu_setup(full_limits_wgpu_setup())
             .build_eframe(move |cc| {
+                #[cfg(feature = "probe")]
+                let _ = probe_state.set(cc.wgpu_render_state.clone().expect("wgpu viewer"));
                 let repaint_signal = repaint_signal.clone();
                 cc.egui_ctx.set_request_repaint_callback(move |_info| {
                     let (lock, cvar) = &*repaint_signal;
@@ -217,8 +223,31 @@ fn run_headless(
     re_log::info!("Headless viewer running at {}x{}.", size.x, size.y);
 
     let idle_timeout = Duration::from_secs(1);
+    #[cfg(feature = "probe")]
+    let mut probe = std::env::var_os("GSPLAT_VIEWER_PROBE").map(|path| {
+        gsplat_viewer::frame_probe::FrameProbe::new(
+            path.into(),
+            probe_state.get().expect("created device").clone(),
+            size,
+        )
+    });
     loop {
+        #[cfg(feature = "probe")]
+        if let Some(probe) = &mut probe {
+            probe.begin_frame(&harness.ctx);
+        }
         harness.step();
+        #[cfg(feature = "probe")]
+        if let Some(probe) = &mut probe
+            && probe.end_frame(&harness.ctx, harness.output())?
+        {
+            // Pixel evidence is captured only after the last timed sample.
+            harness
+                .render()
+                .map_err(|err| anyhow::anyhow!(err))?
+                .save(probe.screenshot_path())?;
+            return Ok(());
+        }
 
         if has_pending_close(&harness) {
             re_log::info!("Headless viewer received close request, shutting down.");

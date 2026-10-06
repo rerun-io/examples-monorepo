@@ -227,6 +227,10 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                                 continue;
                             }
                         };
+                        #[cfg(feature = "probe")]
+                        if let Some(camera) = _submitted {
+                            crate::frame_probe::observe(ctx.egui_ctx(), camera);
+                        }
                         if retry {
                             ctx.egui_ctx().request_repaint();
                         }

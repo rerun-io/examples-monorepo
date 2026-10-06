@@ -7,12 +7,17 @@ edition = "2024"
 name = "gsplat-rust-renderer"
 path = "src/main.rs"
 
+[features]
+probe = ["dep:serde", "dep:serde_json"]
+
 [dependencies]
 gsplat-core = { path = "../gsplat-core" }
 anyhow.workspace = true
 clap.workspace = true
 glam.workspace = true
 wgpu.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 # Published Rerun 0.38.1 crates from crates.io — reproducible from a clean
 # checkout on any machine. Rerun 0.38 uses egui/eframe 0.36, so the headless
 # kittest harness must stay on the same egui family as re_viewer.

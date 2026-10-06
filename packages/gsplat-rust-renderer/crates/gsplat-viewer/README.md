@@ -18,3 +18,5 @@ splats can lag native content by one frame. Perspective cameras are supported.
 
 See [architecture](../../docs/architecture.md) for selection, cache, depth,
 framing and device details. Pixel tests are in `tests/test_viewer_pixels.py`.
+The optional `probe` Cargo feature adds headless frame timing; its session
+orchestration lives outside the shipped package.

@@ -6123,6 +6123,8 @@ dependencies = [
  "re_view_spatial",
  "re_viewer",
  "re_viewer_context",
+ "serde",
+ "serde_json",
  "tokio",
  "wgpu",
 ]
