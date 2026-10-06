@@ -6,13 +6,8 @@ pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::SUBGROUP
-            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
-        required_limits: wgpu::Limits {
-            max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size,
-            max_buffer_size: adapter.limits().max_buffer_size,
-            ..Default::default()
-        },
+        required_features: gsplat_core::required_features(&adapter),
+        required_limits: gsplat_core::required_limits(&adapter),
         ..Default::default()
     }))
     .unwrap()

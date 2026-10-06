@@ -8,6 +8,7 @@ description = "WebGPU Gaussian splat forward rendering without a tensor runtime"
 serde = ["dep:serde"]
 
 [dependencies]
+half = { version = "2.7", features = ["bytemuck"] }
 bytemuck.workspace = true
 glam.workspace = true
 thiserror.workspace = true

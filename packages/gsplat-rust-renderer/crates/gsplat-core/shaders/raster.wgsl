@@ -5,6 +5,7 @@
 @group(0) @binding(4) var<storage, read_write> out_float: array<vec4f>;
 @group(0) @binding(5) var<storage, read_write> out_packed: array<u32>;
 @group(0) @binding(6) var out_texture: texture_storage_2d < rgba8unorm, write >;
+// OPTIONAL_DEPTH_DECLARATIONS
 var<workgroup> batch: array<Splat, 256>;
 var<workgroup> range_lo: u32;
 var<workgroup> range_hi: u32;
@@ -32,6 +33,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
     let hi = workgroupUniformLoad(&range_hi);
     var transmittance = 1.0;
     var color = vec3f(0.0);
+    // OPTIONAL_DEPTH_INIT
     var done = !inside;
     if done {
         atomicAdd(&num_done, 1u);
@@ -47,6 +49,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
         let remaining = min(256u, hi - start);
         if lid < remaining {
             batch[lid] = projected[isect_ids[start + lid]];
+            // OPTIONAL_DEPTH_LOAD
         }
         workgroupBarrier();
         let was_done = done;
@@ -60,6 +63,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
                     done = true;
                 } else {
                     color += max(vec3f(p.r, p.g, p.b), vec3f(0.0)) * (alpha * transmittance);
+                    // OPTIONAL_DEPTH_ACCUMULATE
                     transmittance = next;
                 }
             }
@@ -68,6 +72,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
             atomicAdd(&num_done, 1u);
         }
     }
+    // OPTIONAL_DEPTH_STORE
     return vec4f(color + transmittance * u.background.xyz, 1.0 - transmittance);
 }
 

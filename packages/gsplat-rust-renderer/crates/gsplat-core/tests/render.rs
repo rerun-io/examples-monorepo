@@ -6,12 +6,30 @@ use gsplat_core::{Camera, CameraModel, RenderMode, RenderOptions, Renderer, Spla
 #[test]
 #[ignore = "integration: GPU"]
 fn centered_gaussian_has_analytic_color_alpha_and_background() {
+    analytic_render(glam::Affine3A::IDENTITY, 0.182_996_84);
+}
+#[test]
+#[ignore = "integration: GPU"]
+fn instance_affine_preserves_projection_and_covariance() {
+    analytic_render(
+        glam::Affine3A::from_scale_rotation_translation(
+            Vec3::new(2.0, 0.5, 1.0),
+            Quat::from_rotation_z(0.7),
+            Vec3::new(0.4, -0.3, 1.0),
+        ),
+        0.106_753_71,
+    );
+}
+fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f32) {
     let (device, queue) = common::gpu();
     let renderer = Renderer::new(&device, &queue).unwrap();
+    let p = world_from_local
+        .inverse()
+        .transform_point3(Vec3::new(0.0, 0.0, 2.0));
     let scene = renderer
         .upload(
             &Splats {
-                transforms: vec![[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0]],
+                transforms: vec![[p.x, p.y, p.z, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0]],
                 raw_opacities: vec![0.0],
                 sh_coefficients: vec![[0.0; 3]],
                 sh_degree: 0,
@@ -42,6 +60,7 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
         size: UVec2::splat(33),
     };
     let options = RenderOptions {
+        world_from_local,
         background: Vec3::new(0.2, 0.4, 0.6),
         ..Default::default()
     };
@@ -112,6 +131,8 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
         assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
     }
     assert_eq!(rgba[0], [0.2, 0.4, 0.6, 0.0]);
+    // Independent Gaussian covariance: (f/2)^2 exp(-4) A A^T + 0.3 I.
+    assert!((rgba[16 * 33 + 19][3] - alpha_three_pixels_right).abs() < 1e-5);
     let bytes = common::read::<u8>(&device, &queue, &packed, 33 * 33 * 4);
     assert_eq!(
         &bytes[(16 * 33 + 16) * 4..(16 * 33 + 17) * 4],
@@ -121,6 +142,31 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
     let center = &bytes[16 * 256 + 16 * 4..16 * 256 + 17 * 4];
     assert_eq!(&center[..3], &[89, 115, 140]);
     assert!(center[3].abs_diff(128) <= 1);
+
+    if world_from_local == glam::Affine3A::IDENTITY {
+        // The same uploaded scene supports two blueprint modes. For this
+        // isotropic Gaussian mip compensation is v/(v+0.1), v=4.1769916755.
+        for (mode, alpha) in [(Some(RenderMode::Mip), 0.488_309_54), (None, 0.5)] {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            renderer
+                .render(
+                    &mut encoder,
+                    &mut view,
+                    &camera,
+                    &RenderOptions {
+                        render_mode: mode,
+                        ..options
+                    },
+                    Target::Float(&float),
+                )
+                .unwrap();
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+            let rgba = common::read::<[f32; 4]>(&device, &queue, &float, 33 * 33);
+            assert!((rgba[16 * 33 + 16][3] - alpha).abs() < 1e-5);
+        }
+    }
 
     let mut encoder = device.create_command_encoder(&Default::default());
     assert!(
@@ -147,4 +193,111 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
             )
             .is_err()
     );
+}
+
+#[test]
+#[ignore = "integration: GPU"]
+fn tiny_invertible_instances_are_valid() {
+    analytic_render(glam::Affine3A::from_scale(Vec3::splat(0.0001)), 0.0);
+}
+
+#[test]
+#[ignore = "integration: GPU"]
+fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
+    let (device, queue) = common::gpu();
+    let renderer = Renderer::new(&device, &queue).unwrap();
+    let scene = renderer
+        .upload(
+            &Splats {
+                transforms: [2.0, 4.0]
+                    .map(|z| [0.0, 0.0, z, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0])
+                    .to_vec(),
+                raw_opacities: vec![0.0; 2],
+                sh_coefficients: vec![[0.0; 3]; 2],
+                sh_degree: 0,
+                min_scale: None,
+            },
+            RenderMode::Default,
+        )
+        .unwrap();
+    let mut view = renderer.create_view(&scene, 64).unwrap();
+    let camera = Camera {
+        model: CameraModel::Pinhole,
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        fov_x: 1.0,
+        fov_y: 1.0,
+        center_uv: Vec2::splat(0.5),
+        size: UVec2::splat(33),
+    };
+    let make_texture = |format| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 33,
+                height: 33,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let color = make_texture(wgpu::TextureFormat::Rgba8Unorm);
+    let depth = make_texture(wgpu::TextureFormat::R32Float);
+    let output = common::upload(&device, &vec![0.0f32; 64 * 33]);
+    let color_output = common::upload(&device, &vec![0u8; 256 * 33]);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer
+        .render(
+            &mut encoder,
+            &mut view,
+            &camera,
+            &RenderOptions::default(),
+            Target::TextureDepth {
+                color: &color.create_view(&Default::default()),
+                depth: &depth.create_view(&Default::default()),
+            },
+        )
+        .unwrap();
+    encoder.copy_texture_to_buffer(
+        depth.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(33),
+            },
+        },
+        depth.size(),
+    );
+    encoder.copy_texture_to_buffer(
+        color.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &color_output,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(33),
+            },
+        },
+        color.size(),
+    );
+    queue.submit([encoder.finish()]);
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+    let values: Vec<f32> = common::read(&device, &queue, &output, 64 * 33);
+    assert!((values[16 * 64 + 16] - 8.0 / 3.0).abs() < 1e-5);
+    assert_eq!(values[0], 0.0);
+    let rgba: Vec<u8> = common::read(&device, &queue, &color_output, 256 * 33);
+    for (actual, expected) in rgba[16 * 256 + 16 * 4..16 * 256 + 17 * 4]
+        .iter()
+        .zip([96, 96, 96, 191])
+    {
+        assert!(actual.abs_diff(expected) <= 1);
+    }
 }

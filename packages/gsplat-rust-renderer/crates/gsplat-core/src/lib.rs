@@ -5,6 +5,8 @@
 //! fork commit `4db81837f`, and `enable subgroups;` prepended on WebGPU only.
 //! Naga 30 rejects that directive; no browser path is implemented here.
 
+extern crate self as gsplat_core;
+
 mod camera;
 mod gpu;
 mod kernels;
@@ -43,3 +45,14 @@ mod primitive_tests;
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
 mod test_utils;
+
+pub mod native;
+
+/// Request the adapter's full limits, retaining stock viewer texture capabilities.
+pub fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    adapter.limits()
+}
+/// Subgroups are mandatory; timing is enabled only when supported.
+pub fn required_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    wgpu::Features::SUBGROUP | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY)
+}

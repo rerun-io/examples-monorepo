@@ -35,12 +35,16 @@ pub(crate) enum TargetHandle {
     Float(wgpu::Buffer),
     Packed(wgpu::Buffer),
     Texture(wgpu::TextureView),
+    TextureDepth(wgpu::TextureView, wgpu::TextureView),
 }
 impl TargetHandle {
     pub fn matches(&self, target: &Target<'_>) -> bool {
         match (self, target) {
             (Self::Float(a), Target::Float(b)) | (Self::Packed(a), Target::Packed(b)) => a == *b,
             (Self::Texture(a), Target::Texture(b)) => a == *b,
+            (Self::TextureDepth(a, d), Target::TextureDepth { color: b, depth: e }) => {
+                a == *b && d == *e
+            }
             _ => false,
         }
     }
@@ -304,6 +308,10 @@ impl ViewState {
             frame.raster = None;
         }
         Ok(())
+    }
+    /// Whether this view still has submitted feedback to consume.
+    pub fn has_pending_frames(&self) -> bool {
+        !self.pending.is_empty()
     }
     /// Nonblocking completed-frame counts. An overflow preserves the target and requests a rerender.
     pub fn poll_feedback(&mut self) -> Result<Option<FrameStats>, Error> {

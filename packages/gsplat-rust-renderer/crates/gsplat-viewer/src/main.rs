@@ -1,44 +1,15 @@
 //! Stock Rerun viewer plus one extra Gaussian splat visualizer.
 //!
-//! # Architecture
-//!
-//! This binary is a lightly customized Rerun viewer.  It does two things on top
-//! of the stock viewer:
-//!
-//! 1. **Starts a gRPC server** on `127.0.0.1:9876` that accepts standard Rerun
-//!    log messages.  Any Python process that calls `rr.connect_grpc()` will send
-//!    component data here.
-//!
-//! 2. **Registers a custom `Gaussians3D` visualizer** on the built-in
-//!    `Spatial3DView`.  When the data store contains entities matching the
-//!    upstream `Gaussians3D` contract (`centers`, and optionally `scales`,
-//!    `quaternions`, `colors`, `sh_coefficients`, `show_spherical_harmonics`),
-//!    the custom visualizer takes over rendering using a GPU-accelerated
-//!    Gaussian splatting pipeline instead of the stock point-cloud renderer.
-//!
-//! Everything else (UI, blueprint, timeline, selection, etc.) is inherited from
-//! the stock Rerun viewer unchanged.
-//!
-//! # Usage
-//!
-//! ```bash
-//! # Terminal 1 – launch the viewer:
-//! cargo run --release --bin gsplat-rust-renderer
-//!
-//! # Headless variant (no OS window; screenshots via ViewerClient.save_screenshot):
-//! cargo run --release --bin gsplat-rust-renderer -- --headless
-//!
-//! # Terminal 2 – send Gaussian splat data from Python:
-//! python tools/log_gaussian_ply.py --rr-config.connect
-//! ```
+//! Queries native GaussianSplats3D through ComputeGaussianSplats3D and composites
+//! gsplat-core output in Spatial3DView. Supports live gRPC, saved recordings,
+//! and headless screenshots with the same registration path.
 
-use gsplat_lib::gaussian_visualizer;
+use gsplat_viewer::gaussian_visualizer;
 
+use clap::Parser as _;
 use re_sdk_types::View as _;
 use re_viewer::external::{eframe, egui};
-use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -171,24 +142,17 @@ fn create_app(
     // Rerun 0.38 requires registration before the first renderer() lookup.
     viewer.with_render_ctx_mut(|ctx| {
         ctx.renderers_mut()
-            .register::<gsplat_lib::gaussian_renderer::GaussianRenderer>();
+            .register::<gsplat_viewer::gaussian_renderer::GaussianRenderer>();
     });
 
-    // ── Register the custom Gaussian splat visualizer ─────────────────
-    // `extend_view_class` adds our visualizer to the existing
-    // Spatial3DView.  Any entity that matches the Gaussians3D
-    // archetype will be rendered by our custom GPU pipeline instead
-    // of the stock point-cloud renderer.
+    // Keep both explicit choices; the context system installs process-local defaults.
     viewer.extend_view_class(
         re_sdk_types::blueprint::views::Spatial3DView::identifier(),
-        |registrator| {
-            registrator.register_visualizer::<gaussian_visualizer::GaussianSplatVisualizer>()?;
-            Ok(())
-        },
+        register_splat_system,
     )?;
 
     // Wire up live logs and positional files only after the custom visualizer
-    // is registered, so the first activated blueprint can resolve Gaussians3D.
+    // is registered, so the first activated blueprint can resolve ComputeGaussianSplats3D.
     viewer.add_log_receiver(grpc_rx);
     if let Some(rrd_path) = rrd_path {
         // Rerun's normal file-opening route both ingests the stores and selects
@@ -204,11 +168,7 @@ fn create_app(
 // Headless mode
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Vendored from Rerun's `re_viewer/src/headless.rs`, with one key change:
-// the harness uses OUR full-limits wgpu device (see `full_limits_wgpu_setup`)
-// instead of `re_viewer`'s crate-private `wgpu_options()`.  Rerun's headless
-// device requests downlevel-defaults limits with **zero compute limits**, which
-// cannot create the Gaussian splatting compute pipelines.
+// Drive the public test harness with the same compute-capable device as the window.
 
 /// Run the viewer in headless mode.
 ///
@@ -235,6 +195,7 @@ fn run_headless(
         let repaint_signal = repaint_signal.clone();
         egui_kittest::Harness::<re_viewer::App>::builder()
             .with_size(size)
+            .with_step_dt(1.0 / 60.0)
             .wgpu_setup(full_limits_wgpu_setup())
             .build_eframe(move |cc| {
                 let repaint_signal = repaint_signal.clone();
@@ -245,8 +206,11 @@ fn run_headless(
                 });
                 // Creation failures (renderer setup, visualizer registration)
                 // are fatal in a non-interactive headless run — abort loudly.
-                app_creator(cc)
-                    .unwrap_or_else(|err| panic!("failed to create headless viewer app: {err}"))
+                let mut app = app_creator(cc)
+                    .unwrap_or_else(|err| panic!("failed to create headless viewer app: {err}"));
+                // Keep logs/reports available without transient overlays in pixel captures.
+                app.app_options_mut().show_notification_toasts = false;
+                app
             })
     };
 
@@ -255,7 +219,6 @@ fn run_headless(
     let idle_timeout = Duration::from_secs(1);
     loop {
         harness.step();
-        handle_pending_screenshots(&mut harness);
 
         if has_pending_close(&harness) {
             re_log::info!("Headless viewer received close request, shutting down.");
@@ -279,9 +242,8 @@ fn run_headless(
 ///
 /// `UICommand::Quit` (and the Ctrl-C handler) ultimately send
 /// `ViewportCommand::Close`.  In a normal `eframe::run_native` setup the
-/// windowing backend consumes that and exits the event loop.  `kittest`
-/// ignores viewport commands, so we have to detect `Close` here and break
-/// out of the headless loop ourselves.
+/// windowing backend consumes that and exits the event loop. The harness
+/// handles screenshot commands; this outer loop must still honor `Close`.
 fn has_pending_close(harness: &egui_kittest::Harness<'_, re_viewer::App>) -> bool {
     harness
         .output()
@@ -291,195 +253,35 @@ fn has_pending_close(harness: &egui_kittest::Harness<'_, re_viewer::App>) -> boo
         .any(|cmd| matches!(cmd, egui::ViewportCommand::Close))
 }
 
-/// Bridge `egui::ViewportCommand::Screenshot` requests through `kittest`'s
-/// offscreen renderer.
-///
-/// In a normal `eframe::run_native` setup, the windowing backend captures the
-/// framebuffer after a screenshot command and emits an
-/// `egui::Event::Screenshot` that the viewer's `App` listens for.  `kittest`
-/// doesn't process viewport commands itself, so we have to do that translation
-/// here, otherwise `save_screenshot` requests would be silently dropped.
-fn handle_pending_screenshots(harness: &mut egui_kittest::Harness<'_, re_viewer::App>) {
-    let pending: Vec<egui::UserData> = harness
-        .output()
-        .viewport_output
-        .values()
-        .flat_map(|v| v.commands.iter())
-        .filter_map(|cmd| match cmd {
-            egui::ViewportCommand::Screenshot(user_data) => Some(user_data.clone()),
-            _ => None,
-        })
-        .collect();
-
-    if pending.is_empty() {
-        return;
-    }
-
-    let rgba = match harness.render() {
-        Ok(rgba) => rgba,
-        Err(err) => {
-            re_log::error!("Failed to render headless screenshot: {err}");
-            return;
-        }
-    };
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    let pixels = rgba.into_raw();
-    let color_image = Arc::new(egui::ColorImage::from_rgba_premultiplied(size, &pixels));
-
-    for user_data in pending {
-        harness.event(egui::Event::Screenshot {
-            viewport_id: egui::ViewportId::ROOT,
-            user_data,
-            image: color_image.clone(),
-        });
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLI parsing
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Minimal command-line options.  We only need `--port`, `--headless`,
-/// `--window-size`, `--hide-welcome-screen` and `--version`; everything else
-/// is warned about and ignored so the binary can be used as a
-/// drop-in replacement for `rerun`.
-#[derive(Clone, Debug)]
+/// Viewer startup options. Unknown flags fail with a useful CLI error.
+#[derive(Clone, Debug, clap::Parser)]
+#[command(disable_version_flag = true)]
 struct Cli {
-    /// TCP port for the gRPC server.
+    #[arg(long, default_value_t = GRPC_PORT)]
     port: u16,
-    /// If true, print the version string and exit.
+    #[arg(long = "version", short = 'V')]
     print_version: bool,
-    /// Run without an OS window (screenshots via `ViewerClient.save_screenshot`).
+    #[arg(long)]
     headless: bool,
-    /// Viewport size in logical points, parsed from `--window-size WxH`.
+    #[arg(long, value_parser = parse_window_size)]
     window_size: Option<egui::Vec2>,
-    /// Hide the welcome screen (passed by `rr.spawn` / `ViewerClient.spawn`).
+    #[arg(long)]
     hide_welcome_screen: bool,
-    /// Optional recording loaded into the custom viewer at startup.
     rrd_path: Option<PathBuf>,
+    // SDK spawn compatibility. Rerun manages these defaults internally.
+    #[arg(long = "memory-limit", hide = true)]
+    _memory_limit: Option<String>,
+    #[arg(long = "server-memory-limit", hide = true)]
+    _server_memory_limit: Option<String>,
+    #[arg(long = "expect-data-soon", hide = true)]
+    _expect_data_soon: bool,
 }
-
 fn parse_cli() -> anyhow::Result<Cli> {
-    parse_cli_from(std::env::args_os().skip(1))
-}
-
-fn parse_cli_from(args: impl Iterator<Item = OsString>) -> anyhow::Result<Cli> {
-    let mut args = args.peekable();
-    let mut cli = Cli {
-        port: GRPC_PORT,
-        print_version: false,
-        headless: false,
-        window_size: None,
-        hide_welcome_screen: false,
-        rrd_path: None,
-    };
-
-    while let Some(arg) = args.next() {
-        if arg == "--version" || arg == "-V" {
-            cli.print_version = true;
-            continue;
-        }
-
-        if arg == "--port" {
-            let value = args
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("missing value for --port"))?;
-            cli.port = parse_port(&value)?;
-            continue;
-        }
-
-        if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--port=")) {
-            cli.port = parse_port_str(value)?;
-            continue;
-        }
-
-        if arg == "--headless" {
-            cli.headless = true;
-            continue;
-        }
-
-        if arg == "--window-size" {
-            let value = args
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("missing value for --window-size"))?;
-            let value = value
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("non-utf8 window size value"))?;
-            cli.window_size = Some(parse_window_size(value)?);
-            continue;
-        }
-
-        if let Some(value) = arg
-            .to_str()
-            .and_then(|arg| arg.strip_prefix("--window-size="))
-        {
-            cli.window_size = Some(parse_window_size(value)?);
-            continue;
-        }
-
-        if arg == "--hide-welcome-screen" {
-            cli.hide_welcome_screen = true;
-            continue;
-        }
-
-        // Silently ignore flags that the stock `rerun` binary accepts so
-        // this binary can be used as a drop-in replacement.
-        if arg == "--memory-limit" || arg == "--server-memory-limit" {
-            let _ = args.next();
-            continue;
-        }
-
-        if arg == "--expect-data-soon" {
-            continue;
-        }
-
-        if arg.to_str().is_some_and(|arg| {
-            arg.starts_with("--memory-limit=") || arg.starts_with("--server-memory-limit=")
-        }) {
-            continue;
-        }
-
-        if arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
-            eprintln!(
-                "warning: unrecognized viewer flag '{}'; ignoring it",
-                arg.to_string_lossy()
-            );
-            if args
-                .peek()
-                .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
-            {
-                let _ = args.next();
-            }
-            continue;
-        }
-
-        let path = PathBuf::from(&arg);
-        if path.extension().is_some_and(|extension| extension == "rrd") {
-            if let Some(existing) = &cli.rrd_path {
-                anyhow::bail!(
-                    "multiple positional .rrd paths are not supported: '{}' and '{}'",
-                    existing.display(),
-                    path.display()
-                );
-            }
-            cli.rrd_path = Some(path);
-        }
-    }
-
-    Ok(cli)
-}
-
-fn parse_port(value: &OsString) -> anyhow::Result<u16> {
-    let value = value
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-utf8 port value"))?;
-    parse_port_str(value)
-}
-
-fn parse_port_str(value: &str) -> anyhow::Result<u16> {
-    value
-        .parse::<u16>()
-        .map_err(|err: ParseIntError| anyhow::anyhow!("invalid port '{value}': {err}"))
+    Ok(Cli::parse())
 }
 
 /// Parse a `WIDTHxHEIGHT` string (e.g. `1600x900`) into an `egui::Vec2`.
@@ -510,39 +312,51 @@ fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
 /// Key choices:
 /// - **Adapter selection** — delegates to `re_renderer` so we pick the same
 ///   GPU that Rerun's internal renderer expects.
-/// - **Device limits** — we request the adapter's full limits so compute
+/// - **Device limits** — we request the WebGPU compute limits so compute
 ///   shaders (storage buffers, workgroup sizes) aren't artificially capped.
 ///   This is why the headless path can't use `re_viewer`'s own wgpu options:
 ///   those request zero compute limits.
+fn validate_compute_adapter(
+    features: re_renderer::external::wgpu::Features,
+    limits: &re_renderer::external::wgpu::Limits,
+) -> Result<(), String> {
+    use re_renderer::external::wgpu;
+    if !features.contains(wgpu::Features::SUBGROUP) {
+        return Err("ComputeGaussianSplats3D requires wgpu Features::SUBGROUP".into());
+    }
+    let required = wgpu::Limits {
+        max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+        max_buffer_size: limits.max_buffer_size,
+        ..Default::default()
+    };
+    if !required.check_limits(limits) {
+        return Err("ComputeGaussianSplats3D requires WebGPU compute limits (8 storage buffers, 256 threads per workgroup)".into());
+    }
+    Ok(())
+}
+
 fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
     eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
         // Use Rerun's preferred wgpu instance descriptor (Vulkan on
         // Linux, Metal on macOS).
         instance_descriptor: re_renderer::device_caps::instance_descriptor(None),
         native_adapter_selector: Some(Arc::new(move |adapters, surface| {
-            re_renderer::device_caps::select_adapter(
+            let adapter = re_renderer::device_caps::select_adapter(
                 adapters,
                 re_renderer::device_caps::instance_descriptor(None).backends,
                 surface,
-            )
+            )?;
+            validate_compute_adapter(adapter.features(), &adapter.limits())
+                .map_err(|error| format!("{}: {error}", adapter.get_info().name))?;
+            Ok(adapter)
         })),
         device_descriptor: Arc::new(|adapter| re_renderer::external::wgpu::DeviceDescriptor {
             label: Some("gsplat-rust-renderer device"),
-            // Request all features the adapter supports, except
-            // MAPPABLE_PRIMARY_BUFFERS which isn't needed and can
-            // cause issues on some drivers.
-            required_features: adapter
-                .features()
-                .difference(re_renderer::external::wgpu::Features::MAPPABLE_PRIMARY_BUFFERS),
-            // Use the adapter's full limits so our compute shaders
-            // aren't restricted by the default (very conservative)
-            // wgpu limits.
-            required_limits: adapter.limits(),
+            required_features: gsplat_core::required_features(adapter),
+            required_limits: gsplat_core::required_limits(adapter),
             memory_hints: re_renderer::external::wgpu::MemoryHints::MemoryUsage,
             trace: re_renderer::external::wgpu::Trace::Off,
-            experimental_features: unsafe {
-                re_renderer::external::wgpu::ExperimentalFeatures::enabled()
-            },
+            experimental_features: Default::default(),
         }),
         ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
     })
@@ -582,56 +396,96 @@ fn native_options() -> eframe::NativeOptions {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
-
     #[test]
-    fn positional_rrd_is_kept_for_startup_loading() {
-        let cli = parse_cli_from(
-            [
-                OsString::from("--headless"),
-                OsString::from("--port"),
-                OsString::from("4321"),
-                OsString::from("training.rrd"),
-            ]
-            .into_iter(),
-        )
+    fn startup_arguments_and_sdk_flags() {
+        let cli = Cli::try_parse_from([
+            "viewer",
+            "--headless",
+            "--port=4321",
+            "--window-size",
+            "800x600",
+            "--expect-data-soon",
+            "training.rrd",
+        ])
         .unwrap();
-
-        assert_eq!(cli.rrd_path, Some(std::path::PathBuf::from("training.rrd")));
-    }
-
-    #[test]
-    fn multiple_positional_rrds_are_rejected() {
-        let error =
-            parse_cli_from([OsString::from("one.rrd"), OsString::from("two.rrd")].into_iter())
-                .unwrap_err();
-        assert!(error.to_string().contains("multiple positional .rrd"));
-    }
-
-    #[test]
-    fn unknown_flag_value_is_not_misparsed_as_recording() {
-        let cli = parse_cli_from(
-            [
-                OsString::from("--future-output"),
-                OsString::from("value.rrd"),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        assert_eq!(cli.rrd_path, None);
-    }
-
-    #[test]
-    fn unknown_flag_warns_and_known_arguments_still_parse() {
-        let cli = parse_cli_from(
-            [
-                OsString::from("--future-switch"),
-                OsString::from("--headless"),
-                OsString::from("training.rrd"),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-        assert!(cli.headless);
         assert_eq!(cli.rrd_path, Some(PathBuf::from("training.rrd")));
+        assert_eq!(cli.window_size, Some(egui::vec2(800.0, 600.0)));
+        assert_eq!(cli.port, 4321);
+        assert!(cli.headless);
+    }
+    #[test]
+    fn invalid_arguments_fail_clearly() {
+        for args in [
+            vec!["viewer", "one.rrd", "two.rrd"],
+            vec!["viewer", "--future-output", "value.rrd"],
+            vec!["viewer", "--window-size=0x1"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use re_renderer::external::wgpu;
+
+    #[test]
+    fn startup_reports_missing_subgroups() {
+        let error =
+            super::validate_compute_adapter(wgpu::Features::empty(), &wgpu::Limits::default())
+                .unwrap_err();
+        assert!(error.contains("SUBGROUP"));
+        assert!(
+            super::validate_compute_adapter(wgpu::Features::SUBGROUP, &wgpu::Limits::default())
+                .is_ok()
+        );
+    }
+}
+
+fn register_splat_system(
+    registrator: &mut re_viewer_context::ViewSystemRegistrator<'_>,
+) -> Result<(), re_viewer_context::ViewClassRegistryError> {
+    gsplat_viewer::bounds::register(registrator);
+    registrator
+        .register_context_system::<gsplat_viewer::automatic_selection::AutomaticSplatSelection>()?;
+    registrator.register_visualizer::<gaussian_visualizer::GaussianSplatVisualizer>()
+}
+
+#[cfg(test)]
+mod automatic_selection_tests {
+    use super::*;
+    use re_viewer_context::{ViewClass as _, ViewClassRegistry};
+
+    #[test]
+    fn custom_spatial_view_keeps_both_explicit_choices() {
+        let mut registry = ViewClassRegistry::default();
+        let reflection = re_sdk_types::reflection::reflection();
+        let options = Default::default();
+        let mut fallbacks = Default::default();
+        registry
+            .add_class::<re_view_spatial::SpatialView3D>(reflection, &options, &mut fallbacks)
+            .unwrap();
+        registry
+            .extend_class(
+                re_view_spatial::SpatialView3D::identifier(),
+                reflection,
+                &options,
+                &mut fallbacks,
+                register_splat_system,
+            )
+            .unwrap();
+        let visualizers =
+            registry.new_visualizer_collection(re_view_spatial::SpatialView3D::identifier());
+        let mut splats: Vec<_> = visualizers
+            .iter_with_identifiers()
+            .map(|(id, _)| id.to_string())
+            .filter(|id| id.contains("GaussianSplats3D"))
+            .collect();
+        splats.sort();
+        assert_eq!(splats, ["ComputeGaussianSplats3D", "GaussianSplats3D"]);
+        assert!(
+            visualizers.iter_with_identifiers().count() > 10,
+            "Other spatial visualizers remain registered"
+        );
     }
 }

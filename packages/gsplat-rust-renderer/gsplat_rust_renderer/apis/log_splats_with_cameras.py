@@ -1,7 +1,7 @@
 """Log a trained splat PLY together with its NeRF-synthetic dataset cameras.
 
 Clean ``log-scene`` flow: at ``frame=0`` on the ``"frame"`` timeline it logs the
-splat under ``/world/splats`` (bound to the ``"Gaussians3D"`` visualizer) plus
+splat under ``/world/splats`` as native ``GaussianSplats3D`` plus
 one camera per view under ``/world/cameras/<split>_<NNNN>`` — a ``Transform3D``
 + ``rr.Pinhole`` frustum with the composited GT image on the image plane, so
 clicking a frustum shows its photo. The blueprint pairs a 3D view with a Tabs
@@ -27,7 +27,7 @@ from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
-from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, SPLATS_VISUALIZER, Gaussians3D
+from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, compute_visualizer, splats_from_ply
 from gsplat_rust_renderer.nerfbaselines import DEFAULT_SCENE, scene_data_dir, scene_ply_path
 from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited
 
@@ -40,6 +40,10 @@ class LogSceneConfig:
 
     rr_config: RerunTyroConfig
     """Viewer wiring (spawn/connect/save/serve) — use --rr-config.connect for a running viewer."""
+    compute: bool = False
+    """Explicitly select the custom compute visualizer; normally each viewer selects its renderer."""
+    render_mode: Literal["default", "mip"] | None = None
+    """Per-entity compute rendering mode, stored in the blueprint."""
     scene: str = DEFAULT_SCENE
     """nerfbaselines scene; resolves --scene-dir and --ply-path defaults when they are omitted."""
     scene_dir: Path | None = None
@@ -83,7 +87,7 @@ def log_split_cameras(scene_dir: Path, split: Literal["train", "test"], image_pl
     return cam_paths
 
 
-def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int) -> rrb.Blueprint:
+def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int, compute: bool = False, render_mode: Literal["default", "mip"] | None = None) -> rrb.Blueprint:
     """Build the 3D-view + per-split image-grid blueprint.
 
     Args:
@@ -93,6 +97,8 @@ def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int)
     Returns:
         A ``Horizontal(3D view, Tabs(Grid per split))`` blueprint.
     """
+    if render_mode is not None and not compute:
+        raise ValueError("--render-mode requires --compute")
     grids: list[rrb.Grid] = []
     for split, cam_paths in split_cam_paths.items():
         subset: Int[ndarray, "k"] = _even_subset(len(cam_paths), max_image_views)
@@ -107,7 +113,7 @@ def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int)
     view3d = rrb.Spatial3DView(
         origin="/",
         name="splats + dataset cameras",
-        overrides={SPLATS_ENTITY: rrb.Visualizer(SPLATS_VISUALIZER)},
+        overrides={SPLATS_ENTITY: compute_visualizer(render_mode or "default")} if compute else {},
         background=rrb.Background(color=(255, 255, 255), kind=rrb.BackgroundKind.SolidColor),
     )
     return rrb.Blueprint(
@@ -129,14 +135,14 @@ def main(config: LogSceneConfig) -> None:
 
     rr.set_time("frame", sequence=0)
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    rr.log(SPLATS_ENTITY, Gaussians3D.from_ply(ply_path))
+    rr.log(SPLATS_ENTITY, splats_from_ply(ply_path))
 
     split_cam_paths: dict[str, list[str]] = {}
     for split in SPLITS:
         if (scene_dir / f"transforms_{split}.json").exists():
             split_cam_paths[split] = log_split_cameras(scene_dir, split, config.image_plane_distance)
 
-    rr.send_blueprint(scene_blueprint(split_cam_paths, config.max_image_views))
+    rr.send_blueprint(scene_blueprint(split_cam_paths, config.max_image_views, config.compute, config.render_mode))
 
     rec: rr.RecordingStream | None = rr.get_global_data_recording()
     assert rec is not None

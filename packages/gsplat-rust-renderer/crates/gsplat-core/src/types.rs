@@ -14,7 +14,7 @@ pub struct Splats {
 }
 
 /// Camera pose is camera-to-world. Principal point is normalized by image size.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub model: crate::CameraModel,
     pub position: Vec3,
@@ -32,8 +32,12 @@ pub enum RenderMode {
     Mip,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
+    /// Per-view override; None uses the shared scene's mode.
+    pub render_mode: Option<RenderMode>,
+    /// Instance affine transform; SH directions remain in local coordinates.
+    pub world_from_local: glam::Affine3A,
     /// Applied during rasterization; alpha remains accumulated splat coverage.
     pub background: Vec3,
     /// Positive multiplier, applied as a log-scale offset before the 3D floor.
@@ -42,6 +46,8 @@ pub struct RenderOptions {
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
+            render_mode: None,
+            world_from_local: glam::Affine3A::IDENTITY,
             background: Vec3::ZERO,
             splat_scale: 1.0,
         }
@@ -56,6 +62,11 @@ pub enum Target<'a> {
     Packed(&'a wgpu::Buffer),
     /// rgba8unorm storage texture, for viewer composition.
     Texture(&'a wgpu::TextureView),
+    /// Viewer-only color plus alpha-weighted expected camera depth (positive Z), r32float.
+    TextureDepth {
+        color: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]

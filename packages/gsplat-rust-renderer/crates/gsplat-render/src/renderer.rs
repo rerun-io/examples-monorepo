@@ -189,15 +189,8 @@ impl Renderer {
         }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::SUBGROUP
-                    | (features & wgpu::Features::TIMESTAMP_QUERY),
-                required_limits: wgpu::Limits {
-                    max_storage_buffer_binding_size: adapter
-                        .limits()
-                        .max_storage_buffer_binding_size,
-                    max_buffer_size: adapter.limits().max_buffer_size,
-                    ..Default::default()
-                },
+                required_features: gsplat_core::required_features(&adapter),
+                required_limits: gsplat_core::required_limits(&adapter),
                 ..Default::default()
             })
             .await

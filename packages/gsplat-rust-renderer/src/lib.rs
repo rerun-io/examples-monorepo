@@ -28,8 +28,3 @@
 pub mod gsplat_core;
 pub mod nerf_camera;
 pub mod ply_loader;
-
-#[cfg(feature = "viewer")]
-pub mod gaussian_renderer;
-#[cfg(feature = "viewer")]
-pub mod gaussian_visualizer;

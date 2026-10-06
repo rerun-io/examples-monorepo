@@ -1,6 +1,6 @@
 # gsplat-rust-renderer
 
-`gsplat-rust-renderer` adds a tile-based, GPU compute Gaussian-splat visualizer to the [Rerun](https://rerun.io) desktop viewer. Python logs the upstream `Gaussians3D` component contract; Rust renders it with wgpu on Metal or Vulkan. The same GPU core also powers a standalone PNG renderer, so no CUDA is required.
+`gsplat-rust-renderer` adds a tile-based, GPU compute Gaussian-splat visualizer to the [Rerun](https://rerun.io) desktop viewer. Python logs Rerun 0.38.1's native `GaussianSplats3D` archetype; Rust renders it with wgpu on Metal or Vulkan. The same GPU core also powers a standalone PNG renderer, so no CUDA is required.
 
 <p align="center">
   <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
@@ -58,7 +58,7 @@ Then log the pretrained PLY, all train/test cameras, and their ground-truth imag
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-log-scene
 ```
 
-The viewer listens on `127.0.0.1:9876`. A stock Rerun viewer can ingest the data but cannot render this package's `Gaussians3D` visualizer.
+The viewer listens on `127.0.0.1:9876`. Recordings need no visualizer override: this viewer selects `ComputeGaussianSplats3D` automatically, while stock Rerun 0.38.1 draws native splats. Use `--compute` only for an explicit compute selection or render-mode override. See the [viewer registration notes](crates/gsplat-viewer/README.md).
 
 <p align="center">
   <img src="docs/media/pretrained-lego.png" width="560" alt="Pretrained Lego checkpoint prediction">

@@ -6,6 +6,9 @@ use crate::{Camera, Error, RenderMode, RenderOptions, Scene, Splats, Target, Vie
 use bytemuck::{Pod, Zeroable};
 use std::sync::{Arc, mpsc};
 
+// Optional depth raster: 256 * (9 splat floats + 1 depth float), plus four shared scalars.
+pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_256;
+
 pub const STAGE_NAMES: [&str; 8] = [
     "project_forward",
     "depth_sort",
@@ -59,7 +62,7 @@ impl Renderer {
             || limits.max_storage_buffers_per_shader_stage < 8
             || limits.max_compute_invocations_per_workgroup < 256
             || limits.max_compute_workgroup_size_x < 256
-            || limits.max_compute_workgroup_storage_size < 10_240
+            || limits.max_compute_workgroup_storage_size < REQUIRED_WORKGROUP_STORAGE_BYTES
         {
             return Err(Error::Capabilities);
         }
@@ -113,6 +116,8 @@ impl Renderer {
             || !(camera.fov_x > 0.0 && camera.fov_x < std::f64::consts::TAU)
             || !(camera.fov_y > 0.0 && camera.fov_y < std::f64::consts::TAU)
             || !camera.model.coefficients().iter().all(|x| x.is_finite())
+            || !options.world_from_local.is_finite()
+            || !options.world_from_local.inverse().is_finite()
             || !options.background.is_finite()
             || !options.splat_scale.is_finite()
             || options.splat_scale <= 0.0
@@ -137,7 +142,11 @@ impl Renderer {
                     buffer.as_entire_binding(),
                 )
             }
-            Target::Texture(texture_view) => {
+            Target::Texture(texture_view)
+            | Target::TextureDepth {
+                color: texture_view,
+                ..
+            } => {
                 let texture = texture_view.texture();
                 if texture.width() != camera.size.x
                     || texture.height() != camera.size.y
@@ -154,7 +163,30 @@ impl Renderer {
                         "target requires a matching single-mip rgba8unorm storage texture",
                     ));
                 }
-                (2, 6, wgpu::BindingResource::TextureView(texture_view))
+                if let Target::TextureDepth { depth, .. } = &target {
+                    let d = depth.texture();
+                    if d.width() != camera.size.x
+                        || d.height() != camera.size.y
+                        || d.format() != wgpu::TextureFormat::R32Float
+                        || d.sample_count() != 1
+                        || d.mip_level_count() != 1
+                        || d.depth_or_array_layers() != 1
+                        || !d.usage().contains(wgpu::TextureUsages::STORAGE_BINDING)
+                    {
+                        return Err(Error::Input(
+                            "depth requires a matching r32float storage texture",
+                        ));
+                    }
+                }
+                (
+                    if matches!(target, Target::TextureDepth { .. }) {
+                        3
+                    } else {
+                        2
+                    },
+                    6,
+                    wgpu::BindingResource::TextureView(texture_view),
+                )
             }
         };
         let tiles = glam::UVec2::new(camera.size.x.div_ceil(16), camera.size.y.div_ceil(16));
@@ -177,8 +209,14 @@ impl Renderer {
         let (clamps, radial_limit) = camera.clamp_limits();
         let coefficients = camera.model.coefficients();
         let uniforms = Uniforms {
-            view: camera.world_to_local().to_cols_array_2d(),
-            camera: camera.position.extend(0.0).to_array(),
+            view: (camera.world_to_local() * glam::Mat4::from(options.world_from_local))
+                .to_cols_array_2d(),
+            camera: options
+                .world_from_local
+                .inverse()
+                .transform_point3(camera.position)
+                .extend(0.0)
+                .to_array(),
             pinhole: [focal.x, focal.y, center.x, center.y],
             clamp_limits: clamps.to_array(),
             image: [camera.size.x, camera.size.y, tiles.x, tiles.y],
@@ -186,7 +224,7 @@ impl Renderer {
             background: options.background.extend(0.0).to_array(),
             options: [
                 options.splat_scale.ln(),
-                f32::from(scene.mode == RenderMode::Mip),
+                f32::from(options.render_mode.unwrap_or(scene.mode) == RenderMode::Mip),
                 f32::from(scene.has_min_scale),
                 0.0,
             ],
@@ -203,28 +241,32 @@ impl Renderer {
             .as_ref()
             .is_none_or(|(cached, _)| !cached.matches(&target))
         {
-            let group = bind(
-                &self.device,
-                raster,
-                &[
-                    (0, frame.uniform.as_entire_binding()),
-                    (
-                        1,
-                        view.intersections
-                            .sort
-                            .output(view.bits)
-                            .1
-                            .as_entire_binding(),
-                    ),
-                    (2, view.offsets.as_entire_binding()),
-                    (3, view.projected.as_entire_binding()),
-                    (binding, resource),
-                ],
-            );
+            let mut bindings = vec![
+                (0, frame.uniform.as_entire_binding()),
+                (
+                    1,
+                    view.intersections
+                        .sort
+                        .output(view.bits)
+                        .1
+                        .as_entire_binding(),
+                ),
+                (2, view.offsets.as_entire_binding()),
+                (3, view.projected.as_entire_binding()),
+                (binding, resource),
+            ];
+            if let Target::TextureDepth { depth, .. } = &target {
+                bindings.push((7, view.depth_sort.output(32).0.as_entire_binding()));
+                bindings.push((8, wgpu::BindingResource::TextureView(depth)));
+            }
+            let group = bind(&self.device, raster, &bindings);
             let handle = match target {
                 Target::Float(b) => TargetHandle::Float(b.clone()),
                 Target::Packed(b) => TargetHandle::Packed(b.clone()),
                 Target::Texture(v) => TargetHandle::Texture(v.clone()),
+                Target::TextureDepth { color, depth } => {
+                    TargetHandle::TextureDepth(color.clone(), depth.clone())
+                }
             };
             frame.raster = Some((handle, group));
         }
