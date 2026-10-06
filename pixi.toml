@@ -2261,7 +2261,7 @@ description = "Launch the Rerun viewer with Gaussian splat visualization"
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-fmt]
 cmd = "cargo fmt --all -- --check"
 cwd = "packages/gsplat-rust-renderer"
-description = "Format Rust code"
+description = "Check Rust formatting"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-clippy]
 cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
@@ -2277,6 +2277,31 @@ description = "Run Rust test suite"
 cmd = "cargo run --locked --release -p gsplat-eval --"
 cwd = "packages/gsplat-rust-renderer"
 description = "Score paired PNG directories with Brush or published metrics"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-bench-build]
+cmd = "cargo build --locked --release -p gsplat-bench -p gsplat-eval"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build the benchmark and evaluator"
+
+[feature.gsplat-rust-renderer.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "gsplat-rust-renderer-fmt", "gsplat-rust-renderer-clippy", "gsplat-rust-renderer-rust-test"]
+description = "Run Python, Rust and GPU integration author checks"
+
+[feature.gsplat-rust-renderer.tasks.tests-integration]
+cmd = "pytest -q -ra -m integration"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run Python and Rust integration contracts, reporting missing assets as skips"
+
+[feature.gsplat-rust-renderer.tasks.tests-golden]
+cmd = "pytest -q -ra -m golden"
+cwd = "packages/gsplat-rust-renderer"
+depends-on = ["gsplat-bench-build"]
+description = "Build release tools and run golden references"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-bench]
+cmd = "cargo run --locked --release -p gsplat-bench --"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run synchronized speed or Brush-oracle parity measurements"
 
 # ── Python demo tasks ────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-ply]

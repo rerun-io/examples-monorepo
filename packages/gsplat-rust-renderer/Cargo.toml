@@ -14,7 +14,7 @@ serde_json = "1"
 thiserror = "2"
 wgpu = "=30.0.0"
 burn = { git = "https://github.com/tracel-ai/burn", branch = "main", version = "=0.22.0-pre.3", default-features = false, features = ["std", "wgpu"] }
-tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "fs"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "fs", "sync"] }
 brush-render = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
 brush-serde = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
 brush-loss = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }

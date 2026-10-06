@@ -467,12 +467,17 @@ fn project_splat(splat_index: u32) -> ProjectedSplatInfo {
         vec3f(vc2.x, vc2.y, -vc2.z),
     );
     let viewport_size_px = project_uniforms.viewport_and_near.xy;
-    let pixel_center = viewport_size_px * 0.5;
+    let half_viewport = viewport_size_px * 0.5;
+    // Off-axis projection: focal scale and principal point are independent.
+    let pixel_center = half_viewport * vec2f(
+        1.0 - project_uniforms.projection_from_view[2].x,
+        1.0 - project_uniforms.projection_from_view[2].y,
+    );
     let focal_ndc = vec2f(
         project_uniforms.projection_from_view[0].x,
         project_uniforms.projection_from_view[1].y,
     );
-    let focal_px = focal_ndc * pixel_center;
+    let focal_px = focal_ndc * half_viewport;
     let mean_camera = vec3f(mean_view.x, mean_view.y, camera_depth);
     let mean_px = focal_px * mean_camera.xy / camera_depth + pixel_center;
     if !is_reasonable_vec2(mean_px) {

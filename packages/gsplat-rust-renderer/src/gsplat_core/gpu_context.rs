@@ -50,23 +50,30 @@ impl GpuContext {
             );
         }
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("gsplat-render"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits {
-                max_storage_buffers_per_shader_stage: MIN_STORAGE_BUFFERS,
-                max_compute_workgroups_per_dimension:
-                    adapter_limits.max_compute_workgroups_per_dimension,
-                max_buffer_size: adapter_limits.max_buffer_size,
-                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
-                max_compute_invocations_per_workgroup:
-                    adapter_limits.max_compute_invocations_per_workgroup,
-                ..wgpu::Limits::downlevel_defaults()
-            },
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            trace: wgpu::Trace::Off,
-            experimental_features: Default::default(),
-        }))
+        let (device, queue) = pollster::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("gsplat-render"),
+                required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+                required_limits: wgpu::Limits {
+                    // The downlevel default is 2048, too small for the 4K benchmark.
+                    // Stay within WebGPU's standard texture limit and adapter support.
+                    max_texture_dimension_2d: wgpu::Limits::default()
+                        .max_texture_dimension_2d
+                        .min(adapter_limits.max_texture_dimension_2d),
+                    max_storage_buffers_per_shader_stage: MIN_STORAGE_BUFFERS,
+                    max_compute_workgroups_per_dimension: adapter_limits
+                        .max_compute_workgroups_per_dimension,
+                    max_buffer_size: adapter_limits.max_buffer_size,
+                    max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+                    max_compute_invocations_per_workgroup: adapter_limits
+                        .max_compute_invocations_per_workgroup,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+                experimental_features: Default::default(),
+            }),
+        )
         .map_err(|e| anyhow::anyhow!("Failed to create device: {e}"))?;
 
         Ok(Self {

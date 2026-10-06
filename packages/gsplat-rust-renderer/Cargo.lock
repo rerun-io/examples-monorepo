@@ -5997,13 +5997,26 @@ dependencies = [
 name = "gsplat-bench"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "brush-render",
  "brush-serde",
  "burn",
+ "bytemuck",
+ "clap",
+ "colmap-reader",
  "glam",
+ "gsplat-eval",
+ "gsplat-rust-renderer",
  "image",
- "lpips",
+ "macaw",
+ "re_renderer",
+ "re_sdk_types",
+ "re_types_core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]

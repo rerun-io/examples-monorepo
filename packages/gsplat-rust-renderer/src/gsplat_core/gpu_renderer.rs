@@ -85,6 +85,7 @@ pub struct GpuRenderResources {
     depth_sort: RadixSort,
     tile_sort: RadixSort,
     isect_capacity: usize,
+    raw_intersection_count: wgpu::Buffer,
 
     // Buffers touched by encoder-level ops (clears / copies) each frame.
     num_visible_buf: wgpu::Buffer,
@@ -502,6 +503,7 @@ impl GpuRenderResources {
             depth_sort,
             tile_sort,
             isect_capacity,
+            raw_intersection_count: tile_isect_count_buf,
             num_visible_buf,
             tile_offsets_buf,
             tile_id_from_isect_buf,
@@ -525,6 +527,19 @@ impl GpuRenderResources {
         renderer: &GpuRenderer,
         camera: &CameraApproximation,
     ) -> RenderOutput {
+        self.render_gpu(ctx, renderer, camera, None);
+        self.read_output(ctx)
+    }
+
+    /// Submit a frame without copying or mapping pixels. Optional timestamps
+    /// bracket the six compute stages; the caller resolves the 12 queries.
+    pub fn render_gpu(
+        &self,
+        ctx: &GpuContext,
+        renderer: &GpuRenderer,
+        camera: &CameraApproximation,
+        timestamps: Option<&wgpu::QuerySet>,
+    ) {
         debug_assert_eq!(camera.viewport_size_px.x.max(1.0) as u32, self.width);
         debug_assert_eq!(camera.viewport_size_px.y.max(1.0) as u32, self.height);
 
@@ -539,6 +554,13 @@ impl GpuRenderResources {
                     label: Some("gsplat_render"),
                 });
 
+        let stamp = |i: u32| {
+            timestamps.map(|query_set| wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(2 * i),
+                end_of_pass_write_index: Some(2 * i + 1),
+            })
+        };
         // The visible counter accumulates atomically — reset it each frame.
         encoder.clear_buffer(&self.num_visible_buf, 0, None);
 
@@ -547,7 +569,7 @@ impl GpuRenderResources {
             let mut pass: wgpu::ComputePass<'_> =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("project_forward"),
-                    timestamp_writes: None,
+                    timestamp_writes: stamp(0),
                 });
             pass.set_pipeline(&renderer.pipelines.project_forward);
             pass.set_bind_group(0, &self.bind_groups.project_forward, &[]);
@@ -561,7 +583,7 @@ impl GpuRenderResources {
             let mut pass: wgpu::ComputePass<'_> =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("gid_and_depth_sort"),
-                    timestamp_writes: None,
+                    timestamp_writes: stamp(1),
                 });
             self.gid_sort.encode(&mut pass, &renderer.pipelines);
             self.depth_sort.encode(&mut pass, &renderer.pipelines);
@@ -572,7 +594,7 @@ impl GpuRenderResources {
             let mut pass: wgpu::ComputePass<'_> =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("project_visible_scan_map"),
-                    timestamp_writes: None,
+                    timestamp_writes: stamp(2),
                 });
 
             pass.set_pipeline(&renderer.pipelines.project_visible);
@@ -609,7 +631,7 @@ impl GpuRenderResources {
             let mut pass: wgpu::ComputePass<'_> =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("tile_sort"),
-                    timestamp_writes: None,
+                    timestamp_writes: stamp(3),
                 });
             self.tile_sort.encode(&mut pass, &renderer.pipelines);
         }
@@ -639,7 +661,7 @@ impl GpuRenderResources {
             let mut pass: wgpu::ComputePass<'_> =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("tile_offsets"),
-                    timestamp_writes: None,
+                    timestamp_writes: stamp(4),
                 });
             pass.set_pipeline(&renderer.pipelines.tile_offsets);
             pass.set_bind_group(0, &self.bind_groups.tile_offsets, &[]);
@@ -651,13 +673,59 @@ impl GpuRenderResources {
             let mut pass: wgpu::ComputePass<'_> =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("rasterize"),
-                    timestamp_writes: None,
+                    timestamp_writes: stamp(5),
                 });
             pass.set_pipeline(&renderer.pipelines.rasterize);
             pass.set_bind_group(0, &self.bind_groups.rasterize, &[]);
             pass.dispatch_workgroups(self.raster_grid.0, self.raster_grid.1, 1);
         }
 
+        ctx.queue.submit([encoder.finish()]);
+    }
+
+    /// Check the unclamped count outside timing; a truncated frame is not valid evidence.
+    pub fn check_intersection_capacity(&self, ctx: &GpuContext) -> Result<(), String> {
+        let read = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raw intersection count"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.raw_intersection_count, 4, &read, 0, 4);
+        ctx.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| e.to_string())?;
+        rx.recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let bytes = read
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?;
+        let count = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes")) as usize;
+        if count > self.isect_capacity {
+            return Err(format!(
+                "raw intersections {count} exceed capacity {}",
+                self.isect_capacity
+            ));
+        }
+        Ok(())
+    }
+
+    /// Copy and read the last submitted frame, outside the speed lane.
+    pub fn read_output(&self, ctx: &GpuContext) -> RenderOutput {
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("gsplat_readback"),
+            });
         // ── Readback raster texture ──────────────────────────────────────
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -714,3 +782,13 @@ impl GpuRenderResources {
         }
     }
 }
+
+/// Order of the optional diagnostic timestamp pairs in `render_gpu`.
+pub const STAGE_NAMES: [&str; 6] = [
+    "project_forward",
+    "gid_and_depth_sort",
+    "project_visible_scan_map",
+    "tile_sort",
+    "tile_offsets",
+    "rasterize",
+];

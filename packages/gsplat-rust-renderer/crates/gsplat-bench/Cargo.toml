@@ -10,6 +10,18 @@ burn.workspace = true
 image.workspace = true
 glam.workspace = true
 tokio.workspace = true
+gsplat-rust-renderer = { path = "../..", default-features = false }
+gsplat-eval = { path = "../gsplat-eval" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+re_renderer = "=0.38.1"
+re_sdk_types = "=0.38.1"
+re_types_core = "=0.38.1"
+macaw = "0.30"
 
-[dev-dependencies]
-lpips.workspace = true
+colmap-reader = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }

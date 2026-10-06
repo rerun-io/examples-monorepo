@@ -19,7 +19,7 @@ def test_rust_gpu_dependency_pins() -> None:
         if family in (*pins, "wgpu", "naga") or name == "lpips":
             assert name not in seen, f"duplicate GPU-family dependency: {name}"
             seen.add(name)
-            if (family in pins or name == "lpips") and package["source"].startswith("git+"):
+            if (family in pins or name == "lpips") and name != "cubecl-hip-sys":
                 revision: str = pins["brush" if name == "lpips" else family]
                 assert package["source"].endswith(f"#{revision}"), (name, package["source"])
         assert not (name.startswith("re_") or name == "rerun") or package["version"] != "0.36.3"
