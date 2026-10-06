@@ -1,14 +1,18 @@
-"""Native archetype construction using Rerun 0.38.1's PLY conversion rules."""
+"""Native PLY import and optional compute-viewer selection."""
+
 import warnings
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32
-from plyfile import PlyData
+from numpy import ndarray
+from rerun.chunk import ChunkStore, RrdReader
 
+# The synthetic calibration writer uses the same f32 DC basis as native PLY.
 SH_C0: float = float(np.float32(0.5) * np.sqrt(np.float32(1.0) / np.float32(np.pi)))
 SPLATS_ENTITY: str = "/world/splats"
 SPLATS_VISUALIZER: str = "ComputeGaussianSplats3D"
@@ -17,39 +21,33 @@ SPLATS_VISUALIZER: str = "ComputeGaussianSplats3D"
 def compute_visualizer(render_mode: Literal["default", "mip"] = "default") -> rrb.Visualizer:
     """Explicit custom-viewer choice; stock viewers cannot execute this visualizer."""
     warnings.warn("ComputeGaussianSplats3D requires the custom viewer; stock Rerun will show no splats for this explicit override.", stacklevel=2)
-    descriptor = rr.ComponentDescriptor("ComputeGaussianSplats3D:render_mode", component_type="rerun.components.Text")
+    descriptor: rr.ComponentDescriptor = rr.ComponentDescriptor("ComputeGaussianSplats3D:render_mode", component_type="rerun.components.Text")
     return rrb.Visualizer(SPLATS_VISUALIZER, overrides=[rr.components.TextBatch([render_mode]).described(descriptor)])
 
 
-def splats_from_ply(path: Path, with_sh: bool = True) -> rr.GaussianSplats3D:
-    """Match native Rust PLY rules: f32 activations, +0.5 u8 rounding, normalized xyzw,
-    coefficient-major f16 SH, zero padding and truncation above degree three.
+def log_ply(path: Path, *, recording: rr.RecordingStream | None = None) -> Float32[ndarray, "2 3"]:
+    """Import static native splats and return their 2nd/98th percentile camera bounds.
+
+    Rerun owns PLY decoding. Its chunk reader preserves the native components while
+    keeping the logger's entity path and camera framing independent of file names.
     """
-    vertex = PlyData.read(path)["vertex"].data
-    required = ["x", "y", "z", "opacity", *[f"{prefix}_{i}" for prefix, count in (("scale", 3), ("rot", 4), ("f_dc", 3)) for i in range(count)]]
-    names = set(vertex.dtype.names or ())
-    if not set(required) <= names:
-        raise ValueError(f"{path}: missing required 3DGS properties: {sorted(set(required) - names)}")
-    centers = np.column_stack([vertex[name] for name in ("x", "y", "z")]).astype(np.float32)
-    scales = np.exp(np.column_stack([vertex[f"scale_{i}"] for i in range(3)]).astype(np.float32))
-    quaternions = np.column_stack([vertex[f"rot_{i}"] for i in (1, 2, 3, 0)]).astype(np.float32)
-    norm = np.linalg.norm(quaternions, axis=1, keepdims=True)
-    quaternions = np.where(norm > 0.0, quaternions / np.maximum(norm, np.finfo(np.float32).tiny), np.array([0, 0, 0, 1], dtype=np.float32))
-    dc = np.column_stack([vertex[f"f_dc_{i}"] for i in range(3)]).astype(np.float32)
-    c0 = np.float32(SH_C0)
-    rgb = np.float32(0.5) + c0 * dc
-    alpha = np.float32(1.0) / (np.float32(1.0) + np.exp(-vertex["opacity"].astype(np.float32)))
-    rgba = (np.clip(np.column_stack([rgb, alpha]), 0.0, 1.0) * np.float32(255.0) + np.float32(0.5)).astype(np.uint8)
-    count = sum(name.startswith("f_rest_") for name in names)
-    stride = count // 3 if with_sh and count % 3 == 0 else 0
-    sh: Float32[np.ndarray, "n 15 3"] | None = None
-    if stride:
-        sh = np.zeros((len(vertex), 15, 3), dtype=np.float32)
-        for channel in range(3):
-            for coefficient in range(min(stride, 15)):
-                name = f"f_rest_{channel * stride + coefficient}"
-                if name in names:
-                    sh[:, coefficient, channel] = vertex[name]
-    degree = min(3, int(np.ceil(np.sqrt(min(stride, 15) + 1))) - 1)
-    return rr.GaussianSplats3D(centers=centers, scales=scales, quaternions=quaternions, colors=rgba,
-                             sh_coefficients=sh, spherical_harmonics_degree=degree)
+    # Clear before the importer allocates row IDs: a newer static clear hides older chunks.
+    rr.log(SPLATS_ENTITY, rr.Clear(recursive=True), static=True, recording=recording)
+    with TemporaryDirectory(prefix="gsplat-ply-") as directory:
+        rrd: Path = Path(directory) / "native.rrd"
+        source: rr.RecordingStream = rr.RecordingStream("gsplat-ply-import", send_properties=False)
+        source.save(rrd)
+        try:
+            rr.log_file_from_contents("splats.ply", path.read_bytes(), static=True, recording=source)
+            source.flush(timeout_sec=30.0)
+        finally:
+            source.disconnect()
+        store: ChunkStore = RrdReader(rrd).stream().filter(content="/splats.ply").map(lambda chunk: chunk.with_entity_path(SPLATS_ENTITY)).collect()
+        centers: Float32[ndarray, "n 3"] = np.concatenate(
+            [
+                chunk.to_record_batch().column("GaussianSplats3D:centers").flatten().flatten().to_numpy().reshape(-1, 3)
+                for chunk in store.stream().to_chunks()
+            ]
+        )
+        rr.send_chunks(store, recording=recording)
+        return np.percentile(centers, [2.0, 98.0], axis=0).astype(np.float32)

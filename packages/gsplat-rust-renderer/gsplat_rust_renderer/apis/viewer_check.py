@@ -21,7 +21,7 @@ from serde import serde
 from serde.json import to_json
 
 from gsplat_rust_renderer.apis.calibration_scene import look_at_c2w
-from gsplat_rust_renderer.gaussians3d import compute_visualizer, splats_from_ply
+from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
 
 
 @serde(deny_unknown_fields=True)
@@ -121,7 +121,7 @@ def check_portable_recording(config: Config) -> None:
         rr.save(recording_path)
         rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-        rr.log("world/splats", splats_from_ply(config.ply), static=True)
+        log_ply(config.ply)
         recording = rr.get_global_data_recording()
         assert recording is not None
         recording.flush(timeout_sec=30.0)
@@ -279,7 +279,7 @@ def main(config: Config) -> None:
         rr.connect_grpc(viewer.url)
         try:
             rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-            rr.log("world/splats", splats_from_ply(config.ply), static=True)
+            log_ply(config.ply)
             view: rrb.Spatial3DView = rrb.Spatial3DView(
                 origin="/", contents=["world/splats"],
                 background=rrb.Background(color=(255, 255, 255) if config.mode == "pair-white" else (0, 0, 0), kind="SolidColor"), line_grid=False,

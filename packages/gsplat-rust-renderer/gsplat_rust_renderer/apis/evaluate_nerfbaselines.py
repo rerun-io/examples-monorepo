@@ -1,10 +1,10 @@
 """Render and evaluate full nerfbaselines Blender test splits."""
 
-import dataclasses
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
+
+from serde.json import to_json
 
 from gsplat_rust_renderer.evaluation import (
     CheckpointEvaluation,
@@ -99,8 +99,7 @@ def main(config: Config) -> None:
         )
 
     config.report.parent.mkdir(parents=True, exist_ok=True)
-    report_data = [dataclasses.asdict(report) for report in reports]
-    config.report.write_text(json.dumps(report_data, indent=2) + "\n")
+    config.report.write_text(to_json(reports) + "\n")
     print(f"Wrote {config.report}")
     failures: list[str] = quality_guard_failures(reports, config)
     if failures:

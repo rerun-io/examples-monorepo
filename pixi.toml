@@ -1952,9 +1952,8 @@ tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.31.2,<0.32"
 tomli-w = ">=1.2,<2"
 orjson = ">=3.11,<4"
-# CPU-only PyTorch for lpips metrics (no CUDA requirement).
-pytorch-cpu = ">=2.8.0"
-torchvision = "*"
+scipy = "*"
+pillow = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
@@ -1979,7 +1978,6 @@ xorg-libxrandr = "*"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
-lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }

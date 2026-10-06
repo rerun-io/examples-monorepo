@@ -1,7 +1,7 @@
 """Log a trained splat PLY together with its NeRF-synthetic dataset cameras.
 
-Clean ``log-scene`` flow: at ``frame=0`` on the ``"frame"`` timeline it logs the
-splat under ``/world/splats`` as native ``GaussianSplats3D`` plus
+The ``log-scene`` flow logs static native ``GaussianSplats3D`` at
+``/world/splats`` and frame-0 cameras on the ``"frame"`` timeline:
 one camera per view under ``/world/cameras/<split>_<NNNN>`` — a ``Transform3D``
 + ``rr.Pinhole`` frustum with the composited GT image on the image plane, so
 clicking a frustum shows its photo. The blueprint pairs a 3D view with a Tabs
@@ -27,7 +27,7 @@ from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
-from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, compute_visualizer, splats_from_ply
+from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, compute_visualizer, log_ply
 from gsplat_rust_renderer.nerfbaselines import DEFAULT_SCENE, scene_data_dir, scene_ply_path
 from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited
 
@@ -125,7 +125,7 @@ def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int,
 
 
 def main(config: LogSceneConfig) -> None:
-    """Log the splat + dataset cameras at frame 0 and send the scene blueprint.
+    """Log the static splat and frame-0 cameras, then send the scene blueprint.
 
     Args:
         config: CLI configuration parsed by tyro.
@@ -135,7 +135,7 @@ def main(config: LogSceneConfig) -> None:
 
     rr.set_time("frame", sequence=0)
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    rr.log(SPLATS_ENTITY, splats_from_ply(ply_path))
+    log_ply(ply_path)
 
     split_cam_paths: dict[str, list[str]] = {}
     for split in SPLITS:

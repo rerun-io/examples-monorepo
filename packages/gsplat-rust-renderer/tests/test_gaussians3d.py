@@ -1,12 +1,14 @@
 """Native PLY conversion and portable blueprint contracts."""
+
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rerun as rr
+from jaxtyping import Float32
 from plyfile import PlyData, PlyElement
 
-from gsplat_rust_renderer.gaussians3d import compute_visualizer, splats_from_ply
+from gsplat_rust_renderer.gaussians3d import compute_visualizer
 
 
 def _write_synthetic_ply(path: Path) -> None:
@@ -14,10 +16,22 @@ def _write_synthetic_ply(path: Path) -> None:
 
     Chosen so exp/sigmoid/DC/quat-reorder/SH-transpose all have easy hand values.
     """
-    fields: list[str] = (
-        ["x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3", "opacity", "f_dc_0", "f_dc_1", "f_dc_2"]
-        + [f"f_rest_{i}" for i in range(9)]
-    )
+    fields: list[str] = [
+        "x",
+        "y",
+        "z",
+        "scale_0",
+        "scale_1",
+        "scale_2",
+        "rot_0",
+        "rot_1",
+        "rot_2",
+        "rot_3",
+        "opacity",
+        "f_dc_0",
+        "f_dc_1",
+        "f_dc_2",
+    ] + [f"f_rest_{i}" for i in range(9)]
     dtype: list[tuple[str, str]] = [(name, "f4") for name in fields]
     data: np.ndarray = np.zeros(2, dtype=dtype)
 
@@ -41,31 +55,38 @@ def _write_synthetic_ply(path: Path) -> None:
     PlyData([PlyElement.describe(data, "vertex")]).write(str(path))
 
 
-def test_from_ply_conversion(tmp_path: Path) -> None:
-    path = tmp_path / "tiny.ply"
-    _write_synthetic_ply(path)
-    splats = splats_from_ply(path)
-    assert isinstance(splats, rr.GaussianSplats3D)
-    assert splats.centers is not None and splats.scales is not None
-    assert splats.quaternions is not None and splats.colors is not None
-    assert splats.sh_coefficients is not None and splats.spherical_harmonics_degree is not None
-    np.testing.assert_array_equal(splats.centers.as_arrow_array().to_pylist(), [[1, 2, 3], [-1, -2, -3]])
-    np.testing.assert_allclose(splats.scales.as_arrow_array().to_pylist()[0], [1, 2, 4], rtol=1e-6)
-    np.testing.assert_array_equal(splats.quaternions.as_arrow_array().to_pylist(), [[0, 0, 0, 1], [0, 0, 1, 0]])
-    assert splats.colors.as_arrow_array().to_pylist()[0] == int.from_bytes([128, 199, 56, 128], "big")
-    np.testing.assert_array_equal(splats.sh_coefficients.as_arrow_array().to_pylist()[0][:3], [[0, 3, 6], [1, 4, 7], [2, 5, 8]])
-    assert splats.spherical_harmonics_degree.as_arrow_array().to_pylist() == [1]
+@pytest.mark.integration
+def test_native_ply_import_preserves_values_path_and_framing(tmp_path: Path) -> None:
+    """The native importer owns decoding; the logger preserves its public path and framing."""
+    import pyarrow as pa
+    from rerun.chunk import Chunk, RrdReader
 
+    from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, log_ply
 
-def test_native_schema_and_blueprint_property(tmp_path: Path) -> None:
-    path = tmp_path / "tiny.ply"
+    path: Path = tmp_path / "tiny.ply"
     _write_synthetic_ply(path)
-    splats = splats_from_ply(path)
-    batches = list(splats.as_component_batches())
-    assert all(batch.component_descriptor().archetype == "rerun.archetypes.GaussianSplats3D" for batch in batches)
-    assert splats.sh_coefficients is not None
-    assert str(splats.sh_coefficients.as_arrow_array().type.value_type.value_type) == "halffloat"
-    assert compute_visualizer("mip") is not None
+    recording: rr.RecordingStream = rr.RecordingStream("native-ply-contract")
+    output: Path = tmp_path / "native.rrd"
+    recording.save(output)
+    bounds: Float32[np.ndarray, "2 3"] = log_ply(path, recording=recording)
+    recording.flush(timeout_sec=30.0)
+    recording.disconnect()
+    np.testing.assert_allclose(bounds, [[-0.96, -1.92, -2.88], [0.96, 1.92, 2.88]], rtol=1e-6)
+    chunks: list[Chunk] = list(RrdReader(output).stream().filter(content=SPLATS_ENTITY).to_chunks())
+    native: list[Chunk] = [chunk for chunk in chunks if "GaussianSplats3D:centers" in chunk.to_record_batch().schema.names]
+    assert len(native) == 1
+    batch: pa.RecordBatch = native[0].to_record_batch()
+    centers: pa.Array = batch.column("GaussianSplats3D:centers").flatten()
+    scales: pa.Array = batch.column("GaussianSplats3D:scales").flatten()
+    rotations: pa.Array = batch.column("GaussianSplats3D:quaternions").flatten()
+    colors: pa.Array = batch.column("GaussianSplats3D:colors").flatten()
+    sh: pa.Array = batch.column("GaussianSplats3D:sh_coefficients").flatten()
+    np.testing.assert_array_equal(centers.to_pylist(), [[1, 2, 3], [-1, -2, -3]])
+    np.testing.assert_allclose(scales.to_pylist()[0], [1, 2, 4], rtol=1e-6)
+    np.testing.assert_array_equal(rotations.to_pylist(), [[0, 0, 0, 1], [0, 0, 1, 0]])
+    assert colors.to_pylist()[0] == int.from_bytes([128, 199, 56, 128], "big")
+    np.testing.assert_array_equal(sh.to_pylist()[0][:3], [[0, 3, 6], [1, 4, 7], [2, 5, 8]])
+    assert str(sh.type.value_type.value_type) == "halffloat"
 
 
 def test_logging_blueprint_defaults_and_mode_validation() -> None:
@@ -73,15 +94,18 @@ def test_logging_blueprint_defaults_and_mode_validation() -> None:
 
     from gsplat_rust_renderer.apis.log_gaussian_ply import splat_blueprint
     from gsplat_rust_renderer.apis.log_splats_with_cameras import scene_blueprint
-    splats = rr.GaussianSplats3D(centers=[[0, 0, 0]])
-    default = next(iter(splat_blueprint(splats).root_container.contents))
+
+    bounds: Float32[np.ndarray, "2 3"] = np.zeros((2, 3), dtype=np.float32)
+    with pytest.warns(UserWarning, match="custom viewer"):
+        assert compute_visualizer("mip") is not None
+    default = next(iter(splat_blueprint(bounds).root_container.contents))
     assert isinstance(default, rrb.Spatial3DView)
     assert not default.visualizer_overrides
-    explicit = next(iter(splat_blueprint(splats, compute=True, render_mode="mip").root_container.contents))
+    explicit = next(iter(splat_blueprint(bounds, compute=True, render_mode="mip").root_container.contents))
     assert isinstance(explicit, rrb.Spatial3DView)
     assert explicit.visualizer_overrides
     with pytest.raises(ValueError, match="--compute"):
-        splat_blueprint(splats, render_mode="mip")
+        splat_blueprint(bounds, render_mode="mip")
     with pytest.raises(ValueError, match="--compute"):
         scene_blueprint({}, 1, render_mode="default")
 
@@ -98,13 +122,34 @@ def test_python_recording_is_decoded_by_shared_core(tmp_path: Path) -> None:
     recording = rr.RecordingStream("native-roundtrip")
     rrd = tmp_path / "native.rrd"
     recording.save(rrd)
-    recording.log("splats", splats_from_ply(ply), static=True)
+    from gsplat_rust_renderer.gaussians3d import log_ply
+
+    log_ply(ply, recording=recording)
     recording.flush(timeout_sec=30.0)
     recording.disconnect()
     result = subprocess.run(
-        [str(root / "target/debug/gsplat-bench"), "parity", "--impl", "ours-archetype", "--oracle", "ours", "--ply", str(ply),
-         "--archetype-rrd", str(rrd), "--path", "orbit:1", "--res", "32x32", "--out", str(tmp_path / "parity.json")],
-        check=False, capture_output=True, text=True, timeout=120,
+        [
+            str(root / "target/debug/gsplat-bench"),
+            "parity",
+            "--impl",
+            "ours-archetype",
+            "--oracle",
+            "ours",
+            "--ply",
+            str(ply),
+            "--archetype-rrd",
+            str(rrd),
+            "--path",
+            "orbit:1",
+            "--res",
+            "32x32",
+            "--out",
+            str(tmp_path / "parity.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "view 0:" in result.stderr + result.stdout

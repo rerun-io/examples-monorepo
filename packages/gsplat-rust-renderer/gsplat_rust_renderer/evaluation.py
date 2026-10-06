@@ -2,15 +2,84 @@
 
 from __future__ import annotations
 
-import json
+import os
 import subprocess
 from dataclasses import dataclass
+from json import JSONDecodeError
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Literal
 
-import numpy as np
-from jaxtyping import Float32
+from serde import SerdeError, serde
+from serde.json import from_json
 
-from gsplat_rust_renderer.metrics import load_image_rgb, psnr, ssim
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class Metrics:
+    """Mean image metrics from the Rust evaluator."""
+    psnr: float
+    """Peak signal-to-noise ratio in dB."""
+    ssim: float
+    """Structural similarity."""
+    lpips: float | None = None
+    """Optional perceptual distance."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class ViewMetrics:
+    """One image's Rust evaluation."""
+    name: str
+    """Relative PNG path."""
+    psnr: float
+    """Peak signal-to-noise ratio in dB."""
+    ssim: float
+    """Structural similarity."""
+    lpips: float | None = None
+    """Optional perceptual distance."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class DependencyVersion:
+    """Resolved Cargo dependency."""
+    version: str
+    """Crate version."""
+    source: str
+    """Registry or exact git source."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class Versions:
+    """Build provenance from the Rust evaluator."""
+    evaluator: str
+    """Evaluator package version."""
+    ours: str
+    """Build-time git description including dirty state."""
+    profile: str
+    """Cargo build profile."""
+    release_settings: str
+    """Workspace release settings."""
+    dependencies: dict[str, DependencyVersion]
+    """Resolved renderer dependencies."""
+    environment: dict[str, str | None]
+    """Backend environment overrides at run time."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class Evaluation:
+    """Rust evaluator report."""
+    views: list[ViewMetrics]
+    """Per-image measurements."""
+    mean: Metrics
+    """Arithmetic per-image mean."""
+    convention: Literal["brush", "published"]
+    """Metric convention name."""
+    versions: Versions
+    """Tool versions."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +94,7 @@ class EvaluationMetrics:
     """Arithmetic mean of per-image SSIM values."""
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class CheckpointEvaluation:
     """Measured checkpoint metrics compared with its published results."""
@@ -88,53 +158,49 @@ def render_test_split(
     subprocess.run(command, check=True)
 
 
-def evaluate_prediction_directory(rendered_dir: Path, ground_truth_dir: Path) -> EvaluationMetrics:
-    """Evaluate matching PNGs below two directories.
+def evaluate_prediction_directory(
+    rendered_dir: Path, ground_truth_dir: Path, *, eval_binary: Path | None = None,
+) -> EvaluationMetrics:
+    """Delegate published white-background metrics to the Rust evaluator."""
+    binary: Path = eval_binary or Path(os.environ.get(
+        "GSPLAT_EVAL_BIN", str(Path(__file__).resolve().parents[1] / "target/release/gsplat-eval"),
+    ))
+    with TemporaryDirectory(prefix="gsplat-eval-") as directory:
+        report_path: Path = Path(directory) / "evaluation.json"
+        subprocess.run([
+            str(binary.resolve()), "dirs", "--render", str(rendered_dir), "--gt", str(ground_truth_dir),
+            "--convention", "published", "--out", str(report_path),
+        ], check=True)
+        report: Evaluation = from_json(Evaluation, report_path.read_text())
+    return EvaluationMetrics(image_count=len(report.views), psnr=report.mean.psnr, ssim=report.mean.ssim)
 
-    Images are paired by their relative paths. Aggregates are arithmetic means
-    over per-image metrics, matching nerfbaselines' scene-level convention.
 
-    Args:
-        rendered_dir: Root containing rendered PNG images.
-        ground_truth_dir: Root containing ground-truth PNG images.
+@serde
+@dataclass(frozen=True, slots=True)
+class PublishedMetrics:
+    """Metrics read from third-party checkpoint metadata."""
+    psnr: float
+    """Published peak signal-to-noise ratio."""
+    ssim: float
+    """Published structural similarity."""
 
-    Returns:
-        The number of image pairs and their mean PSNR and SSIM.
-    """
-    rendered_relative_paths: list[Path] = sorted(
-        (path.relative_to(rendered_dir) for path in rendered_dir.rglob("*.png")), key=Path.as_posix
-    )
-    ground_truth_relative_paths: list[Path] = sorted(
-        (path.relative_to(ground_truth_dir) for path in ground_truth_dir.rglob("*.png")), key=Path.as_posix
-    )
-    if not rendered_relative_paths:
-        raise ValueError(f"no PNG images found below {rendered_dir}")
-    if rendered_relative_paths != ground_truth_relative_paths:
-        rendered_set: set[Path] = set(rendered_relative_paths)
-        ground_truth_set: set[Path] = set(ground_truth_relative_paths)
-        missing_rendered: list[str] = sorted(path.as_posix() for path in ground_truth_set - rendered_set)
-        missing_ground_truth: list[str] = sorted(path.as_posix() for path in rendered_set - ground_truth_set)
-        raise ValueError(
-            "image sets differ: "
-            f"missing rendered={missing_rendered[:5]}, missing ground truth={missing_ground_truth[:5]}"
-        )
 
-    psnr_values: list[float] = []
-    ssim_values: list[float] = []
-    for relative_path in rendered_relative_paths:
-        rendered_path: Path = rendered_dir / relative_path
-        ground_truth_path: Path = ground_truth_dir / relative_path
-        rendered_rgb: Float32[np.ndarray, "h w 3"] = load_image_rgb(rendered_path)
-        ground_truth_rgb: Float32[np.ndarray, "h w 3"] = load_image_rgb(ground_truth_path)
-        psnr_values.append(psnr(rendered_rgb, ground_truth_rgb))
-        ssim_values.append(ssim(rendered_rgb, ground_truth_rgb))
+@serde
+@dataclass(frozen=True, slots=True)
+class DatasetMetadata:
+    """Scene identity from a third-party checkpoint."""
+    scene: str
+    """Benchmark scene name."""
 
-    image_count: int = len(rendered_relative_paths)
-    return EvaluationMetrics(
-        image_count=image_count,
-        psnr=sum(psnr_values) / image_count,
-        ssim=sum(ssim_values) / image_count,
-    )
+
+@serde
+@dataclass(frozen=True, slots=True)
+class CheckpointResults:
+    """The checkpoint metadata fields used by the quality guard."""
+    metrics: PublishedMetrics
+    """Published image metrics."""
+    render_dataset_metadata: DatasetMetadata
+    """Source scene metadata."""
 
 
 def evaluate_predictions_against_checkpoint(rendered_dir: Path, checkpoint_dir: Path) -> CheckpointEvaluation:
@@ -149,26 +215,20 @@ def evaluate_predictions_against_checkpoint(rendered_dir: Path, checkpoint_dir: 
     Returns:
         Recomputed and published metrics with signed differences.
     """
-    results_data: dict[str, object] = json.loads((checkpoint_dir / "results.json").read_text())
-    metrics_data: object = results_data.get("metrics")
-    metadata: object = results_data.get("render_dataset_metadata")
-    if not isinstance(metrics_data, dict) or not isinstance(metadata, dict):
-        raise ValueError(f"{checkpoint_dir / 'results.json'} is missing metrics or render_dataset_metadata")
-
-    scene_value: object = metadata.get("scene")
-    published_psnr_value: object = metrics_data.get("psnr")
-    published_ssim_value: object = metrics_data.get("ssim")
-    if not isinstance(scene_value, str) or not isinstance(published_psnr_value, (int, float)) or not isinstance(published_ssim_value, (int, float)):
-        raise ValueError(f"{checkpoint_dir / 'results.json'} has invalid scene, PSNR, or SSIM values")
+    source: Path = checkpoint_dir / "results.json"
+    try:
+        published: CheckpointResults = from_json(CheckpointResults, source.read_text())
+    except (SerdeError, JSONDecodeError) as error:
+        raise ValueError(f"Invalid checkpoint metadata {source}: {error}") from error
 
     measured: EvaluationMetrics = evaluate_prediction_directory(
         rendered_dir,
         checkpoint_dir / "predictions" / "gt-color",
     )
-    published_psnr: float = float(published_psnr_value)
-    published_ssim: float = float(published_ssim_value)
+    published_psnr: float = published.metrics.psnr
+    published_ssim: float = published.metrics.ssim
     return CheckpointEvaluation(
-        scene=scene_value,
+        scene=published.render_dataset_metadata.scene,
         image_count=measured.image_count,
         measured_psnr=measured.psnr,
         published_psnr=published_psnr,
