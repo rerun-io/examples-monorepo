@@ -473,7 +473,7 @@ mod tests {
         let frame: Vec<u8> = expand_pooled(&pooled);
         let mut back: Vec<u8> = vec![0; POOLED_LEN];
         assert!(
-            crate::kornia_ext::pool::pool4_u8(
+            kornia_staging_imgproc::resize::pool4_u8(
                 &frame,
                 DETNET_WIDTH,
                 DETNET_HEIGHT,

@@ -66,3 +66,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
 | Integer area resize | slam-rs `area.rs`, `area/kernels.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
+| 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |

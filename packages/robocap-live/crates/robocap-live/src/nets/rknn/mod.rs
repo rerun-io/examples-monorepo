@@ -11,8 +11,8 @@
 //! The models have the `/255` baked in (`rknn_convert.py`: mean 0, std 255), so the image input is on the u8 scale. DetNet's
 //! 640x480 frame is average-pooled 4x4 on the CPU to the 120x160 input the model expects, in one pass from the small image's rows
 //! straight into the model's input type ([`PooledInput`]; the black bars are zeros). How the image is fed follows the
-//! model's input type ([`ImageFeed`]): an INT8 model gets u8 (the rounded pool [`pool4_u8`](crate::kornia_ext::pool::pool4_u8), the crop rounded to u8; the NPU
-//! quantises its input at about that step anyway); an FP16 model gets the unrounded image (the exact pool [`pool4_mean_f32`](crate::kornia_ext::pool::pool4_mean_f32),
+//! model's input type ([`ImageFeed`]): an INT8 model gets u8 (the rounded pool [`pool4_u8`](kornia_staging_imgproc::resize::pool4_u8), the crop rounded to u8; the NPU
+//! quantises its input at about that step anyway); an FP16 model gets the unrounded image (the exact pool [`pool4_mean_f32`](kornia_staging_imgproc::resize::pool4_mean_f32),
 //! the float crop), normalised and converted to fp16 on our side and passed through in its native NHWC layout, because
 //! rounding the pooled input to u8 alone moves DetNet's centres by 2.9 px mean on s66 frames. KeyNet's crop goes into one buffer
 //! of the same type ([`CropInput`]); its prior keypoints are always float32.
@@ -22,7 +22,7 @@ use std::path::Path;
 mod api;
 pub use api::{InputData, NpuCore, RknnError, RknnModel, RknnRuntime, RunTiming, TensorInfo};
 
-use crate::kornia_ext::pool::{pool4_from_sums, pool4_mean_f32, pool4_u8};
+use kornia_staging_imgproc::resize::{pool4_from_sums, pool4_mean_f32, pool4_u8};
 
 use super::{
     CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
@@ -83,7 +83,7 @@ impl ImageFeed {
     }
 }
 
-// The CPU pre-processing (kornia-style free functions on slices; see UPSTREAM.md). The 4x4 pooling is kornia_ext::pool.
+// The CPU pre-processing (kornia-style free functions on slices; see UPSTREAM.md). The 4x4 pooling is `kornia_staging_imgproc::resize`.
 
 fn pool_error(error: kornia_image::ImageError) -> NetsError {
     NetsError::Input { net: "detnet", message: format!("pool4: {error}") }

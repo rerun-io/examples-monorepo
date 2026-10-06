@@ -14,7 +14,7 @@ use kornia_image::Image;
 use kornia_imgproc::padding::{Padding2D, PaddingMode, spatial_padding};
 use kornia_staging_3d::camera::virtual_camera::maps_from_virtual_pinhole_kb4_f32;
 use robocap_live::kornia_ext::remap::remap_f32_from_u8 as remap_f32_from_u8_zero_border;
-use robocap_live::kornia_ext::pool::pool4_mean_f32;
+use kornia_staging_imgproc::resize::pool4_mean_f32;
 use robocap_live::frame::isometry_from_matrix;
 use robocap_live::frame::{CameraFrame, FULL_SIZE, FrameMeta, Luma, NUM_CAMERAS, Rig, SMALL_SIZE};
 use robocap_live::hands::CropSource;

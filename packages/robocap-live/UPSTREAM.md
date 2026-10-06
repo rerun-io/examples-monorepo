@@ -25,8 +25,7 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
 - `src/nets/rknn/api.rs` RknnRuntime / RknnModel -> kornia-rs `examples/rknn` (beside `examples/onnx`), or a small kornia runtime
   crate: a dlopened RKNN 2.x C-API binding (one context per NPU core, u8/f16/f32 inputs, float outputs into caller buffers,
   typed errors, rknn_destroy on drop). kornia has no inference crate, so this stays ours until one exists.
-- `src/kornia_ext/pool.rs` pool4_u8 / pool4_mean_f32 -> kornia-imgproc resize: integer-factor box downscale (u8 rounded half to
-  even like torch, and an unrounded f32 mean), the 4x4 case of the `resize_area_u8` gap.
+- 4x4 pooling is staged in `kornia-staging-imgproc::resize`; see [the staging tracker](../kornia-staging/README.md).
 - `src/hands/heatmaps.rs` decode_heatmaps (one decoder for the tracker and the golden comparison) -> kornia-tensor-ops / kornia-imgproc features: per-channel heatmap arg-max with a
   separable log-quadratic sub-pixel refinement (handtrack's decode_heatmaps).
 - `src/log/video.rs` `AccessUnitSplitter` + `H264Encoder` -> kornia-io (gstreamer / video): a hardware H.264 video sink that does not

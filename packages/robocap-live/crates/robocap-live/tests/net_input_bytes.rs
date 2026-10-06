@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use kornia_image::Image;
 use kornia_imgproc::padding::{Padding2D, PaddingMode, spatial_padding};
 use kornia_staging_imgproc::resize::resize_area_u8;
-use robocap_live::kornia_ext::pool::{pool4_mean_f32, pool4_u8};
+use kornia_staging_imgproc::resize::{pool4_mean_f32, pool4_u8};
 use robocap_live::downsample::{SmallImagePool, small_images};
 use robocap_live::frame::{FULL_SIZE, FrameReader, SMALL_SIZE};
 use robocap_live::hands::letterbox::{BarLetterbox, NET_SIZE};

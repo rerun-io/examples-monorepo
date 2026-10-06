@@ -3,5 +3,4 @@
 #![deny(missing_docs)]
 
 pub mod heatmap;
-pub mod pool;
 pub mod remap;
