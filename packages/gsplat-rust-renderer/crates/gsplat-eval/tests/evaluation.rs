@@ -88,15 +88,6 @@ async fn float_parity_preserves_highlights_and_detects_alpha() {
 #[tokio::test]
 #[ignore = "integration: GPU and Lego PLY/cameras/GT assets (selected by pytest)"]
 async fn lego_float_evaluation_matches_brush_eval_stats() {
-    #[derive(serde::Deserialize)]
-    struct Document {
-        camera_angle_x: f32,
-        frames: Vec<Frame>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Frame {
-        transform_matrix: [[f32; 4]; 4],
-    }
     let ply = std::env::var("GSPLAT_TEST_PLY")
         .expect("asset GSPLAT_TEST_PLY is required; use tests-integration for skip handling");
     let cameras = std::env::var("GSPLAT_TEST_CAMERAS").expect("asset GSPLAT_TEST_CAMERAS required");
@@ -105,21 +96,14 @@ async fn lego_float_evaluation_matches_brush_eval_stats() {
         brush_serde::import::load_splat_from_ply(tokio::fs::File::open(ply).await.unwrap(), None)
             .await
             .unwrap();
-    let document: Document =
-        serde_json::from_reader(std::fs::File::open(cameras).unwrap()).unwrap();
-    let pose = glam::Mat4::from_cols_array_2d(&document.frames[0].transform_matrix).transpose()
-        * glam::Mat4::from_scale(glam::vec3(1.0, -1.0, -1.0));
+    let frames =
+        gsplat_render::camera::load_frames(std::path::Path::new(&cameras), Some((256, 256)))
+            .await
+            .unwrap();
+    let camera = frames[0].camera.brush_camera();
     let gt = image::open(gt)
         .unwrap()
         .resize_exact(256, 256, image::imageops::FilterType::Triangle);
-    let camera = brush_render::camera::Camera::new(
-        pose.w_axis.truncate(),
-        glam::Quat::from_mat4(&pose),
-        document.camera_angle_x.into(),
-        document.camera_angle_x.into(),
-        glam::Vec2::splat(0.5),
-        brush_render::kernels::camera_model::CameraModel::Pinhole,
-    );
     let device = burn::tensor::Device::default();
     let splats = loaded.data.into_splats(
         &device,

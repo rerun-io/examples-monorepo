@@ -23,4 +23,4 @@ toml = "1.1"
 [dev-dependencies]
 brush-train.workspace = true
 brush-serde.workspace = true
-glam.workspace = true
+gsplat-render = { path = "../gsplat-render" }
