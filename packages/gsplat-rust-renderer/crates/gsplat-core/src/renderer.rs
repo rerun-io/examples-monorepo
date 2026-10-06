@@ -22,6 +22,8 @@ struct Scene {
     transforms: wgpu::Buffer,
     opacity: wgpu::Buffer,
     sh: wgpu::Buffer,
+    min_scale: wgpu::Buffer,
+    has_min_scale: bool,
     n: u32,
     degree: u32,
     ids: wgpu::Buffer,
@@ -128,6 +130,11 @@ impl Renderer {
                 }))
         };
         let scene = Scene {
+            min_scale: upload(
+                "3D scale floor",
+                bytemuck::cast_slice(splats.min_scale.as_deref().unwrap_or(&[0.0])),
+            )?,
+            has_min_scale: splats.min_scale.is_some(),
             transforms: upload("raw transforms", bytemuck::cast_slice(&splats.transforms))?,
             opacity: upload("raw opacity", bytemuck::cast_slice(&splats.raw_opacities))?,
             sh: upload(
@@ -169,6 +176,8 @@ impl Renderer {
             || !(camera.fov_x > 0.0 && camera.fov_x < std::f64::consts::PI)
             || !(camera.fov_y > 0.0 && camera.fov_y < std::f64::consts::PI)
             || !options.background.is_finite()
+            || !options.splat_scale.is_finite()
+            || options.splat_scale <= 0.0
         {
             return Err(Error::Input("invalid camera or background"));
         }
@@ -196,7 +205,12 @@ impl Renderer {
             image: [camera.size.x, camera.size.y, tiles.x, tiles.y],
             scene: [scene.n, scene.degree, (scene.degree + 1).pow(2), 0],
             background: options.background.extend(0.0).to_array(),
-            options: [0.0; 4],
+            options: [
+                options.splat_scale.ln(),
+                f32::from(options.render_mode == crate::RenderMode::Mip),
+                f32::from(scene.has_min_scale),
+                0.0,
+            ],
         };
         let uniform = self
             .device
@@ -214,6 +228,7 @@ impl Renderer {
                 (0, &uniform),
                 (1, &scene.transforms),
                 (2, &scene.opacity),
+                (3, &scene.min_scale),
                 (4, &scene.ids),
                 (5, &scene.depths),
                 (6, &self.counts),
@@ -314,6 +329,7 @@ impl Renderer {
                 (0, &uniform),
                 (1, &scene.transforms),
                 (2, &scene.opacity),
+                (3, &scene.min_scale),
                 (4, &scene.ids),
                 (6, &self.counts),
                 (8, &scene.projected),

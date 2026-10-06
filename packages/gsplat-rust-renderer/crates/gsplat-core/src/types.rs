@@ -24,10 +24,29 @@ pub struct Camera {
     pub size: UVec2,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderMode {
+    #[default]
+    Default,
+    Mip,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct RenderOptions {
     /// Applied during rasterization; alpha remains accumulated splat coverage.
     pub background: Vec3,
+    pub render_mode: RenderMode,
+    /// Positive multiplier, applied as a log-scale offset before the 3D floor.
+    pub splat_scale: f32,
+}
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            background: Vec3::ZERO,
+            render_mode: RenderMode::Default,
+            splat_scale: 1.0,
+        }
+    }
 }
 
 /// Caller-owned GPU output. Buffers require STORAGE; texture requires STORAGE_BINDING.

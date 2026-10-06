@@ -1,6 +1,7 @@
 // Brush project_forward + project_visible, adapted to raw buffers.
 @group(0) @binding(1) var<storage,read> transforms: array<f32>;
 @group(0) @binding(2) var<storage,read> raw_opacity: array<f32>;
+@group(0) @binding(3) var<storage,read> min_scale: array<f32>;
 @group(0) @binding(4) var<storage,read_write> ids: array<u32>;
 @group(0) @binding(5) var<storage,read_write> depths: array<u32>;
 @group(0) @binding(6) var<storage,read_write> counts: array<atomic<u32>>;
@@ -14,11 +15,19 @@ fn project(id: u32) -> Projection {
     let point = (u.view*vec4f(mean,1.0)).xyz;
     var result: Projection;
     if !finite3(point) || point.z > 1e10 || point.z < 0.01 { return result; }
-    let scale = exp(vec3f(transforms[base+7u],transforms[base+8u],transforms[base+9u]));
+    var scale = exp(vec3f(transforms[base+7u],transforms[base+8u],transforms[base+9u])+u.options.x);
     if !finite3(scale) { return result; }
     let qraw = vec4f(transforms[base+3u],transforms[base+4u],transforms[base+5u],transforms[base+6u]);
     let qnorm = dot(qraw,qraw);
     if !(qnorm >= 1e-6 && finite(qnorm)) || !finite(raw_opacity[id]) { return result; }
+    var opacity = 1.0/(1.0+exp(-raw_opacity[id]));
+    if u.options.z != 0.0 {
+        let floor = min_scale[id];
+        let filtered = sqrt(scale*scale+floor*floor);
+        let ratio = scale/filtered;
+        opacity = clamp(opacity*(ratio.x*ratio.y*ratio.z),1e-6,1.0-1e-6);
+        scale = filtered;
+    }
     let q = qraw*(1.0/sqrt(qnorm));
     let w=q.x; let x=q.y; let y=q.z; let z=q.w;
     let rotation = mat3x3f(vec3f(1.0-2.0*(y*y+z*z),2.0*(x*y+w*z),2.0*(x*z-w*y)),
@@ -36,9 +45,15 @@ fn project(id: u32) -> Projection {
     var cov = vec3f(dot(v0,v0),dot(v0,v1),dot(v1,v1));
     let max_abs = max(max(abs(cov.x),abs(cov.y)),abs(cov.z));
     cov *= select(1.0,1e18/max_abs,max_abs>1e18);
-    cov += vec3f(0.3,0.0,0.3);
+    let raw_cov = cov;
+    let blur = select(0.3,0.1,u.options.y != 0.0);
+    cov += vec3f(blur,0.0,blur);
+    if u.options.y != 0.0 {
+        let raw_det = raw_cov.x*raw_cov.z-raw_cov.y*raw_cov.y;
+        let blurred_det = cov.x*cov.z-cov.y*cov.y;
+        opacity *= sqrt(max(raw_det,0.0)/blurred_det);
+    }
     if !finite3(cov) { return result; }
-    let opacity = 1.0/(1.0+exp(-raw_opacity[id]));
     if !(opacity >= 1.0/255.0) { return result; }
     let det = cov.x*cov.z-cov.y*cov.y;
     let conic = vec3f(cov.z,-cov.y,cov.x)*select(0.0,1.0/det,det>0.0);

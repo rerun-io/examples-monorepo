@@ -52,6 +52,7 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
             &camera,
             &RenderOptions {
                 background: Vec3::new(0.2, 0.4, 0.6),
+                ..Default::default()
             },
             Target::Float(&target),
         )
@@ -100,6 +101,7 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
                 &camera,
                 &RenderOptions {
                     background: Vec3::new(0.2, 0.4, 0.6),
+                    ..Default::default()
                 },
                 if texture_output {
                     Target::Texture(&view)
