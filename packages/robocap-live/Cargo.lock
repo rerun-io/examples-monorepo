@@ -3060,6 +3060,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-sensors"
+version = "0.1.0"
+dependencies = [
+ "kornia-algebra",
+ "kornia-image",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-tensor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5610,6 +5619,7 @@ dependencies = [
  "kornia-staging-imgproc",
  "kornia-staging-io",
  "kornia-staging-sensor-iio",
+ "kornia-staging-sensors",
  "libc",
  "libloading 0.8.9",
  "nalgebra",
@@ -5629,6 +5639,7 @@ name = "robocap-live-py"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-staging-sensors",
  "nalgebra",
  "numpy",
  "pyo3",

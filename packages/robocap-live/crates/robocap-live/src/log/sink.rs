@@ -29,7 +29,7 @@ impl FramesetSink for LoggerSink {
         let Some(logger) = self.logger.as_mut() else { return Ok(()) };
         // The logger draws a pose only when it is a usable one.
         let frame = FrameLog {
-            t_ns: record.frameset.t_ns,
+            t_ns: record.frameset.timestamp_ns,
             small: std::array::from_fn(|c| record.small[c].as_ref()),
             world_from_rig: record.pose.filter(|pose| pose.ok).map(|pose| &pose.world_from_rig),
             slam_status: record.pose.map_or("none", |pose| pose.status.as_str()),

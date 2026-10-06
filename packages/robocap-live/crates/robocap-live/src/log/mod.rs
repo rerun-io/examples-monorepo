@@ -36,18 +36,19 @@ use std::time::{Duration, Instant};
 use nalgebra::Isometry3;
 use rerun::RecordingStream;
 
-use crate::sched::FrameTimings;
-use crate::frame::{Luma, NUM_CAMERAS, Rig, SMALL_SIZE};
+use crate::frame::Luma;
+use crate::frame::{NUM_CAMERAS, Rig, SMALL_SIZE};
 use crate::hands::HandFrameResult;
+use crate::sched::FrameTimings;
 use display::{APPLICATION_ID, DisplayAssets, DisplayError};
-use preview::{PreviewQueue, PreviewSender};
-pub use sink::LoggerSink;
-use scene::{DeliveredState, RecordState};
-use worker::{FrameItem, SaveSlot, VideoSink, Worker};
+use kornia_staging_io::video::H264Encoder;
 use kornia_staging_io::video::{EncoderConfig, VideoError};
+use preview::{PreviewQueue, PreviewSender};
+use scene::{DeliveredState, RecordState};
+pub use sink::LoggerSink;
 use video::{EncoderReport, VideoSample};
 use worker::EncoderState;
-use kornia_staging_io::video::H264Encoder;
+use worker::{FrameItem, SaveSlot, VideoSink, Worker};
 
 /// Errors of the logger.
 #[derive(Debug, thiserror::Error)]
@@ -91,7 +92,9 @@ impl FromStr for VideoMode {
             "h264" => Ok(Self::H264),
             "raw" => Ok(Self::Raw),
             "off" => Ok(Self::Off),
-            other => Err(LogError::Invalid(format!("video mode {other:?}: expected h264, raw or off"))),
+            other => Err(LogError::Invalid(format!(
+                "video mode {other:?}: expected h264, raw or off"
+            ))),
         }
     }
 }
@@ -141,7 +144,8 @@ impl Default for LoggerConfig {
             viewer: None,
             save: None,
             video: VideoMode::H264,
-            encoder: video::mpp(SMALL_SIZE, 30, 1_000_000, 30).expect("valid fixed preview geometry"),
+            encoder: video::mpp(SMALL_SIZE, 30, 1_000_000, 30)
+                .expect("valid fixed preview geometry"),
             display: None,
             recording_id: None,
             time_origin_ns: None,
@@ -288,7 +292,13 @@ impl Prelude {
 /// Free bytes on the filesystem holding `path` (`statvfs`), if it can be read.
 pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
-    let dir = if path.is_dir() { path } else { path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")) };
+    let dir = if path.is_dir() {
+        path
+    } else {
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."))
+    };
     let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
     // SAFETY: `c_path` is a valid NUL-terminated string and `stat` points to writable memory of the right size; statvfs only
@@ -310,7 +320,10 @@ struct Shutdown(Mutex<Option<Instant>>);
 
 impl Shutdown {
     fn deadline(&self) -> Instant {
-        let mut deadline = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut deadline = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(5))
     }
 }
@@ -341,14 +354,29 @@ impl Logger {
     /// [`LogError`] if the display asset is invalid, a stream cannot be opened, or an encoder cannot start.
     pub fn new(rig: &Rig, options: LoggerConfig) -> Result<Self, LogError> {
         if rig.cameras.len() != NUM_CAMERAS {
-            return Err(LogError::Invalid(format!("rig has {} cameras, expected {NUM_CAMERAS}", rig.cameras.len())));
+            return Err(LogError::Invalid(format!(
+                "rig has {} cameras, expected {NUM_CAMERAS}",
+                rig.cameras.len()
+            )));
         }
         let recording_id = options.recording_id.clone().unwrap_or_else(|| {
-            let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             format!("robocap-live-{seconds}")
         });
-        let display = options.display.as_deref().map(DisplayAssets::load).transpose()?;
-        let prelude = Arc::new(Prelude { rig: rig.clone(), h264: options.video == VideoMode::H264, display, content: options.content });
+        let display = options
+            .display
+            .as_deref()
+            .map(DisplayAssets::load)
+            .transpose()?;
+        let prelude = Arc::new(Prelude {
+            rig: rig.clone(),
+            h264: options.video == VideoMode::H264,
+            display,
+            content: options.content,
+        });
         let counters = Arc::new(LogCounters::default());
         let started = Instant::now();
         let shutdown = Arc::new(Shutdown::default());
@@ -384,10 +412,16 @@ impl Logger {
 
         let (preview_queue, preview) = match &options.viewer {
             Some(url) => {
-                let uri: rerun::external::re_uri::ProxyUri =
-                    url.parse().map_err(|e| LogError::Invalid(format!("viewer URL {url:?}: {e} (expected rerun+http://<host>:9876/proxy)")))?;
+                let uri: rerun::external::re_uri::ProxyUri = url.parse().map_err(|e| {
+                    LogError::Invalid(format!(
+                        "viewer URL {url:?}: {e} (expected rerun+http://<host>:9876/proxy)"
+                    ))
+                })?;
                 let (tx, rx) = sync_channel(options.preview_queue.max(1));
-                let queue = PreviewQueue { tx, counters: counters.clone() };
+                let queue = PreviewQueue {
+                    tx,
+                    counters: counters.clone(),
+                };
                 let sender = PreviewSender {
                     uri,
                     recording_id: recording_id.clone(),
@@ -407,16 +441,32 @@ impl Logger {
         };
 
         if let Some(&camera) = options.video_cameras.iter().find(|&&c| c >= NUM_CAMERAS) {
-            return Err(LogError::Invalid(format!("video camera {camera}: there are {NUM_CAMERAS} cameras")));
+            return Err(LogError::Invalid(format!(
+                "video camera {camera}: there are {NUM_CAMERAS} cameras"
+            )));
         }
         let mut encoders: Vec<Option<EncoderState>> = (0..NUM_CAMERAS).map(|_| None).collect();
         if options.video == VideoMode::H264 {
-            for (camera, slot) in encoders.iter_mut().enumerate().filter(|(camera, _)| options.video_cameras.contains(camera)) {
-                let mut sink = VideoSink { save: save.clone(), preview: preview_queue.clone(), counters: counters.clone(), seq: 0 };
+            for (camera, slot) in encoders
+                .iter_mut()
+                .enumerate()
+                .filter(|(camera, _)| options.video_cameras.contains(camera))
+            {
+                let mut sink = VideoSink {
+                    save: save.clone(),
+                    preview: preview_queue.clone(),
+                    counters: counters.clone(),
+                    seq: 0,
+                };
                 *slot = Some(EncoderState {
-                    encoder: H264Encoder::spawn(&options.encoder, move |sample| sink.send(VideoSample {
-                        camera, t_ns: sample.timestamp_ns, data: sample.unit.data.into(), keyframe: sample.unit.keyframe,
-                    }))?,
+                    encoder: H264Encoder::spawn(&options.encoder, move |sample| {
+                        sink.send(VideoSample {
+                            camera,
+                            t_ns: sample.timestamp_ns,
+                            data: sample.unit.data.into(),
+                            keyframe: sample.unit.keyframe,
+                        })
+                    })?,
                     cpu_seconds: 0.0,
                 });
             }
@@ -482,7 +532,9 @@ impl Logger {
             timings: *frame.timings,
             received: Instant::now(),
         };
-        let Some(input) = &self.input else { return Err(LogError::WorkerGone) };
+        let Some(input) = &self.input else {
+            return Err(LogError::WorkerGone);
+        };
         if self.lossless {
             return input.send(item).map_err(|_| LogError::WorkerGone);
         }
@@ -515,9 +567,13 @@ impl Logger {
                 std::thread::sleep(Duration::from_millis(10));
             }
             if !worker.is_finished() {
-                return Err(LogError::Invalid("logging worker exceeded the shutdown deadline".into()));
+                return Err(LogError::Invalid(
+                    "logging worker exceeded the shutdown deadline".into(),
+                ));
             }
-            worker.join().map_err(|_| LogError::Invalid("the logging worker panicked".into()))??
+            worker
+                .join()
+                .map_err(|_| LogError::Invalid("the logging worker panicked".into()))??
         } else {
             Vec::new()
         };
@@ -526,7 +582,9 @@ impl Logger {
                 std::thread::sleep(Duration::from_millis(10));
             }
             if preview.is_finished() {
-                preview.join().map_err(|_| LogError::Invalid("the preview sender panicked".into()))?;
+                preview
+                    .join()
+                    .map_err(|_| LogError::Invalid("the preview sender panicked".into()))?;
             }
         }
         Ok((self.counters.snapshot(self.started), encoders))
@@ -542,5 +600,9 @@ impl Drop for Logger {
 
 /// Encoder per-camera CPU, as a share of one core over the encoder's life (for reports).
 pub fn encoder_cpu_percent(stats: &EncoderReport) -> f64 {
-    if stats.stats.wall_seconds > 0.0 { 100.0 * stats.cpu_seconds / stats.stats.wall_seconds } else { 0.0 }
+    if stats.stats.wall_seconds > 0.0 {
+        100.0 * stats.cpu_seconds / stats.stats.wall_seconds
+    } else {
+        0.0
+    }
 }

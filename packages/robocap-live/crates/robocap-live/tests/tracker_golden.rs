@@ -11,7 +11,9 @@
 use std::sync::{Arc, Mutex};
 
 use kornia_image::{Image, ImageSize};
-use robocap_live::frame::{CameraFrame, FrameMeta, Luma, NUM_CAMERAS};
+use kornia_staging_sensors::{CameraFrame, CaptureMeta};
+use robocap_live::frame::Luma;
+use robocap_live::frame::NUM_CAMERAS;
 use robocap_live::hands::model::GenericHandModel;
 use robocap_live::hands::scale::{CalibrationConfig, calibrate_scale};
 use robocap_live::hands::tracker::{Tracker, TrackerConfig};
@@ -28,15 +30,27 @@ struct Run {
     tracker: Tracker,
 }
 
-fn run(golden: &Arc<Golden>, scale: ScaleMode, frames: usize) -> Result<Run, Box<dyn std::error::Error>> {
+fn run(
+    golden: &Arc<Golden>,
+    scale: ScaleMode,
+    frames: usize,
+) -> Result<Run, Box<dyn std::error::Error>> {
     run_with(golden, scale, frames, false)
 }
 
 /// [`run`] with ROBUST_TRACKER_CONFIG and DetNet on every camera (`detnet_all_cameras`, one group) or round robin (a group per
 /// camera).
-fn run_with(golden: &Arc<Golden>, scale: ScaleMode, frames: usize, detnet_all_cameras: bool) -> Result<Run, Box<dyn std::error::Error>> {
+fn run_with(
+    golden: &Arc<Golden>,
+    scale: ScaleMode,
+    frames: usize,
+    detnet_all_cameras: bool,
+) -> Result<Run, Box<dyn std::error::Error>> {
     let log = Arc::new(Mutex::new(CallLog::default()));
-    let perception = Box::new(TablePerception { golden: golden.clone(), log: log.clone() });
+    let perception = Box::new(TablePerception {
+        golden: golden.clone(),
+        log: log.clone(),
+    });
     let hands = HandsConfig {
         scale,
         cameras: (0..NUM_CAMERAS).collect(),
@@ -46,16 +60,36 @@ fn run_with(golden: &Arc<Golden>, scale: ScaleMode, frames: usize, detnet_all_ca
         scale_wait: false,
         acquire_threads: 4,
     };
-    let mut tracker = Tracker::new(&golden.record.rig, &hands, TrackerConfig::robust(), perception)?;
-    let image: Luma = Arc::new(Image::new(ImageSize { width: 1, height: 1 }, vec![0u8])?);
+    let mut tracker = Tracker::new(
+        &golden.record.rig,
+        &hands,
+        TrackerConfig::robust(),
+        perception,
+    )?;
+    let image: Luma = Arc::new(Image::new(
+        ImageSize {
+            width: 1,
+            height: 1,
+        },
+        vec![0u8],
+    )?);
     let images: [Option<&Luma>; NUM_CAMERAS] = [Some(&image); NUM_CAMERAS];
-    let camera_frame = CameraFrame { meta: FrameMeta::default(), full: image.clone() };
+    let camera_frame = CameraFrame {
+        meta: CaptureMeta::default(),
+        full: image.clone(),
+    };
     let mut nets = NoNets;
     let mut results = Vec::new();
     let mut poses = Vec::new();
     for frame in 0..frames {
         log.lock().map_err(|_| "log poisoned")?.frame = frame;
-        let inputs = HandInputs { index: frame as u64, t_ns: frame as i64 * 33_333_333, full: [Some(&camera_frame); NUM_CAMERAS], small: images };
+        let inputs = HandInputs {
+            turned_180: [false; NUM_CAMERAS],
+            index: frame as u64,
+            t_ns: frame as i64 * 33_333_333,
+            full: [Some(&camera_frame); NUM_CAMERAS],
+            small: images,
+        };
         results.push(tracker.track(&inputs, &golden.isometry(frame), &mut nets)?);
         poses.push(std::array::from_fn(|side| {
             tracker.pose(side).map(|pose| {
@@ -73,7 +107,12 @@ fn run_with(golden: &Arc<Golden>, scale: ScaleMode, frames: usize, detnet_all_ca
             })
         }));
     }
-    Ok(Run { results, poses, log, tracker })
+    Ok(Run {
+        results,
+        poses,
+        log,
+        tracker,
+    })
 }
 
 /// Largest deviations seen over a run, for the report.
@@ -100,17 +139,37 @@ fn compare(name: &str, golden: &RunRecord, run: &Run) -> Result<Deviations, Stri
             Some(c) => c as i64,
         };
         if detnet != expected.detnet_camera {
-            return Err(format!("{context}: DetNet camera {detnet}, Python {}", expected.detnet_camera));
+            return Err(format!(
+                "{context}: DetNet camera {detnet}, Python {}",
+                expected.detnet_camera
+            ));
         }
-        let calls: Vec<&Vec<Request>> = log.keynet.iter().filter(|(f, _)| *f == frame).map(|(_, r)| r).collect();
+        let calls: Vec<&Vec<Request>> = log
+            .keynet
+            .iter()
+            .filter(|(f, _)| *f == frame)
+            .map(|(_, r)| r)
+            .collect();
         if calls.len() != expected.keynet_calls.len() {
-            return Err(format!("{context}: {} KeyNet calls, Python {}", calls.len(), expected.keynet_calls.len()));
+            return Err(format!(
+                "{context}: {} KeyNet calls, Python {}",
+                calls.len(),
+                expected.keynet_calls.len()
+            ));
         }
         for (call, want) in calls.iter().zip(&expected.keynet_calls) {
-            let got: Vec<(usize, usize, bool)> = call.iter().map(|r| (r.camera, r.side, r.acquisition)).collect();
-            let want_views: Vec<(usize, usize, bool)> = want.iter().map(|r| (r.camera, r.side, r.acquisition)).collect();
+            let got: Vec<(usize, usize, bool)> = call
+                .iter()
+                .map(|r| (r.camera, r.side, r.acquisition))
+                .collect();
+            let want_views: Vec<(usize, usize, bool)> = want
+                .iter()
+                .map(|r| (r.camera, r.side, r.acquisition))
+                .collect();
             if got != want_views {
-                return Err(format!("{context}: KeyNet views {got:?}, Python {want_views:?}"));
+                return Err(format!(
+                    "{context}: KeyNet views {got:?}, Python {want_views:?}"
+                ));
             }
             for (r, w) in call.iter().zip(want) {
                 for k in 0..3 {
@@ -131,18 +190,27 @@ fn compare(name: &str, golden: &RunRecord, run: &Run) -> Result<Deviations, Stri
                     worst.rotation = worst.rotation.max((pose[i] - want.rotation[i]).abs());
                 }
                 for i in 0..3 {
-                    worst.translation_m = worst.translation_m.max((pose[9 + i] - want.translation[i]).abs());
+                    worst.translation_m = worst
+                        .translation_m
+                        .max((pose[9 + i] - want.translation[i]).abs());
                 }
                 for i in 0..22 {
-                    worst.angle_rad = worst.angle_rad.max((pose[12 + i] - want.joint_angles[i]).abs());
+                    worst.angle_rad = worst
+                        .angle_rad
+                        .max((pose[12 + i] - want.joint_angles[i]).abs());
                 }
             }
             if expected.reported[side] {
                 let views: Vec<usize> = hand.fitted_views().map(|v| v.camera).collect();
                 if views != expected.view_cameras[side] {
-                    return Err(format!("{context} hand {side}: fit views {views:?}, Python {:?}", expected.view_cameras[side]));
+                    return Err(format!(
+                        "{context} hand {side}: fit views {views:?}, Python {:?}",
+                        expected.view_cameras[side]
+                    ));
                 }
-                let (Some(landmarks), Some(want)) = (&hand.landmarks_world, &expected.landmarks[side]) else {
+                let (Some(landmarks), Some(want)) =
+                    (&hand.landmarks_world, &expected.landmarks[side])
+                else {
                     return Err(format!("{context} hand {side}: reported without landmarks"));
                 };
                 for (p, q) in landmarks.iter().zip(want) {
@@ -169,7 +237,10 @@ const MAX_CIRCLE_PX: f64 = 3e-3;
 
 fn check(deviations: &Deviations) {
     eprintln!("{deviations:?}");
-    assert!(deviations.translation_m < MAX_TRANSLATION_M, "{deviations:?}");
+    assert!(
+        deviations.translation_m < MAX_TRANSLATION_M,
+        "{deviations:?}"
+    );
     assert!(deviations.landmark_m < MAX_LANDMARK_M, "{deviations:?}");
     assert!(deviations.rotation < MAX_ROTATION, "{deviations:?}");
     assert!(deviations.angle_rad < MAX_ANGLE_RAD, "{deviations:?}");
@@ -189,19 +260,45 @@ fn tracking_at_the_calibrated_scale_matches_python() -> Result<(), Box<dyn std::
 #[test]
 fn detnet_on_all_cameras_matches_python() -> Result<(), Box<dyn std::error::Error>> {
     let golden = Arc::new(golden()?);
-    let run = run_with(&golden, ScaleMode::Fixed(golden.record.all_cameras_run.phi), golden.record.frames, true)?;
-    check(&compare("all cameras", &golden.record.all_cameras_run, &run)?);
+    let run = run_with(
+        &golden,
+        ScaleMode::Fixed(golden.record.all_cameras_run.phi),
+        golden.record.frames,
+        true,
+    )?;
+    check(&compare(
+        "all cameras",
+        &golden.record.all_cameras_run,
+        &run,
+    )?);
     // DetNet ran on all six cameras on every frame with an untracked hand.
     let log = run.log.lock().map_err(|_| "log poisoned")?;
-    for frame in golden.record.all_cameras_run.frames.iter().filter(|f| f.detnet_camera >= 0) {
-        let cameras: Vec<usize> = log.detnet.iter().filter(|(f, _)| *f == frame.frame).map(|(_, c)| *c).collect();
-        assert_eq!(cameras, (0..NUM_CAMERAS).collect::<Vec<_>>(), "frame {}", frame.frame);
+    for frame in golden
+        .record
+        .all_cameras_run
+        .frames
+        .iter()
+        .filter(|f| f.detnet_camera >= 0)
+    {
+        let cameras: Vec<usize> = log
+            .detnet
+            .iter()
+            .filter(|(f, _)| *f == frame.frame)
+            .map(|(_, c)| *c)
+            .collect();
+        assert_eq!(
+            cameras,
+            (0..NUM_CAMERAS).collect::<Vec<_>>(),
+            "frame {}",
+            frame.frame
+        );
     }
     Ok(())
 }
 
 #[test]
-fn live_calibration_matches_python_calibrate_unknown_hand() -> Result<(), Box<dyn std::error::Error>> {
+fn live_calibration_matches_python_calibrate_unknown_hand() -> Result<(), Box<dyn std::error::Error>>
+{
     let golden = Arc::new(golden()?);
     let calibration_frames = golden.record.calibration_frames;
     // Frames 0..59 lie within the first 2 s; the solve starts on frame 60.
@@ -209,20 +306,39 @@ fn live_calibration_matches_python_calibrate_unknown_hand() -> Result<(), Box<dy
     let mut run = run(&golden, ScaleMode::Auto { seconds }, calibration_frames + 1)?;
     let deviations = compare("calibration", &golden.record.calibration_run, &run)?;
     check(&deviations);
-    assert!(run.results.iter().take(calibration_frames).all(|r| r.scale == 1.0 && !r.scale_final));
+    assert!(
+        run.results
+            .iter()
+            .take(calibration_frames)
+            .all(|r| r.scale == 1.0 && !r.scale_final)
+    );
     run.tracker.finish_scale();
-    let outcome = run.tracker.scale_outcome().cloned().ok_or("no calibration outcome")?;
-    eprintln!("Rust phi {:.6} from {} blocks in {:.3} s; Python {:.6} from {}", outcome.phi, outcome.blocks, outcome.solve_s,
-              golden.record.calibration.phi_raw, golden.record.calibration.blocks);
+    let outcome = run
+        .tracker
+        .scale_outcome()
+        .cloned()
+        .ok_or("no calibration outcome")?;
+    eprintln!(
+        "Rust phi {:.6} from {} blocks in {:.3} s; Python {:.6} from {}",
+        outcome.phi,
+        outcome.blocks,
+        outcome.solve_s,
+        golden.record.calibration.phi_raw,
+        golden.record.calibration.blocks
+    );
     assert_eq!(outcome.blocks, golden.record.calibration.blocks);
     // Measured: 0.920668 vs 0.920667 (same 25 iterations); handtrack's Jacobian is float32 central differences, ours analytic.
-    assert!((outcome.phi - golden.record.calibration.phi_raw).abs() < 1e-5, "{outcome:?}");
+    assert!(
+        (outcome.phi - golden.record.calibration.phi_raw).abs() < 1e-5,
+        "{outcome:?}"
+    );
     assert!((run.tracker.phi() - outcome.phi).abs() < 1e-15);
     Ok(())
 }
 
 #[test]
-fn calibrate_scale_on_pythons_observations_matches_python() -> Result<(), Box<dyn std::error::Error>> {
+fn calibrate_scale_on_pythons_observations_matches_python() -> Result<(), Box<dyn std::error::Error>>
+{
     let golden = golden()?;
     let blocks = golden.calibration_blocks()?;
     let generic = GenericHandModel::load()?;
@@ -231,8 +347,15 @@ fn calibrate_scale_on_pythons_observations_matches_python() -> Result<(), Box<dy
     let expected = &golden.record.calibration;
     eprintln!(
         "Rust phi {:.6} ({} iterations, {}, e_2d {:.1}, {:.3} s); Python {:.6} ({} iterations, {}, e_2d {:.1})",
-        calibration.phi, calibration.iterations, calibration.termination.as_str(), calibration.e_2d, begin.elapsed().as_secs_f64(),
-        expected.phi_raw, expected.iterations, expected.termination, expected.e_2d
+        calibration.phi,
+        calibration.iterations,
+        calibration.termination.as_str(),
+        calibration.e_2d,
+        begin.elapsed().as_secs_f64(),
+        expected.phi_raw,
+        expected.iterations,
+        expected.termination,
+        expected.e_2d
     );
     assert_eq!(calibration.blocks, expected.blocks);
     assert!((calibration.phi - expected.phi_raw).abs() < 1e-5);

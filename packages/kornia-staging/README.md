@@ -31,6 +31,7 @@ Module paths mirror the destination module paths.
 | kornia-staging-3d | kornia-rs / kornia-3d |
 | kornia-staging-algebra | kornia-rs / kornia-algebra |
 | kornia-staging-io | kornia-rs / kornia-io |
+| kornia-staging-sensors | kornia-slam / kornia-sensors |
 | kornia-staging-slam | kornia-slam |
 | kornia-staging-sensor-iio | sensor-rt / proposed sensor-iio |
 | kornia-staging-gpu | proposed kornia-gpu |
@@ -99,3 +100,5 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Rust MPLANE capture (no C), clock flags, leased MMAP planes and copied/borrowed luma | robocap-live `capture/camera.rs`, `v4l2_mplane.c`; robocap-recorder `camera.rs`, `native/camera.c` (C cores ported to Rust) | kornia-rs / kornia-io / v4l::mplane | staged | - |
 | Annex-B splitter and subprocess H.264 encoder | robocap-live log/video.rs | kornia-rs / kornia-io::video | staged; upstream fit open: overlaps kornia_io gstreamer::VideoWriter; Pablo decides at landing (D6) | - |
 | H.264/AV1 packets to borrowed luma planes with explicit limited/full/unknown range | slam-rs-cli decode.rs + native/dav1d.c | kornia-rs / kornia-io::video | staged | - |
+| N-camera body rig and IMU corrections | slam-rs calib.rs, robocap-live frame.rs | kornia-slam / kornia-sensors::rig | deferred: no consumer reads it | - |
+| Runtime frames, IMU combiner and timestamp matcher | `robocap-types`, `robocap-live/{source,capture}` + `robocap-recorder/live_slam.rs` | kornia-slam `kornia-sensors` (`imu` module and frame exports) | staged | - |

@@ -30,7 +30,8 @@ use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::{Backend, ImageView, Vio, VioResult, VioStatus};
 
-use crate::frame::{ImuSample, SLAM_CAMERAS, SMALL_SIZE, isometry_from_array};
+use crate::frame::{SLAM_CAMERAS, SMALL_SIZE, isometry_from_array};
+use kornia_staging_sensors::imu::CombinedImuSample;
 
 /// Cap A's 4-camera calibration at 640x360 (Basalt JSON, KB4, `T_imu_cam`), as PR #270 embeds it.
 pub const CAP_A_CALIBRATION: &str =
@@ -360,16 +361,17 @@ impl SlamEstimator {
     /// # Errors
     ///
     /// [`SlamError::Vio`] on a non-finite sample.
-    pub fn push_imu(&mut self, sample: &ImuSample) -> Result<(), SlamError> {
+    pub fn push_imu(&mut self, sample: &CombinedImuSample) -> Result<(), SlamError> {
         if self
             .vio
             .last_imu_t_ns()
-            .is_some_and(|last| sample.t_ns <= last)
+            .is_some_and(|last| sample.timestamp_ns <= last)
         {
             self.imu_unordered += 1;
             return Ok(());
         }
-        self.vio.push_imu(sample.t_ns, sample.gyro, sample.accel)?;
+        self.vio
+            .push_imu(sample.timestamp_ns, sample.gyro.to_array(), sample.accel.to_array())?;
         Ok(())
     }
 
@@ -558,10 +560,10 @@ mod tests {
         )?;
         let image = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
         for tick in 0..50 {
-            slam.push_imu(&ImuSample {
-                t_ns: 1_000_000_000 + tick * 5_000_000,
-                gyro: [0.0; 3],
-                accel: [0.0, 0.0, 9.81],
+            slam.push_imu(&CombinedImuSample {
+                timestamp_ns: 1_000_000_000 + tick * 5_000_000,
+                gyro: [0.0; 3].into(),
+                accel: [0.0, 0.0, 9.81].into(),
             })?;
         }
         assert!(slam.track(7, 1_010_000_000, [&image; 4])?.is_none());
@@ -600,10 +602,10 @@ mod tests {
         let image = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
         for first in [1_000_000_000, 2_000_000_000] {
             for tick in 0..20 {
-                slam.push_imu(&ImuSample {
-                    t_ns: first + tick * 5_000_000,
-                    gyro: [0.0; 3],
-                    accel: [0.0, 0.0, 9.81],
+                slam.push_imu(&CombinedImuSample {
+                    timestamp_ns: first + tick * 5_000_000,
+                    gyro: [0.0; 3].into(),
+                    accel: [0.0, 0.0, 9.81].into(),
                 })?;
             }
             assert!(slam.track(42, first + 10_000_000, [&image; 4])?.is_none());
@@ -827,24 +829,24 @@ mod tests {
             slam.track(0, 0, [&small, &small, &small, &small]),
             Err(SlamError::Input(_))
         ));
-        slam.push_imu(&ImuSample {
-            t_ns: 10,
-            gyro: [0.0; 3],
-            accel: [0.0, 0.0, 9.81],
+        slam.push_imu(&CombinedImuSample {
+            timestamp_ns: 10,
+            gyro: [0.0; 3].into(),
+            accel: [0.0, 0.0, 9.81].into(),
         })?;
-        slam.push_imu(&ImuSample {
-            t_ns: 10,
-            gyro: [0.0; 3],
-            accel: [0.0, 0.0, 9.81],
+        slam.push_imu(&CombinedImuSample {
+            timestamp_ns: 10,
+            gyro: [0.0; 3].into(),
+            accel: [0.0, 0.0, 9.81].into(),
         })?;
         assert_eq!(slam.imu_unordered, 1);
         assert!(slam.imu_covers(9) && !slam.imu_covers(10));
         slam.reset()?;
         assert!(!slam.imu_covers(9), "a reset estimator has no IMU");
-        slam.push_imu(&ImuSample {
-            t_ns: 5,
-            gyro: [0.0; 3],
-            accel: [0.0, 0.0, 9.81],
+        slam.push_imu(&CombinedImuSample {
+            timestamp_ns: 5,
+            gyro: [0.0; 3].into(),
+            accel: [0.0, 0.0, 9.81].into(),
         })?;
         assert_eq!(
             slam.imu_unordered, 1,
@@ -892,10 +894,10 @@ mod tests {
             let mut submitted = Vec::new();
             for tick in 0..=1200_i64 {
                 let t = 1_000_000_000 + tick * 5_000_000;
-                slam.push_imu(&ImuSample {
-                    t_ns: t,
-                    gyro: [0.0; 3],
-                    accel: [0.0, 0.0, 9.81],
+                slam.push_imu(&CombinedImuSample {
+                    timestamp_ns: t,
+                    gyro: [0.0; 3].into(),
+                    accel: [0.0, 0.0, 9.81].into(),
                 })?;
                 if tick % 14 == 8 {
                     let frame_t = t - 6_000_000;

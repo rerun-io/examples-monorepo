@@ -1,26 +1,34 @@
 //! Lossy preview delivery: the sender alone gates each camera's video on keyframes, and computes scene transitions only after
 //! taking a snapshot from the queue.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rerun::RecordingStream;
 use rerun::sink::{GrpcSinkConnectionState, LogSink};
 
-use super::{LogCounters, LogError, Prelude, Shutdown, scene};
 use super::display::APPLICATION_ID;
 use super::scene::{DeliveredState, SceneSnapshot};
 use super::video::VideoSample;
 use super::worker::{log_image, log_video_sample};
-use crate::frame::{Luma, NUM_CAMERAS};
+use super::{LogCounters, LogError, Prelude, Shutdown, scene};
+use crate::frame::Luma;
+use crate::frame::NUM_CAMERAS;
 
 /// What travels to the preview sender.
 pub(super) enum PreviewItem {
     /// An access unit; `seq` numbers the camera's samples from 0, so the sender sees one the queue dropped.
-    Video { seq: u64, sample: VideoSample },
-    Image { camera: usize, t_ns: i64, luma: Luma },
+    Video {
+        seq: u64,
+        sample: VideoSample,
+    },
+    Image {
+        camera: usize,
+        t_ns: i64,
+        luma: Luma,
+    },
     Frame(Arc<SceneSnapshot>),
 }
 
@@ -57,7 +65,9 @@ impl ProxySink {
             compression: re_log_encoding::rrd::Compression::Off,
             ..rerun::external::re_grpc_client::write::Options::default()
         };
-        Self(Arc::new(rerun::external::re_grpc_client::write::Client::new(uri, options)))
+        Self(Arc::new(
+            rerun::external::re_grpc_client::write::Client::new(uri, options),
+        ))
     }
 }
 
@@ -67,7 +77,9 @@ impl LogSink for ProxySink {
     }
 
     fn flush_blocking(&self, timeout: Duration) -> Result<(), rerun::sink::SinkFlushError> {
-        self.0.flush_blocking(timeout).map_err(|e| rerun::sink::SinkFlushError::failed(e.to_string()))
+        self.0
+            .flush_blocking(timeout)
+            .map_err(|e| rerun::sink::SinkFlushError::failed(e.to_string()))
     }
 }
 
@@ -83,7 +95,10 @@ pub(super) struct KeyGate {
 impl KeyGate {
     /// A fresh stream: every camera waits for a keyframe.
     pub(super) fn new() -> Self {
-        Self { need_key: [true; NUM_CAMERAS], next_seq: [0; NUM_CAMERAS] }
+        Self {
+            need_key: [true; NUM_CAMERAS],
+            next_seq: [0; NUM_CAMERAS],
+        }
     }
 
     /// A new stream after a reconnect: every camera waits for a keyframe again.
@@ -115,7 +130,15 @@ pub(super) struct PreviewSender {
 }
 
 impl PreviewSender {
-    fn connect(&self) -> Result<(RecordingStream, Arc<rerun::external::re_grpc_client::write::Client>), LogError> {
+    fn connect(
+        &self,
+    ) -> Result<
+        (
+            RecordingStream,
+            Arc<rerun::external::re_grpc_client::write::Client>,
+        ),
+        LogError,
+    > {
         let sink = ProxySink::new(self.uri.clone());
         let client = sink.0.clone();
         let config = rerun::log::ChunkBatcherConfig {
@@ -152,7 +175,9 @@ impl PreviewSender {
             };
             if last_check.elapsed() > Duration::from_millis(500) {
                 last_check = Instant::now();
-                let lost = connection.as_ref().is_none_or(|(_, client)| matches!(client.status(), GrpcSinkConnectionState::Disconnected(_)));
+                let lost = connection.as_ref().is_none_or(|(_, client)| {
+                    matches!(client.status(), GrpcSinkConnectionState::Disconnected(_))
+                });
                 if lost {
                     // The viewer went away (or never answered): open a fresh stream; the client retries until it connects.
                     if let Some((old, _)) = connection.take() {
@@ -163,7 +188,11 @@ impl PreviewSender {
                         Ok(fresh) => {
                             delivered = DeliveredState::reconnected();
                             if let Some(snapshot) = &latest
-                                && let Err(error) = scene::write_record(&fresh.0, &delivered.record(snapshot), self.prelude.content)
+                                && let Err(error) = scene::write_record(
+                                    &fresh.0,
+                                    &delivered.record(snapshot),
+                                    self.prelude.content,
+                                )
                             {
                                 self.counters.error("preview scene restore", &error);
                             }
@@ -180,22 +209,32 @@ impl PreviewSender {
             if let PreviewItem::Frame(snapshot) = &item {
                 latest = Some(snapshot.clone());
             }
-            let Some((rec, _)) = &connection else { continue };
+            let Some((rec, _)) = &connection else {
+                continue;
+            };
             let result = match &item {
                 PreviewItem::Video { seq, sample } => {
                     if !gate.admit(sample.camera, *seq, sample.keyframe) {
                         LogCounters::add(&self.counters.preview_gated, 1);
                         continue;
                     }
-                    LogCounters::add(&self.counters.preview_payload_bytes, sample.data.len() as u64);
+                    LogCounters::add(
+                        &self.counters.preview_payload_bytes,
+                        sample.data.len() as u64,
+                    );
                     log_video_sample(rec, sample);
                     Ok(())
                 }
                 PreviewItem::Image { camera, t_ns, luma } => {
-                    LogCounters::add(&self.counters.preview_payload_bytes, luma.as_slice().len() as u64);
+                    LogCounters::add(
+                        &self.counters.preview_payload_bytes,
+                        luma.as_slice().len() as u64,
+                    );
                     log_image(rec, *camera, *t_ns, luma)
                 }
-                PreviewItem::Frame(record) => scene::write_record(rec, &delivered.record(record), self.prelude.content),
+                PreviewItem::Frame(record) => {
+                    scene::write_record(rec, &delivered.record(record), self.prelude.content)
+                }
             };
             match result {
                 Ok(()) => LogCounters::add(&self.counters.preview_sent, 1),
@@ -203,8 +242,16 @@ impl PreviewSender {
             }
         }
         if let Some((rec, _)) = connection {
-            if rec.flush_with_timeout(self.shutdown.deadline().saturating_duration_since(Instant::now())).is_err() {
-                self.counters.error("preview flush", &"timed out (viewer unreachable?)");
+            if rec
+                .flush_with_timeout(
+                    self.shutdown
+                        .deadline()
+                        .saturating_duration_since(Instant::now()),
+                )
+                .is_err()
+            {
+                self.counters
+                    .error("preview flush", &"timed out (viewer unreachable?)");
             }
             std::thread::spawn(move || drop(rec));
         }

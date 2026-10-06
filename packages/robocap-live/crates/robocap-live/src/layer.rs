@@ -14,14 +14,17 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
-use crate::frame::{CameraFrame, Frameset, NUM_CAMERAS, Rig};
+use crate::frame::{NUM_CAMERAS, Rig};
 use crate::hands::{self, HandTimings, HandsConfig, HandsError};
 use crate::log::scene::{Content, HandOverlays};
 use crate::log::{LogError, LogStats, Logger, LoggerConfig, LoggerSink, VideoMode};
 use crate::nets::HandNets;
-use crate::sched::{self, FramesetSink, HandsStage, OutputRecord, PipelineConfig, RunSummary, SchedError, SinkError};
+use crate::sched::{
+    self, FramesetSink, HandsStage, OutputRecord, PipelineConfig, RunSummary, SchedError, SinkError,
+};
 use crate::slam::{ReferencePoses, SlamMode};
 use crate::source::channel::channel;
+use kornia_staging_sensors::{CameraFrame, Frameset};
 
 /// Framesets a push may run ahead of the pipeline's source stage (the stages' own queues hold more).
 const PUSH_QUEUE: usize = 2;
@@ -147,7 +150,12 @@ impl HandsLayerWriter {
     /// [`LayerError::Hands`] for a bad rig or tracker setting, [`LayerError::Log`] when the file cannot be opened,
     /// [`LayerError::Incomplete`] when the logger refuses to save (its filesystem is below the free-space floor) or the pipeline
     /// thread cannot start.
-    pub fn new(rig: &Rig, nets: Box<dyn HandNets>, reference: ReferencePoses, config: HandsLayerConfig) -> Result<Self, LayerError> {
+    pub fn new(
+        rig: &Rig,
+        nets: Box<dyn HandNets>,
+        reference: ReferencePoses,
+        config: HandsLayerConfig,
+    ) -> Result<Self, LayerError> {
         let tracker = hands::new_tracker(rig, config.hands)?;
         let output = config.output.clone();
         let options = LoggerConfig {
@@ -162,12 +170,16 @@ impl HandsLayerWriter {
         };
         let logger = Logger::new(rig, options)?;
         if logger.stats().save_stopped_low_disk {
-            return Err(LayerError::Incomplete(format!("{}: too little free space to write the layer", output.display())));
+            return Err(LayerError::Incomplete(format!(
+                "{}: too little free space to write the layer",
+                output.display()
+            )));
         }
         let sink = LoggerSink::new(logger);
         let log_stats = sink.final_stats();
         let counts = Arc::new(Mutex::new(LayerCounts::default()));
-        let sinks: Vec<Box<dyn FramesetSink>> = vec![Box::new(sink), Box::new(Tally(counts.clone()))];
+        let sinks: Vec<Box<dyn FramesetSink>> =
+            vec![Box::new(sink), Box::new(Tally(counts.clone()))];
         let stop = Arc::new(AtomicBool::new(false));
         let (framesets, source) = channel(rig.clone(), PUSH_QUEUE, stop.clone());
         // `robocap-live --source replay <dump> --slam reference --hands on` with the CLI's defaults.
@@ -175,7 +187,11 @@ impl HandsLayerWriter {
             lossless: true,
             slam_mode: SlamMode::Reference,
             reference: Some(reference),
-            hands: Some(HandsStage { tracker, nets, nets_factory: None }),
+            hands: Some(HandsStage {
+                tracker,
+                nets,
+                nets_factory: None,
+            }),
             downsample_threads: config.downsample_threads.max(1),
             ..PipelineConfig::default()
         };
@@ -201,20 +217,35 @@ impl HandsLayerWriter {
     ///
     /// [`LayerError::Input`] for a time that does not increase, and the pipeline's error when it
     /// has stopped.
-    pub fn push(&mut self, t_ns: i64, mut cameras: [Option<CameraFrame>; NUM_CAMERAS]) -> Result<u64, LayerError> {
+    pub fn push(
+        &mut self,
+        t_ns: i64,
+        mut cameras: [Option<CameraFrame>; NUM_CAMERAS],
+    ) -> Result<u64, LayerError> {
         let index = self.next_index;
         if let Some(last) = self.last_t_ns.filter(|&last| t_ns <= last) {
-            return Err(LayerError::Input(format!("frameset {index} at {t_ns} ns does not follow {last} ns")));
+            return Err(LayerError::Input(format!(
+                "frameset {index} at {t_ns} ns does not follow {last} ns"
+            )));
         }
         for camera in cameras.iter_mut().flatten() {
-            camera.meta.seq = index;
+            camera.meta.sequence = index;
         }
-        let frameset = Frameset { index, t_ns, cameras };
-        let Some(framesets) = &self.framesets else { return Err(LayerError::Input("the layer is finished".into())) };
+        let frameset = Frameset {
+            index,
+            timestamp_ns: t_ns,
+            cameras: cameras.into(),
+        };
+        let Some(framesets) = &self.framesets else {
+            return Err(LayerError::Input("the layer is finished".into()));
+        };
         if framesets.send(frameset).is_err() {
             // The source stage has ended: the pipeline stopped on an error.
             self.framesets = None;
-            return Err(self.join().err().unwrap_or_else(|| LayerError::Incomplete("the pipeline ended early".into())));
+            return Err(self
+                .join()
+                .err()
+                .unwrap_or_else(|| LayerError::Incomplete("the pipeline ended early".into())));
         }
         self.next_index += 1;
         self.last_t_ns = Some(t_ns);
@@ -223,8 +254,13 @@ impl HandsLayerWriter {
 
     /// Wait for the pipeline thread.
     fn join(&mut self) -> Result<RunSummary, LayerError> {
-        let run = self.run.take().ok_or_else(|| LayerError::Input("the layer is finished".into()))?;
-        Ok(run.join().map_err(|_| LayerError::Incomplete("the pipeline thread panicked".into()))??)
+        let run = self
+            .run
+            .take()
+            .ok_or_else(|| LayerError::Input("the layer is finished".into()))?;
+        Ok(run
+            .join()
+            .map_err(|_| LayerError::Incomplete("the pipeline thread panicked".into()))??)
     }
 
     /// End the input, drain the pipeline and close the layer file.
@@ -236,19 +272,42 @@ impl HandsLayerWriter {
     pub fn finish(mut self) -> Result<LayerSummary, LayerError> {
         drop(self.framesets.take());
         let run = self.join()?;
-        let counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        let log = self.log_stats.lock().unwrap_or_else(PoisonError::into_inner).take().ok_or_else(|| LayerError::Incomplete("the logger did not finish".into()))?;
+        let counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let log = self
+            .log_stats
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| LayerError::Incomplete("the logger did not finish".into()))?;
         let c = &run.counters;
-        let pipeline_errors = c.hands_errors + c.nets_failures + c.hands_without_nets + c.hands_bypassed + c.output_late + c.output_errors;
+        let pipeline_errors = c.hands_errors
+            + c.nets_failures
+            + c.hands_without_nets
+            + c.hands_bypassed
+            + c.output_late
+            + c.output_errors;
         let dropped = run.downsample_dropped + run.hands_dropped + run.output_dropped;
         if self.next_index == 0 {
             return Err(LayerError::Input("no frameset was pushed".into()));
         }
-        if counts.framesets != self.next_index || pipeline_errors + dropped > 0 || log.save_stopped_low_disk || log.framesets_dropped > 0 || log.errors > 0 {
+        if counts.framesets != self.next_index
+            || pipeline_errors + dropped > 0
+            || log.save_stopped_low_disk
+            || log.framesets_dropped > 0
+            || log.errors > 0
+        {
             return Err(LayerError::Incomplete(format!(
                 "the layer is incomplete: {} of {} framesets reached the output, {pipeline_errors} hands/output errors, {dropped} dropped in the \
                  pipeline, {} dropped by the logger, {} logger errors, saving stopped for low disk: {}",
-                counts.framesets, self.next_index, log.framesets_dropped, log.errors, log.save_stopped_low_disk
+                counts.framesets,
+                self.next_index,
+                log.framesets_dropped,
+                log.errors,
+                log.save_stopped_low_disk
             )));
         }
         Ok(LayerSummary { counts, run, log })
@@ -273,16 +332,24 @@ mod tests {
     use kornia_image::Image;
 
     use super::*;
-    use crate::frame::{FULL_SIZE, FrameMeta};
+    use crate::frame::FULL_SIZE;
     use crate::nets::NoNets;
+    use kornia_staging_sensors::CaptureMeta;
 
     use crate::log::tests::test_rig;
 
-    fn cameras(t_ns: i64, cameras: &[usize]) -> Result<[Option<CameraFrame>; NUM_CAMERAS], kornia_image::ImageError> {
+    fn cameras(
+        t_ns: i64,
+        cameras: &[usize],
+    ) -> Result<[Option<CameraFrame>; NUM_CAMERAS], kornia_image::ImageError> {
         let image = Arc::new(Image::<u8, 1>::from_size_val(FULL_SIZE, 90)?);
         let frames: [Option<CameraFrame>; NUM_CAMERAS] = std::array::from_fn(|camera| {
             cameras.contains(&camera).then(|| CameraFrame {
-                meta: FrameMeta { seq: 0, pts_ns: t_ns, source_id: camera as u32, turned_180: false },
+                meta: CaptureMeta {
+                    sequence: 0,
+                    timestamp_ns: t_ns,
+                    camera_slot: camera,
+                },
                 full: image.clone(),
             })
         });
@@ -294,28 +361,53 @@ mod tests {
             output,
             recording_id: "segment".into(),
             hand_overlays: HandOverlays::Debug,
-            hands: HandsConfig { scale_wait: true, ..HandsConfig::default() },
+            hands: HandsConfig {
+                scale_wait: true,
+                ..HandsConfig::default()
+            },
             downsample_threads: 2,
         }
     }
 
     #[test]
-    fn a_layer_runs_its_framesets_through_the_pipeline_in_order_and_refuses_the_rest() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_layer_runs_its_framesets_through_the_pipeline_in_order_and_refuses_the_rest()
+    -> Result<(), Box<dyn std::error::Error>> {
         let dir = std::env::temp_dir().join(format!("robocap-live-layer-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let output = dir.join("layer.rrd");
-        let pose = [1.0, 0.0, 0.0, 0.1, 0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.3, 0.0, 0.0, 0.0, 1.0];
+        let pose = [
+            1.0, 0.0, 0.0, 0.1, 0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.3, 0.0, 0.0, 0.0, 1.0,
+        ];
         // Framesets 33 ms apart, a pose for the first only (a reference pose matches within 2 ms): the second is tracked on
         // the first one's, the pose store's newest usable pose.
         let (t0, t1) = (1_000_000_000, 1_033_000_000);
         let reference = ReferencePoses::new(vec![(t0, pose), (t1, [f64::NAN; 16])], t0, None);
-        let mut layer = HandsLayerWriter::new(&test_rig(), Box::new(NoNets), reference, config(output.clone()))?;
+        let mut layer = HandsLayerWriter::new(
+            &test_rig(),
+            Box::new(NoNets),
+            reference,
+            config(output.clone()),
+        )?;
         assert_eq!(layer.push(t0, cameras(t0, &[0, 1, 2, 3, 4, 5])?)?, 0);
         assert_eq!(layer.push(t1, cameras(t1, &[0, 2])?)?, 1);
-        assert!(matches!(layer.push(t1, cameras(t1, &[0])?), Err(LayerError::Input(_))), "time does not increase");
+        assert!(
+            matches!(
+                layer.push(t1, cameras(t1, &[0])?),
+                Err(LayerError::Input(_))
+            ),
+            "time does not increase"
+        );
         let summary = layer.finish()?;
         let counts = &summary.counts;
-        assert_eq!((counts.framesets, counts.with_pose, counts.held_pose, counts.reported), (2, 1, 1, [0, 0]));
+        assert_eq!(
+            (
+                counts.framesets,
+                counts.with_pose,
+                counts.held_pose,
+                counts.reported
+            ),
+            (2, 1, 1, [0, 0])
+        );
         assert_eq!((summary.log.framesets_in, summary.run.framesets), (2, 2));
         assert!(output.metadata()?.len() > 0);
         std::fs::remove_dir_all(&dir)?;
@@ -324,9 +416,15 @@ mod tests {
 
     #[test]
     fn a_layer_dropped_unfinished_stops_its_pipeline() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = std::env::temp_dir().join(format!("robocap-live-layer-drop-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("robocap-live-layer-drop-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
-        let mut layer = HandsLayerWriter::new(&test_rig(), Box::new(NoNets), ReferencePoses::new(Vec::new(), 0, None), config(dir.join("layer.rrd")))?;
+        let mut layer = HandsLayerWriter::new(
+            &test_rig(),
+            Box::new(NoNets),
+            ReferencePoses::new(Vec::new(), 0, None),
+            config(dir.join("layer.rrd")),
+        )?;
         layer.push(1_000, cameras(1_000, &[0])?)?;
         drop(layer);
         std::fs::remove_dir_all(&dir)?;

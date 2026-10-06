@@ -27,11 +27,15 @@ use nalgebra::Isometry3;
 use serde::Serialize;
 
 use crate::downsample::{SmallImagePool, SmallImages, small_images};
-use crate::frame::{Frameset, ImuSample, NUM_CAMERAS};
+use crate::frame::NUM_CAMERAS;
 use crate::hands::{HandFrameResult, HandInputs, HandTracking, HandsError};
 use crate::nets::{HandNets, NetsError};
 use crate::slam::{ReferencePoses, SlamConfig, SlamLane, SlamMode, SlamPose, SlamStatus};
-use crate::source::{FrameSource, SourceError, SourceEvent};
+use crate::source::FrameSource;
+use crate::source::SourceError;
+use kornia_staging_sensors::SourceEvent;
+use kornia_staging_sensors::{Frameset};
+use kornia_staging_sensors::imu::{CombinedImuSample};
 
 mod queue;
 mod record;
@@ -42,10 +46,13 @@ mod system;
 use queue::{PoseStore, QueuePolicy, StageQueue, lock};
 pub use record::{FrameTimings, FramesetSink, OutputRecord, RecordWriter, SinkError};
 use slam_stage::slam_loop;
-use stats::{STAGES, Stage, Stats};
 pub use stats::{Counters, Summary};
+use stats::{STAGES, Stage, Stats};
 use system::{CoreCpu, ThreadCpu};
-pub use system::{CoreLayout, CpuFreqCap, PowerSample, detect_big_little, parse_cpu_list, pin_current_thread, set_uclamp_min, soc_temperature_c};
+pub use system::{
+    CoreLayout, CpuFreqCap, PowerSample, detect_big_little, parse_cpu_list, pin_current_thread,
+    set_uclamp_min, soc_temperature_c,
+};
 
 /// Errors of the runtime.
 #[derive(Debug, thiserror::Error)]
@@ -73,7 +80,10 @@ pub enum SchedError {
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 fn stage_error(stage: &'static str, error: impl std::fmt::Display) -> SchedError {
-    SchedError::Stage { stage, message: error.to_string() }
+    SchedError::Stage {
+        stage,
+        message: error.to_string(),
+    }
 }
 
 /// Where the hands stage gets its tracker and networks.
@@ -244,7 +254,13 @@ impl Shared {
     }
 
     /// Count one event in the counter `field` picks and print `message` for the first `first` of them and then every `every`-th.
-    fn count_and_report(&self, field: impl FnOnce(&mut Counters) -> &mut u64, first: u64, every: u64, message: impl FnOnce(u64) -> String) {
+    fn count_and_report(
+        &self,
+        field: impl FnOnce(&mut Counters) -> &mut u64,
+        first: u64,
+        every: u64,
+        message: impl FnOnce(u64) -> String,
+    ) {
         let count = self.stats.with(|s| {
             let counter = field(&mut s.counters);
             *counter += 1;
@@ -275,12 +291,20 @@ fn spawn_stage(
             {
                 eprintln!("robocap-live: {name}: {error} (continuing without the frequency hint)");
             }
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pinned.and_then(|()| body()))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pinned.and_then(|()| body())
+            })) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => shared.fail(error),
                 Err(panic) => {
-                    let message = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned());
-                    shared.fail(SchedError::Thread(name, format!("panicked: {}", message.unwrap_or_default())));
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned());
+                    shared.fail(SchedError::Thread(
+                        name,
+                        format!("panicked: {}", message.unwrap_or_default()),
+                    ));
                 }
             }
         })
@@ -299,7 +323,11 @@ pub fn run(
     stop: Arc<AtomicBool>,
 ) -> Result<RunSummary, SchedError> {
     let lossless = config.lossless;
-    let policy = if lossless { QueuePolicy::Block } else { QueuePolicy::DropOldest };
+    let policy = if lossless {
+        QueuePolicy::Block
+    } else {
+        QueuePolicy::DropOldest
+    };
     let depth = |realtime: usize| if lossless { 4 } else { realtime };
     let shared = Arc::new(Shared {
         stats: Stats::default(),
@@ -318,7 +346,9 @@ pub fn run(
         shared.fail(error);
     }
     let monitored = monitor(&shared, &handles, &config, hands_on);
-    let mut first_error = monitored.stuck.then(|| SchedError::Thread("stage", "did not end after the stop".into()));
+    let mut first_error = monitored
+        .stuck
+        .then(|| SchedError::Thread("stage", "did not end after the stop".into()));
     for handle in handles {
         if monitored.stuck && !handle.is_finished() {
             continue;
@@ -341,59 +371,110 @@ fn start_stages(
     sinks: Vec<Box<dyn FramesetSink>>,
     handles: &mut Vec<thread::JoinHandle<()>>,
 ) -> Result<(), SchedError> {
+    let turned_180 = source.turned_180();
     let lossless = config.lossless;
     let slam_on = config.slam_mode == SlamMode::On;
     let hands_on = config.hands.is_some();
     // Consumers wait for SLAM to pass their frameset: without a bound in a lossless run with SLAM (the run is deterministic), else
     // up to `hands_wait`.
     let pose_wait = (!lossless || !slam_on).then_some(config.hands_wait);
-    let (imu_tx, imu_rx) = mpsc::channel::<ImuSample>();
+    let (imu_tx, imu_rx) = mpsc::channel::<CombinedImuSample>();
 
     // SLAM (A76): built on its own thread after pinning, so the frontend pool inherits the A76 mask.
     if slam_on {
         let (stage, slam, imu_wait) = (shared.clone(), config.slam.clone(), config.imu_wait);
-        handles.push(spawn_stage("rl-slam", config.cpus_big.clone(), config.slam_uclamp_min, shared, move || {
-            let result = slam_loop(&stage, &imu_rx, slam, lossless, imu_wait);
-            stage.poses.close();
-            stage.slam.close();
-            result
-        })?);
+        handles.push(spawn_stage(
+            "rl-slam",
+            config.cpus_big.clone(),
+            config.slam_uclamp_min,
+            shared,
+            move || {
+                let result = slam_loop(&stage, &imu_rx, slam, lossless, imu_wait);
+                stage.poses.close();
+                stage.slam.close();
+                result
+            },
+        )?);
     }
     if let Some(hands) = config.hands.take() {
         let stage = shared.clone();
-        handles.push(spawn_stage("rl-hands", config.cpus_hands.clone(), config.hands_uclamp_min, shared, move || hands_loop(&stage, hands, pose_wait))?);
+        handles.push(spawn_stage(
+            "rl-hands",
+            config.cpus_hands.clone(),
+            config.hands_uclamp_min,
+            shared,
+            move || hands_loop(&stage, hands, pose_wait, turned_180),
+        )?);
     }
     let stage = shared.clone();
-    handles.push(spawn_stage("rl-output", config.cpus_little.clone(), None, shared, move || output_loop(&stage, sinks, lossless, pose_wait))?);
+    handles.push(spawn_stage(
+        "rl-output",
+        config.cpus_little.clone(),
+        None,
+        shared,
+        move || output_loop(&stage, sinks, lossless, pose_wait),
+    )?);
     let stage = shared.clone();
-    let (threads, only, slam_mode, reference) = (config.downsample_threads.max(1), config.small_cameras.clone(), config.slam_mode, config.reference.take());
+    let (threads, only, slam_mode, reference) = (
+        config.downsample_threads.max(1),
+        config.small_cameras.clone(),
+        config.slam_mode,
+        config.reference.take(),
+    );
     let pool_cpus = config.cpus_downsample.clone();
-    handles.push(spawn_stage("rl-downsample", config.cpus_little.clone(), None, shared, move || {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("rl-ds-{i}"))
-            .start_handler(move |_| {
-                if let Some(cpus) = &pool_cpus
-                    && let Err(error) = pin_current_thread(cpus)
-                {
-                    eprintln!("robocap-live: rl-ds: {error} (running unpinned)");
-                }
-            })
-            .build()
-            .map_err(|e| stage_error("downsample", e))?;
-        downsample_loop(&stage, &pool, only.as_deref(), slam_mode, reference.as_ref(), hands_on)
-    })?);
+    handles.push(spawn_stage(
+        "rl-downsample",
+        config.cpus_little.clone(),
+        None,
+        shared,
+        move || {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("rl-ds-{i}"))
+                .start_handler(move |_| {
+                    if let Some(cpus) = &pool_cpus
+                        && let Err(error) = pin_current_thread(cpus)
+                    {
+                        eprintln!("robocap-live: rl-ds: {error} (running unpinned)");
+                    }
+                })
+                .build()
+                .map_err(|e| stage_error("downsample", e))?;
+            downsample_loop(
+                &stage,
+                &pool,
+                only.as_deref(),
+                slam_mode,
+                reference.as_ref(),
+                hands_on,
+                turned_180,
+            )
+        },
+    )?);
     let stage = shared.clone();
     let duration = config.duration;
-    handles.push(spawn_stage("rl-source", config.cpus_little.clone(), None, shared, move || {
-        source_loop(&stage, source, slam_on.then_some(imu_tx), duration)
-    })?);
+    handles.push(spawn_stage(
+        "rl-source",
+        config.cpus_little.clone(),
+        None,
+        shared,
+        move || source_loop(&stage, source, slam_on.then_some(imu_tx), duration),
+    )?);
     Ok(())
 }
 
 /// The hands stage (A55 + NPU): the tracker on each frameset, with the newest pose at or before it.
-fn hands_loop(shared: &Shared, stage: HandsStage, pose_wait: Option<Duration>) -> Result<(), SchedError> {
-    let HandsStage { mut tracker, nets, mut nets_factory } = stage;
+fn hands_loop(
+    shared: &Shared,
+    stage: HandsStage,
+    pose_wait: Option<Duration>,
+    turned_180: [bool; NUM_CAMERAS],
+) -> Result<(), SchedError> {
+    let HandsStage {
+        mut tracker,
+        nets,
+        mut nets_factory,
+    } = stage;
     let mut nets: Option<Box<dyn HandNets>> = Some(nets);
     let mut last_rebuild: Option<Instant> = None;
     while let Some(item) = shared.hands.pop() {
@@ -405,18 +486,33 @@ fn hands_loop(shared: &Shared, stage: HandsStage, pose_wait: Option<Duration>) -
             match factory() {
                 Ok(fresh) => {
                     shared.stats.with(|s| s.counters.nets_recreated += 1);
-                    eprintln!("robocap-live: hands: networks rebuilt ({})", fresh.describe());
+                    eprintln!(
+                        "robocap-live: hands: networks rebuilt ({})",
+                        fresh.describe()
+                    );
                     nets = Some(fresh);
                 }
-                Err(error) => eprintln!("robocap-live: hands: rebuilding the networks failed: {error} (retrying in 1 s)"),
+                Err(error) => eprintln!(
+                    "robocap-live: hands: rebuilding the networks failed: {error} (retrying in 1 s)"
+                ),
             }
         }
         let (pose, waited) = shared.poses.pose_for(item.frameset.index, pose_wait);
-        shared.stats.record(Stage::PoseWait, waited.as_secs_f64() * 1e3);
+        shared
+            .stats
+            .record(Stage::PoseWait, waited.as_secs_f64() * 1e3);
         let world_from_rig = pose.map_or_else(Isometry3::identity, |p| p.world_from_rig);
-        let full: [Option<&crate::frame::CameraFrame>; NUM_CAMERAS] = std::array::from_fn(|c| item.frameset.cameras[c].as_ref());
-        let small: [Option<&crate::frame::Luma>; NUM_CAMERAS] = std::array::from_fn(|c| item.small[c].as_ref());
-        let inputs = HandInputs { index: item.frameset.index, t_ns: item.frameset.t_ns, full, small };
+        let full: [Option<&kornia_staging_sensors::CameraFrame>; NUM_CAMERAS] =
+            std::array::from_fn(|c| item.frameset.cameras[c].as_ref());
+        let small: [Option<&crate::frame::Luma>; NUM_CAMERAS] =
+            std::array::from_fn(|c| item.small[c].as_ref());
+        let inputs = HandInputs {
+            turned_180,
+            index: item.frameset.index,
+            t_ns: item.frameset.timestamp_ns,
+            full,
+            small,
+        };
         let started = Instant::now();
         let result = match nets.as_mut() {
             Some(nets) => Some(tracker.step(&inputs, &world_from_rig, nets.as_mut())),
@@ -443,7 +539,12 @@ fn hands_loop(shared: &Shared, stage: HandsStage, pose_wait: Option<Duration>) -
                 None
             }
             Some(Err(error)) => {
-                shared.count_and_report(|c| &mut c.hands_errors, 5, 0, |_| format!("hands: {error}"));
+                shared.count_and_report(
+                    |c| &mut c.hands_errors,
+                    5,
+                    0,
+                    |_| format!("hands: {error}"),
+                );
                 None
             }
         };
@@ -452,14 +553,26 @@ fn hands_loop(shared: &Shared, stage: HandsStage, pose_wait: Option<Duration>) -
         if let Some(hands) = &hands {
             timings.set_hands(hands_ms, &hands.timings);
         }
-        shared.out.push(HandsDone { item, outcome: Some(HandsOutcome { pose, hands, timings }) });
+        shared.out.push(HandsDone {
+            item,
+            outcome: Some(HandsOutcome {
+                pose,
+                hands,
+                timings,
+            }),
+        });
     }
     shared.out.close();
     Ok(())
 }
 
 /// The output stage (A55): every frameset, in order, to the sinks.
-fn output_loop(shared: &Shared, mut sinks: Vec<Box<dyn FramesetSink>>, lossless: bool, pose_wait: Option<Duration>) -> Result<(), SchedError> {
+fn output_loop(
+    shared: &Shared,
+    mut sinks: Vec<Box<dyn FramesetSink>>,
+    lossless: bool,
+    pose_wait: Option<Duration>,
+) -> Result<(), SchedError> {
     let mut last_index: Option<u64> = None;
     while let Some(HandsDone { item, outcome }) = shared.out.pop() {
         if !lossless && last_index.is_some_and(|last| item.frameset.index <= last) {
@@ -467,23 +580,46 @@ fn output_loop(shared: &Shared, mut sinks: Vec<Box<dyn FramesetSink>>, lossless:
             continue;
         }
         last_index = Some(item.frameset.index);
-        let HandsOutcome { pose, hands, mut timings } = outcome.unwrap_or_else(|| {
+        let HandsOutcome {
+            pose,
+            hands,
+            mut timings,
+        } = outcome.unwrap_or_else(|| {
             // It skipped the hands stage: the output stage is its pose consumer.
             let (pose, waited) = shared.poses.pose_for(item.frameset.index, pose_wait);
             let mut timings = FrameTimings::downsampled(item.downsample_ms);
             timings.set_pose(pose.as_ref(), item.frameset.index, waited);
-            HandsOutcome { pose, hands: None, timings }
+            HandsOutcome {
+                pose,
+                hands: None,
+                timings,
+            }
         });
         timings.pipeline_ms = item.emitted.elapsed().as_secs_f64() * 1e3;
         let started = Instant::now();
-        let record = OutputRecord { frameset: &item.frameset, small: &item.small, pose: pose.as_ref(), hands: hands.as_ref(), timings: &timings };
+        let record = OutputRecord {
+            frameset: &item.frameset,
+            small: &item.small,
+            pose: pose.as_ref(),
+            hands: hands.as_ref(),
+            timings: &timings,
+        };
         for sink in sinks.iter_mut() {
             if let Err(error) = sink.frameset(&record) {
-                shared.count_and_report(|c| &mut c.output_errors, 5, 0, |_| format!("output: {error}"));
+                shared.count_and_report(
+                    |c| &mut c.output_errors,
+                    5,
+                    0,
+                    |_| format!("output: {error}"),
+                );
             }
         }
-        shared.stats.record(Stage::Output, started.elapsed().as_secs_f64() * 1e3);
-        shared.stats.record(Stage::EndToEnd, item.emitted.elapsed().as_secs_f64() * 1e3);
+        shared
+            .stats
+            .record(Stage::Output, started.elapsed().as_secs_f64() * 1e3);
+        shared
+            .stats
+            .record(Stage::EndToEnd, item.emitted.elapsed().as_secs_f64() * 1e3);
     }
     for sink in sinks.iter_mut() {
         if let Err(error) = sink.finish() {
@@ -501,23 +637,43 @@ fn downsample_loop(
     slam_mode: SlamMode,
     reference: Option<&ReferencePoses>,
     hands_on: bool,
+    turned_180: [bool; NUM_CAMERAS],
 ) -> Result<(), SchedError> {
     let mut images = SmallImagePool::default();
     while let Some((frameset, emitted)) = shared.ds.pop() {
         let started = Instant::now();
-        let small = pool.install(|| small_images(&frameset, only, &mut images)).map_err(|e| stage_error("downsample", e))?;
+        let small = pool
+            .install(|| small_images(&frameset, &turned_180, only, &mut images))
+            .map_err(|e| stage_error("downsample", e))?;
         let downsample_ms = started.elapsed().as_secs_f64() * 1e3;
         shared.stats.record(Stage::Downsample, downsample_ms);
-        let item = Arc::new(Downsampled { frameset, small, emitted, downsample_ms });
+        let item = Arc::new(Downsampled {
+            frameset,
+            small,
+            emitted,
+            downsample_ms,
+        });
         match slam_mode {
             SlamMode::On => {
                 shared.slam.push(item.clone());
             }
-            SlamMode::Off => shared.poses.publish(SlamPose::untracked(item.frameset.index, item.frameset.t_ns, SlamStatus::Off)),
+            SlamMode::Off => shared.poses.publish(SlamPose::untracked(
+                item.frameset.index,
+                item.frameset.timestamp_ns,
+                SlamStatus::Off,
+            )),
             SlamMode::Reference => {
-                if let Some(world_from_rig) = reference.and_then(|r| r.at(item.frameset.t_ns)) {
-                    let untracked = SlamPose::untracked(item.frameset.index, item.frameset.t_ns, SlamStatus::Reference);
-                    shared.poses.publish(SlamPose { world_from_rig, ok: true, ..untracked });
+                if let Some(world_from_rig) = reference.and_then(|r| r.at(item.frameset.timestamp_ns)) {
+                    let untracked = SlamPose::untracked(
+                        item.frameset.index,
+                        item.frameset.timestamp_ns,
+                        SlamStatus::Reference,
+                    );
+                    shared.poses.publish(SlamPose {
+                        world_from_rig,
+                        ok: true,
+                        ..untracked
+                    });
                 } else {
                     // An absent catalog pose is a skip, not an identity estimate of this frame. Hold the last reference.
                     shared.poses.progress(item.frameset.index);
@@ -531,10 +687,16 @@ fn downsample_loop(
             shared.hands.push_evicting(item, &mut evicted);
             for item in evicted {
                 shared.stats.with(|s| s.counters.hands_bypassed += 1);
-                shared.out.push(HandsDone { item, outcome: None });
+                shared.out.push(HandsDone {
+                    item,
+                    outcome: None,
+                });
             }
         } else {
-            shared.out.push(HandsDone { item, outcome: None });
+            shared.out.push(HandsDone {
+                item,
+                outcome: None,
+            });
         }
     }
     shared.slam.close();
@@ -551,10 +713,19 @@ fn downsample_loop(
 
 /// The source stage (A55): framesets to the downsample queue, IMU samples to SLAM (`imu`, when SLAM runs), until the source ends,
 /// a stop, or `duration` from the first event.
-fn source_loop(shared: &Shared, mut source: Box<dyn FrameSource>, imu: Option<mpsc::Sender<ImuSample>>, duration: Option<Duration>) -> Result<(), SchedError> {
+fn source_loop(
+    shared: &Shared,
+    mut source: Box<dyn FrameSource>,
+    imu: Option<mpsc::Sender<CombinedImuSample>>,
+    duration: Option<Duration>,
+) -> Result<(), SchedError> {
     let mut started: Option<Instant> = None;
     let result = loop {
-        if shared.stop.load(Ordering::Relaxed) || started.zip(duration).is_some_and(|(at, limit)| at.elapsed() >= limit) {
+        if shared.stop.load(Ordering::Relaxed)
+            || started
+                .zip(duration)
+                .is_some_and(|(at, limit)| at.elapsed() >= limit)
+        {
             break Ok(());
         }
         let event = match source.next_event() {
@@ -574,6 +745,9 @@ fn source_loop(shared: &Shared, mut source: Box<dyn FrameSource>, imu: Option<mp
                 }
             }
             SourceEvent::Frameset(frameset) => {
+                if let Err(error) = crate::frame::require_cap_slots(&frameset) {
+                    break Err(SchedError::Source(SourceError::Frame(error)));
+                }
                 shared.stats.record(Stage::Source, 0.0);
                 shared.ds.push((frameset, Instant::now()));
             }
@@ -596,12 +770,23 @@ struct Monitored {
 
 /// One line per second until every stage finishes. A stop drains input; a failure closes all queues.
 /// At the shutdown deadline, close all queues to wake remaining waiters and report stuck stages.
-fn monitor(shared: &Shared, handles: &[thread::JoinHandle<()>], config: &PipelineConfig, hands_on: bool) -> Monitored {
+fn monitor(
+    shared: &Shared,
+    handles: &[thread::JoinHandle<()>],
+    config: &PipelineConfig,
+    hands_on: bool,
+) -> Monitored {
     let mut thread_cpu = ThreadCpu::default();
     let mut core_cpu = CoreCpu::default();
     let _ = (thread_cpu.sample(), core_cpu.sample());
     let run_started = Instant::now();
-    let mut monitored = Monitored { stuck: false, cpu_totals: Vec::new(), thread_totals: Default::default(), samples: 0, power: Vec::new() };
+    let mut monitored = Monitored {
+        stuck: false,
+        cpu_totals: Vec::new(),
+        thread_totals: Default::default(),
+        samples: 0,
+        power: Vec::new(),
+    };
     let mut last_print = Instant::now();
     let mut stop_seen: Option<Instant> = None;
     let mut aborted = false;
@@ -621,8 +806,15 @@ fn monitor(shared: &Shared, handles: &[thread::JoinHandle<()>], config: &Pipelin
             });
             if seen.elapsed() > SHUTDOWN_GRACE {
                 shared.close_all();
-                let alive: Vec<String> = handles.iter().filter(|h| !h.is_finished()).map(|h| h.thread().name().unwrap_or("?").to_owned()).collect();
-                eprintln!("robocap-live: stages {alive:?} did not end {} s after the stop; leaving them", SHUTDOWN_GRACE.as_secs());
+                let alive: Vec<String> = handles
+                    .iter()
+                    .filter(|h| !h.is_finished())
+                    .map(|h| h.thread().name().unwrap_or("?").to_owned())
+                    .collect();
+                eprintln!(
+                    "robocap-live: stages {alive:?} did not end {} s after the stop; leaving them",
+                    SHUTDOWN_GRACE.as_secs()
+                );
                 monitored.stuck = true;
                 break;
             }
@@ -643,7 +835,11 @@ fn monitor(shared: &Shared, handles: &[thread::JoinHandle<()>], config: &Pipelin
         for (name, pct) in &threads {
             *monitored.thread_totals.entry(name.clone()).or_default() += pct;
         }
-        let drops = (shared.slam.dropped(), shared.hands.dropped(), shared.out.dropped());
+        let drops = (
+            shared.slam.dropped(),
+            shared.hands.dropped(),
+            shared.out.dropped(),
+        );
         let soc_c = soc_temperature_c();
         let line = shared.stats.with(|s| {
             let rate = |stage: Stage| s.window[stage as usize].len() as f64 / window;
@@ -696,7 +892,11 @@ fn monitor(shared: &Shared, handles: &[thread::JoinHandle<()>], config: &Pipelin
         if config.print_every_second {
             eprintln!("{line}");
             if !threads.is_empty() {
-                let top: Vec<String> = threads.iter().take(8).map(|(name, pct)| format!("{name} {pct:.0}%")).collect();
+                let top: Vec<String> = threads
+                    .iter()
+                    .take(8)
+                    .map(|(name, pct)| format!("{name} {pct:.0}%"))
+                    .collect();
                 eprintln!("           threads: {}", top.join(", "));
             }
             eprintln!("{}", power.line());
@@ -714,7 +914,13 @@ fn summary(shared: &Shared, monitored: Monitored) -> RunSummary {
             _ => 0.0,
         };
         let framesets = s.total[Stage::Source as usize].len();
-        let per_second = |n: usize| if seconds > 0.0 { (n.saturating_sub(1)) as f64 / seconds } else { 0.0 };
+        let per_second = |n: usize| {
+            if seconds > 0.0 {
+                (n.saturating_sub(1)) as f64 / seconds
+            } else {
+                0.0
+            }
+        };
         RunSummary {
             seconds,
             framesets,
@@ -729,7 +935,10 @@ fn summary(shared: &Shared, monitored: Monitored) -> RunSummary {
                 .filter(|(stage, _)| *stage != Stage::Source)
                 .map(|&(stage, name)| (name.to_string(), Summary::of(&s.total[stage as usize])))
                 .collect(),
-            stage_fps: STAGES.iter().map(|&(stage, name)| (name.to_string(), per_second(s.total[stage as usize].len()))).collect(),
+            stage_fps: STAGES
+                .iter()
+                .map(|&(stage, name)| (name.to_string(), per_second(s.total[stage as usize].len())))
+                .collect(),
             ..Default::default()
         }
     });
@@ -741,8 +950,16 @@ fn summary(shared: &Shared, monitored: Monitored) -> RunSummary {
     summary.power = monitored.power;
     if monitored.samples > 0 {
         let samples = monitored.samples as f64;
-        summary.cpu_busy_pct = monitored.cpu_totals.iter().map(|t| (t / samples * 10.0).round() / 10.0).collect();
-        summary.thread_cpu_pct = monitored.thread_totals.into_iter().map(|(k, v)| (k, (v / samples * 10.0).round() / 10.0)).collect();
+        summary.cpu_busy_pct = monitored
+            .cpu_totals
+            .iter()
+            .map(|t| (t / samples * 10.0).round() / 10.0)
+            .collect();
+        summary.thread_cpu_pct = monitored
+            .thread_totals
+            .into_iter()
+            .map(|(k, v)| (k, (v / samples * 10.0).round() / 10.0))
+            .collect();
     }
     summary
 }

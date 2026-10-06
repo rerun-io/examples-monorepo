@@ -14,7 +14,6 @@ pub mod camera;
 pub mod device;
 pub mod iio;
 pub mod imu;
-pub mod matcher;
 
 use std::path::PathBuf;
 
@@ -56,18 +55,34 @@ pub enum CaptureError {
 impl CaptureError {
     /// An [`CaptureError::Io`] from the last OS error.
     pub fn last_os_error(what: impl Into<String>) -> Self {
-        Self::Io { what: what.into(), source: std::io::Error::last_os_error() }
+        Self::Io {
+            what: what.into(),
+            source: std::io::Error::last_os_error(),
+        }
     }
 }
 
 /// The rkisp mainpath of each camera, in camera-index order ([`crate::frame::CAMERA_NAMES`]; PR #270's `CAMERAS`).
-pub const CAMERA_DEVICES: [&str; crate::frame::NUM_CAMERAS] =
-    ["/dev/video75", "/dev/video111", "/dev/video84", "/dev/video66", "/dev/video102", "/dev/video93"];
+pub const CAMERA_DEVICES: [&str; crate::frame::NUM_CAMERAS] = [
+    "/dev/video75",
+    "/dev/video111",
+    "/dev/video84",
+    "/dev/video66",
+    "/dev/video102",
+    "/dev/video93",
+];
 
 /// The vendor's camera layout, which its recorder (`omni-specs.bin`) reads.
 pub const ROBOT_JSON: &str = "/userdata/robot.json";
 /// The vendor's `camera_position` of each camera index.
-pub const VENDOR_POSITIONS: [&str; crate::frame::NUM_CAMERAS] = ["left-front", "right-front", "left-eye", "right-eye", "left", "right"];
+pub const VENDOR_POSITIONS: [&str; crate::frame::NUM_CAMERAS] = [
+    "left-front",
+    "right-front",
+    "left-eye",
+    "right-eye",
+    "left",
+    "right",
+];
 
 /// The fields of one `robot.json` camera entry that capture reads; the vendor's other fields are ignored.
 #[derive(Deserialize)]
@@ -104,26 +119,41 @@ fn no_rotation() -> i64 {
 /// rotate code other than -1 or 1 (0 and 2 are 90-degree turns, which would change the image size), or a mirror or flip alone.
 pub fn vendor_turned_180(text: &str) -> Result<[bool; crate::frame::NUM_CAMERAS], CaptureError> {
     let bad = |message: String| CaptureError::Device(format!("{ROBOT_JSON}: {message}"));
-    let root: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text).map_err(|e| bad(e.to_string()))?;
+    let root: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(text).map_err(|e| bad(e.to_string()))?;
     let cameras: Vec<VendorCamera> = root
         .iter()
         .filter(|(_, entry)| entry.get("camera_position").is_some())
-        .map(|(key, entry)| VendorCamera::deserialize(entry).map_err(|e| bad(format!("{key}: {e}"))))
+        .map(|(key, entry)| {
+            VendorCamera::deserialize(entry).map_err(|e| bad(format!("{key}: {e}")))
+        })
         .collect::<Result<_, _>>()?;
     let mut out = [false; crate::frame::NUM_CAMERAS];
     for (camera, position) in VENDOR_POSITIONS.iter().enumerate() {
-        let entry = cameras.iter().find(|entry| entry.camera_position == *position).ok_or_else(|| bad(format!("no {position} camera")))?;
+        let entry = cameras
+            .iter()
+            .find(|entry| entry.camera_position == *position)
+            .ok_or_else(|| bad(format!("no {position} camera")))?;
         if entry.name != CAMERA_DEVICES[camera] {
-            return Err(bad(format!("{position} is {}, we capture {}", entry.name, CAMERA_DEVICES[camera])));
+            return Err(bad(format!(
+                "{position} is {}, we capture {}",
+                entry.name, CAMERA_DEVICES[camera]
+            )));
         }
         let turned = match entry.rotate {
             -1 => false,
             1 => true,
-            other => return Err(bad(format!("{position}: rotate {other} is not supported (only -1 and 1; 0 and 2 turn 90 degrees)"))),
+            other => {
+                return Err(bad(format!(
+                    "{position}: rotate {other} is not supported (only -1 and 1; 0 and 2 turn 90 degrees)"
+                )));
+            }
         };
         let (mirror, flip) = (entry.mirror, entry.flip);
         if mirror != flip {
-            return Err(bad(format!("{position}: mirror {mirror} with flip {flip} (a one-axis flip) is not supported")));
+            return Err(bad(format!(
+                "{position}: mirror {mirror} with flip {flip} (a one-axis flip) is not supported"
+            )));
         }
         out[camera] = turned != mirror;
     }
@@ -167,7 +197,9 @@ impl Cap {
 
     /// The cap whose [`Cap::device`] is `device` (a rig's or a dump's `device`).
     pub fn from_device(device: &str) -> Option<Self> {
-        [Self::A, Self::B].into_iter().find(|cap| cap.device() == device)
+        [Self::A, Self::B]
+            .into_iter()
+            .find(|cap| cap.device() == device)
     }
 
     /// The cap's name in `rig.json` and a dump's `meta.json` (`device`).
@@ -195,8 +227,12 @@ mod tests {
     /// the left eye's `rotate` as JSON text (`None`: no `rotate` field).
     fn robot_json(left_eye_node: &str, left_eye_rotate: Option<&str>) -> String {
         let camera = |k: usize, node: &str, rotate: Option<&str>, position: &str| {
-            let rotate = rotate.map(|rotate| format!(r#""rotate": {rotate}, "#)).unwrap_or_default();
-            format!(r#""video{k}": {{"name": "{node}", "mirror": false, {rotate}"flip": false, "fps": 30, "camera_position": "{position}"}}"#)
+            let rotate = rotate
+                .map(|rotate| format!(r#""rotate": {rotate}, "#))
+                .unwrap_or_default();
+            format!(
+                r#""video{k}": {{"name": "{node}", "mirror": false, {rotate}"flip": false, "fps": 30, "camera_position": "{position}"}}"#
+            )
         };
         format!(
             "{{\"imu\": [], {}, {}, {}, {}, {}, {}}}",
@@ -212,39 +248,77 @@ mod tests {
     #[test]
     fn the_vendor_turns_the_eye_cameras_180_degrees() -> Result<(), CaptureError> {
         // camera order: left_front, right_front, left_eye, right_eye, left, right
-        assert_eq!(vendor_turned_180(&robot_json("/dev/video84", Some("1")))?, [false, false, true, true, false, false]);
+        assert_eq!(
+            vendor_turned_180(&robot_json("/dev/video84", Some("1")))?,
+            [false, false, true, true, false, false]
+        );
         Ok(())
     }
 
     #[test]
-    fn only_an_absent_rotate_is_upright_and_a_rotate_that_is_not_an_integer_is_refused() -> Result<(), CaptureError> {
+    fn only_an_absent_rotate_is_upright_and_a_rotate_that_is_not_an_integer_is_refused()
+    -> Result<(), CaptureError> {
         let upright_left_eye = [false, false, false, true, false, false];
-        assert_eq!(vendor_turned_180(&robot_json("/dev/video84", None))?, upright_left_eye, "absent");
-        assert_eq!(vendor_turned_180(&robot_json("/dev/video84", Some("-1")))?, upright_left_eye);
+        assert_eq!(
+            vendor_turned_180(&robot_json("/dev/video84", None))?,
+            upright_left_eye,
+            "absent"
+        );
+        assert_eq!(
+            vendor_turned_180(&robot_json("/dev/video84", Some("-1")))?,
+            upright_left_eye
+        );
         assert!(vendor_turned_180(&robot_json("/dev/video84", Some("1")))?[2]);
         for malformed in ["\"1\"", "null", "1.5", "1.0", "true", "[1]"] {
-            assert!(vendor_turned_180(&robot_json("/dev/video84", Some(malformed))).is_err(), "rotate {malformed}");
+            assert!(
+                vendor_turned_180(&robot_json("/dev/video84", Some(malformed))).is_err(),
+                "rotate {malformed}"
+            );
         }
         for unsupported in ["0", "2", "180", "-2"] {
-            assert!(vendor_turned_180(&robot_json("/dev/video84", Some(unsupported))).is_err(), "rotate {unsupported}");
+            assert!(
+                vendor_turned_180(&robot_json("/dev/video84", Some(unsupported))).is_err(),
+                "rotate {unsupported}"
+            );
         }
         Ok(())
     }
 
     #[test]
     fn a_vendor_layout_we_do_not_capture_is_refused() {
-        assert!(vendor_turned_180(&robot_json("/dev/video85", Some("1"))).is_err(), "left-eye on another node than we capture");
-        assert!(vendor_turned_180("{\"video0\": {}}").is_err(), "cameras missing");
+        assert!(
+            vendor_turned_180(&robot_json("/dev/video85", Some("1"))).is_err(),
+            "left-eye on another node than we capture"
+        );
+        assert!(
+            vendor_turned_180("{\"video0\": {}}").is_err(),
+            "cameras missing"
+        );
     }
 
     #[test]
-    fn mirror_and_flip_compose_with_the_turn_and_a_one_axis_flip_is_refused() -> Result<(), CaptureError> {
+    fn mirror_and_flip_compose_with_the_turn_and_a_one_axis_flip_is_refused()
+    -> Result<(), CaptureError> {
         // The fixture's first entry is right_eye, rotate 1.
-        let mirrored = robot_json("/dev/video84", Some("1")).replacen("\"mirror\": false", "\"mirror\": true", 1);
-        assert!(vendor_turned_180(&mirrored).is_err(), "a mirror alone is not a turn");
-        assert!(vendor_turned_180(&mirrored.replacen("\"mirror\": true", "\"mirror\": 1", 1)).is_err(), "mirror is a bool");
+        let mirrored = robot_json("/dev/video84", Some("1")).replacen(
+            "\"mirror\": false",
+            "\"mirror\": true",
+            1,
+        );
+        assert!(
+            vendor_turned_180(&mirrored).is_err(),
+            "a mirror alone is not a turn"
+        );
+        assert!(
+            vendor_turned_180(&mirrored.replacen("\"mirror\": true", "\"mirror\": 1", 1)).is_err(),
+            "mirror is a bool"
+        );
         let both = mirrored.replacen("\"flip\": false", "\"flip\": true", 1);
-        assert_eq!(vendor_turned_180(&both)?, [false, false, true, false, false, false], "the turn, mirrored and flipped, is upright");
+        assert_eq!(
+            vendor_turned_180(&both)?,
+            [false, false, true, false, false, false],
+            "the turn, mirrored and flipped, is upright"
+        );
         Ok(())
     }
 }

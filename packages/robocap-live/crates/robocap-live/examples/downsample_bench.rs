@@ -10,10 +10,9 @@ use kornia_image::Image;
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_imgproc::resize::resize_fast_mono_aa;
 use kornia_staging_imgproc::resize::resize_area_u8;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta, Frameset};
 use robocap_live::downsample::{SmallImagePool, small_images};
-use robocap_live::frame::{
-    CameraFrame, FULL_SIZE, FrameMeta, FrameReader, Frameset, NUM_CAMERAS, SMALL_SIZE,
-};
+use robocap_live::frame::{FULL_SIZE, FrameReader, NUM_CAMERAS, SMALL_SIZE};
 use robocap_live::sched::{parse_cpu_list, pin_current_thread};
 
 fn arg(name: &str) -> Option<String> {
@@ -53,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .ok_or("empty frames.bin")?,
         None => {
             let mut state = 1u64;
-            let mut cameras: [Option<CameraFrame>; NUM_CAMERAS] = Default::default();
+            let mut cameras = vec![None; NUM_CAMERAS];
             for (camera, slot) in cameras.iter_mut().enumerate() {
                 let data: Vec<u8> = (0..FULL_SIZE.width * FULL_SIZE.height)
                     .map(|_| {
@@ -63,11 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         (state >> 56) as u8
                     })
                     .collect();
-                let meta = FrameMeta {
-                    seq: 0,
-                    pts_ns: 0,
-                    source_id: camera as u32,
-                    turned_180: false,
+                let meta = CaptureMeta {
+                    sequence: 0,
+                    timestamp_ns: 0,
+                    camera_slot: camera,
                 };
                 *slot = Some(CameraFrame {
                     meta,
@@ -76,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             Frameset {
                 index: 0,
-                t_ns: 0,
+                timestamp_ns: 0,
                 cameras,
             }
         }
@@ -159,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut images = SmallImagePool::default();
     let (frameset_ms, frameset95) = pool.install(|| {
         time_ms(iterations, || {
-            Ok(small_images(&frameset, None, &mut images).map(|_| ())?)
+            Ok(small_images(&frameset, &[false; NUM_CAMERAS], None, &mut images).map(|_| ())?)
         })
     })?;
     println!(

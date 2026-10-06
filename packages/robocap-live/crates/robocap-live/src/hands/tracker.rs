@@ -40,9 +40,11 @@ use super::{
     CropSource, DetNetHit, HandFrameResult, HandInputs, HandOutput, HandTimings, HandTracking,
     HandsConfig, HandsError, KeyNetView, LEFT, RIGHT, ScaleMode, ViewOutcome,
 };
-use crate::frame::{CameraFrame, Luma, NUM_CAMERAS, Rig};
+use crate::frame::Luma;
+use crate::frame::{NUM_CAMERAS, Rig};
 use crate::nets::{HandNets, NUM_LANDMARKS};
 use kornia_staging_imgproc::contours::min_enclosing_circle;
+use kornia_staging_sensors::CameraFrame;
 
 /// The tracker's thresholds: the fields of handtrack's `TrackerConfig` that `ROBUST_TRACKER_CONFIG` uses or sets.
 /// [`TrackerConfig::robust`] (the [`Default`]) is `ROBUST_TRACKER_CONFIG` exactly; [`TrackerConfig::handtrack_default`] is
@@ -157,6 +159,7 @@ pub trait Perception: Send {
         &mut self,
         nets: &mut dyn HandNets,
         full: &[Option<&CameraFrame>; NUM_CAMERAS],
+        turned_180: &[bool; NUM_CAMERAS],
         world_from_rig: &Isometry3<f64>,
         views: &[ViewRequest],
     ) -> Result<(Vec<KeypointEstimate>, f64), HandsError>;
@@ -615,9 +618,13 @@ impl Tracker {
         plans: &[ViewRequest],
     ) -> Result<Vec<KeypointEstimate>, HandsError> {
         let begin = Instant::now();
-        let (estimates, crops) =
-            self.perception
-                .estimate(step.nets, &step.inputs.full, step.world_from_rig, plans)?;
+        let (estimates, crops) = self.perception.estimate(
+            step.nets,
+            &step.inputs.full,
+            &step.inputs.turned_180,
+            step.world_from_rig,
+            plans,
+        )?;
         step.timings.crops_ms += crops;
         step.timings.keynet_ms += begin.elapsed().as_secs_f64() * 1e3 - crops;
         if estimates.len() != plans.len() {

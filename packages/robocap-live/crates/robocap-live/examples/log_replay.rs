@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 
 use kornia_image::Image;
 use kornia_staging_imgproc::resize::resize_area_u8;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta, Frameset};
+use robocap_live::frame::Luma;
 use robocap_live::frame::isometry_from_matrix;
 use robocap_live::frame::{
-    CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, Luma, NUM_CAMERAS, Rig,
-    SMALL_SIZE, write_small_dump,
+    DumpMeta, FULL_SIZE, FrameReader, NUM_CAMERAS, Rig, SMALL_SIZE, write_small_dump,
 };
 use robocap_live::hands::{HandFrameResult, HandOutput};
 use robocap_live::log::video::{EncoderKind, encoder_config};
@@ -203,10 +204,10 @@ fn main() -> Result<(), Error> {
             }
         }
         let cam_t_ns =
-            std::array::from_fn(|c| frameset.cameras[c].as_ref().map_or(0, |f| f.meta.pts_ns));
+            std::array::from_fn(|c| frameset.cameras[c].as_ref().map_or(0, |f| f.meta.timestamp_ns));
         frames.push(Frame {
             index: frameset.index,
-            t_ns: frameset.t_ns,
+            t_ns: frameset.timestamp_ns,
             cam_t_ns,
             small,
         });
@@ -224,18 +225,19 @@ fn main() -> Result<(), Error> {
     if let Some(out) = &args.write_small {
         let framesets = frames.iter().map(|frame| Frameset {
             index: frame.index,
-            t_ns: frame.t_ns,
-            cameras: std::array::from_fn(|c| {
-                frame.small[c].as_ref().map(|full| CameraFrame {
-                    meta: FrameMeta {
-                        seq: frame.index,
-                        pts_ns: frame.cam_t_ns[c],
-                        source_id: c as u32,
-                        turned_180: false,
-                    },
-                    full: full.clone(),
+            timestamp_ns: frame.t_ns,
+            cameras: (0..NUM_CAMERAS)
+                .map(|c| {
+                    frame.small[c].as_ref().map(|full| CameraFrame {
+                        meta: CaptureMeta {
+                            sequence: frame.index,
+                            timestamp_ns: frame.cam_t_ns[c],
+                            camera_slot: c,
+                        },
+                        full: full.clone(),
+                    })
                 })
-            }),
+                .collect(),
         });
         let written = write_small_dump(
             &args.dump,

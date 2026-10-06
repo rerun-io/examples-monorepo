@@ -1,5 +1,5 @@
 //! Frame sources: the live cameras + IMU on the cap, a `robocap-live-dump/1` replay, or framesets handed over by another thread
-//! ([`channel`]). Each yields [`SourceEvent`]s in time order (IMU samples up to a frameset's time come before it, as slam-rs
+//! ([`channel`]). Each yields [`kornia_staging_sensors::SourceEvent`]s in time order (IMU samples up to a frameset's time come before it, as slam-rs
 //! needs). The pull shape follows kornia-slam's app `FrameSource`
 //! (`next_frame() -> Result<Option<_>, SourceError>`), generalised to a six-camera rig with integer-nanosecond time.
 #![deny(missing_docs)]
@@ -9,9 +9,8 @@ pub mod channel;
 pub mod live;
 pub mod replay;
 
-use crate::frame::{FrameError, Rig};
-
-pub use crate::frame::SourceEvent;
+use crate::frame::{FrameError, NUM_CAMERAS, Rig};
+use kornia_staging_sensors::SourceEvent;
 
 /// Errors of a frame source.
 #[derive(Debug, thiserror::Error)]
@@ -27,14 +26,16 @@ pub enum SourceError {
     Stopped(String),
 }
 
-/// Anything that produces framesets and IMU samples in time order.
+/// Application source with calibrated rig metadata and mounting orientation.
 pub trait FrameSource: Send {
-    /// The rig the frames come from.
+    /// Calibrated six-camera rig.
     fn rig(&self) -> &Rig;
-    /// The next event, or `None` when the source is exhausted (replay end, or a stop request).
-    ///
+    /// Cameras whose stored pixels are turned relative to calibration.
+    fn turned_180(&self) -> [bool; NUM_CAMERAS] {
+        [false; NUM_CAMERAS]
+    }
+    /// Read the next event; `None` means EOF or requested stop.
     /// # Errors
-    ///
-    /// [`SourceError`] when a device or the dump fails; the source is unusable afterwards.
+    /// Returns a capture, replay, or source shutdown error.
     fn next_event(&mut self) -> Result<Option<SourceEvent>, SourceError>;
 }

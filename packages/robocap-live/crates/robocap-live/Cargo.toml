@@ -7,16 +7,17 @@ publish.workspace = true
 description = "Live SLAM + hand tracking on the RoboCap cap, and the same core replaying an exported session."
 
 [dependencies]
-kornia-staging-3d.workspace = true
+kornia-algebra = { workspace = true }
+kornia-staging-sensors.workspace = true
 kornia-staging-io.workspace = true
 kornia-staging-sensor-iio.workspace = true
 kornia-staging-imgproc.workspace = true
+kornia-staging-3d.workspace = true
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 handfit = { workspace = true }
 # nets: f32 -> f16 for FP16 RKNN model inputs.
 half = "2"
-kornia-algebra = { workspace = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }
 libc = "0.2"

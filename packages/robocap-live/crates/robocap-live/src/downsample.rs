@@ -13,7 +13,9 @@ use std::sync::Arc;
 use kornia_image::{Image, ImageError};
 use rayon::prelude::*;
 
-use crate::frame::{Frameset, Luma, NUM_CAMERAS, SMALL_SIZE};
+use crate::frame::Luma;
+use crate::frame::{FrameError, NUM_CAMERAS, SMALL_SIZE};
+use kornia_staging_sensors::Frameset;
 
 use kornia_staging_imgproc::resize::resize_area_u8;
 
@@ -69,20 +71,23 @@ impl SmallImagePool {
 ///
 /// # Errors
 ///
-/// [`ImageError`] when a camera's full image is not 1920x1080 (3x the small size).
+/// [`FrameError::Invalid`] for a camera count other than six; [`FrameError::Image`]
+/// when a camera image is not 1920x1080 (3x the small size).
 ///
-/// A frame turned 180 degrees ([`crate::frame::FrameMeta::turned_180`]) comes out upright: its small image is reversed in place
+/// A frame marked in `turned_180` comes out upright: its small image is reversed in place
 /// after the downsample, which is exact, as the 3x3 area mean commutes with the turn.
 pub fn small_images(
     frameset: &Frameset,
+    turned_180: &[bool; NUM_CAMERAS],
     only: Option<&[usize]>,
     pool: &mut SmallImagePool,
-) -> Result<SmallImages, ImageError> {
+) -> Result<SmallImages, FrameError> {
+    crate::frame::require_cap_slots(frameset)?;
     let wanted = |camera: usize| only.is_none_or(|cameras| cameras.contains(&camera));
     let mut jobs: Vec<(usize, &Luma, bool, Image<u8, 1>)> = Vec::with_capacity(NUM_CAMERAS);
     for (camera, frame) in frameset.cameras.iter().enumerate() {
         if let Some(frame) = frame.as_ref().filter(|_| wanted(camera)) {
-            jobs.push((camera, &frame.full, frame.meta.turned_180, pool.take()?));
+            jobs.push((camera, &frame.full, turned_180[camera], pool.take()?));
         }
     }
     let results: Vec<(usize, Result<Luma, ImageError>)> = jobs
@@ -107,6 +112,26 @@ pub fn small_images(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_camera_count_is_rejected_by_direct_downsample_calls() {
+        for count in [5, 7] {
+            let frame = Frameset {
+                index: 0,
+                timestamp_ns: 0,
+                cameras: vec![None; count],
+            };
+            assert!(
+                small_images(
+                    &frame,
+                    &[false; NUM_CAMERAS],
+                    None,
+                    &mut SmallImagePool::default()
+                )
+                .is_err()
+            );
+        }
+    }
+
     use kornia_image::ImageSize;
 
     use super::*;
@@ -131,26 +156,27 @@ mod tests {
             },
             pseudo_random(1920 * 1080, seed),
         )?);
-        let cameras = std::array::from_fn(|camera| {
-            Some(crate::frame::CameraFrame {
-                meta: crate::frame::FrameMeta {
-                    seq: 0,
-                    pts_ns: 0,
-                    source_id: camera as u32,
-                    turned_180: false,
-                },
-                full: full.clone(),
+        let cameras = (0..NUM_CAMERAS)
+            .map(|camera| {
+                Some(kornia_staging_sensors::CameraFrame {
+                    meta: kornia_staging_sensors::CaptureMeta {
+                        sequence: 0,
+                        timestamp_ns: 0,
+                        camera_slot: camera,
+                    },
+                    full: full.clone(),
+                })
             })
-        });
+            .collect();
         Ok(Frameset {
             index: 0,
-            t_ns: 0,
+            timestamp_ns: 0,
             cameras,
         })
     }
 
     #[test]
-    fn an_upside_down_cameras_small_image_is_exactly_its_upright_frames() -> Result<(), ImageError>
+    fn an_upside_down_cameras_small_image_is_exactly_its_upright_frames() -> Result<(), FrameError>
     {
         let upright = frameset(4)?;
         let mut turned = upright.clone();
@@ -165,9 +191,18 @@ mod tests {
             },
             reversed,
         )?);
-        frame.meta.turned_180 = true;
-        let expected = small_images(&upright, None, &mut SmallImagePool::default())?;
-        let got = small_images(&turned, None, &mut SmallImagePool::default())?;
+        let expected = small_images(
+            &upright,
+            &[false; NUM_CAMERAS],
+            None,
+            &mut SmallImagePool::default(),
+        )?;
+        let got = small_images(
+            &turned,
+            &[false, false, true, false, false, false],
+            None,
+            &mut SmallImagePool::default(),
+        )?;
         let pixels = |images: &SmallImages, camera: usize| {
             images[camera].as_ref().map(|luma| luma.as_slice().to_vec())
         };
@@ -183,16 +218,16 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_rewrites_only_images_no_stage_holds() -> Result<(), ImageError> {
+    fn the_pool_rewrites_only_images_no_stage_holds() -> Result<(), FrameError> {
         let mut pool = SmallImagePool::default();
-        let first = small_images(&frameset(1)?, None, &mut pool)?;
+        let first = small_images(&frameset(1)?, &[false; NUM_CAMERAS], None, &mut pool)?;
         let addresses: Vec<*const u8> = first
             .iter()
             .flatten()
             .map(|luma| luma.as_slice().as_ptr())
             .collect();
         // A stage still holds the first frameset: the second gets new images.
-        let second = small_images(&frameset(2)?, None, &mut pool)?;
+        let second = small_images(&frameset(2)?, &[false; NUM_CAMERAS], None, &mut pool)?;
         assert!(
             second
                 .iter()
@@ -201,7 +236,7 @@ mod tests {
         );
         // Once the stages drop it, the next frameset is written into the first frameset's memory, with the right pixels.
         drop(first);
-        let third = small_images(&frameset(3)?, None, &mut pool)?;
+        let third = small_images(&frameset(3)?, &[false; NUM_CAMERAS], None, &mut pool)?;
         assert!(
             third
                 .iter()

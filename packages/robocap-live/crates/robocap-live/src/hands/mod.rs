@@ -5,8 +5,10 @@
 
 use nalgebra::Isometry3;
 
-use crate::frame::{CameraFrame, Luma, NUM_CAMERAS, Rig};
+use crate::frame::Luma;
+use crate::frame::{NUM_CAMERAS, Rig};
 use crate::nets::{HandNets, NUM_LANDMARKS, NetsError};
+use kornia_staging_sensors::CameraFrame;
 
 // Perception: cameras, the DetNet letterbox and decode, perspective KeyNet crops and decode.
 pub mod camera;
@@ -97,6 +99,8 @@ impl Default for HandsConfig {
 
 /// One frameset's images for the tracker.
 pub struct HandInputs<'a> {
+    /// Cameras whose full-resolution pixels need a half-turn to match calibration.
+    pub turned_180: [bool; NUM_CAMERAS],
     /// Frameset index.
     pub index: u64,
     /// Frameset time, nanoseconds.

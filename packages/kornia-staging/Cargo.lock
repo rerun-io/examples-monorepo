@@ -2629,6 +2629,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-sensors"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "kornia-algebra",
+ "kornia-image",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "kornia-staging-slam"
 version = "0.1.0"
 dependencies = [

@@ -11,17 +11,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kornia_image::Image;
-use numpy::{PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use kornia_staging_sensors::{CameraFrame, CaptureMeta};
+use numpy::{
+    PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use robocap_live::frame::{CAMERA_NAMES, CameraFrame, FULL_SIZE, FrameMeta, NUM_CAMERAS, RigCamera};
-use robocap_live::hands::{HandsConfig};
+use robocap_live::frame::{CAMERA_NAMES, FULL_SIZE, NUM_CAMERAS, RigCamera};
+use robocap_live::hands::HandsConfig;
 use robocap_live::layer::{HandsLayerConfig, HandsLayerWriter, LayerError};
-use robocap_live::slam::ReferencePoses;
-use robocap_live::sched::PipelineConfig;
 use robocap_live::log::scene::HandOverlays;
 use robocap_live::nets::ort::{OrtConfig, OrtDevice, OrtNets};
 use robocap_live::nets::{HandNets, NoNets};
+use robocap_live::sched::PipelineConfig;
+use robocap_live::slam::ReferencePoses;
 
 fn value_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
@@ -36,9 +39,16 @@ fn layer_error(error: LayerError) -> PyErr {
 }
 
 /// Copy a C-contiguous float64 array of `rows x N` values out of Python.
-fn rows<const N: usize>(array: &PyReadonlyArray2<'_, f64>, name: &str, count: usize) -> PyResult<Vec<[f64; N]>> {
+fn rows<const N: usize>(
+    array: &PyReadonlyArray2<'_, f64>,
+    name: &str,
+    count: usize,
+) -> PyResult<Vec<[f64; N]>> {
     if array.shape() != [count, N] {
-        return Err(value_error(format!("{name} must have shape ({count}, {N}), got {:?}", array.shape())));
+        return Err(value_error(format!(
+            "{name} must have shape ({count}, {N}), got {:?}",
+            array.shape()
+        )));
     }
     // Fortran order passes as_slice() too, with its values running down the columns.
     let values: &[f64] = array.as_slice().ok().filter(|_| array.is_c_contiguous()).ok_or_else(|| value_error(format!("{name} must be C-contiguous")))?;
@@ -47,12 +57,20 @@ fn rows<const N: usize>(array: &PyReadonlyArray2<'_, f64>, name: &str, count: us
 
 /// Copy row-major 4x4 matrices after validating their dtype, shape and layout.
 fn matrices(array: &Bound<'_, PyAny>, name: &str, count: usize) -> PyResult<Vec<[f64; 16]>> {
-    let poses = array.cast::<PyArray3<f64>>()
-        .map_err(|_| value_error(format!("{name} must be a float64 array of shape (n, 4, 4)")))?.readonly();
+    let poses = array
+        .cast::<PyArray3<f64>>()
+        .map_err(|_| value_error(format!("{name} must be a float64 array of shape (n, 4, 4)")))?
+        .readonly();
     if poses.shape() != [count, 4, 4] {
-        return Err(value_error(format!("{name} must have shape ({count}, 4, 4), got {:?}", poses.shape())));
+        return Err(value_error(format!(
+            "{name} must have shape ({count}, 4, 4), got {:?}",
+            poses.shape()
+        )));
     }
-    let values = poses.as_slice().ok().filter(|_| poses.is_c_contiguous())
+    let values = poses
+        .as_slice()
+        .ok()
+        .filter(|_| poses.is_c_contiguous())
         .ok_or_else(|| value_error(format!("{name} must be C-contiguous")))?;
     Ok(values.as_chunks::<16>().0.iter().map(|row| std::array::from_fn(|i| row[i])).collect())
 }
@@ -92,21 +110,29 @@ impl Rig {
             .map(|c| {
                 let [width, height] = sizes[c];
                 if width.fract() != 0.0 || height.fract() != 0.0 || width < 1.0 || height < 1.0 {
-                    return Err(value_error(format!("camera {c}: resolution {width}x{height} is not whole pixels")));
+                    return Err(value_error(format!(
+                        "camera {c}: resolution {width}x{height} is not whole pixels"
+                    )));
                 }
                 let pose = &poses[c];
                 Ok(RigCamera {
                     name: names[c].clone(),
                     width: width as u32,
                     height: height as u32,
-                    cam_from_rig: std::array::from_fn(|row| std::array::from_fn(|col| pose[4 * row + col])),
+                    cam_from_rig: std::array::from_fn(|row| {
+                        std::array::from_fn(|col| pose[4 * row + col])
+                    }),
                     focal: focals[c],
                     principal: principals[c],
                     fisheye62: Some(coefficients[c]),
                 })
             })
             .collect::<PyResult<_>>()?;
-        let inner = robocap_live::frame::Rig { cameras, source, device };
+        let inner = robocap_live::frame::Rig {
+            cameras,
+            source,
+            device,
+        };
         inner.validate().map_err(value_error)?;
         Ok(Self { inner })
     }
@@ -114,7 +140,11 @@ impl Rig {
     /// The camera names in index order.
     #[getter]
     fn names(&self) -> Vec<String> {
-        self.inner.cameras.iter().map(|camera| camera.name.clone()).collect()
+        self.inner
+            .cameras
+            .iter()
+            .map(|camera| camera.name.clone())
+            .collect()
     }
 
     /// Where the calibration came from.
@@ -174,21 +204,44 @@ pub struct LayerSummary {
 impl LayerSummary {
     /// One pipeline stage's summed wall time in milliseconds (the stages overlap).
     fn stage_total_ms(&self, stage: &str) -> PyResult<f64> {
-        self.stages.get(stage).copied()
-            .ok_or_else(|| value_error(format!("no stage {stage:?}: {:?}", self.stages.keys().collect::<Vec<_>>())))
+        self.stages.get(stage).copied().ok_or_else(|| {
+            value_error(format!(
+                "no stage {stage:?}: {:?}",
+                self.stages.keys().collect::<Vec<_>>()
+            ))
+        })
     }
 }
 
 /// One camera's frame for the core: a Rust-owned snapshot in row-major order, for every NumPy layout.
-fn camera_frame(object: &Bound<'_, PyAny>, camera: usize, pts_ns: i64) -> PyResult<CameraFrame> {
-    let array = object.cast::<PyArray2<u8>>().map_err(|_| value_error(format!("frame {camera} must be a 2-D uint8 numpy array")))?;
+fn camera_frame(object: &Bound<'_, PyAny>, camera: usize, timestamp_ns: i64) -> PyResult<CameraFrame> {
+    let array = object
+        .cast::<PyArray2<u8>>()
+        .map_err(|_| value_error(format!("frame {camera} must be a 2-D uint8 numpy array")))?;
     let readonly = array.readonly();
     if readonly.shape() != [FULL_SIZE.height, FULL_SIZE.width] {
-        return Err(value_error(format!("frame {camera} has shape {:?}, expected ({}, {})", readonly.shape(), FULL_SIZE.height, FULL_SIZE.width)));
+        return Err(value_error(format!(
+            "frame {camera} has shape {:?}, expected ({}, {})",
+            readonly.shape(),
+            FULL_SIZE.height,
+            FULL_SIZE.width
+        )));
     }
-    let pixels = readonly.as_array().as_standard_layout().into_owned().into_raw_vec_and_offset().0;
+    let pixels = readonly
+        .as_array()
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset()
+        .0;
     let image = Image::new(FULL_SIZE, pixels).map_err(value_error)?;
-    Ok(CameraFrame { meta: FrameMeta { seq: 0, pts_ns, source_id: camera as u32, turned_180: false }, full: Arc::new(image) })
+    Ok(CameraFrame {
+        meta: CaptureMeta {
+            sequence: 0,
+            timestamp_ns,
+            camera_slot: camera,
+        },
+        full: Arc::new(image),
+    })
 }
 
 fn ort_device(device: &str) -> PyResult<OrtDevice> {
@@ -200,7 +253,11 @@ fn ort_device(device: &str) -> PyResult<OrtDevice> {
             .strip_prefix("cuda:")
             .and_then(|index| index.parse().ok())
             .map(OrtDevice::Cuda)
-            .ok_or_else(|| value_error(format!("device {other:?}: expected auto, cpu, cuda or cuda:<n>"))),
+            .ok_or_else(|| {
+                value_error(format!(
+                    "device {other:?}: expected auto, cpu, cuda or cuda:<n>"
+                ))
+            }),
     }
 }
 
@@ -213,7 +270,9 @@ pub struct HandsLayer {
 
 impl HandsLayer {
     fn writer(&mut self) -> PyResult<&mut HandsLayerWriter> {
-        self.writer.as_mut().ok_or_else(|| value_error("the layer is finished"))
+        self.writer
+            .as_mut()
+            .ok_or_else(|| value_error("the layer is finished"))
     }
 }
 
@@ -251,9 +310,18 @@ impl HandsLayer {
         let rig = rig.inner.clone();
         let nets: Box<dyn HandNets> = match nets {
             "ort" => {
-                let dir = models_dir.ok_or_else(|| value_error("nets='ort' needs models_dir (detnet_full.onnx, keynet.onnx)"))?;
-                let options = OrtConfig { device: ort_device(device)?, dylib: ort_dylib, intra_threads: ort_threads };
-                Box::new(py.detach(|| OrtNets::new(&dir, &options)).map_err(|error| PyRuntimeError::new_err(error.to_string()))?)
+                let dir = models_dir.ok_or_else(|| {
+                    value_error("nets='ort' needs models_dir (detnet_full.onnx, keynet.onnx)")
+                })?;
+                let options = OrtConfig {
+                    device: ort_device(device)?,
+                    dylib: ort_dylib,
+                    intra_threads: ort_threads,
+                };
+                Box::new(
+                    py.detach(|| OrtNets::new(&dir, &options))
+                        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+                )
             }
             "none" => Box::new(NoNets),
             other => return Err(value_error(format!("nets {other:?}: expected ort or none"))),
@@ -265,12 +333,18 @@ impl HandsLayer {
             ..HandsConfig::default()
         };
         let config = HandsLayerConfig {
-            output, recording_id, hand_overlays, hands,
+            output,
+            recording_id,
+            hand_overlays,
+            hands,
             downsample_threads: PipelineConfig::default().downsample_threads,
         };
         let description = nets.describe();
         let writer = HandsLayerWriter::new(&rig, nets, reference, config).map_err(layer_error)?;
-        Ok(Self { nets: description, writer: Some(writer) })
+        Ok(Self {
+            nets: description,
+            writer: Some(writer),
+        })
     }
 
     /// The networks in use (ONNX Runtime names the device it actually got).
@@ -285,39 +359,73 @@ impl HandsLayer {
     /// before it is queued; the caller may reuse or mutate it after this returns. `t_ns` is the frameset's catalog
     /// `video_time` and `camera_t_ns` each present camera's own (default `t_ns`).
     #[pyo3(signature = (t_ns, frames, camera_t_ns = None))]
-    fn push(&mut self, py: Python<'_>, t_ns: i64, frames: Vec<Option<Bound<'_, PyAny>>>, camera_t_ns: Option<Vec<i64>>) -> PyResult<u64> {
+    fn push(
+        &mut self,
+        py: Python<'_>,
+        t_ns: i64,
+        frames: Vec<Option<Bound<'_, PyAny>>>,
+        camera_t_ns: Option<Vec<i64>>,
+    ) -> PyResult<u64> {
         if frames.len() != NUM_CAMERAS {
-            return Err(value_error(format!("{} frames, expected {NUM_CAMERAS} ({})", frames.len(), CAMERA_NAMES.join(", "))));
+            return Err(value_error(format!(
+                "{} frames, expected {NUM_CAMERAS} ({})",
+                frames.len(),
+                CAMERA_NAMES.join(", ")
+            )));
         }
-        if camera_t_ns.as_ref().is_some_and(|times| times.len() != NUM_CAMERAS) {
-            return Err(value_error(format!("camera_t_ns must hold {NUM_CAMERAS} times")));
+        if camera_t_ns
+            .as_ref()
+            .is_some_and(|times| times.len() != NUM_CAMERAS)
+        {
+            return Err(value_error(format!(
+                "camera_t_ns must hold {NUM_CAMERAS} times"
+            )));
         }
         let writer = self.writer()?;
         let mut cameras: [Option<CameraFrame>; NUM_CAMERAS] = Default::default();
         for (camera, (slot, frame)) in cameras.iter_mut().zip(&frames).enumerate() {
             if let Some(frame) = frame {
-                let pts_ns: i64 = camera_t_ns.as_ref().map_or(t_ns, |times| times[camera]);
-                *slot = Some(camera_frame(frame, camera, pts_ns)?);
+                let timestamp_ns: i64 = camera_t_ns.as_ref().map_or(t_ns, |times| times[camera]);
+                *slot = Some(camera_frame(frame, camera, timestamp_ns)?);
             }
         }
         #[cfg(test)]
         tests::retain_submitted(&cameras);
-        py.detach(|| writer.push(t_ns, cameras)).map_err(layer_error)
+        py.detach(|| writer.push(t_ns, cameras))
+            .map_err(layer_error)
     }
 
     /// End the input, drain the pipeline, close the file and return the layer's totals; the layer takes no frameset after this.
     fn finish(&mut self, py: Python<'_>) -> PyResult<LayerSummary> {
-        let writer = self.writer.take().ok_or_else(|| value_error("the layer is finished"))?;
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| value_error("the layer is finished"))?;
         let inner = py.detach(|| writer.finish()).map_err(layer_error)?;
         let counts = inner.counts;
         let t = counts.hand_timings;
         Ok(LayerSummary {
-            framesets: counts.framesets, with_pose: counts.with_pose, held_pose: counts.held_pose,
-            tracked: (counts.tracked[0], counts.tracked[1]), reported: (counts.reported[0], counts.reported[1]),
-            scale: counts.scale, scale_final: counts.scale_final,
-            hand_stages: HandStageTimes { detnet_ms: t.detnet_ms, crops_ms: t.crops_ms, keynet_ms: t.keynet_ms, fit_ms: t.fit_ms, tracker_ms: t.tracker_ms },
+            framesets: counts.framesets,
+            with_pose: counts.with_pose,
+            held_pose: counts.held_pose,
+            tracked: (counts.tracked[0], counts.tracked[1]),
+            reported: (counts.reported[0], counts.reported[1]),
+            scale: counts.scale,
+            scale_final: counts.scale_final,
+            hand_stages: HandStageTimes {
+                detnet_ms: t.detnet_ms,
+                crops_ms: t.crops_ms,
+                keynet_ms: t.keynet_ms,
+                fit_ms: t.fit_ms,
+                tracker_ms: t.tracker_ms,
+            },
             log_worker_ms_mean: inner.log.worker_ms_mean,
-            stages: inner.run.stages.into_iter().map(|(name, stage)| (name, stage.mean * stage.count as f64)).collect(),
+            stages: inner
+                .run
+                .stages
+                .into_iter()
+                .map(|(name, stage)| (name, stage.mean * stage.count as f64))
+                .collect(),
         })
     }
 
@@ -331,10 +439,19 @@ impl HandsLayer {
 }
 
 /// The reference pose table: frameset times and row-major 4x4 poses, NaN rows for framesets without one.
-fn reference_poses(t_ns: &PyReadonlyArray1<'_, i64>, world_from_rig: &Bound<'_, PyAny>) -> PyResult<ReferencePoses> {
-    let times: &[i64] = t_ns.as_slice().map_err(|_| value_error("reference_t_ns must be a contiguous int64 array"))?;
+fn reference_poses(
+    t_ns: &PyReadonlyArray1<'_, i64>,
+    world_from_rig: &Bound<'_, PyAny>,
+) -> PyResult<ReferencePoses> {
+    let times: &[i64] = t_ns
+        .as_slice()
+        .map_err(|_| value_error("reference_t_ns must be a contiguous int64 array"))?;
     let poses = matrices(world_from_rig, "reference_world_from_rig", times.len())?;
-    Ok(ReferencePoses::new(times.iter().copied().zip(poses).collect(), 0, None))
+    Ok(ReferencePoses::new(
+        times.iter().copied().zip(poses).collect(),
+        0,
+        None,
+    ))
 }
 
 #[pymodule]

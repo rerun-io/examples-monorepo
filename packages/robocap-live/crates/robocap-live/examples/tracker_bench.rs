@@ -16,8 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use kornia_image::Image;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta};
 use nalgebra::Isometry3;
-use robocap_live::frame::{CameraFrame, FULL_SIZE, FrameMeta, Luma, NUM_CAMERAS, SMALL_SIZE};
+use robocap_live::frame::Luma;
+use robocap_live::frame::{FULL_SIZE, NUM_CAMERAS, SMALL_SIZE};
 use robocap_live::hands::estimator::PerspectiveKeyNet;
 use robocap_live::hands::model::GenericHandModel;
 use robocap_live::hands::scale::{CalibrationBlock, CalibrationConfig, calibrate_scale};
@@ -28,7 +30,10 @@ use robocap_live::sched::Summary;
 
 #[path = "../tests/common/tracker_fixtures.rs"]
 mod fixtures;
-use fixtures::{CallLog, Error, Golden, NoNets, Queue, QueuedNets, RenderedPerception, TRUE_PHI, TablePerception, Truth, golden, scene_landmarks};
+use fixtures::{
+    CallLog, Error, Golden, NoNets, Queue, QueuedNets, RenderedPerception, TRUE_PHI,
+    TablePerception, Truth, golden, scene_landmarks,
+};
 
 /// p50 / p95 / max / mean of a sample, milliseconds.
 fn summary(values: &[f64]) -> String {
@@ -36,17 +41,33 @@ fn summary(values: &[f64]) -> String {
         return "n 0".into();
     }
     let s = Summary::of(values);
-    format!("n {:>4}  mean {:>7.3}  p50 {:>7.3}  p95 {:>7.3}  max {:>7.3} ms", s.count, s.mean, s.p50, s.p95, s.max)
+    format!(
+        "n {:>4}  mean {:>7.3}  p50 {:>7.3}  p95 {:>7.3}  max {:>7.3} ms",
+        s.count, s.mean, s.p50, s.p95, s.max
+    )
 }
 
 fn bench_tracker(golden: &Arc<Golden>, repeats: usize, all_cameras: bool) -> Result<(), Error> {
-    let image: Luma = Arc::new(Image::new(kornia_image::ImageSize { width: 1, height: 1 }, vec![0u8])?);
+    let image: Luma = Arc::new(Image::new(
+        kornia_image::ImageSize {
+            width: 1,
+            height: 1,
+        },
+        vec![0u8],
+    )?);
     let images: [Option<&Luma>; NUM_CAMERAS] = [Some(&image); NUM_CAMERAS];
-    let camera_frame = CameraFrame { meta: FrameMeta::default(), full: image.clone() };
-    let (mut tracking, mut acquiring, mut fit_tracking, mut fit_acquiring, mut all) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let camera_frame = CameraFrame {
+        meta: CaptureMeta::default(),
+        full: image.clone(),
+    };
+    let (mut tracking, mut acquiring, mut fit_tracking, mut fit_acquiring, mut all) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for _ in 0..repeats {
         let log = Arc::new(Mutex::new(CallLog::default()));
-        let perception = Box::new(TablePerception { golden: golden.clone(), log: log.clone() });
+        let perception = Box::new(TablePerception {
+            golden: golden.clone(),
+            log: log.clone(),
+        });
         let hands = HandsConfig {
             scale: ScaleMode::Fixed(golden.record.tracking_run.phi),
             cameras: (0..NUM_CAMERAS).collect(),
@@ -54,16 +75,34 @@ fn bench_tracker(golden: &Arc<Golden>, repeats: usize, all_cameras: bool) -> Res
             detnet_groups: if all_cameras { 1 } else { NUM_CAMERAS },
             ..HandsConfig::default()
         };
-        let mut tracker = Tracker::new(&golden.record.rig, &hands, TrackerConfig::default(), perception)?;
+        let mut tracker = Tracker::new(
+            &golden.record.rig,
+            &hands,
+            TrackerConfig::default(),
+            perception,
+        )?;
         for f in 0..golden.record.frames {
             log.lock().map_err(|_| "poisoned")?.frame = f;
             let was_tracked = [tracker.is_tracked(LEFT), tracker.is_tracked(RIGHT)];
-            let inputs = HandInputs { index: f as u64, t_ns: f as i64 * 33_333_333, full: [Some(&camera_frame); NUM_CAMERAS], small: images };
+            let inputs = HandInputs {
+                turned_180: [false; NUM_CAMERAS],
+                index: f as u64,
+                t_ns: f as i64 * 33_333_333,
+                full: [Some(&camera_frame); NUM_CAMERAS],
+                small: images,
+            };
             let begin = Instant::now();
-            let result: HandFrameResult = tracker.track(&inputs, &golden.isometry(f), &mut NoNets)?;
+            let result: HandFrameResult =
+                tracker.track(&inputs, &golden.isometry(f), &mut NoNets)?;
             let ms = begin.elapsed().as_secs_f64() * 1e3;
             all.push(ms);
-            if result.detnet_camera.is_some() && result.hands.iter().zip(was_tracked).any(|(h, was)| h.tracked && !was) {
+            if result.detnet_camera.is_some()
+                && result
+                    .hands
+                    .iter()
+                    .zip(was_tracked)
+                    .any(|(h, was)| h.tracked && !was)
+            {
                 acquiring.push(ms);
                 fit_acquiring.push(result.timings.fit_ms);
             } else if was_tracked.iter().all(|t| *t) && result.hands.iter().all(|h| h.tracked) {
@@ -74,7 +113,11 @@ fn bench_tracker(golden: &Arc<Golden>, repeats: usize, all_cameras: bool) -> Res
     }
     println!(
         "tracker (recorded estimator outputs, no nets, no crops), DetNet {}, {} frames x {repeats}:",
-        if all_cameras { "on all cameras" } else { "round robin" },
+        if all_cameras {
+            "on all cameras"
+        } else {
+            "round robin"
+        },
         golden.record.frames
     );
     println!("  every step               {}", summary(&all));
@@ -98,16 +141,29 @@ impl HandNets for SceneNets {
         if let Some(real) = self.real.as_mut() {
             real.detnet(frames)?;
         }
-        QueuedNets { queue: self.queue.clone() }.detnet(frames)
+        QueuedNets {
+            queue: self.queue.clone(),
+        }
+        .detnet(frames)
     }
-    fn keynet(&mut self, crops: &[&[f32]], keypoints: &[[f32; 3 * NUM_LANDMARKS]]) -> Result<Vec<KeyNetRaw>, NetsError> {
+    fn keynet(
+        &mut self,
+        crops: &[&[f32]],
+        keypoints: &[[f32; 3 * NUM_LANDMARKS]],
+    ) -> Result<Vec<KeyNetRaw>, NetsError> {
         if let Some(real) = self.real.as_mut() {
             real.keynet(crops, keypoints)?;
         }
-        QueuedNets { queue: self.queue.clone() }.keynet(crops, keypoints)
+        QueuedNets {
+            queue: self.queue.clone(),
+        }
+        .keynet(crops, keypoints)
     }
     fn describe(&self) -> String {
-        self.real.as_ref().map_or_else(|| "renders".into(), |r| format!("renders after {}", r.describe()))
+        self.real.as_ref().map_or_else(
+            || "renders".into(),
+            |r| format!("renders after {}", r.describe()),
+        )
     }
 }
 
@@ -118,15 +174,32 @@ fn bench_scene(
     right_hidden: bool,
     real: &mut Option<Box<dyn HandNets>>,
 ) -> Result<(), Error> {
-    let truth = Arc::new(Truth::new(&golden.record.rig, scene_landmarks(right_hidden)?)?);
-    let full = CameraFrame { meta: FrameMeta::default(), full: Arc::new(Image::from_size_val(FULL_SIZE, 0u8)?) };
+    let truth = Arc::new(Truth::new(
+        &golden.record.rig,
+        scene_landmarks(right_hidden)?,
+    )?);
+    let full = CameraFrame {
+        meta: CaptureMeta::default(),
+        full: Arc::new(Image::from_size_val(FULL_SIZE, 0u8)?),
+    };
     let small: Luma = Arc::new(Image::from_size_val(SMALL_SIZE, 0u8)?);
-    let (mut steps, mut detnet, mut crops, mut keynet, mut fits, mut rest) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut steps, mut detnet, mut crops, mut keynet, mut fits, mut rest) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     let mut acquisitions = Vec::new();
     for _ in 0..repeats.max(1) {
         let queue = Arc::new(Mutex::new(Queue::default()));
         let estimator = PerspectiveKeyNet::new(&golden.record.rig, TRUE_PHI)?;
-        let perception = RenderedPerception { truth: truth.clone(), estimator, queue: queue.clone() };
+        let perception = RenderedPerception {
+            truth: truth.clone(),
+            estimator,
+            queue: queue.clone(),
+        };
         let hands = HandsConfig {
             scale: ScaleMode::Fixed(TRUE_PHI),
             cameras: (0..NUM_CAMERAS).collect(),
@@ -134,10 +207,24 @@ fn bench_scene(
             detnet_groups: if all_cameras { groups } else { NUM_CAMERAS },
             ..HandsConfig::default()
         };
-        let mut tracker = Tracker::new(&golden.record.rig, &hands, TrackerConfig::default(), Box::new(perception))?;
-        let mut nets = SceneNets { queue, real: real.take() };
+        let mut tracker = Tracker::new(
+            &golden.record.rig,
+            &hands,
+            TrackerConfig::default(),
+            Box::new(perception),
+        )?;
+        let mut nets = SceneNets {
+            queue,
+            real: real.take(),
+        };
         for f in 0..40 {
-            let inputs = HandInputs { index: f, t_ns: f as i64 * 33_333_333, full: [Some(&full); NUM_CAMERAS], small: [Some(&small); NUM_CAMERAS] };
+            let inputs = HandInputs {
+                turned_180: [false; NUM_CAMERAS],
+                index: f,
+                t_ns: f as i64 * 33_333_333,
+                full: [Some(&full); NUM_CAMERAS],
+                small: [Some(&small); NUM_CAMERAS],
+            };
             let was_tracked = tracker.is_tracked(LEFT);
             let begin = Instant::now();
             let result = tracker.track(&inputs, &Isometry3::identity(), &mut nets)?;
@@ -145,7 +232,8 @@ fn bench_scene(
             if !was_tracked && result.hands[LEFT].tracked {
                 acquisitions.push(ms);
             }
-            let steady = result.hands[LEFT].reported && (right_hidden || result.hands[RIGHT].reported);
+            let steady =
+                result.hands[LEFT].reported && (right_hidden || result.hands[RIGHT].reported);
             if f >= 10 && steady {
                 steps.push(ms);
                 detnet.push(result.timings.detnet_ms);
@@ -157,10 +245,18 @@ fn bench_scene(
         }
         *real = nets.real.take();
     }
-    let nets_name = real.as_ref().map_or("ground-truth renders (no NPU)".to_string(), |r| format!("{} + renders", r.describe()));
+    let nets_name = real
+        .as_ref()
+        .map_or("ground-truth renders (no NPU)".to_string(), |r| {
+            format!("{} + renders", r.describe())
+        });
     println!(
         "still scene through the perspective-crop estimator, {}, DetNet {}, nets: {nets_name}",
-        if right_hidden { "left hand tracked, right hand hidden (DetNet every frameset)" } else { "both hands tracked (4 crops)" },
+        if right_hidden {
+            "left hand tracked, right hand hidden (DetNet every frameset)"
+        } else {
+            "both hands tracked (4 crops)"
+        },
         match (all_cameras, groups) {
             (false, _) => "round robin".to_string(),
             (true, 1) => "on all 6 cameras".to_string(),
@@ -186,7 +282,11 @@ fn bench_calibration(golden: &Golden, repeats: usize) -> Result<(), Error> {
         let mut last = None;
         for _ in 0..repeats.clamp(1, 5) {
             let begin = Instant::now();
-            last = Some(calibrate_scale(generic.model(), &set, &CalibrationConfig::default())?);
+            last = Some(calibrate_scale(
+                generic.model(),
+                &set,
+                &CalibrationConfig::default(),
+            )?);
             times.push(begin.elapsed().as_secs_f64() * 1e3);
         }
         let calibration = last.ok_or("no run")?;
@@ -210,7 +310,11 @@ fn main() -> Result<(), Error> {
     while index < args.len() {
         match args[index].as_str() {
             "--nets" => {
-                models = Some(args.get(index + 1).ok_or("--nets needs the models directory")?.clone());
+                models = Some(
+                    args.get(index + 1)
+                        .ok_or("--nets needs the models directory")?
+                        .clone(),
+                );
                 index += 1;
             }
             value => repeats = value.parse()?,
