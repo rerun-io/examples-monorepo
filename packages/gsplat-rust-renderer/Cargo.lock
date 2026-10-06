@@ -699,6 +699,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee19bd99b43e3691acbad4e840420a4881cea6c0b66a208125a824f8fd53f5a1"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "futures-io",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-executor"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -836,6 +848,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "async_zip"
+version = "0.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c50d65ce1b0e0cb65a785ff615f78860d7754290647d3b983208daa4f85e6"
+dependencies = [
+ "async-compression",
+ "crc32fast",
+ "futures-lite",
+ "pin-project",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1126,6 +1153,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ball-tree"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d446f833f499965fbe9be40f251e89e00aaef268d2835593d060d7023f88efa6"
+
+[[package]]
 name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1382,6 +1415,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "brush-dataset"
+version = "1.0.0"
+source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
+dependencies = [
+ "brush-async",
+ "brush-render",
+ "brush-serde",
+ "brush-vfs",
+ "burn",
+ "clap",
+ "colmap-reader",
+ "glam",
+ "image",
+ "itertools 0.15.0",
+ "jpeg-decoder",
+ "log",
+ "parse-size",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "brush-loss"
+version = "1.0.0"
+source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
+dependencies = [
+ "brush-cube",
+ "burn",
+ "burn-cubecl",
+ "glam",
+]
+
+[[package]]
 name = "brush-render"
 version = "1.0.0"
 source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
@@ -1455,6 +1525,56 @@ dependencies = [
  "burn-wgpu",
  "bytemuck",
  "tracing",
+]
+
+[[package]]
+name = "brush-train"
+version = "1.0.0"
+source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
+dependencies = [
+ "anyhow",
+ "ball-tree",
+ "brush-cube",
+ "brush-dataset",
+ "brush-loss",
+ "brush-render",
+ "brush-serde",
+ "burn",
+ "clap",
+ "glam",
+ "hashbrown 0.16.1",
+ "image",
+ "log",
+ "lpips",
+ "rand 0.10.2",
+ "rayon",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "brush-vfs"
+version = "1.0.0"
+source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
+dependencies = [
+ "async_zip",
+ "brush-async",
+ "futures-util",
+ "js-sys",
+ "log",
+ "path-clean",
+ "reqwest 0.13.5",
+ "rrfd",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.6.0",
+ "web-sys",
 ]
 
 [[package]]
@@ -2361,6 +2481,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "colmap-reader"
+version = "1.0.0"
+source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
+dependencies = [
+ "brush-async",
+ "glam",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "color"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2426,6 +2557,22 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98fc98460ba0ad5317075d3632b8dfc45d0be8c4a49347c2a38272019717614a"
+dependencies = [
+ "compression-core",
+ "flate2",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "concat-idents"
@@ -4755,7 +4902,7 @@ dependencies = [
  "ureq 3.4.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.4.2",
  "web-sys",
 ]
 
@@ -5860,6 +6007,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsplat-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brush-dataset",
+ "brush-loss",
+ "brush-render",
+ "brush-serde",
+ "brush-train",
+ "burn",
+ "clap",
+ "glam",
+ "image",
+ "lpips",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "gsplat-rust-renderer"
 version = "0.1.0"
 dependencies = [
@@ -5981,6 +6150,10 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -6151,7 +6324,7 @@ dependencies = [
  "http",
  "http-cache",
  "http-cache-semantics",
- "reqwest",
+ "reqwest 0.12.28",
  "reqwest-middleware",
  "serde",
  "url",
@@ -6758,6 +6931,15 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]
@@ -8391,6 +8573,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse-size"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
+
+[[package]]
 name = "password-hash"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8418,6 +8606,12 @@ name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
+
+[[package]]
+name = "path-clean"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
 
 [[package]]
 name = "pathdiff"
@@ -8692,7 +8886,7 @@ dependencies = [
  "combine",
  "downcast-rs 2.0.2",
  "dyn-clone",
- "hashbrown 0.17.1",
+ "hashbrown 0.14.5",
  "hi_sparse_bitset",
  "indexmap 2.14.0",
  "inventory",
@@ -10030,7 +10224,7 @@ dependencies = [
  "re_tracing",
  "re_types_core",
  "re_uri",
- "reqwest",
+ "reqwest 0.12.28",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -12111,6 +12305,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "reqwest"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.5.0",
+ "web-sys",
+]
+
+[[package]]
 name = "reqwest-middleware"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12119,7 +12345,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "http",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "thiserror 1.0.69",
  "tower-service",
@@ -12210,7 +12436,7 @@ dependencies = [
  "tower-service",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.4.2",
  "web-sys",
 ]
 
@@ -12264,6 +12490,9 @@ dependencies = [
  "raw-window-handle",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "web-sys",
  "windows-sys 0.61.2",
 ]
@@ -12364,6 +12593,27 @@ name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
+name = "rrfd"
+version = "1.0.0"
+source = "git+https://github.com/ArthurBrussee/brush?rev=1388f74c6fe0236f68ee4915564bf00e9d2e3747#1388f74c6fe0236f68ee4915564bf00e9d2e3747"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "jni",
+ "js-sys",
+ "lazy_static",
+ "rfd",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.6.0",
+ "web-sys",
+]
 
 [[package]]
 name = "rsqlite-vfs"
@@ -14455,7 +14705,7 @@ dependencies = [
  "image",
  "log",
  "lru",
- "reqwest",
+ "reqwest 0.12.28",
  "reqwest-middleware",
  "thiserror 2.0.20",
  "tokio",
@@ -14557,6 +14807,32 @@ name = "wasm-streams"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7d3be8814f5ba5f074491a469eed3d73c273ffad955f25ed1635efac4b0d269"
 dependencies = [
  "futures-util",
  "js-sys",

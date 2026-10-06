@@ -2273,6 +2273,11 @@ cmd = "cargo test --locked --workspace"
 cwd = "packages/gsplat-rust-renderer"
 description = "Run Rust test suite"
 
+[feature.gsplat-rust-renderer.tasks.gsplat-eval]
+cmd = "cargo run --locked --release -p gsplat-eval --"
+cwd = "packages/gsplat-rust-renderer"
+description = "Score paired PNG directories with Brush or published metrics"
+
 # ── Python demo tasks ────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-ply]
 cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"

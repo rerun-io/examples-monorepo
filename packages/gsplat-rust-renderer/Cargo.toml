@@ -108,6 +108,7 @@ re_viewer_context = { version = "=0.38.1", optional = true }
 rerun = { version = "=0.38.1", features = ["native_viewer", "log_setup"], optional = true }
 tokio = { workspace = true, optional = true }
 
+
 # Match Brush: thin LTO; codegen-units keeps Cargo's release default (16).
 [profile.release]
 lto = "thin"
