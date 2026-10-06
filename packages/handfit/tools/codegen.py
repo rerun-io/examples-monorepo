@@ -102,36 +102,11 @@ def landmarks(
     return output
 
 
-def project_fisheye62(point: sf.V3, focal: sf.V2, principal: sf.V2, distortion: sf.V8) -> sf.V2:
-    radius: sf.Scalar = sf.sqrt(point[0] ** 2 + point[1] ** 2 + 1e-12)
-    scale: sf.Scalar = sf.atan2(radius, point[2]) / radius
-    x: sf.Scalar = point[0] * scale
-    y: sf.Scalar = point[1] * scale
-    radius_sq: sf.Scalar = sf.Min(x * x + y * y, sf.pi**2)
-    radial: sf.Scalar = 1 + radius_sq * (
-        distortion[0]
-        + radius_sq
-        * (distortion[1] + radius_sq * (distortion[2] + radius_sq * (distortion[3] + radius_sq * (distortion[4] + radius_sq * distortion[5]))))
-    )
-    u: sf.Scalar = x * radial
-    v: sf.Scalar = y * radial
-    uv_sq: sf.Scalar = u * u + v * v
-    return sf.V2(
-        focal[0] * (u + 2 * distortion[7] * u * v + distortion[6] * (uv_sq + 2 * u * u)) + principal[0],
-        focal[1] * (v + 2 * distortion[6] * u * v + distortion[7] * (uv_sq + 2 * v * v)) + principal[1],
-    )
-
-
-def project_pinhole(point: sf.V3, focal: sf.V2, principal: sf.V2) -> sf.V2:
-    z_safe: sf.Scalar = sf.Piecewise((1e-9, sf.Abs(point[2]) < 1e-9), (point[2], True))
-    return sf.V2(focal[0] * point[0] / z_safe + principal[0], focal[1] * point[1] / z_safe + principal[1])
-
-
 def main() -> None:
     start: float = time.perf_counter()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     names: list[str] = []
-    for fn, argument in [(project_pinhole, "point"), (project_fisheye62, "point"), (landmarks, "delta")]:
+    for fn, argument in [(landmarks, "delta")]:
         name: str = fn.__name__ + "_with_jacobian"
         print(f"Generating {name}", flush=True)
         generator = codegen.Codegen.function(fn, config=CheckedRustConfig()).with_jacobians(which_args=[argument], include_results=True, name=name)

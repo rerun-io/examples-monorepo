@@ -373,7 +373,7 @@ impl Tracker {
             .map_err(|error| HandsError::Invalid(error.to_string()))?;
         if active
             .iter()
-            .map(|&c| cameras[c].fit.distortion.is_some())
+            .map(|&c| cameras[c].fit.is_fisheye())
             .collect::<std::collections::HashSet<_>>()
             .len()
             > 1

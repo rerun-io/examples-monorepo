@@ -27,9 +27,7 @@ fn ints(array: &PyReadonlyArrayDyn<'_, i64>, shape: &[usize], name: &str) -> PyR
 #[derive(Clone)]
 struct Camera {
     transform: Matrix4<f64>,
-    focal: Vector2<f64>,
-    principal: Vector2<f64>,
-    distortion: Option<SVector<f64, 8>>,
+    model: handfit::residual::CameraModelKind<f64>,
 }
 
 #[pyclass(module = "handfit._core")]
@@ -107,27 +105,15 @@ impl HandFitter {
         principal: PyReadonlyArrayDyn<'_, f32>,
         distortion: Option<PyReadonlyArrayDyn<'_, f32>>,
     ) -> PyResult<usize> {
-        let camera = Camera {
-            transform: Matrix4::from_row_slice(&floats(&cam_from_rig, &[4, 4], "cam_from_rig")?),
-            focal: Vector2::from_row_slice(&floats(&focal, &[2], "focal")?),
-            principal: Vector2::from_row_slice(&floats(&principal, &[2], "principal")?),
-            distortion: distortion
-                .map(|d| floats(&d, &[8], "distortion").map(|a| SVector::from_row_slice(&a)))
-                .transpose()?,
-        };
-        if camera
-            .transform
-            .iter()
-            .chain(camera.focal.iter())
-            .chain(camera.principal.iter())
-            .any(|v| !v.is_finite())
-            || camera
-                .distortion
-                .as_ref()
-                .is_some_and(|d| d.iter().any(|v| !v.is_finite()))
-        {
-            return Err(PyValueError::new_err("non-finite camera"));
-        }
+        let transform = Matrix4::from_row_slice(&floats(&cam_from_rig, &[4, 4], "cam_from_rig")?);
+        if transform.iter().any(|v| !v.is_finite()) { return Err(PyValueError::new_err("non-finite camera transform")); }
+        let focal = Vector2::from_row_slice(&floats(&focal, &[2], "focal")?);
+        let principal = Vector2::from_row_slice(&floats(&principal, &[2], "principal")?);
+        let distortion = distortion.map(|d| floats(&d, &[8], "distortion").map(|a| SVector::from_row_slice(&a))).transpose()?;
+        let model = handfit::residual::camera_model(&focal, &principal, distortion.as_ref()).map_err(|source| {
+            PyValueError::new_err(handfit::residual::ViewValidationError::InvalidCalibration { view: self.cameras.len(), source }.to_string())
+        })?;
+        let camera = Camera { transform, model };
         let index = self.cameras.len();
         self.cameras.push(camera);
         Ok(index)
@@ -202,9 +188,7 @@ impl HandFitter {
                 let view = View {
                     rotation,
                     translation,
-                    focal: camera.focal,
-                    principal: camera.principal,
-                    distortion: camera.distortion,
+                    camera: camera.model,
                     pixels: SMatrix::from_row_slice(&pixels[idx * 42..idx * 42 + 42]),
                     weights: SVector::from_row_slice(&weights[idx * 21..idx * 21 + 21]),
                     distances: SVector::from_row_slice(&distances[idx * 21..idx * 21 + 21]),

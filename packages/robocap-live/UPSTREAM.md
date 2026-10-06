@@ -25,8 +25,6 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   (`to_net`/`from_net`), built on `spatial_padding`.
 - `src/hands/circles.rs` min_enclosing_circle -> kornia-imgproc (contours/features): OpenCV's `minEnclosingCircle` (Welzl, f64,
   deterministic), with docs, a doctest and unit tests.
-- `src/hands/scale.rs` calibrate_scale -> handfit (or kornia-3d's BA tooling): one shared model scale + per-frame poses by LM with a
-  Schur complement on the scale, analytic scale column.
 - `src/nets/rknn/api.rs` RknnRuntime / RknnModel -> kornia-rs `examples/rknn` (beside `examples/onnx`), or a small kornia runtime
   crate: a dlopened RKNN 2.x C-API binding (one context per NPU core, u8/f16/f32 inputs, float outputs into caller buffers,
   typed errors, rknn_destroy on drop). kornia has no inference crate, so this stays ours until one exists.

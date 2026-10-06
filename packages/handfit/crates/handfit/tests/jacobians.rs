@@ -1,8 +1,5 @@
-use handfit::generated::{
-    project_fisheye62_with_jacobian::sym::project_fisheye62_with_jacobian as fisheye,
-    project_pinhole_with_jacobian::sym::project_pinhole_with_jacobian as pinhole,
-};
 use handfit::model::{LandmarkJacobian, Step};
+use handfit::residual::{camera_model, project_camera};
 use handfit::{Model, Pose};
 use nalgebra::{Rotation3, SMatrix, SVector, Vector2, Vector3};
 
@@ -46,12 +43,10 @@ fn camera_jacobians_match_random_central_differences() {
         let distortion =
             SVector::<f64, 8>::from_fn(|i, _| rng.signed() * 0.03 * 0.1_f64.powi(i.min(5) as i32));
         for lens in 0..2 {
+            let camera =
+                camera_model(&focal, &principal, (lens == 1).then_some(&distortion)).unwrap();
             let project = |p: &Vector3<f64>, j: Option<&mut SMatrix<f64, 2, 3>>| {
-                if lens == 0 {
-                    pinhole(p, &focal, &principal, j)
-                } else {
-                    fisheye(p, &focal, &principal, &distortion, j)
-                }
+                project_camera(&camera, p, j)
             };
             let mut jac = SMatrix::<f64, 2, 3>::zeros();
             project(&point, Some(&mut jac));
@@ -135,15 +130,23 @@ fn camera_optical_axis_and_pinhole_z_safe() {
     let mut jac = SMatrix::<f64, 2, 3>::zeros();
     let p = Vector3::new(0.0, 0.0, 1.0);
     assert_eq!(
-        fisheye(&p, &focal, &principal, &SVector::zeros(), Some(&mut jac)),
+        project_camera(
+            &camera_model(&focal, &principal, Some(&SVector::zeros())).unwrap(),
+            &p,
+            Some(&mut jac)
+        ),
         principal
     );
     assert!((jac[(0, 0)] - 500.0).abs() < 1e-7);
     assert!((jac[(1, 1)] - 600.0).abs() < 1e-7);
     assert_eq!(jac[(0, 2)], 0.0);
-    for z in [-0.5e-9, 0.0, 0.5e-9] {
+    for z in [-0.5e-9, -1e-10, 0.0, 0.5e-9] {
         let p = Vector3::new(1e-9, 2e-9, z);
-        let got = pinhole(&p, &focal, &principal, Some(&mut jac));
+        let got = project_camera(
+            &camera_model(&focal, &principal, None).unwrap(),
+            &p,
+            Some(&mut jac),
+        );
         assert!((got - Vector2::new(820.0, 1440.0)).norm() < 1e-10);
         assert_eq!(jac[(0, 2)], 0.0);
         assert_eq!(jac[(1, 2)], 0.0);

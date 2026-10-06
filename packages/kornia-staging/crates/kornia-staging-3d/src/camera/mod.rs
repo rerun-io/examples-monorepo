@@ -192,6 +192,20 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::Kb4(v) => v.project_unchecked(point),
         }
     }
+    /// Project without validity checks, optionally writing the row-major point Jacobian.
+    /// Intrinsic derivatives remain on the concrete camera APIs.
+    pub fn project_unchecked_with_point_jacobian(
+        &self,
+        point: [S; 3],
+        jacobian: Option<&mut [[S; 3]; 2]>,
+    ) -> [S; 2] {
+        match self {
+            Self::Pinhole(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::Fisheye624(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::BrownConrady(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::Kb4(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+        }
+    }
     /// Project once and retain both the pixel and checked-domain status.
     /// A rejected pixel is unchecked and must not enter downstream geometry.
     #[inline]

@@ -3313,13 +3313,32 @@ inputs = [
     "packages/handfit/Cargo.toml",
     "packages/handfit/Cargo.lock",
     "packages/handfit/crates/*/Cargo.toml",
-    "packages/handfit/crates/*/src/**/*.rs",
+    "packages/handfit/crates/*/build.rs",
+    "packages/handfit/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
 ]
 outputs = ["packages/handfit/handfit/_core.so"]
 description = "Build the native hand-pose fit and install handfit._core in place"
 
 [feature.handfit.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "handfit-cargo-test"]
+
+# Both handfit and handtrack load handfit._core; rebuild before every Python test lane.
+[feature.handfit.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["handfit-build"]
+
+[feature.handfit.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["handfit-build"]
+
+[feature.handfit.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["handfit-build"]
 
 [feature.handfit.tasks.handfit-cargo-test]
 cmd = "cargo test --release --workspace"

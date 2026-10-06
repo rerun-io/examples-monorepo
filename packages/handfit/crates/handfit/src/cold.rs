@@ -1,11 +1,9 @@
 //! Acquisition: ray alignment, cube wrists, palm-only LM, then full finger fits.
 use crate::{
-    lm::solve,
-    model::Step,
-    residual::{project, Views},
-    Config, FitError, FitResult, JacobianMode, Model, Pose, Termination, View,
+    lm::solve, model::Step, residual::Views, Config, FitError, FitResult, JacobianMode, Model,
+    Pose, Termination, View,
 };
-use nalgebra::{Matrix2, Matrix3, SVector, Vector2, Vector3};
+use nalgebra::{Matrix3, SVector, Vector3};
 use std::time::{Duration, Instant};
 
 pub const PALM: [usize; 6] = [5, 8, 11, 14, 17, 20];
@@ -51,50 +49,6 @@ pub fn neutral(model: &Model) -> Pose {
     }
 }
 
-fn direction(xy: Vector2<f64>) -> Vector3<f64> {
-    let angle = (xy.norm_squared() + 1e-12).sqrt();
-    Vector3::new(
-        xy.x * angle.sin() / angle,
-        xy.y * angle.sin() / angle,
-        angle.cos(),
-    )
-}
-
-/// The ray of a pixel: eight Newton iterations on [`project`] with the reference's 1e-3 central-difference Jacobian (the
-/// pinhole in closed form).
-///
-/// # Arguments
-///
-/// * `view` - The camera.
-/// * `pixel` - The pixel.
-///
-/// # Returns
-///
-/// The unit ray in the camera frame; zero when a Newton step is singular, and its non-finite components zeroed.
-pub fn unproject(view: &View, pixel: Vector2<f64>) -> Vector3<f64> {
-    let mut xy = (pixel - view.principal).component_div(&view.focal);
-    if view.distortion.is_none() {
-        return Vector3::new(xy.x, xy.y, 1.0).normalize();
-    }
-    for _ in 0..8 {
-        let mut jac = Matrix2::zeros();
-        for k in 0..2 {
-            let mut offset = Vector2::zeros();
-            offset[k] = 1e-3;
-            jac.column_mut(k).copy_from(
-                &((project(view, &direction(xy + offset))
-                    - project(view, &direction(xy - offset)))
-                    / 2e-3),
-            );
-        }
-        let Some(step) = jac.lu().solve(&(project(view, &direction(xy)) - pixel)) else {
-            return Vector3::zeros();
-        };
-        xy -= step;
-    }
-    direction(xy).map(|x| if x.is_finite() { x } else { 0.0 })
-}
-
 /// The cold fit's wrist hypotheses: one ray-aligned wrist per view (Kabsch on the palm keypoints, or every keypoint when fewer
 /// than three palm points are observed), then the first `config.rotation_hypotheses` axis-aligned rotations about the best
 /// view's anchor. Aligned slots 0 and 1 always precede the cube rotations, even for a single view.
@@ -132,7 +86,14 @@ pub fn wrist_hypotheses(
         usable[v] = used.len() >= 3;
         let rays: Vec<Vector3<f64>> = used
             .iter()
-            .map(|&i| unproject(view, view.pixels.row(i).transpose()))
+            .map(|&i| {
+                Vector3::from(
+                    views
+                        .camera(v)
+                        .unproject([view.pixels[(i, 0)], view.pixels[(i, 1)]])
+                        .unwrap_or([0.0; 3]),
+                )
+            })
             .collect();
         let offsets: Vec<Vector3<f64>> = used
             .iter()
@@ -298,7 +259,7 @@ fn parallel_map_with_builder<T: Sync, R: Send>(
 ///
 /// # Errors
 ///
-/// [`FitError::TooManyViews`] for more than two views, [`FitError::NoFullFit`] when `config` asks for no full fit.
+/// [`FitError::Views`] for more than two views, [`FitError::NoFullFit`] when `config` asks for no full fit.
 pub fn initial_pose(
     model: &Model,
     config: &Config,
@@ -333,7 +294,8 @@ pub fn initial_pose_parallel(
     mode: JacobianMode,
     threads: usize,
 ) -> Result<FitResult, FitError> {
-    let checked = Views::new(views).ok_or(FitError::TooManyViews { views: views.len() })?;
+    let checked =
+        Views::new(views)?;
     let started = Instant::now();
     let (hypotheses, usable) = wrist_hypotheses(model, config, mirror, checked);
     let hypotheses_time = started.elapsed();
@@ -368,9 +330,7 @@ pub fn initial_pose_parallel(
         }
     }
     // As many views as `views`.
-    let rigid_views = Views::new(&rigid_views).ok_or(FitError::TooManyViews {
-        views: rigid_views.len(),
-    })?;
+    let rigid_views = Views::new(&rigid_views)?;
     let started = Instant::now();
     let rigid: Vec<FitResult> = parallel_map(&hypotheses, threads, |p| {
         solve(model, &stage, p, mirror, rigid_views, mode, true)

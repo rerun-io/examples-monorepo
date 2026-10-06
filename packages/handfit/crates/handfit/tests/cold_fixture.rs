@@ -28,9 +28,7 @@ fn golden_wrist_hypotheses_match_torch_export_in_order() {
         .map(|_| View {
             rotation: Matrix3::from_row_slice(take(9)),
             translation: Vector3::from_row_slice(take(3)),
-            focal: Vector2::from_row_slice(take(2)),
-            principal: Vector2::from_row_slice(take(2)),
-            distortion: Some(SVector::from_row_slice(take(8))),
+            camera: handfit::residual::camera_model(&Vector2::from_row_slice(take(2)), &Vector2::from_row_slice(take(2)), Some(&SVector::from_row_slice(take(8)))).unwrap(),
             pixels: SMatrix::from_row_slice(take(42)),
             weights: SVector::from_row_slice(take(21)),
             distances: SVector::from_row_slice(take(21)),

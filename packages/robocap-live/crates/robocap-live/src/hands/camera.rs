@@ -1,15 +1,15 @@
 //! One rig camera for hand geometry ([`RigCameraModel`]), in the two precisions handtrack uses for it:
-//! - the lens (kornia-3d `KannalaBrandt4`, KB4, or a plain pinhole) plus `cam_from_rig` in float64, for the KeyNet crops and the
+//! - the lens (kornia-staging-3d `KannalaBrandt4`, KB4, or a plain pinhole) plus `cam_from_rig` in float64, for the KeyNet crops and the
 //!   overlays (handtrack's `geometry/camera.py`);
 //! - [`FitParams`]: the same calibration rounded to float32, as handtrack's `CameraRig` holds it and handfit's Python binding
 //!   receives it, for the tracker's planning projections and the fit ([`fit_view`]). The model keeps the two apart, which keeps
 //!   both float contracts with Python exact.
 //!
 //! The port of handtrack's `geometry/camera.py` for the cameras RoboCap has: its Fisheye62 formula with `k5 = k6 = p1 = p2 = 0`
-//! is exactly kornia-3d's Kannala-Brandt `KannalaBrandt4` (the `r^2 <= pi^2` clip never binds, since theta <= pi). Projection is
+//! is exactly kornia-staging-3d's Kannala-Brandt `KannalaBrandt4` (the `r^2 <= pi^2` clip never binds, since theta <= pi). Projection is
 //! unclipped (points behind the camera and outside the image still project), as in handtrack; use [`in_front`] for z > 0.
 
-use kornia_staging_3d::camera::{CameraModel, KannalaBrandt4, Pinhole, UnprojectError};
+use kornia_staging_3d::camera::{CameraModel, CameraModelKind, KannalaBrandt4, Pinhole, UnprojectError};
 use nalgebra::{Isometry3, Matrix3, Vector2, Vector3};
 
 use crate::frame::{NUM_CAMERAS, Rig, RigCamera};
@@ -65,26 +65,21 @@ pub struct RigCameraModel {
 #[derive(Clone, Debug)]
 pub struct FitParams {
     /// Camera from rig, metres.
-    pub cam_from_rig: Matrix4<f64>,
-    /// (fx, fy).
-    pub focal: Vector2<f64>,
-    /// (cx, cy).
-    pub principal: Vector2<f64>,
-    /// Fisheye62 `[k1..k6, p1, p2]`; `None` = pinhole.
-    pub distortion: Option<SVector<f64, 8>>,
+    cam_from_rig: Matrix4<f64>,
+    camera: CameraModelKind<f64>,
+
 }
 
 impl FitParams {
+    /// Whether the rounded fit lens has Fisheye62 distortion.
+    pub fn is_fisheye(&self) -> bool {
+        matches!(self.camera, CameraModelKind::Fisheye624(_))
+    }
+
     /// Unclipped projection into the camera's own pixels (handtrack `geometry.camera.project`: Fisheye62 or pinhole, through
     /// handfit's lens).
     pub fn project(&self, point_cam: &Vector3<f64>) -> Vector2<f64> {
-        handfit::residual::project_lens(
-            point_cam,
-            &self.focal,
-            &self.principal,
-            self.distortion.as_ref(),
-            None,
-        )
+        handfit::residual::project_camera(&self.camera, point_cam, None)
     }
 
     /// A world point into the camera (handtrack `world_to_cameras`: p_cam = cam_from_rig · rig_from_world · p_world), with
@@ -151,21 +146,16 @@ impl RigCameraModel {
             m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
         );
         let translation = Vector3::new(m[0][3], m[1][3], m[2][3]);
+        let focal = Vector2::new(f32_round(fx), f32_round(fy));
+        let principal = Vector2::new(f32_round(cx), f32_round(cy));
+        let distortion = camera.fisheye62.map(|k| SVector::<f64, 8>::from_fn(|i, _| f32_round(k[i])));
+        let rounded_camera = handfit::residual::camera_model(&focal, &principal, distortion.as_ref())
+            .map_err(|_| invalid("camera calibration or branch overflow"))?;
         let fit = FitParams {
             cam_from_rig: Matrix4::from_fn(|i, k| f32_round(m[i][k])),
-            focal: Vector2::new(f32_round(fx), f32_round(fy)),
-            principal: Vector2::new(f32_round(cx), f32_round(cy)),
-            distortion: camera
-                .fisheye62
-                .map(|k| SVector::<f64, 8>::from_fn(|i, _| f32_round(k[i]))),
+            camera: rounded_camera,
         };
-        let rounded = fit
-            .cam_from_rig
-            .iter()
-            .chain(fit.focal.iter())
-            .chain(fit.principal.iter())
-            .chain(fit.distortion.iter().flat_map(|d| d.iter()));
-        if rounded.into_iter().any(|x| !x.is_finite()) {
+        if fit.cam_from_rig.iter().any(|x| !x.is_finite()) {
             return Err(invalid("a value beyond float32"));
         }
         let net = BarLetterbox::for_size(camera.width, camera.height).ok_or_else(|| {
@@ -206,9 +196,7 @@ impl RigCameraModel {
                     .then(|| Vector2::from(pixel))
             }
             Lens::Pinhole(pinhole) => {
-                // handtrack clamps |z| < 1e-9; in_front owns its visibility policy.
-                let z = if p_cam.z.abs() < 1e-9 { 1e-9 } else { p_cam.z };
-                Some(pinhole.project_unchecked([p_cam.x, p_cam.y, z]).into())
+                Some(handfit::residual::handtrack_pinhole_project(pinhole, p_cam, None))
             }
         }
     }
@@ -294,9 +282,7 @@ pub fn fit_view(
     View {
         rotation,
         translation,
-        focal: fit.focal,
-        principal: fit.principal,
-        distortion: fit.distortion,
+        camera: fit.camera,
         pixels: SMatrix::from_fn(|i, k| {
             if keypoints_px[i][k].is_finite() {
                 f32_round(keypoints_px[i][k])

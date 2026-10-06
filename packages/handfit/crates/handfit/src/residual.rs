@@ -1,11 +1,9 @@
-use crate::generated::{
-    project_fisheye62_with_jacobian::sym::project_fisheye62_with_jacobian,
-    project_pinhole_with_jacobian::sym::project_pinhole_with_jacobian,
-};
 use crate::{
     model::{LandmarkJacobian, Model, Pose, Step},
     Config, JacobianMode,
 };
+pub use kornia_staging_3d::camera::CameraModelKind;
+use kornia_staging_3d::camera::{Fisheye624, InvalidCalibration, Pinhole};
 use nalgebra::{Matrix3, Matrix4, RowVector3, SMatrix, SVector, Vector2, Vector3};
 
 pub type Residual = SVector<f64, 158>;
@@ -21,9 +19,8 @@ pub type RigidJacobian = JacobianRows<6>;
 pub struct View {
     pub rotation: Matrix3<f64>,
     pub translation: Vector3<f64>,
-    pub focal: Vector2<f64>,
-    pub principal: Vector2<f64>,
-    pub distortion: Option<SVector<f64, 8>>,
+    /// Lens validated once when the view is constructed.
+    pub camera: CameraModelKind<f64>,
     pub pixels: SMatrix<f64, 21, 2>,
     pub weights: SVector<f64, 21>,
     pub distances: SVector<f64, 21>,
@@ -32,10 +29,26 @@ pub struct View {
 /// The most views of one hand a fit takes: the residual has pixel and distance rows for two.
 pub const MAX_VIEWS: usize = 2;
 
+/// Rejection when validating a hand's view collection.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum ViewValidationError {
+    /// The fixed residual cannot hold this many views.
+    #[error("{views} views exceed the limit of {MAX_VIEWS}")]
+    TooManyViews { views: usize },
+    /// Invalid camera calibration, retaining the source view and cause.
+    #[error("view {view}: {source}")]
+    InvalidCalibration {
+        view: usize,
+        source: InvalidCalibration,
+    },
+}
+
 /// The views of one hand, at most [`MAX_VIEWS`]: view `v` owns pixel rows `42 v..42 v + 42` and distance rows
 /// `84 + 21 v..84 + 21 v + 21` of the [`Residual`]. No views is a valid input: a warm fit then runs on its prior alone.
 #[derive(Clone, Copy)]
-pub struct Views<'a>(&'a [View]);
+pub struct Views<'a> {
+    views: &'a [View],
+}
 
 impl<'a> Views<'a> {
     /// The checked views of one hand.
@@ -44,11 +57,17 @@ impl<'a> Views<'a> {
     ///
     /// * `views` - The hand's views, in residual order.
     ///
-    /// # Returns
-    ///
-    /// `None` when there are more than [`MAX_VIEWS`].
-    pub fn new(views: &'a [View]) -> Option<Self> {
-        (views.len() <= MAX_VIEWS).then_some(Self(views))
+    /// # Errors
+    /// Rejects excess views. Each view already holds a validated lens.
+    pub fn new(views: &'a [View]) -> Result<Self, ViewValidationError> {
+        if views.len() > MAX_VIEWS {
+            return Err(ViewValidationError::TooManyViews { views: views.len() });
+        }
+        Ok(Self { views })
+    }
+    /// The validated lens cached for one view.
+    pub fn camera(&self, index: usize) -> &CameraModelKind<f64> {
+        &self.views[index].camera
     }
 }
 
@@ -56,7 +75,7 @@ impl std::ops::Deref for Views<'_> {
     type Target = [View];
 
     fn deref(&self) -> &[View] {
-        self.0
+        self.views
     }
 }
 
@@ -279,13 +298,7 @@ fn assemble<const N: usize>(
             let norm = point.norm();
             let weight = view.weights[i].sqrt();
             let mut proj_jac = SMatrix::<f64, 2, 3>::zeros();
-            let pixels = project_lens(
-                &point,
-                &view.focal,
-                &view.principal,
-                view.distortion.as_ref(),
-                want.then_some(&mut proj_jac),
-            );
+            let pixels = project_camera(views.camera(v), &point, want.then_some(&mut proj_jac));
             let pixel_row = 42 * v + 2 * i;
             result
                 .fixed_rows_mut::<2>(pixel_row)
@@ -463,37 +476,78 @@ pub fn linearize(
     (residual, jac)
 }
 
-/// The pixel of a camera-frame point in `view`'s lens: the projection the residual and [`crate::cold::unproject`] share.
-///
+/// Construct the validated Fisheye62 or pinhole lens used by hand fitting.
 /// # Arguments
-///
-/// * `view` - The camera (its focal length, principal point and Fisheye62 distortion, if any).
-/// * `point` - A point in that camera's frame, metres.
-///
-/// # Returns
-///
-/// The pixel, unclipped ([`project_lens`]).
-pub fn project(view: &View, point: &Vector3<f64>) -> Vector2<f64> {
-    project_lens(
-        point,
-        &view.focal,
-        &view.principal,
-        view.distortion.as_ref(),
-        None,
-    )
-}
-
-/// The pixel of a camera-frame point (metres), unclipped: Fisheye62 with `distortion` `[k1..k6, p1, p2]`, the pinhole without
-/// (handtrack `geometry.camera.project`), and its 2x3 Jacobian into `jacobian` when given.
-pub fn project_lens(
-    point: &Vector3<f64>,
+/// * `focal`, `principal` - Focal lengths and principal point in pixels.
+/// * `distortion` - Fisheye62 radial and tangential coefficients, or pinhole.
+/// # Errors
+/// Returns the staged camera's calibration error.
+pub fn camera_model(
     focal: &Vector2<f64>,
     principal: &Vector2<f64>,
     distortion: Option<&SVector<f64, 8>>,
+) -> Result<CameraModelKind<f64>, InvalidCalibration> {
+    let head = [focal.x, focal.y, principal.x, principal.y];
+    Ok(if let Some(d) = distortion {
+        CameraModelKind::Fisheye624(Fisheye624::fisheye62(
+            head,
+            [d[0], d[1], d[2], d[3], d[4], d[5]],
+            [d[6], d[7]],
+        )?)
+    } else {
+        CameraModelKind::Pinhole(Pinhole::new(head)?)
+    })
+}
+
+/// Unclipped projection under handtrack's lens policy, using a prevalidated camera.
+/// # Arguments
+/// * `camera` - Immutable lens constructed once for the calibration.
+/// * `point` - Camera-frame point in metres.
+/// * `jacobian` - Optional pixel derivative with respect to the point.
+pub fn project_camera(
+    camera: &CameraModelKind<f64>,
+    point: &Vector3<f64>,
     jacobian: Option<&mut SMatrix<f64, 2, 3>>,
 ) -> Vector2<f64> {
-    match distortion {
-        Some(d) => project_fisheye62_with_jacobian(point, focal, principal, d, jacobian),
-        None => project_pinhole_with_jacobian(point, focal, principal, jacobian),
+    if let CameraModelKind::Pinhole(pinhole) = camera {
+        return handtrack_pinhole_project(pinhole, point, jacobian);
     }
+    let mut derivative = [[0.0; 3]; 2];
+    let output = camera.project_unchecked_with_point_jacobian(
+        [point.x, point.y, point.z],
+        jacobian.as_ref().map(|_| &mut derivative),
+    );
+    if let Some(j) = jacobian {
+        *j = SMatrix::from_row_slice(derivative.as_flattened());
+    }
+    Vector2::from(output)
+}
+
+/// Pinhole projection with handtrack's positive depth clamp and flat depth derivative.
+/// # Arguments
+/// * `camera` - Validated pinhole calibration.
+/// * `point` - Camera-frame point; depths with magnitude below 1e-9 are clamped to 1e-9.
+/// * `jacobian` - Optional pixel derivative; its depth column is zero when clamped.
+pub fn handtrack_pinhole_project(
+    camera: &Pinhole<f64>,
+    point: &Vector3<f64>,
+    jacobian: Option<&mut SMatrix<f64, 2, 3>>,
+) -> Vector2<f64> {
+    use kornia_staging_3d::camera::CameraModel;
+    let clamped = point.z.abs() < 1e-9;
+    let z = if clamped { 1e-9 } else { point.z };
+    let mut derivative = [[0.0; 3]; 2];
+    let output = camera.project_unchecked_with_jacobians(
+        [point.x, point.y, z],
+        jacobian.as_ref().map(|_| &mut derivative),
+        None,
+    );
+    if let Some(j) = jacobian {
+        if clamped {
+            derivative[0][2] = 0.0;
+            derivative[1][2] = 0.0;
+        }
+        *j = SMatrix::from_row_slice(derivative.as_flattened());
+    }
+    Vector2::from(output)
 }
