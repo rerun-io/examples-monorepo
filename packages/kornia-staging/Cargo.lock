@@ -2621,6 +2621,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-io"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "libc",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "kornia-staging-sensor-iio"
 version = "0.1.0"
 dependencies = [

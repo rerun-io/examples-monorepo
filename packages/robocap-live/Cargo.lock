@@ -3043,6 +3043,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-io"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-staging-sensor-iio"
 version = "0.1.0"
 dependencies = [
@@ -5591,7 +5600,6 @@ name = "robocap-live"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cc",
  "clap",
  "half",
  "handfit",
@@ -5600,6 +5608,7 @@ dependencies = [
  "kornia-imgproc",
  "kornia-staging-3d",
  "kornia-staging-imgproc",
+ "kornia-staging-io",
  "kornia-staging-sensor-iio",
  "libc",
  "libloading 0.8.9",

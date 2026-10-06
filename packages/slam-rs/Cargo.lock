@@ -3224,6 +3224,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-io"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-staging-sensor-iio"
 version = "0.1.0"
 dependencies = [
@@ -6264,10 +6273,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
- "cc",
  "gstreamer",
  "gstreamer-app",
+ "kornia-image",
  "kornia-staging-imgproc",
+ "kornia-staging-io",
  "kornia-staging-sensor-iio",
  "libc",
  "re_build_info 0.37.0",

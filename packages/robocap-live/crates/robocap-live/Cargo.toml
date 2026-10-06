@@ -8,6 +8,7 @@ description = "Live SLAM + hand tracking on the RoboCap cap, and the same core r
 
 [dependencies]
 kornia-staging-3d.workspace = true
+kornia-staging-io.workspace = true
 kornia-staging-sensor-iio.workspace = true
 kornia-staging-imgproc.workspace = true
 anyhow = { workspace = true }
@@ -34,9 +35,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 slam-rs = { workspace = true }
 thiserror = { workspace = true }
-
-[build-dependencies]
-cc = "1"
 
 # Live capture needs no feature: it is compiled on Linux (cfg(target_os = "linux")) and refuses to run anywhere but Cap A or
 # Cap B.

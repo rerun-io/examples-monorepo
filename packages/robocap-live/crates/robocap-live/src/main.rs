@@ -147,6 +147,9 @@ impl std::fmt::Display for Uclamp {
 }
 
 /// RoboCap live pipeline: cameras + IMU -> slam-rs VIO + hand tracking -> Rerun, live on Cap A or Cap B or replaying a dump.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CaptureArg { Copy, ZeroCopy }
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
@@ -272,7 +275,7 @@ struct Cli {
     /// Live: `zero-copy` (frames are read-only images over the capture buffers) or `copy` (each luma plane copied out).
     #[cfg(target_os = "linux")]
     #[arg(long, default_value = "zero-copy")]
-    capture: robocap_live::capture::camera::CaptureMode,
+    capture: CaptureArg,
     /// Video in the Rerun stream: `h264` (encoder child processes), `raw` (640x360 luma images, local viewers) or `off`.
     #[arg(long, default_value = if cfg!(target_arch = "aarch64") { "h264" } else { "raw" })]
     video: VideoMode,
@@ -613,7 +616,7 @@ fn main() -> Result<()> {
 #[cfg(target_os = "linux")]
 fn live_source(cli: &Cli, stop: Arc<AtomicBool>) -> Result<Box<dyn FrameSource>> {
     use robocap_live::source::live::{LiveConfig, LiveSource};
-    let options = LiveConfig { rig_path: cli.rig.clone(), imu_time_offset_ns: cli.imu_time_offset_ns, capture: cli.capture, ..LiveConfig::default() };
+    let options = LiveConfig { rig_path: cli.rig.clone(), imu_time_offset_ns: cli.imu_time_offset_ns, capture: match cli.capture { CaptureArg::Copy => kornia_staging_io::v4l::mplane::CaptureMode::Copy, CaptureArg::ZeroCopy => kornia_staging_io::v4l::mplane::CaptureMode::ZeroCopy }, ..LiveConfig::default() };
     eprintln!("robocap-live: live IMU time offset {} ns", options.imu_time_offset_ns);
     Ok(Box::new(LiveSource::open(options, stop)?))
 }

@@ -23,7 +23,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::{FrameSource, SourceError, SourceEvent};
-use crate::capture::camera::{Camera, CaptureMode, CaptureStream, LumaFrame};
+use kornia_staging_io::v4l::mplane::{Camera, CaptureMode, CaptureStream, LumaFrame};
+use crate::capture::camera::{capture_format, MIN_QUEUED};
 use crate::capture::device::{FrameTrigger, ImuDevice, monotonic_ns, require_cap, require_vendor_recorder_stopped};
 use crate::capture::iio::MotionKind;
 use kornia_staging_sensor_iio::IioScan;
@@ -122,7 +123,7 @@ pub struct LiveSource {
     turned_180: [bool; NUM_CAMERAS],
 }
 
-fn device_error(error: CaptureError) -> SourceError {
+fn device_error(error: impl std::fmt::Display) -> SourceError {
     SourceError::Device(error.to_string())
 }
 
@@ -153,7 +154,7 @@ impl LiveSource {
         let trigger = FrameTrigger::stopped().map_err(device_error)?;
         let mut cameras = Vec::with_capacity(NUM_CAMERAS);
         for path in CAMERA_DEVICES {
-            cameras.push(Camera::open(path).map_err(device_error)?);
+            cameras.push(Camera::open(path, capture_format().map_err(device_error)?).map_err(device_error)?);
         }
         let gyro = ImuDevice::start(IMU0_GYRO_IIO, MotionKind::Gyro).map_err(device_error)?;
         let accel = ImuDevice::start(IMU0_ACCEL_IIO, MotionKind::Accel).map_err(device_error)?;
@@ -187,7 +188,7 @@ impl LiveSource {
             turned_180,
         };
         for (camera, device) in cameras.into_iter().enumerate() {
-            let device = CaptureStream::new(device, source.options.capture);
+            let device = CaptureStream::new(device, source.options.capture, MIN_QUEUED).map_err(device_error)?;
             let (tx, shared, stop) = (tx.clone(), source.shared.clone(), source.local_stop.clone());
             let max_in_flight = source.options.max_frames_in_flight;
             let handle = std::thread::Builder::new()

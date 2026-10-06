@@ -2,13 +2,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the earlier cap binary's linkage: carry Rust's unwinder from the
     // toolchain archives instead of requiring a compiler runtime on the cap.
     let target = std::env::var("TARGET")?;
-    if target.contains("linux") {
-        println!("cargo:rerun-if-changed=native/camera.c");
-        cc::Build::new()
-            .file("native/camera.c")
-            .warnings_into_errors(true)
-            .compile("cap_camera");
-    }
     if target == "aarch64-unknown-linux-gnu" {
         let compiler_key = format!("CC_{}", target.replace('-', "_"));
         println!("cargo:rerun-if-env-changed={compiler_key}");
