@@ -1,8 +1,8 @@
 //! The flow frontend's shared fixtures: the frontend on the synthetic rig, a
 //! CPU tracker, and a tracker that fails on a chosen call.
 
+use kornia_staging_imgproc::features::CpuCornerScan;
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::CpuCornerScan;
 use slam_rs::frontend::flow::{FrameToFrameOpticalFlow, FrontendOptions};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::Pattern51;
@@ -151,7 +151,7 @@ pub fn failing_frontend_with_ratio(
                 calls: std::cell::Cell::new(0),
                 failures: fail_on..=fail_on,
             },
-            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+            kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                 CpuCornerScan::default(),
             )),
         )

@@ -4,11 +4,11 @@ use crate::calib::Calibration;
 use crate::camera::RigCamera;
 use crate::config::VioConfig;
 use crate::duration_ns;
-use crate::frontend::detect::{CellSelect, DetectorScratch};
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
 use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16, ensure_pyramids};
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
 
 use super::flow::{FlowTimings, FrontendError};
 
@@ -25,7 +25,7 @@ pub struct StereoContext<'a> {
 /// The frame-level seam. Patch trackers expose only patch operations.
 pub trait FrameStages {
     type Tracker: PatchTracker;
-    type Scanner: crate::frontend::detect::CornerScan + ?Sized;
+    type Scanner: kornia_staging_imgproc::features::CornerScan<Error: Into<FrontendError>> + ?Sized;
 
     fn tracker(&self) -> &Self::Tracker;
     fn tracker_mut(&mut self) -> &mut Self::Tracker;
@@ -104,7 +104,9 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> CpuStages<T> {
 
 impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
     type Tracker = T;
-    type Scanner = dyn crate::frontend::detect::CornerScan;
+    type Scanner = dyn kornia_staging_imgproc::features::CornerScan<
+            Error = kornia_staging_imgproc::features::DetectError,
+        >;
 
     fn tracker(&self) -> &T {
         &self.tracker

@@ -6,8 +6,6 @@
 //! patch index first in storage order, and frame buffers are reused. Fixed loop
 //! bounds and explicit validity flags support CPU and GPU stage implementations.
 
-pub mod cell;
-pub mod detect;
 pub mod flow;
 
 pub mod ldlt;

@@ -77,14 +77,16 @@ fn packed_camera_selection_is_exact_in_one_dispatch() {
 #[test]
 fn the_gpu_cell_selection_holds_for_every_camera_slot() {
     let config: DetectorConfig = detector_config(472.0);
-    let mut host: DetectorScratch = DetectorScratch::default();
+    let mut host: DetectorScratch<dyn CornerScan<Error = FrontendError>> =
+        DetectorScratch::with_scanner(Box::new(AppScan(CpuCornerScan::default())));
     let bands = Arc::new(AtomicUsize::new(0));
     let selections = Arc::new(AtomicUsize::new(0));
-    let mut device: DetectorScratch = DetectorScratch::with_scanner(Box::new(CountingScan {
-        inner: Box::new(GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap()),
-        bands: Arc::clone(&bands),
-        selections: Arc::clone(&selections),
-    }));
+    let mut device: DetectorScratch<dyn CornerScan<Error = FrontendError>> =
+        DetectorScratch::with_scanner(Box::new(CountingScan {
+            inner: Box::new(GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap()),
+            bands: Arc::clone(&bands),
+            selections: Arc::clone(&selections),
+        }));
 
     for camera in 0..4 {
         let before_bands = bands.load(Ordering::Relaxed);
@@ -138,7 +140,7 @@ impl SelectionFixture {
         let grid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
         let selects: Vec<_> = images
             .iter()
-            .map(|image| slam_rs::frontend::detect::cell_select(image, &grid, &config))
+            .map(|image| kornia_staging_imgproc::features::cell_select(image, &grid, &config))
             .collect();
         assert!(
             selects.iter().all(Option::is_some),
@@ -154,7 +156,7 @@ impl SelectionFixture {
         }
     }
 
-    fn keys(&self, scanner: &mut dyn CornerScan) -> Vec<Vec<u32>> {
+    fn keys(&self, scanner: &mut impl CornerScan) -> Vec<Vec<u32>> {
         self.images
             .iter()
             .enumerate()
@@ -223,7 +225,7 @@ fn a_prepared_selection_is_spent_once() {
     let images: [Image<u16, 1>; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
     let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
     let select: CellSelect =
-        slam_rs::frontend::detect::cell_select(&images[0], &grid, &config).unwrap();
+        kornia_staging_imgproc::features::cell_select(&images[0], &grid, &config).unwrap();
     let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
         * ((grid.y_stop - grid.y_start) / grid.cell + 1);
 

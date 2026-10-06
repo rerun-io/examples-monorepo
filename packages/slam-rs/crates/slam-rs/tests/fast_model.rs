@@ -10,7 +10,7 @@
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{FastCorner, Rect as KorniaRect, fast_detect_rect_u8};
-use slam_rs::frontend::detect::{
+use kornia_staging_imgproc::features::{
     CellGrid, CornerScan, CpuCornerScan, DetectorConfig, FAST_BORDER, FAST_FILTER_LANES,
     FAST_RING_COLUMN, FAST_RING_ROW, Occupancy, SelectionStatus, block_filter_end, cell_select,
 };

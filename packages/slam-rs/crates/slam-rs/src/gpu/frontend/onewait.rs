@@ -6,12 +6,12 @@ use cubecl::prelude::*;
 use super::GpuStages;
 use kornia_staging_3d::camera::CameraModelKind;
 use crate::config::MatchingGuessType;
-use crate::frontend::detect::{CellGrid, CellSelect};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::stages::StereoContext;
 use crate::frontend::tracker::{TrackInput, TrackerError};
 use crate::gpu::kernels::klt_fused::{CachedU32Upload, FUSED_RUNS, decode_point, launch_fused};
 use crate::gpu::{GpuError, guarded, kernels, pyramid::GpuPyramid, submission};
+use kornia_staging_imgproc::features::{CellGrid, CellSelect};
 
 pub(super) enum Phase {
     Off,
@@ -164,7 +164,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         let Some(keys) = self
             .current
             .detector
-            .scanner
+            .scanner_mut()
             .staged_handles()
             .filter(|keys| keys.len() == 1)
         else {

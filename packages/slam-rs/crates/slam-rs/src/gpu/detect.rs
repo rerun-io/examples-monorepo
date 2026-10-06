@@ -9,12 +9,13 @@ use kornia_imgproc::features::FastCorner;
 use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::Level0;
 use super::{GpuError, guarded};
-use crate::frontend::cell::SelectionStatus;
-use crate::frontend::detect::{
+use crate::frontend::flow::FrontendError;
+use kornia_image::Image;
+use kornia_staging_imgproc::features::SelectionStatus;
+use kornia_staging_imgproc::features::{
     BandCache, BandRequest, CellSelect, CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN,
     FAST_RING_ROW, block_filter_end, opencv_corner_score,
 };
-use kornia_image::Image;
 
 #[derive(Default)]
 enum SelectionReads {
@@ -387,7 +388,7 @@ impl<R: Runtime> GpuCornerScan<R> {
 }
 
 /// A downloaded key buffer as `u32`, refused when it is not the grid's length.
-fn checked_keys(keys: &[u8], cells: usize) -> Result<&[u32], DetectError> {
+fn checked_keys(keys: &[u8], cells: usize) -> Result<&[u32], FrontendError> {
     let expected: usize = cells * size_of::<u32>();
     if keys.len() != expected {
         return Err(super::GpuError::ShortRead {
@@ -441,7 +442,8 @@ fn filter_row(
 }
 
 impl<R: Runtime> CornerScan for GpuCornerScan<R> {
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
+    type Error = FrontendError;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), FrontendError> {
         guarded(
             GpuError::DeviceLost {
                 what: "corner scan",
@@ -516,7 +518,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     /// host's own total order. What comes back is 361 x 4 B on the 960x960 index
     /// rig. The band path stays for the shapes the trait's contract excludes.
     /// Equality tests compare both CPU and GPU cell selectors with a band-only
-    /// wrapper around [`CpuCornerScan`](crate::frontend::detect::CpuCornerScan).
+    /// wrapper around [`CpuCornerScan`](kornia_staging_imgproc::features::CpuCornerScan).
     ///
     /// `out` is left empty — and the frame untouched — when the grid needs more
     /// cubes in one dispatch dimension than a WebGPU implementation must allow.
@@ -525,9 +527,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         camera: usize,
         image: &Image<u16, 1>,
         select: &CellSelect,
-        _eligibility: Option<(&crate::frontend::cell::Occupancy<'_>, &[bool])>,
+        _eligibility: Option<(&kornia_staging_imgproc::features::Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
-    ) -> Result<SelectionStatus, DetectError> {
+    ) -> Result<SelectionStatus, FrontendError> {
         out.clear();
         if !select.supports(image.width(), image.height()) {
             return Ok(SelectionStatus::Unsupported);
@@ -583,7 +585,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         &mut self,
         images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
-    ) -> Result<(), DetectError> {
+    ) -> Result<(), FrontendError> {
         self.abort_selection();
         self.cameras
             .resize_with(images.len(), CameraWorkspace::default);
@@ -618,7 +620,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         outcome
     }
 
-    fn take_cells(&mut self) -> Result<(), DetectError> {
+    fn take_cells(&mut self) -> Result<(), FrontendError> {
         let outcome = guarded(
             GpuError::DeviceLost {
                 what: "corner cell selection",
@@ -707,11 +709,11 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         outcome
     }
 
-    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], FrontendError> {
         // The same refusal the CPU lane returns, and asked in the same place: a
         // band before a scan is a programming error, not an empty frame.
         let (Some(kept), Some(mask)) = (self.kept.as_ref(), self.mask.as_ref()) else {
-            return Err(DetectError::NotScanned);
+            return Err(DetectError::NotScanned.into());
         };
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
         // margin)` (`fast.rs`).

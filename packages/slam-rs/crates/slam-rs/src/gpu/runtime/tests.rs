@@ -30,7 +30,7 @@ fn a_failed_device_read_is_a_typed_error_at_every_stage() {
     let tracker: crate::frontend::tracker::TrackerError =
         GpuError::DeviceReadFailed { what }.into();
     let pyramid: crate::pyramid::PyramidError = GpuError::DeviceReadFailed { what }.into();
-    let detect: crate::frontend::detect::DetectError = GpuError::DeviceReadFailed { what }.into();
+    let detect: crate::frontend::flow::FrontendError = GpuError::DeviceReadFailed { what }.into();
     for message in [tracker.to_string(), pyramid.to_string(), detect.to_string()] {
         assert!(
             message.contains(what),

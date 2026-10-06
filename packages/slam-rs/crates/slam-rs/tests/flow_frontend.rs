@@ -10,10 +10,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{BandRequest, CornerScan, DetectError, FastCorner};
+use kornia_staging_imgproc::features::{CellGrid, MaskRect, Masks};
 use nalgebra::{Matrix4, Vector3};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::{CellGrid, Masks, Rect};
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::Pattern51;
@@ -289,7 +290,7 @@ fn cached_batches_match_rebuilding_through_masks_losses_and_redetection() {
                 Masks::default(),
                 Masks {
                     masks: if step % 4 == 1 {
-                        vec![Rect {
+                        vec![MaskRect {
                             x: 20.0,
                             y: 20.0,
                             w: 70.0,
@@ -401,7 +402,7 @@ fn a_mask_over_the_whole_frame_suppresses_detection() {
     let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     let masks: Vec<Masks> = vec![
         Masks {
-            masks: vec![Rect {
+            masks: vec![MaskRect {
                 x: 0.0,
                 y: 0.0,
                 w: WIDTH as f32,
@@ -520,26 +521,19 @@ struct EmptyScan {
     cameras: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
-impl slam_rs::frontend::detect::CornerScan for EmptyScan {
-    fn fork(&self) -> Option<Box<dyn slam_rs::frontend::detect::CornerScan>> {
+impl CornerScan for EmptyScan {
+    type Error = DetectError;
+    fn fork(&self) -> Option<Box<dyn CornerScan<Error = DetectError>>> {
         self.independent
-            .then(|| Box::new(self.clone()) as Box<dyn slam_rs::frontend::detect::CornerScan>)
+            .then(|| Box::new(self.clone()) as Box<dyn CornerScan<Error = DetectError>>)
     }
 
-    fn scan(
-        &mut self,
-        camera: usize,
-        _image: &Image<u16, 1>,
-    ) -> Result<(), slam_rs::frontend::detect::DetectError> {
+    fn scan(&mut self, camera: usize, _image: &Image<u16, 1>) -> Result<(), DetectError> {
         self.cameras.lock().unwrap().push(camera);
         Ok(())
     }
 
-    fn band(
-        &mut self,
-        _request: slam_rs::frontend::detect::BandRequest,
-    ) -> Result<&[slam_rs::frontend::detect::FastCorner], slam_rs::frontend::detect::DetectError>
-    {
+    fn band(&mut self, _request: BandRequest) -> Result<&[FastCorner], DetectError> {
         Ok(&[])
     }
 }
@@ -578,10 +572,12 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
             slam_rs::frontend::stages::CpuStages::new(
                 CpuPyramidBuilder::new(),
                 tracker,
-                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(EmptyScan {
-                    independent,
-                    cameras: cameras.clone(),
-                })),
+                kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
+                    EmptyScan {
+                        independent,
+                        cameras: cameras.clone(),
+                    },
+                )),
             )
             .unwrap(),
             pool,

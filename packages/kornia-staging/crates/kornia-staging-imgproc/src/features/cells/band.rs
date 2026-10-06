@@ -1,10 +1,10 @@
 //! CPU band scans, candidate caching, and host suppression.
-use super::cells::CellScores;
+use super::scores::CellScores;
 use super::{
     BandRequest, CellSelect, CornerScan, DetectError, FastCorner, Occupancy, SelectionStatus,
 };
 use kornia_image::{Image, ImageSize};
-use kornia_imgproc::features::{Rect as KorniaRect, fast_detect_rect_u8};
+use kornia_imgproc::features::{fast_detect_rect_u8, Rect as KorniaRect};
 
 /// The Bresenham radius `cv::FAST` and kornia both skip at a border
 /// (`cells.rs, `fast.rs).
@@ -36,6 +36,9 @@ const FAST_FILTER_WIDTH: usize = 800;
 /// sync with kornia-imgproc `features/fast.rs`: NEON unless
 /// `KORNIA_FAST_NEON == "0"` on aarch64, AVX2 on x86_64, otherwise scalar.
 /// The scalar loop has no block filter, even on images at least 800 pixels wide.
+///
+/// # Arguments
+/// * `width` - Full image row length; the block filter is width-dependent.
 pub fn block_filter_end(width: usize) -> (usize, bool) {
     let blocks: usize = width.saturating_sub(2 * FAST_BORDER) / FAST_FILTER_LANES;
     (
@@ -79,7 +82,7 @@ const FAST_ARC_LENGTH: usize = 9;
 /// Both scanners hold one of these, which is why it lives here beside the trait
 /// that documents the key rather than twice in the two backends.
 #[derive(Debug, Default)]
-pub(crate) struct BandCache {
+pub struct BandCache {
     /// `slots[rung][row]`, `None` until that band has been produced.
     ///
     /// Indexed rather than searched: `detect_keypoints_with_cells` asks 361
@@ -91,7 +94,7 @@ pub(crate) struct BandCache {
 
 impl BandCache {
     /// Drop every band, keeping the two outer allocations.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         for rows in &mut self.slots {
             for slot in rows.iter_mut() {
                 *slot = None;
@@ -100,7 +103,7 @@ impl BandCache {
     }
 
     /// Bands currently held, for `Debug`.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.slots
             .iter()
             .flatten()
@@ -108,9 +111,18 @@ impl BandCache {
             .count()
     }
 
+    /// Whether no band is cached.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The band at `(row, rung)`, produced by `scan` the first time it is asked
     /// for and read out of the cache afterwards.
-    pub(crate) fn get_or_insert_with(
+    ///
+    /// # Arguments
+    /// * `row`, `rung` - Cell-row and threshold-rung cache indices.
+    /// * `scan` - Produce the row band on a cache miss.
+    pub fn get_or_insert_with(
         &mut self,
         row: usize,
         rung: usize,
@@ -144,7 +156,7 @@ pub struct CpuCornerScan {
     gray: Option<Image<u8, 1>>,
     width: usize,
     height: usize,
-    /// The [`Band`]s this frame has already scanned, in the order they were
+    /// The candidate bands this frame has already scanned, in the order they were
     /// first asked for.
     bands: BandCache,
     cells: CellScores,
@@ -161,6 +173,9 @@ impl Default for CpuCornerScan {
 impl CpuCornerScan {
     /// A scanner that selects per cell (`true`) or always takes the band walk.
     #[must_use]
+    ///
+    /// # Arguments
+    /// * `select_by_cell` - Select per cell when true; use band scanning otherwise.
     pub fn with_cell_selection(select_by_cell: bool) -> Self {
         Self {
             gray: None,
@@ -186,7 +201,8 @@ impl std::fmt::Debug for CpuCornerScan {
 }
 
 impl CornerScan for CpuCornerScan {
-    fn fork(&self) -> Option<Box<dyn CornerScan>> {
+    type Error = DetectError;
+    fn fork(&self) -> Option<Box<dyn CornerScan<Error = DetectError>>> {
         Some(Box::new(Self::with_cell_selection(self.select_by_cell)))
     }
 
@@ -220,13 +236,8 @@ impl CornerScan for CpuCornerScan {
         let gray: &mut Image<u8, 1> = match &mut self.gray {
             Some(existing) if fits => existing,
             slot => slot.insert(
-                Image::from_size_val(ImageSize { width, height }, 0u8).map_err(|_| {
-                    DetectError::GrayViewRefused {
-                        width,
-                        height,
-                        actual: 0,
-                    }
-                })?,
+                Image::from_size_val(ImageSize { width, height }, 0u8)
+                    .map_err(|_| DetectError::GrayAllocation { width, height })?,
             ),
         };
         // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)`, once,
@@ -276,6 +287,9 @@ impl CornerScan for CpuCornerScan {
 /// against a non-candidate's zero uses the same score convention.
 /// Candidates at threshold `t` score at least `t`, and the ladder has a positive floor.
 #[inline]
+///
+/// # Arguments
+/// * `normalized` - Response emitted by Kornia FAST.
 pub fn opencv_corner_score(normalized: f32) -> f32 {
     (normalized * 255.0).round() - 1.0
 }

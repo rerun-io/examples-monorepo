@@ -6,7 +6,6 @@ use super::{
     GpuCornerScan, GpuError, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder,
     guarded, submission,
 };
-use crate::frontend::detect::{CellSelect, DetectorScratch};
 use crate::frontend::flow::{FlowTimings, FrontendError};
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::patterns::Pattern;
@@ -16,6 +15,7 @@ use crate::pyramid::ensure_pyramids;
 use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameInput {
@@ -52,7 +52,7 @@ impl<R: Runtime> GpuFrame<R> {
     fn build(&mut self, images: &[Image<u16, 1>], levels: usize) -> Result<(), FrontendError> {
         ensure_pyramids(&self.builder, &mut self.pyramids, images, levels)?;
         self.builder.build_images(images, &mut self.pyramids)?;
-        self.detector.scanner.use_level0(&mut self.builder);
+        self.detector.scanner_mut().use_level0(&mut self.builder);
         Ok(())
     }
 }
@@ -179,7 +179,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             if let Some(state) = self.one_wait.as_ref().filter(|_| stereo_read) {
                 reads.push(state.io.clone());
             }
-            let staged = self.current.detector.scanner.take_staged();
+            let staged = self.current.detector.scanner_mut().take_staged();
             let selected = staged.is_some();
             if let Some(handles) = staged {
                 reads.extend(handles);
@@ -209,7 +209,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             if selected && bytes.len() >= outputs {
                 self.current
                     .detector
-                    .scanner
+                    .scanner_mut()
                     .deliver(bytes.split_off(outputs));
             }
             if stereo_read && bytes.len() == outputs {

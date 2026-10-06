@@ -45,8 +45,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{CellGrid, CpuCornerScan};
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::{CellGrid, CpuCornerScan};
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
 };
@@ -405,7 +405,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
         slam_rs::frontend::stages::CpuStages::new(
             CpuPyramidBuilder::new(),
             FailingTracker::fail_from(inner, 8),
-            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+            kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                 CpuCornerScan::default(),
             )),
         )

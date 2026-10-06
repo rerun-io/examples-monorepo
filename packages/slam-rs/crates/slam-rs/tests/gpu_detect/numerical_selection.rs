@@ -4,7 +4,7 @@ use super::*;
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn default_cell_selection_follows_kornias_neon_gate() {
-    use slam_rs::frontend::detect::SelectionStatus;
+    use kornia_staging_imgproc::features::SelectionStatus;
     let image = slam_rs::image::zeros(64, 64).unwrap();
     let select = CellSelect {
         grid: CellGrid::new(64, 64, 32).unwrap(),
@@ -26,7 +26,7 @@ fn default_cell_selection_follows_kornias_neon_gate() {
 
 #[test]
 fn cell_selection_refuses_unrepresentable_keys_and_thresholds() {
-    use slam_rs::frontend::detect::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
+    use kornia_staging_imgproc::features::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
     for (width, height, threshold) in [
         (CELL_KEY_LIMIT, 64, 5),
         (64, CELL_KEY_LIMIT, 5),
@@ -100,7 +100,7 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
                 .cells()
                 .enumerate()
                 .filter(|(i, _)| i % 3 == 0)
-                .map(|(_, (column, row))| Rect {
+                .map(|(_, (column, row))| MaskRect {
                     x: (grid.x_start + column * cell) as f32,
                     y: (grid.y_start + row * cell) as f32,
                     w: cell as f32,
@@ -144,7 +144,7 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
     let counts = vec![0; grid.rows * grid.columns];
     let detect = |image: &Image<u16, 1>| {
         detect_with(
-            Box::new(CpuCornerScan::with_cell_selection(true)),
+            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
             image,
             &grid,
             &counts,
@@ -195,7 +195,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
         // skip has to land on the same cells on both lanes.
         let mut busy: Vec<i32> = vec![0; cells];
         for (index, count) in busy.iter_mut().enumerate() {
-            *count = i32::from(index % 3 == 0);
+            *count = i32::from(index.is_multiple_of(3));
         }
         detection_agrees(
             DetectionCase {
@@ -245,7 +245,7 @@ fn the_cell_selection_applies_the_same_gates() {
         let mut x: usize = grid.x_start;
         while x <= grid.x_stop {
             if index.is_multiple_of(3) {
-                masks.masks.push(Rect {
+                masks.masks.push(MaskRect {
                     x: x as f32,
                     y: y as f32,
                     w: grid.cell as f32,
@@ -274,7 +274,7 @@ fn the_cell_selection_applies_the_same_gates() {
     // shape: the device path has to refuse it and the band walk has to answer,
     // which is the same answer either way.
     let mut straddling: Masks = Masks::default();
-    straddling.masks.push(Rect {
+    straddling.masks.push(MaskRect {
         x: (grid.x_start + 17) as f32,
         y: (grid.y_start + 21) as f32,
         w: grid.cell as f32,
@@ -468,7 +468,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
         };
         assert_eq!(threshold_rungs(&at_the_minimum).last(), Some(min_threshold));
         let admitted: usize = detect_with(
-            Box::new(CpuCornerScan::with_cell_selection(true)),
+            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
             &image,
             &grid,
             &counts,

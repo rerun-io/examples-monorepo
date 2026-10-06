@@ -45,7 +45,7 @@ pub trait PyramidBuilder {
     ///
     /// `camera` is the frame's place in the frameset, not a hint: a backend
     /// whose pyramid lives on a device publishes level 0 under that index so
-    /// the detector's [`crate::frontend::detect::CornerScan`] — the only other
+    /// the detector's [`kornia_staging_imgproc::features::CornerScan`] — the only other
     /// stage that reads the same pixels — can read the copy already there
     /// rather than upload a second one. A backend that keeps its levels in host
     /// memory ignores it, because the caller still holds `img`.

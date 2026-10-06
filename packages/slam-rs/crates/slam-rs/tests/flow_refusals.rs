@@ -3,9 +3,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{CpuCornerScan, LOWEST_THRESHOLD_RUNG, MAX_CELLS};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::{CpuCornerScan, LOWEST_THRESHOLD_RUNG, MAX_CELLS};
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::parallel::{MAX_THREADS, WorkPool};
 use slam_rs::frontend::patterns::{Pattern51, Pattern52};
@@ -302,7 +302,7 @@ fn a_budget_larger_than_the_tracker_is_refused() {
         slam_rs::frontend::stages::CpuStages::new(
             CpuPyramidBuilder::new(),
             tracker,
-            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+            kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                 CpuCornerScan::default(),
             )),
         )
@@ -394,7 +394,7 @@ fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
             slam_rs::frontend::stages::CpuStages::new(
                 CpuPyramidBuilder::new(),
                 tracker,
-                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                     CpuCornerScan::default(),
                 )),
             )

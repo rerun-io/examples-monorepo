@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
-use slam_rs::frontend::detect::CornerScan;
+use kornia_staging_imgproc::features::CornerScan;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::tracker::{
     FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,

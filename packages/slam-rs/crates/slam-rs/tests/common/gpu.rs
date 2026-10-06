@@ -1,6 +1,6 @@
 //! Shared fixtures for GPU integration binaries.
 
-use slam_rs::frontend::detect::BandRequest;
+use kornia_staging_imgproc::features::BandRequest;
 use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{FlowTransforms, PointsSoA};
 

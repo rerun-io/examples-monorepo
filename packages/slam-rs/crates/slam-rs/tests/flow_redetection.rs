@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{MaskRect, Masks};
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::{Masks, Rect};
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::types::KeypointId;
@@ -120,7 +120,7 @@ fn masks_leaving(frame: &FlowFrame, survivors: usize) -> [Masks; 1] {
         masks: (survivors..frame.cameras[0].len())
             .map(|index| {
                 let position = frame.cameras[0].transforms.translation(index);
-                Rect {
+                MaskRect {
                     x: position.x - 0.25,
                     y: position.y - 0.25,
                     w: 0.5,
@@ -186,7 +186,7 @@ fn redetection_uses_the_latest_post_detection_count() {
     let mut flow = gated_frontend(2, 0.5);
     let images = [dotted_image(0), dotted_image(0)];
     let initial_mask = [Masks {
-        masks: vec![Rect {
+        masks: vec![MaskRect {
             x: 60.0,
             y: 0.0,
             w: WIDTH as f32,

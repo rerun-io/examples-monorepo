@@ -3188,7 +3188,9 @@ name = "kornia-staging-imgproc"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-imgproc",
  "rayon",
+ "thiserror",
 ]
 
 [[package]]
@@ -6703,6 +6705,7 @@ name = "slam-rs-py"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-staging-imgproc",
  "numpy",
  "pyo3",
  "slam-rs",

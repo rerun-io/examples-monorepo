@@ -8,6 +8,7 @@
 mod catalog;
 
 use kornia_image::Image;
+use kornia_staging_imgproc::features::CellGrid;
 use numpy::{
     PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
     ToPyArray,
@@ -18,7 +19,6 @@ use slam_rs::calib::{
     Calibration as CoreCalibration, CameraParts as CoreCameraParts, ImuParts as CoreImuParts,
 };
 use slam_rs::config::VioConfig as CoreVioConfig;
-use slam_rs::frontend::detect::CellGrid;
 use slam_rs::frontend::flow::{
     FlowFrame as CoreFlowFrame, FrameToFrameOpticalFlow, FrontendError, FrontendOptions,
     PosePrediction,

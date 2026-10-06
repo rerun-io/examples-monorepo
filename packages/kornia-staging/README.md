@@ -75,3 +75,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
 | Dense u8-shift8 ingestion and sparse u16 bilinear values/gradients | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Integer u16 Gaussian downsampling and row scratch | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
+| Centered FAST cells, band scans, masks and deterministic selection | slam-rs `frontend/detect*`, `frontend/cell.rs` | kornia-rs / kornia-imgproc / `features` (private cells) | staged | - |

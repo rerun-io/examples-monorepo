@@ -5,9 +5,9 @@ use std::sync::Arc;
 use cubecl::prelude::*;
 
 use super::{GpuCornerScan, Selection};
-use crate::frontend::detect::CellSelect;
 use crate::gpu::kernels;
 use kornia_image::Image;
+use kornia_staging_imgproc::features::CellSelect;
 
 #[derive(Clone)]
 pub(super) struct BatchScanBuffers {

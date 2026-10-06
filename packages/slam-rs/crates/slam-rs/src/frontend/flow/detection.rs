@@ -2,10 +2,6 @@
 
 use super::{FrameToFrameOpticalFlow, FrontendError, project_between_cams};
 use crate::duration_ns;
-use crate::frontend::detect::{
-    CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, Masks, Occupancy, Rect,
-    detect_keypoints_with_cells,
-};
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
@@ -14,6 +10,10 @@ use crate::frontend::tracker::PatchTracker;
 use crate::lie::Se3;
 use crate::types::KeypointId;
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{
+    CellGrid, DetectorConfig, DetectorScratch, KeypointsData, MaskRect, Masks, Occupancy,
+    detect_keypoints_with_cells,
+};
 use nalgebra::{Matrix4, Vector2, Vector4};
 
 impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
@@ -112,6 +112,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
                     scratch,
                     out,
                 )
+                .map_err(Into::into)
             };
         let parallel =
             side_pool
@@ -125,7 +126,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
                             .zip(detected[cameras.clone()].par_iter_mut())
                             .enumerate()
                             .map(|(slot, (scratch, out))| detect(slot + 1, scratch, out))
-                            .collect::<Vec<Result<(), DetectError>>>()
+                            .collect::<Vec<Result<(), FrontendError>>>()
                     })
                 });
         match parallel {
@@ -220,7 +221,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
                 let in_bounds: bool =
                     c0_uv.x >= 0.0 && c0_uv.x < width && c0_uv.y >= 0.0 && c0_uv.y < height;
                 if projected && in_bounds {
-                    out.masks.push(Rect {
+                    out.masks.push(MaskRect {
                         x: (x - half) as f32,
                         y: (y - half) as f32,
                         w: cell as f32,

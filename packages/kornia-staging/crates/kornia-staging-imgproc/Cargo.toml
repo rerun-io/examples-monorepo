@@ -6,11 +6,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+kornia-imgproc.workspace = true
 kornia-image.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]
-kornia-imgproc.workspace = true
 proptest.workspace = true
 approx.workspace = true
 criterion.workspace = true
@@ -28,4 +29,8 @@ harness = false
 
 [[bench]]
 name = "pyramid"
+harness = false
+
+[[bench]]
+name = "cells"
 harness = false

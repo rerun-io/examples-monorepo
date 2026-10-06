@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+fn image(width: usize, height: usize) -> Result<Image<u16, 1>, kornia_image::ImageError> {
+    Image::from_size_val(kornia_image::ImageSize { width, height }, 0)
+}
 
 const BUDGET: usize = 4096;
 
@@ -37,7 +40,7 @@ fn a_band_before_a_scan_is_refused() {
 }
 
 fn dotted_image(width: usize, height: usize, spacing: usize) -> Image<u16, 1> {
-    let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
+    let mut image: Image<u16, 1> = image(width, height).unwrap();
     for y in 0..height {
         for x in 0..width {
             let background: f64 = 60.0 + 25.0 * (x as f64 * 0.09).sin() * (y as f64 * 0.07).cos();
@@ -100,9 +103,16 @@ fn a_different_image_size_gives_a_different_grid_start() {
 /// An image smaller than one cell must be refused before grid arithmetic underflows.
 #[test]
 fn an_image_narrower_than_a_cell_has_no_grid() {
-    assert!(CellGrid::new(30, 200, 50).is_none());
-    assert!(CellGrid::new(200, 30, 50).is_none());
-    assert!(CellGrid::new(200, 200, 0).is_none());
+    for (width, height, cell) in [(30, 200, 50), (200, 30, 50), (200, 200, 0)] {
+        assert_eq!(
+            CellGrid::new(width, height, cell),
+            Err(CellGridError::InvalidGeometry {
+                width,
+                height,
+                cell
+            })
+        );
+    }
 }
 
 /// A coordinate just left of `x_start` truncates to column zero.
@@ -142,12 +152,7 @@ fn corners_are_found_and_stay_inside_the_edge_threshold() {
     assert_eq!(out.corners.len(), out.responses.len());
     for corner in &out.corners {
         assert!(
-            kornia_staging_imgproc::interpolation::in_bounds_u16(
-                &image,
-                corner[0],
-                corner[1],
-                EDGE_THRESHOLD
-            ),
+            crate::interpolation::in_bounds_u16(&image, corner[0], corner[1], EDGE_THRESHOLD),
             "corner {corner:?} is inside the edge margin"
         );
     }
@@ -185,11 +190,9 @@ fn no_cell_yields_more_than_its_budget() {
         let (row, column) = grid.cell_of(corner[0], corner[1]);
         per_cell[row * grid.columns + column] += 1;
     }
-    assert!(
-        per_cell
-            .iter()
-            .all(|count| *count <= config.num_points_cell)
-    );
+    assert!(per_cell
+        .iter()
+        .all(|count| *count <= config.num_points_cell));
 }
 
 /// The threshold ladder must terminate even with a non-positive requested minimum.
@@ -197,7 +200,7 @@ fn no_cell_yields_more_than_its_budget() {
 /// a minimum of one, which is the enforced floor.
 #[test]
 fn a_non_positive_min_threshold_still_terminates() {
-    let blank: Image<u16, 1> = crate::image::zeros(200, 200).unwrap();
+    let blank: Image<u16, 1> = image(200, 200).unwrap();
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -368,7 +371,7 @@ fn a_mask_over_the_whole_image_drops_everything() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let masks: Masks = Masks {
-        masks: vec![Rect {
+        masks: vec![MaskRect {
             x: 0.0,
             y: 0.0,
             w: 200.0,
@@ -546,13 +549,13 @@ fn a_cell_outside_the_occupancy_matrix_is_skipped() {
 fn masks_are_half_open_and_disjunctive() {
     let masks: Masks = Masks {
         masks: vec![
-            Rect {
+            MaskRect {
                 x: 0.0,
                 y: 0.0,
                 w: 10.0,
                 h: 10.0,
             },
-            Rect {
+            MaskRect {
                 x: 50.0,
                 y: 50.0,
                 w: 5.0,
@@ -626,7 +629,7 @@ fn the_response_is_opencvs_corner_score() {
     assert!(opencv_corner_score(0.5) < opencv_corner_score(0.75));
 
     // On a real isolated peak, the whole pipeline reports 254.
-    let mut image: Image<u16, 1> = crate::image::zeros(120, 120).unwrap();
+    let mut image: Image<u16, 1> = image(120, 120).unwrap();
     for y in 0..120 {
         for x in 0..120 {
             image.set_pixel(x, y, 0, 0).unwrap();
@@ -692,6 +695,7 @@ fn an_occupancy_shape_that_overflows_is_refused() {
 struct MalformedSelection(usize);
 
 impl CornerScan for MalformedSelection {
+    type Error = DetectError;
     fn scan(&mut self, _: usize, _: &Image<u16, 1>) -> Result<(), DetectError> {
         panic!("a malformed selection must not fall back to scanning")
     }
@@ -715,7 +719,7 @@ impl CornerScan for MalformedSelection {
 
 #[test]
 fn malformed_selection_lengths_are_refused_without_fallback() {
-    let image = crate::image::zeros(200, 200).unwrap();
+    let image = image(200, 200).unwrap();
     let grid = CellGrid::new(200, 200, 50).unwrap();
     let counts = vec![0; grid.rows * grid.columns];
     let occupancy = Occupancy {
@@ -744,4 +748,25 @@ fn malformed_selection_lengths_are_refused_without_fallback() {
             })
         );
     }
+}
+#[test]
+fn unrepresentable_grid_shape_is_a_typed_error() {
+    assert_eq!(
+        CellGrid::new(usize::MAX, 50, 1),
+        Err(CellGridError::ShapeOverflow)
+    );
+    assert_eq!(
+        CellGrid::new(50, usize::MAX, 1),
+        Err(CellGridError::ShapeOverflow)
+    );
+    let exact = CellGrid::new(1023, 1023, 1).unwrap();
+    assert_eq!(exact.rows * exact.columns, MAX_CELLS);
+    assert_eq!(
+        CellGrid::new(1024, 1023, 1),
+        Err(CellGridError::TooManyCells {
+            rows: 1024,
+            columns: 1025,
+            ceiling: MAX_CELLS,
+        })
+    );
 }

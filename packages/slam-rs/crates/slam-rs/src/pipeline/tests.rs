@@ -311,12 +311,14 @@ fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
         for vio in [&mut reference, &mut lookahead] {
             vio.masks[0].masks.clear();
             if index == 2 {
-                vio.masks[0].masks.push(frontend::detect::Rect {
-                    x: 100.0,
-                    y: 100.0,
-                    w: 200.0,
-                    h: 200.0,
-                });
+                vio.masks[0]
+                    .masks
+                    .push(kornia_staging_imgproc::features::MaskRect {
+                        x: 100.0,
+                        y: 100.0,
+                        w: 200.0,
+                        h: 200.0,
+                    });
             }
         }
         let current = views(actual);

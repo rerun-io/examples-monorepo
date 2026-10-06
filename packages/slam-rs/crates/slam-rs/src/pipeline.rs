@@ -42,7 +42,7 @@ pub struct Vio<S: Scalar = f32> {
     /// Reusable lookahead input, filled by the same lane as the current frame.
     next_frames: Vec<kornia_image::Image<u16, 1>>,
     /// `img->masks`, always empty here: masks come from Monado.
-    masks: Vec<frontend::detect::Masks>,
+    masks: Vec<kornia_staging_imgproc::features::Masks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
     camera_count: usize,
     /// The last frameset's timestamp, `t_ns` in the frontend.
@@ -129,7 +129,7 @@ impl<S: Scalar> Vio<S> {
             calib_f32,
             frames: Vec::new(),
             next_frames: Vec::new(),
-            masks: vec![frontend::detect::Masks::default(); camera_count],
+            masks: vec![kornia_staging_imgproc::features::Masks::default(); camera_count],
             camera_count,
             last_frame_t_ns: None,
             last_stats: None,

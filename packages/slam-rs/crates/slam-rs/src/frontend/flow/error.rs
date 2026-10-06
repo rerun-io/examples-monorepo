@@ -1,19 +1,24 @@
 //! Failures reported by the frontend driver and its backends.
 
 use crate::camera::CameraError;
-use crate::frontend::detect::DetectError;
-#[cfg(doc)]
-use crate::frontend::detect::{LOWEST_THRESHOLD_RUNG, MAX_CELLS};
 #[cfg(doc)]
 use crate::frontend::parallel::MAX_THREADS;
 use crate::frontend::tracker::TrackerError;
 #[cfg(doc)]
 use crate::frontend::tracker::{MAX_CAPACITY, MAX_LEVELS};
 use crate::pyramid::PyramidError;
+use kornia_staging_imgproc::features::DetectError;
+#[cfg(doc)]
+use kornia_staging_imgproc::features::{LOWEST_THRESHOLD_RUNG, MAX_CELLS};
 
 /// What the frontend can refuse.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FrontendError {
+    /// Device backend failure, retained at the application boundary.
+    #[cfg(feature = "gpu-core")]
+    #[error(transparent)]
+    Gpu(#[from] crate::gpu::GpuError),
+
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]
     NoCameras,

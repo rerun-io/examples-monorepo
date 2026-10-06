@@ -15,19 +15,19 @@
 //! Stable sorting retains scan order among tied scores (D09, trap 2).
 
 mod band;
-mod cells;
-pub use super::cell::{
-    CELL_KEY_LIMIT, CellGrid, CellSelect, DetectorConfig, EDGE_THRESHOLD, LOWEST_THRESHOLD_RUNG,
-    MAX_CELLS, Masks, NO_CELL_WINNER, Occupancy, Rect, SelectionStatus, cell_select,
-    threshold_rungs,
+mod grid;
+mod scores;
+use self::grid::{cell_masks, decode_key};
+pub use self::grid::{
+    cell_select, threshold_rungs, CellGrid, CellGridError, CellSelect, DetectorConfig, MaskRect,
+    Masks, Occupancy, SelectionStatus, CELL_KEY_LIMIT, EDGE_THRESHOLD, KEY_FIELD_MASK,
+    KEY_ROW_SHIFT, KEY_SCORE_SHIFT, LOWEST_THRESHOLD_RUNG, MAX_CELLS, NO_CELL_WINNER,
 };
-use super::cell::{cell_masks, decode_key};
-#[cfg(feature = "gpu-core")]
-pub(crate) use band::BandCache;
 use band::suppress_non_maxima;
+pub use band::BandCache;
 pub use band::{
-    CpuCornerScan, FAST_BORDER, FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW,
-    block_filter_end, opencv_corner_score,
+    block_filter_end, opencv_corner_score, CpuCornerScan, FAST_BORDER, FAST_FILTER_LANES,
+    FAST_RING_COLUMN, FAST_RING_ROW,
 };
 
 /// kornia's FAST corner, re-exported because [`CornerScan::band`] hands it back:
@@ -39,8 +39,16 @@ use kornia_image::Image;
 /// Detector input failures, including invalid caller-supplied occupancy dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DetectError {
-    /// A backend claimed selection but returned a malformed key vector.
-    #[error("selection returned {actual} keys, expected {expected}")]
+    /// The scanner could not allocate its grayscale image.
+    #[error("cannot allocate a {width}x{height} grayscale image")]
+    GrayAllocation {
+        /// Requested columns.
+        width: usize,
+        /// Requested rows.
+        height: usize,
+    },
+    /// A backend claimed selection but returned a malformed winner vector.
+    #[error("selection returned {actual} winners, expected {expected}")]
     SelectionLength {
         /// Keys returned by the backend.
         actual: usize,
@@ -70,18 +78,6 @@ pub enum DetectError {
         /// Cells the buffer holds.
         actual: usize,
     },
-    /// A GPU scanner's device read failed, or came back the wrong length.
-    ///
-    /// Only a GPU scanner produces this, and it is one variant rather than
-    /// several because an incomplete CubeCL runtime fails every way at once: it
-    /// panics on its own worker thread, the launch reports success, and the
-    /// download comes back short or as zeros. The [`crate::gpu::GpuError`]
-    /// inside names which buffer and whether the read failed or was short;
-    /// reading either as a candidate image would quietly detect nothing
-    /// (decision D32).
-    #[cfg(feature = "gpu-core")]
-    #[error(transparent)]
-    Gpu(#[from] crate::gpu::GpuError),
     /// [`CornerScan::band`] was asked for corners before [`CornerScan::scan`]
     /// ran on this frame.
     ///
@@ -169,6 +165,9 @@ pub struct BandRequest {
 /// across the interpreter's threads even though nothing here runs on more than
 /// one.
 pub trait CornerScan: std::fmt::Debug + Send + Sync {
+    /// Backend failures include the common detector input errors.
+    type Error: std::error::Error + Send + Sync + From<DetectError>;
+
     /// Make an independent scanner with the same corner-selection behavior.
     ///
     /// # Returns
@@ -177,7 +176,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// `None` when callers must use this scanner serially. Implementations
     /// must preserve configuration and must not depend on shared per-frame
     /// preparation such as `submit_cells` on the original scanner.
-    fn fork(&self) -> Option<Box<dyn CornerScan>> {
+    fn fork(&self) -> Option<Box<dyn CornerScan<Error = Self::Error>>> {
         None
     }
 
@@ -186,7 +185,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// Called once per camera per frameset, before any [`CornerScan::band`].
     ///
     /// `camera` is the frame's place in the frameset. It is here for the same
-    /// reason it is on [`crate::pyramid::PyramidBuilder::build`]: these are the
+    /// reason it is on the caller's pyramid builder: these are the
     /// only two stages that read level 0, and on a device backend they read the
     /// *same* pixels, so a scanner that knows which camera it was handed can
     /// read the pyramid's own level 0 instead of uploading the frame a second
@@ -196,7 +195,11 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     ///
     /// [`DetectError`] when the geometry cannot be viewed as 8-bit, or a device
     /// backend cannot size its buffers.
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError>;
+    ///
+    /// # Arguments
+    /// * `camera` - Frame position used by a device backend.
+    /// * `image` - Dense current source image.
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), Self::Error>;
 
     /// The candidates of `request`'s band.
     ///
@@ -217,7 +220,10 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// [`DetectError::NotScanned`] when no frame has been scanned: a band before
     /// a scan is a programming error on both lanes, not an empty frame
     /// (decision D32). A device backend can also fail on the read.
-    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError>;
+    ///
+    /// # Arguments
+    /// * `request` - Cell row, threshold rung and pixel band.
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], Self::Error>;
 
     /// Pick the winner of every grid cell where the pixels already are, filling
     /// `out` with one packed key per cell and returning [`SelectionStatus::Selected`].
@@ -256,6 +262,12 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     ///
     /// Whatever the backend's own scan can fail with; a backend that leaves
     /// `out` empty must not have consumed the frame.
+    ///
+    /// # Arguments
+    /// * `camera`, `image` - Frame position and source pixels.
+    /// * `select` - Packed-key selection geometry and policy.
+    /// * `_eligibility` - Optional occupancy counts and whole-cell masks.
+    /// * `out` - Reusable output, one packed winner per visited cell.
     fn select_cells(
         &mut self,
         camera: usize,
@@ -263,7 +275,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
         select: &CellSelect,
         _eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
-    ) -> Result<SelectionStatus, DetectError> {
+    ) -> Result<SelectionStatus, Self::Error> {
         let _ = (camera, image, select);
         out.clear();
         Ok(SelectionStatus::Unsupported)
@@ -289,11 +301,15 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// Whatever the backend's own scan can fail with.
+    ///
+    /// # Arguments
+    /// * `images` - Current images in camera order.
+    /// * `selects` - Selection request per camera, or None to omit it.
     fn submit_cells(
         &mut self,
         images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
-    ) -> Result<(), DetectError> {
+    ) -> Result<(), Self::Error> {
         let _ = (images, selects);
         Ok(())
     }
@@ -308,7 +324,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// Whatever the backend's own download can fail with.
-    fn take_cells(&mut self) -> Result<(), DetectError> {
+    fn take_cells(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -316,8 +332,8 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
 /// The detector's per-frame working set: the corner scanner plus the buffers
 /// [`detect_keypoints_with_cells`] filters and suppresses in.
 #[derive(Debug)]
-pub struct DetectorScratch<S: CornerScan + ?Sized = dyn CornerScan> {
-    pub(crate) scanner: Box<S>,
+pub struct DetectorScratch<S: CornerScan + ?Sized = dyn CornerScan<Error = DetectError>> {
+    scanner: Box<S>,
     corners: Vec<FastCorner>,
     /// One cell's FAST scores, local coordinates, zero where there is no
     /// candidate. Kept zero between calls so only the entries a cell writes are
@@ -343,6 +359,9 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
     ///
     /// This is how a GPU backend enters the detector: the scanner is the only
     /// part of it that reads pixels.
+    ///
+    /// # Arguments
+    /// * `scanner` - Owned backend providing row bands and optional cell selection.
     pub fn with_scanner(scanner: Box<S>) -> Self {
         Self {
             scanner,
@@ -354,8 +373,13 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
         }
     }
 
+    /// Access the owned backend for backend-specific frame preparation.
+    pub fn scanner_mut(&mut self) -> &mut S {
+        &mut self.scanner
+    }
+
     /// Independent detector scratch for side-camera CPU work.
-    pub fn fork(&self) -> Option<DetectorScratch> {
+    pub fn fork(&self) -> Option<DetectorScratch<dyn CornerScan<Error = S::Error>>> {
         self.scanner.fork().map(DetectorScratch::with_scanner)
     }
 
@@ -364,11 +388,15 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
     /// # Errors
     ///
     /// Whatever the scanner's own preparation can fail with.
+    ///
+    /// # Arguments
+    /// * `images` - Current images in camera order.
+    /// * `selects` - Selection request per camera, or None to omit it.
     pub fn submit_cells(
         &mut self,
         images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
-    ) -> Result<(), DetectError> {
+    ) -> Result<(), S::Error> {
         self.scanner.submit_cells(images, selects)
     }
 
@@ -377,7 +405,7 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
     /// # Errors
     ///
     /// Whatever the scanner's own download can fail with.
-    pub fn take_cells(&mut self) -> Result<(), DetectError> {
+    pub fn take_cells(&mut self) -> Result<(), S::Error> {
         self.scanner.take_cells()
     }
 }
@@ -388,6 +416,32 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
 /// reached, never below [`LOWEST_THRESHOLD_RUNG`]. Sort survivors by descending
 /// response and apply safe radius, masks and edge margin.
 /// `max_corners` caps the call in scan order to protect fixed-capacity buffers.
+///
+/// # Arguments
+/// * `image`, `camera` - Dense image and its index in a caller-owned frame set.
+/// * `grid`, `occupancy` - Centered detection geometry and shared feature counts.
+/// * `config`, `masks` - Selection policy and excluded image regions.
+/// * `max_corners` - Maximum number of corners emitted in scan order.
+/// * `scratch`, `out` - Reusable working storage and output arrays.
+///
+/// # Examples
+/// ```
+/// use kornia_image::{Image, ImageSize};
+/// use kornia_staging_imgproc::features::{CellGrid, DetectorConfig, DetectorScratch,
+///     KeypointsData, Masks, Occupancy, detect_keypoints_with_cells};
+/// let image = Image::from_size_val(ImageSize { width: 100, height: 100 }, 4000u16)?;
+/// let grid = CellGrid::new(100, 100, 25)?;
+/// let counts = vec![0; grid.rows * grid.columns];
+/// let occupancy = Occupancy { counts: &counts, rows: grid.rows, columns: grid.columns };
+/// let config = DetectorConfig { num_points_cell: 1, min_threshold: 5,
+///     max_threshold: 40, safe_radius: 0.0 };
+/// let mut scratch = DetectorScratch::default();
+/// let mut out = KeypointsData::default();
+/// detect_keypoints_with_cells(&image, 0, &grid, &occupancy, &config,
+///     &Masks::default(), 100, &mut scratch, &mut out)?;
+/// assert!(out.is_empty()); // A constant image has no FAST corners.
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 /// Returns typed errors for occupancy overflow, a short count buffer or an
@@ -403,7 +457,7 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
     max_corners: usize,
     scratch: &mut DetectorScratch<S>,
     out: &mut KeypointsData,
-) -> Result<(), DetectError> {
+) -> Result<(), S::Error> {
     out.corners.clear();
     out.responses.clear();
 
@@ -419,7 +473,8 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
             columns: occupancy.columns,
             expected: needed,
             actual: occupancy.counts.len(),
-        });
+        }
+        .into());
     }
 
     // The last rung the cell walk below visits, which is also what the device
@@ -477,7 +532,8 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
         return Err(DetectError::SelectionLength {
             actual: winners.len(),
             expected: cells_x * cells_y,
-        });
+        }
+        .into());
     }
     if !selected {
         scanner.scan(camera, image)?;
@@ -495,12 +551,13 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
             continue;
         }
         if selected {
-            if !masked[row * cells_x + column]
-                && let Some((point, score)) = decode_key(winners[row * cells_x + column]) {
+            if !masked[row * cells_x + column] {
+                if let Some((point, score)) = decode_key(winners[row * cells_x + column]) {
                     out.corners.push(point);
                     out.responses
                         .push(opencv_corner_score(score as f32 / 255.0));
                 }
+            }
             continue;
         }
         let x = grid.x_start + column * grid.cell;
@@ -567,12 +624,7 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
                 if masks.in_bounds(full_x, full_y) {
                     continue;
                 }
-                if !kornia_staging_imgproc::interpolation::in_bounds_u16(
-                    image,
-                    full_x,
-                    full_y,
-                    EDGE_THRESHOLD,
-                ) {
+                if !crate::interpolation::in_bounds_u16(image, full_x, full_y, EDGE_THRESHOLD) {
                     continue;
                 }
 

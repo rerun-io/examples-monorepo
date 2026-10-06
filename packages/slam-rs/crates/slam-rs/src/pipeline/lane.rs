@@ -124,7 +124,7 @@ impl FrontendLane {
         t_ns: i64,
         images: &[kornia_image::Image<u16, 1>],
         prediction: &frontend::flow::PosePrediction,
-        masks: &[frontend::detect::Masks],
+        masks: &[kornia_staging_imgproc::features::Masks],
     ) -> Result<&frontend::flow::FlowFrame, frontend::flow::FrontendError> {
         on_lane!(self, |flow| flow
             .process_frame(t_ns, images, prediction, masks))
@@ -178,7 +178,7 @@ impl FrontendLane {
     }
 
     /// The occupancy grid's geometry.
-    pub fn occupancy_grid(&self) -> frontend::detect::CellGrid {
+    pub fn occupancy_grid(&self) -> kornia_staging_imgproc::features::CellGrid {
         on_lane!(self, |flow| flow.occupancy_grid())
     }
 

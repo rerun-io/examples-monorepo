@@ -32,10 +32,6 @@ use crate::calib::Calibration;
 use crate::camera::RigCamera;
 use crate::config::VioConfig;
 use crate::duration_ns;
-use crate::frontend::detect::{
-    CellGrid, CellSelect, CpuCornerScan, DetectorConfig, DetectorScratch, KeypointsData,
-    LOWEST_THRESHOLD_RUNG, MAX_CELLS, Masks, cell_select,
-};
 use crate::frontend::parallel::{MAX_THREADS, WorkPool};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
@@ -45,6 +41,10 @@ use crate::lie::Se3;
 use crate::pyramid::CpuPyramidBuilder;
 use crate::types::KeypointId;
 use kornia_image::Image;
+use kornia_staging_imgproc::features::{
+    CellGrid, CellSelect, CpuCornerScan, DetectorConfig, DetectorScratch, KeypointsData,
+    LOWEST_THRESHOLD_RUNG, Masks, cell_select,
+};
 
 /// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
 /// [`FrameToFrameOpticalFlow::with_stages`] selects implementations without
@@ -375,27 +375,24 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
         for (camera, rig_camera) in cameras.iter().enumerate() {
             let width: usize = rig_camera.width() as usize;
             let height: usize = rig_camera.height() as usize;
-            let grid: CellGrid =
-                CellGrid::new(width, height, cell).ok_or(FrontendError::FrameTooSmall {
+            let grid = CellGrid::new(width, height, cell).map_err(|error| match error {
+                kornia_staging_imgproc::features::CellGridError::TooManyCells {
+                    rows,
+                    columns,
+                    ceiling,
+                } => FrontendError::TooManyCells {
+                    camera,
+                    rows,
+                    columns,
+                    ceiling,
+                },
+                _ => FrontendError::FrameTooSmall {
                     camera,
                     width,
                     height,
                     cell,
-                })?;
-            // Two reasons the ceiling is per camera: camera 0's grid sizes
-            // `cells` below, one `i32` per cell per camera, and a `Vec` too long
-            // to exist panics rather than returning (decision D32); and every
-            // camera is detected on its own grid, which bounds that camera's
-            // detection scan on every frame (`detect.rs`). Saturating like
-            // the sibling ceilings: a product that leaves `usize` is past it.
-            if grid.rows.saturating_mul(grid.columns) > MAX_CELLS {
-                return Err(FrontendError::TooManyCells {
-                    camera,
-                    rows: grid.rows,
-                    columns: grid.columns,
-                    ceiling: MAX_CELLS,
-                });
-            }
+                },
+            })?;
             detection_grids.push(grid);
         }
         let occupancy_grid: CellGrid = detection_grids[0];
@@ -764,7 +761,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
         // reads them itself, which is the read the detector used to make on
         // every frameset.
         let mark: std::time::Instant = std::time::Instant::now();
-        self.stages.detector().take_cells()?;
+        self.stages.detector().take_cells().map_err(Into::into)?;
         self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {

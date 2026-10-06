@@ -22,8 +22,8 @@
 use cubecl::frontend::CompilationArg;
 use kornia_image::Image;
 use kornia_imgproc::features::FastCorner;
+use kornia_staging_imgproc::features::{BandRequest, CornerScan, CpuCornerScan, DetectError};
 use nalgebra::Vector2;
-use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::se2::AffineCompact2f;
@@ -694,7 +694,7 @@ fn a_gpu_band_before_a_scan_is_refused() {
         GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     assert_eq!(
         gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
-        DetectError::NotScanned
+        slam_rs::frontend::flow::FrontendError::Detect(DetectError::NotScanned)
     );
 }
 

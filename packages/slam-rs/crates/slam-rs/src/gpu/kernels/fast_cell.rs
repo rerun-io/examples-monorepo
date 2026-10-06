@@ -6,8 +6,8 @@ use super::{
 use cubecl::prelude::*;
 
 const UNITS: usize = 128;
-const BORDER: usize = crate::frontend::detect::FAST_BORDER;
-const EDGE: f32 = crate::frontend::detect::EDGE_THRESHOLD;
+const BORDER: usize = kornia_staging_imgproc::features::FAST_BORDER;
+const EDGE: f32 = kornia_staging_imgproc::features::EDGE_THRESHOLD;
 
 #[cube]
 fn tile_pixel(tile: &Shared<[u32]>, slot: usize) -> u32 {
@@ -38,8 +38,8 @@ fn score_tile(
         let mut diff = Array::<i32>::new(16usize);
         #[unroll]
         for k in 0..16usize {
-            let dy = comptime!(crate::frontend::detect::FAST_RING_ROW[k] + 3) as usize;
-            let dx = comptime!(crate::frontend::detect::FAST_RING_COLUMN[k] + 3) as usize;
+            let dy = comptime!(kornia_staging_imgproc::features::FAST_RING_ROW[k] + 3) as usize;
+            let dx = comptime!(kornia_staging_imgproc::features::FAST_RING_COLUMN[k] + 3) as usize;
             diff[k] = i32::cast_from(tile_pixel(tile, (y + dy - 3usize) * cell + x + dx - 3usize))
                 - center;
         }

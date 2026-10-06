@@ -60,11 +60,14 @@ fn a_failed_scan_leaves_no_band_readable() {
     arm_fault_at(CORNER_SCAN_READ);
     assert_eq!(
         scanner.scan(0, &dotted_image(512, 128)).unwrap_err(),
-        DetectError::Gpu(GpuError::DeviceLost {
+        FrontendError::Gpu(GpuError::DeviceLost {
             what: "corner scan"
         })
     );
-    assert_eq!(scanner.band(band(3)).unwrap_err(), DetectError::NotScanned);
+    assert_eq!(
+        scanner.band(band(3)).unwrap_err(),
+        FrontendError::Detect(DetectError::NotScanned)
+    );
 }
 
 /// A failed scan that changes the geometry refuses rather than indexes.
@@ -83,12 +86,12 @@ fn a_failed_scan_that_changes_the_geometry_does_not_panic() {
     assert!(scanner.scan(1, &dotted_image(960, 240)).is_err());
     assert_eq!(
         scanner.band(band(150)).unwrap_err(),
-        DetectError::NotScanned
+        FrontendError::Detect(DetectError::NotScanned)
     );
 }
 #[test]
 fn selection_failures_invalidate_the_batch_and_allow_retry() {
-    use crate::frontend::detect::{CellGrid, DetectorConfig, cell_select};
+    use kornia_staging_imgproc::features::{CellGrid, DetectorConfig, cell_select};
     let images = [dotted_image(512, 128), dotted_image(512, 128)];
     let config = DetectorConfig {
         num_points_cell: 1,

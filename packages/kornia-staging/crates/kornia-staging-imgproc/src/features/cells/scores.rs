@@ -1,9 +1,10 @@
+#![cfg_attr(target_arch = "aarch64", allow(unsafe_code))] // NEON kernels check bounds before vector loads/stores.
 //! Single-pass FAST-9 scoring and selection in each eligible cell.
+use super::grid::{KEY_ROW_SHIFT, KEY_SCORE_SHIFT};
 use super::{
-    CellSelect, EDGE_THRESHOLD, FAST_BORDER, FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW,
-    NO_CELL_WINNER, Occupancy, block_filter_end,
+    block_filter_end, CellSelect, Occupancy, EDGE_THRESHOLD, FAST_BORDER, FAST_FILTER_LANES,
+    FAST_RING_COLUMN, FAST_RING_ROW, NO_CELL_WINNER,
 };
-use crate::frontend::cell::{KEY_ROW_SHIFT, KEY_SCORE_SHIFT};
 use kornia_image::Image;
 
 /// Reused across cells and frames; no per-row allocations or narrowed image.
@@ -37,14 +38,15 @@ impl CellScores {
         });
         for (column, row) in grid.cells() {
             let index = row * cells_x + column;
-            if let Some((occupancy, masked)) = eligibility
-                && (masked[index]
+            if let Some((occupancy, masked)) = eligibility {
+                if masked[index]
                     || row >= occupancy.rows
                     || column >= occupancy.columns
-                    || occupancy.counts[row * occupancy.columns + column] >= 1)
+                    || occupancy.counts[row * occupancy.columns + column] >= 1
                 {
                     continue;
                 }
+            }
             let first_x = grid.x_start + column * grid.cell + FAST_BORDER;
             let first_y = grid.y_start + row * grid.cell + FAST_BORDER;
             let last_x =
@@ -126,12 +128,7 @@ impl CellScores {
                     {
                         continue;
                     }
-                    if kornia_staging_imgproc::interpolation::in_bounds_u16(
-                        image,
-                        xf,
-                        yf,
-                        EDGE_THRESHOLD,
-                    ) {
+                    if crate::interpolation::in_bounds_u16(image, xf, yf, EDGE_THRESHOLD) {
                         best = key;
                     }
                 }
@@ -149,6 +146,8 @@ fn score_row(
     threshold: u8,
     out: &mut [u8],
 ) {
+    let pixels = image.as_slice();
+    let width = image.width();
     #[cfg(target_arch = "aarch64")]
     if out.len() >= 16 {
         // CellSelect is public: establish memory bounds even for a grid whose
@@ -158,7 +157,7 @@ fn score_row(
                 && first_x
                     .checked_add(out.len())
                     .and_then(|end| end.checked_add(FAST_BORDER))
-                    .is_some_and(|end| end <= image.width())
+                    .is_some_and(|end| end <= width)
         );
         assert!(
             y >= FAST_BORDER
@@ -169,16 +168,13 @@ fn score_row(
         loop {
             // SAFETY: every centre is within the radius-three image border.
             // Each load covers 16 centres plus the same ring offset, so it
-            // remains within its image row, including on a strided image.
+            // remains within its image row, within the dense image.
             // The store covers exactly 16 entries in out. NEON is mandatory
             // on aarch64. The final block overlaps instead of reading past
             // the window or paying for a scalar tail of up to 15 pixels.
             unsafe {
                 score_neon(
-                    image
-                        .as_slice()
-                        .as_ptr()
-                        .add(y * image.width() + first_x + offset),
+                    pixels.as_ptr().add(y * width + first_x + offset),
                     ring,
                     threshold,
                     out.as_mut_ptr().add(offset),
@@ -191,12 +187,7 @@ fn score_row(
         }
     }
     for (lane, score) in out.iter_mut().enumerate() {
-        *score = score_scalar(
-            image.as_slice(),
-            y * image.width() + first_x + lane,
-            ring,
-            threshold,
-        );
+        *score = score_scalar(pixels, y * width + first_x + lane, ring, threshold);
     }
 }
 
@@ -334,28 +325,15 @@ mod tests {
     /// scalar scorer. Full u16 noise checks that only the high byte is read.
     #[test]
     #[allow(clippy::unwrap_used)]
-    fn neon_scores_match_scalar_on_random_and_recorded_pixels() {
-        let mut random = crate::image::from_u8_strided(&vec![0; 144 * 97], 131, 97, 144).unwrap();
-        let mut state = 0x5f71_4213u32;
-        for y in 0..random.height() {
-            for x in 0..random.width() {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                random.set_pixel(x, y, 0, (state >> 16) as u16).unwrap();
-            }
+    fn neon_scores_match_scalar_on_random_and_textured_pixels() {
+        let random = crate::test_images::random_image(131, 97, 0x5f71_4213);
+        let mut textured = crate::test_images::zeros(960, 960);
+        for (index, pixel) in textured.as_slice_mut().iter_mut().enumerate() {
+            let (x, y) = ((index % 960) as f32, (index / 960) as f32);
+            let waves = 128.0 + 60.0 * (x / 11.0).sin() + 50.0 * (y / 7.0).cos();
+            *pixel = (waves.clamp(0.0, 255.0) as u16) << 8;
         }
-        // Committed P5 fixture: the final width * height bytes are its raster.
-        let pgm = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/flow/frames/frame_000_cam0.pgm"
-        ));
-        let pixels = &pgm[pgm.len() - 960 * 960..];
-        let mut recorded = crate::image::zeros(960, 960).unwrap();
-        for (i, &pixel) in pixels.iter().enumerate() {
-            recorded
-                .set_pixel(i % 960, i / 960, 0, u16::from(pixel) << 8)
-                .unwrap();
-        }
-        for image in [&random, &recorded] {
+        for image in [&random, &textured] {
             let ring = std::array::from_fn(|k| {
                 FAST_RING_ROW[k] as isize * image.width() as isize + FAST_RING_COLUMN[k] as isize
             });

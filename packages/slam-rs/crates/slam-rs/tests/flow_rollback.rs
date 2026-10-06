@@ -212,30 +212,33 @@ fn a_backend_error_after_the_first_camera_is_undone_too() {
 
 #[derive(Debug)]
 struct RefuseAfterTracking {
-    inner: slam_rs::frontend::detect::CpuCornerScan,
+    inner: kornia_staging_imgproc::features::CpuCornerScan,
     refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl slam_rs::frontend::detect::CornerScan for RefuseAfterTracking {
+impl kornia_staging_imgproc::features::CornerScan for RefuseAfterTracking {
+    type Error = kornia_staging_imgproc::features::DetectError;
     fn scan(
         &mut self,
         camera: usize,
         image: &Image<u16, 1>,
-    ) -> Result<(), slam_rs::frontend::detect::DetectError> {
+    ) -> Result<(), kornia_staging_imgproc::features::DetectError> {
         self.inner.scan(camera, image)
     }
 
     fn band(
         &mut self,
-        request: slam_rs::frontend::detect::BandRequest,
-    ) -> Result<&[slam_rs::frontend::detect::FastCorner], slam_rs::frontend::detect::DetectError>
-    {
+        request: kornia_staging_imgproc::features::BandRequest,
+    ) -> Result<
+        &[kornia_staging_imgproc::features::FastCorner],
+        kornia_staging_imgproc::features::DetectError,
+    > {
         self.inner.band(request)
     }
 
-    fn take_cells(&mut self) -> Result<(), slam_rs::frontend::detect::DetectError> {
+    fn take_cells(&mut self) -> Result<(), kornia_staging_imgproc::features::DetectError> {
         if self.refuse.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            Err(slam_rs::frontend::detect::DetectError::NotScanned)
+            Err(kornia_staging_imgproc::features::DetectError::NotScanned)
         } else {
             Ok(())
         }
@@ -275,7 +278,7 @@ fn a_refused_frame_does_not_leave_uncommitted_backward_templates_in_the_cache() 
             slam_rs::frontend::stages::CpuStages::new(
                 CpuPyramidBuilder::new(),
                 tracker,
-                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                     RefuseAfterTracking {
                         inner: Default::default(),
                         refuse: refuse.clone(),

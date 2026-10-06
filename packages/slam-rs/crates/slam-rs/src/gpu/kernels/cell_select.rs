@@ -20,20 +20,20 @@ const SELECT_DIM_Y: usize = 8;
 const SELECT_SLOTS: usize = SELECT_DIM_X * SELECT_DIM_Y;
 
 /// The FAST ring radius, off the CPU detector's own constant.
-const SELECT_MARGIN: usize = crate::frontend::detect::FAST_BORDER;
+const SELECT_MARGIN: usize = kornia_staging_imgproc::features::FAST_BORDER;
 /// `EDGE_THRESHOLD`, likewise: the kernel applies the same gate the host loop
 /// applied to the corner it chose.
-const SELECT_EDGE: f32 = crate::frontend::detect::EDGE_THRESHOLD;
+const SELECT_EDGE: f32 = kornia_staging_imgproc::features::EDGE_THRESHOLD;
 
 // The packed cell key's layout is the host detector's, aliased rather than
 // re-declared for the same reason `FILTER_LANES` is: the kernel writes the keys
 // and `detect_keypoints_with_cells` takes them apart, and a shift that drifted
 // by one would move every corner without failing to compile.
 /// Where the packed key keeps `255 - score`.
-const KEY_SCORE_SHIFT: u32 = crate::frontend::cell::KEY_SCORE_SHIFT;
+const KEY_SCORE_SHIFT: u32 = kornia_staging_imgproc::features::KEY_SCORE_SHIFT;
 /// Where the packed key keeps the row.
-const KEY_ROW_SHIFT: u32 = crate::frontend::cell::KEY_ROW_SHIFT;
-pub(super) const NO_WINNER: u32 = crate::frontend::detect::NO_CELL_WINNER;
+const KEY_ROW_SHIFT: u32 = kornia_staging_imgproc::features::KEY_ROW_SHIFT;
+pub(super) const NO_WINNER: u32 = kornia_staging_imgproc::features::NO_CELL_WINNER;
 
 /// Admission and packed total order shared by both FAST cell kernels.
 #[cube]
@@ -369,7 +369,7 @@ impl CellSelectGeometry {
     pub fn new(
         width: usize,
         height: usize,
-        select: &crate::frontend::detect::CellSelect,
+        select: &kornia_staging_imgproc::features::CellSelect,
     ) -> Option<Self> {
         let grid = &select.grid;
         let (cells_x, cells_y) = grid.dimensions();
@@ -401,7 +401,7 @@ pub(crate) fn uses_cell_kernel<R: Runtime>(
     client: &ComputeClient<R>,
 ) -> bool {
     (12..=64).contains(&cell)
-        && !crate::frontend::detect::block_filter_end(width).1
+        && !kornia_staging_imgproc::features::block_filter_end(width).1
         && super::cell_shared_bytes(cell) <= client.properties().hardware.max_shared_memory_size
 }
 

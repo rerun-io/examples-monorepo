@@ -9,7 +9,7 @@
 //! deterministic.
 //!
 //! What is checked here is the exactness argument behind
-//! [`slam_rs::frontend::detect::CornerScan::select_cells`]: the whole of
+//! [`kornia_staging_imgproc::features::CornerScan::select_cells`]: the whole of
 //! `detectKeypointsWithCells` runs twice over the same frame — once through
 //! a band-only `CpuCornerScan`, and once through each cell selector — and
 //! the two results have to be equal corner for corner, response for response, in
@@ -25,11 +25,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kornia_image::Image;
-use slam_rs::frontend::detect::{
+use kornia_staging_imgproc::features::{
     BandRequest, CELL_KEY_LIMIT, CellGrid, CellSelect, CornerScan, CpuCornerScan, DetectError,
-    DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, Masks, Occupancy,
-    Rect, detect_keypoints_with_cells, threshold_rungs,
+    DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, MaskRect, Masks,
+    Occupancy, detect_keypoints_with_cells, threshold_rungs,
 };
+use slam_rs::frontend::flow::FrontendError;
 #[cfg(feature = "gpu-core")]
 use slam_rs::gpu::{GpuCornerScan, gpu_client};
 
@@ -43,12 +44,51 @@ use common::cornered_image;
 struct BandScan(CpuCornerScan);
 
 impl CornerScan for BandScan {
+    type Error = DetectError;
     fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
         self.0.scan(camera, image)
     }
 
     fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
         self.0.band(request)
+    }
+}
+
+/// Give the heterogeneous CPU/GPU test collection one application error type.
+#[derive(Debug)]
+struct AppScan<S>(S);
+impl<S: CornerScan> CornerScan for AppScan<S>
+where
+    S::Error: Into<FrontendError>,
+{
+    type Error = FrontendError;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), Self::Error> {
+        self.0.scan(camera, image).map_err(Into::into)
+    }
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], Self::Error> {
+        self.0.band(request).map_err(Into::into)
+    }
+    fn select_cells(
+        &mut self,
+        camera: usize,
+        image: &Image<u16, 1>,
+        select: &CellSelect,
+        eligibility: Option<(&Occupancy<'_>, &[bool])>,
+        out: &mut Vec<u32>,
+    ) -> Result<kornia_staging_imgproc::features::SelectionStatus, Self::Error> {
+        self.0
+            .select_cells(camera, image, select, eligibility, out)
+            .map_err(Into::into)
+    }
+    fn submit_cells(
+        &mut self,
+        images: &[Image<u16, 1>],
+        selects: &[Option<CellSelect>],
+    ) -> Result<(), Self::Error> {
+        self.0.submit_cells(images, selects).map_err(Into::into)
+    }
+    fn take_cells(&mut self) -> Result<(), Self::Error> {
+        self.0.take_cells().map_err(Into::into)
     }
 }
 
@@ -70,17 +110,18 @@ fn detector_config(safe_radius: f32) -> DetectorConfig {
 /// while measuring nothing. So each one says which path it meant.
 #[derive(Debug)]
 struct CountingScan {
-    inner: Box<dyn CornerScan>,
+    inner: Box<dyn CornerScan<Error = FrontendError>>,
     bands: Arc<AtomicUsize>,
     selections: Arc<AtomicUsize>,
 }
 
 impl CornerScan for CountingScan {
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
+    type Error = FrontendError;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), FrontendError> {
         self.inner.scan(camera, image)
     }
 
-    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], FrontendError> {
         self.bands.fetch_add(1, Ordering::Relaxed);
         self.inner.band(request)
     }
@@ -92,7 +133,7 @@ impl CornerScan for CountingScan {
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
-    ) -> Result<slam_rs::frontend::cell::SelectionStatus, DetectError> {
+    ) -> Result<kornia_staging_imgproc::features::SelectionStatus, FrontendError> {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner
             .select_cells(camera, image, select, eligibility, out)
@@ -105,12 +146,12 @@ impl CornerScan for CountingScan {
         &mut self,
         images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
-    ) -> Result<(), DetectError> {
+    ) -> Result<(), FrontendError> {
         self.inner.submit_cells(images, selects)
     }
 
     /// Forwarded for the reason above: this is the half that downloads.
-    fn take_cells(&mut self) -> Result<(), DetectError> {
+    fn take_cells(&mut self) -> Result<(), FrontendError> {
         self.inner.take_cells()
     }
 }
@@ -139,7 +180,7 @@ impl ExpectedPath {
 
 /// One camera's detection, from a scanner of the caller's choosing.
 fn detect_with(
-    scanner: Box<dyn CornerScan>,
+    scanner: Box<dyn CornerScan<Error = FrontendError>>,
     image: &Image<u16, 1>,
     grid: &CellGrid,
     counts: &[i32],
@@ -147,7 +188,7 @@ fn detect_with(
     masks: &Masks,
     budget: usize,
 ) -> KeypointsData {
-    let mut scratch: DetectorScratch = DetectorScratch::with_scanner(scanner);
+    let mut scratch = DetectorScratch::with_scanner(scanner);
     let mut out: KeypointsData = KeypointsData::default();
     detect_keypoints_with_cells(
         image,
@@ -202,7 +243,7 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         label,
     } = case;
     let want: KeypointsData = detect_with(
-        Box::new(BandScan::default()),
+        Box::new(AppScan(BandScan::default())),
         image,
         grid,
         counts,
@@ -210,8 +251,11 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         masks,
         budget,
     );
-    let scanners: Vec<(&str, Box<dyn CornerScan>)> = vec![
-        ("CPU", Box::new(CpuCornerScan::with_cell_selection(true))),
+    let scanners: Vec<(&str, Box<dyn CornerScan<Error = FrontendError>>)> = vec![
+        (
+            "CPU",
+            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
+        ),
         #[cfg(feature = "gpu-core")]
         (
             "GPU",
