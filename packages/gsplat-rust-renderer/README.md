@@ -4,29 +4,27 @@
 
 <p align="center">
   <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Rerun-0.34.1-0b82f9" alt="Rerun badge">
+    <img src="https://img.shields.io/badge/Rerun-0.38.1-0b82f9" alt="Rerun badge">
   </a>
   <a title="Pixi" href="https://pixi.sh/latest/" target="_blank" rel="noopener noreferrer">
     <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
   </a>
   <a title="Rust" href="https://www.rust-lang.org/" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Rust-1.93-dea584" alt="Rust badge">
+    <img src="https://img.shields.io/badge/Rust-1.98-dea584" alt="Rust badge">
   </a>
 </p>
 
 <p align="center">
-  <img src="docs/media/dense-training-dashboard.gif" width="600" alt="Custom viewer sweeping a dense 7,000-iteration Brush training recording: GPU splats converge in the 3D scene while four eval render pairs and loss/PSNR/SSIM/splat-count curves fill in">
 </p>
 
-The animation sweeps the real per-iteration 7,000-step dense Brush recording inside the custom viewer: the GPU splat cloud converges from noise to the Lego bulldozer while four ground-truth/render eval pairs and the loss, PSNR, SSIM, and splat-count curves fill in.
 
 ## Requirements
 
 - [Pixi](https://pixi.sh/latest/#installation)
 - Apple Silicon with Metal, or Linux with Vulkan
-- Enough local storage for build artifacts, datasets, and recordings (the supplied dense RRD is 2.4 GB)
+- Enough local storage for build artifacts, datasets, and recordings
 
-Run every command below from the repository root. Rust and Python Rerun packages are pinned together at `0.34.1`; do not update one side independently.
+Run every command below from the repository root. Rust and Python Rerun packages are pinned together at `0.38.1`; do not update one side independently.
 
 ## Install and build
 
@@ -70,43 +68,35 @@ The image above is a real prediction bundled with the downloaded checkpoint.
 
 ## Brush training
 
-### Live, headed training
-
-On macOS, this task builds the pinned Brush `v0.3.0` metrics variant, trains for 7,000 steps, opens this custom viewer, and saves `data/brush-runs/lego-live/training.rrd` at the same time:
+The native trainer runs pinned Brush in process. See [Training recordings](docs/architecture.md#training-recordings) for the logging contract and dashboard layout.
 
 ```bash
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-replay-lego-live
+# Prepare the local seed-42 initialization (training also runs this automatically).
+pixi run -e gsplat-rust-renderer --frozen gsplat-rust-renderer-prepare-nerf-init lego
+# Scene, step count, and mode; modes are record, live, and video.
+pixi run -e gsplat-rust-renderer --frozen gsplat-rust-renderer-train lego 30000 record
+pixi run -e gsplat-rust-renderer --frozen gsplat-rust-renderer-train lego 7000 video
 ```
 
-The recording contains the camera ring, loss/PSNR/SSIM/splat-count curves, four eval GT/render pairs, and eight retained splat snapshots (iteration 50, every 1,000 steps, and the final step). The blueprint uses a dark gradient and continuously orbits the scene.
+Scenes include the eight Blender scenes, Truck, and Train. Outputs go to
+`data/brush-runs/<scene>/<iterations>/<mode>/` inside the package. Each 30k run
+exports a 7k checkpoint and its final model. Live mode connects to a viewer
+already listening on port 9876. Pass extra Brush flags after `--`.
 
-### Headless replay artifact
-
-For the same bounded artifact without opening a viewer:
+Blender inputs are derived under `data/nerf-synthetic-init/`; set
+`GSPLAT_NERF_INIT_ROOT` only to use an existing derived dataset elsewhere.
+Both trainers must read the same initialized dataset for comparisons.
 
 ```bash
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-replay-lego
+# Build the pinned upstream reference locally in .brush/bin/brush-cli.
+pixi run -e gsplat-rust-renderer --frozen gsplat-brush-cli-build
+# Score all test cameras from unclipped float renders using the bench library.
+pixi run -e gsplat-rust-renderer --frozen gsplat-train-score \
+  --ply /path/to/export_7000.ply --dataset /path/to/lego --out /path/to/score.json
 ```
 
-Open the result later by passing the RRD positionally to the custom viewer:
-
-```bash
-packages/gsplat-rust-renderer/target/release/gsplat-rust-renderer packages/gsplat-rust-renderer/data/brush-runs/lego/training.rrd
-```
-
-## Dense video RRD
-
-The video task exports and logs one full-geometry snapshot per iteration, evaluates every 25 steps, keeps higher-order SH only on the final snapshot, and deletes processed PLY/eval directories as it goes:
-
-```bash
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-video-rrd-lego
-```
-
-Its output is `packages/gsplat-rust-renderer/data/brush-runs/lego-dense/training.rrd`. The `--video-layout` blueprint is flat and dark: the spinning scene and all four eval pairs sit above Loss, PSNR, SSIM, and Splats plots.
-
-![Four final dense-run evaluation ground-truth/render pairs](docs/media/dense-eval-pairs.png)
-
-Each adjacent pair is ground truth then Brush render, for eval views 0 through 3. See [the architecture notes](docs/architecture.md#training-recordings) for retention and layout details.
+`gsplat-train-build` builds the native binary; `target/release/gsplat-train --help`
+lists Brush options. With no `--save`, `--connect`, or `--spawn`, all logging is off.
 
 ## Full-split PSNR/SSIM evaluation
 
@@ -124,12 +114,15 @@ The second task reuses one standalone GPU process per scene and writes `packages
 Run the package gates from the repository root:
 
 ```bash
-pixi run -e gsplat-rust-renderer-dev --frozen lint
-pixi run -e gsplat-rust-renderer-dev --frozen typecheck
-pixi run -e gsplat-rust-renderer-dev --frozen tests
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-clippy
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-rust-test
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pixi run -e gsplat-rust-renderer-dev --frozen gate
 ```
+
+The integration lane includes a 200-step training recording check. `GSPLAT_LEGO`
+can override its default initialized dataset at
+`packages/gsplat-rust-renderer/data/nerf-synthetic-init/lego`. The golden lane compares the
+pretrained Lego conversion against Rerun’s PLY loader; `GSPLAT_TEST_PLY` selects
+the checkpoint. Missing assets produce explicit skips.
 
 ## Architecture
 

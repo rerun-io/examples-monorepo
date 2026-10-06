@@ -1,8 +1,7 @@
 """Shared scene I/O for the gsplat CLIs: NeRF-synthetic + COLMAP camera loaders
 and GT-image compositing.
 
-Imported by both ``apis/visualize_brush_training.py`` and
-``apis/log_splats_with_cameras.py`` — kept in the package (not ``tools/``) so
+Used by ``apis/log_splats_with_cameras.py`` and kept in the package so
 ``beartype_this_package()`` instruments it in dev. pycolmap is not in this env;
 the COLMAP binary layout is stable and these parsers avoid a heavyweight dep.
 """

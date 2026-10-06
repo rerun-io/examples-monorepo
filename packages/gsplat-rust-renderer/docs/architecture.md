@@ -4,38 +4,19 @@ This page describes the current renderer and recording paths. For copy-paste usa
 
 ## System shape
 
-```text
-Python PLY / Brush sidecar
-          │  Rerun 0.34.1 Gaussians3D components over gRPC or RRD
-          ▼
-┌──────────────────────────────┐       ┌──────────────────────────┐
-│ custom Rerun viewer          │       │ standalone gsplat-render │
-│ gaussian_visualizer.rs       │       │ render_cli.rs            │
-│ gaussian_renderer.rs         │       │ raw wgpu + PNG readback  │
-└──────────────┬───────────────┘       └────────────┬─────────────┘
-               └───────────────┬────────────────────┘
-                               ▼
-                     gsplat_core + shared WGSL
-```
+The native training path is `gsplat-train` → Brush tensors → Rerun 0.38.1
+`GaussianSplats3D`. The bench crate owns float rendering and evaluation.
+The older custom viewer and standalone `gsplat-render` still share `gsplat_core`
+and its WGSL shaders in this branch; the native viewer migration replaces that
+viewer path separately.
 
-`gsplat_core` is Rerun-free. Both front ends share its cloud/camera types, bind-group layouts, compute pipelines, buffer helpers, constants, and five compute shaders. The viewer adds a sixth shader to composite the raster texture into Rerun's viewport.
+## Native training wire contract
 
-The custom viewer registers its visualizer before attaching live receivers or opening a positional `.rrd`. This matters at startup: the first activated blueprint can resolve `Gaussians3D` immediately, and positional recordings open through Rerun's normal file route rather than landing on the catalog page.
-
-## Upstream `Gaussians3D` wire contract
-
-Released Rerun `0.34.1` does not yet expose a generated Python archetype here, so Python emits custom component batches that exactly match the upstream schema. Rust queries the same field-qualified descriptors.
-
-| Descriptor | Component type | Arrow value | Default |
-|---|---|---|---|
-| `Gaussians3D:centers` | `Position3D` | `FixedSizeList<Float32, 3>` | required |
-| `Gaussians3D:scales` | `Scale3D` | `FixedSizeList<Float32, 3>` | `0.01` per axis |
-| `Gaussians3D:quaternions` | `RotationQuat` | `FixedSizeList<Float32, 4>` (`xyzw`) | identity |
-| `Gaussians3D:colors` | `Color` | `UInt32` (`0xRRGGBBAA`) | opaque white |
-| `Gaussians3D:sh_coefficients` | `SphericalHarmonics3` | `FixedSizeList<Float16, 45>` | absent / DC only |
-| `Gaussians3D:show_spherical_harmonics` | `ShowSphericalHarmonics` | scalar `Bool` | `true` |
-
-Fixed-size-list children are named `item` and non-nullable. Color stores the PLY's SH DC term as RGB plus sigmoid opacity; the optional 45 float16 values contain degrees 1–3 in coefficient-major order.
+The trainer uses the generated Rerun `GaussianSplats3D` archetype. Centers and
+scales are float32 triples, rotations are XYZW quaternions, and colors are RGBA8.
+Higher SH uses `SphericalHarmonics3Rgb` (45 float16 values), with an explicit
+`spherical_harmonics_degree`. The legacy Python `Gaussians3D` adapter belongs to
+the older viewer path and is not used by training.
 
 ## Viewer frame lifecycle
 
@@ -89,19 +70,50 @@ The clamp stage stores `DrawIndirectArgs` beside the live count. Viewer tile-rad
 
 ## Training recordings
 
-The pure-trainer path keeps Brush's embedded Rerun disabled and uses this package's Rerun `0.34.1` sidecar. It logs:
+`crates/gsplat-train` drives Brush's pinned `create_process_with_device` stream.
+The local observer adapter exposes the existing loss/LR/refine values without
+changing training math, loading, config merge, evaluation or exports. It emits
+step events every five steps and at the final step. Refine statistics come
+from refine events, not sampled step events. The temporary adapter and complete
+patch live in `vendor/brush-process`; remove it when Brush exposes these stats.
 
-- the true `iterations` timeline plus a dense `step` timeline;
-- all 100 training-camera frusta with 160-pixel JPEG ground-truth planes;
-- `loss/total`, `psnr/eval`, `ssim/eval`, and `splats/num_splats`;
-- four `eval/view_{0..3}/{ground_truth,render}` pairs;
-- `world/splats` snapshots with complete geometry and optional higher-order SH.
+The trainer captures tensor handles from the current splat slot before advancing
+the stream. A separate logging thread reads them asynchronously, folds Brush's
+minimum-scale filter as its exporter does, and logs native `GaussianSplats3D`.
+Scales use exp, WXYZ rotations become normalized XYZW, DC/opacity become RGBA8,
+and higher SH uses coefficient-major 15-by-3 f16 values. Degree 4 is truncated
+only at this logging boundary. Snapshots retain step 50, every 1,000 steps, and
+the final step by default; only the final snapshot carries higher SH.
+`--snapshot-first` changes the first retained step. Brush's
+`--rerun-log-splats-every` changes the periodic cadence. These and
+`--rerun-log-train-stats-every` accept positive multiples of five; the latter
+keeps Brush's 50-step default. Console progress is independent at 100 steps.
+`--rerun-max-img-size` controls eval thumbnails (default 512); camera thumbnails
+are capped at 256. Images use JPEG quality 85. The legacy `--rerun-enabled` and
+unsupported distribution flag are rejected explicitly, including merged config.
+Brush's own Rerun logger stays disabled.
 
-Both rich blueprints use `GradientDark`, collapsed panels, a 0.2 rad/s orbital eye, and explicit `Gaussians3D` overrides. The normal layout uses a 2×2 eval grid plus Quality tabs and a Splats plot. `--video-layout` removes tabs: all four eval pairs are stacked beside the scene, with four graphs in one bottom row.
+All dynamic data uses `iterations`. Scalars include loss, step milliseconds,
+splat counts, learning rates, refine statistics, sampled GPU memory and Brush's
+EvalResult PSNR/SSIM. Cameras use Pinhole + Transform3D and small JPEG thumbnails;
+distorted camera models are explicitly documented as pinhole approximations.
+Four fixed eval views are rendered only at Brush's eval steps, at thumbnail
+resolution on the logging thread. They use a black background; GT is
+premultiplied with Brush's packed-image conversion. All snapshot and scalar
+readbacks run asynchronously on that thread. A logging failure emits a warning
+and does not abort training; sink flushing has a two-second timeout. A live
+sink must connect during a bounded check before training; an unavailable sink
+is disabled with a warning to avoid the SDK's unconnected queue backpressure.
 
-![Start, midpoint, and end of the dense run's first eval view](media/training-progression.png)
-
-The ordinary 7K replay exports every 50 steps, evaluates every 500, and retains eight splat snapshots: 50, 1,000-step boundaries, and 7,000. The dense video task exports and logs every iteration, evaluates every 25 steps, keeps intermediate snapshots DC-only, preserves SH on the final snapshot, and deletes processed PLY/eval batches. Its measured RRD has 7,000 splat timeline points and four tracked eval views.
+The Rust blueprint places a 3D scene and four eval pairs above metric tabs.
+`--video` adds a spinning eye and a flat Loss/PSNR/SSIM/Splats row. Brush's
+estimated axis is a model-rotation target from -Y. Apply that rotation's inverse
+to -Y for the eye up and nearest world ViewCoordinates, so the spin follows the
+unrotated scene. The default has no visualizer override and opens in
+stock Rerun. `--compute-visualizer` explicitly selects `ComputeGaussianSplats3D`
+for a compatible custom viewer; it cannot be combined with stock `--spawn`.
+`--connect` and `--save`
+fan out through Rerun's sinks, so live and saved recordings contain the same data.
 
 ## Evaluation path
 
