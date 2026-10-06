@@ -1,4 +1,5 @@
 //! Synchronized speed and float Brush-oracle parity runners.
+mod score;
 mod speed;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -20,6 +21,7 @@ struct Args {
 enum Action {
     Speed(speed::SpeedArgs),
     Parity(ParityArgs),
+    Score(score::ScoreArgs),
 }
 #[derive(clap::Args)]
 pub struct CameraArgs {
@@ -322,10 +324,12 @@ async fn main() -> Result<()> {
     let out = match &action {
         Action::Speed(a) => a.out.clone(),
         Action::Parity(a) => a.out.clone(),
+        Action::Score(a) => a.out.clone(),
     };
     let result = match action {
         Action::Speed(a) => speed::run(a).await,
         Action::Parity(a) => run_parity(a).await,
+        Action::Score(a) => score::run(a).await,
     };
     if let Err(error) = &result
         && let Some(gsplat_bench::Error::Unsupported(reason)) =
@@ -351,6 +355,22 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn score_accepts_an_export_and_dataset() {
+        assert!(
+            Args::try_parse_from([
+                "bench",
+                "score",
+                "--ply",
+                "export.ply",
+                "--dataset",
+                "lego",
+                "--out",
+                "score.json"
+            ])
+            .is_ok()
+        );
+    }
     #[tokio::test]
     async fn orbit_up_places_cameras_above_the_scene_and_looks_at_focus() {
         let args = Args::try_parse_from([

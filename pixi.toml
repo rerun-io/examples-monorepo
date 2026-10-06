@@ -2108,6 +2108,18 @@ cwd = "packages/gsplat-rust-renderer"
 outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
 description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
 
+[feature.gsplat-rust-renderer.tasks.gsplat-brush-cli-build]
+cmd = "cargo install --git https://github.com/ArthurBrussee/brush --rev 1388f74c6fe0236f68ee4915564bf00e9d2e3747 brush-cli --locked --root .brush"
+cwd = "packages/gsplat-rust-renderer"
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_INCREMENTAL = "0", CARGO_TARGET_DIR = "target/brush-cli" }
+description = "Build the pinned, unmodified Brush CLI locally for training comparisons"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-train-score]
+cmd = "cargo run --release --locked -p gsplat-bench -- score"
+cwd = "packages/gsplat-rust-renderer"
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_INCREMENTAL = "0" }
+description = "Score exported PLYs against NeRF test views using unclipped float renders"
+
 # ── Brush training tasks ─────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-install-brush-mac]
 cmd = "test -x data/tools/brush-v0.3.0/brush_app || (mkdir -p data/tools/brush-v0.3.0 && curl -fL https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-aarch64-apple-darwin.tar.xz -o data/tools/brush-v0.3.0.tar.xz && echo '65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c  data/tools/brush-v0.3.0.tar.xz' | shasum -a 256 -c - && tar -xJf data/tools/brush-v0.3.0.tar.xz --strip-components=1 -C data/tools/brush-v0.3.0 && rm data/tools/brush-v0.3.0.tar.xz)"
