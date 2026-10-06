@@ -93,10 +93,10 @@ fn vo_problem(num_frames: usize, seed: u64) -> Problem {
                     let p_cam: Vector3<f64> = t_c_w * p3d;
                     let mut pixel: Vector2<f64> = Vector2::zeros();
                     let mut jacobian = nalgebra::Matrix2x4::zeros();
-                    let ok: bool = estimator.cameras()[c].project_with_jacobian(
+                    let ok: bool = estimator.cameras()[c].project_point(
                         &Vector4::new(p_cam[0], p_cam[1], p_cam[2], 1.0),
                         &mut pixel,
-                        &mut jacobian,
+                        Some(&mut jacobian),
                     );
                     assert!(ok, "the synthetic problem must project");
                     // `Random() / 100` pixels of noise.

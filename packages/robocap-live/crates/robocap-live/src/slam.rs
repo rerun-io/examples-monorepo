@@ -542,7 +542,7 @@ impl SlamEstimator {
 #[cfg(test)]
 mod tests {
     use kornia_image::ImageSize;
-    use slam_rs::calib::{CameraModel, PinholeParams};
+    use slam_rs::calib::{BasaltCamera, PinholeParams};
     use slam_rs::lie::{Se3, So3};
 
     use super::*;
@@ -793,7 +793,7 @@ mod tests {
         // left_front (SLAM camera 0) at 640x360 = the factory Kalibr fx at 1920x1080 over 3: Cap A 636.4361 (its
         // camchain-imucam.yaml), Cap B 612.4247 (fe6fede545c972fa/imus_cam_lr_front_extrinsic).
         let fx = |slam: &SlamEstimator| match &slam.calibration.intrinsics[0] {
-            CameraModel::Kb4(kb4) => kb4.fx,
+            BasaltCamera::Kb4(kb4) => kb4.fx,
             _ => f64::NAN,
         };
         let cap_a = SlamEstimator::with_profile(CAP_A_CALIBRATION, 1, SlamProfile::Live, &[])?;
@@ -863,7 +863,7 @@ mod tests {
         for camera in 0..4 {
             calibration.t_i_c[camera] =
                 Se3::new(So3::identity(), [camera as f64 * 0.08, 0.0, 0.0].into());
-            calibration.intrinsics[camera] = CameraModel::Pinhole(PinholeParams {
+            calibration.intrinsics[camera] = BasaltCamera::Pinhole(PinholeParams {
                 fx: 300.0,
                 fy: 300.0,
                 cx: 320.0,

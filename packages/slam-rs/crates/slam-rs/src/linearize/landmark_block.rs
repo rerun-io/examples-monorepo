@@ -5,7 +5,7 @@
 use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3};
 
 use crate::ba_base::{LinearizePointOut, linearize_point};
-use crate::camera::CameraEnum;
+use crate::camera::SlamCamera;
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, c};
 use crate::linearize::{LinearizeError, RelPoseLin};
@@ -346,7 +346,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         &mut self,
         lm: &Landmark<S>,
         rel_pose_lin: &[RelPoseLin<S>],
-        cameras: &[CameraEnum<S>],
+        cameras: &[SlamCamera<S>],
         options: &LandmarkBlockOptions<S>,
     ) -> Result<S, LinearizeError> {
         // `storage.setZero()`.
@@ -368,7 +368,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                         target: obs.tcid_t.frame_id,
                         target_cam: obs.tcid_t.cam_id,
                     })?;
-            let cam: &CameraEnum<S> =
+            let cam: &SlamCamera<S> =
                 cameras
                     .get(obs.tcid_t.cam_id)
                     .ok_or(LinearizeError::UnknownCamera {
@@ -932,7 +932,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::calib::{CameraModel, Kb4Params};
+    use crate::calib::{BasaltCamera, Kb4Params};
     use crate::lie::Se3;
     use crate::types::LandmarkId;
     use nalgebra::{Matrix4, Matrix6, Vector4};
@@ -970,8 +970,8 @@ mod tests {
         Some(usize::from(target.cam_id == 1))
     }
 
-    fn cameras() -> Vec<CameraEnum<f64>> {
-        let model: CameraModel<f64> = CameraModel::Kb4(Kb4Params {
+    fn cameras() -> Vec<SlamCamera<f64>> {
+        let model: BasaltCamera<f64> = BasaltCamera::Kb4(Kb4Params {
             fx: 379.045,
             fy: 379.008,
             cx: 505.512,
@@ -982,8 +982,8 @@ mod tests {
             k4: -0.000452646,
         });
         vec![
-            CameraEnum::from_model(&model).unwrap(),
-            CameraEnum::from_model(&model).unwrap(),
+            SlamCamera::from_model(&model).unwrap(),
+            SlamCamera::from_model(&model).unwrap(),
         ]
     }
 

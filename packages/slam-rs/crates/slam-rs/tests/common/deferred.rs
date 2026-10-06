@@ -1,6 +1,6 @@
 //! The moving-ceiling fixture of the deferred-keyframe integration test.
 
-use super::api::calib::{Calibration, CameraModel, PinholeParams};
+use super::api::calib::{BasaltCamera, Calibration, PinholeParams};
 use super::api::config::VioConfig;
 use super::api::frontend::flow::FrontendOptions;
 use super::api::lie::{Se3, So3};
@@ -28,7 +28,7 @@ pub fn calibration() -> Calibration<f64> {
     for camera in 0..4 {
         calibration.t_i_c[camera] =
             Se3::new(So3::identity(), [camera as f64 * 0.08, 0.0, 0.0].into());
-        calibration.intrinsics[camera] = CameraModel::Pinhole(PinholeParams {
+        calibration.intrinsics[camera] = BasaltCamera::Pinhole(PinholeParams {
             fx: FOCAL,
             fy: FOCAL,
             cx: WIDTH as f64 / 2.0,

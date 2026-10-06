@@ -2,7 +2,7 @@
 
 use super::{EstimatorError, FlowObservations, SqrtKeypointVio, cast_pixel};
 use crate::ba_base::triangulate;
-use crate::camera::CameraEnum;
+use crate::camera::SlamCamera;
 use crate::landmark::{Landmark, StereographicParam};
 use crate::lie::{LieScalar, Se3};
 use crate::types::{KeypointId, LandmarkId, TimeCamId};
@@ -69,7 +69,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         for (cam_id, ids) in unconnected_obs.iter().enumerate() {
             let tcidl: TimeCamId = TimeCamId::new(frame.t_ns, cam_id);
             let host_keypoints: &BTreeMap<KeypointId, Vector2<f32>> = &frame.cameras[cam_id];
-            let cam0: CameraEnum<S> = self.ba.cameras()[cam_id];
+            let cam0: SlamCamera<S> = self.ba.cameras()[cam_id];
             let t_i_c0_inv: Se3<S> = self.ba.calib.t_i_c[cam_id].inverse();
             for kpt_id in ids {
                 let lm_id: LandmarkId = LandmarkId::from(*kpt_id);
@@ -113,7 +113,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     // pair, not the landmark.
                     let mut p0_3d: Vector4<S> = Vector4::zeros();
                     let mut p1_3d: Vector4<S> = Vector4::zeros();
-                    let cam1: CameraEnum<S> = self.ba.cameras()[tcido.cam_id];
+                    let cam1: SlamCamera<S> = self.ba.cameras()[tcido.cam_id];
                     let valid0: bool = cam0.unproject(&p0, &mut p0_3d);
                     let valid1: bool = cam1.unproject(p1, &mut p1_3d);
                     if !valid0 || !valid1 {

@@ -2990,6 +2990,7 @@ dependencies = [
  "kornia-image",
  "kornia-staging-algebra",
  "nalgebra",
+ "serde",
  "thiserror",
 ]
 
@@ -5994,6 +5995,8 @@ dependencies = [
  "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
+ "kornia-staging-algebra",
  "log",
  "nalgebra",
  "rayon",

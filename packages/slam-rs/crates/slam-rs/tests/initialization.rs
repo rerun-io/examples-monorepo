@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use nalgebra::{Matrix2x4, Vector2, Vector3, Vector4};
-use slam_rs::camera::CameraEnum;
+use slam_rs::camera::SlamCamera;
 use slam_rs::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::LieScalar;
@@ -25,12 +25,12 @@ fn stereo(t_ns: i64, count: usize) -> Arc<FlowObservations> {
             );
         for (cam, pixels) in frame.cameras.iter_mut().enumerate() {
             let p = calibration.t_i_c[cam].inverse() * point;
-            let model = CameraEnum::from_model(&calibration.intrinsics[cam]).unwrap();
+            let model = SlamCamera::from_model(&calibration.intrinsics[cam]).unwrap();
             let mut pixel = Vector2::zeros();
-            assert!(model.project_with_jacobian(
+            assert!(model.project_point(
                 &Vector4::new(p.x, p.y, p.z, 1.0),
                 &mut pixel,
-                &mut Matrix2x4::zeros(),
+                Some(&mut Matrix2x4::zeros())
             ));
             pixels.insert(KeypointId(id as u64), pixel.cast());
         }

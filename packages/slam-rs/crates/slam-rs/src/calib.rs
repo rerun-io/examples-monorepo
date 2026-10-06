@@ -139,72 +139,7 @@ mod vector3_json {
     }
 }
 
-/// Pinhole, `fx fy cx cy`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PinholeParams<S> {
-    /// Focal length along image x, pixels.
-    pub fx: S,
-    /// Focal length along image y, pixels.
-    pub fy: S,
-    /// Principal point x, pixels.
-    pub cx: S,
-    /// Principal point y, pixels.
-    pub cy: S,
-}
-
-/// Kannala-Brandt with four radial terms.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Kb4Params<S> {
-    /// Focal length along image x, pixels.
-    pub fx: S,
-    /// Focal length along image y, pixels.
-    pub fy: S,
-    /// Principal point x, pixels.
-    pub cx: S,
-    /// Principal point y, pixels.
-    pub cy: S,
-    /// First radial coefficient.
-    pub k1: S,
-    /// Second radial coefficient.
-    pub k2: S,
-    /// Third radial coefficient.
-    pub k3: S,
-    /// Fourth radial coefficient.
-    pub k4: S,
-}
-
-/// Pinhole with eight-term rational Brown-Conrady distortion.
-/// The disk order is `k1 k2 p1 p2 k3 k4 k5 k6`, matching OpenCV.
-/// `rpmax` is stored beside the twelve optimized parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Radtan8Params<S> {
-    /// Focal length along image x, pixels.
-    pub fx: S,
-    /// Focal length along image y, pixels.
-    pub fy: S,
-    /// Principal point x, pixels.
-    pub cx: S,
-    /// Principal point y, pixels.
-    pub cy: S,
-    /// First numerator radial coefficient.
-    pub k1: S,
-    /// Second numerator radial coefficient.
-    pub k2: S,
-    /// First tangential coefficient.
-    pub p1: S,
-    /// Second tangential coefficient.
-    pub p2: S,
-    /// Third numerator radial coefficient.
-    pub k3: S,
-    /// First denominator radial coefficient.
-    pub k4: S,
-    /// Second denominator radial coefficient.
-    pub k5: S,
-    /// Third denominator radial coefficient.
-    pub k6: S,
-    /// Largest projectable radius; beyond it the rational model turns over.
-    pub rpmax: S,
-}
+pub use kornia_staging_3d::camera::formats::{Kb4Params, PinholeParams, Radtan8Params};
 
 /// Double sphere.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -259,11 +194,11 @@ pub struct UnifiedParams<S> {
 ///
 /// Six variants can be parsed. `ds`, `eucm` and `ucm` have no projection
 /// implementation and return `CameraError::UnsupportedModel` from
-/// [`crate::camera::CameraEnum::from_model`] (D13). Parsing them first lets the
+/// the staged model converter. Parsing them first lets the
 /// error name the unsupported model rather than an unrelated JSON field.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "camera_type", content = "intrinsics")]
-pub enum CameraModel<S> {
+pub enum BasaltCamera<S> {
     /// `pinhole`.
     #[serde(rename = "pinhole")]
     Pinhole(PinholeParams<S>),
@@ -284,7 +219,7 @@ pub enum CameraModel<S> {
     Unified(UnifiedParams<S>),
 }
 
-impl<S: Copy> CameraModel<S> {
+impl<S: Copy> BasaltCamera<S> {
     /// The model name stored in `camera_type`.
     pub fn name(&self) -> &'static str {
         match self {
@@ -299,7 +234,7 @@ impl<S: Copy> CameraModel<S> {
 
     /// The optimized parameter vector: `fx fy cx cy`, then model-specific terms.
     /// Distortion coefficients are `params()[4..]`. For `pinhole-radtan8`, `rpmax`
-    /// is a fixed bound outside the twelve-vector; see [`CameraModel::valid_radius`].
+    /// is a fixed bound outside the twelve-vector; see [`BasaltCamera::valid_radius`].
     pub fn params(&self) -> Vec<S> {
         match self {
             Self::Pinhole(p) => vec![p.fx, p.fy, p.cx, p.cy],
@@ -315,10 +250,6 @@ impl<S: Copy> CameraModel<S> {
 
     /// `rpmax` for `pinhole-radtan8`, which is the only model that has one.
     ///
-    /// No production caller — `rpmax` reaches the projection through
-    /// [`crate::camera::CameraEnum::from_model`] — and the only reader of the
-    /// parsed field on this type, which is what makes a calibration's `rpmax`
-    /// checkable where it is parsed.
     pub fn valid_radius(&self) -> Option<S> {
         match self {
             Self::PinholeRadtan8(p) => Some(p.rpmax),
@@ -327,19 +258,18 @@ impl<S: Copy> CameraModel<S> {
     }
 }
 
-impl<S: LieScalar> CameraModel<S> {
-    /// `GenericCamera::cast` : the same model in
-    /// another scalar.
-    pub fn cast<T: LieScalar>(&self) -> CameraModel<T> {
+impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
+    /// Convert the calibration to another scalar precision.
+    pub fn cast<T: kornia_staging_algebra::Scalar>(&self) -> BasaltCamera<T> {
         let convert = |value: S| -> T { T::from_literal(value.to_f64()) };
         match self {
-            Self::Pinhole(p) => CameraModel::Pinhole(PinholeParams {
+            Self::Pinhole(p) => BasaltCamera::Pinhole(PinholeParams {
                 fx: convert(p.fx),
                 fy: convert(p.fy),
                 cx: convert(p.cx),
                 cy: convert(p.cy),
             }),
-            Self::Kb4(p) => CameraModel::Kb4(Kb4Params {
+            Self::Kb4(p) => BasaltCamera::Kb4(Kb4Params {
                 fx: convert(p.fx),
                 fy: convert(p.fy),
                 cx: convert(p.cx),
@@ -349,7 +279,7 @@ impl<S: LieScalar> CameraModel<S> {
                 k3: convert(p.k3),
                 k4: convert(p.k4),
             }),
-            Self::PinholeRadtan8(p) => CameraModel::PinholeRadtan8(Radtan8Params {
+            Self::PinholeRadtan8(p) => BasaltCamera::PinholeRadtan8(Radtan8Params {
                 fx: convert(p.fx),
                 fy: convert(p.fy),
                 cx: convert(p.cx),
@@ -364,7 +294,7 @@ impl<S: LieScalar> CameraModel<S> {
                 k6: convert(p.k6),
                 rpmax: convert(p.rpmax),
             }),
-            Self::DoubleSphere(p) => CameraModel::DoubleSphere(DoubleSphereParams {
+            Self::DoubleSphere(p) => BasaltCamera::DoubleSphere(DoubleSphereParams {
                 fx: convert(p.fx),
                 fy: convert(p.fy),
                 cx: convert(p.cx),
@@ -372,7 +302,7 @@ impl<S: LieScalar> CameraModel<S> {
                 xi: convert(p.xi),
                 alpha: convert(p.alpha),
             }),
-            Self::ExtendedUnified(p) => CameraModel::ExtendedUnified(ExtendedUnifiedParams {
+            Self::ExtendedUnified(p) => BasaltCamera::ExtendedUnified(ExtendedUnifiedParams {
                 fx: convert(p.fx),
                 fy: convert(p.fy),
                 cx: convert(p.cx),
@@ -380,7 +310,7 @@ impl<S: LieScalar> CameraModel<S> {
                 alpha: convert(p.alpha),
                 beta: convert(p.beta),
             }),
-            Self::Unified(p) => CameraModel::Unified(UnifiedParams {
+            Self::Unified(p) => BasaltCamera::Unified(UnifiedParams {
                 fx: convert(p.fx),
                 fy: convert(p.fy),
                 cx: convert(p.cx),
@@ -388,6 +318,25 @@ impl<S: LieScalar> CameraModel<S> {
                 alpha: convert(p.alpha),
             }),
         }
+    }
+}
+
+impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
+    /// Convert a supported calibration into a validated staged camera.
+    pub fn to_staged(
+        &self,
+    ) -> Result<
+        kornia_staging_3d::camera::CameraModelKind<S>,
+        kornia_staging_3d::camera::formats::ConversionError,
+    > {
+        use kornia_staging_3d::camera::formats::{BasaltCamera as Supported, ConversionError};
+        let supported = match *self {
+            Self::Pinhole(p) => Supported::Pinhole(p),
+            Self::Kb4(p) => Supported::Kb4(p),
+            Self::PinholeRadtan8(p) => Supported::PinholeRadtan8(p),
+            _ => return Err(ConversionError::Unsupported(self.name().into())),
+        };
+        (&supported).try_into()
     }
 }
 
@@ -515,7 +464,7 @@ pub struct Calibration<S: LieScalar> {
     /// Camera pose in the IMU frame, one per camera: `p_i = T_i_c p_c`.
     pub t_i_c: Vec<Se3<S>>,
     /// Projection model, one per camera.
-    pub intrinsics: Vec<CameraModel<S>>,
+    pub intrinsics: Vec<BasaltCamera<S>>,
     /// `[width, height]` per camera, in pixels.
     pub resolution: Vec<[u32; 2]>,
     /// Vignetting splines, empty in every reference calibration but EuRoC's.
@@ -547,7 +496,7 @@ pub struct Calibration<S: LieScalar> {
 struct CalibrationJson<S: LieScalar> {
     #[serde(rename = "T_imu_cam")]
     t_imu_cam: Vec<PoseJson<S>>,
-    intrinsics: Vec<CameraModel<S>>,
+    intrinsics: Vec<BasaltCamera<S>>,
     resolution: Vec<[u32; 2]>,
     vignette: Vec<VignetteSpline<S>>,
     calib_accel_bias: CalibAccelBias<S>,
@@ -747,7 +696,7 @@ impl<S: LieScalar> Calibration<S> {
         };
         Calibration {
             t_i_c: self.t_i_c.iter().map(Se3::cast).collect(),
-            intrinsics: self.intrinsics.iter().map(CameraModel::cast).collect(),
+            intrinsics: self.intrinsics.iter().map(BasaltCamera::cast).collect(),
             resolution: self.resolution.clone(),
             vignette: self
                 .vignette
@@ -792,7 +741,7 @@ impl<S: LieScalar> Calibration<S> {
         imu: &ImuParts<S>,
     ) -> Result<Self, CalibError> {
         let mut t_i_c: Vec<Se3<S>> = Vec::with_capacity(cameras.len());
-        let mut intrinsics: Vec<CameraModel<S>> = Vec::with_capacity(cameras.len());
+        let mut intrinsics: Vec<BasaltCamera<S>> = Vec::with_capacity(cameras.len());
         let mut resolution: Vec<[u32; 2]> = Vec::with_capacity(cameras.len());
 
         for (index, camera) in cameras.iter().enumerate() {
@@ -850,7 +799,7 @@ fn pose_from_row_major<S: LieScalar>(m: &[S; 16], index: usize) -> Result<Se3<S>
 fn camera_model_from_parts<S: LieScalar>(
     camera: &CameraParts<S>,
     index: usize,
-) -> Result<CameraModel<S>, CalibError> {
+) -> Result<BasaltCamera<S>, CalibError> {
     let (fx, fy, cx, cy): (S, S, S, S) = (camera.fx, camera.fy, camera.cx, camera.cy);
     let d: &[S] = &camera.distortion;
 
@@ -870,11 +819,11 @@ fn camera_model_from_parts<S: LieScalar>(
     match camera.model.as_str() {
         "pinhole" => {
             expect(0, "pinhole")?;
-            Ok(CameraModel::Pinhole(PinholeParams { fx, fy, cx, cy }))
+            Ok(BasaltCamera::Pinhole(PinholeParams { fx, fy, cx, cy }))
         }
         "kb4" => {
             expect(4, "kb4")?;
-            Ok(CameraModel::Kb4(Kb4Params {
+            Ok(BasaltCamera::Kb4(Kb4Params {
                 fx,
                 fy,
                 cx,
@@ -888,7 +837,7 @@ fn camera_model_from_parts<S: LieScalar>(
         // Accept both `radtan8` and `pinhole-radtan8` for the same model.
         "radtan8" | "pinhole-radtan8" => {
             expect(8, "pinhole-radtan8")?;
-            Ok(CameraModel::PinholeRadtan8(Radtan8Params {
+            Ok(BasaltCamera::PinholeRadtan8(Radtan8Params {
                 fx,
                 fy,
                 cx,
@@ -907,7 +856,7 @@ fn camera_model_from_parts<S: LieScalar>(
         }
         "ds" => {
             expect(2, "ds")?;
-            Ok(CameraModel::DoubleSphere(DoubleSphereParams {
+            Ok(BasaltCamera::DoubleSphere(DoubleSphereParams {
                 fx,
                 fy,
                 cx,
@@ -918,7 +867,7 @@ fn camera_model_from_parts<S: LieScalar>(
         }
         "eucm" => {
             expect(2, "eucm")?;
-            Ok(CameraModel::ExtendedUnified(ExtendedUnifiedParams {
+            Ok(BasaltCamera::ExtendedUnified(ExtendedUnifiedParams {
                 fx,
                 fy,
                 cx,
@@ -929,7 +878,7 @@ fn camera_model_from_parts<S: LieScalar>(
         }
         "ucm" => {
             expect(1, "ucm")?;
-            Ok(CameraModel::Unified(UnifiedParams {
+            Ok(BasaltCamera::Unified(UnifiedParams {
                 fx,
                 fy,
                 cx,

@@ -484,12 +484,25 @@ impl<S: lie::LieScalar> Vio<S> {
             .filter(|_| status == VioStatus::Tracking)
             .map(|state| VioPose {
                 world_from_rig: pose_to_array(&Isometry3::from_parts(
-                    state.t_w_i.translation.map(lie::LieScalar::to_f64).into(),
+                    state
+                        .t_w_i
+                        .translation
+                        .map(kornia_staging_algebra::Scalar::to_f64)
+                        .into(),
                     *state.t_w_i.rotation.cast::<f64>().quaternion(),
                 )),
-                velocity: state.vel_w_i.map(lie::LieScalar::to_f64).into(),
-                gyro_bias: state.bias_gyro.map(lie::LieScalar::to_f64).into(),
-                accel_bias: state.bias_accel.map(lie::LieScalar::to_f64).into(),
+                velocity: state
+                    .vel_w_i
+                    .map(kornia_staging_algebra::Scalar::to_f64)
+                    .into(),
+                gyro_bias: state
+                    .bias_gyro
+                    .map(kornia_staging_algebra::Scalar::to_f64)
+                    .into(),
+                accel_bias: state
+                    .bias_accel
+                    .map(kornia_staging_algebra::Scalar::to_f64)
+                    .into(),
             });
         VioResult { status, t_ns, pose }
     }
@@ -563,9 +576,9 @@ impl<S: lie::LieScalar> Vio<S> {
             self.latest_state = Some(types::PoseVelBiasState {
                 t_ns: state.t_ns,
                 t_w_i: state.t_w_i.cast(),
-                vel_w_i: state.vel_w_i.map(lie::LieScalar::to_f64),
-                bias_gyro: state.bias_gyro.map(lie::LieScalar::to_f64),
-                bias_accel: state.bias_accel.map(lie::LieScalar::to_f64),
+                vel_w_i: state.vel_w_i.map(kornia_staging_algebra::Scalar::to_f64),
+                bias_gyro: state.bias_gyro.map(kornia_staging_algebra::Scalar::to_f64),
+                bias_accel: state.bias_accel.map(kornia_staging_algebra::Scalar::to_f64),
             });
         }
     }

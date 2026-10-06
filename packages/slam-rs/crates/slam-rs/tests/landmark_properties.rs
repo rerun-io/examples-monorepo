@@ -6,7 +6,7 @@ use nalgebra::{Matrix2x3, Matrix2x6, Vector2, Vector3, Vector6};
 use proptest::prelude::*;
 use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point, triangulate};
 use slam_rs::calib::Calibration;
-use slam_rs::camera::CameraEnum;
+use slam_rs::camera::SlamCamera;
 use slam_rs::landmark::Landmark;
 use slam_rs::lie::{Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
@@ -29,7 +29,7 @@ proptest! {
         let observation = Vector2::from(observation);
         for name in ["msdmi", "msdmg"] {
             let calibration: Calibration<f64> = Calibration::from_json_str(common::calibration_text(name)).unwrap();
-            let camera = CameraEnum::from_model(&calibration.intrinsics[0]).unwrap();
+            let camera = SlamCamera::from_model(&calibration.intrinsics[0]).unwrap();
             let mut residual = Vector2::zeros();
             let mut jp = Matrix2x3::zeros();
             let mut jx = Matrix2x6::zeros();

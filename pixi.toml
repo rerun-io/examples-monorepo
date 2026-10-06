@@ -2586,6 +2586,16 @@ depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
     "packages/slam-rs/patches/**",
     "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
     "packages/slam-rs/tools/prepare_patched_deps.py",
@@ -2707,6 +2717,16 @@ depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu --target-dir target/wgpu && cp target/wgpu/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
     "packages/slam-rs/patches/**",
     "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
     "packages/slam-rs/tools/prepare_patched_deps.py",
