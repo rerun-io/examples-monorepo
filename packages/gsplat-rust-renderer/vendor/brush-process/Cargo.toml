@@ -1,0 +1,35 @@
+[package]
+name = "brush-process"
+version = "1.0.0"
+edition = "2024"
+
+[features]
+debug-validation = ["brush-train/debug-validation"]
+
+[dependencies]
+brush-render.workspace = true
+brush-serde.workspace = true
+brush-train.workspace = true
+brush-dataset.workspace = true
+brush-vfs = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
+brush-async = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
+brush-rerun = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }
+burn.workspace = true
+burn-wgpu = { git = "https://github.com/tracel-ai/burn", branch = "main", features = ["exclusive-memory-only"] }
+alphanumeric-sort = "1.5.3"
+anyhow.workspace = true
+async-fn-stream = "0.3"
+clap.workspace = true
+rand = "0.10"
+log = "0.4"
+glam.workspace = true
+web-time = "1.1"
+tracing = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+wgpu.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

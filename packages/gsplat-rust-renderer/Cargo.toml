@@ -109,3 +109,7 @@ tokio = { workspace = true, optional = true }
 [profile.release]
 lto = "thin"
 codegen-units = 16
+
+# Observer-only event additions; see vendor/brush-process/README.md.
+[patch.'https://github.com/ArthurBrussee/brush']
+brush-process = { path = "vendor/brush-process" }

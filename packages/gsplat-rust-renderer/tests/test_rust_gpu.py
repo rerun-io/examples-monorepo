@@ -6,10 +6,47 @@ from pathlib import Path
 import pytest
 
 
+def run_rust_contract(package: str, suite: str | None, name: str, assets: tuple[str, ...]) -> None:
+    """Missing external assets are pytest skips; Rust failures remain failures."""
+    root: Path = Path(__file__).resolve().parents[1]
+    environment: dict[str, str] = dict(os.environ)
+    defaults: dict[str, Path] = {
+        "GSPLAT_LEGO": Path(environment.get("GSPLAT_NERF_INIT_ROOT", str(root / "data/nerf-synthetic-init"))) / "lego",
+        "GSPLAT_TEST_PLY": root / "data/nerfbaselines/pretrained/lego/checkpoint/point_cloud/iteration_30000/point_cloud.ply",
+        "GSPLAT_TEST_CAMERAS": root / "data/nerfbaselines/data/lego/transforms_test.json",
+        "GSPLAT_TEST_GT": root / "data/nerfbaselines/data/lego/test/r_0.png",
+        "GSPLAT_TEST_COLMAP": root / "data/mipnerf360/garden/sparse/0",
+    }
+    for key in assets:
+        path: Path = Path(environment.get(key, str(defaults[key])))
+        if not path.exists():
+            pytest.skip(f"Required Rust integration asset {key} missing: {path}")
+        if key == "GSPLAT_LEGO" and not (path / "points3d.ply").is_file():
+            pytest.skip(f"Required initialized Lego cloud missing: {path / 'points3d.ply'}")
+        environment[key] = str(path)
+    environment["CARGO_PROFILE_DEV_DEBUG"] = "0"
+    environment["CARGO_PROFILE_TEST_DEBUG"] = "0"
+    environment["CARGO_INCREMENTAL"] = "0"
+    selection: list[str] = ["--lib"] if suite is None else ["--test", suite]
+    if suite == "bin:gsplat-bench":
+        selection = ["--bin", "gsplat-bench"]
+    result: subprocess.CompletedProcess[str] = subprocess.run(
+        ["cargo", "test", "--locked", "--package", package, *selection, name, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1"],
+        cwd=root, env=environment, text=True, capture_output=True, check=False,
+    )
+    print(result.stdout)
+    print(result.stderr)
+    if result.returncode == 0 and "SKIP:" in result.stderr:
+        pytest.skip(result.stderr.split("SKIP:", 1)[1].splitlines()[0].strip())
+    assert result.returncode == 0, f"Rust integration contract failed: {suite}::{name}"
+    assert "1 passed" in result.stdout, f"Rust test selection was empty: {suite}::{name}"
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize(
     ("package", "suite", "name", "assets"),
     [
+        ("gsplat-train", "recording", "lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs", ("GSPLAT_LEGO",)),
         ("gsplat-eval", "evaluation", "brush_quantization_premultiplication_and_identity", ()),
         ("gsplat-eval", "evaluation", "evaluator_lpips_matches_reference", ()),
         ("gsplat-eval", "evaluation", "float_parity_preserves_highlights_and_detects_alpha", ()),
@@ -35,33 +72,11 @@ import pytest
     ],
 )
 def test_rust_gpu_contract(package: str, suite: str | None, name: str, assets: tuple[str, ...]) -> None:
-    """Missing external assets are pytest skips; Rust failures remain failures."""
-    root: Path = Path(__file__).resolve().parents[1]
-    environment: dict[str, str] = dict(os.environ)
-    defaults: dict[str, Path] = {
-        "GSPLAT_TEST_PLY": root / "data/nerfbaselines/pretrained/lego/checkpoint/point_cloud/iteration_30000/point_cloud.ply",
-        "GSPLAT_TEST_CAMERAS": root / "data/nerfbaselines/data/lego/transforms_test.json",
-        "GSPLAT_TEST_GT": root / "data/nerfbaselines/data/lego/test/r_0.png",
-        "GSPLAT_TEST_COLMAP": root / "data/mipnerf360/garden/sparse/0",
-    }
-    for key in assets:
-        path: Path = Path(environment.get(key, str(defaults[key])))
-        if not path.exists():
-            pytest.skip(f"Required Rust integration asset {key} missing: {path}")
-        environment[key] = str(path)
-    environment["CARGO_PROFILE_DEV_DEBUG"] = "0"
-    environment["CARGO_PROFILE_TEST_DEBUG"] = "0"
-    environment["CARGO_INCREMENTAL"] = "0"
-    selection: list[str] = ["--lib"] if suite is None else ["--test", suite]
-    if suite == "bin:gsplat-bench":
-        selection = ["--bin", "gsplat-bench"]
-    result: subprocess.CompletedProcess[str] = subprocess.run(
-        ["cargo", "test", "--locked", "--package", package, *selection, name, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1"],
-        cwd=root, env=environment, text=True, capture_output=True, check=False,
-    )
-    print(result.stdout)
-    print(result.stderr)
-    if result.returncode == 0 and "SKIP:" in result.stderr:
-        pytest.skip(result.stderr.split("SKIP:", 1)[1].splitlines()[0].strip())
-    assert result.returncode == 0, f"Rust integration contract failed: {suite}::{name}"
-    assert "1 passed" in result.stdout, f"Rust test selection was empty: {suite}::{name}"
+    """Execute GPU behavior contracts through the integration task."""
+    run_rust_contract(package, suite, name, assets)
+
+
+@pytest.mark.golden
+def test_training_conversion_matches_rerun_loader() -> None:
+    """Compare every native component against the pretrained Lego PLY reference."""
+    run_rust_contract("gsplat-train", "recording", "pretrained_lego_conversion_matches_rerun_loader", ("GSPLAT_TEST_PLY",))
