@@ -4,7 +4,6 @@ use crate::frontend::flow::FrontendError;
 use cubecl::prelude::Runtime;
 
 use super::pyramid::GpuPyramid;
-use crate::pyramid::Pyramid;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::{SourcePatches};
 use kornia_staging_imgproc::optical_flow::patch_tracker::{PointsSoA};

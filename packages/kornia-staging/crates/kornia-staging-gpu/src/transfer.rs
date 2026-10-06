@@ -21,3 +21,14 @@ pub fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> G
     log::warn!("reading {what} from the device failed: {error}");
     GpuError::DeviceReadFailed { what }
 }
+
+/// Storage binding alignment and maximum size, in bytes.
+pub fn binding_limits<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+) -> (usize, usize) {
+    let memory = &client.properties().memory;
+    (
+        (memory.alignment as usize).max(256),
+        memory.max_page_size as usize,
+    )
+}

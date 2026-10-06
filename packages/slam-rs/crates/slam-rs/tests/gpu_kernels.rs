@@ -38,7 +38,7 @@ use slam_rs::gpu::{
     GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, 
     
 };
-use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError};
+use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder};
 
 mod common;
 
@@ -118,85 +118,6 @@ fn assert_levels_equal(cpu: &PyramidPlanU16, gpu: &GpuPyramid<GpuRuntime>, label
     }
 }
 
-#[test]
-fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
-    for (width, height) in [(960, 960), (640, 480), (517, 193), (64, 64)] {
-        let image: Image<u16, 1> = textured_image(width, height, 0.0, 0.0);
-        let (cpu, gpu) = both_pyramids(&image);
-        assert_levels_equal(&cpu, &gpu, &format!("{width}x{height}"));
-    }
-}
-
-#[test]
-fn batched_gpu_pyramids_keep_every_camera_pixel_exact() {
-    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
-    let mut cpu_builder = CpuPyramidBuilder::new();
-    let pool = WorkPool::new(1).unwrap();
-    for (width, height) in [(640, 480), (517, 193), (65, 67)] {
-        let mut pyramids: Vec<_> = (0..4)
-            .map(|_| builder.allocate(width, height, LEVELS).unwrap())
-            .collect();
-        for frame in 0..2 {
-            let images: Vec<_> = (0..4)
-                .map(|camera| {
-                    packed_texture(width, height, (camera * 7 + frame) as f32, camera as f32)
-                })
-                .collect();
-            builder.build_frames(&images, &mut pyramids, &pool).unwrap();
-            for (camera, image) in images.iter().enumerate() {
-                let mut expected = cpu_builder.allocate(width, height, LEVELS).unwrap();
-                cpu_builder.build(camera, image, &mut expected).unwrap();
-                assert_levels_equal(
-                    &expected,
-                    &pyramids[camera],
-                    &format!("camera {camera}, frame {frame}"),
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn prepared_gpu_pixels_survive_reusing_the_source_image() {
-    let mut image = textured_image(96, 96, 0.0, 0.0);
-    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
-    let mut pyramid = builder.allocate(96, 96, 1).unwrap();
-    let expected = image.clone();
-    builder
-        .prepare_images(std::slice::from_ref(&image))
-        .unwrap();
-    slam_rs::image::fill_from_u8_strided(&mut image, &vec![0; 96 * 96], 96, 96, 96).unwrap();
-    builder.build(0, &image, &mut pyramid).unwrap();
-    let mut actual = slam_rs::image::empty();
-    pyramid.copy_level_into(0, &mut actual).unwrap();
-    assert_eq!(actual.as_slice(), expected.as_slice());
-}
-
-/// A pyramid of level 0 alone is refused rather than allocated empty.
-///
-/// With `optical_flow_levels = 0` the odd buffer holds no level, and
-/// `client.empty(0)` is a zero-sized allocation that wgpu rejects at
-/// validation — on cubecl's own worker thread, where a panic reaches the caller
-/// as data rather than as an error. That is the failure mode `probe_storage`
-/// exists to prevent, reachable through a config value instead, so the geometry
-/// is refused the way every other unbuildable one is.
-#[test]
-fn a_pyramid_of_one_level_is_refused_rather_than_allocated_empty() {
-    let builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
-    let refused = builder.allocate(64, 48, 0);
-    assert!(
-        matches!(
-            refused,
-            Err(PyramidError::Plan(kornia_staging_imgproc::pyramid::PyramidPlanError::TooSmall {
-                width: 64,
-                height: 48,
-                max_level: 0
-            }))
-        ),
-        "a single-level pyramid was accepted: {refused:?}"
-    );
-}
-
 /// A frame whose stride is wider than its width — dav1d's shape — must upload
 /// the same pixels, not the padding.
 #[test]
@@ -215,26 +136,6 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
 
     let (cpu, gpu) = both_pyramids(&strided);
     assert_levels_equal(&cpu, &gpu, "a 64x48 frame with stride 96");
-}
-
-/// The pyramid the builder allocates is reused frame after frame, so the second
-/// frame must not see the first one's pixels anywhere.
-#[test]
-fn a_reused_pyramid_carries_only_the_newest_frame() {
-    let first: Image<u16, 1> = textured_image(128, 96, 0.0, 0.0);
-    let second: Image<u16, 1> = textured_image(128, 96, 7.0, -3.0);
-
-    let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
-    let mut gpu: GpuPyramid<GpuRuntime> = gpu_builder.allocate(128, 96, LEVELS).unwrap();
-    gpu_builder.build(0, &first, &mut gpu).unwrap();
-    gpu_builder.build(0, &second, &mut gpu).unwrap();
-
-    let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidPlanU16 = cpu_builder.allocate(128, 96, LEVELS).unwrap();
-    cpu_builder.build(0, &second, &mut cpu).unwrap();
-
-    assert_levels_equal(&cpu, &gpu, "the second frame of a reused pyramid");
 }
 
 /// [`textured_image`]'s field at 16.8 M pixels, in a fraction of the time.

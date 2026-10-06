@@ -91,3 +91,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Batched tracking protocol and identity-keyed template caches | slam-rs `frontend/tracker.rs`, `tracker/cpu.rs` | kornia-slam / kornia-slam / `tracking::optical_flow` | staged | - |
 | Wgpu polling wakeup | cubecl-wgpu 0.11.0-pre.3 compute/{poll,stream,timings} | cubecl-wgpu | staged (temporary patch) | - |
 | CubeCL runtime, storage/subgroup probes and typed failures; pinned patch preparation | slam-rs `gpu/runtime.rs`, patches and prepare helper | proposed kornia-gpu / runtime; CubeCL patches | staged | - |
+| Persistent u16 GPU pyramids | slam-rs `gpu/pyramid.rs`, `gpu/kernels/pyramid.rs` | proposed kornia-gpu / `pyramid` | staged | - |

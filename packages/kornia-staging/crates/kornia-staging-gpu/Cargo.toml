@@ -12,7 +12,10 @@ default = []
 wgpu = ["dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
 
 [dependencies]
+bytes.workspace = true
+kornia-image.workspace = true
 cubecl.workspace = true
+cubecl-environment.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-algebra.workspace = true
 thiserror.workspace = true
@@ -28,3 +31,9 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
 approx.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "pyramid"
+harness = false
+required-features = ["wgpu"]

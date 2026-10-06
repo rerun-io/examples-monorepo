@@ -3189,8 +3189,11 @@ dependencies = [
 name = "kornia-staging-gpu"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cubecl",
+ "cubecl-environment",
  "cubecl-wgpu",
+ "kornia-image",
  "kornia-staging-algebra",
  "kornia-staging-imgproc",
  "log",
@@ -6688,7 +6691,6 @@ dependencies = [
  "approx",
  "bytes",
  "cubecl",
- "cubecl-environment",
  "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",

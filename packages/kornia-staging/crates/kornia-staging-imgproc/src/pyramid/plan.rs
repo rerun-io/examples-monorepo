@@ -67,6 +67,38 @@ pub enum PyramidPlanError {
     },
 }
 
+/// Validate the size of a floor-halved u16 pyramid without allocating it.
+///
+/// # Errors
+/// Rejects reductions whose source is smaller than three pixels per side,
+/// and input dimensions that cannot fit in a u16 allocation.
+pub fn check_u16_geometry(size: ImageSize, max_level: usize) -> Result<(), PyramidPlanError> {
+    let (mut width, mut height) = (size.width, size.height);
+    for _ in 0..max_level {
+        if width < 3 || height < 3 {
+            return Err(PyramidPlanError::TooSmall {
+                width: size.width,
+                height: size.height,
+                max_level,
+            });
+        }
+        width /= 2;
+        height /= 2;
+    }
+    let layout_error = || PyramidPlanError::LayoutOverflow {
+        width: size.width,
+        height: size.height,
+    };
+    let len = size
+        .width
+        .checked_mul(size.height)
+        .ok_or_else(layout_error)?;
+    if len > isize::MAX as usize / size_of::<u16>() {
+        return Err(layout_error());
+    }
+    Ok(())
+}
+
 /// A Gaussian u16 pyramid with reusable levels and filter scratch.
 /// Each reduction floor-halves both dimensions. This differs from the ceil-half
 /// rule of upstream `pyrdown_u8` and `pyrdown_f32`. Filtering uses reflect-101,
@@ -101,29 +133,7 @@ impl PyramidPlanU16 {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn new(size: ImageSize, max_level: usize) -> Result<Self, PyramidPlanError> {
-        let (mut width, mut height) = (size.width, size.height);
-        for _ in 0..max_level {
-            if width < 3 || height < 3 {
-                return Err(PyramidPlanError::TooSmall {
-                    width: size.width,
-                    height: size.height,
-                    max_level,
-                });
-            }
-            width /= 2;
-            height /= 2;
-        }
-        let layout_error = || PyramidPlanError::LayoutOverflow {
-            width: size.width,
-            height: size.height,
-        };
-        let len = size
-            .width
-            .checked_mul(size.height)
-            .ok_or_else(layout_error)?;
-        if len > isize::MAX as usize / size_of::<u16>() {
-            return Err(layout_error());
-        }
+        check_u16_geometry(size, max_level)?;
         let mut levels = Vec::with_capacity(max_level + 1);
         let (mut width, mut height) = (size.width, size.height);
         for _ in 0..=max_level {

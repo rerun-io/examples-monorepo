@@ -86,7 +86,7 @@ pub(crate) fn launch_probe<N: Numeric, R: Runtime>(
 /// Both handles must belong to `client` and hold their declared number of u16
 /// elements. Each declared length must be at least `count`. The source and
 /// destination ranges must not overlap.
-pub unsafe fn launch_copy_level0<R: Runtime>(
+pub(crate) unsafe fn launch_copy_level0<R: Runtime>(
     client: &ComputeClient<R>,
     src: Buffer<'_>,
     dst: Buffer<'_>,

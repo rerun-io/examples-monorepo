@@ -13,7 +13,6 @@ use super::kernels::klt_fused::{
 use super::patches::GpuPatchSources;
 use super::pyramid::GpuPyramid;
 use super::{ guarded};
-use crate::pyramid::Pyramid;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackPhase};
 use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowTransforms, TrackerError};

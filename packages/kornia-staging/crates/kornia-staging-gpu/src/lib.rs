@@ -16,3 +16,5 @@ pub mod transfer;
 /// Portable GPU runtime, with target-specific shader compiler selection.
 #[cfg(feature = "wgpu")]
 pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
+
+pub mod pyramid;

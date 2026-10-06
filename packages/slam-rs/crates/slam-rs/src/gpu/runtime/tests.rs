@@ -60,9 +60,9 @@ fn a_panic_inside_a_stage_is_a_typed_error() {
     assert!(
         matches!(
             error,
-            crate::pyramid::PyramidError::Gpu(GpuError::DeviceLost {
+            crate::pyramid::PyramidError::Gpu(kornia_staging_gpu::pyramid::PyramidError::Gpu(GpuError::DeviceLost {
                 what: "pyramid build"
-            })
+            }))
         ),
         "a panicking stage gave {error}"
     );
@@ -162,9 +162,9 @@ fn a_panic_in_an_exported_read_is_a_typed_error() {
     assert!(
         matches!(
             read,
-            PyramidError::Gpu(GpuError::DeviceLost {
+            PyramidError::Gpu(kornia_staging_gpu::pyramid::PyramidError::Gpu(GpuError::DeviceLost {
                 what: "a pyramid level read"
-            })
+            }))
         ),
         "a panicking level read gave {read}"
     );

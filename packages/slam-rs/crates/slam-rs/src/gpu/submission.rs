@@ -29,7 +29,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
 
 /// All deferred GPU work for a frame, in upload/launch order.
 pub(super) enum Launch {
-    Pyramid(super::pyramid::PyramidLaunch),
+    Pyramid(kornia_staging_gpu::pyramid::PyramidLaunch),
     Corners(super::detect::batch::CornerLaunch),
     Klt(super::track::FusedLaunch),
     Stereo(super::frontend::onewait::StereoLaunch),
@@ -38,7 +38,9 @@ pub(super) enum Launch {
 impl Launch {
     fn run<R: cubecl::prelude::Runtime>(self, client: &cubecl::prelude::ComputeClient<R>) {
         match self {
-            Self::Pyramid(launch) => launch.run(client),
+            // SAFETY: The frame prepares and runs these launches on its exclusive
+            // client stream, before any later frame can reuse the upload.
+            Self::Pyramid(launch) => unsafe { launch.run(client) },
             Self::Corners(launch) => launch.run(client),
             Self::Klt(launch) => launch.run(client),
             Self::Stereo(launch) => launch.run(client),
@@ -142,18 +144,7 @@ impl Drop for FrameBatch {
     }
 }
 
-/// Storage binding alignment and maximum size, in bytes.
-pub(super) fn binding_limits<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-) -> (usize, usize) {
-    let memory = &client.properties().memory;
-    (
-        (memory.alignment as usize).max(256),
-        memory.max_page_size as usize,
-    )
-}
-
-pub(super) use kornia_staging_gpu::transfer::{read_failed, upload};
+pub(super) use kornia_staging_gpu::transfer::{binding_limits, read_failed, upload};
 
 /// Download every handle together and map device errors at one boundary.
 #[cfg(feature = "gpu-core")]

@@ -185,8 +185,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// Take the builder's published level-zero views after building the frame.
     /// Both stages must use the same client. Reuse the two table allocations.
     pub fn use_level0(&mut self, builder: &mut super::GpuPyramidBuilder<R>) {
-        self.level0.clear();
-        std::mem::swap(&mut self.level0, &mut builder.level0);
+        builder.inner.take_level0(&mut self.level0);
     }
 
     pub(super) fn staged_handles(&self) -> Option<&[cubecl::server::Handle]> {

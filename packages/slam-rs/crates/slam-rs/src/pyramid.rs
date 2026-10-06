@@ -13,11 +13,6 @@ use crate::image::IngestError;
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::pyramid::{PyramidPlanError, PyramidPlanU16};
 
-/// Minimum filter side length: the first output reaches source index two.
-/// Refuse smaller geometry at construction (D32).
-#[cfg(feature = "gpu-core")]
-pub(crate) const MIN_SIDE: usize = 3;
-
 /// The stage seam: build every level of one camera's pyramid in one call.
 ///
 /// An associated `Pyramid` type from day one, so a GPU backend can carry
@@ -149,29 +144,10 @@ pub enum PyramidError {
     /// The level geometry does not fit in memory.
     #[error("level geometry is not representable: {0}")]
     Image(#[from] IngestError),
-    /// A GPU backend's device read failed.
-    ///
-    /// Kept in the application: the download in `copy_level_into` can fail on the device, and
-    /// the trait's caller must get a typed error rather than a panic (D32).
+    /// Staged GPU pyramid failure.
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
-    Gpu(#[from] kornia_staging_gpu::runtime::GpuError),
-    /// A device download returned the wrong number of bytes.
-    ///
-    /// Only a GPU backend produces this. A CubeCL runtime whose shader
-    /// compilation fails panics on its own worker thread and hands
-    /// back a short buffer rather than an error, and reading that as pixels
-    /// would quietly give a black pyramid; every download is length-checked and
-    /// a short one is refused here instead (decision D32).
-    #[error("reading level {level} returned {actual} bytes, expected {expected}")]
-    ShortDeviceRead {
-        /// Level asked for.
-        level: usize,
-        /// Bytes the device returned.
-        actual: usize,
-        /// Bytes the level's geometry needs.
-        expected: usize,
-    },
+    Gpu(#[from] kornia_staging_gpu::pyramid::PyramidError),
 }
 
 impl Pyramid for PyramidPlanU16 {

@@ -14,7 +14,11 @@ use cubecl::prelude::*;
 /// reflection `2h - 2 - x`. Callers only ever reach `x <= h`.
 #[cube]
 fn reflect_high(x: usize, h: usize) -> usize {
-    if x < h { x } else { h + h - 2usize - x }
+    if x < h {
+        x
+    } else {
+        h + h - 2usize - x
+    }
 }
 
 /// `std::abs(2 * r - k)`, which is the *other*
@@ -25,7 +29,11 @@ fn reflect_high(x: usize, h: usize) -> usize {
 #[allow(clippy::manual_abs_diff)]
 #[cube]
 fn reflect_low(twice: usize, k: usize) -> usize {
-    if twice >= k { twice - k } else { k - twice }
+    if twice >= k {
+        twice - k
+    } else {
+        k - twice
+    }
 }
 
 /// One row's five horizontal taps, `[1, 4, 6, 4, 1]`, as an exact `usize` sum.
@@ -55,7 +63,7 @@ fn input_byte(src: &[u32], index: usize) -> u32 {
 /// Widen level zero and reduce level one in the same dispatch. All inputs are
 /// bytes, so the first filter's factor of 256 cancels its final division exactly.
 #[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::manual_is_multiple_of)]
 fn ingest_kernel(
     src: &[u32],
     even: &mut [u16],
@@ -153,7 +161,7 @@ const SUBSAMPLE_W: usize = 16;
 const SUBSAMPLE_H: usize = 8;
 const SOURCE_ROWS: usize = 2 * SUBSAMPLE_H + 4;
 
-/// Separable tiled counterpart of [`crate::pyramid::subsample`].
+/// Separable tiled counterpart of the CPU floor-halved Gaussian reduction.
 /// Exact integer sums and one final rounding make it equal to the separable CPU
 /// filter. Reflect rows about source height and columns about source width.
 /// The maximum accumulator is `65535 * 16 * 16`, which fits the working integer.

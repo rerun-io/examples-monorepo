@@ -10,6 +10,14 @@ use crate::GpuRuntime;
 /// What can go wrong bringing up or running a GPU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
+    /// A batch has different input and output counts.
+    #[error("batch has {inputs} inputs but {outputs} outputs")]
+    BatchSizeMismatch {
+        /// Number of inputs.
+        inputs: usize,
+        /// Number of outputs.
+        outputs: usize,
+    },
     /// A frame was begun before the previous frame scope ended.
     #[error("nested GPU frontend frame")]
     NestedFrame,

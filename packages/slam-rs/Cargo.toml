@@ -55,7 +55,6 @@ kornia-algebra = { version = "0.2", default-features = false }
 # The GPU phase (decision D21, D70). CubeCL 0.11 prerelease with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
 cubecl = "=0.11.0-pre.3"
-cubecl-environment = { version = "=0.11.0-pre.3", features = ["shared-bytes"] }
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]
 unwrap_used = "deny"

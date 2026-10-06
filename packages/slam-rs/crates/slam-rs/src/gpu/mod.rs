@@ -14,7 +14,7 @@ mod patches;
 mod pyramid;
 mod submission;
 pub use submission::LaunchList;
-use submission::{read_blocking, read_failed, upload_frame};
+use submission::{read_blocking, upload_frame};
 #[cfg(test)]
 mod runtime;
 use kornia_staging_gpu::runtime::RUNTIME_NAME;
