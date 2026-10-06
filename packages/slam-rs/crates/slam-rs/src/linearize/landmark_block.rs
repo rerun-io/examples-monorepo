@@ -3,18 +3,16 @@
 //! support back-substitution; remaining rows form the reduced camera system.
 
 use kornia_staging_algebra::Scalar;
-use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Vector2};
 
 use crate::ba_base::linearize_point;
-use kornia_staging_slam::factors::LinearizePointOut;
 use crate::camera::SlamCamera;
 use crate::landmark::Landmark;
 use crate::lie::{c};
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
-use kornia_staging_algebra::linalg::qr::{
-    Givens, apply_householder_unchecked, make_householder_unchecked,
-};
+use kornia_staging_slam::factors::LinearizePointOut;
+use kornia_staging_slam::sqrt_ba::{BackSubstitution, LandmarkQr};
 
 /// `LandmarkBlock<Scalar>::Options`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,42 +128,16 @@ pub struct LandmarkBlock<S: Scalar> {
     storage: DMatrix<S>,
     /// One entry per observation, in `lm.obs` order.
     observations: Vec<BlockObservation>,
-    /// The pose columns the observations write into, ascending and deduplicated.
-    ///
-    /// Every other column of `0..padding_idx` stays exactly zero for the block's
-    /// whole life: `linearizeLandmark` only ever writes `block<2, 6>` at an
-    /// observation's host and target offsets, and the Householder
-    /// reflections and Givens rotations that follow act on rows, which cannot
-    /// move a zero column off zero. An observation dropped for marginalization
-    /// writes nothing because it has no relative pose, and
-    /// its `abs_t_idx` is the `0` sentinel, which is a column of
-    /// whichever frame the ordering puts first — so it is left out.
-    /// QR, back-substitution and dense assembly can skip the other columns;
-    /// `dense_h_b_touches_only_observed_columns` and
-    /// `a_dropped_observation_writes_no_columns` pin the invariant.
-    ///
-    /// The "cannot move a zero column off zero" step is finite arithmetic: a
-    /// reflection whose coefficients are non-finite writes NaN everywhere,
-    /// which is why [`Self::active_writeback_is_exact`] checks rather than
-    /// assumes.
-    active_cols: Vec<usize>,
-    /// Full-width QR can make inactive columns non-finite. Reset for each QR.
-    qr_full_width: bool,
+    /// Numerical layout, active columns and elimination scratch.
+    qr: LandmarkQr<S>,
     /// The landmark this block belongs to.
     lm_id: LandmarkId,
     /// `lm_ptr->host_kf_id`.
     host_kf_id: TimeCamId,
     /// `is_fixed_` : the landmark is not optimised.
     is_fixed: bool,
-    padding_idx: usize,
-    lm_idx: usize,
-    res_idx: usize,
-    num_rows: usize,
-    num_cols: usize,
     /// `state`.
     state: LandmarkBlockState,
-    /// Reusable reflection-axis scratch.
-    work_essential: Vec<S>,
 }
 
 /// `compute_error_weight`.
@@ -239,51 +211,7 @@ impl<S: Scalar> LandmarkBlock<S> {
             });
         }
 
-        // Check every step of layout arithmetic: the sizes come
-        // from a caller-supplied ordering, and an overflow here would silently
-        // wrap into a buffer that aliases its own blocks (decision D32).
-        let padding_idx: usize = aom.total_size();
-        let num_rows: usize = observations
-            .len()
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(3))
-            .ok_or(LinearizeError::LayoutOverflow)?;
-        let pad: usize = padding_idx % 4;
-        let padding_size: usize = if pad != 0 { 4 - pad } else { 0 };
-        let lm_idx: usize = padding_idx
-            .checked_add(padding_size)
-            .ok_or(LinearizeError::LayoutOverflow)?;
-        let res_idx: usize = lm_idx
-            .checked_add(3)
-            .ok_or(LinearizeError::LayoutOverflow)?;
-        let num_cols: usize = res_idx
-            .checked_add(1)
-            .ok_or(LinearizeError::LayoutOverflow)?;
-        // The padded column count must be a multiple of four.
-        if !num_cols.is_multiple_of(4) {
-            return Err(LinearizeError::UnalignedBlock { num_cols });
-        }
-        // `storage.resize(num_rows, num_cols)`. Each dimension being
-        // representable is not enough: nalgebra multiplies them, and the
-        // allocator wants the byte count, which must fit in an `isize`
-        // (decision D32). An ordering carrying one absurd block size reaches
-        // here with both dimensions individually fine.
-        let elements: usize =
-            num_rows
-                .checked_mul(num_cols)
-                .ok_or(LinearizeError::BlockTooLarge {
-                    rows: num_rows,
-                    cols: num_cols,
-                })?;
-        let fits: bool = elements
-            .checked_mul(size_of::<S>())
-            .is_some_and(|bytes| bytes <= isize::MAX as usize);
-        if !fits {
-            return Err(LinearizeError::BlockTooLarge {
-                rows: num_rows,
-                cols: num_cols,
-            });
-        }
+        let padding_idx = aom.total_size();
         // Check that every six-column pose block fits before writing.
         for obs in &observations {
             if obs.rel_pose.is_some() {
@@ -291,7 +219,7 @@ impl<S: Scalar> LandmarkBlock<S> {
                     .abs_t_idx
                     .max(obs.abs_h_idx)
                     .checked_add(POSE_SIZE)
-                    .ok_or(LinearizeError::LayoutOverflow)?;
+                    .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
                 if end > padding_idx {
                     return Err(LinearizeError::PoseBlockOutOfRange {
                         offset: obs.abs_t_idx.max(obs.abs_h_idx),
@@ -317,21 +245,15 @@ impl<S: Scalar> LandmarkBlock<S> {
         active_cols.sort_unstable();
         active_cols.dedup();
 
+        let qr = LandmarkQr::new(observations.len(), padding_idx, active_cols)?;
         Ok(Self {
-            storage: DMatrix::zeros(num_rows, num_cols),
+            storage: DMatrix::zeros(qr.rows(), qr.columns()),
             observations,
-            active_cols,
-            qr_full_width: false,
+            qr,
             lm_id,
             host_kf_id: host,
             is_fixed,
-            padding_idx,
-            lm_idx,
-            res_idx,
-            num_rows,
-            num_cols,
             state: LandmarkBlockState::Allocated,
-            work_essential: vec![S::zero(); num_rows],
         })
     }
 
@@ -442,10 +364,10 @@ impl<S: Scalar> LandmarkBlock<S> {
 
             for r in 0..2 {
                 for col in 0..3 {
-                    self.storage[(obs_idx + r, self.lm_idx + col)] =
+                    self.storage[(obs_idx + r, self.qr.landmark_column() + col)] =
                         sqrt_weight * d_res_d_p[(r, col)];
                 }
-                self.storage[(obs_idx + r, self.res_idx)] = sqrt_weight * res[r];
+                self.storage[(obs_idx + r, self.qr.residual_column())] = sqrt_weight * res[r];
             }
 
             // The scaling happens once, in place, and then both pose
@@ -477,86 +399,15 @@ impl<S: Scalar> LandmarkBlock<S> {
                 found: self.state,
             });
         }
-        self.qr_full_width = !options.use_householder;
         if options.use_householder {
-            self.perform_qr_householder();
+            self.qr
+                .eliminate_householder_unchecked(self.storage.as_mut_slice());
         } else {
-            self.perform_qr_givens();
+            self.qr
+                .eliminate_givens_unchecked(self.storage.as_mut_slice());
         }
         self.state = LandmarkBlockState::Marginalized;
         Ok(())
-    }
-
-    /// Three reflections over active columns, at full width for non-finite axes.
-    fn perform_qr_householder(&mut self) {
-        for k in 0..3 {
-            // Exclude damping rows from reflection. Skip an empty reflection when fewer
-            // than two observations leave insufficient rows; malformed sparse blocks must
-            // not cause an out-of-range access.
-            let remaining_rows: usize = self.num_rows.saturating_sub(k + 3);
-            if remaining_rows == 0 {
-                continue;
-            }
-            let (tau, _beta) = make_householder_unchecked(
-                &self.storage.as_slice()[(self.lm_idx + k) * self.num_rows + k
-                    ..(self.lm_idx + k) * self.num_rows + k + remaining_rows],
-                &mut self.work_essential,
-            );
-            let axis = &self.work_essential[..remaining_rows];
-            if axis.iter().all(|value| value.is_finite()) {
-                // A finite reflection leaves an untouched zero column at zero.
-                // Each live column still uses nalgebra's original dot/update.
-                for column in self
-                    .active_cols
-                    .iter()
-                    .copied()
-                    .chain(self.lm_idx..self.num_cols)
-                {
-                    apply_householder_unchecked(
-                        &mut self.storage.as_mut_slice()[column * self.num_rows + k..],
-                        remaining_rows,
-                        1,
-                        self.num_rows,
-                        axis,
-                        tau,
-                    );
-                }
-            } else {
-                // Non-finite axes must propagate through the unobserved columns.
-                self.qr_full_width = true;
-                apply_householder_unchecked(
-                    &mut self.storage.as_mut_slice()[k..],
-                    remaining_rows,
-                    self.num_cols,
-                    self.num_rows,
-                    axis,
-                    tau,
-                );
-            }
-        }
-    }
-
-    /// Givens QR (Golub & Van Loan Algorithm 5.2.4), retained to check Householder elimination.
-    fn perform_qr_givens(&mut self) {
-        // Guard empty observation sets before subtracting the row offset.
-        if self.num_rows < 4 {
-            return;
-        }
-        for n in 0..3 {
-            let mut m: usize = self.num_rows - 4;
-            while m > n {
-                let rot = Givens::cancel_y(
-                    self.storage[(m - 1, self.lm_idx + n)],
-                    self.storage[(m, self.lm_idx + n)],
-                );
-                rot.apply_unchecked(
-                    &mut self.storage.as_mut_slice()[m - 1..],
-                    self.num_cols,
-                    self.num_rows,
-                );
-                m -= 1;
-            }
-        }
     }
 
     /// Recover and apply the landmark increment, adding its predicted cost decrease.
@@ -597,33 +448,36 @@ impl<S: Scalar> LandmarkBlock<S> {
         if self.is_fixed {
             return Ok(());
         }
-        if pose_inc.nrows() != self.padding_idx {
+        if pose_inc.nrows() != self.qr.pose_columns() {
             return Err(LinearizeError::PoseIncrementSize {
-                expected: self.padding_idx,
+                expected: self.qr.pose_columns(),
                 found: pose_inc.nrows(),
             });
         }
 
-        // `Q1Jl`, the upper triangle of the 3x3 at the top of the
-        // landmark columns.
-        let mut q1jl: Matrix3<S> = Matrix3::zeros();
-        for r in 0..3 {
-            for col in r..3 {
-                q1jl[(r, col)] = self.storage[(r, self.lm_idx + col)];
+        let (inc, det, cost_term) = match self.qr.back_substitute_unchecked(
+            self.storage.as_slice(),
+            pose_inc.as_slice(),
+            pose_inc_is_finite,
+        ) {
+            BackSubstitution::Singular => {
+                log::warn!(
+                    "det(Q1Jl) == 0, skipping backsubstitution for lm: Landmark(id={:?}, host_kf_id={:?})",
+                    self.lm_id,
+                    self.host_kf_id
+                );
+                return Ok(());
             }
-        }
-
-        // The product of the triangular diagonal detects a singular landmark.
-        let det: S = (q1jl[(0, 0)] * q1jl[(1, 1)] * q1jl[(2, 2)]).abs();
-        if det == S::zero() {
-            // trap 11: skip this landmark, keep the rest.
-            log::warn!(
-                "det(Q1Jl) == 0, skipping backsubstitution for lm: Landmark(id={:?}, host_kf_id={:?})",
-                self.lm_id,
-                self.host_kf_id
-            );
-            return Ok(());
-        } else if det < c::<S>(0.01) {
+            BackSubstitution::NonFinite => {
+                return Err(LinearizeError::NonFiniteLandmarkStep { lm_id: self.lm_id });
+            }
+            BackSubstitution::Solved {
+                increment,
+                determinant,
+                cost_term,
+            } => (increment, determinant, cost_term),
+        };
+        if det < c::<S>(0.01) {
             log::warn!(
                 "Unusually small det(Q1Jl)={}, lm: Landmark(id={:?}, host_kf_id={:?})",
                 det.to_f64(),
@@ -631,60 +485,7 @@ impl<S: Scalar> LandmarkBlock<S> {
                 self.host_kf_id
             );
         }
-
-        // `Q1Jr + Q1Jp * pose_inc`.
-        let mut rhs: Vector3<S> = Vector3::zeros();
-        for r in 0..3 {
-            let mut acc: S = S::zero();
-            for k in self.back_substitution_columns(pose_inc_is_finite) {
-                acc += self.storage[(r, k)] * pose_inc[k];
-            }
-            rhs[r] = self.storage[(r, self.res_idx)] + acc;
-        }
-
-        // Back-substitute from the last row, then negate the solution.
-        let mut inc: Vector3<S> = Vector3::zeros();
-        for r in (0..3usize).rev() {
-            let mut acc: S = S::zero();
-            for k in (r + 1)..3 {
-                acc += q1jl[(r, k)] * inc[k];
-            }
-            inc[r] = (rhs[r] - acc) / q1jl[(r, r)];
-        }
-        inc = -inc;
-
-        //  calls `setLandmarkDamping(0)` here, to undo the damping before
-        // the model cost change. The port has no damping (D34, D68) and the
-        // three damping rows are provably still zero — `storage` starts zeroed,
-        // the observations fill rows `0..2*obs`, and both QR paths stop at
-        // `num_rows - 3` — so there is nothing to undo.
-
-        // `QJinc = storage.topLeftCorner(num_rows - 3, padding_idx) * pose_inc`
-        // then `QJinc.head<3>() += Q1Jl * inc` with `Q1Jl`
-        // re-read from the now-undamped storage.
-        let q2_rows: usize = self.num_rows - 3;
-        let mut qjinc: DVector<S> = DVector::zeros(q2_rows);
-        for r in 0..q2_rows {
-            let mut acc: S = S::zero();
-            for k in self.back_substitution_columns(pose_inc_is_finite) {
-                acc += self.storage[(r, k)] * pose_inc[k];
-            }
-            qjinc[r] = acc;
-        }
-        for r in 0..3.min(q2_rows) {
-            let mut acc: S = S::zero();
-            for k in r..3 {
-                acc += self.storage[(r, self.lm_idx + k)] * inc[k];
-            }
-            qjinc[r] += acc;
-        }
-
-        // `diff = QJinc^T * (0.5 * QJinc + Qr)`.
-        let mut diff: S = S::zero();
-        for r in 0..q2_rows {
-            diff += qjinc[r] * (c::<S>(0.5) * qjinc[r] + self.storage[(r, self.res_idx)]);
-        }
-        *l_diff -= diff;
+        *l_diff -= cost_term;
 
         // No column-scale multiplication is needed because Jacobian scaling is absent (D68).
         lm.direction[0] += inc[0];
@@ -696,20 +497,6 @@ impl<S: Scalar> LandmarkBlock<S> {
             S::zero()
         };
         Ok(())
-    }
-
-    /// Finite-axis Householder QR leaves inactive columns at zero. Full-width
-    /// QR or a non-finite increment needs the original multiply order.
-    fn back_substitution_columns(
-        &self,
-        pose_inc_is_finite: bool,
-    ) -> impl Iterator<Item = usize> + '_ {
-        let (active, full) = if pose_inc_is_finite && !self.qr_full_width {
-            (self.active_cols.as_slice(), 0..0)
-        } else {
-            (&[][..], 0..self.padding_idx)
-        };
-        active.iter().copied().chain(full)
     }
 
     /// `get_dense_Q2Jp_Q2r(Q2Jp, Q2r, start_idx)` : the null-space
@@ -727,15 +514,15 @@ impl<S: Scalar> LandmarkBlock<S> {
     ) -> Result<(), LinearizeError> {
         let rows: usize = self.num_q2rows();
         // Validate destination rows and columns before writing.
-        if q2jp.ncols() != self.padding_idx {
+        if q2jp.ncols() != self.qr.pose_columns() {
             return Err(LinearizeError::StackedSystemSize {
-                expected: self.padding_idx,
+                expected: self.qr.pose_columns(),
                 found: q2jp.ncols(),
             });
         }
         let end: usize = start_idx
             .checked_add(rows)
-            .ok_or(LinearizeError::LayoutOverflow)?;
+            .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
         if end > q2jp.nrows() || end > q2r.nrows() {
             return Err(LinearizeError::StackedSystemSize {
                 expected: end,
@@ -743,8 +530,8 @@ impl<S: Scalar> LandmarkBlock<S> {
             });
         }
         for r in 0..rows {
-            q2r[start_idx + r] = self.storage[(3 + r, self.res_idx)];
-            for k in 0..self.padding_idx {
+            q2r[start_idx + r] = self.storage[(3 + r, self.qr.residual_column())];
+            for k in 0..self.qr.pose_columns() {
                 q2jp[(start_idx + r, k)] = self.storage[(3 + r, k)];
             }
         }
@@ -753,13 +540,13 @@ impl<S: Scalar> LandmarkBlock<S> {
 
     /// The pose columns `Self::add_dense_h_b_active` writes; see the field.
     pub fn active_cols(&self) -> &[usize] {
-        &self.active_cols
+        self.qr.active_columns()
     }
 
     /// Every pose column of the dense system, `0..padding_idx`: what
     /// [`Self::add_dense_h_b`] writes.
     pub fn pose_columns(&self) -> std::ops::Range<usize> {
-        0..self.padding_idx
+        0..self.qr.pose_columns()
     }
 
     /// Add `Q₂J_pᵀ Q₂J_p` and `Q₂J_pᵀ Q₂r` at full width.
@@ -782,7 +569,7 @@ impl<S: Scalar> LandmarkBlock<S> {
     /// including NaNs and signed zero (D32).
     pub(crate) fn active_writeback_is_exact(&self) -> bool {
         let rows: usize = self.num_q2rows();
-        let mut active = self.active_cols.iter().copied().peekable();
+        let mut active = self.qr.active_columns().iter().copied().peekable();
         for column in self.pose_columns() {
             if active.next_if_eq(&column).is_some() {
                 for r in 0..rows {
@@ -801,7 +588,11 @@ impl<S: Scalar> LandmarkBlock<S> {
             }
         }
         // The residual column, the other factor of `b`.
-        (0..rows).all(|r| self.storage[(3 + r, self.res_idx)].to_f64().is_finite())
+        (0..rows).all(|r| {
+            self.storage[(3 + r, self.qr.residual_column())]
+                .to_f64()
+                .is_finite()
+        })
     }
 
     /// Refuse a destination that is too small with a typed error.
@@ -810,12 +601,12 @@ impl<S: Scalar> LandmarkBlock<S> {
         h: &DMatrix<S>,
         b: &DVector<S>,
     ) -> Result<(), LinearizeError> {
-        if h.nrows() < self.padding_idx
-            || h.ncols() < self.padding_idx
-            || b.nrows() < self.padding_idx
+        if h.nrows() < self.qr.pose_columns()
+            || h.ncols() < self.qr.pose_columns()
+            || b.nrows() < self.qr.pose_columns()
         {
             return Err(LinearizeError::StackedSystemSize {
-                expected: self.padding_idx,
+                expected: self.qr.pose_columns(),
                 found: h.nrows().min(b.nrows()),
             });
         }
@@ -864,7 +655,7 @@ impl<S: Scalar> LandmarkBlock<S> {
             }
         }
         for r in 0..rows {
-            scratch.rows[r * stride + live] = self.storage[(3 + r, self.res_idx)];
+            scratch.rows[r * stride + live] = self.storage[(3 + r, self.qr.residual_column())];
         }
 
         let transposed: &[S] = &scratch.rows;
@@ -900,7 +691,7 @@ impl<S: Scalar> LandmarkBlock<S> {
 
     /// Stored row count minus the three reserved damping rows; includes the `Q₁` rows.
     pub fn num_q2rows(&self) -> usize {
-        self.num_rows - 3
+        self.qr.rows() - 3
     }
 
     /// The landmark this block belongs to.
@@ -924,11 +715,11 @@ impl<S: Scalar> LandmarkBlock<S> {
     /// port, so it is observable and the fixture checks all five numbers.
     pub fn layout(&self) -> (usize, usize, usize, usize, usize) {
         (
-            self.num_rows,
-            self.num_cols,
-            self.padding_idx,
-            self.lm_idx,
-            self.res_idx,
+            self.qr.rows(),
+            self.qr.columns(),
+            self.qr.pose_columns(),
+            self.qr.landmark_column(),
+            self.qr.residual_column(),
         )
     }
 
@@ -946,7 +737,7 @@ mod tests {
     use crate::calib::{BasaltCamera, Kb4Params};
     use crate::lie::Se3;
     use crate::types::LandmarkId;
-    use nalgebra::{Matrix4, Matrix6, Vector4};
+    use nalgebra::{Matrix4, Matrix6, Vector3, Vector4};
 
     /// A one-frame ordering and a landmark hosted in it, seen twice.
     fn fixture(order_frames: usize) -> (AbsOrderMap, Landmark<f64>, Vec<RelPoseLin<f64>>) {
@@ -1019,14 +810,17 @@ mod tests {
         let mut block: LandmarkBlock<f64> =
             LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
         // Both observations are in frame 0, so only its six columns are live.
-        assert_eq!(block.active_cols, (0..POSE_SIZE).collect::<Vec<usize>>());
+        assert_eq!(
+            block.qr.active_columns(),
+            (0..POSE_SIZE).collect::<Vec<usize>>()
+        );
 
         block
             .linearize_landmark(&lm, &rel, &cameras(), &options())
             .unwrap();
         let zero_after = |block: &LandmarkBlock<f64>, stage: &str| {
-            for column in POSE_SIZE..block.padding_idx {
-                for row in 0..block.num_rows {
+            for column in POSE_SIZE..block.qr.pose_columns() {
+                for row in 0..block.qr.rows() {
                     assert_eq!(
                         block.storage[(row, column)],
                         0.0,
@@ -1048,8 +842,8 @@ mod tests {
     /// one a loop over the whole `padding_idx` square produces, coefficient by
     /// coefficient and **bit for bit**. Both tests of the skip rest on this.
     fn assert_dense_h_b_is_the_full_loop(block: &LandmarkBlock<f64>) {
-        let mut h: DMatrix<f64> = DMatrix::zeros(block.padding_idx, block.padding_idx);
-        let mut b: DVector<f64> = DVector::zeros(block.padding_idx);
+        let mut h: DMatrix<f64> = DMatrix::zeros(block.qr.pose_columns(), block.qr.pose_columns());
+        let mut b: DVector<f64> = DVector::zeros(block.qr.pose_columns());
         block.add_dense_h_b_over(
             block.active_cols(),
             &mut h,
@@ -1057,8 +851,8 @@ mod tests {
             &mut DenseHbScratch::default(),
         );
         let rows: usize = block.num_q2rows();
-        for i in 0..block.padding_idx {
-            for j in 0..block.padding_idx {
+        for i in 0..block.qr.pose_columns() {
+            for j in 0..block.qr.pose_columns() {
                 let mut acc: f64 = 0.0;
                 for r in 0..rows {
                     acc += block.storage[(3 + r, i)] * block.storage[(3 + r, j)];
@@ -1067,7 +861,8 @@ mod tests {
             }
             let mut acc: f64 = 0.0;
             for r in 0..rows {
-                acc += block.storage[(3 + r, i)] * block.storage[(3 + r, block.res_idx)];
+                acc +=
+                    block.storage[(3 + r, i)] * block.storage[(3 + r, block.qr.residual_column())];
             }
             assert_eq!(b[i].to_bits(), acc.to_bits(), "b({i})");
         }
@@ -1089,9 +884,12 @@ mod tests {
             .unwrap();
         block.perform_qr(&options()).unwrap();
         // Both observations are in frame 0: columns `6..24` are the skipped ones.
-        assert_eq!(block.active_cols, (0..POSE_SIZE).collect::<Vec<usize>>());
+        assert_eq!(
+            block.qr.active_columns(),
+            (0..POSE_SIZE).collect::<Vec<usize>>()
+        );
 
-        let n: usize = block.padding_idx;
+        let n: usize = block.qr.pose_columns();
         let mut h: DMatrix<f64> = DMatrix::from_element(n, n, -0.0);
         let mut b: DVector<f64> = DVector::from_element(n, -0.0);
         block
@@ -1136,7 +934,7 @@ mod tests {
             !block.active_writeback_is_exact(),
             "a NaN block must not take the skip"
         );
-        let spread: bool = (POSE_SIZE..block.padding_idx).any(|column| {
+        let spread: bool = (POSE_SIZE..block.qr.pose_columns()).any(|column| {
             (0..block.num_q2rows()).any(|r| !block.storage[(3 + r, column)].is_finite())
         });
         assert!(
@@ -1170,7 +968,7 @@ mod tests {
             LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
         let live: std::ops::Range<usize> = POSE_SIZE..2 * POSE_SIZE;
         assert_eq!(
-            block.active_cols,
+            block.qr.active_columns(),
             live.clone().collect::<Vec<usize>>(),
             "the dropped observation's sentinel offset is not a column it writes"
         );
@@ -1179,8 +977,8 @@ mod tests {
             .unwrap();
         block.perform_qr(&options()).unwrap();
 
-        for column in (0..block.padding_idx).filter(|column| !live.contains(column)) {
-            for row in 0..block.num_rows {
+        for column in (0..block.qr.pose_columns()).filter(|column| !live.contains(column)) {
+            for row in 0..block.qr.rows() {
                 assert_eq!(
                     block.storage[(row, column)],
                     0.0,
@@ -1268,6 +1066,27 @@ mod tests {
                 found: 3,
             }
         );
+    }
+
+    #[test]
+    fn nonfinite_back_substitution_leaves_landmark_and_cost_unchanged() {
+        let (aom, mut landmark, _) = fixture(1);
+        let before = landmark.clone();
+        let mut block =
+            LandmarkBlock::allocate(landmark.id, &landmark, &index, &aom, false).unwrap();
+        block.state = LandmarkBlockState::Marginalized;
+        for i in 0..3 {
+            block.storage[(i, block.qr.landmark_column() + i)] = 1.0;
+        }
+        block.storage[(0, block.qr.residual_column())] = f64::NAN;
+        let mut cost = 5.0;
+        assert!(matches!(
+            block.back_substitute(&mut landmark, &DVector::zeros(POSE_SIZE), &mut cost),
+            Err(LinearizeError::NonFiniteLandmarkStep { .. })
+        ));
+        assert_eq!(landmark.direction, before.direction);
+        assert_eq!(landmark.inv_dist, before.inv_dist);
+        assert_eq!(cost, 5.0);
     }
 
     /// Singular and fixed landmarks are skipped without error (trap 11).
@@ -1399,7 +1218,7 @@ mod tests {
         aom.push(0, usize::MAX / 2 - (usize::MAX / 2) % 4).unwrap();
         let err = LandmarkBlock::<f64>::allocate(lm.id, &lm, &index, &aom, false).unwrap_err();
         assert!(
-            matches!(err, LinearizeError::BlockTooLarge { .. }),
+            matches!(err, LinearizeError::SqrtBa(kornia_staging_slam::sqrt_ba::SqrtBaError::BlockTooLarge { .. })),
             "{err:?}"
         );
     }

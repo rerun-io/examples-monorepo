@@ -176,7 +176,7 @@ impl<S: Scalar> LinearizationAbsQR<S> {
             landmark_block_idx.push(num_rows_q2r);
             num_rows_q2r = num_rows_q2r
                 .checked_add(block.num_q2rows())
-                .ok_or(LinearizeError::LayoutOverflow)?;
+                .ok_or(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow)?;
         }
 
         // Resolve IMU endpoints and full-state block sizes once at construction.
@@ -243,7 +243,7 @@ impl<S: Scalar> LinearizationAbsQR<S> {
         for (i, (tcid_h, tcid_t)) in self.rel_pose_pairs.iter().enumerate() {
             let Some(rpl) = self.rel_pose_lin.get_mut(i) else {
                 // Unreachable: the two vectors are built together.
-                return Err(LinearizeError::LayoutOverflow);
+                return Err(kornia_staging_slam::sqrt_ba::SqrtBaError::LayoutOverflow.into());
             };
             if tcid_h == tcid_t {
                 rpl.t_t_h = Matrix4::identity();
