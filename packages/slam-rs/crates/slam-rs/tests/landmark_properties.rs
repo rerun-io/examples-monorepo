@@ -1,10 +1,9 @@
-//! Landmark residual and reconstruction properties. Chart round trips and chart
-//! finite differences already live in landmark.rs and ba_base.rs.
+//! Landmark residual and estimator Jacobian properties.
 #![allow(clippy::unwrap_used)]
 
 use nalgebra::{Matrix2x3, Matrix2x6, Vector2, Vector3, Vector6};
 use proptest::prelude::*;
-use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point, triangulate};
+use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point};
 use slam_rs::calib::Calibration;
 use slam_rs::camera::SlamCamera;
 use slam_rs::landmark::Landmark;
@@ -77,70 +76,4 @@ proptest! {
         }
     }
 
-    #[test]
-    fn triangulation_reprojects_to_both_observations(
-        x in -0.5f64..0.5, y in -0.5f64..0.5, depth in 0.5f64..20.0,
-        baseline in 0.1f64..0.5, rotation in prop::array::uniform3(-0.1f64..0.1),
-    ) {
-        let pose = Se3::new(So3::exp(&Vector3::from(rotation)), Vector3::new(baseline, 0.0, 0.0));
-        let point = Vector3::new(x, y, depth);
-        let f0 = point.normalize();
-        let f1 = (pose.inverse() * point).normalize();
-        let result = triangulate(&f0, &f1, &pose).unwrap();
-        prop_assert!(result[3] > 0.0 && result[3] < 3.0);
-        let reconstructed = result.fixed_rows::<3>(0) / result[3];
-        prop_assert!((reconstructed.normalize() - f0).norm() < 1e-9);
-        prop_assert!(((pose.inverse() * reconstructed).normalize() - f1).norm() < 1e-9);
-    }
-}
-
-#[test]
-fn behind_camera_points_fail_the_inverse_distance_gate() {
-    // DLT returns homogeneous points; its caller requires 0 < inverse distance < 3.
-    let pose = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-    let behind = Vector3::new(0.0, 0.0, -2.0);
-    let result = triangulate(
-        &-behind.normalize(),
-        &-(pose.inverse() * behind).normalize(),
-        &pose,
-    )
-    .unwrap();
-    assert!(result[3] < 0.0);
-}
-
-#[test]
-fn parallel_rays_fail_the_inverse_distance_gate() {
-    let pose = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-    assert!(triangulate(&Vector3::z(), &Vector3::z(), &pose).is_none());
-    let pose32 = Se3::new(So3::identity(), Vector3::new(0.1f32, 0.0, 0.0));
-    assert!(triangulate(&Vector3::z(), &Vector3::z(), &pose32).is_none());
-}
-
-proptest! {
-    #[test]
-    fn inverse_distance_cutoff_f64(delta in 1e-8f64..0.01, baseline in 0.05f64..0.2) {
-        for (inverse_distance, accepted) in [(3.0 - delta, true), (3.0 + delta, false)] {
-            let pose = Se3::new(So3::identity(), Vector3::new(baseline, 0.0, 0.0));
-            let point = Vector3::new(0.0, 0.0, 1.0 / inverse_distance);
-            let f1 = (pose.inverse() * point).normalize();
-            let result = triangulate(&Vector3::z(), &f1, &pose).unwrap();
-            prop_assert!(result.iter().all(|v| v.is_finite()));
-            prop_assert_eq!(result[3] > 0.0 && result[3] < 3.0, accepted);
-            prop_assert!((result[3] - inverse_distance).abs() < 1e-10);
-        }
-    }
-
-    #[test]
-    fn inverse_distance_cutoff_f32(delta in 1e-4f32..0.01, baseline in 0.05f32..0.2) {
-        // Keep a gap larger than f32 reconstruction error on each side of 1/3 m.
-        for (inverse_distance, accepted) in [(3.0 - delta, true), (3.0 + delta, false)] {
-            let pose = Se3::new(So3::identity(), Vector3::new(baseline, 0.0, 0.0));
-            let point = Vector3::new(0.0, 0.0, 1.0 / inverse_distance);
-            let f1 = (pose.inverse() * point).normalize();
-            let result = triangulate(&Vector3::z(), &f1, &pose).unwrap();
-            prop_assert!(result.iter().all(|v| v.is_finite()));
-            prop_assert_eq!(result[3] > 0.0 && result[3] < 3.0, accepted);
-            prop_assert!((result[3] - inverse_distance).abs() < 2e-6);
-        }
-    }
 }

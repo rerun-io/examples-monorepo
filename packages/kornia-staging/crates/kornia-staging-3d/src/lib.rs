@@ -6,3 +6,5 @@
 //! When an item lands upstream, bump the dependency, swap imports, and delete it here.
 
 pub mod camera;
+/// Pose geometry and bearing coordinates.
+pub mod pose;

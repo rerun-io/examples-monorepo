@@ -66,3 +66,4 @@ pub const GPU_BACKEND: Option<&str> = None;
 pub(crate) fn duration_ns(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
+

@@ -2,8 +2,8 @@
 
 use kornia_staging_algebra::Scalar;
 use super::{EstimatorError, FlowObservations, SqrtKeypointVio, cast_pixel};
-use crate::ba_base::triangulate;
 use crate::camera::SlamCamera;
+use kornia_staging_3d::pose::triangulate_bearing as triangulate;
 use crate::landmark::{Landmark, StereographicParam};
 use crate::lie::{Se3};
 use crate::types::{KeypointId, LandmarkId, TimeCamId};
