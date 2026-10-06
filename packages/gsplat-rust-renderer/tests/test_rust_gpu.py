@@ -19,10 +19,15 @@ import pytest
         ("gsplat-bench", "renderers", "independent_brush_renders_have_exact_identity_on_one_splat", ()),
         ("gsplat-bench", "renderers", "old_core_renders_at_4k", ()),
         ("gsplat-bench", "renderers", "garden_colmap_projects_observed_points", ("GSPLAT_TEST_COLMAP",)),
+        ("gsplat-core", None, "primitive_tests::gpu_counts_cross_recursive_boundaries_and_reuse_scratch", ()),
         ("gsplat-core", None, "primitive_tests::inclusive_scan_crosses_recursive_block_boundaries", ()),
         ("gsplat-core", None, "primitive_tests::radix_sort_is_stable_for_duplicates_and_partial_blocks", ()),
         ("gsplat-core", None, "primitive_tests::radix_sort_crosses_the_70m_reduced_histogram_boundary", ()),
         ("gsplat-core", "render", "centered_gaussian_has_analytic_color_alpha_and_background", ()),
+        ("gsplat-core", "views", "one_scene_renders_two_views_in_one_submit", ()),
+        ("gsplat-core", None, "view::tests::feedback_recovers_after_capacity_error_and_bounds_pending_frames", ()),
+        ("gsplat-core", "indirect", "overflow_preserves_target_then_grows_and_rerenders_exactly", ()),
+        ("gsplat-core", None, "gpu::tests::wrapped_intersection_count_cannot_enable_raster", ()),
     ],
 )
 def test_rust_gpu_contract(package: str, suite: str | None, name: str, assets: tuple[str, ...]) -> None:

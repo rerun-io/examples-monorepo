@@ -1,201 +1,202 @@
-//! Stable radix sorting and inclusive prefix sums, with 1024 elements per block.
-use crate::gpu::{bind, dispatch, pipeline, storage, uniform};
+//! Cached scan and stable 4-bit radix sort; counts stay on the GPU.
+use crate::gpu::{Dispatches, bind, storage, uniform};
+use crate::kernels::Kernels;
 
-struct ScanLevel {
+pub(crate) struct Scan {
     output: wgpu::Buffer,
-    sums: wgpu::Buffer,
-    params: wgpu::Buffer,
-    capacity: u32,
-}
-
-/// Recursive inclusive u32 scan. The count stays on the GPU.
-/// Allocate once for a capacity, then reuse for each frame.
-/// Values and their sum must fit in u32.
-pub struct Scan {
-    device: wgpu::Device,
-    scan: wgpu::ComputePipeline,
-    add: wgpu::ComputePipeline,
-    levels: Vec<ScanLevel>,
+    groups: Vec<[Option<wgpu::BindGroup>; 2]>,
+    dispatches: Dispatches,
 }
 impl Scan {
-    /// `count_index` selects a u32 in the count buffer passed to [`Self::encode`].
-    pub fn new(device: &wgpu::Device, capacity: u32, count_index: u32) -> Self {
-        let source = format!(
-            "{}\n{}",
-            include_str!("../shaders/scan_common.wgsl"),
-            include_str!("../shaders/scan.wgsl")
-        );
+    pub fn new(
+        device: &wgpu::Device,
+        kernels: &Kernels,
+        capacity: u32,
+        count_index: u32,
+        input: &wgpu::Buffer,
+        count: &wgpu::Buffer,
+    ) -> Self {
         let mut levels = Vec::new();
         let mut n = capacity.max(1);
         let mut divisor = 1;
+        let mut plans = Vec::new();
         loop {
             let blocks = n.div_ceil(1024);
-            levels.push(ScanLevel {
-                output: storage(device, "scan output", u64::from(n) * 4),
-                sums: storage(device, "scan block sums", u64::from(blocks) * 4),
-                params: uniform(device, &[count_index, divisor, capacity, 0]),
-                capacity: n,
-            });
+            levels.push((
+                storage(device, "scan output", u64::from(n) * 4),
+                storage(device, "scan block sums", u64::from(blocks) * 4),
+                uniform(device, &[count_index, divisor, capacity, 0]),
+            ));
+            plans.push([count_index, capacity, divisor * 1024, 1]);
+            plans.push([count_index, capacity, divisor * 256, 1]);
             if blocks == 1 {
                 break;
             }
             n = blocks;
             divisor *= 1024;
         }
+        let groups = levels
+            .iter()
+            .enumerate()
+            .map(|(i, (output, sums, params))| {
+                let source = if i == 0 { input } else { &levels[i - 1].1 };
+                let scan = bind(
+                    device,
+                    &kernels.scan[0],
+                    &[
+                        (0, count.as_entire_binding()),
+                        (1, source.as_entire_binding()),
+                        (2, output.as_entire_binding()),
+                        (3, sums.as_entire_binding()),
+                        (4, params.as_entire_binding()),
+                    ],
+                );
+                let add = levels.get(i + 1).map(|next| {
+                    bind(
+                        device,
+                        &kernels.scan[1],
+                        &[
+                            (0, count.as_entire_binding()),
+                            (1, next.0.as_entire_binding()),
+                            (2, output.as_entire_binding()),
+                            (4, params.as_entire_binding()),
+                        ],
+                    )
+                });
+                [Some(scan), add]
+            })
+            .collect();
         Self {
-            device: device.clone(),
-            scan: pipeline(device, &source, "scan", &[]),
-            add: pipeline(device, &source, "add_offsets", &[]),
-            levels,
+            output: levels[0].0.clone(),
+            groups,
+            dispatches: Dispatches::new(device, &kernels.prepare, count, &plans),
         }
     }
-    /// Encode without submission or host synchronization; read [`Self::output`] after completion.
-    pub fn encode(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        input: &wgpu::Buffer,
-        count: &wgpu::Buffer,
-    ) {
-        for (i, level) in self.levels.iter().enumerate() {
-            let source = if i == 0 {
-                input
-            } else {
-                &self.levels[i - 1].sums
-            };
-            let group = bind(
-                &self.device,
-                &self.scan,
-                &[
-                    (0, count),
-                    (1, source),
-                    (2, &level.output),
-                    (3, &level.sums),
-                    (4, &level.params),
-                ],
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, kernels: &Kernels) {
+        self.dispatches.prepare(encoder, &kernels.prepare);
+        for (i, groups) in self.groups.iter().enumerate() {
+            self.dispatches.dispatch(
+                encoder,
+                i as u32 * 2,
+                &kernels.scan[0],
+                groups[0].as_ref().unwrap(),
             );
-            dispatch(encoder, &self.scan, &group, level.capacity.div_ceil(1024));
         }
-        for i in (0..self.levels.len() - 1).rev() {
-            let level = &self.levels[i];
-            let group = bind(
-                &self.device,
-                &self.add,
-                &[
-                    (0, count),
-                    (1, &self.levels[i + 1].output),
-                    (2, &level.output),
-                    (4, &level.params),
-                ],
-            );
-            dispatch(encoder, &self.add, &group, level.capacity.div_ceil(256));
+        for (i, groups) in self.groups.iter().enumerate().rev() {
+            if let Some(group) = &groups[1] {
+                self.dispatches
+                    .dispatch(encoder, i as u32 * 2 + 1, &kernels.scan[1], group);
+            }
         }
     }
-    /// Inclusive sums, valid up to the input count (at most the capacity).
     pub fn output(&self) -> &wgpu::Buffer {
-        &self.levels[0].output
+        &self.output
     }
 }
 
-/// Stable 4-bit radix sort. Keys and values are sorted in place; no CPU count readback.
-/// Each digit uses count, reduce, scan, scan-add, and scatter kernels.
-pub struct RadixSort {
-    device: wgpu::Device,
-    kernels: [wgpu::ComputePipeline; 5],
-    temporary_keys: wgpu::Buffer,
-    temporary_values: wgpu::Buffer,
-    histogram: wgpu::Buffer,
-    reduced: wgpu::Buffer,
-    params: Vec<wgpu::Buffer>,
-    capacity: u32,
+pub(crate) struct RadixSort {
+    keys: [wgpu::Buffer; 2],
+    values: [wgpu::Buffer; 2],
+    groups: [[wgpu::BindGroup; 5]; 8],
+    dispatches: Dispatches,
 }
 impl RadixSort {
-    pub fn new(device: &wgpu::Device, capacity: u32, count_index: u32, bits: u32) -> Self {
-        assert!((1..=32).contains(&bits));
-        let source = format!(
-            "{}\n{}",
-            include_str!("../shaders/scan_common.wgsl"),
-            include_str!("../shaders/sort.wgsl")
-        );
-        let blocks = capacity.div_ceil(1024).max(1);
-        Self {
-            device: device.clone(),
-            kernels: [
-                "count_keys",
-                "reduce_counts",
-                "scan_counts",
-                "scan_add",
-                "scatter",
-            ]
-            .map(|entry| pipeline(device, &source, entry, &[])),
-            temporary_keys: storage(device, "sort keys", u64::from(capacity) * 4),
-            temporary_values: storage(device, "sort values", u64::from(capacity) * 4),
-            histogram: storage(device, "sort histogram", u64::from(blocks) * 16 * 4),
-            reduced: storage(
-                device,
-                "sort reduced histogram",
-                u64::from(blocks.div_ceil(1024)) * 16 * 4,
-            ),
-            params: (0..bits.div_ceil(4))
-                .map(|digit| uniform(device, &[count_index, digit * 4, capacity, 0]))
-                .collect(),
-            capacity,
-        }
-    }
-    pub fn encode(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
+    pub fn new(
+        device: &wgpu::Device,
+        kernels: &Kernels,
+        capacity: u32,
+        count_index: u32,
         keys: &wgpu::Buffer,
         values: &wgpu::Buffer,
         count: &wgpu::Buffer,
-    ) {
-        let blocks = self.capacity.div_ceil(1024);
-        let reduced_blocks = 16 * blocks.div_ceil(1024);
-        for (digit, params) in self.params.iter().enumerate() {
-            let (src, vals, dst, out_vals) = if digit % 2 == 0 {
-                (keys, values, &self.temporary_keys, &self.temporary_values)
-            } else {
-                (&self.temporary_keys, &self.temporary_values, keys, values)
-            };
+    ) -> Self {
+        let keys = [
+            keys.clone(),
+            storage(device, "sort keys", u64::from(capacity) * 4),
+        ];
+        let values = [
+            values.clone(),
+            storage(device, "sort values", u64::from(capacity) * 4),
+        ];
+        let blocks = capacity.div_ceil(1024).max(1);
+        let histogram = storage(device, "sort histogram", u64::from(blocks) * 64);
+        let reduced = storage(
+            device,
+            "sort reduced histogram",
+            u64::from(blocks.div_ceil(1024)) * 64,
+        );
+        let groups = std::array::from_fn(|digit| {
+            let params = uniform(device, &[count_index, digit as u32 * 4, capacity, 0]);
+            let source = digit % 2;
+            let dest = 1 - source;
             let bindings = [
-                vec![(0, count), (1, src), (3, &self.histogram), (7, params)],
                 vec![
                     (0, count),
-                    (3, &self.histogram),
-                    (4, &self.reduced),
-                    (7, params),
+                    (1, &keys[source]),
+                    (3, &histogram),
+                    (7, &params),
                 ],
-                vec![(0, count), (4, &self.reduced), (7, params)],
+                vec![(0, count), (3, &histogram), (4, &reduced), (7, &params)],
+                vec![(0, count), (4, &reduced), (7, &params)],
+                vec![(0, count), (3, &histogram), (4, &reduced), (7, &params)],
                 vec![
                     (0, count),
-                    (3, &self.histogram),
-                    (4, &self.reduced),
-                    (7, params),
-                ],
-                vec![
-                    (0, count),
-                    (1, src),
-                    (2, vals),
-                    (3, &self.histogram),
-                    (5, dst),
-                    (6, out_vals),
-                    (7, params),
+                    (1, &keys[source]),
+                    (2, &values[source]),
+                    (3, &histogram),
+                    (5, &keys[dest]),
+                    (6, &values[dest]),
+                    (7, &params),
                 ],
             ];
-            for ((kernel, bindings), groups) in self.kernels.iter().zip(bindings).zip([
-                blocks,
-                reduced_blocks,
-                1,
-                reduced_blocks,
-                blocks,
-            ]) {
-                let group = bind(&self.device, kernel, &bindings);
-                dispatch(encoder, kernel, &group, groups);
+            std::array::from_fn(|stage| {
+                bind(
+                    device,
+                    &kernels.sort[stage],
+                    &bindings[stage]
+                        .iter()
+                        .map(|(i, b)| (*i, b.as_entire_binding()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        });
+        Self {
+            keys,
+            values,
+            groups,
+            dispatches: Dispatches::new(
+                device,
+                &kernels.prepare,
+                count,
+                &[
+                    [count_index, capacity, 1024, 1],
+                    [count_index, capacity, 1024 * 1024, 16],
+                ],
+            ),
+        }
+    }
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, kernels: &Kernels, bits: u32) {
+        assert!((1..=32).contains(&bits));
+        self.dispatches.prepare(encoder, &kernels.prepare);
+        for groups in &self.groups[..bits.div_ceil(4) as usize] {
+            for (stage, plan) in [Some(0), Some(1), None, Some(1), Some(0)]
+                .into_iter()
+                .enumerate()
+            {
+                if let Some(plan) = plan {
+                    self.dispatches
+                        .dispatch(encoder, plan, &kernels.sort[stage], &groups[stage]);
+                } else {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(&kernels.sort[stage]);
+                    pass.set_bind_group(0, &groups[stage], &[]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
             }
         }
-        if self.params.len() % 2 == 1 && self.capacity > 0 {
-            let size = u64::from(self.capacity) * 4;
-            encoder.copy_buffer_to_buffer(&self.temporary_keys, 0, keys, 0, size);
-            encoder.copy_buffer_to_buffer(&self.temporary_values, 0, values, 0, size);
-        }
+    }
+    pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        let index = bits.div_ceil(4) as usize % 2;
+        (&self.keys[index], &self.values[index])
     }
 }

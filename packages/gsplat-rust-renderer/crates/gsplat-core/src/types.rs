@@ -36,7 +36,6 @@ pub enum RenderMode {
 pub struct RenderOptions {
     /// Applied during rasterization; alpha remains accumulated splat coverage.
     pub background: Vec3,
-    pub render_mode: RenderMode,
     /// Positive multiplier, applied as a log-scale offset before the 3D floor.
     pub splat_scale: f32,
     /// Specialize the projection shader by lens model. False keeps a uniform switch.
@@ -46,7 +45,6 @@ impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             background: Vec3::ZERO,
-            render_mode: RenderMode::Default,
             splat_scale: 1.0,
             specialize_camera: false,
         }
@@ -69,28 +67,6 @@ pub struct FrameStats {
     pub intersections: u32,
     pub intersection_capacity: u32,
     pub overflow_events: u32,
-}
-
-/// Enabled-device capabilities, validated again by Renderer::new.
-#[derive(Clone, Copy, Debug)]
-pub struct Capabilities {
-    pub max_storage_buffer_bytes: u64,
-}
-impl Capabilities {
-    pub fn from_device(device: &wgpu::Device) -> Result<Self, crate::Error> {
-        let limits = device.limits();
-        if !device.features().contains(wgpu::Features::SUBGROUP)
-            || limits.max_storage_buffers_per_shader_stage < 8
-            || limits.max_compute_invocations_per_workgroup < 256
-            || limits.max_compute_workgroup_size_x < 256
-            || limits.max_compute_workgroup_storage_size < 10_240
-        {
-            return Err(crate::Error::Capabilities);
-        }
-        Ok(Self {
-            max_storage_buffer_bytes: limits
-                .max_storage_buffer_binding_size
-                .min(limits.max_buffer_size),
-        })
-    }
+    /// The previous allocation was too small; submit this view again after feedback.
+    pub needs_rerender: bool,
 }

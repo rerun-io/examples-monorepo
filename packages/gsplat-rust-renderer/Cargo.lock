@@ -6026,6 +6026,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "naga",
  "pollster 0.4.0",
  "thiserror 2.0.20",
  "wgpu",
