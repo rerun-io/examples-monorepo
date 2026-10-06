@@ -17,7 +17,6 @@ pub mod letterbox;
 pub mod mesh;
 pub mod perspective;
 // Tracking: the tracker state machine, the hand model, enclosing circles, the scale calibration.
-pub mod circles;
 pub mod model;
 pub mod perception;
 pub mod scale;
@@ -203,7 +202,9 @@ pub struct HandOutput {
 impl HandOutput {
     /// The views the kept fit used: `keynet_views` with [`ViewOutcome::Fitted`], in request order.
     pub fn fitted_views(&self) -> impl Iterator<Item = &KeyNetView> {
-        self.keynet_views.iter().filter(|view| view.outcome == ViewOutcome::Fitted)
+        self.keynet_views
+            .iter()
+            .filter(|view| view.outcome == ViewOutcome::Fitted)
     }
 }
 
@@ -246,7 +247,12 @@ pub trait HandTracking: Send {
     /// # Errors
     ///
     /// [`HandsError::Nets`] when a network fails (the caller may rebuild the networks), [`HandsError::Invalid`] for bad inputs.
-    fn step(&mut self, inputs: &HandInputs<'_>, world_from_rig: &Isometry3<f64>, nets: &mut dyn HandNets) -> Result<HandFrameResult, HandsError>;
+    fn step(
+        &mut self,
+        inputs: &HandInputs<'_>,
+        world_from_rig: &Isometry3<f64>,
+        nets: &mut dyn HandNets,
+    ) -> Result<HandFrameResult, HandsError>;
 }
 
 /// Build the tracker for a rig: handtrack's `Tracker` with `ROBUST_TRACKER_CONFIG` and the native fit
@@ -258,5 +264,10 @@ pub trait HandTracking: Send {
 /// [`HandsError::Invalid`] for a bad camera list, scale or rig; [`HandsError::Model`] when the hand model asset is broken.
 pub fn new_tracker(rig: &Rig, config: HandsConfig) -> Result<Box<dyn HandTracking>, HandsError> {
     let perception = Box::new(perception::NetsPerception::new(rig)?);
-    Ok(Box::new(tracker::Tracker::new(rig, &config, tracker::TrackerConfig::default(), perception)?))
+    Ok(Box::new(tracker::Tracker::new(
+        rig,
+        &config,
+        tracker::TrackerConfig::default(),
+        perception,
+    )?))
 }

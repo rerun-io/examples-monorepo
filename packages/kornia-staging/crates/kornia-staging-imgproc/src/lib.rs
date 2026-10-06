@@ -10,3 +10,5 @@ pub mod interpolation;
 /// Feature extraction and decoding.
 pub mod features;
 
+/// Contour geometry.
+pub mod contours;

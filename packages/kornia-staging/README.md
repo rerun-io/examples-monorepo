@@ -69,3 +69,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | Scaled zero-border bilinear remap | robocap-live `kornia_ext/remap.rs` | kornia-rs / kornia-imgproc / interpolation::remap | staged | - |
 | Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |
+| Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |

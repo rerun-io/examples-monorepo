@@ -1,10 +1,8 @@
-//! The smallest circle enclosing a set of 2D points (OpenCV's `minEnclosingCircle`, which handtrack's
-//! `labels.circles.enclosing_circles` calls), written kornia-style for upstreaming to kornia-imgproc's contour features.
+//! The smallest circle enclosing a set of 2D points.
 //!
-//! Welzl's algorithm in its iterative move-to-front-free form: deterministic (input order), O(n) expected and O(n^3) worst
-//! case, which is nothing for a hand's 21 keypoints. Double precision; OpenCV computes in float32 and pads the radius by
+//! Deterministic support-point loops in input order, with O(n^3) worst-case cost.
+//! No randomization or expected-linear guarantee. Double precision; OpenCV computes in float32 and pads the radius by
 //! 1e-4, so the two agree to about 1e-4 pixels.
-#![deny(missing_docs)]
 
 /// A circle: centre `(cx, cy)` and radius, in the points' units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,7 +28,11 @@ impl Circle {
 
     fn diameter(a: [f64; 2], b: [f64; 2]) -> Self {
         let radius = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() / 2.0;
-        Self { cx: (a[0] + b[0]) / 2.0, cy: (a[1] + b[1]) / 2.0, radius }
+        Self {
+            cx: (a[0] + b[0]) / 2.0,
+            cy: (a[1] + b[1]) / 2.0,
+            radius,
+        }
     }
 
     /// The circle through three points; for (nearly) collinear points, the circle on the farthest pair.
@@ -40,14 +42,28 @@ impl Circle {
         let d = 2.0 * (bx * cy - by * cx);
         let scale = (bx * bx + by * by).max(cx * cx + cy * cy);
         if d.abs() <= 1e-12 * scale.max(f64::MIN_POSITIVE) {
-            let pairs = [Self::diameter(a, b), Self::diameter(a, c), Self::diameter(b, c)];
-            return pairs.into_iter().fold(pairs[0], |best, circle| if circle.radius > best.radius { circle } else { best });
+            let pairs = [
+                Self::diameter(a, b),
+                Self::diameter(a, c),
+                Self::diameter(b, c),
+            ];
+            return pairs.into_iter().fold(pairs[0], |best, circle| {
+                if circle.radius > best.radius {
+                    circle
+                } else {
+                    best
+                }
+            });
         }
         let b2 = bx * bx + by * by;
         let c2 = cx * cx + cy * cy;
         let ux = (cy * b2 - by * c2) / d;
         let uy = (bx * c2 - cx * b2) / d;
-        Self { cx: a[0] + ux, cy: a[1] + uy, radius: (ux * ux + uy * uy).sqrt() }
+        Self {
+            cx: a[0] + ux,
+            cy: a[1] + uy,
+            radius: (ux * ux + uy * uy).sqrt(),
+        }
     }
 }
 
@@ -64,18 +80,26 @@ impl Circle {
 /// # Example
 ///
 /// ```
-/// use robocap_live::hands::circles::min_enclosing_circle;
+/// use kornia_staging_imgproc::contours::min_enclosing_circle;
 /// let circle = min_enclosing_circle(&[[0.0, 0.0], [2.0, 0.0], [1.0, 0.5]]).unwrap();
 /// assert!((circle.cx - 1.0).abs() < 1e-12 && (circle.radius - 1.0).abs() < 1e-12);
 /// ```
 pub fn min_enclosing_circle(points: &[[f64; 2]]) -> Option<Circle> {
     let first = *points.first()?;
-    let mut circle = Circle { cx: first[0], cy: first[1], radius: 0.0 };
+    let mut circle = Circle {
+        cx: first[0],
+        cy: first[1],
+        radius: 0.0,
+    };
     for i in 1..points.len() {
         if circle.contains(points[i]) {
             continue;
         }
-        circle = Circle { cx: points[i][0], cy: points[i][1], radius: 0.0 };
+        circle = Circle {
+            cx: points[i][0],
+            cy: points[i][1],
+            radius: 0.0,
+        };
         for j in 0..i {
             if circle.contains(points[j]) {
                 continue;
@@ -96,22 +120,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opencv_fixture() {
+        // Generated with cv2.minEnclosingCircle in the simplecv environment,
+        // OpenCV 4.13.0; f32 points. OpenCV pads the radius by about 1e-4.
+        let points = [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [1.0, 2.0],
+            [-0.5, 0.5],
+            [0.5, 0.699999988079071],
+        ];
+        let circle = min_enclosing_circle(&points).unwrap();
+        approx::assert_abs_diff_eq!(circle.cx, 0.8333333134651184, epsilon = 2e-6);
+        approx::assert_abs_diff_eq!(circle.cy, 0.6666666865348816, epsilon = 2e-6);
+        approx::assert_abs_diff_eq!(circle.radius, 1.3438096046447754, epsilon = 2e-4);
+    }
+
+    #[test]
     fn empty_and_single_points() {
         assert!(min_enclosing_circle(&[]).is_none());
-        assert_eq!(min_enclosing_circle(&[[3.0, 4.0]]), Some(Circle { cx: 3.0, cy: 4.0, radius: 0.0 }));
+        assert_eq!(
+            min_enclosing_circle(&[[3.0, 4.0]]),
+            Some(Circle {
+                cx: 3.0,
+                cy: 4.0,
+                radius: 0.0
+            })
+        );
     }
 
     #[test]
     fn a_triangle_with_an_obtuse_angle_uses_its_longest_side() -> Result<(), String> {
-        let circle = min_enclosing_circle(&[[0.0, 0.0], [10.0, 0.0], [5.0, 1.0]]).ok_or("no circle")?;
-        assert!((circle.cx - 5.0).abs() < 1e-12 && circle.cy.abs() < 1e-12 && (circle.radius - 5.0).abs() < 1e-12);
+        let circle =
+            min_enclosing_circle(&[[0.0, 0.0], [10.0, 0.0], [5.0, 1.0]]).ok_or("no circle")?;
+        assert!(
+            (circle.cx - 5.0).abs() < 1e-12
+                && circle.cy.abs() < 1e-12
+                && (circle.radius - 5.0).abs() < 1e-12
+        );
         Ok(())
     }
 
     #[test]
     fn collinear_points() -> Result<(), String> {
-        let circle = min_enclosing_circle(&[[0.0, 0.0], [1.0, 1.0], [3.0, 3.0], [2.0, 2.0]]).ok_or("no circle")?;
-        assert!((circle.cx - 1.5).abs() < 1e-12 && (circle.radius - 1.5 * 2f64.sqrt()).abs() < 1e-12);
+        let circle = min_enclosing_circle(&[[0.0, 0.0], [1.0, 1.0], [3.0, 3.0], [2.0, 2.0]])
+            .ok_or("no circle")?;
+        assert!(
+            (circle.cx - 1.5).abs() < 1e-12 && (circle.radius - 1.5 * 2f64.sqrt()).abs() < 1e-12
+        );
         Ok(())
     }
 
@@ -119,15 +175,26 @@ mod tests {
     fn every_point_is_inside_and_three_touch_a_random_cloud() -> Result<(), String> {
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 11) as f64 / (1u64 << 53) as f64
         };
         for _ in 0..200 {
             let points: Vec<[f64; 2]> = (0..21).map(|_| [400.0 * next(), 300.0 * next()]).collect();
             let circle = min_enclosing_circle(&points).ok_or("no circle")?;
-            let distances: Vec<f64> = points.iter().map(|p| ((p[0] - circle.cx).powi(2) + (p[1] - circle.cy).powi(2)).sqrt()).collect();
+            let distances: Vec<f64> = points
+                .iter()
+                .map(|p| ((p[0] - circle.cx).powi(2) + (p[1] - circle.cy).powi(2)).sqrt())
+                .collect();
             assert!(distances.iter().all(|d| *d <= circle.radius + 1e-6));
-            assert!(distances.iter().filter(|d| (**d - circle.radius).abs() < 1e-6).count() >= 2);
+            assert!(
+                distances
+                    .iter()
+                    .filter(|d| (**d - circle.radius).abs() < 1e-6)
+                    .count()
+                    >= 2
+            );
         }
         Ok(())
     }

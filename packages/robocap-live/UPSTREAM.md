@@ -6,7 +6,6 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   types with integer-ns time; a raw multi-camera replay format.
 - `src/source/mod.rs` FrameSource (rig, next_event) -> kornia-slam: an N-camera + IMU source trait (its roadmap item
   "multi-camera rigs, ported from slam-rs").
-- Integer area resize is staged in `kornia-staging-imgproc::resize::area`; see [the staging tracker](../kornia-staging/README.md).
 - `src/capture/v4l2_mplane.c` + `capture/camera.rs` -> kornia-io `v4l`: multi-planar (`VIDEO_CAPTURE_MPLANE`) NV12 capture with
   `V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC` checked and the luma plane copied out; kornia-io's `V4lVideoCapture` is single-planar only
   and drops the buffer flags. Adapted from PR #270.
@@ -14,12 +13,8 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   validation, attribute save/restore), accel interpolated onto gyro stamps into combined `ImuMeasurement`-shaped samples, and a
   clock guard. Adapted from PR #270.
 - `src/capture/matcher.rs` -> kornia-sensors / sensor-rt: timestamp-tolerance multi-camera frameset assembly.
-- Scaled zero-border remap is staged in `kornia-staging-imgproc::interpolation::remap`; see [the staging tracker](../kornia-staging/README.md).
-- Heatmap peaks are staged in `kornia-staging-imgproc::features::heatmap`; see [the staging tracker](../kornia-staging/README.md).
 - `src/hands/letterbox.rs` BarLetterbox -> kornia-imgproc `preprocess`: the mono letterbox with its public pixel-centre maps
   (`to_net`/`from_net`), built on `spatial_padding`.
-- `src/hands/circles.rs` min_enclosing_circle -> kornia-imgproc (contours/features): OpenCV's `minEnclosingCircle` (Welzl, f64,
-  deterministic), with docs, a doctest and unit tests.
 - `src/nets/rknn/api.rs` RknnRuntime / RknnModel -> kornia-rs `examples/rknn` (beside `examples/onnx`), or a small kornia runtime
   crate: a dlopened RKNN 2.x C-API binding (one context per NPU core, u8/f16/f32 inputs, float outputs into caller buffers,
   typed errors, rknn_destroy on drop). kornia has no inference crate, so this stays ours until one exists.
