@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 
+import cv2
+import numpy as np
 import torch
 from jaxtyping import Float32
 
@@ -80,6 +82,28 @@ def test_so3_exp_basics() -> None:
     rot: Float32[torch.Tensor, "3 3"] = so3_exp(torch.tensor([[0.0, 0.0, math.pi / 2]]))[0]
     got: Float32[torch.Tensor, "3"] = rot @ torch.tensor([1.0, 0.0, 0.0])
     assert torch.allclose(got, torch.tensor([0.0, 1.0, 0.0]), atol=1e-5)
+
+
+def test_project_points_brown_conrady_matches_opencv() -> None:
+    """Both tangential terms use undistorted coordinates, as in OpenCV."""
+    points: Float32[torch.Tensor, "s 3"] = torch.tensor(
+        [[0.8, 0.6, 2.0], [-0.9, 0.7, 2.5], [0.7, -0.8, 1.8], [-0.6, -0.5, 2.2], [0.1, 0.2, 3.0]],
+        dtype=torch.float32,
+    )
+    rotation: Float32[torch.Tensor, "3 3"] = so3_exp(torch.tensor([[0.08, -0.12, 0.04]], dtype=torch.float32))[0]
+    translation: Float32[torch.Tensor, "3"] = torch.tensor([0.1, -0.05, 0.3], dtype=torch.float32)
+    intrinsics: Float32[torch.Tensor, "3 3"] = torch.tensor(
+        [[800.0, 0.0, 640.0], [0.0, 820.0, 360.0], [0.0, 0.0, 1.0]], dtype=torch.float32
+    )
+    distortion: Float32[torch.Tensor, "5"] = torch.tensor([0.12, -0.04, 0.015, -0.02, 0.008], dtype=torch.float32)
+    rotation_vector: Float32[np.ndarray, "3 1"] = cv2.Rodrigues(rotation.numpy())[0]
+    expected: Float32[np.ndarray, "s 1 2"] = cv2.projectPoints(
+        points.numpy(), rotation_vector, translation.numpy(), intrinsics.numpy(), distortion.numpy()
+    )[0]
+    projection: tuple[Float32[torch.Tensor, "s 2"], Float32[torch.Tensor, "s"]] = project_points(
+        points, rotation, translation, intrinsics, distortion
+    )
+    np.testing.assert_allclose(projection[0].numpy(), expected[:, 0, :], rtol=0.0, atol=1e-4)
 
 
 def test_bundle_adjust_recovers_perturbed_extrinsics() -> None:

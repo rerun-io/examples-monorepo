@@ -96,8 +96,10 @@ def project_points(
         k1, k2, p1, p2, k3 = (dist_coeffs[0], dist_coeffs[1], dist_coeffs[2], dist_coeffs[3], dist_coeffs[4])
         r2: Float32[torch.Tensor, "s"] = xn * xn + yn * yn
         radial: Float32[torch.Tensor, "s"] = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
-        xn = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
-        yn = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+        xn, yn = (
+            xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn),
+            yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn,
+        )
 
     fx: Float32[torch.Tensor, ""] = k_matrix[0, 0]
     fy: Float32[torch.Tensor, ""] = k_matrix[1, 1]
