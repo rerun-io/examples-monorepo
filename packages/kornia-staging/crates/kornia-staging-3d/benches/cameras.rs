@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use kornia_staging_3d::camera::{CameraModel, KannalaBrandt4};
+use kornia_staging_3d::camera::{CameraModel, Fisheye624, KannalaBrandt4};
 use kornia_staging_algebra::Scalar;
 use std::hint::black_box;
 fn lane<S: Scalar>(c: &mut Criterion, label: &str) {
@@ -33,6 +33,22 @@ fn lane<S: Scalar>(c: &mut Criterion, label: &str) {
 
     group.bench_function("kb4_unproject", |b| {
         b.iter(|| black_box(&camera).unproject(black_box(pixel)))
+    });
+    let fish = Fisheye624::fisheye62(
+        param[..4].try_into().unwrap(),
+        [0.01, -0.001, 0.0001, 0.0, 0.0, 0.0].map(S::from_literal),
+        [0.002, -0.003].map(S::from_literal),
+    )
+    .expect("valid camera calibration");
+    let fish_pixel = fish.project_unchecked(point);
+    group.bench_function("fisheye624_project", |b| {
+        b.iter(|| black_box(&fish).project(black_box(point)))
+    });
+    group.bench_function("fisheye624_project_unchecked", |b| {
+        b.iter(|| black_box(&fish).project_unchecked(black_box(point)))
+    });
+    group.bench_function("fisheye624_unproject", |b| {
+        b.iter(|| black_box(&fish).unproject(black_box(fish_pixel)))
     });
     group.finish();
 }

@@ -129,5 +129,7 @@ fn right_front() -> KannalaBrandt4<f64> {
 }
 
 mod brown;
+mod fisheye624;
 mod kb4;
 mod pinhole;
+mod regressions;
