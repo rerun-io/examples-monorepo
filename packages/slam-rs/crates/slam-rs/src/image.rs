@@ -1,11 +1,11 @@
 //! Validated frame ingestion into dense Kornia images.
 use kornia_image::{Image, ImageSize};
-use kornia_staging_imgproc::color::widen_u8_shift8_strided;
+use kornia_staging_imgproc::color::widen_u8_shift8_strided_unchecked;
 use thiserror::Error;
 
 /// Everything that can go wrong building or filling an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum ImageError {
+pub enum IngestError {
     /// A row pitch cannot be shorter than the row it carries.
     #[error("stride {stride} is shorter than width {width}")]
     StrideTooSmall {
@@ -50,9 +50,9 @@ pub enum ImageError {
 ///
 /// # Errors
 /// Returns a geometry or allocation-layout error before allocating invalid sizes.
-pub fn zeros(width: usize, height: usize) -> Result<Image<u16, 1>, ImageError> {
+pub fn zeros(width: usize, height: usize) -> Result<Image<u16, 1>, IngestError> {
     let len = checked_pixel_len(width, height, width)?;
-    Image::new(ImageSize { width, height }, vec![0; len]).map_err(|_| ImageError::LayoutTooLarge {
+    Image::new(ImageSize { width, height }, vec![0; len]).map_err(|_| IngestError::LayoutTooLarge {
         len,
         max: max_elements::<u16>(),
     })
@@ -84,7 +84,7 @@ pub fn from_u8_strided(
     width: usize,
     height: usize,
     stride: usize,
-) -> Result<Image<u16, 1>, ImageError> {
+) -> Result<Image<u16, 1>, IngestError> {
     let mut image = empty();
     fill_from_u8_strided(&mut image, bytes, width, height, stride)?;
     Ok(image)
@@ -100,31 +100,41 @@ pub fn fill_from_u8_strided(
     width: usize,
     height: usize,
     stride: usize,
-) -> Result<(), ImageError> {
+) -> Result<(), IngestError> {
     let source_len = checked_len(width, height, stride)?;
     if bytes.len() < source_len {
-        return Err(ImageError::ShortBuffer {
+        return Err(IngestError::ShortBuffer {
             height,
             stride,
             len: bytes.len(),
         });
     }
-    checked_pixel_len(width, height, width)?;
+    fill_from_u8_strided_unchecked(image, bytes, width, height, stride)
+}
+
+/// Refill from source geometry already validated at the frame boundary.
+///
+/// # Panics
+/// May panic if `stride < width` or the source does not contain `stride * height` bytes.
+pub(crate) fn fill_from_u8_strided_unchecked(
+    image: &mut Image<u16, 1>,
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> Result<(), IngestError> {
     if image.width() != width || image.height() != height {
         *image = zeros(width, height)?;
     }
-    widen_u8_shift8_strided(bytes, stride, image).map_err(|_| ImageError::ShortBuffer {
-        height,
-        stride,
-        len: bytes.len(),
-    })
+    widen_u8_shift8_strided_unchecked(bytes, stride, image);
+    Ok(())
 }
 
 /// Copy a dense image, reusing storage when its geometry matches.
 ///
 /// # Errors
 /// Returns an allocation-layout error for unrepresentable geometry.
-pub fn copy_image(source: &Image<u16, 1>, target: &mut Image<u16, 1>) -> Result<(), ImageError> {
+pub fn copy_image(source: &Image<u16, 1>, target: &mut Image<u16, 1>) -> Result<(), IngestError> {
     if source.size() != target.size() {
         *target = zeros(source.width(), source.height())?;
     }
@@ -146,21 +156,21 @@ pub(crate) const fn max_elements<T>() -> usize {
 ///
 /// This is an element *count*, not a layout: use it for a source buffer that
 /// already exists. Sizing an allocation goes through [`checked_pixel_len`].
-fn checked_len(width: usize, height: usize, stride: usize) -> Result<usize, ImageError> {
+fn checked_len(width: usize, height: usize, stride: usize) -> Result<usize, IngestError> {
     if stride < width {
-        return Err(ImageError::StrideTooSmall { width, stride });
+        return Err(IngestError::StrideTooSmall { width, stride });
     }
     stride
         .checked_mul(height)
-        .ok_or(ImageError::SizeOverflow { height, stride })
+        .ok_or(IngestError::SizeOverflow { height, stride })
 }
 
 /// [`checked_len`], and the `u16` buffer it describes must be allocatable.
-fn checked_pixel_len(width: usize, height: usize, stride: usize) -> Result<usize, ImageError> {
+fn checked_pixel_len(width: usize, height: usize, stride: usize) -> Result<usize, IngestError> {
     let len: usize = checked_len(width, height, stride)?;
     let max: usize = max_elements::<u16>();
     if len > max {
-        return Err(ImageError::LayoutTooLarge { len, max });
+        return Err(IngestError::LayoutTooLarge { len, max });
     }
     Ok(len)
 }
@@ -184,14 +194,14 @@ mod tests {
     fn a_bad_geometry_is_an_error_not_a_panic() {
         assert_eq!(
             from_u8_strided(&[0; 4], 4, 1, 2).err(),
-            Some(ImageError::StrideTooSmall {
+            Some(IngestError::StrideTooSmall {
                 width: 4,
                 stride: 2
             })
         );
         assert_eq!(
             from_u8_strided(&[0; 4], 4, 2, 4).err(),
-            Some(ImageError::ShortBuffer {
+            Some(IngestError::ShortBuffer {
                 height: 2,
                 stride: 4,
                 len: 4
@@ -199,7 +209,7 @@ mod tests {
         );
         assert_eq!(
             from_u8_strided(&[], 1, 2, 1 << 63).err(),
-            Some(ImageError::SizeOverflow {
+            Some(IngestError::SizeOverflow {
                 height: 2,
                 stride: 1 << 63
             })
@@ -211,12 +221,12 @@ mod tests {
         let max = max_elements::<u16>();
         assert_eq!(
             zeros(max + 1, 1).err(),
-            Some(ImageError::LayoutTooLarge { len: max + 1, max })
+            Some(IngestError::LayoutTooLarge { len: max + 1, max })
         );
         let mut image = zeros(2, 2).unwrap();
         assert_eq!(
             fill_from_u8_strided(&mut image, &[0; 4], max + 1, 1, max + 1),
-            Err(ImageError::ShortBuffer {
+            Err(IngestError::ShortBuffer {
                 height: 1,
                 stride: max + 1,
                 len: 4

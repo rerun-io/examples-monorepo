@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra"]
-default-members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra"]
+members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra", "crates/kornia-staging-slam"]
+default-members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra", "crates/kornia-staging-slam"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
+kornia-staging-imgproc = { path = "crates/kornia-staging-imgproc" }
 kornia-image = { version = "0.2", default-features = false }
 kornia-imgproc = { version = "0.2", default-features = false }
 kornia-3d = { version = "0.2", default-features = false }

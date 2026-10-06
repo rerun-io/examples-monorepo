@@ -3,75 +3,29 @@ use kornia_image::{Image, ImageError};
 
 const KERNEL: [i32; 5] = [1, 4, 6, 4, 1];
 
-/// Reusable vertical-filter row for [`pyrdown_u16`].
-/// A larger row can serve subsequent, smaller levels without reallocating.
-#[derive(Debug, Clone, Default)]
-pub struct PyrDownU16Scratch {
-    row: Vec<i32>,
-}
-
-impl PyrDownU16Scratch {
-    /// Allocate scratch for source rows up to `width` pixels.
-    ///
-    /// # Arguments
-    /// * `width` - Largest source row this scratch will filter.
-    ///
-    /// # Errors
-    /// Rejects widths that exceed the single-allocation byte limit.
-    pub fn new(width: usize) -> Result<Self, ImageError> {
-        let mut scratch = Self::default();
-        scratch.prepare(width)?;
-        Ok(scratch)
-    }
-
-    /// Grow once for a new largest source width; reuse existing storage otherwise.
-    ///
-    /// # Arguments
-    /// * `width` - Required source row length.
-    ///
-    /// # Errors
-    /// Rejects widths that exceed the single-allocation byte limit.
-    pub fn prepare(&mut self, width: usize) -> Result<(), ImageError> {
-        if width <= self.row.len() {
-            return Ok(());
-        }
-        let max = isize::MAX as usize / size_of::<i32>();
-        if width > max {
-            return Err(ImageError::InvalidChannelShape(width, max));
-        }
-        self.row.resize(width, 0);
-        Ok(())
-    }
-}
-
 /// Filter with `[1,4,6,4,1]` in both axes and floor-half the dimensions.
 /// Borders use reflect-101; i32 intermediates retain all precision until the
-/// final `(sum + 128) >> 8`. Scratch is caller-owned and is not resized here.
+/// final `(sum + 128) >> 8`. This convenience entry point allocates one temporary row. Use
+/// [`super::PyramidPlanU16`] to reuse storage across frames.
 ///
 /// # Arguments
 /// * `src` - Dense, single-channel u16 image, at least 3 by 3.
 /// * `dst` - Destination with dimensions `(src.width()/2, src.height()/2)`.
-/// * `scratch` - Row storage prepared for at least `src.width()` pixels.
 ///
 /// # Errors
-/// Rejects incompatible geometry or insufficient scratch before writing output.
+/// Rejects incompatible geometry before writing output.
 ///
 /// # Examples
 /// ```
 /// use kornia_image::{Image, ImageSize};
-/// use kornia_staging_imgproc::pyramid::{pyrdown_u16, PyrDownU16Scratch};
+/// use kornia_staging_imgproc::pyramid::pyrdown_floor_u16;
 /// let src = Image::from_size_val(ImageSize { width: 9, height: 7 }, 4242u16)?;
 /// let mut dst = Image::from_size_val(ImageSize { width: 4, height: 3 }, 0u16)?;
-/// let mut scratch = PyrDownU16Scratch::new(9)?;
-/// pyrdown_u16(&src, &mut dst, &mut scratch)?;
+/// pyrdown_floor_u16(&src, &mut dst)?;
 /// assert!(dst.as_slice().iter().all(|&pixel| pixel == 4242));
 /// # Ok::<(), kornia_image::ImageError>(())
 /// ```
-pub fn pyrdown_u16(
-    src: &Image<u16, 1>,
-    dst: &mut Image<u16, 1>,
-    scratch: &mut PyrDownU16Scratch,
-) -> Result<(), ImageError> {
+pub fn pyrdown_floor_u16(src: &Image<u16, 1>, dst: &mut Image<u16, 1>) -> Result<(), ImageError> {
     if src.width() < 3 || src.height() < 3 {
         return Err(ImageError::InvalidImageSize(
             src.width(),
@@ -88,40 +42,35 @@ pub fn pyrdown_u16(
             src.height() / 2,
         ));
     }
-    if scratch.row.len() < src.width() {
-        return Err(ImageError::InvalidChannelShape(
-            scratch.row.len(),
-            src.width(),
-        ));
-    }
-    pyrdown_u16_unchecked(src, dst, scratch);
+    let mut scratch = vec![0; src.width()];
+    pyrdown_floor_u16_with_scratch(src, dst, &mut scratch);
     Ok(())
 }
 
 /// Filter a level whose geometry and scratch have already been checked.
 ///
 /// # Arguments
-/// As [`pyrdown_u16`]. Source sides must be at least three, destination sides
+/// As [`pyrdown_floor_u16`]. Source sides must be at least three, destination sides
 /// must be floor-halved, and scratch must cover the source width.
 ///
 /// # Panics
 /// Indexing may panic if these preconditions are not met.
 #[inline]
-pub fn pyrdown_u16_unchecked(
+pub(super) fn pyrdown_floor_u16_with_scratch(
     src: &Image<u16, 1>,
     dst: &mut Image<u16, 1>,
-    scratch: &mut PyrDownU16Scratch,
+    scratch: &mut [i32],
 ) {
-    let scratch = &mut scratch.row;
     let src_width: usize = src.width();
     let src_height: usize = src.height();
     let dst_width: usize = dst.width();
-    let dst_height: usize = dst.height();
     debug_assert_eq!(dst_width, src_width >> 1);
-    debug_assert_eq!(dst_height, src_height >> 1);
+    debug_assert_eq!(dst.height(), src_height >> 1);
+    let pixels = src.as_slice();
+    let output = dst.as_slice_mut();
 
     // Vertical convolution, one accumulator row per destination row.
-    for r in 0..dst_height {
+    for (r, out_row) in output.chunks_exact_mut(dst_width).enumerate() {
         let row2: i64 = 2 * r as i64;
         // `std::abs(2 * r - 2)` and `std::abs(2 * r - 1)`, not `border101`.
         let rows: [usize; 5] = [
@@ -131,13 +80,8 @@ pub fn pyrdown_u16_unchecked(
             border101(row2 + 1, src_height as i64) as usize,
             border101(row2 + 2, src_height as i64) as usize,
         ];
-        let [row_m2, row_m1, row_0, row_p1, row_p2]: [&[u16]; 5] = [
-            &src.as_slice()[(rows[0]) * src.width()..((rows[0]) + 1) * src.width()],
-            &src.as_slice()[(rows[1]) * src.width()..((rows[1]) + 1) * src.width()],
-            &src.as_slice()[(rows[2]) * src.width()..((rows[2]) + 1) * src.width()],
-            &src.as_slice()[(rows[3]) * src.width()..((rows[3]) + 1) * src.width()],
-            &src.as_slice()[(rows[4]) * src.width()..((rows[4]) + 1) * src.width()],
-        ];
+        let [row_m2, row_m1, row_0, row_p1, row_p2] =
+            rows.map(|row| &pixels[row * src_width..][..src_width]);
         // `tmp(r, c)`, one contiguous run of `c` rather than one column of it.
         let band: &mut [i32] = &mut scratch[..src_width];
         for c in 0..src_width {
@@ -149,13 +93,7 @@ pub fn pyrdown_u16_unchecked(
         }
         // Consume the vertical row immediately. Reflection is about the source
         // width, and rounding still occurs only after both integer passes.
-        for (c, pixel) in {
-            let width = dst.width();
-            &mut dst.as_slice_mut()[(r) * width..((r) + 1) * width]
-        }
-        .iter_mut()
-        .enumerate()
-        {
+        for (c, pixel) in out_row.iter_mut().enumerate() {
             // Interior five-tap windows are contiguous. Peel low/high border columns to keep
             // reflection arithmetic out of the large interior loop.
             let value: i32 = match (2 * c)
@@ -194,7 +132,7 @@ pub fn pyrdown_u16_unchecked(
 }
 /// High-end reflect-101: `h - 1 - |h - 1 - x|` for non-negative x.
 /// Negative indices instead reflect with absolute value; the formulas are not
-/// interchangeable outside their domains (trap 3).
+/// interchangeable outside their domains.
 #[inline]
 fn border101(x: i64, h: i64) -> i64 {
     h - 1 - (h - 1 - x).abs()
@@ -205,55 +143,22 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn zeros(width: usize, height: usize) -> Result<Image<u16, 1>, ImageError> {
-        Image::from_size_val(kornia_image::ImageSize { width, height }, 0)
-    }
-    fn build(image: &Image<u16, 1>, reductions: usize) -> Vec<Image<u16, 1>> {
-        let mut levels = vec![image.clone()];
-        let mut scratch = PyrDownU16Scratch::new(image.width()).unwrap();
-        for level in 0..reductions {
-            let source = &levels[level];
-            let mut next = zeros(source.width() / 2, source.height() / 2).unwrap();
-            pyrdown_u16(source, &mut next, &mut scratch).unwrap();
-            levels.push(next);
-        }
-        levels
-    }
-    #[test]
-    fn scratch_reuses_the_largest_row_and_rejects_unallocatable_widths() {
-        let mut scratch = PyrDownU16Scratch::new(96).unwrap();
-        let pointer = scratch.row.as_ptr();
-        let capacity = scratch.row.capacity();
-        for width in [96, 48, 24, 96] {
-            scratch.prepare(width).unwrap();
-        }
-        assert_eq!(scratch.row.as_ptr(), pointer);
-        assert_eq!(scratch.row.capacity(), capacity);
-        assert!(PyrDownU16Scratch::new(usize::MAX).is_err());
-        assert!(PyrDownU16Scratch::new(isize::MAX as usize / size_of::<i32>() + 1).is_err());
-    }
+    use crate::test_images::{random_image, zeros};
+
     #[test]
     fn checked_boundary_rejects_invalid_geometry_before_writing() {
-        let source = zeros(9, 7).unwrap();
-        let mut destination = Image::from_size_val(
+        let source = zeros(9, 7);
+        let mut wrong = Image::from_size_val(
             kornia_image::ImageSize {
-                width: 4,
+                width: 5,
                 height: 3,
             },
             123,
         )
         .unwrap();
-        let mut short = PyrDownU16Scratch::new(8).unwrap();
-        assert!(pyrdown_u16(&source, &mut destination, &mut short).is_err());
-        assert!(destination.as_slice().iter().all(|&v| v == 123));
-        let mut scratch = PyrDownU16Scratch::new(9).unwrap();
-        assert!(pyrdown_u16(&source, &mut zeros(5, 3).unwrap(), &mut scratch).is_err());
-        assert!(pyrdown_u16(
-            &zeros(2, 7).unwrap(),
-            &mut zeros(1, 3).unwrap(),
-            &mut scratch
-        )
-        .is_err());
+        assert!(pyrdown_floor_u16(&source, &mut wrong).is_err());
+        assert!(wrong.as_slice().iter().all(|&value| value == 123));
+        assert!(pyrdown_floor_u16(&zeros(2, 7), &mut zeros(1, 3)).is_err());
     }
     /// Independent reflect-101 implementation that repeatedly mirrors into `[0, n)`.
     fn reflect101_naive(mut index: i64, n: i64) -> i64 {
@@ -273,7 +178,7 @@ mod tests {
     fn subsample_naive(src: &Image<u16, 1>) -> Image<u16, 1> {
         let width: usize = src.width() >> 1;
         let height: usize = src.height() >> 1;
-        let mut dst: Image<u16, 1> = zeros(width, height).unwrap();
+        let mut dst: Image<u16, 1> = zeros(width, height);
         for r in 0..height {
             for c in 0..width {
                 let mut sum: i64 = 0;
@@ -283,12 +188,8 @@ mod tests {
                     for (dx, kx) in KERNEL.iter().enumerate() {
                         let x: i64 =
                             reflect101_naive(2 * c as i64 + dx as i64 - 2, src.width() as i64);
-                        let pixel: i64 = i64::from(
-                            src.get_pixel(x as usize, y as usize, 0)
-                                .copied()
-                                .ok()
-                                .unwrap(),
-                        );
+                        let pixel: i64 =
+                            i64::from(src.get_pixel(x as usize, y as usize, 0).copied().unwrap());
                         sum += i64::from(*ky) * i64::from(*kx) * pixel;
                     }
                 }
@@ -298,28 +199,11 @@ mod tests {
         dst
     }
 
-    fn random_image(width: usize, height: usize, seed: u64) -> Image<u16, 1> {
-        let mut image: Image<u16, 1> = zeros(width, height).unwrap();
-        let mut state: u64 = seed | 1;
-        for y in 0..height {
-            for pixel in {
-                let width = image.width();
-                &mut image.as_slice_mut()[(y) * width..((y) + 1) * width]
-            } {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *pixel = (state >> 32) as u16;
-            }
-        }
-        image
-    }
-
     #[test]
     fn border101_matches_the_naive_reflection_over_its_whole_domain() {
         for n in 2i64..24 {
             // Check high-end reflection on `[0, 2*(n-1)]` and absolute-value reflection below
-            // zero against the independent implementation (trap 3).
+            // zero against the independent implementation.
             for x in 0..=2 * (n - 1) {
                 assert_eq!(
                     border101(x, n),
@@ -373,21 +257,12 @@ mod tests {
             kornia_imgproc::pyramid::pyrdown_u8(&source, &mut kornia_out).unwrap();
 
             // Our own subsample over the same values, held in `u16` with no shift.
-            let mut ours: Image<u16, 1> = zeros(width, height).unwrap();
-            for (y, row) in bytes.chunks_exact(width).enumerate() {
-                for (pixel, byte) in {
-                    let width = ours.width();
-                    &mut ours.as_slice_mut()[(y) * width..((y) + 1) * width]
-                }
-                .iter_mut()
-                .zip(row)
-                {
-                    *pixel = u16::from(*byte);
-                }
+            let mut ours: Image<u16, 1> = zeros(width, height);
+            for (pixel, byte) in ours.as_slice_mut().iter_mut().zip(&bytes) {
+                *pixel = u16::from(*byte);
             }
-            let mut got: Image<u16, 1> = zeros(width / 2, height / 2).unwrap();
-            let mut scratch = PyrDownU16Scratch::new(width).unwrap();
-            pyrdown_u16(&ours, &mut got, &mut scratch).unwrap();
+            let mut got: Image<u16, 1> = zeros(width / 2, height / 2);
+            pyrdown_floor_u16(&ours, &mut got).unwrap();
 
             let expected: Vec<u16> = kornia_out
                 .as_slice()
@@ -412,9 +287,8 @@ mod tests {
         ) {
             let image: Image<u16, 1> = random_image(width, height, seed);
             let expected: Image<u16, 1> = subsample_naive(&image);
-            let mut got: Image<u16, 1> = zeros(width >> 1, height >> 1).unwrap();
-            let mut scratch = PyrDownU16Scratch::new(width).unwrap();
-            pyrdown_u16(&image, &mut got, &mut scratch).unwrap();
+            let mut got: Image<u16, 1> = zeros(width >> 1, height >> 1);
+            pyrdown_floor_u16(&image, &mut got).unwrap();
             prop_assert_eq!(got.as_slice(), expected.as_slice());
         }
 
@@ -426,11 +300,12 @@ mod tests {
             seed in any::<u64>(),
         ) {
             let image: Image<u16, 1> = random_image(width, height, seed);
-            let pyramid = build(&image, 3);
+            let mut pyramid = super::super::PyramidPlanU16::new(image.size(), 3).unwrap();
+            pyramid.run(&image).unwrap();
             let mut expected: Image<u16, 1> = image.clone();
-            for level in 1..pyramid.len() {
+            for level in 1..pyramid.levels().len() {
                 expected = subsample_naive(&expected);
-                prop_assert_eq!(pyramid.get(level).unwrap().as_slice(), expected.as_slice());
+                prop_assert_eq!(pyramid.levels().get(level).unwrap().as_slice(), expected.as_slice());
             }
         }
 
@@ -443,10 +318,11 @@ mod tests {
             seed in any::<u64>(),
         ) {
             let image: Image<u16, 1> = random_image(width, height, seed);
-            let pyramid = build(&image, 1);
+            let mut pyramid = super::super::PyramidPlanU16::new(image.size(), 1).unwrap();
+            pyramid.run(&image).unwrap();
             let low: u16 = *image.as_slice().iter().min().unwrap();
             let high: u16 = *image.as_slice().iter().max().unwrap();
-            for pixel in pyramid.get(1).unwrap().as_slice() {
+            for pixel in pyramid.levels().get(1).unwrap().as_slice() {
                 prop_assert!(*pixel >= low && *pixel <= high);
             }
         }

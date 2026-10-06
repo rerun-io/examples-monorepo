@@ -95,7 +95,7 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
         let counts: Vec<i32> = (0..grid.rows * grid.columns)
             .map(|i| i32::from(i % 5 == 0))
             .collect();
-        let masks = Masks {
+        let masks = CellMasks {
             masks: grid
                 .cells()
                 .enumerate()
@@ -114,7 +114,7 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
                     image: &image,
                     grid: &grid,
                     counts: &counts,
-                    config: &DetectorConfig {
+                    config: &CenteredCellConfig {
                         min_threshold: threshold,
                         max_threshold: threshold,
                         ..detector_config(0.0)
@@ -149,7 +149,7 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
             &grid,
             &counts,
             &detector_config(0.0),
-            &Masks::default(),
+            &CellMasks::default(),
             1,
         )
     };
@@ -165,7 +165,7 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
 /// Every cell of a real MIO10 frameset, both cameras, empty and half full.
 #[test]
 fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
-    let config: DetectorConfig = detector_config(472.0);
+    let config: CenteredCellConfig = detector_config(472.0);
     for camera in 0..2 {
         let image: Image<u16, 1> = common::mio10_frame(0, camera);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
@@ -179,7 +179,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
                 grid: &grid,
                 counts: &empty,
                 config: &config,
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("cam{camera} empty"),
             },
@@ -203,7 +203,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
                 grid: &grid,
                 counts: &busy,
                 config: &config,
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("cam{camera} occupied"),
             },
@@ -228,7 +228,7 @@ fn the_cell_selection_applies_the_same_gates() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(radius),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("safe radius {radius}"),
             },
@@ -238,7 +238,7 @@ fn the_cell_selection_applies_the_same_gates() {
 
     // `cam0OverlapCellsMasksForCam`'s own shape: `cell` x `cell` rectangles at
     // the cell origins. Every third one, so masked and clear cells interleave.
-    let mut masks: Masks = Masks::default();
+    let mut masks: CellMasks = CellMasks::default();
     let mut index: usize = 0;
     let mut y: usize = grid.y_start;
     while y <= grid.y_stop {
@@ -273,7 +273,7 @@ fn the_cell_selection_applies_the_same_gates() {
     // A rectangle that straddles a cell boundary is the mixed-geometry rig's
     // shape: the device path has to refuse it and the band walk has to answer,
     // which is the same answer either way.
-    let mut straddling: Masks = Masks::default();
+    let mut straddling: CellMasks = CellMasks::default();
     straddling.masks.push(MaskRect {
         x: (grid.x_start + 17) as f32,
         y: (grid.y_start + 21) as f32,
@@ -301,7 +301,7 @@ fn the_cell_selection_applies_the_same_gates() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(472.0),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget,
                 label: &format!("budget {budget}"),
             },
@@ -340,7 +340,7 @@ fn the_cell_selection_matches_the_host_walk_on_uneven_frames() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(0.0),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("{width}x{height} cell {cell}"),
             },
@@ -428,7 +428,7 @@ fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(0.0),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label,
             },
@@ -453,7 +453,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
     for (max_threshold, min_threshold, last_rung) in [(40i32, 6i32, 10i32), (32, 5, 8)] {
-        let config: DetectorConfig = DetectorConfig {
+        let config: CenteredCellConfig = CenteredCellConfig {
             max_threshold,
             min_threshold,
             ..detector_config(472.0)
@@ -462,7 +462,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
 
         // The ladder that stops at the configured minimum instead: one rung, at
         // `min_threshold`. This is what a device given the wrong bound detects.
-        let at_the_minimum: DetectorConfig = DetectorConfig {
+        let at_the_minimum: CenteredCellConfig = CenteredCellConfig {
             max_threshold: min_threshold,
             ..config
         };
@@ -473,7 +473,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
             &grid,
             &counts,
             &at_the_minimum,
-            &Masks::default(),
+            &CellMasks::default(),
             4096,
         )
         .corners
@@ -486,7 +486,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
                 grid: &grid,
                 counts: &counts,
                 config: &config,
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &label,
             },
@@ -519,7 +519,7 @@ fn a_frame_at_the_key_limit_takes_the_band_walk() {
             grid: &grid,
             counts: &counts,
             config: &detector_config(0.0),
-            masks: &Masks::default(),
+            masks: &CellMasks::default(),
             budget: 4096,
             label: "a frame at the key limit",
         },
@@ -537,7 +537,7 @@ fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
     let image: Image<u16, 1> = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
-    let config: DetectorConfig = DetectorConfig {
+    let config: CenteredCellConfig = CenteredCellConfig {
         num_points_cell: 2,
         ..detector_config(472.0)
     };
@@ -547,7 +547,7 @@ fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
             grid: &grid,
             counts: &counts,
             config: &config,
-            masks: &Masks::default(),
+            masks: &CellMasks::default(),
             budget: 4096,
             label: "two points per cell",
         },

@@ -113,7 +113,7 @@ fn fast_score_kernel(
 /// Lanes per block of kornia's local-maximum filter, off the CPU detector's own
 /// constant so the kernel and the host cannot disagree about the block
 /// alignment that decides the corner set.
-const FILTER_LANES: usize = kornia_staging_imgproc::features::FAST_FILTER_LANES;
+const FILTER_LANES: usize = crate::frontend::detect::FAST_FILTER_LANES;
 /// The last lane of a block, which has no right-hand neighbour to beat.
 const FILTER_LAST: usize = FILTER_LANES - 1;
 

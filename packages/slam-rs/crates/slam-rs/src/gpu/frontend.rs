@@ -6,16 +6,17 @@ use super::{
     GpuCornerScan, GpuError, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder,
     guarded, submission,
 };
+use crate::frontend::detect::FrameCornerScan;
 use crate::frontend::flow::{FlowTimings, FrontendError};
+use crate::frontend::input::{FrameImages, PackedImages};
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::stages::{FrameStages, StereoContext};
-use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
-use crate::pyramid::ensure_pyramids;
+use crate::pyramid::ensure_pyramid_sizes;
 use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
-use kornia_image::Image;
 use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameInput {
@@ -29,14 +30,14 @@ struct GpuFrame<R: Runtime> {
     detector: DetectorScratch<GpuCornerScan<R>>,
     selects: Vec<Option<CellSelect>>,
     input: Option<FrameInput>,
-    images: Vec<Image<u16, 1>>,
+    images: PackedImages,
 }
 
 impl<R: Runtime> GpuFrame<R> {
     fn new(
         client: ComputeClient<R>,
         launches: &submission::LaunchList,
-    ) -> Result<Self, TrackerError> {
+    ) -> Result<Self, FrontendError> {
         let builder = GpuPyramidBuilder::new(client.clone(), launches.clone());
         let scanner = GpuCornerScan::new(client, launches.clone())?;
         Ok(Self {
@@ -45,13 +46,21 @@ impl<R: Runtime> GpuFrame<R> {
             detector: DetectorScratch::with_scanner(Box::new(scanner)),
             selects: Vec::new(),
             input: None,
-            images: Vec::new(),
+            images: PackedImages::default(),
         })
     }
 
-    fn build(&mut self, images: &[Image<u16, 1>], levels: usize) -> Result<(), FrontendError> {
-        ensure_pyramids(&self.builder, &mut self.pyramids, images, levels)?;
-        self.builder.build_images(images, &mut self.pyramids)?;
+    fn build(&mut self, images: FrameImages<'_>, levels: usize) -> Result<(), FrontendError> {
+        ensure_pyramid_sizes(
+            &self.builder,
+            &mut self.pyramids,
+            images.iter().map(|image| image.size()),
+            levels,
+        )?;
+        match images {
+            FrameImages::Dense(images) => self.builder.build_images(images, &mut self.pyramids)?,
+            FrameImages::Packed(images) => self.builder.build_packed(images, &mut self.pyramids)?,
+        }
         self.detector.scanner_mut().use_level0(&mut self.builder);
         Ok(())
     }
@@ -76,7 +85,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         client: ComputeClient<R>,
         tracker: GpuPatchTracker<P, R>,
         launches: submission::LaunchList,
-    ) -> Result<Self, TrackerError> {
+    ) -> Result<Self, FrontendError> {
         let patches = tracker.make_patches()?;
         Ok(Self {
             current: GpuFrame::new(client.clone(), &launches)?,
@@ -92,15 +101,10 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         })
     }
 
-    pub(crate) fn prepare_packed_inputs(&mut self, views: &[crate::ImageView<'_>]) {
-        self.current.builder.prepare_packed_inputs(views);
-    }
-
     pub(crate) fn queue_lookahead(
         &mut self,
         t_ns: i64,
-        images: &mut Vec<Image<u16, 1>>,
-        views: &[crate::ImageView<'_>],
+        images: &mut PackedImages,
         selects: &[Option<CellSelect>],
     ) -> Result<(), VioError> {
         if self.next.is_none() {
@@ -108,16 +112,14 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 self.client
                     .exclusive(|| GpuFrame::new(self.client.clone(), &self.launches))
                     .map_err(|error| {
-                        FrontendError::from(TrackerError::from(submission::read_failed(
+                        FrontendError::from(submission::read_failed(
                             "lookahead construction",
                             &error,
-                        )))
-                    })?
-                    .map_err(FrontendError::from)?,
+                        ))
+                    })??,
             );
         }
         if let Some(next) = &mut self.next {
-            next.builder.prepare_packed_inputs(views);
             std::mem::swap(&mut next.images, images);
             next.selects.clear();
             next.selects.extend_from_slice(selects);
@@ -143,10 +145,12 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         next.input = None;
         // Move the owned input aside while building through the same frame method.
         let images = std::mem::take(&mut next.images);
-        let outcome = next.build(&images, self.tracker.num_levels() - 1);
+        let outcome = next.build(FrameImages::Packed(&images), self.tracker.num_levels() - 1);
         next.images = images;
         outcome?;
-        next.detector.submit_cells(&next.images, &next.selects)?;
+        next.detector
+            .scanner_mut()
+            .submit_cells(FrameImages::Packed(&next.images), &next.selects)?;
         guarded(
             GpuError::DeviceLost {
                 what: "lookahead submission",
@@ -154,10 +158,10 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             || {
                 self.launches.flush(&self.client);
                 self.client.flush().map_err(|error| {
-                    TrackerError::from(submission::read_failed("lookahead submission", &error))
+                    FrontendError::from(submission::read_failed("lookahead submission", &error))
                 })?;
 
-                Ok::<(), TrackerError>(())
+                Ok::<(), FrontendError>(())
             },
         )?;
         next.input = Some(FrameInput::Ready(t_ns));
@@ -168,7 +172,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         &mut self,
         timings: &mut FlowTimings,
         overlap_lookahead: bool,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<(), FrontendError> {
         let outcome = guarded(GpuError::DeviceLost { what: "tracker" }, || {
             let mut reads = self.tracker.read_handles();
             let lanes = reads.len();
@@ -250,23 +254,16 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     fn prepare(
         &mut self,
         t_ns: i64,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         levels: usize,
         _pool: &WorkPool,
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
-        self.guard = Some(self.launches.begin().map_err(TrackerError::from)?);
+        self.guard = Some(self.launches.begin()?);
         let mark = std::time::Instant::now();
-        // The pixel comparison preserves both exact hint validation and the
-        // established host materialization timing before temporal KLT.
+        // A hint is reusable only for the exact retained byte input.
         if self.current.input == Some(FrameInput::Ready(t_ns))
-            && self.current.images.len() == images.len()
-            && self
-                .current
-                .images
-                .iter()
-                .zip(images)
-                .all(|(a, b)| a.size() == b.size() && a.as_slice() == b.as_slice())
+            && matches!(images, FrameImages::Packed(images) if self.current.images.same_pixels(images))
         {
             timings.gpu_lookahead = true;
         } else {
@@ -281,7 +278,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     }
     fn prepare_detection(
         &mut self,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         selects: &[Option<CellSelect>],
         context: StereoContext<'_>,
         timings: &mut FlowTimings,
@@ -301,6 +298,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         if self.current.input.take().is_none() {
             self.current
                 .detector
+                .scanner_mut()
                 .submit_cells(images, &self.current.selects)?;
         }
         timings.detect_ns += duration_ns(mark);
@@ -308,58 +306,61 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     }
     fn temporal(
         &mut self,
-        inputs: &mut [TrackInput],
+        inputs: &[TrackInput],
+        slots: &mut [usize],
         timings: &mut FlowTimings,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<(), FrontendError> {
         self.tracker.submit_batch(
             &self.previous,
             &self.current.pyramids,
-            inputs,
+            TrackPhase::Temporal(inputs),
             &mut self.patches,
-            true,
+            slots,
         )?;
         self.submit_stereo()?;
         self.collect(timings, false)
     }
     fn stereo(
         &mut self,
-        inputs: &mut [TrackInput],
-        images: &[Image<u16, 1>],
+        phase: TrackPhase<'_>,
+        slots: &mut [usize],
+        images: FrameImages<'_>,
         selects: &[Option<CellSelect>],
         nonoverlap: bool,
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
         let mark = std::time::Instant::now();
-        if self.take_stereo(inputs)? {
+        if self.take_stereo(phase, slots)? {
             timings.stereo_ns += duration_ns(mark);
             return Ok(());
         }
-        if !inputs.is_empty() {
+        if !slots.is_empty() {
             self.tracker.submit_batch(
                 &self.current.pyramids,
                 &self.current.pyramids,
-                inputs,
+                phase,
                 &mut self.patches,
-                false,
+                slots,
             )?;
         }
         timings.stereo_ns += duration_ns(mark);
-        if !inputs.is_empty() && nonoverlap {
+        if !slots.is_empty() && nonoverlap {
             let mark = std::time::Instant::now();
             self.current.selects.copy_from_slice(selects);
             self.current.selects[0] = None;
             self.current
                 .detector
+                .scanner_mut()
                 .submit_cells(images, &self.current.selects)?;
             timings.detect_ns += duration_ns(mark);
         }
         let mark = std::time::Instant::now();
-        if !inputs.is_empty() {
+        if !slots.is_empty() {
             self.collect(timings, true)?;
         }
         timings.stereo_ns += duration_ns(mark);
         let mark = std::time::Instant::now();
-        self.current.detector.take_cells()?;
+        self.current.detector.scanner_mut().take_cells()?;
         timings.detect_ns += duration_ns(mark);
         Ok(())
     }

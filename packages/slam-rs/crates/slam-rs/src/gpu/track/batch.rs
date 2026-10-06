@@ -1,24 +1,25 @@
 //! One fused KLT dispatch over a phase's cameras in shared pyramid arenas.
 
+use crate::frontend::flow::FrontendError;
 use std::sync::Arc;
 
 use cubecl::prelude::*;
 
 use super::{FUSED_RUNS, FusedLaunch, GpuPatchTracker, stage_points};
-use crate::frontend::tracker::{TrackInput, TrackerError, check_track_inputs};
 use crate::gpu::{GpuError, guarded, pyramid::GpuPyramid, submission};
-use crate::pyramid::Pyramid;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
+use kornia_staging_imgproc::optical_flow::patch_tracker::{TrackerError};
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     pub(super) fn submit_packed(
         &mut self,
         prev: &[GpuPyramid<R>],
         next: &[GpuPyramid<R>],
-        inputs: &mut [TrackInput],
-    ) -> Result<bool, TrackerError> {
+        inputs: ValidatedPhase<'_>,
+        slots: &mut [usize],
+    ) -> Result<bool, FrontendError> {
         let params = self.fused_params();
-        let Some(first) = inputs.first() else {
+        let Some(first) = inputs.iter().next() else {
             return Ok(true);
         };
         let (Some(a), Some(b)) = (prev[first.source].arena(), next[first.destination].arena())
@@ -42,18 +43,8 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             return Err(TrackerError::TooManyPasses {
                 submitted: inputs.len(),
                 lanes: self.results.len(),
-            });
-        }
-        for input in inputs.iter() {
-            check_track_inputs(
-                input.guesses.len(),
-                input.positions.len(),
-                self.num_levels,
-                prev[input.source].num_levels(),
-                next[input.destination].num_levels(),
-                self.capacity,
-                self.num_levels,
-            )?;
+            }
+            .into());
         }
         guarded(
             GpuError::DeviceLost {
@@ -62,14 +53,14 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             || {
                 self.geometry.clear();
                 self.staging.clear();
-                for (lane, input) in inputs.iter_mut().enumerate() {
+                for (lane, input) in inputs.iter().enumerate() {
                     prev[input.source].append_geometry(&mut self.geometry, Some(a));
                     next[input.destination].append_geometry(&mut self.geometry, Some(b));
                     let count = input.guesses.len();
-                    stage_points(&mut self.staging, &input.guesses, lane, |index| {
+                    stage_points(&mut self.staging, input.guesses, lane, |index| {
                         (1.0, input.positions.get(index))
                     });
-                    input.result = lane;
+                    slots[lane] = lane;
                     self.batch.slot_mut(lane, self.capacity);
                     self.pending.push(count);
                 }
@@ -105,3 +96,5 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         )
     }
 }
+
+use kornia_staging_slam::tracking::optical_flow::ValidatedPhase;

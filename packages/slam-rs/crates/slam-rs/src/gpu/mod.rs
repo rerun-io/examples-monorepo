@@ -41,7 +41,7 @@ pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
     max_iterations: usize,
     max_recovered_dist2: f32,
     cameras: usize,
-) -> Result<GpuStages<P, GpuRuntime>, crate::frontend::tracker::TrackerError> {
+) -> Result<GpuStages<P, GpuRuntime>, crate::frontend::flow::FrontendError> {
     guarded(
         GpuError::ClientPanicked {
             runtime: RUNTIME_NAME,

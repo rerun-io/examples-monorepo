@@ -3,17 +3,18 @@
 use crate::camera::CameraError;
 #[cfg(doc)]
 use crate::frontend::parallel::MAX_THREADS;
-use crate::frontend::tracker::TrackerError;
-#[cfg(doc)]
-use crate::frontend::tracker::{MAX_CAPACITY, MAX_LEVELS};
 use crate::pyramid::PyramidError;
-use kornia_staging_imgproc::features::DetectError;
+use kornia_staging_imgproc::features::CenteredCellError;
 #[cfg(doc)]
-use kornia_staging_imgproc::features::{LOWEST_THRESHOLD_RUNG, MAX_CELLS};
+use kornia_staging_imgproc::features::LOWEST_THRESHOLD_RUNG;
+use kornia_staging_imgproc::optical_flow::patch_tracker::TrackerError;
 
 /// What the frontend can refuse.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FrontendError {
+    /// Host image allocation failed while preparing a CPU fallback.
+    #[error(transparent)]
+    Image(#[from] crate::image::IngestError),
     /// Device backend failure, retained at the application boundary.
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
@@ -57,33 +58,9 @@ pub enum FrontendError {
     /// `optical_flow_type` names an implementation that is not ported.
     #[error("optical flow type {0:?} is not ported; only frame_to_frame is")]
     UnsupportedFlowType(String),
-    /// A camera's frame is smaller than one detection cell.
-    #[error("camera {camera}: a {width}x{height} frame cannot carry a {cell}-pixel detection grid")]
-    FrameTooSmall {
-        /// Which camera.
-        camera: usize,
-        /// Frame width.
-        width: usize,
-        /// Frame height.
-        height: usize,
-        /// `optical_flow_detection_grid_size`.
-        cell: usize,
-    },
-    /// A camera's detection grid has more cells than one occupancy buffer holds.
-    #[error(
-        "camera {camera}: the calibrated resolution over the detection grid size is a \
-         {rows}x{columns} occupancy grid; the ceiling is {ceiling} cells"
-    )]
-    TooManyCells {
-        /// Which camera.
-        camera: usize,
-        /// Rows the grid asks for.
-        rows: usize,
-        /// Columns the grid asks for.
-        columns: usize,
-        /// [`MAX_CELLS`].
-        ceiling: usize,
-    },
+    /// The staged detector grid rejected the image geometry.
+    #[error(transparent)]
+    Grid(#[from] kornia_staging_imgproc::features::CellGridError),
     /// A config field that indexes or counts is negative.
     #[error("{field} must not be negative, got {value}")]
     NegativeConfig {
@@ -160,7 +137,7 @@ pub enum FrontendError {
     Tracker(#[from] TrackerError),
     /// The detector refused the inputs.
     #[error("detector: {0}")]
-    Detect(#[from] DetectError),
+    Detect(#[from] CenteredCellError),
     /// The thread pool could not be built.
     #[error("could not build a pool of {threads} threads")]
     ThreadPool {
@@ -176,24 +153,6 @@ pub enum FrontendError {
         /// Workers asked for.
         threads: usize,
         /// [`MAX_THREADS`].
-        ceiling: usize,
-    },
-    /// A larger keypoint budget was asked for than [`MAX_CAPACITY`].
-    #[error("max_keypoints is {max_keypoints}, the ceiling is {ceiling}")]
-    TooManyKeypoints {
-        /// Keypoints asked for.
-        max_keypoints: usize,
-        /// [`MAX_CAPACITY`].
-        ceiling: usize,
-    },
-    /// `optical_flow_levels` asks for a deeper pyramid than the buffers allow.
-    #[error("optical_flow_levels is {levels}, so {num_levels} levels; the ceiling is {ceiling}")]
-    TooManyLevels {
-        /// `optical_flow_levels` from the config file.
-        levels: i32,
-        /// `optical_flow_levels + 1`, which is what every buffer is sized with.
-        num_levels: usize,
-        /// [`MAX_LEVELS`].
         ceiling: usize,
     },
 }

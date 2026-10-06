@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use super::{Pattern, Pattern51};
+use crate::interpolation::U16View;
 use kornia_image::Image;
 use nalgebra::Vector2;
 
@@ -11,8 +12,12 @@ fn assert_group_bits<P: Pattern>(image: &Image<u16, 1>, positions: [Vector2<f32>
     use super::{build_patch_group, patch_increment_rows, patch_residual_taps};
     let mut data = vec![0.0; 4 * P::SIZE];
     let mut jacobian = vec![0.0; 12 * P::SIZE];
-    let (means, valid) =
-        build_patch_group::<P>(image, positions.map(Into::into), &mut data, &mut jacobian);
+    let (means, valid) = build_patch_group::<P>(
+        U16View::new(image),
+        positions.map(Into::into),
+        &mut data,
+        &mut jacobian,
+    );
     let transforms = positions.map(|pos| {
         let mut transform = se2_exp(&[0.0, 0.0, angle]);
         transform.translation = (pos + Vector2::new(0.21, -0.37)).into();
@@ -21,7 +26,7 @@ fn assert_group_bits<P: Pattern>(image: &Image<u16, 1>, positions: [Vector2<f32>
     for lane in 0..4 {
         let mut scalar = OpticalFlowPatch::<P>::default();
         (scalar.mean, scalar.valid) = build_patch::<P, _>(
-            image,
+            &U16View::new(image),
             positions[lane].as_ref(),
             &mut scalar.data,
             1,
@@ -53,7 +58,7 @@ fn assert_group_bits<P: Pattern>(image: &Image<u16, 1>, positions: [Vector2<f32>
             patch_residual_taps::<P>(
                 &data[lane..],
                 4,
-                image,
+                U16View::new(image),
                 &transforms[lane],
                 &mut tap_residual
             )

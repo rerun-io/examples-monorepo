@@ -4,11 +4,13 @@ use crate::calib::Calibration;
 use crate::camera::RigCamera;
 use crate::config::VioConfig;
 use crate::duration_ns;
+use crate::frontend::detect::FrameCornerScan;
+use crate::frontend::input::FrameImages;
 use crate::frontend::parallel::WorkPool;
-use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
-use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16, ensure_pyramids};
-use kornia_image::Image;
+use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder, ensure_pyramid_sizes};
 use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
+use kornia_staging_imgproc::pyramid::PyramidPlanU16;
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
 
 use super::flow::{FlowTimings, FrontendError};
 
@@ -24,8 +26,8 @@ pub struct StereoContext<'a> {
 
 /// The frame-level seam. Patch trackers expose only patch operations.
 pub trait FrameStages {
-    type Tracker: PatchTracker;
-    type Scanner: kornia_staging_imgproc::features::CornerScan<Error: Into<FrontendError>> + ?Sized;
+    type Tracker: PatchTracker<Error: Into<FrontendError>>;
+    type Scanner: FrameCornerScan<Error: Into<FrontendError>> + ?Sized;
 
     fn tracker(&self) -> &Self::Tracker;
     fn tracker_mut(&mut self) -> &mut Self::Tracker;
@@ -40,7 +42,7 @@ pub trait FrameStages {
     fn prepare(
         &mut self,
         t_ns: i64,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         levels: usize,
         pool: &WorkPool,
         timings: &mut FlowTimings,
@@ -48,7 +50,7 @@ pub trait FrameStages {
 
     fn prepare_detection(
         &mut self,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         selects: &[Option<CellSelect>],
         context: StereoContext<'_>,
         timings: &mut FlowTimings,
@@ -56,14 +58,16 @@ pub trait FrameStages {
 
     fn temporal(
         &mut self,
-        inputs: &mut [TrackInput],
+        inputs: &[TrackInput],
+        slots: &mut [usize],
         timings: &mut FlowTimings,
-    ) -> Result<(), TrackerError>;
+    ) -> Result<(), FrontendError>;
 
     fn stereo(
         &mut self,
-        inputs: &mut [TrackInput],
-        images: &[Image<u16, 1>],
+        phase: TrackPhase<'_>,
+        slots: &mut [usize],
+        images: FrameImages<'_>,
         selects: &[Option<CellSelect>],
         nonoverlap: bool,
         timings: &mut FlowTimings,
@@ -75,21 +79,24 @@ pub trait FrameStages {
 
 /// CPU frame storage. The previous pyramid changes only when a frame commits.
 #[derive(Debug)]
-pub struct CpuStages<T: PatchTracker<Pyramid = PyramidU16>> {
+pub struct CpuStages<T: PatchTracker<Pyramid = PyramidPlanU16>, S: FrameCornerScan = kornia_staging_imgproc::features::CpuCornerScan> {
     builder: CpuPyramidBuilder,
-    previous: Vec<PyramidU16>,
-    current: Vec<PyramidU16>,
-    detector: DetectorScratch,
+    previous: Vec<PyramidPlanU16>,
+    current: Vec<PyramidPlanU16>,
+    detector: DetectorScratch<S>,
     tracker: T,
     patches: T::Patches,
 }
 
-impl<T: PatchTracker<Pyramid = PyramidU16>> CpuStages<T> {
+impl<T: PatchTracker<Pyramid = PyramidPlanU16>, S: FrameCornerScan> CpuStages<T, S>
+where
+    FrontendError: From<T::Error>,
+{
     pub fn new(
         builder: CpuPyramidBuilder,
         tracker: T,
-        detector: DetectorScratch,
-    ) -> Result<Self, TrackerError> {
+        detector: DetectorScratch<S>,
+    ) -> Result<Self, FrontendError> {
         let patches = tracker.make_patches()?;
         Ok(Self {
             builder,
@@ -102,11 +109,12 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> CpuStages<T> {
     }
 }
 
-impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
+impl<T: PatchTracker<Pyramid = PyramidPlanU16>, S: FrameCornerScan> FrameStages for CpuStages<T, S>
+where
+    FrontendError: From<T::Error>,
+{
     type Tracker = T;
-    type Scanner = dyn kornia_staging_imgproc::features::CornerScan<
-            Error = kornia_staging_imgproc::features::DetectError,
-        >;
+    type Scanner = S;
 
     fn tracker(&self) -> &T {
         &self.tracker
@@ -118,19 +126,34 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
         &mut self.detector
     }
     fn side_detectors(&self, cameras: usize) -> Option<Vec<DetectorScratch<Self::Scanner>>> {
-        (1..cameras).map(|_| self.detector.fork()).collect()
+        (1..cameras)
+            .map(|_| {
+                self.detector
+                    .scanner()
+                    .fork_frame()
+                    .map(DetectorScratch::with_scanner)
+            })
+            .collect()
     }
 
     fn prepare(
         &mut self,
         _t_ns: i64,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         levels: usize,
         pool: &WorkPool,
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
         let mark = std::time::Instant::now();
-        ensure_pyramids(&self.builder, &mut self.current, images, levels)?;
+        let FrameImages::Dense(images) = images else {
+            unreachable!("CPU stage receives dense frames")
+        };
+        ensure_pyramid_sizes(
+            &self.builder,
+            &mut self.current,
+            images.iter().map(kornia_image::Image::size),
+            levels,
+        )?;
         self.builder.build_frames(images, &mut self.current, pool)?;
         timings.pyramid_ns = duration_ns(mark);
         Ok(())
@@ -138,7 +161,7 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
 
     fn prepare_detection(
         &mut self,
-        _images: &[Image<u16, 1>],
+        _images: FrameImages<'_>,
         _selects: &[Option<CellSelect>],
         _context: StereoContext<'_>,
         _timings: &mut FlowTimings,
@@ -148,40 +171,43 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
 
     fn temporal(
         &mut self,
-        inputs: &mut [TrackInput],
+        inputs: &[TrackInput],
+        slots: &mut [usize],
         _timings: &mut FlowTimings,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<(), FrontendError> {
         self.tracker.submit_batch(
             &self.previous,
             &self.current,
-            inputs,
+            TrackPhase::Temporal(inputs),
             &mut self.patches,
-            true,
+            slots,
         )?;
-        self.tracker.collect()
+        self.tracker.collect()?;
+        Ok(())
     }
 
     fn stereo(
         &mut self,
-        inputs: &mut [TrackInput],
-        _images: &[Image<u16, 1>],
+        phase: TrackPhase<'_>,
+        slots: &mut [usize],
+        _images: FrameImages<'_>,
         _selects: &[Option<CellSelect>],
         _nonoverlap: bool,
         timings: &mut FlowTimings,
     ) -> Result<(), FrontendError> {
         let mark = std::time::Instant::now();
-        if !inputs.is_empty() {
+        if !slots.is_empty() {
             self.tracker.submit_batch(
                 &self.current,
                 &self.current,
-                inputs,
+                phase,
                 &mut self.patches,
-                false,
+                slots,
             )?;
         }
         timings.stereo_ns += duration_ns(mark);
         let mark = std::time::Instant::now();
-        if !inputs.is_empty() {
+        if !slots.is_empty() {
             self.tracker.collect()?;
         }
         timings.stereo_ns += duration_ns(mark);

@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use kornia_image::Image;
+use kornia_staging_imgproc::optical_flow::patch_tracker::PointsSoA;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector6};
 use serde::Deserialize;
 use slam_rs::calib::{BasaltCamera, Calibration, Kb4Params};
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::tracker::PointsSoA;
 use slam_rs::lie::Se3;
 
 #[allow(
@@ -591,7 +591,6 @@ pub fn grid_positions(size: usize) -> PointsSoA {
 use slam_rs::calib::{CalibAccelBias, CalibGyroBias, PinholeParams};
 use slam_rs::config::MatchingGuessType;
 use slam_rs::lie::So3;
-use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
 use std::collections::BTreeMap;
 
 /// The synthetic rig's frame size, shared by `flow_rig` and `dotted_image`.
@@ -686,20 +685,6 @@ pub fn dotted_image(shift: i32) -> Image<u16, 1> {
         cy += 17;
     }
     image
-}
-
-/// A CPU pyramid of `image` with `levels` halvings on top of level 0.
-#[allow(
-    dead_code,
-    reason = "used by klt_tracker; other binaries compile a subset"
-)]
-pub fn pyramid_of(image: &Image<u16, 1>, levels: usize) -> PyramidU16 {
-    let mut pyramid: PyramidU16 =
-        PyramidU16::with_capacity(image.width(), image.height(), levels).expect("a valid geometry");
-    CpuPyramidBuilder::new()
-        .build(0, image, &mut pyramid)
-        .expect("the geometry the pyramid was allocated for");
-    pyramid
 }
 
 pub mod flow;

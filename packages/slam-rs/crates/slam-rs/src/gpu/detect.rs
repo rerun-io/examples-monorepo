@@ -9,12 +9,14 @@ use kornia_imgproc::features::FastCorner;
 use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::Level0;
 use super::{GpuError, guarded};
+use crate::frontend::detect::{FrameCornerScan, decode_key};
 use crate::frontend::flow::FrontendError;
+use crate::frontend::input::{FrameImage, FrameImages};
 use kornia_image::Image;
 use kornia_staging_imgproc::features::SelectionStatus;
 use kornia_staging_imgproc::features::{
-    BandCache, BandRequest, CellSelect, CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN,
-    FAST_RING_ROW, block_filter_end, opencv_corner_score,
+    BandCache, BandRequest, CellSelect, CenteredCellError, CornerScan, FAST_BORDER,
+    opencv_corner_score,
 };
 
 #[derive(Default)]
@@ -232,7 +234,11 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// geometry; a fresh upload otherwise. The geometry check is what makes the
     /// fallback safe rather than hopeful: a stale entry from another frame size
     /// is refused instead of read.
-    fn frame(&mut self, camera: usize, image: &Image<u16, 1>) -> (cubecl::server::Handle, usize) {
+    fn frame(
+        &mut self,
+        camera: usize,
+        image: FrameImage<'_>,
+    ) -> Result<(cubecl::server::Handle, usize), FrontendError> {
         // `image` is the authority on the geometry, not `self.width`/`self.height`:
         // those are the same frame's, set by `scan` two lines up, and one fact
         // with two sources inside one call is how they come apart.
@@ -245,14 +251,14 @@ impl<R: Runtime> GpuCornerScan<R> {
             .flatten()
             .filter(|level0| level0.width == width && level0.height == height);
         if let Some(level0) = shared {
-            return (level0.handle, pixels);
+            return Ok((level0.handle, pixels));
         }
 
         self.uploads += 1;
         // The frame goes up as `u16` and the `>> 8` the detector reads happens
         // on the device: the extra 0.9 MB over the bus costs less than a
         // whole-frame narrowing pass on the host.
-        super::upload_frame(&self.client, image)
+        Ok(image.with_dense(|image| super::upload_frame(&self.client, image))?)
     }
 
     /// This camera's candidate kernels and its cell selection, launched into the
@@ -264,19 +270,23 @@ impl<R: Runtime> GpuCornerScan<R> {
     fn launch_selection(
         &mut self,
         camera: usize,
-        image: &Image<u16, 1>,
+        image: FrameImage<'_>,
         select: &CellSelect,
-    ) -> Option<(cubecl::server::Handle, usize)> {
+    ) -> Result<Option<(cubecl::server::Handle, usize)>, FrontendError> {
         // A sparse or mixed-grid selection uses the immediate per-camera path.
         // Its level-zero input may still be in the frame's deferred dispatches.
         self.launches.flush(&self.client);
-        let geometry = kernels::CellSelectGeometry::new(image.width(), image.height(), select)?;
+        let Some(geometry) =
+            kernels::CellSelectGeometry::new(image.width(), image.height(), select)
+        else {
+            return Ok(None);
+        };
         let cells = geometry.cells_x * geometry.cells_y;
         let fused = kernels::uses_cell_kernel(select.grid.cell, image.width(), &self.client);
         let handles = if fused {
             None
         } else {
-            Some(self.candidates(camera, image))
+            Some(self.candidates(camera, image)?)
         };
 
         if self.cameras.len() <= camera {
@@ -302,7 +312,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                 geometry,
             );
         } else {
-            let (frame, pixels) = self.frame(camera, image);
+            let (frame, pixels) = self.frame(camera, image)?;
             kernels::launch_fast_cell::<R>(
                 &self.client,
                 (&frame, pixels),
@@ -310,7 +320,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                 geometry,
             );
         }
-        Some((best, cells))
+        Ok(Some((best, cells)))
     }
 
     /// Level 0 in, the candidate image out: the two kernels both entry points
@@ -320,7 +330,11 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// recorded before anything can fail, so a scan that dies further on leaves
     /// a scanner that refuses a band rather than one that answers with the last
     /// frame's corners under this frame's width (decision D32).
-    fn candidates(&mut self, camera: usize, image: &Image<u16, 1>) -> ScanHandles {
+    fn candidates(
+        &mut self,
+        camera: usize,
+        image: FrameImage<'_>,
+    ) -> Result<ScanHandles, FrontendError> {
         self.launches.flush(&self.client);
         self.bands.clear();
         self.kept = None;
@@ -331,7 +345,7 @@ impl<R: Runtime> GpuCornerScan<R> {
         self.words = self.width.div_ceil(MASK_BITS);
         let mask_len: usize = self.words * self.height;
 
-        let (handle, handle_len): (cubecl::server::Handle, usize) = self.frame(camera, image);
+        let (handle, handle_len): (cubecl::server::Handle, usize) = self.frame(camera, image)?;
         if self.cameras.len() <= camera {
             self.cameras
                 .resize_with(camera + 1, CameraWorkspace::default);
@@ -378,12 +392,12 @@ impl<R: Runtime> GpuCornerScan<R> {
             filtered_end,
             use_filter,
         );
-        ScanHandles {
+        Ok(ScanHandles {
             kept,
             mask,
             pixels,
             mask_len,
-        }
+        })
     }
 }
 
@@ -441,15 +455,14 @@ fn filter_row(
     }
 }
 
-impl<R: Runtime> CornerScan for GpuCornerScan<R> {
-    type Error = FrontendError;
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), FrontendError> {
+impl<R: Runtime> FrameCornerScan for GpuCornerScan<R> {
+    fn scan_frame(&mut self, camera: usize, image: FrameImage<'_>) -> Result<(), FrontendError> {
         guarded(
             GpuError::DeviceLost {
                 what: "corner scan",
             },
             || {
-                let handles: ScanHandles = self.candidates(camera, image);
+                let handles: ScanHandles = self.candidates(camera, image)?;
                 kernels::launch_fast_mask::<R>(
                     &self.client,
                     (&handles.kept, handles.pixels),
@@ -522,13 +535,13 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     ///
     /// `out` is left empty — and the frame untouched — when the grid needs more
     /// cubes in one dispatch dimension than a WebGPU implementation must allow.
-    fn select_cells(
+    fn select_frame(
         &mut self,
         camera: usize,
-        image: &Image<u16, 1>,
+        image: FrameImage<'_>,
         select: &CellSelect,
         _eligibility: Option<(&kornia_staging_imgproc::features::Occupancy<'_>, &[bool])>,
-        out: &mut Vec<u32>,
+        out: &mut Vec<Option<FastCorner>>,
     ) -> Result<SelectionStatus, FrontendError> {
         out.clear();
         if !select.supports(image.width(), image.height()) {
@@ -539,7 +552,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         if let Some(workspace) = self.cameras.get_mut(camera)
             && matches!(std::mem::take(&mut workspace.selection), Selection::Ready(ready) if ready == *select)
             {
-                out.extend_from_slice(&workspace.host_keys);
+                out.extend(workspace.host_keys.iter().copied().map(decode_key));
                 return Ok(SelectionStatus::Selected);
             }
         guarded(
@@ -547,7 +560,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 what: "corner cell selection",
             },
             || {
-                let Some((best, cells)) = self.launch_selection(camera, image, select) else {
+                let Some((best, cells)) = self.launch_selection(camera, image, select)? else {
                     return Ok(SelectionStatus::Unsupported);
                 };
 
@@ -569,7 +582,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 // Copied rather than held, unlike the candidate image: 1.4 kB
                 // into a buffer the detector owns and reuses, against a
                 // `Bytes` the next frame would replace anyway.
-                out.extend_from_slice(checked_keys(&keys, cells)?);
+                out.extend(checked_keys(&keys, cells)?.iter().copied().map(decode_key));
                 Ok(SelectionStatus::Selected)
             },
         )
@@ -583,7 +596,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     /// enough that another stage's read can absorb it.
     fn submit_cells(
         &mut self,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         selects: &[Option<CellSelect>],
     ) -> Result<(), FrontendError> {
         self.abort_selection();
@@ -603,7 +616,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     let Some(select) = selects.get(camera).copied().flatten() else {
                         continue;
                     };
-                    if let Some((best, _)) = self.launch_selection(camera, image, &select) {
+                    if let Some((best, _)) = self.launch_selection(camera, image, &select)? {
                         self.cameras[camera].selection = Selection::Pending(select);
                         handles.push(best);
                         #[cfg(test)]
@@ -708,12 +721,27 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         }
         outcome
     }
-
+}
+impl<R: Runtime> CornerScan for GpuCornerScan<R> {
+    type Error = FrontendError;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), Self::Error> {
+        self.scan_frame(camera, FrameImage::dense(image))
+    }
+    fn select_cells(
+        &mut self,
+        camera: usize,
+        image: &Image<u16, 1>,
+        select: &CellSelect,
+        eligibility: Option<(&kornia_staging_imgproc::features::Occupancy<'_>, &[bool])>,
+        out: &mut Vec<Option<FastCorner>>,
+    ) -> Result<SelectionStatus, Self::Error> {
+        self.select_frame(camera, FrameImage::dense(image), select, eligibility, out)
+    }
     fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], FrontendError> {
         // The same refusal the CPU lane returns, and asked in the same place: a
         // band before a scan is a programming error, not an empty frame.
         let (Some(kept), Some(mask)) = (self.kept.as_ref(), self.mask.as_ref()) else {
-            return Err(DetectError::NotScanned.into());
+            return Err(CenteredCellError::NotScanned.into());
         };
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
         // margin)` (`fast.rs`).
@@ -751,3 +779,5 @@ impl<R: Runtime> std::fmt::Debug for GpuCornerScan<R> {
 
 #[cfg(test)]
 mod tests;
+
+use crate::frontend::detect::{FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end};

@@ -27,8 +27,7 @@ fn a_failed_device_read_is_a_typed_error_at_every_stage() {
 
     // The three stages a download sits in each carry it, so the error
     // reaches the Python boundary as the documented `ValueError`.
-    let tracker: crate::frontend::tracker::TrackerError =
-        GpuError::DeviceReadFailed { what }.into();
+    let tracker: crate::frontend::flow::FrontendError = GpuError::DeviceReadFailed { what }.into();
     let pyramid: crate::pyramid::PyramidError = GpuError::DeviceReadFailed { what }.into();
     let detect: crate::frontend::flow::FrontendError = GpuError::DeviceReadFailed { what }.into();
     for message in [tracker.to_string(), pyramid.to_string(), detect.to_string()] {
@@ -85,18 +84,18 @@ fn a_panic_inside_a_stage_is_a_typed_error() {
 #[test]
 fn a_panic_after_the_client_is_built_is_a_typed_error() {
     arm_fault_at(GUARDED_REGION);
-    let outer: crate::frontend::tracker::TrackerError =
+    let outer: crate::frontend::flow::FrontendError =
         gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(64, 3, 5, 4.0, 2)
             .unwrap_err();
     assert!(
         matches!(
             outer,
-            crate::frontend::tracker::TrackerError::Gpu(GpuError::ClientPanicked { .. })
+            crate::frontend::flow::FrontendError::Gpu(GpuError::ClientPanicked { .. })
         ),
         "a panic in the outer region gave {outer}"
     );
 
-    let probe: crate::frontend::tracker::TrackerError = gpu_client()
+    let probe: crate::frontend::flow::FrontendError = gpu_client()
         .unwrap()
         .exclusive(|| {
             arm_fault_at(STORAGE_PROBE);
@@ -109,7 +108,7 @@ fn a_panic_after_the_client_is_built_is_a_typed_error() {
     assert!(
         matches!(
             probe,
-            crate::frontend::tracker::TrackerError::Gpu(GpuError::DeviceLost {
+            crate::frontend::flow::FrontendError::Gpu(GpuError::DeviceLost {
                 what: "the storage probe"
             })
         ),
@@ -133,7 +132,7 @@ fn a_panic_after_the_client_is_built_is_a_typed_error() {
 /// D32).
 #[test]
 fn a_panic_in_an_exported_constructor_is_a_typed_error() {
-    use crate::frontend::tracker::TrackerError;
+    use crate::frontend::flow::FrontendError;
     use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 
     let client = gpu_client().unwrap();
@@ -149,7 +148,7 @@ fn a_panic_in_an_exported_constructor_is_a_typed_error() {
     );
 
     arm_fault_at(GUARDED_REGION);
-    let tracker: TrackerError = GpuPatchTracker::<Pattern51, GpuRuntime>::new(
+    let tracker: FrontendError = GpuPatchTracker::<Pattern51, GpuRuntime>::new(
         client.clone(),
         64,
         4,
@@ -162,7 +161,7 @@ fn a_panic_in_an_exported_constructor_is_a_typed_error() {
     assert!(
         matches!(
             tracker,
-            TrackerError::Gpu(GpuError::DeviceLost {
+            FrontendError::Gpu(GpuError::DeviceLost {
                 what: "tracker allocation"
             })
         ),

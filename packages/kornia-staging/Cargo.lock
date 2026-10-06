@@ -931,6 +931,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-slam"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "criterion",
+ "kornia-image",
+ "kornia-staging-imgproc",
+ "nalgebra",
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "kornia-tensor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -7,8 +7,8 @@ fn image(width: usize, height: usize) -> Result<Image<u16, 1>, kornia_image::Ima
 
 const BUDGET: usize = 4096;
 
-fn config() -> DetectorConfig {
-    DetectorConfig {
+fn config() -> CenteredCellConfig {
+    CenteredCellConfig {
         num_points_cell: 1,
         min_threshold: 5,
         max_threshold: 40,
@@ -16,16 +16,10 @@ fn config() -> DetectorConfig {
     }
 }
 
-/// Bright 5x5 squares on a **gently varying** background.
-///
-/// The variation matters: with a flat background every candidate along a
-/// square's edge scores the same 255, and OpenCV's strictly-greater
-/// suppression then kills the whole plateau — a real image has no such ties,
-/// and neither does this one.
 /// A band asked for before the frame was scanned is a programming error on
 /// both lanes, and it is the same typed error on both:
 /// `detect_keypoints_with_cells` scans first, so an empty band here would
-/// be a detector that reports success and finds nothing (D32).
+/// be a detector that reports success and finds nothing.
 #[test]
 fn a_band_before_a_scan_is_refused() {
     let mut scanner: CpuCornerScan = CpuCornerScan::default();
@@ -36,9 +30,18 @@ fn a_band_before_a_scan_is_refused() {
         rows: 32,
         threshold: 5,
     };
-    assert_eq!(scanner.band(request).unwrap_err(), DetectError::NotScanned);
+    assert_eq!(
+        scanner.band(request).unwrap_err(),
+        CenteredCellError::NotScanned
+    );
 }
 
+/// Bright 5x5 squares on a **gently varying** background.
+///
+/// The variation matters: with a flat background every candidate along a
+/// square's edge scores the same 255, and OpenCV's strictly-greater
+/// suppression then kills the whole plateau — a real image has no such ties,
+/// and neither does this one.
 fn dotted_image(width: usize, height: usize, spacing: usize) -> Image<u16, 1> {
     let mut image: Image<u16, 1> = image(width, height).unwrap();
     for y in 0..height {
@@ -134,14 +137,14 @@ fn corners_are_found_and_stay_inside_the_edge_threshold() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -169,8 +172,8 @@ fn no_cell_yields_more_than_its_budget() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
-    let mut config: DetectorConfig = config();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
+    let mut config: CenteredCellConfig = config();
     config.num_points_cell = 2;
     detect_keypoints_with_cells(
         &image,
@@ -178,7 +181,7 @@ fn no_cell_yields_more_than_its_budget() {
         &grid,
         &occupancy(&cells, &grid),
         &config,
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -204,9 +207,9 @@ fn a_non_positive_min_threshold_still_terminates() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
 
-    let mut floored: DetectorConfig = config();
+    let mut floored: CenteredCellConfig = config();
     floored.min_threshold = LOWEST_THRESHOLD_RUNG;
     detect_keypoints_with_cells(
         &blank,
@@ -214,7 +217,7 @@ fn a_non_positive_min_threshold_still_terminates() {
         &grid,
         &occupancy(&cells, &grid),
         &floored,
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -223,7 +226,7 @@ fn a_non_positive_min_threshold_still_terminates() {
     let expected: usize = out.corners.len();
 
     for min_threshold in [0, -1, i32::MIN] {
-        let mut bad: DetectorConfig = config();
+        let mut bad: CenteredCellConfig = config();
         bad.min_threshold = min_threshold;
         detect_keypoints_with_cells(
             &blank,
@@ -231,7 +234,7 @@ fn a_non_positive_min_threshold_still_terminates() {
             &grid,
             &occupancy(&cells, &grid),
             &bad,
-            &Masks::default(),
+            &CellMasks::default(),
             BUDGET,
             &mut scratch,
             &mut out,
@@ -254,7 +257,7 @@ fn a_non_positive_min_threshold_still_terminates() {
 #[test]
 fn the_ladder_halves_the_maximum_and_need_never_reach_the_minimum() {
     let rungs = |max_threshold: i32, min_threshold: i32| -> Vec<i32> {
-        threshold_rungs(&DetectorConfig {
+        threshold_rungs(&CenteredCellConfig {
             max_threshold,
             min_threshold,
             ..config()
@@ -279,8 +282,8 @@ fn a_maximum_under_the_minimum_detects_nothing() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
-    let mut empty_ladder: DetectorConfig = config();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
+    let mut empty_ladder: CenteredCellConfig = config();
     empty_ladder.max_threshold = config().min_threshold - 1;
     detect_keypoints_with_cells(
         &image,
@@ -288,7 +291,7 @@ fn a_maximum_under_the_minimum_detects_nothing() {
         &grid,
         &occupancy(&cells, &grid),
         &empty_ladder,
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -304,14 +307,14 @@ fn a_valid_min_threshold_is_left_alone() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -330,7 +333,7 @@ fn an_occupied_cell_is_skipped() {
     let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
 
     let empty: Vec<i32> = vec![0; grid.rows * grid.columns];
     detect_keypoints_with_cells(
@@ -339,7 +342,7 @@ fn an_occupied_cell_is_skipped() {
         &grid,
         &occupancy(&empty, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -354,7 +357,7 @@ fn an_occupied_cell_is_skipped() {
         &grid,
         &occupancy(&full, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -370,7 +373,7 @@ fn a_mask_over_the_whole_image_drops_everything() {
     let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
-    let masks: Masks = Masks {
+    let masks: CellMasks = CellMasks {
         masks: vec![MaskRect {
             x: 0.0,
             y: 0.0,
@@ -379,7 +382,7 @@ fn a_mask_over_the_whole_image_drops_everything() {
         }],
     };
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
@@ -402,8 +405,8 @@ fn the_safe_radius_gate_keeps_only_the_middle() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
-    let mut config: DetectorConfig = config();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
+    let mut config: CenteredCellConfig = config();
     config.safe_radius = 40.0;
     detect_keypoints_with_cells(
         &image,
@@ -411,7 +414,7 @@ fn the_safe_radius_gate_keeps_only_the_middle() {
         &grid,
         &occupancy(&cells, &grid),
         &config,
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -434,14 +437,14 @@ fn the_corner_budget_truncates_in_scan_order() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut full: KeypointsData = KeypointsData::default();
+    let mut full: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut full,
@@ -449,14 +452,14 @@ fn the_corner_budget_truncates_in_scan_order() {
     .unwrap();
     assert!(full.len() > 2);
 
-    let mut capped: KeypointsData = KeypointsData::default();
+    let mut capped: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         2,
         &mut scratch,
         &mut capped,
@@ -465,14 +468,14 @@ fn the_corner_budget_truncates_in_scan_order() {
     assert_eq!(capped.len(), 2);
     assert_eq!(capped.corners, full.corners[..2]);
 
-    let mut none: KeypointsData = KeypointsData::default();
+    let mut none: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         0,
         &mut scratch,
         &mut none,
@@ -482,21 +485,21 @@ fn the_corner_budget_truncates_in_scan_order() {
 }
 
 /// The occupancy buffer is a caller input, so a short one is a typed error
-/// rather than a read past the end (decision D32).
+/// rather than a read past the end.
 #[test]
 fn a_short_occupancy_buffer_is_refused() {
     let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; 3];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     let error = detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -504,7 +507,7 @@ fn a_short_occupancy_buffer_is_refused() {
     .unwrap_err();
     assert_eq!(
         error,
-        DetectError::OccupancyTooSmall {
+        CenteredCellError::OccupancyTooSmall {
             rows: grid.rows,
             columns: grid.columns,
             expected: grid.rows * grid.columns,
@@ -513,7 +516,7 @@ fn a_short_occupancy_buffer_is_refused() {
     );
 }
 
-/// Skip detection cells outside the allocated occupancy shape (trap 15).
+/// Skip detection cells outside the allocated occupancy shape.
 #[test]
 fn a_cell_outside_the_occupancy_matrix_is_skipped() {
     let image: Image<u16, 1> = dotted_image(300, 200, 16);
@@ -522,14 +525,14 @@ fn a_cell_outside_the_occupancy_matrix_is_skipped() {
     let narrow: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; narrow.rows * narrow.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &narrow),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -547,7 +550,7 @@ fn a_cell_outside_the_occupancy_matrix_is_skipped() {
 /// masked means inside *any* rectangle, half-open.
 #[test]
 fn masks_are_half_open_and_disjunctive() {
-    let masks: Masks = Masks {
+    let masks: CellMasks = CellMasks {
         masks: vec![
             MaskRect {
                 x: 0.0,
@@ -568,7 +571,7 @@ fn masks_are_half_open_and_disjunctive() {
     assert!(!masks.in_bounds(10.0, 5.0));
     assert!(masks.in_bounds(52.0, 52.0));
     assert!(!masks.in_bounds(20.0, 20.0));
-    assert!(!Masks::default().in_bounds(1.0, 1.0));
+    assert!(!CellMasks::default().in_bounds(1.0, 1.0));
 }
 
 /// OpenCV's rule, spelled out: strictly greater than all eight neighbours,
@@ -641,14 +644,14 @@ fn the_response_is_opencvs_corner_score() {
     let grid: CellGrid = CellGrid::new(120, 120, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         &image,
         0,
         &grid,
         &occupancy(&cells, &grid),
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -665,7 +668,7 @@ fn an_occupancy_shape_that_overflows_is_refused() {
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; 32];
     let mut scratch: DetectorScratch = DetectorScratch::default();
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     let error = detect_keypoints_with_cells(
         &image,
         0,
@@ -676,7 +679,7 @@ fn an_occupancy_shape_that_overflows_is_refused() {
             columns: 2,
         },
         &config(),
-        &Masks::default(),
+        &CellMasks::default(),
         BUDGET,
         &mut scratch,
         &mut out,
@@ -684,7 +687,7 @@ fn an_occupancy_shape_that_overflows_is_refused() {
     .unwrap_err();
     assert_eq!(
         error,
-        DetectError::OccupancyShapeOverflow {
+        CenteredCellError::OccupancyShapeOverflow {
             rows: usize::MAX,
             columns: 2
         }
@@ -695,12 +698,12 @@ fn an_occupancy_shape_that_overflows_is_refused() {
 struct MalformedSelection(usize);
 
 impl CornerScan for MalformedSelection {
-    type Error = DetectError;
-    fn scan(&mut self, _: usize, _: &Image<u16, 1>) -> Result<(), DetectError> {
+    type Error = CenteredCellError;
+    fn scan(&mut self, _: usize, _: &Image<u16, 1>) -> Result<(), CenteredCellError> {
         panic!("a malformed selection must not fall back to scanning")
     }
 
-    fn band(&mut self, _: BandRequest) -> Result<&[FastCorner], DetectError> {
+    fn band(&mut self, _: BandRequest) -> Result<&[FastCorner], CenteredCellError> {
         panic!("a malformed selection must not fall back to a band")
     }
 
@@ -710,9 +713,9 @@ impl CornerScan for MalformedSelection {
         _: &Image<u16, 1>,
         _: &CellSelect,
         _eligibility: Option<(&Occupancy<'_>, &[bool])>,
-        out: &mut Vec<u32>,
-    ) -> Result<SelectionStatus, DetectError> {
-        out.resize(self.0, NO_CELL_WINNER);
+        out: &mut Vec<Option<FastCorner>>,
+    ) -> Result<SelectionStatus, CenteredCellError> {
+        out.resize(self.0, None);
         Ok(SelectionStatus::Selected)
     }
 }
@@ -729,7 +732,7 @@ fn malformed_selection_lengths_are_refused_without_fallback() {
     };
     for actual in [0, 15, 17] {
         let mut scratch = DetectorScratch::with_scanner(Box::new(MalformedSelection(actual)));
-        let mut out = KeypointsData::default();
+        let mut out = CenteredCellKeypoints::default();
         assert_eq!(
             detect_keypoints_with_cells(
                 &image,
@@ -737,12 +740,12 @@ fn malformed_selection_lengths_are_refused_without_fallback() {
                 &grid,
                 &occupancy,
                 &config(),
-                &Masks::default(),
+                &CellMasks::default(),
                 BUDGET,
                 &mut scratch,
                 &mut out
             ),
-            Err(DetectError::SelectionLength {
+            Err(CenteredCellError::SelectionLength {
                 actual,
                 expected: 16
             })

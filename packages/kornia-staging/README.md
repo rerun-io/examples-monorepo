@@ -73,11 +73,14 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Pivoted fixed-size LDLT | slam-rs `ldlt.rs` | kornia-rs / kornia-algebra / linalg::ldlt | staged | - |
 | Lie precision and update extensions (proposes the documented Sophus Taylor branches upstream) | slam-rs `lie.rs` | kornia-rs / kornia-algebra / lie | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
-| Dense u8-shift8 ingestion and sparse u16 bilinear values/gradients | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
-| Integer u16 Gaussian downsampling and row scratch | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
+| Strided u8-shift8 ingestion and sparse u16 bilinear values/gradients (dense conversion uses upstream cast_and_scale) | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
+| Floor-halved integer u16 Gaussian downsampling and reusable PyramidPlanU16 | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
 | Centered FAST cells, band scans, masks and deterministic selection | slam-rs `frontend/detect*`, `frontend/cell.rs` | kornia-rs / kornia-imgproc / `features` (private cells) | staged | - |
 | Wgpu polling wakeup | cubecl-wgpu 0.11.0-pre.3 compute/{poll,stream,timings} | cubecl-wgpu | staged (temporary patch) | - |
-| Mean-normalized SE(2) patch alignment and sampling patterns | slam-rs `frontend/{patch,patterns,se2,simd,ldlt}.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_se2` | staged | - |
+| Mean-normalized SE(2) patches and sealed sampling patterns (private Sophus-style exponential preserves normalization and cubic small-angle term) | slam-rs `frontend/{patch,patterns,se2,simd,ldlt}.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_se2` | staged | - |
+| Stateless forward/backward CPU patch tracking and reusable storage | slam-rs `frontend/tracker/cpu.rs`, `patch_soa.rs`, `storage.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_tracker` | staged | - |
+| Batched tracking protocol and identity-keyed template caches | slam-rs `frontend/tracker.rs`, `tracker/cpu.rs` | kornia-slam / kornia-slam / `tracking::optical_flow` | staged | - |
 
 CubeCL wgpu polling is patched in `../slam-rs/patches/` before the tracker split.
 patch preparation moves into this package with the GPU runtime item.
+

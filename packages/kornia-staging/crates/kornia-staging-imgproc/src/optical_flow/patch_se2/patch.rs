@@ -7,7 +7,7 @@
 //!
 //! Builds write into caller-owned structure-of-arrays storage.
 //! The largest temporary is a 3x3 matrix plus a 3-vector, avoiding a full patch
-//! Jacobian in per-thread GPU storage. Residual sampling warps one tap at a time,
+//! Jacobian in temporary storage. Residual sampling warps one tap at a time,
 //! avoiding a transient transformed-pattern matrix.
 
 use nalgebra::Matrix3;
@@ -15,25 +15,18 @@ use nalgebra::Matrix3;
 use super::ldlt::ldlt_inverse3;
 use super::patterns::Pattern;
 use super::se2::AffineCompact2;
-use kornia_image::Image;
+use crate::interpolation::U16View;
 
 use super::simd::F32x4;
 
-/// # Arguments
-/// `source` is a dense image; `positions` holds four centres; `data` and `jacobian` have at least `4 * P::SIZE` and `12 * P::SIZE` elements.
-///
-/// # Preconditions
-/// Call [`super::patterns::validate_pattern`] once for `P` before using this low-level kernel.
-/// Strides and buffers must cover every addressed element.
-///
 /// Build four independent patches in `[row][tap][lane]` storage.
 /// Each lane follows the scalar oracle's operation order. The pivoted
 /// factorization remains scalar because each point can choose different pivots.
 ///
 /// # Panics
 /// If data has fewer than `4 * P::SIZE` elements or the factor fewer than `12 * P::SIZE`.
-pub fn build_patch_group<P: Pattern>(
-    source: &Image<u16, 1>,
+pub(crate) fn build_patch_group<P: Pattern>(
+    source: U16View<'_>,
     positions: [[f32; 2]; 4],
     data: &mut [f32],
     jacobian: &mut [f32],
@@ -121,12 +114,16 @@ pub const PATCH_BORDER: f32 = 2.0;
 ///
 /// # Panics
 /// If factor or residual storage is too short for the pattern and strides.
-pub fn patch_increment_rows<P: Pattern>(
+pub(crate) fn patch_increment_rows<P: Pattern>(
     factor: &[f32],
     element_stride: usize,
     row_stride: usize,
     residual: &[f32],
 ) -> [f32; 3] {
+    // Validate the last selected coefficient once, without requiring padding
+    // after the final lane, so the tap loop can use these established bounds.
+    let needed = 2 * row_stride + (P::SIZE - 1) * element_stride + 1;
+    let factor = &factor[..needed];
     let mut sum = F32x4::ZERO;
     for (tap, &value) in residual[..P::SIZE].iter().enumerate() {
         let offset = tap * element_stride;
@@ -141,23 +138,16 @@ pub fn patch_increment_rows<P: Pattern>(
     [sum.0[0], sum.0[1], sum.0[2]]
 }
 
-/// # Arguments
-/// `data` contains source taps at `stride`; `source` and `transform` specify target sampling; `residual` holds `P::SIZE` outputs.
-///
-/// # Preconditions
-/// Call [`super::patterns::validate_pattern`] once for `P` before using this low-level kernel.
-/// Strides and buffers must cover every addressed element.
-///
 /// Sample four taps of one point at a time. The sum still visits individual
 /// taps in ascending order, so this can serve scalar tracking call sites
 /// without changing their arithmetic or needing adjacent points' guesses.
 ///
 /// # Panics
 /// If data or residual storage is too short for the pattern and stride.
-pub fn patch_residual_taps<P: Pattern>(
+pub(crate) fn patch_residual_taps<P: Pattern>(
     data: &[f32],
     stride: usize,
-    source: &Image<u16, 1>,
+    source: U16View<'_>,
     transform: &AffineCompact2<f32>,
     residual: &mut [f32],
 ) -> bool {
@@ -186,10 +176,14 @@ pub fn patch_residual_taps<P: Pattern>(
             }
         }
     }
-    if !sum.is_finite() || sum < f32::EPSILON {
+    // At most 52 bounded u16 bilinear values contribute, so this sum is finite.
+    // The generic-source residual must still check for floating-point overflow.
+    if sum < f32::EPSILON {
         residual[..P::SIZE].fill(0.0);
         return false;
     }
+    // Establish the strided template bounds once, without trailing lane padding.
+    let data = &data[..(P::SIZE - 1) * stride + 1];
     let mut num_residuals = 0;
     for base in (0..P::SIZE).step_by(4) {
         let lanes = (P::SIZE - base).min(4);
@@ -226,17 +220,17 @@ pub fn patch_residual_taps<P: Pattern>(
 #[inline]
 #[allow(unsafe_code)] // Bounds cover the whole bilinear stencil before gathering.
 pub(crate) fn sample_group<const GRAD: bool>(
-    image: &Image<u16, 1>,
+    image: U16View<'_>,
     x: F32x4,
     y: F32x4,
 ) -> (F32x4, [F32x4; 2], [bool; 4]) {
     let ix = x.0.map(|v| v as usize);
     let iy = y.0.map(|v| v as usize);
     let valid = std::array::from_fn(|lane| {
-        crate::interpolation::in_bounds_u16(image, x.0[lane], y.0[lane], 2.0)
+        image.in_bounds(x.0[lane], y.0[lane], 2.0)
             // Integer checks also cover dimensions beyond f32's exact range.
-            && ix[lane] >= 1 && ix[lane] < image.width().saturating_sub(2)
-            && iy[lane] >= 1 && iy[lane] < image.height().saturating_sub(2)
+            && ix[lane] >= 1 && ix[lane] < image.width.saturating_sub(2)
+            && iy[lane] >= 1 && iy[lane] < image.height.saturating_sub(2)
     });
     let dx = x - F32x4(ix.map(|v| v as f32));
     let dy = y - F32x4(iy.map(|v| v as f32));
@@ -244,11 +238,11 @@ pub(crate) fn sample_group<const GRAD: bool>(
     let ddy = F32x4::splat(1.0) - dy;
     let weights = [ddx * ddy, ddx * dy, dx * ddy, dx * dy];
     // Borrow dense pixels once for the whole stencil.
-    let pixels = image.as_slice();
+    let pixels = image.pixels;
     let pixel = |ox: usize, oy: usize| {
         F32x4(std::array::from_fn(|lane| {
             if valid[lane] {
-                let offset = (iy[lane] - 1 + oy) * image.width() + ix[lane] - 1 + ox;
+                let offset = (iy[lane] - 1 + oy) * image.width + ix[lane] - 1 + ox;
                 // SAFETY: valid covers the entire [-1, +2] stencil; image
                 // construction guarantees width * height contiguous storage.
                 f32::from(unsafe { *pixels.get_unchecked(offset) })

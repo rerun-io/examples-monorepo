@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
-use kornia_staging_imgproc::features::{MaskRect, Masks};
+use kornia_staging_imgproc::features::{CellMasks, MaskRect};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::*;
@@ -115,14 +115,14 @@ fn a_skipped_frameset_leaves_no_camera_detected() {
 }
 
 /// Remove exact old positions while leaving other corners available to detect.
-fn masks_leaving(frame: &FlowFrame, survivors: usize) -> [Masks; 1] {
-    [Masks {
+fn masks_leaving(frame: &FlowFrame, survivors: usize) -> [CellMasks; 1] {
+    [CellMasks {
         masks: (survivors..frame.cameras[0].len())
             .map(|index| {
                 let position = frame.cameras[0].transforms.translation(index);
                 MaskRect {
-                    x: position.x - 0.25,
-                    y: position.y - 0.25,
+                    x: position[0] - 0.25,
+                    y: position[1] - 0.25,
                     w: 0.5,
                     h: 0.5,
                 }
@@ -185,7 +185,7 @@ fn redetection_resumes_on_the_frameset_that_loses_every_track() {
 fn redetection_uses_the_latest_post_detection_count() {
     let mut flow = gated_frontend(2, 0.5);
     let images = [dotted_image(0), dotted_image(0)];
-    let initial_mask = [Masks {
+    let initial_mask = [CellMasks {
         masks: vec![MaskRect {
             x: 60.0,
             y: 0.0,

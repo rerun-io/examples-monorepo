@@ -23,7 +23,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
                     .map_err(|error| read_failed("frontend dispatch", &error))
             },
         );
-        result.map_err(crate::frontend::tracker::TrackerError::from)?
+        result.map_err(crate::frontend::flow::FrontendError::from)?
     }
 }
 
@@ -121,7 +121,7 @@ impl FrameBatch {
     pub(super) fn finish<R: cubecl::prelude::Runtime>(
         self,
         client: &cubecl::prelude::ComputeClient<R>,
-    ) -> Result<(), crate::frontend::tracker::TrackerError> {
+    ) -> Result<(), crate::frontend::flow::FrontendError> {
         super::guarded(
             GpuError::DeviceLost {
                 what: "frame dispatch",
@@ -216,8 +216,6 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     image: &kornia_image::Image<u16, 1>,
 ) -> (cubecl::server::Handle, usize) {
     use cubecl::prelude::CubeElement;
-    (
-        upload(client, u16::as_bytes(image.as_slice())),
-        image.as_slice().len(),
-    )
+    let pixels = image.as_slice();
+    (upload(client, u16::as_bytes(pixels)), pixels.len())
 }

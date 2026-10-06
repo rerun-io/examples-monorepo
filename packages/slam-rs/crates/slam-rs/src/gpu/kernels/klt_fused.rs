@@ -93,21 +93,21 @@ impl CachedU32Upload {
 pub(crate) fn encode_point(
     warp: [f32; 6],
     valid: f32,
-    source: nalgebra::Vector2<f32>,
+    source: [f32; 2],
     camera: usize,
 ) -> [f32; FUSED_RUNS] {
     let mut values = [0.0; FUSED_RUNS];
     values[RUN_WARP..RUN_VALID].copy_from_slice(&warp);
     values[RUN_VALID] = valid;
-    values[RUN_SOURCE_X] = source.x;
-    values[RUN_SOURCE_Y] = source.y;
+    values[RUN_SOURCE_X] = source[0];
+    values[RUN_SOURCE_Y] = source[1];
     values[RUN_CAMERA] = camera as f32;
     values
 }
 
 pub(crate) fn decode_point(
     values: &[f32],
-    out: &mut crate::frontend::tracker::FlowResult,
+    out: &mut kornia_staging_imgproc::optical_flow::patch_tracker::FlowResult,
     index: usize,
 ) {
     let transform = kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f {

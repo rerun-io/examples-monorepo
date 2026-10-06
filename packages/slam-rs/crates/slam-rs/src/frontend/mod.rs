@@ -8,7 +8,11 @@
 
 pub mod flow;
 
-pub mod parallel;
 pub mod patterns;
 pub mod stages;
-pub mod tracker;
+
+pub mod parallel;
+
+pub mod input;
+
+pub mod detect;

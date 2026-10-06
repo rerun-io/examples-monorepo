@@ -26,9 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{
-    BandRequest, CELL_KEY_LIMIT, CellGrid, CellSelect, CornerScan, CpuCornerScan, DetectError,
-    DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, MaskRect, Masks,
-    Occupancy, detect_keypoints_with_cells, threshold_rungs,
+    BandRequest, CellGrid, CellMasks, CellSelect, CenteredCellConfig, CenteredCellError,
+    CenteredCellKeypoints, CornerScan, CpuCornerScan, DetectorScratch, FAST_BORDER, FastCorner,
+    MaskRect, Occupancy, detect_keypoints_with_cells, threshold_rungs,
 };
 use slam_rs::frontend::flow::FrontendError;
 #[cfg(feature = "gpu-core")]
@@ -44,12 +44,12 @@ use common::cornered_image;
 struct BandScan(CpuCornerScan);
 
 impl CornerScan for BandScan {
-    type Error = DetectError;
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
+    type Error = CenteredCellError;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), CenteredCellError> {
         self.0.scan(camera, image)
     }
 
-    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], CenteredCellError> {
         self.0.band(request)
     }
 }
@@ -74,28 +74,18 @@ where
         image: &Image<u16, 1>,
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
-        out: &mut Vec<u32>,
+        out: &mut Vec<Option<FastCorner>>,
     ) -> Result<kornia_staging_imgproc::features::SelectionStatus, Self::Error> {
         self.0
             .select_cells(camera, image, select, eligibility, out)
             .map_err(Into::into)
     }
-    fn submit_cells(
-        &mut self,
-        images: &[Image<u16, 1>],
-        selects: &[Option<CellSelect>],
-    ) -> Result<(), Self::Error> {
-        self.0.submit_cells(images, selects).map_err(Into::into)
-    }
-    fn take_cells(&mut self) -> Result<(), Self::Error> {
-        self.0.take_cells().map_err(Into::into)
-    }
 }
 
 /// The msd-index detector, which is `num_points_cell = 1` and the 40/20/10/5
 /// ladder every shipped config runs.
-fn detector_config(safe_radius: f32) -> DetectorConfig {
-    DetectorConfig {
+fn detector_config(safe_radius: f32) -> CenteredCellConfig {
+    CenteredCellConfig {
         num_points_cell: 1,
         min_threshold: 5,
         max_threshold: 40,
@@ -132,27 +122,11 @@ impl CornerScan for CountingScan {
         image: &Image<u16, 1>,
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
-        out: &mut Vec<u32>,
+        out: &mut Vec<Option<FastCorner>>,
     ) -> Result<kornia_staging_imgproc::features::SelectionStatus, FrontendError> {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner
             .select_cells(camera, image, select, eligibility, out)
-    }
-
-    /// Forwarded, not defaulted: the trait's default prepares nothing, so a
-    /// decorator that forgot this would silently take the device lane off the
-    /// batched path and every equality below would still pass.
-    fn submit_cells(
-        &mut self,
-        images: &[Image<u16, 1>],
-        selects: &[Option<CellSelect>],
-    ) -> Result<(), FrontendError> {
-        self.inner.submit_cells(images, selects)
-    }
-
-    /// Forwarded for the reason above: this is the half that downloads.
-    fn take_cells(&mut self) -> Result<(), FrontendError> {
-        self.inner.take_cells()
     }
 }
 
@@ -184,12 +158,12 @@ fn detect_with(
     image: &Image<u16, 1>,
     grid: &CellGrid,
     counts: &[i32],
-    config: &DetectorConfig,
-    masks: &Masks,
+    config: &CenteredCellConfig,
+    masks: &CellMasks,
     budget: usize,
-) -> KeypointsData {
+) -> CenteredCellKeypoints {
     let mut scratch = DetectorScratch::with_scanner(scanner);
-    let mut out: KeypointsData = KeypointsData::default();
+    let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         image,
         0,
@@ -214,8 +188,8 @@ struct DetectionCase<'a> {
     image: &'a Image<u16, 1>,
     grid: &'a CellGrid,
     counts: &'a [i32],
-    config: &'a DetectorConfig,
-    masks: &'a Masks,
+    config: &'a CenteredCellConfig,
+    masks: &'a CellMasks,
     budget: usize,
     label: &'a str,
 }
@@ -224,7 +198,7 @@ struct DetectionCase<'a> {
 ///
 /// The whole of `detectKeypointsWithCells` runs twice over the same frame — once
 /// through `BandScan`, which walks bands, and once through each selector —
-/// and the two `KeypointsData` must be equal, corner for corner and response for
+/// and the two `CenteredCellKeypoints` must be equal, corner for corner and response for
 /// response, in the same cell scan order.
 ///
 /// That equality is the exactness argument, not the A/B run: the ladder carries
@@ -242,7 +216,7 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         budget,
         label,
     } = case;
-    let want: KeypointsData = detect_with(
+    let want: CenteredCellKeypoints = detect_with(
         Box::new(AppScan(BandScan::default())),
         image,
         grid,
@@ -266,7 +240,7 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         let label = &format!("{label} ({selector})");
         let bands: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let selections: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-        let got: KeypointsData = detect_with(
+        let got: CenteredCellKeypoints = detect_with(
             Box::new(CountingScan {
                 inner: scanner,
                 bands: Arc::clone(&bands),
@@ -295,3 +269,8 @@ mod numerical_selection;
 #[cfg(feature = "gpu-core")]
 #[path = "gpu_detect/batch_lifecycle.rs"]
 mod batch_lifecycle;
+
+use slam_rs::frontend::detect::CELL_KEY_LIMIT;
+
+#[cfg(feature = "gpu-core")]
+use slam_rs::frontend::{detect::FrameCornerScan, input::FrameImages};

@@ -1,0 +1,24 @@
+[package]
+name = "kornia-staging-slam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kornia-staging-imgproc.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+kornia-image.workspace = true
+nalgebra.workspace = true
+proptest.workspace = true
+approx.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "patch_tracker"
+harness = false

@@ -4,7 +4,7 @@
 use crate::Vio;
 #[cfg(feature = "gpu-wgpu")]
 use crate::gpu;
-use crate::{Backend, ImageView, VioError, calib, config, frontend, image};
+use crate::{Backend, VioError, calib, config, frontend};
 
 /// The frontend of a [`Vio`], on whichever backend it was built for.
 ///
@@ -48,24 +48,15 @@ macro_rules! on_lane {
 }
 
 impl FrontendLane {
-    /// Retain byte inputs for the GPU upload, outside the host image type.
-    pub(super) fn prepare_packed_inputs(&mut self, _views: &[ImageView<'_>]) {
-        #[cfg(feature = "gpu-wgpu")]
-        if let Self::Gpu(flow) = self {
-            flow.prepare_packed_inputs(_views);
-        }
-    }
-
     /// Queue image-only work on lanes that support lookahead.
     pub(super) fn queue_lookahead(
         &mut self,
         _t_ns: i64,
-        _images: &mut Vec<kornia_image::Image<u16, 1>>,
-        _views: &[ImageView<'_>],
+        _images: &mut crate::frontend::input::PackedImages,
     ) -> Result<(), VioError> {
         #[cfg(feature = "gpu-wgpu")]
         if let Self::Gpu(flow) = self {
-            flow.queue_lookahead(_t_ns, _images, _views)?;
+            flow.queue_lookahead(_t_ns, _images)?;
         }
         Ok(())
     }
@@ -78,17 +69,8 @@ impl FrontendLane {
         }
     }
 
-    /// Densify and widen into each lane's reusable host image.
-    pub(super) fn fill_frame(
-        &self,
-        frame: &mut kornia_image::Image<u16, 1>,
-        view: &ImageView<'_>,
-    ) -> Result<(), image::ImageError> {
-        image::fill_from_u8_strided(frame, view.data, view.width, view.height, view.stride)
-    }
-
     /// Share the CPU frontend's workers with the synchronous estimator.
-    pub(super) fn cpu_pool(&self) -> Option<frontend::parallel::WorkPool> {
+    pub(super) fn cpu_pool(&self) -> Option<crate::frontend::parallel::WorkPool> {
         match self {
             Self::Cpu(flow) => Some(flow.pool().clone()),
             #[cfg(feature = "gpu-wgpu")]
@@ -131,10 +113,21 @@ impl FrontendLane {
         t_ns: i64,
         images: &[kornia_image::Image<u16, 1>],
         prediction: &frontend::flow::PosePrediction,
-        masks: &[kornia_staging_imgproc::features::Masks],
+        masks: &[kornia_staging_imgproc::features::CellMasks],
     ) -> Result<&frontend::flow::FlowFrame, frontend::flow::FrontendError> {
         on_lane!(self, |flow| flow
             .process_frame(t_ns, images, prediction, masks))
+    }
+
+    pub(crate) fn process_frame_input(
+        &mut self,
+        t_ns: i64,
+        images: frontend::input::FrameImages<'_>,
+        prediction: &frontend::flow::PosePrediction,
+        masks: &[kornia_staging_imgproc::features::CellMasks],
+    ) -> Result<&frontend::flow::FlowFrame, frontend::flow::FrontendError> {
+        on_lane!(self, |flow| flow
+            .process_frame_input(t_ns, images, prediction, masks))
     }
 
     /// What the last frame's phases cost.
@@ -239,10 +232,9 @@ pub(super) fn build_frontend(
                     config.optical_flow_max_iterations as usize,
                     config.optical_flow_max_recovered_dist2,
                     calibration.intrinsics.len(),
-                )
-                .map_err(frontend::flow::FrontendError::from)?;
+                )?;
             // One worker: the side cameras' detection stays on the caller.
-            let host_pool = frontend::parallel::WorkPool::new(1)
+            let host_pool = crate::frontend::parallel::WorkPool::new(1)
                 .map_err(|_| frontend::flow::FrontendError::ThreadPool { threads: 1 })?;
             Ok(FrontendLane::Gpu(
                 frontend::flow::FrameToFrameOpticalFlow::with_stages(

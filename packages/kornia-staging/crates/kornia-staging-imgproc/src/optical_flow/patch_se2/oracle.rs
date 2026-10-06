@@ -1,15 +1,17 @@
 //! Scalar reference implementation for patch tests and benchmarks.
-use std::marker::PhantomData;
-use nalgebra::{Matrix3, Vector3};
 use super::ldlt::ldlt_inverse3;
-use super::patterns::{validate_pattern, PatchError, Pattern, MAX_PATTERN_SIZE};
-use super::se2::AffineCompact2;
 use super::patch::PATCH_BORDER;
+use super::patterns::{PatchError, Pattern, MAX_PATTERN_SIZE};
+use super::se2::AffineCompact2;
+use crate::interpolation::U16View;
 use kornia_image::Image;
 use kornia_staging_algebra::Scalar;
+use nalgebra::{Matrix3, Vector3};
+use std::marker::PhantomData;
+
 /// A patch sampling source. Tests can supply analytic functions in place of images.
 /// Static dispatch avoids per-tap virtual calls.
-pub trait PatchSource<S: Scalar> {
+pub(crate) trait PatchSource<S: Scalar> {
     /// `img.InBounds(p, border)`.
     fn in_bounds(&self, x: S, y: S, border: S) -> bool;
 
@@ -20,30 +22,23 @@ pub trait PatchSource<S: Scalar> {
     fn interp_grad(&self, x: S, y: S) -> (S, [S; 2]);
 }
 
-impl PatchSource<f32> for Image<u16, 1> {
+impl PatchSource<f32> for U16View<'_> {
     #[inline]
     fn in_bounds(&self, x: f32, y: f32, border: f32) -> bool {
-        crate::interpolation::in_bounds_u16(self, x, y, border)
+        U16View::in_bounds(*self, x, y, border)
     }
 
     #[inline]
     fn interp(&self, x: f32, y: f32) -> f32 {
-        crate::interpolation::sample_bilinear_u16(self, x, y)
+        self.sample_bilinear(x, y)
     }
 
     #[inline]
     fn interp_grad(&self, x: f32, y: f32) -> (f32, [f32; 2]) {
-        crate::interpolation::sample_bilinear_with_gradient_u16(self, x, y)
+        self.sample_bilinear_with_gradient(x, y)
     }
 }
 
-/// # Arguments
-/// `source` and `pos` specify sampling; data and Jacobian strides address one tap and one row in the supplied buffers.
-///
-/// # Preconditions
-/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
-/// Strides and buffers must cover every addressed element.
-///
 /// Write a strided transposed SE(2) sampling Jacobian.
 /// `data[i * data_stride]` is tap i; row/element strides address the three Jacobian rows.
 ///
@@ -51,13 +46,13 @@ impl PatchSource<f32> for Image<u16, 1> {
 /// Compute `mean = sum/n` and `mean_inv = n/sum` separately. Subtract the
 /// product-rule term `grad_sumᵀ * raw_data[i] / sum`, zero invalid rows, then
 /// scale valid data and Jacobians by `mean_inv`. Omitting the product-rule term
-/// converges to the wrong warp (`papers-part2.md` §12.1).
+/// converges to the wrong warp.
 /// Returns the mean and valid tap count.
 ///
 /// # Panics
 /// If either array is too short for the pattern and strides.
 #[allow(clippy::too_many_arguments)]
-pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
+pub(crate) fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
     source: &Src,
     pos: &[S; 2],
     data: &mut [S],
@@ -134,13 +129,6 @@ pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
     (mean, num_valid_points)
 }
 
-/// # Arguments
-/// `source` and `pos` specify sampling; data and Jacobian strides address one tap and one row in the supplied buffers.
-///
-/// # Preconditions
-/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
-/// Strides and buffers must cover every addressed element.
-///
 /// Build a patch factor in caller storage at the supplied strides.
 /// On return the Jacobian buffer contains `H^-1 Jᵀ`, formed by tap-ordered
 /// rank-one updates, guarded 3x3 LDLT and column-wise multiplication.
@@ -149,7 +137,7 @@ pub fn set_data_jac_se2<P: Pattern, S: Scalar, Src: PatchSource<S>>(
 ///
 /// # Panics
 /// If either array is too short for the pattern and strides.
-pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
+pub(crate) fn build_patch<P: Pattern, Src: PatchSource<f32>>(
     source: &Src,
     pos: &[f32; 2],
     data: &mut [f32],
@@ -175,7 +163,7 @@ pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
         // `H += row row^T`. nalgebra walks the columns and does
         // `h[(r, c)] += (1 · row[c]) · row[r]` where the nested loop below it
         // did `row[r] · row[c]`, so the accumulation is bit-identical, not
-        // merely equivalent (S33 audit B, row 7).
+        // merely equivalent.
         h_se2.ger(1.0, &row, &row, 1.0);
     }
 
@@ -197,7 +185,7 @@ pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
 }
 
 /// Packed f32 patch record used by tests.
-/// Tracking uses [`build_patch_group`] with the same per-point operation order.
+/// Tracking uses [`super::patch::build_patch_group`] with the same per-point operation order.
 /// The record stores source position, normalized taps, cached `H^-1 Jᵀ`, mean
 /// and validity. Negative taps mark invalid samples. Only `P::SIZE` entries of
 /// the maximum-sized buffers are used.
@@ -234,26 +222,23 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     /// Build a mean-normalized patch with a cached inverse Hessian.
     ///
     /// # Arguments
-    /// * `source` - image or analytic sampling source.
+    /// * `source` - dense single-channel image.
     /// * `pos` - finite centre in source pixels.
     ///
     /// # Errors
-    /// Returns an error for invalid pattern geometry or a non-finite centre.
+    /// Returns an error for a non-finite centre.
     /// Textureless and out-of-bounds patches succeed with `valid == false`.
     ///
     /// ```
     /// use kornia_image::{Image, ImageSize};
-    /// use kornia_staging_imgproc::optical_flow::patch_se2::{OpticalFlowPatch, Pattern51};
+    /// use kornia_staging_imgproc::optical_flow::patch_se2::{oracle::OpticalFlowPatch, Pattern51};
     /// let image = Image::<u16,1>::from_size_val(ImageSize { width: 32, height: 32 }, 0)?;
     /// let patch = OpticalFlowPatch::<Pattern51>::new(&image, [16.0,16.0])?;
     /// assert!(!patch.valid);
     /// assert_eq!(patch.mean, 0.0);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn new<Src: PatchSource<f32>>(
-        source: &Src,
-        pos: impl Into<[f32; 2]>,
-    ) -> Result<Self, PatchError> {
+    pub fn new(source: &Image<u16, 1>, pos: impl Into<[f32; 2]>) -> Result<Self, PatchError> {
         let mut patch: Self = Self::default();
         patch.set_from_image(source, pos)?;
         Ok(patch)
@@ -261,22 +246,20 @@ impl<P: Pattern> OpticalFlowPatch<P> {
 
     /// `setFromImage`, into this record's packed storage.
     ///
-    /// A thin call into [`build_patch`] at stride 1. The tracking path does not
-    /// come through here: [`build_patch_group`] writes straight into its
-    /// grouped arrays, so no packed record is ever built per patch.
+    /// The tracker builds directly into its grouped arrays instead of creating
+    /// a packed record per point.
     ///
     /// # Arguments
-    /// * `source` - image or analytic sampling source.
+    /// * `source` - dense single-channel image.
     /// * `pos` - finite centre in source pixels.
     ///
     /// # Errors
-    /// Returns an error for invalid patterns or non-finite centres, leaving this record unchanged.
-    pub fn set_from_image<Src: PatchSource<f32>>(
+    /// Returns an error for a non-finite centre, leaving this record unchanged.
+    pub fn set_from_image(
         &mut self,
-        source: &Src,
+        source: &Image<u16, 1>,
         pos: impl Into<[f32; 2]>,
     ) -> Result<(), PatchError> {
-        validate_pattern::<P>()?;
         let pos = pos.into();
         if !pos.iter().all(|v| v.is_finite()) {
             return Err(PatchError::NonFinitePosition);
@@ -287,8 +270,8 @@ impl<P: Pattern> OpticalFlowPatch<P> {
             h_se2_inv_j_se2_t,
             ..
         } = self;
-        let (mean, valid) = build_patch::<P, Src>(
-            source,
+        let (mean, valid) = build_patch::<P, _>(
+            &U16View::new(source),
             &pos,
             data,
             1,
@@ -311,31 +294,28 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     /// count and sum come from the taps in bounds in the *target*, while
     /// `data[i]` was normalised by the source's own count, so the two
     /// normalisations differ whenever the patch straddles a border
-    /// (`papers-part2.md` §13 deviation D5). Everything else is zeroed.
+    /// during sampling. Everything else is zeroed.
     ///
     /// Returns `true` only when more than half the pattern survived.
     ///
-    /// # Panics
+    /// # Arguments
+    /// * `source` - Dense target image.
+    /// * `transform` - Warp from sampling offsets to target pixels.
+    /// * `residual` - Output storage for at least `P::SIZE` values.
     ///
+    /// # Panics
     /// If `residual` is shorter than `P::SIZE`.
     #[inline]
-    pub fn residual<Src: PatchSource<f32>>(
+    pub fn residual(
         &self,
-        source: &Src,
+        source: &Image<u16, 1>,
         transform: &AffineCompact2<f32>,
         residual: &mut [f32],
     ) -> bool {
-        patch_residual::<P, Src>(&self.data, 1, source, transform, residual)
+        patch_residual::<P, _>(&self.data, 1, &U16View::new(source), transform, residual)
     }
 }
 
-/// # Arguments
-/// `data` contains source taps at `stride`; `source` and `transform` specify target sampling; `residual` holds `P::SIZE` outputs.
-///
-/// # Preconditions
-/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
-/// Strides and buffers must cover every addressed element.
-///
 /// [`OpticalFlowPatch::residual`] over a strided `data` array.
 ///
 /// `stride` is the distance between two taps of the same patch: `1` for the
@@ -349,7 +329,7 @@ impl<P: Pattern> OpticalFlowPatch<P> {
 // As `set_data`: `i` is the tap index of `residual`, `data` and `P::OFFSETS`.
 #[allow(clippy::needless_range_loop)]
 #[inline]
-pub fn patch_residual<P: Pattern, Src: PatchSource<f32>>(
+pub(crate) fn patch_residual<P: Pattern, Src: PatchSource<f32>>(
     data: &[f32],
     stride: usize,
     source: &Src,
@@ -392,21 +372,15 @@ pub fn patch_residual<P: Pattern, Src: PatchSource<f32>>(
     num_residuals > P::SIZE / 2
 }
 
-/// # Arguments
-/// `h_inv_jt` stores the inverse factor at element/row strides; `residual` holds `P::SIZE` values.
-///
-/// # Preconditions
-/// Call [`validate_pattern`] once for `P` before using this low-level kernel.
-/// Strides and buffers must cover every addressed element.
-///
 /// Multiply a strided 3xP factor by the residual, without a leading minus.
 /// The same routine reads packed and structure-of-arrays storage. Sum taps in
-/// ascending order for determinism (D31).
+/// ascending order for determinism.
 ///
 /// # Panics
 /// If factor or residual storage is too short.
 #[inline]
-pub fn patch_increment<P: Pattern>(
+#[cfg(test)]
+pub(crate) fn patch_increment<P: Pattern>(
     h_inv_jt: &[f32],
     element_stride: usize,
     row_stride: usize,
@@ -427,7 +401,6 @@ pub fn patch_increment<P: Pattern>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use crate::optical_flow::patch_se2::build_patch_group;
 
     /// Test sampling without Jacobians, optionally through an SE(2) warp.
     /// Mark out-of-bounds taps negative, then normalize by the valid-tap mean.
@@ -480,6 +453,7 @@ mod tests {
     use super::super::patterns::{Pattern51, Pattern52};
     use super::super::se2::se2_exp;
     use super::*;
+    use crate::optical_flow::patch_se2::build_patch_group;
     use approx::assert_abs_diff_eq;
     use nalgebra::Vector2;
 
@@ -664,7 +638,16 @@ mod tests {
                 (1.0, [f32::INFINITY, 0.0])
             }
         }
-        let patch = OpticalFlowPatch::<Pattern51>::new(&BadSource, [0.0, 0.0]).unwrap();
+        let mut patch = OpticalFlowPatch::<Pattern51>::default();
+        (patch.mean, patch.valid) = build_patch::<Pattern51, _>(
+            &BadSource,
+            &[0.0, 0.0],
+            &mut patch.data,
+            1,
+            patch.h_se2_inv_j_se2_t.as_flattened_mut(),
+            1,
+            MAX_PATTERN_SIZE,
+        );
         assert!(!patch.valid);
         assert!(patch
             .h_se2_inv_j_se2_t
@@ -672,24 +655,23 @@ mod tests {
             .flatten()
             .all(|v| v.is_finite()));
         let mut residual = [1.0; MAX_PATTERN_SIZE];
-        assert!(!patch.residual(&BadSource, &AffineCompact2::identity(), &mut residual));
+        assert!(!patch_residual::<Pattern51, _>(
+            &patch.data,
+            1,
+            &BadSource,
+            &AffineCompact2::identity(),
+            &mut residual
+        ));
         assert!(residual.iter().all(|v| *v == 0.0));
     }
 
     #[test]
     fn patch_constructor_rejects_invalid_geometry() {
-        #[derive(Clone, Copy)]
-        struct Empty;
-        impl Pattern for Empty {
-            const SIZE: usize = 0;
-            const OFFSETS: &'static [[f32; 2]] = &[];
-        }
         let image = textured_image(64, 64);
-        assert!(OpticalFlowPatch::<Empty>::new(&image, [32.0, 32.0]).is_err());
         assert!(OpticalFlowPatch::<Pattern51>::new(&image, [f32::NAN, 32.0]).is_err());
     }
 
-    /// an all-black patch has mean zero, so it is not valid.
+    /// An all-black patch has mean zero, so it is not valid.
     #[test]
     fn an_all_black_patch_is_not_valid() {
         let image: Image<u16, 1> = Image::from_size_val(
@@ -712,8 +694,12 @@ mod tests {
             .all(|v| v.is_finite()));
         let mut data = [0.0; 4 * MAX_PATTERN_SIZE];
         let mut factors = [0.0; 12 * MAX_PATTERN_SIZE];
-        let (means, valid) =
-            build_patch_group::<Pattern51>(&image, [[32.0, 32.0]; 4], &mut data, &mut factors);
+        let (means, valid) = build_patch_group::<Pattern51>(
+            U16View::new(&image),
+            [[32.0, 32.0]; 4],
+            &mut data,
+            &mut factors,
+        );
         assert_eq!(valid, [false; 4]);
         assert!(means
             .iter()
@@ -722,7 +708,7 @@ mod tests {
             .all(|v| v.is_finite()));
     }
 
-    /// a residual against an all-black target zeroes and fails.
+    /// A residual against an all-black target is zero and invalid.
     #[test]
     fn a_residual_against_black_fails_and_zeroes() {
         let image: Image<u16, 1> = textured_image(64, 64);
@@ -764,55 +750,16 @@ mod tests {
         assert!(!survived);
     }
 
-    /// : a tap outside the image is marked negative, and the
+    /// A tap outside the image is marked negative, and the
     /// mean-normalisation of `setData` keeps the sign.
     #[test]
     fn out_of_bounds_taps_stay_negative() {
         let image: Image<u16, 1> = textured_image(64, 64);
         let mut data: [f32; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
         let (mean, valid) =
-            set_data::<Pattern51, f32, Image<u16, 1>>(&image, &[4.0, 32.0], None, &mut data);
+            set_data::<Pattern51, f32, _>(&U16View::new(&image), &[4.0, 32.0], None, &mut data);
         assert!(mean > 0.0);
         assert!(valid < Pattern51::SIZE);
         assert!(data.iter().take(Pattern51::SIZE).any(|value| *value < 0.0));
-    }
-    /// The **accounting** behind the module's private-state claim, not the
-    /// claim itself.
-    ///
-    /// The GPU seam budgets about 512 bytes of thread-private state before
-    /// Vulkan/SPIR-V goes racy (`cubecl-portability.md` §12.2, CubeCL #1336).
-    /// What a compiler actually puts on the stack is a property of the compiled
-    /// code — measured at 36 bytes for the largest local and 344 for the frame,
-    /// quoted in the module docs — and no `size_of` can stand in for that. What
-    /// this pins is the *shape*: the pieces the build and the tracking loop hold
-    /// are all small and none is sized by the pattern, and the packed record
-    /// that is sized by the pattern is over the budget, so an edit that put one
-    /// back on the hot path would have to change this test to pass.
-    #[test]
-    fn the_documented_private_state_accounting_holds() {
-        // `build_patch`: the Hessian, its inverse, one column and one row.
-        const BUILD: usize =
-            2 * size_of::<Matrix3<f32>>() + size_of::<Vector3<f32>>() + size_of::<[f32; 3]>();
-        // `track_point_at_level`: one residual vector, one warp, one increment.
-        const TRACK: usize = size_of::<[f32; MAX_PATTERN_SIZE]>()
-            + size_of::<AffineCompact2<f32>>()
-            + size_of::<Vector3<f32>>();
-        const {
-            assert!(BUILD <= 512, "the patch build holds too much private state");
-        };
-        const {
-            assert!(
-                TRACK <= 512,
-                "one tracking iteration holds too much private state"
-            );
-        };
-
-        // The packed record is one patch's *storage*, the same bytes the
-        // structure-of-arrays holds in its columns — not a transient. It is over
-        // the budget, which is exactly why the tracking path never builds one:
-        // `PatchSoA::build` writes groups straight into its own arrays instead.
-        const {
-            assert!(size_of::<OpticalFlowPatch<Pattern51>>() > 512);
-        };
     }
 }

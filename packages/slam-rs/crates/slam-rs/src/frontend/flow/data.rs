@@ -2,10 +2,10 @@
 
 #[cfg(doc)]
 use super::FrameToFrameOpticalFlow;
-use crate::frontend::tracker::FlowTransforms;
 use crate::lie::Se3;
 use crate::types::KeypointId;
 use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 
 /// Sentinel response `-1` for a keypoint without a detector score.
 pub const NO_RESPONSE: f32 = -1.0;
@@ -22,7 +22,7 @@ pub struct FrontendOptions {
     /// Detection and matching stop adding in scan order when full, preserving existing
     /// tracks and keeping the frame processable. The default exceeds the shipped
     /// 50-pixel grid's capacity on a 960x960 image; the caller's upper limit is
-    /// [`crate::frontend::tracker::MAX_CAPACITY`].
+    /// [`kornia_staging_imgproc::optical_flow::patch_tracker::limits::MAX_CAPACITY`].
     pub max_keypoints: usize,
 }
 

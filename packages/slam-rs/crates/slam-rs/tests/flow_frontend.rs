@@ -10,16 +10,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
-use kornia_staging_imgproc::features::{BandRequest, CornerScan, DetectError, FastCorner};
-use kornia_staging_imgproc::features::{CellGrid, MaskRect, Masks};
+use kornia_staging_imgproc::features::{BandRequest, CornerScan, FastCorner};
+use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
+use kornia_staging_slam::tracking::optical_flow::CpuPatchTracker;
 use nalgebra::{Matrix4, Vector3};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::tracker::CpuPatchTracker;
 use slam_rs::lie::{Se3, So3};
 use slam_rs::pyramid::CpuPyramidBuilder;
 use slam_rs::types::KeypointId;
@@ -122,7 +122,7 @@ fn camera_zero_cell_counts_match_its_keypoints() {
     let mut expected: Vec<i32> = vec![0; grid.rows * grid.columns];
     for index in 0..flow.frame().cameras[0].len() {
         let translation = flow.frame().cameras[0].transforms.translation(index);
-        let (row, column) = grid.cell_of(translation.x, translation.y);
+        let (row, column) = grid.cell_of(translation[0], translation[1]);
         expected[row * grid.columns + column] += 1;
     }
     assert_eq!(flow.cell_counts(0), &expected[..]);
@@ -287,8 +287,8 @@ fn cached_batches_match_rebuilding_through_masks_losses_and_redetection() {
                 },
             ];
             let masks = [
-                Masks::default(),
-                Masks {
+                CellMasks::default(),
+                CellMasks {
                     masks: if step % 4 == 1 {
                         vec![MaskRect {
                             x: 20.0,
@@ -400,8 +400,8 @@ fn identical_frames_at_negative_timestamps_keep_their_ids() {
 fn a_mask_over_the_whole_frame_suppresses_detection() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
     let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
-    let masks: Vec<Masks> = vec![
-        Masks {
+    let masks: Vec<CellMasks> = vec![
+        CellMasks {
             masks: vec![MaskRect {
                 x: 0.0,
                 y: 0.0,
@@ -509,8 +509,8 @@ fn a_mixed_resolution_rig_runs() {
     assert!(!frame.cameras[0].is_empty());
     for index in 0..frame.cameras[1].len() {
         let position = frame.cameras[1].transforms.translation(index);
-        assert!(position.x >= 0.0 && position.x < 240.0);
-        assert!(position.y >= 0.0 && position.y < 240.0);
+        assert!(position[0] >= 0.0 && position[0] < 240.0);
+        assert!(position[1] >= 0.0 && position[1] < 240.0);
     }
 }
 
@@ -521,19 +521,23 @@ struct EmptyScan {
     cameras: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
+impl slam_rs::frontend::detect::FrameCornerScan for EmptyScan {
+    fn fork_frame(&self) -> Option<Box<Self>> { self.independent.then(|| Box::new(self.clone())) }
+}
+
 impl CornerScan for EmptyScan {
-    type Error = DetectError;
-    fn fork(&self) -> Option<Box<dyn CornerScan<Error = DetectError>>> {
+    type Error = FrontendError;
+    fn fork(&self) -> Option<Box<dyn CornerScan<Error = FrontendError>>> {
         self.independent
-            .then(|| Box::new(self.clone()) as Box<dyn CornerScan<Error = DetectError>>)
+            .then(|| Box::new(self.clone()) as Box<dyn CornerScan<Error = FrontendError>>)
     }
 
-    fn scan(&mut self, camera: usize, _image: &Image<u16, 1>) -> Result<(), DetectError> {
+    fn scan(&mut self, camera: usize, _image: &Image<u16, 1>) -> Result<(), FrontendError> {
         self.cameras.lock().unwrap().push(camera);
         Ok(())
     }
 
-    fn band(&mut self, _request: BandRequest) -> Result<&[FastCorner], DetectError> {
+    fn band(&mut self, _request: BandRequest) -> Result<&[FastCorner], FrontendError> {
         Ok(&[])
     }
 }
@@ -561,7 +565,7 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
             config.optical_flow_levels as usize + 1,
             config.optical_flow_max_iterations as usize,
             config.optical_flow_max_recovered_dist2,
-            pool.clone(),
+            pool.clone().rayon_pool(),
         )
         .unwrap();
         let cameras = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

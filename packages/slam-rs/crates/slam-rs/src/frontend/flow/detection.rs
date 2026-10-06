@@ -2,17 +2,18 @@
 
 use super::{FrameToFrameOpticalFlow, FrontendError, project_between_cams};
 use crate::duration_ns;
+use crate::frontend::detect::FrameCornerScan;
+use crate::frontend::input::FrameImages;
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::stages::FrameStages;
-use crate::frontend::tracker::PatchTracker;
 use crate::lie::Se3;
 use crate::types::KeypointId;
-use kornia_image::Image;
 use kornia_staging_imgproc::features::{
-    CellGrid, DetectorConfig, DetectorScratch, KeypointsData, MaskRect, Masks, Occupancy,
-    detect_keypoints_with_cells,
+    CellGrid, CellMasks, CenteredCellConfig, CenteredCellKeypoints, DetectorScratch, MaskRect,
+    Occupancy, detect_prepared_keypoints_with_cells,
 };
 use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_slam::tracking::optical_flow::PatchTracker;
 use nalgebra::{Matrix4, Vector2, Vector4};
 
 impl<
@@ -24,7 +25,10 @@ impl<
     pub(super) fn update_cell_counts(&mut self, camera: usize) {
         self.cells[camera].fill(0);
         for index in 0..self.frame.cameras[camera].len() {
-            let position: Vector2<f32> = self.frame.cameras[camera].transforms.translation(index);
+            let position: Vector2<f32> = self.frame.cameras[camera]
+                .transforms
+                .translation(index)
+                .into();
             // `if (p[0] < x_start ||... || p[1] >= y_stop + c) continue;`.
             if !self.occupancy_grid.contains(position.x, position.y) {
                 continue;
@@ -54,8 +58,8 @@ impl<
     }
 
     /// `detectKeypointsWithCells`' own configuration, from this frontend's.
-    pub(super) fn detector_config(&self) -> DetectorConfig {
-        DetectorConfig {
+    pub(super) fn detector_config(&self) -> CenteredCellConfig {
+        CenteredCellConfig {
             num_points_cell: self.config.optical_flow_detection_num_points_cell as usize,
             min_threshold: self.config.optical_flow_detection_min_threshold,
             max_threshold: self.config.optical_flow_detection_max_threshold,
@@ -71,7 +75,7 @@ impl<
         &mut self,
         cameras: std::ops::Range<usize>,
         side_pool: Option<WorkPool>,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
     ) -> Result<(), FrontendError> {
         let config = self.detector_config();
         let mark = std::time::Instant::now();
@@ -89,34 +93,51 @@ impl<
         } = self;
         let detector = stages.detector();
         let occupancy_grid: &CellGrid = occupancy_grid;
-        let detect =
-            |camera: usize, scratch: &mut DetectorScratch<F::Scanner>, out: &mut KeypointsData| {
-                out.corners.clear();
-                out.responses.clear();
-                let budget = options
-                    .max_keypoints
-                    .saturating_sub(frame.cameras[camera].len());
-                if budget == 0 {
-                    return Ok(());
-                }
-                // Level 0 is the unchanged input image, including on the device lane.
-                detect_keypoints_with_cells(
-                    &images[camera],
-                    camera,
-                    &detection_grids[camera],
-                    &Occupancy {
-                        counts: &cells[camera],
-                        rows: occupancy_grid.rows,
-                        columns: occupancy_grid.columns,
-                    },
-                    &config,
-                    &masks[camera],
-                    budget,
-                    scratch,
-                    out,
-                )
-                .map_err(Into::into)
-            };
+        let detect = |camera: usize,
+                      scratch: &mut DetectorScratch<F::Scanner>,
+                      out: &mut CenteredCellKeypoints| {
+            out.corners.clear();
+            out.responses.clear();
+            let budget = options
+                .max_keypoints
+                .saturating_sub(frame.cameras[camera].len());
+            if budget == 0 {
+                return Ok(());
+            }
+            // Level 0 is the unchanged input image, including on the device lane.
+            detect_prepared_keypoints_with_cells(
+                images.get(camera).size(),
+                &detection_grids[camera],
+                &Occupancy {
+                    counts: &cells[camera],
+                    rows: occupancy_grid.rows,
+                    columns: occupancy_grid.columns,
+                },
+                &config,
+                &masks[camera],
+                budget,
+                scratch,
+                out,
+                |scanner, select, winners| {
+                    let image = images.get(camera);
+                    let selected = if let Some((select, occupancy, masked)) = select {
+                        scanner.select_frame(
+                            camera,
+                            image,
+                            select,
+                            Some((occupancy, masked)),
+                            winners,
+                        )? == kornia_staging_imgproc::features::SelectionStatus::Selected
+                    } else {
+                        false
+                    };
+                    if !selected {
+                        scanner.scan_frame(camera, image)?;
+                    }
+                    Ok(selected)
+                },
+            )
+        };
         let parallel =
             side_pool
                 .as_ref()
@@ -156,7 +177,7 @@ impl<
 
     /// The second half of `addPointsForCamera`: register `detected` on camera
     /// `camera` under fresh ids, bumping cells.
-    fn file_detected(&mut self, camera: usize, detected: &KeypointsData) {
+    fn file_detected(&mut self, camera: usize, detected: &CenteredCellKeypoints) {
         for index in 0..detected.corners.len() {
             let corner: [f32; 2] = detected.corners[index];
             let response: f32 = detected.responses[index];
@@ -213,7 +234,7 @@ impl<
         let height: f32 = cameras[0].resolution[1] as f32;
         let t_ci_c0: Se3<f32> = calib.t_i_c[camera].inverse() * calib.t_i_c[0];
 
-        let out: &mut Masks = &mut masks[camera];
+        let out: &mut CellMasks = &mut masks[camera];
         let mut y: usize = y_first;
         while y <= y_last {
             let mut x: usize = x_first;
@@ -263,7 +284,7 @@ impl<
 
     /// `addPoints` : detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
-    pub(super) fn add_points(&mut self, images: &[Image<u16, 1>]) -> Result<(), FrontendError> {
+    pub(super) fn add_points(&mut self, images: FrameImages<'_>) -> Result<(), FrontendError> {
         // Camera 0's cell winners are already on the host: `run_passes`
         // launched them before the temporal tracks and the tracks' own download
         // brought them back (D78). A backend without a device path prepared
@@ -279,7 +300,12 @@ impl<
             self.prepare_tracks(None);
         }
         self.stages.stereo(
-            &mut self.passes[1..],
+            kornia_staging_slam::tracking::optical_flow::TrackPhase::Matching {
+                ids: &self.passes[0].ids,
+                positions: &self.passes[0].positions,
+                destinations: &self.matching_guesses,
+            },
+            &mut self.result_slots[1..],
             images,
             &self.cell_selects,
             self.config.optical_flow_detection_nonoverlap,
@@ -287,7 +313,7 @@ impl<
         )?;
         let mark = std::time::Instant::now();
         for camera in 1..self.cameras.len() {
-            self.finish_track_points(camera);
+            self.finish_track_points(0, camera);
             self.add_keypoints(camera);
         }
         self.timings.stereo_ns += duration_ns(mark);
@@ -318,7 +344,10 @@ impl<
             let Some(in_cam0) = self.frame.cameras[0].get(id) else {
                 continue;
             };
-            let proj1: Vector2<f32> = self.frame.cameras[camera].transforms.translation(index);
+            let proj1: Vector2<f32> = self.frame.cameras[camera]
+                .transforms
+                .translation(index)
+                .into();
 
             let mut p3d0: Vector4<f32> = Vector4::zeros();
             let mut p3d1: Vector4<f32> = Vector4::zeros();

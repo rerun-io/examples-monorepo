@@ -60,7 +60,7 @@ impl<S: Scalar> Vio<S> {
         let observations = self.pending_observations.as_ref().cloned();
         if observations.is_none() && !self.estimator.has_deferred_keyframe() {
             self.frontend
-                .process_frame(t_ns, &self.frames, prediction, &self.masks)?;
+                .process_frame_input(t_ns, self.frames.view(), prediction, &self.masks)?;
             return Ok(None);
         }
         // The frontend owns these workers while the estimator runs beside it.
@@ -89,7 +89,7 @@ impl<S: Scalar> Vio<S> {
                 })
                 .map_err(|error| VioError::EstimatorThread(error.to_string()))?;
             let flow = frontend
-                .process_frame(t_ns, frames, prediction, masks)
+                .process_frame_input(t_ns, frames.view(), prediction, masks)
                 .map(|_| ());
             let mark = std::time::Instant::now();
             let estimated = worker.join().map_err(|_| VioError::EstimatorPanicked);

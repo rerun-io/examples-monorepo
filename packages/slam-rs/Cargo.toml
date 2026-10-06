@@ -15,6 +15,8 @@ rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
+bytes = "1"
+kornia-staging-slam = { path = "../kornia-staging/crates/kornia-staging-slam" }
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d", features = ["serde"] }
 kornia-staging-algebra = { path = "../kornia-staging/crates/kornia-staging-algebra" }
 kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }
@@ -54,6 +56,7 @@ kornia-algebra = { version = "0.2", default-features = false }
 # The GPU phase (decision D21, D70). CubeCL 0.11 prerelease with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
 cubecl = "=0.11.0-pre.3"
+cubecl-environment = { version = "=0.11.0-pre.3", features = ["shared-bytes"] }
 # No `features` here: which shader compiler cubecl-wgpu builds is decided per
 # target in `crates/slam-rs/Cargo.toml`, because `spirv` and `msl` are not the
 # same lane on the same platform (see the two target sections there).

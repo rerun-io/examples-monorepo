@@ -1,25 +1,29 @@
 //! Fixed 2-D sampling offsets for optical-flow patches.
 //! [`Pattern52`] has 52 taps; [`Pattern51`] scales them by one half.
-//! Shipped configs select Pattern51 and the binding requires it, so sampling
-//! uses bilinear interpolation. Offsets and the binary scale are exact in f32.
+//! Offsets and the binary scale are exact in f32.
 
-/// Taps in the largest pattern, and therefore the capacity of every per-patch buffer.
-///
-/// A fixed capacity plus a per-pattern count is what the GPU seam asks for
-/// (`cubecl-portability.md` §12.2: preallocated fixed-capacity outputs with
-/// counts, never a growing buffer), and it lets one buffer layout serve both
-/// patterns.
-pub const MAX_PATTERN_SIZE: usize = 52;
+/// Capacity shared by the built-in sampling patterns.
+pub(crate) const MAX_PATTERN_SIZE: usize = 52;
 
-/// Compile-time sampling pattern; the type parameter avoids per-tap indirection.
-/// `SIZE` must be in `1..=MAX_PATTERN_SIZE`, and `OFFSETS` must have exactly
-/// that many finite offsets. Constructors check this with [`validate_pattern`].
-pub trait Pattern: Copy + Clone + Send + Sync + 'static {
-    /// `Pattern::PATTERN_SIZE`.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Built-in compile-time sampling pattern, with finite offsets in sampling order.
+/// The trait is sealed to keep the fixed-size patch buffers valid.
+pub trait Pattern: sealed::Sealed + Copy + Clone + Send + Sync + 'static {
+    /// Number of sampling taps.
     const SIZE: usize;
-
     /// Tap offsets in sampling order.
     const OFFSETS: &'static [[f32; 2]];
+}
+
+/// Invalid patch centre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PatchError {
+    /// The sampling centre is not finite.
+    #[error("patch centre must be finite")]
+    NonFinitePosition,
 }
 
 /// `Pattern52`, 52 taps at spacing 2.
@@ -92,12 +96,14 @@ const PATTERN52_RAW: [[f32; 2]; 52] = [
     [3.0, -7.0],
 ];
 
+impl sealed::Sealed for Pattern52 {}
+
 impl Pattern for Pattern52 {
     const SIZE: usize = 52;
     const OFFSETS: &'static [[f32; 2]] = &PATTERN52_RAW;
 }
 
-/// `factor * Pattern52`, the way and build other.
+/// Scale the base offsets by an exact binary factor.
 const fn scaled_pattern52(factor: f32) -> [[f32; 2]; 52] {
     let mut out: [[f32; 2]; 52] = [[0.0; 2]; 52];
     let mut i: usize = 0;
@@ -108,12 +114,14 @@ const fn scaled_pattern52(factor: f32) -> [[f32; 2]; 52] {
     out
 }
 
-/// `Pattern51` = `0.5 * Pattern52`, the shipped pattern.
+/// Half-scale offsets of [`Pattern52`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pattern51;
 
 /// `0.5 * Pattern52::pattern2`.
 const PATTERN51_RAW: [[f32; 2]; 52] = scaled_pattern52(0.5);
+
+impl sealed::Sealed for Pattern51 {}
 
 impl Pattern for Pattern51 {
     const SIZE: usize = 52;
@@ -144,7 +152,7 @@ mod tests {
         }
     }
 
-    /// The layout of the ASCII art in : eight rows of
+    /// The pattern has eight rows of
     /// descending `y`, and each row's `x` ascending.
     #[test]
     fn pattern52_rows_run_from_the_top_down_and_left_to_right() {
@@ -184,30 +192,4 @@ mod tests {
             assert_eq!(sum_y, 0.0);
         }
     }
-}
-
-/// Invalid sampling pattern or patch centre.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum PatchError {
-    /// Pattern tap count is outside the fixed storage or differs from the offsets.
-    #[error("pattern needs 1..=52 finite offsets matching its size")]
-    InvalidPattern,
-    /// The sampling centre is not finite.
-    #[error("patch centre must be finite")]
-    NonFinitePosition,
-}
-
-/// Validate a pattern once before allocating or sampling its patches.
-///
-/// # Errors
-/// Returns [`PatchError::InvalidPattern`] for invalid counts or non-finite offsets.
-pub fn validate_pattern<P: Pattern>() -> Result<(), PatchError> {
-    if P::SIZE == 0
-        || P::SIZE > MAX_PATTERN_SIZE
-        || P::OFFSETS.len() != P::SIZE
-        || !P::OFFSETS.iter().flatten().all(|v| v.is_finite())
-    {
-        return Err(PatchError::InvalidPattern);
-    }
-    Ok(())
 }

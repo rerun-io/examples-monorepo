@@ -1,9 +1,9 @@
 use super::*;
 
-/// Shared-arena selection must keep each camera's exact keys and the fused
-/// launch count, including side-camera batches and a later frameset.
+/// Dense camera uploads preserve exact cell selection for side-camera batches
+/// and later framesets, without entering the packed-byte ingest path.
 #[test]
-fn packed_camera_selection_is_exact_in_one_dispatch() {
+fn dense_camera_selection_is_exact_after_pyramid_upload() {
     use slam_rs::frontend::parallel::WorkPool;
     use slam_rs::gpu::GpuPyramidBuilder;
     use slam_rs::pyramid::PyramidBuilder;
@@ -50,7 +50,9 @@ fn packed_camera_selection_is_exact_in_one_dispatch() {
                 let selects: Vec<_> = (0..4)
                     .map(|camera| (first..end).contains(&camera).then_some(select))
                     .collect();
-                scanner.submit_cells(&images, &selects).unwrap();
+                scanner
+                    .submit_cells(FrameImages::Dense(&images), &selects)
+                    .unwrap();
                 scanner.take_cells().unwrap();
                 for (camera, image) in images.iter().enumerate().take(end).skip(first) {
                     let mut got = Vec::new();
@@ -76,7 +78,7 @@ fn packed_camera_selection_is_exact_in_one_dispatch() {
 /// per-camera buffers a thing that can be got wrong.
 #[test]
 fn the_gpu_cell_selection_holds_for_every_camera_slot() {
-    let config: DetectorConfig = detector_config(472.0);
+    let config: CenteredCellConfig = detector_config(472.0);
     let mut host: DetectorScratch<dyn CornerScan<Error = FrontendError>> =
         DetectorScratch::with_scanner(Box::new(AppScan(CpuCornerScan::default())));
     let bands = Arc::new(AtomicUsize::new(0));
@@ -100,8 +102,8 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
             rows: grid.rows,
             columns: grid.columns,
         };
-        let mut want: KeypointsData = KeypointsData::default();
-        let mut got: KeypointsData = KeypointsData::default();
+        let mut want: CenteredCellKeypoints = CenteredCellKeypoints::default();
+        let mut got: CenteredCellKeypoints = CenteredCellKeypoints::default();
         for (scratch, out) in [(&mut host, &mut want), (&mut device, &mut got)] {
             detect_keypoints_with_cells(
                 &image,
@@ -109,7 +111,7 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
                 &grid,
                 &occupancy,
                 &config,
-                &Masks::default(),
+                &CellMasks::default(),
                 4096,
                 scratch,
                 out,
@@ -140,7 +142,9 @@ impl SelectionFixture {
         let grid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
         let selects: Vec<_> = images
             .iter()
-            .map(|image| kornia_staging_imgproc::features::cell_select(image, &grid, &config))
+            .map(|image| {
+                kornia_staging_imgproc::features::cell_select(image.size(), &grid, &config)
+            })
             .collect();
         assert!(
             selects.iter().all(Option::is_some),
@@ -156,7 +160,7 @@ impl SelectionFixture {
         }
     }
 
-    fn keys(&self, scanner: &mut impl CornerScan) -> Vec<Vec<u32>> {
+    fn keys(&self, scanner: &mut impl CornerScan) -> Vec<Vec<Option<FastCorner>>> {
         self.images
             .iter()
             .enumerate()
@@ -180,8 +184,8 @@ impl SelectionFixture {
 
 /// The batched preparation answers exactly what the per-camera call does.
 ///
-/// [`CornerScan::submit_cells`] launches every camera's selection at once and
-/// [`CornerScan::take_cells`] downloads them together, which is a scheduling
+/// [`FrameCornerScan::submit_cells`] launches every camera's selection at once and
+/// [`FrameCornerScan::take_cells`] downloads them together, which is a scheduling
 /// change and must be nothing
 /// else: the keys it hands each camera have to be the ones that camera's own
 /// `select_cells` would have read. Two different MIO10 frames in the two camera
@@ -196,7 +200,9 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
         GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     let alone = fixture.keys(&mut scanner);
 
-    scanner.submit_cells(images, selects).unwrap();
+    scanner
+        .submit_cells(FrameImages::Dense(images), selects)
+        .unwrap();
     scanner.take_cells().unwrap();
     assert_eq!(fixture.keys(&mut scanner), alone, "out of the batch");
     assert_ne!(alone[0], alone[1], "the two cameras hold the same frame");
@@ -221,11 +227,11 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
 /// only one camera is offered, are the two ways that could happen.
 #[test]
 fn a_prepared_selection_is_spent_once() {
-    let config: DetectorConfig = detector_config(472.0);
+    let config: CenteredCellConfig = detector_config(472.0);
     let images: [Image<u16, 1>; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
     let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
     let select: CellSelect =
-        kornia_staging_imgproc::features::cell_select(&images[0], &grid, &config).unwrap();
+        kornia_staging_imgproc::features::cell_select(images[0].size(), &grid, &config).unwrap();
     let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
         * ((grid.y_stop - grid.y_start) / grid.cell + 1);
 
@@ -233,15 +239,15 @@ fn a_prepared_selection_is_spent_once() {
         GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     // Only camera 0 is offered, so camera 1 has nothing prepared for it.
     scanner
-        .submit_cells(&images, &[Some(select), None])
+        .submit_cells(FrameImages::Dense(&images), &[Some(select), None])
         .unwrap();
     scanner.take_cells().unwrap();
 
-    let mut first: Vec<u32> = Vec::new();
+    let mut first: Vec<Option<FastCorner>> = Vec::new();
     scanner
         .select_cells(0, &images[0], &select, None, &mut first)
         .unwrap();
-    let mut again: Vec<u32> = Vec::new();
+    let mut again: Vec<Option<FastCorner>> = Vec::new();
     scanner
         .select_cells(0, &images[1], &select, None, &mut again)
         .unwrap();
@@ -253,7 +259,7 @@ fn a_prepared_selection_is_spent_once() {
     assert_ne!(expected, first, "the second image must have different keys");
     assert_eq!(again, expected, "the second read must scan the new image");
 
-    let mut second: Vec<u32> = Vec::new();
+    let mut second: Vec<Option<FastCorner>> = Vec::new();
     scanner
         .select_cells(1, &images[1], &select, None, &mut second)
         .unwrap();

@@ -28,22 +28,25 @@ use std::marker::PhantomData;
 
 use nalgebra::Matrix4;
 
+use super::detect::FrameCornerScan;
+use super::input::FrameImages;
+#[cfg(feature = "gpu-wgpu")]
+use super::input::PackedImages;
 use crate::calib::Calibration;
 use crate::camera::RigCamera;
 use crate::config::VioConfig;
 use crate::duration_ns;
 use crate::frontend::parallel::{MAX_THREADS, WorkPool};
-use crate::frontend::tracker::{
-    CpuPatchTracker, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, TrackInput,
-};
 use crate::lie::Se3;
 use crate::pyramid::CpuPyramidBuilder;
 use crate::types::KeypointId;
 use kornia_image::Image;
 use kornia_staging_imgproc::features::{
-    CellGrid, CellSelect, CpuCornerScan, DetectorConfig, DetectorScratch, KeypointsData,
-    LOWEST_THRESHOLD_RUNG, Masks, cell_select,
+    CellGrid, CellMasks, CellSelect, CenteredCellConfig, CenteredCellKeypoints, CpuCornerScan,
+    DetectorScratch, LOWEST_THRESHOLD_RUNG, cell_select,
 };
+use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
+use kornia_staging_slam::tracking::optical_flow::{CpuPatchTracker, PatchTracker, TrackInput};
 
 /// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
 /// [`FrameToFrameOpticalFlow::with_stages`] selects implementations without
@@ -82,8 +85,8 @@ pub struct FrameToFrameOpticalFlow<
     frame_counter: u64,
     /// `depth_guess`, seeded from the config and refreshed by the estimator.
     depth_guess: f32,
-    /// Masks for this frame, grown by `cam0OverlapCellsMasksForCam`.
-    masks: Vec<Masks>,
+    /// CellMasks for this frame, grown by `cam0OverlapCellsMasksForCam`.
+    masks: Vec<CellMasks>,
 
     stages: F,
     /// The source keypoint ids of each lane of the batch in flight, in map order
@@ -92,6 +95,8 @@ pub struct FrameToFrameOpticalFlow<
     /// before any of them is read, and mapping a tracked slot back to its
     /// keypoint needs this after the download.
     passes: Vec<TrackInput>,
+    matching_guesses: Vec<FlowTransforms>,
+    result_slots: Vec<usize>,
     /// The ids that survived, in ascending source order, with their warps.
     tracked_ids: Vec<KeypointId>,
     /// The warps of [`FrameToFrameOpticalFlow::tracked_ids`].
@@ -100,7 +105,7 @@ pub struct FrameToFrameOpticalFlow<
     /// cannot ([`cell_select`]); rebuilt at the top of every frameset, before
     /// anything about it has been decided.
     cell_selects: Vec<Option<CellSelect>>,
-    detected: Vec<KeypointsData>,
+    detected: Vec<CenteredCellKeypoints>,
     /// Independent scanners for side-camera work, only when the selected
     /// backend supports it. Otherwise all cameras use `detector` serially.
     side_detectors: Option<Vec<DetectorScratch<F::Scanner>>>,
@@ -146,19 +151,14 @@ impl<P: crate::frontend::patterns::ConfiguredPattern>
         self.stages.discard_lookahead();
     }
 
-    pub(crate) fn prepare_packed_inputs(&mut self, views: &[crate::ImageView<'_>]) {
-        self.stages.prepare_packed_inputs(views);
-    }
-
     pub(crate) fn queue_lookahead(
         &mut self,
         t_ns: i64,
-        images: &mut Vec<Image<u16, 1>>,
-        views: &[crate::ImageView<'_>],
+        images: &mut PackedImages,
     ) -> Result<(), crate::VioError> {
-        self.update_cell_selects(images);
+        self.update_cell_selects(FrameImages::Packed(images));
         self.stages
-            .queue_lookahead(t_ns, images, views, &self.cell_selects)
+            .queue_lookahead(t_ns, images, &self.cell_selects)
     }
 }
 
@@ -178,7 +178,7 @@ impl<P: crate::frontend::patterns::ConfiguredPattern> FrameToFrameOpticalFlow<P>
     ///
     /// [`FrontendError`] when the config names another flow type or pattern, when
     /// the rig is empty, ragged, too small for the grid or asks for more
-    /// occupancy cells than [`MAX_CELLS`], when the detector's threshold ladder
+    /// occupancy cells than [`kornia_staging_imgproc::features::MAX_CELLS`], when the detector's threshold ladder
     /// would never end, when a camera model has no projection, when the thread
     /// pool cannot be built, or when `threads` or `max_keypoints` is outside
     /// what [`FrontendOptions`] allows.
@@ -199,7 +199,7 @@ impl<P: crate::frontend::patterns::ConfiguredPattern> FrameToFrameOpticalFlow<P>
             num_levels,
             config.optical_flow_max_iterations as usize,
             config.optical_flow_max_recovered_dist2,
-            pool.clone(),
+            pool.rayon_pool(),
         )?;
         Self::with_stages(
             config,
@@ -222,12 +222,6 @@ impl<
 {
     /// The config checks that do not depend on the backends.
     fn validate_config(config: &VioConfig) -> Result<(), FrontendError> {
-        if config
-            .port_klt_exit_step_px
-            .is_some_and(|value| !value.is_finite() || value <= 0.0)
-        {
-            return Err(crate::frontend::tracker::TrackerError::InvalidExitStep.into());
-        }
         if config.optical_flow_type != "frame_to_frame" {
             return Err(FrontendError::UnsupportedFlowType(
                 config.optical_flow_type.clone(),
@@ -274,44 +268,21 @@ impl<
                 max_threshold,
             });
         }
-        // Every per-patch buffer is sized with `optical_flow_levels + 1`, so a
-        // config asking for a pyramid nothing could hold is refused here rather
-        // than at the allocation, which aborts instead of returning.
-        let num_levels: usize = config.optical_flow_levels as usize + 1;
-        if num_levels > MAX_LEVELS {
-            return Err(FrontendError::TooManyLevels {
-                levels: config.optical_flow_levels,
-                num_levels,
-                ceiling: MAX_LEVELS,
-            });
-        }
         Ok(())
     }
 
     /// Validate caller-supplied frontend options independently of the selected backend.
-    /// A prebuilt tracker passed to `with_stages` does not run `PatchSoA::new`, so
-    /// the frontend must enforce its own bounds at this seam.
     fn validate_options(options: &FrontendOptions) -> Result<(), FrontendError> {
-        // rayon spawns exactly what it is asked for, so an unbounded `threads`
-        // exhausts the machine's threads instead of returning an error; zero is
-        // a pool no work can run on, which `WorkPool::new` reads as one.
-        if options.threads == 0 {
-            return Err(FrontendError::NoThreads);
-        }
-        if options.threads > MAX_THREADS {
-            return Err(FrontendError::TooManyThreads {
-                threads: options.threads,
-                ceiling: MAX_THREADS,
-            });
-        }
-        // The budget sizes every per-patch buffer, and a `Vec` too long to
-        // allocate panics rather than returning (decision D32).
-        if options.max_keypoints > MAX_CAPACITY {
-            return Err(FrontendError::TooManyKeypoints {
-                max_keypoints: options.max_keypoints,
-                ceiling: MAX_CAPACITY,
-            });
-        }
+        crate::frontend::parallel::validate_threads(options.threads).map_err(|_| {
+            if options.threads == 0 {
+                FrontendError::NoThreads
+            } else {
+                FrontendError::TooManyThreads {
+                    threads: options.threads,
+                    ceiling: MAX_THREADS,
+                }
+            }
+        })?;
         Ok(())
     }
 
@@ -329,7 +300,9 @@ impl<
         Self::validate_options(&options)?;
 
         let tracker = stages.tracker_mut();
-        tracker.set_klt_exit_step_px(config.port_klt_exit_step_px);
+        tracker
+            .set_klt_exit_step_px(config.port_klt_exit_step_px)
+            .map_err(Into::into)?;
 
         let num_levels: usize = config.optical_flow_levels as usize + 1;
         if tracker.num_levels() != num_levels {
@@ -377,27 +350,10 @@ impl<
         // shaped from camera 0 alone, so that shape is separate.
         let cell: usize = config.optical_flow_detection_grid_size as usize;
         let mut detection_grids: Vec<CellGrid> = Vec::with_capacity(num_cams);
-        for (camera, rig_camera) in cameras.iter().enumerate() {
+        for rig_camera in &cameras {
             let width: usize = rig_camera.width() as usize;
             let height: usize = rig_camera.height() as usize;
-            let grid = CellGrid::new(width, height, cell).map_err(|error| match error {
-                kornia_staging_imgproc::features::CellGridError::TooManyCells {
-                    rows,
-                    columns,
-                    ceiling,
-                } => FrontendError::TooManyCells {
-                    camera,
-                    rows,
-                    columns,
-                    ceiling,
-                },
-                _ => FrontendError::FrameTooSmall {
-                    camera,
-                    width,
-                    height,
-                    cell,
-                },
-            })?;
+            let grid = CellGrid::new(width, height, cell)?;
             detection_grids.push(grid);
         }
         let occupancy_grid: CellGrid = detection_grids[0];
@@ -407,14 +363,18 @@ impl<
             depth_guess: config.optical_flow_matching_default_depth,
             stages,
             cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
-            masks: vec![Masks::default(); num_cams],
+            masks: vec![CellMasks::default(); num_cams],
             snapshot: FrameState::default(),
             timings: FlowTimings::default(),
             passes: (0..num_cams).map(|_| TrackInput::default()).collect(),
+            matching_guesses: (1..num_cams).map(|_| FlowTransforms::default()).collect(),
+            result_slots: vec![0; num_cams],
             tracked_ids: Vec::new(),
             tracked: FlowTransforms::default(),
             cell_selects: vec![None; num_cams],
-            detected: (0..num_cams).map(|_| KeypointsData::default()).collect(),
+            detected: (0..num_cams)
+                .map(|_| CenteredCellKeypoints::default())
+                .collect(),
             side_detectors,
             host_pool,
             new_cam0: Keypoints::default(),
@@ -599,7 +559,20 @@ impl<
         t_ns: i64,
         images: &[Image<u16, 1>],
         prediction: &PosePrediction,
-        masks: &[Masks],
+        masks: &[CellMasks],
+    ) -> Result<&FlowFrame, FrontendError>
+    where
+        F: Send,
+    {
+        self.process_frame_input(t_ns, FrameImages::Dense(images), prediction, masks)
+    }
+
+    pub(crate) fn process_frame_input(
+        &mut self,
+        t_ns: i64,
+        images: FrameImages<'_>,
+        prediction: &PosePrediction,
+        masks: &[CellMasks],
     ) -> Result<&FlowFrame, FrontendError>
     where
         F: Send,
@@ -619,9 +592,9 @@ impl<
     fn process_frame_inner(
         &mut self,
         t_ns: i64,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         prediction: &PosePrediction,
-        masks: &[Masks],
+        masks: &[CellMasks],
     ) -> Result<(), FrontendError> {
         self.check_frameset(
             t_ns,
@@ -673,8 +646,8 @@ impl<
         Ok(())
     }
 
-    fn update_cell_selects(&mut self, images: &[Image<u16, 1>]) {
-        let config: DetectorConfig = self.detector_config();
+    fn update_cell_selects(&mut self, images: FrameImages<'_>) {
+        let config: CenteredCellConfig = self.detector_config();
         let Self {
             cell_selects,
             detection_grids,
@@ -682,10 +655,10 @@ impl<
         } = self;
         for ((slot, image), grid) in cell_selects
             .iter_mut()
-            .zip(images)
+            .zip(images.iter())
             .zip(detection_grids.iter())
         {
-            *slot = cell_select(image, grid, &config);
+            *slot = cell_select(image.size(), grid, &config);
         }
     }
 
@@ -695,9 +668,9 @@ impl<
     /// step here touches the pyramid sets, the timestamp or the frame counter.
     fn run_passes(
         &mut self,
-        images: &[Image<u16, 1>],
+        images: FrameImages<'_>,
         prediction: &PosePrediction,
-        masks: &[Masks],
+        masks: &[CellMasks],
     ) -> Result<(), FrontendError> {
         for (index, mask) in self.masks.iter_mut().enumerate() {
             mask.masks.clear();
@@ -750,7 +723,8 @@ impl<
             // lane is the frameset's dominant host cost (D77).
             let mark: std::time::Instant = std::time::Instant::now();
             self.prepare_tracks(Some(prediction));
-            self.stages.temporal(&mut self.passes, &mut self.timings)?;
+            self.stages
+                .temporal(&self.passes, &mut self.result_slots, &mut self.timings)?;
             self.timings.track_ns += duration_ns(mark);
             for camera in 0..num_cams {
                 self.finish_camera(camera);
@@ -766,7 +740,7 @@ impl<
         // reads them itself, which is the read the detector used to make on
         // every frameset.
         let mark: std::time::Instant = std::time::Instant::now();
-        self.stages.detector().take_cells().map_err(Into::into)?;
+        self.stages.detector().scanner_mut().take_cells().map_err(Into::into)?;
         self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {

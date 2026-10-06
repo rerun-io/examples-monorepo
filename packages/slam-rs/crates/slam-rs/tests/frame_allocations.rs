@@ -48,11 +48,11 @@ use kornia_image::Image;
 use kornia_staging_imgproc::features::{CellGrid, CpuCornerScan};
 use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
+use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
 };
-use slam_rs::frontend::tracker::FlowTransforms;
 
 mod common;
 

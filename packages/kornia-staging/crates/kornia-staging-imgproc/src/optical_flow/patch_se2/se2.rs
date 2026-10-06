@@ -34,7 +34,10 @@ impl<S: Scalar> AffineCompact2<S> {
         }
     }
 
-    /// An identity rotation at `position`, as `addPointsForCamera` builds one
+    /// An identity rotation at `position`.
+    ///
+    /// # Arguments
+    /// * `position` - Translation in image pixels.
     pub fn at(position: impl Into<[S; 2]>) -> Self {
         Self {
             linear: [[S::one(), S::zero()], [S::zero(), S::one()]],
@@ -44,6 +47,9 @@ impl<S: Scalar> AffineCompact2<S> {
 
     /// Compose warps: `linear = self.linear * other.linear` and
     /// `translation = self.linear * other.translation + self.translation`.
+    ///
+    /// # Arguments
+    /// * `other` - Warp applied before this warp.
     #[inline]
     pub fn compose(&self, other: &Self) -> Self {
         Self {
@@ -53,6 +59,19 @@ impl<S: Scalar> AffineCompact2<S> {
             translation: (Matrix2::from(self.linear) * Vector2::from(other.translation)
                 + Vector2::from(self.translation))
             .into(),
+        }
+    }
+
+    /// Build a warp from row-major linear coefficients followed by translation.
+    ///
+    /// # Arguments
+    /// * `coefficients` - `[m00, m01, m10, m11, tx, ty]`.
+    #[inline]
+    pub fn from_coefficients(coefficients: [S; 6]) -> Self {
+        let [m00, m01, m10, m11, tx, ty] = coefficients;
+        Self {
+            linear: [[m00, m10], [m01, m11]],
+            translation: [tx, ty],
         }
     }
 
@@ -78,6 +97,9 @@ impl<S: Scalar> AffineCompact2<S> {
     /// (`transform.linear().matrix() * pattern2`, then `colwise() += translation`),
     /// in the same multiply-then-add order, so fusing the two statements into
     /// this call is bit-identical to materialising the 2xP matrix first.
+    ///
+    /// # Arguments
+    /// * `tap` - Sampling offset in pixel coordinates.
     #[inline]
     pub fn warp_tap(&self, tap: [S; 2]) -> [S; 2] {
         [
@@ -92,7 +114,7 @@ impl<S: Scalar> AffineCompact2<S> {
 /// The small-angle thresholds are `1e-10` in f64 and `1e-5` in f32.
 /// Translation is `V(theta) * upsilon`, evaluated as two scalar expressions.
 #[inline]
-pub fn se2_exp<S: Scalar>(tangent: &[S; 3]) -> AffineCompact2<S> {
+pub(crate) fn se2_exp<S: Scalar>(tangent: &[S; 3]) -> AffineCompact2<S> {
     let one: S = S::one();
     let theta: S = tangent[2];
     // `SO2<Scalar>::exp(theta)` — cos/sin, then normalise.
@@ -127,6 +149,15 @@ pub fn se2_exp<S: Scalar>(tangent: &[S; 3]) -> AffineCompact2<S> {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+
+    #[test]
+    fn coefficients_preserve_the_linear_layout_and_translation() {
+        let warp = AffineCompact2f::from_coefficients([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(warp.linear, [[1.0, 3.0], [2.0, 4.0]]);
+        assert_eq!(warp.translation, [5.0, 6.0]);
+        assert_eq!(warp.coefficients(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(warp.warp_tap([7.0, 8.0]), [28.0, 59.0]);
+    }
 
     #[test]
     fn exp_of_zero_is_the_identity() {

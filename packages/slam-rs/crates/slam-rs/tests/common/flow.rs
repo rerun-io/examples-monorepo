@@ -3,13 +3,15 @@
 
 use kornia_staging_imgproc::features::CpuCornerScan;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
+use kornia_staging_imgproc::optical_flow::patch_tracker::{PatchSoA, TrackerError};
+use kornia_staging_imgproc::pyramid::PyramidPlanU16;
+use kornia_staging_slam::tracking::optical_flow::{
+    CpuPatchTracker, PatchTracker, TrackBatch, TrackPhase,
+};
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::{FrameToFrameOpticalFlow, FrontendOptions};
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::tracker::{
-    CpuPatchTracker, FlowTransforms, PatchSoA, PatchTracker, TrackerError,
-};
-use slam_rs::pyramid::{CpuPyramidBuilder, PyramidU16};
+use slam_rs::pyramid::CpuPyramidBuilder;
 
 use super::{flow_config as config, flow_rig as rig};
 
@@ -33,7 +35,7 @@ pub fn cpu_tracker(config: &VioConfig, capacity: usize) -> CpuPatchTracker<Patte
         config.optical_flow_levels as usize + 1,
         config.optical_flow_max_iterations as usize,
         config.optical_flow_max_recovered_dist2,
-        WorkPool::new(1).unwrap(),
+        None,
     )
     .unwrap()
 }
@@ -69,19 +71,20 @@ impl FailingTracker {
 }
 
 impl PatchTracker for FailingTracker {
-    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) {
+    type Error = TrackerError;
+    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) -> Result<(), TrackerError> {
         self.inner.set_klt_exit_step_px(threshold)
     }
 
-    fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
+    fn batch(&self) -> &TrackBatch {
         self.inner.batch()
     }
-    fn batch_mut(&mut self) -> &mut slam_rs::frontend::tracker::TrackBatch {
+    fn batch_mut(&mut self) -> &mut TrackBatch {
         self.inner.batch_mut()
     }
 
     type Pattern = Pattern51;
-    type Pyramid = PyramidU16;
+    type Pyramid = PyramidPlanU16;
     type Patches = PatchSoA<Pattern51>;
 
     fn capacity(&self) -> usize {
@@ -96,21 +99,24 @@ impl PatchTracker for FailingTracker {
         self.inner.make_patches()
     }
 
-    fn submit(
+    fn submit_batch(
         &mut self,
-        prev: &PyramidU16,
-        next: &PyramidU16,
-        patches: &PatchSoA<Pattern51>,
-        transforms_in: &FlowTransforms,
-    ) -> Result<usize, TrackerError> {
-        self.calls.set(self.calls.get() + 1);
-        if self.failures.contains(&self.calls.get()) {
-            return Err(TrackerError::CapacityExceeded {
-                offered: usize::MAX,
-                capacity: 0,
-            });
+        prev: &[PyramidPlanU16],
+        next: &[PyramidPlanU16],
+        phase: TrackPhase<'_>,
+        patches: &mut PatchSoA<Pattern51>,
+        slots: &mut [usize],
+    ) -> Result<(), TrackerError> {
+        for _ in 0..slots.len() {
+            self.calls.set(self.calls.get() + 1);
+            if self.failures.contains(&self.calls.get()) {
+                return Err(TrackerError::CapacityExceeded {
+                    offered: usize::MAX,
+                    capacity: 0,
+                });
+            }
         }
-        self.inner.submit(prev, next, patches, transforms_in)
+        self.inner.submit_batch(prev, next, phase, patches, slots)
     }
 }
 

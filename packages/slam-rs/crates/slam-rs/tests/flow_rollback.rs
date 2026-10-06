@@ -217,28 +217,23 @@ struct RefuseAfterTracking {
 }
 
 impl kornia_staging_imgproc::features::CornerScan for RefuseAfterTracking {
-    type Error = kornia_staging_imgproc::features::DetectError;
-    fn scan(
-        &mut self,
-        camera: usize,
-        image: &Image<u16, 1>,
-    ) -> Result<(), kornia_staging_imgproc::features::DetectError> {
-        self.inner.scan(camera, image)
+    type Error = FrontendError;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), FrontendError> {
+        self.inner.scan(camera, image).map_err(Into::into)
     }
 
     fn band(
         &mut self,
         request: kornia_staging_imgproc::features::BandRequest,
-    ) -> Result<
-        &[kornia_staging_imgproc::features::FastCorner],
-        kornia_staging_imgproc::features::DetectError,
-    > {
-        self.inner.band(request)
+    ) -> Result<&[kornia_staging_imgproc::features::FastCorner], FrontendError> {
+        self.inner.band(request).map_err(Into::into)
     }
+}
 
-    fn take_cells(&mut self) -> Result<(), kornia_staging_imgproc::features::DetectError> {
+impl slam_rs::frontend::detect::FrameCornerScan for RefuseAfterTracking {
+    fn take_cells(&mut self) -> Result<(), FrontendError> {
         if self.refuse.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            Err(kornia_staging_imgproc::features::DetectError::NotScanned)
+            Err(kornia_staging_imgproc::features::CenteredCellError::NotScanned.into())
         } else {
             Ok(())
         }
@@ -249,8 +244,8 @@ impl kornia_staging_imgproc::features::CornerScan for RefuseAfterTracking {
 /// A retry must track against the last committed image, with rebuilt templates.
 #[test]
 fn a_refused_frame_does_not_leave_uncommitted_backward_templates_in_the_cache() {
+    use kornia_staging_slam::tracking::optical_flow::CpuPatchTracker;
     use slam_rs::frontend::parallel::WorkPool;
-    use slam_rs::frontend::tracker::CpuPatchTracker;
     use slam_rs::pyramid::CpuPyramidBuilder;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -267,7 +262,7 @@ fn a_refused_frame_does_not_leave_uncommitted_backward_templates_in_the_cache() 
             config.optical_flow_levels as usize + 1,
             config.optical_flow_max_iterations as usize,
             config.optical_flow_max_recovered_dist2,
-            pool.clone(),
+            pool.clone().rayon_pool(),
         )
         .unwrap();
         let refuse = Arc::new(AtomicBool::new(false));

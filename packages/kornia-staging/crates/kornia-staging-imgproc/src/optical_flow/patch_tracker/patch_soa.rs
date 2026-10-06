@@ -1,15 +1,12 @@
 //! Source patches in groups of four: `[group][level][row][tap][lane]`.
 
-use nalgebra::Vector2;
-
-use super::{
-    MAX_LEVELS, Pattern, PointsSoA, SourcePatches, TrackerError, check_patch_inputs,
-    checked_patch_shape,
-};
-use crate::frontend::parallel::WorkPool;
-use crate::pyramid::{Pyramid, PyramidU16};
-use kornia_image::Image;
-use kornia_staging_imgproc::optical_flow::patch_se2::build_patch_group;
+use super::{check_patch_inputs, checked_patch_shape, PointsSoA, TrackerError, MAX_LEVELS};
+use crate::interpolation::U16View;
+use crate::optical_flow::patch_se2::build_patch_group;
+use crate::optical_flow::patch_se2::Pattern;
+use crate::pyramid::PyramidPlanU16;
+use rayon::ThreadPool;
+use std::sync::Arc;
 
 /// One camera's source patches for every pyramid level, in structure-of-arrays form.
 ///
@@ -29,9 +26,9 @@ pub struct PatchSoA<P: Pattern> {
     pub(super) h_inv_jt: Vec<f32>,
     /// `valid[(group * num_levels + level) * 4 + lane]`.
     valid: Vec<bool>,
-    /// Workers [`SourcePatches::build`] spreads the groups over; `None` builds
+    /// Workers [`PatchSoA::build`] spreads the groups over; `None` builds
     /// on the calling thread.
-    pool: Option<WorkPool>,
+    pool: Option<Arc<ThreadPool>>,
     pattern: std::marker::PhantomData<P>,
 }
 
@@ -40,23 +37,25 @@ impl<P: Pattern> PatchSoA<P> {
     /// its own contiguous block of each array and every patch a pure function
     /// of its position and level, so the values are those of the sequential
     /// build.
-    pub fn with_pool(mut self, pool: WorkPool) -> Self {
-        self.pool = (pool.threads() > 1).then_some(pool);
+    pub fn with_pool(mut self, pool: Option<Arc<ThreadPool>>) -> Self {
+        self.pool = pool;
         self
     }
 
     /// Storage for `capacity` patches over `num_levels` pyramid levels.
     ///
-    /// `num_levels` is `optical_flow_levels + 1`, matching
-    /// [`crate::pyramid::Pyramid::num_levels`].
+    /// `num_levels` includes the full-resolution level.
+    ///
+    /// # Arguments
+    /// * `capacity` - Maximum source points, at most [`super::MAX_CAPACITY`].
+    /// * `num_levels` - Positive count including level zero, at most [`MAX_LEVELS`].
     ///
     /// # Errors
     ///
     /// Whatever the crate's `checked_patch_shape` refuses. All of it is checked before
     /// anything is allocated: the products below reach `Vec` as a length, and a
-    /// `Vec` too long to exist panics rather than returning (decision D32).
+    /// `Vec` too long to exist panics rather than returning.
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
-        kornia_staging_imgproc::optical_flow::patch_se2::validate_pattern::<P>()?;
         checked_patch_shape(capacity, num_levels, P::SIZE)?;
         let padded_capacity = capacity.div_ceil(4) * 4;
         let (flags, taps) = checked_patch_shape(padded_capacity, num_levels, P::SIZE)?;
@@ -115,18 +114,16 @@ impl<P: Pattern> PatchSoA<P> {
     }
 }
 
-impl<P: Pattern> SourcePatches for PatchSoA<P> {
-    type Pyramid = PyramidU16;
-
+impl<P: Pattern> PatchSoA<P> {
     /// Build every patch at every level from `pyramid`.
     ///
     /// One patch per entry of `positions`, at `position / (1 << level)` — the
     /// Source position divided by the pyramid scale.
     /// [`build_patch_group`] writes directly into these arrays. With a pool,
     /// groups are built in parallel; otherwise the caller builds them.
-    fn build(
+    pub fn build(
         &mut self,
-        pyramid: &PyramidU16,
+        pyramid: &PyramidPlanU16,
         positions: &PointsSoA,
         selected: Option<&[bool]>,
     ) -> Result<(), TrackerError> {
@@ -135,24 +132,18 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
             count,
             self.capacity,
             selected,
-            pyramid.num_levels(),
+            pyramid.levels().len(),
             self.num_levels,
         )?;
         self.len = count;
 
-        let mut images: [Option<&Image<u16, 1>>; MAX_LEVELS] = [None; MAX_LEVELS];
-        for level in 0..self.num_levels {
-            let image: Option<&Image<u16, 1>> = pyramid.level(level);
-            match (images.get_mut(level), image) {
-                (Some(slot), Some(image)) => *slot = Some(image),
-                _ => {
-                    return Err(TrackerError::LevelMismatch {
-                        what: "the pyramid",
-                        expected: self.num_levels,
-                        actual: pyramid.num_levels(),
-                    });
-                }
-            }
+        let mut images: [Option<U16View<'_>>; MAX_LEVELS] = [None; MAX_LEVELS];
+        for (slot, image) in images
+            .iter_mut()
+            .zip(pyramid.levels())
+            .take(self.num_levels)
+        {
+            *slot = Some(U16View::new(image));
         }
 
         if count == 0 {
@@ -174,14 +165,17 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                     let scale = (1u32 << level) as f32;
                     let points = std::array::from_fn(|lane| {
                         if active[lane] {
-                            positions.get(group * 4 + lane) / scale
+                            {
+                                let [x, y] = positions.get(group * 4 + lane);
+                                [x / scale, y / scale]
+                            }
                         } else {
-                            Vector2::new(-100.0, -100.0)
+                            [-100.0, -100.0]
                         }
                     });
                     let (_, ok) = build_patch_group::<P>(
                         image,
-                        points.map(Into::into),
+                        points,
                         &mut data[level * 4 * P::SIZE..],
                         &mut h_inv_jt[level * 12 * P::SIZE..],
                     );
@@ -196,7 +190,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
         let data = &mut self.data[..groups * data_block];
         let h_inv_jt = &mut self.h_inv_jt[..groups * jacobian_block];
         let valid = &mut self.valid[..groups * levels * 4];
-        let parallel: Option<()> = self.pool.as_ref().and_then(|pool| {
+        let parallel: Option<()> = self.pool.as_ref().map(|pool| {
             pool.install(|| {
                 use rayon::prelude::*;
                 data.par_chunks_mut(data_block)
@@ -225,11 +219,20 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
         Ok(())
     }
 
-    fn len(&self) -> usize {
+    /// Number of source points in the current build.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Number of built points.
+    pub fn len(&self) -> usize {
         self.len
     }
 
-    fn position(&self, patch: usize) -> Vector2<f32> {
+    /// Source centre at full resolution.
+    /// # Panics
+    /// If patch is outside the built point count.
+    pub fn position(&self, patch: usize) -> [f32; 2] {
         self.positions.get(patch)
     }
 }

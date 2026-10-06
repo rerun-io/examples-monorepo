@@ -16,7 +16,7 @@ workspace = true
 [features]
 # The kernels, stage backends and seam. Internal: enable `gpu-wgpu` to
 # select the runtime as well.
-gpu-core = ["dep:cubecl"]
+gpu-core = ["dep:cubecl", "dep:cubecl-environment"]
 # The CubeCL frontend through wgpu (Vulkan / Metal / DX12), off by default.
 # `slam-rs-wgpu-test` checks the kernels on the device.
 #
@@ -39,10 +39,13 @@ gpu-core = ["dep:cubecl"]
 gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
 
 [dependencies]
+bytes.workspace = true
+kornia-staging-slam.workspace = true
 kornia-staging-3d.workspace = true
 kornia-staging-algebra.workspace = true
 kornia-staging-imgproc.workspace = true
 cubecl = { workspace = true, optional = true }
+cubecl-environment = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }
 kornia-algebra = { workspace = true }

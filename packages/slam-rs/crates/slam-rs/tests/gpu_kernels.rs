@@ -22,19 +22,21 @@
 use cubecl::frontend::CompilationArg;
 use kornia_image::Image;
 use kornia_imgproc::features::FastCorner;
-use kornia_staging_imgproc::features::{BandRequest, CornerScan, CpuCornerScan, DetectError};
+use kornia_staging_imgproc::features::{BandRequest, CenteredCellError, CornerScan, CpuCornerScan};
 use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
+use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowResult, FlowTransforms, PatchSoA, PointsSoA, PatchTrackerPlan};
+use kornia_staging_slam::tracking::optical_flow::{
+    PatchTracker, TrackInput, TrackPhase,
+};
+use kornia_staging_imgproc::pyramid::PyramidPlanU16;
 use nalgebra::Vector2;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::frontend::tracker::{
-    CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
-};
 use slam_rs::gpu::{
     GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, GpuRuntime,
     gpu_client,
 };
-use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
+use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError};
 
 mod common;
 
@@ -59,11 +61,11 @@ fn packed_texture(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1
 }
 
 /// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
-fn both_pyramids(image: &Image<u16, 1>) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
+fn both_pyramids(image: &Image<u16, 1>) -> (PyramidPlanU16, GpuPyramid<GpuRuntime>) {
     let (width, height): (usize, usize) = (image.width(), image.height());
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidU16 = cpu_builder.allocate(width, height, LEVELS).unwrap();
+    let mut cpu: PyramidPlanU16 = cpu_builder.allocate(width, height, LEVELS).unwrap();
     cpu_builder.build(0, image, &mut cpu).unwrap();
 
     let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
@@ -79,7 +81,7 @@ fn both_pyramids(image: &Image<u16, 1>) -> (PyramidU16, GpuPyramid<GpuRuntime>) 
 /// The message names the worst pixel and where it is, so a regression says how
 /// far it moved rather than only that it moved. Equality is the bound: the
 /// arithmetic is integer on both lanes (module doc).
-fn assert_levels_equal(cpu: &PyramidU16, gpu: &GpuPyramid<GpuRuntime>, label: &str) {
+fn assert_levels_equal(cpu: &PyramidPlanU16, gpu: &GpuPyramid<GpuRuntime>, label: &str) {
     assert_eq!(gpu.num_levels(), cpu.num_levels(), "{label}");
     let mut expected: Image<u16, 1> = slam_rs::image::empty();
     let mut actual: Image<u16, 1> = slam_rs::image::empty();
@@ -183,11 +185,11 @@ fn a_pyramid_of_one_level_is_refused_rather_than_allocated_empty() {
     assert!(
         matches!(
             refused,
-            Err(PyramidError::TooSmall {
+            Err(PyramidError::Plan(kornia_staging_imgproc::pyramid::PyramidPlanError::TooSmall {
                 width: 64,
                 height: 48,
-                num_levels: 0
-            })
+                max_level: 0
+            }))
         ),
         "a single-level pyramid was accepted: {refused:?}"
     );
@@ -227,7 +229,7 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     gpu_builder.build(0, &second, &mut gpu).unwrap();
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidU16 = cpu_builder.allocate(128, 96, LEVELS).unwrap();
+    let mut cpu: PyramidPlanU16 = cpu_builder.allocate(128, 96, LEVELS).unwrap();
     cpu_builder.build(0, &second, &mut cpu).unwrap();
 
     assert_levels_equal(&cpu, &gpu, "the second frame of a reused pyramid");
@@ -351,19 +353,19 @@ fn track_both_lanes(
 ) -> (FlowResult, FlowResult) {
     // ── the CPU lane
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu_prev: PyramidU16 = cpu_builder.allocate(size, size, LEVELS).unwrap();
-    let mut cpu_next: PyramidU16 = cpu_builder.allocate(size, size, LEVELS).unwrap();
+    let mut cpu_prev: PyramidPlanU16 = cpu_builder.allocate(size, size, LEVELS).unwrap();
+    let mut cpu_next: PyramidPlanU16 = cpu_builder.allocate(size, size, LEVELS).unwrap();
     cpu_builder.build(0, first, &mut cpu_prev).unwrap();
     cpu_builder.build(0, second, &mut cpu_next).unwrap();
-    let mut cpu_tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
+    let mut cpu_tracker: PatchTrackerPlan<Pattern51> = PatchTrackerPlan::new(
         MAX_KEYPOINTS,
         LEVELS + 1,
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
-        WorkPool::new(1).unwrap(),
+        WorkPool::new(1).unwrap().rayon_pool(),
     )
     .unwrap();
-    let mut cpu_patches: PatchSoA<Pattern51> = cpu_tracker.make_patches().unwrap();
+    let mut cpu_patches: PatchSoA<Pattern51> = PatchSoA::new(MAX_KEYPOINTS, LEVELS + 1).unwrap();
     cpu_patches.build(&cpu_prev, positions, None).unwrap();
     let mut cpu_result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
     cpu_tracker
@@ -388,11 +390,11 @@ fn track_both_lanes(
     )
     .unwrap();
     let mut gpu_patches: GpuPatchSources<Pattern51, _> = gpu_tracker.make_patches().unwrap();
-    gpu_patches.build(&gpu_prev, positions, None).unwrap();
-    let mut gpu_result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
-    gpu_tracker
-        .track(&gpu_prev, &gpu_next, &gpu_patches, guesses, &mut gpu_result)
-        .unwrap();
+    let input = TrackInput { ids: (0..positions.len() as u64).collect(), positions: positions.clone(), guesses: guesses.clone() };
+    let mut slots = [0];
+    gpu_tracker.submit_batch(std::slice::from_ref(&gpu_prev), std::slice::from_ref(&gpu_next), TrackPhase::Temporal(&[input]), &mut gpu_patches, &mut slots).unwrap();
+    gpu_tracker.collect().unwrap();
+    let gpu_result = gpu_tracker.result(slots[0]).clone();
     (cpu_result, gpu_result)
 }
 
@@ -449,15 +451,15 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     for index in 0..count {
         if gpu_result.is_valid(index) {
             tracked += 1;
-            let moved =
-                Vector2::from(gpu_result.transform(index).translation) - positions.get(index);
+            let moved = Vector2::from(gpu_result.transform(index).translation)
+                - Vector2::from(positions.get(index));
             worst_shift = worst_shift
                 .max((moved.x - SHIFT).abs())
                 .max((moved.y + 1.5).abs());
         }
         if cpu_result.is_valid(index) {
-            let moved =
-                Vector2::from(cpu_result.transform(index).translation) - positions.get(index);
+            let moved = Vector2::from(cpu_result.transform(index).translation)
+                - Vector2::from(positions.get(index));
             worst_cpu_shift = worst_cpu_shift
                 .max((moved.x - SHIFT).abs())
                 .max((moved.y + 1.5).abs());
@@ -596,7 +598,7 @@ fn both_lanes_agree_on_a_bad_initial_guess() {
             Vector2::new(-8.0, -8.0)
         } else {
             let offset: f32 = 4.0 + 6.0 * (index % 5) as f32;
-            positions.get(index) + Vector2::new(offset, -offset)
+            Vector2::from(positions.get(index)) + Vector2::new(offset, -offset)
         };
         guesses.set(index, &AffineCompact2f::at(displaced));
     }
@@ -697,7 +699,7 @@ fn a_gpu_band_before_a_scan_is_refused() {
         GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
     assert_eq!(
         gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
-        slam_rs::frontend::flow::FrontendError::Detect(DetectError::NotScanned)
+        slam_rs::frontend::flow::FrontendError::Detect(CenteredCellError::NotScanned)
     );
 }
 
@@ -1113,7 +1115,7 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
     let mut lane1: PointsSoA = PointsSoA::default();
     for index in (0..lane0.len()).step_by(2) {
         let point = lane0.get(index);
-        lane1.push(Vector2::new(point.x + 0.25, point.y - 0.25));
+        lane1.push(Vector2::new(point[0] + 0.25, point[1] - 0.25));
     }
     let guesses: [FlowTransforms; 2] = [guesses_at(&lane0), guesses_at(&lane1)];
     let points: [&PointsSoA; 2] = [&lane0, &lane1];
@@ -1140,23 +1142,31 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
     // ── one at a time, which is the reference
     let mut alone: Vec<FlowResult> = Vec::new();
     for lane in 0..2 {
-        let mut out: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
-        patches.build(&prev, points[lane], None).unwrap();
-        tracker
-            .track(&prev, &next, &patches, &guesses[lane], &mut out)
-            .unwrap();
+        let input = TrackInput { ids: (0..points[lane].len() as u64).collect(), positions: points[lane].clone(), guesses: guesses[lane].clone() };
+        let mut slot = [0];
+        tracker.submit_batch(std::slice::from_ref(&prev), std::slice::from_ref(&next), TrackPhase::Temporal(&[input]), &mut patches, &mut slot).unwrap();
+        tracker.collect().unwrap();
+        let out = tracker.result(slot[0]).clone();
         alone.push(out);
     }
 
     // ── both launched, then one download
-    let mut passes = Vec::new();
+    let mut passes = [0; 2];
     for lane in 0..2 {
-        patches.build(&prev, points[lane], None).unwrap();
-        passes.push(
-            tracker
-                .submit(&prev, &next, &patches, &guesses[lane])
-                .unwrap(),
-        );
+        let input = TrackInput {
+            ids: (0..points[lane].len() as u64).collect(),
+            positions: points[lane].clone(),
+            guesses: guesses[lane].clone(),
+        };
+        tracker
+            .submit_batch(
+                std::slice::from_ref(&prev),
+                std::slice::from_ref(&next),
+                TrackPhase::Temporal(&[input]),
+                &mut patches,
+                &mut passes[lane..lane + 1],
+            )
+            .unwrap();
     }
     tracker.collect().unwrap();
 
@@ -1192,7 +1202,6 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
 /// including a partial final workgroup and camera boundaries inside subgroups.
 #[test]
 fn fused_temporal_batch_matches_cpu() {
-    use slam_rs::frontend::tracker::TrackInput;
     let client = gpu_client().unwrap();
     let mut builder = CpuPyramidBuilder::new();
     let mut pyramids = [Vec::new(), Vec::new()];
@@ -1229,15 +1238,15 @@ fn fused_temporal_batch_matches_cpu() {
             }
             input.push(&AffineCompact2f::at(guess));
         }
-        let mut tracker = CpuPatchTracker::<Pattern51>::new(
+        let mut tracker = PatchTrackerPlan::<Pattern51>::new(
             33,
             LEVELS + 1,
             MAX_ITERATIONS,
             MAX_RECOVERED_DIST2,
-            WorkPool::new(1).unwrap(),
+            WorkPool::new(1).unwrap().rayon_pool(),
         )
         .unwrap();
-        let mut patches = tracker.make_patches().unwrap();
+        let mut patches = PatchSoA::<Pattern51>::new(33, LEVELS + 1).unwrap();
         patches.build(&pyramids[0][camera], &points, None).unwrap();
         let mut result = FlowResult::with_capacity(33);
         tracker
@@ -1293,30 +1302,28 @@ fn fused_temporal_batch_matches_cpu() {
     )
     .unwrap();
     let mut patches = tracker.make_patches().unwrap();
-    let mut inputs: Vec<_> = positions
+    let inputs: Vec<_> = positions
         .into_iter()
         .zip(guesses)
-        .enumerate()
-        .map(|(camera, (positions, guesses))| TrackInput {
-            source: camera,
-            destination: camera,
+        .map(|(positions, guesses)| TrackInput {
+            ids: (0..positions.len() as u64).collect(),
             positions,
             guesses,
-            ..Default::default()
         })
         .collect();
+    let mut slots = [0; 4];
     tracker
         .submit_batch(
             &gpu_pyramids[0],
             &gpu_pyramids[1],
-            &mut inputs,
+            TrackPhase::Temporal(&inputs),
             &mut patches,
-            true,
+            &mut slots,
         )
         .unwrap();
     tracker.collect().unwrap();
-    for (camera, input) in inputs.iter().enumerate() {
-        let actual = tracker.result(input.result);
+    for camera in 0..inputs.len() {
+        let actual = tracker.result(slots[camera]);
         let cpu = &expected[camera];
         for point in 0..33 {
             assert_eq!(

@@ -5,9 +5,8 @@
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CornerScan;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
-use slam_rs::frontend::tracker::{
-    FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,
-};
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
+use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowTransforms, PointsSoA};
 use slam_rs::gpu::{
     GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramidBuilder, gpu_client,
 };
@@ -95,7 +94,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
     )
     .unwrap();
     let mut patches: GpuPatchSources<Pattern51, _> = tracker.make_patches().unwrap();
-    let mut result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
+    let mut slots = [0];
 
     // Two cameras of the same geometry, as a stereo rig is: the mixed-geometry
     // case is what `the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing`
@@ -112,6 +111,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
         .collect();
     let positions: PointsSoA = grid_positions(960);
     let guesses: FlowTransforms = guesses_at(&positions);
+    let input = TrackInput { ids: (0..positions.len() as u64).collect(), positions, guesses };
 
     let mut reserved: Vec<u64> = Vec::with_capacity(FRAMES);
     let mut in_use: Vec<u64> = Vec::with_capacity(FRAMES);
@@ -128,10 +128,9 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
         // source and camera 1's the target, which is one frame pair per
         // frameset through the whole KLT.
         let (previous, next) = pyramids.split_at_mut(1);
-        patches.build(&previous[0], &positions, None).unwrap();
-        tracker
-            .track(&previous[0], &next[0], &patches, &guesses, &mut result)
-            .unwrap();
+        tracker.submit_batch(previous, next, TrackPhase::Temporal(std::slice::from_ref(&input)), &mut patches, &mut slots).unwrap();
+        tracker.collect().unwrap();
+        let result = tracker.result(slots[0]);
         // `.unwrap()`, not `if let Ok`: a runtime that stops reporting its
         // memory usage would leave these at zero and this test — the only one
         // that would catch unbounded device growth — passing having measured

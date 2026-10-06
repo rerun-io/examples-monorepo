@@ -1,14 +1,13 @@
-//! Shared detection-cell geometry, eligibility, masks, and packed winner keys.
+//! Detection-cell geometry, eligibility, masks, and private winner keys.
 use super::FAST_BORDER;
-use kornia_image::Image;
+use kornia_image::ImageSize;
 
-/// `const int EDGE_THRESHOLD = 19`.
+/// Margin excluded from the final keypoint set, in pixels.
 pub const EDGE_THRESHOLD: f32 = 19.0;
 
 /// Shared feature counts with an explicit allocated shape.
-/// The frontend sizes occupancy from camera 0 while detection uses each camera's
-/// own grid. Explicit dimensions let mixed-resolution rigs skip cells outside
-/// the shared matrix instead of indexing beyond it.
+/// Explicit dimensions let images with different resolutions share occupancy
+/// counts and skip cells outside the matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Occupancy<'a> {
     /// Feature counts, row-major over `rows` x `columns`.
@@ -34,10 +33,10 @@ pub struct MaskRect {
 
 impl MaskRect {
     /// Whether a point lies within this half-open rectangle.
-    #[inline]
     ///
     /// # Arguments
     /// * `x`, `y` - Pixel coordinates in the image frame.
+    #[inline]
     pub fn in_bounds(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -45,47 +44,39 @@ impl MaskRect {
 
 /// Image regions to ignore.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Masks {
+pub struct CellMasks {
     /// The rectangles; a point inside any of them is masked.
     pub masks: Vec<MaskRect>,
 }
 
-impl Masks {
-    /// `Masks::inBounds` : inside *any* rectangle.
-    #[inline]
+impl CellMasks {
+    /// Whether a point lies inside any rectangle.
     ///
     /// # Arguments
     /// * `x`, `y` - Pixel coordinates in the image frame.
+    #[inline]
     pub fn in_bounds(&self, x: f32, y: f32) -> bool {
         self.masks.iter().any(|mask| mask.in_bounds(x, y))
     }
 
-    /// `Masks::operator+=` : append, never merge.
+    /// Append rectangles without merging them.
     ///
     /// # Arguments
     /// * `other` - Rectangles to append without merging.
-    pub fn extend(&mut self, other: &Masks) {
+    pub fn extend(&mut self, other: &CellMasks) {
         self.masks.extend_from_slice(&other.masks);
     }
 }
 
-/// The most cells one camera's detection grid may carry.
-///
-/// The shape comes from the calibrated resolution over
-/// `optical_flow_detection_grid_size`, so a calibration sizes a buffer as much
-/// as `max_keypoints` does: the occupancy counts are one `i32` per cell per
-/// camera, and a one-pixel grid over a 4,294,967,294-pixel-square frame asked
-/// for 2^64 of them — `vec![0; rows * columns]` answers that with a `capacity
-/// overflow` panic rather than an error (decision D32).
-///
-/// The independent grid limit bounds occupancy storage to 4 MiB per camera.
+/// Maximum entries in a grid's occupancy matrix.
+/// This independent limit bounds i32 occupancy storage to 4 MiB.
 pub const MAX_CELLS: usize = 1 << 20;
 
 /// Centered detection grid: `x_start = (w % cell) / 2` and
 /// `x_stop = x_start + cell * (w / cell - 1)`. Shared by detection and cell counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellGrid {
-    /// `PATCH_SIZE`, i.e. `optical_flow_detection_grid_size`.
+    /// Side length of each square cell in pixels.
     pub cell: usize,
     /// First cell's left edge.
     pub x_start: usize,
@@ -189,11 +180,11 @@ impl CellGrid {
 
     /// Map a keypoint to an occupancy cell.
     /// The f32 quotient is truncated towards zero: a point just left of the origin
-    /// maps to column zero. Saturating conversion prevents an invalid index (trap 15).
-    #[inline]
+    /// maps to column zero. Saturating conversion prevents an invalid index.
     ///
     /// # Arguments
     /// * `x`, `y` - Pixel coordinates in the image frame.
+    #[inline]
     pub fn cell_of(&self, x: f32, y: f32) -> (usize, usize) {
         let column: i32 = ((x - self.x_start as f32) / self.cell as f32) as i32;
         let row: i32 = ((y - self.y_start as f32) / self.cell as f32) as i32;
@@ -204,10 +195,10 @@ impl CellGrid {
     }
 
     /// Whether a keypoint is inside the grid at all.
-    #[inline]
     ///
     /// # Arguments
     /// * `x`, `y` - Pixel coordinates in the image frame.
+    #[inline]
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x_start as f32
             && y >= self.y_start as f32
@@ -216,31 +207,30 @@ impl CellGrid {
     }
 }
 
-/// Everything `detectKeypointsWithCells` reads out of the config.
+/// Thresholds, point budget and safe radius for centered-cell detection.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DetectorConfig {
-    /// `optical_flow_detection_num_points_cell`.
+pub struct CenteredCellConfig {
+    /// Maximum accepted corners per visited cell.
     pub num_points_cell: usize,
-    /// `optical_flow_detection_min_threshold`, floored at
+    /// Minimum FAST threshold, floored at
     /// [`LOWEST_THRESHOLD_RUNG`] by the ladder below.
     pub min_threshold: i32,
-    /// `optical_flow_detection_max_threshold`.
+    /// First threshold in the halving ladder.
     pub max_threshold: i32,
-    /// `optical_flow_image_safe_radius`; `0` switches the gate off.
+    /// Allowed radial fraction around the image center; zero disables this filter.
     pub safe_radius: f32,
 }
 
 /// Lowest rung of the detector's halving threshold ladder.
 /// Integer division leaves zero unchanged, so allowing a non-positive lower
-/// threshold could loop forever. The frontend refuses such configurations, and
-/// this floor also protects direct detector callers (D32).
+/// threshold could loop forever. This floor guarantees termination.
 pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 
 /// The thresholds [`super::detect_keypoints_with_cells`]'s ladder visits, in order.
 ///
 /// `max_threshold`, then halved by integer division for as long as the value
 /// stays at or above the floor, which is `min_threshold` but never under
-/// [`LOWEST_THRESHOLD_RUNG`]. The shipped 40/5 configs give 40, 20, 10, 5; 40/6
+/// [`LOWEST_THRESHOLD_RUNG`]. For example, limits 40/5 give 40, 20, 10, 5; 40/6
 /// gives 40, 20, 10 and **not** 6, because the next halving is 5 and the ladder
 /// never visits the floor itself unless a halving happens to land on it. The
 /// sequence is empty when `max_threshold` is already under the floor.
@@ -254,13 +244,13 @@ pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 ///
 /// # Arguments
 /// * `config` - Integer threshold ladder limits.
-pub fn threshold_rungs(config: &DetectorConfig) -> impl Iterator<Item = i32> {
+pub fn threshold_rungs(config: &CenteredCellConfig) -> impl Iterator<Item = i32> {
     let floor: i32 = config.min_threshold.max(LOWEST_THRESHOLD_RUNG);
     std::iter::successors(Some(config.max_threshold), |threshold| Some(threshold / 2))
         .take_while(move |threshold| *threshold >= floor)
 }
 
-/// What a device backend needs to pick one corner per grid cell itself.
+/// Geometry and threshold for selecting one corner per grid cell.
 ///
 /// The other half of [`super::CornerScan`], and the reason it is a separate call
 /// rather than a flag on [`super::BandRequest`]: a backend that takes it does the whole
@@ -275,7 +265,7 @@ pub struct CellSelect {
     /// only one that decides the winner (see [`super::CornerScan::select_cells`]).
     /// Not `min_threshold`: the halving ladder need never reach it.
     pub threshold: i32,
-    /// `optical_flow_image_safe_radius`; `0` switches the gate off.
+    /// Allowed radial fraction around the image center; zero disables this filter.
     pub safe_radius: f32,
 }
 
@@ -283,42 +273,36 @@ pub struct CellSelect {
 ///
 /// Unreachable as a real key: a winner scores at least `threshold + 1 >= 2`, so
 /// its score field is at most 253 where this is 255.
-pub const NO_CELL_WINNER: u32 = u32::MAX;
+pub(super) const NO_CELL_WINNER: u32 = u32::MAX;
 
 /// Where a packed cell key keeps `255 - score`.
-pub const KEY_SCORE_SHIFT: u32 = 24;
+pub(super) const KEY_SCORE_SHIFT: u32 = 24;
 /// Where a packed cell key keeps the row.
-pub const KEY_ROW_SHIFT: u32 = 12;
+pub(super) const KEY_ROW_SHIFT: u32 = 12;
 /// A packed cell key's column field, which is also its row field's width.
-pub const KEY_FIELD_MASK: u32 = 0xFFF;
+const KEY_FIELD_MASK: u32 = 0xFFF;
 
 /// The frame size a packed cell key stops describing.
 ///
-/// Twelve bits each for the row and the column, which every calibrated frame in
-/// the reference set is two orders of magnitude inside; a larger one takes the
-/// band path instead of losing a coordinate.
-pub const CELL_KEY_LIMIT: usize = 1 << KEY_ROW_SHIFT;
+/// Twelve bits each for row and column; larger images use the band path.
+const CELL_KEY_LIMIT: usize = 1 << KEY_ROW_SHIFT;
 
-/// The cell selection [`super::detect_keypoints_with_cells`] would ask `camera` for,
-/// or `None` when nothing about the shape can take the device path.
+/// Cell-selection geometry for a one-point-per-cell detector, when supported.
 ///
-/// Mask-independent on purpose: `cell_masks` decides the rest of the gate and is
-/// not known until the frameset has masked the camera, while the kernels this
-/// describes read the frame and nothing else. So this is what
-/// [`super::CornerScan::submit_cells`] can be handed before the frameset has run, and
-/// [`super::detect_keypoints_with_cells`] applies the mask half itself.
-#[must_use]
+/// Mask-independent: whole-cell eligibility is checked by the detector after
+/// geometry is prepared. Unsupported sizes and point budgets use the band path.
 ///
 /// # Arguments
-/// * `image` - Dense source image used to bound packed coordinates.
+/// * `size` - Source dimensions used to bound cell selection.
 /// * `grid` - Centered selection grid.
 /// * `config` - Threshold, point-budget and radius policy.
+#[must_use]
 pub fn cell_select(
-    image: &Image<u16, 1>,
+    size: ImageSize,
     grid: &CellGrid,
-    config: &DetectorConfig,
+    config: &CenteredCellConfig,
 ) -> Option<CellSelect> {
-    let (width, height): (usize, usize) = (image.width(), image.height());
+    let (width, height): (usize, usize) = (size.width, size.height);
     let takes_cell_selection: bool = config.num_points_cell == 1
         && grid.cell > 2 * FAST_BORDER
         && width >= grid.cell
@@ -338,10 +322,10 @@ pub fn cell_select(
 }
 
 impl CellSelect {
-    /// Whether packed cell keys and the threshold ladder support this image.
+    /// Whether the cell scorer supports these dimensions and threshold.
     ///
     /// # Arguments
-    /// * `width`, `height` - Image dimensions for the proposed packed-key selection.
+    /// * `width`, `height` - Image dimensions for the proposed cell selection.
     pub fn supports(&self, width: usize, height: usize) -> bool {
         width < CELL_KEY_LIMIT && height < CELL_KEY_LIMIT && self.threshold >= LOWEST_THRESHOLD_RUNG
     }
@@ -365,18 +349,14 @@ fn cell_index(edge: f32, start: usize, cell: f32) -> Option<usize> {
 /// Cell selection picks one corner per cell and cannot ask the masks about the
 /// runner-up, so it is only sound where a mask covers a cell **whole**: then the
 /// cell has no unmasked candidate at all and dropping its key is the same answer
-/// the host walk gives. That is what the frontend's masks are —
-/// `cam0OverlapCellsMasksForCam` pushes `cell` x `cell` rectangles at the cell
-/// origins — but only while the camera being detected shares camera 0's grid,
-/// which the mixed-geometry rigs the port supports deliberately do not. Rather
-/// than assume it, every rectangle is checked against this grid and a camera
-/// with one that straddles a cell boundary takes the band path.
+/// the band walk gives. Each mask is checked against this image's grid;
+/// a rectangle that straddles a cell boundary requires the band path.
 ///
 /// `false` is that refusal. A rectangle past the last cell is not one: the cell
 /// loop never looks there, and the candidates of the last cell stop at its own
 /// right edge.
 pub(crate) fn cell_masks(
-    masks: &Masks,
+    masks: &CellMasks,
     grid: &CellGrid,
     cells_x: usize,
     cells_y: usize,
@@ -407,7 +387,7 @@ pub(crate) fn cell_masks(
 pub enum SelectionStatus {
     /// Shape, mask, or backend limits require the band path.
     Unsupported,
-    /// The backend returned one key per visited grid cell.
+    /// The backend returned one optional corner per visited grid cell.
     Selected,
 }
 

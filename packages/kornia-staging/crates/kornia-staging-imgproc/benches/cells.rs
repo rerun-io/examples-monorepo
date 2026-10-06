@@ -1,8 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::features::{
-    detect_keypoints_with_cells, CellGrid, CpuCornerScan, DetectorConfig, DetectorScratch,
-    KeypointsData, Masks, Occupancy,
+    detect_keypoints_with_cells, CellGrid, CellMasks, CenteredCellConfig, CenteredCellKeypoints,
+    CpuCornerScan, DetectorScratch, Occupancy,
 };
 use std::hint::black_box;
 fn bench(c: &mut Criterion) {
@@ -23,17 +23,17 @@ fn bench(c: &mut Criterion) {
         rows: grid.rows,
         columns: grid.columns,
     };
-    let config = DetectorConfig {
+    let config = CenteredCellConfig {
         num_points_cell: 1,
         min_threshold: 5,
         max_threshold: 40,
         safe_radius: 0.0,
     };
-    let masks = Masks::default();
+    let masks = CellMasks::default();
     for select in [false, true] {
         let mut scratch =
             DetectorScratch::with_scanner(Box::new(CpuCornerScan::with_cell_selection(select)));
-        let mut out = KeypointsData::default();
+        let mut out = CenteredCellKeypoints::default();
         c.bench_function(
             if select {
                 "centered_fast_cells_960x720"
