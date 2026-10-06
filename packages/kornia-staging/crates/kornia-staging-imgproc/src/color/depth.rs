@@ -67,7 +67,7 @@ pub fn widen_u8_shift8_strided_unchecked(src: &[u8], stride: usize, dst: &mut Im
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_images::zeros;
+    use crate::test_fixtures::zeros;
 
     #[test]
     fn rejects_short_rows_and_unrepresentable_source_geometry() {

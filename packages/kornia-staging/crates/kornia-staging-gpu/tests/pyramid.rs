@@ -1,5 +1,7 @@
 //! Exact CPU/GPU pyramid contract, moved from the consumer.
+#![allow(unsafe_code)]
 #![cfg(feature = "wgpu")]
+use images::textured_image;
 use kornia_image::{Image, ImageSize};
 use kornia_staging_gpu::{
     pyramid::{GpuPyramid, GpuPyramidBuilder, PyramidError},
@@ -7,25 +9,8 @@ use kornia_staging_gpu::{
     GpuRuntime,
 };
 use kornia_staging_imgproc::pyramid::{PyramidPlanError, PyramidPlanU16};
-#[path = "common/images.rs"]
-mod images;
-use images::textured_image;
+use kornia_staging_imgproc::test_fixtures as images;
 const LEVELS: usize = 3;
-
-fn packed_texture(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
-    let source = textured_image(width, height, dx, dy);
-    let bytes: Vec<u8> = source
-        .as_slice()
-        .iter()
-        .map(|pixel| (pixel >> 8) as u8)
-        .collect();
-    let image = Image::new(
-        source.size(),
-        bytes.iter().map(|&v| u16::from(v) << 8).collect(),
-    )
-    .unwrap();
-    image
-}
 
 /// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
 fn both_pyramids(image: &Image<u16, 1>) -> (PyramidPlanU16, GpuPyramid<GpuRuntime>) {
@@ -319,3 +304,5 @@ fn dense_batches_reject_mismatched_camera_counts() {
         );
     }
 }
+
+use kornia_staging_imgproc::test_fixtures::packed_texture;

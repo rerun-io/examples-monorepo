@@ -20,6 +20,10 @@ pub enum FrontendError {
     #[error(transparent)]
     Gpu(#[from] kornia_staging_gpu::runtime::GpuError),
 
+    /// Staged corner extraction failure.
+    #[cfg(feature = "gpu-core")]
+    #[error(transparent)]
+    GpuScan(#[from] kornia_staging_gpu::features::ScanError),
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]
     NoCameras,

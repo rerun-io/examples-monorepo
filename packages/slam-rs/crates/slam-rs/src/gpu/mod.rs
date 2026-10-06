@@ -14,7 +14,6 @@ mod patches;
 mod pyramid;
 mod submission;
 pub use submission::LaunchList;
-use submission::{read_blocking, upload_frame};
 #[cfg(test)]
 mod runtime;
 use kornia_staging_gpu::runtime::RUNTIME_NAME;
@@ -23,7 +22,7 @@ use kornia_staging_gpu::runtime::guarded;
 use kornia_staging_gpu::runtime::probe_storage;
 use kornia_staging_gpu::runtime::{GpuError, gpu_client};
 #[cfg(test)]
-use runtime::{BLOCKING_READ, CORNER_SCAN_READ, arm_fault_at, fire_if_armed, guarded};
+use runtime::guarded;
 mod frontend;
 pub use frontend::GpuStages;
 mod track;

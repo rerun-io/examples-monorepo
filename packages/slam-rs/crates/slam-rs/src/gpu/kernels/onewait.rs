@@ -6,10 +6,10 @@
 //! Selected points: live count followed by interleaved x,y in column-major
 //! cell order. Stereo slots retain the fused kernel's ten-float point layout.
 use super::klt_fused::FUSED_RUNS;
-use crate::frontend::detect::NO_CELL_WINNER;
+use kornia_staging_imgproc::features::backend::NO_CELL_WINNER;
 
-const KEY_ROW_SHIFT: u32 = crate::frontend::detect::KEY_ROW_SHIFT;
-const KEY_FIELD_MASK: u32 = crate::frontend::detect::KEY_FIELD_MASK;
+const KEY_ROW_SHIFT: u32 = kornia_staging_imgproc::features::backend::KEY_ROW_SHIFT;
+const KEY_FIELD_MASK: u32 = kornia_staging_imgproc::features::backend::KEY_FIELD_MASK;
 
 pub(crate) const PARAM_HEADER: usize = 5;
 pub(crate) const RADTAN8_PARAMS: usize = 12;

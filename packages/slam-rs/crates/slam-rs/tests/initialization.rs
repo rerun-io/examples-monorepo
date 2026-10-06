@@ -130,7 +130,7 @@ fn gpu_lag_and_lookahead_wait_for_stereo() {
 }
 
 fn check_pipeline(backend: Backend) {
-    let directory = common::fixtures().join("flow/frames");
+    let directory = common::shared_frames();
     let stereo: Vec<_> = (0..2)
         .map(|camera| common::read_pgm(&directory, 0, camera))
         .collect();

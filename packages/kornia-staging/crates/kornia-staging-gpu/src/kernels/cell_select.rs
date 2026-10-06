@@ -30,10 +30,10 @@ const SELECT_EDGE: f32 = kornia_staging_imgproc::features::EDGE_THRESHOLD;
 // and `detect_keypoints_with_cells` takes them apart, and a shift that drifted
 // by one would move every corner without failing to compile.
 /// Where the packed key keeps `255 - score`.
-const KEY_SCORE_SHIFT: u32 = crate::frontend::detect::KEY_SCORE_SHIFT;
+const KEY_SCORE_SHIFT: u32 = kornia_staging_imgproc::features::backend::KEY_SCORE_SHIFT;
 /// Where the packed key keeps the row.
-const KEY_ROW_SHIFT: u32 = crate::frontend::detect::KEY_ROW_SHIFT;
-pub(super) const NO_WINNER: u32 = crate::frontend::detect::NO_CELL_WINNER;
+const KEY_ROW_SHIFT: u32 = kornia_staging_imgproc::features::backend::KEY_ROW_SHIFT;
+pub(super) const NO_WINNER: u32 = kornia_staging_imgproc::features::backend::NO_CELL_WINNER;
 
 /// Admission and packed total order shared by both FAST cell kernels.
 #[cube]
@@ -115,13 +115,8 @@ fn cell_candidate(
 
 /// `detectKeypointsWithCells`' inner loop, one cube per grid cell.
 ///
-/// The host used to download the candidate image and its bitmask — 2.07 MB per
-/// two-camera frameset on MIO10 — walk one row band per cell row, suppress
-/// non-maxima per cell and sort the survivors. All of that is this kernel, and
-/// what comes back is one packed key per cell.
-///
-/// **Why one key is the whole answer.** Every shipped config sets
-/// `optical_flow_detection_num_points_cell = 1`, and the threshold ladder cannot
+/// Return one packed winner per cell without downloading the score image.
+/// For one point per cell, the threshold ladder cannot
 /// change which corner that one point is: a candidate at rung `t` is
 /// `kept > t`, suppression kills `p` only through a neighbour `q` with
 /// `score_q >= score_p`, and such a `q` is itself a candidate at every rung `p`
@@ -401,7 +396,7 @@ pub(crate) fn uses_cell_kernel<R: Runtime>(
     client: &ComputeClient<R>,
 ) -> bool {
     (12..=64).contains(&cell)
-        && !crate::frontend::detect::block_filter_end(width).1
+        && !kornia_staging_imgproc::features::backend::block_filter_end(width).1
         && super::cell_shared_bytes(cell) <= client.properties().hardware.max_shared_memory_size
 }
 

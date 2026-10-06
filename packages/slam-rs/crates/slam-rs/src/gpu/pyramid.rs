@@ -9,8 +9,8 @@ use crate::frontend::input::{FrameImages, PackedImages};
 use crate::pyramid::{Pyramid, PyramidBuilder, PyramidError};
 use cubecl::prelude::*;
 use kornia_image::{Image, ImageSize};
+pub(super) use kornia_staging_gpu::pyramid::FrameArena;
 pub use kornia_staging_gpu::pyramid::GpuPyramid;
-pub(super) use kornia_staging_gpu::pyramid::{FrameArena, Level0};
 
 /// Schedule persistent device pyramids with the frontend frame queue.
 pub struct GpuPyramidBuilder<R: Runtime> {

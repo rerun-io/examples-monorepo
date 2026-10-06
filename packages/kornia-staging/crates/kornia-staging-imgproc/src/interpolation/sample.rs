@@ -163,7 +163,7 @@ impl<'a> U16View<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_images::random_image;
+    use crate::test_fixtures::random_image;
     use approx::assert_abs_diff_eq;
     use kornia_image::ImageSize;
     use proptest::prelude::*;

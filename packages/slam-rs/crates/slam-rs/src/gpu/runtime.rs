@@ -11,13 +11,6 @@ thread_local! {
 #[cfg(test)]
 const GUARDED_REGION: &str = "a guarded region";
 
-/// A fault site: the corner scan's download, which is where a real device
-/// failure lands **after** the scan has recorded the new frame's geometry. The
-/// guarded region's own site fires before the body runs and so cannot ask what
-/// a half-finished scan leaves behind.
-#[cfg(test)]
-pub(super) const CORNER_SCAN_READ: &str = "the corner scan's read";
-
 /// A fault site: the blocking read's own download. Unlike the sites above this
 /// one is not a panic: the download returns a typed device error.
 #[cfg(test)]

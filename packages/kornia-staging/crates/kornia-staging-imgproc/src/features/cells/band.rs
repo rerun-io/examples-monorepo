@@ -11,13 +11,12 @@ pub const FAST_BORDER: usize = 3;
 
 /// kornia's Bresenham ring: ring point `k` sits `FAST_RING_ROW[k]` rows and
 /// [`FAST_RING_COLUMN`]`[k]` columns from the centre.
-pub(super) const FAST_RING_ROW: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
+pub const FAST_RING_ROW: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
 /// The column half of [`FAST_RING_ROW`]'s ring.
-pub(super) const FAST_RING_COLUMN: [i32; 16] =
-    [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
+pub const FAST_RING_COLUMN: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
 
 /// Lanes in one block of kornia's in-block local-maximum filter.
-pub(super) const FAST_FILTER_LANES: usize = 16;
+pub const FAST_FILTER_LANES: usize = 16;
 
 /// The width at which kornia turns that filter on.
 const FAST_FILTER_WIDTH: usize = 800;
@@ -38,7 +37,7 @@ const FAST_FILTER_WIDTH: usize = 800;
 ///
 /// # Arguments
 /// * `width` - Full image row length; the block filter is width-dependent.
-pub(super) fn block_filter_end(width: usize) -> (usize, bool) {
+pub fn block_filter_end(width: usize) -> (usize, bool) {
     let blocks: usize = width.saturating_sub(2 * FAST_BORDER) / FAST_FILTER_LANES;
     (
         FAST_BORDER + blocks * FAST_FILTER_LANES,
@@ -219,12 +218,7 @@ impl CornerScan for CpuCornerScan {
         self.cells
             .select(image, select, eligibility, &mut self.keys);
         out.clear();
-        out.extend(self.keys.iter().map(|&key| {
-            super::grid::decode_key(key).map(|(xy, score)| FastCorner {
-                xy,
-                response: opencv_corner_score(score as f32 / 255.0),
-            })
-        }));
+        out.extend(self.keys.iter().copied().map(super::grid::decode_cell_key));
         Ok(SelectionStatus::Selected)
     }
 

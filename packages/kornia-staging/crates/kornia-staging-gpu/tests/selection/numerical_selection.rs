@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_arch = "aarch64")]
 fn default_cell_selection_follows_kornias_neon_gate() {
     use kornia_staging_imgproc::features::SelectionStatus;
-    let image = slam_rs::image::zeros(64, 64).unwrap();
+    let image = common::zeros(64, 64);
     let select = CellSelect {
         grid: CellGrid::new(64, 64, 32).unwrap(),
         threshold: 5,
@@ -26,13 +26,13 @@ fn default_cell_selection_follows_kornias_neon_gate() {
 
 #[test]
 fn cell_selection_refuses_unrepresentable_keys_and_thresholds() {
-    use kornia_staging_imgproc::features::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
+    use kornia_staging_imgproc::features::{SelectionStatus, LOWEST_THRESHOLD_RUNG};
     for (width, height, threshold) in [
         (CELL_KEY_LIMIT, 64, 5),
         (64, CELL_KEY_LIMIT, 5),
         (64, 64, LOWEST_THRESHOLD_RUNG - 1),
     ] {
-        let image = slam_rs::image::zeros(width, height).unwrap();
+        let image = common::zeros(width, height);
         let grid = CellGrid::new(width, height, 32).unwrap();
         let select = CellSelect {
             grid,
@@ -78,19 +78,10 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
         (817, 127, 60),
         (960, 129, 50),
     ] {
-        let mut image = slam_rs::image::from_u8_strided(
-            &vec![0; (width + 13) * height],
-            width,
-            height,
-            width + 13,
-        )
-        .unwrap();
-        for y in 0..height {
-            for x in 0..width {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                image.set_pixel(x, y, 0, (state >> 16) as u16).unwrap();
-            }
-        }
+        let mut image =
+            common::from_u8_strided(&vec![0; (width + 13) * height], width, height, width + 13)
+                .unwrap();
+        kornia_staging_imgproc::test_fixtures::lcg_image_u16(&mut state, &mut image);
         let grid = CellGrid::new(width, height, cell).unwrap();
         let counts: Vec<i32> = (0..grid.rows * grid.columns)
             .map(|i| i32::from(i % 5 == 0))
@@ -131,7 +122,7 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
 
 #[test]
 fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
-    let mut image = slam_rs::image::zeros(100, 100).unwrap();
+    let mut image = common::zeros(100, 100);
     for y in 0..100 {
         for x in 0..100 {
             image.set_pixel(x, y, 0, 128 << 8).unwrap();
@@ -144,7 +135,7 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
     let counts = vec![0; grid.rows * grid.columns];
     let detect = |image: &Image<u16, 1>| {
         detect_with(
-            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
+            CpuCornerScan::with_cell_selection(true),
             image,
             &grid,
             &counts,
@@ -468,7 +459,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
         };
         assert_eq!(threshold_rungs(&at_the_minimum).last(), Some(min_threshold));
         let admitted: usize = detect_with(
-            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
+            CpuCornerScan::with_cell_selection(true),
             &image,
             &grid,
             &counts,

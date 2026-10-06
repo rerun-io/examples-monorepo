@@ -4,15 +4,12 @@ use super::*;
 /// and later framesets, without entering the packed-byte ingest path.
 #[test]
 fn dense_camera_selection_is_exact_after_pyramid_upload() {
-    use slam_rs::frontend::parallel::WorkPool;
-    use slam_rs::gpu::GpuPyramidBuilder;
-    use slam_rs::pyramid::PyramidBuilder;
+    use kornia_staging_gpu::pyramid::GpuPyramidBuilder;
 
     let client = gpu_client().unwrap();
-    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
-    let mut scanner = GpuCornerScan::new(client, Default::default()).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone());
+    let mut scanner = GpuCornerScan::new(client).unwrap();
 
-    let pool = WorkPool::new(1).unwrap();
     let mut cpu = CpuCornerScan::with_cell_selection(true);
     let mut state = 0x8912_ab34u32;
     for (width, height, cell) in [(640, 480, 50), (517, 193, 37)] {
@@ -28,31 +25,17 @@ fn dense_camera_selection_is_exact_after_pyramid_upload() {
             let images: Vec<_> = (0..4)
                 .map(|_| {
                     let mut bytes = vec![0; (width + 13) * height];
-                    for byte in &mut bytes {
-                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                        *byte = (state >> 24) as u8;
-                    }
-                    let mut image = slam_rs::image::empty();
-                    slam_rs::image::fill_from_u8_strided(
-                        &mut image,
-                        &bytes,
-                        width,
-                        height,
-                        width + 13,
-                    )
-                    .unwrap();
-                    image
+                    kornia_staging_imgproc::test_fixtures::lcg_bytes(&mut state, &mut bytes);
+                    common::from_u8_strided(&bytes, width, height, width + 13).unwrap()
                 })
                 .collect();
-            builder.build_frames(&images, &mut pyramids, &pool).unwrap();
+            builder.build_images(&images, &mut pyramids).unwrap();
             scanner.use_level0(&mut builder);
             for (first, end) in [(0, 1), (1, 4), (0, 4)] {
                 let selects: Vec<_> = (0..4)
                     .map(|camera| (first..end).contains(&camera).then_some(select))
                     .collect();
-                scanner
-                    .submit_cells(FrameImages::Dense(&images), &selects)
-                    .unwrap();
+                submit_cells(&mut scanner, &gpu_client().unwrap(), &images, &selects).unwrap();
                 scanner.take_cells().unwrap();
                 for (camera, image) in images.iter().enumerate().take(end).skip(first) {
                     let mut got = Vec::new();
@@ -79,16 +62,14 @@ fn dense_camera_selection_is_exact_after_pyramid_upload() {
 #[test]
 fn the_gpu_cell_selection_holds_for_every_camera_slot() {
     let config: CenteredCellConfig = detector_config(472.0);
-    let mut host: DetectorScratch<dyn CornerScan<Error = FrontendError>> =
-        DetectorScratch::with_scanner(Box::new(AppScan(CpuCornerScan::default())));
+    let mut host = DetectorScratch::with_scanner(Box::new(CpuCornerScan::default()));
     let bands = Arc::new(AtomicUsize::new(0));
     let selections = Arc::new(AtomicUsize::new(0));
-    let mut device: DetectorScratch<dyn CornerScan<Error = FrontendError>> =
-        DetectorScratch::with_scanner(Box::new(CountingScan {
-            inner: Box::new(GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap()),
-            bands: Arc::clone(&bands),
-            selections: Arc::clone(&selections),
-        }));
+    let mut device = DetectorScratch::with_scanner(Box::new(CountingScan {
+        inner: GpuCornerScan::new(gpu_client().unwrap()).unwrap(),
+        bands: Arc::clone(&bands),
+        selections: Arc::clone(&selections),
+    }));
 
     for camera in 0..4 {
         let before_bands = bands.load(Ordering::Relaxed);
@@ -104,20 +85,30 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
         };
         let mut want: CenteredCellKeypoints = CenteredCellKeypoints::default();
         let mut got: CenteredCellKeypoints = CenteredCellKeypoints::default();
-        for (scratch, out) in [(&mut host, &mut want), (&mut device, &mut got)] {
-            detect_keypoints_with_cells(
-                &image,
-                camera,
-                &grid,
-                &occupancy,
-                &config,
-                &CellMasks::default(),
-                4096,
-                scratch,
-                out,
-            )
-            .unwrap();
-        }
+        detect_keypoints_with_cells(
+            &image,
+            camera,
+            &grid,
+            &occupancy,
+            &config,
+            &CellMasks::default(),
+            4096,
+            &mut host,
+            &mut want,
+        )
+        .unwrap();
+        detect_keypoints_with_cells(
+            &image,
+            camera,
+            &grid,
+            &occupancy,
+            &config,
+            &CellMasks::default(),
+            4096,
+            &mut device,
+            &mut got,
+        )
+        .unwrap();
         ExpectedPath::CellSelection.assert(
             bands.load(Ordering::Relaxed) - before_bands,
             selections.load(Ordering::Relaxed) - before_selections,
@@ -184,8 +175,8 @@ impl SelectionFixture {
 
 /// The batched preparation answers exactly what the per-camera call does.
 ///
-/// [`FrameCornerScan::submit_cells`] launches every camera's selection at once and
-/// [`FrameCornerScan::take_cells`] downloads them together, which is a scheduling
+/// [`GpuCornerScan::submit_cells`] launches every camera's selection at once and
+/// [`GpuCornerScan::take_cells`] downloads them together, which is a scheduling
 /// change and must be nothing
 /// else: the keys it hands each camera have to be the ones that camera's own
 /// `select_cells` would have read. Two different MIO10 frames in the two camera
@@ -196,13 +187,10 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
     let images = &fixture.images;
     let selects = &fixture.selects;
 
-    let mut scanner: GpuCornerScan<_> =
-        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
     let alone = fixture.keys(&mut scanner);
 
-    scanner
-        .submit_cells(FrameImages::Dense(images), selects)
-        .unwrap();
+    submit_cells(&mut scanner, &gpu_client().unwrap(), images, selects).unwrap();
     scanner.take_cells().unwrap();
     assert_eq!(fixture.keys(&mut scanner), alone, "out of the batch");
     assert_ne!(alone[0], alone[1], "the two cameras hold the same frame");
@@ -235,12 +223,15 @@ fn a_prepared_selection_is_spent_once() {
     let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
         * ((grid.y_stop - grid.y_start) / grid.cell + 1);
 
-    let mut scanner: GpuCornerScan<_> =
-        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
     // Only camera 0 is offered, so camera 1 has nothing prepared for it.
-    scanner
-        .submit_cells(FrameImages::Dense(&images), &[Some(select), None])
-        .unwrap();
+    submit_cells(
+        &mut scanner,
+        &gpu_client().unwrap(),
+        &images,
+        &[Some(select), None],
+    )
+    .unwrap();
     scanner.take_cells().unwrap();
 
     let mut first: Vec<Option<FastCorner>> = Vec::new();
@@ -251,7 +242,7 @@ fn a_prepared_selection_is_spent_once() {
     scanner
         .select_cells(0, &images[1], &select, None, &mut again)
         .unwrap();
-    let mut independent = GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
+    let mut independent = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
     let mut expected = Vec::new();
     independent
         .select_cells(0, &images[1], &select, None, &mut expected)

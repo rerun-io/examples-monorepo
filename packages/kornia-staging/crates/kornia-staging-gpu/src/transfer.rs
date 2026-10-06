@@ -32,3 +32,18 @@ pub fn binding_limits<R: cubecl::prelude::Runtime>(
         memory.max_page_size as usize,
     )
 }
+
+/// Download handles together, converting device failures and unwinds to typed errors.
+///
+/// # Errors
+/// Returns a typed read or device-loss error. Callers validate operation-specific lengths.
+pub fn read_buffers<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    handles: Vec<cubecl::server::Handle>,
+    what: &'static str,
+) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
+    crate::runtime::guarded(GpuError::DeviceLost { what }, || {
+        cubecl::future::reader::read_sync(client.read_async(handles))
+            .map_err(|error| read_failed(what, &error))
+    })
+}

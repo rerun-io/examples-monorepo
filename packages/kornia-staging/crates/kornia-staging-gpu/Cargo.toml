@@ -14,6 +14,7 @@ wgpu = ["dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
 [dependencies]
 bytes.workspace = true
 kornia-image.workspace = true
+kornia-imgproc.workspace = true
 cubecl.workspace = true
 cubecl-environment.workspace = true
 kornia-staging-imgproc.workspace = true
@@ -30,10 +31,16 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["msl"] }
 cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
+kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
 approx.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "pyramid"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "features"
 harness = false
 required-features = ["wgpu"]

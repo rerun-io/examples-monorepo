@@ -88,15 +88,8 @@ fn four_patch_builds_match_scalar_bits() {
     )
     .unwrap();
     let mut state = 0x7d91_230bu32;
-    let mut random = || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        state
-    };
-    for y in 0..64 {
-        for x in 0..80 {
-            image.set_pixel(x, y, 0, (random() >> 16) as u16).unwrap();
-        }
-    }
+    crate::test_fixtures::lcg_image_u16(&mut state, &mut image);
+    let mut random = || crate::test_fixtures::lcg_next(&mut state);
     for _ in 0..256 {
         let positions = std::array::from_fn(|_| {
             Vector2::new(

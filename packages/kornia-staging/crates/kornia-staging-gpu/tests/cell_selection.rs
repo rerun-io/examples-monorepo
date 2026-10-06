@@ -1,12 +1,5 @@
 //! CPU and GPU cell selectors against the kornia band walk, cell for cell.
-//!
-//! A binary of its own rather than three more tests in `gpu_kernels.rs`, and for
-//! a measurable reason: `the_whole_gpu_path_holds_the_pool_flat` asserts that
-//! CubeCL's pool is **exactly** flat frame after frame, and every test in one
-//! binary shares one client and one pool. These drive two 960x960 scanners at a
-//! time, which made that assertion fail about one run in three. Cargo runs test
-//! binaries one after another, so the separation is what makes both
-//! deterministic.
+#![allow(unsafe_code)]
 //!
 //! What is checked here is the exactness argument behind
 //! [`kornia_staging_imgproc::features::CornerScan::select_cells`]: the whole of
@@ -17,26 +10,23 @@
 //! key's row and column fields break them the way the row-major band walk and a
 //! stable sort do.
 //!
-//! CPU comparisons always run. GPU comparisons and lifecycle tests need
-//! `--features gpu-wgpu` and a working CubeCL runtime.
+//! These parity and lifecycle tests need `--features wgpu` and a working device.
+#![cfg(feature = "wgpu")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[cfg(feature = "gpu-core")]
-use kornia_staging_gpu::runtime::gpu_client;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use kornia_image::Image;
+use kornia_staging_gpu::{features::GpuCornerScan, runtime::gpu_client};
 use kornia_staging_imgproc::features::{
-    BandRequest, CellGrid, CellMasks, CellSelect, CenteredCellConfig, CenteredCellError,
-    CenteredCellKeypoints, CornerScan, CpuCornerScan, DetectorScratch, FAST_BORDER, FastCorner,
-    MaskRect, Occupancy, detect_keypoints_with_cells, threshold_rungs,
+    detect_keypoints_with_cells, threshold_rungs, BandRequest, CellGrid, CellMasks, CellSelect,
+    CenteredCellConfig, CenteredCellError, CenteredCellKeypoints, CornerScan, CpuCornerScan,
+    DetectorScratch, FastCorner, MaskRect, Occupancy, FAST_BORDER,
 };
-use slam_rs::frontend::flow::FrontendError;
-#[cfg(feature = "gpu-core")]
-use slam_rs::gpu::{GpuCornerScan, };
 
-mod common;
+mod selection;
+use selection as common;
 
 use common::cornered_image;
 
@@ -53,34 +43,6 @@ impl CornerScan for BandScan {
 
     fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], CenteredCellError> {
         self.0.band(request)
-    }
-}
-
-/// Give the heterogeneous CPU/GPU test collection one application error type.
-#[derive(Debug)]
-struct AppScan<S>(S);
-impl<S: CornerScan> CornerScan for AppScan<S>
-where
-    S::Error: Into<FrontendError>,
-{
-    type Error = FrontendError;
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), Self::Error> {
-        self.0.scan(camera, image).map_err(Into::into)
-    }
-    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], Self::Error> {
-        self.0.band(request).map_err(Into::into)
-    }
-    fn select_cells(
-        &mut self,
-        camera: usize,
-        image: &Image<u16, 1>,
-        select: &CellSelect,
-        eligibility: Option<(&Occupancy<'_>, &[bool])>,
-        out: &mut Vec<Option<FastCorner>>,
-    ) -> Result<kornia_staging_imgproc::features::SelectionStatus, Self::Error> {
-        self.0
-            .select_cells(camera, image, select, eligibility, out)
-            .map_err(Into::into)
     }
 }
 
@@ -101,19 +63,19 @@ fn detector_config(safe_radius: f32) -> CenteredCellConfig {
 /// engaged agrees with the host walk perfectly, and every check here would pass
 /// while measuring nothing. So each one says which path it meant.
 #[derive(Debug)]
-struct CountingScan {
-    inner: Box<dyn CornerScan<Error = FrontendError>>,
+struct CountingScan<S> {
+    inner: S,
     bands: Arc<AtomicUsize>,
     selections: Arc<AtomicUsize>,
 }
 
-impl CornerScan for CountingScan {
-    type Error = FrontendError;
-    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), FrontendError> {
+impl<S: CornerScan> CornerScan for CountingScan<S> {
+    type Error = S::Error;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), Self::Error> {
         self.inner.scan(camera, image)
     }
 
-    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], FrontendError> {
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], Self::Error> {
         self.bands.fetch_add(1, Ordering::Relaxed);
         self.inner.band(request)
     }
@@ -125,7 +87,7 @@ impl CornerScan for CountingScan {
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<Option<FastCorner>>,
-    ) -> Result<kornia_staging_imgproc::features::SelectionStatus, FrontendError> {
+    ) -> Result<kornia_staging_imgproc::features::SelectionStatus, Self::Error> {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner
             .select_cells(camera, image, select, eligibility, out)
@@ -155,8 +117,8 @@ impl ExpectedPath {
 }
 
 /// One camera's detection, from a scanner of the caller's choosing.
-fn detect_with(
-    scanner: Box<dyn CornerScan<Error = FrontendError>>,
+fn detect_with<S: CornerScan + 'static>(
+    scanner: S,
     image: &Image<u16, 1>,
     grid: &CellGrid,
     counts: &[i32],
@@ -164,7 +126,7 @@ fn detect_with(
     masks: &CellMasks,
     budget: usize,
 ) -> CenteredCellKeypoints {
-    let mut scratch = DetectorScratch::with_scanner(scanner);
+    let mut scratch = DetectorScratch::with_scanner(Box::new(scanner));
     let mut out: CenteredCellKeypoints = CenteredCellKeypoints::default();
     detect_keypoints_with_cells(
         image,
@@ -186,6 +148,7 @@ fn detect_with(
 }
 
 /// Inputs for one numerical selection comparison.
+#[derive(Clone, Copy)]
 struct DetectionCase<'a> {
     image: &'a Image<u16, 1>,
     grid: &'a CellGrid,
@@ -216,10 +179,10 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         config,
         masks,
         budget,
-        label,
+        label: _,
     } = case;
     let want: CenteredCellKeypoints = detect_with(
-        Box::new(AppScan(BandScan::default())),
+        BandScan::default(),
         image,
         grid,
         counts,
@@ -227,52 +190,80 @@ fn detection_agrees(case: DetectionCase<'_>, expected: ExpectedPath) -> usize {
         masks,
         budget,
     );
-    let scanners: Vec<(&str, Box<dyn CornerScan<Error = FrontendError>>)> = vec![
-        (
-            "CPU",
-            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
-        ),
-        #[cfg(feature = "gpu-core")]
-        (
-            "GPU",
-            Box::new(GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap()),
-        ),
-    ];
-    for (selector, scanner) in scanners {
-        let label = &format!("{label} ({selector})");
-        let bands: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-        let selections: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-        let got: CenteredCellKeypoints = detect_with(
-            Box::new(CountingScan {
-                inner: scanner,
-                bands: Arc::clone(&bands),
-                selections: Arc::clone(&selections),
-            }),
-            image,
-            grid,
-            counts,
-            config,
-            masks,
-            budget,
-        );
-        assert_eq!(got, want, "{label}: corners and responses");
-        expected.assert(
-            bands.load(Ordering::Relaxed),
-            selections.load(Ordering::Relaxed),
-            label,
-        );
-    }
+    compare_detection(
+        CpuCornerScan::with_cell_selection(true),
+        "CPU",
+        case,
+        expected,
+        &want,
+    );
+    compare_detection(
+        GpuCornerScan::new(gpu_client().unwrap()).unwrap(),
+        "GPU",
+        case,
+        expected,
+        &want,
+    );
     want.corners.len()
 }
 
-#[path = "gpu_detect/numerical_selection.rs"]
-mod numerical_selection;
-
-#[cfg(feature = "gpu-core")]
-#[path = "gpu_detect/batch_lifecycle.rs"]
+fn compare_detection<S: CornerScan + 'static>(
+    scanner: S,
+    selector: &str,
+    case: DetectionCase<'_>,
+    expected: ExpectedPath,
+    want: &CenteredCellKeypoints,
+) {
+    let label = &format!("{} ({selector})", case.label);
+    let bands = Arc::new(AtomicUsize::new(0));
+    let selections = Arc::new(AtomicUsize::new(0));
+    let got = detect_with(
+        CountingScan {
+            inner: scanner,
+            bands: bands.clone(),
+            selections: selections.clone(),
+        },
+        case.image,
+        case.grid,
+        case.counts,
+        case.config,
+        case.masks,
+        case.budget,
+    );
+    assert_eq!(&got, want, "{label}: corners and responses");
+    expected.assert(
+        bands.load(Ordering::Relaxed),
+        selections.load(Ordering::Relaxed),
+        label,
+    );
+}
+#[path = "selection/batch_lifecycle.rs"]
 mod batch_lifecycle;
+#[path = "selection/numerical_selection.rs"]
+mod numerical_selection;
+use kornia_staging_imgproc::features::backend::CELL_KEY_LIMIT;
 
-use slam_rs::frontend::detect::CELL_KEY_LIMIT;
-
-#[cfg(feature = "gpu-core")]
-use slam_rs::frontend::{detect::FrameCornerScan, input::FrameImages};
+fn submit_cells<R: cubecl::prelude::Runtime>(
+    scan: &mut GpuCornerScan<R>,
+    client: &cubecl::prelude::ComputeClient<R>,
+    images: &[Image<u16, 1>],
+    selects: &[Option<CellSelect>],
+) -> Result<(), kornia_staging_gpu::features::ScanError> {
+    scan.submit_cells(
+        images.iter().map(Image::size),
+        selects,
+        |scan, camera, select| {
+            scan.submit_input(
+                camera,
+                kornia_staging_gpu::features::ScanInput::Dense(&images[camera]),
+                select,
+            )
+        },
+        |work| {
+            unsafe {
+                work.run(client);
+            }
+            Ok(())
+        },
+    )
+}

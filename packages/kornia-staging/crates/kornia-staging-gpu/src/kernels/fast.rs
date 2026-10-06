@@ -26,8 +26,8 @@ pub(crate) const RING_BIAS: usize = 3;
 /// `corner_score_9 > t` — including the saturation, since a saturated bound
 /// forces the corresponding difference under `t` too. So one dense score image
 /// answers every rung of the detector's threshold ladder, and
-/// `tests/fast_model.rs` checks that claim against kornia itself at five rungs
-/// and two widths before any of this runs.
+/// the staged `the_gpu_corner_scan_is_exact_against_kornia` test checks
+/// threshold equivalence and output ordering against Kornia.
 #[cube(launch, launch_unchecked)]
 fn fast_score_kernel(
     frame: &[u16],
@@ -53,18 +53,8 @@ fn fast_score_kernel(
     // the bus and saves a whole-frame pass on the host, which measured the
     // larger of the two.
     let center = u32::cast_from(frame[y * width + x]) >> 8u32;
-    // `#[unroll]` on all three loops below, and not for the sake of this card.
-    // `dark` and `bright` are indexed dynamically (`dark[(k + i) % 16]`) from
-    // loops with comptime bounds, so a rolled kernel cannot keep them in
-    // registers: 16 x 4 B x 2 arrays x 256 units is 32 kB of local memory per
-    // cube in the frame's hottest kernel, plus seventeen uncoalesced global
-    // loads per pixel. Unrolled, every index is a literal and both arrays fit
-    // in registers. On a 5090 at 7-11 % utilisation this changes nothing
-    // measurable and nothing should be concluded from measuring it here; it is
-    // for the shared-LPDDR targets the portable lane exists for, where
-    // `Robocap.md`'s Pi 5 lesson is that a memory-bound kernel loses to the CPU
-    // outright. The corner-scan equality tests on both lanes are what say it
-    // changed no value.
+    // Unroll the fixed ring so all indices are constants and its samples can
+    // stay in registers instead of per-thread local memory.
     let mut dark = Array::<u32>::new(16usize);
     let mut bright = Array::<u32>::new(16usize);
     #[unroll]
@@ -113,7 +103,7 @@ fn fast_score_kernel(
 /// Lanes per block of kornia's local-maximum filter, off the CPU detector's own
 /// constant so the kernel and the host cannot disagree about the block
 /// alignment that decides the corner set.
-const FILTER_LANES: usize = crate::frontend::detect::FAST_FILTER_LANES;
+const FILTER_LANES: usize = kornia_staging_imgproc::features::backend::FAST_FILTER_LANES;
 /// The last lane of a block, which has no right-hand neighbour to beat.
 const FILTER_LAST: usize = FILTER_LANES - 1;
 

@@ -273,19 +273,19 @@ pub struct CellSelect {
 ///
 /// Unreachable as a real key: a winner scores at least `threshold + 1 >= 2`, so
 /// its score field is at most 253 where this is 255.
-pub(super) const NO_CELL_WINNER: u32 = u32::MAX;
+pub const NO_CELL_WINNER: u32 = u32::MAX;
 
 /// Where a packed cell key keeps `255 - score`.
-pub(super) const KEY_SCORE_SHIFT: u32 = 24;
+pub const KEY_SCORE_SHIFT: u32 = 24;
 /// Where a packed cell key keeps the row.
-pub(super) const KEY_ROW_SHIFT: u32 = 12;
+pub const KEY_ROW_SHIFT: u32 = 12;
 /// A packed cell key's column field, which is also its row field's width.
-const KEY_FIELD_MASK: u32 = 0xFFF;
+pub const KEY_FIELD_MASK: u32 = 0xFFF;
 
 /// The frame size a packed cell key stops describing.
 ///
 /// Twelve bits each for row and column; larger images use the band path.
-const CELL_KEY_LIMIT: usize = 1 << KEY_ROW_SHIFT;
+pub const CELL_KEY_LIMIT: usize = 1 << KEY_ROW_SHIFT;
 
 /// Cell-selection geometry for a one-point-per-cell detector, when supported.
 ///
@@ -392,15 +392,15 @@ pub enum SelectionStatus {
 }
 
 /// Decode one packed winner, retaining the sentinel as absence.
-pub(crate) fn decode_key(key: u32) -> Option<([f32; 2], u32)> {
+pub fn decode_cell_key(key: u32) -> Option<kornia_imgproc::features::FastCorner> {
     if key == NO_CELL_WINNER {
         return None;
     }
-    Some((
-        [
+    Some(kornia_imgproc::features::FastCorner {
+        xy: [
             (key & KEY_FIELD_MASK) as f32,
             ((key >> KEY_ROW_SHIFT) & KEY_FIELD_MASK) as f32,
         ],
-        255 - (key >> KEY_SCORE_SHIFT),
-    ))
+        response: super::opencv_corner_score((255 - (key >> KEY_SCORE_SHIFT)) as f32 / 255.0),
+    })
 }

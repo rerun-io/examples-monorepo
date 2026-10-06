@@ -326,8 +326,8 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn neon_scores_match_scalar_on_random_and_textured_pixels() {
-        let random = crate::test_images::random_image(131, 97, 0x5f71_4213);
-        let mut textured = crate::test_images::zeros(960, 960);
+        let random = crate::test_fixtures::random_image(131, 97, 0x5f71_4213);
+        let mut textured = crate::test_fixtures::zeros(960, 960);
         for (index, pixel) in textured.as_slice_mut().iter_mut().enumerate() {
             let (x, y) = ((index % 960) as f32, (index / 960) as f32);
             let waves = 128.0 + 60.0 * (x / 11.0).sin() + 50.0 * (y / 7.0).cos();

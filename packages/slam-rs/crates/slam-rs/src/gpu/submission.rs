@@ -30,7 +30,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
 /// All deferred GPU work for a frame, in upload/launch order.
 pub(super) enum Launch {
     Pyramid(kornia_staging_gpu::pyramid::PyramidLaunch),
-    Corners(super::detect::batch::CornerLaunch),
+    Corners(kornia_staging_gpu::features::CornerLaunch),
     Klt(super::track::FusedLaunch),
     Stereo(super::frontend::onewait::StereoLaunch),
 }
@@ -41,7 +41,8 @@ impl Launch {
             // SAFETY: The frame prepares and runs these launches on its exclusive
             // client stream, before any later frame can reuse the upload.
             Self::Pyramid(launch) => unsafe { launch.run(client) },
-            Self::Corners(launch) => launch.run(client),
+            // SAFETY: The frame queues this work after its pyramid on the same client stream.
+            Self::Corners(launch) => unsafe { launch.run(client) },
             Self::Klt(launch) => launch.run(client),
             Self::Stereo(launch) => launch.run(client),
         }
@@ -103,6 +104,8 @@ impl LaunchList {
         &self,
         client: &cubecl::prelude::ComputeClient<R>,
     ) {
+        #[cfg(test)]
+        super::runtime::fire_if_armed("queued launch");
         let commands = std::mem::take(
             &mut self
                 .0
@@ -144,7 +147,7 @@ impl Drop for FrameBatch {
     }
 }
 
-pub(super) use kornia_staging_gpu::transfer::{binding_limits, read_failed, upload};
+pub(super) use kornia_staging_gpu::transfer::read_failed;
 
 /// Download every handle together and map device errors at one boundary.
 #[cfg(feature = "gpu-core")]
@@ -176,17 +179,4 @@ pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
     let pending = client.read_async(handles);
     after_copy()?;
     cubecl::future::reader::read_sync(pending).map_err(|error| read_failed(what, &error))
-}
-
-/// One frame on the device, and how many pixels it holds.
-///
-/// Upload a dense Kornia frame, with one aligned transfer copy and no row repacking.
-#[cfg(feature = "gpu-core")]
-pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    image: &kornia_image::Image<u16, 1>,
-) -> (cubecl::server::Handle, usize) {
-    use cubecl::prelude::CubeElement;
-    let pixels = image.as_slice();
-    (upload(client, u16::as_bytes(pixels)), pixels.len())
 }

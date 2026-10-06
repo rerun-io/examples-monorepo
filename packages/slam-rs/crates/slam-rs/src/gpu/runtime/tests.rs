@@ -171,3 +171,32 @@ fn a_panic_in_an_exported_read_is_a_typed_error() {
 
     pyramid.copy_level_into(0, &mut level).unwrap();
 }
+
+#[test]
+fn a_failed_corner_queue_flush_is_typed_and_invalidates_old_bands() {
+    use kornia_image::{Image, ImageSize};
+    use kornia_staging_imgproc::features::{BandRequest, CornerScan};
+    let mut scan = GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
+    let image = Image::from_size_val(
+        ImageSize {
+            width: 64,
+            height: 64,
+        },
+        0u16,
+    )
+    .unwrap();
+    let band = BandRequest {
+        row: 0,
+        rung: 0,
+        y: 3,
+        rows: 44,
+        threshold: 5,
+    };
+    scan.scan(0, &image).unwrap();
+    assert!(scan.band(band).is_ok());
+    arm_fault_at("queued launch");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan.scan(0, &image)));
+    assert!(outcome.is_ok(), "the device panic must be converted");
+    assert!(outcome.unwrap().is_err());
+    assert!(scan.band(band).is_err(), "old bands must be invalidated");
+}

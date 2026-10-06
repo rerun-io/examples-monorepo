@@ -23,8 +23,6 @@ use kornia_staging_gpu::GpuRuntime;
 use kornia_staging_gpu::runtime::gpu_client;
 use cubecl::frontend::CompilationArg;
 use kornia_image::Image;
-use kornia_imgproc::features::FastCorner;
-use kornia_staging_imgproc::features::{BandRequest, CenteredCellError, CornerScan, CpuCornerScan};
 use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
 use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowResult, FlowTransforms, PatchSoA, PointsSoA, PatchTrackerPlan};
@@ -34,10 +32,7 @@ use kornia_staging_slam::tracking::optical_flow::{
 use kornia_staging_imgproc::pyramid::PyramidPlanU16;
 use nalgebra::Vector2;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::gpu::{
-    GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, 
-    
-};
+use slam_rs::gpu::{GpuPatchSources, GpuPatchTracker, GpuPyramidBuilder, };
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder};
 
 mod common;
@@ -45,78 +40,8 @@ mod common;
 #[path = "../src/gpu/finite.rs"]
 mod finite;
 
-use common::gpu::{
-    LEVELS, MAX_ITERATIONS, MAX_KEYPOINTS, MAX_RECOVERED_DIST2, band_at, guesses_at,
-};
+use common::gpu::{LEVELS, MAX_ITERATIONS, MAX_KEYPOINTS, MAX_RECOVERED_DIST2, guesses_at};
 use common::{cornered_image, grid_positions, texture, textured_image};
-
-fn packed_texture(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
-    let source = textured_image(width, height, dx, dy);
-    let bytes: Vec<u8> = source
-        .as_slice()
-        .iter()
-        .map(|pixel| (pixel >> 8) as u8)
-        .collect();
-    let mut image = slam_rs::image::empty();
-    slam_rs::image::fill_from_u8_strided(&mut image, &bytes, width, height, width).unwrap();
-    image
-}
-
-/// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
-fn both_pyramids(image: &Image<u16, 1>) -> (PyramidPlanU16, GpuPyramid<GpuRuntime>) {
-    let (width, height): (usize, usize) = (image.width(), image.height());
-
-    let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidPlanU16 = cpu_builder.allocate(width, height, LEVELS).unwrap();
-    cpu_builder.build(0, image, &mut cpu).unwrap();
-
-    let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
-    let mut gpu: GpuPyramid<GpuRuntime> = gpu_builder.allocate(width, height, LEVELS).unwrap();
-    gpu_builder.build(0, image, &mut gpu).unwrap();
-
-    (cpu, gpu)
-}
-
-/// Every level of the two pyramids holds the same geometry and the same pixels.
-///
-/// The message names the worst pixel and where it is, so a regression says how
-/// far it moved rather than only that it moved. Equality is the bound: the
-/// arithmetic is integer on both lanes (module doc).
-fn assert_levels_equal(cpu: &PyramidPlanU16, gpu: &GpuPyramid<GpuRuntime>, label: &str) {
-    assert_eq!(gpu.num_levels(), cpu.num_levels(), "{label}");
-    let mut expected: Image<u16, 1> = slam_rs::image::empty();
-    let mut actual: Image<u16, 1> = slam_rs::image::empty();
-    for level in 0..cpu.num_levels() {
-        assert_eq!(
-            gpu.level_size(level),
-            cpu.level_size(level),
-            "{label}, level {level}"
-        );
-        cpu.copy_level_into(level, &mut expected).unwrap();
-        gpu.copy_level_into(level, &mut actual).unwrap();
-        let mut worst: i64 = 0;
-        let mut worst_at: (usize, usize) = (0, 0);
-        for y in 0..expected.height() {
-            for x in 0..expected.width() {
-                let difference: i64 = i64::from(actual.get_pixel(x, y, 0).copied().ok().unwrap())
-                    - i64::from(expected.get_pixel(x, y, 0).copied().ok().unwrap());
-                if difference.abs() > worst {
-                    worst = difference.abs();
-                    worst_at = (x, y);
-                }
-            }
-        }
-        assert_eq!(
-            worst,
-            0,
-            "{label}, level {level} differs: max-abs-diff {worst} at {worst_at:?} \
-             ({}x{}); the fused 5x5 pass is integer arithmetic and must be exact",
-            expected.width(),
-            expected.height()
-        );
-    }
-}
 
 /// A frame whose stride is wider than its width — dav1d's shape — must upload
 /// the same pixels, not the padding.
@@ -134,8 +59,12 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
         }
     }
 
-    let (cpu, gpu) = both_pyramids(&strided);
-    assert_levels_equal(&cpu, &gpu, "a 64x48 frame with stride 96");
+    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
+    let mut pyramid = builder.allocate(64, 48, LEVELS).unwrap();
+    builder.build(0, &strided, &mut pyramid).unwrap();
+    let mut actual = slam_rs::image::empty();
+    pyramid.copy_level_into(0, &mut actual).unwrap();
+    assert_eq!(actual.as_slice(), strided.as_slice());
 }
 
 /// [`textured_image`]'s field at 16.8 M pixels, in a fraction of the time.
@@ -532,183 +461,6 @@ fn both_lanes_agree_on_a_bad_initial_guess() {
     }
 }
 
-/// Every band the detector asks for, at every rung of the shipped ladder, from
-/// two scanners — and the count of corners they agreed on.
-///
-/// One per grid row of a 50-pixel cell, which is the shape
-/// `detect_keypoints_with_cells` drives. Written once because both corner tests
-/// need exactly it: the "exact against kornia" one and the "reads the pyramid"
-/// one, which would otherwise drift into checking different amounts.
-fn bands_agree(
-    reference: &mut impl CornerScan,
-    actual: &mut impl CornerScan,
-    height: usize,
-    label: &str,
-) -> usize {
-    let mut total: usize = 0;
-    for (row, band_y) in (3..height - 3).step_by(50).enumerate() {
-        for (rung, threshold) in [40i32, 20, 10, 5, 1].into_iter().enumerate() {
-            let request: BandRequest = band_at(row, rung, band_y, 44, threshold);
-            let want: Vec<FastCorner> = reference.band(request).unwrap().to_vec();
-            let got: &[FastCorner] = actual.band(request).unwrap();
-            assert_eq!(
-                got.len(),
-                want.len(),
-                "{label} band {band_y} threshold {threshold}: {} corners against {}",
-                got.len(),
-                want.len()
-            );
-            for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
-                assert_eq!(
-                    (got.xy, got.response),
-                    (want.xy, want.response),
-                    "{label} band {band_y} threshold {threshold}, corner {index}"
-                );
-            }
-            total += want.len();
-        }
-    }
-    total
-}
-
-/// The GPU corner scanner is **exact**, not within a tolerance.
-///
-/// kornia's candidate test at threshold `t` is the same statement as
-/// `corner_score_9 > t`, and its in-block local-maximum filter compares raw
-/// scores, so one dense score image answers every rung of the ladder. That is
-/// what `tests/fast_model.rs` establishes on the CPU against kornia itself;
-/// this checks that the two CubeCL kernels implement the same thing, corner for
-/// corner, response for response, and in the same row-major order.
-#[test]
-fn the_gpu_corner_scan_is_exact_against_kornia() {
-    for (width, height) in [(960usize, 240usize), (512, 192)] {
-        let image: Image<u16, 1> = cornered_image(width, height);
-        let mut cpu: CpuCornerScan = CpuCornerScan::default();
-        let mut gpu: GpuCornerScan<_> =
-            GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
-        cpu.scan(0, &image).unwrap();
-        gpu.scan(0, &image).unwrap();
-
-        let total: usize = bands_agree(&mut cpu, &mut gpu, height, &format!("{width}x{height}"));
-        println!("{width}x{height}: {total} corners over every band and rung, identical");
-    }
-}
-
-/// The GPU lane refuses a band before a scan with the same typed error the CPU
-/// lane returns, rather than caching an empty one and reporting success (D32).
-#[test]
-fn a_gpu_band_before_a_scan_is_refused() {
-    let mut gpu: GpuCornerScan<_> =
-        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
-    assert_eq!(
-        gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
-        slam_rs::frontend::flow::FrontendError::Detect(CenteredCellError::NotScanned)
-    );
-}
-
-/// The scanner is reused frame after frame, so the second frame's bands must be
-/// the second frame's.
-#[test]
-fn a_reused_corner_scan_carries_only_the_newest_frame() {
-    let first: Image<u16, 1> = cornered_image(512, 128);
-    let second: Image<u16, 1> = slam_rs::image::zeros(512, 128).unwrap();
-
-    let mut gpu: GpuCornerScan<_> =
-        GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
-    gpu.scan(0, &first).unwrap();
-    assert!(
-        !gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
-        "the textured frame has corners"
-    );
-    gpu.scan(0, &second).unwrap();
-    assert!(
-        gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
-        "a black frame has none"
-    );
-}
-
-/// The detector reads the pyramid's level 0, and uploads nothing.
-///
-/// The corner scanner and the pyramid builder are handed the same pixels once
-/// per camera per frameset — the detector's input *is* level 0
-///  — and until the camera index reached
-/// both seams the GPU scanner had no way to know that, so it uploaded the frame
-/// a second time. This is the test that the sharing is exact rather than merely
-/// cheaper: the same corners at every rung, from a scanner that uploaded zero
-/// frames, on two cameras of different geometry so the per-camera table is
-/// actually indexed.
-#[test]
-fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
-    let frames: [Image<u16, 1>; 2] = [cornered_image(960, 240), cornered_image(512, 192)];
-    let client = gpu_client().unwrap();
-
-    // The lane the frontend runs: one builder, one scanner, one client, the
-    // level-0 table between them.
-    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
-    let mut shared: GpuCornerScan<_> =
-        GpuCornerScan::new(client.clone(), Default::default()).unwrap();
-
-    // The lane before this change: the scanner uploads its own copy.
-    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(client, Default::default()).unwrap();
-
-    let mut pyramids: Vec<_> = frames
-        .iter()
-        .map(|frame| builder.allocate(frame.width(), frame.height(), 3).unwrap())
-        .collect();
-    for (camera, frame) in frames.iter().enumerate() {
-        builder.build(camera, frame, &mut pyramids[camera]).unwrap();
-    }
-    shared.use_level0(&mut builder);
-    for (camera, frame) in frames.iter().enumerate() {
-        shared.scan(camera, frame).unwrap();
-        alone.scan(camera, frame).unwrap();
-        let total: usize = bands_agree(
-            &mut alone,
-            &mut shared,
-            frame.height(),
-            &format!("camera {camera}"),
-        );
-        println!(
-            "camera {camera} ({}x{}): {total} corners identical, uploads shared {} / alone {}",
-            frame.width(),
-            frame.height(),
-            shared.frame_uploads(),
-            alone.frame_uploads()
-        );
-    }
-    assert_eq!(
-        shared.frame_uploads(),
-        0,
-        "the shared scanner uploaded a frame the pyramid had already put on the device"
-    );
-    assert_eq!(alone.frame_uploads(), frames.len());
-
-    // And each camera's three device buffers are allocated once for the life of
-    // the scanner, not once per frameset. A one-slot geometry cache holds only
-    // for a rig whose cameras are all the same size; on this one — 960x240 next
-    // to 512x192, which is why the test drives two — a scanner without the
-    // cache misses on every scan and re-allocates 4 MB.
-    let allocations: usize = shared.buffer_allocations();
-    assert_eq!(allocations, frames.len(), "one geometry, one allocation");
-    for _ in 0..3 {
-        for (camera, frame) in frames.iter().enumerate() {
-            shared.scan(camera, frame).unwrap();
-        }
-    }
-    assert_eq!(
-        shared.buffer_allocations(),
-        allocations,
-        "three more framesets of the same rig re-allocated the scan buffers"
-    );
-    assert_eq!(shared.frame_uploads(), 0);
-
-    // A frame whose geometry does not match the published entry is refused
-    // rather than read: the fallback upload is what keeps a stale table safe.
-    let odd: Image<u16, 1> = cornered_image(256, 128);
-    shared.scan(0, &odd).unwrap();
-    assert_eq!(shared.frame_uploads(), 1);
-}
-
 #[cubecl::prelude::cube(launch_unchecked)]
 fn finite_probe(input: &[f32], output: &mut [u32]) {
     use cubecl::prelude::*;
@@ -1072,3 +824,5 @@ fn fused_temporal_batch_matches_cpu() {
         }
     }
 }
+
+use kornia_staging_imgproc::test_fixtures::packed_texture;

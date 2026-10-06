@@ -52,6 +52,8 @@ impl<R: Runtime> GpuFrame<R> {
     }
 
     fn build(&mut self, images: FrameImages<'_>, levels: usize) -> Result<(), FrontendError> {
+        // Occupied cells can leave unused selections; they belong to the previous frame.
+        self.detector.scanner_mut().inner.abort_selection();
         ensure_pyramid_sizes(
             &self.builder,
             &mut self.pyramids,
@@ -184,10 +186,9 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             if let Some(state) = self.one_wait.as_ref().filter(|_| stereo_read) {
                 reads.push(state.io.clone());
             }
-            let staged = self.current.detector.scanner_mut().take_staged();
-            let selected = staged.is_some();
-            if let Some(handles) = staged {
-                reads.extend(handles);
+            let mut staged = self.current.detector.scanner_mut().take_staged();
+            if let Some(selection) = &mut staged {
+                reads.extend(selection.take_handles());
             }
             let mut bytes = if reads.is_empty() {
                 Vec::new()
@@ -211,11 +212,11 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 )?
             };
             let outputs = lanes + usize::from(stereo_read);
-            if selected && bytes.len() >= outputs {
+            if let Some(selection) = staged.filter(|_| bytes.len() >= outputs) {
                 self.current
                     .detector
                     .scanner_mut()
-                    .deliver(bytes.split_off(outputs));
+                    .deliver(selection, bytes.split_off(outputs))?;
             }
             if stereo_read && bytes.len() == outputs {
                 timings.gpu_one_wait = true;
@@ -349,6 +350,8 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
             let mark = std::time::Instant::now();
             self.current.selects.copy_from_slice(selects);
             self.current.selects[0] = None;
+            // The primary-camera pass is complete; unused results must not block side cameras.
+            self.current.detector.scanner_mut().inner.abort_selection();
             self.current
                 .detector
                 .scanner_mut()
@@ -393,5 +396,30 @@ impl<P: Pattern, R: Runtime> std::fmt::Debug for GpuStages<P, R> {
         f.debug_struct("GpuStages")
             .field("tracker", &self.tracker)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, feature = "gpu-wgpu"))]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the validation host"]
+#[allow(clippy::unwrap_used)]
+fn rebuilding_a_frame_discards_unused_detector_results() {
+    use kornia_image::{Image, ImageSize};
+    use kornia_staging_imgproc::features::CellGrid;
+
+    let client = kornia_staging_gpu::runtime::gpu_client().unwrap();
+    let launches = submission::LaunchList::default();
+    let mut frame = GpuFrame::new(client, &launches).unwrap();
+    let images = [Image::from_size_val(ImageSize { width: 64, height: 64 }, 0u16).unwrap()];
+    let selects = [Some(CellSelect {
+        grid: CellGrid::new(64, 64, 16).unwrap(),
+        threshold: 5,
+        safe_radius: 0.0,
+    })];
+    for _ in 0..2 {
+        frame.build(FrameImages::Dense(&images), 3).unwrap();
+        frame.detector.scanner_mut().submit_cells(FrameImages::Dense(&images), &selects).unwrap();
+        frame.detector.scanner_mut().take_cells().unwrap();
+        // A full occupancy grid can leave these results unused until this frame slot is rebuilt.
     }
 }

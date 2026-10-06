@@ -3194,6 +3194,7 @@ dependencies = [
  "cubecl-environment",
  "cubecl-wgpu",
  "kornia-image",
+ "kornia-imgproc",
  "kornia-staging-algebra",
  "kornia-staging-imgproc",
  "log",

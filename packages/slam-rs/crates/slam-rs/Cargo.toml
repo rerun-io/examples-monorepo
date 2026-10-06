@@ -41,5 +41,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
 approx = { workspace = true }
 proptest = { workspace = true }

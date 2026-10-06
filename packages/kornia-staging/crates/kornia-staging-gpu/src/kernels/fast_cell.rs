@@ -1,6 +1,6 @@
 //! Cell-local FAST-9 scoring, suppression and exact winner selection.
 use super::{
-    cell_select::{CellSelectGeometry, NO_WINNER, cell_key, min_tree},
+    cell_select::{cell_key, min_tree, CellSelectGeometry, NO_WINNER},
     layout::Buffer,
 };
 use cubecl::prelude::*;
@@ -38,8 +38,10 @@ fn score_tile(
         let mut diff = Array::<i32>::new(16usize);
         #[unroll]
         for k in 0..16usize {
-            let dy = comptime!(crate::frontend::detect::FAST_RING_ROW[k] + 3) as usize;
-            let dx = comptime!(crate::frontend::detect::FAST_RING_COLUMN[k] + 3) as usize;
+            let dy =
+                comptime!(kornia_staging_imgproc::features::backend::FAST_RING_ROW[k] + 3) as usize;
+            let dx = comptime!(kornia_staging_imgproc::features::backend::FAST_RING_COLUMN[k] + 3)
+                as usize;
             diff[k] = i32::cast_from(tile_pixel(tile, (y + dy - 3usize) * cell + x + dx - 3usize))
                 - center;
         }

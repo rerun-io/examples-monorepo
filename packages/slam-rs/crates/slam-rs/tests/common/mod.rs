@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use kornia_image::Image;
-use kornia_staging_imgproc::optical_flow::patch_tracker::PointsSoA;
-use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, Vector3, Vector6};
 use serde::Deserialize;
 use slam_rs::calib::{BasaltCamera, Calibration, Kb4Params};
 use slam_rs::config::VioConfig;
@@ -219,73 +218,17 @@ pub fn config_for(dataset_name: &str) -> VioConfig {
     dead_code,
     reason = "used by vio_pipeline; other binaries compile a subset"
 )]
-pub struct Pgm {
-    pub width: usize,
-    pub height: usize,
-    pub pixels: Vec<u8>,
-}
+pub use kornia_staging_imgproc::test_fixtures::Pgm;
 
-/// `frame_<NNN>_cam<C>.pgm` under `directory`, in 's
-/// layout.
-#[allow(
-    dead_code,
-    reason = "used by vio_pipeline; other binaries compile a subset"
-)]
+#[allow(dead_code)]
+pub fn shared_frames() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../kornia-staging/fixtures/frames")
+}
+#[allow(dead_code)]
 pub fn read_pgm(directory: &Path, frame: usize, camera: usize) -> Pgm {
-    let path: PathBuf = directory.join(format!("frame_{frame:03}_cam{camera}.pgm"));
-    let bytes: Vec<u8> = std::fs::read(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-
-    // "P5\n<w> <h>\n255\n" then the raster; the writer emits exactly that.
-    let mut fields: Vec<usize> = Vec::new();
-    let mut cursor: usize = 2;
-    while fields.len() < 3 {
-        while bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        let start: usize = cursor;
-        while !bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        fields.push(
-            std::str::from_utf8(&bytes[start..cursor])
-                .unwrap()
-                .parse()
-                .unwrap(),
-        );
-    }
-    cursor += 1;
-    assert_eq!(fields[2], 255, "{} is not an 8-bit PGM", path.display());
-    Pgm {
-        width: fields[0],
-        height: fields[1],
-        pixels: bytes[cursor..].to_vec(),
-    }
-}
-
-/// One committed MIO10 frameset as the frontend and the detector take it:
-/// 960x960, the msd-index rig's geometry, each PGM byte in the high half of a
-/// `u16`.
-///
-/// The GPU exactness gate and the host-seam bench drive the same three
-/// framesets, so the fixture location and the widening live here rather than
-/// once per binary. They stay separate binaries: D72 wants the shared CubeCL
-/// pool isolated per test process.
-#[allow(
-    dead_code,
-    reason = "used by gpu_detect; other binaries compile a subset"
-)]
-pub fn mio10_frame(frame: usize, camera: usize) -> Image<u16, 1> {
-    let pgm: Pgm = read_pgm(&fixtures().join("flow/frames"), frame, camera);
-    let mut image: Image<u16, 1> = slam_rs::image::zeros(pgm.width, pgm.height).unwrap();
-    for y in 0..pgm.height {
-        for x in 0..pgm.width {
-            image
-                .set_pixel(x, y, 0, u16::from(pgm.pixels[y * pgm.width + x]) << 8)
-                .unwrap();
-        }
-    }
-    image
+    kornia_staging_imgproc::test_fixtures::read_pgm(
+        &directory.join(format!("frame_{frame:03}_cam{camera}.pgm")),
+    )
 }
 
 /// How many consecutive framesets `directory` covers, up to `limit`: a
@@ -465,13 +408,12 @@ pub fn dense_schur(
 // every patch is well conditioned, and a corner-rich one where FAST has plenty
 // to find.
 
-#[path = "../../../../../kornia-staging/crates/kornia-staging-gpu/tests/common/images.rs"]
-mod images;
 #[allow(
     unused_imports,
     reason = "integration binaries use different fixture subsets"
 )]
 pub use images::{cornered_bytes, cornered_image, texture, textured_image};
+use kornia_staging_imgproc::test_fixtures as images;
 
 /// A grid of source positions well inside a `size` x `size` frame, spaced so no
 /// two patches overlap and every one is far enough from the border for the
@@ -480,19 +422,9 @@ pub use images::{cornered_bytes, cornered_image, texture, textured_image};
     dead_code,
     reason = "used by gpu_kernels; other binaries compile a subset"
 )]
-pub fn grid_positions(size: usize) -> PointsSoA {
-    let mut positions: PointsSoA = PointsSoA::with_capacity(256);
-    let mut y: usize = 96;
-    while y + 96 < size {
-        let mut x: usize = 96;
-        while x + 96 < size {
-            positions.push(Vector2::new(x as f32 + 0.37, y as f32 - 0.21));
-            x += 71;
-        }
-        y += 71;
-    }
-    positions
-}
+#[allow(unused_imports, reason = "integration binaries use different fixtures")]
+pub use gpu_flow::grid_positions;
+use kornia_staging_imgproc::test_fixtures as gpu_flow;
 
 // ---- frontend fixtures (S25 FRONT) ----------------------------------------
 //

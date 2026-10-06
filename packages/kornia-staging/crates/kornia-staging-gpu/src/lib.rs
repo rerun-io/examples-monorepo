@@ -18,3 +18,5 @@ pub mod transfer;
 pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 
 pub mod pyramid;
+
+pub mod features;

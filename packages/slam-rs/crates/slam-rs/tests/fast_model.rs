@@ -243,6 +243,6 @@ fn the_model_reproduces_kornia() {
     }
 }
 
-use slam_rs::frontend::detect::{
+use kornia_staging_imgproc::features::backend::{
     FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
 };

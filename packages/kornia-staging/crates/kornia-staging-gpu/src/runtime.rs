@@ -10,6 +10,15 @@ use crate::GpuRuntime;
 /// What can go wrong bringing up or running a GPU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
+    /// Cell submissions require a batch started by the scanner.
+    #[error("begin a cell-selection batch before submitting cameras")]
+    BatchNotBegun,
+    /// Camera submissions must be in range, unique and ascending.
+    #[error("camera {camera} is out of range or out of order for this batch")]
+    InvalidBatchCamera {
+        /// Rejected camera index.
+        camera: usize,
+    },
     /// A batch has different input and output counts.
     #[error("batch has {inputs} inputs but {outputs} outputs")]
     BatchSizeMismatch {

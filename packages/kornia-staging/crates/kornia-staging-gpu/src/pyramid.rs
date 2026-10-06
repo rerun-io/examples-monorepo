@@ -65,7 +65,7 @@ pub enum PyramidError {
 /// allocation alive, so a published entry is readable whatever happens to the
 /// pyramid afterwards.
 #[derive(Debug, Clone)]
-pub struct Level0 {
+pub(crate) struct Level0 {
     /// A view of exactly `width * height` packed `u16` pixels. Frameset builds
     /// publish the front of each camera's even-arena slot; individual builds
     /// publish the upload buffer that their level-zero copy reads.
@@ -766,7 +766,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
     }
 
     /// Replace the caller's level-zero views with this build's views.
-    pub fn take_level0(&mut self, out: &mut Vec<Option<Level0>>) {
+    pub(crate) fn take_level0(&mut self, out: &mut Vec<Option<Level0>>) {
         out.clear();
         std::mem::swap(out, &mut self.level0);
     }
