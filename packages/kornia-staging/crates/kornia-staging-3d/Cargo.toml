@@ -17,6 +17,7 @@ thiserror.workspace = true
 nalgebra.workspace = true
 
 [dev-dependencies]
+kornia-tensor.workspace = true
 serde.workspace = true
 proptest.workspace = true
 approx.workspace = true

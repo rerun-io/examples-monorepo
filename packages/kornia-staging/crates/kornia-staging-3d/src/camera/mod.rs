@@ -379,3 +379,6 @@ mod test_oracles {
     pub mod pinhole;
 }
 
+/// Virtual pinhole map generation, including an opt-in approximate KB4 kernel.
+#[cfg(feature = "virtual-camera")]
+pub mod virtual_camera;
