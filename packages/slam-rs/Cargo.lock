@@ -6666,6 +6666,7 @@ dependencies = [
  "kornia-imgproc",
  "kornia-staging-3d",
  "kornia-staging-algebra",
+ "kornia-staging-imgproc",
  "log",
  "nalgebra",
  "proptest",
@@ -6701,6 +6702,7 @@ dependencies = [
 name = "slam-rs-py"
 version = "0.1.0"
 dependencies = [
+ "kornia-image",
  "numpy",
  "pyo3",
  "slam-rs",

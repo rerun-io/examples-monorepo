@@ -22,7 +22,6 @@ use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 /// a decision. The frontend uses f32; the estimator scalar is selectable.
 /// With `port.frontend_lag`, frontend(t) runs beside estimator(t-1); results
 /// carry t-1's timestamp. Drain the final result with [`Self::flush`].
-#[derive(Debug)]
 pub struct Vio<S: Scalar = f32> {
     frontend: FrontendLane,
     estimator: estimator::SqrtKeypointVio<S>,
@@ -38,10 +37,10 @@ pub struct Vio<S: Scalar = f32> {
     /// The static bias calibration, applied to the frontend's samples in `f32`
     /// and cast back to `f64`.
     calib_f32: calib::Calibration<f32>,
-    /// Owned frames: reusable widened buffers on CPU, dense bytes on GPU.
-    frames: Vec<image::ImageU16>,
+    /// Owned frames: reusable dense widened buffers.
+    frames: Vec<kornia_image::Image<u16, 1>>,
     /// Reusable lookahead input, filled by the same lane as the current frame.
-    next_frames: Vec<image::ImageU16>,
+    next_frames: Vec<kornia_image::Image<u16, 1>>,
     /// `img->masks`, always empty here: masks come from Monado.
     masks: Vec<frontend::detect::Masks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
@@ -306,13 +305,12 @@ impl<S: Scalar> Vio<S> {
             && let Some((next_t_ns, next_images)) = lookahead
         {
             let vio = &mut *prepared.vio;
-            vio.next_frames
-                .resize_with(next_images.len(), image::ImageU16::default);
+            vio.next_frames.resize_with(next_images.len(), image::empty);
             for (frame, view) in vio.next_frames.iter_mut().zip(next_images) {
                 vio.frontend.fill_frame(frame, view)?;
             }
             vio.frontend
-                .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
+                .queue_lookahead(next_t_ns, &mut vio.next_frames, next_images)?;
         }
         prepared.finish()
     }
@@ -392,13 +390,12 @@ impl<S: Scalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        // Keep GPU input packed until its first pyramid dispatch. CPU callers
-        // retain the existing widening into reusable image buffers.
-        self.frames
-            .resize_with(images.len(), image::ImageU16::default);
+        // Widen and densify directly into reusable image buffers.
+        self.frames.resize_with(images.len(), image::empty);
         for (frame, view) in self.frames.iter_mut().zip(images.iter()) {
             self.frontend.fill_frame(frame, view)?;
         }
+        self.frontend.prepare_packed_inputs(images);
         Ok(PreparedTrack {
             vio: self,
             t_ns,
@@ -716,4 +713,60 @@ fn pose_to_array(pose: &Isometry3<f64>) -> [f64; 7] {
         rotation.k,
         rotation.w,
     ]
+}
+
+impl<S: Scalar> std::fmt::Debug for Vio<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive destructuring keeps retry fingerprints complete when fields are added.
+        let Self {
+            frontend,
+            estimator,
+            frontend_imu,
+            frontend_pending,
+            latest_state,
+            frontend_noise,
+            calib_f32,
+            frames,
+            next_frames,
+            masks,
+            camera_count,
+            last_frame_t_ns,
+            last_stats,
+            frontend_timings,
+            last_deferred,
+            pending_observations,
+            overlap_timings,
+        } = self;
+        f.debug_struct("Vio")
+            .field("frontend", frontend)
+            .field("estimator", estimator)
+            .field("frontend_imu", frontend_imu)
+            .field("frontend_pending", frontend_pending)
+            .field("latest_state", latest_state)
+            .field("frontend_noise", frontend_noise)
+            .field("calib_f32", calib_f32)
+            .field(
+                "frames",
+                &frames
+                    .iter()
+                    .map(|image| (image.size(), image.as_slice()))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "next_frames",
+                &next_frames
+                    .iter()
+                    .map(|image| (image.size(), image.as_slice()))
+                    .collect::<Vec<_>>(),
+            )
+            .field("masks", masks)
+            .field("camera_count", camera_count)
+            .field("last_frame_t_ns", last_frame_t_ns)
+            .field("last_stats", last_stats)
+            .field("frontend_timings", frontend_timings)
+            .field("last_deferred", last_deferred)
+            .field("pending_observations", pending_observations)
+            .field("overlap_timings", overlap_timings)
+            .finish()
+    }
 }

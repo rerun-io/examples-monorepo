@@ -41,10 +41,10 @@ use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
     CpuPatchTracker, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, TrackInput,
 };
-use crate::image::ImageU16;
 use crate::lie::Se3;
 use crate::pyramid::CpuPyramidBuilder;
 use crate::types::KeypointId;
+use kornia_image::Image;
 
 /// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
 /// [`FrameToFrameOpticalFlow::with_stages`] selects implementations without
@@ -145,14 +145,19 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, crate::gpu:
         self.stages.discard_lookahead();
     }
 
+    pub(crate) fn prepare_packed_inputs(&mut self, views: &[crate::ImageView<'_>]) {
+        self.stages.prepare_packed_inputs(views);
+    }
+
     pub(crate) fn queue_lookahead(
         &mut self,
         t_ns: i64,
-        images: &mut Vec<ImageU16>,
+        images: &mut Vec<Image<u16, 1>>,
+        views: &[crate::ImageView<'_>],
     ) -> Result<(), crate::VioError> {
         self.update_cell_selects(images);
         self.stages
-            .queue_lookahead(t_ns, images, &self.cell_selects)
+            .queue_lookahead(t_ns, images, views, &self.cell_selects)
     }
 }
 
@@ -590,7 +595,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
     pub fn process_frame(
         &mut self,
         t_ns: i64,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<&FlowFrame, FrontendError>
@@ -612,7 +617,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
     fn process_frame_inner(
         &mut self,
         t_ns: i64,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<(), FrontendError> {
@@ -666,7 +671,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
         Ok(())
     }
 
-    fn update_cell_selects(&mut self, images: &[ImageU16]) {
+    fn update_cell_selects(&mut self, images: &[Image<u16, 1>]) {
         let config: DetectorConfig = self.detector_config();
         let Self {
             cell_selects,
@@ -688,7 +693,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
     /// step here touches the pyramid sets, the timestamp or the frame counter.
     fn run_passes(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<(), FrontendError> {

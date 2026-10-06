@@ -53,7 +53,7 @@ fn a_panic_inside_a_stage_is_a_typed_error() {
     let mut builder: GpuPyramidBuilder<GpuRuntime> =
         GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     let mut pyramid: GpuPyramid<GpuRuntime> = builder.allocate(64, 64, 2).unwrap();
-    let image: crate::image::ImageU16 = crate::image::ImageU16::zeros(64, 64).unwrap();
+    let image: kornia_image::Image<u16, 1> = crate::image::zeros(64, 64).unwrap();
     builder.build(0, &image, &mut pyramid).unwrap();
 
     arm_fault_at(GUARDED_REGION);
@@ -205,7 +205,7 @@ fn a_panic_in_an_exported_read_is_a_typed_error() {
     let builder: GpuPyramidBuilder<GpuRuntime> =
         GpuPyramidBuilder::new(client.clone(), Default::default());
     let pyramid: GpuPyramid<GpuRuntime> = builder.allocate(64, 64, 2).unwrap();
-    let mut level: crate::image::ImageU16 = crate::image::ImageU16::default();
+    let mut level: kornia_image::Image<u16, 1> = crate::image::empty();
 
     arm_fault_at(GUARDED_REGION);
     let read: PyramidError = pyramid.copy_level_into(0, &mut level).unwrap_err();

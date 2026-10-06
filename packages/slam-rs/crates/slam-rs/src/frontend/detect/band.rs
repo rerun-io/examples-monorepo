@@ -3,7 +3,6 @@ use super::cells::CellScores;
 use super::{
     BandRequest, CellSelect, CornerScan, DetectError, FastCorner, Occupancy, SelectionStatus,
 };
-use crate::image::ImageU16;
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{Rect as KorniaRect, fast_detect_rect_u8};
 
@@ -194,7 +193,7 @@ impl CornerScan for CpuCornerScan {
     fn select_cells(
         &mut self,
         _camera: usize,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
@@ -208,7 +207,7 @@ impl CornerScan for CpuCornerScan {
 
     /// `_camera` is unused: the caller holds the frame and nothing here is
     /// shared between cameras.
-    fn scan(&mut self, _camera: usize, image: &ImageU16) -> Result<(), DetectError> {
+    fn scan(&mut self, _camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
         // The bands are this image's; the previous frame's are stale.
         self.bands.clear();
         let (width, height): (usize, usize) = (image.width(), image.height());
@@ -235,20 +234,8 @@ impl CornerScan for CpuCornerScan {
         // time, not one `push` per pixel: the capacity check a `push` carries is
         // what stops the narrowing from vectorising.
         let pixels: &mut [u8] = gray.as_slice_mut();
-        if image.stride() == width {
-            // One pass over the whole frame when it is unstrided, which every
-            // frame from the port's own decode path is: a single long loop
-            // vectorises where 960 short ones each pay their own prologue.
-            for (narrowed, wide) in pixels.iter_mut().zip(&image.data()[..width * height]) {
-                *narrowed = (*wide >> 8) as u8;
-            }
-        } else {
-            for y in 0..height {
-                let row: &mut [u8] = &mut pixels[y * width..(y + 1) * width];
-                for (narrowed, wide) in row.iter_mut().zip(image.row(y)) {
-                    *narrowed = (*wide >> 8) as u8;
-                }
-            }
+        for (narrowed, wide) in pixels.iter_mut().zip(image.as_slice()) {
+            *narrowed = (*wide >> 8) as u8;
         }
         Ok(())
     }

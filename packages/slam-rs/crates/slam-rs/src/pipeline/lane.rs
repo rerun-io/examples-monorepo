@@ -41,15 +41,24 @@ macro_rules! on_lane {
 }
 
 impl FrontendLane {
+    /// Retain byte inputs for the GPU upload, outside the host image type.
+    pub(super) fn prepare_packed_inputs(&mut self, _views: &[ImageView<'_>]) {
+        #[cfg(feature = "gpu-wgpu")]
+        if let Self::Gpu(flow) = self {
+            flow.prepare_packed_inputs(_views);
+        }
+    }
+
     /// Queue image-only work on lanes that support lookahead.
     pub(super) fn queue_lookahead(
         &mut self,
         _t_ns: i64,
-        _images: &mut Vec<image::ImageU16>,
+        _images: &mut Vec<kornia_image::Image<u16, 1>>,
+        _views: &[ImageView<'_>],
     ) -> Result<(), VioError> {
         #[cfg(feature = "gpu-wgpu")]
         if let Self::Gpu(flow) = self {
-            flow.queue_lookahead(_t_ns, _images)?;
+            flow.queue_lookahead(_t_ns, _images, _views)?;
         }
         Ok(())
     }
@@ -62,21 +71,13 @@ impl FrontendLane {
         }
     }
 
-    /// Preserve each lane's ingestion representation and materialization timing.
+    /// Densify and widen into each lane's reusable host image.
     pub(super) fn fill_frame(
         &self,
-        frame: &mut image::ImageU16,
+        frame: &mut kornia_image::Image<u16, 1>,
         view: &ImageView<'_>,
     ) -> Result<(), image::ImageError> {
-        match self {
-            Self::Cpu(_) => {
-                frame.fill_from_u8_strided(view.data, view.width, view.height, view.stride)
-            }
-            #[cfg(feature = "gpu-wgpu")]
-            Self::Gpu(_) => {
-                frame.fill_packed_u8_strided(view.data, view.width, view.height, view.stride)
-            }
-        }
+        image::fill_from_u8_strided(frame, view.data, view.width, view.height, view.stride)
     }
 
     /// Share the CPU frontend's workers with the synchronous estimator.
@@ -121,7 +122,7 @@ impl FrontendLane {
     pub fn process_frame(
         &mut self,
         t_ns: i64,
-        images: &[image::ImageU16],
+        images: &[kornia_image::Image<u16, 1>],
         prediction: &frontend::flow::PosePrediction,
         masks: &[frontend::detect::Masks],
     ) -> Result<&frontend::flow::FlowFrame, frontend::flow::FrontendError> {

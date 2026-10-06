@@ -2,6 +2,7 @@
 #![cfg(feature = "gpu-core")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_image::Image;
 use slam_rs::frontend::detect::CornerScan;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::tracker::{
@@ -10,7 +11,6 @@ use slam_rs::frontend::tracker::{
 use slam_rs::gpu::{
     GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramidBuilder, gpu_client,
 };
-use slam_rs::image::ImageU16;
 use slam_rs::pyramid::PyramidBuilder;
 
 mod common;
@@ -101,7 +101,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
     // case is what `the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing`
     // drives, and one geometry is the harder test for a *leak*, because nothing
     // here can be blamed on a cache that keeps missing.
-    let frames: [ImageU16; 2] = [cornered_image(960, 960), cornered_image(960, 960)];
+    let frames: [Image<u16, 1>; 2] = [cornered_image(960, 960), cornered_image(960, 960)];
     let mut pyramids: Vec<_> = frames
         .iter()
         .map(|frame| {

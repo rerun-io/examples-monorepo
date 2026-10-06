@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_arch = "aarch64")]
 fn default_cell_selection_follows_kornias_neon_gate() {
     use slam_rs::frontend::detect::SelectionStatus;
-    let image = ImageU16::zeros(64, 64).unwrap();
+    let image = slam_rs::image::zeros(64, 64).unwrap();
     let select = CellSelect {
         grid: CellGrid::new(64, 64, 32).unwrap(),
         threshold: 5,
@@ -32,7 +32,7 @@ fn cell_selection_refuses_unrepresentable_keys_and_thresholds() {
         (64, CELL_KEY_LIMIT, 5),
         (64, 64, LOWEST_THRESHOLD_RUNG - 1),
     ] {
-        let image = ImageU16::zeros(width, height).unwrap();
+        let image = slam_rs::image::zeros(width, height).unwrap();
         let grid = CellGrid::new(width, height, 32).unwrap();
         let select = CellSelect {
             grid,
@@ -78,11 +78,17 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
         (817, 127, 60),
         (960, 129, 50),
     ] {
-        let mut image = ImageU16::zeros_with_stride(width, height, width + 13).unwrap();
+        let mut image = slam_rs::image::from_u8_strided(
+            &vec![0; (width + 13) * height],
+            width,
+            height,
+            width + 13,
+        )
+        .unwrap();
         for y in 0..height {
             for x in 0..width {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                image.set(x, y, (state >> 16) as u16);
+                image.set_pixel(x, y, 0, (state >> 16) as u16).unwrap();
             }
         }
         let grid = CellGrid::new(width, height, cell).unwrap();
@@ -125,18 +131,18 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
 
 #[test]
 fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
-    let mut image = ImageU16::zeros(100, 100).unwrap();
+    let mut image = slam_rs::image::zeros(100, 100).unwrap();
     for y in 0..100 {
         for x in 0..100 {
-            image.set(x, y, 128 << 8);
+            image.set_pixel(x, y, 0, 128 << 8).unwrap();
         }
     }
     for (x, y) in [(35, 35), (65, 35), (35, 65)] {
-        image.set(x, y, 0);
+        image.set_pixel(x, y, 0, 0).unwrap();
     }
     let grid = CellGrid::new(100, 100, 100).unwrap();
     let counts = vec![0; grid.rows * grid.columns];
-    let detect = |image: &ImageU16| {
+    let detect = |image: &Image<u16, 1>| {
         detect_with(
             Box::new(CpuCornerScan::with_cell_selection(true)),
             image,
@@ -150,7 +156,7 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
     let tied = detect(&image);
     assert_eq!(tied.corners, [[35.0, 35.0]]);
     assert_eq!(tied.responses, [127.0]);
-    image.set(36, 35, 0);
+    image.set_pixel(36, 35, 0, 0).unwrap();
     let plateau = detect(&image);
     assert_eq!(plateau.corners, [[65.0, 35.0]]);
     assert_eq!(plateau.responses, [127.0]);
@@ -161,7 +167,7 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
 fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
     let config: DetectorConfig = detector_config(472.0);
     for camera in 0..2 {
-        let image: ImageU16 = common::mio10_frame(0, camera);
+        let image: Image<u16, 1> = common::mio10_frame(0, camera);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let cells: usize = grid.rows * grid.columns;
 
@@ -209,7 +215,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
 /// The gates the kernel took over, one at a time, and the budget the host keeps.
 #[test]
 fn the_cell_selection_applies_the_same_gates() {
-    let image: ImageU16 = common::mio10_frame(1, 0);
+    let image: Image<u16, 1> = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
@@ -322,7 +328,7 @@ fn the_cell_selection_matches_the_host_walk_on_uneven_frames() {
         (640, 480, 50),
         (641, 479, 64),
     ] {
-        let image: ImageU16 = cornered_image(width, height);
+        let image: Image<u16, 1> = cornered_image(width, height);
         let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
         // The precondition the clamp test below needs and this one does not
         // have: `CellGrid::new` cannot produce a cell that runs past the image.
@@ -385,7 +391,7 @@ fn caller_grid(
 #[test]
 fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
     let (width, height, cell): (usize, usize, usize) = (200, 150, 50);
-    let image: ImageU16 = cornered_image(width, height);
+    let image: Image<u16, 1> = cornered_image(width, height);
 
     // Cells at x = 20, 70, 120, 170 and y = 10, 60, 110: the last column ends at
     // 220 and the last row at 160, both past the frame.
@@ -442,7 +448,7 @@ fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
 /// vacuously.
 #[test]
 fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
-    let image: ImageU16 = common::mio10_frame(0, 0);
+    let image: Image<u16, 1> = common::mio10_frame(0, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
@@ -504,7 +510,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
 #[test]
 fn a_frame_at_the_key_limit_takes_the_band_walk() {
     let (width, height, cell): (usize, usize, usize) = (CELL_KEY_LIMIT, 96, 32);
-    let image: ImageU16 = cornered_image(width, height);
+    let image: Image<u16, 1> = cornered_image(width, height);
     let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
     let agreed: usize = detection_agrees(
@@ -528,7 +534,7 @@ fn a_frame_at_the_key_limit_takes_the_band_walk() {
 /// the ladder decides how many corners a cell contributes and one key cannot say.
 #[test]
 fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
-    let image: ImageU16 = common::mio10_frame(1, 0);
+    let image: Image<u16, 1> = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
     let config: DetectorConfig = DetectorConfig {

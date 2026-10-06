@@ -178,6 +178,7 @@ pub fn project_between_cams(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
     use super::*;
     use crate::calib::Calibration;
     use crate::camera::SlamCamera;

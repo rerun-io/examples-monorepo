@@ -1,6 +1,6 @@
 //! Shared detection-cell geometry, eligibility, masks, and packed winner keys.
 use super::detect::FAST_BORDER;
-use crate::image::ImageU16;
+use kornia_image::Image;
 
 /// `const int EDGE_THRESHOLD = 19`.
 pub const EDGE_THRESHOLD: f32 = 19.0;
@@ -241,7 +241,7 @@ pub const CELL_KEY_LIMIT: usize = 1 << KEY_ROW_SHIFT;
 /// [`super::detect::detect_keypoints_with_cells`] applies the mask half itself.
 #[must_use]
 pub fn cell_select(
-    image: &ImageU16,
+    image: &Image<u16, 1>,
     grid: &CellGrid,
     config: &DetectorConfig,
 ) -> Option<CellSelect> {

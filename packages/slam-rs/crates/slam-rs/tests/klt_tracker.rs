@@ -7,13 +7,13 @@
 //! moved with them rather than being swapped for the shared generator.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_image::Image;
 use nalgebra::{Matrix2, Vector2};
 use proptest::prelude::*;
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::{Pattern, Pattern51};
 use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::*;
-use slam_rs::image::ImageU16;
 use slam_rs::pyramid::PyramidU16;
 
 mod common;
@@ -72,14 +72,22 @@ fn finite_out_of_image_guesses_are_rejected_without_losing_source_slots() {
     scene.transforms.set(0, &rejected);
     let mut tracker = tracker(count, levels, 1);
     let mut result = FlowResult::with_capacity(count);
-    tracker.track(&scene.prev, &scene.next, &scene.patches, &scene.transforms, &mut result).unwrap();
+    tracker
+        .track(
+            &scene.prev,
+            &scene.next,
+            &scene.patches,
+            &scene.transforms,
+            &mut result,
+        )
+        .unwrap();
     assert!(!result.is_valid(0));
     assert!(!result.tracked().is_empty());
     assert_eq!(scene.positions.len(), scene.transforms.len());
 }
 
 /// Compare the public scalar and four-point patch operations at the bit level.
-fn assert_group_bits<P: Pattern>(image: &ImageU16, positions: [Vector2<f32>; 4], angle: f32) {
+fn assert_group_bits<P: Pattern>(image: &Image<u16, 1>, positions: [Vector2<f32>; 4], angle: f32) {
     use nalgebra::Vector3;
     use slam_rs::frontend::patch::{
         OpticalFlowPatch, build_patch_group, patch_increment, patch_increment_rows,
@@ -142,7 +150,7 @@ fn assert_group_bits<P: Pattern>(image: &ImageU16, positions: [Vector2<f32>; 4],
 #[test]
 fn four_patch_builds_match_scalar_bits() {
     use slam_rs::frontend::patterns::Pattern52;
-    let mut image = ImageU16::zeros_with_stride(80, 64, 87).unwrap();
+    let mut image = slam_rs::image::from_u8_strided(&vec![0; 87 * 64], 80, 64, 87).unwrap();
     let mut state = 0x7d91_230bu32;
     let mut random = || {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -150,7 +158,7 @@ fn four_patch_builds_match_scalar_bits() {
     };
     for y in 0..64 {
         for x in 0..80 {
-            image.set(x, y, (random() >> 16) as u16);
+            image.set_pixel(x, y, 0, (random() >> 16) as u16).unwrap();
         }
     }
     for _ in 0..256 {
@@ -168,7 +176,7 @@ fn four_patch_builds_match_scalar_bits() {
 
 #[test]
 fn four_patch_degenerate_and_invalid_lanes_match_scalar_bits() {
-    let mut image = ImageU16::zeros_with_stride(80, 64, 87).unwrap();
+    let mut image = slam_rs::image::from_u8_strided(&vec![0; 87 * 64], 80, 64, 87).unwrap();
     let positions = [
         Vector2::new(32.25, 30.5),
         Vector2::new(2.0, 2.0),
@@ -178,7 +186,7 @@ fn four_patch_degenerate_and_invalid_lanes_match_scalar_bits() {
     assert_group_bits::<Pattern51>(&image, positions, 0.0);
     for y in 0..64 {
         for x in 0..80 {
-            image.set(x, y, 12_345);
+            image.set_pixel(x, y, 0, 12_345).unwrap();
         }
     }
     assert_group_bits::<Pattern51>(&image, positions, -0.0);
@@ -227,14 +235,14 @@ fn texture(x: f64, y: f64) -> f64 {
 
 /// A textured frame, shifted by `(dx, dy)`: the same continuous field
 /// resampled at `(x - dx, y - dy)`, so the shift is exact by construction.
-fn shifted_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+fn shifted_image(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
+    let mut image: Image<u16, 1> = slam_rs::image::zeros(width, height).unwrap();
     for y in 0..height {
         for x in 0..width {
             let fx: f64 = f64::from(x as f32 - dx);
             let fy: f64 = f64::from(y as f32 - dy);
             let value: f64 = 32_000.0 + 28_000.0 * texture(fx, fy);
-            image.set(x, y, value as u16);
+            image.set_pixel(x, y, 0, value as u16).unwrap();
         }
     }
     image
@@ -249,8 +257,8 @@ struct Fixture {
 }
 
 fn fixture(dx: f32, dy: f32, levels: usize) -> Fixture {
-    let base: ImageU16 = shifted_image(160, 160, 0.0, 0.0);
-    let moved: ImageU16 = shifted_image(160, 160, dx, dy);
+    let base: Image<u16, 1> = shifted_image(160, 160, 0.0, 0.0);
+    let moved: Image<u16, 1> = shifted_image(160, 160, dx, dy);
     let prev: PyramidU16 = pyramid_of(&base, levels);
     let next: PyramidU16 = pyramid_of(&moved, levels);
 
@@ -499,13 +507,13 @@ fn a_mismatched_pair_is_rejected() {
     let levels: usize = 3;
     let scene: Fixture = fixture(0.0, 0.0, levels);
     // A different texture entirely, not a shift of the first.
-    let mut other: ImageU16 = ImageU16::zeros(160, 160).unwrap();
+    let mut other: Image<u16, 1> = slam_rs::image::zeros(160, 160).unwrap();
     for y in 0..160 {
         for x in 0..160 {
             let value: f64 = 25_000.0
                 + 9_000.0 * ((x as f64) * 0.61).cos()
                 + 6_000.0 * ((y as f64) * 0.47).sin();
-            other.set(x, y, value as u16);
+            other.set_pixel(x, y, 0, value as u16).unwrap();
         }
     }
     let unrelated: PyramidU16 = pyramid_of(&other, levels);
@@ -963,7 +971,7 @@ fn the_flow_result_writing_surface_compacts_what_it_is_given() {
 #[test]
 fn an_empty_patch_set_builds_on_one_worker_and_on_a_pool() {
     let levels: usize = 3;
-    let base: ImageU16 = shifted_image(160, 160, 0.0, 0.0);
+    let base: Image<u16, 1> = shifted_image(160, 160, 0.0, 0.0);
     let prev: PyramidU16 = pyramid_of(&base, levels);
     let positions: PointsSoA = PointsSoA::default();
     let mut single: PatchSoA<Pattern51> = PatchSoA::new(0, levels + 1).unwrap();

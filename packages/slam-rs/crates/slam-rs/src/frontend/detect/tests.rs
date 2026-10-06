@@ -36,12 +36,12 @@ fn a_band_before_a_scan_is_refused() {
     assert_eq!(scanner.band(request).unwrap_err(), DetectError::NotScanned);
 }
 
-fn dotted_image(width: usize, height: usize, spacing: usize) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+fn dotted_image(width: usize, height: usize, spacing: usize) -> Image<u16, 1> {
+    let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
     for y in 0..height {
         for x in 0..width {
             let background: f64 = 60.0 + 25.0 * (x as f64 * 0.09).sin() * (y as f64 * 0.07).cos();
-            image.set(x, y, (background as u16) << 8);
+            image.set_pixel(x, y, 0, (background as u16) << 8).unwrap();
         }
     }
     let mut cy: usize = spacing;
@@ -50,7 +50,7 @@ fn dotted_image(width: usize, height: usize, spacing: usize) -> ImageU16 {
         while cx + 5 < width {
             for dy in 0..5 {
                 for dx in 0..5 {
-                    image.set(cx + dx, cy + dy, 200u16 << 8);
+                    image.set_pixel(cx + dx, cy + dy, 0, 200u16 << 8).unwrap();
                 }
             }
             cx += spacing;
@@ -120,7 +120,7 @@ fn a_coordinate_before_the_grid_lands_in_the_first_cell() {
 
 #[test]
 fn corners_are_found_and_stay_inside_the_edge_threshold() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -142,7 +142,12 @@ fn corners_are_found_and_stay_inside_the_edge_threshold() {
     assert_eq!(out.corners.len(), out.responses.len());
     for corner in &out.corners {
         assert!(
-            image.in_bounds(corner[0], corner[1], EDGE_THRESHOLD),
+            kornia_staging_imgproc::interpolation::in_bounds_u16(
+                &image,
+                corner[0],
+                corner[1],
+                EDGE_THRESHOLD
+            ),
             "corner {corner:?} is inside the edge margin"
         );
     }
@@ -155,7 +160,7 @@ fn corners_are_found_and_stay_inside_the_edge_threshold() {
 /// The per-cell budget is `num_points_cell`.
 #[test]
 fn no_cell_yields_more_than_its_budget() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -192,7 +197,7 @@ fn no_cell_yields_more_than_its_budget() {
 /// a minimum of one, which is the enforced floor.
 #[test]
 fn a_non_positive_min_threshold_still_terminates() {
-    let blank: ImageU16 = ImageU16::zeros(200, 200).unwrap();
+    let blank: Image<u16, 1> = crate::image::zeros(200, 200).unwrap();
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -267,7 +272,7 @@ fn the_ladder_halves_the_maximum_and_need_never_reach_the_minimum() {
 /// nobody asked for.
 #[test]
 fn a_maximum_under_the_minimum_detects_nothing() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -292,7 +297,7 @@ fn a_maximum_under_the_minimum_detects_nothing() {
 /// The floor changes nothing for a config whose ladder already ends.
 #[test]
 fn a_valid_min_threshold_is_left_alone() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -319,7 +324,7 @@ fn a_valid_min_threshold_is_left_alone() {
 /// an occupied cell is skipped whole.
 #[test]
 fn an_occupied_cell_is_skipped() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let mut scratch: DetectorScratch = DetectorScratch::default();
     let mut out: KeypointsData = KeypointsData::default();
@@ -359,7 +364,7 @@ fn an_occupied_cell_is_skipped() {
 /// a masked corner is dropped.
 #[test]
 fn a_mask_over_the_whole_image_drops_everything() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let masks: Masks = Masks {
@@ -390,7 +395,7 @@ fn a_mask_over_the_whole_image_drops_everything() {
 /// outside `safe_radius` of the image centre, nothing is kept.
 #[test]
 fn the_safe_radius_gate_keeps_only_the_middle() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -422,7 +427,7 @@ fn the_safe_radius_gate_keeps_only_the_middle() {
 /// `max_corners` is the port's own cap and stops the walk mid-grid.
 #[test]
 fn the_corner_budget_truncates_in_scan_order() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -477,7 +482,7 @@ fn the_corner_budget_truncates_in_scan_order() {
 /// rather than a read past the end (decision D32).
 #[test]
 fn a_short_occupancy_buffer_is_refused() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; 3];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -508,7 +513,7 @@ fn a_short_occupancy_buffer_is_refused() {
 /// Skip detection cells outside the allocated occupancy shape (trap 15).
 #[test]
 fn a_cell_outside_the_occupancy_matrix_is_skipped() {
-    let image: ImageU16 = dotted_image(300, 200, 16);
+    let image: Image<u16, 1> = dotted_image(300, 200, 16);
     let grid: CellGrid = CellGrid::new(300, 200, 50).unwrap();
     // The occupancy matrix of a 200-wide camera 0.
     let narrow: CellGrid = CellGrid::new(200, 200, 50).unwrap();
@@ -621,15 +626,15 @@ fn the_response_is_opencvs_corner_score() {
     assert!(opencv_corner_score(0.5) < opencv_corner_score(0.75));
 
     // On a real isolated peak, the whole pipeline reports 254.
-    let mut image: ImageU16 = ImageU16::zeros(120, 120).unwrap();
+    let mut image: Image<u16, 1> = crate::image::zeros(120, 120).unwrap();
     for y in 0..120 {
         for x in 0..120 {
-            image.set(x, y, 0);
+            image.set_pixel(x, y, 0, 0).unwrap();
         }
     }
     // Inside cell (60, 60)'s detection band `[63, 107)` and clear of the
     // 19-pixel edge margin.
-    image.set(80, 80, 255u16 << 8);
+    image.set_pixel(80, 80, 0, 255u16 << 8).unwrap();
     let grid: CellGrid = CellGrid::new(120, 120, 50).unwrap();
     let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -653,7 +658,7 @@ fn the_response_is_opencvs_corner_score() {
 /// `rows * columns` used to wrap before it was compared with the buffer.
 #[test]
 fn an_occupancy_shape_that_overflows_is_refused() {
-    let image: ImageU16 = dotted_image(200, 200, 16);
+    let image: Image<u16, 1> = dotted_image(200, 200, 16);
     let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
     let cells: Vec<i32> = vec![0; 32];
     let mut scratch: DetectorScratch = DetectorScratch::default();
@@ -687,7 +692,7 @@ fn an_occupancy_shape_that_overflows_is_refused() {
 struct MalformedSelection(usize);
 
 impl CornerScan for MalformedSelection {
-    fn scan(&mut self, _: usize, _: &ImageU16) -> Result<(), DetectError> {
+    fn scan(&mut self, _: usize, _: &Image<u16, 1>) -> Result<(), DetectError> {
         panic!("a malformed selection must not fall back to scanning")
     }
 
@@ -698,7 +703,7 @@ impl CornerScan for MalformedSelection {
     fn select_cells(
         &mut self,
         _: usize,
-        _: &ImageU16,
+        _: &Image<u16, 1>,
         _: &CellSelect,
         _eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
@@ -710,7 +715,7 @@ impl CornerScan for MalformedSelection {
 
 #[test]
 fn malformed_selection_lengths_are_refused_without_fallback() {
-    let image = ImageU16::zeros(200, 200).unwrap();
+    let image = crate::image::zeros(200, 200).unwrap();
     let grid = CellGrid::new(200, 200, 50).unwrap();
     let counts = vec![0; grid.rows * grid.columns];
     let occupancy = Occupancy {

@@ -2,9 +2,9 @@
 //! through one leaves the frontend as the last good frame left it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_image::Image;
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::image::ImageU16;
 use slam_rs::types::KeypointId;
 
 mod common;
@@ -17,15 +17,15 @@ use common::{FLOW_HEIGHT as HEIGHT, FLOW_WIDTH as WIDTH, dotted_image};
 #[test]
 fn a_frame_of_the_wrong_size_commits_nothing() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(1_000, &images, &PosePrediction::default(), &[])
         .unwrap();
     let before: FlowFrame = flow.frame().clone();
     let ids_before: u64 = flow.last_keypoint_id();
 
-    let odd: [ImageU16; 2] = [
-        ImageU16::zeros(WIDTH + 8, HEIGHT).unwrap(),
-        ImageU16::zeros(WIDTH + 8, HEIGHT).unwrap(),
+    let odd: [Image<u16, 1>; 2] = [
+        slam_rs::image::zeros(WIDTH + 8, HEIGHT).unwrap(),
+        slam_rs::image::zeros(WIDTH + 8, HEIGHT).unwrap(),
     ];
     assert!(
         flow.process_frame(2_000, &odd, &PosePrediction::default(), &[])
@@ -37,7 +37,7 @@ fn a_frame_of_the_wrong_size_commits_nothing() {
     assert_eq!(flow.frame(), &before);
 
     // And the frontend still tracks afterwards, from the frame it kept.
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     let after: Vec<KeypointId> = flow
         .process_frame(3_000, &moved, &PosePrediction::default(), &[])
         .unwrap()
@@ -63,9 +63,9 @@ fn a_frame_of_the_wrong_size_commits_nothing() {
 #[test]
 fn a_rejected_frame_leaves_the_frontend_usable() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let tiny: [ImageU16; 2] = [
-        ImageU16::zeros(1, 1).unwrap(),
-        ImageU16::zeros(1, 1).unwrap(),
+    let tiny: [Image<u16, 1>; 2] = [
+        slam_rs::image::zeros(1, 1).unwrap(),
+        slam_rs::image::zeros(1, 1).unwrap(),
     ];
     let error = flow
         .process_frame(1, &tiny, &PosePrediction::default(), &[])
@@ -87,12 +87,12 @@ fn a_rejected_frame_leaves_the_frontend_usable() {
 
     // The next valid frame is treated as the first, and the one after it
     // tracks against a pyramid that exists.
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     let frame: &FlowFrame = flow
         .process_frame(2, &images, &PosePrediction::default(), &[])
         .unwrap();
     assert!(!frame.cameras[0].is_empty());
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     flow.process_frame(3, &moved, &PosePrediction::default(), &[])
         .unwrap();
     assert_eq!(flow.frame_counter(), 2);
@@ -102,12 +102,12 @@ fn a_rejected_frame_leaves_the_frontend_usable() {
 #[test]
 fn a_frameset_of_the_wrong_width_commits_nothing() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
     let before: FlowFrame = flow.frame().clone();
 
-    let short: [ImageU16; 1] = [dotted_image(1)];
+    let short: [Image<u16, 1>; 1] = [dotted_image(1)];
     assert!(
         flow.process_frame(1, &short, &PosePrediction::default(), &[])
             .is_err()
@@ -117,7 +117,7 @@ fn a_frameset_of_the_wrong_width_commits_nothing() {
     assert_eq!(flow.frame(), &before);
 
     // And the frontend still works afterwards.
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     flow.process_frame(2, &moved, &PosePrediction::default(), &[])
         .unwrap();
     assert_eq!(flow.frame_counter(), 2);
@@ -131,9 +131,9 @@ fn a_frameset_of_the_wrong_width_commits_nothing() {
 /// keypoints with frame 2's pyramid on the next call.
 #[test]
 fn a_backend_error_leaves_the_frame_as_the_last_good_one() {
-    let first: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
-    let second: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
-    let third: [ImageU16; 2] = [dotted_image(2), dotted_image(2)];
+    let first: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
+    let second: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
+    let third: [Image<u16, 1>; 2] = [dotted_image(2), dotted_image(2)];
 
     // The clean run skips the frame the other run fails on.
     let mut clean: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -181,9 +181,9 @@ fn a_backend_error_leaves_the_frame_as_the_last_good_one() {
 /// tracked and its keypoint map rewritten inside the same call.
 #[test]
 fn a_backend_error_after_the_first_camera_is_undone_too() {
-    let first: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
-    let second: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
-    let third: [ImageU16; 2] = [dotted_image(2), dotted_image(2)];
+    let first: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
+    let second: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
+    let third: [Image<u16, 1>; 2] = [dotted_image(2), dotted_image(2)];
 
     let mut clean: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
     clean
@@ -220,7 +220,7 @@ impl slam_rs::frontend::detect::CornerScan for RefuseAfterTracking {
     fn scan(
         &mut self,
         camera: usize,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
     ) -> Result<(), slam_rs::frontend::detect::DetectError> {
         self.inner.scan(camera, image)
     }

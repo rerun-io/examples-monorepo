@@ -19,7 +19,7 @@ use nalgebra::{Matrix3, Vector2, Vector3};
 use crate::frontend::ldlt::ldlt_inverse3;
 use crate::frontend::patterns::{MAX_PATTERN_SIZE, Pattern};
 use crate::frontend::se2::AffineCompact2;
-use crate::image::ImageU16;
+use kornia_image::Image;
 
 use crate::frontend::simd::F32x4;
 
@@ -30,7 +30,7 @@ use crate::frontend::simd::F32x4;
 /// # Panics
 /// If data has fewer than `4 * P::SIZE` elements or the factor fewer than `12 * P::SIZE`.
 pub fn build_patch_group<P: Pattern>(
-    source: &ImageU16,
+    source: &Image<u16, 1>,
     positions: [Vector2<f32>; 4],
     data: &mut [f32],
     jacobian: &mut [f32],
@@ -43,7 +43,7 @@ pub fn build_patch_group<P: Pattern>(
     let pos_y = F32x4(positions.map(|p| p.y));
     for (tap, &[x, y]) in P::OFFSETS.iter().take(P::SIZE).enumerate() {
         let (raw, [gx, gy], valid) =
-            source.sample_group::<true>(pos_x + F32x4::splat(x), pos_y + F32x4::splat(y));
+            sample_group::<true>(source, pos_x + F32x4::splat(x), pos_y + F32x4::splat(y));
         let rows = [gx, gy, gx * F32x4::splat(-y) + gy * F32x4::splat(x)];
         raw.store(&mut data[4 * tap..]);
         sum = sum + F32x4::select(valid, raw, F32x4::ZERO);
@@ -123,20 +123,20 @@ pub trait PatchSource<S: Scalar> {
     fn interp_grad(&self, x: S, y: S) -> (S, [S; 2]);
 }
 
-impl PatchSource<f32> for ImageU16 {
+impl PatchSource<f32> for Image<u16, 1> {
     #[inline]
     fn in_bounds(&self, x: f32, y: f32, border: f32) -> bool {
-        ImageU16::in_bounds(self, x, y, border)
+        kornia_staging_imgproc::interpolation::in_bounds_u16(self, x, y, border)
     }
 
     #[inline]
     fn interp(&self, x: f32, y: f32) -> f32 {
-        ImageU16::interp(self, x, y)
+        kornia_staging_imgproc::interpolation::sample_bilinear_u16(self, x, y)
     }
 
     #[inline]
     fn interp_grad(&self, x: f32, y: f32) -> (f32, [f32; 2]) {
-        ImageU16::interp_grad(self, x, y)
+        kornia_staging_imgproc::interpolation::sample_bilinear_with_gradient_u16(self, x, y)
     }
 }
 
@@ -477,7 +477,7 @@ pub fn patch_increment_rows<P: Pattern>(
 pub fn patch_residual_taps<P: Pattern>(
     data: &[f32],
     stride: usize,
-    source: &ImageU16,
+    source: &Image<u16, 1>,
     transform: &AffineCompact2<f32>,
     residual: &mut [f32],
 ) -> bool {
@@ -497,7 +497,7 @@ pub fn patch_residual_taps<P: Pattern>(
         let y = F32x4(taps.map(|tap| tap[1]));
         let px = warp[0] * x + warp[1] * y + warp[4];
         let py = warp[2] * x + warp[3] * y + warp[5];
-        let (values, _, valid) = source.sample_group::<false>(px, py);
+        let (values, _, valid) = sample_group::<false>(source, px, py);
         for lane in 0..lanes {
             residual[base + lane] = values.0[lane];
             if valid[lane] {
@@ -538,6 +538,61 @@ pub fn patch_residual_taps<P: Pattern>(
         }
     }
     num_residuals > P::SIZE / 2
+}
+
+/// Four KLT samples with a two-pixel border. Gather pixels once their whole
+/// stencil is in bounds, then keep the scalar bilinear operation order in
+/// each SIMD lane. Invalid lanes return -1; callers mask their gradients.
+#[inline]
+pub(crate) fn sample_group<const GRAD: bool>(
+    image: &Image<u16, 1>,
+    x: F32x4,
+    y: F32x4,
+) -> (F32x4, [F32x4; 2], [bool; 4]) {
+    let ix = x.0.map(|v| v as usize);
+    let iy = y.0.map(|v| v as usize);
+    let valid = std::array::from_fn(|lane| {
+        kornia_staging_imgproc::interpolation::in_bounds_u16(image, x.0[lane], y.0[lane], 2.0)
+            // Integer checks also cover dimensions beyond f32's exact range.
+            && ix[lane] >= 1 && ix[lane] < image.width().saturating_sub(2)
+            && iy[lane] >= 1 && iy[lane] < image.height().saturating_sub(2)
+    });
+    let dx = x - F32x4(ix.map(|v| v as f32));
+    let dy = y - F32x4(iy.map(|v| v as f32));
+    let ddx = F32x4::splat(1.0) - dx;
+    let ddy = F32x4::splat(1.0) - dy;
+    let weights = [ddx * ddy, ddx * dy, dx * ddy, dx * dy];
+    // Borrow dense pixels once for the whole stencil.
+    let pixels = image.as_slice();
+    let pixel = |ox: usize, oy: usize| {
+        F32x4(std::array::from_fn(|lane| {
+            if valid[lane] {
+                let offset = (iy[lane] - 1 + oy) * image.width() + ix[lane] - 1 + ox;
+                // SAFETY: valid covers the entire [-1, +2] stencil; image
+                // construction guarantees width * height contiguous storage.
+                f32::from(unsafe { *pixels.get_unchecked(offset) })
+            } else {
+                0.0
+            }
+        }))
+    };
+    let interpolate =
+        |a, b, c, d| weights[0] * a + weights[1] * b + weights[2] * c + weights[3] * d;
+    let p00 = pixel(1, 1);
+    let p01 = pixel(1, 2);
+    let p10 = pixel(2, 1);
+    let p11 = pixel(2, 2);
+    let value = F32x4::select(valid, interpolate(p00, p01, p10, p11), F32x4::splat(-1.0));
+    let gradients = if GRAD {
+        let mx = interpolate(pixel(0, 1), pixel(0, 2), p00, p01);
+        let px = interpolate(p10, p11, pixel(3, 1), pixel(3, 2));
+        let my = interpolate(pixel(1, 0), p00, pixel(2, 0), p10);
+        let py = interpolate(p01, pixel(1, 3), p11, pixel(2, 3));
+        [F32x4::splat(0.5) * (px - mx), F32x4::splat(0.5) * (py - my)]
+    } else {
+        [F32x4::ZERO; 2]
+    };
+    (value, gradients, valid)
 }
 
 #[cfg(test)]
@@ -728,8 +783,8 @@ mod tests {
 
     /// A synthetic textured image: a smooth ramp plus a sinusoid, so every patch
     /// has gradient in both directions and `H_se2` is well conditioned.
-    fn textured_image(width: usize, height: usize) -> ImageU16 {
-        let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+    fn textured_image(width: usize, height: usize) -> Image<u16, 1> {
+        let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
         for y in 0..height {
             for x in 0..width {
                 let fx: f64 = x as f64;
@@ -737,7 +792,7 @@ mod tests {
                 let value: f64 = 20_000.0
                     + 8_000.0 * (fx * 0.31).sin() * (fy * 0.23).cos()
                     + 3_000.0 * ((fx + fy) * 0.11).sin();
-                image.set(x, y, value as u16);
+                image.set_pixel(x, y, 0, value as u16).unwrap();
             }
         }
         image
@@ -745,7 +800,7 @@ mod tests {
 
     #[test]
     fn a_textured_patch_is_valid_and_its_residual_against_itself_is_zero() {
-        let image: ImageU16 = textured_image(64, 64);
+        let image: Image<u16, 1> = textured_image(64, 64);
         let patch: OpticalFlowPatch<Pattern51> =
             OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
         assert!(patch.valid);
@@ -766,7 +821,7 @@ mod tests {
     /// an all-black patch has mean zero, so it is not valid.
     #[test]
     fn an_all_black_patch_is_not_valid() {
-        let image: ImageU16 = ImageU16::zeros(64, 64).unwrap();
+        let image: Image<u16, 1> = crate::image::zeros(64, 64).unwrap();
         let patch: OpticalFlowPatch<Pattern51> =
             OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
         assert!(!patch.valid);
@@ -775,8 +830,8 @@ mod tests {
     /// a residual against an all-black target zeroes and fails.
     #[test]
     fn a_residual_against_black_fails_and_zeroes() {
-        let image: ImageU16 = textured_image(64, 64);
-        let black: ImageU16 = ImageU16::zeros(64, 64).unwrap();
+        let image: Image<u16, 1> = textured_image(64, 64);
+        let black: Image<u16, 1> = crate::image::zeros(64, 64).unwrap();
         let patch: OpticalFlowPatch<Pattern51> =
             OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
 
@@ -794,7 +849,7 @@ mod tests {
     /// rejected however good the surviving taps are.
     #[test]
     fn a_residual_with_half_the_pattern_outside_is_rejected() {
-        let image: ImageU16 = textured_image(64, 64);
+        let image: Image<u16, 1> = textured_image(64, 64);
         let patch: OpticalFlowPatch<Pattern51> =
             OpticalFlowPatch::new(&image, Vector2::new(32.0, 32.0));
 
@@ -811,10 +866,14 @@ mod tests {
     /// mean-normalisation of `setData` keeps the sign.
     #[test]
     fn out_of_bounds_taps_stay_negative() {
-        let image: ImageU16 = textured_image(64, 64);
+        let image: Image<u16, 1> = textured_image(64, 64);
         let mut data: [f32; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
-        let (mean, valid) =
-            set_data::<Pattern51, f32, ImageU16>(&image, &Vector2::new(4.0, 32.0), None, &mut data);
+        let (mean, valid) = set_data::<Pattern51, f32, Image<u16, 1>>(
+            &image,
+            &Vector2::new(4.0, 32.0),
+            None,
+            &mut data,
+        );
         assert!(mean > 0.0);
         assert!(valid < Pattern51::SIZE);
         assert!(data.iter().take(Pattern51::SIZE).any(|value| *value < 0.0));

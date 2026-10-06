@@ -4,7 +4,7 @@ use super::{
     NO_CELL_WINNER, Occupancy, block_filter_end,
 };
 use crate::frontend::cell::{KEY_ROW_SHIFT, KEY_SCORE_SHIFT};
-use crate::image::ImageU16;
+use kornia_image::Image;
 
 /// Reused across cells and frames; no per-row allocations or narrowed image.
 #[derive(Default)]
@@ -16,7 +16,7 @@ pub(super) struct CellScores {
 impl CellScores {
     pub(super) fn select(
         &mut self,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
@@ -33,7 +33,7 @@ impl CellScores {
         }
         let (filtered_end, use_filter) = block_filter_end(width);
         let ring: [isize; 16] = std::array::from_fn(|k| {
-            FAST_RING_ROW[k] as isize * image.stride() as isize + FAST_RING_COLUMN[k] as isize
+            FAST_RING_ROW[k] as isize * image.width() as isize + FAST_RING_COLUMN[k] as isize
         });
         for (column, row) in grid.cells() {
             let index = row * cells_x + column;
@@ -126,7 +126,12 @@ impl CellScores {
                     {
                         continue;
                     }
-                    if image.in_bounds(xf, yf, EDGE_THRESHOLD) {
+                    if kornia_staging_imgproc::interpolation::in_bounds_u16(
+                        image,
+                        xf,
+                        yf,
+                        EDGE_THRESHOLD,
+                    ) {
                         best = key;
                     }
                 }
@@ -137,7 +142,7 @@ impl CellScores {
 }
 
 fn score_row(
-    image: &ImageU16,
+    image: &Image<u16, 1>,
     ring: &[isize; 16],
     first_x: usize,
     y: usize,
@@ -171,9 +176,9 @@ fn score_row(
             unsafe {
                 score_neon(
                     image
-                        .data()
+                        .as_slice()
                         .as_ptr()
-                        .add(y * image.stride() + first_x + offset),
+                        .add(y * image.width() + first_x + offset),
                     ring,
                     threshold,
                     out.as_mut_ptr().add(offset),
@@ -187,8 +192,8 @@ fn score_row(
     }
     for (lane, score) in out.iter_mut().enumerate() {
         *score = score_scalar(
-            image.data(),
-            y * image.stride() + first_x + lane,
+            image.as_slice(),
+            y * image.width() + first_x + lane,
             ring,
             threshold,
         );
@@ -330,12 +335,12 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn neon_scores_match_scalar_on_random_and_recorded_pixels() {
-        let mut random = ImageU16::zeros_with_stride(131, 97, 144).unwrap();
+        let mut random = crate::image::from_u8_strided(&vec![0; 144 * 97], 131, 97, 144).unwrap();
         let mut state = 0x5f71_4213u32;
         for y in 0..random.height() {
             for x in 0..random.width() {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                random.set(x, y, (state >> 16) as u16);
+                random.set_pixel(x, y, 0, (state >> 16) as u16).unwrap();
             }
         }
         // Committed P5 fixture: the final width * height bytes are its raster.
@@ -344,13 +349,15 @@ mod tests {
             "/tests/fixtures/flow/frames/frame_000_cam0.pgm"
         ));
         let pixels = &pgm[pgm.len() - 960 * 960..];
-        let mut recorded = ImageU16::zeros(960, 960).unwrap();
+        let mut recorded = crate::image::zeros(960, 960).unwrap();
         for (i, &pixel) in pixels.iter().enumerate() {
-            recorded.set(i % 960, i / 960, u16::from(pixel) << 8);
+            recorded
+                .set_pixel(i % 960, i / 960, 0, u16::from(pixel) << 8)
+                .unwrap();
         }
         for image in [&random, &recorded] {
             let ring = std::array::from_fn(|k| {
-                FAST_RING_ROW[k] as isize * image.stride() as isize + FAST_RING_COLUMN[k] as isize
+                FAST_RING_ROW[k] as isize * image.width() as isize + FAST_RING_COLUMN[k] as isize
             });
             for threshold in [1, 5, 10, 40, 127, 254, 255] {
                 for len in [1, 15, 16, 17, 31, 32, 44, 64] {
@@ -362,8 +369,8 @@ mod tests {
                                 assert_eq!(
                                     score,
                                     score_scalar(
-                                        image.data(),
-                                        y * image.stride() + first_x + lane,
+                                        image.as_slice(),
+                                        y * image.width() + first_x + lane,
                                         &ring,
                                         threshold
                                     ),

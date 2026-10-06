@@ -10,6 +10,7 @@ kornia-image.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 approx.workspace = true
 criterion.workspace = true
 
@@ -18,4 +19,8 @@ workspace = true
 
 [[bench]]
 name = "area"
+harness = false
+
+[[bench]]
+name = "sampling"
 harness = false

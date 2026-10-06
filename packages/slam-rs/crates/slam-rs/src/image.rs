@@ -1,12 +1,6 @@
-//! Owned u16 grayscale images and bilinear sampling for the frontend.
-//! Eight-bit input is widened by `u8 << 8`, preserving interpolation precision
-//! (D08). Row strides count u16 elements internally and bytes on input.
-//! Honor padded source rows, such as a 1024-byte decoder stride for a 960-pixel
-//! image (D28). Flat owned buffers support upload without repacking.
-//! GPU ingestion can retain dense bytes and defer host widening until a CPU
-//! consumer requests u16 pixels; all pixel accessors keep the same values.
-
-use crate::frontend::simd::F32x4;
+//! Validated frame ingestion into dense Kornia images.
+use kornia_image::{Image, ImageSize};
+use kornia_staging_imgproc::color::widen_u8_shift8_strided;
 use thiserror::Error;
 
 /// Everything that can go wrong building or filling an image.
@@ -52,440 +46,90 @@ pub enum ImageError {
     },
 }
 
-/// An owned grayscale image with u16 pixel access and explicit row stride.
-/// GPU byte input is widened lazily; mutable access materializes u16 storage.
-#[derive(Debug, Clone, Default)]
-pub struct ImageU16 {
-    data: Vec<u16>,
-    // GPU ingestion keeps bytes until a CPU consumer actually requests pixels.
-    #[cfg(feature = "gpu-core")]
-    // Boxed so CPU images stay small: the pyramid and KLT loops touch these structs.
-    #[expect(
-        clippy::type_complexity,
-        reason = "packed storage remains until the frame-input API migration"
-    )]
-    packed: Option<Box<(Vec<u8>, std::sync::OnceLock<Vec<u16>>)>>,
+/// Allocate a dense zero-filled frame after checking its allocation bounds.
+///
+/// # Errors
+/// Returns a geometry or allocation-layout error before allocating invalid sizes.
+pub fn zeros(width: usize, height: usize) -> Result<Image<u16, 1>, ImageError> {
+    let len = checked_pixel_len(width, height, width)?;
+    Image::new(ImageSize { width, height }, vec![0; len]).map_err(|_| ImageError::LayoutTooLarge {
+        len,
+        max: max_elements::<u16>(),
+    })
+}
+
+/// Empty reusable ingestion buffer.
+#[allow(
+    clippy::unwrap_used,
+    reason = "zero geometry always constructs an empty tensor"
+)]
+pub fn empty() -> Image<u16, 1> {
+    // No allocation; zero dimensions are valid for Kornia's empty tensor.
+    Image::new(
+        ImageSize {
+            width: 0,
+            height: 0,
+        },
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// Widen padded source rows directly into a dense image.
+///
+/// # Errors
+/// Rejects short rows, truncated input, overflowing geometry or allocation bounds.
+pub fn from_u8_strided(
+    bytes: &[u8],
     width: usize,
     height: usize,
     stride: usize,
+) -> Result<Image<u16, 1>, ImageError> {
+    let mut image = empty();
+    fill_from_u8_strided(&mut image, bytes, width, height, stride)?;
+    Ok(image)
 }
 
-impl PartialEq for ImageU16 {
-    fn eq(&self, other: &Self) -> bool {
-        self.width == other.width
-            && self.height == other.height
-            && self.stride == other.stride
-            && self.data() == other.data()
-    }
-}
-
-impl Eq for ImageU16 {}
-
-impl ImageU16 {
-    /// A zero-filled image with a dense row stride.
-    ///
-    /// # Errors
-    ///
-    /// As [`ImageU16::zeros_with_stride`], which this is `stride == width` of.
-    pub fn zeros(width: usize, height: usize) -> Result<Self, ImageError> {
-        Self::zeros_with_stride(width, height, width)
-    }
-
-    /// A zero-filled image with an explicit row stride in pixels.
-    ///
-    /// # Errors
-    ///
-    /// [`ImageError::StrideTooSmall`] if `stride < width`,
-    /// [`ImageError::SizeOverflow`] if `stride * height` does not fit in a
-    /// `usize`, [`ImageError::LayoutTooLarge`] if the buffer it describes is
-    /// bigger than one allocation may be.
-    pub fn zeros_with_stride(
-        width: usize,
-        height: usize,
-        stride: usize,
-    ) -> Result<Self, ImageError> {
-        let len: usize = checked_pixel_len(width, height, stride)?;
-        Ok(Self {
-            data: vec![0; len],
-            #[cfg(feature = "gpu-core")]
-            packed: None,
-            width,
+/// Refill a frame, retaining the allocation for unchanged geometry.
+///
+/// # Errors
+/// Rejects invalid source geometry before changing the destination.
+pub fn fill_from_u8_strided(
+    image: &mut Image<u16, 1>,
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> Result<(), ImageError> {
+    let source_len = checked_len(width, height, stride)?;
+    if bytes.len() < source_len {
+        return Err(ImageError::ShortBuffer {
             height,
             stride,
-        })
-    }
-
-    /// Widen an 8-bit image with `u8 << 8`, honoring `stride_bytes` between rows.
-    /// The buffer must cover `stride_bytes * height` bytes.
-    ///
-    /// # Errors
-    /// Returns stride, overflow or short-buffer errors when geometry is invalid.
-    pub fn from_u8_strided(
-        bytes: &[u8],
-        width: usize,
-        height: usize,
-        stride_bytes: usize,
-    ) -> Result<Self, ImageError> {
-        let mut image: Self = Self::default();
-        image.fill_from_u8_strided(bytes, width, height, stride_bytes)?;
-        Ok(image)
-    }
-
-    /// Refill this image from an 8-bit source, reusing the buffer.
-    ///
-    /// This is the per-frame path: when the capacity already covers
-    /// `width * height`, no allocation happens, whatever the previous geometry
-    /// was. The resulting image is dense (`stride == width`).
-    ///
-    /// # Errors
-    ///
-    /// As [`ImageU16::from_u8_strided`].
-    pub fn fill_from_u8_strided(
-        &mut self,
-        bytes: &[u8],
-        width: usize,
-        height: usize,
-        stride_bytes: usize,
-    ) -> Result<(), ImageError> {
-        let source_len: usize = checked_len(width, height, stride_bytes)?;
-        if bytes.len() < source_len {
-            return Err(ImageError::ShortBuffer {
-                height,
-                stride: stride_bytes,
-                len: bytes.len(),
-            });
-        }
-        let len: usize = checked_pixel_len(width, height, width)?;
-        #[cfg(feature = "gpu-core")]
-        {
-            self.packed = None;
-        }
-        // `resize` only allocates when `len` exceeds the current capacity, so a
-        // steady stream of same-sized frames never touches the allocator.
-        self.data.resize(len, 0);
-        self.width = width;
-        self.height = height;
-        self.stride = width;
-        for row in 0..height {
-            // Both slices are in range: the source by the `ShortBuffer` check
-            // above, the destination because `data.len() == width * height`.
-            let source: &[u8] = &bytes[row * stride_bytes..row * stride_bytes + width];
-            let target: &mut [u16] = &mut self.data[row * width..row * width + width];
-            for (pixel, byte) in target.iter_mut().zip(source.iter()) {
-                *pixel = u16::from(*byte) << 8;
-            }
-        }
-        Ok(())
-    }
-
-    /// Own byte input without widening it on the host. GPU pyramid builders
-    /// consume [`Self::packed_u8`]; ordinary image reads still return `u8 << 8`.
-    /// CPU fallback pixels are materialized once, only when read.
-    ///
-    /// # Errors
-    /// As [`Self::fill_from_u8_strided`].
-    #[cfg(feature = "gpu-core")]
-    pub fn fill_packed_u8_strided(
-        &mut self,
-        bytes: &[u8],
-        width: usize,
-        height: usize,
-        stride_bytes: usize,
-    ) -> Result<(), ImageError> {
-        let source_len = checked_len(width, height, stride_bytes)?;
-        if bytes.len() < source_len {
-            return Err(ImageError::ShortBuffer {
-                height,
-                stride: stride_bytes,
-                len: bytes.len(),
-            });
-        }
-        let len = checked_pixel_len(width, height, width)?;
-        let (packed, widened) = &mut **self.packed.get_or_insert_with(Default::default);
-        packed.clear();
-        packed.reserve(len);
-        for row in 0..height {
-            packed.extend_from_slice(&bytes[row * stride_bytes..row * stride_bytes + width]);
-        }
-        widened.take();
-        self.width = width;
-        self.height = height;
-        self.stride = width;
-        Ok(())
-    }
-
-    /// Dense original byte pixels, when this image came through GPU ingestion.
-    /// A mutable pixel access invalidates them before it returns.
-    #[cfg(feature = "gpu-core")]
-    pub fn packed_u8(&self) -> Option<&[u8]> {
-        self.packed.as_deref().map(|(bytes, _)| bytes.as_slice())
-    }
-
-    #[cfg(feature = "gpu-core")]
-    fn materialize(&mut self) {
-        if let Some(packed) = self.packed.take() {
-            let (bytes, widened) = *packed;
-            if let Some(pixels) = widened.into_inner() {
-                self.data = pixels;
-            } else {
-                self.data.clear();
-                self.data
-                    .extend(bytes.into_iter().map(|value| u16::from(value) << 8));
-            }
-        }
-    }
-
-    /// Copy `source` into this image, reusing the buffer.
-    ///
-    /// The result is dense (`stride == width`) whatever `source`'s stride is,
-    /// and no allocation happens when the capacity already covers it. This is
-    /// how a caller reads pixels out of a pyramid without borrowing its
-    /// storage — see [`crate::pyramid::Pyramid::copy_level_into`].
-    ///
-    /// # Errors
-    ///
-    /// [`ImageError::LayoutTooLarge`] or [`ImageError::SizeOverflow`] when
-    /// `source`'s geometry cannot be allocated densely. Neither is reachable
-    /// from a `source` that already exists.
-    pub fn copy_from(&mut self, source: &ImageU16) -> Result<(), ImageError> {
-        let width: usize = source.width;
-        let height: usize = source.height;
-        let len: usize = checked_pixel_len(width, height, width)?;
-        #[cfg(feature = "gpu-core")]
-        {
-            self.packed = None;
-        }
-        self.data.resize(len, 0);
-        self.width = width;
-        self.height = height;
-        self.stride = width;
-        for row in 0..height {
-            // Both slices are in range: `source` upholds `stride * height`, and
-            // `data.len() == width * height`.
-            let from: &[u16] = source.row(row);
-            self.data[row * width..row * width + width].copy_from_slice(from);
-        }
-        Ok(())
-    }
-
-    /// Row length in pixels.
-    pub fn width(&self) -> usize {
-        self.width
-    }
-
-    /// Number of rows.
-    pub fn height(&self) -> usize {
-        self.height
-    }
-
-    /// Distance between the starts of two rows, in pixels.
-    pub fn stride(&self) -> usize {
-        self.stride
-    }
-
-    /// The whole buffer, `stride * height` pixels long.
-    pub fn data(&self) -> &[u16] {
-        #[cfg(feature = "gpu-core")]
-        if let Some((bytes, widened)) = self.packed.as_deref() {
-            return widened
-                .get_or_init(|| bytes.iter().map(|&value| u16::from(value) << 8).collect());
-        }
-        &self.data
-    }
-
-    /// One row, `width` pixels long.
-    ///
-    /// # Panics
-    ///
-    /// If `y >= height`. Callers on the frontend path index rows they have
-    /// already bounds-checked; this is the checked accessor for everyone else.
-    pub fn row(&self, y: usize) -> &[u16] {
-        &self.data()[y * self.stride..y * self.stride + self.width]
-    }
-
-    /// One row, `width` pixels long, mutably.
-    ///
-    /// # Panics
-    ///
-    /// If `y >= height`. Callers on the frontend path index rows they have
-    /// already bounds-checked; this is the checked accessor for everyone else.
-    pub fn row_mut(&mut self, y: usize) -> &mut [u16] {
-        #[cfg(feature = "gpu-core")]
-        self.materialize();
-        &mut self.data[y * self.stride..y * self.stride + self.width]
-    }
-
-    /// The pixel at `(x, y)`, or `None` outside the image.
-    pub fn get(&self, x: usize, y: usize) -> Option<u16> {
-        if x < self.width && y < self.height {
-            Some(self.data()[y * self.stride + x])
-        } else {
-            None
-        }
-    }
-
-    /// Write the pixel at `(x, y)`; a coordinate outside the image is ignored.
-    pub fn set(&mut self, x: usize, y: usize, value: u16) {
-        if x < self.width && y < self.height {
-            #[cfg(feature = "gpu-core")]
-            self.materialize();
-            self.data[y * self.stride + x] = value;
-        }
-    }
-
-    /// Four KLT samples with a two-pixel border. Gather pixels once their whole
-    /// stencil is in bounds, then keep the scalar bilinear operation order in
-    /// each SIMD lane. Invalid lanes return -1; callers mask their gradients.
-    #[inline]
-    pub(crate) fn sample_group<const GRAD: bool>(
-        &self,
-        x: F32x4,
-        y: F32x4,
-    ) -> (F32x4, [F32x4; 2], [bool; 4]) {
-        let ix = x.0.map(|v| v as usize);
-        let iy = y.0.map(|v| v as usize);
-        let valid = std::array::from_fn(|lane| {
-            self.in_bounds(x.0[lane], y.0[lane], 2.0)
-                // Integer checks also cover dimensions beyond f32's exact range.
-                && ix[lane] >= 1 && ix[lane] < self.width.saturating_sub(2)
-                && iy[lane] >= 1 && iy[lane] < self.height.saturating_sub(2)
+            len: bytes.len(),
         });
-        let dx = x - F32x4(ix.map(|v| v as f32));
-        let dy = y - F32x4(iy.map(|v| v as f32));
-        let ddx = F32x4::splat(1.0) - dx;
-        let ddy = F32x4::splat(1.0) - dy;
-        let weights = [ddx * ddy, ddx * dy, dx * ddy, dx * dy];
-        // Resolve packed storage once for the whole stencil, never per pixel.
-        let pixels = self.data();
-        let pixel = |ox: usize, oy: usize| {
-            F32x4(std::array::from_fn(|lane| {
-                if valid[lane] {
-                    let offset = (iy[lane] - 1 + oy) * self.stride + ix[lane] - 1 + ox;
-                    // SAFETY: valid covers the entire [-1, +2] stencil; image
-                    // construction guarantees stride >= width and stride * height storage.
-                    f32::from(unsafe { *pixels.get_unchecked(offset) })
-                } else {
-                    0.0
-                }
-            }))
-        };
-        let interpolate =
-            |a, b, c, d| weights[0] * a + weights[1] * b + weights[2] * c + weights[3] * d;
-        let p00 = pixel(1, 1);
-        let p01 = pixel(1, 2);
-        let p10 = pixel(2, 1);
-        let p11 = pixel(2, 2);
-        let value = F32x4::select(valid, interpolate(p00, p01, p10, p11), F32x4::splat(-1.0));
-        let gradients = if GRAD {
-            let mx = interpolate(pixel(0, 1), pixel(0, 2), p00, p01);
-            let px = interpolate(p10, p11, pixel(3, 1), pixel(3, 2));
-            let my = interpolate(pixel(1, 0), p00, pixel(2, 0), p10);
-            let py = interpolate(p01, pixel(1, 3), p11, pixel(2, 3));
-            [F32x4::splat(0.5) * (px - mx), F32x4::splat(0.5) * (py - my)]
-        } else {
-            [F32x4::ZERO; 2]
-        };
-        (value, gradients, valid)
     }
-
-    /// Floating-point bounds: `border <= x < w - border - 1`, and likewise for y.
-    /// The extra pixel leaves room for interpolation's unconditional neighbor read.
-    /// Use border zero for values and at least one for gradients.
-    pub fn in_bounds(&self, x: f32, y: f32, border: f32) -> bool {
-        border <= x
-            && x < (self.width as f32 - border - 1.0)
-            && border <= y
-            && y < (self.height as f32 - border - 1.0)
+    checked_pixel_len(width, height, width)?;
+    if image.width() != width || image.height() != height {
+        *image = zeros(width, height)?;
     }
+    widen_u8_shift8_strided(bytes, stride, image).map_err(|_| ImageError::ShortBuffer {
+        height,
+        stride,
+        len: bytes.len(),
+    })
+}
 
-    /// Bilinear sampling with fixed multiplication grouping and summation order.
-    /// Interpolate the four surrounding pixels with weights formed from x/y fractions.
-    /// Truncation towards zero equals floor only for non-negative coordinates;
-    /// callers must establish `in_bounds(x, y, 0)` first.
-    ///
-    /// # Panics
-    /// If sampling indexes outside image storage.
-    #[inline]
-    pub fn interp(&self, x: f32, y: f32) -> f32 {
-        debug_assert!(self.in_bounds(x, y, 0.0), "interp needs InBounds(x, y, 0)");
-
-        let ix: usize = x as usize;
-        let iy: usize = y as usize;
-        let pixels = self.data();
-        let at = |px: usize, py: usize| f32::from(pixels[py * self.stride + px]);
-
-        let dx: f32 = x - ix as f32;
-        let dy: f32 = y - iy as f32;
-
-        let ddx: f32 = 1.0 - dx;
-        let ddy: f32 = 1.0 - dy;
-
-        ddx * ddy * at(ix, iy)
-            + ddx * dy * at(ix, iy + 1)
-            + dx * ddy * at(ix + 1, iy)
-            + dx * dy * at(ix + 1, iy + 1)
+/// Copy a dense image, reusing storage when its geometry matches.
+///
+/// # Errors
+/// Returns an allocation-layout error for unrepresentable geometry.
+pub fn copy_image(source: &Image<u16, 1>, target: &mut Image<u16, 1>) -> Result<(), ImageError> {
+    if source.size() != target.size() {
+        *target = zeros(source.width(), source.height())?;
     }
-
-    /// Bilinear value and unit-spacing central differences of the bilinear surface.
-    /// The gradient is not its analytic derivative. The stencil reaches from `ix-1`
-    /// to `ix+2` and `iy-1` to `iy+2`, requiring `in_bounds(x, y, 1)`.
-    /// Sparse 52-tap KLT sampling avoids building a dense gradient image.
-    ///
-    /// # Panics
-    /// If the gradient stencil indexes outside image storage.
-    #[inline]
-    pub fn interp_grad(&self, x: f32, y: f32) -> (f32, [f32; 2]) {
-        debug_assert!(
-            self.in_bounds(x, y, 1.0),
-            "interp_grad needs InBounds(x, y, 1)"
-        );
-
-        let ix: usize = x as usize;
-        let iy: usize = y as usize;
-        let pixels = self.data();
-        let at = |px: usize, py: usize| f32::from(pixels[py * self.stride + px]);
-
-        let dx: f32 = x - ix as f32;
-        let dy: f32 = y - iy as f32;
-
-        let ddx: f32 = 1.0 - dx;
-        let ddy: f32 = 1.0 - dy;
-
-        let px0y0: f32 = at(ix, iy);
-        let px1y0: f32 = at(ix + 1, iy);
-        let px0y1: f32 = at(ix, iy + 1);
-        let px1y1: f32 = at(ix + 1, iy + 1);
-
-        let value: f32 = ddx * ddy * px0y0 + ddx * dy * px0y1 + dx * ddy * px1y0 + dx * dy * px1y1;
-
-        let pxm1y0: f32 = at(ix - 1, iy);
-        let pxm1y1: f32 = at(ix - 1, iy + 1);
-
-        let res_mx: f32 =
-            ddx * ddy * pxm1y0 + ddx * dy * pxm1y1 + dx * ddy * px0y0 + dx * dy * px0y1;
-
-        let px2y0: f32 = at(ix + 2, iy);
-        let px2y1: f32 = at(ix + 2, iy + 1);
-
-        let res_px: f32 = ddx * ddy * px1y0 + ddx * dy * px1y1 + dx * ddy * px2y0 + dx * dy * px2y1;
-
-        let grad_x: f32 = 0.5 * (res_px - res_mx);
-
-        let px0ym1: f32 = at(ix, iy - 1);
-        let px1ym1: f32 = at(ix + 1, iy - 1);
-
-        let res_my: f32 =
-            ddx * ddy * px0ym1 + ddx * dy * px0y0 + dx * ddy * px1ym1 + dx * dy * px1y0;
-
-        let px0y2: f32 = at(ix, iy + 2);
-        let px1y2: f32 = at(ix + 1, iy + 2);
-
-        let res_py: f32 = ddx * ddy * px0y1 + ddx * dy * px0y2 + dx * ddy * px1y1 + dx * dy * px1y2;
-
-        let grad_y: f32 = 0.5 * (res_py - res_my);
-
-        (value, [grad_x, grad_y])
-    }
+    target.as_slice_mut().copy_from_slice(source.as_slice());
+    Ok(())
 }
 
 /// Most elements of type `T` one Rust allocation may hold.
@@ -524,160 +168,54 @@ fn checked_pixel_len(width: usize, height: usize, stride: usize) -> Result<usize
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-
     use super::*;
-    use approx::assert_abs_diff_eq;
+    use kornia_staging_imgproc::interpolation::{
+        sample_bilinear_u16, sample_bilinear_with_gradient_u16,
+    };
     use proptest::prelude::*;
-
-    /// `sin(x / 100 + y / 20)` sampled into `u16`, the image form of
-    /// Smooth analytic sampling function.
-    const SMOOTH_AMPLITUDE: f64 = 20_000.0;
-    const SMOOTH_OFFSET: f64 = 32_768.0;
-
-    fn smooth_value(x: f64, y: f64) -> f64 {
-        (x / 100.0 + y / 20.0).sin() * SMOOTH_AMPLITUDE + SMOOTH_OFFSET
-    }
-
-    fn smooth_image(width: usize, height: usize) -> ImageU16 {
-        let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
-        for y in 0..height {
-            for x in 0..width {
-                image.set(x, y, smooth_value(x as f64, y as f64).round() as u16);
-            }
-        }
-        image
-    }
-
-    fn random_image(width: usize, height: usize, seed: u64) -> ImageU16 {
-        let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
-        let mut state: u64 = seed | 1;
-        for y in 0..height {
-            for pixel in image.row_mut(y) {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *pixel = (state >> 32) as u16;
-            }
-        }
-        image
-    }
 
     #[test]
     fn widening_shifts_left_by_eight() {
-        let bytes: [u8; 4] = [0, 1, 128, 255];
-        let image: ImageU16 = ImageU16::from_u8_strided(&bytes, 4, 1, 4).unwrap();
-        assert_eq!(image.data(), &[0, 256, 32_768, 65_280]);
-    }
-
-    #[cfg(feature = "gpu-core")]
-    #[test]
-    fn packed_refilled_images_support_public_sampling() {
-        // Keep an old u16 buffer so a broken release accessor reads stale data,
-        // rather than invoking undefined behavior while reporting this failure.
-        let mut image = ImageU16::from_u8_strided(&[99; 25], 5, 5, 5).unwrap();
-        let first: Vec<u8> = (0..5)
-            .flat_map(|y| (0..6).map(move |x| x + 2 * y))
-            .collect();
-        image.fill_packed_u8_strided(&first, 5, 5, 6).unwrap();
-        assert_eq!(image.interp(1.25, 1.5), 1088.0);
-        assert_eq!(image.interp_grad(1.25, 1.5), (1088.0, [256.0, 512.0]));
-
-        let second: Vec<u8> = (0..5)
-            .flat_map(|y| (0..6).map(move |x| 20 + 3 * x + 4 * y))
-            .collect();
-        image.fill_packed_u8_strided(&second, 5, 5, 6).unwrap();
-        assert_eq!(image.interp(1.25, 1.5), 7616.0);
-        assert_eq!(image.interp_grad(1.25, 1.5), (7616.0, [768.0, 1024.0]));
-    }
-
-    #[cfg(feature = "gpu-core")]
-    #[test]
-    fn packed_input_keeps_exact_pixels_through_reads_mutation_and_refills() {
-        let mut image = ImageU16::default();
-        image
-            .fill_packed_u8_strided(&[1, 255, 99, 128, 0, 99], 2, 2, 3)
-            .unwrap();
-        assert_eq!(image.packed_u8(), Some([1, 255, 128, 0].as_slice()));
-        assert_eq!(image.get(1, 0), Some(65280));
-        assert_eq!(image.row(1), &[32768, 0]);
-        assert_eq!(image.data(), &[256, 65280, 32768, 0]);
-        let mut copy = ImageU16::default();
-        copy.copy_from(&image).unwrap();
-        assert_eq!(copy, image);
-        image.row_mut(1)[1] = 123;
-        assert_eq!(image.packed_u8(), None);
-        assert_eq!(image.get(1, 1), Some(123));
-        image.fill_packed_u8_strided(&[2, 3], 2, 1, 2).unwrap();
-        assert_eq!(image.data(), &[512, 768]);
-        image.set(0, 0, 777);
-        assert_eq!(image.data(), &[777, 768]);
-        image.fill_packed_u8_strided(&[4, 5], 2, 1, 2).unwrap();
-        image.fill_from_u8_strided(&[6, 7], 2, 1, 2).unwrap();
-        assert_eq!(image.packed_u8(), None);
-        assert_eq!(image.data(), &[1536, 1792]);
-    }
-
-    #[test]
-    fn widening_honours_the_source_byte_stride() {
-        // Two rows of three pixels inside a padded five-byte stride, dav1d's shape.
-        let bytes: [u8; 10] = [1, 2, 3, 99, 99, 4, 5, 6, 99, 99];
-        let image: ImageU16 = ImageU16::from_u8_strided(&bytes, 3, 2, 5).unwrap();
-        assert_eq!(image.width(), 3);
-        assert_eq!(image.height(), 2);
-        assert_eq!(image.stride(), 3);
-        assert_eq!(image.data(), &[256, 512, 768, 1024, 1280, 1536]);
+        let image = from_u8_strided(&[0, 1, 128, 255], 4, 1, 4).unwrap();
+        assert_eq!(image.as_slice(), &[0, 256, 32768, 65280]);
     }
 
     #[test]
     fn a_bad_geometry_is_an_error_not_a_panic() {
         assert_eq!(
-            ImageU16::from_u8_strided(&[0; 4], 4, 1, 2),
-            Err(ImageError::StrideTooSmall {
+            from_u8_strided(&[0; 4], 4, 1, 2).err(),
+            Some(ImageError::StrideTooSmall {
                 width: 4,
                 stride: 2
             })
         );
         assert_eq!(
-            ImageU16::from_u8_strided(&[0; 4], 4, 2, 4),
-            Err(ImageError::ShortBuffer {
+            from_u8_strided(&[0; 4], 4, 2, 4).err(),
+            Some(ImageError::ShortBuffer {
                 height: 2,
                 stride: 4,
                 len: 4
             })
         );
         assert_eq!(
-            ImageU16::from_u8_strided(&[], 1, 2, 1 << 63),
-            Err(ImageError::SizeOverflow {
+            from_u8_strided(&[], 1, 2, 1 << 63).err(),
+            Some(ImageError::SizeOverflow {
                 height: 2,
                 stride: 1 << 63
             })
         );
     }
 
-    /// A geometry whose pixel count fits a `usize` but whose *bytes* exceed
-    /// `isize::MAX` must be refused, not handed to the allocator: `vec![0; n]`
-    /// aborts the process there, and an abort inside the released-GIL region
-    /// takes the whole interpreter with it (decision D32).
-    ///
-    /// Nothing here allocates: every call returns before the `vec!`.
     #[test]
     fn an_unallocatable_layout_is_an_error_not_an_abort() {
-        let max: usize = max_elements::<u16>();
-        assert_eq!(max, isize::MAX as usize / 2);
+        let max = max_elements::<u16>();
         assert_eq!(
-            ImageU16::zeros(max + 1, 1),
-            Err(ImageError::LayoutTooLarge { len: max + 1, max })
+            zeros(max + 1, 1).err(),
+            Some(ImageError::LayoutTooLarge { len: max + 1, max })
         );
+        let mut image = zeros(2, 2).unwrap();
         assert_eq!(
-            ImageU16::zeros_with_stride(1, 2, max),
-            Err(ImageError::LayoutTooLarge { len: 2 * max, max })
-        );
-        // A frame that big cannot be filled either. `max + 1` pixels are more
-        // than any slice can hold, so the source check fires first; either way
-        // it is an error and no allocation is attempted.
-        let mut image: ImageU16 = ImageU16::zeros(2, 2).unwrap();
-        assert_eq!(
-            image.fill_from_u8_strided(&[0; 4], max + 1, 1, max + 1),
+            fill_from_u8_strided(&mut image, &[0; 4], max + 1, 1, max + 1),
             Err(ImageError::ShortBuffer {
                 height: 1,
                 stride: max + 1,
@@ -687,195 +225,54 @@ mod tests {
     }
 
     #[test]
-    fn copy_from_densifies_and_reuses_the_buffer() {
-        let source: ImageU16 = {
-            let mut padded: ImageU16 = ImageU16::zeros_with_stride(3, 2, 5).unwrap();
-            for y in 0..2 {
-                for x in 0..3 {
-                    padded.set(x, y, (10 * y + x) as u16);
-                }
-            }
-            padded
-        };
-        let mut target: ImageU16 = ImageU16::zeros(3, 2).unwrap();
-        let pointer: *const u16 = target.data().as_ptr();
-        target.copy_from(&source).unwrap();
-        assert_eq!(target.stride(), 3);
-        assert_eq!(target.data(), &[0, 1, 2, 10, 11, 12]);
-        assert_eq!(target.data().as_ptr(), pointer, "the buffer moved");
+    fn densified_images_support_sampling_after_each_refill() {
+        let mut image = from_u8_strided(&[99; 25], 5, 5, 5).unwrap();
+        let first: Vec<u8> = (0..5)
+            .flat_map(|y| (0..6).map(move |x| x + 2 * y))
+            .collect();
+        fill_from_u8_strided(&mut image, &first, 5, 5, 6).unwrap();
+        assert_eq!(sample_bilinear_u16(&image, 1.25, 1.5), 1088.0);
+        assert_eq!(
+            sample_bilinear_with_gradient_u16(&image, 1.25, 1.5),
+            (1088.0, [256.0, 512.0])
+        );
+        let second: Vec<u8> = (0..5)
+            .flat_map(|y| (0..6).map(move |x| 20 + 3 * x + 4 * y))
+            .collect();
+        fill_from_u8_strided(&mut image, &second, 5, 5, 6).unwrap();
+        assert_eq!(sample_bilinear_u16(&image, 1.25, 1.5), 7616.0);
+        assert_eq!(
+            sample_bilinear_with_gradient_u16(&image, 1.25, 1.5),
+            (7616.0, [768.0, 1024.0])
+        );
     }
 
     #[test]
-    fn refilling_a_same_sized_frame_never_reallocates() {
-        let bytes: Vec<u8> = (0..64 * 32).map(|i| (i % 251) as u8).collect();
-        let mut image: ImageU16 = ImageU16::from_u8_strided(&bytes, 64, 32, 64).unwrap();
-        let pointer: *const u16 = image.data().as_ptr();
-        let capacity: usize = image.data.capacity();
+    fn refilling_and_copying_same_sized_frames_never_reallocates() {
+        let bytes: Vec<u8> = (0..70 * 32).map(|i| (i % 251) as u8).collect();
+        let mut image = from_u8_strided(&bytes, 64, 32, 70).unwrap();
+        let pointer = image.as_slice().as_ptr();
+        let mut copy = zeros(64, 32).unwrap();
+        let copy_pointer = copy.as_slice().as_ptr();
         for _ in 0..8 {
-            image.fill_from_u8_strided(&bytes, 64, 32, 64).unwrap();
+            fill_from_u8_strided(&mut image, &bytes, 64, 32, 70).unwrap();
+            copy_image(&image, &mut copy).unwrap();
         }
-        assert_eq!(image.data().as_ptr(), pointer, "the buffer moved");
-        assert_eq!(image.data.capacity(), capacity, "the buffer was regrown");
-        // A smaller frame reuses the same allocation too.
-        image.fill_from_u8_strided(&bytes, 32, 16, 64).unwrap();
-        assert_eq!(image.data().as_ptr(), pointer);
-        assert_eq!(image.data.capacity(), capacity);
-        assert_eq!(image.data().len(), 32 * 16);
-    }
-
-    #[test]
-    fn in_bounds_excludes_the_last_row_and_column() {
-        let image: ImageU16 = ImageU16::zeros(10, 8).unwrap();
-        assert!(image.in_bounds(0.0, 0.0, 0.0));
-        assert!(image.in_bounds(8.99, 6.99, 0.0));
-        // `w - 1` is out of bounds at border 0: `interp` reads `ix + 1`.
-        assert!(!image.in_bounds(9.0, 3.0, 0.0));
-        assert!(!image.in_bounds(3.0, 7.0, 0.0));
-        // border 1 loses one more pixel on each side.
-        assert!(!image.in_bounds(0.5, 3.0, 1.0));
-        assert!(image.in_bounds(1.0, 1.0, 1.0));
-        assert!(!image.in_bounds(8.0, 3.0, 1.0));
-        assert!(!image.in_bounds(3.0, 6.0, 1.0));
-    }
-
-    #[test]
-    fn interp_at_an_integer_coordinate_is_the_pixel() {
-        let image: ImageU16 = random_image(17, 13, 7);
-        for y in 0..12 {
-            for x in 0..16 {
-                assert_abs_diff_eq!(
-                    image.interp(x as f32, y as f32),
-                    f32::from(image.get(x, y).unwrap()),
-                    epsilon = 0.0
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn interp_halfway_is_the_average_of_the_four_neighbours() {
-        let mut image: ImageU16 = ImageU16::zeros(4, 4).unwrap();
-        image.set(1, 1, 100);
-        image.set(2, 1, 200);
-        image.set(1, 2, 300);
-        image.set(2, 2, 400);
-        assert_abs_diff_eq!(image.interp(1.5, 1.5), 250.0, epsilon = 1e-4);
-        assert_abs_diff_eq!(image.interp(1.5, 1.0), 150.0, epsilon = 1e-4);
-        assert_abs_diff_eq!(image.interp(1.0, 1.5), 200.0, epsilon = 1e-4);
-    }
-
-    /// Sample a smooth sine into an image and compare `interp_grad` with unit-step
-    /// central differences of `interp`. A looser check against the sine's analytic
-    /// derivative also catches swapped or sign-flipped axes.
-    #[test]
-    fn image_interpolate_grad() {
-        let image: ImageU16 = smooth_image(512, 256);
-        let (x, y): (f32, f32) = (231.4, 123.34345);
-
-        let (value, grad) = image.interp_grad(x, y);
-        assert_abs_diff_eq!(value, image.interp(x, y), epsilon = 0.0);
-
-        let numeric: [f32; 2] = [
-            0.5 * (image.interp(x + 1.0, y) - image.interp(x - 1.0, y)),
-            0.5 * (image.interp(x, y + 1.0) - image.interp(x, y - 1.0)),
-        ];
-        assert_abs_diff_eq!(grad[0], numeric[0], epsilon = 1e-2);
-        assert_abs_diff_eq!(grad[1], numeric[1], epsilon = 1e-2);
-
-        let phase: f64 = f64::from(x) / 100.0 + f64::from(y) / 20.0;
-        let analytic: [f64; 2] = [
-            phase.cos() * SMOOTH_AMPLITUDE / 100.0,
-            phase.cos() * SMOOTH_AMPLITUDE / 20.0,
-        ];
-        assert_abs_diff_eq!(
-            f64::from(grad[0]),
-            analytic[0],
-            epsilon = 0.02 * analytic[0].abs()
-        );
-        assert_abs_diff_eq!(
-            f64::from(grad[1]),
-            analytic[1],
-            epsilon = 0.02 * analytic[1].abs()
-        );
+        assert_eq!(image.as_slice().as_ptr(), pointer);
+        assert_eq!(copy.as_slice().as_ptr(), copy_pointer);
+        assert_eq!(copy.as_slice(), image.as_slice());
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-
-        /// Every integer coordinate inside the image reads back its own pixel:
-        /// `dx = dy = 0` makes the first product 1 and the other three 0.
         #[test]
-        fn interp_reproduces_the_pixel_at_integer_coordinates(
-            seed in any::<u64>(),
-            x in 0usize..30,
-            y in 0usize..20,
-        ) {
-            let image: ImageU16 = random_image(31, 21, seed);
-            prop_assert_eq!(
-                image.interp(x as f32, y as f32),
-                f32::from(image.get(x, y).unwrap())
-            );
-        }
-
-        /// `interp_grad` is exactly the value and the unit-spacing central
-        /// differences of `interp`. Not bit-exact only
-        /// because `interp(x + 1, y)` recomputes `dx` from a different float.
-        #[test]
-        fn interp_grad_is_the_central_difference_of_interp(
-            seed in any::<u64>(),
-            x in 1.0f32..28.0,
-            y in 1.0f32..18.0,
-        ) {
-            let image: ImageU16 = random_image(31, 21, seed);
-            let (value, grad) = image.interp_grad(x, y);
-            prop_assert_eq!(value, image.interp(x, y));
-            let dx: f32 = 0.5 * (image.interp(x + 1.0, y) - image.interp(x - 1.0, y));
-            let dy: f32 = 0.5 * (image.interp(x, y + 1.0) - image.interp(x, y - 1.0));
-            prop_assert!((grad[0] - dx).abs() <= 1e-2 * (1.0 + dx.abs()), "{} vs {}", grad[0], dx);
-            prop_assert!((grad[1] - dy).abs() <= 1e-2 * (1.0 + dy.abs()), "{} vs {}", grad[1], dy);
-        }
-
-        /// On a smooth image the gradient agrees with a central finite
-        /// difference of `interp` taken at half-pixel steps.
-        #[test]
-        fn gradients_match_finite_differences_on_a_smooth_image(
-            x in 30.0f32..480.0,
-            y in 30.0f32..220.0,
-        ) {
-            let image: ImageU16 = smooth_image(512, 256);
-            let (_, grad) = image.interp_grad(x, y);
-            let step: f32 = 0.5;
-            let dx: f32 = (image.interp(x + step, y) - image.interp(x - step, y)) / (2.0 * step);
-            let dy: f32 = (image.interp(x, y + step) - image.interp(x, y - step)) / (2.0 * step);
-            // The two differ by the third derivative of the sine over the step,
-            // plus the bilinear interpolation error: both are below 1% of the
-            // y gradient, which is the larger of the two.
-            let scale: f32 = 0.01 * (SMOOTH_AMPLITUDE as f32 / 20.0);
-            prop_assert!((grad[0] - dx).abs() <= scale, "dx {} vs {}", grad[0], dx);
-            prop_assert!((grad[1] - dy).abs() <= scale, "dy {} vs {}", grad[1], dy);
-        }
-
-        /// Whatever the geometry, the widened image is dense, the right length
-        /// and every pixel is its source byte shifted left by eight.
-        #[test]
-        fn widening_is_stride_correct_for_any_padding(
-            width in 1usize..17,
-            height in 1usize..13,
-            padding in 0usize..7,
-        ) {
-            let stride: usize = width + padding;
+        fn widening_is_stride_correct_for_any_padding(width in 1usize..17, height in 1usize..13, padding in 0usize..7) {
+            let stride = width + padding;
             let bytes: Vec<u8> = (0..stride * height).map(|i| (i % 256) as u8).collect();
-            let image: ImageU16 = ImageU16::from_u8_strided(&bytes, width, height, stride)?;
-            prop_assert_eq!(image.stride(), width);
-            prop_assert_eq!(image.data().len(), width * height);
-            for y in 0..height {
-                for x in 0..width {
-                    prop_assert_eq!(
-                        image.get(x, y),
-                        Some(u16::from(bytes[y * stride + x]) << 8)
-                    );
-                }
-            }
+            let image = from_u8_strided(&bytes, width, height, stride)?;
+            prop_assert_eq!(image.as_slice().len(), width * height);
+            for y in 0..height { for x in 0..width {
+                prop_assert_eq!(image.as_slice()[y * width + x], u16::from(bytes[y * stride + x]) << 8);
+            }}
         }
     }
 }

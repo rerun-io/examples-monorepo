@@ -32,10 +32,15 @@ fn packed_camera_selection_is_exact_in_one_dispatch() {
                         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                         *byte = (state >> 24) as u8;
                     }
-                    let mut image = ImageU16::default();
-                    image
-                        .fill_packed_u8_strided(&bytes, width, height, width + 13)
-                        .unwrap();
+                    let mut image = slam_rs::image::empty();
+                    slam_rs::image::fill_from_u8_strided(
+                        &mut image,
+                        &bytes,
+                        width,
+                        height,
+                        width + 13,
+                    )
+                    .unwrap();
                     image
                 })
                 .collect();
@@ -85,7 +90,7 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
         let before_bands = bands.load(Ordering::Relaxed);
         let before_selections = selections.load(Ordering::Relaxed);
         // Two frames alternating, so consecutive slots hold different pixels.
-        let image: ImageU16 = common::mio10_frame(camera % 2, camera % 2);
+        let image: Image<u16, 1> = common::mio10_frame(camera % 2, camera % 2);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
         let occupancy: Occupancy<'_> = Occupancy {
@@ -122,13 +127,13 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
 
 /// Two different camera inputs with device-shaped selection geometry.
 struct SelectionFixture {
-    images: [ImageU16; 2],
+    images: [Image<u16, 1>; 2],
     selects: Vec<Option<CellSelect>>,
     cells: usize,
 }
 
 impl SelectionFixture {
-    fn new(images: [ImageU16; 2]) -> Self {
+    fn new(images: [Image<u16, 1>; 2]) -> Self {
         let config = detector_config(472.0);
         let grid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
         let selects: Vec<_> = images
@@ -215,7 +220,7 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
 #[test]
 fn a_prepared_selection_is_spent_once() {
     let config: DetectorConfig = detector_config(472.0);
-    let images: [ImageU16; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
+    let images: [Image<u16, 1>; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
     let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
     let select: CellSelect =
         slam_rs::frontend::detect::cell_select(&images[0], &grid, &config).unwrap();

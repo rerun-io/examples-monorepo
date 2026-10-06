@@ -2,11 +2,11 @@
 //! `port.redetect_survivor_ratio`), on the synthetic rig of `tests/common`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_image::Image;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::detect::{Masks, Rect};
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::image::ImageU16;
 use slam_rs::types::KeypointId;
 
 mod common;
@@ -34,7 +34,7 @@ fn the_default_config_detects_on_every_frameset() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
     let mut watermark: u64 = 0;
     for shift in 0..6 {
-        let images: [ImageU16; 2] = [dotted_image(shift), dotted_image(shift)];
+        let images: [Image<u16, 1>; 2] = [dotted_image(shift), dotted_image(shift)];
         flow.process_frame(i64::from(shift), &images, &PosePrediction::default(), &[])
             .unwrap();
         assert!(
@@ -50,14 +50,14 @@ fn the_default_config_detects_on_every_frameset() {
 #[test]
 fn a_survivor_ratio_nothing_reaches_detects_only_on_the_first_frameset() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = gated_frontend(2, 1e-6);
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
     let after_first: u64 = flow.last_keypoint_id();
     assert!(after_first > 0, "the first frameset must detect");
 
     for shift in 1..6 {
-        let moved: [ImageU16; 2] = [dotted_image(shift), dotted_image(shift)];
+        let moved: [Image<u16, 1>; 2] = [dotted_image(shift), dotted_image(shift)];
         flow.process_frame(i64::from(shift), &moved, &PosePrediction::default(), &[])
             .unwrap();
         assert_eq!(
@@ -74,7 +74,7 @@ fn a_survivor_ratio_nothing_reaches_detects_only_on_the_first_frameset() {
 #[test]
 fn a_skipped_frameset_leaves_no_camera_detected() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = gated_frontend(3, 1e-6);
-    let images: [ImageU16; 3] = [dotted_image(0), dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 3] = [dotted_image(0), dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
     let mut known: Vec<Vec<KeypointId>> = flow
@@ -86,7 +86,7 @@ fn a_skipped_frameset_leaves_no_camera_detected() {
     assert!(known.iter().all(|ids| !ids.is_empty()));
 
     for shift in 1..4 {
-        let moved: [ImageU16; 3] = [
+        let moved: [Image<u16, 1>; 3] = [
             dotted_image(shift),
             dotted_image(shift),
             dotted_image(shift),
@@ -221,8 +221,8 @@ fn redetection_uses_the_latest_post_detection_count() {
 fn redetection_resumes_after_an_empty_initial_detection() {
     let mut flow = gated_frontend(2, 0.5);
     let blank = [
-        ImageU16::zeros(WIDTH, HEIGHT).unwrap(),
-        ImageU16::zeros(WIDTH, HEIGHT).unwrap(),
+        slam_rs::image::zeros(WIDTH, HEIGHT).unwrap(),
+        slam_rs::image::zeros(WIDTH, HEIGHT).unwrap(),
     ];
     flow.process_frame(0, &blank, &PosePrediction::default(), &[])
         .unwrap();

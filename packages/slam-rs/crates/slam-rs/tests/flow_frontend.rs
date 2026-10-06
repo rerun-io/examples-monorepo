@@ -9,6 +9,7 @@
 //! `flow_rollback.rs`); the fixtures they share are in `tests/common/flow.rs`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_image::Image;
 use nalgebra::{Matrix4, Vector3};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
@@ -18,7 +19,6 @@ use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::CpuPatchTracker;
-use slam_rs::image::ImageU16;
 use slam_rs::lie::{Se3, So3};
 use slam_rs::pyramid::CpuPyramidBuilder;
 use slam_rs::types::KeypointId;
@@ -34,7 +34,7 @@ use common::{
 #[test]
 fn the_first_frame_detects_on_camera_zero_and_matches_into_camera_one() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     let frame: &FlowFrame = flow
         .process_frame(1_000, &images, &PosePrediction::default(), &[])
         .unwrap();
@@ -61,7 +61,7 @@ fn the_first_frame_detects_on_camera_zero_and_matches_into_camera_one() {
 #[test]
 fn keypoint_ids_are_one_monotonic_space() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
     let after_first: u64 = flow.last_keypoint_id();
@@ -71,7 +71,7 @@ fn keypoint_ids_are_one_monotonic_space() {
         assert!(camera.ids.iter().all(|id| id.0 < after_first));
     }
 
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     flow.process_frame(1, &moved, &PosePrediction::default(), &[])
         .unwrap();
     assert!(flow.last_keypoint_id() >= after_first);
@@ -86,7 +86,7 @@ fn the_keypoint_watermark_describes_the_committed_frame() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
     assert_eq!(flow.last_keypoint_id_before_frame(), 0);
 
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
     // Everything the first frameset detected is new, so the watermark is
@@ -94,7 +94,7 @@ fn the_keypoint_watermark_describes_the_committed_frame() {
     assert_eq!(flow.last_keypoint_id_before_frame(), 0);
     let after_first: u64 = flow.last_keypoint_id();
 
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     flow.process_frame(1, &moved, &PosePrediction::default(), &[])
         .unwrap();
     assert_eq!(flow.last_keypoint_id_before_frame(), after_first);
@@ -113,7 +113,7 @@ fn the_keypoint_watermark_describes_the_committed_frame() {
 #[test]
 fn camera_zero_cell_counts_match_its_keypoints() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
 
@@ -132,12 +132,12 @@ fn camera_zero_cell_counts_match_its_keypoints() {
 #[test]
 fn tracking_carries_keypoints_across_a_shifted_frame() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let first: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let first: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     flow.process_frame(0, &first, &PosePrediction::default(), &[])
         .unwrap();
     let before: Vec<KeypointId> = flow.frame().cameras[0].ids.clone();
 
-    let second: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let second: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     flow.process_frame(1, &second, &PosePrediction::default(), &[])
         .unwrap();
     let survived: usize = flow.frame().cameras[0]
@@ -162,8 +162,8 @@ fn tracking_carries_keypoints_across_a_shifted_frame() {
 
 #[test]
 fn one_thread_and_four_threads_produce_the_same_frame() {
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
 
     let mut single: FrameToFrameOpticalFlow<Pattern51> = frontend(
         2,
@@ -192,16 +192,16 @@ fn one_thread_and_four_threads_produce_the_same_frame() {
 
 #[test]
 fn four_cpu_cameras_produce_the_same_frames_and_ids_at_one_and_four_threads() {
-    let images: [ImageU16; 4] = std::array::from_fn(|camera| {
+    let images: [Image<u16, 1>; 4] = std::array::from_fn(|camera| {
         if camera == 0 {
-            ImageU16::zeros(WIDTH, HEIGHT).unwrap()
+            slam_rs::image::zeros(WIDTH, HEIGHT).unwrap()
         } else {
             dotted_image(0)
         }
     });
-    let moved: [ImageU16; 4] = std::array::from_fn(|camera| {
+    let moved: [Image<u16, 1>; 4] = std::array::from_fn(|camera| {
         if camera == 0 {
-            ImageU16::zeros(WIDTH, HEIGHT).unwrap()
+            slam_rs::image::zeros(WIDTH, HEIGHT).unwrap()
         } else {
             dotted_image(1)
         }
@@ -249,8 +249,8 @@ fn four_cpu_cameras_produce_the_same_frames_and_ids_at_one_and_four_threads() {
 
 #[test]
 fn two_runs_of_the_same_input_produce_the_same_frame() {
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
-    let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
+    let moved: [Image<u16, 1>; 2] = [dotted_image(1), dotted_image(1)];
     let mut frames: Vec<FlowFrame> = Vec::new();
     for _ in 0..2 {
         let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -280,7 +280,7 @@ fn cached_batches_match_rebuilding_through_masks_losses_and_redetection() {
             let images = [
                 dotted_image(step % 5),
                 if step % 7 == 3 {
-                    ImageU16::zeros(WIDTH, HEIGHT).unwrap()
+                    slam_rs::image::zeros(WIDTH, HEIGHT).unwrap()
                 } else {
                     dotted_image((step + 1) % 5)
                 },
@@ -330,7 +330,7 @@ fn cached_batches_match_rebuilding_through_masks_losses_and_redetection() {
 #[test]
 fn a_single_camera_rig_detects_and_skips_matching() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(1, FrontendOptions::default());
-    let images: [ImageU16; 1] = [dotted_image(0)];
+    let images: [Image<u16, 1>; 1] = [dotted_image(0)];
     let frame: &FlowFrame = flow
         .process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
@@ -361,7 +361,7 @@ fn the_essential_matrix_is_per_camera() {
 /// Two identical frames at negative times must track instead of resetting ids.
 #[test]
 fn identical_frames_at_negative_timestamps_keep_their_ids() {
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     let mut shared_per_start: Vec<usize> = Vec::new();
     for start in [-2_000_000_000i64, -2, 0] {
         let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -398,7 +398,7 @@ fn identical_frames_at_negative_timestamps_keep_their_ids() {
 #[test]
 fn a_mask_over_the_whole_frame_suppresses_detection() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), dotted_image(0)];
     let masks: Vec<Masks> = vec![
         Masks {
             masks: vec![Rect {
@@ -430,7 +430,7 @@ fn the_keypoint_budget_is_never_exceeded() {
             },
         );
         for step in 0..3 {
-            let images: [ImageU16; 2] = [dotted_image(step), dotted_image(step)];
+            let images: [Image<u16, 1>; 2] = [dotted_image(step), dotted_image(step)];
             let frame: &FlowFrame = flow
                 .process_frame(step.into(), &images, &PosePrediction::default(), &[])
                 .unwrap();
@@ -486,18 +486,22 @@ fn a_mixed_resolution_rig_runs() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
         FrameToFrameOpticalFlow::new(config(), &mixed, FrontendOptions::default()).unwrap();
 
-    let wide: ImageU16 = {
-        let mut image: ImageU16 = ImageU16::zeros(240, 240).unwrap();
-        let source: ImageU16 = dotted_image(0);
+    let wide: Image<u16, 1> = {
+        let mut image: Image<u16, 1> = slam_rs::image::zeros(240, 240).unwrap();
+        let source: Image<u16, 1> = dotted_image(0);
         for y in 0..240 {
             for x in 0..240 {
-                let value: u16 = source.get(x % WIDTH, y % HEIGHT).unwrap_or(0);
-                image.set(x, y, value);
+                let value: u16 = source
+                    .get_pixel(x % WIDTH, y % HEIGHT, 0)
+                    .copied()
+                    .ok()
+                    .unwrap_or(0);
+                image.set_pixel(x, y, 0, value).unwrap();
             }
         }
         image
     };
-    let images: [ImageU16; 2] = [dotted_image(0), wide];
+    let images: [Image<u16, 1>; 2] = [dotted_image(0), wide];
     let frame: &FlowFrame = flow
         .process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap();
@@ -525,7 +529,7 @@ impl slam_rs::frontend::detect::CornerScan for EmptyScan {
     fn scan(
         &mut self,
         camera: usize,
-        _image: &ImageU16,
+        _image: &Image<u16, 1>,
     ) -> Result<(), slam_rs::frontend::detect::DetectError> {
         self.cameras.lock().unwrap().push(camera);
         Ok(())

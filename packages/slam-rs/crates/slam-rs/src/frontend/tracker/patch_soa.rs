@@ -8,8 +8,8 @@ use super::{
 };
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::patch::build_patch_group;
-use crate::image::ImageU16;
 use crate::pyramid::{Pyramid, PyramidU16};
+use kornia_image::Image;
 
 /// One camera's source patches for every pyramid level, in structure-of-arrays form.
 ///
@@ -139,9 +139,9 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
         )?;
         self.len = count;
 
-        let mut images: [Option<&ImageU16>; MAX_LEVELS] = [None; MAX_LEVELS];
+        let mut images: [Option<&Image<u16, 1>>; MAX_LEVELS] = [None; MAX_LEVELS];
         for level in 0..self.num_levels {
-            let image: Option<&ImageU16> = pyramid.level(level);
+            let image: Option<&Image<u16, 1>> = pyramid.level(level);
             match (images.get_mut(level), image) {
                 (Some(slot), Some(image)) => *slot = Some(image),
                 _ => {

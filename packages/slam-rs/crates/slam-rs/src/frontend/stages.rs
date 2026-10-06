@@ -7,8 +7,8 @@ use crate::duration_ns;
 use crate::frontend::detect::{CellSelect, DetectorScratch};
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
-use crate::image::ImageU16;
 use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16, ensure_pyramids};
+use kornia_image::Image;
 
 use super::flow::{FlowTimings, FrontendError};
 
@@ -40,7 +40,7 @@ pub trait FrameStages {
     fn prepare(
         &mut self,
         t_ns: i64,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         levels: usize,
         pool: &WorkPool,
         timings: &mut FlowTimings,
@@ -48,7 +48,7 @@ pub trait FrameStages {
 
     fn prepare_detection(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
         context: StereoContext<'_>,
         timings: &mut FlowTimings,
@@ -63,7 +63,7 @@ pub trait FrameStages {
     fn stereo(
         &mut self,
         inputs: &mut [TrackInput],
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
         nonoverlap: bool,
         timings: &mut FlowTimings,
@@ -122,7 +122,7 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
     fn prepare(
         &mut self,
         _t_ns: i64,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         levels: usize,
         pool: &WorkPool,
         timings: &mut FlowTimings,
@@ -136,7 +136,7 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
 
     fn prepare_detection(
         &mut self,
-        _images: &[ImageU16],
+        _images: &[Image<u16, 1>],
         _selects: &[Option<CellSelect>],
         _context: StereoContext<'_>,
         _timings: &mut FlowTimings,
@@ -162,7 +162,7 @@ impl<T: PatchTracker<Pyramid = PyramidU16>> FrameStages for CpuStages<T> {
     fn stereo(
         &mut self,
         inputs: &mut [TrackInput],
-        _images: &[ImageU16],
+        _images: &[Image<u16, 1>],
         _selects: &[Option<CellSelect>],
         _nonoverlap: bool,
         timings: &mut FlowTimings,

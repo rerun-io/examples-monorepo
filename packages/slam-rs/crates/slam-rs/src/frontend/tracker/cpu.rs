@@ -5,8 +5,8 @@ use crate::frontend::parallel::WorkPool;
 use crate::frontend::patch::{patch_increment_rows, patch_residual_taps};
 use crate::frontend::patterns::MAX_PATTERN_SIZE;
 use crate::frontend::se2::se2_exp;
-use crate::image::ImageU16;
 use crate::pyramid::PyramidU16;
+use kornia_image::Image;
 use nalgebra::{Matrix2, Vector3};
 
 /// The CPU tracker: `trackPoints` with the same arithmetic and a fixed thread budget.
@@ -716,7 +716,7 @@ fn track_point<P: Pattern>(
 /// (`transform *= SE2::exp(inc)`) and require the new centre to stay two
 /// pixels inside the image.
 fn track_point_at_level<P: Pattern>(
-    image: &ImageU16,
+    image: &Image<u16, 1>,
     patches: &PatchSoA<P>,
     level: usize,
     index: usize,
@@ -766,7 +766,8 @@ fn track_point_at_level<P: Pattern>(
 
             if patch_valid {
                 *transform = transform.compose(&se2_exp(&increment));
-                patch_valid &= image.in_bounds(
+                patch_valid &= kornia_staging_imgproc::interpolation::in_bounds_u16(
+                    image,
                     transform.translation.x,
                     transform.translation.y,
                     FILTER_MARGIN,

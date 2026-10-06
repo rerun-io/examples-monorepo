@@ -20,6 +20,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use cubecl::frontend::CompilationArg;
+use kornia_image::Image;
 use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
 use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
@@ -33,7 +34,6 @@ use slam_rs::gpu::{
     GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, GpuRuntime,
     gpu_client,
 };
-use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
 
 mod common;
@@ -46,22 +46,20 @@ use common::gpu::{
 };
 use common::{cornered_image, grid_positions, texture, textured_image};
 
-fn packed_texture(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
+fn packed_texture(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
     let source = textured_image(width, height, dx, dy);
     let bytes: Vec<u8> = source
-        .data()
+        .as_slice()
         .iter()
         .map(|pixel| (pixel >> 8) as u8)
         .collect();
-    let mut image = ImageU16::default();
-    image
-        .fill_packed_u8_strided(&bytes, width, height, width)
-        .unwrap();
+    let mut image = slam_rs::image::empty();
+    slam_rs::image::fill_from_u8_strided(&mut image, &bytes, width, height, width).unwrap();
     image
 }
 
 /// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
-fn both_pyramids(image: &ImageU16) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
+fn both_pyramids(image: &Image<u16, 1>) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
     let (width, height): (usize, usize) = (image.width(), image.height());
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
@@ -83,8 +81,8 @@ fn both_pyramids(image: &ImageU16) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
 /// arithmetic is integer on both lanes (module doc).
 fn assert_levels_equal(cpu: &PyramidU16, gpu: &GpuPyramid<GpuRuntime>, label: &str) {
     assert_eq!(gpu.num_levels(), cpu.num_levels(), "{label}");
-    let mut expected: ImageU16 = ImageU16::default();
-    let mut actual: ImageU16 = ImageU16::default();
+    let mut expected: Image<u16, 1> = slam_rs::image::empty();
+    let mut actual: Image<u16, 1> = slam_rs::image::empty();
     for level in 0..cpu.num_levels() {
         assert_eq!(
             gpu.level_size(level),
@@ -97,8 +95,8 @@ fn assert_levels_equal(cpu: &PyramidU16, gpu: &GpuPyramid<GpuRuntime>, label: &s
         let mut worst_at: (usize, usize) = (0, 0);
         for y in 0..expected.height() {
             for x in 0..expected.width() {
-                let difference: i64 =
-                    i64::from(actual.get(x, y).unwrap()) - i64::from(expected.get(x, y).unwrap());
+                let difference: i64 = i64::from(actual.get_pixel(x, y, 0).copied().ok().unwrap())
+                    - i64::from(expected.get_pixel(x, y, 0).copied().ok().unwrap());
                 if difference.abs() > worst {
                     worst = difference.abs();
                     worst_at = (x, y);
@@ -119,7 +117,7 @@ fn assert_levels_equal(cpu: &PyramidU16, gpu: &GpuPyramid<GpuRuntime>, label: &s
 #[test]
 fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
     for (width, height) in [(960, 960), (640, 480), (517, 193), (64, 64)] {
-        let image: ImageU16 = textured_image(width, height, 0.0, 0.0);
+        let image: Image<u16, 1> = textured_image(width, height, 0.0, 0.0);
         let (cpu, gpu) = both_pyramids(&image);
         assert_levels_equal(&cpu, &gpu, &format!("{width}x{height}"));
     }
@@ -163,13 +161,11 @@ fn prepared_gpu_pixels_survive_reusing_the_source_image() {
     builder
         .prepare_images(std::slice::from_ref(&image))
         .unwrap();
-    image
-        .fill_from_u8_strided(&vec![0; 96 * 96], 96, 96, 96)
-        .unwrap();
+    slam_rs::image::fill_from_u8_strided(&mut image, &vec![0; 96 * 96], 96, 96, 96).unwrap();
     builder.build(0, &image, &mut pyramid).unwrap();
-    let mut actual = ImageU16::default();
+    let mut actual = slam_rs::image::empty();
     pyramid.copy_level_into(0, &mut actual).unwrap();
-    assert_eq!(actual.data(), expected.data());
+    assert_eq!(actual.as_slice(), expected.as_slice());
 }
 
 /// A pyramid of level 0 alone is refused rather than allocated empty.
@@ -201,10 +197,16 @@ fn a_pyramid_of_one_level_is_refused_rather_than_allocated_empty() {
 /// the same pixels, not the padding.
 #[test]
 fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
-    let source: ImageU16 = textured_image(64, 48, 0.0, 0.0);
-    let mut strided: ImageU16 = ImageU16::zeros_with_stride(64, 48, 96).unwrap();
+    let bytes: Vec<u8> = (0..96 * 48).map(|i| (i % 251) as u8).collect();
+    let strided = slam_rs::image::from_u8_strided(&bytes, 64, 48, 96).unwrap();
+    assert_eq!(strided.as_slice().len(), 64 * 48);
     for y in 0..48 {
-        strided.row_mut(y).copy_from_slice(source.row(y));
+        for x in 0..64 {
+            assert_eq!(
+                strided.as_slice()[y * 64 + x],
+                u16::from(bytes[y * 96 + x]) << 8
+            );
+        }
     }
 
     let (cpu, gpu) = both_pyramids(&strided);
@@ -215,8 +217,8 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
 /// frame must not see the first one's pixels anywhere.
 #[test]
 fn a_reused_pyramid_carries_only_the_newest_frame() {
-    let first: ImageU16 = textured_image(128, 96, 0.0, 0.0);
-    let second: ImageU16 = textured_image(128, 96, 7.0, -3.0);
+    let first: Image<u16, 1> = textured_image(128, 96, 0.0, 0.0);
+    let second: Image<u16, 1> = textured_image(128, 96, 7.0, -3.0);
 
     let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
         GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
@@ -240,18 +242,20 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
 /// a patch with a singular `H` would be dropped by both lanes and compare
 /// vacuously — and stays an exact translation of itself under `(dx, dy)`, which
 /// is what the tracking half of the fixture measures.
-fn separable_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
+fn separable_image(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
     let column: Vec<f64> = (0..width)
         .map(|x| 0.5 + 0.4 * texture(x as f64 - f64::from(dx), 0.0))
         .collect();
     let row: Vec<f64> = (0..height)
         .map(|y| 0.5 + 0.4 * texture(0.0, y as f64 - f64::from(dy)))
         .collect();
-    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+    let mut image: Image<u16, 1> = slam_rs::image::zeros(width, height).unwrap();
     for (y, vertical) in row.iter().enumerate() {
         let scaled: f64 = vertical * 65535.0;
         for (x, horizontal) in column.iter().enumerate() {
-            image.set(x, y, (horizontal * scaled).clamp(0.0, 65535.0) as u16);
+            image
+                .set_pixel(x, y, 0, (horizontal * scaled).clamp(0.0, 65535.0) as u16)
+                .unwrap();
         }
     }
     image
@@ -288,8 +292,8 @@ fn a_level_base_past_f32_precision_reaches_the_kernels_exactly() {
     );
 
     let started: std::time::Instant = std::time::Instant::now();
-    let first: ImageU16 = separable_image(SIDE, SIDE, 0.0, 0.0);
-    let second: ImageU16 = separable_image(SIDE, SIDE, SHIFT, -1.5);
+    let first: Image<u16, 1> = separable_image(SIDE, SIDE, 0.0, 0.0);
+    let second: Image<u16, 1> = separable_image(SIDE, SIDE, SHIFT, -1.5);
     // Patches well inside the frame at every level: level 3 is 512x512, so a
     // level-0 position must stay under 4064 to keep its taps in bounds there.
     let mut positions: PointsSoA = PointsSoA::with_capacity(32);
@@ -340,8 +344,8 @@ const LANE_POSITION_BOUND: f32 = 1e-3;
 /// apart in.
 fn track_both_lanes(
     size: usize,
-    first: &ImageU16,
-    second: &ImageU16,
+    first: &Image<u16, 1>,
+    second: &Image<u16, 1>,
     positions: &PointsSoA,
     guesses: &FlowTransforms,
 ) -> (FlowResult, FlowResult) {
@@ -424,8 +428,8 @@ fn assert_lanes_agree(cpu: &FlowResult, gpu: &FlowResult, count: usize, label: &
 #[test]
 fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     const SHIFT: f32 = 2.75;
-    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
-    let second: ImageU16 = textured_image(512, 512, SHIFT, -1.5);
+    let first: Image<u16, 1> = textured_image(512, 512, 0.0, 0.0);
+    let second: Image<u16, 1> = textured_image(512, 512, SHIFT, -1.5);
     let positions: PointsSoA = grid_positions(512);
     let count: usize = positions.len();
     let guesses: FlowTransforms = guesses_at(&positions);
@@ -498,11 +502,11 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
 /// *shifted* frame and keeps all 25.
 #[test]
 fn both_lanes_reject_a_track_onto_an_unrelated_frame() {
-    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
+    let first: Image<u16, 1> = textured_image(512, 512, 0.0, 0.0);
     // A different field, not a shift of the first: `cornered_image` is one LCG
     // plus a much shorter wave, so nothing in it correlates with the plane-wave
     // texture the patches were built on.
-    let unrelated: ImageU16 = cornered_image(512, 512);
+    let unrelated: Image<u16, 1> = cornered_image(512, 512);
     let positions: PointsSoA = grid_positions(512);
     let count: usize = positions.len();
     let guesses: FlowTransforms = guesses_at(&positions);
@@ -535,8 +539,8 @@ fn both_lanes_reject_a_track_onto_an_unrelated_frame() {
 /// every one.
 #[test]
 fn both_lanes_agree_at_the_border_margin() {
-    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
-    let second: ImageU16 = textured_image(512, 512, 0.75, -0.25);
+    let first: Image<u16, 1> = textured_image(512, 512, 0.0, 0.0);
+    let second: Image<u16, 1> = textured_image(512, 512, 0.75, -0.25);
     let mut positions: PointsSoA = PointsSoA::with_capacity(256);
     let mut x: usize = 4;
     while x <= 60 {
@@ -577,8 +581,8 @@ fn both_lanes_agree_at_the_border_margin() {
 /// identically.
 #[test]
 fn both_lanes_agree_on_a_bad_initial_guess() {
-    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
-    let second: ImageU16 = textured_image(512, 512, 1.25, 0.5);
+    let first: Image<u16, 1> = textured_image(512, 512, 0.0, 0.0);
+    let second: Image<u16, 1> = textured_image(512, 512, 1.25, 0.5);
     let positions: PointsSoA = grid_positions(512);
     let count: usize = positions.len();
     let mut guesses: FlowTransforms = FlowTransforms::with_capacity(count);
@@ -670,7 +674,7 @@ fn bands_agree(
 #[test]
 fn the_gpu_corner_scan_is_exact_against_kornia() {
     for (width, height) in [(960usize, 240usize), (512, 192)] {
-        let image: ImageU16 = cornered_image(width, height);
+        let image: Image<u16, 1> = cornered_image(width, height);
         let mut cpu: CpuCornerScan = CpuCornerScan::default();
         let mut gpu: GpuCornerScan<_> =
             GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
@@ -698,8 +702,8 @@ fn a_gpu_band_before_a_scan_is_refused() {
 /// the second frame's.
 #[test]
 fn a_reused_corner_scan_carries_only_the_newest_frame() {
-    let first: ImageU16 = cornered_image(512, 128);
-    let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
+    let first: Image<u16, 1> = cornered_image(512, 128);
+    let second: Image<u16, 1> = slam_rs::image::zeros(512, 128).unwrap();
 
     let mut gpu: GpuCornerScan<_> =
         GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
@@ -727,7 +731,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
 /// actually indexed.
 #[test]
 fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
-    let frames: [ImageU16; 2] = [cornered_image(960, 240), cornered_image(512, 192)];
+    let frames: [Image<u16, 1>; 2] = [cornered_image(960, 240), cornered_image(512, 192)];
     let client = gpu_client().unwrap();
 
     // The lane the frontend runs: one builder, one scanner, one client, the
@@ -792,7 +796,7 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
 
     // A frame whose geometry does not match the published entry is refused
     // rather than read: the fallback upload is what keeps a stale table safe.
-    let odd: ImageU16 = cornered_image(256, 128);
+    let odd: Image<u16, 1> = cornered_image(256, 128);
     shared.scan(0, &odd).unwrap();
     assert_eq!(shared.frame_uploads(), 1);
 }
@@ -1098,8 +1102,8 @@ fn small_angle_trig_stays_within_two_ulps_of_the_cpu() {
 #[test]
 fn a_batch_of_two_passes_answers_what_two_calls_do() {
     const SIZE: usize = 512;
-    let first: ImageU16 = textured_image(SIZE, SIZE, 0.0, 0.0);
-    let second: ImageU16 = textured_image(SIZE, SIZE, 2.75, -1.5);
+    let first: Image<u16, 1> = textured_image(SIZE, SIZE, 0.0, 0.0);
+    let second: Image<u16, 1> = textured_image(SIZE, SIZE, 2.75, -1.5);
     let lane0: PointsSoA = grid_positions(SIZE);
     // A different pass, so a batch that answered both lanes from one of them
     // would be caught: half the patches, a quarter-pixel off the grid.
@@ -1197,9 +1201,14 @@ fn fused_temporal_batch_matches_cpu() {
         for (frame, frame_pyramids) in pyramids.iter_mut().enumerate() {
             let mut image = packed_texture(512, 512, frame as f32 * 2.75, frame as f32 * -1.5);
             if camera == 3 {
-                image
-                    .fill_packed_u8_strided(&vec![0; 512 * 512], 512, 512, 512)
-                    .unwrap();
+                slam_rs::image::fill_from_u8_strided(
+                    &mut image,
+                    &vec![0; 512 * 512],
+                    512,
+                    512,
+                    512,
+                )
+                .unwrap();
             }
             let mut pyramid = builder.allocate(512, 512, LEVELS).unwrap();
             builder.build(camera, &image, &mut pyramid).unwrap();

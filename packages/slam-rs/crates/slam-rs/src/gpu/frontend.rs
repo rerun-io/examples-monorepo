@@ -12,10 +12,10 @@ use crate::frontend::parallel::WorkPool;
 use crate::frontend::patterns::Pattern;
 use crate::frontend::stages::{FrameStages, StereoContext};
 use crate::frontend::tracker::{PatchTracker, TrackInput, TrackerError};
-use crate::image::ImageU16;
 use crate::pyramid::ensure_pyramids;
 use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
+use kornia_image::Image;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameInput {
@@ -29,7 +29,7 @@ struct GpuFrame<R: Runtime> {
     detector: DetectorScratch<GpuCornerScan<R>>,
     selects: Vec<Option<CellSelect>>,
     input: Option<FrameInput>,
-    images: Vec<ImageU16>,
+    images: Vec<Image<u16, 1>>,
 }
 
 impl<R: Runtime> GpuFrame<R> {
@@ -49,7 +49,7 @@ impl<R: Runtime> GpuFrame<R> {
         })
     }
 
-    fn build(&mut self, images: &[ImageU16], levels: usize) -> Result<(), FrontendError> {
+    fn build(&mut self, images: &[Image<u16, 1>], levels: usize) -> Result<(), FrontendError> {
         ensure_pyramids(&self.builder, &mut self.pyramids, images, levels)?;
         self.builder.build_images(images, &mut self.pyramids)?;
         self.detector.scanner.use_level0(&mut self.builder);
@@ -92,10 +92,15 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         })
     }
 
+    pub(crate) fn prepare_packed_inputs(&mut self, views: &[crate::ImageView<'_>]) {
+        self.current.builder.prepare_packed_inputs(views);
+    }
+
     pub(crate) fn queue_lookahead(
         &mut self,
         t_ns: i64,
-        images: &mut Vec<ImageU16>,
+        images: &mut Vec<Image<u16, 1>>,
+        views: &[crate::ImageView<'_>],
         selects: &[Option<CellSelect>],
     ) -> Result<(), VioError> {
         if self.next.is_none() {
@@ -112,6 +117,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             );
         }
         if let Some(next) = &mut self.next {
+            next.builder.prepare_packed_inputs(views);
             std::mem::swap(&mut next.images, images);
             next.selects.clear();
             next.selects.extend_from_slice(selects);
@@ -244,7 +250,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     fn prepare(
         &mut self,
         t_ns: i64,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         levels: usize,
         _pool: &WorkPool,
         timings: &mut FlowTimings,
@@ -253,7 +259,15 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         let mark = std::time::Instant::now();
         // The pixel comparison preserves both exact hint validation and the
         // established host materialization timing before temporal KLT.
-        if self.current.input == Some(FrameInput::Ready(t_ns)) && self.current.images == images {
+        if self.current.input == Some(FrameInput::Ready(t_ns))
+            && self.current.images.len() == images.len()
+            && self
+                .current
+                .images
+                .iter()
+                .zip(images)
+                .all(|(a, b)| a.size() == b.size() && a.as_slice() == b.as_slice())
+        {
             timings.gpu_lookahead = true;
         } else {
             self.current.input = None;
@@ -267,7 +281,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     }
     fn prepare_detection(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
         context: StereoContext<'_>,
         timings: &mut FlowTimings,
@@ -310,7 +324,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
     fn stereo(
         &mut self,
         inputs: &mut [TrackInput],
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
         nonoverlap: bool,
         timings: &mut FlowTimings,

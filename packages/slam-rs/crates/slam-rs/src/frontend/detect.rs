@@ -34,7 +34,7 @@ pub use band::{
 /// a backend outside this crate cannot implement the trait without naming it.
 pub use kornia_imgproc::features::FastCorner;
 
-use crate::image::ImageU16;
+use kornia_image::Image;
 
 /// Detector input failures, including invalid caller-supplied occupancy dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -196,7 +196,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     ///
     /// [`DetectError`] when the geometry cannot be viewed as 8-bit, or a device
     /// backend cannot size its buffers.
-    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError>;
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError>;
 
     /// The candidates of `request`'s band.
     ///
@@ -259,7 +259,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     fn select_cells(
         &mut self,
         camera: usize,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
         select: &CellSelect,
         _eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
@@ -291,7 +291,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// Whatever the backend's own scan can fail with.
     fn submit_cells(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
         let _ = (images, selects);
@@ -366,7 +366,7 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
     /// Whatever the scanner's own preparation can fail with.
     pub fn submit_cells(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
         self.scanner.submit_cells(images, selects)
@@ -394,7 +394,7 @@ impl<S: CornerScan + ?Sized> DetectorScratch<S> {
 /// invalid gray image view.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
-    image: &ImageU16,
+    image: &Image<u16, 1>,
     camera: usize,
     grid: &CellGrid,
     occupancy: &Occupancy<'_>,
@@ -567,7 +567,12 @@ pub fn detect_keypoints_with_cells<S: CornerScan + ?Sized>(
                 if masks.in_bounds(full_x, full_y) {
                     continue;
                 }
-                if !image.in_bounds(full_x, full_y, EDGE_THRESHOLD) {
+                if !kornia_staging_imgproc::interpolation::in_bounds_u16(
+                    image,
+                    full_x,
+                    full_y,
+                    EDGE_THRESHOLD,
+                ) {
                     continue;
                 }
 

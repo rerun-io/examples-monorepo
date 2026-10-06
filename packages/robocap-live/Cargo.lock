@@ -6006,6 +6006,7 @@ dependencies = [
  "kornia-imgproc",
  "kornia-staging-3d",
  "kornia-staging-algebra",
+ "kornia-staging-imgproc",
  "log",
  "nalgebra",
  "rayon",

@@ -18,6 +18,7 @@ crate-type = ["cdylib"]
 gpu-wgpu = ["slam-rs/gpu-wgpu"]
 
 [dependencies]
+kornia-image.workspace = true
 slam-rs = { workspace = true }
 numpy = { workspace = true }
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }

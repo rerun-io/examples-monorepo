@@ -7,7 +7,7 @@ use cubecl::prelude::*;
 use super::{GpuCornerScan, Selection};
 use crate::frontend::detect::CellSelect;
 use crate::gpu::kernels;
-use crate::image::ImageU16;
+use kornia_image::Image;
 
 #[derive(Clone)]
 pub(super) struct BatchScanBuffers {
@@ -23,7 +23,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// without a shared arena. Those retain the general selection path.
     pub(super) fn launch_selection_batch(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
     ) -> Option<cubecl::server::Handle> {
         let first = selects

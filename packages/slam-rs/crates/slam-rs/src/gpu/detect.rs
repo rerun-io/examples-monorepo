@@ -14,7 +14,7 @@ use crate::frontend::detect::{
     BandCache, BandRequest, CellSelect, CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN,
     FAST_RING_ROW, block_filter_end, opencv_corner_score,
 };
-use crate::image::ImageU16;
+use kornia_image::Image;
 
 #[derive(Default)]
 enum SelectionReads {
@@ -101,7 +101,6 @@ pub struct GpuCornerScan<R: Runtime> {
     /// between frames so this stage reaches the **host** allocator not at all
     /// (D49). The device side is a different promise and a weaker one: see
     /// [`super`]'s "Residency".
-    packed: Vec<u16>,
     /// Reusable allocations and explicit selection readiness, indexed by camera.
     cameras: Vec<CameraWorkspace>,
     batch: Option<batch::BatchScanBuffers>,
@@ -162,7 +161,6 @@ impl<R: Runtime> GpuCornerScan<R> {
                     ring: super::submission::upload(&client, u32::as_bytes(&ring)),
                     level0: Vec::new(),
                     uploads: 0,
-                    packed: Vec::new(),
                     cameras: Vec::new(),
                     batch: None,
                     selection_stride: None,
@@ -233,7 +231,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// geometry; a fresh upload otherwise. The geometry check is what makes the
     /// fallback safe rather than hopeful: a stale entry from another frame size
     /// is refused instead of read.
-    fn frame(&mut self, camera: usize, image: &ImageU16) -> (cubecl::server::Handle, usize) {
+    fn frame(&mut self, camera: usize, image: &Image<u16, 1>) -> (cubecl::server::Handle, usize) {
         // `image` is the authority on the geometry, not `self.width`/`self.height`:
         // those are the same frame's, set by `scan` two lines up, and one fact
         // with two sources inside one call is how they come apart.
@@ -253,7 +251,7 @@ impl<R: Runtime> GpuCornerScan<R> {
         // The frame goes up as `u16` and the `>> 8` the detector reads happens
         // on the device: the extra 0.9 MB over the bus costs less than a
         // whole-frame narrowing pass on the host.
-        super::upload_frame(&self.client, image, &mut self.packed)
+        super::upload_frame(&self.client, image)
     }
 
     /// This camera's candidate kernels and its cell selection, launched into the
@@ -265,7 +263,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     fn launch_selection(
         &mut self,
         camera: usize,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
         select: &CellSelect,
     ) -> Option<(cubecl::server::Handle, usize)> {
         // A sparse or mixed-grid selection uses the immediate per-camera path.
@@ -321,7 +319,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// recorded before anything can fail, so a scan that dies further on leaves
     /// a scanner that refuses a band rather than one that answers with the last
     /// frame's corners under this frame's width (decision D32).
-    fn candidates(&mut self, camera: usize, image: &ImageU16) -> ScanHandles {
+    fn candidates(&mut self, camera: usize, image: &Image<u16, 1>) -> ScanHandles {
         self.launches.flush(&self.client);
         self.bands.clear();
         self.kept = None;
@@ -443,7 +441,7 @@ fn filter_row(
 }
 
 impl<R: Runtime> CornerScan for GpuCornerScan<R> {
-    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
         guarded(
             GpuError::DeviceLost {
                 what: "corner scan",
@@ -525,7 +523,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     fn select_cells(
         &mut self,
         camera: usize,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
         select: &CellSelect,
         _eligibility: Option<(&crate::frontend::cell::Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
@@ -583,7 +581,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     /// enough that another stage's read can absorb it.
     fn submit_cells(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
         self.abort_selection();

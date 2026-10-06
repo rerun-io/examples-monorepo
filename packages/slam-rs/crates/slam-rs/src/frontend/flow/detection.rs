@@ -11,9 +11,9 @@ use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::stages::FrameStages;
 use crate::frontend::tracker::PatchTracker;
-use crate::image::ImageU16;
 use crate::lie::Se3;
 use crate::types::KeypointId;
+use kornia_image::Image;
 use nalgebra::{Matrix4, Vector2, Vector4};
 
 impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFrameOpticalFlow<P, F> {
@@ -68,7 +68,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
         &mut self,
         cameras: std::ops::Range<usize>,
         side_pool: Option<WorkPool>,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
     ) -> Result<(), FrontendError> {
         let config = self.detector_config();
         let mark = std::time::Instant::now();
@@ -259,7 +259,7 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
 
     /// `addPoints` : detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
-    pub(super) fn add_points(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
+    pub(super) fn add_points(&mut self, images: &[Image<u16, 1>]) -> Result<(), FrontendError> {
         // Camera 0's cell winners are already on the host: `run_passes`
         // launched them before the temporal tracks and the tracks' own download
         // brought them back (D78). A backend without a device path prepared

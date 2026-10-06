@@ -73,3 +73,4 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Pivoted fixed-size LDLT | slam-rs `ldlt.rs` | kornia-rs / kornia-algebra / linalg::ldlt | staged | - |
 | Lie precision and update extensions (proposes the documented Sophus Taylor branches upstream) | slam-rs `lie.rs` | kornia-rs / kornia-algebra / lie | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
+| Dense u8-shift8 ingestion and sparse u16 bilinear values/gradients | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |

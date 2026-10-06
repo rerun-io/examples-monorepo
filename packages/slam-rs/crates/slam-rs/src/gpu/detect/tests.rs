@@ -5,11 +5,11 @@ use crate::gpu::{CORNER_SCAN_READ, GpuRuntime, arm_fault_at, gpu_client};
 
 /// Bright squares on a flat background: a frame FAST finds corners in,
 /// which is what `frontend::detect`'s own fixture is for the CPU lane.
-fn dotted_image(width: usize, height: usize) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+fn dotted_image(width: usize, height: usize) -> Image<u16, 1> {
+    let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
     for y in 0..height {
         for x in 0..width {
-            image.set(x, y, 60u16 << 8);
+            image.set_pixel(x, y, 0, 60u16 << 8).unwrap();
         }
     }
     let mut cy: usize = 20;
@@ -18,7 +18,7 @@ fn dotted_image(width: usize, height: usize) -> ImageU16 {
         while cx + 5 < width {
             for dy in 0..5 {
                 for dx in 0..5 {
-                    image.set(cx + dx, cy + dy, 200u16 << 8);
+                    image.set_pixel(cx + dx, cy + dy, 0, 200u16 << 8).unwrap();
                 }
             }
             cx += 20;

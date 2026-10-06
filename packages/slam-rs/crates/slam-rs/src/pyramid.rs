@@ -9,7 +9,8 @@
 //! Sparse KLT gradient sampling avoids constructing unused dense gradient images.
 
 use crate::frontend::parallel::WorkPool;
-use crate::image::{ImageError, ImageU16};
+use crate::image::ImageError;
+use kornia_image::Image;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The 5-tap Gaussian.
@@ -30,7 +31,7 @@ pub trait PyramidBuilder {
     /// their upload-before-dispatch ordering; CPU builders can split by camera.
     fn build_frames(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         out: &mut [Self::Pyramid],
         pool: &WorkPool,
     ) -> Result<(), PyramidError>;
@@ -59,7 +60,7 @@ pub trait PyramidBuilder {
     fn build(
         &mut self,
         camera: usize,
-        img: &ImageU16,
+        img: &Image<u16, 1>,
         out: &mut Self::Pyramid,
     ) -> Result<(), PyramidError>;
 
@@ -85,7 +86,7 @@ pub trait PyramidBuilder {
 pub(crate) fn ensure_pyramids<B: PyramidBuilder>(
     builder: &B,
     pyramids: &mut Vec<B::Pyramid>,
-    images: &[ImageU16],
+    images: &[Image<u16, 1>],
     levels: usize,
 ) -> Result<(), PyramidError> {
     pyramids.truncate(images.len());
@@ -133,7 +134,7 @@ pub trait Pyramid {
     ///
     /// [`PyramidError::NoSuchLevel`] past the top level, or the image error
     /// when `out` cannot be sized.
-    fn copy_level_into(&self, level: usize, out: &mut ImageU16) -> Result<(), PyramidError>;
+    fn copy_level_into(&self, level: usize, out: &mut Image<u16, 1>) -> Result<(), PyramidError>;
 }
 
 /// What can go wrong building a pyramid.
@@ -209,9 +210,9 @@ pub enum PyramidError {
 }
 
 /// One camera's pyramid: level 0 plus `num_levels` halvings, each a flat buffer.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PyramidU16 {
-    levels: Vec<ImageU16>,
+    levels: Vec<Image<u16, 1>>,
     /// Unique across builds, including different allocations and builders.
     /// Clones keep the generation until either copy is rebuilt.
     generation: PyramidGeneration,
@@ -232,7 +233,12 @@ impl std::fmt::Debug for PyramidGeneration {
 // Equality describes pixels, not the build history used by template caches.
 impl PartialEq for PyramidU16 {
     fn eq(&self, other: &Self) -> bool {
-        self.levels == other.levels
+        self.levels.len() == other.levels.len()
+            && self
+                .levels
+                .iter()
+                .zip(&other.levels)
+                .all(|(a, b)| a.size() == b.size() && a.as_slice() == b.as_slice())
     }
 }
 
@@ -258,10 +264,10 @@ impl PyramidU16 {
                 });
             }
         }
-        let mut levels: Vec<ImageU16> = Vec::with_capacity(num_levels + 1);
+        let mut levels: Vec<Image<u16, 1>> = Vec::with_capacity(num_levels + 1);
         for level in 0..=num_levels {
             // Level dimensions are original dimensions shifted right by the level index.
-            levels.push(ImageU16::zeros(width >> level, height >> level)?);
+            levels.push(crate::image::zeros(width >> level, height >> level)?);
         }
         Ok(Self {
             levels,
@@ -277,7 +283,7 @@ impl PyramidU16 {
     ///
     /// `pub(crate)` on purpose: this lends pyramid storage, which the trait
     /// seam may not do. The in-crate KLT tracker is the only caller.
-    pub(crate) fn level(&self, level: usize) -> Option<&ImageU16> {
+    pub(crate) fn level(&self, level: usize) -> Option<&Image<u16, 1>> {
         self.levels.get(level)
     }
 }
@@ -289,15 +295,15 @@ impl Pyramid for PyramidU16 {
 
     fn level_size(&self, level: usize) -> Option<(usize, usize, usize)> {
         self.level(level)
-            .map(|image| (image.width(), image.height(), image.stride()))
+            .map(|image| (image.width(), image.height(), image.width()))
     }
 
-    fn copy_level_into(&self, level: usize, out: &mut ImageU16) -> Result<(), PyramidError> {
-        let source: &ImageU16 = self.level(level).ok_or(PyramidError::NoSuchLevel {
+    fn copy_level_into(&self, level: usize, out: &mut Image<u16, 1>) -> Result<(), PyramidError> {
+        let source: &Image<u16, 1> = self.level(level).ok_or(PyramidError::NoSuchLevel {
             level,
             num_levels: self.levels.len(),
         })?;
-        out.copy_from(source)?;
+        crate::image::copy_image(source, out)?;
         Ok(())
     }
 }
@@ -321,14 +327,15 @@ impl PyramidBuilder for CpuPyramidBuilder {
 
     fn build_frames(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         out: &mut [PyramidU16],
         pool: &WorkPool,
     ) -> Result<(), PyramidError> {
         self.camera_scratch.resize_with(images.len(), Vec::new);
-        let build = |(image, (scratch, pyramid)): (&ImageU16, (&mut Vec<i32>, &mut PyramidU16))| {
-            build_cpu(image, pyramid, scratch)
-        };
+        let build =
+            |(image, (scratch, pyramid)): (&Image<u16, 1>, (&mut Vec<i32>, &mut PyramidU16))| {
+                build_cpu(image, pyramid, scratch)
+            };
         if let Some(result) = pool.install(|| {
             use rayon::prelude::*;
             images
@@ -361,7 +368,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
     fn build(
         &mut self,
         _camera: usize,
-        img: &ImageU16,
+        img: &Image<u16, 1>,
         out: &mut PyramidU16,
     ) -> Result<(), PyramidError> {
         build_cpu(img, out, &mut self.scratch)
@@ -370,7 +377,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
 
 /// Shared by single-camera builds and the frameset's independent camera tasks.
 fn build_cpu(
-    img: &ImageU16,
+    img: &Image<u16, 1>,
     out: &mut PyramidU16,
     scratch: &mut Vec<i32>,
 ) -> Result<(), PyramidError> {
@@ -402,8 +409,8 @@ fn build_cpu(
             .unwrap_or_else(|_| panic!("pyramid build generation exhausted")),
     );
 
-    // Copy row by row to support strided source images.
-    out.levels[0].copy_from(img)?;
+    // Reuse the dense level-zero allocation.
+    crate::image::copy_image(img, &mut out.levels[0])?;
 
     scratch.resize(scratch_len(img.width(), img.height())?, 0);
     for level in 1..out.levels.len() {
@@ -442,7 +449,7 @@ fn border101(x: i64, h: i64) -> i64 {
 /// # Panics
 /// If source sides are below [`MIN_SIDE`], destination is not half-size, or scratch
 /// is short. Construction and builder checks establish these preconditions.
-fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
+fn subsample(src: &Image<u16, 1>, dst: &mut Image<u16, 1>, scratch: &mut [i32]) {
     let src_width: usize = src.width();
     let src_height: usize = src.height();
     let dst_width: usize = dst.width();
@@ -462,11 +469,11 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
             border101(row2 + 2, src_height as i64) as usize,
         ];
         let [row_m2, row_m1, row_0, row_p1, row_p2]: [&[u16]; 5] = [
-            src.row(rows[0]),
-            src.row(rows[1]),
-            src.row(rows[2]),
-            src.row(rows[3]),
-            src.row(rows[4]),
+            &src.as_slice()[(rows[0]) * src.width()..((rows[0]) + 1) * src.width()],
+            &src.as_slice()[(rows[1]) * src.width()..((rows[1]) + 1) * src.width()],
+            &src.as_slice()[(rows[2]) * src.width()..((rows[2]) + 1) * src.width()],
+            &src.as_slice()[(rows[3]) * src.width()..((rows[3]) + 1) * src.width()],
+            &src.as_slice()[(rows[4]) * src.width()..((rows[4]) + 1) * src.width()],
         ];
         // `tmp(r, c)`, one contiguous run of `c` rather than one column of it.
         let band: &mut [i32] = &mut scratch[..src_width];
@@ -479,7 +486,13 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
         }
         // Consume the vertical row immediately. Reflection is about the source
         // width, and rounding still occurs only after both integer passes.
-        for (c, pixel) in dst.row_mut(r).iter_mut().enumerate() {
+        for (c, pixel) in {
+            let width = dst.width();
+            &mut dst.as_slice_mut()[(r) * width..((r) + 1) * width]
+        }
+        .iter_mut()
+        .enumerate()
+        {
             // Interior five-tap windows are contiguous. Peel low/high border columns to keep
             // reflection arithmetic out of the large interior loop.
             let value: i32 = match (2 * c)
@@ -517,6 +530,22 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
     }
 }
 
+impl std::fmt::Debug for PyramidU16 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PyramidU16")
+            .field(
+                "levels",
+                &self
+                    .levels
+                    .iter()
+                    .map(|image| (image.size(), image.as_slice()))
+                    .collect::<Vec<_>>(),
+            )
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -540,10 +569,10 @@ mod tests {
     }
 
     /// Independent direct 5x5 convolution with reflect-101 borders and one final rounding.
-    fn subsample_naive(src: &ImageU16) -> ImageU16 {
+    fn subsample_naive(src: &Image<u16, 1>) -> Image<u16, 1> {
         let width: usize = src.width() >> 1;
         let height: usize = src.height() >> 1;
-        let mut dst: ImageU16 = ImageU16::zeros(width, height).unwrap();
+        let mut dst: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
         for r in 0..height {
             for c in 0..width {
                 let mut sum: i64 = 0;
@@ -553,21 +582,29 @@ mod tests {
                     for (dx, kx) in KERNEL.iter().enumerate() {
                         let x: i64 =
                             reflect101_naive(2 * c as i64 + dx as i64 - 2, src.width() as i64);
-                        let pixel: i64 = i64::from(src.get(x as usize, y as usize).unwrap());
+                        let pixel: i64 = i64::from(
+                            src.get_pixel(x as usize, y as usize, 0)
+                                .copied()
+                                .ok()
+                                .unwrap(),
+                        );
                         sum += i64::from(*ky) * i64::from(*kx) * pixel;
                     }
                 }
-                dst.set(c, r, ((sum + 128) >> 8) as u16);
+                dst.set_pixel(c, r, 0, ((sum + 128) >> 8) as u16).unwrap();
             }
         }
         dst
     }
 
-    fn random_image(width: usize, height: usize, seed: u64) -> ImageU16 {
-        let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+    fn random_image(width: usize, height: usize, seed: u64) -> Image<u16, 1> {
+        let mut image: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
         let mut state: u64 = seed | 1;
         for y in 0..height {
-            for pixel in image.row_mut(y) {
+            for pixel in {
+                let width = image.width();
+                &mut image.as_slice_mut()[(y) * width..((y) + 1) * width]
+            } {
                 state = state
                     .wrapping_mul(6_364_136_223_846_793_005)
                     .wrapping_add(1);
@@ -579,13 +616,13 @@ mod tests {
 
     /// Every level, coarsest last. Generic code walks `0..num_levels()` like
     /// this; the tests do the same rather than borrowing the level vector.
-    fn each_level(pyramid: &PyramidU16) -> Vec<&ImageU16> {
+    fn each_level(pyramid: &PyramidU16) -> Vec<&Image<u16, 1>> {
         (0..pyramid.num_levels())
             .map(|level| pyramid.level(level).unwrap())
             .collect()
     }
 
-    fn build(image: &ImageU16, num_levels: usize) -> PyramidU16 {
+    fn build(image: &Image<u16, 1>, num_levels: usize) -> PyramidU16 {
         let mut pyramid: PyramidU16 =
             PyramidU16::with_capacity(image.width(), image.height(), num_levels).unwrap();
         CpuPyramidBuilder::new()
@@ -621,22 +658,26 @@ mod tests {
 
     #[test]
     fn level_zero_is_a_copy_of_the_frame() {
-        let image: ImageU16 = random_image(20, 14, 3);
+        let image: Image<u16, 1> = random_image(20, 14, 3);
         let pyramid: PyramidU16 = build(&image, 2);
-        assert_eq!(pyramid.level(0).unwrap(), &image);
+        assert_eq!(pyramid.level(0).unwrap().as_slice(), image.as_slice());
     }
 
     #[test]
     fn a_flat_image_stays_flat() {
         // The kernel sums to 256 and the rounding is `(v * 256 + 128) >> 8`,
         // so a constant image is a fixed point at every level.
-        let mut image: ImageU16 = ImageU16::zeros(32, 32).unwrap();
+        let mut image: Image<u16, 1> = crate::image::zeros(32, 32).unwrap();
         for y in 0..image.height() {
-            image.row_mut(y).fill(4_242);
+            {
+                let width = image.width();
+                &mut image.as_slice_mut()[(y) * width..((y) + 1) * width]
+            }
+            .fill(4_242);
         }
         let pyramid: PyramidU16 = build(&image, 3);
         for level in each_level(&pyramid) {
-            assert!(level.data().iter().all(|pixel| *pixel == 4_242));
+            assert!(level.as_slice().iter().all(|pixel| *pixel == 4_242));
         }
     }
 
@@ -658,22 +699,22 @@ mod tests {
     /// The seam hands out geometry and copies, never storage.
     #[test]
     fn the_pyramid_trait_lends_nothing() {
-        let image: ImageU16 = random_image(32, 24, 21);
+        let image: Image<u16, 1> = random_image(32, 24, 21);
         let pyramid: PyramidU16 = build(&image, 2);
         assert_eq!(pyramid.num_levels(), 3);
         assert_eq!(pyramid.level_size(0), Some((32, 24, 32)));
         assert_eq!(pyramid.level_size(2), Some((8, 6, 8)));
         assert_eq!(pyramid.level_size(3), None);
 
-        let mut out: ImageU16 = ImageU16::default();
+        let mut out: Image<u16, 1> = crate::image::empty();
         pyramid.copy_level_into(1, &mut out).unwrap();
         assert_eq!((out.width(), out.height()), (16, 12));
-        assert_eq!(out.data(), pyramid.level(1).unwrap().data());
+        assert_eq!(out.as_slice(), pyramid.level(1).unwrap().as_slice());
 
         // Copying the same level again reuses the caller's allocation.
-        let pointer: *const u16 = out.data().as_ptr();
+        let pointer: *const u16 = out.as_slice().as_ptr();
         pyramid.copy_level_into(1, &mut out).unwrap();
-        assert_eq!(out.data().as_ptr(), pointer);
+        assert_eq!(out.as_slice().as_ptr(), pointer);
 
         assert_eq!(
             pyramid.copy_level_into(9, &mut out),
@@ -709,7 +750,7 @@ mod tests {
     #[test]
     fn a_frame_of_the_wrong_size_is_refused() {
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(32, 24, 2).unwrap();
-        let image: ImageU16 = random_image(32, 25, 4);
+        let image: Image<u16, 1> = random_image(32, 25, 4);
         assert_eq!(
             CpuPyramidBuilder::new().build(0, &image, &mut pyramid),
             Err(PyramidError::GeometryMismatch {
@@ -723,7 +764,7 @@ mod tests {
 
     #[test]
     fn rebuilding_allocates_nothing() {
-        let image: ImageU16 = random_image(96, 64, 5);
+        let image: Image<u16, 1> = random_image(96, 64, 5);
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(96, 64, 3).unwrap();
         // `new`'s scratch is empty; the first `build` sizes it, and the pointers
         // are captured after that build, so this still measures re-use.
@@ -731,11 +772,11 @@ mod tests {
         builder.build(0, &image, &mut pyramid).unwrap();
         let pointers: Vec<*const u16> = each_level(&pyramid)
             .iter()
-            .map(|level| level.data().as_ptr())
+            .map(|level| level.as_slice().as_ptr())
             .collect();
         let capacities: Vec<usize> = each_level(&pyramid)
             .iter()
-            .map(|level| level.data().len())
+            .map(|level| level.as_slice().len())
             .collect();
         let scratch: *const i32 = builder.scratch.as_ptr();
         let scratch_capacity: usize = builder.scratch.capacity();
@@ -746,14 +787,14 @@ mod tests {
         }
         let after: Vec<*const u16> = each_level(&pyramid)
             .iter()
-            .map(|level| level.data().as_ptr())
+            .map(|level| level.as_slice().as_ptr())
             .collect();
         assert_eq!(after, pointers, "a level buffer moved");
         assert_eq!(
             capacities,
             each_level(&pyramid)
                 .iter()
-                .map(|level| level.data().len())
+                .map(|level| level.as_slice().len())
                 .collect::<Vec<usize>>()
         );
         assert_eq!(builder.scratch.as_ptr(), scratch, "the scratch moved");
@@ -818,13 +859,19 @@ mod tests {
             kornia_imgproc::pyramid::pyrdown_u8(&source, &mut kornia_out).unwrap();
 
             // Our own subsample over the same values, held in `u16` with no shift.
-            let mut ours: ImageU16 = ImageU16::zeros(width, height).unwrap();
+            let mut ours: Image<u16, 1> = crate::image::zeros(width, height).unwrap();
             for (y, row) in bytes.chunks_exact(width).enumerate() {
-                for (pixel, byte) in ours.row_mut(y).iter_mut().zip(row) {
+                for (pixel, byte) in {
+                    let width = ours.width();
+                    &mut ours.as_slice_mut()[(y) * width..((y) + 1) * width]
+                }
+                .iter_mut()
+                .zip(row)
+                {
                     *pixel = u16::from(*byte);
                 }
             }
-            let mut got: ImageU16 = ImageU16::zeros(width / 2, height / 2).unwrap();
+            let mut got: Image<u16, 1> = crate::image::zeros(width / 2, height / 2).unwrap();
             let mut scratch: Vec<i32> = vec![0; scratch_len(width, height).unwrap()];
             subsample(&ours, &mut got, &mut scratch);
 
@@ -833,7 +880,7 @@ mod tests {
                 .iter()
                 .map(|byte| u16::from(*byte))
                 .collect();
-            assert_eq!(got.data(), expected.as_slice(), "{width}x{height}");
+            assert_eq!(got.as_slice(), expected.as_slice(), "{width}x{height}");
         }
     }
 
@@ -849,12 +896,12 @@ mod tests {
             height in 3usize..40,
             seed in any::<u64>(),
         ) {
-            let image: ImageU16 = random_image(width, height, seed);
-            let expected: ImageU16 = subsample_naive(&image);
-            let mut got: ImageU16 = ImageU16::zeros(width >> 1, height >> 1).unwrap();
+            let image: Image<u16, 1> = random_image(width, height, seed);
+            let expected: Image<u16, 1> = subsample_naive(&image);
+            let mut got: Image<u16, 1> = crate::image::zeros(width >> 1, height >> 1).unwrap();
             let mut scratch: Vec<i32> = vec![0; scratch_len(width, height).unwrap()];
             subsample(&image, &mut got, &mut scratch);
-            prop_assert_eq!(got.data(), expected.data());
+            prop_assert_eq!(got.as_slice(), expected.as_slice());
         }
 
         /// Every level of a whole pyramid, not just the first subsample.
@@ -864,12 +911,12 @@ mod tests {
             height in 24usize..70,
             seed in any::<u64>(),
         ) {
-            let image: ImageU16 = random_image(width, height, seed);
+            let image: Image<u16, 1> = random_image(width, height, seed);
             let pyramid: PyramidU16 = build(&image, 3);
-            let mut expected: ImageU16 = image.clone();
+            let mut expected: Image<u16, 1> = image.clone();
             for level in 1..pyramid.num_levels() {
                 expected = subsample_naive(&expected);
-                prop_assert_eq!(pyramid.level(level).unwrap().data(), expected.data());
+                prop_assert_eq!(pyramid.level(level).unwrap().as_slice(), expected.as_slice());
             }
         }
 
@@ -881,11 +928,11 @@ mod tests {
             height in 3usize..40,
             seed in any::<u64>(),
         ) {
-            let image: ImageU16 = random_image(width, height, seed);
+            let image: Image<u16, 1> = random_image(width, height, seed);
             let pyramid: PyramidU16 = build(&image, 1);
-            let low: u16 = *image.data().iter().min().unwrap();
-            let high: u16 = *image.data().iter().max().unwrap();
-            for pixel in pyramid.level(1).unwrap().data() {
+            let low: u16 = *image.as_slice().iter().min().unwrap();
+            let high: u16 = *image.as_slice().iter().max().unwrap();
+            for pixel in pyramid.level(1).unwrap().as_slice() {
                 prop_assert!(*pixel >= low && *pixel <= high);
             }
         }

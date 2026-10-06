@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use kornia_image::Image;
 use slam_rs::frontend::detect::{
     BandRequest, CELL_KEY_LIMIT, CellGrid, CellSelect, CornerScan, CpuCornerScan, DetectError,
     DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, Masks, Occupancy,
@@ -31,7 +32,6 @@ use slam_rs::frontend::detect::{
 };
 #[cfg(feature = "gpu-core")]
 use slam_rs::gpu::{GpuCornerScan, gpu_client};
-use slam_rs::image::ImageU16;
 
 mod common;
 
@@ -43,7 +43,7 @@ use common::cornered_image;
 struct BandScan(CpuCornerScan);
 
 impl CornerScan for BandScan {
-    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
         self.0.scan(camera, image)
     }
 
@@ -76,7 +76,7 @@ struct CountingScan {
 }
 
 impl CornerScan for CountingScan {
-    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
+    fn scan(&mut self, camera: usize, image: &Image<u16, 1>) -> Result<(), DetectError> {
         self.inner.scan(camera, image)
     }
 
@@ -88,7 +88,7 @@ impl CornerScan for CountingScan {
     fn select_cells(
         &mut self,
         camera: usize,
-        image: &ImageU16,
+        image: &Image<u16, 1>,
         select: &CellSelect,
         eligibility: Option<(&Occupancy<'_>, &[bool])>,
         out: &mut Vec<u32>,
@@ -103,7 +103,7 @@ impl CornerScan for CountingScan {
     /// batched path and every equality below would still pass.
     fn submit_cells(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
         self.inner.submit_cells(images, selects)
@@ -140,7 +140,7 @@ impl ExpectedPath {
 /// One camera's detection, from a scanner of the caller's choosing.
 fn detect_with(
     scanner: Box<dyn CornerScan>,
-    image: &ImageU16,
+    image: &Image<u16, 1>,
     grid: &CellGrid,
     counts: &[i32],
     config: &DetectorConfig,
@@ -170,7 +170,7 @@ fn detect_with(
 
 /// Inputs for one numerical selection comparison.
 struct DetectionCase<'a> {
-    image: &'a ImageU16,
+    image: &'a Image<u16, 1>,
     grid: &'a CellGrid,
     counts: &'a [i32],
     config: &'a DetectorConfig,

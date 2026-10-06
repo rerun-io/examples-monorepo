@@ -6,8 +6,8 @@ use cubecl::prelude::*;
 
 use super::kernels;
 use super::{GpuError, guarded};
-use crate::image::ImageU16;
 use crate::pyramid::{MIN_SIDE, Pyramid, PyramidError};
+use kornia_image::Image;
 
 /// Where one camera's level 0 sits on the device, for the stage that reads the
 /// same pixels.
@@ -212,10 +212,11 @@ impl<R: Runtime> GpuPyramid<R> {
 pub struct GpuPyramidBuilder<R: Runtime> {
     launches: super::submission::LaunchList,
     client: ComputeClient<R>,
-    staging: Vec<u16>,
     pub(super) level0: Vec<Option<Level0>>,
     prepared: Vec<Option<Level0>>,
     packed_upload: Option<(usize, cubecl::server::Handle)>,
+    packed_frames: Vec<PackedFrame>,
+    packed_ready: bool,
 }
 
 impl<R: Runtime> GpuPyramidBuilder<R> {
@@ -223,16 +224,36 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
     pub fn new(client: ComputeClient<R>, launches: super::submission::LaunchList) -> Self {
         Self {
             client,
-            staging: Vec::new(),
             level0: Default::default(),
             prepared: Vec::new(),
             packed_upload: None,
+            packed_frames: Vec::new(),
+            packed_ready: false,
             launches,
         }
     }
 
+    /// Retain the validated source bytes separately from dense host images.
+    /// Only the pipeline calls this, immediately after ingesting the same views.
+    pub(crate) fn prepare_packed_inputs(&mut self, views: &[crate::ImageView<'_>]) {
+        self.packed_frames
+            .resize_with(views.len(), PackedFrame::default);
+        for (frame, view) in self.packed_frames.iter_mut().zip(views) {
+            frame.width = view.width;
+            frame.height = view.height;
+            frame.pixels.clear();
+            frame.pixels.reserve(view.width * view.height);
+            for row in 0..view.height {
+                frame.pixels.extend_from_slice(
+                    &view.data[row * view.stride..row * view.stride + view.width],
+                );
+            }
+        }
+        self.packed_ready = true;
+    }
+
     /// Prepare uploads for individually built camera pyramids.
-    pub fn prepare_images(&mut self, images: &[ImageU16]) -> Result<(), PyramidError> {
+    pub fn prepare_images(&mut self, images: &[Image<u16, 1>]) -> Result<(), PyramidError> {
         guarded(
             GpuError::DeviceLost {
                 what: "frameset uploads",
@@ -241,7 +262,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
                 self.prepared.resize_with(images.len(), || None);
                 for (slot, image) in self.prepared.iter_mut().zip(images) {
                     // Upload every camera before building its pyramid.
-                    let (handle, _) = super::upload_frame(&self.client, image, &mut self.staging);
+                    let (handle, _) = super::upload_frame(&self.client, image);
                     *slot = Some(Level0 {
                         handle,
                         width: image.width(),
@@ -260,7 +281,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
     type Pyramid = GpuPyramid<R>;
     fn build_frames(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         out: &mut [GpuPyramid<R>],
         _pool: &crate::frontend::parallel::WorkPool,
     ) -> Result<(), PyramidError> {
@@ -290,7 +311,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
     fn build(
         &mut self,
         camera: usize,
-        img: &ImageU16,
+        img: &Image<u16, 1>,
         out: &mut GpuPyramid<R>,
     ) -> Result<(), PyramidError> {
         guarded(
@@ -327,7 +348,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                         {
                             (frame.handle, frame.width * frame.height)
                         }
-                        _ => super::upload_frame(&out.client, img, &mut self.staging),
+                        _ => super::upload_frame(&out.client, img),
                     };
                 kernels::launch_copy_level0::<R>(
                     &out.client,
@@ -384,7 +405,7 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
     /// owns. Being off the per-frame path is also why it carries its own guard
     /// rather than sitting inside a stage's: a download panics rather than
     /// returning when the device is gone (decision D32).
-    fn copy_level_into(&self, level: usize, out: &mut ImageU16) -> Result<(), PyramidError> {
+    fn copy_level_into(&self, level: usize, out: &mut Image<u16, 1>) -> Result<(), PyramidError> {
         guarded(
             GpuError::DeviceLost {
                 what: "a pyramid level read",
@@ -411,11 +432,14 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
                     });
                 }
                 let pixels: &[u16] = u16::from_bytes(&bytes);
-                *out = ImageU16::zeros(geometry.width, geometry.height)?;
+                *out = crate::image::zeros(geometry.width, geometry.height)?;
                 for y in 0..geometry.height {
                     let start: usize = geometry.base + y * geometry.width;
-                    out.row_mut(y)
-                        .copy_from_slice(&pixels[start..start + geometry.width]);
+                    {
+                        let width = out.width();
+                        &mut out.as_slice_mut()[(y) * width..((y) + 1) * width]
+                    }
+                    .copy_from_slice(&pixels[start..start + geometry.width]);
                 }
                 Ok(())
             },
@@ -438,10 +462,17 @@ impl<R: Runtime> std::fmt::Debug for GpuPyramid<R> {
 impl<R: Runtime> std::fmt::Debug for GpuPyramidBuilder<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GpuPyramidBuilder")
-            .field("staging", &self.staging.len())
             .field("level0_cameras", &self.level0.len())
             .finish()
     }
+}
+
+/// Packed shift-eight input is an upload resource, separate from image storage.
+#[derive(Default)]
+struct PackedFrame {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
 }
 
 pub(super) struct PyramidLaunch {
@@ -493,10 +524,15 @@ impl PyramidLaunch {
 impl<R: Runtime> GpuPyramidBuilder<R> {
     pub(super) fn build_images(
         &mut self,
-        images: &[ImageU16],
+        images: &[Image<u16, 1>],
         out: &mut [GpuPyramid<R>],
     ) -> Result<(), PyramidError> {
         use crate::pyramid::PyramidBuilder;
+        let packed_ready = std::mem::take(&mut self.packed_ready)
+            && self.packed_frames.len() == images.len()
+            && self.packed_frames.iter().zip(images).all(|(frame, image)| {
+                frame.width == image.width() && frame.height == image.height()
+            });
         let Some(first) = out.first() else {
             return Ok(());
         };
@@ -511,7 +547,10 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
         // Mixed geometry and arenas beyond a binding's limit keep the general
         // per-camera path. In the common rig every camera has the same shape.
         let batchable = images.len() == cameras
-            && images.iter().all(|image| image.packed_u8().is_some())
+            && (packed_ready
+                || images
+                    .iter()
+                    .all(|image| image.as_slice().iter().all(|pixel| pixel & 255 == 0)))
             && cameras <= kernels::MAX_CUBES_PER_DIM as usize
             && out.iter().all(|pyramid| pyramid.levels == first.levels)
             && lengths
@@ -604,9 +643,13 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
                 let bytes_per_frame = images[0].width() * images[0].height() * cameras;
                 let bytes = bytes_per_frame.next_multiple_of(4);
                 let mut packed = Vec::with_capacity(bytes);
-                for image in images {
-                    if let Some(pixels) = image.packed_u8() {
-                        packed.extend_from_slice(pixels);
+                if packed_ready {
+                    for frame in &self.packed_frames {
+                        packed.extend_from_slice(&frame.pixels);
+                    }
+                } else {
+                    for image in images {
+                        packed.extend(image.as_slice().iter().map(|pixel| (pixel >> 8) as u8));
                     }
                 }
                 packed.resize(bytes, 0);
