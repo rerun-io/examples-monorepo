@@ -17,6 +17,7 @@ nalgebra = "0.35"
 numpy = "0.29"
 pyo3 = "0.29"
 thiserror = "2"
+criterion = "0.8"
 
 [profile.dev]
 opt-level = 2

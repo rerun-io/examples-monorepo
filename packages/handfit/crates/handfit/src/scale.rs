@@ -14,11 +14,13 @@
 use nalgebra::{SMatrix, SVector, SymmetricEigen};
 
 pub use crate::lm::Termination;
-use crate::lm::{predicted_reduction, DAMPING_GROWTH, MAX_DAMPING};
+use crate::lm::{effective_predicted_reduction, stationary, MAX_DAMPING};
 use crate::model::{orthonormalize, retract, Step};
 use crate::residual::{evaluate, project_camera, Residual, View, Views};
 use crate::{Config, Model, Pose};
-use kornia_staging_algebra::optim::solvers::nielsen_damping;
+use kornia_staging_algebra::optim::solvers::{
+    levenberg_marquardt, DampingRule, LmConfig, LmProblem,
+};
 
 const LANDMARKS: usize = 21;
 const POSE: usize = 26;
@@ -390,7 +392,7 @@ pub fn calibrate_scale(
                 config.joint_limit_margin_rad
             }
     });
-    let mut poses: Vec<Pose> = used
+    let poses: Vec<Pose> = used
         .iter()
         .map(|&i| {
             let mut pose = hands[i].initial.clone();
@@ -401,126 +403,35 @@ pub fn calibrate_scale(
             pose
         })
         .collect();
-    let mut scale = 1.0;
-    let mut lin = linearize_all(generic, scale, &poses, &blocks);
-    let mut damping = config.initial_damping;
-    let mut growth = DAMPING_GROWTH;
-    let mut converged = false;
-    let mut termination = if lin.energy.is_finite() {
-        Termination::Iterations
-    } else {
-        Termination::NonFinite
+    let lin = linearize_all(generic, 1.0, &poses, &blocks);
+    let mut problem = ScaleProblem {
+        generic,
+        relative_tolerance: config.relative_tolerance,
+        blocks: &blocks,
+        limits: &limits,
+        poses,
+        scale: 1.0,
+        lin,
+        candidate: None,
     };
-    let mut iterations = 0;
-    for _ in 0..config.iterations {
-        if termination == Termination::NonFinite {
-            break;
-        }
-        iterations += 1;
-        let normal = normal_all(&poses, &lin, &limits);
-        // Damped pose blocks: solve [coupling, gradient] per block, then the scalar Schur equation for the scale step.
-        let damped = schur(&normal, |pose_block, pose_mask, coupling, gradient| {
-            let scaling = marquardt_scaling(&pose_block.diagonal(), pose_mask);
-            let mut damped = *pose_block;
-            for i in 0..POSE {
-                damped[(i, i)] += damping * scaling[i] + (1.0 - pose_mask[i]);
-            }
-            let lu = damped.lu();
-            Some((lu.solve(coupling)?, lu.solve(gradient)?))
-        });
-        let Some(damped) = damped else {
-            termination = Termination::NonFinite;
-            break;
-        };
-        let schur_complement = damped.curvature * (1.0 + damping) - damped.coupling;
-        let scale_step = (-damped.gradient + damped.coupled_gradient) / schur_complement;
-        let steps = block_steps(&damped.solved, scale_step);
-        let candidates: Vec<Pose> = poses
-            .iter()
-            .zip(&steps)
-            .map(|(pose, step)| retract(pose, &step.fixed_rows::<POSE>(0).into_owned(), &limits))
-            .collect();
-        let candidate_scale = scale + scale_step as f32 as f64;
-        let predicted: f64 = (0..poses.len())
-            .map(|b| {
-                predicted_reduction(
-                    &poses[b],
-                    &candidates[b],
-                    &steps[b],
-                    &normal.h[b],
-                    &normal.g[b],
-                )
-            })
-            .sum();
-        let new_lin = linearize_all(generic, candidate_scale, &candidates, &blocks);
-        if !new_lin.energy.is_finite() {
-            termination = Termination::NonFinite;
-            break;
-        }
-        let reduction = lin.energy - new_lin.energy;
-        if reduction > 0.0 {
-            converged = reduction <= config.relative_tolerance * lin.energy;
-            poses = candidates;
-            scale = candidate_scale;
-            lin = new_lin;
-            damping = nielsen_damping(damping, reduction, predicted, Default::default());
-            growth = DAMPING_GROWTH;
-        } else {
-            damping *= growth;
-            growth *= DAMPING_GROWTH;
-        }
-        if converged {
-            termination = Termination::Tolerance;
-            break;
-        }
-        if damping > MAX_DAMPING {
-            // Recompute at the retained solution: the last step may have been accepted. Undamped (pseudo-inverted) blocks.
-            let normal = normal_all(&poses, &lin, &limits);
-            let mut scaled_gradient_sq: f64 = 0.0;
-            let undamped = schur(&normal, |pose_block, pose_mask, coupling, gradient| {
-                let scaling = marquardt_scaling(&pose_block.diagonal(), pose_mask);
-                for i in 0..POSE {
-                    scaled_gradient_sq =
-                        scaled_gradient_sq.max(gradient[i] * gradient[i] / scaling[i]);
-                }
-                let inverse = undamped_inverse(pose_block, pose_mask);
-                Some((inverse * coupling, inverse * gradient))
-            });
-            // The pseudo-inverse always solves.
-            let Some(undamped) = undamped else {
-                termination = Termination::NonFinite;
-                break;
-            };
-            let schur_complement = undamped.curvature - undamped.coupling;
-            let mut gn_prediction = f64::INFINITY;
-            if schur_complement > f64::EPSILON * undamped.curvature {
-                let scale_step =
-                    (-undamped.gradient + undamped.coupled_gradient) / schur_complement;
-                gn_prediction = 0.0;
-                for (b, step) in block_steps(&undamped.solved, scale_step).iter().enumerate() {
-                    let candidate =
-                        retract(&poses[b], &step.fixed_rows::<POSE>(0).into_owned(), &limits);
-                    gn_prediction += predicted_reduction(
-                        &poses[b],
-                        &candidate,
-                        step,
-                        &normal.h[b],
-                        &normal.g[b],
-                    );
-                }
-            }
-            scaled_gradient_sq = scaled_gradient_sq
-                .max(undamped.gradient * undamped.gradient / undamped.curvature.max(1e-30));
-            converged = gn_prediction.abs() <= config.relative_tolerance * lin.energy
-                || scaled_gradient_sq <= f32::EPSILON as f64 * lin.energy;
-            termination = if converged {
-                Termination::Stationary
-            } else {
-                Termination::Damping
-            };
-            break;
-        }
-    }
+    let solver = LmConfig {
+        max_iterations: config.iterations,
+        relative_tolerance: config.relative_tolerance,
+        absolute_tolerance: 0.0,
+        initial_damping: config.initial_damping,
+        max_damping: MAX_DAMPING,
+    };
+    let report = levenberg_marquardt(
+        &mut problem,
+        &solver,
+        DampingRule::Nielsen {
+            policy: Default::default(),
+        },
+    );
+    let mut termination = Termination::from(report.termination);
+    let ScaleProblem {
+        mut poses, scale, ..
+    } = problem;
     if !scale.is_finite() {
         return Err(ScaleError::Diverged);
     }
@@ -547,8 +458,141 @@ pub fn calibrate_scale(
         used,
         e_2d,
         blocks: blocks.len(),
-        iterations,
-        converged: converged && termination != Termination::NonFinite,
+        iterations: report.iterations,
+        converged: termination.converged(),
         termination,
     })
+}
+
+struct ScaleStep {
+    steps: Vec<SVector<f64, 27>>,
+    poses: Vec<Pose>,
+    scale: f64,
+}
+
+struct ScaleProblem<'a, 'b> {
+    generic: &'a Model,
+    relative_tolerance: f64,
+    blocks: &'a [(f64, Views<'b>)],
+    limits: &'a SMatrix<f64, 20, 2>,
+    poses: Vec<Pose>,
+    scale: f64,
+    lin: Linearized,
+    candidate: Option<(Vec<Pose>, f64, Linearized)>,
+}
+
+impl LmProblem<f64> for ScaleProblem<'_, '_> {
+    type Normal = Normal;
+    type Step = ScaleStep;
+
+    fn energy(&self) -> f64 {
+        self.lin.energy
+    }
+
+    #[inline]
+    fn linearize(&mut self) -> Self::Normal {
+        normal_all(&self.poses, &self.lin, self.limits)
+    }
+
+    fn solve_damped(&self, normal: &Normal, damping: f64) -> Option<ScaleStep> {
+        let damped = schur(normal, |pose_block, pose_mask, coupling, gradient| {
+            let scaling = marquardt_scaling(&pose_block.diagonal(), pose_mask);
+            let mut damped = *pose_block;
+            for i in 0..POSE {
+                damped[(i, i)] += damping * scaling[i] + (1.0 - pose_mask[i]);
+            }
+            let lu = damped.lu();
+            Some((lu.solve(coupling)?, lu.solve(gradient)?))
+        })?;
+        let schur_complement = damped.curvature * (1.0 + damping) - damped.coupling;
+        let scale_step = (-damped.gradient + damped.coupled_gradient) / schur_complement;
+        let steps = block_steps(&damped.solved, scale_step);
+        let poses = self
+            .poses
+            .iter()
+            .zip(&steps)
+            .map(|(pose, step)| {
+                retract(pose, &step.fixed_rows::<POSE>(0).into_owned(), self.limits)
+            })
+            .collect();
+        let scale = self.scale + scale_step as f32 as f64;
+        Some(ScaleStep {
+            steps,
+            poses,
+            scale,
+        })
+    }
+
+    fn predicted_reduction(&self, normal: &Normal, step: &ScaleStep) -> f64 {
+        (0..self.poses.len())
+            .map(|b| {
+                effective_predicted_reduction(
+                    &self.poses[b],
+                    &step.poses[b],
+                    &step.steps[b],
+                    &normal.h[b],
+                    &normal.g[b],
+                )
+            })
+            .sum()
+    }
+
+    fn try_step(&mut self, step: ScaleStep) -> f64 {
+        let poses = step.poses;
+        let lin = linearize_all(self.generic, step.scale, &poses, self.blocks);
+        let energy = lin.energy;
+        self.candidate = Some((poses, step.scale, lin));
+        energy
+    }
+
+    fn accept(&mut self) {
+        if let Some((poses, scale, lin)) = self.candidate.take() {
+            self.poses = poses;
+            self.scale = scale;
+            self.lin = lin;
+        }
+    }
+
+    fn is_stationary(&mut self) -> bool {
+        let normal = self.linearize();
+        let mut scaled_gradient_sq: f64 = 0.0;
+        let Some(undamped) = schur(&normal, |pose_block, pose_mask, coupling, gradient| {
+            let scaling = marquardt_scaling(&pose_block.diagonal(), pose_mask);
+            for i in 0..POSE {
+                scaled_gradient_sq = scaled_gradient_sq.max(gradient[i] * gradient[i] / scaling[i]);
+            }
+            let inverse = undamped_inverse(pose_block, pose_mask);
+            Some((inverse * coupling, inverse * gradient))
+        }) else {
+            unreachable!("the pseudo-inverse closure always returns a solution");
+        };
+        let schur_complement = undamped.curvature - undamped.coupling;
+        let mut gn_prediction = f64::INFINITY;
+        if schur_complement > f64::EPSILON * undamped.curvature {
+            let scale_step = (-undamped.gradient + undamped.coupled_gradient) / schur_complement;
+            gn_prediction = 0.0;
+            for (b, step) in block_steps(&undamped.solved, scale_step).iter().enumerate() {
+                let candidate = retract(
+                    &self.poses[b],
+                    &step.fixed_rows::<POSE>(0).into_owned(),
+                    self.limits,
+                );
+                gn_prediction += effective_predicted_reduction(
+                    &self.poses[b],
+                    &candidate,
+                    step,
+                    &normal.h[b],
+                    &normal.g[b],
+                );
+            }
+        }
+        scaled_gradient_sq = scaled_gradient_sq
+            .max(undamped.gradient * undamped.gradient / undamped.curvature.max(1e-30));
+        stationary(
+            gn_prediction,
+            scaled_gradient_sq,
+            self.relative_tolerance,
+            self.lin.energy,
+        )
+    }
 }

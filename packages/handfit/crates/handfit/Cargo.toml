@@ -11,3 +11,10 @@ nalgebra = { workspace = true }
 thiserror = { workspace = true }
 kornia-staging-3d = { path = "../../../kornia-staging/crates/kornia-staging-3d", default-features = false }
 kornia-staging-algebra = { path = "../../../kornia-staging/crates/kornia-staging-algebra" }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "calibrate_scale"
+harness = false
