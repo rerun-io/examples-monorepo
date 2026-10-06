@@ -23,7 +23,7 @@ class PatchedCrate:
     sha256: str
     """Expected archive digest."""
     patch: str
-    """Patch path relative to the SLAM package."""
+    """Patch path relative to the staging package."""
 
 
 PATCHED_CRATES: tuple[PatchedCrate, ...] = (
@@ -50,14 +50,6 @@ PATCHED_CRATES: tuple[PatchedCrate, ...] = (
 
 # src/device/handle/channel.rs at CubeCL fork commit 93d463c9.
 CHANNEL_SHA256: str = '75e4b83cb12ad4bfa07b2e72c8e7fafdb363c00f98682174f03dafc8f5e849d7'
-
-
-@dataclass(frozen=True, slots=True)
-class Config:
-    """Prepare the dependencies of this source checkout."""
-
-    package_dir: Path = Path(__file__).resolve().parents[2]
-    """SLAM package containing Cargo.toml and patches/."""
 
 
 def content_fingerprint(tree: Path, patch: Path) -> str:
@@ -124,8 +116,23 @@ def prepare(crate: PatchedCrate, package_dir: Path, cargo_home: Path) -> None:
         print(f'{stem}: prepared ({"cache" if cached is not None else "download"})')
 
 
+@dataclass(frozen=True, slots=True)
+class Config:
+    """Locations used to prepare the pinned Cargo dependencies."""
+
+    package_dir: Path = Path(__file__).resolve().parents[1]
+    """Staging package containing patches and the target directory."""
+    cargo_home: Path = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+    """Cargo cache containing the verified source archives."""
+
+
 def main(config: Config) -> None:
-    """Prepare every pinned patch using Cargo's configured archive cache."""
-    cargo_home: Path = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+    """Prepare every pinned patch using the configured package and Cargo cache."""
     for crate in PATCHED_CRATES:
-        prepare(crate, config.package_dir, cargo_home)
+        prepare(crate, config.package_dir, config.cargo_home)
+
+
+if __name__ == "__main__":
+    import tyro
+
+    main(tyro.cli(Config))

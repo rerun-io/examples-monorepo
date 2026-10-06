@@ -1,6 +1,7 @@
 //! The GPU [`PatchTracker`]: both passes and the recovered-distance test on the
 //! device, one wait per call.
 
+use kornia_staging_gpu::runtime::GpuError;
 use crate::frontend::flow::FrontendError;
 mod batch;
 
@@ -11,7 +12,7 @@ use super::kernels::klt_fused::{
 };
 use super::patches::GpuPatchSources;
 use super::pyramid::GpuPyramid;
-use super::{GpuError, guarded};
+use super::{ guarded};
 use crate::pyramid::Pyramid;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackPhase};
@@ -125,7 +126,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     num_levels,
                     P::SIZE,
                 )?;
-                super::runtime::probe_subgroups(&client)?;
+                kornia_staging_gpu::runtime::probe_subgroups(&client)?;
 
                 let lanes = lanes.max(1);
                 let transform_bytes: usize = FUSED_RUNS * capacity * size_of::<f32>();
@@ -397,7 +398,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             // One buffer per non-empty lane, in the order they were asked for;
             // anything else is the runtime breaking its own contract.
             let Some(buffer) = bytes.get(if packed_count == 0 { read } else { 0 }) else {
-                return Err(super::GpuError::DeviceReadFailed {
+                return Err(kornia_staging_gpu::runtime::GpuError::DeviceReadFailed {
                     what: "a tracker lane's result",
                 }
                 .into());

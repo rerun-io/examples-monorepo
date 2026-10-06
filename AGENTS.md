@@ -313,8 +313,8 @@ linux-64 (pixi >= 0.73, as set by `requires-pixi`) and move back to a public rel
 
 ## Gotchas
 
-- **slam-rs bare Cargo / rust-analyzer bootstrap** — run `pixi run -e slam-rs-dev --frozen slam-rs-patch-deps` once per fresh checkout (`slam-rs-osx-dev` on macOS). Cargo's path override needs the prepared `target/patch/` tree; the Pixi Cargo tasks prepare it automatically. The bump runbook is beside `[patch.crates-io]` in the package's `Cargo.toml`.
-- **slam-rs offline patch tests need their own cache** — from `packages/slam-rs`, run `pixi run -e slam-rs-dev --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml` once per Cargo home before `slam-rs-patch-test` (`slam-rs-osx-dev` on macOS). The prepared crate resolves standalone; an offline `test-log` miss means this cache is incomplete.
+- **kornia-staging patched CubeCL bootstrap** — run `pixi run -e kornia-staging --frozen kornia-staging-patch-deps` once per fresh checkout (also on macOS). Cargo's path override needs the prepared `packages/kornia-staging/target/patch/` tree; the Pixi Cargo tasks prepare it automatically. The bump runbook is beside `[patch.crates-io]` in the package's `Cargo.toml`.
+- **kornia-staging patched CubeCL offline test cache** — from `packages/kornia-staging`, run `pixi run -e kornia-staging --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml` and `pixi run -e kornia-staging --frozen cargo fetch --locked --manifest-path target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml` once per Cargo home before the CubeCL park and wgpu poll tests (also on macOS). The prepared crate resolves standalone; an offline `test-log` miss means this cache is incomplete.
 
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`

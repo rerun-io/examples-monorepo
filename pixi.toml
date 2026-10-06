@@ -2573,14 +2573,8 @@ CORE_CDYLIB = "lib_core.dylib"
 # cargo never runs during `pixi lock`/`pixi install`: the extension is built by
 # this task and dropped next to the Python sources, where hatchling's editable
 # .pth already looks (the dpvo / mast3r-slam in-place pattern).
-[feature.slam-rs.tasks.slam-rs-patch-deps]
-# Always verify prepared content, including when task inputs have not changed.
-cmd = "python tools/prepare_patched_deps.py"
-cwd = "packages/slam-rs"
-description = "Prepare checksummed Cargo dependencies with local patches"
-
 [feature.slam-rs.tasks.slam-rs-build]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 # The CPU core and the GPU core (slam-rs-wgpu-build) share slam_rs/_core.so: each task that needs one installs it first, and
 # the install is a rename, so a running process keeps the file it loaded. Separate target dirs make the switch a copy, not a rebuild.
 cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
@@ -2596,15 +2590,9 @@ inputs = [
     "packages/kornia-staging/crates/*/Cargo.toml",
     "packages/kornia-staging/crates/*/build.rs",
     "packages/kornia-staging/crates/*/src/**",
-    "packages/slam-rs/patches/**",
-    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
-    "packages/slam-rs/tools/prepare_patched_deps.py",
-    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
-    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/.prepared-sha256",
-    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/.prepared-sha256",
+    "packages/kornia-staging/patches/**",
+    "packages/kornia-staging/scripts/prepare_patched_deps.py",
+    "packages/kornia-staging/target/patch/**",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/crates/*/Cargo.toml",
@@ -2615,37 +2603,25 @@ outputs = ["packages/slam-rs/slam_rs/_core.so"]
 description = "Build the Rust VIO core and install slam_rs._core in place"
 
 [feature.slam-rs.tasks.slam-rs-clippy]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo clippy --workspace --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Run clippy over the whole Rust workspace"
 
-[feature.slam-rs.tasks.slam-rs-patch-test]
-depends-on = ["slam-rs-patch-deps"]
-cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml park"
-cwd = "packages/slam-rs"
-description = "Run the patched CubeCL channel park tests"
-
-[feature.slam-rs.tasks.slam-rs-wgpu-poll-test]
-depends-on = ["slam-rs-patch-deps"]
-cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml --lib compute::poll::_impl::tests --no-default-features --features std,spirv"
-cwd = "packages/slam-rs"
-description = "Test idle blocking, retained wakeups and poll worker shutdown"
-
 [feature.slam-rs.tasks.slam-rs-rust-test]
-depends-on = ["slam-rs-patch-test", "slam-rs-wgpu-poll-test"]
+depends-on = [{ task = "kornia-staging-cubecl-park-test", environment = "kornia-staging" }]
 cmd = "cargo test --locked --offline --workspace -- --nocapture"
 cwd = "packages/slam-rs"
 description = "Run the Rust test suite (unit tests + proptest)"
 
 [feature.slam-rs.tasks.slam-rs-recorder-test]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo test --locked --offline -p robocap-recorder --features live-slam -- --nocapture"
 cwd = "packages/slam-rs"
 description = "Run the recorder's live SLAM adapter tests without capture hardware"
 
 [feature.slam-rs.tasks.slam-rs-catalog-test]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = """bash -c 'cargo test --locked --offline -p slam-rs-cli --features catalog && if [[ -n ${SLAM_RS_CATALOG_URL:-} && -f ${SLAM_RS_TEST_FIXTURE:-}/clip.json && ( -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8 || -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8.xz ) && -n ${SLAM_RS_TEST_OUTPUT:-} ]]; then cargo test --locked --offline -p slam-rs-cli --features catalog catalog_inputs_match_python_fixture -- --ignored --nocapture; else echo "SKIP catalog_inputs_match_python_fixture: set SLAM_RS_CATALOG_URL, SLAM_RS_TEST_FIXTURE (clip.json plus frames.u8 or frames.u8.xz), SLAM_RS_TEST_OUTPUT; dav1d required for G2"; fi'"""
 cwd = "packages/slam-rs"
 description = "Run native catalog tests and explicitly select fixture parity when its assets are configured"
@@ -2690,7 +2666,7 @@ description = "Build the core, then run the package golden reference tests"
 # Clippy checks GPU code and tests with warnings denied; the default lane
 # does not compile these optional modules.
 [feature.slam-rs.tasks.slam-rs-wgpu-clippy]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo clippy -p slam-rs --features gpu-wgpu --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Lint the portable wgpu lane, tests included, with warnings denied"
@@ -2713,7 +2689,7 @@ cwd = "packages/slam-rs"
 description = "Run workspace tests with wgpu, checking that all four GPU integration binaries contain tests"
 
 [feature.slam-rs.tasks.slam-rs-wgpu-doc]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = 'RUSTDOCFLAGS="-D warnings" cargo doc --locked --offline --no-deps -p slam-rs -p slam-rs-py --features slam-rs/gpu-wgpu'
 cwd = "packages/slam-rs"
 description = "Build wgpu Rust documentation with warnings denied"
@@ -2721,7 +2697,7 @@ description = "Build wgpu Rust documentation with warnings denied"
 # The same core on the portable lane, for measuring it: `--gpu` then selects
 # wgpu, the only GPU runtime (D70).
 [feature.slam-rs.tasks.slam-rs-wgpu-build]
-depends-on = ["slam-rs-patch-deps"]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu --target-dir target/wgpu && cp target/wgpu/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
@@ -2735,15 +2711,9 @@ inputs = [
     "packages/kornia-staging/crates/*/Cargo.toml",
     "packages/kornia-staging/crates/*/build.rs",
     "packages/kornia-staging/crates/*/src/**",
-    "packages/slam-rs/patches/**",
-    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
-    "packages/slam-rs/tools/prepare_patched_deps.py",
-    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
-    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/.prepared-sha256",
-    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/.prepared-sha256",
+    "packages/kornia-staging/patches/**",
+    "packages/kornia-staging/scripts/prepare_patched_deps.py",
+    "packages/kornia-staging/target/patch/**",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/crates/*/Cargo.toml",
@@ -2771,12 +2741,12 @@ ffmpeg = "7.*"
 pkg-config = "*"
 
 [feature.robocap-recorder.tasks.robocap-recorder-test]
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo test --locked -p robocap-recorder --features gstreamer-capture,live-slam"
 cwd = "packages/slam-rs"
 
 [feature.robocap-recorder.tasks.robocap-recorder-clippy]
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo clippy --locked -p robocap-recorder --features gstreamer-capture,live-slam --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 
@@ -2800,13 +2770,13 @@ CXX_aarch64_unknown_linux_gnu = "aarch64-conda-linux-gnu-g++"
 [feature.robocap-cross.tasks.slam-rs-cli-catalog-build]
 cmd = "bash crates/slam-rs-cli/scripts/build-catalog-arm.sh"
 cwd = "packages/slam-rs"
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 description = "Build the ARM catalog replay CLI with dav1d headers and static OpenH264 C++ support"
 
 [feature.robocap-cross.tasks.robocap-live-build-arm]
 cmd = "bash scripts/build-arm.sh"
 cwd = "packages/robocap-live"
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 description = "Build robocap-live and robocap-panel for this host and for the caps (aarch64), and check the cap binary"
 
 [feature.robocap-cross.tasks.robocap-live-deploy]
@@ -2822,7 +2792,7 @@ description = "Deploy, start or stop the web panel on a cap: deploy|start|stop|s
 [feature.robocap-cross.tasks.robocap-direct-build]
 cmd = "bash crates/robocap-recorder/scripts/build-arm.sh"
 cwd = "packages/slam-rs"
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 description = "Build the release ARM recorder; pass the cap runtime sysroot directory"
 
 # ── the macOS lane ───────────────────────────────────────────────────────
@@ -3448,10 +3418,10 @@ PACKAGE_DIR = "packages/robocap-live"
 PYREFLY_TARGET = "robocap_live tools/apps tests"
 
 # cargo never runs during `pixi lock`/`pixi install`: the extension is built here and dropped beside the Python sources
-# (the slam-rs-build pattern). robocap-live path-depends on slam-rs, whose patched cubecl-common tree slam-rs-patch-deps
+# (the slam-rs-build pattern). robocap-live path-depends on slam-rs, whose shared CubeCL patches kornia-staging-patch-deps
 # prepares.
 [feature.robocap-live.tasks.robocap-live-build]
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "PYO3_BUILD_EXTENSION_MODULE=1 cargo build --release -p robocap-live-py && cp target/release/lib_core.so robocap_live/_core.so.new && mv robocap_live/_core.so.new robocap_live/_core.so"
 cwd = "packages/robocap-live"
 inputs = [
@@ -3475,21 +3445,16 @@ inputs = [
     "packages/kornia-staging/crates/*/Cargo.toml",
     "packages/kornia-staging/crates/*/build.rs",
     "packages/kornia-staging/crates/*/src/**",
-    "packages/slam-rs/patches/**",
-    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
-    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
-    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/.prepared-sha256",
-    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/**",
-    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/.prepared-sha256",
+    "packages/kornia-staging/patches/**",
+    "packages/kornia-staging/scripts/prepare_patched_deps.py",
+    "packages/kornia-staging/target/patch/**",
 ]
 description = "Build the Rust hands-layer core and install robocap_live._core in place"
 
 # The binding's test embeds this environment's Python: libpython from its lib dir, the standard library from its prefix.
 [feature.robocap-live.tasks.robocap-live-rust-test]
 cmd = "LD_LIBRARY_PATH=$CONDA_PREFIX/lib PYTHONHOME=$CONDA_PREFIX cargo test --locked --offline --workspace -- --nocapture"
-depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cwd = "packages/robocap-live"
 description = "Run native scheduler, layer, SLAM and panel tests"
 
@@ -3535,9 +3500,49 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.kornia-staging.dependencies]
 rust = "1.98.*"
+python = "3.12.*"
+git = "*"
+
+[feature.kornia-staging.pypi-dependencies]
+tyro = ">=0.9.1,<0.10"
 
 [feature.kornia-staging.activation.env]
 PACKAGE_DIR = "packages/kornia-staging"
+PYREFLY_TARGET = "scripts tests"
+
+[feature.kornia-staging.tasks.kornia-staging-patch-deps]
+cmd = "python -m scripts.prepare_patched_deps"
+cwd = "packages/kornia-staging"
+description = "Verify and prepare pinned CubeCL source patches"
+
+[feature.kornia-staging.tasks.kornia-staging-patch-test]
+cmd = "python -m pytest -q tests"
+cwd = "packages/kornia-staging"
+description = "Test patch preparation without network access"
+
+[feature.kornia-staging.tasks.kornia-staging-patch-integration]
+depends-on = ["kornia-staging-patch-deps"]
+cmd = "python -m pytest -q tests -m integration"
+cwd = "packages/kornia-staging"
+description = "Verify pinned patch archives and patched Cargo resolution"
+
+[feature.kornia-staging.tasks.kornia-staging-cubecl-park-test]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml park"
+cwd = "packages/kornia-staging"
+description = "Test the patched CubeCL channel wakeup protocol"
+
+[feature.kornia-staging.tasks.kornia-staging-wgpu-poll-test]
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml --lib compute::poll::_impl::tests --no-default-features --features std,spirv"
+cwd = "packages/kornia-staging"
+description = "Test idle blocking, retained wakeups and poll worker shutdown"
+
+[feature.kornia-staging.tasks.kornia-staging-gpu-test]
+depends-on = ["kornia-staging-cubecl-park-test", "kornia-staging-wgpu-poll-test"]
+cmd = "cargo test --locked -p kornia-staging-gpu --features wgpu && cargo clippy --locked -p kornia-staging-gpu --features wgpu --all-targets -- -D warnings"
+cwd = "packages/kornia-staging"
+description = "Test portable GPU operations on the host device"
 
 [feature.kornia-staging.tasks.kornia-staging-fmt-check]
 cmd = "cargo fmt --all -- --check"
@@ -3545,17 +3550,19 @@ cwd = "packages/kornia-staging"
 description = "Check Rust formatting"
 
 [feature.kornia-staging.tasks.kornia-staging-clippy]
-cmd = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo clippy --locked --workspace --all-targets --no-default-features -- -D warnings"
+depends-on = ["kornia-staging-patch-deps"]
+cmd = "cargo clippy --locked --workspace --exclude kornia-staging-gpu --all-targets --all-features -- -D warnings && cargo clippy --locked --workspace --exclude kornia-staging-gpu --all-targets --no-default-features -- -D warnings"
 cwd = "packages/kornia-staging"
 description = "Check all Rust targets with warnings denied"
 
 [feature.kornia-staging.tasks.kornia-staging-test]
-cmd = "cargo test --locked --workspace --all-features && cargo test --locked --workspace --no-default-features"
+depends-on = ["kornia-staging-patch-deps"]
+cmd = "cargo test --locked --workspace --exclude kornia-staging-gpu --all-features && cargo test --locked --workspace --exclude kornia-staging-gpu --no-default-features"
 cwd = "packages/kornia-staging"
 description = "Run Rust workspace tests and doctests"
 
 [feature.kornia-staging.tasks.gate]
-depends-on = ["kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test"]
+depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test", "kornia-staging-patch-test", "kornia-staging-patch-integration"]
 description = "Run the Rust author checks for staged Kornia code"
 
 # ═══════════════════════════════════════════════════════════════════════════

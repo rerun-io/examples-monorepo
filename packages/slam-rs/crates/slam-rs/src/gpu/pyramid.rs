@@ -1,12 +1,13 @@
 //! The GPU [`PyramidBuilder`]: level 0 uploaded, every halving built on device.
 
 use kornia_staging_imgproc::pyramid::PyramidPlanError;
+use kornia_staging_gpu::runtime::GpuError;
 use std::sync::Arc;
 
 use cubecl::prelude::*;
 
 use super::kernels;
-use super::{GpuError, guarded};
+use super::{ guarded};
 use crate::frontend::input::{FrameImages, PackedImages};
 use crate::pyramid::{MIN_SIDE, Pyramid, PyramidError};
 use kornia_image::{Image, ImageSize};
@@ -329,12 +330,16 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                         }
                         _ => super::upload_frame(&out.client, img),
                     };
-                kernels::launch_copy_level0::<R>(
-                    &out.client,
-                    (&upload, pixels),
-                    (&out.even, out.even_len),
-                    pixels,
-                );
+                // SAFETY: The upload holds this frame's pixels; the validated
+                // even allocation contains level 0 and is a distinct buffer.
+                unsafe {
+                    kernels::launch_copy_level0::<R>(
+                        &out.client,
+                        (&upload, pixels),
+                        (&out.even, out.even_len),
+                        pixels,
+                    );
+                }
 
                 if self.level0.len() <= camera {
                     self.level0.resize(camera + 1, None);
@@ -674,7 +679,7 @@ mod tests {
 
     #[test]
     fn dense_u16_inputs_keep_the_general_path_and_all_low_bits() {
-        let client = crate::gpu::gpu_client().unwrap();
+        let client = kornia_staging_gpu::runtime::gpu_client().unwrap();
         let mut builder = GpuPyramidBuilder::new(client, Default::default());
         for shift_only in [true, false] {
             let pixels: Vec<u16> = (0..64 * 48)
@@ -707,7 +712,7 @@ mod tests {
 
     #[test]
     fn odd_packed_cameras_use_one_arena_and_preserve_visible_pixels() {
-        let client = crate::gpu::gpu_client().unwrap();
+        let client = kornia_staging_gpu::runtime::gpu_client().unwrap();
         let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
         let cameras: Vec<Vec<u8>> = (0..2)
             .map(|camera| {

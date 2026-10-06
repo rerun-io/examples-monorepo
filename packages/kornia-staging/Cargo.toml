@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra", "crates/kornia-staging-slam"]
+members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra", "crates/kornia-staging-slam", "crates/kornia-staging-gpu"]
 default-members = ["crates/kornia-staging-3d", "crates/kornia-staging-imgproc", "crates/kornia-staging-algebra", "crates/kornia-staging-slam"]
+
+exclude = ["target/patch/cubecl-wgpu-0.11.0-pre.3", "target/patch/cubecl-common-0.11.0-pre.3", "target/patch/cubecl-spirv-0.11.0-pre.3"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +12,10 @@ rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
+cubecl = "=0.11.0-pre.3"
+cubecl-wgpu = "=0.11.0-pre.3"
+wgpu = { version = "30", default-features = false }
+log = "0.4"
 kornia-staging-imgproc = { path = "crates/kornia-staging-imgproc" }
 kornia-image = { version = "0.2", default-features = false }
 kornia-imgproc = { version = "0.2", default-features = false }
@@ -29,3 +35,10 @@ criterion = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
+
+# Prepare with the kornia-staging-patch-deps Pixi task before invoking Cargo.
+# Bump archive hashes in scripts/prepare_patched_deps.py and rebase patches/.
+[patch.crates-io]
+cubecl-wgpu = { path = "target/patch/cubecl-wgpu-0.11.0-pre.3" }
+cubecl-common = { path = "target/patch/cubecl-common-0.11.0-pre.3" }
+cubecl-spirv = { path = "target/patch/cubecl-spirv-0.11.0-pre.3" }

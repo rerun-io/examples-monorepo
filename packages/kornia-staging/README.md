@@ -22,7 +22,7 @@ imports slam-rs, robocap-live, handfit, or gsplat-rust-renderer.
 ## Destinations
 
 CPU crates are default workspace members;
-GPU, IO, and sensor-IIO crates will be opt-in, with Linux gates where required.
+GPU, IO and sensor-IIO are opt-in members for bare Cargo commands.
 Module paths mirror the destination module paths.
 
 | Crate | Destination repository / crate |
@@ -45,8 +45,18 @@ pixi run -e kornia-staging-dev --frozen gate
 ```
 
 The gate checks Rust formatting, Clippy with warnings denied, workspace tests,
-and doctests. It does not run Python tooling. Run each affected consumer's gate
+and doctests for every workspace member except GPU, in both feature modes,
+plus Python patch-preparation tests.
+Run `pixi run -e kornia-staging-dev --frozen kornia-staging-gpu-test`
+for the opt-in GPU tests and Clippy on the host device.
+CPU-only bare Cargo commands also require these workspace patches.
+Prepare the pinned CubeCL trees with `kornia-staging-patch-deps` before bare Cargo;
+consumer workspace roots must repeat the three `[patch.crates-io]` overrides. Run each affected consumer's gate
 and its required numeric checks before committing a staged item.
+
+The GPU gate also tests the patched wgpu poll scheduler. On a fresh Cargo home,
+fetch its standalone test dependencies once with `cargo fetch --locked --manifest-path
+packages/kornia-staging/target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml` after patch preparation.
 
 ## Numerical layouts
 
@@ -76,11 +86,8 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Strided u8-shift8 ingestion and sparse u16 bilinear values/gradients (dense conversion uses upstream cast_and_scale) | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Floor-halved integer u16 Gaussian downsampling and reusable PyramidPlanU16 | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
 | Centered FAST cells, band scans, masks and deterministic selection | slam-rs `frontend/detect*`, `frontend/cell.rs` | kornia-rs / kornia-imgproc / `features` (private cells) | staged | - |
-| Wgpu polling wakeup | cubecl-wgpu 0.11.0-pre.3 compute/{poll,stream,timings} | cubecl-wgpu | staged (temporary patch) | - |
 | Mean-normalized SE(2) patches and sealed sampling patterns (private Sophus-style exponential preserves normalization and cubic small-angle term) | slam-rs `frontend/{patch,patterns,se2,simd,ldlt}.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_se2` | staged | - |
 | Stateless forward/backward CPU patch tracking and reusable storage | slam-rs `frontend/tracker/cpu.rs`, `patch_soa.rs`, `storage.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_tracker` | staged | - |
 | Batched tracking protocol and identity-keyed template caches | slam-rs `frontend/tracker.rs`, `tracker/cpu.rs` | kornia-slam / kornia-slam / `tracking::optical_flow` | staged | - |
-
-CubeCL wgpu polling is patched in `../slam-rs/patches/` before the tracker split.
-patch preparation moves into this package with the GPU runtime item.
-
+| Wgpu polling wakeup | cubecl-wgpu 0.11.0-pre.3 compute/{poll,stream,timings} | cubecl-wgpu | staged (temporary patch) | - |
+| CubeCL runtime, storage/subgroup probes and typed failures; pinned patch preparation | slam-rs `gpu/runtime.rs`, patches and prepare helper | proposed kornia-gpu / runtime; CubeCL patches | staged | - |

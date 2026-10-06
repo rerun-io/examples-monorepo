@@ -30,7 +30,7 @@ pub enum FrontendLane {
             kornia_staging_imgproc::optical_flow::patch_se2::Pattern51,
             gpu::GpuStages<
                 kornia_staging_imgproc::optical_flow::patch_se2::Pattern51,
-                gpu::GpuRuntime,
+                kornia_staging_gpu::GpuRuntime,
             >,
         >,
     ),

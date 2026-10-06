@@ -18,7 +18,7 @@ pub enum FrontendError {
     /// Device backend failure, retained at the application boundary.
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
-    Gpu(#[from] crate::gpu::GpuError),
+    Gpu(#[from] kornia_staging_gpu::runtime::GpuError),
 
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from slam_rs.apis.prepare_patched_deps import CHANNEL_SHA256, PATCHED_CRATES, PatchedCrate, prepare
+from scripts.prepare_patched_deps import CHANNEL_SHA256, PATCHED_CRATES, PatchedCrate, prepare
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ def test_real_patch_and_locked_cargo_resolution(tmp_path: Path, crate: PatchedCr
         assert hashlib.sha256(main_channel.read_bytes()).hexdigest() == CHANNEL_SHA256
     result: subprocess.CompletedProcess[str] = subprocess.run(
         # CubeCL is optional; select its lane so it appears in the resolved graph.
-        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--features', 'slam-rs/gpu-wgpu'],
+        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--features', 'kornia-staging-gpu/wgpu'],
         cwd=package_dir,
         check=True,
         capture_output=True,

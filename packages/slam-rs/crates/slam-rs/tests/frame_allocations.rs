@@ -41,6 +41,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "gpu-core")]
+use kornia_staging_gpu::GpuRuntime;
+#[cfg(feature = "gpu-core")]
+use kornia_staging_gpu::runtime::gpu_client;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -156,7 +160,7 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
 #[cfg(feature = "gpu-wgpu")]
 #[test]
 fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
-    use slam_rs::gpu::{GpuPyramidBuilder, GpuRuntime, gpu_client};
+    use slam_rs::gpu::{GpuPyramidBuilder,  };
 
     let image = slam_rs::image::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
     let mut builder: GpuPyramidBuilder<GpuRuntime> =

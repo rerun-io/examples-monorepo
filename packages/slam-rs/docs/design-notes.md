@@ -13,7 +13,7 @@ rejected experiments, is the version of this file before the cut:
 |---|---|
 | `crates/slam-rs` | The core (`slam_rs` lib). No Python, no Rerun; the GPU frontend is its `gpu-wgpu` feature. |
 | `crates/slam-rs-py` | PyO3 `cdylib` built in place as `slam_rs/_core.so`. |
-| `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
+| `crates/slam-rs-cli` | Native `slam-rs` commands, including replay and catalog input. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
 | `slam.toml` | Runtime settings: estimator files and RoboCap camera selection/reader rules. Sensor calibration comes from the catalog. |
@@ -24,21 +24,21 @@ rejected experiments, is the version of this file before the cut:
 
 | Module | What it is |
 |---|---|
-| `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: SO(3) operations through kornia-algebra, the adjoint, four SO(3) Jacobians and their inverses, the decoupled SE(3) pair, and the left-multiplied pose increment the estimator runs on. |
+| `lie` | Scalar literals and NaN-preserving maximum; `So3`/`Se3` use `kornia-staging-algebra::lie`. |
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseState`/`PoseVelState`/`PoseVelBiasState` and the two fixed-linearization wrappers. |
 | `config` | `VioConfig`, read from the package's `configs/*_config.json`, plus the `port.*` overlay keys the profiles set. |
 | `calib` | `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
-| `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians (2x4 point, 2xN parameter, 4x2 and 4xN for unprojection), the `rpmax` and `z >= epsilonSqrt` domain checks, and a `CameraEnum` that dispatches without a vtable. `ds`, `eucm` and `ucm` parse but are rejected here. |
+| `camera` | `SlamCamera` adapts the validated `kornia-staging-3d::camera` models to homogeneous estimator inputs. Calibration formats live in staging. |
 | `image` | `kornia_image::Image<u16, 1>`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
-| `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, with a separable integer Gaussian filter and one final rounding, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
+| `pyramid` | Application pyramid scheduling around `kornia-staging-imgproc::pyramid::PyramidPlanU16`; integer reduction and geometry validation live in staging. |
 | `landmark` | `StereographicParam` (`project`/`unproject` and both Jacobians), the three-parameter `Landmark` with its backup pair, and `LandmarkDatabase`: the host->target->landmark adjacency, the `min_num_obs = 2` sweep and `remove_keyframes`. Landmarks live in one id-sorted `Vec` behind a `BTreeMap` index rather than a per-landmark hash map, and every map is a `BTreeMap`, so iteration order is reproducible (D31). |
-| `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` using nalgebra SVD in f64. |
-| `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
-| `frontend` | The optical-flow frontend: `patterns` (Pattern52/51 from `patterns.h`; the other two are unreachable on every shipped config), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker, with detection on demand) and `parallel` (the explicit thread budget). |
-| `gpu` | The CubeCL frontend behind `gpu-wgpu`: the kernels, the per-cell corner selection, the patch and track stages, the `ReadRelay` that lets one stage's download carry another's buffers, and the seam counters. |
-| `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). S34 uses nalgebra reflection and Givens operations with preallocated scratch. |
-| `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR, `marginalizeHelperSqrtToSqrt` — the one routine of the three the shipped path reaches — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule. The two squared-form routines, the complete orthogonal decomposition they inverted the marginalized block with, and `checkMargNullspace`/`checkEigenvalues` are **not** ported: `SqrtKeypointVio::new` refuses `vio_sqrt_marg` off, so nothing on any shipped config reaches them (D68). |
-| `qr` | In-place nalgebra reflections and Givens rotations over column-major storage and reusable scratch. |
+| `ba_base` | Window states, error evaluation and backup/restore; hosted reprojection and relative pose factors use `kornia-staging-slam::factors`; bearing triangulation uses `kornia-staging-3d::pose`. |
+| `imu` | Frame-boundary accumulation, gravity initialization and inertial factors. `kornia-staging-sensors::imu` owns midpoint preintegration, covariance and bias propagation. |
+| `frontend` | Application frame stages, camera selection, track identities and worker policy. `kornia-staging-imgproc` owns cell detection and patch arithmetic; `kornia-staging-slam::tracking::optical_flow` owns batch tracking and template caches. |
+| `gpu` | Application scheduling around `kornia-staging-gpu` pyramids, FAST selection, fused KLT, camera kernels and readback. One tracker collection path also carries detector and stereo results. |
+| `linearize` | Application landmark/state indexing and linearization scheduling; `kornia-staging-slam::sqrt_ba` owns landmark QR, back-substitution and deterministic dense reduction. |
+| `marg` | Application keep/marginalize scheduling around the rank-aware QR operations in `kornia-staging-slam::sqrt_ba`. |
+| `qr` | Householder and scaled Givens kernels now live in `kornia-staging-algebra::linalg`. |
 | `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget over reused scratch), and `frame_update`, the fast profile's between-keyframes solve. |
 
 ## Python API
@@ -163,29 +163,30 @@ to the estimator's pixels, not only its speed.
 
 ## Patched dependencies
 
-`slam-rs-patch-deps` verifies the CubeCL archive SHA256, applies the checked-in
-channel park patch into `target/patch/`, and checks the prepared files on reuse.
+`kornia-staging-patch-deps` verifies the CubeCL archive SHA256, applies the checked-in
+patches into `packages/kornia-staging/target/patch/`, and checks the prepared files on reuse.
 A process lock makes concurrent preparation safe. Cargo consumes that tree
 through `[patch.crates-io]`; the Pixi Cargo tasks prepare it first.
 
 Bare Cargo and rust-analyzer need this once per fresh checkout:
 
 ```bash
-pixi run -e slam-rs-dev --frozen slam-rs-patch-deps
-# macOS: use -e slam-rs-osx-dev
+pixi run -e kornia-staging --frozen kornia-staging-patch-deps
+# Same command on macOS
 ```
 
-`slam-rs-patch-test` resolves the prepared crate as a standalone package and
-runs offline. Fill each Cargo home's cache once from the package directory:
+The CubeCL park and wgpu poll tests run offline on standalone prepared crates.
+From `packages/kornia-staging`, fill each Cargo home's cache once:
 
 ```bash
-pixi run -e slam-rs-dev --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml
-pixi run -e slam-rs-dev --frozen slam-rs-patch-test
+pixi run -e kornia-staging --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml
+pixi run -e kornia-staging --frozen cargo fetch --locked --manifest-path target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml
+pixi run -e kornia-staging --frozen kornia-staging-patch-test
 ```
 
-Use `slam-rs-osx-dev` on macOS. A missing `test-log` offline error means that
+Use the same environment on macOS. A missing `test-log` offline error means the
 cache is incomplete. The version-bump runbook is beside `[patch.crates-io]`
-in `Cargo.toml`.
+in `packages/kornia-staging/Cargo.toml`.
 
 ```bash
 pixi run -e slam-rs-dev --frozen slam-rs-build

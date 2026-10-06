@@ -1,5 +1,5 @@
 //! sampling kernels and their launchers.
-use super::layout::{Buffer, linear_1d};
+use super::layout::{linear_1d, Buffer};
 use cubecl::prelude::*;
 
 // Per-frame launchers use launch_unchecked. Stage shape checks establish
@@ -9,7 +9,7 @@ use cubecl::prelude::*;
 
 /// `Image<u16, 1>::in_bounds`.
 #[cube]
-pub(crate) fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bool {
+pub fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bool {
     border <= x
         && x < (f32::cast_from(width) - border - 1.0f32)
         && border <= y
@@ -18,13 +18,13 @@ pub(crate) fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize
 
 /// One pixel of a level, as `f32`.
 #[cube]
-pub(super) fn at(image: &[u16], base: usize, stride: usize, x: usize, y: usize) -> f32 {
+pub fn at(image: &[u16], base: usize, stride: usize, x: usize, y: usize) -> f32 {
     f32::cast_from(image[base + y * stride + x])
 }
 
 /// Bilinear sampling with the CPU implementation's multiplication grouping and sum order.
 #[cube]
-pub(crate) fn interp(image: &[u16], base: usize, stride: usize, x: f32, y: f32) -> f32 {
+pub fn interp(image: &[u16], base: usize, stride: usize, x: f32, y: f32) -> f32 {
     let ix = usize::cast_from(x);
     let iy = usize::cast_from(y);
     let dx = x - f32::cast_from(ix);
@@ -37,23 +37,9 @@ pub(crate) fn interp(image: &[u16], base: usize, stride: usize, x: f32, y: f32) 
         + dx * dy * at(image, base, stride, ix + 1usize, iy + 1usize)
 }
 
-/// A device copy of `count` elements of one width.
-///
-/// Two callers, and the second is why the kernel is generic rather than fixed
-/// to the width the probe needs. [`super::super::probe_storage`] copies a known
-/// pattern of four widths to refuse a runtime that cannot store one of them;
-/// [`launch_copy_level0`] copies the frame at `u16`, because the upload and the
-/// pyramid want different shapes. The upload wants to be exactly as long as the
-/// frame — `create_from_slice` is CubeCL 0.10's only host-to-device write and it
-/// copies the payload on the host before the bus sees it, so every byte over
-/// the frame is paid for twice — while the pyramid wants level 0 at offset zero
-/// of the buffer that also holds levels 2 and 4, because the per-patch kernels
-/// reach a level through two bindings split by parity. One device copy of the
-/// frame, a few microseconds at this card's bandwidth, buys both, and leaves
-/// the even allocation to be made once at `allocate` rather than replaced every
-/// frame.
+/// Copy a typed buffer for the storage probe or a persistent pyramid's level zero.
 #[cube(launch, launch_unchecked)]
-fn probe_kernel<N: Numeric>(src: &[N], dst: &mut [N], count: usize) {
+fn copy_kernel<N: Numeric>(src: &[N], dst: &mut [N], count: usize) {
     let index = usize::cast_from(ABSOLUTE_POS);
     if index >= count {
         terminate!();
@@ -78,7 +64,7 @@ pub(crate) fn launch_probe<N: Numeric, R: Runtime>(
     let (cubes, units) = linear_1d(count);
 
     unsafe {
-        probe_kernel::launch::<N, R>(
+        copy_kernel::launch::<N, R>(
             client,
             cubes,
             units,
@@ -91,11 +77,16 @@ pub(crate) fn launch_probe<N: Numeric, R: Runtime>(
 
 /// Copy `count` pixels from the upload buffer to the front of `dst`.
 ///
-/// [`probe_kernel`] instantiated at `u16`, not a second kernel: the body was
+/// `copy_kernel` instantiated at `u16`, not a second kernel: the body was
 /// the same three lines, so a copy kernel of its own meant two
 /// SPIR-V modules compiled for one copy. `launch_unchecked` here where
-/// [`launch_probe`] takes the checked one — this is the per-frame path.
-pub(crate) fn launch_copy_level0<R: Runtime>(
+/// `launch_probe` takes the checked one — this is the per-frame path.
+///
+/// # Safety
+/// Both handles must belong to `client` and hold their declared number of u16
+/// elements. Each declared length must be at least `count`. The source and
+/// destination ranges must not overlap.
+pub unsafe fn launch_copy_level0<R: Runtime>(
     client: &ComputeClient<R>,
     src: Buffer<'_>,
     dst: Buffer<'_>,
@@ -104,7 +95,7 @@ pub(crate) fn launch_copy_level0<R: Runtime>(
     let (cubes, units) = linear_1d(count);
 
     unsafe {
-        probe_kernel::launch_unchecked::<u16, R>(
+        copy_kernel::launch_unchecked::<u16, R>(
             client,
             cubes,
             units,

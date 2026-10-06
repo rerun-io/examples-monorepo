@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
+use kornia_staging_gpu::GpuRuntime;
+use kornia_staging_gpu::runtime::gpu_client;
 use super::*;
-use crate::gpu::{CORNER_SCAN_READ, GpuRuntime, arm_fault_at, gpu_client};
+use crate::gpu::{CORNER_SCAN_READ,  arm_fault_at, };
 
 /// Shared-arena batches preserve exact winners across camera subsets and refills.
 #[test]

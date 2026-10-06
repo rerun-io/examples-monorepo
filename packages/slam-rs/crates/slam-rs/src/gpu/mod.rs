@@ -15,11 +15,15 @@ mod pyramid;
 mod submission;
 pub use submission::LaunchList;
 use submission::{read_blocking, read_failed, upload_frame};
-mod runtime;
-pub use runtime::{BACKEND_NAME, GpuError, gpu_client, probe_storage};
 #[cfg(test)]
-use runtime::{BLOCKING_READ, CORNER_SCAN_READ, arm_fault_at, fire_if_armed};
-use runtime::{RUNTIME_NAME, guarded};
+mod runtime;
+use kornia_staging_gpu::runtime::RUNTIME_NAME;
+#[cfg(not(test))]
+use kornia_staging_gpu::runtime::guarded;
+use kornia_staging_gpu::runtime::probe_storage;
+use kornia_staging_gpu::runtime::{GpuError, gpu_client};
+#[cfg(test)]
+use runtime::{BLOCKING_READ, CORNER_SCAN_READ, arm_fault_at, fire_if_armed, guarded};
 mod frontend;
 pub use frontend::GpuStages;
 mod track;
@@ -30,9 +34,7 @@ pub use patches::GpuPatchSources;
 pub use pyramid::{GpuPyramid, GpuPyramidBuilder};
 pub use track::GpuPatchTracker;
 
-/// The runtime this build's GPU lane runs on: the portable one.
-#[cfg(feature = "gpu-wgpu")]
-pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
+use kornia_staging_gpu::GpuRuntime;
 
 /// Construct the frame-stage owner on the selected device.
 pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(

@@ -155,7 +155,7 @@ pub enum PyramidError {
     /// the trait's caller must get a typed error rather than a panic (D32).
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
-    Gpu(#[from] crate::gpu::GpuError),
+    Gpu(#[from] kornia_staging_gpu::runtime::GpuError),
     /// A device download returned the wrong number of bytes.
     ///
     /// Only a GPU backend produces this. A CubeCL runtime whose shader

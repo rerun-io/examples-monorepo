@@ -3,12 +3,13 @@
 
 pub(super) mod batch;
 
+use kornia_staging_gpu::runtime::GpuError;
 use cubecl::prelude::*;
 use kornia_imgproc::features::FastCorner;
 
 use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::Level0;
-use super::{GpuError, guarded};
+use super::{ guarded};
 use crate::frontend::detect::{FrameCornerScan, decode_key};
 use crate::frontend::flow::FrontendError;
 use crate::frontend::input::{FrameImage, FrameImages};

@@ -21,6 +21,8 @@
 //! `--features gpu-wgpu` and a working CubeCL runtime.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "gpu-core")]
+use kornia_staging_gpu::runtime::gpu_client;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -32,7 +34,7 @@ use kornia_staging_imgproc::features::{
 };
 use slam_rs::frontend::flow::FrontendError;
 #[cfg(feature = "gpu-core")]
-use slam_rs::gpu::{GpuCornerScan, gpu_client};
+use slam_rs::gpu::{GpuCornerScan, };
 
 mod common;
 

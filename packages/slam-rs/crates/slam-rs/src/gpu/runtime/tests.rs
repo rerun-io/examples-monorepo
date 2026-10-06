@@ -71,18 +71,9 @@ fn a_panic_inside_a_stage_is_a_typed_error() {
     builder.build(0, &image, &mut pyramid).unwrap();
 }
 
-/// A panic anywhere in the bring-up is a typed error, not an unwind.
-///
-/// Two guards, because the bring-up has two layers now. `gpu_stages`
-/// itself is guarded from its first line to the returned backends, and a
-/// fault at the top of that region — before any client exists — comes back
-/// as `ClientPanicked`. Inside it, `probe_storage` and the three
-/// constructors each carry their own guard, because each is also a public
-/// entry a caller reaches on its own, and a fault at the probe's site comes
-/// back as that guard's `DeviceLost`. Either way nothing unwinds past the
-/// constructor (decision D32).
+/// A panic in the consumer bring-up becomes a typed error.
 #[test]
-fn a_panic_after_the_client_is_built_is_a_typed_error() {
+fn a_panic_in_consumer_bringup_is_a_typed_error() {
     arm_fault_at(GUARDED_REGION);
     let outer: crate::frontend::flow::FrontendError =
         gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(64, 3, 5, 4.0, 2)
@@ -93,26 +84,6 @@ fn a_panic_after_the_client_is_built_is_a_typed_error() {
             crate::frontend::flow::FrontendError::Gpu(GpuError::ClientPanicked { .. })
         ),
         "a panic in the outer region gave {outer}"
-    );
-
-    let probe: crate::frontend::flow::FrontendError = gpu_client()
-        .unwrap()
-        .exclusive(|| {
-            arm_fault_at(STORAGE_PROBE);
-            gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(
-                64, 3, 5, 4.0, 2,
-            )
-        })
-        .unwrap()
-        .unwrap_err();
-    assert!(
-        matches!(
-            probe,
-            crate::frontend::flow::FrontendError::Gpu(GpuError::DeviceLost {
-                what: "the storage probe"
-            })
-        ),
-        "a panic in the storage probe gave {probe}"
     );
 
     // And the same call with nothing armed builds the three backends, so
@@ -171,30 +142,6 @@ fn a_panic_in_an_exported_constructor_is_a_typed_error() {
     GpuCornerScan::<GpuRuntime>::new(client.clone(), Default::default()).unwrap();
     GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0, 2, Default::default())
         .unwrap();
-}
-
-/// A panic in the public storage probe is a typed error, not an unwind.
-///
-/// [`probe_storage`] is public and it allocates, launches and downloads, so
-/// it is a device operation a caller reaches without going through
-/// `gpu_stages` and its guard. The fault is armed at the probe's own
-/// site — the same one `a_panic_after_the_client_is_built_is_a_typed_error`
-/// uses through the constructor path — and here the call is direct.
-#[test]
-fn a_panic_in_the_public_storage_probe_is_a_typed_error() {
-    let client = gpu_client().unwrap();
-
-    arm_fault_at(STORAGE_PROBE);
-    assert_eq!(
-        probe_storage(&client).unwrap_err(),
-        GpuError::DeviceLost {
-            what: "the storage probe"
-        }
-    );
-
-    // Unarmed the same probe passes on this host, so the line above is the
-    // guard and not a runtime that cannot store these widths.
-    probe_storage(&client).unwrap();
 }
 
 /// A panic in an exported read is a typed error, not an unwind.

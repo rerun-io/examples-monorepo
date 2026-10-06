@@ -1,5 +1,6 @@
 //! Device selection connects temporal KLT to stereo without an intermediate read.
 
+use kornia_staging_gpu::runtime::GpuError;
 use crate::gpu::kernels::onewait::{CAMERA_PARAMS_START, PER_CAMERA_PARAMS};
 use cubecl::prelude::*;
 
@@ -9,7 +10,7 @@ use crate::config::MatchingGuessType;
 use crate::frontend::flow::FrontendError;
 use crate::frontend::stages::StereoContext;
 use crate::gpu::kernels::klt_fused::{CachedU32Upload, FUSED_RUNS, decode_point, launch_fused};
-use crate::gpu::{GpuError, guarded, kernels, pyramid::GpuPyramid, submission};
+use crate::gpu::{ guarded, kernels, pyramid::GpuPyramid, submission};
 use kornia_staging_imgproc::features::{CellGrid, CellSelect};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::TrackPhase;

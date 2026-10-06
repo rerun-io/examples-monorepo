@@ -48,10 +48,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// carries. This is that fact, and it is read on the Python side
 /// (`_core.gpu_backend`) to name the lane a fleet row was measured on.
 ///
-/// [`gpu::BACKEND_NAME`] is the same name; this wrapper is what a build without
+/// [`kornia_staging_gpu::runtime::BACKEND_NAME`] is the same name; this wrapper is what a build without
 /// the feature can still answer.
 #[cfg(feature = "gpu-core")]
-pub const GPU_BACKEND: Option<&str> = Some(gpu::BACKEND_NAME);
+pub const GPU_BACKEND: Option<&str> = Some(kornia_staging_gpu::runtime::BACKEND_NAME);
 
 /// Which GPU runtime this build's frontend carries: none, this being the
 /// off-by-default CPU port the fleet installs.

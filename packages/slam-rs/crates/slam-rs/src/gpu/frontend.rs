@@ -3,8 +3,7 @@
 pub(super) mod onewait;
 
 use super::{
-    GpuCornerScan, GpuError, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder,
-    guarded, submission,
+    GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, submission,
 };
 use crate::frontend::detect::FrameCornerScan;
 use crate::frontend::flow::{FlowTimings, FrontendError};
@@ -14,6 +13,8 @@ use crate::frontend::stages::{FrameStages, StereoContext};
 use crate::pyramid::ensure_pyramid_sizes;
 use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
+use kornia_staging_gpu::runtime::GpuError;
+use kornia_staging_gpu::runtime::guarded;
 use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};

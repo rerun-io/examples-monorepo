@@ -1,6 +1,8 @@
 # Monorepo-wide Pyrefly config. Keep all Pyrefly settings here and do not add
 # package-local `[tool.pyrefly]` sections in `packages/*/pyproject.toml`.
 project-includes = [
+    "packages/kornia-staging/scripts/**/*",
+    "packages/kornia-staging/tests/**/*",
     "packages/monoprior/monopriors/**/*",
     "packages/simplecv/simplecv/**/*",
     "packages/prompt-da/src/**/*",
@@ -76,6 +78,7 @@ disable-search-path-heuristics = true
 
 # Source roots — where first-party imports are resolved from
 search-path = [
+    "packages/kornia-staging",
     "packages/monoprior",
     "packages/simplecv",
     "packages/prompt-da/src",
@@ -119,6 +122,7 @@ search-path = [
 # any import regardless of which package file is open.
 # Requires all *-dev envs installed (pixi install -a)
 site-package-path = [
+    ".pixi/envs/kornia-staging-dev/lib/python3.12/site-packages",
     # Per-package envs for package-specific deps.
     # Common deps (rerun, numpy, etc.) are resolved from the python-interpreter-path
     # (dev env) automatically — no need to list .pixi/envs/dev here.

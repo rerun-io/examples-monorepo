@@ -1,12 +1,13 @@
 //! One fused KLT dispatch over a phase's cameras in shared pyramid arenas.
 
+use kornia_staging_gpu::runtime::GpuError;
 use crate::frontend::flow::FrontendError;
 use std::sync::Arc;
 
 use cubecl::prelude::*;
 
 use super::{FUSED_RUNS, FusedLaunch, GpuPatchTracker, stage_points};
-use crate::gpu::{GpuError, guarded, pyramid::GpuPyramid, submission};
+use crate::gpu::{guarded, pyramid::GpuPyramid, submission};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_imgproc::optical_flow::patch_tracker::{TrackerError};
 
