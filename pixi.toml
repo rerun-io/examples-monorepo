@@ -2633,7 +2633,7 @@ cwd = "packages/slam-rs"
 description = "Run native catalog tests and explicitly select fixture parity when its assets are configured"
 
 [feature.slam-rs.tasks.gate]
-depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test"]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test", "slam-rs-clippy", "slam-rs-wgpu-clippy"]
 description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
 
 [feature.slam-rs.tasks.slam-rs-fmt]
@@ -3318,6 +3318,9 @@ inputs = [
 outputs = ["packages/handfit/handfit/_core.so"]
 description = "Build the native hand-pose fit and install handfit._core in place"
 
+[feature.handfit.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "handfit-cargo-test"]
+
 [feature.handfit.tasks.handfit-cargo-test]
 cmd = "cargo test --release --workspace"
 cwd = "packages/handfit"
@@ -3411,8 +3414,13 @@ depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
 cwd = "packages/robocap-live"
 description = "Run native scheduler, layer, SLAM and panel tests"
 
+[feature.robocap-live.tasks.robocap-live-clippy]
+cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cwd = "packages/robocap-live"
+description = "Lint the Rust capture workspace with warnings denied"
+
 [feature.robocap-live.tasks.gate]
-depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "robocap-live-rust-test"]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "robocap-live-rust-test", "robocap-live-clippy"]
 description = "Run Python and native author checks for robocap-live"
 
 [feature.robocap-live.tasks.robocap-hands-layer]
