@@ -316,6 +316,9 @@ struct Cli {
     /// Write the final summary as JSON.
     #[arg(long)]
     summary_json: Option<PathBuf>,
+    /// Write per-frame capture diagnostics to this CSV (live source only; opt-in).
+    #[arg(long)]
+    frame_csv: Option<PathBuf>,
     /// No per-second lines.
     #[arg(long)]
     quiet: bool,
@@ -419,7 +422,7 @@ fn main() -> Result<()> {
             .spawn(move || {
                 loop {
                     if FIRST_SIGNAL_NS.load(Ordering::SeqCst) != 0 {
-                        eprintln!("robocap-live: stopping (signal)");
+                        eprintln!("{} (signal)", robocap_live::log_markers::STOPPING);
                         stop.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -477,6 +480,13 @@ fn main() -> Result<()> {
         SlamArg::Reference => SlamMode::Reference,
     };
     let kind = cli.source.first().map(String::as_str);
+    #[cfg(target_os = "linux")]
+    let diagnostic_log = if let Some(path) = &cli.frame_csv {
+        anyhow::ensure!(kind == Some("live"), "--frame-csv requires --source live");
+        Some(robocap_live::diagnostic::DiagnosticLog::open(path)?)
+    } else {
+        None
+    };
     let mut reference = None;
     let realtime;
     let source: Box<dyn FrameSource> = match kind {
@@ -523,7 +533,18 @@ fn main() -> Result<()> {
                 bail!("--slam reference needs --source replay");
             }
             realtime = true;
-            live_source(&cli, stop.clone())?
+            #[cfg(target_os = "linux")]
+            {
+                live_source(
+                    &cli,
+                    stop.clone(),
+                    diagnostic_log.as_ref().map(|log| log.sink()),
+                )?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                live_source(&cli, stop.clone())?
+            }
         }
         _ => bail!("--source must be `live` or `replay <dump dir>`"),
     };
@@ -692,7 +713,14 @@ fn main() -> Result<()> {
             "lossless (blocking queues)"
         }
     );
-    let summary = sched::run(source, config, sinks, stop)?;
+    let result = sched::run(source, config, sinks, stop);
+    #[cfg(target_os = "linux")]
+    let diagnostic_stats = diagnostic_log.map(|log| log.finish()).transpose()?;
+    let mut summary = serde_json::to_value(result?)?;
+    #[cfg(target_os = "linux")]
+    if let Some(stats) = diagnostic_stats {
+        summary["frame_diagnostics"] = serde_json::to_value(stats)?;
+    }
     let json = serde_json::to_string_pretty(&summary)?;
     let mut brief = serde_json::to_value(&summary)?;
     if let Some(object) = brief.as_object_mut() {
@@ -710,9 +738,14 @@ fn main() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn live_source(cli: &Cli, stop: Arc<AtomicBool>) -> Result<Box<dyn FrameSource>> {
+fn live_source(
+    cli: &Cli,
+    stop: Arc<AtomicBool>,
+    diagnostic: Option<robocap_live::diagnostic::DiagnosticSink>,
+) -> Result<Box<dyn FrameSource>> {
     use robocap_live::source::live::{LiveConfig, LiveSource};
     let options = LiveConfig {
+        diagnostic,
         rig_path: cli.rig.clone(),
         imu_time_offset_ns: cli.imu_time_offset_ns,
         capture: match cli.capture {

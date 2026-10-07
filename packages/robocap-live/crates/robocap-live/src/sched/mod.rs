@@ -18,7 +18,6 @@
 //! Every stage records its wall time per frameset; a one-line summary is printed every second and a final summary at the end.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,6 +41,10 @@ mod record;
 mod slam_stage;
 mod stats;
 mod system;
+
+// Retain over four seconds at the 2 kHz IMU rate. A gap
+// beyond three seconds resets SLAM, so older samples cannot bridge that world.
+const LIVE_IMU_CAPACITY: usize = 8192;
 
 use queue::{PoseStore, QueuePolicy, StageQueue, lock};
 pub use record::{FrameTimings, FramesetSink, OutputRecord, RecordWriter, SinkError};
@@ -164,6 +167,9 @@ impl Default for PipelineConfig {
 /// Final numbers of a run.
 #[derive(Debug, Default, Serialize)]
 pub struct RunSummary {
+    /// Live clock health and recovery counters; absent for replay.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<crate::source::CaptureSnapshot>,
     /// Wall seconds from the first to the last frameset arrival.
     pub seconds: f64,
     /// Framesets from the source.
@@ -226,6 +232,7 @@ struct HandsDone {
 
 /// The queues, poses, counters and stop flag every stage shares.
 struct Shared {
+    capture: Option<crate::source::CaptureHealth>,
     stats: Stats,
     poses: PoseStore,
     ds: StageQueue<(Frameset, Instant)>,
@@ -330,6 +337,7 @@ pub fn run(
     };
     let depth = |realtime: usize| if lossless { 4 } else { realtime };
     let shared = Arc::new(Shared {
+        capture: source.capture_health(),
         stats: Stats::default(),
         poses: PoseStore::new(lossless),
         ds: StageQueue::new(2, policy),
@@ -378,7 +386,10 @@ fn start_stages(
     // Consumers wait for SLAM to pass their frameset: without a bound in a lossless run with SLAM (the run is deterministic), else
     // up to `hands_wait`.
     let pose_wait = (!lossless || !slam_on).then_some(config.hands_wait);
-    let (imu_tx, imu_rx) = mpsc::channel::<CombinedImuSample>();
+    // More than the 3 s reset interval at the cap's maximum IMU rate, even at 2 kHz.
+    // Replay keeps the original unbounded FIFO semantics and never evicts a sample.
+    let imu_tx = Arc::new(StageQueue::<CombinedImuSample>::new(if lossless { usize::MAX } else { LIVE_IMU_CAPACITY }, QueuePolicy::DropOldest));
+    let imu_rx = imu_tx.clone();
 
     // SLAM (A76): built on its own thread after pinning, so the frontend pool inherits the A76 mask.
     if slam_on {
@@ -716,7 +727,7 @@ fn downsample_loop(
 fn source_loop(
     shared: &Shared,
     mut source: Box<dyn FrameSource>,
-    imu: Option<mpsc::Sender<CombinedImuSample>>,
+    imu: Option<Arc<StageQueue<CombinedImuSample>>>,
     duration: Option<Duration>,
 ) -> Result<(), SchedError> {
     let mut started: Option<Instant> = None;
@@ -741,7 +752,8 @@ fn source_loop(
                     s.imu_window += 1;
                 });
                 if let Some(imu) = &imu {
-                    let _ = imu.send(sample);
+                    let _ = imu.push(sample);
+                    shared.stats.with(|s| s.counters.slam_imu_dropped = imu.dropped());
                 }
             }
             SourceEvent::Frameset(frameset) => {
@@ -754,7 +766,7 @@ fn source_loop(
         }
     };
     // Close the IMU channel and the queue (also after an error), so the stages drain what arrived.
-    drop(imu);
+    if let Some(imu) = imu { imu.close(); }
     shared.ds.close();
     result
 }
@@ -882,6 +894,10 @@ fn monitor(
             if let Some(t) = soc_c {
                 line += &format!(" {t:.1} C");
             }
+            if let Some(health) = &shared.capture
+                && let Ok(json) = serde_json::to_string(&health.snapshot()) {
+                line += &format!("{}{json}", crate::log_markers::CAPTURE_HEALTH);
+            }
             for window in s.window.iter_mut() {
                 window.clear();
             }
@@ -922,6 +938,7 @@ fn summary(shared: &Shared, monitored: Monitored) -> RunSummary {
             }
         };
         RunSummary {
+            capture: shared.capture.as_ref().map(|health| health.snapshot()),
             seconds,
             framesets,
             source_fps: per_second(framesets),

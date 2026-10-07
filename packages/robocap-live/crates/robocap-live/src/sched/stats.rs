@@ -114,6 +114,9 @@ pub struct Counters {
     pub slam_rate_skipped: u64,
     /// Framesets without all four SLAM cameras.
     pub slam_missing_cameras: u64,
+    /// Oldest live IMU samples evicted during a prolonged outage; replay never evicts.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub slam_imu_dropped: u64,
     /// Framesets the IMU did not cover in time.
     pub slam_imu_timeouts: u64,
     /// IMU samples SLAM dropped because they did not follow the previous one.
@@ -180,3 +183,5 @@ impl Stats {
         f(&mut lock(&self.inner))
     }
 }
+
+fn is_zero(value: &u64) -> bool { *value == 0 }

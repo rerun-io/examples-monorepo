@@ -13,7 +13,7 @@ use super::{SchedError, Shared, Stage, stage_error};
 /// The SLAM stage (A76): rate selection, IMU coverage, `Vio::track`, and the poses published for hands and output.
 pub(super) fn slam_loop(
     shared: &Shared,
-    imu: &mpsc::Receiver<CombinedImuSample>,
+    imu: &super::queue::StageQueue<CombinedImuSample>,
     config: SlamConfig,
     lossless: bool,
     imu_wait: Duration,
@@ -34,6 +34,7 @@ pub(super) fn slam_loop(
     let mut last_t: Option<i64> = None;
     let mut imu_rewind: Option<i64> = None;
     let mut imu_open = true;
+    let mut dropped_imu = 0;
     let push = |slam: &mut SlamEstimator, sample: CombinedImuSample| {
         slam.push_imu(&sample).map_err(|e| stage_error("slam", e))
     };
@@ -46,11 +47,6 @@ pub(super) fn slam_loop(
             skip_frame(shared, &mut slam, lossless, index)?;
             continue;
         }
-        let Some(images) = slam_images(&item.small) else {
-            stats.with(|s| s.counters.slam_missing_cameras += 1);
-            skip_frame(shared, &mut slam, lossless, index)?;
-            continue;
-        };
         if let Some(last) = last_t.filter(|&last| backwards || t - last > crate::slam::RESET_GAP_NS)
         {
             flush_slam(shared, &mut slam)?;
@@ -75,11 +71,22 @@ pub(super) fn slam_loop(
             last_t = None;
             selector = RateSelector::new(config.hz, config.rate_tolerance_ns);
         }
+        let Some(images) = slam_images(&item.small) else {
+            stats.with(|s| s.counters.slam_missing_cameras += 1);
+            skip_frame(shared, &mut slam, lossless, index)?;
+            continue;
+        };
+        let dropped = imu.dropped();
+        if dropped != dropped_imu {
+            flush_slam(shared, &mut slam)?;
+            restart_slam(shared, &mut slam, index, format_args!("IMU retention overflow: {} samples", dropped - dropped_imu))?;
+            dropped_imu = dropped;
+        }
         let deadline = Instant::now() + imu_wait;
         // Read only through coverage. Draining the channel ahead of time would lose future IMU on a reset.
         while !slam.imu_covers(t) && imu_open {
             let next = if lossless {
-                imu.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                imu.pop().ok_or(mpsc::RecvTimeoutError::Disconnected)
             } else {
                 imu.recv_timeout(deadline.saturating_duration_since(Instant::now()))
             };

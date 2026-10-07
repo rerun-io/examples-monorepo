@@ -4,10 +4,13 @@
 
 pub mod capture;
 pub mod downsample;
+#[cfg(target_os = "linux")]
+pub mod diagnostic;
 pub mod frame;
 pub mod hands;
 pub mod layer;
 pub mod log;
+pub mod log_markers;
 pub mod nets;
 pub mod sched;
 pub mod slam;

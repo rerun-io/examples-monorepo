@@ -25,6 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+#[path = "../../robocap-live/src/log_markers.rs"]
+mod log_markers;
 mod handoff;
 mod run;
 
@@ -351,6 +353,12 @@ fn last_line<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     text.lines().rev().find(|line| line.trim_start().starts_with(prefix))
 }
 
+/// Structured live health from the newest scheduler line (older binaries omit it).
+fn capture_health(log: &str) -> Option<Value> {
+    let (_, json) = status_line(log)?.split_once(log_markers::CAPTURE_HEALTH)?;
+    serde_json::from_str(json).ok()
+}
+
 fn status(panel: &Panel) -> Value {
     let zones: Vec<(String, f64)> = (0..16)
         .map_while(|zone| {
@@ -408,7 +416,7 @@ fn status(panel: &Panel) -> Value {
     let state = DeviceState::read(pid.filter(|_| running), &procs, disk_free, hottest);
     let log = log_text(panel, 32 * 1024);
     let live_running = running && pid.is_some_and(|session| !live_processes(&procs, &panel.root, session).is_empty());
-    let ended = log.contains("robocap-live: stopping") || log.contains("robocap-live: capture stopped") || log.contains(RUN_ENDED);
+    let ended = log.contains(log_markers::STOPPING) || log.contains(log_markers::CAPTURE_STOPPED) || log.contains(RUN_ENDED);
     let run_phase =
         if matches!(record.owner, Owner::Starting { .. }) { Phase::Starting } else { phase(running, live_running, record.stopping() || ended) };
     let checks = checks(&state);
@@ -460,9 +468,10 @@ fn status(panel: &Panel) -> Value {
             "cmd": read_trim(panel.root.join("run/live.cmd")),
             "log": read_trim(panel.root.join("run/live.log")),
             "status": status_line(&log),
+            "capture": capture_health(&log),
             "power": last_line(&log, "power:"),
             "threads": last_line(&log, "threads:"),
-            "live": last_line(&log, "robocap-live: camera fps").or_else(|| last_line(&log, "robocap-live: capture stopped")),
+            "live": last_line(&log, "robocap-live: camera fps").or_else(|| last_line(&log, log_markers::CAPTURE_STOPPED)),
             "handoff": last_line(&log, "[handoff"),
             "error": last_line(&log, "Error:"),
             "last_exit": record.last_exit,
@@ -620,6 +629,16 @@ mod tests {
         assert_eq!((fresh.get(read), fresh.get(read)), (1, 1));
         let stale = Cached::new(Duration::ZERO);
         assert_eq!((stale.get(read), stale.get(read)), (2, 3));
+    }
+
+    #[test]
+    fn capture_health_survives_status_parsing_and_marks_recovery() {
+        let log = "[   1.0 s] src 0/s | capture_health {\"capture_sync\":\"out_of_sync\",\"capture_resyncs\":1,\"capture_out_of_sync_s\":2.5,\"complete_frameset_hz\":0.0}\n[   2.0 s] src 0/s | capture_health {\"capture_sync\":\"resyncing\",\"capture_resyncs\":2,\"capture_out_of_sync_s\":3.5,\"complete_frameset_hz\":0.0}\n";
+        let health = capture_health(log).unwrap();
+        assert_eq!(health["capture_sync"], "resyncing");
+        assert_eq!(health["capture_resyncs"], 2);
+        assert_eq!(health["capture_out_of_sync_s"], 3.5);
+        assert!(capture_health("old binary: no health fields").is_none());
     }
 
     #[test]

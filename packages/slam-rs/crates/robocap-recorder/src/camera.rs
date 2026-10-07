@@ -33,9 +33,9 @@ impl Camera {
         let bytes = crate::FRAME_WIDTH * crate::FRAME_HEIGHT * 3 / 2;
         let frame = CameraFrame {
             nv12: buffer.plane(0).context("NV12 plane missing")?[..bytes].to_vec(),
-            timestamp_ns: buffer.timestamp_ns,
-            sequence: buffer.sequence,
-            flags: buffer.flags,
+            timestamp_ns: buffer.meta().timestamp_ns,
+            sequence: buffer.meta().sequence,
+            flags: buffer.meta().flags,
         };
         buffer.queue()?;
         Ok(Some(frame))

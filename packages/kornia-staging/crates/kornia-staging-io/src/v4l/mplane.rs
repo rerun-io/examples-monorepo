@@ -129,6 +129,7 @@ struct RawFormat {
 
 use std::any::Any;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 
 use kornia_image::Image;
@@ -139,6 +140,25 @@ const MAX_PLANES: usize = 8;
 const TIMESTAMP_MASK: u32 = 0xe000;
 /// `V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC`.
 const TIMESTAMP_MONOTONIC: u32 = 0x2000;
+
+/// Diagnostic metadata copied immediately after DQBUF, before validation or copying pixels.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DequeueMeta {
+    /// V4L2 buffer index.
+    pub index: u32,
+    /// Driver sequence number, including rejected buffers.
+    pub sequence: u32,
+    /// Raw V4L2 status, timestamp type and timestamp source flags.
+    pub flags: u32,
+    /// Driver timeval converted to nanoseconds.
+    pub timestamp_ns: i64,
+    /// CLOCK_MONOTONIC immediately after DQBUF returns.
+    pub dequeue_ns: i64,
+    /// Number of returned planes, capped at the UAPI array capacity.
+    pub planes: u32,
+    /// Raw bytesused for each plane (includes data_offset).
+    pub bytesused: [u32; MAX_PLANES],
+}
 
 /// A buffer lent out by [`Camera::dequeue`]: the kernel does not write it until [`LentBuffer::queue`] gives it back. The lease
 /// holds its camera's descriptor and mappings, so its luma stays readable after the [`Camera`] has dropped:
@@ -160,22 +180,16 @@ const TIMESTAMP_MONOTONIC: u32 = 0x2000;
 ///
 /// ```compile_fail,E0616
 /// fn retarget(buffer: &mut kornia_staging_io::v4l::mplane::LentBuffer) {
-///     buffer.index = 0;
+///     buffer.meta.index = 0;
 /// }
 /// ```
 #[derive(Debug)]
 #[must_use = "a lent buffer returns to the driver when queued explicitly or dropped"]
 pub struct LentBuffer {
-    index: u32,
-    /// `buffer.timestamp`, CLOCK_MONOTONIC nanoseconds.
-    pub timestamp_ns: i64,
-    /// The driver's sequence number.
-    pub sequence: u32,
+    meta: DequeueMeta,
     planes: [*const u8; MAX_PLANES],
     lengths: [usize; MAX_PLANES],
     queued: bool,
-    /// Original V4L2 timestamp and status flags.
-    pub flags: u32,
     owner: Arc<CameraOwner>,
 }
 
@@ -187,6 +201,11 @@ unsafe impl Send for LentBuffer {}
 unsafe impl Sync for LentBuffer {}
 
 impl LentBuffer {
+    /// Immutable dequeue metadata; the lease's return index cannot be changed.
+    pub fn meta(&self) -> &DequeueMeta {
+        &self.meta
+    }
+
     /// One captured plane including stride padding; the lease keeps it immutable.
     /// # Arguments
     /// * `index` - zero-based plane index.
@@ -200,7 +219,7 @@ impl LentBuffer {
 
     /// The V4L2 buffer index.
     pub fn index(&self) -> u32 {
-        self.index
+        self.meta.index
     }
 
     /// The luma plane at the configured size and stride.
@@ -219,9 +238,9 @@ impl LentBuffer {
     pub fn queue(mut self) -> Result<(), MplaneError> {
         self.owner
             .device
-            .queue(self.index)
+            .queue(self.meta.index)
             .map_err(|source| MplaneError::Io {
-                what: format!("queue buffer {} of {}", self.index, self.owner.path),
+                what: format!("queue buffer {} of {}", self.meta.index, self.owner.path),
                 source,
             })?;
         self.queued = true;
@@ -232,7 +251,7 @@ impl LentBuffer {
 impl Drop for LentBuffer {
     fn drop(&mut self) {
         if !self.queued {
-            if let Err(error) = self.owner.device.queue(self.index) {
+            if let Err(error) = self.owner.device.queue(self.meta.index) {
                 eprintln!("V4L2 requeue on drop failed: {error}");
             }
         }
@@ -241,14 +260,16 @@ impl Drop for LentBuffer {
 
 /// A dequeued frame's luma plane and V4L2 metadata.
 pub struct LumaFrame {
+    /// Raw dequeue diagnostics, before any pixel copy.
+    pub meta: DequeueMeta,
+    /// True if this frame owns a driver buffer instead of copied luma.
+    pub leased: bool,
+    /// Images still holding driver buffers, including this frame, at publication.
+    pub held_buffers: u32,
+    /// Leases not yet requeued, including returned leases waiting for the capture thread.
+    pub unrequeued_buffers: u32,
     /// Packed visible luma: an owned copy, or ([`CaptureMode::ZeroCopy`]) a read-only image over the capture buffer.
     pub luma: Image<u8, 1>,
-    /// `buffer.timestamp`, CLOCK_MONOTONIC nanoseconds.
-    pub timestamp_ns: i64,
-    /// The driver's sequence number.
-    pub sequence: u32,
-    /// Original V4L2 timestamp and status flags.
-    pub flags: u32,
 }
 
 /// The camera owner (descriptor, buffers and their mappings), shared by its [`Camera`] and every [`LentBuffer`] the camera
@@ -270,9 +291,16 @@ unsafe impl Sync for CameraOwner {}
 /// One capture device, streaming from `open` until it and every buffer it lent out have dropped.
 pub struct Camera {
     owner: Arc<CameraOwner>,
+    rejected: Option<Box<dyn Fn(DequeueMeta) + Send + Sync>>,
 }
 
 impl Camera {
+    /// Observe rejected buffers before requeue; the callback must not block or retain images.
+    /// # Arguments
+    /// * `observer` - receives raw metadata even when ERROR or bytesused validation fails.
+    pub fn observe_rejected(&mut self, observer: impl Fn(DequeueMeta) + Send + Sync + 'static) {
+        self.rejected = Some(Box::new(observer));
+    }
     /// The validated capture format.
     pub fn format(&self) -> &CaptureFormat {
         &self.owner.format
@@ -312,6 +340,7 @@ impl Camera {
         })?;
         let count = device.count();
         Ok(Self {
+            rejected: None,
             owner: Arc::new(CameraOwner {
                 device,
                 path: path.to_owned(),
@@ -341,29 +370,34 @@ impl Camera {
     /// * `timeout_ms` - nonnegative wait budget in milliseconds.
     pub fn dequeue(&self, timeout_ms: u16) -> Result<Option<LentBuffer>, MplaneError> {
         let path = &self.owner.path;
-        let Some(frame) =
-            self.owner
-                .device
-                .dequeue(timeout_ms)
-                .map_err(|source| MplaneError::Io {
-                    what: format!("dequeue {path}"),
-                    source,
-                })?
+        let Some(frame) = self
+            .owner
+            .device
+            .dequeue_observed(
+                timeout_ms,
+                self.rejected
+                    .as_ref()
+                    .map(|f| f.as_ref() as &dyn Fn(DequeueMeta)),
+            )
+            .map_err(|source| MplaneError::Io {
+                what: format!("dequeue {path}"),
+                source,
+            })?
         else {
             return Ok(None);
         };
-        let flags = frame.flags;
+        let flags = frame.meta.flags;
         let buffer = LentBuffer {
-            index: frame.index,
-            timestamp_ns: frame.timestamp_ns,
-            sequence: frame.sequence,
+            meta: frame.meta,
             planes: frame.planes,
             lengths: frame.lengths,
-            flags,
             queued: false,
             owner: self.owner.clone(),
         };
         if flags & TIMESTAMP_MASK != TIMESTAMP_MONOTONIC {
+            if let Some(observe) = &self.rejected {
+                observe(buffer.meta);
+            }
             buffer.queue()?;
             return Err(MplaneError::Timing(format!(
                 "{path}: buffer flags {flags:#x}, not a monotonic timestamp"
@@ -390,10 +424,11 @@ impl Camera {
         };
         let luma = self.copy_luma(&buffer)?;
         let frame = LumaFrame {
+            meta: buffer.meta,
+            leased: false,
+            held_buffers: 0,
+            unrequeued_buffers: 0,
             luma,
-            timestamp_ns: buffer.timestamp_ns,
-            sequence: buffer.sequence,
-            flags: buffer.flags,
         };
         buffer.queue()?;
         Ok(Some(frame))
@@ -428,11 +463,13 @@ pub enum CaptureMode {
 struct LentLuma<T> {
     buffer: Option<T>,
     returns: mpsc::Sender<T>,
+    held: Arc<AtomicU32>,
 }
 
 impl<T> Drop for LentLuma<T> {
     fn drop(&mut self) {
         if let Some(buffer) = self.buffer.take() {
+            self.held.fetch_sub(1, Ordering::Relaxed);
             // The capture thread has ended when the send fails: the lease requeues on drop, and the camera closes with the
             // last of its leases.
             let _ = self.returns.send(buffer);
@@ -442,6 +479,7 @@ impl<T> Drop for LentLuma<T> {
 
 /// One camera's frames in a [`CaptureMode`]; owned by its capture thread.
 pub struct CaptureStream {
+    held: Arc<AtomicU32>,
     camera: Camera,
     mode: CaptureMode,
     count: u32,
@@ -453,6 +491,18 @@ pub struct CaptureStream {
 }
 
 impl CaptureStream {
+    /// Observe rejected dequeues with the current count of downstream driver-buffer owners.
+    /// # Arguments
+    /// * `observer` - nonblocking diagnostic sink, called before buffer requeue.
+    pub fn observe_rejected(
+        &mut self,
+        observer: impl Fn(DequeueMeta, u32) + Send + Sync + 'static,
+    ) {
+        let held = self.held.clone();
+        self.camera
+            .observe_rejected(move |meta| observer(meta, held.load(Ordering::Relaxed)));
+    }
+
     /// Stream `camera`'s frames in `mode`.
     /// # Arguments
     /// * `camera` - opened camera owner.
@@ -467,6 +517,7 @@ impl CaptureStream {
         }
         let (returns_tx, returns_rx) = mpsc::channel();
         Ok(Self {
+            held: Arc::new(AtomicU32::new(0)),
             camera,
             mode,
             count,
@@ -505,7 +556,7 @@ impl CaptureStream {
         let Some(buffer) = self.camera.dequeue(timeout_ms)? else {
             return Ok(None);
         };
-        let (timestamp_ns, sequence, flags) = (buffer.timestamp_ns, buffer.sequence, buffer.flags);
+        let meta = buffer.meta;
         if self.count.saturating_sub(self.lent + 1) < self.min_queued
             || self.camera.owner.format.planes[0].stride != self.camera.owner.format.size.width
         {
@@ -513,17 +564,20 @@ impl CaptureStream {
             buffer.queue()?;
             self.fallback_copies += 1;
             return Ok(Some(LumaFrame {
+                meta,
+                leased: false,
+                held_buffers: self.held.load(Ordering::Relaxed),
+                unrequeued_buffers: self.lent,
                 luma,
-                timestamp_ns,
-                sequence,
-                flags,
             }));
         }
         let data = buffer.planes[0];
         // Counted before the image exists: if wrapping fails, the dropped keepalive returns the buffer, and the next drain
         // uncounts it.
         self.lent += 1;
+        self.held.fetch_add(1, Ordering::Relaxed);
         let keepalive: Arc<dyn Any + Send + Sync> = Arc::new(LentLuma {
+            held: self.held.clone(),
             buffer: Some(buffer),
             returns: self.returns_tx.clone(),
         });
@@ -535,10 +589,11 @@ impl CaptureStream {
             Image::from_borrowed_host_readonly(self.camera.owner.format.size, data, keepalive)?
         };
         Ok(Some(LumaFrame {
+            meta,
+            leased: true,
+            held_buffers: self.held.load(Ordering::Relaxed),
+            unrequeued_buffers: self.lent,
             luma,
-            timestamp_ns,
-            sequence,
-            flags,
         }))
     }
 }
@@ -625,7 +680,9 @@ mod tests {
             let data = token.pixels.as_ptr();
             let (tx, rx) = mpsc::channel();
             let mut receiver = Some(rx);
+            let held = Arc::new(AtomicU32::new(1));
             let keepalive: Arc<dyn Any + Send + Sync> = Arc::new(LentLuma {
+                held: held.clone(),
                 buffer: Some(token),
                 returns: tx,
             });
@@ -642,6 +699,7 @@ mod tests {
             });
             let clone = image.clone();
             drop(image);
+            assert_eq!(held.load(Ordering::Relaxed), 1);
             assert_eq!(clone.as_slice(), &[1, 2, 3, 4]);
             assert_eq!(drops.load(Ordering::SeqCst), 0);
             assert!(receiver.as_ref().unwrap().try_recv().is_err());
@@ -649,6 +707,11 @@ mod tests {
                 drop(receiver.take());
             }
             drop(clone);
+            assert_eq!(
+                held.load(Ordering::Relaxed),
+                0,
+                "returned leases no longer count as downstream-held"
+            );
             if !closed {
                 assert_eq!(
                     drops.load(Ordering::SeqCst),

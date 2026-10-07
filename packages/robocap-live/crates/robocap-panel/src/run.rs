@@ -159,6 +159,8 @@ pub struct StartRequest {
     /// uclamp.min 1024 for SLAM and hands (faster, hotter); off = the kernel's default.
     uclamp: bool,
     duration_s: u32,
+    /// Opt-in capture metadata CSV beside the summary.
+    frame_csv: bool,
 }
 
 impl StartRequest {
@@ -208,6 +210,7 @@ impl StartRequest {
             slam_lag: choice("slam_lag", "auto", &["auto", "on", "off"])?,
             uclamp: flag("uclamp", false),
             duration_s: number("duration_s", 1800, 10..=7200)?,
+            frame_csv: flag("frame_csv", false),
         })
     }
 
@@ -223,6 +226,7 @@ impl StartRequest {
             "slam_lag": self.slam_lag,
             "uclamp": self.uclamp,
             "duration_s": self.duration_s,
+            "frame_csv": self.frame_csv,
         })
     }
 
@@ -249,6 +253,7 @@ impl StartRequest {
         let uclamp = if self.uclamp { "1024" } else { "none" };
         command.extend(["--slam-uclamp".into(), uclamp.into(), "--hands-uclamp".into(), uclamp.into()]);
         command.extend(["--duration".into(), self.duration_s.to_string(), "--summary-json".into(), at(&format!("logs/rt-{stamp}.json"))]);
+        if self.frame_csv { command.extend(["--frame-csv".into(), at(&format!("logs/rt-{stamp}.frames.csv"))]); }
         command
     }
 }
@@ -454,12 +459,21 @@ exit $status
     }
 
     #[test]
+    fn frame_csv_is_opt_in_and_uses_this_runs_log_path() -> Result<(), String> {
+        let root = Path::new("/root/robocap-live");
+        assert!(!StartRequest::parse("")?.command(root, 7).iter().any(|arg| arg == "--frame-csv"));
+        let command = StartRequest::parse("frame_csv=on")?.command(root, 7);
+        assert!(command.windows(2).any(|args| args == ["--frame-csv", "/root/robocap-live/logs/rt-7.frames.csv"]));
+        Ok(())
+    }
+
+    #[test]
     fn the_start_form_builds_the_command_line_and_refuses_anything_else() -> Result<(), String> {
         let request = StartRequest::parse("viewer=rerun%2Bhttp%3A%2F%2F198.51.100.7%3A9876%2Fproxy&video_cameras=0%2C1%2C5&slam_hz=30&duration_s=600&hands=on")?;
         assert_eq!(request.viewer, "rerun+http://198.51.100.7:9876/proxy");
         assert_eq!((request.video_cameras.clone(), request.slam_hz, request.duration_s, request.hands, request.uclamp), (vec![0, 1, 5], 30, 600, true, false));
         let form = json!({"viewer": "rerun+http://198.51.100.7:9876/proxy", "video_cameras": [0, 1, 5], "hands": true, "hand_overlays": "fit",
-            "slam_hz": 30, "slam_lane": "gpu", "slam_lag": "auto", "uclamp": false, "duration_s": 600});
+            "slam_hz": 30, "slam_lane": "gpu", "slam_lag": "auto", "uclamp": false, "duration_s": 600, "frame_csv": false});
         assert_eq!(request.to_json(), form, "the page refills its form from these names");
         let command = request.command(Path::new("/root/robocap-live"), 7).join(" ");
         assert_eq!(

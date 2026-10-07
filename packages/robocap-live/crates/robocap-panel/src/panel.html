@@ -216,6 +216,7 @@
     </div>
     <div class="row2">
       <button type="button" class="toggle" id="hands" aria-pressed="true"><span class="box"><svg><use href="#i-check"/></svg></span>Hands</button>
+      <button type="button" class="toggle" id="frame_csv" aria-pressed="false" title="Save capture timestamps and sync events beside the run summary"><span class="box"><svg><use href="#i-check"/></svg></span>Capture CSV</button>
       <button type="button" class="toggle" id="uclamp" aria-pressed="false" title="uclamp.min 1024 for SLAM and hands: faster, hotter, more power"><span class="box"><svg><use href="#i-check"/></svg></span>uclamp boost</button>
     </div>
     <div class="notes" id="checks" aria-live="polite"></div>
@@ -393,6 +394,7 @@ function loadForm(s) {
   $("minutes").value = r.duration_s ? Math.max(1, Math.round(r.duration_s / 60)) : 5;
   setSeg($("dur-presets"), $("minutes").value);
   setPressed($("hands"), r.hands ?? true);
+  setPressed($("frame_csv"), r.frame_csv ?? false);
   setPressed($("uclamp"), r.uclamp ?? false);
 }
 
@@ -451,6 +453,11 @@ function render(s) {
   setTile(pipe.e2e, st?.out?.[1], 1, st?.out ? `out ${fmt(st.out[0], 1)}/s · drop ${st.out[2]}` : "");
   if (live && st) { pipe.src.spark.push(st.src?.[0]); pipe.slam.spark.push(st.slam?.[0]); pipe.hands.spark.push(st.hands?.[0]); pipe.e2e.spark.push(st.out?.[1]); }
   const notes = [];
+  const sync = run.capture;
+  if (live && sync && sync.capture_sync !== "in_sync") {
+    notes.push(note("bad", `CAMERAS OUT OF SYNC${sync.capture_sync === "resyncing" ? " · recovering" : ""}: ${sync.capture_resyncs} resync attempts · ${fmt(sync.capture_out_of_sync_s, 1)} s lost`));
+  }
+  if (sync) notes.push(note("info", `Complete six-camera framesets: ${fmt(sync.complete_frameset_hz, 1)}/s · resyncs ${sync.capture_resyncs} · out of sync ${fmt(sync.capture_out_of_sync_s, 1)} s`));
   if (!live && st && ph === "idle") notes.push(note("info", "The tiles show the last run's final second."));
   if (run.error) notes.push(note("bad", run.error));
   const capture = run.live || "", gaps = capture.match(/seq_gaps \[[^\]]*\]/), fsets = capture.match(/framesets complete \d+ partial \d+/);
@@ -551,7 +558,7 @@ async function post(path, body) {
 $("start").onclick = () => {
   const request = { viewer: $("viewer").value.trim(), video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
     slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
-    duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), uclamp: pressed($("uclamp")) };
+    duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), frame_csv: pressed($("frame_csv")), uclamp: pressed($("uclamp")) };
   localStorage.setItem("robocap-request", JSON.stringify(request));
   post("api/start", new URLSearchParams({ ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" }).toString());
 };
