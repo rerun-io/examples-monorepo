@@ -64,6 +64,8 @@ class LayoutPiece:
     """Fixed byte offset; variable pieces have no fixed offset."""
     size: int = 1
     """Element count of a ``DataPieceArray``; 1 for a single value."""
+    index: int = -1
+    """Slot in the variable-size index; fixed pieces have none."""
 
 
 @serde
@@ -352,11 +354,40 @@ class VrsFile:
         )
 
 
+VALUE_BYTES: dict[str, int] = {
+    "Bool": 1, "char": 1, "int8_t": 1, "uint8_t": 1, "int16_t": 2, "uint16_t": 2,
+    "int32_t": 4, "uint32_t": 4, "float": 4, "int64_t": 8, "uint64_t": 8, "double": 8,
+}  # fmt: skip
+"""Byte width of each scalar a fixed DataPiece holds."""
+
+
+class ImageLayout(NamedTuple):
+    """Where one record format's DataLayout ends and its capture time sits."""
+
+    fixed_size: int
+    """Bytes of the fixed block."""
+    timestamp_offset: int
+    """``capture_timestamp_ns`` within the fixed block."""
+    variable_pieces: int
+    """Variable pieces after it; each has a (uint32 offset, uint32 length) index entry, then the bytes, then the JPEG."""
+
+
+def fixed_block_size(layout: DataLayout, where: str) -> int:
+    """Bytes the fixed pieces span, from their offsets and scalar widths (``data_layout+...`` formats do not state it)."""
+    ends: list[int] = []
+    for piece in (piece for piece in layout.data_layout if piece.offset >= 0):
+        match: re.Match[str] | None = re.fullmatch(r"DataPiece(?:Value|Array)<(\w+)>", piece.type)
+        if match is None or match[1] not in VALUE_BYTES:
+            raise ValueError(f"{where}: unsupported fixed DataLayout piece {piece.name} ({piece.type})")
+        ends.append(piece.offset + VALUE_BYTES[match[1]] * piece.size)
+    return max(ends, default=0)
+
+
 class VrsImageReader:
     """One JPEG camera stream of an open ``VrsFile``, its data formats validated.
 
-    The image path accepts only a fixed DataLayout followed by JPEG, in
-    uncompressed, lz4 or zstd records.
+    The image path accepts a DataLayout followed by JPEG, in uncompressed, lz4 or zstd records: ``data_layout/size=N``
+    (fixed fields only) or ``data_layout`` (fixed fields plus variable ones, e.g. Aria Gen1's ``image_metadata``).
     """
 
     def __init__(self, vrs: VrsFile, stream_id: str) -> None:
@@ -364,37 +395,44 @@ class VrsImageReader:
         self.stream_id: str = stream_id
         where: str = f"{vrs.path}/{stream_id}"
         description: StreamDescription = vrs.description(stream_id)
-        self._layouts: dict[int, tuple[int, int]] = {}
+        self._layouts: dict[int, ImageLayout] = {}
         for version, record_format in description.record_formats.items():
-            match: re.Match[str] | None = re.fullmatch(r"data_layout/size=(\d+)\+image/jpg", record_format)
+            match: re.Match[str] | None = re.fullmatch(r"data_layout(?:/size=(\d+))?\+image/jpg", record_format)
             if match is None:
                 raise ValueError(f"{where}: unsupported image format {record_format}")
-            size: int = int(match[1])
             layout: DataLayout = read_layout(description.layout_docs[version], where)
+            variable_pieces: int = sum(piece.index >= 0 for piece in layout.data_layout)
+            if match[1] is not None and variable_pieces:
+                raise ValueError(f"{where}: a sized DataLayout with variable pieces")
+            size: int = int(match[1]) if match[1] is not None else fixed_block_size(layout, where)
             timestamps: list[LayoutPiece] = [piece for piece in layout.data_layout if piece.name == "capture_timestamp_ns"]
             if len(timestamps) != 1 or timestamps[0].type != "DataPieceValue<int64_t>" or not 0 <= timestamps[0].offset <= size - 8:
                 raise ValueError(f"{where}: invalid capture_timestamp_ns layout")
-            self._layouts[version] = (size, timestamps[0].offset)
+            self._layouts[version] = ImageLayout(size, timestamps[0].offset, variable_pieces)
 
     def images(self) -> Iterator[ImageRecord]:
         """Yield complete JPEG blocks with validated boundaries and timestamps."""
         where: str = f"{self.vrs.path}/{self.stream_id}"
         for version, payload in self.vrs.payloads(self.stream_id, DATA_RECORD, dict.fromkeys(self._layouts)):
-            layout_size, timestamp_offset = self._layouts[version]
-            if len(payload) < layout_size + 4:
+            layout: ImageLayout = self._layouts[version]
+            start: int = layout.fixed_size + 8 * layout.variable_pieces
+            if layout.variable_pieces and len(payload) >= start:
+                entries: tuple[int, ...] = struct.unpack_from(f"<{2 * layout.variable_pieces}I", payload, layout.fixed_size)
+                start += max(entries[slot] + entries[slot + 1] for slot in range(0, len(entries), 2))
+            if len(payload) < start + 4:
                 raise ValueError(f"{where}: truncated image payload")
-            timestamp: int = struct.unpack_from("<q", payload, timestamp_offset)[0]
-            image: bytes = payload[layout_size:]
+            timestamp: int = struct.unpack_from("<q", payload, layout.timestamp_offset)[0]
+            image: bytes = payload[start:]
             if not image.startswith(b"\xff\xd8") or not image.endswith(b"\xff\xd9"):
                 raise ValueError(f"{where}: invalid JPEG boundaries")
             yield ImageRecord(timestamp, image)
 
     def capture_timestamps(self) -> Int64[ndarray, "n"]:
         """Every image's capture clock in file order, reading only the DataLayout of uncompressed records."""
-        prefix_sizes: dict[int, int | None] = {version: size for version, (size, _) in self._layouts.items()}
+        prefix_sizes: dict[int, int | None] = {version: layout.fixed_size for version, layout in self._layouts.items()}
         return np.fromiter(
             (
-                struct.unpack_from("<q", payload, self._layouts[version][1])[0]
+                struct.unpack_from("<q", payload, self._layouts[version].timestamp_offset)[0]
                 for version, payload in self.vrs.payloads(self.stream_id, DATA_RECORD, prefix_sizes)
             ),
             dtype=np.int64,
