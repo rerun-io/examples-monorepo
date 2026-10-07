@@ -1,4 +1,5 @@
 //! GPU/asset contracts, selected by the pytest integration runner with real skips.
+mod common;
 use glam::{Mat4, Vec3};
 use gsplat_cli::Evaluator;
 use gsplat_cli::camera::{self, CameraSpec};
@@ -77,9 +78,10 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .unwrap();
     println!("Brush Packed versus Float: {packed_score:?}");
     assert!(packed_score.minimum_psnr() > 35.0);
-    let mut ours = gsplat_cli::engines::ours(&scene, 256, 256, &Default::default())
-        .await
-        .unwrap();
+    let mut ours =
+        gsplat_cli::engines::ours(&scene, glam::uvec2(256, 256), &Default::default(), None)
+            .await
+            .unwrap();
     // Speed renders into the packed target; readback must not score an untouched float buffer.
     RenderEngine::render(&mut ours, &camera, false)
         .await
@@ -218,7 +220,7 @@ async fn garden_colmap_projects_observed_points() {
         let data = image.points.unwrap();
         for (xy, id) in data.xys.iter().zip(data.point3d_ids) {
             if let Some(point) = points.get(&id) {
-                errors.push(camera.project(*point).distance(*xy) as f64);
+                errors.push(common::project(camera, *point).distance(*xy) as f64);
             }
         }
     }

@@ -53,27 +53,15 @@ impl Engine {
             Implementation::Native => Ok(Self::Native(Box::new(
                 Native::new(ply, scene.data.num_splats()).await?,
             ))),
-            Implementation::Ours => {
-                let renderer = if let Some(path) = archetype {
-                    let mut splats = archetype_splats(path)?;
-                    if splats.transforms.len() != scene.data.num_splats() {
-                        return Err(Error::Invalid("PLY loaders disagree on count".into()));
-                    }
-                    splats.min_scale = settings
-                        .min_scale
-                        .map(|floor| vec![floor; splats.transforms.len()]);
-                    crate::Renderer::new(
-                        &splats,
-                        settings.options(scene.mode),
-                        glam::uvec2(camera.width, camera.height),
-                        settings.initial_capacity,
-                    )
-                    .await?
-                } else {
-                    ours(scene, camera.width, camera.height, settings).await?
-                };
-                Ok(Self::Ours(Box::new(renderer)))
-            }
+            Implementation::Ours => Ok(Self::Ours(Box::new(
+                ours(
+                    scene,
+                    glam::uvec2(camera.width, camera.height),
+                    settings,
+                    archetype,
+                )
+                .await?,
+            ))),
         }
     }
     pub fn output_format(&self) -> &'static str {
@@ -353,18 +341,25 @@ impl RenderEngine for crate::Renderer {
 /// Construct the shared renderer with the benchmark's recorded controls.
 pub async fn ours(
     scene: &PlyScene,
-    width: u32,
-    height: u32,
+    size: glam::UVec2,
     settings: &RenderSettings,
+    archetype: Option<&Path>,
 ) -> Result<crate::Renderer> {
-    let mut splats = crate::raw_splats(&scene.data)?;
+    let mut splats = if let Some(path) = archetype {
+        archetype_splats(path)?
+    } else {
+        crate::raw_splats(&scene.data)?
+    };
+    if splats.transforms.len() != scene.data.num_splats() {
+        return Err(Error::Invalid("PLY loaders disagree on count".into()));
+    }
     if let Some(floor) = settings.min_scale {
         splats.min_scale = Some(vec![floor; scene.data.num_splats()]);
     }
     crate::Renderer::new(
         &splats,
         settings.options(scene.mode),
-        glam::UVec2::new(width, height),
+        size,
         settings.initial_capacity,
     )
     .await

@@ -135,9 +135,7 @@ async fn parity(
         let view = ParityView {
             metrics: ViewMetrics {
                 name: format!("{index:03}"),
-                psnr: score.rgb.psnr,
-                ssim: score.rgb.ssim,
-                lpips: None,
+                metrics: score.rgb,
             },
             alpha_psnr: score.alpha_psnr,
             white_psnr: score.white_psnr,
@@ -145,7 +143,7 @@ async fn parity(
         };
         eprintln!(
             "view {index}: RGB {:.6}, alpha {:.6}, white {:.6} dB",
-            view.metrics.psnr, view.alpha_psnr, view.white_psnr
+            view.metrics.metrics.psnr, view.alpha_psnr, view.white_psnr
         );
         if let Some(dir) = &a.save_images {
             save_pair(
@@ -204,7 +202,7 @@ async fn parity(
             provenance: Provenance::default(),
             min_rgb_psnr: views
                 .iter()
-                .map(|v| v.metrics.psnr)
+                .map(|v| v.metrics.metrics.psnr)
                 .fold(f64::INFINITY, f64::min),
             views,
             mean,

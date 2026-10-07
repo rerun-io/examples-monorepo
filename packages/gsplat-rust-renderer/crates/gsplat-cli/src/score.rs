@@ -55,9 +55,7 @@ pub async fn run(args: ScoreArgs) -> Result<()> {
                 .strip_prefix(&args.dataset)?
                 .to_string_lossy()
                 .into_owned(),
-            psnr: metrics.psnr,
-            ssim: metrics.ssim,
-            lpips: metrics.lpips,
+            metrics,
         });
     }
     let mean = gsplat_cli::mean(&views);

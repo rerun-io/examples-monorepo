@@ -38,58 +38,6 @@ impl CameraSpec {
     pub fn pose(&self) -> Mat4 {
         Mat4::from_cols_array_2d(&self.world_from_camera).transpose()
     }
-    pub fn project(&self, point: glam::Vec3) -> glam::Vec2 {
-        let p = self.pose().inverse().transform_point3(point);
-        let x = p.x / p.z;
-        let y = p.y / p.z;
-        let r2 = x * x + y * y;
-        let kb = |k1: f32, k2: f32, k3: f32, k4: f32| {
-            let r = r2.sqrt();
-            if r < 1e-8 {
-                return 1.0;
-            }
-            let theta = r.atan();
-            let t2 = theta * theta;
-            theta * (1.0 + t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4)))) / r
-        };
-        let (radial, p1, p2, sx, sy) = match self.model {
-            CameraModel::Pinhole => (1.0, 0.0, 0.0, 0.0, 0.0),
-            CameraModel::KannalaBrandt4 { k1, k2, k3, k4 } => {
-                (kb(k1, k2, k3, k4), 0.0, 0.0, 0.0, 0.0)
-            }
-            CameraModel::RadialTangential8 {
-                k1,
-                k2,
-                k3,
-                k4,
-                k5,
-                k6,
-                p1,
-                p2,
-            } => (
-                (1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))) / (1.0 + r2 * (k4 + r2 * (k5 + r2 * k6))),
-                p1,
-                p2,
-                0.0,
-                0.0,
-            ),
-            CameraModel::ThinPrismFisheye {
-                k1,
-                k2,
-                k3,
-                k4,
-                p1,
-                p2,
-                sx1,
-                sy1,
-            } => (kb(k1, k2, k3, k4), p1, p2, sx1, sy1),
-        };
-        glam::Vec2::new(
-            self.fx * (radial * x + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x) + sx * r2) + self.cx,
-            self.fy * (radial * y + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y * y) + sy * r2) + self.cy,
-        )
-    }
-
     pub fn validate(&self) -> Result<(), CameraError> {
         if self.width == 0
             || self.height == 0
@@ -218,9 +166,37 @@ impl CameraSpec {
     }
 }
 
+pub fn orbit(
+    center: glam::Vec3,
+    radius: glam::Vec2,
+    elevation: f32,
+    count: usize,
+    template: &CameraSpec,
+    up: Option<glam::Vec3>,
+) -> Vec<CameraSpec> {
+    let basis = up.map(|up| {
+        let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Z, up.normalize());
+        Mat4::from_translation(center) * Mat4::from_quat(rotation) * Mat4::from_translation(-center)
+    });
+    (0..count)
+        .map(|i| {
+            let angle = std::f32::consts::TAU * i as f32 / count as f32;
+            let position =
+                center + glam::Vec3::new(radius.x * angle.cos(), radius.y * angle.sin(), elevation);
+            let pose = Mat4::look_at_lh(position, center, -glam::Vec3::Z).inverse();
+            let pose = basis.map_or(pose, |basis| basis * pose);
+            CameraSpec {
+                world_from_camera: pose.transpose().to_cols_array_2d(),
+                ..template.clone()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::project;
     use glam::Vec3;
     #[test]
     fn nerf_axis_conversion_round_trip() {
@@ -249,7 +225,7 @@ mod tests {
             model: CameraModel::Pinhole,
         };
         assert_eq!(
-            cam.project(glam::Vec3::new(1.0, 2.0, 10.0)),
+            project(&cam, glam::Vec3::new(1.0, 2.0, 10.0)),
             glam::Vec2::new(330.0, 280.0)
         );
     }
@@ -268,11 +244,7 @@ mod tests {
     fn resize_preserves_normalized_projection() {
         let cam = CameraSpec::from_nerf(Mat4::IDENTITY, 1.0, 800, 600);
         let p = glam::Vec3::new(0.2, 0.1, -1.0);
-        assert!(
-            cam.resized(400, 300)
-                .project(p)
-                .abs_diff_eq(cam.project(p) * 0.5, 1e-5)
-        );
+        assert!(project(&cam.resized(400, 300), p).abs_diff_eq(project(&cam, p) * 0.5, 1e-5));
     }
 
     #[test]
@@ -323,8 +295,7 @@ mod tests {
             let decoded: CameraSpec = serde_json::from_str(&text).unwrap();
             assert_eq!(serde_json::to_string(&decoded).unwrap(), text);
             assert!(
-                decoded
-                    .project(glam::Vec3::new(0.4, 0.3, -1.0))
+                project(&decoded, glam::Vec3::new(0.4, 0.3, -1.0))
                     .abs_diff_eq(glam::Vec2::from_array(expected), 1e-3)
             );
             let brush = decoded.brush_camera();
@@ -350,8 +321,7 @@ mod tests {
         let mut camera = CameraSpec::from_nerf(Mat4::IDENTITY, 1.0, 640, 480);
         camera.world_from_camera = world.transpose().to_cols_array_2d();
         assert!(
-            camera
-                .project(world.transform_point3(glam::Vec3::Z))
+            project(&camera, world.transform_point3(glam::Vec3::Z))
                 .abs_diff_eq(glam::Vec2::new(320.0, 240.0), 1e-3)
         );
     }
@@ -363,39 +333,6 @@ mod tests {
             .replacen('{', "{\"typo\":1,", 1);
         assert!(serde_json::from_str::<CameraSpec>(&text).is_err());
     }
-}
-
-pub fn orbit(
-    center: glam::Vec3,
-    radius: glam::Vec2,
-    elevation: f32,
-    count: usize,
-    template: &CameraSpec,
-    up: Option<glam::Vec3>,
-) -> Vec<CameraSpec> {
-    let basis = up.map(|up| {
-        let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Z, up.normalize());
-        Mat4::from_translation(center) * Mat4::from_quat(rotation) * Mat4::from_translation(-center)
-    });
-    (0..count)
-        .map(|i| {
-            let angle = std::f32::consts::TAU * i as f32 / count as f32;
-            let position =
-                center + glam::Vec3::new(radius.x * angle.cos(), radius.y * angle.sin(), elevation);
-            let pose = Mat4::look_at_lh(position, center, -glam::Vec3::Z).inverse();
-            let pose = basis.map_or(pose, |basis| basis * pose);
-            CameraSpec {
-                world_from_camera: pose.transpose().to_cols_array_2d(),
-                ..template.clone()
-            }
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod orbit_tests {
-    use super::*;
-    use gsplat_core::CameraModel;
     #[test]
     fn orbit_looks_at_center_and_closes() {
         let template = CameraSpec {
@@ -412,11 +349,7 @@ mod orbit_tests {
         let path = orbit(center, glam::Vec2::new(4.0, 2.0), 1.0, 4, &template, None);
         assert_eq!(path.len(), 4);
         for camera in &path {
-            assert!(
-                camera
-                    .project(center)
-                    .abs_diff_eq(glam::Vec2::new(320.0, 240.0), 1e-3)
-            );
+            assert!(project(camera, center).abs_diff_eq(glam::Vec2::new(320.0, 240.0), 1e-3));
         }
         assert!(
             path[0]

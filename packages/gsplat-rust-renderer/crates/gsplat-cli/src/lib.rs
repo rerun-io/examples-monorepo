@@ -63,3 +63,7 @@ mod tests {
         assert!(super::parity_image(vec![f32::NAN; 4], 1, 1).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod common;

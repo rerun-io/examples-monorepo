@@ -36,13 +36,10 @@ pub struct Metrics {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ViewMetrics {
     pub name: String,
-    pub psnr: f64,
-    pub ssim: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lpips: Option<f64>,
+    #[serde(flatten)]
+    pub metrics: Metrics,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -197,9 +194,7 @@ pub async fn evaluate_directories(
             .await?;
         views.push(ViewMetrics {
             name: path.to_string_lossy().replace('\\', "/"),
-            psnr: metrics.psnr,
-            ssim: metrics.ssim,
-            lpips: metrics.lpips,
+            metrics,
         });
     }
     let mean = mean(&views);
@@ -215,12 +210,12 @@ pub fn mean(views: &[ViewMetrics]) -> Metrics {
     assert!(!views.is_empty(), "empty metric set");
     let n = views.len() as f64;
     Metrics {
-        psnr: views.iter().map(|v| v.psnr).sum::<f64>() / n,
-        ssim: views.iter().map(|v| v.ssim).sum::<f64>() / n,
-        lpips: views.iter().all(|v| v.lpips.is_some()).then(|| {
+        psnr: views.iter().map(|v| v.metrics.psnr).sum::<f64>() / n,
+        ssim: views.iter().map(|v| v.metrics.ssim).sum::<f64>() / n,
+        lpips: views.iter().all(|v| v.metrics.lpips.is_some()).then(|| {
             views
                 .iter()
-                .map(|v| v.lpips.expect("requested LPIPS"))
+                .map(|v| v.metrics.lpips.expect("requested LPIPS"))
                 .sum::<f64>()
                 / n
         }),
