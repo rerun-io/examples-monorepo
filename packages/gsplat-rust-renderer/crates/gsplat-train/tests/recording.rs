@@ -59,37 +59,21 @@ fn lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs() {
             let chunk = re_chunk::Chunk::from_arrow_msg(&message).unwrap();
             let entity = chunk.entity_path().to_string();
             entities.insert(entity.clone());
-            if entity == "/refine/num_added" {
-                refine_steps.extend(
-                    chunk
-                        .timelines()
-                        .values()
-                        .find(|t| t.timeline().name().as_str() == "iterations")
-                        .unwrap()
-                        .times_raw()
-                        .iter()
-                        .copied(),
-                );
-            }
-            if entity == "/eval/view_0/render" {
-                render_steps.extend(
-                    chunk
-                        .timelines()
-                        .values()
-                        .find(|t| t.timeline().name().as_str() == "iterations")
-                        .unwrap()
-                        .times_raw()
-                        .iter()
-                        .copied(),
-                );
-            }
+            let destination = match entity.as_str() {
+                "/refine/num_added" => &mut refine_steps,
+                "/eval/view_0/render" => &mut render_steps,
+                "/world/splats" => &mut snapshots,
+                "/loss/total" => &mut loss_steps,
+                "/lr/mean" => &mut learning_rate_steps,
+                _ => continue, // Static camera and image chunks need no iteration timeline.
+            };
+            let timeline = chunk
+                .timelines()
+                .values()
+                .find(|t| t.timeline().name().as_str() == "iterations")
+                .expect("recognized temporal entity must carry iterations");
+            destination.extend(timeline.times_raw().iter().copied());
             if entity == "/world/splats" {
-                let timeline = chunk
-                    .timelines()
-                    .values()
-                    .find(|t| t.timeline().name().as_str() == "iterations")
-                    .unwrap();
-                snapshots.extend(timeline.times_raw().iter().copied());
                 for (row, step) in timeline.times_raw().iter().enumerate() {
                     let sh = expected.sh_coefficients.as_ref().unwrap();
                     let actual_sh = chunk.component_batch_raw(sh.descriptor.component, row);
@@ -153,27 +137,26 @@ fn lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs() {
                     }
                 }
             }
-            if entity == "/loss/total" || entity == "/lr/mean" {
-                let timeline = chunk
-                    .timelines()
-                    .values()
-                    .find(|t| t.timeline().name().as_str() == "iterations")
-                    .unwrap();
-                if entity == "/loss/total" {
-                    loss_steps.extend(timeline.times_raw().iter().copied());
-                } else {
-                    learning_rate_steps.extend(timeline.times_raw().iter().copied());
-                }
-            }
         }
     }
     snapshots.sort_unstable();
     assert_eq!(snapshots, [50, 200]);
-    let expected_stats: Vec<i64> = (5..=200).step_by(5).collect();
     loss_steps.sort_unstable();
     learning_rate_steps.sort_unstable();
-    assert_eq!(loss_steps, expected_stats);
-    assert_eq!(learning_rate_steps, expected_stats);
+    assert_eq!(
+        loss_steps.last(),
+        Some(&200),
+        "final metrics must be retained"
+    );
+    assert!(
+        loss_steps
+            .iter()
+            .all(|step| (5..=200).contains(step) && step % 5 == 0)
+    );
+    assert_eq!(
+        learning_rate_steps, loss_steps,
+        "a retained step carries loss and LR together"
+    );
     refine_steps.sort_unstable();
     assert_eq!(refine_steps, [51, 101, 151]);
     render_steps.sort_unstable();

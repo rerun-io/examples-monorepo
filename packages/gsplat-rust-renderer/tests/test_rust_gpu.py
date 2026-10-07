@@ -28,8 +28,8 @@ def run_rust_contract(package: str, suite: str | None, name: str, assets: tuple[
     environment["CARGO_PROFILE_TEST_DEBUG"] = "0"
     environment["CARGO_INCREMENTAL"] = "0"
     selection: list[str] = ["--lib"] if suite is None else ["--test", suite]
-    if suite == "bin:gsplat-bench":
-        selection = ["--bin", "gsplat-bench"]
+    if suite is not None and suite.startswith("bin:"):
+        selection = ["--bin", suite.removeprefix("bin:")]
     result: subprocess.CompletedProcess[str] = subprocess.run(
         ["cargo", "test", "--locked", "--package", package, *selection, name, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1"],
         cwd=root, env=environment, text=True, capture_output=True, check=False,
@@ -47,6 +47,7 @@ def run_rust_contract(package: str, suite: str | None, name: str, assets: tuple[
     ("package", "suite", "name", "assets"),
     [
         ("gsplat-train", "recording", "lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs", ("GSPLAT_LEGO",)),
+        ("gsplat-train", "bin:gsplat-train", "recorder::tests::saturated_recording_drops_intermediate_metrics_without_blocking_training", ()),
         ("gsplat-eval", "evaluation", "brush_quantization_premultiplication_and_identity", ()),
         ("gsplat-eval", "evaluation", "evaluator_lpips_matches_reference", ()),
         ("gsplat-eval", "evaluation", "float_parity_preserves_highlights_and_detects_alpha", ()),

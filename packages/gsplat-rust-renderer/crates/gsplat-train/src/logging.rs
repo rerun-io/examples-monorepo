@@ -1,9 +1,8 @@
 //! GPU readback and logging run off the trainer thread, using captured tensor handles.
 use anyhow::Context;
 use brush_dataset::{Dataset, scene::SceneView};
-use brush_process::message::TrainMessage;
 use brush_render::gaussian_splats::Splats;
-use brush_train::msg::RefineStats;
+use brush_train::msg::{RefineStats, TrainStepStats};
 use rerun::{RecordingStream, Scalars};
 use std::{sync::mpsc::Receiver, time::Duration};
 
@@ -18,9 +17,16 @@ pub enum Observation {
         max_image_size: u32,
     },
     UpAxis(glam::Vec3),
-    Metrics {
-        message: TrainMessage,
+    Step {
+        iter: u32,
+        stats: TrainStepStats,
+        step_duration: Duration,
         num_splats: u32,
+    },
+    Refine {
+        iter: u32,
+        refine: RefineStats,
+        refine_duration: Duration,
     },
     Eval {
         iter: u32,
@@ -101,137 +107,198 @@ pub async fn run(
             continue;
         }
         let result: anyhow::Result<()> = async {
-        match observation {
-            Observation::Config { max_image_size: size } => max_image_size = size,
-            Observation::UpAxis(up) => {
-                let up = scene_up(up);
-                let axis = if up.x.abs() >= up.y.abs() && up.x.abs() >= up.z.abs() {
-                    if up.x > 0.0 { rerun::ViewCoordinates::RIGHT_HAND_X_UP() } else { rerun::ViewCoordinates::RIGHT_HAND_X_DOWN() }
-                } else if up.y.abs() >= up.z.abs() {
-                    if up.y > 0.0 { rerun::ViewCoordinates::RIGHT_HAND_Y_UP() } else { rerun::ViewCoordinates::RIGHT_HAND_Y_DOWN() }
-                } else if up.z > 0.0 { rerun::ViewCoordinates::RIGHT_HAND_Z_UP() } else { rerun::ViewCoordinates::RIGHT_HAND_Z_DOWN() };
-                rec.log_static("world", &axis)?;
-                super::dashboard::send(&rec, eval_views.len(), compute, video, Some(up.to_array()))?;
-            }
-            Observation::Dataset(dataset) => {
-                eval_views = dataset.eval.map_or_else(Vec::new, |scene| {
-                    scene.views.iter().take(4).cloned().collect()
-                });
-                rec.log_static("world/dataset/camera", &rerun::TextDocument::new("Pinhole approximations; lens distortion is omitted from frustums. Evaluation uses each original camera model."))?;
-                for (i, view) in dataset.train.views.iter().enumerate() {
-                    let thumbnail = view.image.clone().with_max_resolution(max_image_size.min(256)).load().await?;
-                    let size = glam::uvec2(thumbnail.width(), thumbnail.height());
-                    let camera = view.camera.with_pinhole();
-                    let path = format!("world/dataset/camera/{i}");
-                    rec.log_static(
-                        path.as_str(),
-                        &rerun::Transform3D::from_translation_rotation(
-                            camera.position,
-                            camera.rotation,
-                        ),
-                    )?;
-                    rec.log_static(
-                        path.as_str(),
-                        &rerun::Pinhole::from_focal_length_and_resolution(
-                            camera.focal(size).to_array(),
-                            size.as_vec2().to_array(),
-                        )
-                        .with_principal_point(camera.center(size).to_array()),
-                    )?;
-                    jpeg(
+            match observation {
+                Observation::Config {
+                    max_image_size: size,
+                } => max_image_size = size,
+                Observation::UpAxis(up) => {
+                    let up = scene_up(up);
+                    let axis = if up.x.abs() >= up.y.abs() && up.x.abs() >= up.z.abs() {
+                        if up.x > 0.0 {
+                            rerun::ViewCoordinates::RIGHT_HAND_X_UP()
+                        } else {
+                            rerun::ViewCoordinates::RIGHT_HAND_X_DOWN()
+                        }
+                    } else if up.y.abs() >= up.z.abs() {
+                        if up.y > 0.0 {
+                            rerun::ViewCoordinates::RIGHT_HAND_Y_UP()
+                        } else {
+                            rerun::ViewCoordinates::RIGHT_HAND_Y_DOWN()
+                        }
+                    } else if up.z > 0.0 {
+                        rerun::ViewCoordinates::RIGHT_HAND_Z_UP()
+                    } else {
+                        rerun::ViewCoordinates::RIGHT_HAND_Z_DOWN()
+                    };
+                    rec.log_static("world", &axis)?;
+                    super::dashboard::send(
                         &rec,
-                        &format!("{path}/image"),
-                        black_ground_truth(thumbnail, view.image.alpha_mode())?,
-                        true,
+                        eval_views.len(),
+                        compute,
+                        video,
+                        Some(up.to_array()),
                     )?;
                 }
-                for (i, view) in eval_views.iter().enumerate() {
-                    jpeg(
-                        &rec,
-                        &format!("eval/view_{i}/ground_truth"),
-                        black_ground_truth(view.image.clone().with_max_resolution(max_image_size).load().await?, view.image.alpha_mode())?,
-                        true,
+                Observation::Dataset(dataset) => {
+                    eval_views = dataset.eval.map_or_else(Vec::new, |scene| {
+                        scene.views.iter().take(4).cloned().collect()
+                    });
+                    rec.log_static(
+                        "world/dataset/camera",
+                        &rerun::TextDocument::new(concat!(
+                            "Pinhole approximations; lens distortion is omitted from frustums. ",
+                            "Evaluation uses each original camera model.",
+                        )),
                     )?;
+                    for (i, view) in dataset.train.views.iter().enumerate() {
+                        let thumbnail = view
+                            .image
+                            .clone()
+                            .with_max_resolution(max_image_size.min(256))
+                            .load()
+                            .await?;
+                        let size = glam::uvec2(thumbnail.width(), thumbnail.height());
+                        let camera = view.camera.with_pinhole();
+                        let path = format!("world/dataset/camera/{i}");
+                        rec.log_static(
+                            path.as_str(),
+                            &rerun::Transform3D::from_translation_rotation(
+                                camera.position,
+                                camera.rotation,
+                            ),
+                        )?;
+                        rec.log_static(
+                            path.as_str(),
+                            &rerun::Pinhole::from_focal_length_and_resolution(
+                                camera.focal(size).to_array(),
+                                size.as_vec2().to_array(),
+                            )
+                            .with_principal_point(camera.center(size).to_array()),
+                        )?;
+                        jpeg(
+                            &rec,
+                            &format!("{path}/image"),
+                            black_ground_truth(thumbnail, view.image.alpha_mode())?,
+                            true,
+                        )?;
+                    }
+                    for (i, view) in eval_views.iter().enumerate() {
+                        jpeg(
+                            &rec,
+                            &format!("eval/view_{i}/ground_truth"),
+                            black_ground_truth(
+                                view.image
+                                    .clone()
+                                    .with_max_resolution(max_image_size)
+                                    .load()
+                                    .await?,
+                                view.image.alpha_mode(),
+                            )?,
+                            true,
+                        )?;
+                    }
                 }
-            }
-            Observation::Snapshot {
-                iter,
-                splats,
-                full_sh,
-            } => {
-                rec.set_time_sequence("iterations", iter);
-                if splats.sh_degree() > 3 && !warned_sh4 {
-                    eprintln!("Rerun supports SH through degree 3; truncating degree 4.");
-                    warned_sh4 = true;
-                }
-                let snapshot = gsplat_train::read_splats(splats, full_sh).await?;
-                rec.log("world/splats", &snapshot)?;
-                // Memory reporting synchronizes the compute server. Keep it at
-                // snapshot cadence, on this worker, rather than the step path.
-                if let Some(usage) = device.memory_pool_usage() {
-                    scalar(&rec, "memory/used", usage.bytes_in_use as f64)?;
-                    scalar(&rec, "memory/reserved", usage.bytes_reserved as f64)?;
-                }
-            }
-            Observation::Metrics { message, num_splats } => match message {
-                TrainMessage::TrainStep { iter, stats, step_duration, .. } => {
+                Observation::Snapshot {
+                    iter,
+                    splats,
+                    full_sh,
+                } => {
                     rec.set_time_sequence("iterations", iter);
-                    scalar(&rec, "loss/total", stats.loss.into_scalar_async::<f32>().await? as f64)?;
+                    if splats.sh_degree() > 3 && !warned_sh4 {
+                        eprintln!("Rerun supports SH through degree 3; truncating degree 4.");
+                        warned_sh4 = true;
+                    }
+                    let snapshot = gsplat_train::read_splats(splats, full_sh).await?;
+                    rec.log("world/splats", &snapshot)?;
+                    // Memory reporting synchronizes the compute server. Keep it at
+                    // snapshot cadence, on this worker, rather than the step path.
+                    if let Some(usage) = device.memory_pool_usage() {
+                        scalar(&rec, "memory/used", usage.bytes_in_use as f64)?;
+                        scalar(&rec, "memory/reserved", usage.bytes_reserved as f64)?;
+                    }
+                }
+                Observation::Step {
+                    iter,
+                    stats,
+                    step_duration,
+                    num_splats,
+                } => {
+                    rec.set_time_sequence("iterations", iter);
+                    scalar(
+                        &rec,
+                        "loss/total",
+                        stats.loss.into_scalar_async::<f32>().await? as f64,
+                    )?;
                     scalar(&rec, "train/step_ms", step_duration.as_secs_f64() * 1000.0)?;
                     scalar(&rec, "splats/num_splats", num_splats as f64)?;
                     scalar(&rec, "splats/splats_visible", stats.num_visible as f64)?;
-                    for (key, value) in [("mean", stats.lr_mean), ("rotation", stats.lr_rotation), ("scale", stats.lr_scale), ("coeffs", stats.lr_coeffs), ("opac", stats.lr_opac)] {
+                    for (key, value) in [
+                        ("mean", stats.lr_mean),
+                        ("rotation", stats.lr_rotation),
+                        ("scale", stats.lr_scale),
+                        ("coeffs", stats.lr_coeffs),
+                        ("opac", stats.lr_opac),
+                    ] {
                         scalar(&rec, &format!("lr/{key}"), value)?;
                     }
                 }
-                TrainMessage::RefineStep { iter, refine, refine_duration, .. } => {
+                Observation::Refine {
+                    iter,
+                    refine,
+                    refine_duration,
+                } => {
                     rec.set_time_sequence("iterations", iter);
                     refine_stats(&rec, &refine, refine_duration)?;
                 }
-                _ => unreachable!("only step and refine metrics enter this channel"),
-            },
-            Observation::Eval {
-                iter,
-                psnr,
-                ssim,
-                splats,
-            } => {
-                rec.set_time_sequence("iterations", iter);
-                scalar(&rec, "psnr/eval", psnr as f64)?;
-                scalar(&rec, "ssim/eval", ssim as f64)?;
-                for (i, view) in eval_views.iter().enumerate() {
-                    let (w, h) = view.image.clone().with_max_resolution(max_image_size).dimensions().await?;
-                    let (render, _) = brush_render::render_splats(
-                        splats.clone(),
-                        &view.camera,
-                        glam::uvec2(w, h),
-                        glam::Vec3::ZERO,
-                        None,
-                        brush_render::TextureMode::Float,
-                    )
-                    .await;
-                    let pixels = render.into_data_async().await?.try_into_vec::<f32>()?;
-                    let bytes = pixels
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .flat_map(|p| {
-                            p[..3]
-                                .iter()
-                                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-                        })
-                        .collect();
-                    jpeg(
-                        &rec,
-                        &format!("eval/view_{i}/render"),
-                        image::RgbImage::from_raw(w, h, bytes).context("invalid render image")?,
-                        false,
-                    )?;
+                Observation::Eval {
+                    iter,
+                    psnr,
+                    ssim,
+                    splats,
+                } => {
+                    rec.set_time_sequence("iterations", iter);
+                    scalar(&rec, "psnr/eval", psnr as f64)?;
+                    scalar(&rec, "ssim/eval", ssim as f64)?;
+                    for (i, view) in eval_views.iter().enumerate() {
+                        let (w, h) = view
+                            .image
+                            .clone()
+                            .with_max_resolution(max_image_size)
+                            .dimensions()
+                            .await?;
+                        let (render, _) = brush_render::render_splats(
+                            splats.clone(),
+                            &view.camera,
+                            glam::uvec2(w, h),
+                            glam::Vec3::ZERO,
+                            None,
+                            brush_render::TextureMode::Float,
+                        )
+                        .await;
+                        let pixels = render.into_data_async().await?.try_into_vec::<f32>()?;
+                        let bytes = pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .flat_map(|p| {
+                                p[..3]
+                                    .iter()
+                                    .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                            })
+                            .collect();
+                        jpeg(
+                            &rec,
+                            &format!("eval/view_{i}/render"),
+                            image::RgbImage::from_raw(w, h, bytes)
+                                .context("invalid render image")?,
+                            false,
+                        )?;
+                    }
                 }
             }
+            Ok(())
         }
-        Ok(())
-        }.await;
+        .await;
         if let Err(error) = result {
             eprintln!("Recording observation warning: {error:#}");
         }
