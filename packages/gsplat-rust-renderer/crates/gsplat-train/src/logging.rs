@@ -113,22 +113,14 @@ pub async fn run(
                 } => max_image_size = size,
                 Observation::UpAxis(up) => {
                     let up = scene_up(up);
-                    let axis = if up.x.abs() >= up.y.abs() && up.x.abs() >= up.z.abs() {
-                        if up.x > 0.0 {
-                            rerun::ViewCoordinates::RIGHT_HAND_X_UP()
-                        } else {
-                            rerun::ViewCoordinates::RIGHT_HAND_X_DOWN()
-                        }
-                    } else if up.y.abs() >= up.z.abs() {
-                        if up.y > 0.0 {
-                            rerun::ViewCoordinates::RIGHT_HAND_Y_UP()
-                        } else {
-                            rerun::ViewCoordinates::RIGHT_HAND_Y_DOWN()
-                        }
-                    } else if up.z > 0.0 {
-                        rerun::ViewCoordinates::RIGHT_HAND_Z_UP()
-                    } else {
-                        rerun::ViewCoordinates::RIGHT_HAND_Z_DOWN()
+                    let a = up.abs();
+                    let axis = match (a.max_position(), up[a.max_position()] > 0.0) {
+                        (0, true) => rerun::ViewCoordinates::RIGHT_HAND_X_UP(),
+                        (0, false) => rerun::ViewCoordinates::RIGHT_HAND_X_DOWN(),
+                        (1, true) => rerun::ViewCoordinates::RIGHT_HAND_Y_UP(),
+                        (1, false) => rerun::ViewCoordinates::RIGHT_HAND_Y_DOWN(),
+                        (_, true) => rerun::ViewCoordinates::RIGHT_HAND_Z_UP(),
+                        (_, false) => rerun::ViewCoordinates::RIGHT_HAND_Z_DOWN(),
                     };
                     rec.log_static("world", &axis)?;
                     super::dashboard::send(

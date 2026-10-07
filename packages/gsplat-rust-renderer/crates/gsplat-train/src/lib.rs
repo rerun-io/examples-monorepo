@@ -161,19 +161,9 @@ mod tests {
         )
         .as_bytes();
         let expected = rerun::GaussianSplats3D::from_ply_file_contents(ply, None).unwrap();
+        use std::f32::consts::LN_2;
         let converted = to_archetype(
-            &[
-                1.0,
-                2.0,
-                3.0,
-                0.0,
-                3.0,
-                0.0,
-                4.0,
-                0.0,
-                std::f32::consts::LN_2,
-                -std::f32::consts::LN_2,
-            ],
+            &[1.0, 2.0, 3.0, 0.0, 3.0, 0.0, 4.0, 0.0, LN_2, -LN_2],
             &[-4.0, 0.0, 4.0],
             &[0.0],
             1,
