@@ -2,6 +2,8 @@
 
 import hashlib
 import os
+import warnings
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -19,14 +21,46 @@ MISSING_INPUT: str = "missing"
 DecodedRecord = TypeVar("DecodedRecord")
 
 
-def iter_jsonl(path: Path, decode: Callable[[dict[str, object], int], DecodedRecord]) -> Iterator[DecodedRecord]:  # noqa: UP047 - Runtime TypeVar annotations.
-    """Stream strictly decoded records with their source line in any error."""
+def recover_suffix(line: bytes, index: int, decode: Callable[[dict[str, object], int], DecodedRecord], validate: Callable[[DecodedRecord], object] | None) -> DecodedRecord | None:  # noqa: UP047 - Runtime TypeVar annotations.
+    """Find a complete trailing JSON object that passes its provider schema."""
+    offset: int = line.find(b'{"', 1)
+    while offset >= 0:
+        try:
+            suffix: object = orjson.loads(line[offset:])
+            if isinstance(suffix, dict):
+                candidate: DecodedRecord = decode(suffix, index)
+                if validate is not None:
+                    validate(candidate)
+                return candidate
+        except (orjson.JSONDecodeError, SerdeError, ValueError):
+            pass  # A candidate suffix is not a complete provider record.
+        offset = line.find(b'{"', offset + 2)
+    return None
+
+
+def iter_jsonl(path: Path, decode: Callable[[dict[str, object], int], DecodedRecord], *, skipped: Counter[str] | None, validate_recovered: Callable[[DecodedRecord], object] | None = None) -> Iterator[DecodedRecord]:  # noqa: UP047 - Runtime TypeVar annotations.
+    """Yield decoded records; skipped=None makes provider detection silent and uncounted."""
+    def warn(index: int, reason: str) -> None:
+        """Keep damage counts and file-and-line diagnostics together."""
+        if skipped is None:
+            return
+        skipped[reason] += 1
+        warnings.warn(f"{path}:{index + 1}: {reason}", stacklevel=3)
+
     with path.open("rb") as stream:
-        for index, line in enumerate(stream):
+        for index, original in enumerate(stream):
+            line: bytes = original.lstrip(b"\0")
+            if line != original:
+                warn(index, "nul-padded-line")
             try:
                 raw: object = orjson.loads(line)
             except orjson.JSONDecodeError:
-                raise ValueError(f"{path}:{index + 1}: invalid JSON") from None
+                recovered: DecodedRecord | None = recover_suffix(line, index, decode, validate_recovered)
+                warn(index, "damaged-line")
+                if recovered is not None:
+                    warn(index, "merged-line")
+                    yield recovered
+                continue
             if not isinstance(raw, dict):
                 raise ValueError(f"{path}:{index + 1}: expected a JSON object")
             try:

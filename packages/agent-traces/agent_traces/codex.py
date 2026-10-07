@@ -158,7 +158,7 @@ class RolloutFacts:
 def collect(path: Path, meta: cr.SessionMeta) -> RolloutFacts:
     """Collect body facts using the already decoded and accepted header."""
     facts: RolloutFacts = RolloutFacts(path.resolve(), meta)
-    records: Iterator[EnvelopeRecord] = iter_jsonl(path, decode_envelope)
+    records: Iterator[EnvelopeRecord] = iter_jsonl(path, decode_envelope, skipped=facts.skipped, validate_recovered=decode_record)
     legacy_total: cr.TokenUsage | None = None
     turn_id: str = ""
     model: str = ""
@@ -460,7 +460,7 @@ def rollout_home(path: Path) -> Path:
 def rollout_header(path: Path) -> cr.SessionMeta:
     """Decode a header and identify legacy layouts without reading its body."""
     with path.open("rb") as stream:
-        line: bytes = stream.readline()
+        line: bytes = stream.readline().lstrip(b"\0")
     try:
         raw: object = orjson.loads(line)
         if isinstance(raw, dict) and "type" not in raw and "id" in raw and "timestamp" in raw:

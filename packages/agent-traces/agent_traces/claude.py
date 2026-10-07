@@ -184,7 +184,7 @@ def unique_records(paths: list[Path], skipped: Counter[str]) -> Iterator[_Source
     """Keep the first UUID occurrence across all files of one agent."""
     seen: set[str] = set()
     for path in paths:
-        for source in iter_jsonl(path, decode_record):
+        for source in iter_jsonl(path, decode_record, skipped=skipped):
             if source.replay_key in seen:
                 skipped["replayed-record"] += 1
             else:

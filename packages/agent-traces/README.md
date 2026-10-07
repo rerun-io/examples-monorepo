@@ -181,6 +181,8 @@ If one session appears on two computers, the copy registered first is kept and t
 - Codex rollouts from CLI versions older than 0.150 are skipped. `convert-all` prints the count per version. Pre-envelope files are skipped as `property:skipped:legacy_rollout`. Children without native completion items retain their message records. Unknown records and response subtypes are counted by full tag.
 - Codex rollouts do not record how long each command ran, so Codex tool rows have no elapsed time.
 - Codex subagent rollouts go into their parent's recording. When the parent is skipped or fails, its subagents are skipped too, and the summary says why.
+- Leading NUL bytes are removed and counted as `property:skipped:nul_padded_line`. A truncated prefix followed by a complete record is recovered only if the trailing JSON object passes the provider schema; this counts as `property:skipped:merged_line` and also `property:skipped:damaged_line` for the lost prefix. Other damaged lines, including truncated tails, are skipped with a file-and-line warning. Valid JSON with an invalid required shape still fails the session.
+- Home layout selects the batch provider. For single-file conversion, the first decodable line selects it; damaged leading lines do not prevent a Claude conversion.
 - In Rerun 0.38.1, a TextLog view can show an empty panel when the time cursor is after a very tall last row. Move the cursor onto the row or use Current message.
 - If `convert-all` reports an unsupported manifest version, delete that `manifest.json`. The next run converts every session in that profile again.
 - Costs are not computed. The Claude CLI's own session total is kept as a property when the transcript has one.

@@ -1,5 +1,6 @@
 """Codex parser and recording contracts use synthetic rollouts."""
 
+import re
 from pathlib import Path
 
 import pyarrow as pa
@@ -475,6 +476,29 @@ def test_old_version_rejected_before_body_decode(rollout_builder: RolloutBuilder
     monkeypatch.setattr(codex.orjson, "loads", no_bodies)
     with pytest.raises(SkipSession, match="codex-cli-0.149.9"):
         codex.session_source(rollout_builder.path).parse()
+
+
+def test_damaged_rollout_line_is_skipped_counted_and_warned(rollout_builder: RolloutBuilder) -> None:
+    """A damaged line after the header costs that line only; the rest of the rollout converts."""
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    with rollout_builder.path.open("ab") as stream:
+        stream.write(b'{"type":"event_msg","pay\n')
+    rollout_builder.item("Reasoning")
+    with pytest.warns(UserWarning, match=rf"{re.escape(str(rollout_builder.path))}:3: "):
+        session = parse_rollout(rollout_builder.path)
+    assert session.skipped["damaged-line"] == 1
+    assert sum(isinstance(e.payload, Thinking) for e in session.main) == 2
+
+
+def test_valid_json_that_is_not_an_object_still_fails_the_rollout(rollout_builder: RolloutBuilder) -> None:
+    """Only a line that is not valid JSON counts as damaged; a JSON value of the wrong shape is a format change."""
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    with rollout_builder.path.open("ab") as stream:
+        stream.write(b"[]\n")
+    with pytest.raises(ValueError, match=r"rollout-thread.jsonl:3: expected a JSON object"):
+        parse_rollout(rollout_builder.path)
 
 
 @pytest.mark.parametrize(("parent_model", "child_model", "expected"), [

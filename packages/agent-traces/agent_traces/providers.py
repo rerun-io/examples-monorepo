@@ -43,7 +43,7 @@ def provider_for(path: Path) -> Provider:
         """Read the discriminator without interpreting provider fields."""
         return from_dict(_FirstRecord, raw)
 
-    for first in iter_jsonl(path, decode):
+    for first in iter_jsonl(path, decode, skipped=None):
         return codex if first.type == "session_meta" or (not first.type and first.id and first.timestamp) else claude
     raise ValueError(f"{path}: no decodable records")
 
