@@ -39,6 +39,12 @@ PATCHED_CRATES: tuple[PatchedCrate, ...] = (
         'a4763912d17cbdd93c63b7e0d5450ffa1881bbcfbba4576adbb94a23854cccaf',
         'patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch',
     ),
+    PatchedCrate(
+        'cubecl-wgpu',
+        '0.11.0-pre.3',
+        '68a70096df8a1a1a327ffcc3327bbc4a9b2ba461c25e0e7863806721f8601664',
+        'patches/cubecl-wgpu-0.11.0-pre.3-poll-on-request.patch',
+    ),
 )
 
 

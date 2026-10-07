@@ -1,0 +1,256 @@
+--- a/src/compute/poll.rs
++++ b/src/compute/poll.rs
+@@ -1,70 +1,91 @@
+ #[cfg(not(target_family = "wasm"))]
+ mod _impl {
+-    use std::thread::JoinHandle;
++    use std::sync::mpsc::{self, SyncSender, TrySendError};
+ 
+     #[derive(Debug)]
+     pub struct WgpuPoll {
+-        active_handle: std::sync::Arc<()>,
+-        cancel_sender: std::sync::mpsc::Sender<()>,
+-        poll_thread: JoinHandle<()>,
++        requests: SyncSender<()>,
+     }
+ 
+     impl WgpuPoll {
+         pub fn new(device: wgpu::Device) -> Self {
+-            let active_handle = std::sync::Arc::new(());
+-            let thread_check = active_handle.clone();
++            Self::with_poll(move || {
++                if let Err(e) = device.poll(wgpu::PollType::Wait {
++                    submission_index: None,
++                    timeout: None,
++                }) {
++                    log::warn!("wgpu: failed to wait for submitted work. ({e})");
++                }
++            })
++        }
+ 
+-            let (cancel_sender, cancel_receiver) = std::sync::mpsc::channel();
+-            let poll_thread = std::thread::spawn(move || {
+-                loop {
+-                    // Check whether the WgpuPoll, this thread, and something else is holding
+-                    // a handle.
+-                    if std::sync::Arc::strong_count(&thread_check) > 2 {
+-                        if let Err(e) = device.poll(wgpu::PollType::Wait {
+-                            submission_index: None, // Wait for most recent
+-                            timeout: None,
+-                        }) {
+-                            log::warn!(
+-                                "wgpu: requested wait timed out before the submission was completed during sync. ({e})"
+-                            )
+-                        }
+-                    } else {
+-                        // Do not cancel thread while someone still needs to poll.
+-                        if cancel_receiver.try_recv().is_ok() {
+-                            break;
+-                        }
+-
+-                        std::thread::park();
+-                    }
+-                    std::thread::yield_now();
++        fn with_poll(mut poll: impl FnMut() + Send + 'static) -> Self {
++            // One queued request suffices: Wait drains all work registered before
++            // that request. A request arriving during the wait triggers another poll.
++            let (requests, receiver) = mpsc::sync_channel(1);
++            std::thread::spawn(move || {
++                while receiver.recv().is_ok() {
++                    poll();
+                 }
+             });
++            Self { requests }
++        }
+ 
+-            Self {
+-                active_handle,
+-                cancel_sender,
+-                poll_thread,
++        /// Wake the worker AFTER submitting work and registering its callbacks.
++        /// Futures consuming those callbacks never keep an idle worker spinning.
++        pub fn start_polling(&self) {
++            match self.requests.try_send(()) {
++                Ok(()) | Err(TrySendError::Full(())) => {}
++                Err(TrySendError::Disconnected(())) => panic!("wgpu polling thread stopped"),
+             }
+         }
+-        /// Get a handle, as long as it's alive the polling will be active.
+-        pub fn start_polling(&self) -> std::sync::Arc<()> {
+-            let handle = self.active_handle.clone();
+-            self.poll_thread.thread().unpark();
+-            handle
++    }
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++        use std::sync::mpsc::{self, RecvTimeoutError};
++        use std::time::Duration;
++
++        #[test]
++        fn completed_poll_does_not_repeat_while_consumer_is_delayed() {
++            let (completed, events) = mpsc::channel();
++            let poll = WgpuPoll::with_poll(move || {
++                let _ = completed.send(());
++            });
++            poll.start_polling();
++            events.recv_timeout(Duration::from_secs(2)).unwrap();
++            assert_eq!(
++                events.recv_timeout(Duration::from_millis(50)),
++                Err(RecvTimeoutError::Timeout)
++            );
++            poll.start_polling();
++            events.recv_timeout(Duration::from_secs(2)).unwrap();
+         }
+-    }
+ 
+-    impl Drop for WgpuPoll {
+-        fn drop(&mut self) {
+-            self.cancel_sender
+-                .send(())
+-                .expect("Failed to shutdown polling thread.");
+-            self.poll_thread.thread().unpark();
++        #[test]
++        fn request_during_poll_is_retained_and_shutdown_drains_it() {
++            let (entered, events) = mpsc::channel();
++            let (release, blocked) = mpsc::channel();
++            let poll = WgpuPoll::with_poll(move || {
++                entered.send(()).unwrap();
++                blocked.recv().unwrap();
++            });
++            poll.start_polling();
++            events.recv_timeout(Duration::from_secs(2)).unwrap();
++            poll.start_polling();
++            drop(poll);
++            release.send(()).unwrap();
++            events.recv_timeout(Duration::from_secs(2)).unwrap();
++            release.send(()).unwrap();
++            assert_eq!(
++                events.recv_timeout(Duration::from_secs(2)),
++                Err(RecvTimeoutError::Disconnected)
++            );
+         }
+     }
+ }
+ 
+-// On Wasm, the browser handles the polling loop, so we don't need anything.
++// On Wasm, the browser handles the polling loop.
+ #[cfg(target_family = "wasm")]
+ mod _impl {
+     #[derive(Debug)]
+@@ -73,9 +94,7 @@
+         pub fn new(_device: wgpu::Device) -> Self {
+             Self {}
+         }
+-        pub fn start_polling(&self) -> alloc::sync::Arc<()> {
+-            alloc::sync::Arc::new(())
+-        }
++        pub fn start_polling(&self) {}
+     }
+ }
+ 
+--- a/src/compute/stream.rs
++++ b/src/compute/stream.rs
+@@ -323,7 +323,7 @@
+             }
+         }
+ 
+-        let poll = self.poll.start_polling();
++        self.poll.start_polling();
+ 
+         Box::pin(async move {
+             for receiver in callbacks.iter().flatten() {
+@@ -333,9 +333,6 @@
+                     .expect("Unable to receive buffer slice result.")
+                     .expect("Failed to map buffer");
+             }
+-
+-            // Can stop polling now.
+-            core::mem::drop(poll);
+ 
+             let result = {
+                 staging_info
+@@ -412,7 +409,6 @@
+                 profiler.stop(token)
+             }
+             Timings::Device(..) => {
+-                let poll = self.poll.start_polling();
+                 self.compute_pass = None;
+ 
+                 // Submit commands needed for profiling.
+@@ -442,10 +438,10 @@
+                 };
+ 
+                 match result {
+-                    Ok(_) => timing.stop_profile(buffer, poll),
++                    Ok(_) => timing.stop_profile(buffer, &self.poll),
+                     Err(err) => {
+                         // Just to clean the timing buffer.
+-                        let _ = timing.stop_profile(buffer, poll).ok();
++                        let _ = timing.stop_profile(buffer, &self.poll).ok();
+                         Err(ProfileError::Server(Box::new(err)))
+                     }
+                 }
+@@ -467,15 +463,13 @@
+ 
+         let queue = self.queue.clone();
+         let error_future = error_scope.pop();
+-        let poll = self.poll.start_polling();
++        let (sender, receiver) = cubecl_environment::future::channel::bounded::<()>(1);
++        queue.on_submitted_work_done(move || {
++            let _ = sender.try_send(());
++        });
++        self.poll.start_polling();
+ 
+         Box::pin(async move {
+-            let (sender, receiver) = cubecl_environment::future::channel::bounded::<()>(1);
+-            queue.on_submitted_work_done(move || {
+-                // Signal that we're done.
+-                let _ = sender.try_send(());
+-                core::mem::drop(poll);
+-            });
+             let _ = receiver.recv().await;
+ 
+             if let Some(error) = error_future.await {
+--- a/src/compute/timings.rs
++++ b/src/compute/timings.rs
+@@ -379,28 +379,28 @@
+     pub fn stop_profile(
+         &self,
+         map_buffer: Option<wgpu::Buffer>,
+-        poll_signal: Arc<()>,
++        poll: &super::poll::WgpuPoll,
+     ) -> Result<ProfileDuration, ProfileError> {
+         if let Some(map_buffer) = map_buffer {
+             let period = self.queue_period;
+             let epoch_tick = self.epoch_tick;
+             let epoch_instant = self.epoch_instant;
+ 
++            let (sender, rec) = cubecl_environment::future::channel::bounded(1);
++            map_buffer
++                .slice(..)
++                .map_async(wgpu::MapMode::Read, move |v| {
++                    // This might fail if the channel is closed (eg. the future is dropped).
++                    // This is fine, just means results aren't needed anymore.
++                    let _ = sender.try_send(v);
++                });
++            poll.start_polling();
++
+             Ok(ProfileDuration::new_device_time(async move {
+-                let (sender, rec) = cubecl_environment::future::channel::bounded(1);
+-                map_buffer
+-                    .slice(..)
+-                    .map_async(wgpu::MapMode::Read, move |v| {
+-                        // This might fail if the channel is closed (eg. the future is dropped).
+-                        // This is fine, just means results aren't needed anymore.
+-                        let _ = sender.try_send(v);
+-                    });
+                 rec.recv()
+                     .await
+                     .expect("Unable to receive buffer slice result.")
+                     .expect("Failed to map buffer");
+-                // Can stop polling now.
+-                core::mem::drop(poll_signal);
+ 
+                 let binding = map_buffer.slice(..).get_mapped_range().unwrap();
+                 let data: &[u64] = bytemuck::try_cast_slice(&binding).unwrap();

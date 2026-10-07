@@ -2603,6 +2603,8 @@ inputs = [
     "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/**",
     "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/.prepared-sha256",
+    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/crates/*/Cargo.toml",
@@ -2624,8 +2626,14 @@ cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-common-
 cwd = "packages/slam-rs"
 description = "Run the patched CubeCL channel park tests"
 
+[feature.slam-rs.tasks.slam-rs-wgpu-poll-test]
+depends-on = ["slam-rs-patch-deps"]
+cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml --lib compute::poll::_impl::tests --no-default-features --features std,spirv"
+cwd = "packages/slam-rs"
+description = "Test idle blocking, retained wakeups and poll worker shutdown"
+
 [feature.slam-rs.tasks.slam-rs-rust-test]
-depends-on = ["slam-rs-patch-test"]
+depends-on = ["slam-rs-patch-test", "slam-rs-wgpu-poll-test"]
 cmd = "cargo test --locked --offline --workspace -- --nocapture"
 cwd = "packages/slam-rs"
 description = "Run the Rust test suite (unit tests + proptest)"
@@ -2734,6 +2742,8 @@ inputs = [
     "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/**",
     "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/.prepared-sha256",
+    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/crates/*/Cargo.toml",
@@ -3465,6 +3475,14 @@ inputs = [
     "packages/kornia-staging/crates/*/Cargo.toml",
     "packages/kornia-staging/crates/*/build.rs",
     "packages/kornia-staging/crates/*/src/**",
+    "packages/slam-rs/patches/**",
+    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
+    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3/.prepared-sha256",
+    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3/.prepared-sha256",
 ]
 description = "Build the Rust hands-layer core and install robocap_live._core in place"
 

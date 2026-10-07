@@ -76,4 +76,8 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Dense u8-shift8 ingestion and sparse u16 bilinear values/gradients | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Integer u16 Gaussian downsampling and row scratch | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
 | Centered FAST cells, band scans, masks and deterministic selection | slam-rs `frontend/detect*`, `frontend/cell.rs` | kornia-rs / kornia-imgproc / `features` (private cells) | staged | - |
+| Wgpu polling wakeup | cubecl-wgpu 0.11.0-pre.3 compute/{poll,stream,timings} | cubecl-wgpu | staged (temporary patch) | - |
 | Mean-normalized SE(2) patch alignment and sampling patterns | slam-rs `frontend/{patch,patterns,se2,simd,ldlt}.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_se2` | staged | - |
+
+CubeCL wgpu polling is patched in `../slam-rs/patches/` before the tracker split.
+patch preparation moves into this package with the GPU runtime item.
