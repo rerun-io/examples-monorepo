@@ -165,7 +165,7 @@ layout, so the upstream evaluation tools run on it unchanged:
 ```
 
 ```bash
-export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria-rrd    # rrds go to the NAS
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/dataforge-lamaria-rrd    # rrds go to the NAS
 export DATAFORGE_FFMPEG=/home/pablo/.pixi/bin/ffmpeg          # the ffmpeg with av1_nvenc
 pixi run -e dataforge --frozen dataforge-download lamaria                 # --sequences A B C
 # --sequence belongs to the verb, so it goes before the dataset subcommand
@@ -250,7 +250,7 @@ then registers both layers under one dataset:
 
 ```bash
 # --catalog-url belongs to the verb, so it precedes the dataset subcommand
-RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria-rrd \
+RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/dataforge-lamaria-rrd \
   pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://127.0.0.1:9988 lamaria
 ```
 
