@@ -3,36 +3,19 @@ use crate::kernels::Kernels;
 use crate::{Camera, Error, RenderOptions, Scene, Splats, Target, ViewState};
 use std::sync::Arc;
 
-pub const STAGE_NAMES: [&str; 8] = [
-    "project_forward",
-    "depth_sort",
-    "gather_scan",
-    "project_visible",
-    "map_intersections",
-    "tile_sort",
-    "tile_offsets",
-    "rasterize",
-];
-/// Contiguous GPU intervals; projection includes indirect-dispatch preparation.
-pub fn stage_queries(stage: usize) -> (usize, usize) {
-    (if stage == 0 { 0 } else { stage + 1 }, stage + 2)
-}
-
 /// Device-lifetime pipelines. Scene uploads and per-view scratch have independent lifetimes.
 pub struct Renderer {
     device: wgpu::Device,
-    queue: wgpu::Queue,
     limit: u64,
     kernels: Kernels,
 }
 impl Renderer {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, Error> {
+    pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
         let limits = device.limits();
         crate::check_adapter(device.features(), &limits)?;
         let kernels = Kernels::new(device);
         Ok(Self {
             device: device.clone(),
-            queue: queue.clone(),
             limit: limits
                 .max_storage_buffer_binding_size
                 .min(limits.max_buffer_size),
@@ -59,6 +42,7 @@ impl Renderer {
     /// Overflow leaves the target intact; rerender after feedback requests more capacity.
     pub fn render(
         &self,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &mut ViewState,
         camera: &Camera,
@@ -67,6 +51,6 @@ impl Renderer {
     ) -> Result<(), Error> {
         camera.validate()?;
         options.validate()?;
-        view.encode(encoder, &self.queue, &self.kernels, camera, options, target)
+        view.encode(encoder, queue, &self.kernels, camera, options, target)
     }
 }

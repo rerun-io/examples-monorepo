@@ -1,3 +1,5 @@
+#import <./scan_common.wgsl>
+
 // Hand port of brush-sort 1388f74c. Five stages per 4-bit digit.
 struct Params {
     count_index: u32,

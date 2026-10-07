@@ -11,16 +11,22 @@ pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_256;
 mod camera;
 mod gpu;
 mod kernels;
+mod lens;
 pub mod native;
+mod output;
 mod primitives;
 mod renderer;
 mod scene;
+mod shader;
+mod timing;
 mod types;
 mod view;
-pub use camera::CameraModel;
-pub use renderer::{Renderer, STAGE_NAMES, stage_queries};
+pub use lens::CameraModel;
+pub use output::Target;
+pub use renderer::Renderer;
 pub use scene::Scene;
-pub use types::{Camera, FrameStats, RenderMode, RenderOptions, Splats, Target};
+pub use timing::{STAGE_NAMES, stage_queries};
+pub use types::{Camera, FrameStats, RenderMode, RenderOptions, Splats};
 pub use view::ViewState;
 
 /// Input, capability, or readback failure at the renderer boundary.

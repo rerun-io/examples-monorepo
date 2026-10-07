@@ -1,3 +1,5 @@
+#import <./scan_common.wgsl>
+
 // Hand port of brush-scan 1388f74c.
 struct Params {
     count_index: u32,

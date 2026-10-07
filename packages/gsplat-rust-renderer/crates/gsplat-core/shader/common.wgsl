@@ -15,6 +15,7 @@ struct Uniforms {
     coeff1: vec4f,
     lens: vec4u,
     camera_limits: vec4f,
+    padding: vec4u,
 }
 
 struct Splat {

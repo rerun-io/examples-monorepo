@@ -6,8 +6,8 @@ use gsplat_core::{Camera, CameraModel, RenderOptions, Renderer, Splats, Target};
 #[test]
 #[ignore = "integration: GPU"]
 fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
-    let (device, queue) = common::gpu();
-    let renderer = Renderer::new(&device, &queue).unwrap();
+    let (device, queue) = &common::gpu();
+    let renderer = Renderer::new(device).unwrap();
     let scene = renderer
         .upload(&Splats {
             transforms: vec![[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0]],
@@ -20,7 +20,7 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
     let mut small = renderer.create_view(&scene, 1).unwrap();
     let mut reference = renderer.create_view(&scene, 64).unwrap();
     let camera = common::pinhole_camera(64);
-    let target = common::upload(&device, &vec![[0.0f32; 4]; 64 * 64]);
+    let target = common::upload(device, &vec![[0.0f32; 4]; 64 * 64]);
     let mut outputs = Vec::new();
     for frame in 0..3 {
         let view = if frame == 2 {
@@ -31,6 +31,7 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
             .render(
+                queue,
                 &mut encoder,
                 view,
                 &camera,
@@ -39,7 +40,7 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
             )
             .unwrap();
         queue.submit([encoder.finish()]);
-        outputs.push(common::read::<[f32; 4]>(&device, &queue, &target, 64 * 64));
+        outputs.push(common::read::<[f32; 4]>(device, queue, &target, 64 * 64));
         let stats = view.poll_feedback().unwrap().unwrap();
         assert_eq!(stats.needs_rerender, frame == 0);
         if frame != 2 {
@@ -58,6 +59,7 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
             .render(
+                queue,
                 &mut encoder,
                 &mut small,
                 &camera,

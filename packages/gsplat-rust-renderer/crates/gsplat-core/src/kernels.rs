@@ -1,22 +1,18 @@
 //! Device-lifetime modules and pipelines; allocation paths never compile shaders.
 use crate::gpu::{module, pipeline};
 
-pub(crate) fn sources() -> [String; 6] {
-    let common = include_str!("../shaders/render_common.wgsl");
-    let scan = include_str!("../shaders/scan_common.wgsl");
+pub(crate) fn sources() -> [String; 8] {
     [
-        format!(
-            "{common}\n{}\n{}\n{}",
-            include_str!("../shaders/counts.wgsl"),
-            include_str!("../shaders/camera.wgsl"),
-            include_str!("../shaders/project.wgsl")
-        ),
-        format!("{common}\n{}", include_str!("../shaders/map.wgsl")),
-        format!("{common}\n{}", include_str!("../shaders/raster.wgsl")),
-        format!("{scan}\n{}", include_str!("../shaders/scan.wgsl")),
-        format!("{scan}\n{}", include_str!("../shaders/sort.wgsl")),
-        include_str!("../shaders/dispatch.wgsl").into(),
+        "project.wgsl",
+        "map.wgsl",
+        "raster.wgsl",
+        "scan.wgsl",
+        "sort.wgsl",
+        "dispatch.wgsl",
+        "raster_outputs.wgsl",
+        "raster_depth.wgsl",
     ]
+    .map(crate::shader::resolve)
 }
 
 pub(crate) struct Kernels {
@@ -40,17 +36,24 @@ pub(crate) struct Kernels {
 }
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
-        let [projection, mapping, raster, scan, sort, prepare] =
-            sources().map(|s| module(device, &s));
-        let depth = module(device, &depth_source());
+        let [
+            projection,
+            mapping,
+            raster,
+            scan,
+            sort,
+            prepare,
+            outputs,
+            depth,
+        ] = sources().map(|s| module(device, &s));
         Self {
             project_forward: pipeline(device, &projection, "project_forward"),
             project_visible: pipeline(device, &projection, "project_visible"),
             gather: pipeline(device, &mapping, "gather"),
             map_tiles: pipeline(device, &mapping, "map_tiles"),
             tile_offsets: pipeline(device, &mapping, "tile_offsets"),
-            float: pipeline(device, &raster, "raster_float"),
-            packed: pipeline(device, &raster, "raster_packed"),
+            float: pipeline(device, &outputs, "raster_float"),
+            packed: pipeline(device, &outputs, "raster_packed"),
             texture: pipeline(device, &raster, "raster_texture"),
             texture_depth: pipeline(device, &depth, "raster_texture_depth"),
             scan: pipeline(device, &scan, "scan"),
@@ -63,8 +66,8 @@ impl Kernels {
             prepare: pipeline(device, &prepare, "prepare"),
         }
     }
-    pub fn raster(&self, kind: crate::types::RasterKind) -> &wgpu::ComputePipeline {
-        use crate::types::RasterKind;
+    pub fn raster(&self, kind: crate::output::RasterKind) -> &wgpu::ComputePipeline {
+        use crate::output::RasterKind;
         match kind {
             RasterKind::Float => &self.float,
             RasterKind::Packed => &self.packed,
@@ -73,19 +76,12 @@ impl Kernels {
         }
     }
 }
-fn depth_source() -> String {
-    format!(
-        "{}\n{}",
-        include_str!("../shaders/render_common.wgsl"),
-        include_str!("../shaders/raster_depth.wgsl")
-    )
-}
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn every_native_shader_validates_with_naga() {
-        for source in super::sources().into_iter().chain([super::depth_source()]) {
+        for source in super::sources() {
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
             naga::valid::Validator::new(
@@ -96,6 +92,11 @@ mod tests {
             .unwrap();
             let mut layout = naga::proc::Layouter::default();
             layout.update(module.to_ctx()).unwrap();
+            for (handle, ty) in module.types.iter() {
+                if ty.name.as_deref() == Some("Uniforms") {
+                    assert_eq!(layout[handle].size, 256);
+                }
+            }
             let workgroup_bytes: u32 = module
                 .global_variables
                 .iter()

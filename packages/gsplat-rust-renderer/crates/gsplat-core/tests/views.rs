@@ -6,8 +6,8 @@ use gsplat_core::{Camera, CameraModel, RenderOptions, Renderer, Splats, Target};
 #[test]
 #[ignore = "integration: GPU"]
 fn one_scene_renders_two_views_in_one_submit() {
-    let (device, queue) = common::gpu();
-    let renderer = Renderer::new(&device, &queue).unwrap();
+    let (device, queue) = &common::gpu();
+    let renderer = Renderer::new(device).unwrap();
     let scene = renderer
         .upload(&Splats {
             transforms: vec![[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0]],
@@ -41,6 +41,7 @@ fn one_scene_renders_two_views_in_one_submit() {
         for (index, view) in views.iter_mut().enumerate() {
             renderer
                 .render(
+                    queue,
                     &mut encoder,
                     view,
                     &camera,

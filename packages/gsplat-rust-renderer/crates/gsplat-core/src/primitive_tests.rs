@@ -1,6 +1,6 @@
 //! Primitive contracts against independent CPU references.
-use crate::gpu::CountSlot;
 use crate::kernels::Kernels;
+use crate::primitives::dispatch::CountSlot;
 use crate::primitives::{RadixSort, Scan};
 use crate::test_utils::{gpu, read, upload};
 
@@ -9,14 +9,13 @@ use crate::test_utils::{gpu, read, upload};
 fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
     use crate::gpu::{module, pipeline};
     let mut kernels = Kernels::new(device);
-    let sources = crate::kernels::sources();
     let poison_scan = "
         if lid < 64u { partials[lid] = 0xdeadbeefu; }
         if lid == 0u { cube_total = 0xdeadbeefu; length = 0xdeadbeefu; }
         for (var j = 0u; j < 4u; j++) { lds[j * 256u + lid] = 0xdeadbeefu; }
         workgroupBarrier();
     ";
-    let scan = sources[3].replacen(
+    let scan = crate::shader::resolve("scan.wgsl").replacen(
         "    if lid == 0u {\n        length =",
         &format!("{poison_scan}\n    if lid == 0u {{\n        length ="),
         1,
@@ -24,7 +23,7 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
     let scan = module(device, &scan);
     kernels.scan = pipeline(device, &scan, "scan");
     kernels.add_offsets = pipeline(device, &scan, "add_offsets");
-    let sort = sources[4].replace(
+    let sort = crate::shader::resolve("sort.wgsl").replace(
         "    let n = sort_length(lid);",
         &format!(
             "{poison_scan}
@@ -51,8 +50,8 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
 #[test]
 #[ignore = "integration: GPU"]
 fn inclusive_scan_crosses_recursive_block_boundaries() {
-    let (device, queue) = gpu();
-    let kernels = poisoned_kernels(&device);
+    let (device, queue) = &gpu();
+    let kernels = poisoned_kernels(device);
     for n in [0, 1, 1023, 1024, 1025, 1_048_577] {
         let input: Vec<u32> = (0..n).map(|i| (i % 7) as u32).collect();
         let expected: Vec<u32> = input
@@ -62,10 +61,10 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
                 Some(*sum)
             })
             .collect();
-        let values = upload(&device, &input);
-        let count = upload(&device, &[n as u32, 0]);
+        let values = upload(device, &input);
+        let count = upload(device, &[n as u32, 0]);
         let scan = Scan::new(
-            &device,
+            device,
             &kernels,
             n as u32,
             CountSlot::Visible,
@@ -76,7 +75,7 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
         scan.encode(&mut encoder, &kernels, None);
         queue.submit([encoder.finish()]);
         assert_eq!(
-            read::<u32>(&device, &queue, scan.output(), n),
+            read::<u32>(device, queue, scan.output(), n),
             expected,
             "length {n}"
         );
@@ -86,19 +85,19 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
 #[test]
 #[ignore = "integration: GPU"]
 fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
-    let (device, queue) = gpu();
-    let kernels = poisoned_kernels(&device);
+    let (device, queue) = &gpu();
+    let kernels = poisoned_kernels(device);
     for n in [1u32, 255, 256, 257, 1023, 1024, 1025, 65537, 1_048_577] {
         let input: Vec<u32> = (0..n)
             .map(|i| i.wrapping_mul(1664525).wrapping_add(1013904223) % 65537)
             .collect();
         let mut expected: Vec<u32> = (0..n).collect();
         expected.sort_by_key(|i| input[*i as usize]);
-        let keys = upload(&device, &input);
-        let values = upload(&device, &(0..n).collect::<Vec<_>>());
-        let count = upload(&device, &[n, 0]);
+        let keys = upload(device, &input);
+        let values = upload(device, &(0..n).collect::<Vec<_>>());
+        let count = upload(device, &[n, 0]);
         let sort = RadixSort::new(
-            &device,
+            device,
             &kernels,
             n,
             CountSlot::Visible,
@@ -119,12 +118,12 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
             queue.submit([encoder.finish()]);
             let (keys, values) = sort.output(bits);
             assert_eq!(
-                read::<u32>(&device, &queue, values, n as usize),
+                read::<u32>(device, queue, values, n as usize),
                 expected,
                 "length {n}, {bits} bits"
             );
             assert_eq!(
-                read::<u32>(&device, &queue, keys, n as usize),
+                read::<u32>(device, queue, keys, n as usize),
                 expected
                     .iter()
                     .map(|i| input[*i as usize])
@@ -137,18 +136,18 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
 #[test]
 #[ignore = "integration: GPU"]
 fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
-    let (device, queue) = gpu();
-    let kernels = poisoned_kernels(&device);
+    let (device, queue) = &gpu();
+    let kernels = poisoned_kernels(device);
     let capacity = 1_048_577u32;
     let input: Vec<u32> = (0..capacity)
         .map(|i| i.wrapping_mul(1664525) % 17)
         .collect();
     let ids: Vec<u32> = (0..capacity).collect();
-    let keys = upload(&device, &input);
-    let values = upload(&device, &ids);
-    let count = upload(&device, &[0, capacity]);
+    let keys = upload(device, &input);
+    let values = upload(device, &ids);
+    let count = upload(device, &[0, capacity]);
     let sort = RadixSort::new(
-        &device,
+        device,
         &kernels,
         capacity,
         CountSlot::Intersections,
@@ -157,7 +156,7 @@ fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
         &count,
     );
     let scan = Scan::new(
-        &device,
+        device,
         &kernels,
         capacity,
         CountSlot::Intersections,
@@ -180,13 +179,13 @@ fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
             })
             .collect();
         assert_eq!(
-            read::<u32>(&device, &queue, scan.output(), n as usize),
+            read::<u32>(device, queue, scan.output(), n as usize),
             expected_scan
         );
         let mut expected: Vec<u32> = (0..n).collect();
         expected.sort_by_key(|i| input[*i as usize]);
         assert_eq!(
-            read::<u32>(&device, &queue, sort.output(8).1, n as usize),
+            read::<u32>(device, queue, sort.output(8).1, n as usize),
             expected
         );
     }

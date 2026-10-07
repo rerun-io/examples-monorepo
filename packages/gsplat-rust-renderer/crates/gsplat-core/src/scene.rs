@@ -1,6 +1,5 @@
 //! Immutable GPU parameters shared by views without another upload.
 use crate::{Error, Splats};
-use wgpu::util::DeviceExt as _;
 
 pub struct Scene {
     pub(crate) transforms: wgpu::Buffer,
@@ -43,13 +42,12 @@ impl Scene {
                     limit,
                 });
             }
-            Ok(
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: if bytes.is_empty() { &[0; 4] } else { bytes },
-                    usage: wgpu::BufferUsages::STORAGE,
-                }),
-            )
+            Ok(crate::gpu::upload(
+                device,
+                label,
+                bytes,
+                wgpu::BufferUsages::STORAGE,
+            ))
         };
         Ok(Self {
             transforms: upload("raw transforms", bytemuck::cast_slice(&splats.transforms))?,

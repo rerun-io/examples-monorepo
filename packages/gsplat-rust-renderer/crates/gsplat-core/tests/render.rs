@@ -6,12 +6,16 @@ use gsplat_core::{Camera, CameraModel, RenderMode, RenderOptions, Renderer, Spla
 #[test]
 #[ignore = "integration: GPU"]
 fn centered_gaussian_has_analytic_color_alpha_and_background() {
-    analytic_render(glam::Affine3A::IDENTITY, 0.182_996_84);
+    let (device, queue) = common::gpu();
+    analytic_render(&device, &queue, glam::Affine3A::IDENTITY, 0.182_996_84);
 }
 #[test]
 #[ignore = "integration: GPU"]
 fn instance_affine_preserves_projection_and_covariance() {
+    let (device, queue) = common::gpu();
     analytic_render(
+        &device,
+        &queue,
         glam::Affine3A::from_scale_rotation_translation(
             Vec3::new(2.0, 0.5, 1.0),
             Quat::from_rotation_z(0.7),
@@ -20,9 +24,13 @@ fn instance_affine_preserves_projection_and_covariance() {
         0.106_753_71,
     );
 }
-fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f32) {
-    let (device, queue) = common::gpu();
-    let renderer = Renderer::new(&device, &queue).unwrap();
+fn analytic_render(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_from_local: glam::Affine3A,
+    alpha_three_pixels_right: f32,
+) {
+    let renderer = Renderer::new(device).unwrap();
     let p = world_from_local
         .inverse()
         .transform_point3(Vec3::new(0.0, 0.0, 2.0));
@@ -53,11 +61,11 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
         background: Vec3::new(0.2, 0.4, 0.6),
         ..Default::default()
     };
-    let float = common::upload(&device, &vec![[0.0f32; 4]; 33 * 33]);
-    let packed = common::upload(&device, &vec![0u32; 33 * 33]);
-    let texture = texture(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let float = common::upload(device, &vec![[0.0f32; 4]; 33 * 33]);
+    let packed = common::upload(device, &vec![0u32; 33 * 33]);
+    let texture = texture(device, wgpu::TextureFormat::Rgba8Unorm);
     let texture_view = texture.create_view(&Default::default());
-    let texture_copy = common::upload(&device, &vec![0u8; 256 * 33]);
+    let texture_copy = common::upload(device, &vec![0u8; 256 * 33]);
     for target in [
         Target::Float(float.clone()),
         Target::Packed(packed.clone()),
@@ -65,7 +73,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
     ] {
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
-            .render(&mut encoder, &mut view, &camera, &options, target)
+            .render(queue, &mut encoder, &mut view, &camera, &options, target)
             .unwrap();
         copy_texture(&mut encoder, &texture, &texture_copy);
         queue.submit([encoder.finish()]);
@@ -81,7 +89,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
             let mut encoder = device.create_command_encoder(&Default::default());
             encoder.resolve_query_set(queries, 0..10, &resolved, 0);
             queue.submit([encoder.finish()]);
-            let ticks = common::read::<u64>(&device, &queue, &resolved, 10);
+            let ticks = common::read::<u64>(device, queue, &resolved, 10);
             assert!(ticks[0] > 0 && ticks[9] > ticks[0]);
             assert!(ticks.windows(2).all(|pair| pair[1] >= pair[0]), "{ticks:?}");
             let total: u64 = (0..gsplat_core::STAGE_NAMES.len())
@@ -91,19 +99,19 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
             assert_eq!(total, ticks[9] - ticks[0]);
         }
     }
-    let rgba = common::read::<[f32; 4]>(&device, &queue, &float, 33 * 33);
+    let rgba = common::read::<[f32; 4]>(device, queue, &float, 33 * 33);
     for (actual, expected) in rgba[16 * 33 + 16].iter().zip([0.35, 0.45, 0.55, 0.5]) {
         assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
     }
     assert_eq!(rgba[0], [0.2, 0.4, 0.6, 0.0]);
     // Independent Gaussian covariance: (f/2)^2 exp(-4) A A^T + 0.3 I.
     assert!((rgba[16 * 33 + 19][3] - alpha_three_pixels_right).abs() < 1e-5);
-    let bytes = common::read::<u8>(&device, &queue, &packed, 33 * 33 * 4);
+    let bytes = common::read::<u8>(device, queue, &packed, 33 * 33 * 4);
     assert_eq!(
         &bytes[(16 * 33 + 16) * 4..(16 * 33 + 17) * 4],
         &[89, 114, 140, 127]
     );
-    let bytes = common::read::<u8>(&device, &queue, &texture_copy, 256 * 33);
+    let bytes = common::read::<u8>(device, queue, &texture_copy, 256 * 33);
     let center = &bytes[16 * 256 + 16 * 4..16 * 256 + 17 * 4];
     assert_eq!(&center[..3], &[89, 115, 140]);
     assert!(center[3].abs_diff(128) <= 1);
@@ -115,6 +123,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
             let mut encoder = device.create_command_encoder(&Default::default());
             renderer
                 .render(
+                    queue,
                     &mut encoder,
                     &mut view,
                     &camera,
@@ -128,7 +137,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
             queue.submit([encoder.finish()]);
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
-            let rgba = common::read::<[f32; 4]>(&device, &queue, &float, 33 * 33);
+            let rgba = common::read::<[f32; 4]>(device, queue, &float, 33 * 33);
             assert!((rgba[16 * 33 + 16][3] - alpha).abs() < 1e-5);
         }
     }
@@ -137,6 +146,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
     assert!(
         renderer
             .render(
+                queue,
                 &mut encoder,
                 &mut view,
                 &camera,
@@ -150,6 +160,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
     assert!(
         renderer
             .render(
+                queue,
                 &mut encoder,
                 &mut view,
                 &wrong_camera,
@@ -163,14 +174,20 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
 #[test]
 #[ignore = "integration: GPU"]
 fn tiny_invertible_instances_are_valid() {
-    analytic_render(glam::Affine3A::from_scale(Vec3::splat(0.0001)), 0.0);
+    let (device, queue) = common::gpu();
+    analytic_render(
+        &device,
+        &queue,
+        glam::Affine3A::from_scale(Vec3::splat(0.0001)),
+        0.0,
+    );
 }
 
 #[test]
 #[ignore = "integration: GPU"]
 fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
-    let (device, queue) = common::gpu();
-    let renderer = Renderer::new(&device, &queue).unwrap();
+    let (device, queue) = &common::gpu();
+    let renderer = Renderer::new(device).unwrap();
     let scene = renderer
         .upload(&Splats {
             transforms: [2.0, 4.0]
@@ -184,13 +201,14 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
         .unwrap();
     let mut view = renderer.create_view(&scene, 64).unwrap();
     let camera = common::pinhole_camera(33);
-    let color = texture(&device, wgpu::TextureFormat::Rgba8Unorm);
-    let depth = texture(&device, wgpu::TextureFormat::R32Float);
-    let output = common::upload(&device, &vec![0.0f32; 64 * 33]);
-    let color_output = common::upload(&device, &vec![0u8; 256 * 33]);
+    let color = texture(device, wgpu::TextureFormat::Rgba8Unorm);
+    let depth = texture(device, wgpu::TextureFormat::R32Float);
+    let output = common::upload(device, &vec![0.0f32; 64 * 33]);
+    let color_output = common::upload(device, &vec![0u8; 256 * 33]);
     let mut encoder = device.create_command_encoder(&Default::default());
     renderer
         .render(
+            queue,
             &mut encoder,
             &mut view,
             &camera,
@@ -206,10 +224,10 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
     queue.submit([encoder.finish()]);
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
-    let values: Vec<f32> = common::read(&device, &queue, &output, 64 * 33);
+    let values: Vec<f32> = common::read(device, queue, &output, 64 * 33);
     assert!((values[16 * 64 + 16] - 8.0 / 3.0).abs() < 1e-5);
     assert_eq!(values[0], 0.0);
-    let rgba: Vec<u8> = common::read(&device, &queue, &color_output, 256 * 33);
+    let rgba: Vec<u8> = common::read(device, queue, &color_output, 256 * 33);
     for (actual, expected) in rgba[16 * 256 + 16 * 4..16 * 256 + 17 * 4]
         .iter()
         .zip([96, 96, 96, 191])

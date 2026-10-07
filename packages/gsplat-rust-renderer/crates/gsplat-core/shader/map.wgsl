@@ -1,3 +1,5 @@
+#import <./common.wgsl>
+
 // Brush gather, map_gaussians, and get_tile_offsets, adapted to raw WGSL.
 @group(0) @binding(1) var<storage, read> counts: array<u32>;
 @group(0) @binding(2) var<storage, read> ids: array<u32>;

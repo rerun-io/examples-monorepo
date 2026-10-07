@@ -1,13 +1,14 @@
 //! Per-view scratch, reusable frame bindings, and bounded asynchronous feedback.
-use crate::gpu::{
-    CountSlot, DispatchPlan, DispatchSlot, Dispatches, bind, dispatch, storage, uniform,
-};
+use crate::gpu::{bind, storage, uniform};
+mod encode;
+use crate::gpu;
 use crate::kernels::Kernels;
+use crate::primitives::dispatch::{CountSlot, DispatchPlan, DispatchSlot, Dispatches};
 use crate::primitives::{RadixSort, Scan};
-use crate::{Camera, Error, FrameStats, RenderMode, RenderOptions, Scene, Target};
-use bytemuck::{Pod, Zeroable};
+use crate::{Error, FrameStats, Scene, Target};
+use encode::Uniforms;
 use std::collections::VecDeque;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 struct Intersections {
     capacity: u32,
@@ -37,64 +38,6 @@ impl Intersections {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Uniforms {
-    view: [[f32; 4]; 4],
-    camera: [f32; 4],
-    pinhole: [f32; 4],
-    clamp_limits: [f32; 4],
-    image: [u32; 4],
-    scene: [u32; 4],
-    background: [f32; 4],
-    options: Flags,
-    coeff0: [f32; 4],
-    coeff1: [f32; 4],
-    lens: [u32; 4],
-    camera_limits: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Flags {
-    log_splat_scale: f32,
-    mip: u32,
-    has_min_scale: u32,
-    padding: u32,
-}
-impl Uniforms {
-    fn new(camera: &Camera, options: &RenderOptions, scene: &Scene, tiles: glam::UVec2) -> Self {
-        let focal = camera.focal();
-        let center = camera.center_uv * camera.size.as_vec2();
-        let (clamps, radial_limit) = camera.clamp_limits();
-        let coefficients = camera.model.coefficients();
-        Self {
-            view: (camera.world_to_local() * glam::Mat4::from(options.world_from_local))
-                .to_cols_array_2d(),
-            camera: options
-                .world_from_local
-                .inverse()
-                .transform_point3(camera.position)
-                .extend(0.0)
-                .to_array(),
-            pinhole: [focal.x, focal.y, center.x, center.y],
-            clamp_limits: clamps.to_array(),
-            image: [camera.size.x, camera.size.y, tiles.x, tiles.y],
-            scene: [scene.n, scene.degree, (scene.degree + 1).pow(2), 0],
-            background: options.background.extend(0.0).to_array(),
-            options: Flags {
-                log_splat_scale: options.splat_scale.ln(),
-                mip: u32::from(options.render_mode == RenderMode::Mip),
-                has_min_scale: u32::from(scene.has_min_scale),
-                padding: 0,
-            },
-            coeff0: coefficients[..4].try_into().unwrap(),
-            coeff1: coefficients[4..].try_into().unwrap(),
-            lens: [camera.model.kind(), 0, 0, 0],
-            camera_limits: [camera.half_max_render_fov(), radial_limit, 0.0, 0.0],
-        }
-    }
-}
 struct ProjectionGroups {
     forward: wgpu::BindGroup,
     visible: wgpu::BindGroup,
@@ -109,7 +52,7 @@ struct FrameSlot {
     projection: ProjectionGroups,
     mapping: MappingGroups,
     raster: Option<(Target, wgpu::BindGroup)>,
-    receiver: Option<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    receiver: Option<gpu::Feedback>,
     capacity: u32,
 }
 
@@ -132,7 +75,7 @@ pub struct ViewState {
     pending: VecDeque<usize>,
     required_capacity: u32,
     limit: u64,
-    timestamp_queries: Option<wgpu::QuerySet>,
+    timing: crate::timing::StageTimer,
     overflow_events: u32,
 }
 #[derive(Clone, Copy)]
@@ -158,131 +101,6 @@ fn plans(n: u32, capacity: u32, tiles: u32) -> [DispatchPlan; 3] {
     ]
 }
 impl ViewState {
-    pub(crate) fn encode(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
-        kernels: &Kernels,
-        camera: &Camera,
-        options: &RenderOptions,
-        target: Target,
-    ) -> Result<(), Error> {
-        let raster_kind = target.layout(camera.size)?;
-        let tiles = glam::UVec2::new(camera.size.x.div_ceil(16), camera.size.y.div_ceil(16));
-        let tile_count = tiles
-            .x
-            .checked_mul(tiles.y)
-            .ok_or(Error::Input("too many tiles"))?;
-        self.resize(queue, kernels, tile_count)?;
-        let index = self
-            .frames
-            .iter()
-            .position(|frame| frame.receiver.is_none())
-            .ok_or(Error::Busy(
-                "three frames are pending; poll view feedback before rendering again",
-            ))?;
-        let frame = &mut self.frames[index];
-        let scene = &self.scene;
-        let uniforms = Uniforms::new(camera, options, scene, tiles);
-        queue.write_buffer(&frame.uniform, 0, bytemuck::bytes_of(&uniforms));
-        let raster = kernels.raster(raster_kind);
-        if frame
-            .raster
-            .as_ref()
-            .is_none_or(|(cached, _)| cached != &target)
-        {
-            let mut bindings = vec![
-                (0, frame.uniform.as_entire_binding()),
-                (
-                    1,
-                    self.intersections
-                        .sort
-                        .output(self.bits)
-                        .1
-                        .as_entire_binding(),
-                ),
-                (2, self.offsets.as_entire_binding()),
-                (3, self.projected.as_entire_binding()),
-                (raster_kind.binding(), target.resource()),
-            ];
-            if let Target::TextureDepth { depth, .. } = &target {
-                bindings.push((7, self.depth_sort.output(32).0.as_entire_binding()));
-                bindings.push((8, wgpu::BindingResource::TextureView(depth)));
-            }
-            let group = bind(&self.device, raster, &bindings);
-            frame.raster = Some((target, group));
-        }
-        let queries = self.timestamp_queries.as_ref();
-        let timestamps = |start, end| {
-            queries.map(|query_set| wgpu::ComputePassTimestampWrites {
-                query_set,
-                beginning_of_pass_write_index: start,
-                end_of_pass_write_index: Some(end),
-            })
-        };
-        encoder.clear_buffer(&self.counts, 0, None);
-        dispatch(
-            encoder,
-            &kernels.project_forward,
-            &frame.projection.forward,
-            scene.n.div_ceil(256),
-            timestamps(Some(0), 1),
-        );
-        self.dispatches
-            .prepare(encoder, &kernels.prepare, timestamps(None, 2));
-        self.depth_sort
-            .encode(encoder, kernels, 32, timestamps(None, 3));
-        self.dispatches.dispatch(
-            encoder,
-            ViewDispatch::Visible,
-            &kernels.gather,
-            &self.gather,
-            None,
-        );
-        self.scan.encode(encoder, kernels, timestamps(None, 4));
-        self.dispatches.dispatch(
-            encoder,
-            ViewDispatch::Visible,
-            &kernels.project_visible,
-            &frame.projection.visible,
-            timestamps(None, 5),
-        );
-        self.dispatches.dispatch(
-            encoder,
-            ViewDispatch::Visible,
-            &kernels.map_tiles,
-            &frame.mapping.tiles,
-            timestamps(None, 6),
-        );
-        self.intersections
-            .sort
-            .encode(encoder, kernels, self.bits, timestamps(None, 7));
-        encoder.clear_buffer(&self.offsets, 0, None);
-        self.dispatches.dispatch(
-            encoder,
-            ViewDispatch::Intersections,
-            &kernels.tile_offsets,
-            &frame.mapping.offsets,
-            timestamps(None, 8),
-        );
-        self.dispatches.dispatch(
-            encoder,
-            ViewDispatch::Raster,
-            raster,
-            &frame.raster.as_ref().unwrap().1,
-            timestamps(None, 9),
-        );
-        encoder.copy_buffer_to_buffer(&self.counts, 0, &frame.readback, 0, 8);
-        let (tx, rx) = mpsc::channel();
-        encoder.map_buffer_on_submit(&frame.readback, wgpu::MapMode::Read, .., move |result| {
-            let _ = tx.send(result);
-        });
-        frame.receiver = Some(rx);
-        frame.capacity = self.intersections.capacity;
-        self.pending.push_back(index);
-        Ok(())
-    }
-
     pub(crate) fn new(
         device: &wgpu::Device,
         kernels: &Kernels,
@@ -376,12 +194,7 @@ impl ViewState {
                 raster: None,
                 receiver: None,
                 capacity,
-                readback: device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("frame feedback"),
-                    size: 8,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
+                readback: gpu::feedback_buffer(device),
             }
         });
         Ok(Self {
@@ -401,7 +214,7 @@ impl ViewState {
             pending: VecDeque::new(),
             required_capacity: capacity,
             limit,
-            timestamp_queries: None,
+            timing: crate::timing::StageTimer::default(),
             overflow_events: 0,
         })
     }
@@ -514,28 +327,15 @@ impl ViewState {
         let mut latest = None;
         while let Some(&index) = self.pending.front() {
             let frame = &mut self.frames[index];
-            let status = frame
-                .receiver
-                .as_ref()
-                .expect("pending receiver")
-                .try_recv();
-            if matches!(status, Err(mpsc::TryRecvError::Empty)) {
+            let Some(counts) = gpu::read_feedback(
+                &frame.readback,
+                frame.receiver.as_ref().expect("pending receiver"),
+            ) else {
                 break;
-            }
+            };
             self.pending.pop_front();
             frame.receiver = None;
-            let result = (|| {
-                status
-                    .map_err(|e| Error::Readback(e.to_string()))?
-                    .map_err(|e| Error::Readback(e.to_string()))?;
-                let data = frame
-                    .readback
-                    .get_mapped_range(..)
-                    .map_err(|e| Error::Readback(e.to_string()))?;
-                Ok(*bytemuck::from_bytes::<[u32; 2]>(&data))
-            })();
-            frame.readback.unmap();
-            let counts = result?;
+            let counts = counts?;
             if counts[0] & 0x8000_0000 != 0 {
                 return Err(Error::IntersectionOverflow);
             }
@@ -563,20 +363,7 @@ impl ViewState {
     }
     /// Diagnostic timestamps need ten slots; wait for completion before resolving on Metal.
     pub fn set_timestamp_queries(&mut self, queries: Option<wgpu::QuerySet>) -> Result<(), Error> {
-        if let Some(q) = &queries
-            && (!self
-                .device
-                .features()
-                .contains(wgpu::Features::TIMESTAMP_QUERY)
-                || !matches!(q.ty(), wgpu::QueryType::Timestamp)
-                || q.count() < 10)
-        {
-            return Err(Error::Input(
-                "stage profiling requires TIMESTAMP_QUERY and ten timestamp slots",
-            ));
-        }
-        self.timestamp_queries = queries;
-        Ok(())
+        self.timing.set(&self.device, queries)
     }
 }
 
@@ -588,8 +375,8 @@ mod tests {
     #[test]
     #[ignore = "integration: GPU"]
     fn feedback_recovers_after_capacity_error_and_bounds_pending_frames() {
-        let (device, queue) = gpu();
-        let renderer = Renderer::new(&device, &queue).unwrap();
+        let (device, queue) = &gpu();
+        let renderer = Renderer::new(device).unwrap();
         let scene = renderer
             .upload(&Splats {
                 transforms: vec![[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0]],
@@ -601,10 +388,11 @@ mod tests {
             .unwrap();
         let mut view = renderer.create_view(&scene, 1).unwrap();
         let mut camera = crate::test_utils::pinhole_camera(64);
-        let target = upload(&device, &vec![[0.0f32; 4]; 64 * 64]);
+        let target = upload(device, &vec![[0.0f32; 4]; 64 * 64]);
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
             .render(
+                queue,
                 &mut encoder,
                 &mut view,
                 &camera,
@@ -624,6 +412,7 @@ mod tests {
         for _ in 0..3 {
             renderer
                 .render(
+                    queue,
                     &mut encoder,
                     &mut view,
                     &camera,
@@ -635,6 +424,7 @@ mod tests {
         assert!(
             renderer
                 .render(
+                    queue,
                     &mut encoder,
                     &mut view,
                     &camera,
@@ -651,6 +441,7 @@ mod tests {
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
             .render(
+                queue,
                 &mut encoder,
                 &mut view,
                 &camera,

@@ -1,10 +1,9 @@
+#import <./common.wgsl>
+
 // Hand port of Brush rasterize 1388f74c. 256 splats per cooperative batch.
 @group(0) @binding(1) var<storage, read> isect_ids: array<u32>;
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> projected: array<Splat>;
-@group(0) @binding(4) var<storage, read_write> out_float: array<vec4f>;
-@group(0) @binding(5) var<storage, read_write> out_packed: array<u32>;
-@group(0) @binding(6) var out_texture: texture_storage_2d < rgba8unorm, write >;
 var<workgroup> batch: array<Splat, 256>;
 var<workgroup> range_lo: u32;
 var<workgroup> range_hi: u32;
@@ -69,41 +68,4 @@ fn raster(tile: u32, lid: u32) -> vec4f {
         }
     }
     return vec4f(color + transmittance * u.background.xyz, 1.0 - transmittance);
-}
-
-@compute @workgroup_size(256) fn raster_float(@builtin(workgroup_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let tile = gid.x + gid.y * groups.x;
-    if tile >= u.image.z * u.image.w {
-        return;
-    }
-    let rgba = raster(tile, lid);
-    let pix = pixel(tile, lid);
-    if all(pix < u.image.xy) {
-        out_float[pix.x + pix.y * u.image.x] = rgba;
-    }
-}
-
-@compute @workgroup_size(256) fn raster_packed(@builtin(workgroup_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let tile = gid.x + gid.y * groups.x;
-    if tile >= u.image.z * u.image.w {
-        return;
-    }
-    let rgba = raster(tile, lid);
-    let pix = pixel(tile, lid);
-    if all(pix < u.image.xy) {
-        let v = vec4u(clamp(rgba * 255.0, vec4f(0.0), vec4f(255.0)));
-        out_packed[pix.x + pix.y * u.image.x] = v.x | (v.y << 8u) | (v.z << 16u) | (v.w << 24u);
-    }
-}
-
-@compute @workgroup_size(256) fn raster_texture(@builtin(workgroup_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let tile = gid.x + gid.y * groups.x;
-    if tile >= u.image.z * u.image.w {
-        return;
-    }
-    let rgba = raster(tile, lid);
-    let pix = pixel(tile, lid);
-    if all(pix < u.image.xy) {
-        textureStore(out_texture, pix, rgba);
-    }
 }

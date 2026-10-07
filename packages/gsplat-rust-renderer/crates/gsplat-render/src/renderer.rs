@@ -178,7 +178,7 @@ impl Renderer {
             })
             .await
             .map_err(gpu)?;
-        let core = gsplat_core::Renderer::new(&device, &queue)?;
+        let core = gsplat_core::Renderer::new(&device)?;
         let scene = core.upload(splats)?;
         let view = core.create_view(&scene, initial_capacity)?;
         let bytes = u64::from(size.x) * u64::from(size.y) * 16;
@@ -224,6 +224,7 @@ impl Renderer {
         loop {
             let mut encoder = self.device.create_command_encoder(&Default::default());
             self.core.render(
+                &self.queue,
                 &mut encoder,
                 &mut self.view,
                 &camera.core_camera(),

@@ -1,3 +1,5 @@
+#import <./common.wgsl>
+
 // Hand port of Brush rasterize 1388f74c. 256 splats per cooperative batch.
 @group(0) @binding(1) var<storage, read> isect_ids: array<u32>;
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;

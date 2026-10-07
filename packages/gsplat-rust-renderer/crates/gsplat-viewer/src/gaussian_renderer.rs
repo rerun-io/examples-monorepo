@@ -88,6 +88,7 @@ impl CachedEntity {
         }
         let mut encoder = ctx.device.create_command_encoder(&Default::default());
         renderer.core.render(
+            &ctx.queue,
             &mut encoder,
             &mut self.core,
             camera,
@@ -421,8 +422,7 @@ impl Renderer for GaussianRenderer {
         Self {
             composite_bind_group_layout,
             render_pipeline_tile,
-            core: gsplat_core::Renderer::new(&ctx.device, &ctx.queue)
-                .expect("validated gsplat device"),
+            core: gsplat_core::Renderer::new(&ctx.device).expect("validated gsplat device"),
         }
     }
 

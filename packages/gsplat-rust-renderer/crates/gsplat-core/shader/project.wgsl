@@ -1,3 +1,7 @@
+#import <./common.wgsl>
+#import <./counts.wgsl>
+#import <./lens.wgsl>
+
 // Brush project_forward + project_visible, adapted to raw buffers.
 @group(0) @binding(1) var<storage, read> transforms: array<f32>;
 @group(0) @binding(2) var<storage, read> raw_opacity: array<f32>;
