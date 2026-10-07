@@ -1,10 +1,8 @@
 //! Score exported splats against NeRF test images using unclipped float renders.
 use anyhow::Result;
-use gsplat_bench::{
-    camera::load_frames,
-    renderers::{Brush, RenderEngine, Scene},
-};
+use gsplat_bench::renderers::{Brush, RenderEngine, Scene};
 use gsplat_eval::{Convention, Evaluator, Metrics, Versions, ViewMetrics};
+use gsplat_render::camera::load_frames;
 use serde::Serialize;
 use std::path::PathBuf;
 

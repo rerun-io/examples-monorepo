@@ -5,11 +5,14 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use glam::{Mat4, Vec2};
 use gsplat_bench::{
-    camera::{self, CameraPath, CameraSpec},
-    renderers::{Adapter, Brush, Implementation, Native, RenderEngine, Scene},
-    settings::RenderSettings,
+    camera,
+    renderers::{Adapter, Engine, Implementation, RenderEngine, Scene},
 };
 use gsplat_eval::{Evaluator, Metrics, Versions, ViewMetrics};
+use gsplat_render::{
+    camera::{CameraSpec, load_frames},
+    settings::RenderSettings,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 #[derive(Parser)]
@@ -28,10 +31,13 @@ pub struct CameraArgs {
     #[arg(long)]
     ply: PathBuf,
     #[arg(long, alias = "cameras", default_value = "orbit:300")]
-    path: CameraPath,
-    #[arg(long, default_value = "native")]
-    res: String,
-    #[arg(long, value_delimiter = ',', num_args = 2)]
+    path: String,
+    /// Keep every Nth camera after sorting input filenames.
+    #[arg(long, default_value = "1")]
+    holdout_every: std::num::NonZeroUsize,
+    #[arg(long, default_value = "native", value_parser = resolution)]
+    res: Resolution,
+    #[arg(long, num_args = 2)]
     radius: Option<Vec<f32>>,
     #[arg(long)]
     elevation: Option<f32>,
@@ -49,9 +55,9 @@ enum Oracle {
 }
 #[derive(clap::Args)]
 struct ParityArgs {
-    /// Read the actual native archetype logged by Python (one complete splat row).
-    #[arg(long)]
-    archetype_rrd: Option<PathBuf>,
+    /// Quantize through the native archetype, optionally from one complete RRD splat row.
+    #[arg(long, num_args = 0..=1)]
+    archetype: Option<Option<PathBuf>>,
     #[arg(long = "impl", value_enum)]
     implementation: Implementation,
     #[arg(long, value_enum)]
@@ -67,73 +73,64 @@ struct ParityArgs {
     #[arg(long)]
     limit: Option<usize>,
 }
-fn resolution(value: &str) -> Result<Option<(u32, u32)>> {
+#[derive(Clone, Debug)]
+struct Resolution(Option<(u32, u32)>);
+fn resolution(value: &str) -> Result<Resolution> {
     if value == "native" {
-        return Ok(None);
+        return Ok(Resolution(None));
     }
     let (w, h) = value
         .split_once('x')
         .context("resolution must be WxH or native")?;
     let (w, h) = (w.parse()?, h.parse()?);
     ensure!(w >= 11 && h >= 11, "resolution must be at least 11x11");
-    Ok(Some((w, h)))
+    Ok(Resolution(Some((w, h))))
 }
 async fn cameras(args: &CameraArgs, scene: &Scene) -> Result<Vec<CameraSpec>> {
-    let size = resolution(&args.res)?;
-    let mut path = match &args.path {
-        CameraPath::Orbit(count) => {
-            let (w, h) = size.unwrap_or((800, 800));
-            let template = CameraSpec::from_nerf(Mat4::IDENTITY, 0.6911112, w, h);
-            let r = args
-                .radius
-                .as_ref()
-                .map(|r| Vec2::new(r[0], r[1]))
-                .unwrap_or(Vec2::splat(scene.extent * 2.5));
-            ensure!(
-                r.is_finite() && r.min_element() > 0.0,
-                "invalid orbit radius"
-            );
-            let center = args
-                .center
-                .as_deref()
-                .map(glam::Vec3::from_slice)
-                .unwrap_or(scene.center);
-            ensure!(center.is_finite(), "invalid orbit center");
-            let mut path = camera::orbit(
-                center,
-                r,
-                args.elevation.unwrap_or(scene.extent * 0.8),
-                *count,
-                &template,
-            );
-            if let Some(up) = &args.orbit_up {
-                let up = glam::Vec3::from_slice(up);
-                ensure!(
-                    up.is_finite() && up.length_squared() > 1e-12,
-                    "invalid orbit up-vector"
-                );
-                let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Z, up.normalize());
-                let basis = Mat4::from_translation(center)
-                    * Mat4::from_quat(rotation)
-                    * Mat4::from_translation(-center);
-                for camera in &mut path {
-                    camera.world_from_camera =
-                        (basis * camera.pose()).transpose().to_cols_array_2d();
-                }
-            }
-            path
-        }
-        CameraPath::TestViews(p) | CameraPath::Colmap(p) => camera::load_frames(p, None)
-            .await?
-            .into_iter()
-            .map(|frame| frame.camera)
-            .collect(),
-        CameraPath::Specs(p) => serde_json::from_slice::<Vec<CameraSpec>>(&std::fs::read(p)?)?,
-        CameraPath::ColmapTest(p) => {
-            let mut frames = camera::load_frames(p, None).await?;
+    let size = args.res.0;
+    let mut path = if let Some(count) = args.path.strip_prefix("orbit:") {
+        let count: std::num::NonZeroUsize =
+            count.parse().context("orbit count must be positive")?;
+        let (w, h) = size.unwrap_or((800, 800));
+        let template = CameraSpec::from_nerf(Mat4::IDENTITY, 0.6911112, w, h);
+        let r = args
+            .radius
+            .as_deref()
+            .map(Vec2::from_slice)
+            .unwrap_or(Vec2::splat(scene.extent * 2.5));
+        ensure!(
+            r.is_finite() && r.min_element() > 0.0,
+            "invalid orbit radius"
+        );
+        let center = args
+            .center
+            .as_deref()
+            .map(glam::Vec3::from_slice)
+            .unwrap_or(scene.center);
+        ensure!(center.is_finite(), "invalid orbit center");
+        let up = args.orbit_up.as_deref().map(glam::Vec3::from_slice);
+        ensure!(
+            up.is_none_or(|up| up.is_finite() && up.length_squared() > 1e-12),
+            "invalid orbit up-vector"
+        );
+        camera::orbit(
+            center,
+            r,
+            args.elevation.unwrap_or(scene.extent * 0.8),
+            count.get(),
+            &template,
+            up,
+        )
+    } else {
+        let mut frames = load_frames(Path::new(&args.path), size).await?;
+        if args.holdout_every.get() > 1 {
             frames.sort_by(|a, b| a.file_path.cmp(&b.file_path));
-            frames.into_iter().step_by(8).map(|f| f.camera).collect()
         }
+        frames
+            .into_iter()
+            .step_by(args.holdout_every.get())
+            .map(|f| f.camera)
+            .collect()
     };
     if let Some((w, h)) = size {
         path = path.into_iter().map(|c| c.resized(w, h)).collect();
@@ -167,6 +164,7 @@ struct ParityView {
 #[serde(deny_unknown_fields)]
 struct ParityReport {
     implementation: Implementation,
+    archetype: bool,
     oracle: Oracle,
     image_boundary: String,
     settings: RenderSettings,
@@ -224,12 +222,12 @@ fn save_pair(
         .save(dir.join(format!("{name}-diff4.png")))?;
     Ok(())
 }
-async fn parity<R: RenderEngine, O: RenderEngine>(
+async fn parity(
     a: ParityArgs,
     scene: Scene,
     cameras: Vec<CameraSpec>,
-    mut renderer: R,
-    mut oracle: O,
+    mut renderer: Engine,
+    mut oracle: Engine,
     oracle_kind: Oracle,
 ) -> Result<()> {
     let oracle_label = match oracle_kind {
@@ -301,93 +299,71 @@ async fn parity<R: RenderEngine, O: RenderEngine>(
     let mean = gsplat_eval::mean(&views.iter().map(|v| v.metrics.clone()).collect::<Vec<_>>());
     let mean_alpha_psnr = views.iter().map(|v| v.alpha_psnr).sum::<f64>() / views.len() as f64;
     let mean_white_psnr = views.iter().map(|v| v.white_psnr).sum::<f64>() / views.len() as f64;
-    write_json(&a.out,&ParityReport {implementation:a.implementation,oracle:oracle_kind,settings:a.settings,image_boundary:"in-memory premultiplied RGBA f32; no scoring clipping/quantization; native intrinsically uses an RGBA8 target".into(),ply:a.camera.ply,splats:scene.data.num_splats(),cameras,adapter:renderer.adapter(),oracle_adapter:oracle.adapter(),versions:Versions::default(),min_rgb_psnr:views.iter().map(|v| v.metrics.psnr).fold(f64::INFINITY,f64::min),views,mean,mean_alpha_psnr,mean_white_psnr,worst_five:worst.into_iter().map(|e|e.view).collect()})
-}
-async fn with_oracle<R: RenderEngine>(
-    a: ParityArgs,
-    scene: Scene,
-    cameras: Vec<CameraSpec>,
-    renderer: R,
-) -> Result<()> {
-    let kind = a
-        .oracle
-        .unwrap_or(if a.implementation == Implementation::OursArchetype {
-            Oracle::Ours
-        } else {
-            Oracle::Brush
-        });
-    match kind {
-        Oracle::Brush => {
-            let oracle = Brush::new(&scene, &a.settings).await;
-            parity(a, scene, cameras, renderer, oracle, kind).await
-        }
-        Oracle::Ours => {
-            let oracle = gsplat_bench::renderers::ours(
-                &scene,
-                cameras[0].width,
-                cameras[0].height,
-                &a.settings,
-            )
-            .await?;
-            parity(a, scene, cameras, renderer, oracle, kind).await
-        }
-    }
+    const IMAGE_BOUNDARY: &str = concat!(
+        "in-memory premultiplied RGBA f32; no scoring clipping/quantization; ",
+        "native intrinsically uses an RGBA8 target",
+    );
+    write_json(
+        &a.out,
+        &ParityReport {
+            implementation: a.implementation,
+            archetype: a.archetype.is_some(),
+            oracle: oracle_kind,
+            settings: a.settings,
+            image_boundary: IMAGE_BOUNDARY.into(),
+            ply: a.camera.ply,
+            splats: scene.data.num_splats(),
+            cameras,
+            adapter: renderer.adapter(),
+            oracle_adapter: oracle.adapter(),
+            versions: Versions::default(),
+            min_rgb_psnr: views
+                .iter()
+                .map(|v| v.metrics.psnr)
+                .fold(f64::INFINITY, f64::min),
+            views,
+            mean,
+            mean_alpha_psnr,
+            mean_white_psnr,
+            worst_five: worst.into_iter().map(|e| e.view).collect(),
+        },
+    )
 }
 async fn run_parity(a: ParityArgs) -> Result<()> {
     ensure!(
-        a.archetype_rrd.is_none() || a.implementation == Implementation::OursArchetype,
-        "--archetype-rrd requires --impl ours-archetype"
+        a.archetype.is_none() || a.implementation == Implementation::Ours,
+        "--archetype requires --impl ours"
     );
     let scene = Scene::load(&a.camera.ply).await?;
-    gsplat_bench::settings::validate_backend(&a.settings, a.implementation, scene.mode)?;
     let mut cameras = cameras(&a.camera, &scene).await?;
     if let Some(n) = a.limit {
         ensure!(n > 0, "limit must be positive");
         cameras.truncate(n);
     }
-    match a.implementation {
-        Implementation::Brush => {
-            let r = Brush::new(&scene, &a.settings).await;
-            with_oracle(a, scene, cameras, r).await
-        }
-        Implementation::Ours | Implementation::OursArchetype => {
-            let r = if a.implementation == Implementation::OursArchetype {
-                let mut splats = gsplat_bench::renderers::archetype_splats(
-                    a.archetype_rrd.as_deref().unwrap_or(&a.camera.ply),
-                )?;
-                ensure!(
-                    splats.transforms.len() == scene.data.num_splats(),
-                    "PLY loaders disagree on count"
-                );
-                splats.min_scale = a
-                    .settings
-                    .min_scale
-                    .map(|floor| vec![floor; splats.transforms.len()]);
-                let mut r = gsplat_render::Renderer::new(
-                    &splats,
-                    a.settings.mode(scene.mode),
-                    glam::uvec2(cameras[0].width, cameras[0].height),
-                    a.settings.initial_capacity,
-                )
-                .await?;
-                r.options = a.settings.options();
-                r
-            } else {
-                gsplat_bench::renderers::ours(
-                    &scene,
-                    cameras[0].width,
-                    cameras[0].height,
-                    &a.settings,
-                )
-                .await?
-            };
-            with_oracle(a, scene, cameras, r).await
-        }
-        Implementation::Native => {
-            let r = Native::new(&a.camera.ply, scene.data.num_splats()).await?;
-            with_oracle(a, scene, cameras, r).await
-        }
-    }
+    let source = a
+        .archetype
+        .as_ref()
+        .map(|path| path.as_deref().unwrap_or(a.camera.ply.as_path()));
+    let renderer = Engine::new(
+        a.implementation,
+        &scene,
+        &a.settings,
+        &cameras[0],
+        &a.camera.ply,
+        source,
+    )
+    .await?;
+    let oracle_kind = a.oracle.unwrap_or(if source.is_some() {
+        Oracle::Ours
+    } else {
+        Oracle::Brush
+    });
+    let kind = match oracle_kind {
+        Oracle::Ours => Implementation::Ours,
+        Oracle::Brush => Implementation::Brush,
+    };
+    let oracle = Engine::new(kind, &scene, &a.settings, &cameras[0], &a.camera.ply, None).await?;
+    parity(a, scene, cameras, renderer, oracle, oracle_kind).await
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -427,6 +403,36 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn parity_accepts_archetype_and_plain_camera_paths_with_holdout() {
+        for path in [None, Some(None), Some(Some("recording.rrd"))] {
+            let mut cli = vec!["bench", "parity"];
+            if let Some(recording) = path {
+                cli.push("--archetype");
+                if let Some(recording) = recording {
+                    cli.push(recording);
+                }
+            }
+            cli.extend([
+                "--impl",
+                "ours",
+                "--ply",
+                "scene.ply",
+                "--path",
+                "cameras.json",
+                "--holdout-every",
+                "8",
+                "--out",
+                "result.json",
+            ]);
+            let Action::Parity(parsed) = Args::try_parse_from(cli).unwrap().command else {
+                panic!("expected parity command");
+            };
+            assert_eq!(parsed.archetype, path.map(|p| p.map(PathBuf::from)));
+            assert_eq!(parsed.camera.path, "cameras.json");
+            assert_eq!(parsed.camera.holdout_every.get(), 8);
+        }
+    }
+    #[test]
     fn score_accepts_an_export_and_dataset() {
         assert!(
             Args::try_parse_from([
@@ -441,24 +447,6 @@ mod tests {
             ])
             .is_ok()
         );
-    }
-    #[test]
-    fn cli_rejects_retired_renderer() {
-        for command in ["speed", "parity"] {
-            assert!(
-                Args::try_parse_from([
-                    "bench",
-                    command,
-                    "--impl",
-                    "ours-old",
-                    "--ply",
-                    "scene.ply",
-                    "--out",
-                    "result.json"
-                ])
-                .is_err()
-            );
-        }
     }
     #[tokio::test]
     async fn orbit_up_places_cameras_above_the_scene_and_looks_at_focus() {
@@ -520,14 +508,7 @@ mod tests {
         }
     }
     #[test]
-    fn cli_rejects_unknown_path_and_oracle() {
-        assert!(
-            Args::try_parse_from([
-                "bench", "parity", "--impl", "native", "--ply", "x", "--path", "orbit300", "--out",
-                "y"
-            ])
-            .is_err()
-        );
+    fn cli_rejects_unknown_oracle_and_invalid_resolution() {
         assert!(
             Args::try_parse_from([
                 "bench", "parity", "--impl", "native", "--ply", "x", "--oracle", "typo", "--out",
@@ -535,7 +516,7 @@ mod tests {
             ])
             .is_err()
         );
-        assert_eq!(resolution("1920x1080").unwrap(), Some((1920, 1080)));
+        assert_eq!(resolution("1920x1080").unwrap().0, Some((1920, 1080)));
         assert!(resolution("0x800").is_err());
     }
 }

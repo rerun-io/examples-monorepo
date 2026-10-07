@@ -1,7 +1,7 @@
 //! Quiet-host sampling with an explicit, recorded 90-minute loaded-host fallback.
-use anyhow::Result;
 #[cfg(not(target_os = "macos"))]
-use anyhow::{Context, ensure};
+use anyhow::Context;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_os = "macos"))]
 use std::fs;
@@ -14,31 +14,13 @@ use std::{
 pub struct HostSample {
     pub load_average_1m: Option<f64>,
     pub logical_cores: Option<usize>,
-    pub context_switches_per_second: Option<f64>,
     pub gpu_percent: Option<u32>,
     pub gpu_memory_mib: Option<u64>,
-    pub sm_clock_mhz: Option<u32>,
-    pub memory_clock_mhz: Option<u32>,
-    pub pstate: Option<String>,
-    pub power_watts: Option<f64>,
 }
-#[cfg(not(target_os = "macos"))]
-fn context_switches() -> Result<u64> {
-    fs::read_to_string("/proc/stat")?
-        .lines()
-        .find_map(|l| l.strip_prefix("ctxt "))
-        .context("missing /proc/stat ctxt")?
-        .trim()
-        .parse()
-        .context("invalid ctxt count")
-}
-/// Sample over one second so the context-switch rate has a defined interval.
+/// Record unknown GPU utilization when no NVIDIA sampler is available.
 #[cfg(not(target_os = "macos"))]
 pub fn sample() -> Result<HostSample> {
-    let before = context_switches()?;
-    let start = Instant::now();
     std::thread::sleep(Duration::from_secs(1));
-    let rate = (context_switches()?.saturating_sub(before)) as f64 / start.elapsed().as_secs_f64();
     let load = fs::read_to_string("/proc/loadavg")?
         .split_whitespace()
         .next()
@@ -48,36 +30,39 @@ pub fn sample() -> Result<HostSample> {
         .lines()
         .filter(|l| l.starts_with("processor\t"))
         .count();
-    ensure!(logical_cores > 0, "cannot determine logical core count");
     let result = Command::new("nvidia-smi")
         .args([
-            "--query-gpu=utilization.gpu,memory.used,clocks.sm,clocks.mem,pstate,power.draw",
+            "--query-gpu=utilization.gpu,memory.used",
             "--format=csv,noheader,nounits",
         ])
-        .output()?;
-    ensure!(
-        result.status.success(),
-        "nvidia-smi failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let text = String::from_utf8(result.stdout)?;
-    let rows: Vec<_> = text.lines().collect();
-    ensure!(
-        rows.len() == 1,
-        "timing requires one unambiguous NVIDIA GPU"
-    );
-    let fields: Vec<_> = rows[0].split(',').map(str::trim).collect();
-    ensure!(fields.len() == 6, "invalid nvidia-smi sample");
+        .output()
+        .ok()
+        .filter(|r| r.status.success());
+    let text = result.and_then(|r| String::from_utf8(r.stdout).ok());
+    let (gpu_percent, gpu_memory_mib) = text.as_deref().map_or((None, None), nvidia_sample);
     Ok(HostSample {
         load_average_1m: Some(load),
         logical_cores: Some(logical_cores),
-        context_switches_per_second: Some(rate),
-        gpu_percent: Some(fields[0].parse()?),
-        gpu_memory_mib: Some(fields[1].parse()?),
-        sm_clock_mhz: Some(fields[2].parse()?),
-        memory_clock_mhz: Some(fields[3].parse()?),
-        pstate: Some(fields[4].into()),
-        power_watts: Some(fields[5].parse()?),
+        gpu_percent,
+        gpu_memory_mib,
+    })
+}
+#[cfg(any(not(target_os = "macos"), test))]
+fn nvidia_sample(text: &str) -> (Option<u32>, Option<u64>) {
+    let rows: Vec<_> = text.lines().collect();
+    // The busiest GPU controls admission on machines with multiple adapters.
+    let samples: Option<Vec<(u32, u64)>> = rows
+        .iter()
+        .map(|row| {
+            let (gpu, memory) = row.split_once(',')?;
+            Some((gpu.trim().parse().ok()?, memory.trim().parse().ok()?))
+        })
+        .collect();
+    samples.filter(|s| !s.is_empty()).map_or((None, None), |s| {
+        (
+            s.iter().map(|x| x.0).max(),
+            Some(s.iter().map(|x| x.1).sum()),
+        )
     })
 }
 #[cfg(not(target_os = "macos"))]
@@ -148,12 +133,7 @@ fn macos_sample(load: Option<&str>, cores: Option<&str>, accelerator: Option<&st
         load_average_1m,
         logical_cores,
         gpu_percent,
-        context_switches_per_second: None,
         gpu_memory_mib: None,
-        sm_clock_mhz: None,
-        memory_clock_mhz: None,
-        pstate: None,
-        power_watts: None,
     }
 }
 
@@ -216,11 +196,6 @@ pub fn wait_quiet(deadline: Instant) -> Result<(Vec<HostSample>, bool)> {
         }
         if let Some(loaded_host) = admission_complete(quiet_samples, samples.len(), deadline) {
             if loaded_host {
-                #[cfg(not(target_os = "macos"))]
-                ensure!(
-                    cpuset()? == "8-15,24-31",
-                    "loaded-host fallback requires CCD1 cpuset 8-15,24-31"
-                );
                 eprintln!("quiet-host: case deadline reached; proceeding with loaded_host=true");
             }
             return Ok((samples.into_iter().collect(), loaded_host));
@@ -231,6 +206,12 @@ pub fn wait_quiet(deadline: Instant) -> Result<(Vec<HostSample>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nvidia_samples_record_multiple_adapters_and_missing_fields() {
+        assert_eq!(nvidia_sample("1, 120\n87, 340\n"), (Some(87), Some(460)));
+        assert_eq!(nvidia_sample("N/A, 0"), (None, None));
+        assert_eq!(nvidia_sample(""), (None, None));
+    }
     #[test]
     fn expired_case_deadline_keeps_ten_samples_without_restarting_the_wait() {
         let deadline = Instant::now() - Duration::from_secs(1);

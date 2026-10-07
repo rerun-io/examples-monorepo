@@ -1,13 +1,15 @@
 //! Loading and pixel transfers are separate from the synchronized speed lane.
-use crate::settings::RenderSettings;
-use crate::{Error, Result, camera::CameraSpec, gpu};
+use crate::{Error, Result, gpu};
 use brush_render::{
     TextureMode,
     gaussian_splats::{SplatRenderMode, Splats},
 };
 use burn::tensor::{Device, Tensor};
 use glam::Vec3;
+use gsplat_render::camera::CameraSpec;
+use gsplat_render::settings::RenderSettings;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 mod archetype;
 mod native;
 pub use archetype::archetype_splats;
@@ -18,9 +20,117 @@ pub use native::Native;
 pub enum Implementation {
     Brush,
     Ours,
-    OursArchetype,
     Native,
 }
+
+/// Exactly one initialized renderer; parity source choice is independent of backend choice.
+pub enum Engine {
+    Brush(Box<Brush>),
+    Ours(Box<gsplat_render::Renderer>),
+    Native(Box<Native>),
+}
+impl Engine {
+    pub async fn new(
+        kind: Implementation,
+        scene: &Scene,
+        settings: &RenderSettings,
+        camera: &CameraSpec,
+        ply: &Path,
+        archetype: Option<&Path>,
+    ) -> Result<Self> {
+        settings.validate()?;
+        if matches!(kind, Implementation::Native)
+            && (settings.mode(scene.mode) != gsplat_core::RenderMode::Default
+                || settings.splat_scale != 1.0
+                || settings.min_scale.is_some())
+        {
+            return Err(Error::Unsupported(
+                "render-mode, scale, or floor controls for this reference renderer".into(),
+            ));
+        }
+        match kind {
+            Implementation::Brush => Ok(Self::Brush(Box::new(Brush::new(scene, settings).await))),
+            Implementation::Native => Ok(Self::Native(Box::new(
+                Native::new(ply, scene.data.num_splats()).await?,
+            ))),
+            Implementation::Ours => {
+                let renderer = if let Some(path) = archetype {
+                    let mut splats = archetype_splats(path)?;
+                    if splats.transforms.len() != scene.data.num_splats() {
+                        return Err(Error::Invalid("PLY loaders disagree on count".into()));
+                    }
+                    splats.min_scale = settings
+                        .min_scale
+                        .map(|floor| vec![floor; splats.transforms.len()]);
+                    let mut renderer = gsplat_render::Renderer::new(
+                        &splats,
+                        settings.mode(scene.mode),
+                        glam::uvec2(camera.width, camera.height),
+                        settings.initial_capacity,
+                    )
+                    .await?;
+                    renderer.options = settings.options();
+                    renderer
+                } else {
+                    ours(scene, camera.width, camera.height, settings).await?
+                };
+                Ok(Self::Ours(Box::new(renderer)))
+            }
+        }
+    }
+    pub fn output_format(&self) -> &'static str {
+        match self {
+            Self::Brush(_) => "Brush Packed",
+            Self::Ours(_) => "Packed RGBA8",
+            Self::Native(_) => "Rerun RGBA8UnormSrgb/MSAA4, opaque black background",
+        }
+    }
+}
+impl RenderEngine for Engine {
+    fn capture_next_frame(&mut self) {
+        match self {
+            Self::Brush(r) => r.capture_next_frame(),
+            Self::Ours(r) => r.capture_next_frame(),
+            Self::Native(r) => r.capture_next_frame(),
+        }
+    }
+    async fn render(&mut self, camera: &CameraSpec, parity: bool) -> Result<Counts> {
+        match self {
+            Self::Brush(r) => RenderEngine::render(r.as_mut(), camera, parity).await,
+            Self::Ours(r) => RenderEngine::render(r.as_mut(), camera, parity).await,
+            Self::Native(r) => RenderEngine::render(r.as_mut(), camera, parity).await,
+        }
+    }
+    fn finish(&self) -> Result<()> {
+        match self {
+            Self::Brush(r) => RenderEngine::finish(r.as_ref()),
+            Self::Ours(r) => RenderEngine::finish(r.as_ref()),
+            Self::Native(r) => RenderEngine::finish(r.as_ref()),
+        }
+    }
+    async fn read_rgba_f32(&mut self) -> Result<Vec<f32>> {
+        match self {
+            Self::Brush(r) => r.read_rgba_f32().await,
+            Self::Ours(r) => r.read_rgba_f32().await,
+            Self::Native(r) => r.read_rgba_f32().await,
+        }
+    }
+    fn adapter(&self) -> Adapter {
+        match self {
+            Self::Brush(r) => RenderEngine::adapter(r.as_ref()),
+            Self::Ours(r) => RenderEngine::adapter(r.as_ref()),
+            Self::Native(r) => RenderEngine::adapter(r.as_ref()),
+        }
+    }
+    async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
+        match self {
+            Self::Brush(r) => r.stages(camera).await,
+            Self::Ours(r) => r.stages(camera).await,
+            Self::Native(r) => r.stages(camera).await,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adapter {
@@ -50,8 +160,11 @@ pub struct Counts {
 
 #[allow(async_fn_in_trait)]
 pub trait RenderEngine {
-    /// Encode and submit one camera; retain output only when parity is requested.
+    /// Encode and submit one camera. Parity selects float for compute/Brush
+    /// and transparent RGBA8 for native; false selects the timed output.
     async fn render(&mut self, camera: &CameraSpec, parity: bool) -> Result<Counts>;
+    /// Request capture of the next frame without changing its render settings.
+    fn capture_next_frame(&mut self) {}
     /// Wait for completion without reading pixels.
     fn finish(&self) -> Result<()>;
     async fn read_rgba_f32(&mut self) -> Result<Vec<f32>>;
@@ -232,7 +345,7 @@ impl RenderEngine for gsplat_render::Renderer {
         Ok(())
     }
     async fn read_rgba_f32(&mut self) -> Result<Vec<f32>> {
-        Ok(self.read_rgba(gsplat_render::Output::Float)?)
+        Ok(self.read_rgba()?)
     }
     fn adapter(&self) -> Adapter {
         self.adapter.clone().into()
@@ -263,3 +376,53 @@ pub async fn ours(
 
 #[cfg(test)]
 mod coverage;
+
+struct Decoded {
+    centers: Vec<[f32; 3]>,
+    scales: Vec<[f32; 3]>,
+    quaternions: Vec<[f32; 4]>,
+    colors: Vec<u32>,
+    sh: Vec<[[half::f16; 3]; 15]>,
+    degree: u32,
+}
+fn column<C: re_types_core::FromArrow>(
+    batch: &Option<re_sdk_types::SerializedComponentBatch>,
+) -> Result<Vec<C>> {
+    batch
+        .as_ref()
+        .map(|b| C::from_arrow(&b.array))
+        .transpose()
+        .map(|v| v.unwrap_or_default())
+        .map_err(|e| Error::Invalid(e.to_string()))
+}
+fn decode(native: &re_sdk_types::archetypes::GaussianSplats3D) -> Result<Decoded> {
+    use re_sdk_types::components as c;
+    if native.centers.is_none() {
+        return Err(Error::Invalid("native splats have no centers".into()));
+    }
+    Ok(Decoded {
+        centers: column::<c::Position3D>(&native.centers)?
+            .into_iter()
+            .map(|v| v.0.0)
+            .collect(),
+        scales: column::<c::Scale3D>(&native.scales)?
+            .into_iter()
+            .map(|v| v.0.0)
+            .collect(),
+        quaternions: column::<c::RotationQuat>(&native.quaternions)?
+            .into_iter()
+            .map(|v| v.0.0)
+            .collect(),
+        colors: column::<c::Color>(&native.colors)?
+            .into_iter()
+            .map(|v| u32::from_be_bytes(v.to_array()))
+            .collect(),
+        sh: column::<c::SphericalHarmonics3Rgb>(&native.sh_coefficients)?
+            .into_iter()
+            .map(|v| v.0.0)
+            .collect(),
+        degree: column::<c::SphericalHarmonicsDegree>(&native.spherical_harmonics_degree)?
+            .first()
+            .map_or(3, |v| v.0.0),
+    })
+}

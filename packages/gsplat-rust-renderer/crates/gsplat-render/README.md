@@ -21,5 +21,4 @@ the unsupported COLMAP FOV model returns an error.
 before a symmetric clipped, rounded RGB8 export. Rendered alpha is coverage;
 it is not applied a second time during export.
 
-`--benchmark --num-frames N` reports render plus GPU completion without pixel
-readback. Use `gsplat-bench speed` for the full idle-GPU, repeated protocol.
+Use `gsplat-bench speed` for synchronized timings.

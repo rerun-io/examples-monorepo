@@ -105,6 +105,7 @@ pub struct Renderer {
     float: wgpu::Buffer,
     packed: wgpu::Buffer,
     size: UVec2,
+    last_output: Option<Output>,
 }
 impl Renderer {
     /// GPU stage durations from a separate packed-output diagnostic frame.
@@ -226,6 +227,7 @@ impl Renderer {
             float,
             packed,
             size,
+            last_output: None,
         })
     }
     pub fn render(
@@ -256,6 +258,7 @@ impl Renderer {
                 .poll_feedback()?
                 .ok_or_else(|| Error::Gpu("completed frame has no count feedback".into()))?;
             if !feedback.needs_rerender {
+                self.last_output = Some(output);
                 return Ok(feedback);
             }
         }
@@ -266,7 +269,11 @@ impl Renderer {
             .map_err(|e| Error::Gpu(e.to_string()))?;
         Ok(())
     }
-    pub fn read_rgba(&self, output: Output) -> Result<Vec<f32>> {
+    /// Read the target written by the last successful render.
+    pub fn read_rgba(&self) -> Result<Vec<f32>> {
+        let output = self
+            .last_output
+            .ok_or_else(|| Error::Invalid("render before readback".into()))?;
         let target = if matches!(output, Output::Float) {
             &self.float
         } else {

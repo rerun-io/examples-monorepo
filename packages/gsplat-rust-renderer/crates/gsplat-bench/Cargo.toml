@@ -19,10 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
-log = "0.4"
-# Rerun's codec dependency strips trace logs in release. Keep API events
-# available for the opt-in attribution counter; logging is otherwise disabled.
-wgpu-core = { version = "=30.0.1", features = ["api_log_info"] }
+half = "2"
 re_renderer = "=0.38.1"
 re_sdk_types = "=0.38.1"
 re_types_core = "=0.38.1"
@@ -31,4 +28,5 @@ re_log_types = "=0.38.1"
 re_chunk = "=0.38.1"
 macaw = "0.30"
 
+[dev-dependencies]
 colmap-reader = { git = "https://github.com/ArthurBrussee/brush", rev = "1388f74c6fe0236f68ee4915564bf00e9d2e3747" }

@@ -28,27 +28,6 @@ pub struct CameraSpec {
     pub model: CameraModel,
 }
 
-pub fn orbit(
-    center: glam::Vec3,
-    radius: glam::Vec2,
-    elevation: f32,
-    count: usize,
-    template: &CameraSpec,
-) -> Vec<CameraSpec> {
-    (0..count)
-        .map(|i| {
-            let angle = std::f32::consts::TAU * i as f32 / count as f32;
-            let position =
-                center + glam::Vec3::new(radius.x * angle.cos(), radius.y * angle.sin(), elevation);
-            let pose = Mat4::look_at_lh(position, center, -glam::Vec3::Z).inverse();
-            CameraSpec {
-                world_from_camera: pose.transpose().to_cols_array_2d(),
-                ..template.clone()
-            }
-        })
-        .collect()
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("invalid camera: {0}")]
 pub struct CameraError(pub &'static str);
@@ -56,13 +35,6 @@ pub struct CameraError(pub &'static str);
 pub use crate::camera_files::{CameraFrame, load_frames};
 
 impl CameraSpec {
-    pub fn vertical_fov(&self) -> f32 {
-        2.0 * (self.height as f32 / (2.0 * self.fy)).atan()
-    }
-    pub fn aspect(&self) -> f32 {
-        self.width as f32 * self.fy / (self.height as f32 * self.fx)
-    }
-
     pub fn pose(&self) -> Mat4 {
         Mat4::from_cols_array_2d(&self.world_from_camera).transpose()
     }
@@ -279,37 +251,6 @@ mod tests {
         assert_eq!(
             cam.project(glam::Vec3::new(1.0, 2.0, 10.0)),
             glam::Vec2::new(330.0, 280.0)
-        );
-    }
-
-    #[test]
-    fn orbit_looks_at_center_and_closes() {
-        let template = CameraSpec {
-            world_from_camera: Mat4::IDENTITY.to_cols_array_2d(),
-            width: 640,
-            height: 480,
-            fx: 400.0,
-            fy: 400.0,
-            cx: 320.0,
-            cy: 240.0,
-            model: CameraModel::Pinhole,
-        };
-        let center = glam::Vec3::new(1.0, 2.0, 3.0);
-        let path = orbit(center, glam::Vec2::new(4.0, 2.0), 1.0, 4, &template);
-        assert_eq!(path.len(), 4);
-        for camera in &path {
-            assert!(
-                camera
-                    .project(center)
-                    .abs_diff_eq(glam::Vec2::new(320.0, 240.0), 1e-3)
-            );
-        }
-        assert!(
-            path[0]
-                .pose()
-                .w_axis
-                .truncate()
-                .abs_diff_eq(center + glam::Vec3::new(4.0, 0.0, 1.0), 1e-5)
         );
     }
 

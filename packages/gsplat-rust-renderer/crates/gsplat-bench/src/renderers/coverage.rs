@@ -1,7 +1,7 @@
 //! Synthetic contracts for branches absent from the stored SH3 scenes.
 use super::*;
-use crate::camera::CameraModel;
 use glam::Mat4;
+use gsplat_core::CameraModel;
 
 fn synthetic_scene(degree: u32) -> Scene {
     let n = 12;
@@ -67,7 +67,7 @@ async fn compare(
     let stats = RenderEngine::render(&mut ours, camera, true).await.unwrap();
     let oracle_stats = reference.render(camera, true).await.unwrap();
     reference.finish().unwrap();
-    let actual = ours.read_rgba(gsplat_render::Output::Float).unwrap();
+    let actual = ours.read_rgba().unwrap();
     let expected = reference.read_rgba_f32().await.unwrap();
     assert_eq!(stats.visible, oracle_stats.visible);
     let maximum = actual

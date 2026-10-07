@@ -1,7 +1,7 @@
 //! PLY -> native Arrow archetype -> the viewer's shared core conversion.
 use crate::{Error, Result};
-use re_sdk_types::{archetypes::GaussianSplats3D, components};
-use re_types_core::{Archetype as _, FromArrow as _};
+use re_sdk_types::archetypes::GaussianSplats3D;
+use re_types_core::Archetype as _;
 use std::path::Path;
 
 pub fn archetype_splats(path: &Path) -> Result<gsplat_core::Splats> {
@@ -48,72 +48,14 @@ pub fn archetype_splats(path: &Path) -> Result<gsplat_core::Splats> {
     } else {
         GaussianSplats3D::from_ply_file_path(path)?
     };
-    let centers = components::Position3D::from_arrow(
-        &native
-            .centers
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("PLY has no centers".into()))?
-            .array,
-    )
-    .map_err(|e| Error::Invalid(e.to_string()))?
-    .into_iter()
-    .map(|p| p.0.0)
-    .collect::<Vec<_>>();
-    let scales = native
-        .scales
-        .as_ref()
-        .map(|batch| components::Scale3D::from_arrow(&batch.array))
-        .transpose()
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.0.0)
-        .collect::<Vec<_>>();
-    let quaternions = native
-        .quaternions
-        .as_ref()
-        .map(|batch| components::RotationQuat::from_arrow(&batch.array))
-        .transpose()
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .unwrap_or_default()
-        .into_iter()
-        .map(|q| q.0.0)
-        .collect::<Vec<_>>();
-    let colors = native
-        .colors
-        .as_ref()
-        .map(|batch| components::Color::from_arrow(&batch.array))
-        .transpose()
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| u32::from_be_bytes(c.to_array()))
-        .collect::<Vec<_>>();
-    let sh = native
-        .sh_coefficients
-        .as_ref()
-        .map(|batch| components::SphericalHarmonics3Rgb::from_arrow(&batch.array))
-        .transpose()
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.0.0)
-        .collect::<Vec<_>>();
-    let degree = native
-        .spherical_harmonics_degree
-        .as_ref()
-        .map(|batch| components::SphericalHarmonicsDegree::from_arrow(&batch.array))
-        .transpose()
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .and_then(|v| v.first().map(|d| d.0.0))
-        .unwrap_or(3);
+    let decoded = super::decode(&native)?;
     gsplat_core::native::NativeSplats {
-        centers: &centers,
-        scales: &scales,
-        quaternions: &quaternions,
-        colors: &colors,
-        sh: &sh,
-        degree,
+        centers: &decoded.centers,
+        scales: &decoded.scales,
+        quaternions: &decoded.quaternions,
+        colors: &decoded.colors,
+        sh: &decoded.sh,
+        degree: decoded.degree,
     }
     .to_core()
     .map_err(|e| Error::Invalid(e.to_string()))

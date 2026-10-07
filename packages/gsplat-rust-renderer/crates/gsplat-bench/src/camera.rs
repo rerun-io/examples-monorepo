@@ -1,58 +1,66 @@
-//! Shared camera model and explicit benchmark path syntax.
-pub use gsplat_render::camera::*;
-#[derive(Debug, Clone)]
-pub enum CameraPath {
-    Orbit(usize),
-    TestViews(std::path::PathBuf),
-    Specs(std::path::PathBuf),
-    Colmap(std::path::PathBuf),
-    /// Mip-NeRF 360 holdout: every eighth image after sorting filenames.
-    ColmapTest(std::path::PathBuf),
-}
-impl std::str::FromStr for CameraPath {
-    type Err = String;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value == "held" {
-            return Ok(Self::Orbit(1));
-        }
-        let (kind, path) = value
-            .split_once(':')
-            .ok_or("path must be orbit:N, held, test-views:FILE, specs:FILE, colmap:DIR, or colmap-test:DIR")?;
-        if path.is_empty() {
-            return Err("camera path payload is empty".into());
-        }
-        match kind {
-            "orbit" => {
-                let n = path
-                    .parse::<usize>()
-                    .map_err(|_| "orbit count must be a positive integer")?;
-                if n == 0 {
-                    Err("orbit count must be positive".into())
-                } else {
-                    Ok(Self::Orbit(n))
-                }
+//! Camera paths generated only for benchmark measurements.
+use glam::Mat4;
+use gsplat_render::camera::CameraSpec;
+
+pub fn orbit(
+    center: glam::Vec3,
+    radius: glam::Vec2,
+    elevation: f32,
+    count: usize,
+    template: &CameraSpec,
+    up: Option<glam::Vec3>,
+) -> Vec<CameraSpec> {
+    let basis = up.map(|up| {
+        let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Z, up.normalize());
+        Mat4::from_translation(center) * Mat4::from_quat(rotation) * Mat4::from_translation(-center)
+    });
+    (0..count)
+        .map(|i| {
+            let angle = std::f32::consts::TAU * i as f32 / count as f32;
+            let position =
+                center + glam::Vec3::new(radius.x * angle.cos(), radius.y * angle.sin(), elevation);
+            let pose = Mat4::look_at_lh(position, center, -glam::Vec3::Z).inverse();
+            let pose = basis.map_or(pose, |basis| basis * pose);
+            CameraSpec {
+                world_from_camera: pose.transpose().to_cols_array_2d(),
+                ..template.clone()
             }
-            "test-views" => Ok(Self::TestViews(path.into())),
-            "specs" => Ok(Self::Specs(path.into())),
-            "colmap" => Ok(Self::Colmap(path.into())),
-            "colmap-test" => Ok(Self::ColmapTest(path.into())),
-            _ => Err(format!("unknown camera path prefix {kind:?}")),
-        }
-    }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gsplat_core::CameraModel;
     #[test]
-    fn explicit_camera_path_syntax() {
-        assert!(matches!(
-            "orbit:300".parse::<CameraPath>().unwrap(),
-            CameraPath::Orbit(300)
-        ));
-        assert!("colmap-test:scene/sparse/0".parse::<CameraPath>().is_ok());
-        for invalid in ["orbit300", "orbit:0", "orbit:-1", "colmap:", "testview:x"] {
-            assert!(invalid.parse::<CameraPath>().is_err(), "{invalid}");
+    fn orbit_looks_at_center_and_closes() {
+        let template = CameraSpec {
+            world_from_camera: Mat4::IDENTITY.to_cols_array_2d(),
+            width: 640,
+            height: 480,
+            fx: 400.0,
+            fy: 400.0,
+            cx: 320.0,
+            cy: 240.0,
+            model: CameraModel::Pinhole,
+        };
+        let center = glam::Vec3::new(1.0, 2.0, 3.0);
+        let path = orbit(center, glam::Vec2::new(4.0, 2.0), 1.0, 4, &template, None);
+        assert_eq!(path.len(), 4);
+        for camera in &path {
+            assert!(
+                camera
+                    .project(center)
+                    .abs_diff_eq(glam::Vec2::new(320.0, 240.0), 1e-3)
+            );
         }
+        assert!(
+            path[0]
+                .pose()
+                .w_axis
+                .truncate()
+                .abs_diff_eq(center + glam::Vec3::new(4.0, 0.0, 1.0), 1e-5)
+        );
     }
 }

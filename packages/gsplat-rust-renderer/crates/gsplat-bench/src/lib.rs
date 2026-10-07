@@ -1,7 +1,6 @@
 //! Reproducible camera, renderer, and measurement boundaries for splat benchmarks.
 pub mod camera;
 pub mod renderers;
-pub mod settings;
 pub mod statistics;
 
 #[derive(Debug, thiserror::Error)]

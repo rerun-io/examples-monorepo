@@ -1,10 +1,8 @@
 //! GPU/asset contracts, selected by the pytest integration runner with real skips.
 use glam::{Mat4, Vec3};
-use gsplat_bench::{
-    camera::{self, CameraSpec},
-    renderers::{Brush, Native, RenderEngine, Scene},
-};
+use gsplat_bench::renderers::{Brush, Native, RenderEngine, Scene};
 use gsplat_eval::Evaluator;
+use gsplat_render::camera::{self, CameraSpec};
 use std::path::PathBuf;
 
 fn one_splat(log_scale: f32) -> Scene {
@@ -43,6 +41,14 @@ async fn capture<R: RenderEngine>(renderer: &mut R, camera: &CameraSpec) -> Vec<
     );
     pixels
 }
+fn assert_rgba8(pixels: &[f32]) {
+    assert!(
+        pixels.iter().all(|value| {
+            (0.0..=1.0).contains(value) && (value * 255.0 - (value * 255.0).round()).abs() < 1e-5
+        }),
+        "timed packed output must contain decoded RGBA8 values"
+    );
+}
 #[tokio::test]
 #[ignore = "integration: GPU and Lego assets; tests-integration handles missing-asset skips"]
 async fn all_renderers_nonblack_and_brush_identity() {
@@ -64,6 +70,7 @@ async fn all_renderers_nonblack_and_brush_identity() {
     brush.render(&camera, false).await.unwrap();
     brush.finish().unwrap();
     let packed = brush.read_rgba_f32().await.unwrap();
+    assert_rgba8(&packed);
     let packed_score = Evaluator::new(false)
         .evaluate_renders(&packed, &reference, 256, 256)
         .await
@@ -73,6 +80,22 @@ async fn all_renderers_nonblack_and_brush_identity() {
     let mut ours = gsplat_bench::renderers::ours(&scene, 256, 256, &Default::default())
         .await
         .unwrap();
+    // Speed renders into the packed target; readback must not score an untouched float buffer.
+    RenderEngine::render(&mut ours, &camera, false)
+        .await
+        .unwrap();
+    RenderEngine::finish(&ours).unwrap();
+    let packed_pixels = ours.read_rgba_f32().await.unwrap();
+    assert_rgba8(&packed_pixels);
+    let packed_core_score = Evaluator::new(false)
+        .evaluate_renders(&packed_pixels, &reference, 256, 256)
+        .await
+        .unwrap();
+    println!("ours packed target: {packed_core_score:?}");
+    assert!(
+        packed_core_score.minimum_psnr() > 35.0,
+        "packed core readback: {packed_core_score:?}"
+    );
     let pixels = capture(&mut ours, &camera).await;
     let score = Evaluator::new(false)
         .evaluate_renders(&pixels, &reference, 256, 256)
@@ -93,6 +116,27 @@ async fn all_renderers_nonblack_and_brush_identity() {
     println!("Brush device window: {} ms", stages[0].ms);
     let evaluator = Evaluator::new(false);
     let mut native = Native::new(&ply, scene.data.num_splats()).await.unwrap();
+    native.capture_next_frame();
+    native.render(&camera, false).await.unwrap();
+    native.finish().unwrap();
+    let native_timed = native.read_rgba_f32().await.unwrap();
+    assert!(
+        native_timed
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 1.0),
+        "native speed validation must read the opaque timed target"
+    );
+    let timed_score = evaluator
+        .evaluate_renders(&native_timed, &reference, 256, 256)
+        .await
+        .unwrap();
+    println!("native timed target: {timed_score:?}");
+    assert!(
+        timed_score.rgb.psnr > 20.0,
+        "native timed target: {timed_score:?}"
+    );
     let pixels = capture(&mut native, &camera).await;
     let native_score = evaluator
         .evaluate_renders(&pixels, &reference, 256, 256)

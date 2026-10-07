@@ -1,18 +1,15 @@
-//! Rerun 0.38.1 native viewer path: public PLY conversion, per-frame builder,
-//! cached CPU back-to-front sort, and per-frame uploads.
+//! Rerun 0.38.1 native renderer path: public PLY conversion, per-frame builder,
+//! per-frame CPU back-to-front sort with a cached seed order, and per-frame uploads.
 use super::*;
-use crate::{
-    camera::{CameraModel, opengl_to_opencv},
-    wait,
-};
+use crate::wait;
 use glam::Vec2;
+use gsplat_render::camera::{CameraModel, opengl_to_opencv};
 use re_renderer::view_builder::{Projection, TargetConfiguration, ViewBuilder};
 use re_renderer::{
     GaussianShCoefficient, GaussianSplatBuilder, RenderConfig, RenderContext, Rgba, Rgba32Unmul,
     ScreenshotProcessor, SortOrderCache, device_caps,
 };
 use re_sdk_types::archetypes::GaussianSplats3D;
-use re_types_core::FromArrow as _;
 use std::path::Path;
 
 pub struct Native {
@@ -28,72 +25,36 @@ pub struct Native {
     sh_count: usize,
     picking_ids: Vec<re_renderer::PickingLayerInstanceId>,
     screenshot_pending: bool,
+    capture_next: bool,
 }
 impl Native {
     pub async fn new(ply_path: &Path, expected_count: usize) -> Result<Self> {
         let gaussians = GaussianSplats3D::from_ply_file_path(ply_path)?;
 
-        let field = |name: &str, opt: &Option<re_sdk_types::SerializedComponentBatch>| {
-            opt.as_ref()
-                .map(|col| col.array.clone())
-                .ok_or_else(|| Error::Invalid(format!("PLY has no {name}")))
+        let decoded = super::decode(&gaussians)?;
+        let centers: Vec<_> = decoded.centers.into_iter().map(Vec3::from_array).collect();
+        let scales = decoded.scales.into_iter().map(Vec3::from_array).collect();
+        let rotations = decoded
+            .quaternions
+            .into_iter()
+            .map(glam::Quat::from_array)
+            .collect();
+        let colors = decoded
+            .colors
+            .into_iter()
+            .map(|c| Rgba32Unmul::from_rgba_unmul_array(c.to_be_bytes()))
+            .collect();
+        let sh_coefficients: Vec<_> = decoded
+            .sh
+            .into_iter()
+            .map(|sh| sh.map(GaussianShCoefficient::from_rgb))
+            .collect();
+        let sh_count = if sh_coefficients.is_empty() {
+            0
+        } else {
+            ((decoded.degree.min(3) + 1).pow(2) - 1) as usize
         };
-
-        let centers: Vec<glam::Vec3> = re_sdk_types::components::Position3D::from_arrow(&field(
-            "centers",
-            &gaussians.centers,
-        )?)
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .into_iter()
-        .map(|p| glam::Vec3::from_array(p.0.0))
-        .collect();
-        let scales: Vec<glam::Vec3> =
-            re_sdk_types::components::Scale3D::from_arrow(&field("scales", &gaussians.scales)?)
-                .map_err(|e| Error::Invalid(e.to_string()))?
-                .into_iter()
-                .map(|s| glam::Vec3::from_array(s.0.0))
-                .collect();
-        let rotations: Vec<glam::Quat> = re_sdk_types::components::RotationQuat::from_arrow(
-            &field("quaternions", &gaussians.quaternions)?,
-        )
-        .map_err(|e| Error::Invalid(e.to_string()))?
-        .into_iter()
-        .map(|q| glam::Quat::from_array(q.0.0))
-        .collect();
-        let colors: Vec<Rgba32Unmul> =
-            re_sdk_types::components::Color::from_arrow(&field("colors", &gaussians.colors)?)
-                .map_err(|e| Error::Invalid(e.to_string()))?
-                .into_iter()
-                .map(|c| Rgba32Unmul::from_rgba_unmul_array(c.to_array()))
-                .collect();
-        let sh_coefficients: Vec<[GaussianShCoefficient; 15]> = gaussians
-            .sh_coefficients
-            .as_ref()
-            .map(|sh| {
-                re_sdk_types::components::SphericalHarmonics3Rgb::from_arrow(&sh.array).map(|v| {
-                    v.into_iter()
-                        .map(|sh| {
-                            std::array::from_fn(|i| GaussianShCoefficient::from_rgb(sh.0.0[i]))
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .transpose()
-            .map_err(|e| Error::Invalid(e.to_string()))?
-            .unwrap_or_default();
-
         let bounds = macaw::BoundingBox::from_points(centers.iter().copied());
-        let sh_count = gaussians
-            .spherical_harmonics_degree
-            .as_ref()
-            .map(|batch| {
-                re_sdk_types::components::SphericalHarmonicsDegree::from_arrow(&batch.array)
-            })
-            .transpose()
-            .map_err(|e| Error::Invalid(e.to_string()))?
-            .and_then(|degrees| degrees.first().copied())
-            .map(|degree| degree.num_coefficients())
-            .unwrap_or(if sh_coefficients.is_empty() { 0 } else { 15 });
         let picking_ids = (0..centers.len())
             .map(|i| re_renderer::PickingLayerInstanceId(i as u64))
             .collect();
@@ -140,10 +101,14 @@ impl Native {
             sh_count,
             picking_ids,
             screenshot_pending: false,
+            capture_next: false,
         })
     }
 }
 impl RenderEngine for Native {
+    fn capture_next_frame(&mut self) {
+        self.capture_next = true;
+    }
     async fn render(&mut self, c: &CameraSpec, parity: bool) -> Result<Counts> {
         if !matches!(c.model, CameraModel::Pinhole) {
             return Err(Error::Unsupported("native lens model".into()));
@@ -163,9 +128,9 @@ impl RenderEngine for Native {
                 resolution_in_pixel: [c.width, c.height],
                 view_from_world: view,
                 projection_from_view: Projection::Perspective {
-                    vertical_fov: c.vertical_fov(),
+                    vertical_fov: 2.0 * (c.height as f32 / (2.0 * c.fy)).atan(),
                     near_plane_distance: 0.01,
-                    aspect_ratio: c.aspect(),
+                    aspect_ratio: c.width as f32 * c.fy / (c.height as f32 * c.fx),
                 },
                 viewport_transformation: re_renderer::RectTransform {
                     region: re_renderer::RectF32::UNIT,
@@ -196,7 +161,8 @@ impl RenderEngine for Native {
         builder
             .queue_draw(&self.ctx, splats.into_draw_data().map_err(gpu)?)
             .map_err(gpu)?;
-        if parity {
+        let capture = std::mem::take(&mut self.capture_next) || parity;
+        if capture {
             builder
                 .schedule_screenshot(&self.ctx, 42, ())
                 .map_err(gpu)?;
@@ -213,7 +179,7 @@ impl RenderEngine for Native {
             .map_err(gpu)?;
         self.ctx.before_submit();
         self.ctx.queue.submit([command]);
-        self.screenshot_pending = parity;
+        self.screenshot_pending = capture;
         Ok(Counts::default())
     }
     fn finish(&self) -> Result<()> {
@@ -222,7 +188,7 @@ impl RenderEngine for Native {
     async fn read_rgba_f32(&mut self) -> Result<Vec<f32>> {
         if !self.screenshot_pending {
             return Err(Error::Invalid(
-                "render with parity=true before readback".into(),
+                "request capture before rendering for readback".into(),
             ));
         }
         for _ in 0..20 {

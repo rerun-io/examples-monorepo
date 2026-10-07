@@ -5938,8 +5938,8 @@ dependencies = [
  "gsplat-core",
  "gsplat-eval",
  "gsplat-render",
+ "half",
  "image",
- "log",
  "macaw",
  "re_chunk 0.38.1",
  "re_log_encoding 0.38.1",
@@ -5952,7 +5952,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wgpu",
- "wgpu-core",
 ]
 
 [[package]]

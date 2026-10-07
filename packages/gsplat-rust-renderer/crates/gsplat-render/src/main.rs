@@ -6,10 +6,7 @@ use gsplat_render::{
     camera::{CameraFrame, load_frames},
     settings::RenderSettings,
 };
-use std::{
-    path::{Component, Path, PathBuf},
-    time::Instant,
-};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Parser)]
 #[command(about = "Render Gaussian splats with the shared raw-wgpu core")]
@@ -21,22 +18,22 @@ struct Args {
     camera: PathBuf,
     #[arg(long, default_value_t = 0)]
     frame: usize,
-    #[arg(long,required_unless_present_any=["benchmark","output_dir"],conflicts_with="output_dir")]
+    #[arg(
+        long,
+        required_unless_present = "output_dir",
+        conflicts_with = "output_dir"
+    )]
     output: Option<PathBuf>,
-    #[arg(long, conflicts_with = "benchmark")]
+    #[arg(long)]
     output_dir: Option<PathBuf>,
     #[arg(long, default_value_t = 800)]
     width: u32,
     #[arg(long, default_value_t = 800)]
     height: u32,
-    #[arg(long,default_value="1,1,1",value_parser=parse_background)]
+    #[arg(long, default_value = "1,1,1", value_parser = parse_background)]
     background: glam::Vec3,
     #[command(flatten)]
     settings: RenderSettings,
-    #[arg(long)]
-    benchmark: bool,
-    #[arg(long, default_value_t = 10)]
-    num_frames: usize,
 }
 fn parse_background(text: &str) -> Result<glam::Vec3, String> {
     let values = text
@@ -61,7 +58,7 @@ fn frame_output(root: &Path, frame: &CameraFrame) -> Result<PathBuf> {
     Ok(root.join(&frame.file_path).with_extension("png"))
 }
 fn save(renderer: &Renderer, size: glam::UVec2, path: &Path) -> Result<()> {
-    let pixels = renderer.read_rgba(Output::Float)?;
+    let pixels = renderer.read_rgba()?;
     ensure!(
         pixels.iter().all(|v| v.is_finite()),
         "render produced nonfinite pixels"
@@ -89,7 +86,6 @@ async fn main() -> Result<()> {
         args.width > 0 && args.height > 0,
         "image dimensions must be positive"
     );
-    ensure!(args.num_frames > 0, "num-frames must be positive");
     let scene = Scene::load(&args.ply).await?;
     let frames = load_frames(&args.camera, Some((args.width, args.height))).await?;
     let size = glam::UVec2::new(args.width, args.height);
@@ -122,19 +118,6 @@ async fn main() -> Result<()> {
         let frame = frames
             .get(args.frame)
             .context("frame index is outside the camera file")?;
-        if args.benchmark {
-            renderer.render(&frame.camera, Output::Packed)?;
-            renderer.finish()?;
-            let start = Instant::now();
-            for _ in 0..args.num_frames {
-                renderer.render(&frame.camera, Output::Packed)?;
-                renderer.finish()?;
-            }
-            eprintln!(
-                "Mean {:.3} ms/frame (render + GPU completion, no pixel readback)",
-                start.elapsed().as_secs_f64() * 1000.0 / args.num_frames as f64
-            );
-        }
         if let Some(path) = args.output {
             renderer.render(&frame.camera, Output::Float)?;
             save(&renderer, size, &path)?;

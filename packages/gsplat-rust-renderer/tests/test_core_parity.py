@@ -46,7 +46,7 @@ def test_core_matches_brush_float_channels(case: str, tmp_path: Path) -> None:
         / scene / "checkpoint/point_cloud/iteration_30000/point_cloud.ply"
     )
     cameras: Path = data / "nerf-synthetic/lego/transforms_test.json"
-    arguments: list[str] = ["--path", f"test-views:{cameras}", "--res", "native"]
+    arguments: list[str] = ["--path", str(cameras), "--res", "native"]
     assets: list[Path] = [ply]
     if scene == "lego":
         assets.append(cameras)
@@ -55,7 +55,7 @@ def test_core_matches_brush_float_channels(case: str, tmp_path: Path) -> None:
     else:
         cameras = root / "tests/fixtures/core-parity" / f"{case}.json"
         assets.append(cameras)
-        arguments = ["--path", f"specs:{cameras}", "--res", "native"]
+        arguments = ["--path", str(cameras), "--res", "native"]
     for asset in assets:
         if not asset.exists():
             pytest.skip(f"Required core parity asset missing: {asset}")
