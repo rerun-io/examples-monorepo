@@ -30,7 +30,7 @@ from agent_traces.claude_records import (
     Usage,
 )
 from agent_traces.claude_workflows import workflow_records
-from agent_traces.sources import SessionSource, iter_jsonl
+from agent_traces.sources import Discovery, SessionSource, iter_jsonl
 from agent_traces.timestamps import parse_timestamp_ns
 
 
@@ -157,7 +157,27 @@ def session_source(path: Path) -> SessionSource:
     workflows: tuple[Path, ...] = tuple(sorted(
         path.resolve() for pattern in ("workflows/wf_*.json", "workflows/scripts/*.js") for path in directory.glob(pattern) if path.is_file()))
     inputs: tuple[Path, ...] = (*(path for files in transcripts.values() for path in files), *outputs, *workflows, *(path for files in metadata_paths.values() for path in files))
-    return SessionSource(main.stem, main, inputs, lambda: parse_session_inventory(main, transcripts, tool_results_dir, frozenset(outputs), workflows, metadata_paths))
+    return SessionSource(main.stem, main, inputs, lambda: parse_session_inventory(main, transcripts, tool_results_dir, frozenset(outputs), workflows, metadata_paths), project=main.parent.name)
+
+
+def is_home(home: Path) -> bool:
+    """Whether this directory has the provider's transcript layout."""
+    return (home / "projects").is_dir()
+
+
+def discover(home: Path) -> Discovery:
+    """Discover main transcripts, reporting inventory failures by path."""
+    if not is_home(home):
+        raise ValueError(f"{home}: Claude home requires a projects directory")
+    result: Discovery = Discovery()
+    for path in sorted((home / "projects").glob("*/*.jsonl")):
+        if path.name.startswith(("agent-", "._")):
+            continue
+        try:
+            result.sessions.append(session_source(path))
+        except (ValueError, SerdeError, OSError) as error:
+            result.failed[path] = str(error)
+    return result
 
 
 def unique_records(paths: list[Path], skipped: Counter[str]) -> Iterator[_SourceRecord]:

@@ -3,7 +3,7 @@
 import hashlib
 import os
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 
@@ -43,6 +43,18 @@ class SessionSource:
     """Resolved files, in fingerprint order, with the main transcript first."""
     parse: Callable[[], Session]
     """Parse the inventoried files without discovering them again."""
+    project: str = ""
+    """Provider working directory or encoded project directory for filtering."""
+
+
+@dataclass(frozen=True, slots=True)
+class Discovery:
+    """Sessions and path-addressed exclusions from one home."""
+
+    sessions: list[SessionSource] = field(default_factory=list)
+    """Recording owners."""
+    failed: dict[Path, str] = field(default_factory=dict)
+    """Paths whose inventory could not be read."""
 
 
 def fingerprint(inputs: tuple[Path, ...]) -> str:

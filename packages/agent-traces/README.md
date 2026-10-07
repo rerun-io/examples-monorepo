@@ -36,6 +36,19 @@ The recordings are written with rerun-sdk 0.38.1. Open them with a viewer of tha
 
 ## Convert your sessions
 
+From the workspace root:
+
+```bash
+pixi run -e agent-traces agent-traces-convert-all --home ~/.claude --out ~/agent-traces
+pixi run -e agent-traces rerun ~/agent-traces/claude/<session-id>.rrd
+```
+
+`convert-all` writes `<out>/<profile>/<session-id>.rrd` and a `manifest.json` per profile. An exclusive `manifest.lock` protects each run from manifest load through its last save. A concurrent run waits and prints a waiting message.
+Run it again at any time. It converts a session again only when the session's files changed, when you pass a different `--host`, or when a new version of this package changes what a recording holds.
+Filter with `--project`, `--session-id`, or `--since YYYY-MM-DD`. `--project` matches a substring of the working directory: the project directory name for Claude.
+
+`convert-all` exits 1 if any session fails; unchanged inputs do not cause failure. Successful work remains saved.
+
 To convert one transcript, use `agent-traces-convert --session <file>.jsonl --out <file>.rrd`. Invalid input layouts return exit status 1 without creating output files.
 
 ## Profiles
@@ -47,12 +60,16 @@ Use `--profile` to choose a different name.
 ## Sessions from another computer
 
 Copy that computer's home folder to this one in any way you like. Copy at least `projects/` for Claude.
-Then convert the copy with `--host` set to the computer's name, so the recordings say where the sessions ran.
+Then convert the copy with `--host` set to the computer's name, so the recordings say where the sessions ran:
 
+```bash
+pixi run -e agent-traces agent-traces-convert-all --home <copy>/.claude --out ~/agent-traces/<computer> --host <computer>
+```
 
 ## Limits
 
 - In Rerun 0.38.1, a TextLog view can show an empty panel when the time cursor is after a very tall last row. Move the cursor onto the row or use Current message.
+- If `convert-all` reports an unsupported manifest version, delete that `manifest.json`. The next run converts every session in that profile again.
 - Costs are not computed. The Claude CLI's own session total is kept as a property when the transcript has one.
 
 
