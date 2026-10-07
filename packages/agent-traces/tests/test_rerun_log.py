@@ -1,0 +1,475 @@
+"""Read saved recordings to test the public writer boundary."""
+
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+import pyarrow as pa
+import pytest
+from rerun.chunk import RrdReader
+
+from agent_traces.events import Session
+from agent_traces.rerun_log import write_session_rrd
+from tests.conftest import RolloutBuilder, SessionBuilder, agent_rows, metadata_values, parse_rollout, parse_session, read_entities
+
+
+def test_conversations_have_wall_and_event_time_and_keep_identity(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Text and thinking are sorted by time without an implicit log timeline."""
+    session_builder.add("user", uuid="u1", parentUuid="p1", promptId="prompt", message={"content": "hello"})
+    session_builder.add("user", message={"content": [{"type": "text", "text": "second"}]})
+    session_builder.add("assistant", requestId="request", message={"id": "m1", "model": "model", "content": [{"type": "text", "text": "later"}]})
+    session_builder.add(
+        "assistant",
+        timestamp="2026-09-18T20:00:01.500Z",
+        message={
+            "id": "m1",
+            "content": [{"type": "text", "text": "earlier"}, {"type": "thinking", "thinking": "reason"}, {"type": "text", "text": "same time"}],
+        },
+    )
+    session_builder.add("user", isCompactSummary=True, message={"content": "summary"})
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
+    out: Path = write_session_rrd(parse_session(session_builder.path), tmp_path / "session.rrd").path
+    entities: dict[str, pa.Table] = read_entities(out)
+    timelines: set[str] = {
+        field.name for table in entities.values() for field in table.schema if (field.metadata or {}).get(b"rerun:kind") == b"index"
+    }
+    assert timelines == {"wall", "event"}
+    assert agent_rows(entities["/conversation/user"], "").num_rows == 2
+    assert entities["/conversation/assistant"]["TextLog:text"].to_pylist() == [["earlier"], ["same time"], ["later"]]
+    assert entities["/conversation/thinking"]["TextLog:level"].to_pylist() == [["DEBUG"]]
+    assert entities["/conversation/compaction"]["TextLog:text"].to_pylist() == [["summary"]]
+    assert metadata_values(entities["/conversation/user"], "uuid")[0] == ["u1"]
+    assert metadata_values(entities["/conversation/assistant"], "request_id")[-1] == ["request"]
+    assert entities["/conversation/assistant"]["wall"].cast(pa.int64()).to_pylist() == [1789761601500000000, 1789761601500000000, 1789761602000000000]
+    assert agent_rows(entities["/conversation/user"], "child").num_rows == 1
+    assert RrdReader(out).recordings()[0].recording_id == "session-123"
+
+
+def test_tool_results_join_calls_and_preserve_images(png_block: dict[str, object], session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """Tool users are not prompts; both image sources and MCP paths survive."""
+
+    image: dict[str, object] = png_block
+    session_builder.add(
+        "assistant",
+        message={"content": [{"type": "tool_use", "id": "t1", "name": "mcp__server__tool", "input": {"command": "echo", "nested": [1, True, None]}}]},
+    )
+    session_builder.add(
+        "user",
+        message={"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "result"}, image], "is_error": True}]},
+        toolUseResult={"agentId": "child"},
+    )
+    session_builder.add("user", message={"content": [image]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "unknown", "content": "no call"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "tools.rrd").path)
+    tool: pa.Table = entities["/tools"].slice(0, 2)
+    assert tool.num_rows == 2
+    assert tool["phase"].to_pylist() == [["call"], ["result"]]
+    assert tool["TextLog:level"].to_pylist() == [["INFO"], ["ERROR"]]
+    assert tool["input_json"].to_pylist()[0] == ['{"command":"echo","nested":[1,true,null]}']
+    assert "result_text" not in tool.column_names  # the result text lives once, in the visible TextLog row
+    assert tool["TextLog:text"].to_pylist()[-1][0].endswith("  result")
+    assert tool["elapsed_ms"].to_pylist()[-1] == [1000.0]
+    assert metadata_values(tool, 'child_agent_id')[-1] == ["child"]
+    assert entities["/elapsed/tools/mcp"]["Scalars:scalars"].to_pylist() == [[1000.0]]
+    assert entities["/tools"]["elapsed_ms"].to_pylist()[-1] == [None]
+    assert "? ms" not in entities["/tools"]["TextLog:text"].to_pylist()[-1][0]
+    images: pa.Table = entities["/media/images"]
+    assert images.num_rows == 2
+    assert metadata_values(images, 'source') == [["tool_result"], ["user"]]
+    assert images["call_id"].to_pylist() == [["t1"], [""]]
+    assert images["EncodedImage:blob"].to_pylist() == [[list(png_bytes)], [list(png_bytes)]]
+    assert "/conversation/user" not in entities
+
+
+def test_usage_counts_final_row_per_message_id_per_agent(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Split assistant blocks repeat usage; missing counters become zero."""
+    session_builder.add(
+        "assistant",
+        message={
+            "id": "m1",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "cache_creation": {"ephemeral_5m_input_tokens": 1, "ephemeral_1h_input_tokens": 2},
+                "output_tokens_details": {"thinking_tokens": 3},
+            },
+            "content": [],
+        },
+    )
+    session_builder.add("assistant", message={"id": "m1", "usage": {"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2, "cache_creation": {"ephemeral_5m_input_tokens": 1, "ephemeral_1h_input_tokens": 2}, "output_tokens_details": {"thinking_tokens": 3}}, "content": []})
+    session_builder.add("assistant", message={"id": "m2", "content": []})
+    session_builder.add(
+        "assistant",
+        path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl",
+        message={"id": "m1", "usage": {"input_tokens": 7}, "content": []},
+    )
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "usage.rrd").path)
+    expected: dict[str, int] = {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "cache_read_tokens": 3,
+        "cache_creation_tokens": 2,
+        "cache_creation_5m_tokens": 1,
+        "cache_creation_1h_tokens": 2,
+        "thinking_tokens": 3,
+    }
+    for name, value in expected.items():
+        assert agent_rows(entities[f"/usage/{name}"], "")["Scalars:scalars"].to_pylist() == [[value], [0]]
+    assert agent_rows(entities["/usage/input_tokens/children"], "child")["Scalars:scalars"].to_pylist() == [[7]]
+
+
+def test_lifecycle_and_flat_recording_properties(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Lifecycle details and skipped metadata survive as rows and properties."""
+    import socket
+
+    session_builder.add("user", cwd="/workspace", gitBranch="main", version="2.1.9", message={"content": "hello"})
+    session_builder.add(
+        "assistant", version="2.1.8", message={"model": "z-model", "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]}
+    )
+    session_builder.add("assistant", message={"model": "a-model", "content": []})
+    session_builder.add("system", subtype="api_error", level="warn", content="retry", future_detail=42)
+    session_builder.add("system", subtype="compact_boundary")
+    for subtype in ["queued_command", "command_permissions", "hook_success", "edited_text_file", "auto_mode"]:
+        session_builder.add("attachment", attachment={"type": subtype, "text": "detail", "unknown": True})
+    session_builder.add("attachment", attachment={"type": "skill_listing"})
+    session_builder.add("pr-link", prNumber=123, prUrl="https://example.test/pr/123", prRepository="org/repo")
+    session_builder.add("custom-title", timestamp=None, customTitle="old title")
+    session_builder.add("ai-title", timestamp=None, aiTitle="last title")
+    session_builder.add("cost-state", timestamp=None, totalCostUSD=1.0)
+    session_builder.add("cost-state", timestamp=None, totalCostUSD=2.5)
+    out: Path = write_session_rrd(parse_session(session_builder.path), tmp_path / "properties.rrd").path
+    entities: dict[str, pa.Table] = read_entities(out)
+    system: pa.Table = entities["/lifecycle/system"]
+    assert system["TextLog:text"].to_pylist() == [["retry"], ["compact_boundary"]]
+    assert system["TextLog:level"].to_pylist() == [["WARN"], ["INFO"]]
+    extra = metadata_values(system, "extra_json")[0][0]
+    assert isinstance(extra, str)
+    assert '"future_detail":42' in extra
+    assert entities["/lifecycle/attachments"].num_rows == 5
+    assert entities["/lifecycle/attachments"]["TextLog:text"].to_pylist()[0] == ["queued_command: detail"]
+    assert metadata_values(entities["/lifecycle/pr_links"], "pr_number") == [[123]]
+    props: pa.Table = entities["/__properties/session"]
+    expected: dict[str, object] = {
+        "session_id": "session-123",
+        "profile": "claude",
+        "host": socket.gethostname(),
+        "cwd": "/workspace",
+        "git_branch": "main",
+        "cli_versions": "2.1.8,2.1.9",
+        "title": "last title",
+        "models": "a-model,z-model",
+        "n_subagents": 0,
+        "n_tool_calls": 1,
+        "n_images": 0,
+        "n_inlined_outputs": 0,
+        "total_cost_usd": 2.5,
+        "source_path": str(session_builder.path.resolve()),
+        "source_sha256": "",
+    }
+    for key, value in expected.items():
+        assert props[key].to_pylist() == [[value]]
+    assert entities["/__properties/skipped"]["cost-state"].to_pylist() == [[2]]
+    assert entities["/__properties/skipped"]["skill_listing"].to_pylist() == [[1]]
+    assert entities["/__properties"]["RecordingInfo:name"].drop_null().to_pylist() == [["claude session- last title"]]
+
+
+def test_tool_rows_keep_sparse_columns_aligned(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Different tool row counts must not depend on SDK inference history."""
+    for index, tool in enumerate(["Bash", "Read", "Read"]):
+        session_builder.add("assistant", message={"content": [{"type": "tool_use", "id": str(index), "name": tool, "input": {}}]})
+        session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": str(index), "content": "ok"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "multiple.rrd").path)
+    assert entities["/tools"].num_rows == 6
+    assert entities["/tools"]["elapsed_ms"].to_pylist()[1::2] == [[1000.0], [1000.0], [1000.0]]
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_ns"),
+    [("2026-09-18T15:00:00.123456789-05:00", 1_789_761_600_123_456_789), ("1969-12-31T23:59:59.999999999Z", -1)],
+)
+def test_all_row_families_preserve_nanoseconds(png_block: dict[str, object],
+    session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path, timestamp: str, expected_ns: int
+) -> None:
+    """Text, scalar, and image columns keep exact timestamps across the epoch."""
+
+    session_builder.add(
+        "assistant", timestamp=timestamp, message={"id": "m1", "content": [{"type": "text", "text": "precise"}], "usage": {"input_tokens": 7}}
+    )
+    session_builder.add(
+        "user",
+        timestamp=timestamp,
+        message={
+            "content": [png_block]
+        },
+    )
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "precise.rrd").path)
+    for entity in ["/conversation/assistant", "/usage/input_tokens", "/media/images"]:
+        assert entities[entity]["wall"].cast(pa.int64()).to_pylist() == [expected_ns]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure_point", ["send_columns", "flush"])
+def test_failed_write_does_not_publish_or_leave_temporary_files(
+    session_builder: SessionBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool, failure_point: str
+) -> None:
+    """Publication preserves an existing destination until all writes succeed."""
+    import rerun as rr
+
+    session_builder.add("user", message={"content": "hello"})
+    out: Path = tmp_path / "atomic.rrd"
+    if existing:
+        out.write_bytes(b"existing recording")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        """Simulate an emission failure after the sink is attached."""
+        raise RuntimeError("injected write failure")
+
+    monkeypatch.setattr(rr.RecordingStream, failure_point, fail)
+    with pytest.raises(RuntimeError, match="injected write failure"):
+        write_session_rrd(parse_session(session_builder.path), out)
+    if existing:
+        assert out.read_bytes() == b"existing recording"
+    else:
+        assert not out.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_raw_tool_metadata_round_trips(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Unknown nested metadata and non-object JSON survive on result rows."""
+    payloads: list[object] = [{"unknown": {"nested": [1, True, None]}}, "output", ["a", {"b": 2}], None]
+    for payload in payloads:
+        session_builder.add("user", toolUseResult=payload, message={"content": [{"type": "tool_result", "content": "ok"}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": "ok"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "raw.rrd").path)
+    assert entities["/tools"]["tool_use_result_json"].to_pylist() == [
+        ['{"unknown":{"nested":[1,true,null]}}'],
+        ['"output"'],
+        ['["a",{"b":2}]'],
+        [""],
+        [""],
+    ]
+def test_turns_follow_prompts_in_file_order(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Turn totals exclude preamble and children, and deduplicate split usage."""
+    session_builder.add("assistant", message={"id": "before", "content": []})
+    session_builder.add("user", promptId="p1", message={"content": "first"})
+    session_builder.add(
+        "assistant",
+        message={
+            "id": "m1",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "output_tokens_details": {"thinking_tokens": 1},
+            },
+            "content": [{"type": "tool_use", "id": "t", "name": "Bash"}],
+        },
+    )
+    session_builder.add("assistant", message={"id": "m1", "usage": {"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2, "output_tokens_details": {"thinking_tokens": 1}}, "content": []})
+    session_builder.add(
+        "user", isMeta=True, message={"content": [{"type": "text", "text": "result label"}, {"type": "tool_result", "tool_use_id": "t", "content": "done"}]}
+    )
+    session_builder.add("user", isCompactSummary=True, message={"content": "summary"})
+    session_builder.add("user", message={"content": [{"type": "text", "text": "second"}, {"type": "text", "text": "line"}]})
+    session_builder.add("assistant", message={"id": "m2", "usage": {"output_tokens": 8}, "content": []})
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "turns.rrd").path)
+    turns: pa.Table = entities["/turns"]
+    assert turns["TextLog:text"].to_pylist() == [["first"], ["second\nline"]]
+    for name, expected in {
+        "turn_index": [0, 1],
+        "file_index": [1, 6],
+        "prompt_id": ["p1", ""],
+        "elapsed_ms": [3000.0, 1000.0],
+        "n_tool_calls": [1, 0],
+        "n_assistant_messages": [1, 1],
+        "n_images": [0, 0],
+        "input_tokens": [10, 0],
+        "output_tokens": [4, 8],
+        "cache_read_tokens": [3, 0],
+        "cache_creation_tokens": [2, 0],
+        "thinking_tokens": [1, 0],
+    }.items():
+        values = metadata_values(turns, name) if name in {"file_index", "prompt_id"} else turns[name].to_pylist()
+        assert values == [[value] for value in expected]
+    assert entities["/__properties/session"]["n_turns"].to_pylist() == [[2]]
+    for name, expected in {"elapsed_ms": [3000.0, 1000.0], "output_tokens": [4.0, 8.0], "tool_calls": [1.0, 0.0]}.items():
+        assert entities[f"/turns/{name}"]["Scalars:scalars"].to_pylist() == [[value] for value in expected]
+    assert not any(path.startswith("/agents/0/turns") for path in entities)
+
+
+def test_turn_images_and_nonprompt_users(png_block: dict[str, object], session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """Images count within turns; result-only and untimed users start no turn."""
+
+    image: dict[str, object] = png_block
+    session_builder.add("user", timestamp=None, message={"content": "untimed"})
+    session_builder.add("user", message={"content": [{"type": "text", "text": "prompt"}, image]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": [image]}]})
+    session_builder.add("user", message={"content": [image]})
+    session_builder.add("system", timestamp="2026-09-18T20:00:02.500Z", content="last in file")
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "images.rrd").path)
+    assert entities["/turns"]["n_images"].to_pylist() == [[3]]
+    assert entities["/turns"]["elapsed_ms"].to_pylist() == [[1000.0]]
+    assert entities["/turns"]["TextLog:level"].to_pylist() == [["INFO"]]
+    assert entities["/turns"]["TextLog:color"].to_pylist() == [[0x8AB4F8FF]]
+    assert entities["/__properties/session"]["n_turns"].to_pylist() == [[1]]
+
+
+def test_turn_image_counts_match_emitted_rows(png_block: dict[str, object], session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """URL, missing-source, and assistant images do not become image rows."""
+
+    inline: dict[str, object] = png_block
+    url: dict[str, object] = {"type": "image", "source": {"type": "url", "url": "https://example.test/image.png"}}
+    session_builder.add("user", message={"content": [{"type": "text", "text": "prompt"}, inline, url, {"type": "image"}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": [inline, url]}]})
+    session_builder.add("assistant", message={"content": [inline]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "image-counts.rrd").path)
+    assert entities["/media/images"].num_rows == 2
+    assert entities["/turns"]["n_images"].to_pylist() == [[2]]
+
+
+def test_agent_and_host_properties(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Every recording names its agent kind and the machine it ran on; host can be overridden for copied homes."""
+    session_builder.add("user", message={"content": "hello"})
+    session: Session = parse_session(session_builder.path)
+    props: pa.Table = read_entities(write_session_rrd(session, tmp_path / "a.rrd").path)["/__properties/session"]
+    assert props["agent"].to_pylist() == [["claude"]]
+    assert props["host"].to_pylist()[0][0]
+    props = read_entities(write_session_rrd(session, tmp_path / "b.rrd", host="laptop").path)["/__properties/session"]
+    assert props["host"].to_pylist() == [["laptop"]]
+
+
+def test_prompt_images_before_text_belong_to_new_turn(png_block: dict[str, object], session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """The entire prompt record starts a turn, regardless of block order."""
+
+    session_builder.add("user", message={"content": "first"})
+    session_builder.add("user", message={"content": [png_block, {"type": "text", "text": "second"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "prompt-images.rrd").path)
+    assert entities["/turns"]["n_images"].to_pylist() == [[0], [1]]
+    assert entities["/turns"]["elapsed_ms"].to_pylist() == [[0.0], [0.0]]
+
+
+def test_written_counts_and_public_mode(png_block: dict[str, object], session_builder: SessionBuilder, tmp_path: Path, png_bytes: bytes) -> None:
+    """Writer counts match saved text, images, usage, turns, and children."""
+
+
+    session_builder.add("user", message={"content": [
+        {"type": "text", "text": "hello"},
+        png_block,
+    ]})
+    session_builder.add("assistant", message={"id": "m", "content": "hi", "usage": {"input_tokens": 7, "output_tokens": 3}})
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
+    result = write_session_rrd(parse_session(session_builder.path), tmp_path / "counts.rrd")
+    assert result.path.stat().st_mode & 0o777 == 0o644
+    entities = read_entities(result.path)
+    assert result.entity_rows == {name.lstrip("/"): table.num_rows for name, table in entities.items() if not name.startswith("/__properties")}
+    assert {"conversation/user", "media/images", "usage/input_tokens", "turns"} <= result.entity_rows.keys()
+
+
+def test_empty_string_properties_survive_a_fresh_process(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """The first recording written by a process keeps empty strings; SDK inference drops an untyped first empty value."""
+    session_builder.add("user", message={"content": "hi"})
+    out: Path = tmp_path / "fresh.rrd"
+    script: str = (
+        "import sys; from pathlib import Path; from agent_traces.claude import session_source; "
+        "from agent_traces.rerun_log import write_session_rrd; write_session_rrd(session_source(Path(sys.argv[1])).parse(), Path(sys.argv[2]))"
+    )
+    subprocess.run([sys.executable, "-c", script, str(session_builder.path), str(out)], check=True)
+    props: pa.Table = read_entities(out)["/__properties/session"]
+    for key in ("title", "source_sha256"):
+        assert props[key].to_pylist() == [[""]]
+
+
+@pytest.mark.parametrize("provider,cost", [("claude", None), ("codex", None), ("claude", 1.25)])
+def test_reported_cost_or_null(tmp_path: Path, provider: str, cost: float | None) -> None:
+    """Both providers write null for an absent cost; reported finite cost survives."""
+    if provider == "claude":
+        builder = SessionBuilder(tmp_path / ".claude/projects/p/a.jsonl")
+        builder.add("user", message={"content": "hello"})
+        if cost is not None:
+            builder.add("cost-state", totalCostUSD=cost)
+        session = parse_session(builder.path)
+    else:
+        rollout = RolloutBuilder(tmp_path / ".codex/sessions/a.jsonl")
+        rollout.meta()
+        rollout.item("Reasoning")
+        session = parse_rollout(rollout.path)
+    assert session.properties["total_cost_usd"] == cost
+    entities = read_entities(write_session_rrd(session, tmp_path / "cost.rrd").path)
+    assert entities["/__properties/session"]["total_cost_usd"].to_pylist() == [[cost]]
+
+
+def test_null_and_known_totals_have_identical_property_types(tmp_path: Path) -> None:
+    """Catalog segments can merge missing and reported token totals."""
+    from dataclasses import replace
+
+    session: Session = Session("schema", "synthetic", tmp_path / "schema.jsonl", [], {}, Counter(),
+                               properties={"total_input_tokens": None, "total_output_tokens": None})
+    schemas = []
+    for index, total in enumerate([None, 23]):
+        updated = replace(session, properties={**session.properties, "total_input_tokens": total, "total_output_tokens": total})
+        props = read_entities(write_session_rrd(updated, tmp_path / f"schema-{index}.rrd").path)["/__properties/session"]
+        schemas.append({field.name: field.type for field in props.schema if field.name != "rerun.controls.RowId"})
+        assert props["total_input_tokens"].to_pylist() == [[total]]
+    assert schemas[0] == schemas[1]
+
+
+@pytest.mark.parametrize("timestamp", [-1_000_000_000, 1_000_000_123])
+def test_recording_start_is_first_event(tmp_path: Path, timestamp: int) -> None:
+    """Conversion time never replaces the first event, including child events."""
+    from agent_traces.events import AssistantText, TimedRecord
+
+    session = Session("start", "synthetic", tmp_path / "source.jsonl",
+                      [TimedRecord(AssistantText("later"), timestamp + 10, 0)],
+                      {"child": [TimedRecord(AssistantText("first"), timestamp, 0)]}, Counter())
+    entities = read_entities(write_session_rrd(session, tmp_path / "start.rrd").path)
+    assert entities["/__properties"]["RecordingInfo:start_time"].combine_chunks().values.cast(pa.int64()).to_pylist() == [timestamp]
+
+
+def test_children_have_visible_attribution_and_separate_scalar_series(tmp_path: Path) -> None:
+    """All child text families identify their agent; plots keep main samples apart."""
+    from agent_traces.events import AssistantText, Lifecycle, Prompt, Thinking, TimedRecord, ToolCall, ToolResult, Usage, UsageSample
+
+    payloads = [Prompt("question"), AssistantText("answer"), Thinking("reason"), ToolCall("Read", "call", "{}", "file_read"),
+                ToolResult("Read", "call", "result", "{}", "file_read", 12.0), Lifecycle("system", "ready"), UsageSample(Usage(input_tokens=7))]
+    main = [TimedRecord(payload, 2_000_000_000 + index, index) for index, payload in enumerate(payloads)]
+    child = [TimedRecord(payload, 1_000_000_000 + index, index) for index, payload in enumerate(payloads)]
+    session = Session("attribution", "synthetic", tmp_path / "source.jsonl", main, {"child": child}, Counter())
+    entities = read_entities(write_session_rrd(session, tmp_path / "attribution.rrd").path)
+    for entity, table in entities.items():
+        if "TextLog:text" not in table.column_names or entity == "/turns":
+            continue
+        original = agent_rows(table, "")
+        nested = agent_rows(table, "child")
+        assert nested.num_rows
+        assert nested["TextLog:text"].to_pylist() == [["[a0] " + text[0]] for text in original["TextLog:text"].to_pylist()]
+        for normal, tint in zip(original["TextLog:color"].to_pylist(), nested["TextLog:color"].to_pylist(), strict=True):
+            assert all(0 < (tint[0] >> shift & 255) < (normal[0] >> shift & 255) for shift in (8, 16, 24))
+            assert tint[0] & 255 == normal[0] & 255
+    for entity in ("/usage/input_tokens", "/elapsed/tools/file_read"):
+        assert entities[entity]["agent_id"].to_pylist() == [[""]]
+        assert entities[entity + "/children"]["agent_id"].to_pylist() == [["child"]]
+
+
+def test_scalar_series_names_are_logged_once_as_static_data(tmp_path: Path) -> None:
+    """A multi-sample scalar series has one timeless legend label, not repeated row names."""
+    from agent_traces.events import TimedRecord, Usage, UsageSample
+
+    records = [TimedRecord(UsageSample(Usage(input_tokens=value)), value * 1_000_000_000, value) for value in (1, 2, 3)]
+    session = Session("static-series", "synthetic", tmp_path / "source.jsonl", records, {"child": records}, Counter())
+    reader = RrdReader(write_session_rrd(session, tmp_path / "static.rrd").path)
+    labels: dict[str, list[str]] = {}
+    for chunk in reader.stream().to_chunks():
+        batch = chunk.to_record_batch()
+        if "SeriesLines:names" in batch.schema.names:
+            assert "wall" not in batch.schema.names
+            assert "log_time" not in batch.schema.names
+            labels.setdefault(str(chunk.entity_path), []).extend(row[0] for row in batch["SeriesLines:names"].to_pylist())
+        if "Scalars:scalars" in batch.schema.names:
+            assert "SeriesLines:names" not in batch.schema.names
+    assert labels["/usage/input_tokens"] == ["input_tokens (main)"]
+    assert labels["/usage/input_tokens/children"] == ["input_tokens (children)"]
