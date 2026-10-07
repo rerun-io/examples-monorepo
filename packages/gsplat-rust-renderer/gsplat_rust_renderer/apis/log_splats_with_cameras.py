@@ -1,16 +1,6 @@
-"""Log a trained splat PLY together with its NeRF-synthetic dataset cameras.
+"""Log native splats and dataset cameras with composited GT image planes.
 
-The ``log-scene`` flow logs static native ``GaussianSplats3D`` at
-``/world/splats`` and frame-0 cameras on the ``"frame"`` timeline:
-one camera per view under ``/world/cameras/<split>_<NNNN>`` — a ``Transform3D``
-+ ``rr.Pinhole`` frustum with the composited GT image on the image plane, so
-clicking a frustum shows its photo. The blueprint pairs a 3D view with a Tabs
-section holding one Grid per split (train/test), each showing an evenly-spaced,
-capped subset of camera image views.
-
-Example (into the live desktop viewer):
-    python tools/log_splats_with_cameras.py --rr-config.connect \\
-        --rr-config.application-id gsplat-rust-renderer --scene lego
+The blueprint pairs a 3D view with capped train/test image grids.
 """
 
 from __future__ import annotations
@@ -66,16 +56,7 @@ def _even_subset(count: int, cap: int) -> Int[ndarray, "k"]:
 
 
 def log_split_cameras(scene_dir: Path, split: Literal["train", "test"], image_plane_distance: float) -> list[str]:
-    """Log every camera of one split as a Pinhole frustum with its GT image plane.
-
-    Args:
-        scene_dir: NeRF-synthetic scene directory.
-        split: Dataset split to load.
-        image_plane_distance: Frustum image-plane distance in world units.
-
-    Returns:
-        The ``/world/cameras/<split>_<NNNN>`` entity path of each logged camera.
-    """
+    """Log each camera as a Pinhole with its GT image; return the entity paths."""
     cameras: list[tuple[PinholeParameters, Path]] = load_nerf_cameras(scene_dir, split)
     cam_paths: list[str] = []
     for index, (camera, image_path) in enumerate(cameras):
@@ -88,15 +69,7 @@ def log_split_cameras(scene_dir: Path, split: Literal["train", "test"], image_pl
 
 
 def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int, compute: bool = False, render_mode: Literal["default", "mip"] | None = None) -> rrb.Blueprint:
-    """Build the 3D-view + per-split image-grid blueprint.
-
-    Args:
-        split_cam_paths: Mapping of split name to its logged camera entity paths.
-        max_image_views: Cap on image views shown per split.
-
-    Returns:
-        A ``Horizontal(3D view, Tabs(Grid per split))`` blueprint.
-    """
+    """Pair a 3D view with per-split image grids capped by max_image_views."""
     if render_mode is not None and not compute:
         raise ValueError("--render-mode requires --compute")
     grids: list[rrb.Grid] = []
@@ -125,11 +98,7 @@ def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int,
 
 
 def main(config: LogSceneConfig) -> None:
-    """Log the static splat and frame-0 cameras, then send the scene blueprint.
-
-    Args:
-        config: CLI configuration parsed by tyro.
-    """
+    """Log static splats and frame-0 cameras, then send the scene blueprint."""
     scene_dir: Path = config.scene_dir if config.scene_dir is not None else scene_data_dir(config.scene)
     ply_path: Path = config.ply_path if config.ply_path is not None else scene_ply_path(config.scene)
 

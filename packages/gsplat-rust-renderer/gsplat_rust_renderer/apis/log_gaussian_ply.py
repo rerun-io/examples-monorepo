@@ -1,7 +1,4 @@
-"""Load a Gaussian PLY in Python and log it to the external Rust viewer.
-
-Logs the splat under ``/world/splats`` as a static scene using the native ``GaussianSplats3D`` component schema, without a visualizer override. The custom viewer selects compute automatically.
-"""
+"""Log a static native GaussianSplats3D scene; the viewer selects its renderer."""
 
 from __future__ import annotations
 
@@ -39,13 +36,10 @@ class LogPlyConfig:
 
 
 def splat_blueprint(bounds: Float32[ndarray, "2 3"], compute: bool = False, render_mode: Literal["default", "mip"] | None = None) -> rrb.Blueprint:
-    """Build a minimal blueprint, with an optional explicit compute selection.
+    """Frame decoded center percentiles, with optional explicit compute selection.
 
     Args:
-        bounds: Native decoded center percentiles used to frame the initial camera.
-
-    Returns:
-        A single-3D-view blueprint; renderer selection defaults to the viewer.
+        bounds: Float32[ndarray, "2 3"] lower and upper center percentiles.
     """
     if render_mode is not None and not compute:
         raise ValueError("--render-mode requires --compute")
@@ -72,11 +66,7 @@ def splat_blueprint(bounds: Float32[ndarray, "2 3"], compute: bool = False, rend
 
 
 def main(config: LogPlyConfig) -> None:
-    """Load a static PLY scene and frame it in the Rerun viewer.
-
-    Args:
-        config: CLI configuration parsed by tyro.
-    """
+    """Load a static PLY scene and frame it in the Rerun viewer."""
     ply_path: Path = config.ply_path if config.ply_path is not None else scene_ply_path(config.scene)
     bounds: Float32[ndarray, "2 3"] = log_ply(ply_path)
 

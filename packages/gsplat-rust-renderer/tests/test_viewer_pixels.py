@@ -24,33 +24,17 @@ def binaries() -> Path:
 
 
 @pytest.mark.integration
-def test_native_lego_and_same_entity_relog(binaries: Path, tmp_path: Path) -> None:
-    """Native Lego is visible and 64 red -> 64 green -> 256 blue replaces the upload."""
-    run_capture(binaries, tmp_path, "relog")
-
-
-@pytest.mark.integration
-def test_two_views_share_upload_and_override_mode(binaries: Path, tmp_path: Path) -> None:
-    """One data generation serves two views with different blueprint render modes."""
-    run_capture(binaries, tmp_path, "views")
-
-
-@pytest.mark.integration
-def test_recording_without_override_in_compute_and_stock_viewers(binaries: Path, tmp_path: Path) -> None:
-    """The same saved native recording works in both viewers without an override."""
-    run_capture(binaries, tmp_path, "portable")
+@pytest.mark.parametrize("mode", ["relog", "views", "portable", "depth"])
+def test_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
+    """Check upload replacement, per-view modes, stock compatibility and opaque depth."""
+    run_capture(binaries, tmp_path, mode)
 
 
 @pytest.mark.golden
-def test_viewer_matches_standalone_at_fixed_eye(binaries: Path, tmp_path: Path) -> None:
-    """Compare the same camera and crop, with the specified 39 dB compositing allowance."""
-    run_capture(binaries, tmp_path, "pair")
-
-
-@pytest.mark.golden
-def test_viewer_white_background_color(binaries: Path, tmp_path: Path) -> None:
-    """White catches linearization of premultiplied display color at soft edges."""
-    run_capture(binaries, tmp_path, "pair-white")
+@pytest.mark.parametrize("mode", ["pair", "pair-white"])
+def test_viewer_pair_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
+    """Compare black and white composition with the standalone fixed-eye render."""
+    run_capture(binaries, tmp_path, mode)
 
 
 def run_capture(binaries: Path, out: Path, mode: str) -> None:
@@ -97,12 +81,6 @@ def test_standalone_calibration_geometry_and_occlusion(binaries: Path, tmp_path:
     with pytest.raises(SystemExit) as result:
         check(CheckConfig(image=image, scene_dir=tmp_path, renderer="gsplat-core", report_json=tmp_path / "calibration-report.json"))
     assert result.value.code == 0
-
-@pytest.mark.integration
-def test_opaque_depth_and_automatic_framing(binaries: Path, tmp_path: Path) -> None:
-    """Front opaque content occludes splats; rear content cannot punch through them."""
-    run_capture(binaries, tmp_path, "depth")
-
 
 @pytest.mark.integration
 @pytest.mark.parametrize(("limit", "scale", "moving", "automatic"), [(1024, 0.18, False, False), (65536, 10.0, True, False), (1024, 0.18, False, True)])

@@ -41,14 +41,7 @@ class Config:
 
 
 def selected_scenes(config: Config) -> tuple[str, ...]:
-    """Resolve a one-scene or all-scene CLI choice.
-
-    Args:
-        config: Evaluation command-line configuration.
-
-    Returns:
-        Ordered scene names to evaluate.
-    """
+    """Resolve a one-scene or all-scene CLI choice."""
     if config.scene == "all":
         return BLENDER_SCENES
     return (config.scene,)
@@ -66,11 +59,7 @@ def quality_guard_failures(reports: list[CheckpointEvaluation], config: Config) 
 
 
 def main(config: Config) -> None:
-    """Run checkpoint validation or standalone rendering plus evaluation.
-
-    Args:
-        config: Evaluation command-line configuration.
-    """
+    """Run checkpoint validation or standalone rendering plus evaluation."""
     reports: list[CheckpointEvaluation] = []
     scenes: tuple[str, ...] = selected_scenes(config)
     for scene in scenes:

@@ -15,7 +15,6 @@ class Metrics:
     """Typed projection of the Rust-owned metric schema."""
 
     psnr: float
-    """Mean PSNR in dB over the scored RGB images."""
 
 
 @serde
@@ -24,11 +23,8 @@ class Parity:
     """The three independent channel means required by the parity gate."""
 
     mean: Metrics
-    """RGB rendered over black."""
     mean_alpha_psnr: float
-    """Mean alpha-channel PSNR in dB."""
     mean_white_psnr: float
-    """Mean RGB PSNR over white in dB."""
 
 
 @pytest.mark.golden

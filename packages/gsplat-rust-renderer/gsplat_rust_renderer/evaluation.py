@@ -8,64 +8,34 @@ from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
 
 from serde import SerdeError, serde
 from serde.json import from_json
 
 
-@serde(deny_unknown_fields=True)
+@serde
 @dataclass(frozen=True, slots=True)
 class Metrics:
-    """Mean image metrics from the Rust evaluator."""
+    """Read the required fields from Rust-owned image metrics."""
     psnr: float
-    """Peak signal-to-noise ratio in dB."""
     ssim: float
-    """Structural similarity."""
-    lpips: float | None = None
-    """Optional perceptual distance."""
 
 
-@serde(deny_unknown_fields=True)
+@serde
 @dataclass(frozen=True, slots=True)
 class ViewMetrics:
-    """One image's Rust evaluation."""
+    """Read the required fields from one Rust-owned image result."""
     name: str
-    """Relative PNG path."""
     psnr: float
-    """Peak signal-to-noise ratio in dB."""
     ssim: float
-    """Structural similarity."""
-    lpips: float | None = None
-    """Optional perceptual distance."""
 
 
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class Provenance:
-    """Runtime source and dependency identity from the Rust evaluator."""
-    crate_version: str
-    """Evaluator package version."""
-    source_sha: str | None
-    """Explicit GSPLAT_SOURCE_SHA or the current checkout revision."""
-    cargo_lock_sha256: str | None
-    """Fingerprint of the workspace's resolved dependencies."""
-    brush: str
-    """Pinned upstream source and observer patch."""
-
-
-@serde(deny_unknown_fields=True)
+@serde
 @dataclass(frozen=True, slots=True)
 class Evaluation:
-    """Rust evaluator report."""
+    """Read Rust-owned evaluation results without mirroring its provenance schema."""
     views: list[ViewMetrics]
-    """Per-image measurements."""
     mean: Metrics
-    """Arithmetic per-image mean."""
-    convention: Literal["brush", "published"]
-    """Metric convention name."""
-    provenance: Provenance
-    """Runtime source and dependency identity."""
 
 
 @serde(deny_unknown_fields=True)
@@ -100,35 +70,11 @@ def render_test_split(
     width: int,
     height: int,
 ) -> None:
-    """Render every camera in a NeRF test split with ``gsplat render``.
-
-    The standalone binary is invoked once so GPU initialization, uploaded
-    splats, and renderer scratch buffers are reused across all frames.
-
-    Args:
-        render_binary: Path to the ``gsplat`` executable.
-        ply_path: Path to the scene's pretrained Gaussian PLY.
-        camera_path: Path to ``transforms_test.json``.
-        output_dir: Directory below which relative frame paths are written.
-        width: Render width in pixels.
-        height: Render height in pixels.
-    """
+    """Render every NeRF test camera in one process, reusing GPU resources."""
     output_dir.mkdir(parents=True, exist_ok=True)
     command: list[str] = [
-        str(render_binary),
-        "render",
-        "--ply",
-        str(ply_path),
-        "--camera",
-        str(camera_path),
-        "--output-dir",
-        str(output_dir),
-        "--width",
-        str(width),
-        "--height",
-        str(height),
-        "--background",
-        "1,1,1",
+        str(render_binary), "render", "--ply", str(ply_path), "--camera", str(camera_path),
+        "--output-dir", str(output_dir), "--width", str(width), "--height", str(height), "--background", "1,1,1",
     ]
     subprocess.run(command, check=True)
 
@@ -179,17 +125,7 @@ class CheckpointResults:
 
 
 def evaluate_predictions_against_checkpoint(rendered_dir: Path, checkpoint_dir: Path) -> CheckpointEvaluation:
-    """Evaluate a rendered split against a nerfbaselines checkpoint.
-
-    Args:
-        rendered_dir: Root containing rendered images at checkpoint-relative
-            paths such as ``test/r_0.png``.
-        checkpoint_dir: Extracted checkpoint directory containing
-            ``results.json`` and ``predictions/gt-color``.
-
-    Returns:
-        Recomputed and published metrics with signed differences.
-    """
+    """Compare a rendered split with the published checkpoint metrics."""
     source: Path = checkpoint_dir / "results.json"
     try:
         published: CheckpointResults = from_json(CheckpointResults, source.read_text())

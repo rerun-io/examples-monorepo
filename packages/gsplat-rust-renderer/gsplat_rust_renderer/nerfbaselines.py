@@ -42,20 +42,10 @@ def scene_ply_path(scene: str = DEFAULT_SCENE, root: Path = DATA_ROOT) -> Path:
 
 
 def extract_zip(zip_path: Path, dest_dir: Path, inner: str | None = None) -> None:
-    """Extract *zip_path* (or its *inner* top-level dir) to *dest_dir* atomically.
+    """Extract to a sibling directory, then atomically rename into dest_dir.
 
-    Extraction goes to a temp sibling directory; the result is published with a
-    single ``rename`` — never a merge into a shared parent — so an interrupted
-    or concurrent run can neither leave a partial tree that the idempotence
-    guards mistake for complete data nor nest content into a directory another
-    process just published. If *dest_dir* appears concurrently (a racing task
-    won), this extraction is discarded and the winner's tree is kept.
-
-    Args:
-        zip_path: Path to the downloaded ``.zip`` archive.
-        dest_dir: Final directory the content is published at.
-        inner: Optional top-level dir inside the archive to publish as
-            *dest_dir* (for zips that nest everything under ``<scene>/``).
+    Atomic publication prevents interrupted or concurrent runs from leaving
+    partial or nested data; if another extraction wins, keep its tree.
     """
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dest_dir.name}-extract-", dir=dest_dir.parent))
@@ -73,16 +63,7 @@ def extract_zip(zip_path: Path, dest_dir: Path, inner: str | None = None) -> Non
 
 
 def download_and_extract(kind: str, scene: str, root: Path = DATA_ROOT) -> Path:
-    """Fetch + unpack one nerfbaselines zip if its target dir is missing.
-
-    Args:
-        kind: ``"data"`` (nerf-synthetic capture) or ``"pretrained"`` (3dgs-mcmc checkpoint).
-        scene: Blender scene name, e.g. ``"lego"``.
-        root: Data root (overridable for tests).
-
-    Returns:
-        The extracted target directory.
-    """
+    """Fetch and unpack one scene archive if its target directory is missing."""
     from huggingface_hub import hf_hub_download
 
     if kind == "data":

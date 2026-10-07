@@ -1,22 +1,10 @@
-"""Camera-calibration scene for cross-renderer validation.
+"""Generate a small 3DGS scene and check analytic marker projections.
 
-Generates a tiny 3DGS PLY with splats at exactly known world positions plus a
-synthesized NeRF-style ``transforms_test.json``, and checks rendered images
-against analytically predicted pixel coordinates (pinhole model).
+Axis markers check handedness and image Y; corners check focal length.
+An orange/purple pair on one ray checks depth ordering and alpha composition.
 
-Each marker's color encodes what it verifies:
-
-* origin (white-ish gray), +X (red), +Y (green), +Z (blue) — handedness and the
-  raster y-flip
-* four corner markers in the z=0 plane — focal length / FOV via inter-blob
-  pixel distances
-* an overlapping front/back pair on one camera ray (orange in front of purple)
-  — depth ordering / alpha compositing
-
-Usage:
-    python tools/calibration_scene.py generate --out-dir data/calibration
-    python tools/calibration_scene.py check --image render.png \
-        --scene-dir data/calibration --renderer gsplat
+Use tools/calibration_scene.py generate to write the scene, then check
+with --image, --scene-dir and --renderer to validate another renderer.
 """
 
 from __future__ import annotations
@@ -61,25 +49,6 @@ class Marker:
     """True for the back splat of the depth probe — must NOT be visible."""
 
 
-def _depth_probe_markers() -> tuple[Marker, Marker]:
-    """Build the front/back depth-probe pair on a single camera ray.
-
-    The back marker (purple) sits at a fixed point; the front marker (orange)
-    is placed on the segment from the back marker toward the camera, so both
-    project to the same pixel and only the front one may be visible.
-
-    Returns:
-        ``(front_marker, back_marker)``.
-    """
-    cam_pos: Float64[np.ndarray, "3"] = np.array(CAMERA_POSITION, dtype=np.float64)
-    back: Float64[np.ndarray, "3"] = np.array([-0.3, 0.3, 0.5], dtype=np.float64)
-    front: Float64[np.ndarray, "3"] = back + 0.4 * (cam_pos - back)
-    return (
-        Marker("depth-front", tuple(front.tolist()), (1.0, 0.55, 0.0)),
-        Marker("depth-back", tuple(back.tolist()), (0.55, 0.0, 0.85), occluded=True),
-    )
-
-
 CAMERA_POSITION: tuple[float, float, float] = (2.0, -2.0, 1.2)
 """Calibration camera position (world, Z-up)."""
 
@@ -88,12 +57,10 @@ CAMERA_TARGET: tuple[float, float, float] = (0.0, 0.0, 0.25)
 
 
 def calibration_markers() -> list[Marker]:
-    """All calibration markers: axes, corners, and the depth probe.
-
-    Returns:
-        Markers in drawing-independent order; the depth probe is last.
-    """
-    front, back = _depth_probe_markers()
+    """Return axis and corner markers followed by the occlusion pair."""
+    cam_pos: Float64[np.ndarray, "3"] = np.array(CAMERA_POSITION, dtype=np.float64)
+    back: Float64[np.ndarray, "3"] = np.array([-0.3, 0.3, 0.5], dtype=np.float64)
+    front: Float64[np.ndarray, "3"] = back + 0.4 * (cam_pos - back)
     return [
         Marker("origin", (0.0, 0.0, 0.0), (0.85, 0.85, 0.85)),
         Marker("+x", (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
@@ -103,8 +70,8 @@ def calibration_markers() -> list[Marker]:
         Marker("corner-pm", (0.5, -0.5, 0.0), (0.0, 1.0, 1.0)),
         Marker("corner-mp", (-0.5, 0.5, 0.0), (1.0, 0.0, 1.0)),
         Marker("corner-mm", (-0.5, -0.5, 0.0), (0.3, 0.3, 0.3)),
-        front,
-        back,
+        Marker("depth-front", tuple(front.tolist()), (1.0, 0.55, 0.0)),
+        Marker("depth-back", tuple(back.tolist()), (0.55, 0.0, 0.85), occluded=True),
     ]
 
 
@@ -116,12 +83,9 @@ def look_at_c2w(
     """Build an OpenGL-convention camera-to-world matrix (camera looks down −Z).
 
     Args:
-        position: Camera center in world space.
-        target: World point the camera looks at.
-        world_up: Approximate up direction used to orthogonalize the frame.
-
-    Returns:
-        4×4 c2w with columns ``[right, up, -forward, position]``.
+        position: Float64[ndarray, "3"] camera center in world space.
+        target: Float64[ndarray, "3"] world point the camera looks at.
+        world_up: Float64[ndarray, "3"] approximate up direction.
     """
     forward: Float64[np.ndarray, "3"] = target - position
     forward = forward / np.linalg.norm(forward)
@@ -150,14 +114,11 @@ def project_to_raster(
     ``u = fx·X/Z + cx`` in a y-up image plane, then one y-flip to raster rows.
 
     Args:
-        point_world: World-space point.
-        c2w: Camera-to-world matrix (OpenGL convention).
+        point_world: Float64[ndarray, "3"] world-space point.
+        c2w: Float64[ndarray, "4 4"] camera-to-world matrix (OpenGL convention).
         camera_angle_x: Horizontal FOV in radians.
         width: Image width in pixels.
         height: Image height in pixels.
-
-    Returns:
-        ``(u, v, depth)`` — raster pixel coordinates and positive view depth.
     """
     w2c: Float64[np.ndarray, "4 4"] = np.linalg.inv(c2w)
     view: Float64[np.ndarray, "3"] = (w2c @ np.append(point_world, 1.0))[:3]
@@ -174,22 +135,8 @@ def project_to_raster(
     return (u, v_raster, depth)
 
 
-def _inverse_sigmoid(value: float) -> float:
-    """Logit — the inverse of the opacity activation used by 3DGS loaders."""
-    return math.log(value / (1.0 - value))
-
-
 def write_calibration_ply(path: Path, markers: list[Marker]) -> None:
-    """Write the markers as a standard 3DGS PLY (inverse activations applied).
-
-    Loaders apply ``exp`` to scales, ``sigmoid`` to opacity, and
-    ``SH_C0·dc + 0.5`` to colors — so we store ``log(scale)``,
-    ``logit(opacity)``, and ``(rgb − 0.5)/SH_C0``.
-
-    Args:
-        path: Output ``.ply`` path.
-        markers: Calibration markers to encode.
-    """
+    """Write markers as 3DGS PLY using inverse scale, opacity and SH activations."""
     n: int = len(markers)
     fields: list[tuple[str, str]] = (
         [(axis, "f4") for axis in ("x", "y", "z")]
@@ -202,7 +149,7 @@ def write_calibration_ply(path: Path, markers: list[Marker]) -> None:
     vertex: Shaped[np.ndarray, "n"] = np.zeros(n, dtype=fields)
 
     log_scale: float = math.log(MARKER_SCALE)
-    raw_opacity: float = _inverse_sigmoid(MARKER_OPACITY)
+    raw_opacity: float = math.log(MARKER_OPACITY / (1.0 - MARKER_OPACITY))
     for i, marker in enumerate(markers):
         vertex["x"][i], vertex["y"][i], vertex["z"][i] = marker.position
         for c in range(3):
@@ -229,11 +176,7 @@ class GenerateConfig:
 
 
 def generate(config: GenerateConfig) -> None:
-    """Write the calibration scene artifacts.
-
-    Args:
-        config: Output directory and prediction resolution.
-    """
+    """Write the calibration PLY, cameras and expected pixel coordinates."""
     markers: list[Marker] = calibration_markers()
     c2w: Float64[np.ndarray, "4 4"] = look_at_c2w(
         np.array(CAMERA_POSITION, dtype=np.float64),
@@ -309,12 +252,9 @@ def _detect_blob(
     """Find the centroid of pixels matching a marker color.
 
     Args:
-        rgb: Image in [0, 1].
+        rgb: Float32[ndarray, "h w 3"] image in [0, 1].
         target_rgb: Expected activated marker color.
         color_tolerance: Per-channel tolerance.
-
-    Returns:
-        ``(u, v, count)`` centroid and mask size, or ``None`` if not found.
     """
     target: Float32[np.ndarray, "3"] = np.array(target_rgb, dtype=np.float32)
     mask: Bool[np.ndarray, "h w"] = np.all(np.abs(rgb - target) < color_tolerance, axis=-1)
@@ -326,14 +266,7 @@ def _detect_blob(
 
 
 def check(config: CheckConfig) -> None:
-    """Compare blob centroids in a rendered image against predictions.
-
-    Exits nonzero if any visible marker is missing/misplaced or the occluded
-    marker is visible.
-
-    Args:
-        config: Image path, scene dir, and tolerances.
-    """
+    """Compare marker centroids and exit nonzero on missing, misplaced or visible occluded markers."""
     payload: dict = json.loads((config.scene_dir / "expected_pixels.json").read_text())
     image: Image.Image = Image.open(config.image).convert("RGB")
     rgb: Float32[np.ndarray, "h w 3"] = np.asarray(image, dtype=np.float32) / 255.0

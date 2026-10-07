@@ -17,20 +17,8 @@ def _write_synthetic_ply(path: Path) -> None:
     Chosen so exp/sigmoid/DC/quat-reorder/SH-transpose all have easy hand values.
     """
     fields: list[str] = [
-        "x",
-        "y",
-        "z",
-        "scale_0",
-        "scale_1",
-        "scale_2",
-        "rot_0",
-        "rot_1",
-        "rot_2",
-        "rot_3",
-        "opacity",
-        "f_dc_0",
-        "f_dc_1",
-        "f_dc_2",
+        "x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+        "opacity", "f_dc_0", "f_dc_1", "f_dc_2",
     ] + [f"f_rest_{i}" for i in range(9)]
     dtype: list[tuple[str, str]] = [(name, "f4") for name in fields]
     data: np.ndarray = np.zeros(2, dtype=dtype)

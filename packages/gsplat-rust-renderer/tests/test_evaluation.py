@@ -51,29 +51,14 @@ def test_render_test_split_invokes_standalone_all_frame_cli(tmp_path: Path, monk
     output_dir: Path = tmp_path / "renders"
 
     render_test_split(
-        render_binary=binary_path,
-        ply_path=ply_path,
-        camera_path=camera_path,
-        output_dir=output_dir,
-        width=800,
-        height=600,
+        render_binary=binary_path, ply_path=ply_path, camera_path=camera_path,
+        output_dir=output_dir, width=800, height=600,
     )
-
     assert capture_path.read_text().splitlines() == [
-        "render",
-        "--ply",
-        str(ply_path),
-        "--camera",
-        str(camera_path),
-        "--output-dir",
-        str(output_dir),
-        "--width",
-        "800",
-        "--height",
-        "600",
-        "--background",
-        "1,1,1",
+        "render", "--ply", str(ply_path), "--camera", str(camera_path), "--output-dir", str(output_dir),
+        "--width", "800", "--height", "600", "--background", "1,1,1",
     ]
+
 
 
 def test_evaluation_cli_selects_one_or_all_blender_scenes() -> None:

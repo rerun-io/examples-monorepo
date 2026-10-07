@@ -41,11 +41,7 @@ class NerfTransforms:
 
 
 def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -> list[tuple[PinholeParameters, Path]]:
-    """Read NeRF-synthetic cameras of one split as (pinhole, image path) pairs.
-
-    The c2w matrices are OpenGL/RUB; simplecv carries the convention through to
-    the Pinhole's ``camera_xyz``, so they are used unmodified.
-    """
+    """Read (pinhole, image path) pairs, retaining OpenGL/RUB c2w and camera_xyz."""
     source: Path = scene_dir / f"transforms_{split}.json"
     try:
         transforms: NerfTransforms = from_json(NerfTransforms, source.read_text())
@@ -77,11 +73,7 @@ def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -
 
 
 def load_rgb_composited(image_path: Path, background: float) -> UInt8[ndarray, "h w 3"]:
-    """Load an image as raw RGB with alpha composited onto a constant background.
-
-    Raw ``rr.Image`` on purpose — ``rr.EncodedImage`` makes the viewer re-decode
-    every visible image every frame (decode-cache misses).
-    """
+    """Composite alpha onto a constant background; raw RGB avoids viewer decode-cache misses."""
     with Image.open(image_path) as img:
         rgba: UInt8[ndarray, "h w c"] = np.asarray(img.convert("RGBA"))
     alpha: Float64[ndarray, "h w 1"] = rgba[..., 3:].astype(np.float64) / 255.0
