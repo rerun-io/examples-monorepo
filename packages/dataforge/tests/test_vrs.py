@@ -114,6 +114,49 @@ def test_capture_timestamps_walk_only_the_layout(tmp_path: Path, compression: in
     assert VrsImageReader(VrsFile(path), "214-1").capture_timestamps().tolist() == [100, 200]
 
 
+def variable_layout_vrs(metadata: bytes, *, index_length: int | None = None) -> bytes:
+    """Aria Gen1's newer image format (LaMAria sequence_2_11): fixed fields, then a variable ``image_metadata`` vector.
+
+    The DataLayout is written as its fixed block, one ``(offset, length)`` uint32 index entry per variable piece, the
+    variable bytes, and then the JPEG; ``index_length`` overrides the length the index claims.
+    """
+    layout = json.dumps(
+        {
+            "data_layout": [
+                {"name": "frame_tag", "type": "DataPieceValue<uint32_t>", "offset": 0},
+                {"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": 4},
+                {"name": "image_metadata", "type": "DataPieceVector<uint8_t>", "index": 0},
+            ]
+        }
+    )
+    length: int = len(metadata) if index_length is None else index_length
+    return vrs_file(
+        {214: {"RF:Data:2": "data_layout+image/jpg", "DL:Data:2:0": layout}},
+        [
+            vrs_record(b"tag!" + struct.pack("<q", stamp) + struct.pack("<II", 0, length) + metadata + b"\xff\xd8test\xff\xd9", type_id=214)
+            for stamp in (100, 200)
+        ],
+    )
+
+
+@pytest.mark.parametrize("metadata", [b"", b"exif"])
+def test_variable_layout_images_start_after_their_variable_pieces(tmp_path: Path, metadata: bytes) -> None:
+    path = tmp_path / "variable.vrs"
+    path.write_bytes(variable_layout_vrs(metadata))
+    reader = VrsImageReader(VrsFile(path), "214-1")
+    frames = list(reader.images())
+    assert [frame.capture_timestamp_ns for frame in frames] == [100, 200]
+    assert [frame.image for frame in frames] == [b"\xff\xd8test\xff\xd9"] * 2
+    assert reader.capture_timestamps().tolist() == [100, 200]
+
+
+def test_a_variable_index_past_the_record_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "variable.vrs"
+    path.write_bytes(variable_layout_vrs(b"exif", index_length=10_000))
+    with pytest.raises(ValueError, match="truncated image payload"):
+        list(VrsImageReader(VrsFile(path), "214-1").images())
+
+
 IMU_LAYOUT: str = json.dumps(
     {
         "data_layout": [

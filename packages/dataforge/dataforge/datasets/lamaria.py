@@ -1115,3 +1115,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
     def table_blueprint(self) -> rrb.Blueprint:
         """Cheap preview card for the dataset's segment table."""
         return build_table_blueprint()
+
+    def table_fields(self) -> writing.TableFields:
+        """Which sequence it is and how much of it there is; the rest stays in the column menu."""
+        fields: tuple[writing.TableField, ...] = (
+            *(writing.TableField(f"property:capture:{name}", name) for name in ("split", "set", "challenge")),
+            writing.TableField("property:capture:num_frames", "frames"),
+            writing.TableField("property:capture:duration_s", "duration (s)"),
+            writing.TableField("property:gt:trajectory_len_m", "gt path (m)"),
+        )
+        return writing.TableFields(cards=fields, table=fields)
