@@ -100,13 +100,13 @@ def render_test_split(
     width: int,
     height: int,
 ) -> None:
-    """Render every camera in a NeRF test split with ``gsplat-render``.
+    """Render every camera in a NeRF test split with ``gsplat render``.
 
     The standalone binary is invoked once so GPU initialization, uploaded
     splats, and renderer scratch buffers are reused across all frames.
 
     Args:
-        render_binary: Path to the standalone ``gsplat-render`` executable.
+        render_binary: Path to the ``gsplat`` executable.
         ply_path: Path to the scene's pretrained Gaussian PLY.
         camera_path: Path to ``transforms_test.json``.
         output_dir: Directory below which relative frame paths are written.
@@ -116,6 +116,7 @@ def render_test_split(
     output_dir.mkdir(parents=True, exist_ok=True)
     command: list[str] = [
         str(render_binary),
+        "render",
         "--ply",
         str(ply_path),
         "--camera",
@@ -137,12 +138,12 @@ def evaluate_prediction_directory(
 ) -> Evaluation:
     """Delegate published white-background metrics to the Rust evaluator."""
     binary: Path = eval_binary or Path(os.environ.get(
-        "GSPLAT_EVAL_BIN", str(Path(__file__).resolve().parents[1] / "target/release/gsplat-eval"),
+        "GSPLAT_BIN", str(Path(__file__).resolve().parents[1] / "target/release/gsplat"),
     ))
     with TemporaryDirectory(prefix="gsplat-eval-") as directory:
         report_path: Path = Path(directory) / "evaluation.json"
         subprocess.run([
-            str(binary.resolve()), "dirs", "--render", str(rendered_dir), "--gt", str(ground_truth_dir),
+            str(binary.resolve()), "eval", "--render", str(rendered_dir), "--gt", str(ground_truth_dir),
             "--convention", "published", "--out", str(report_path),
         ], check=True)
         report: Evaluation = from_json(Evaluation, report_path.read_text())

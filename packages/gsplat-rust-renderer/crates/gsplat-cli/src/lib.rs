@@ -1,12 +1,21 @@
-//! Reproducible camera, renderer, and measurement boundaries for splat benchmarks.
+//! Camera and image boundaries shared by rendering, benchmarks, and evaluation.
 pub mod camera;
-pub mod renderers;
+mod camera_files;
+pub mod engines;
+pub mod metrics;
+mod provenance;
+mod renderer;
+pub mod settings;
 pub mod statistics;
+pub use metrics::{
+    Convention, Evaluation, Evaluator, Metrics, RenderMetrics, ViewMetrics, evaluate_directories,
+    mean, pair_directories, published, published_rgb,
+};
+pub use provenance::Provenance;
+pub use renderer::{Output, PlyScene, Renderer, raw_splats};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error(transparent)]
-    Render(#[from] gsplat_render::Error),
     #[error("{0}")]
     Invalid(String),
     #[error("unsupported: {0}")]
@@ -19,6 +28,10 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Image(#[from] image::ImageError),
+    #[error(transparent)]
+    Camera(#[from] camera::CameraError),
+    #[error(transparent)]
+    Core(#[from] gsplat_core::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 

@@ -36,11 +36,11 @@ def test_evaluation_delegates_published_metrics_to_rust(tmp_path: Path) -> None:
     result = evaluate_prediction_directory(tmp_path / "render", tmp_path / "gt", eval_binary=binary)
     assert (len(result.views), result.mean.psnr, result.mean.ssim) == (1, 12.5, 0.75)
     arguments: list[str] = capture.read_text().splitlines()
-    assert arguments[:7] == ["dirs", "--render", str(tmp_path / "render"), "--gt", str(tmp_path / "gt"), "--convention", "published"]
+    assert arguments[:7] == ["eval", "--render", str(tmp_path / "render"), "--gt", str(tmp_path / "gt"), "--convention", "published"]
 
 
 def test_render_test_split_invokes_standalone_all_frame_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Python orchestration calls the no-Rerun binary once for the full split."""
+    """Python orchestration invokes the render command once for the full split."""
     capture_path: Path = tmp_path / "args.txt"
     binary_path: Path = tmp_path / "fake-gsplat-render"
     binary_path.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_PATH\"\n")
@@ -60,6 +60,7 @@ def test_render_test_split_invokes_standalone_all_frame_cli(tmp_path: Path, monk
     )
 
     assert capture_path.read_text().splitlines() == [
+        "render",
         "--ply",
         str(ply_path),
         "--camera",
@@ -129,7 +130,7 @@ def test_standalone_render_matches_published_quality(scene: str, tmp_path: Path)
     for asset in (ply, camera, checkpoint / "results.json", checkpoint / "predictions/gt-color"):
         if not asset.exists():
             pytest.skip(f"Required standalone quality asset missing: {asset}")
-    binary: Path = Path("target/release/gsplat-render").resolve()
+    binary: Path = Path("target/release/gsplat").resolve()
     assert binary.is_file(), "Build the standalone renderer with tests-golden"
     render_test_split(render_binary=binary, ply_path=ply, camera_path=camera, output_dir=tmp_path, width=800, height=800)
     result = evaluate_predictions_against_checkpoint(tmp_path, checkpoint)

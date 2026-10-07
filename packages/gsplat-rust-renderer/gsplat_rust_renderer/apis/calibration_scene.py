@@ -16,7 +16,7 @@ Each marker's color encodes what it verifies:
 Usage:
     python tools/calibration_scene.py generate --out-dir data/calibration
     python tools/calibration_scene.py check --image render.png \
-        --scene-dir data/calibration --renderer gsplat-render
+        --scene-dir data/calibration --renderer gsplat
 """
 
 from __future__ import annotations
@@ -146,7 +146,7 @@ def project_to_raster(
 ) -> tuple[float, float, float]:
     """Project a world point to raster pixel coordinates (origin top-left).
 
-    Pinhole model with centered principal point, matching ``gsplat-render``:
+    Pinhole model with centered principal point, matching ``gsplat render``:
     ``u = fx·X/Z + cx`` in a y-up image plane, then one y-flip to raster rows.
 
     Args:
@@ -290,7 +290,7 @@ class CheckConfig:
     scene_dir: Path = Path("data/calibration")
     """Directory holding expected_pixels.json from `generate`."""
     renderer: str = "unknown"
-    """Label for the report (e.g. gsplat-render, brush, rerun-viewer)."""
+    """Label for the report (e.g. gsplat, brush, rerun-viewer)."""
     tolerance_px: float = 4.0
     """Max allowed centroid error in pixels (after any resolution rescale)."""
     color_tolerance: float = 0.25

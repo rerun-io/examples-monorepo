@@ -48,7 +48,7 @@ async fn compare(
     floor: Option<Vec<f32>>,
 ) -> (Vec<f32>, Counts) {
     let mut reference = Brush::new(scene, &Default::default()).await;
-    let mut raw = gsplat_render::raw_splats(&scene.data).unwrap();
+    let mut raw = crate::raw_splats(&scene.data).unwrap();
     raw.min_scale = floor.clone();
     if let Some(floor) = floor {
         reference.splats = reference.splats.with_min_scale(Tensor::from_data(
@@ -56,7 +56,7 @@ async fn compare(
             &reference.device,
         ));
     }
-    let mut ours = gsplat_render::Renderer::new(
+    let mut ours = crate::Renderer::new(
         &raw,
         gsplat_core::RenderOptions {
             render_mode: scene.mode,

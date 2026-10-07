@@ -3,9 +3,9 @@
 
 mod float;
 pub mod published;
+pub use crate::Provenance;
+use crate::{Error, gpu};
 pub use float::RenderMetrics;
-mod provenance;
-pub use provenance::Provenance;
 pub use published::rgb as published_rgb;
 
 use std::collections::BTreeSet;
@@ -17,18 +17,6 @@ use brush_render::AlphaMode;
 use burn::tensor::{Device, Int, Tensor, TensorData};
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("invalid image pair: {0}")]
-    Invalid(String),
-    #[error("GPU readback: {0}")]
-    Gpu(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Image(#[from] image::ImageError),
-}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -221,10 +209,6 @@ pub async fn evaluate_directories(
         convention,
         provenance: Provenance::default(),
     })
-}
-
-fn gpu(e: impl std::fmt::Display) -> Error {
-    Error::Gpu(e.to_string())
 }
 
 pub fn mean(views: &[ViewMetrics]) -> Metrics {

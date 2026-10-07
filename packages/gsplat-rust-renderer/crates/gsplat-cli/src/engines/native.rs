@@ -1,9 +1,9 @@
 //! Rerun 0.38.1 native renderer path: public PLY conversion, per-frame builder,
 //! per-frame CPU back-to-front sort with a cached seed order, and per-frame uploads.
 use super::*;
+use crate::camera::{CameraModel, opengl_to_opencv};
 use crate::wait;
 use glam::Vec2;
-use gsplat_render::camera::{CameraModel, opengl_to_opencv};
 use re_renderer::view_builder::{Projection, TargetConfiguration, ViewBuilder};
 use re_renderer::{
     GaussianShCoefficient, GaussianSplatBuilder, RenderConfig, RenderContext, Rgba, Rgba32Unmul,
@@ -119,7 +119,7 @@ impl RenderEngine for Native {
         let mut builder = ViewBuilder::new(
             &self.ctx,
             TargetConfiguration {
-                name: "gsplat-bench".into(),
+                name: "gsplat".into(),
                 blend_with_background: if parity {
                     re_renderer::view_builder::BlendWithBackground::Premultiplied
                 } else {

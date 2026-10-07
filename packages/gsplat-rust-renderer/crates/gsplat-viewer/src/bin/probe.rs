@@ -3,7 +3,7 @@
 #[path = "../application.rs"]
 pub mod application;
 
-use gsplat_render::camera::CameraSpec;
+use gsplat_cli::camera::CameraSpec;
 use re_viewer::external::{eframe, egui};
 use serde::Serialize;
 use std::time::Instant;
@@ -15,7 +15,8 @@ struct Frame {
 }
 #[derive(Serialize)]
 struct Report<'a> {
-    source_sha: String,
+    #[serde(flatten)]
+    provenance: gsplat_cli::Provenance,
     adapter: String,
     boundary: &'static str,
     warmup_frames: usize,
@@ -182,7 +183,7 @@ impl FrameProbe {
             "camera held during a moving-view measurement"
         );
         let report = Report {
-            source_sha: std::env::var("GSPLAT_SOURCE_SHA").unwrap_or_else(|_| "unrecorded".into()),
+            provenance: gsplat_cli::Provenance::default(),
             adapter: self.state.adapter.get_info().name,
             boundary: "headless UI step + compute + Rerun composite + egui paint + GPU completion; no pixel readback; no idle wait",
             warmup_frames: self.warmup,

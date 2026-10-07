@@ -116,7 +116,7 @@ def test_python_recording_is_decoded_by_shared_core(tmp_path: Path) -> None:
     import subprocess
 
     root = Path(__file__).resolve().parents[1]
-    subprocess.run(["cargo", "build", "--locked", "-p", "gsplat-bench"], cwd=root, check=True, timeout=1200)
+    subprocess.run(["cargo", "build", "--locked", "-p", "gsplat-cli"], cwd=root, check=True, timeout=1200)
     ply = tmp_path / "tiny.ply"
     _write_synthetic_ply(ply)
     recording = rr.RecordingStream("native-roundtrip")
@@ -129,7 +129,7 @@ def test_python_recording_is_decoded_by_shared_core(tmp_path: Path) -> None:
     recording.disconnect()
     result = subprocess.run(
         [
-            str(root / "target/debug/gsplat-bench"),
+            str(root / "target/debug/gsplat"),
             "parity",
             "--impl",
             "ours",

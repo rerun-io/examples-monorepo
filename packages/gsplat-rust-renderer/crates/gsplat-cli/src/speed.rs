@@ -2,14 +2,14 @@
 use crate::{CameraArgs, cameras, write_json};
 use anyhow::{Result, ensure};
 use clap::Args;
-use gsplat_bench::{
-    renderers::{
+use gsplat_cli::{Evaluator, Provenance, RenderMetrics};
+use gsplat_cli::{camera::CameraSpec, settings::RenderSettings};
+use gsplat_cli::{
+    engines::{
         Adapter, Brush, Counts, Engine, Implementation, PlyScene, RenderEngine, StageTiming,
     },
     statistics::{Statistics, median, summarize},
 };
-use gsplat_eval::{Evaluator, Provenance, RenderMetrics};
-use gsplat_render::{camera::CameraSpec, settings::RenderSettings};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,

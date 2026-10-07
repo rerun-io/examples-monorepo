@@ -1,5 +1,5 @@
 //! File formats enter through one shared camera/upload boundary.
-use gsplat_render::camera::{CameraModel, load_frames};
+use gsplat_cli::camera::{CameraModel, load_frames};
 
 #[tokio::test]
 async fn ply_metadata_selects_mip_without_changing_raw_parameters() {
@@ -19,10 +19,10 @@ async fn ply_metadata_selects_mip_without_changing_raw_parameters() {
         ),
     )
     .unwrap();
-    let scene = gsplat_render::PlyScene::load(&path).await.unwrap();
+    let scene = gsplat_cli::PlyScene::load(&path).await.unwrap();
     assert_eq!(scene.mode, gsplat_core::RenderMode::Mip);
     assert_eq!(
-        gsplat_render::raw_splats(&scene.data).unwrap().transforms[0][2],
+        gsplat_cli::raw_splats(&scene.data).unwrap().transforms[0][2],
         2.0
     );
     std::fs::remove_file(path).unwrap();
@@ -78,7 +78,7 @@ fn raw_upload_preserves_precision_and_brush_defaults() {
         sh_coeffs: None,
         raw_opacities: None,
     };
-    let raw = gsplat_render::raw_splats(&data).unwrap();
+    let raw = gsplat_cli::raw_splats(&data).unwrap();
     assert_eq!(
         raw.transforms,
         vec![[1.234567, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, -4.0, -4.0, -4.0]]
@@ -89,5 +89,5 @@ fn raw_upload_preserves_precision_and_brush_defaults() {
         sh_coeffs: Some(vec![0.0; 7]),
         ..data
     };
-    assert!(gsplat_render::raw_splats(&invalid).is_err());
+    assert!(gsplat_cli::raw_splats(&invalid).is_err());
 }

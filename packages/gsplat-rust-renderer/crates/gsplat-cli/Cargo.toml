@@ -1,7 +1,11 @@
 [package]
-name = "gsplat-render"
+name = "gsplat-cli"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "gsplat"
+path = "src/main.rs"
 
 [dependencies]
 gsplat-core = { path = "../gsplat-core", features = ["serde"] }
@@ -18,3 +22,19 @@ thiserror.workspace = true
 image.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+burn.workspace = true
+half = "2"
+re_renderer = "=0.38.1"
+re_sdk_types = "=0.38.1"
+re_types_core = "=0.38.1"
+re_log_encoding = { version = "=0.38.1", features = ["decoder"] }
+re_log_types = "=0.38.1"
+re_chunk = "=0.38.1"
+macaw = "0.30"
+brush-dataset.workspace = true
+brush-loss.workspace = true
+lpips.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+brush-train.workspace = true

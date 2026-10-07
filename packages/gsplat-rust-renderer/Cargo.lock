@@ -5925,21 +5925,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "gsplat-bench"
+name = "gsplat-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "brush-dataset",
+ "brush-loss",
  "brush-render",
  "brush-serde",
+ "brush-train",
  "burn",
+ "bytemuck",
  "clap",
  "colmap-reader",
  "glam",
  "gsplat-core",
- "gsplat-eval",
- "gsplat-render",
  "half",
  "image",
+ "lpips",
  "macaw",
  "re_chunk 0.38.1",
  "re_log_encoding 0.38.1",
@@ -5949,6 +5952,7 @@ dependencies = [
  "re_types_core 0.38.1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "wgpu",
@@ -5965,48 +5969,6 @@ dependencies = [
  "pollster 0.4.0",
  "serde",
  "thiserror 2.0.20",
- "wgpu",
-]
-
-[[package]]
-name = "gsplat-eval"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "brush-dataset",
- "brush-loss",
- "brush-render",
- "brush-serde",
- "brush-train",
- "burn",
- "clap",
- "gsplat-render",
- "image",
- "lpips",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "gsplat-render"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "brush-render",
- "brush-serde",
- "bytemuck",
- "clap",
- "colmap-reader",
- "glam",
- "gsplat-core",
- "image",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
  "wgpu",
 ]
 
@@ -6040,8 +6002,8 @@ dependencies = [
  "clap",
  "egui_kittest",
  "glam",
+ "gsplat-cli",
  "gsplat-core",
- "gsplat-render",
  "half",
  "re_byte_size 0.38.1",
  "re_crash_handler",

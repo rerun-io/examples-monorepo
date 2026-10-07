@@ -231,7 +231,7 @@ def check_pair(config: Config, image: UInt8[np.ndarray, "h w 3"], position: Floa
     camera_path.write_text(to_json(camera))
     reference_path: Path = config.out / "standalone.png"
     subprocess.run(
-        [str(config.binaries / "gsplat-render"), "--ply", str(config.ply), "--camera", str(camera_path), "--width", str(w), "--height", str(h), "--background", "1,1,1" if config.mode == "pair-white" else "0,0,0", "--output", str(reference_path)],
+        [str(config.binaries / "gsplat"), "render", "--ply", str(config.ply), "--camera", str(camera_path), "--width", str(w), "--height", str(h), "--background", "1,1,1" if config.mode == "pair-white" else "0,0,0", "--output", str(reference_path)],
         check=True, timeout=120,
     )
     reference: UInt8[np.ndarray, "h w 3"] = np.asarray(Image.open(reference_path).convert("RGB"), dtype=np.uint8)[2:-3, 2:-3]

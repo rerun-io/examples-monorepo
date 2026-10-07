@@ -46,9 +46,9 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
     [
         ("gsplat-train", "recording", ("GSPLAT_LEGO",)),
         ("gsplat-train", "bin:gsplat-train", ()),
-        ("gsplat-eval", "evaluation", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_GT")),
-        ("gsplat-bench", "renderers", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_COLMAP")),
-        ("gsplat-bench", "lib", ()),
+        ("gsplat-cli", "evaluation", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_GT")),
+        ("gsplat-cli", "renderers", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_COLMAP")),
+        ("gsplat-cli", "lib", ()),
         ("gsplat-core", "lib", ()),
         ("gsplat-core", "render", ()),
         ("gsplat-core", "views", ()),

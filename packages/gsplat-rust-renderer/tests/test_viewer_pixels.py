@@ -17,7 +17,7 @@ def binaries() -> Path:
     environment: dict[str, str] = dict(os.environ)
     environment.update(CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0", CARGO_INCREMENTAL="0")
     subprocess.run(
-        ["cargo", "build", "--locked", "--all-features", "-p", "gsplat-viewer", "-p", "gsplat-render"],
+        ["cargo", "build", "--locked", "--all-features", "-p", "gsplat-viewer", "-p", "gsplat-cli"],
         cwd=ROOT, env=environment, check=True, timeout=1200,
     )
     return ROOT / "target/debug"
@@ -91,7 +91,7 @@ def test_standalone_calibration_geometry_and_occlusion(binaries: Path, tmp_path:
     image: Path = tmp_path / "calibration.png"
     # This background lies between the existing dark/light gray marker bands.
     subprocess.run(
-        [str(binaries / "gsplat-render"), "--ply", str(tmp_path / "calibration.ply"), "--camera", str(tmp_path / "transforms_test.json"), "--output", str(image), "--background", "0.575,0.575,0.575"],
+        [str(binaries / "gsplat"), "render", "--ply", str(tmp_path / "calibration.ply"), "--camera", str(tmp_path / "transforms_test.json"), "--output", str(image), "--background", "0.575,0.575,0.575"],
         check=True, timeout=120,
     )
     with pytest.raises(SystemExit) as result:

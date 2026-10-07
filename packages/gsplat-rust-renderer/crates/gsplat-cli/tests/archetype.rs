@@ -27,7 +27,7 @@ fn native_ply_round_trip_preserves_geometry_and_quantizes_opacity() {
         ),
     )
     .unwrap();
-    let splats = gsplat_bench::renderers::archetype_splats(&path).unwrap();
+    let splats = gsplat_cli::engines::archetype_splats(&path).unwrap();
     std::fs::remove_file(path).unwrap();
     assert_eq!(&splats.transforms[0][..3], &[1.0, 2.0, 3.0]);
     assert!((splats.transforms[0][7] + 2.0).abs() < 1e-6);

@@ -2007,7 +2007,7 @@ description = "Download data, pretrained checkpoints, all Blender assets, or tan
 [feature.gsplat-rust-renderer.tasks.gsplat-build]
 cmd = "cargo build --release --locked --workspace --bins --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Build the renderer, trainer, viewer, frame probe, evaluator and benchmark"
+description = "Build the gsplat CLI, trainer, viewer and frame probe"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-brush-cli-build]
 cmd = "cargo install --git https://github.com/ArthurBrussee/brush --rev 1388f74c6fe0236f68ee4915564bf00e9d2e3747 brush-cli --locked --root .brush"

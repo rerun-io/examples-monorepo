@@ -1,4 +1,6 @@
 //! Loading and pixel transfers are separate from the synchronized speed lane.
+use crate::camera::CameraSpec;
+use crate::settings::RenderSettings;
 use crate::{Error, Result, gpu};
 use brush_render::{
     TextureMode,
@@ -6,8 +8,6 @@ use brush_render::{
 };
 use burn::tensor::{Device, Tensor};
 use glam::Vec3;
-use gsplat_render::camera::CameraSpec;
-use gsplat_render::settings::RenderSettings;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 mod archetype;
@@ -26,7 +26,7 @@ pub enum Implementation {
 /// Exactly one initialized renderer; parity source choice is independent of backend choice.
 pub enum Engine {
     Brush(Box<Brush>),
-    Ours(Box<gsplat_render::Renderer>),
+    Ours(Box<crate::Renderer>),
     Native(Box<Native>),
 }
 impl Engine {
@@ -62,7 +62,7 @@ impl Engine {
                     splats.min_scale = settings
                         .min_scale
                         .map(|floor| vec![floor; splats.transforms.len()]);
-                    gsplat_render::Renderer::new(
+                    crate::Renderer::new(
                         &splats,
                         settings.options(scene.mode),
                         glam::uvec2(camera.width, camera.height),
@@ -172,7 +172,7 @@ pub trait RenderEngine {
     }
 }
 
-pub use gsplat_render::PlyScene;
+pub use crate::PlyScene;
 
 pub struct Brush {
     splats: Splats,
@@ -309,7 +309,7 @@ pub struct StageTiming {
     pub name: String,
     pub ms: f64,
 }
-impl RenderEngine for gsplat_render::Renderer {
+impl RenderEngine for crate::Renderer {
     async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
         Ok(self.stage_ms(camera)?.map(|times| {
             gsplat_core::STAGE_NAMES
@@ -324,13 +324,13 @@ impl RenderEngine for gsplat_render::Renderer {
     }
 
     async fn render(&mut self, camera: &CameraSpec, parity: bool) -> Result<Counts> {
-        let stats = gsplat_render::Renderer::render(
+        let stats = crate::Renderer::render(
             self,
             camera,
             if parity {
-                gsplat_render::Output::Float
+                crate::Output::Float
             } else {
-                gsplat_render::Output::Packed
+                crate::Output::Packed
             },
         )?;
         Ok(Counts {
@@ -343,7 +343,7 @@ impl RenderEngine for gsplat_render::Renderer {
         Ok(())
     }
     async fn read_rgba_f32(&mut self) -> Result<Vec<f32>> {
-        Ok(self.read_rgba()?)
+        self.read_rgba()
     }
     fn adapter(&self) -> Adapter {
         self.adapter_info().clone().into()
@@ -356,19 +356,18 @@ pub async fn ours(
     width: u32,
     height: u32,
     settings: &RenderSettings,
-) -> Result<gsplat_render::Renderer> {
-    let mut splats = gsplat_render::raw_splats(&scene.data)?;
+) -> Result<crate::Renderer> {
+    let mut splats = crate::raw_splats(&scene.data)?;
     if let Some(floor) = settings.min_scale {
         splats.min_scale = Some(vec![floor; scene.data.num_splats()]);
     }
-    let renderer = gsplat_render::Renderer::new(
+    crate::Renderer::new(
         &splats,
         settings.options(scene.mode),
         glam::UVec2::new(width, height),
         settings.initial_capacity,
     )
-    .await?;
-    Ok(renderer)
+    .await
 }
 
 #[cfg(test)]

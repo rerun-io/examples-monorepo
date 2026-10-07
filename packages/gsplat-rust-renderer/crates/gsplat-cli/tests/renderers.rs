@@ -1,8 +1,8 @@
 //! GPU/asset contracts, selected by the pytest integration runner with real skips.
 use glam::{Mat4, Vec3};
-use gsplat_bench::renderers::{Brush, Native, PlyScene, RenderEngine};
-use gsplat_eval::Evaluator;
-use gsplat_render::camera::{self, CameraSpec};
+use gsplat_cli::Evaluator;
+use gsplat_cli::camera::{self, CameraSpec};
+use gsplat_cli::engines::{Brush, Native, PlyScene, RenderEngine};
 use std::path::PathBuf;
 
 fn one_splat(log_scale: f32) -> PlyScene {
@@ -77,7 +77,7 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .unwrap();
     println!("Brush Packed versus Float: {packed_score:?}");
     assert!(packed_score.minimum_psnr() > 35.0);
-    let mut ours = gsplat_bench::renderers::ours(&scene, 256, 256, &Default::default())
+    let mut ours = gsplat_cli::engines::ours(&scene, 256, 256, &Default::default())
         .await
         .unwrap();
     // Speed renders into the packed target; readback must not score an untouched float buffer.
@@ -223,7 +223,7 @@ async fn garden_colmap_projects_observed_points() {
         }
     }
     assert!(errors.len() > 1000);
-    let error = gsplat_bench::statistics::median(&errors);
+    let error = gsplat_cli::statistics::median(&errors);
     println!(
         "garden COLMAP median residual {error} px, {} landmarks",
         errors.len()

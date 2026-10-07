@@ -48,24 +48,24 @@ NeRF-synthetic and the COLMAP `truck`/`train` scenes are supported. Direct
 From the package directory in an activated shell:
 
 ```bash
-target/release/gsplat-render --ply scene.ply --camera transforms_test.json \
+target/release/gsplat render --ply scene.ply --camera transforms_test.json \
   --output-dir renders --background 0,0,0
-target/release/gsplat-eval dirs --render renders/test --gt rgb-test --out metrics.json
-target/release/gsplat-bench score --ply export_7000.ply --dataset data/nerfbaselines/data/lego --out training-score.json
-target/release/gsplat-bench parity --impl ours --ply scene.ply \
+target/release/gsplat eval --render renders/test --gt rgb-test --out metrics.json
+target/release/gsplat score --ply export_7000.ply --dataset data/nerfbaselines/data/lego --out training-score.json
+target/release/gsplat parity --impl ours --ply scene.ply \
   --path transforms_test.json --holdout-every 8 --out parity.json
-target/release/gsplat-bench speed --impl ours,brush --ply scene.ply \
+target/release/gsplat speed --impl ours,brush --ply scene.ply \
   --path orbit:300 --res 1920x1080 --out speed.json
 ```
 
 The ground-truth directory must contain the matching RGB images, without depth sidecars.
-`gsplat-bench score` preserves unclipped float renders for training PSNR; exported PNGs
+`gsplat score` preserves unclipped float renders for training PSNR; exported PNGs
 clip and round RGB and therefore measure a different boundary.
 Use `--archetype [RRD]` with parity to measure native archetype quantization.
 `gsplat-rust-renderer-evaluate` runs the white-background published-checkpoint
 guard; add `--checkpoint-only` to score the bundled predictions.
-Measured results and their capture conditions are in the
-[comparison report](https://pablos-4800gt.ilish-ruler.ts.net:8768/gsplat-modern/report.html).
+The [CLI reference](crates/gsplat-cli/README.md) describes camera inputs, metric
+conventions, parity evidence, and timing controls.
 
 ## Measurements
 

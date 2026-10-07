@@ -1,7 +1,7 @@
 //! Headless gsplat-core CLI; flags preserve the Python evaluation harness contract.
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use gsplat_render::{
+use gsplat_cli::{
     Output, PlyScene, Renderer,
     camera::{CameraFrame, load_frames},
     settings::RenderSettings,
@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 #[derive(Parser)]
 #[command(about = "Render Gaussian splats with the shared raw-wgpu core")]
-struct Args {
+pub(crate) struct Args {
     #[arg(long)]
     ply: PathBuf,
     /// NeRF transforms JSON, CameraSpec JSON array, or COLMAP sparse model directory.
@@ -79,9 +79,7 @@ fn save(renderer: &Renderer, size: glam::UVec2, path: &Path) -> Result<()> {
     image::save_buffer(path, &rgb, size.x, size.y, image::ColorType::Rgb8)?;
     Ok(())
 }
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+pub(crate) async fn run(args: Args) -> Result<()> {
     ensure!(
         args.width > 0 && args.height > 0,
         "image dimensions must be positive"
@@ -90,7 +88,7 @@ async fn main() -> Result<()> {
     let frames = load_frames(&args.camera, Some((args.width, args.height))).await?;
     let size = glam::UVec2::new(args.width, args.height);
     args.settings.validate()?;
-    let mut splats = gsplat_render::raw_splats(&scene.data)?;
+    let mut splats = gsplat_cli::raw_splats(&scene.data)?;
     if let Some(floor) = args.settings.min_scale {
         splats.min_scale = Some(vec![floor; splats.transforms.len()]);
     }
@@ -134,7 +132,7 @@ mod tests {
     #[test]
     fn evaluation_cli_accepts_all_frames_white_background_and_mode_override() {
         let args = Args::try_parse_from([
-            "gsplat-render",
+            "gsplat render",
             "--ply",
             "scene.ply",
             "--camera",
@@ -154,15 +152,14 @@ mod tests {
         assert_eq!(args.background, glam::Vec3::ONE);
         assert!(matches!(
             args.settings.render_mode,
-            gsplat_render::settings::Mode::Mip
+            gsplat_cli::settings::Mode::Mip
         ));
         assert!(args.output.is_none());
         assert!(parse_background("1,nan,0").is_err());
     }
     #[test]
     fn output_paths_preserve_subdirectories_and_reject_parent_escape() {
-        let camera =
-            gsplat_render::camera::CameraSpec::from_nerf(glam::Mat4::IDENTITY, 1.0, 800, 800);
+        let camera = gsplat_cli::camera::CameraSpec::from_nerf(glam::Mat4::IDENTITY, 1.0, 800, 800);
         let mut frame = CameraFrame {
             camera,
             file_path: "./test/r_0".into(),

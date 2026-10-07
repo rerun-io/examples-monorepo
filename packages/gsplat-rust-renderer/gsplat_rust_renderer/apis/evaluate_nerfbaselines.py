@@ -24,8 +24,8 @@ class Config:
     """One Blender scene to evaluate, or ``all`` for the full benchmark."""
     checkpoint_only: bool = False
     """Validate bundled checkpoint predictions without running the renderer."""
-    render_binary: Path = Path("target/release/gsplat-render")
-    """Standalone renderer executable built without Rerun."""
+    render_binary: Path = Path("target/release/gsplat")
+    """The gsplat executable; rendering uses the standalone GPU path."""
     output_root: Path = Path("data/evaluation/standalone")
     """Root directory for standalone per-scene renders."""
     report: Path = Path("data/evaluation/metrics.json")

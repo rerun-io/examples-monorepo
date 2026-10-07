@@ -1,5 +1,5 @@
 //! PLY metadata and raw f32 uploads at the application boundary.
-use crate::{Error, Result, camera::CameraSpec};
+use crate::{Error, Result, camera::CameraSpec, gpu};
 use brush_serde::import::SplatData;
 use glam::{UVec2, Vec3};
 use gsplat_core::{RenderMode, RenderOptions, Splats, Target};
@@ -291,8 +291,4 @@ impl Renderer {
         rx.recv().map_err(gpu)?.map_err(gpu)?;
         staging.get_mapped_range(..).map_err(gpu)
     }
-}
-
-fn gpu(error: impl std::fmt::Display) -> Error {
-    Error::Gpu(error.to_string())
 }

@@ -1,8 +1,8 @@
 //! Score exported splats against NeRF test images using unclipped float renders.
 use anyhow::Result;
-use gsplat_bench::renderers::{Brush, PlyScene, RenderEngine};
-use gsplat_eval::{Convention, Evaluator, Metrics, Provenance, ViewMetrics};
-use gsplat_render::camera::load_frames;
+use gsplat_cli::camera::load_frames;
+use gsplat_cli::engines::{Brush, PlyScene, RenderEngine};
+use gsplat_cli::{Convention, Evaluator, Metrics, Provenance, ViewMetrics};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -37,7 +37,7 @@ pub async fn run(args: ScoreArgs) -> Result<()> {
     let mut views = Vec::with_capacity(cameras.len());
     for view in cameras {
         renderer.render(&view.camera, true).await?;
-        let rendered = gsplat_bench::parity_image(
+        let rendered = gsplat_cli::parity_image(
             renderer.read_rgba_f32().await?,
             view.camera.width,
             view.camera.height,
@@ -60,7 +60,7 @@ pub async fn run(args: ScoreArgs) -> Result<()> {
             lpips: metrics.lpips,
         });
     }
-    let mean = gsplat_eval::mean(&views);
+    let mean = gsplat_cli::mean(&views);
     println!(
         "{} views: PSNR {:.8}, SSIM {:.9}",
         views.len(),

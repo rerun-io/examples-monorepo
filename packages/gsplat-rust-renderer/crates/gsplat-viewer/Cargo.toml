@@ -13,11 +13,11 @@ path = "src/bin/probe.rs"
 required-features = ["probe"]
 
 [features]
-probe = ["dep:serde", "dep:serde_json", "dep:gsplat-render"]
+probe = ["dep:serde", "dep:serde_json", "dep:gsplat-cli"]
 
 [dependencies]
 gsplat-core = { path = "../gsplat-core" }
-gsplat-render = { path = "../gsplat-render", optional = true }
+gsplat-cli = { path = "../gsplat-cli", optional = true }
 anyhow.workspace = true
 clap.workspace = true
 glam.workspace = true

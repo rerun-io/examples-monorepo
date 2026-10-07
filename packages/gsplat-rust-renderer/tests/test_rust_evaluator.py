@@ -14,7 +14,7 @@ from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES
 @pytest.mark.parametrize("scene", BLENDER_SCENES)
 def test_published_checkpoint_parity(scene: str, tmp_path: Path) -> None:
     """Every downloaded checkpoint image meets the requested Rust/Python tolerance."""
-    binary: Path = Path(os.environ.get("GSPLAT_EVAL_BIN", "target/release/gsplat-eval")).resolve()
+    binary: Path = Path(os.environ.get("GSPLAT_BIN", "target/release/gsplat")).resolve()
     root: Path = Path(os.environ.get("GSPLAT_CHECKPOINT_ROOT", "data/nerfbaselines/pretrained"))
     predictions: Path = root / scene / "predictions"
     if not binary.is_file():
@@ -23,7 +23,7 @@ def test_published_checkpoint_parity(scene: str, tmp_path: Path) -> None:
         pytest.skip(f"Checkpoint prediction/GT asset missing: {predictions}")
     report: Path = tmp_path / f"{scene}.json"
     subprocess.run([
-        str(binary), "dirs", "--render", str(predictions / "color"), "--gt", str(predictions / "gt-color"),
+        str(binary), "eval", "--render", str(predictions / "color"), "--gt", str(predictions / "gt-color"),
         "--convention", "published", "--out", str(report),
     ], check=True)
     result: Evaluation = from_json(Evaluation, report.read_text())

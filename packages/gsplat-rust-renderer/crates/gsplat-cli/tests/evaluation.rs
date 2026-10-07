@@ -1,5 +1,5 @@
 //! Public evaluator contracts, including optional GPU checks.
-use gsplat_eval::{Convention, Evaluator, pair_directories, published_rgb};
+use gsplat_cli::{Convention, Evaluator, pair_directories, published_rgb};
 use image::{DynamicImage, Rgba, RgbaImage};
 
 #[test]
@@ -96,10 +96,9 @@ async fn lego_float_evaluation_matches_brush_eval_stats() {
         brush_serde::import::load_splat_from_ply(tokio::fs::File::open(ply).await.unwrap(), None)
             .await
             .unwrap();
-    let frames =
-        gsplat_render::camera::load_frames(std::path::Path::new(&cameras), Some((256, 256)))
-            .await
-            .unwrap();
+    let frames = gsplat_cli::camera::load_frames(std::path::Path::new(&cameras), Some((256, 256)))
+        .await
+        .unwrap();
     let camera = frames[0].camera.brush_camera();
     let gt = image::open(gt)
         .unwrap()

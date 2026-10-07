@@ -37,7 +37,7 @@ class Parity:
     "garden-pinhole", "garden-kb4", "garden-rt8", "garden-thin-prism",
 ])
 def test_core_matches_brush_float_channels(case: str, tmp_path: Path) -> None:
-    """Use gsplat-bench for every render, camera conversion, and metric calculation."""
+    """Use gsplat parity for every render, camera conversion, and metric calculation."""
     root: Path = Path(__file__).resolve().parents[1]
     data: Path = Path(os.environ.get("GSPLAT_MODERN_DATA", str(Path.home() / "gsplat-modern-data")))
     scene: str = case.split("-", 1)[0]
@@ -65,8 +65,8 @@ def test_core_matches_brush_float_channels(case: str, tmp_path: Path) -> None:
         arguments.extend(["--min-scale", "0.002", "--splat-scale", "1.3"])
     if case == "lego-indirect":
         arguments.extend(["--initial-capacity", "1"])
-    binary: Path = Path(os.environ.get("GSPLAT_BENCH_BIN", str(root / "target/release/gsplat-bench")))
-    assert binary.is_file(), "Build gsplat-bench with tests-golden, or set GSPLAT_BENCH_BIN to a built benchmark"
+    binary: Path = Path(os.environ.get("GSPLAT_BIN", str(root / "target/release/gsplat")))
+    assert binary.is_file(), "Build gsplat with tests-golden, or set GSPLAT_BIN to a built benchmark"
     output: Path = tmp_path / f"{case}.json"
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [str(binary), "parity", "--impl", "ours", "--oracle", "brush", "--ply", str(ply), *arguments, "--out", str(output)],
