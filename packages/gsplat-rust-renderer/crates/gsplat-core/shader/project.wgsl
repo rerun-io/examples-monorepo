@@ -192,5 +192,5 @@ fn sh_color(id: u32, v: vec3f) -> vec3f {
     let p = project(id);
     let v = normalize(p.mean - u.camera.xyz);
     let color = sh_color(id, v);
-    projected[compact] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z);
+    projected[compact] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z, p.depth);
 }

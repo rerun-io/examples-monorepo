@@ -19,7 +19,8 @@ fn pixel(tile: u32, lid: u32) -> vec2u {
     return vec2u(tile % u.image.z, tile / u.image.z) * 16u + vec2u(compact_bits(lid), compact_bits(lid >> 1u));
 }
 
-fn raster(tile: u32, lid: u32) -> vec4f {
+struct Raster { rgba: vec4f, depth: f32, }
+fn raster(tile: u32, lid: u32) -> Raster {
     let pix = pixel(tile, lid);
     let inside = all(pix < u.image.xy);
     if lid == 0u {
@@ -31,6 +32,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
     let hi = workgroupUniformLoad(&range_hi);
     var transmittance = 1.0;
     var color = vec3f(0.0);
+    var expected_depth = 0.0;
     var done = !inside;
     if done {
         atomicAdd(&num_done, 1u);
@@ -59,6 +61,7 @@ fn raster(tile: u32, lid: u32) -> vec4f {
                     done = true;
                 } else {
                     color += max(vec3f(p.r, p.g, p.b), vec3f(0.0)) * (alpha * transmittance);
+                    expected_depth += p.depth * alpha * transmittance;
                     transmittance = next;
                 }
             }
@@ -67,5 +70,5 @@ fn raster(tile: u32, lid: u32) -> vec4f {
             atomicAdd(&num_done, 1u);
         }
     }
-    return vec4f(color + transmittance * u.background.xyz, 1.0 - transmittance);
+    return Raster(vec4f(color + transmittance * u.background.xyz, 1.0 - transmittance), expected_depth / max(1.0 - transmittance, 1e-8));
 }

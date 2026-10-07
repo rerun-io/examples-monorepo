@@ -33,9 +33,6 @@ pub(crate) fn uniform(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     })
 }
-pub(crate) fn write(queue: &wgpu::Queue, buffer: &wgpu::Buffer, bytes: &[u8]) {
-    queue.write_buffer(buffer, 0, bytes);
-}
 pub(crate) fn module(device: &wgpu::Device, source: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gsplat shader"),

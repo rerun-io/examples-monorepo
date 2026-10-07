@@ -1,25 +1,16 @@
 //! Hierarchical inclusive scan with GPU-resident counts.
-use super::dispatch::{CountSlot, DispatchPlan, DispatchSlot, Dispatches};
+use super::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::gpu::{bind, storage, uniform};
 use crate::kernels::Kernels;
 
-#[derive(Clone, Copy)]
-enum ScanDispatch {
-    Scan(usize),
-    AddOffsets(usize),
+const fn scan_level(level: usize) -> u32 {
+    level as u32 * 2
 }
-impl DispatchSlot for ScanDispatch {
-    fn index(self) -> u32 {
-        match self {
-            Self::Scan(level) => level as u32 * 2,
-            Self::AddOffsets(level) => level as u32 * 2 + 1,
-        }
-    }
-}
+const ADD_OFFSETS: u32 = 1;
 pub(crate) struct Scan {
     output: wgpu::Buffer,
     groups: Vec<(wgpu::BindGroup, Option<wgpu::BindGroup>)>,
-    dispatches: Dispatches<ScanDispatch>,
+    dispatches: Dispatches,
 }
 impl Scan {
     pub fn new(
@@ -98,18 +89,14 @@ impl Scan {
             timestamp_writes,
         });
         for (i, groups) in self.groups.iter().enumerate() {
-            self.dispatches.dispatch_in_pass(
-                &mut pass,
-                ScanDispatch::Scan(i),
-                &kernels.scan,
-                &groups.0,
-            );
+            self.dispatches
+                .dispatch_in_pass(&mut pass, scan_level(i), &kernels.scan, &groups.0);
         }
         for (i, groups) in self.groups.iter().enumerate().rev() {
             if let Some(group) = &groups.1 {
                 self.dispatches.dispatch_in_pass(
                     &mut pass,
-                    ScanDispatch::AddOffsets(i),
+                    scan_level(i) + ADD_OFFSETS,
                     &kernels.add_offsets,
                     group,
                 );

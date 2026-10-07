@@ -1,5 +1,5 @@
 //! Frame uniforms and the ordered forward compute passes.
-use super::{ViewDispatch, ViewState};
+use super::{INTERSECTIONS, RASTER, VISIBLE, ViewState};
 use crate::gpu::{self, bind};
 use crate::kernels::Kernels;
 use crate::primitives::dispatch::dispatch;
@@ -102,7 +102,7 @@ impl ViewState {
         let frame = &mut self.frames[index];
         let scene = &self.scene;
         let uniforms = Uniforms::new(camera, options, scene, tiles);
-        gpu::write(queue, &frame.uniform, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&frame.uniform, 0, bytemuck::bytes_of(&uniforms));
         let raster = kernels.raster(raster_kind);
         if frame
             .raster
@@ -124,13 +124,20 @@ impl ViewState {
                 (raster_kind.binding(), target.resource()),
             ];
             if let Target::TextureDepth { depth, .. } = &target {
-                bindings.push((7, self.depth_sort.output(32).0.as_entire_binding()));
                 bindings.push((8, wgpu::BindingResource::TextureView(depth)));
             }
             let group = bind(&self.device, raster, &bindings);
             frame.raster = Some((target, group));
         }
-        let timestamps = |start, end| self.timing.pass(start, end);
+        let timestamps = |start, end| {
+            self.timing
+                .as_ref()
+                .map(|query_set| wgpu::ComputePassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: start,
+                    end_of_pass_write_index: Some(end),
+                })
+        };
         encoder.clear_buffer(&self.counts, 0, None);
         dispatch(
             encoder,
@@ -143,24 +150,19 @@ impl ViewState {
             .prepare(encoder, &kernels.prepare, timestamps(None, 2));
         self.depth_sort
             .encode(encoder, kernels, 32, timestamps(None, 3));
-        self.dispatches.dispatch(
-            encoder,
-            ViewDispatch::Visible,
-            &kernels.gather,
-            &self.gather,
-            None,
-        );
+        self.dispatches
+            .dispatch(encoder, VISIBLE, &kernels.gather, &self.gather, None);
         self.scan.encode(encoder, kernels, timestamps(None, 4));
         self.dispatches.dispatch(
             encoder,
-            ViewDispatch::Visible,
+            VISIBLE,
             &kernels.project_visible,
             &frame.projection.visible,
             timestamps(None, 5),
         );
         self.dispatches.dispatch(
             encoder,
-            ViewDispatch::Visible,
+            VISIBLE,
             &kernels.map_tiles,
             &frame.mapping.tiles,
             timestamps(None, 6),
@@ -171,14 +173,14 @@ impl ViewState {
         encoder.clear_buffer(&self.offsets, 0, None);
         self.dispatches.dispatch(
             encoder,
-            ViewDispatch::Intersections,
+            INTERSECTIONS,
             &kernels.tile_offsets,
             &frame.mapping.offsets,
             timestamps(None, 8),
         );
         self.dispatches.dispatch(
             encoder,
-            ViewDispatch::Raster,
+            RASTER,
             raster,
             &frame.raster.as_ref().unwrap().1,
             timestamps(None, 9),

@@ -3,7 +3,7 @@ use crate::gpu::{bind, storage, uniform};
 mod encode;
 use crate::gpu;
 use crate::kernels::Kernels;
-use crate::primitives::dispatch::{CountSlot, DispatchPlan, DispatchSlot, Dispatches};
+use crate::primitives::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::primitives::{RadixSort, Scan};
 use crate::{Error, FrameStats, Scene, Target};
 use encode::Uniforms;
@@ -70,29 +70,17 @@ pub struct ViewState {
     offsets: wgpu::Buffer,
     tile_count: u32,
     bits: u32,
-    dispatches: Dispatches<ViewDispatch>,
+    dispatches: Dispatches,
     frames: [FrameSlot; 3],
     pending: VecDeque<usize>,
     required_capacity: u32,
     limit: u64,
-    timing: crate::timing::StageTimer,
+    timing: Option<wgpu::QuerySet>,
     overflow_events: u32,
 }
-#[derive(Clone, Copy)]
-enum ViewDispatch {
-    Visible,
-    Intersections,
-    Raster,
-}
-impl DispatchSlot for ViewDispatch {
-    fn index(self) -> u32 {
-        match self {
-            Self::Visible => 0,
-            Self::Intersections => 1,
-            Self::Raster => 2,
-        }
-    }
-}
+const VISIBLE: u32 = 0;
+const INTERSECTIONS: u32 = 1;
+const RASTER: u32 = 2;
 fn plans(n: u32, capacity: u32, tiles: u32) -> [DispatchPlan; 3] {
     [
         DispatchPlan::new(CountSlot::Visible, n, 256, 1),
@@ -120,7 +108,7 @@ impl ViewState {
         let ids = storage(device, "compact IDs", u64::from(n) * 4);
         let depths = storage(device, "depth keys", u64::from(n) * 4);
         let hits = storage(device, "global tile counts", u64::from(n) * 4);
-        let projected = storage(device, "projected splats", u64::from(n.max(1)) * 36);
+        let projected = storage(device, "projected splats", u64::from(n.max(1)) * 40);
         let gathered = storage(device, "sorted tile counts", u64::from(n) * 4);
         let depth_sort = RadixSort::new(
             device,
@@ -214,7 +202,7 @@ impl ViewState {
             pending: VecDeque::new(),
             required_capacity: capacity,
             limit,
-            timing: crate::timing::StageTimer::default(),
+            timing: None,
             overflow_events: 0,
         })
     }
@@ -363,7 +351,20 @@ impl ViewState {
     }
     /// Diagnostic timestamps need ten slots; wait for completion before resolving on Metal.
     pub fn set_timestamp_queries(&mut self, queries: Option<wgpu::QuerySet>) -> Result<(), Error> {
-        self.timing.set(&self.device, queries)
+        if let Some(q) = &queries
+            && (!self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+                || !matches!(q.ty(), wgpu::QueryType::Timestamp)
+                || q.count() < 10)
+        {
+            return Err(Error::Input(
+                "stage profiling requires TIMESTAMP_QUERY and ten timestamp slots",
+            ));
+        }
+        self.timing = queries;
+        Ok(())
     }
 }
 
@@ -389,17 +390,20 @@ mod tests {
         let mut view = renderer.create_view(&scene, 1).unwrap();
         let mut camera = crate::test_utils::pinhole_camera(64);
         let target = upload(device, &vec![[0.0f32; 4]; 64 * 64]);
-        let mut encoder = device.create_command_encoder(&Default::default());
-        renderer
-            .render(
+        let render = |encoder: &mut wgpu::CommandEncoder,
+                      view: &mut crate::ViewState,
+                      camera: &crate::Camera| {
+            renderer.render(
                 queue,
-                &mut encoder,
-                &mut view,
-                &camera,
+                encoder,
+                view,
+                camera,
                 &RenderOptions::default(),
                 Target::Float(target.clone()),
             )
-            .unwrap();
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        render(&mut encoder, &mut view, &camera).unwrap();
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let limit = view.limit;
@@ -410,45 +414,16 @@ mod tests {
         camera.position.z = 10.0;
         let mut encoder = device.create_command_encoder(&Default::default());
         for _ in 0..3 {
-            renderer
-                .render(
-                    queue,
-                    &mut encoder,
-                    &mut view,
-                    &camera,
-                    &RenderOptions::default(),
-                    Target::Float(target.clone()),
-                )
-                .unwrap();
+            render(&mut encoder, &mut view, &camera).unwrap();
         }
-        assert!(
-            renderer
-                .render(
-                    queue,
-                    &mut encoder,
-                    &mut view,
-                    &camera,
-                    &RenderOptions::default(),
-                    Target::Float(target.clone())
-                )
-                .is_err()
-        );
+        assert!(render(&mut encoder, &mut view, &camera).is_err());
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().intersections, 0);
         assert!(view.poll_feedback().unwrap().is_none());
         // All slots are reusable after draining, including the earlier failed frame.
         let mut encoder = device.create_command_encoder(&Default::default());
-        renderer
-            .render(
-                queue,
-                &mut encoder,
-                &mut view,
-                &camera,
-                &RenderOptions::default(),
-                Target::Float(target.clone()),
-            )
-            .unwrap();
+        render(&mut encoder, &mut view, &camera).unwrap();
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().visible, 0);

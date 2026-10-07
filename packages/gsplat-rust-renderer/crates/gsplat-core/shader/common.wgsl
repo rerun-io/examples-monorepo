@@ -27,7 +27,8 @@ struct Splat {
     opacity: f32,
     r: f32,
     g: f32,
-    b: f32
+    b: f32,
+    depth: f32
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

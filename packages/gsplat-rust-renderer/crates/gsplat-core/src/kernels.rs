@@ -1,7 +1,7 @@
 //! Device-lifetime modules and pipelines; allocation paths never compile shaders.
 use crate::gpu::{module, pipeline};
 
-pub(crate) fn sources() -> [String; 8] {
+pub(crate) fn sources() -> [String; 7] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -10,7 +10,6 @@ pub(crate) fn sources() -> [String; 8] {
         "sort.wgsl",
         "dispatch.wgsl",
         "raster_outputs.wgsl",
-        "raster_depth.wgsl",
     ]
     .map(crate::shader::resolve)
 }
@@ -36,16 +35,8 @@ pub(crate) struct Kernels {
 }
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
-        let [
-            projection,
-            mapping,
-            raster,
-            scan,
-            sort,
-            prepare,
-            outputs,
-            depth,
-        ] = sources().map(|s| module(device, &s));
+        let [projection, mapping, raster, scan, sort, prepare, outputs] =
+            sources().map(|s| module(device, &s));
         Self {
             project_forward: pipeline(device, &projection, "project_forward"),
             project_visible: pipeline(device, &projection, "project_visible"),
@@ -55,7 +46,7 @@ impl Kernels {
             float: pipeline(device, &outputs, "raster_float"),
             packed: pipeline(device, &outputs, "raster_packed"),
             texture: pipeline(device, &raster, "raster_texture"),
-            texture_depth: pipeline(device, &depth, "raster_texture_depth"),
+            texture_depth: pipeline(device, &raster, "raster_texture_depth"),
             scan: pipeline(device, &scan, "scan"),
             add_offsets: pipeline(device, &scan, "add_offsets"),
             count_keys: pipeline(device, &sort, "count_keys"),
@@ -95,6 +86,9 @@ mod tests {
             for (handle, ty) in module.types.iter() {
                 if ty.name.as_deref() == Some("Uniforms") {
                     assert_eq!(layout[handle].size, 256);
+                }
+                if ty.name.as_deref() == Some("Splat") {
+                    assert_eq!(layout[handle].size, 40);
                 }
             }
             let workgroup_bytes: u32 = module

@@ -123,9 +123,9 @@ The map identifies adaptation work as well as files that can move.
 
 | Future PR | Current files and physical line counts |
 | --- | --- |
-| U1 infrastructure | `core/src/gpu.rs` (112); `core/src/lib.rs`: `check_adapter`, `compute_limits` (36 selected / 141 file lines); `viewer/src/application.rs`: `compute_wgpu_setup` (27 selected / 365 file lines) |
-| U2 sort, scan, dispatch | `core/src/primitives.rs` (6); `core/src/primitives/dispatch.rs` (199); `core/src/primitives/scan.rs` (122); `core/src/primitives/sort.rs` (169); `core/shader/counts.wgsl` (8); `core/shader/dispatch.wgsl` (25); `core/shader/scan.wgsl` (55); `core/shader/scan_common.wgsl` (61); `core/shader/sort.wgsl` (205) |
-| U3 forward renderer | `core/src/camera.rs` (49); `core/src/scene.rs` (68); `core/src/types.rs` (95); `core/src/renderer.rs` (66); `core/src/kernels.rs` (112); `core/src/view/mod.rs` (456); `core/src/view/encode.rs` (200); `core/shader/common.wgsl` (79); `core/shader/project.wgsl` (196); `core/shader/map.wgsl` (84); `core/shader/raster.wgsl` (15); `core/shader/raster_common.wgsl` (71); `core/shader/raster_depth.wgsl` (91); `viewer/src/renderer.rs` (392); `viewer/src/composite.wgsl` (19) |
+| U1 infrastructure | `core/src/gpu.rs` (109); `core/src/lib.rs`: `check_adapter`, `compute_limits` (36 selected / 148 file lines); `viewer/src/application.rs`: `compute_wgpu_setup` (27 selected / 365 file lines) |
+| U2 sort, scan, dispatch | `core/src/primitives.rs` (6); `core/src/primitives/dispatch.rs` (187); `core/src/primitives/scan.rs` (109); `core/src/primitives/sort.rs` (154); `core/shader/counts.wgsl` (8); `core/shader/dispatch.wgsl` (25); `core/shader/scan.wgsl` (55); `core/shader/scan_common.wgsl` (61); `core/shader/sort.wgsl` (205) |
+| U3 forward renderer | `core/src/camera.rs` (49); `core/src/scene.rs` (68); `core/src/types.rs` (95); `core/src/renderer.rs` (66); `core/src/kernels.rs` (106); `core/src/view/mod.rs` (431); `core/src/view/encode.rs` (202); `core/shader/common.wgsl` (80); `core/shader/project.wgsl` (196); `core/shader/map.wgsl` (84); `core/shader/raster.wgsl` (30); `core/shader/raster_common.wgsl` (74); `viewer/src/renderer.rs` (392); `viewer/src/composite.wgsl` (19) |
 | U4 GaussianSplats3D wiring | `core/src/native.rs` (90); `viewer/src/cache.rs` (229); `viewer/src/visualizer.rs` (388) |
 | U5 precision fields | Future SDK/blueprint schema change; no implementation claimed here. Existing native conversion and archetype comparison tests supply evidence. |
 

@@ -1,5 +1,5 @@
 //! GPU count sources and cached two-dimensional indirect dispatch plans.
-use crate::gpu::{bind, storage, upload, write};
+use crate::gpu::{bind, storage, upload};
 
 pub(crate) fn dispatch(
     encoder: &mut wgpu::CommandEncoder,
@@ -62,17 +62,13 @@ impl DispatchPlan {
         ]
     }
 }
-pub(crate) trait DispatchSlot: Copy {
-    fn index(self) -> u32;
-}
-pub(crate) struct Dispatches<S: DispatchSlot> {
-    slot: std::marker::PhantomData<S>,
+pub(crate) struct Dispatches {
     plans: wgpu::Buffer,
     args: wgpu::Buffer,
     group: wgpu::BindGroup,
     len: u32,
 }
-impl<S: DispatchSlot> Dispatches<S> {
+impl Dispatches {
     pub fn new(
         device: &wgpu::Device,
         kernel: &wgpu::ComputePipeline,
@@ -96,7 +92,6 @@ impl<S: DispatchSlot> Dispatches<S> {
             ],
         );
         Self {
-            slot: std::marker::PhantomData,
             plans: plan_buffer,
             args,
             group,
@@ -105,9 +100,9 @@ impl<S: DispatchSlot> Dispatches<S> {
     }
     pub fn update(&self, queue: &wgpu::Queue, plans: &[DispatchPlan]) {
         assert_eq!(plans.len(), self.len as usize);
-        write(
-            queue,
+        queue.write_buffer(
             &self.plans,
+            0,
             bytemuck::cast_slice(&plans.iter().map(DispatchPlan::words).collect::<Vec<_>>()),
         );
     }
@@ -128,7 +123,7 @@ impl<S: DispatchSlot> Dispatches<S> {
     pub fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        index: S,
+        index: u32,
         pipeline: &wgpu::ComputePipeline,
         group: &wgpu::BindGroup,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
@@ -142,26 +137,19 @@ impl<S: DispatchSlot> Dispatches<S> {
     pub fn dispatch_in_pass(
         &self,
         pass: &mut wgpu::ComputePass<'_>,
-        index: S,
+        index: u32,
         pipeline: &wgpu::ComputePipeline,
         group: &wgpu::BindGroup,
     ) {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, group, &[]);
-        pass.dispatch_workgroups_indirect(&self.args, u64::from(index.index()) * 16);
+        pass.dispatch_workgroups_indirect(&self.args, u64::from(index) * 16);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[derive(Clone, Copy)]
-    struct Raster;
-    impl DispatchSlot for Raster {
-        fn index(self) -> u32 {
-            0
-        }
-    }
     use crate::gpu::{module, pipeline};
     use crate::test_utils::{gpu, read, upload};
     #[test]
@@ -180,7 +168,7 @@ mod tests {
             &module(device, include_str!("../../shader/dispatch.wgsl")),
             "prepare",
         );
-        let dispatches = Dispatches::<Raster>::new(
+        let dispatches = Dispatches::new(
             device,
             &prepare,
             &counts,

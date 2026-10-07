@@ -9,7 +9,7 @@
     if tile >= u.image.z * u.image.w {
         return;
     }
-    let rgba = raster(tile, lid);
+    let rgba = raster(tile, lid).rgba;
     let pix = pixel(tile, lid);
     if all(pix < u.image.xy) {
         out_float[pix.x + pix.y * u.image.x] = rgba;
@@ -21,7 +21,7 @@
     if tile >= u.image.z * u.image.w {
         return;
     }
-    let rgba = raster(tile, lid);
+    let rgba = raster(tile, lid).rgba;
     let pix = pixel(tile, lid);
     if all(pix < u.image.xy) {
         let v = vec4u(clamp(rgba * 255.0, vec4f(0.0), vec4f(255.0)));

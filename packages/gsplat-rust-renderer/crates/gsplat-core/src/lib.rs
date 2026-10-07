@@ -120,19 +120,26 @@ mod capability_tests {
         };
         let requested = wgpu::Limits::downlevel_webgl2_defaults();
         let limits = super::compute_limits(&available, requested.clone());
-        assert_eq!(limits.max_buffer_size, 1 << 30);
-        assert_eq!(limits.max_storage_buffer_binding_size, 1 << 30);
-        assert_eq!(limits.max_bind_groups, requested.max_bind_groups);
         assert_eq!(
-            limits.max_texture_dimension_2d,
-            requested.max_texture_dimension_2d
+            (
+                limits.max_buffer_size,
+                limits.max_storage_buffer_binding_size,
+                limits.max_bind_groups,
+                limits.max_texture_dimension_2d,
+                limits.max_uniform_buffers_per_shader_stage,
+                limits.max_storage_buffers_per_shader_stage,
+                limits.max_storage_textures_per_shader_stage
+            ),
+            (
+                1 << 30,
+                1 << 30,
+                requested.max_bind_groups,
+                requested.max_texture_dimension_2d,
+                requested.max_uniform_buffers_per_shader_stage,
+                8,
+                2
+            )
         );
-        assert_eq!(
-            limits.max_uniform_buffers_per_shader_stage,
-            requested.max_uniform_buffers_per_shader_stage
-        );
-        assert_eq!(limits.max_storage_buffers_per_shader_stage, 8);
-        assert_eq!(limits.max_storage_textures_per_shader_stage, 2);
         super::check_adapter(wgpu::Features::SUBGROUP, &limits).unwrap();
         assert!(limits.check_limits(&available));
         let weak = wgpu::Limits::downlevel_webgl2_defaults();

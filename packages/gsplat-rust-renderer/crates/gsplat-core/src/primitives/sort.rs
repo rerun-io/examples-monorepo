@@ -1,21 +1,10 @@
 //! Stable four-bit radix sort with GPU-resident counts.
-use super::dispatch::{CountSlot, DispatchPlan, DispatchSlot, Dispatches};
+use super::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::gpu::{bind, storage, uniform};
 use crate::kernels::Kernels;
 
-#[derive(Clone, Copy)]
-enum SortDispatch {
-    Blocks,
-    Reduced,
-}
-impl DispatchSlot for SortDispatch {
-    fn index(self) -> u32 {
-        match self {
-            Self::Blocks => 0,
-            Self::Reduced => 1,
-        }
-    }
-}
+const BLOCKS: u32 = 0;
+const REDUCED: u32 = 1;
 struct SortGroups {
     count_keys: wgpu::BindGroup,
     reduce_counts: wgpu::BindGroup,
@@ -27,7 +16,7 @@ pub(crate) struct RadixSort {
     keys: [wgpu::Buffer; 2],
     values: [wgpu::Buffer; 2],
     groups: [SortGroups; 8],
-    dispatches: Dispatches<SortDispatch>,
+    dispatches: Dispatches,
 }
 impl RadixSort {
     pub fn new(
@@ -135,13 +124,13 @@ impl RadixSort {
         for groups in &self.groups[..bits.div_ceil(4) as usize] {
             self.dispatches.dispatch_in_pass(
                 &mut pass,
-                SortDispatch::Blocks,
+                BLOCKS,
                 &kernels.count_keys,
                 &groups.count_keys,
             );
             self.dispatches.dispatch_in_pass(
                 &mut pass,
-                SortDispatch::Reduced,
+                REDUCED,
                 &kernels.reduce_counts,
                 &groups.reduce_counts,
             );
@@ -150,16 +139,12 @@ impl RadixSort {
             pass.dispatch_workgroups(1, 1, 1);
             self.dispatches.dispatch_in_pass(
                 &mut pass,
-                SortDispatch::Reduced,
+                REDUCED,
                 &kernels.scan_add,
                 &groups.scan_add,
             );
-            self.dispatches.dispatch_in_pass(
-                &mut pass,
-                SortDispatch::Blocks,
-                &kernels.scatter,
-                &groups.scatter,
-            );
+            self.dispatches
+                .dispatch_in_pass(&mut pass, BLOCKS, &kernels.scatter, &groups.scatter);
         }
     }
     pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {
