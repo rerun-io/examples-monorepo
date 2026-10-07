@@ -4,7 +4,7 @@
 //! gsplat-core output in Spatial3DView. Supports live gRPC, saved recordings,
 //! and headless screenshots with the same registration path.
 
-use gsplat_viewer::gaussian_visualizer;
+use gsplat_viewer::visualizer;
 
 use clap::Parser as _;
 use re_sdk_types::View as _;
@@ -104,7 +104,7 @@ pub fn create_app(
 
     viewer.with_render_ctx_mut(|ctx| {
         ctx.renderers_mut()
-            .register::<gsplat_viewer::gaussian_renderer::GaussianRenderer>();
+            .register::<gsplat_viewer::renderer::GaussianRenderer>();
     });
 
     viewer.extend_view_class(
@@ -133,7 +133,7 @@ fn run_headless(
         egui_kittest::Harness::<re_viewer::App>::builder()
             .with_size(size)
             .with_step_dt(1.0 / 60.0)
-            .wgpu_setup(full_limits_wgpu_setup())
+            .wgpu_setup(compute_wgpu_setup())
             .build_eframe(move |cc| {
                 let repaint_signal = repaint_signal.clone();
                 cc.egui_ctx.set_request_repaint_callback(move |_info| {
@@ -219,26 +219,29 @@ pub fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
     Ok(egui::vec2(width, height))
 }
 
-pub fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
     eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
         instance_descriptor: re_renderer::device_caps::instance_descriptor(None),
         native_adapter_selector: Some(Arc::new(move |adapters, surface| {
-            let adapter = re_renderer::device_caps::select_adapter(
+            re_renderer::device_caps::select_adapter(
                 adapters,
                 re_renderer::device_caps::instance_descriptor(None).backends,
                 surface,
-            )?;
-            gsplat_core::check_adapter(adapter.features(), &adapter.limits())
-                .map_err(|error| format!("{}: {error}", adapter.get_info().name))?;
-            Ok(adapter)
+            )
         })),
-        device_descriptor: Arc::new(|adapter| re_renderer::external::wgpu::DeviceDescriptor {
-            label: Some("gsplat-rust-renderer device"),
-            required_features: gsplat_core::required_features(adapter),
-            required_limits: adapter.limits(),
-            memory_hints: re_renderer::external::wgpu::MemoryHints::MemoryUsage,
-            trace: re_renderer::external::wgpu::Trace::Off,
-            experimental_features: Default::default(),
+        device_descriptor: Arc::new(|adapter| {
+            let mut descriptor =
+                re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
+                    .device_descriptor();
+            descriptor.label = Some("Gaussian compute viewer");
+            let available = adapter.limits();
+            if gsplat_core::check_adapter(adapter.features(), &available).is_ok() {
+                descriptor.required_features |= wgpu::Features::SUBGROUP;
+                descriptor.required_limits =
+                    gsplat_core::compute_limits(&available, descriptor.required_limits);
+            }
+            descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+            descriptor
         }),
         ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
     })
@@ -262,7 +265,7 @@ fn native_options() -> eframe::NativeOptions {
                 eframe::egui_wgpu::SurfaceErrorAction::SkipFrame
             }
         }),
-        wgpu_setup: full_limits_wgpu_setup(),
+        wgpu_setup: compute_wgpu_setup(),
     };
     native_options
 }
@@ -271,9 +274,8 @@ fn register_splat_system(
     registrator: &mut re_viewer_context::ViewSystemRegistrator<'_>,
 ) -> Result<(), re_viewer_context::ViewClassRegistryError> {
     gsplat_viewer::bounds::register(registrator);
-    registrator
-        .register_context_system::<gsplat_viewer::automatic_selection::AutomaticSplatSelection>()?;
-    registrator.register_visualizer::<gaussian_visualizer::GaussianSplatVisualizer>()
+    registrator.register_context_system::<gsplat_viewer::selection::AutomaticSplatSelection>()?;
+    registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()
 }
 
 #[cfg(test)]
@@ -324,7 +326,7 @@ mod device_tests {
 }
 
 #[cfg(test)]
-mod automatic_selection_tests {
+mod selection_tests {
     use super::*;
     use re_viewer_context::{ViewClass as _, ViewClassRegistry};
 

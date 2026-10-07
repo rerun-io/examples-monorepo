@@ -67,6 +67,20 @@ impl Uniforms {
     }
 }
 impl ViewState {
+    pub(crate) fn prepare(
+        &mut self,
+        queue: &wgpu::Queue,
+        kernels: &Kernels,
+        size: glam::UVec2,
+    ) -> Result<glam::UVec2, Error> {
+        let tiles = glam::UVec2::new(size.x.div_ceil(16), size.y.div_ceil(16));
+        let tile_count = tiles
+            .x
+            .checked_mul(tiles.y)
+            .ok_or(Error::Input("too many tiles"))?;
+        self.resize(queue, kernels, tile_count)?;
+        Ok(tiles)
+    }
     pub(crate) fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -77,12 +91,7 @@ impl ViewState {
         target: Target,
     ) -> Result<(), Error> {
         let raster_kind = target.layout(camera.size)?;
-        let tiles = glam::UVec2::new(camera.size.x.div_ceil(16), camera.size.y.div_ceil(16));
-        let tile_count = tiles
-            .x
-            .checked_mul(tiles.y)
-            .ok_or(Error::Input("too many tiles"))?;
-        self.resize(queue, kernels, tile_count)?;
+        let tiles = self.prepare(queue, kernels, camera.size)?;
         let index = self
             .frames
             .iter()

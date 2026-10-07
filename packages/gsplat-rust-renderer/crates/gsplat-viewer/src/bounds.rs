@@ -1,5 +1,5 @@
 //! Bounds for default/reset framing through public view fallback providers.
-use crate::gaussian_renderer::GpuCache;
+use crate::cache::GpuCache;
 use glam::Vec3;
 use re_sdk_types::{blueprint::archetypes::EyeControls3D, components::Position3D};
 use re_viewer_context::{QueryContext, ViewStateExt as _, ViewSystemRegistrator};
@@ -43,6 +43,28 @@ fn scene_bounds(ctx: &QueryContext<'_>) -> [Vec3; 2] {
         (Some(b), _) | (_, Some(b)) => b,
         _ => [Vec3::splat(-0.5), Vec3::splat(0.5)],
     }
+}
+
+/// Include the visible three-sigma radius when framing compute or fallback splats.
+pub(crate) fn from_splats(cloud: &gsplat_core::native::NativeSplats<'_>) -> [Vec3; 2] {
+    let mut bounds = [Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)];
+    for (i, center) in cloud.centers.iter().enumerate() {
+        let center = Vec3::from_array(*center);
+        let radius = Vec3::from_array(
+            cloud
+                .scales
+                .get(i)
+                .or_else(|| cloud.scales.last())
+                .copied()
+                .unwrap_or([0.01; 3]),
+        )
+        .abs()
+        .max_element()
+            * 3.0;
+        bounds[0] = bounds[0].min(center - radius);
+        bounds[1] = bounds[1].max(center + radius);
+    }
+    bounds
 }
 
 /// Transform all eight corners; negative scale and rotation are supported.

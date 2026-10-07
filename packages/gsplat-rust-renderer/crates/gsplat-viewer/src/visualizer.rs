@@ -1,6 +1,6 @@
 //! Native archetype queries, memoized uploads, instance transforms and blueprint properties.
-use crate::gaussian_renderer::{Batch, BatchKey, GaussianDrawData, GpuCache};
-use glam::{Quat, UVec2, Vec2};
+use crate::cache::{Batch, BatchKey, GpuCache};
+use glam::UVec2;
 use gsplat_core::{Camera, RenderMode, RenderOptions, native::NativeSplats};
 use half::f16;
 use re_sdk_types::{Archetype as _, Component as _, archetypes::GaussianSplats3D};
@@ -28,7 +28,7 @@ pub fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
 pub struct GaussianSplatVisualizer;
 impl IdentifiedViewSystem for GaussianSplatVisualizer {
     fn identifier() -> ViewSystemIdentifier {
-        crate::automatic_selection::COMPUTE.into()
+        crate::selection::COMPUTE.into()
     }
 }
 impl VisualizerSystem for GaussianSplatVisualizer {
@@ -58,9 +58,9 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             return Ok(output);
         };
         let transforms = systems.get::<TransformTreeContext>(&output)?;
-        let mut draw = GaussianDrawData::default();
+        let mut draw = Vec::new();
         for (data, instruction) in query.iter_visualizer_instruction_for(Self::identifier()) {
-            if !crate::automatic_selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
+            if !crate::selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
                 continue;
             }
             let instances = match transforms.target_from_entity_path(data.entity_path.hash()) {
@@ -96,7 +96,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 ),
             }
         }
-        Ok(output.with_draw_data([draw.into()]))
+        Ok(output.with_draw_data(draw))
     }
 }
 struct Entity<'a> {
@@ -109,9 +109,9 @@ fn draw_entity(
     query: &ViewQuery<'_>,
     entity: Entity<'_>,
     output: &VisualizerExecutionOutput,
-    draw: &mut GaussianDrawData,
+    draw: &mut Vec<re_renderer::QueueableDrawData>,
     camera: &Camera,
-) -> Result<bool, gsplat_core::Error> {
+) -> Result<bool, ViewSystemExecutionError> {
     let Entity {
         data,
         instruction,
@@ -202,26 +202,59 @@ fn draw_entity(
                 instance: index,
                 row,
             };
-            retry |= ctx
+            let options = RenderOptions {
+                render_mode,
+                world_from_local,
+                ..Default::default()
+            };
+            let prepared = ctx
                 .viewer_ctx
                 .store_context
                 .memoizer::<GpuCache, _>(|cache| {
-                    draw.add_batch(
+                    cache.prepare(
                         ctx.render_ctx(),
-                        cache,
                         Batch {
-                            key,
+                            key: key.clone(),
                             cloud: &native,
                             generation: signature,
                             camera,
-                            options: RenderOptions {
-                                render_mode,
-                                world_from_local,
-                                ..Default::default()
-                            },
+                            options,
                         },
                     )
-                })?;
+                });
+            match prepared {
+                Ok((batch, needs_repaint)) => {
+                    draw.push(batch.into());
+                    retry |= needs_repaint;
+                }
+                Err(
+                    error
+                    @ (gsplat_core::Error::Capacity { .. } | gsplat_core::Error::Capabilities),
+                ) => {
+                    re_log::warn_once!("Gaussian compute fallback: {error}");
+                    output.report_unspecified_source(
+                        instruction.id,
+                        re_viewer_context::ViewerReportSeverity::Warning,
+                        format!("{error}; using the native Gaussian renderer"),
+                    );
+                    let sort = ctx
+                        .viewer_ctx
+                        .store_context
+                        .memoizer::<GpuCache, _>(|cache| {
+                            retry |=
+                                cache.fallback_bounds(query.view_id, &native, world_from_local);
+                            cache.native_sort(key)
+                        });
+                    draw.push(
+                        native_fallback(ctx.render_ctx(), &native, world_from_local, sort)?.into(),
+                    );
+                }
+                Err(error) => {
+                    return Err(ViewSystemExecutionError::DrawDataCreationError(
+                        std::sync::Arc::new(error),
+                    ));
+                }
+            }
         }
     }
     Ok(retry)
@@ -277,18 +310,11 @@ pub fn camera_from_view(ctx: &ViewContext<'_>, query: &ViewQuery<'_>) -> Option<
             ctx.egui_ctx().pixels_per_point(),
         ),
     );
-    let world_from_rdf = eye.world_from_rub_view.to_mat4()
-        * glam::Mat4::from_quat(Quat::from_xyzw(1.0, 0.0, 0.0, 0.0));
-    let (_, rotation, position) = world_from_rdf.to_scale_rotation_translation();
-    Some(Camera {
-        model: gsplat_core::CameraModel::Pinhole,
-        position,
-        rotation,
-        fov_y: fov_y as f64,
-        fov_x: 2.0 * ((fov_y as f64 * 0.5).tan() * size.x as f64 / size.y as f64).atan(),
-        center_uv: Vec2::splat(0.5),
+    Some(Camera::from_view(
+        glam::Affine3A::from_mat4(eye.world_from_rub_view.to_mat4()),
+        f64::from(fov_y),
         size,
-    })
+    ))
 }
 
 // Used only for blueprint-valued components, whose source row ids Rerun deliberately clears.
@@ -301,4 +327,62 @@ fn hash_arrow(data: &re_sdk_types::external::arrow::array::ArrayData, hasher: &m
     for child in data.child_data() {
         hash_arrow(child, hasher);
     }
+}
+
+/// The stock texture-backed path remains available when compute storage cannot hold a scene.
+fn native_fallback(
+    ctx: &re_renderer::RenderContext,
+    cloud: &NativeSplats<'_>,
+    world_from_local: glam::Affine3A,
+    sort: re_renderer::SortOrderCache,
+) -> Result<re_renderer::renderer::GaussianSplatDrawData, ViewSystemExecutionError> {
+    let centers: Vec<_> = cloud
+        .centers
+        .iter()
+        .copied()
+        .map(glam::Vec3::from_array)
+        .collect();
+    // The stock builder zips centers with scales before clamping its packed data.
+    // Expand scales first so a broadcast scale cannot repeat the first center.
+    let scales: Vec<_> = (0..cloud.centers.len())
+        .map(|index| {
+            glam::Vec3::from_array(
+                cloud
+                    .scales
+                    .get(index)
+                    .or_else(|| cloud.scales.last())
+                    .copied()
+                    .unwrap_or([0.01; 3]),
+            )
+            .max(glam::Vec3::splat(1e-6))
+        })
+        .collect();
+    let rotations: Vec<_> = cloud
+        .quaternions
+        .iter()
+        .copied()
+        .map(glam::Quat::from_array)
+        .collect();
+    let colors: Vec<_> = cloud
+        .colors
+        .iter()
+        .map(|rgba| re_renderer::Rgba32Unmul::from_rgba_unmul_array(rgba.to_be_bytes()))
+        .collect();
+    let sh: Vec<_> = cloud
+        .sh
+        .iter()
+        .map(|coefficients| coefficients.map(re_renderer::GaussianShCoefficient::from_rgb))
+        .collect();
+    let sh_count = if sh.is_empty() {
+        0
+    } else {
+        ((cloud.degree.min(3) + 1).pow(2) - 1) as usize
+    };
+    let mut builder = re_renderer::GaussianSplatBuilder::new(ctx);
+    builder
+        .batch("Gaussian compute fallback")
+        .world_from_obj(world_from_local)
+        .sort_order(sort)
+        .add_gaussians(&centers, &scales, &rotations, &colors, &sh, sh_count, &[]);
+    Ok(builder.into_draw_data()?)
 }

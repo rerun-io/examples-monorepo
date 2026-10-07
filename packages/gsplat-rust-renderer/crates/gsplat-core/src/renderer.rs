@@ -38,6 +38,16 @@ impl Renderer {
             self.limit,
         )
     }
+    /// Allocate view scratch before queuing draw data so capacity failures can select a fallback.
+    pub fn prepare_view(
+        &self,
+        queue: &wgpu::Queue,
+        view: &mut ViewState,
+        camera: &Camera,
+    ) -> Result<(), Error> {
+        camera.validate()?;
+        view.prepare(queue, &self.kernels, camera.size).map(|_| ())
+    }
     /// Encode without submission or CPU waits. Submit, then poll this view's feedback.
     /// Overflow leaves the target intact; rerender after feedback requests more capacity.
     pub fn render(
