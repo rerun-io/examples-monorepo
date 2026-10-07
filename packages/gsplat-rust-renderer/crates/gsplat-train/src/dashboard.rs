@@ -131,6 +131,9 @@ pub fn send(
 
 #[cfg(test)]
 mod tests {
+    use rerun::external::re_sdk_types::blueprint::archetypes::{
+        EyeControls3D, VisualizerInstruction,
+    };
     #[test]
     fn visualizer_override_is_opt_in_and_eye_uses_scene_up() {
         for compute in [false, true] {
@@ -143,14 +146,19 @@ mod tests {
             for message in storage.take() {
                 if let rerun::log::LogMsg::ArrowMsg(_, arrow) = message {
                     let chunk = re_chunk::Chunk::from_arrow_msg(&arrow).unwrap();
-                    let expected_override = rerun::external::re_sdk_types::blueprint::archetypes::VisualizerInstruction::new("ComputeGaussianSplats3D").visualizer_type.unwrap();
+                    let expected_override = VisualizerInstruction::new("ComputeGaussianSplats3D")
+                        .visualizer_type
+                        .unwrap();
                     if let Some(actual) =
                         chunk.component_batch_raw(expected_override.descriptor.component, 0)
                     {
                         override_seen |= *actual.unwrap() == *expected_override.array;
                     }
                     if chunk.entity_path().to_string().ends_with("/EyeControls3D") {
-                        let expected = rerun::external::re_sdk_types::blueprint::archetypes::EyeControls3D::new().with_eye_up([0.0, 0.0, 1.0]).eye_up.unwrap();
+                        let expected = EyeControls3D::new()
+                            .with_eye_up([0.0, 0.0, 1.0])
+                            .eye_up
+                            .unwrap();
                         assert_eq!(
                             *chunk
                                 .component_batch_raw(expected.descriptor.component, 0)

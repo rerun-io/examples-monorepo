@@ -32,7 +32,7 @@ pub enum Engine {
 impl Engine {
     pub async fn new(
         kind: Implementation,
-        scene: &Scene,
+        scene: &PlyScene,
         settings: &RenderSettings,
         camera: &CameraSpec,
         ply: &Path,
@@ -172,7 +172,7 @@ pub trait RenderEngine {
     }
 }
 
-pub use gsplat_render::Scene;
+pub use gsplat_render::PlyScene;
 
 pub struct Brush {
     splats: Splats,
@@ -183,7 +183,7 @@ pub struct Brush {
     splat_scale: f32,
 }
 impl Brush {
-    pub async fn new(scene: &Scene, settings: &RenderSettings) -> Self {
+    pub async fn new(scene: &PlyScene, settings: &RenderSettings) -> Self {
         use burn::backend::wgpu::{
             RuntimeOptions, WgpuDevice, graphics::AutoGraphicsApi, init_setup_async,
         };
@@ -352,7 +352,7 @@ impl RenderEngine for gsplat_render::Renderer {
 
 /// Construct the shared renderer with the benchmark's recorded controls.
 pub async fn ours(
-    scene: &Scene,
+    scene: &PlyScene,
     width: u32,
     height: u32,
     settings: &RenderSettings,

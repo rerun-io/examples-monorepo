@@ -5,13 +5,13 @@ use glam::{UVec2, Vec3};
 use gsplat_core::{RenderMode, RenderOptions, Splats, Target};
 use std::path::Path;
 
-pub struct Scene {
+pub struct PlyScene {
     pub data: SplatData,
     pub mode: RenderMode,
     pub center: Vec3,
     pub extent: f32,
 }
-impl Scene {
+impl PlyScene {
     pub async fn load(path: &Path) -> Result<Self> {
         let loaded =
             brush_serde::import::load_splat_from_ply(tokio::fs::File::open(path).await?, None)
@@ -139,27 +139,9 @@ impl Renderer {
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let read = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("stage timestamp readback"),
-            size: 80,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.resolve_query_set(&query, 0..10, &resolve, 0);
-        encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 80);
-        self.queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        read.map_async(wgpu::MapMode::Read, .., move |r| {
-            let _ = tx.send(r);
-        });
-        self.finish()?;
-        rx.recv()
-            .map_err(|e| Error::Gpu(e.to_string()))?
-            .map_err(|e| Error::Gpu(e.to_string()))?;
-        let data = read
-            .get_mapped_range(..)
-            .map_err(|e| Error::Gpu(e.to_string()))?;
+        let data = self.read_buffer(encoder, &resolve)?;
         let ticks: &[u64] = bytemuck::cast_slice(&data);
         if ticks[9] <= ticks[0] || ticks.windows(2).any(|pair| pair[1] < pair[0]) {
             return Err(Error::Gpu(format!(
@@ -186,7 +168,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::Gpu(e.to_string()))?;
+            .map_err(gpu)?;
         gsplat_core::check_adapter(adapter.features(), &adapter.limits())?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -195,7 +177,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::Gpu(e.to_string()))?;
+            .map_err(gpu)?;
         let core = gsplat_core::Renderer::new(&device, &queue)?;
         let scene = core.upload(splats)?;
         let view = core.create_view(&scene, initial_capacity)?;
@@ -266,7 +248,7 @@ impl Renderer {
     pub fn finish(&self) -> Result<()> {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| Error::Gpu(e.to_string()))?;
+            .map_err(gpu)?;
         Ok(())
     }
     /// Read the target written by the last successful render.
@@ -279,30 +261,37 @@ impl Renderer {
         } else {
             &self.packed
         };
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pixel readback"),
-            size: target.size(),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(target, 0, &staging, 0, target.size());
-        self.queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        staging.map_async(wgpu::MapMode::Read, .., move |r| {
-            let _ = tx.send(r);
-        });
-        self.finish()?;
-        rx.recv()
-            .map_err(|e| Error::Gpu(e.to_string()))?
-            .map_err(|e| Error::Gpu(e.to_string()))?;
-        let data = staging
-            .get_mapped_range(..)
-            .map_err(|e| Error::Gpu(e.to_string()))?;
+        let encoder = self.device.create_command_encoder(&Default::default());
+        let data = self.read_buffer(encoder, target)?;
         Ok(if matches!(output, Output::Float) {
             bytemuck::cast_slice(&data).to_vec()
         } else {
             data.iter().map(|x| f32::from(*x) / 255.0).collect()
         })
     }
+    fn read_buffer(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        target: &wgpu::Buffer,
+    ) -> Result<wgpu::BufferView> {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gsplat readback"),
+            size: target.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(target, 0, &staging, 0, target.size());
+        let (tx, rx) = std::sync::mpsc::channel();
+        encoder.map_buffer_on_submit(&staging, wgpu::MapMode::Read, .., move |result| {
+            let _ = tx.send(result);
+        });
+        self.queue.submit([encoder.finish()]);
+        self.finish()?;
+        rx.recv().map_err(gpu)?.map_err(gpu)?;
+        staging.get_mapped_range(..).map_err(gpu)
+    }
+}
+
+fn gpu(error: impl std::fmt::Display) -> Error {
+    Error::Gpu(error.to_string())
 }

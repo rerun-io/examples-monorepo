@@ -1,152 +1,101 @@
 # Architecture
 
-Six workspace crates share the scene and camera contracts. Brush is pinned to
-`1388f74c6fe0236f68ee4915564bf00e9d2e3747`; recording and viewer APIs use Rerun
-0.38.1. The earlier `src/gsplat_core` and its shaders have been removed.
+The Cargo workspace has six crates:
 
 | Crate | Responsibility |
-|---|---|
-| `gsplat-core` | Raw wgpu/WGSL forward renderer, immutable scene uploads, per-view scratch |
-| `gsplat-render` | PLY loading through Brush, camera loading, standalone PNG rendering |
-| `gsplat-eval` | Brush/published PSNR and SSIM, optional VGG LPIPS, typed reports |
-| `gsplat-bench` | Brush/core/native comparisons, float scoring, synchronized measurements |
-| `gsplat-viewer` | Rerun native-archetype query, shared compute rendering, scene composition |
-| `gsplat-train` | In-process Brush training, asynchronous native Rerun observations |
+| --- | --- |
+| `gsplat-core` | Raw-wgpu projection, sorting, rasterization, and per-view feedback |
+| `gsplat-render` | Brush PLY input, camera files, and standalone image output |
+| `gsplat-bench` | Brush/native/core comparison, orbit cameras, and synchronized timing |
+| `gsplat-eval` | Image metrics and report provenance |
+| `gsplat-train` | Brush training with native Rerun observations |
+| `gsplat-viewer` | Native archetype queries, compute visualization, and composition |
 
-## Data flow
+## Source and compatibility
 
-```mermaid
-flowchart LR
-    PLY[PLY] --> Load[Brush scene loader]
-    Load --> Core[gsplat-core]
-    Cameras[NeRF / COLMAP / CameraSpec] --> Core
-    Core --> PNG[Standalone PNG]
-    PNG --> Eval[gsplat-eval]
-    Data[Training dataset] --> Train[Brush training stream]
-    Train --> RRD[Native GaussianSplats3D RRD]
-    PLY --> Import[Rerun native PLY importer]
-    Import --> RRD
-    RRD --> Stock[Stock Rerun]
-    RRD --> Viewer[Custom viewer]
-    Viewer --> Core
-```
+Brush is pinned to `1388f74c`. The `brush-src` Pixi-build package fetches that
+revision and applies `patches/brush-1388f74c-process-observer.patch`. This patch
+exposes existing train-step and refinement statistics; it changes no training or
+renderer math. All 16 Brush workspace packages resolve from one installed tree.
+An activation script maintains a stable `target/brush-src` link across prod/dev
+environments. The source recipe and the Cargo patch comment describe upgrades.
+The separately built `brush-cli` reference uses unpatched upstream source.
 
-Python provides downloads, initialization, CLI configuration, camera/image logging,
-and process orchestration. It does not implement PLY decoding or image metrics.
-The PLY logger uses Rerun's importer and chunk reader, renames the native entity to
-`/world/splats`, and computes center percentiles for framing. Static PLY scenes keep
-their path across file names. Training snapshots retain their iteration timeline; synthetic relog checks retain
-their explicit static updates. `scene_io.py` retains the typed NeRF metadata and image compositing needed
-by the camera logger; the shared Rust camera loader serves rendering and evaluation.
+Rerun is pinned to 0.38.1, Burn to `faec3983`, CubeCL to `46752244`, and wgpu to
+registry 30.0.0. Rerun's wasm-bindgen pin prevents use of Brush's wgpu 30.0.1 fork.
+The native path is tested; a web build still needs compatible bindings and
+WebGPU subgroup support. Kernels stay within WebGPU workgroup, storage-buffer,
+and dispatch limits. Devices without subgroups fail with a capability error.
 
-## Scene and view lifetime
+## Core and image boundaries
 
-`gsplat-core::Renderer` owns device-lifetime pipelines. A scene upload holds the
-splat attributes; several views share that upload. Each `ViewState` owns its scratch,
-uniform slots, sort capacity, output, and feedback. Camera movement does not upload
-the scene again. GPU feedback reports capacity overflow; the caller grows capacity
-and rerenders before accepting a frame.
+The core depends only on wgpu and small math/layout libraries. It contains no
+Rerun, Brush, Burn, or async runtime types. `Scene` owns shared GPU input;
+`ViewState` owns scratch buffers, bindings, and bounded feedback slots. Several
+views can share one upload and encode before one queue submission.
 
-The custom viewer queries native `GaussianSplats3D` components and transforms,
-identifies changes by resolved query rows, and shares scene uploads across views.
-Optional component removal, relogging, resizing, and render-mode changes invalidate
-the appropriate resources. The renderer uses the eye committed by the spatial view;
-the public Rerun hook can introduce a one-frame eye delay. It does not guess an eye
-before one exists.
+The forward path projects, sorts visible depths, scans intersection counts,
+projects visible splats, maps and sorts tiles, computes tile offsets, and
+rasterizes. Counts and dispatch plans stay on the GPU. An eight-byte count
+readback detects overflow; the output remains intact until capacity grows and
+the view rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
+Render mode is a per-render option: default blur or mip antialiasing.
 
-Recordings without overrides remain portable: this viewer chooses
-`ComputeGaussianSplats3D`, stock Rerun chooses its native visualizer. An explicit
-native selection stays native. Explicit compute selection requires this custom
-viewer; stock 0.38.1 provides no warning for an unknown visualizer, so the Python
-helper emits that warning when making the selection. Compute mode can be `default` or `mip`, stored in the blueprint.
+Targets own their GPU handles and provide f32 RGBA, packed RGBA8, or storage
+textures. The viewer requests color and alpha-weighted camera depth for
+composition with opaque scene content. Standalone parity uses raw f32 splats;
+native `GaussianSplats3D` adds RGBA8/f16 quantization, which is reported separately.
 
-## GPU pipeline
+## Viewer
 
-The GPU performs visibility, sorting, projection, and rasterization. The timed
-stage boundaries are:
+The custom visualizer reads native components and respects explicit visualizer
+instructions. Automatic selection changes only the active custom viewer's
+blueprint. Recordings without overrides remain portable to stock Rerun.
 
-| Stage | Work |
-|---|---|
-| `project_forward` | Cull/project candidates and prepare indirect dispatch |
-| `depth_sort` | Sort visible splats by depth |
-| `gather_scan` | Gather visible data and scan intersection counts |
-| `project_visible` | Project covariance, evaluate SH, compute tile coverage |
-| `map_intersections` | Emit tile/splat pairs |
-| `tile_sort` | Sort live intersections by tile |
-| `tile_offsets` | Build each tile's range |
-| `rasterize` | Blend sorted splats front to back |
+A store-owned cache shares uploads across views and tracks each instance's target
+with dirty, pending, or complete state. Optional-attribute changes invalidate the
+upload even when centers retain their row ID. Blueprint values need a content
+hash because their source row IDs are cleared by Rerun. Camera and mode changes
+reuse the scene. Unused entries are evicted when frames advance.
 
-Cameras support pinhole, KB4, RT8, and thin-prism distortion. Mip mode applies
-covariance filtering and scale compensation. The standalone path can read unclipped
-float RGBA or packed output; PNG export clips and rounds to 8-bit RGB. The viewer
-composites the display-referred premultiplied color and optional depth through
-Rerun's renderer. Tests cover black and white backgrounds, opaque foreground/rear
-geometry, fixed-camera agreement, and analytic calibration. Compute picking, hover, selection outlines, and per-entity focus bounds are not
-implemented. Expected depth is an approximation for overlapping depth mixtures.
-Entities are not jointly depth-sorted; each instance requires a full render.
+The integration currently submits once and allocates two full-viewport targets
+per instance per view. Submission count and target memory therefore grow with
+both instance and view count. An upstream integration should batch encodes and
+pool targets. Splats in separate entities are not jointly sorted. Picking,
+hover, and outlines are not implemented. The eye comes from public view state
+and can lag one UI frame. Bounds support automatic framing.
 
-Kernels stay within eight storage buffers per stage, at most 256 threads per
-workgroup, and 65,535 dispatch groups per axis through 2D dispatch. The optional
-depth kernel needs 10,256 bytes of shared memory. Device checks fail with a clear
-capability error. Native rendering requires subgroups and sufficient storage limits.
-A browser build is not supplied: registry wgpu 30 lacks the needed WebGPU subgroup
-mapping. No third-party backport is vendored. A future browser path must enable WGSL
-subgroups only on its WebGPU backend; native Naga rejects that directive.
+`gsplat-viewer-probe` is an optional binary (`probe` feature). It reads the camera
+through a view context system and measures a full headless UI/compute/composite
+frame with GPU completion. Production viewer code contains no timing hooks.
 
-## Native format and precision
+## Training and evaluation
 
-The Rerun boundary carries float32 centers/scales, normalized XYZW rotations,
-RGBA8 DC color and opacity, and coefficient-major RGB spherical harmonics in f16.
-Degree 4 is truncated at this boundary. Brush tensors and the core float comparison
-retain their higher-precision representation. Native-archetype PSNR therefore measures
-a different loss from float-core parity; do not compare the two as equivalent gates.
-The PLY importer owns its native defaults and descriptors.
+The trainer consumes typed Brush process events. Recording is disabled unless a
+sink is set. A bounded channel retains at most eight pending observations;
+intermediate step metrics can be dropped and counted, while snapshots,
+evaluations, and final metrics use backpressure. Intermediate snapshots are
+DC-only; the final snapshot includes higher-order SH. Brush's seeded synthetic
+initialization is replaced by the shared seed-42 100k-point cube to avoid its
+pinned random-frustum initialization defect.
 
-## Training recordings
+Training scores use in-memory, unclipped float renders through `gsplat-bench score`.
+PNG directory scores include clipping and rounding from image export. Both call the
+same evaluator. Image scores use Brush's black-background, byte-premultiplied GT and SSIM
+convention. The white-background published-checkpoint guard is explicit and
+separate. Render parity compares unclipped RGBA floats, including alpha and
+white-composited PSNR. Reports record runtime source SHA, Cargo.lock SHA-256,
+and crate version; exported binaries can set `GSPLAT_SOURCE_SHA` explicitly.
 
-`gsplat-train` consumes Brush's `create_process_with_device` stream. It uses
-Brush 1388f74c + packages/brush-src/patches/brush-1388f74c-process-observer.patch:
-it exposes existing loss, learning-rate, and refinement values without changing
-training math, config merging, evaluation, or export. Pixi builds the `brush-src` source package with this patch, and environment activation
-links its installed source tree at `target/brush-src` for Cargo's path overrides.
-The reference Brush CLI uses an unpatched upstream workspace.
-
-Training passes tensor handles to a separate logging thread before advancing the
-stream. Readback and encoding occur there. Scales use exp, rotations change from
-WXYZ to XYZW, and Brush's minimum-scale filter is folded as in its exporter.
-Observations arrive every five steps; snapshots default to step 50, each 1,000 steps,
-and the final step. Only the final snapshot includes higher SH. Override the first
-snapshot with `--snapshot-first` and cadence with `--rerun-log-splats-every`; intervals
-must be positive multiples of five. Stats keep Brush's 50-step default.
-
-All dynamic data uses `iterations`. The dashboard includes the scene, cameras,
-four fixed GT/render pairs, loss, throughput, splat counts, learning rates,
-refinement statistics, sampled GPU memory, and Brush evaluation PSNR/SSIM. Eval
-thumbnails use a black background and premultiplied GT. Distorted cameras appear as
-pinhole approximations. JPEG thumbnails bound recording size. `--video` adds a
-spinning eye and a flat metrics row; the eye follows Brush's estimated scene axis.
-
-`--save` and `--connect` fan out identical data. An unavailable live sink is disabled
-after a bounded connection check. Recording failures warn without stopping training;
-flushes have a two-second timeout. No sink means no logging work. Brush's legacy
-Rerun logger remains disabled; its transitive 0.36 dependency does not produce the
-0.38.1 recording. `--compute-visualizer` is optional and cannot use stock `--spawn`.
-
-## Evaluation and evidence
-
-The Rust evaluator pairs strict relative paths and averages per-view scores. Published
-metrics use the checkpoint's 8-bit convention; Brush metrics and float training scores
-use their declared convention. Optional LPIPS uses Brush's VGG model. Python reads typed
-reports and keeps full-split render orchestration only.
-
-The test tiers separate synthetic CPU logic, GPU/assets/viewer integration, and
-stored-reference/pixel goldens. The nine float-core parity cases compare against
-Brush, while eight published fixtures cover 1,600 images. Full render-quality tests
-also rerender all 200 views per Blender scene. The viewer's native path has its own
-loss, calibration, color, relog, and depth tests. Missing assets are explicit skips.
-
-Current renderer and training measurements, source revisions, and evidence paths are
-in the [README](../README.md). Benchmark wall time includes GPU completion; optional
-timestamp attribution runs separately. Do not mix diagnostic profiling with the
-wall-time lane. Admission samples the GPU and host load; repeat stability is reported
-rather than inferred from one frame. See the [benchmark notes](../crates/gsplat-bench/README.md).
+Speed measures render plus GPU completion with pixels left on the GPU. Admission
+checks load and available GPU utilization, then warmup and repeated timed loops
+produce the median of repeat medians and p95. Separate stage timestamps diagnose
+costs. Every repeat lasts at least ten seconds and covers complete orbits, so
+frame counts can differ but each camera has equal weight. Equal counts would
+shorten fast runs below ten seconds or greatly extend the native runs.
+Camera checks read the target format and render settings used during timing.
+The Rerun native renderer path re-sorts and re-uploads every splat on the CPU
+each frame; these renderer-level comparisons do not measure the complete viewer.
+Readback and image encoding are outside the timed loop. Missing telemetry
+is recorded as unknown. See the [comparison report](https://pablos-4800gt.ilish-ruler.ts.net:8768/gsplat-modern/report.html)
+for measurements and host conditions.

@@ -1,12 +1,12 @@
 //! GPU/asset contracts, selected by the pytest integration runner with real skips.
 use glam::{Mat4, Vec3};
-use gsplat_bench::renderers::{Brush, Native, RenderEngine, Scene};
+use gsplat_bench::renderers::{Brush, Native, PlyScene, RenderEngine};
 use gsplat_eval::Evaluator;
 use gsplat_render::camera::{self, CameraSpec};
 use std::path::PathBuf;
 
-fn one_splat(log_scale: f32) -> Scene {
-    Scene {
+fn one_splat(log_scale: f32) -> PlyScene {
+    PlyScene {
         data: brush_serde::import::SplatData {
             means: vec![0.0; 3],
             rotations: None,
@@ -57,7 +57,7 @@ async fn all_renderers_nonblack_and_brush_identity() {
     );
     let cameras =
         PathBuf::from(std::env::var("GSPLAT_TEST_CAMERAS").expect("missing GSPLAT_TEST_CAMERAS"));
-    let scene = Scene::load(&ply).await.unwrap();
+    let scene = PlyScene::load(&ply).await.unwrap();
     let mut camera = camera::load_frames(&cameras, None).await.unwrap()[0]
         .camera
         .resized(256, 256);

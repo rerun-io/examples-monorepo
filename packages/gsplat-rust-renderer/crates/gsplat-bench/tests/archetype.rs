@@ -2,7 +2,31 @@
 #[test]
 fn native_ply_round_trip_preserves_geometry_and_quantizes_opacity() {
     let path = std::env::temp_dir().join(format!("archetype-{}.ply", std::process::id()));
-    std::fs::write(&path, "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float scale_0\nproperty float scale_1\nproperty float scale_2\nproperty float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\nproperty float opacity\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nend_header\n1 2 3 -2 -2 -2 1 0 0 0 0 0 0 0\n").unwrap();
+    std::fs::write(
+        &path,
+        concat!(
+            "ply\n",
+            "format ascii 1.0\n",
+            "element vertex 1\n",
+            "property float x\n",
+            "property float y\n",
+            "property float z\n",
+            "property float scale_0\n",
+            "property float scale_1\n",
+            "property float scale_2\n",
+            "property float rot_0\n",
+            "property float rot_1\n",
+            "property float rot_2\n",
+            "property float rot_3\n",
+            "property float opacity\n",
+            "property float f_dc_0\n",
+            "property float f_dc_1\n",
+            "property float f_dc_2\n",
+            "end_header\n",
+            "1 2 3 -2 -2 -2 1 0 0 0 0 0 0 0\n",
+        ),
+    )
+    .unwrap();
     let splats = gsplat_bench::renderers::archetype_splats(&path).unwrap();
     std::fs::remove_file(path).unwrap();
     assert_eq!(&splats.transforms[0][..3], &[1.0, 2.0, 3.0]);

@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use gsplat_render::{
-    Output, Renderer, Scene,
+    Output, PlyScene, Renderer,
     camera::{CameraFrame, load_frames},
     settings::RenderSettings,
 };
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
         args.width > 0 && args.height > 0,
         "image dimensions must be positive"
     );
-    let scene = Scene::load(&args.ply).await?;
+    let scene = PlyScene::load(&args.ply).await?;
     let frames = load_frames(&args.camera, Some((args.width, args.height))).await?;
     let size = glam::UVec2::new(args.width, args.height);
     args.settings.validate()?;

@@ -10,7 +10,6 @@ import pytest
 
 from gsplat_rust_renderer.apis.evaluate_nerfbaselines import Config, quality_guard_failures, selected_scenes
 from gsplat_rust_renderer.evaluation import (
-    evaluate_checkpoint_predictions,
     evaluate_prediction_directory,
     evaluate_predictions_against_checkpoint,
     render_test_split,
@@ -35,7 +34,7 @@ def test_evaluation_delegates_published_metrics_to_rust(tmp_path: Path) -> None:
     )
     binary.chmod(0o755)
     result = evaluate_prediction_directory(tmp_path / "render", tmp_path / "gt", eval_binary=binary)
-    assert (result.image_count, result.psnr, result.ssim) == (1, 12.5, 0.75)
+    assert (len(result.views), result.mean.psnr, result.mean.ssim) == (1, 12.5, 0.75)
     arguments: list[str] = capture.read_text().splitlines()
     assert arguments[:7] == ["dirs", "--render", str(tmp_path / "render"), "--gt", str(tmp_path / "gt"), "--convention", "published"]
 
@@ -106,27 +105,14 @@ def test_quality_guard_reports_every_threshold_breach() -> None:
 
 
 @pytest.mark.golden
-def test_lego_checkpoint_predictions_match_published_full_split() -> None:
+@pytest.mark.parametrize("scene", ["lego", "hotdog"])
+def test_checkpoint_predictions_match_published_full_split(scene: str) -> None:
     """Bundled checkpoint renders reproduce published metrics over all 200 views."""
-    checkpoint_dir: Path = scene_pretrained_dir("lego")
+    checkpoint_dir: Path = scene_pretrained_dir(scene)
     if not (checkpoint_dir / "results.json").exists():
-        pytest.skip("lego nerfbaselines checkpoint is not downloaded")
+        pytest.skip(f"{scene} nerfbaselines checkpoint is not downloaded")
 
-    result = evaluate_checkpoint_predictions(checkpoint_dir)
-
-    assert result.image_count == 200
-    np.testing.assert_allclose(result.measured_psnr, result.published_psnr, atol=5e-6)
-    np.testing.assert_allclose(result.measured_ssim, result.published_ssim, atol=5e-6)
-
-
-@pytest.mark.golden
-def test_hotdog_checkpoint_predictions_match_published_full_split() -> None:
-    """Hotdog's bundled renders reproduce both published metrics over 200 views."""
-    checkpoint_dir: Path = scene_pretrained_dir("hotdog")
-    if not (checkpoint_dir / "results.json").exists():
-        pytest.skip("hotdog nerfbaselines checkpoint is not downloaded")
-
-    result = evaluate_checkpoint_predictions(checkpoint_dir)
+    result = evaluate_predictions_against_checkpoint(checkpoint_dir / "predictions/color", checkpoint_dir)
 
     assert result.image_count == 200
     np.testing.assert_allclose(result.measured_psnr, result.published_psnr, atol=5e-6)

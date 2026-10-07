@@ -1999,120 +1999,34 @@ PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 # (blender/<scene>.zip), pretrained from nerfbaselines/nerfbaselines
 # (3dgs-mcmc/blender/<scene>.zip, INRIA layout). Extraction is idempotent.
 [feature.gsplat-rust-renderer.tasks.gsplat-download]
-args = [{ arg = "kind", default = "pretrained", choices = ["data", "pretrained"] }, { arg = "scene", default = "lego", choices = ["lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship"] }]
-cmd = "python -m gsplat_rust_renderer.nerfbaselines {{ kind }} {{ scene }}"
+args = [{ arg = "kind", default = "pretrained" }, { arg = "scene", default = "lego" }]
+cmd = "python tools/download.py {{ kind }} {{ scene }}"
 cwd = "packages/gsplat-rust-renderer"
-description = "Download one Blender dataset or pretrained checkpoint"
+description = "Download data, pretrained checkpoints, all Blender assets, or tandt"
 
-[feature.gsplat-rust-renderer.tasks.gsplat-download-all]
-depends-on = [
-    { task = "gsplat-download", args = ["data", "lego"] },
-    { task = "gsplat-download", args = ["data", "hotdog"] },
-    { task = "gsplat-download", args = ["data", "chair"] },
-    { task = "gsplat-download", args = ["data", "drums"] },
-    { task = "gsplat-download", args = ["data", "ficus"] },
-    { task = "gsplat-download", args = ["data", "materials"] },
-    { task = "gsplat-download", args = ["data", "mic"] },
-    { task = "gsplat-download", args = ["data", "ship"] },
-    { task = "gsplat-download", args = ["pretrained", "lego"] },
-    { task = "gsplat-download", args = ["pretrained", "hotdog"] },
-    { task = "gsplat-download", args = ["pretrained", "chair"] },
-    { task = "gsplat-download", args = ["pretrained", "drums"] },
-    { task = "gsplat-download", args = ["pretrained", "ficus"] },
-    { task = "gsplat-download", args = ["pretrained", "materials"] },
-    { task = "gsplat-download", args = ["pretrained", "mic"] },
-    { task = "gsplat-download", args = ["pretrained", "ship"] },
-]
-description = "Download all eight Blender datasets and pretrained checkpoints"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-tandt]
-cmd = """
-test -d data/tandt || \
-(mkdir -p data && \
-wget -q --show-progress -O data/tandt_db.zip https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip && \
-unzip -q data/tandt_db.zip -d data && \
-rm data/tandt_db.zip)
-"""
+[feature.gsplat-rust-renderer.tasks.gsplat-build]
+cmd = "cargo build --release --locked --workspace --bins --all-features"
 cwd = "packages/gsplat-rust-renderer"
-outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
-description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
+description = "Build the renderer, trainer, viewer, frame probe, evaluator and benchmark"
 
-# ── Brush training tasks ─────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-brush-cli-build]
 cmd = "cargo install --git https://github.com/ArthurBrussee/brush --rev 1388f74c6fe0236f68ee4915564bf00e9d2e3747 brush-cli --locked --root .brush"
 cwd = "packages/gsplat-rust-renderer"
-env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_INCREMENTAL = "0", CARGO_TARGET_DIR = "target/brush-cli" }
-description = "Build the pinned, unmodified Brush CLI locally for training comparisons"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-train-score]
-cmd = "cargo run --release --locked -p gsplat-bench -- score"
-cwd = "packages/gsplat-rust-renderer"
-env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_INCREMENTAL = "0" }
-description = "Score exported PLYs against NeRF test views using unclipped float renders"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-train-build]
-cmd = "cargo build --release --locked -p gsplat-train"
-cwd = "packages/gsplat-rust-renderer"
-env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_INCREMENTAL = "0" }
-description = "Build the in-process Brush trainer with native Rerun logging"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-prepare-nerf-init]
-args = [{ arg = "scene", default = "lego", choices = ["lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship"] }]
-cmd = "python tools/prepare_nerf_init.py --scene {{ scene }}"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download NeRF-synthetic data and derive the seeded 100k-point training initialization"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-prepare-training-data]
-args = ["scene"]
-cmd = "{% if scene == 'truck' or scene == 'train' %}pixi run -e gsplat-rust-renderer --frozen _gsplat-rust-renderer-download-tandt{% else %}python tools/prepare_nerf_init.py --scene {{ scene }}{% endif %}"
-cwd = "packages/gsplat-rust-renderer"
-description = "Prepare the selected Blender or COLMAP training scene"
+env = { CARGO_TARGET_DIR = "target/brush-cli" }
+description = "Build the pinned, unpatched Brush CLI for training comparisons"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-train]
-args = [{ arg = "scene", default = "lego", choices = ["lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship", "truck", "train"] }, { arg = "iterations", default = "30000" }, { arg = "mode", default = "record", choices = ["record", "live", "video"] }]
-cmd = """
-bash -c 'exec {% if scene == 'truck' or scene == 'train' %}target/release/gsplat-train data/tandt/{{ scene }}{% else %}target/release/gsplat-train "${GSPLAT_NERF_INIT_ROOT:-data/nerf-synthetic-init}/{{ scene }}"{% endif %} \
---total-train-iters {{ iterations }} --export-every 7000 \
---save data/brush-runs/{{ scene }}/{{ iterations }}/{{ mode }}/training.rrd \
---export-path "$PIXI_PROJECT_ROOT/packages/gsplat-rust-renderer/data/brush-runs/{{ scene }}/{{ iterations }}/{{ mode }}" \
-{% if mode == 'live' %}--connect rerun+http://127.0.0.1:9876/proxy{% elif mode == 'video' %}--video{% endif %} "$@"' --
-"""
-depends-on = ["gsplat-train-build", { task = "_gsplat-rust-renderer-prepare-training-data", args = ["{{ scene }}"] }]
+args = [{ arg = "scene", default = "lego" }, { arg = "iterations", default = "30000" }, { arg = "mode", default = "record" }]
+cmd = "python tools/train.py --scene {{ scene }} --iterations {{ iterations }} --mode {{ mode }}"
+depends-on = ["gsplat-build"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train a scene; record, live, and video modes use distinct outputs (extra flags follow --)"
-
-# ── Standalone render CLI ────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-render]
-cmd = "cargo run --locked --release -p gsplat-render --"
-cwd = "packages/gsplat-rust-renderer"
-description = "Render a PLY at a NeRF camera position to PNG (no Rerun needed)"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-render]
-cmd = "cargo build --locked --release -p gsplat-render"
-cwd = "packages/gsplat-rust-renderer"
-description = "Build the standalone no-Rerun renderer"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-evaluate-checkpoints]
-cmd = "python tools/evaluate_nerfbaselines.py --checkpoint-only"
-depends-on = ["gsplat-download-all", "gsplat-bench-build"]
-cwd = "packages/gsplat-rust-renderer"
-description = "Validate all bundled 200-image checkpoint predictions against published metrics"
+description = "Prepare a scene and train; modes are record, live and video (extra flags follow --)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-evaluate]
 cmd = "python tools/evaluate_nerfbaselines.py"
-depends-on = [
-    "gsplat-download-all",
-    "_gsplat-rust-renderer-build-render",
-    "gsplat-bench-build",
-]
+depends-on = ["gsplat-build", { task = "gsplat-download", args = ["all", "all"] }]
 cwd = "packages/gsplat-rust-renderer"
-description = "Render and evaluate all eight 200-image Blender test splits with the standalone binary"
-
-# ── Rust tasks ───────────────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-viewer]
-cmd = "cargo run --locked --release --bin gsplat-rust-renderer"
-cwd = "packages/gsplat-rust-renderer"
-description = "Launch the Rerun viewer with Gaussian splat visualization"
+description = "Render and evaluate Blender test splits; --checkpoint-only checks bundled predictions"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-fmt]
 cmd = "cargo fmt --all -- --check"
@@ -2120,24 +2034,14 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Check Rust formatting"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-clippy]
-cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cmd = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"
 cwd = "packages/gsplat-rust-renderer"
-description = "Run clippy on Rust code"
+description = "Run Clippy on all Rust targets, including the frame probe"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-rust-test]
-cmd = "cargo test --locked --workspace"
+cmd = "cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Run Rust test suite"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-eval]
-cmd = "cargo run --locked --release -p gsplat-eval --"
-cwd = "packages/gsplat-rust-renderer"
-description = "Score paired PNG directories with Brush or published metrics"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-bench-build]
-cmd = "cargo build --locked --release -p gsplat-bench -p gsplat-eval -p gsplat-render"
-cwd = "packages/gsplat-rust-renderer"
-description = "Build benchmark, evaluator and standalone renderer together"
+description = "Run Rust unit tests"
 
 [feature.gsplat-rust-renderer.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "gsplat-rust-renderer-fmt", "gsplat-rust-renderer-clippy", "gsplat-rust-renderer-rust-test"]
@@ -2146,38 +2050,26 @@ description = "Run Python, Rust and GPU integration author checks"
 [feature.gsplat-rust-renderer.tasks.tests-integration]
 cmd = "pytest -q -ra -m integration"
 cwd = "packages/gsplat-rust-renderer"
-description = "Run Python and Rust integration contracts, reporting missing assets as skips"
+description = "Run Python and whole-target Rust integration contracts"
 
 [feature.gsplat-rust-renderer.tasks.tests-golden]
 cmd = "pytest -q -ra -m golden"
 cwd = "packages/gsplat-rust-renderer"
-depends-on = ["gsplat-bench-build"]
-description = "Build release tools and run golden references"
+depends-on = ["gsplat-build"]
+description = "Build release tools and compare against golden references"
 
-[feature.gsplat-rust-renderer.tasks.gsplat-bench]
-cmd = "cargo run --locked --release -p gsplat-bench --"
-cwd = "packages/gsplat-rust-renderer"
-description = "Run synchronized speed or Brush-oracle parity measurements"
-
-# ── Python demo tasks ────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-ply]
 cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
 depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }]
 cwd = "packages/gsplat-rust-renderer"
-description = "Load the pretrained lego PLY and log it to the running viewer"
+description = "Log the pretrained Lego PLY to the running viewer"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-scene]
 cmd = "python tools/log_splats_with_cameras.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
-depends-on = [
-    { task = "gsplat-download", args = ["pretrained", "lego"] },
-    { task = "gsplat-download", args = ["data", "lego"] },
-]
+depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { task = "gsplat-download", args = ["data", "lego"] }]
 cwd = "packages/gsplat-rust-renderer"
-description = "Log the pretrained lego splat + dataset cameras to the running viewer"
+description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# dpvo
-# ═══════════════════════════════════════════════════════════════════════════
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 platforms = ["linux-64"]

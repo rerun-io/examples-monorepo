@@ -1,6 +1,6 @@
 //! Score exported splats against NeRF test images using unclipped float renders.
 use anyhow::Result;
-use gsplat_bench::renderers::{Brush, RenderEngine, Scene};
+use gsplat_bench::renderers::{Brush, PlyScene, RenderEngine};
 use gsplat_eval::{Convention, Evaluator, Metrics, Provenance, ViewMetrics};
 use gsplat_render::camera::load_frames;
 use serde::Serialize;
@@ -31,7 +31,7 @@ struct ScoreReport {
 pub async fn run(args: ScoreArgs) -> Result<()> {
     let transforms = args.dataset.join("transforms_test.json");
     let cameras = load_frames(&transforms, None).await?;
-    let scene = Scene::load(&args.ply).await?;
+    let scene = PlyScene::load(&args.ply).await?;
     let mut renderer = Brush::new(&scene, &Default::default()).await;
     let evaluator = Evaluator::new(false);
     let mut views = Vec::with_capacity(cameras.len());

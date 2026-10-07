@@ -4,8 +4,22 @@ use gsplat_render::camera::{CameraModel, load_frames};
 #[tokio::test]
 async fn ply_metadata_selects_mip_without_changing_raw_parameters() {
     let path = std::env::temp_dir().join(format!("gsplat-metadata-{}.ply", std::process::id()));
-    std::fs::write(&path,"ply\nformat ascii 1.0\ncomment splatrendermode: mip\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 2\n").unwrap();
-    let scene = gsplat_render::Scene::load(&path).await.unwrap();
+    std::fs::write(
+        &path,
+        concat!(
+            "ply\n",
+            "format ascii 1.0\n",
+            "comment splatrendermode: mip\n",
+            "element vertex 1\n",
+            "property float x\n",
+            "property float y\n",
+            "property float z\n",
+            "end_header\n",
+            "0 0 2\n",
+        ),
+    )
+    .unwrap();
+    let scene = gsplat_render::PlyScene::load(&path).await.unwrap();
     assert_eq!(scene.mode, gsplat_core::RenderMode::Mip);
     assert_eq!(
         gsplat_render::raw_splats(&scene.data).unwrap().transforms[0][2],

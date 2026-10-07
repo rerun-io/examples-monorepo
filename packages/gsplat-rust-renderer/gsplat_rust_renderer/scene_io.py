@@ -24,6 +24,8 @@ class NerfFrame:
     """Image path relative to the scene directory."""
     transform_matrix: Float64[ndarray, "4 4"]
     """OpenGL camera-to-world matrix."""
+    rotation: float | None = None
+    """Optional source capture rotation."""
 
 
 @serde
@@ -34,6 +36,8 @@ class NerfTransforms:
     """Horizontal field of view in radians."""
     frames: list[NerfFrame]
     """Ordered camera poses and image paths."""
+    ply_file_path: str | None = None
+    """Optional training initialization, relative to the scene directory."""
 
 
 def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -> list[tuple[PinholeParameters, Path]]:

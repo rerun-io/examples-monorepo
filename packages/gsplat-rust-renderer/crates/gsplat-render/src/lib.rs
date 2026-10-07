@@ -4,7 +4,7 @@ pub mod camera;
 mod camera_files;
 mod renderer;
 pub mod settings;
-pub use renderer::{Output, Renderer, Scene, raw_splats};
+pub use renderer::{Output, PlyScene, Renderer, raw_splats};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

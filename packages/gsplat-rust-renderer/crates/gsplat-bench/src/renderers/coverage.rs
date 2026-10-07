@@ -3,9 +3,9 @@ use super::*;
 use glam::Mat4;
 use gsplat_core::CameraModel;
 
-fn synthetic_scene(degree: u32) -> Scene {
+fn synthetic_scene(degree: u32) -> PlyScene {
     let n = 12;
-    Scene {
+    PlyScene {
         data: brush_serde::import::SplatData {
             means: (0..n)
                 .flat_map(|i| {
@@ -43,7 +43,7 @@ fn camera(width: u32, height: u32) -> CameraSpec {
     }
 }
 async fn compare(
-    scene: &Scene,
+    scene: &PlyScene,
     camera: &CameraSpec,
     floor: Option<Vec<f32>>,
 ) -> (Vec<f32>, Counts) {

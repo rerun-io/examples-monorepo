@@ -12,8 +12,9 @@ from jaxtyping import Float32
 from numpy import ndarray
 from rerun.chunk import ChunkStore, RrdReader
 
-# The synthetic calibration writer uses the same f32 DC basis as native PLY.
-SH_C0: float = float(np.float32(0.5) * np.sqrt(np.float32(1.0) / np.float32(np.pi)))
+# Canonical DC basis; consumers cast to their output precision. Keep f64 here
+# so the seeded synthetic initialization remains byte-identical.
+SH_C0: float = 0.28209479177387814
 SPLATS_ENTITY: str = "/world/splats"
 SPLATS_VISUALIZER: str = "ComputeGaussianSplats3D"
 

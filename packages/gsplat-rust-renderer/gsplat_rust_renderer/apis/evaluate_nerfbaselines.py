@@ -8,13 +8,12 @@ from serde.json import to_json
 
 from gsplat_rust_renderer.evaluation import (
     CheckpointEvaluation,
-    evaluate_checkpoint_predictions,
     evaluate_predictions_against_checkpoint,
     render_test_split,
 )
-from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES, scene_data_dir, scene_ply_path, scene_pretrained_dir
+from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES, BlenderScene, scene_data_dir, scene_ply_path, scene_pretrained_dir
 
-SceneChoice: TypeAlias = Literal["all", "lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship"]
+SceneChoice: TypeAlias = Literal["all", BlenderScene]
 
 
 @dataclass
@@ -77,7 +76,7 @@ def main(config: Config) -> None:
     for scene in scenes:
         checkpoint_dir: Path = scene_pretrained_dir(scene)
         if config.checkpoint_only:
-            report: CheckpointEvaluation = evaluate_checkpoint_predictions(checkpoint_dir)
+            report: CheckpointEvaluation = evaluate_predictions_against_checkpoint(checkpoint_dir / "predictions/color", checkpoint_dir)
         else:
             rendered_dir: Path = config.output_root / scene
             render_test_split(

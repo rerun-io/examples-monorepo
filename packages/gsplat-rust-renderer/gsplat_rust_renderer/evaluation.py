@@ -68,18 +68,6 @@ class Evaluation:
     """Runtime source and dependency identity."""
 
 
-@dataclass(frozen=True, slots=True)
-class EvaluationMetrics:
-    """Aggregate image metrics for one evaluated scene."""
-
-    image_count: int
-    """Number of paired images included in the aggregate."""
-    psnr: float
-    """Arithmetic mean of per-image PSNR values in decibels."""
-    ssim: float
-    """Arithmetic mean of per-image SSIM values."""
-
-
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class CheckpointEvaluation:
@@ -146,7 +134,7 @@ def render_test_split(
 
 def evaluate_prediction_directory(
     rendered_dir: Path, ground_truth_dir: Path, *, eval_binary: Path | None = None,
-) -> EvaluationMetrics:
+) -> Evaluation:
     """Delegate published white-background metrics to the Rust evaluator."""
     binary: Path = eval_binary or Path(os.environ.get(
         "GSPLAT_EVAL_BIN", str(Path(__file__).resolve().parents[1] / "target/release/gsplat-eval"),
@@ -158,7 +146,7 @@ def evaluate_prediction_directory(
             "--convention", "published", "--out", str(report_path),
         ], check=True)
         report: Evaluation = from_json(Evaluation, report_path.read_text())
-    return EvaluationMetrics(image_count=len(report.views), psnr=report.mean.psnr, ssim=report.mean.ssim)
+    return report
 
 
 @serde
@@ -207,7 +195,7 @@ def evaluate_predictions_against_checkpoint(rendered_dir: Path, checkpoint_dir: 
     except (SerdeError, JSONDecodeError) as error:
         raise ValueError(f"Invalid checkpoint metadata {source}: {error}") from error
 
-    measured: EvaluationMetrics = evaluate_prediction_directory(
+    measured: Evaluation = evaluate_prediction_directory(
         rendered_dir,
         checkpoint_dir / "predictions" / "gt-color",
     )
@@ -215,27 +203,11 @@ def evaluate_predictions_against_checkpoint(rendered_dir: Path, checkpoint_dir: 
     published_ssim: float = published.metrics.ssim
     return CheckpointEvaluation(
         scene=published.render_dataset_metadata.scene,
-        image_count=measured.image_count,
-        measured_psnr=measured.psnr,
+        image_count=len(measured.views),
+        measured_psnr=measured.mean.psnr,
         published_psnr=published_psnr,
-        psnr_delta=measured.psnr - published_psnr,
-        measured_ssim=measured.ssim,
+        psnr_delta=measured.mean.psnr - published_psnr,
+        measured_ssim=measured.mean.ssim,
         published_ssim=published_ssim,
-        ssim_delta=measured.ssim - published_ssim,
-    )
-
-
-def evaluate_checkpoint_predictions(checkpoint_dir: Path) -> CheckpointEvaluation:
-    """Evaluate a nerfbaselines checkpoint's bundled prediction images.
-
-    Args:
-        checkpoint_dir: Extracted checkpoint directory containing
-            ``results.json`` and ``predictions/{color,gt-color}``.
-
-    Returns:
-        Recomputed and published metrics with signed differences.
-    """
-    return evaluate_predictions_against_checkpoint(
-        checkpoint_dir / "predictions" / "color",
-        checkpoint_dir,
+        ssim_delta=measured.mean.ssim - published_ssim,
     )

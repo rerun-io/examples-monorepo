@@ -1,22 +1,4 @@
-"""nerfbaselines test-data layout + zip extraction for the gsplat demos.
-
-Two HuggingFace sources back the blender scenes (lego by default):
-
-- pretrained models: repo ``nerfbaselines/nerfbaselines`` (model), file
-  ``3dgs-mcmc/blender/<scene>.zip`` — an INRIA-layout ``point_cloud.ply`` under
-  ``checkpoint/point_cloud/iteration_30000/`` plus reference renders
-  (``predictions/color`` / ``predictions/gt-color``) and ``results.json``.
-- datasets: repo ``nerfbaselines/nerfbaselines-data`` (dataset), file
-  ``blender/<scene>.zip`` — standard nerf-synthetic ``<scene>/transforms_*.json``
-  + ``<scene>/{train,test,val}/*.png``.
-
-The pixi ``_gsplat-rust-renderer-download-*`` tasks run this module as a CLI
-(``python -m gsplat_rust_renderer.nerfbaselines {data,pretrained} <scene>``),
-which ``hf download``s the zip and unpacks it (stdlib zipfile) atomically
-behind an idempotence guard; the CLIs resolve their default paths through the
-helpers here. Replaces the old ``pablovela5620/splat-dataset`` +
-``pablovela5620/nerf-synthetic-mirror`` HuggingFace mirrors.
-"""
+"""Download and atomically extract benchmark datasets and pretrained checkpoints."""
 
 from __future__ import annotations
 
@@ -24,6 +6,8 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Literal, TypeAlias, get_args
+from urllib.request import urlretrieve
 
 PRETRAINED_REPO: str = "nerfbaselines/nerfbaselines"
 """HuggingFace model repo holding the pretrained 3dgs-mcmc checkpoints."""
@@ -31,7 +15,8 @@ DATA_REPO: str = "nerfbaselines/nerfbaselines-data"
 """HuggingFace dataset repo holding the nerf-synthetic scene captures."""
 DEFAULT_SCENE: str = "lego"
 """Default blender scene used by the demos."""
-BLENDER_SCENES: tuple[str, ...] = ("lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship")
+BlenderScene: TypeAlias = Literal["lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship"]
+BLENDER_SCENES: tuple[str, ...] = get_args(BlenderScene)
 """All scenes in the NeRF Synthetic Blender benchmark."""
 
 # Module lives at <package>/gsplat_rust_renderer/nerfbaselines.py, so parents[1]
@@ -118,7 +103,12 @@ def download_and_extract(kind: str, scene: str, root: Path = DATA_ROOT) -> Path:
     return target
 
 
-if __name__ == "__main__":
-    import sys
-
-    download_and_extract(sys.argv[1], sys.argv[2])
+def download_tandt(root: Path = DATA_ROOT.parent / "tandt") -> Path:
+    """Download the upstream COLMAP scenes through the same atomic extractor."""
+    if not root.is_dir():
+        with tempfile.TemporaryDirectory(prefix="gsplat-tandt-") as directory:
+            archive = Path(directory) / "tandt.zip"
+            print("Downloading Tanks and Temples scenes")
+            urlretrieve("https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip", archive)
+            extract_zip(archive, root, inner="tandt")
+    return root

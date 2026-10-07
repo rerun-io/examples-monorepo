@@ -138,7 +138,28 @@ mod tests {
     use super::*;
     #[test]
     fn conversion_matches_rerun_ply_activation() {
-        let ply = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float scale_0\nproperty float scale_1\nproperty float scale_2\nproperty float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\nproperty float opacity\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nend_header\n1 2 3 0 0.6931472 -0.6931472 0 3 0 4 0 -4 0 4\n";
+        let ply = concat!(
+            "ply\n",
+            "format ascii 1.0\n",
+            "element vertex 1\n",
+            "property float x\n",
+            "property float y\n",
+            "property float z\n",
+            "property float scale_0\n",
+            "property float scale_1\n",
+            "property float scale_2\n",
+            "property float rot_0\n",
+            "property float rot_1\n",
+            "property float rot_2\n",
+            "property float rot_3\n",
+            "property float opacity\n",
+            "property float f_dc_0\n",
+            "property float f_dc_1\n",
+            "property float f_dc_2\n",
+            "end_header\n",
+            "1 2 3 0 0.6931472 -0.6931472 0 3 0 4 0 -4 0 4\n",
+        )
+        .as_bytes();
         let expected = rerun::GaussianSplats3D::from_ply_file_contents(ply, None).unwrap();
         let converted = to_archetype(
             &[

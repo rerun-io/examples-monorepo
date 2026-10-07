@@ -3,7 +3,9 @@ use crate::{CameraArgs, cameras, write_json};
 use anyhow::{Result, ensure};
 use clap::Args;
 use gsplat_bench::{
-    renderers::{Adapter, Brush, Counts, Engine, Implementation, RenderEngine, Scene, StageTiming},
+    renderers::{
+        Adapter, Brush, Counts, Engine, Implementation, PlyScene, RenderEngine, StageTiming,
+    },
     statistics::{Statistics, median, summarize},
 };
 use gsplat_eval::{Evaluator, Provenance, RenderMetrics};
@@ -219,7 +221,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             "duplicate implementation"
         );
     }
-    let scene = Scene::load(&a.camera.ply).await?;
+    let scene = PlyScene::load(&a.camera.ply).await?;
     let cameras = cameras(&a.camera, &scene).await?;
     let mut engines = Vec::new();
     for &kind in &a.implementations {

@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use glam::{Mat4, Vec2};
 use gsplat_bench::{
     camera,
-    renderers::{Adapter, Engine, Implementation, RenderEngine, Scene},
+    renderers::{Adapter, Engine, Implementation, PlyScene, RenderEngine},
 };
 use gsplat_eval::{Evaluator, Metrics, Provenance, ViewMetrics};
 use gsplat_render::{
@@ -86,7 +86,7 @@ fn resolution(value: &str) -> Result<Resolution> {
     ensure!(w >= 11 && h >= 11, "resolution must be at least 11x11");
     Ok(Resolution(Some((w, h))))
 }
-async fn cameras(args: &CameraArgs, scene: &Scene) -> Result<Vec<CameraSpec>> {
+async fn cameras(args: &CameraArgs, scene: &PlyScene) -> Result<Vec<CameraSpec>> {
     let size = args.res.0;
     let mut path = if let Some(count) = args.path.strip_prefix("orbit:") {
         let count: std::num::NonZeroUsize =
@@ -224,7 +224,7 @@ fn save_pair(
 }
 async fn parity(
     a: ParityArgs,
-    scene: Scene,
+    scene: PlyScene,
     cameras: Vec<CameraSpec>,
     mut renderer: Engine,
     mut oracle: Engine,
@@ -334,7 +334,7 @@ async fn run_parity(a: ParityArgs) -> Result<()> {
         a.archetype.is_none() || a.implementation == Implementation::Ours,
         "--archetype requires --impl ours"
     );
-    let scene = Scene::load(&a.camera.ply).await?;
+    let scene = PlyScene::load(&a.camera.ply).await?;
     let mut cameras = cameras(&a.camera, &scene).await?;
     if let Some(n) = a.limit {
         ensure!(n > 0, "limit must be positive");
@@ -479,7 +479,7 @@ mod tests {
         let Action::Parity(args) = args.command else {
             panic!("parity command")
         };
-        let scene = Scene {
+        let scene = PlyScene {
             data: brush_serde::import::SplatData {
                 means: vec![0.0; 3],
                 rotations: None,

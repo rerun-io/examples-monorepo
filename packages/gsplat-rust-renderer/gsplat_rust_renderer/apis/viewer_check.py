@@ -22,22 +22,7 @@ from serde.json import to_json
 
 from gsplat_rust_renderer.apis.calibration_scene import look_at_c2w
 from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class NerfFrame:
-    """One camera in the standalone renderer's NeRF input format."""
-
-    file_path: str
-    transform_matrix: Float64[np.ndarray, "4 4"]
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class NerfCameras:
-    camera_angle_x: float
-    frames: list[NerfFrame]
+from gsplat_rust_renderer.scene_io import NerfFrame, NerfTransforms
 
 
 @serde(deny_unknown_fields=True)
@@ -241,7 +226,7 @@ def check_pair(config: Config, image: UInt8[np.ndarray, "h w 3"], position: Floa
     h += 5
     w += 5
     fov_y: float = float(np.float32(55.0) * np.float32(math.tau) / np.float32(360.0))
-    camera: NerfCameras = NerfCameras(2.0 * math.atan(math.tan(fov_y / 2.0) * w / h), [NerfFrame("fixed", look_at_c2w(position, target, up))])
+    camera: NerfTransforms = NerfTransforms(2.0 * math.atan(math.tan(fov_y / 2.0) * w / h), [NerfFrame("fixed", look_at_c2w(position, target, up))])
     camera_path: Path = config.out / "camera.json"
     camera_path.write_text(to_json(camera))
     reference_path: Path = config.out / "standalone.png"
