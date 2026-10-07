@@ -4,20 +4,25 @@
 //!
 //! One embedded page and a JSON API, std + serde_json only, so the binary stays small on the cap's 14 GB root:
 //! - `GET /` the page; `GET /api/status` one JSON snapshot (cumulative counters; the page turns them into rates);
-//! - `GET /api/log` the run log's last lines; `POST /api/start` (form fields, see [`run::StartRequest`]); `POST /api/stop`.
+//! - `GET /api/log` the run log's last lines; `POST /api/start` (form fields, see [`run::StartRequest`]); `POST /api/stop`;
+//! - `GET /api/wifi` the cap's Wi-Fi ([`wifi`]); `POST /api/wifi/{scan,join,forget}` from the hotspot, the cap itself, or a
+//!   browser holding the token cookie that the page hands to hotspot visitors ([`may_change_wifi`]);
+//! - `GET /api/viewer` where the named Rerun viewer is now; `POST /api/viewer` saves its name ([`viewer`]).
 //!
 //! Start runs [`checks`], then spawns this same binary as the run supervisor (`robocap-panel handoff`, [`handoff`]: it pauses the
 //! vendor recorder, always restores it, stops the run at its temperature and time limits) around `bin/robocap-live`, detached in
 //! its own session, and writes `run/live.{pid,log,cmd}` so a restarted panel finds the run. The robocap-live command line is built
 //! from the form ([`run::StartRequest::command`]). Stop sends SIGTERM to the supervisor (never to the vendor recorder, never by
-//! name). Start, stop and the run's end share one record ([`run::Run`]). Nothing starts at boot.
+//! name). Start, stop and the run's end share one record ([`run::Run`]). The panel itself starts at boot once `robocap-panel
+//! install-boot` linked `/etc/init.d/S87robocap-panel` to this binary ([`service`]); a run never starts at boot.
 //!
 //! Usage: robocap-panel [--port 8090] [--bind 0.0.0.0] [--root /root/robocap-live]
 //!        robocap-panel handoff <max seconds> <command...>      (the run supervisor; the panel starts it)
+//!        robocap-panel start|stop|status|install-boot|remove-boot [--port 8090]   (the panel as a service, [`service`])
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -29,11 +34,18 @@ use serde_json::{Value, json};
 mod log_markers;
 mod handoff;
 mod run;
+mod service;
+mod viewer;
+mod wifi;
 
 use handoff::{LAUNCHER, MAX_START_TEMP_C, RECORDER, RUN_ENDED, STOP_TEMP_C, WARN_TEMP_C};
 use run::{Checks, Owner, Phase, Run, StartRequest, alive, live_processes, phase, run_pid};
 
 const PAGE: &str = include_str!("panel.html");
+/// The Home Screen icon (180x180, what iOS asks for).
+const ICON: &[u8] = include_bytes!("icon-180.png");
+/// wpa_supplicant's control socket for the cap's Wi-Fi client (`ctrl_interface=/var/run/wpa_supplicant`).
+const WPA_CTRL: &str = "/var/run/wpa_supplicant/wlan0";
 /// The regmap file of the bq25790 charger. Only registers 0x19-0x21 are read (as robocap-guard does): 0x22-0x27 clear on read.
 const CHARGER_REGMAP: &str = "/sys/kernel/debug/regmap/6-006b/registers";
 /// Start warns below this charger input limit and refuses below this battery voltage, with less free disk, or at
@@ -41,6 +53,9 @@ const CHARGER_REGMAP: &str = "/sys/kernel/debug/regmap/6-006b/registers";
 const MIN_INPUT_LIMIT_MA: u32 = 2000;
 const MIN_VBAT_V: f64 = 7.9;
 const MIN_FREE_BYTES: u64 = 1 << 30;
+/// The cap's hotspot subnet (192.168.11.0/24, the vendor's dnsmasq range) and the cookie that lets a LAN browser change Wi-Fi.
+const HOTSPOT_NET: [u8; 3] = [192, 168, 11];
+const TOKEN_COOKIE: &str = "robocap_token";
 
 struct Panel {
     root: PathBuf,
@@ -52,6 +67,10 @@ struct Panel {
     disk: Cached<(Option<u64>, Option<u64>)>,
     /// `iw dev wlan0 link`, re-read every 5 s.
     wifi_link: Cached<String>,
+    /// The cap's Wi-Fi client.
+    wpa: wifi::Wpa,
+    /// The secret in the token cookie (`run/panel-token`, made once; delete the file to revoke every browser).
+    token: String,
 }
 
 /// A fact that costs a child process, re-read at most every `max_age` (the page polls every second, from every open tab).
@@ -84,6 +103,9 @@ fn main() {
     if all.first().is_some_and(|a| a == "handoff") {
         std::process::exit(handoff::main(&all[1..]));
     }
+    if let Some(action) = all.first().filter(|a| ["start", "stop", "status", "install-boot", "remove-boot"].contains(&a.as_str())) {
+        std::process::exit(service::main(action, &all[1..]));
+    }
     let mut args = all.into_iter();
     let (mut port, mut bind, mut root) = (8090u16, "0.0.0.0".to_string(), PathBuf::from("/root/robocap-live"));
     while let Some(arg) = args.next() {
@@ -113,12 +135,21 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let token = match token(&root) {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("robocap-panel: no token, Wi-Fi changes only from the hotspot: {error}");
+            String::new()
+        }
+    };
     let panel = Arc::new(Panel {
         root,
         supervisor: vec![exe, "handoff".to_string()],
         run: Arc::default(),
         disk: Cached::new(Duration::from_secs(30)),
         wifi_link: Cached::new(Duration::from_secs(5)),
+        wpa: wifi::Wpa::new(WPA_CTRL),
+        token,
     });
     for stream in listener.incoming().flatten() {
         let panel = panel.clone();
@@ -167,11 +198,41 @@ fn handle(mut stream: TcpStream, panel: &Arc<Panel>) -> std::io::Result<()> {
         buffer.extend_from_slice(&chunk[..n]);
     }
     let body = String::from_utf8_lossy(&buffer[head_end..(head_end + length).min(buffer.len())]).to_string();
+    let peer = stream.peer_addr().map(|a| a.ip()).unwrap_or(IpAddr::from([0, 0, 0, 0]));
+    let field = |name: &str| body.split('&').find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| run::decode(v)));
+    let wifi_allowed = may_change_wifi(peer, header("cookie").as_deref(), &panel.token);
     if method == "POST" && !same_origin(header("origin").as_deref(), header("host").as_deref()) {
         return respond(&mut stream, 403, "text/plain", "cross-origin request refused");
     }
     match (method.as_str(), path.split('?').next().unwrap_or_default()) {
-        ("GET", "/") => respond(&mut stream, 200, "text/html; charset=utf-8", PAGE),
+        ("GET", "/") => {
+            // A hotspot visitor (or the cap itself) gets the token, so the same browser may change Wi-Fi later from the LAN.
+            let cookie = (on_hotspot_or_cap(peer) && !panel.token.is_empty())
+                .then(|| format!("Set-Cookie: {TOKEN_COOKIE}={}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict\r\n", panel.token));
+            respond_with(&mut stream, 200, "text/html; charset=utf-8", &cookie.unwrap_or_default(), PAGE.as_bytes())
+        }
+        ("GET", "/icon-180.png") => respond_with(&mut stream, 200, "image/png", "", ICON),
+        ("GET", "/api/wifi") => {
+            let state = panel.wpa.state().unwrap_or_else(|error| json!({"error": error}));
+            let hotspot = json!({"ssid": hotspot_ssid(), "ip": format!("{}.1", HOTSPOT_NET.map(|b| b.to_string()).join("."))});
+            let you = json!({"ip": peer.to_string(), "on_hotspot": on_hotspot_or_cap(peer), "may_change": wifi_allowed});
+            respond(&mut stream, 200, "application/json", &json!({"wifi": state, "hotspot": hotspot, "you": you}).to_string())
+        }
+        ("POST", "/api/wifi/scan" | "/api/wifi/join" | "/api/wifi/forget") if !wifi_allowed => respond_result(
+            &mut stream,
+            Err("Wi-Fi changes come from the cap's hotspot: open this page once while joined to it, then this browser may change Wi-Fi from here too".into()),
+        ),
+        ("POST", "/api/wifi/scan") => respond_result(&mut stream, panel.wpa.scan()),
+        ("POST", "/api/wifi/join") => {
+            let result = panel.wpa.join(&field("ssid").unwrap_or_default(), &field("password").unwrap_or_default());
+            respond_result(&mut stream, result)
+        }
+        ("POST", "/api/wifi/forget") => {
+            let result = field("id").and_then(|id| id.parse().ok()).ok_or("forget: no network id".to_string()).and_then(|id| panel.wpa.forget(id));
+            respond_result(&mut stream, result)
+        }
+        ("GET", "/api/viewer") => respond(&mut stream, 200, "application/json", &viewer::find(&panel.root).to_string()),
+        ("POST", "/api/viewer") => respond_result(&mut stream, viewer::save_name(&panel.root, &field("name").unwrap_or_default())),
         ("GET", "/api/status") => respond(&mut stream, 200, "application/json", &status(panel).to_string()),
         ("GET", "/api/log") => respond(&mut stream, 200, "text/plain; charset=utf-8", &log_tail(panel, 60)),
         ("POST", "/api/start") => {
@@ -193,6 +254,25 @@ fn same_origin(origin: Option<&str>, host: Option<&str>) -> bool {
     }
 }
 
+/// Who may change the cap's Wi-Fi: a device on the cap's hotspot or the cap itself, or a browser on the LAN that holds the
+/// panel's token (a cookie it got by opening the panel once over the hotspot).
+fn may_change_wifi(peer: IpAddr, cookie: Option<&str>, token: &str) -> bool {
+    on_hotspot_or_cap(peer) || cookie_value(cookie.unwrap_or_default(), TOKEN_COOKIE).is_some_and(|value| !token.is_empty() && value == token)
+}
+
+/// A device on the cap's own hotspot (the vendor's dnsmasq hands out 192.168.11.0/24) or the cap itself.
+fn on_hotspot_or_cap(peer: IpAddr) -> bool {
+    match peer {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.octets()[..3] == HOTSPOT_NET,
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+/// The value of cookie `name` in a `Cookie:` header ("a=1; b=2").
+fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split(';').find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
+}
+
 fn respond_result(stream: &mut TcpStream, result: Result<Value, String>) -> std::io::Result<()> {
     match result {
         Ok(value) => respond(stream, 200, "application/json", &json!({"ok": true, "result": value}).to_string()),
@@ -201,6 +281,11 @@ fn respond_result(stream: &mut TcpStream, result: Result<Value, String>) -> std:
 }
 
 fn respond(stream: &mut TcpStream, code: u16, kind: &str, body: &str) -> std::io::Result<()> {
+    respond_with(stream, code, kind, "", body.as_bytes())
+}
+
+/// A response with `extra` header lines (each ending in CRLF).
+fn respond_with(stream: &mut TcpStream, code: u16, kind: &str, extra: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match code {
         200 => "OK",
         403 => "Forbidden",
@@ -208,8 +293,27 @@ fn respond(stream: &mut TcpStream, code: u16, kind: &str, body: &str) -> std::io
         409 => "Conflict",
         _ => "Error",
     };
-    write!(stream, "HTTP/1.1 {code} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len())?;
-    stream.write_all(body.as_bytes())
+    write!(stream, "HTTP/1.1 {code} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{extra}Connection: close\r\n\r\n", body.len())?;
+    stream.write_all(body)
+}
+
+/// The panel's token: `run/panel-token`, 128 random bits made on first use.
+fn token(root: &Path) -> std::io::Result<String> {
+    let path = root.join("run/panel-token");
+    if let Some(token) = read_trim(&path).filter(|t| t.len() == 32) {
+        return Ok(token);
+    }
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    fs::create_dir_all(root.join("run"))?;
+    fs::write(&path, &token)?;
+    Ok(token)
+}
+
+/// The hotspot's name: the last `ssid=` line of the config the vendor's S79hostapd writes at boot.
+fn hotspot_ssid() -> Option<String> {
+    fs::read_to_string("/tmp/hostapd.conf").ok()?.lines().rev().find_map(|l| l.strip_prefix("ssid=").map(str::to_string))
 }
 
 fn read_trim(path: impl AsRef<Path>) -> Option<String> {
@@ -582,6 +686,23 @@ fn checks(state: &DeviceState) -> Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wifi_changes_come_from_the_hotspot_the_cap_or_a_browser_with_the_token() {
+        let token = "5f0c9e2a";
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        for (peer, cookie, allowed) in [
+            ("192.168.11.73", None, true),
+            ("127.0.0.1", None, true),
+            ("192.168.1.72", None, false),
+            ("192.168.1.72", Some("robocap_token=5f0c9e2a"), true),
+            ("192.168.1.72", Some("theme=dark; robocap_token=5f0c9e2a"), true),
+            ("192.168.1.72", Some("robocap_token=wrong"), false),
+            ("192.168.8.121", Some("robocap_token="), false),
+        ] {
+            assert_eq!(may_change_wifi(ip(peer), cookie, token), allowed, "{peer} {cookie:?}");
+        }
+    }
 
     #[test]
     fn thermal_scan_skips_failures_and_keeps_later_hot_zones() -> std::io::Result<()> {

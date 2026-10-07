@@ -2,9 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>RoboCap live</title>
 <link rel="icon" href="data:,">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="RoboCap">
 <style>
   /* Colour roles (the dataviz reference palette): dark first, light from the OS setting. Status colours mean state only. */
   :root {
@@ -39,9 +43,9 @@
   .spacer { flex: 1; }
 
   main { max-width: 1480px; margin: 0 auto; padding: 20px 24px 40px; display: grid; gap: 16px; align-items: start;
-         grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); grid-template-areas: "run form" "tiles form" "detail form" "log log"; }
+         grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); grid-template-areas: "run form" "tiles form" "detail form" "wifi wifi" "log log"; }
   #run-card { grid-area: run; } #form-card { grid-area: form; position: sticky; top: 72px; } #dev-tiles { grid-area: tiles; }
-  .devgrid { grid-area: detail; } #log-box { grid-area: log; }
+  .devgrid { grid-area: detail; } #log-box { grid-area: log; } #wifi-card { grid-area: wifi; }
   .card { background: var(--card); border-radius: 14px; box-shadow: inset 0 0 0 1px var(--ring); padding: 18px 20px; min-width: 0; }
   .card h2 { margin: 0 0 14px; font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
 
@@ -76,7 +80,7 @@
   .state svg { width: 12px; height: 12px; }
   .good > svg { color: var(--good); } .warn > svg { color: var(--warn); } .bad > svg { color: var(--critical); } .info > svg { color: var(--muted); }
 
-  .spark { display: block; width: 100%; height: 44px; margin-top: 6px; overflow: visible; touch-action: none; }
+  .spark { display: block; width: 100%; height: 44px; margin-top: 6px; overflow: visible; touch-action: pan-y; }
   .spark .area { fill: var(--series-wash); }
   .spark .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .spark .end { fill: var(--series); stroke: var(--raised); stroke-width: 2; }
@@ -95,7 +99,7 @@
   /* The start form. */
   .field { margin-bottom: 14px; }
   .field > .name { display: block; color: var(--ink-2); font-size: 12.5px; margin-bottom: 6px; }
-  input[type=text], input[type=number] { width: 100%; background: var(--page); color: var(--ink); border: 0; border-radius: 8px;
+  input[type=text], input[type=number], input[type=password] { width: 100%; background: var(--page); color: var(--ink); border: 0; border-radius: 8px;
          box-shadow: inset 0 0 0 1px var(--line); padding: 8px 10px; font: inherit; }
   input:focus-visible, button:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
   .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -148,10 +152,51 @@
   #dev-tiles .spark .end { stroke: var(--card); }
   .devgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
 
+  /* Run settings fold into one line on a phone; the viewer line; the Wi-Fi lists. */
+  #settings > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--ink-2); font-size: 12.5px; margin-bottom: 12px; list-style: none; }
+  #settings > summary::-webkit-details-marker { display: none; }
+  #settings > summary::after { content: "Edit"; margin-left: auto; color: var(--series); }
+  #settings[open] > summary::after { content: "Hide"; }
+  #settings-line { color: var(--ink); overflow-wrap: anywhere; }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  .inline input { flex: 1; min-width: 0; }
+  .wbtn { border: 0; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; background: var(--raised); color: var(--ink);
+          box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; }
+  .wbtn.primary { background: var(--series); color: #fff; box-shadow: none; }
+  .wbtn:disabled { opacity: .38; cursor: default; }
+  #viewer-more { margin-top: 8px; font-size: 12.5px; }
+  #viewer-more summary { cursor: pointer; color: var(--series); }
+  #viewer-more .name { margin: 10px 0 6px; }
+  .wifi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px 24px; }
+  .wrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  .wrow:last-child { border-bottom: 0; }
+  .wrow .ws { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .wrow .wm { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .wjoin { display: flex; gap: 8px; padding: 0 0 10px; }
+  .wjoin input { flex: 1; min-width: 0; }
   details.card summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
   pre { margin: 12px 0 0; max-height: 360px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); white-space: pre-wrap; }
-  @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-areas: "run" "form" "tiles" "detail" "log"; padding: 16px; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-areas: "run" "form" "wifi" "tiles" "detail" "log"; padding: 16px; }
     #form-card { position: static; } header { padding: 10px 16px; } .clock .big { font-size: 44px; } }
+  /* A phone (narrow, or short in landscape): one column in the order run, start, Wi-Fi, device; Start/Stop in a bar on the bottom edge. */
+  @media (max-width: 700px), (max-height: 500px) {
+    header { flex-wrap: wrap; gap: 6px 8px; padding: 8px 12px; } .spacer, #uptime { display: none; }
+    #device { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+    main { grid-template-areas: "run" "form" "wifi" "tiles" "detail" "log"; padding: 12px 12px calc(92px + env(safe-area-inset-bottom)); gap: 12px; }
+    .card { padding: 14px 14px; } .clock .big { font-size: 36px; }
+    .tile .sub { white-space: normal; }
+    .actions { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; margin: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+               background: color-mix(in srgb, var(--page) 92%, transparent); backdrop-filter: blur(8px); border-top: 1px solid var(--line); }
+    .btn { min-height: 50px; font-size: 16px; }
+  }
+  @media (max-width: 700px) { .tiles { grid-template-columns: 1fr 1fr; } }
+  /* Touch: 44 px targets, and 16 px text in fields so iOS does not zoom when one gets focus. */
+  @media (pointer: coarse), (max-width: 700px), (max-height: 500px) {
+    .seg button, .toggle, .links button, .wbtn, #settings > summary, #viewer-more summary, details.card summary { min-height: 44px; }
+    #viewer-more summary, details.card summary { display: flex; align-items: center; }
+    .links button { padding: 0 6px; }
+    input[type=text], input[type=number], input[type=password] { min-height: 44px; font-size: 16px; }
+  }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -197,9 +242,16 @@
   <section class="card" id="form-card" aria-label="start a run">
     <h2>Start a run</h2>
     <div class="field">
-      <label class="name" for="viewer">Rerun viewer</label>
-      <input type="text" id="viewer" placeholder="rerun+http://<viewer address>:9876/proxy" autocomplete="off" spellcheck="false">
+      <div class="name">Rerun viewer</div>
+      <div class="inline"><div class="notes" id="viewer-status" aria-live="polite" style="margin:0;flex:1"></div><button type="button" class="wbtn" id="viewer-check">Check</button></div>
+      <details id="viewer-more"><summary>Change the viewer</summary>
+        <label class="name" for="viewer-name">The Mac's Local hostname (System Settings › General › Sharing)</label>
+        <div class="inline"><input type="text" id="viewer-name" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><button type="button" class="wbtn" id="viewer-save">Save</button></div>
+        <label class="name" for="viewer">Or an address, used when the name is not found</label>
+        <input type="text" id="viewer" placeholder="rerun+http://<viewer address>:9876/proxy" autocomplete="off" autocapitalize="off" autocorrect="off" inputmode="url" spellcheck="false">
+      </details>
     </div>
+    <details id="settings" open><summary><span>Run settings</span><span id="settings-line"></span></summary>
     <div class="field">
       <div class="name" style="display:flex;justify-content:space-between">Video to the viewer <span class="links"><button type="button" id="cams-all">All</button><button type="button" id="cams-none">None</button></span></div>
       <div class="cams" id="cams"><div class="side">Left</div><div class="side">Right</div></div>
@@ -212,13 +264,14 @@
     </div>
     <div class="field">
       <label class="name" for="minutes">Duration (minutes, 0 = no limit)</label>
-      <div class="dur"><input type="number" id="minutes" min="0" max="120" value="0" class="num"><div class="seg" id="dur-presets"><button data-v="0" title="No time limit: the run goes until Stop or the temperature stop">No limit</button><button data-v="2">2</button><button data-v="5">5</button><button data-v="10">10</button><button data-v="30">30</button></div></div>
+      <div class="dur"><input type="number" id="minutes" min="0" max="120" value="0" class="num" inputmode="numeric"><div class="seg" id="dur-presets"><button data-v="0" title="No time limit: the run goes until Stop or the temperature stop">No limit</button><button data-v="2">2</button><button data-v="5">5</button><button data-v="10">10</button><button data-v="30">30</button></div></div>
     </div>
     <div class="row2">
       <button type="button" class="toggle" id="hands" aria-pressed="true"><span class="box"><svg><use href="#i-check"/></svg></span>Hands</button>
       <button type="button" class="toggle" id="frame_csv" aria-pressed="false" title="Save capture timestamps and sync events beside the run summary"><span class="box"><svg><use href="#i-check"/></svg></span>Capture CSV</button>
       <button type="button" class="toggle" id="uclamp" aria-pressed="false" title="uclamp.min 1024 for SLAM and hands: faster, hotter, more power"><span class="box"><svg><use href="#i-check"/></svg></span>uclamp boost</button>
     </div>
+    </details>
     <div class="notes" id="checks" aria-live="polite"></div>
     <div class="actions">
       <button class="btn go" id="start"><svg><use href="#i-play"/></svg>Start run</button>
@@ -234,9 +287,25 @@
     <section class="card"><h2>CPU</h2><div class="meters" id="cpus"></div></section>
     <section class="card"><h2>NPU · GPU · DDR · VPU</h2><div class="meters" id="accel"></div></section>
     <section class="card"><h2>Power</h2><div class="rows" id="power"></div></section>
-    <section class="card"><h2>Wi-Fi</h2><div class="rows" id="net"></div></section>
     <section class="card"><h2>System</h2><div class="rows" id="sys"></div></section>
   </div>
+
+  <section class="card" id="wifi-card" aria-labelledby="wifi-h">
+    <h2 id="wifi-h">Wi-Fi</h2>
+    <div class="wifi-grid">
+      <div>
+        <div class="rows" id="wifi-now"></div>
+        <div class="rows" id="net"></div>
+        <div class="notes" id="wifi-msg" aria-live="polite"></div>
+      </div>
+      <div>
+        <div class="group">Saved networks</div>
+        <div id="wifi-saved"></div>
+        <div class="group" style="display:flex;align-items:center;justify-content:space-between">Nearby <button type="button" class="wbtn" id="wifi-scan">Scan</button></div>
+        <div id="wifi-seen"></div>
+      </div>
+    </div>
+  </section>
 
   <details class="card" id="log-box"><summary>Run log (last 60 lines)</summary><pre id="log"></pre></details>
 </main>
@@ -397,7 +466,18 @@ function loadForm(s) {
   setPressed($("hands"), r.hands ?? true);
   setPressed($("frame_csv"), r.frame_csv ?? false);
   setPressed($("uclamp"), r.uclamp ?? false);
+  summarize();
 }
+
+// The folded settings line ("2 cameras · SLAM 15 Hz GPU · hands fit · no limit"); a phone starts with them folded.
+function summarize() {
+  const cams = camButtons.filter(pressed).length, minutes = Number($("minutes").value);
+  $("settings-line").textContent = `${cams ? `${cams} camera${cams > 1 ? "s" : ""}` : "no video"} · SLAM ${segValue("slam_hz")} Hz ${(segValue("slam_lane") || "").toUpperCase()} · `
+    + `hands ${pressed($("hands")) ? segValue("hand_overlays") : "off"} · ${minutes ? `${minutes} min` : "no limit"}`;
+}
+if (matchMedia("(max-width: 700px), (max-height: 500px)").matches) $("settings").open = false;
+$("settings").addEventListener("click", () => setTimeout(summarize));
+$("minutes").addEventListener("input", summarize);
 
 // robocap-live's 1 Hz line: "[  17.5 s] src 30.4/s imu 205/s | ds .. | slam 27.5 Hz  20.0/ 66.7 ms ok 100% drop 75 | hands 29.4/s  11.5 ms drop 3 | out 29.4/s e2e  15.3 ms drop 0 | ..."
 function parseStatus(line) {
@@ -412,7 +492,7 @@ const PHASES = {
   starting: ["spin", "STARTING", "The cap pauses its vendor recorder, then robocap-live opens the cameras."],
   streaming: ["live", "STREAMING", ""],
   stopping: ["spin", "STOPPING", "robocap-live drains, then the cap restarts its vendor recorder (about 15 s)."],
-  offline: ["bad", "NO CONNECTION", "The panel does not answer; the page retries every second."],
+  offline: ["bad", "NO CONNECTION", "The panel did not answer within 3 s; the page keeps trying."],
 };
 function setPhase(ph, text) {
   const [ic, label, fallback] = PHASES[ph], phase = $("phase");
@@ -523,8 +603,7 @@ function render(s) {
     kv("charger", p.status),
     kv("real input limit", p.input_limit_ma == null ? "unreadable" : `${p.input_limit_ma} mA`, lowInput || p.input_limit_ma == null ? "warnv" : ""),
     kv("input regulation", p.iindpm == null ? "–" : p.iindpm ? "yes: the battery helps" : "no", p.iindpm ? "warnv" : ""));
-  $("net").replaceChildren(kv("network", `${s.net.ssid || "–"} · ${s.net.freq || "–"} MHz`), kv("signal", s.net.signal), kv("link rate", s.net.tx_bitrate),
-    kv("sending · receiving", `${fmt(tx, 2)} · ${fmt(rx, 2)} Mbit/s`));
+  $("net").replaceChildren(kv("signal", s.net.signal), kv("link rate", s.net.tx_bitrate), kv("sending · receiving", `${fmt(tx, 2)} · ${fmt(rx, 2)} Mbit/s`));
   const m = s.mem_kb, gib = b => b == null ? null : b / 2 ** 30;
   $("sys").replaceChildren(
     kv("memory available", `${fmt(gib((m.available || 0) * 1024), 1)} of ${fmt(gib((m.total || 0) * 1024), 1)} GiB`),
@@ -534,10 +613,11 @@ function render(s) {
   prev = s;
 }
 
-// One status request a second, none while the tab is hidden (each one costs the cap a /proc scan).
+// One status request a second, none while the tab is hidden (each one costs the cap a /proc scan). A request that hangs counts
+// as no connection after 3 s, so a phone at the edge of the hotspot never shows a stale run as live.
 async function poll() {
   if (!document.hidden) {
-    try { render(await (await fetch("api/status")).json()); }
+    try { render(await (await fetch("api/status", { signal: AbortSignal.timeout(3000) })).json()); }
     catch (e) { setPhase("offline"); setConn(false); }
   }
   setTimeout(poll, 1000);
@@ -556,15 +636,100 @@ async function post(path, body) {
       ...(r.warnings || []).map(w => note("warn", w)));
   } catch (e) { $("msg").replaceChildren(note("bad", `The panel did not answer: ${e}`)); }
 }
-$("start").onclick = () => {
-  const request = { viewer: $("viewer").value.trim(), video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
+$("start").onclick = async () => {
+  // The named viewer's current address wins; the typed address is the fallback; no viewer is allowed (the run still records).
+  const found = await checkViewer(), typed = $("viewer").value.trim();
+  const request = { viewer: found?.found ? found.url : typed, video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
     slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
     duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), frame_csv: pressed($("frame_csv")), uclamp: pressed($("uclamp")) };
-  localStorage.setItem("robocap-request", JSON.stringify({ ...request, form: 2 }));
-  post("api/start", new URLSearchParams({ ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" }).toString());
+  localStorage.setItem("robocap-request", JSON.stringify({ ...request, viewer: typed, form: 2 }));
+  await post("api/start", new URLSearchParams({ ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" }).toString());
+  if (!request.viewer) $("msg").append(note("warn", "No viewer: the run records on the cap only."));
 };
 $("stop").onclick = () => post("api/stop", "");
-poll(); pollLog();
+
+// The viewer, by the Mac's name: the cap finds its address on whatever network they share and checks port 9876.
+async function checkViewer() {
+  try {
+    const v = await (await fetch("api/viewer", { signal: AbortSignal.timeout(5000) })).json();
+    if (!$("viewer-name").value) $("viewer-name").value = v.name;
+    const typed = $("viewer").value.trim();
+    setNotes($("viewer-status"), [!v.found ? note("bad", `${v.error}${typed ? ` · using ${typed}` : ""}`)
+      : v.running ? note("good", `${v.name} · ${v.address} · viewer running`)
+      : note("warn", `${v.name} · ${v.address} · no viewer yet: open Rerun on the Mac, the cap connects when it starts`)]);
+    return v;
+  } catch (e) { setNotes($("viewer-status"), [note("bad", `The viewer check did not answer: ${e}`)]); return null; }
+}
+$("viewer-check").onclick = checkViewer;
+$("viewer-save").onclick = async () => {
+  const reply = await (await fetch("api/viewer", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ name: $("viewer-name").value.trim() }).toString() })).json();
+  if (!reply.ok) setNotes($("viewer-status"), [note("bad", reply.error)]); else checkViewer();
+};
+
+// The Wi-Fi card: the cap's network, its hotspot, saved and nearby networks. Changes come from the hotspot, or from a browser that
+// opened this page over the hotspot once (the panel's cookie).
+let wifi = null, joining = null, joined = null;
+async function loadWifi() {
+  if (document.hidden) return;
+  try { wifi = await (await fetch("api/wifi", { signal: AbortSignal.timeout(5000) })).json(); renderWifi(); } catch (e) {}
+}
+function renderWifi() {
+  const w = wifi.wifi, you = wifi.you, can = you.may_change, ghz = f => f ? (f > 4000 ? "5 GHz" : "2.4 GHz") : "";
+  $("wifi-now").replaceChildren(
+    kv("the cap's network", w.error ? w.error : w.ssid ? `${w.ssid}${w.ip ? ` · ${w.ip}` : " · no address yet"} · ${ghz(Number(w.freq))}` : "not connected", w.ssid ? "" : "warnv"),
+    kv("the cap's hotspot", `${wifi.hotspot.ssid || "Robocap"} · ${wifi.hotspot.ip}`),
+    kv("this device", you.on_hotspot ? "on the cap's hotspot" : `on the LAN · ${you.ip}`));
+  const notes = [];
+  if (!can) notes.push(note("info", "To change Wi-Fi from here, open this page once while joined to the cap's hotspot."));
+  if (joined && w.ssid === joined && w.ip) notes.push(note("good", `The cap is on ${w.ssid} at ${w.ip}: on that network, open http://${w.ip}:8090`));
+  else if (joined) notes.push(note("info", `Saved ${joined}. The cap joins it when it is in range; its hotspot can drop for a moment while it moves to that network's channel.`));
+  setNotes($("wifi-msg"), [...notes, ...($("wifi-msg").dataset.error ? [note("bad", $("wifi-msg").dataset.error)] : [])]);
+  $("wifi-scan").disabled = !can;
+  if (joining) return;  // keep a password field that is being typed in
+  $("wifi-saved").replaceChildren(...(w.saved || []).map(n => {
+    const row = el("div", "wrow"), forget = el("button", "wbtn", "Forget");
+    forget.type = "button"; forget.disabled = !can;
+    forget.onclick = () => confirm(`Forget ${n.ssid} on the cap?`) && wifiPost("forget", { id: n.id });
+    row.append(el("span", "ws", n.ssid), el("span", "wm", n.ssid === w.ssid ? "connected" : ""), forget);
+    return row;
+  }));
+  if (!(w.saved || []).length) $("wifi-saved").replaceChildren(el("div", "wrow", "none"));
+  $("wifi-seen").replaceChildren(...(w.seen || []).filter(n => !n.saved).slice(0, 12).flatMap(n => {
+    const row = el("div", "wrow"), join = el("button", "wbtn", "Join");
+    join.type = "button"; join.disabled = !can;
+    join.onclick = () => n.secured ? askPassword(n.ssid, row) : wifiPost("join", { ssid: n.ssid, password: "" });
+    row.append(el("span", "ws", n.ssid), el("span", "wm", `${n.signal} dBm · ${ghz(n.freq)}${n.secured ? "" : " · open"}`), join);
+    return [row];
+  }));
+  if (!$("wifi-seen").children.length) $("wifi-seen").replaceChildren(el("div", "wrow", can ? "No other networks seen yet: tap Scan." : "No other networks seen yet."));
+}
+function askPassword(ssid, row) {
+  joining = ssid;
+  const form = el("div", "wjoin"), pw = el("input"), go = el("button", "wbtn primary", "Join"), cancel = el("button", "wbtn", "Cancel");
+  Object.assign(pw, { type: "password", placeholder: `Password for ${ssid}`, autocomplete: "off" });
+  go.type = cancel.type = "button";
+  const done = () => { joining = null; renderWifi(); };
+  go.onclick = async () => { await wifiPost("join", { ssid, password: pw.value }); pw.value = ""; done(); };
+  cancel.onclick = done;
+  form.append(pw, go, cancel);
+  row.after(form);
+  pw.focus();
+}
+async function wifiPost(action, fields) {
+  try {
+    const reply = await (await fetch(`api/wifi/${action}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(), signal: AbortSignal.timeout(10000) })).json();
+    $("wifi-msg").dataset.error = reply.ok ? "" : reply.error;
+    if (reply.ok && action === "join") joined = fields.ssid;
+  } catch (e) { $("wifi-msg").dataset.error = `The panel did not answer: ${e}`; }
+  await loadWifi();
+  setTimeout(loadWifi, action === "scan" ? 4000 : 2000);
+}
+$("wifi-scan").onclick = () => wifiPost("scan", {});
+setInterval(loadWifi, 5000);
+
+poll(); pollLog(); loadWifi(); checkViewer();
 </script>
 </body>
 </html>

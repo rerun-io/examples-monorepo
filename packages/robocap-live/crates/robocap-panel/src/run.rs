@@ -266,7 +266,7 @@ impl StartRequest {
 }
 
 /// `%XX` and `+` decoding of one form value.
-fn decode(value: &str) -> String {
+pub fn decode(value: &str) -> String {
     let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
