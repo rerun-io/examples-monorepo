@@ -30,7 +30,7 @@ mod log_markers;
 mod handoff;
 mod run;
 
-use handoff::{LAUNCHER, MAX_START_TEMP_C, RECORDER, RUN_ENDED, STOP_TEMP_C};
+use handoff::{LAUNCHER, MAX_START_TEMP_C, RECORDER, RUN_ENDED, STOP_TEMP_C, WARN_TEMP_C};
 use run::{Checks, Owner, Phase, Run, StartRequest, alive, live_processes, phase, run_pid};
 
 const PAGE: &str = include_str!("panel.html");
@@ -360,12 +360,7 @@ fn capture_health(log: &str) -> Option<Value> {
 }
 
 fn status(panel: &Panel) -> Value {
-    let zones: Vec<(String, f64)> = (0..16)
-        .map_while(|zone| {
-            let base = format!("/sys/class/thermal/thermal_zone{zone}");
-            Some((read_trim(format!("{base}/type"))?, read_number(format!("{base}/temp"))? / 1000.0))
-        })
-        .collect();
+    let zones = thermal_zones(Path::new("/sys/class/thermal"));
     let thermal: Vec<Value> = zones.iter().map(|(name, c)| json!({"name": name, "c": c})).collect();
     let cpu: Vec<Vec<u64>> = fs::read_to_string("/proc/stat")
         .unwrap_or_default()
@@ -412,7 +407,7 @@ fn status(panel: &Panel) -> Value {
             Err(error) => eprintln!("robocap-panel: {error}"),
         }
     }
-    let hottest = zones.iter().map(|(_, c)| *c).fold(f64::MIN, f64::max);
+    let hottest = zones.iter().map(|(_, c)| *c).reduce(f64::max);
     let state = DeviceState::read(pid.filter(|_| running), &procs, disk_free, hottest);
     let log = log_text(panel, 32 * 1024);
     let live_running = running && pid.is_some_and(|session| !live_processes(&procs, &panel.root, session).is_empty());
@@ -458,6 +453,7 @@ fn status(panel: &Panel) -> Value {
             "min_input_limit_ma": MIN_INPUT_LIMIT_MA,
             "min_vbat_v": MIN_VBAT_V,
             "max_start_temp_c": MAX_START_TEMP_C,
+            "warn_temp_c": WARN_TEMP_C,
             "stop_temp_c": STOP_TEMP_C,
         },
         "checks": {"refusals": checks.refusals, "warnings": checks.warnings},
@@ -491,9 +487,23 @@ fn disk_bytes(path: &str) -> (Option<u64>, Option<u64>) {
     (fields.first().map(|k| k * 1024), fields.get(2).map(|k| k * 1024))
 }
 
-/// The hottest thermal zone, °C.
-fn hottest_c() -> f64 {
-    (0..16).map_while(|z| read_number(format!("/sys/class/thermal/thermal_zone{z}/temp"))).fold(f64::MIN, f64::max) / 1000.0
+/// Read every thermal zone; a failed zone must not hide later ones.
+fn thermal_zones(root: &Path) -> Vec<(String, f64)> {
+    let mut zones: Vec<_> = fs::read_dir(root).into_iter().flatten().flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("thermal_zone"))
+        .filter_map(|entry| {
+            let temperature = read_number(entry.path().join("temp"))? / 1000.0;
+            if !temperature.is_finite() { return None; }
+            let name = read_trim(entry.path().join("type")).unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+            Some((name, temperature))
+        }).collect();
+    zones.sort_by(|a, b| a.0.cmp(&b.0));
+    zones
+}
+
+/// The hottest readable thermal zone, °C; None refuses a start.
+fn hottest_c() -> Option<f64> {
+    thermal_zones(Path::new("/sys/class/thermal")).into_iter().map(|(_, c)| c).reduce(f64::max)
 }
 
 /// What start's checks look at.
@@ -505,14 +515,14 @@ struct DeviceState {
     input_limit_ma: Option<u32>,
     iindpm: Option<bool>,
     battery_v: Option<f64>,
-    hottest_c: f64,
+    hottest_c: Option<f64>,
     disk_free: Option<u64>,
 }
 
 impl DeviceState {
     /// The charger and battery read now; the rest from the caller, which already has it (`run`: the session of the run that is
     /// going). The run's own processes (its session: the supervisor, robocap-live and its encoders) do not make the cap busy.
-    fn read(run: Option<u32>, processes: &[Process], disk_free: Option<u64>, hottest_c: f64) -> Self {
+    fn read(run: Option<u32>, processes: &[Process], disk_free: Option<u64>, hottest_c: Option<f64>) -> Self {
         let (input_limit_ma, iindpm) = read_charger();
         Self {
             run_going: run.is_some(),
@@ -550,8 +560,18 @@ fn checks(state: &DeviceState) -> Checks {
     {
         checks.refusals.push(format!("battery {volts:.2} V is below {MIN_VBAT_V} V"));
     }
-    if state.hottest_c >= MAX_START_TEMP_C {
-        checks.refusals.push(format!("SoC {:.1} °C: a run starts below {MAX_START_TEMP_C} °C", state.hottest_c));
+    let Some(hottest) = state.hottest_c else {
+        checks.refusals.push("cannot read any thermal zone".into());
+        return checks;
+    };
+    if hottest >= MAX_START_TEMP_C {
+        checks.refusals.push(format!("SoC {:.1} °C: a run starts below {MAX_START_TEMP_C} °C", hottest));
+    }
+    if hottest >= WARN_TEMP_C {
+        checks.warnings.push(format!(
+            "SoC {:.1} °C: the kernel throttles from {WARN_TEMP_C} °C (slower SLAM and hands); a run stops at {STOP_TEMP_C} °C",
+            hottest
+        ));
     }
     if state.disk_free.is_some_and(|free| free < MIN_FREE_BYTES) {
         checks.refusals.push(format!("less than {} GiB free on /", MIN_FREE_BYTES >> 30));
@@ -562,6 +582,20 @@ fn checks(state: &DeviceState) -> Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_scan_skips_failures_and_keeps_later_hot_zones() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("panel-thermal-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        assert!(thermal_zones(&root).is_empty());
+        for (zone, reading) in [(0, None), (1, Some("NaN")), (2, Some("95000")), (20, Some("96000"))] {
+            let directory = root.join(format!("thermal_zone{zone}"));
+            fs::create_dir_all(&directory)?;
+            if let Some(reading) = reading { fs::write(directory.join("temp"), reading)?; }
+        }
+        assert_eq!(thermal_zones(&root), [("thermal_zone2".into(), 95.0), ("thermal_zone20".into(), 96.0)]);
+        fs::remove_dir_all(root)
+    }
 
     #[test]
     fn only_an_orphaned_paused_vendor_may_resume() {
@@ -589,7 +623,7 @@ mod tests {
             input_limit_ma: Some(2610),
             iindpm: Some(false),
             battery_v: Some(8.2),
-            hottest_c: 43.0,
+            hottest_c: Some(43.0),
             disk_free: Some(5 << 30),
         };
         assert_eq!(checks(&quiet), Checks::default());
@@ -601,7 +635,7 @@ mod tests {
         assert_eq!((unreadable.refusals.len(), unreadable.warnings.len()), (0, 1), "{unreadable:?}");
         for refused in [
             DeviceState { battery_v: Some(7.8), ..quiet.clone() },
-            DeviceState { hottest_c: 75.0, ..quiet.clone() },
+            DeviceState { hottest_c: Some(75.0), ..quiet.clone() },
             DeviceState { disk_free: Some(1 << 29), ..quiet.clone() },
             DeviceState { busy: vec!["transfer 812: tar -xf -".into()], ..quiet.clone() },
             DeviceState { run_going: true, ..quiet.clone() },

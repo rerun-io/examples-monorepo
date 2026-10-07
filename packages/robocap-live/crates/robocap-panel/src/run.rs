@@ -209,7 +209,11 @@ impl StartRequest {
             slam_lane: choice("slam_lane", "gpu", &["gpu", "cpu"])?,
             slam_lag: choice("slam_lag", "auto", &["auto", "on", "off"])?,
             uclamp: flag("uclamp", false),
-            duration_s: number("duration_s", 1800, 10..=7200)?,
+            // 0 (the default) is no time limit: the run goes until Stop or the supervisor's temperature stop.
+            duration_s: match number("duration_s", 0, 0..=7200)? {
+                1..=9 => return Err("duration_s: 0 (no limit) or 10-7200".into()),
+                seconds => seconds,
+            },
             frame_csv: flag("frame_csv", false),
         })
     }
@@ -252,7 +256,10 @@ impl StartRequest {
         }
         let uclamp = if self.uclamp { "1024" } else { "none" };
         command.extend(["--slam-uclamp".into(), uclamp.into(), "--hands-uclamp".into(), uclamp.into()]);
-        command.extend(["--duration".into(), self.duration_s.to_string(), "--summary-json".into(), at(&format!("logs/rt-{stamp}.json"))]);
+        if self.duration_s > 0 {
+            command.extend(["--duration".into(), self.duration_s.to_string()]);
+        }
+        command.extend(["--summary-json".into(), at(&format!("logs/rt-{stamp}.json"))]);
         if self.frame_csv { command.extend(["--frame-csv".into(), at(&format!("logs/rt-{stamp}.frames.csv"))]); }
         command
     }
@@ -307,9 +314,9 @@ pub fn start(
     }
     let Checks { refusals, warnings } = preflight();
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // The supervisor, its time limit, then robocap-live: what is spawned and what run/live.cmd records.
+    // The supervisor, its time limit (0: none), then robocap-live: what is spawned and what run/live.cmd records.
     let mut argv = supervisor.to_vec();
-    argv.push((request.duration_s + SUPERVISOR_MARGIN_S).to_string());
+    argv.push(if request.duration_s == 0 { 0 } else { request.duration_s + SUPERVISOR_MARGIN_S }.to_string());
     argv.extend(request.command(root, stamp));
     let log_path = root.join(format!("logs/rt-{stamp}.log"));
     let mut record = run.record();
@@ -488,7 +495,9 @@ exit $status
         assert!(StartRequest::parse("duration_s=99999").is_err());
         assert!(StartRequest::parse("slam_hz=60").is_err());
         let defaults = StartRequest::parse("")?;
-        assert_eq!((defaults.viewer.as_str(), defaults.video_cameras.is_empty(), defaults.slam_hz, defaults.duration_s), ("", true, 15, 1800));
+        assert_eq!((defaults.viewer.as_str(), defaults.video_cameras.is_empty(), defaults.slam_hz, defaults.duration_s), ("", true, 15, 0));
+        assert!(!defaults.command(Path::new("/r"), 1).iter().any(|a| a == "--duration"), "the default run has no time limit");
+        assert!(StartRequest::parse("duration_s=5").is_err());
         assert!(defaults.command(Path::new("/r"), 1).join(" ").contains("--video off"));
         Ok(())
     }

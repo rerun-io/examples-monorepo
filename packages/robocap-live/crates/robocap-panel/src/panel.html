@@ -211,8 +211,8 @@
       <div class="field"><div class="name" title="fit: the fitted hand in every camera and DetNet's box; debug: also every KeyNet view and DetNet answer; verbose: also relative depths and the predicted pose. Each level uses more Wi-Fi.">Hand overlays</div><div class="seg" data-name="hand_overlays"><button data-v="fit">Fit</button><button data-v="debug">Debug</button><button data-v="verbose">Verbose</button></div></div>
     </div>
     <div class="field">
-      <label class="name" for="minutes">Duration (minutes)</label>
-      <div class="dur"><input type="number" id="minutes" min="1" max="120" value="5" class="num"><div class="seg" id="dur-presets"><button data-v="2">2</button><button data-v="5">5</button><button data-v="10">10</button><button data-v="30">30</button></div></div>
+      <label class="name" for="minutes">Duration (minutes, 0 = no limit)</label>
+      <div class="dur"><input type="number" id="minutes" min="0" max="120" value="0" class="num"><div class="seg" id="dur-presets"><button data-v="0" title="No time limit: the run goes until Stop or the temperature stop">No limit</button><button data-v="2">2</button><button data-v="5">5</button><button data-v="10">10</button><button data-v="30">30</button></div></div>
     </div>
     <div class="row2">
       <button type="button" class="toggle" id="hands" aria-pressed="true"><span class="box"><svg><use href="#i-check"/></svg></span>Hands</button>
@@ -387,11 +387,12 @@ $("minutes").oninput = () => setSeg($("dur-presets"), $("minutes").value);
 let formLoaded = false;
 function loadForm(s) {
   if (formLoaded) return; formLoaded = true;
-  const r = JSON.parse(localStorage.getItem("robocap-request") || "null") ?? s.run.request ?? {};
+  const saved = JSON.parse(localStorage.getItem("robocap-request") || "null"), r = saved ?? s.run.request ?? {};
   $("viewer").value = r.viewer ?? "";
   camButtons.forEach(b => setPressed(b, (r.video_cameras ?? [0, 1]).map(String).includes(b.dataset.v)));
   for (const [name, fallback] of [["slam_hz", 15], ["slam_lane", "gpu"], ["slam_lag", "auto"], ["hand_overlays", "fit"]]) setSeg(seg(name), r[name] ?? fallback);
-  $("minutes").value = r.duration_s ? Math.max(1, Math.round(r.duration_s / 60)) : 5;
+  // Form 2 made "no time limit" the default: a request this browser saved before it starts unlimited too.
+  $("minutes").value = saved && saved.form !== 2 ? 0 : Math.round((r.duration_s ?? 0) / 60);
   setSeg($("dur-presets"), $("minutes").value);
   setPressed($("hands"), r.hands ?? true);
   setPressed($("frame_csv"), r.frame_csv ?? false);
@@ -443,7 +444,7 @@ function render(s) {
   setPhase(ph, live && req ? `${cams ? `${cams} camera${cams > 1 ? "s" : ""} to the viewer` : "no video"} · SLAM ${req.slam_hz} Hz on ${req.slam_lane.toUpperCase()} · hands ${req.hands ? req.hand_overlays : "off"}` : null);
   const elapsed = ph === "idle" ? 0 : st?.t ?? 0, total = req && ph !== "idle" ? req.duration_s : null;
   $("elapsed").textContent = mmss(elapsed);
-  $("of").textContent = total ? `/ ${mmss(total)}` : "";
+  $("of").textContent = total ? `/ ${mmss(total)}` : req && ph !== "idle" ? "/ no limit" : "";
   $("progress").style.width = total ? `${Math.min(100, 100 * elapsed / total)}%` : "0";
   for (const t of Object.values(pipe)) t.tile.classList.toggle("dim", !live);
   const rate = (v, target) => v == null || !live ? null : [v >= target * 0.95 ? "good" : v >= target * 0.8 ? "warn" : "bad", `target ${target}`];
@@ -478,8 +479,8 @@ function render(s) {
   // Device tiles.
   const hottest = s.thermal.length ? Math.max(...s.thermal.map(t => t.c)) : null;
   dev.temp.spark.limit = L.stop_temp_c;
-  const hot = hottest == null ? null : hottest >= L.stop_temp_c ? "bad" : hottest >= L.max_start_temp_c ? "warn" : "good";
-  setTile(dev.temp, hottest, 1, hottest == null ? "no thermal zones" : `run stops at ${L.stop_temp_c} °C`, hot && [hot, hot === "good" ? "ok" : "hot"]);
+  const hot = hottest == null ? null : hottest >= L.stop_temp_c ? "bad" : hottest >= L.warn_temp_c ? "warn" : "good";
+  setTile(dev.temp, hottest, 1, hottest == null ? "no thermal zones" : `throttles at ${L.warn_temp_c} °C · stops at ${L.stop_temp_c} °C`, hot && [hot, hot === "good" ? "ok" : "throttling"]);
   dev.temp.spark.push(hottest);
   let busy = null;
   if (prev && prev.cpu.length === s.cpu.length) {
@@ -503,7 +504,7 @@ function render(s) {
   dev.net.spark.push(tx);
 
   // Device detail.
-  $("temps").replaceChildren(...s.thermal.map(t => meter(t.name.replace("-thermal", ""), t.c, 95, `${fmt(t.c, 1)} °C`, L.max_start_temp_c, L.stop_temp_c, [L.max_start_temp_c, L.stop_temp_c])));
+  $("temps").replaceChildren(...s.thermal.map(t => meter(t.name.replace("-thermal", ""), t.c, 100, `${fmt(t.c, 1)} °C`, L.warn_temp_c, L.stop_temp_c, [L.max_start_temp_c, L.warn_temp_c, L.stop_temp_c])));
   const cpus = [el("div", "group", "A55 · cores 0–3")];
   const freq = cpu => s.cpufreq.find(f => f.cpus.split(" ").includes(String(cpu)));
   (busy || s.cpu.map(() => null)).forEach((b, i) => {
@@ -559,7 +560,7 @@ $("start").onclick = () => {
   const request = { viewer: $("viewer").value.trim(), video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
     slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
     duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), frame_csv: pressed($("frame_csv")), uclamp: pressed($("uclamp")) };
-  localStorage.setItem("robocap-request", JSON.stringify(request));
+  localStorage.setItem("robocap-request", JSON.stringify({ ...request, form: 2 }));
   post("api/start", new URLSearchParams({ ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" }).toString());
 };
 $("stop").onclick = () => post("api/stop", "");
