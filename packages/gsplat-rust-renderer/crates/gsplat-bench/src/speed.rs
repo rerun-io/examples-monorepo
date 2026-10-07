@@ -6,7 +6,7 @@ use gsplat_bench::{
     renderers::{Adapter, Brush, Counts, Engine, Implementation, RenderEngine, Scene, StageTiming},
     statistics::{Statistics, median, summarize},
 };
-use gsplat_eval::{Evaluator, RenderMetrics, Versions};
+use gsplat_eval::{Evaluator, Provenance, RenderMetrics};
 use gsplat_render::{camera::CameraSpec, settings::RenderSettings};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -84,7 +84,7 @@ struct SpeedReport {
     ply: PathBuf,
     splats: usize,
     cameras: Vec<CameraSpec>,
-    versions: Versions,
+    provenance: Provenance,
     cpuset: String,
     minimum_warmup_seconds: f64,
     minimum_measured_seconds: f64,
@@ -291,7 +291,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             ply: a.camera.ply,
             splats: scene.data.num_splats(),
             cameras,
-            versions: Versions::default(),
+            provenance: Provenance::default(),
             cpuset: host::cpuset()?,
             minimum_warmup_seconds: 5.0,
             minimum_measured_seconds: a.min_seconds,

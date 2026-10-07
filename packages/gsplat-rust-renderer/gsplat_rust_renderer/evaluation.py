@@ -42,30 +42,16 @@ class ViewMetrics:
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class DependencyVersion:
-    """Resolved Cargo dependency."""
-    version: str
-    """Crate version."""
-    source: str
-    """Registry or exact git source."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class Versions:
-    """Build provenance from the Rust evaluator."""
-    evaluator: str
+class Provenance:
+    """Runtime source and dependency identity from the Rust evaluator."""
+    crate_version: str
     """Evaluator package version."""
-    ours: str
-    """Build-time git description including dirty state."""
-    profile: str
-    """Cargo build profile."""
-    release_settings: str
-    """Workspace release settings."""
-    dependencies: dict[str, DependencyVersion]
-    """Resolved renderer dependencies."""
-    environment: dict[str, str | None]
-    """Backend environment overrides at run time."""
+    source_sha: str | None
+    """Explicit GSPLAT_SOURCE_SHA or the current checkout revision."""
+    cargo_lock_sha256: str | None
+    """Fingerprint of the workspace's resolved dependencies."""
+    brush: str
+    """Pinned upstream source and observer patch."""
 
 
 @serde(deny_unknown_fields=True)
@@ -78,8 +64,8 @@ class Evaluation:
     """Arithmetic per-image mean."""
     convention: Literal["brush", "published"]
     """Metric convention name."""
-    versions: Versions
-    """Tool versions."""
+    provenance: Provenance
+    """Runtime source and dependency identity."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,7 @@ use gsplat_bench::{
     camera,
     renderers::{Adapter, Engine, Implementation, RenderEngine, Scene},
 };
-use gsplat_eval::{Evaluator, Metrics, Versions, ViewMetrics};
+use gsplat_eval::{Evaluator, Metrics, Provenance, ViewMetrics};
 use gsplat_render::{
     camera::{CameraSpec, load_frames},
     settings::RenderSettings,
@@ -173,7 +173,7 @@ struct ParityReport {
     cameras: Vec<CameraSpec>,
     adapter: Adapter,
     oracle_adapter: Adapter,
-    versions: Versions,
+    provenance: Provenance,
     views: Vec<ParityView>,
     mean: Metrics,
     min_rgb_psnr: f64,
@@ -316,7 +316,7 @@ async fn parity(
             cameras,
             adapter: renderer.adapter(),
             oracle_adapter: oracle.adapter(),
-            versions: Versions::default(),
+            provenance: Provenance::default(),
             min_rgb_psnr: views
                 .iter()
                 .map(|v| v.metrics.psnr)
@@ -386,14 +386,14 @@ async fn main() -> Result<()> {
         struct UnsupportedReport<'a> {
             status: &'static str,
             reason: &'a str,
-            versions: Versions,
+            provenance: Provenance,
         }
         write_json(
             &out,
             &UnsupportedReport {
                 status: "unsupported",
                 reason,
-                versions: Versions::default(),
+                provenance: Provenance::default(),
             },
         )?;
     }

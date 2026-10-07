@@ -1,7 +1,7 @@
 //! Score exported splats against NeRF test images using unclipped float renders.
 use anyhow::Result;
 use gsplat_bench::renderers::{Brush, RenderEngine, Scene};
-use gsplat_eval::{Convention, Evaluator, Metrics, Versions, ViewMetrics};
+use gsplat_eval::{Convention, Evaluator, Metrics, Provenance, ViewMetrics};
 use gsplat_render::camera::load_frames;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ pub struct ScoreArgs {
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct ScoreReport {
-    versions: Versions,
+    provenance: Provenance,
     ply: PathBuf,
     transforms: PathBuf,
     convention: Convention,
@@ -70,7 +70,7 @@ pub async fn run(args: ScoreArgs) -> Result<()> {
     super::write_json(
         &args.out,
         &ScoreReport {
-            versions: Versions::default(),
+            provenance: Provenance::default(),
             ply: args.ply,
             transforms,
             convention: Convention::Brush,

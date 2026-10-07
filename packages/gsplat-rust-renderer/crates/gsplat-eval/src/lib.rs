@@ -4,9 +4,9 @@
 mod float;
 pub mod published;
 pub use float::RenderMetrics;
-mod versions;
+mod provenance;
+pub use provenance::Provenance;
 pub use published::rgb as published_rgb;
-pub use versions::Versions;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ pub struct Evaluation {
     pub views: Vec<ViewMetrics>,
     pub mean: Metrics,
     pub convention: Convention,
-    pub versions: Versions,
+    pub provenance: Provenance,
 }
 
 /// Holds a device and (when requested) one reusable VGG model.
@@ -219,7 +219,7 @@ pub async fn evaluate_directories(
         views,
         mean,
         convention,
-        versions: Versions::default(),
+        provenance: Provenance::default(),
     })
 }
 

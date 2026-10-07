@@ -26,7 +26,7 @@ def test_evaluation_delegates_published_metrics_to_rust(tmp_path: Path) -> None:
         "views": [{"name": "test/r_0.png", "psnr": 12.5, "ssim": 0.75, "lpips": None}],
         "mean": {"psnr": 12.5, "ssim": 0.75, "lpips": None},
         "convention": "published",
-        "versions": {"evaluator": "test", "ours": "test", "profile": "test", "release_settings": "test", "dependencies": {}, "environment": {}},
+        "provenance": {"crate_version": "test", "source_sha": "test", "cargo_lock_sha256": "test", "brush": "test"},
     })
     binary.write_text(
         "#!/usr/bin/env python3\nimport pathlib, sys\n"
