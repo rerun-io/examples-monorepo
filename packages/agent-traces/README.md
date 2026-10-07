@@ -1,7 +1,7 @@
 # agent-traces
 
 Convert Claude Code session transcripts into Rerun recordings: one `.rrd` per session.
-You can then open a session in the Rerun viewer.
+You can then open a session in the Rerun viewer, or register many sessions on a Rerun catalog and query them together.
 
 Recordings hold full transcripts and tool outputs, which may include secrets. Treat converted files as sensitive.
 
@@ -30,7 +30,7 @@ Read the catalog with `event` to retain repeated `wall` timestamps; use `wall` f
 
 Claude tool references retain their names. Offloaded text is read without newline translation; missing files leave the preview and increment `property:skipped:offloaded_output_missing`.
 
-Each file carries a default layout with only the views that have data: Conversation beside Current message, plus Thinking, Tools, Lifecycle, token plots, Images, Tool elapsed, and Turns. The views include shared child text and `/children` scalar series.
+Each file carries a default layout with only the views that have data: Conversation beside Current message, plus Thinking, Tools, Lifecycle, token plots, Images, Tool elapsed, and Turns. The views include shared child text and `/children` scalar series. The catalog uses the same layout function with all views.
 
 The recordings are written with rerun-sdk 0.38.1. Open them with a viewer of that version or newer.
 
@@ -47,7 +47,7 @@ pixi run -e agent-traces rerun ~/agent-traces/claude/<session-id>.rrd
 Run it again at any time. It converts a session again only when the session's files changed, when you pass a different `--host`, or when a new version of this package changes what a recording holds.
 Filter with `--project`, `--session-id`, or `--since YYYY-MM-DD`. `--project` matches a substring of the working directory: the project directory name for Claude.
 
-`convert-all` exits 1 if any session fails; unchanged inputs do not cause failure. Successful work remains saved.
+`convert-all` exits 1 if any session fails; unchanged inputs do not cause failure. `register` exits 1 if a registration fails or a recording is missing. Successful work remains saved in either case.
 
 To convert one transcript, use `agent-traces-convert --session <file>.jsonl --out <file>.rrd`. Invalid input layouts return exit status 1 without creating output files.
 
@@ -56,6 +56,106 @@ To convert one transcript, use `agent-traces-convert --session <file>.jsonl --ou
 The profile is the home folder's name without the dot: `~/.claude` gives `claude`.
 A second home, for example one set with `CLAUDE_CONFIG_DIR`, gets its own profile from its folder name.
 Use `--profile` to choose a different name.
+
+## Register on a catalog
+
+A `rerun server` has no access control: anyone who can reach its port can read every recording. Treat catalogs serving these recordings as sensitive; bind the server to localhost or keep it on a private network.
+
+Start a catalog server in another terminal (default port 51234), then register one or more output folders:
+
+```bash
+pixi run -e agent-traces rerun server --host 127.0.0.1
+pixi run -e agent-traces agent-traces-register --catalog-url <catalog-url> --out ~/agent-traces/<computer-a> ~/agent-traces/<computer-b>
+```
+
+Profiles are the union across the supplied roots. Each profile becomes one dataset, `agent-traces-<profile>`, with one registration batch and one segment per session. Roots are processed in argument order; if a session appears in several roots, the first copy wins and later copies count as skipped duplicates, including with `--replace`. Blueprints are written once per profile under the first root that contains it.
+`host`, `profile`, and `agent` are segment-table columns, so a query can group or filter by them. The table starts with recording name, wall start, turns, host, agent, and profile; skipped-record counters are hidden. Every registration refreshes both default layouts and retires older blueprint registrations. After unregistering them, it deletes local files named `agent-traces-<32 hex>.rbl` or `agent-traces-table-<32 hex>.rbl` whose parent directory has the registered profile's name, including files under other output roots. Only `file://` URLs with an empty or `localhost` authority qualify; other files, including `agent-traces.rbl`, are left alone. Existing datasets are reused.
+The server opens each recording through its `file://` path, so it must be able to read the output folder. All files are written readable by every user (mode 644).
+
+`register` skips sessions that the dataset already has. After you convert changed sessions again, add `--replace` to update them.
+`rerun server` keeps registrations in memory. After a server restart, run `register` again.
+
+## Query the catalog
+
+Set `catalog_url` and `dataset_name` for your catalog, then run these blocks in order. Each content query applies `filter_contents` before one reader across all segments and projects only small typed columns. Read with `index="event"`: a wall-indexed reader collapses repeated timestamps. Use `wall` for time-window filters before projection and for UTC day grouping. The returned `wall` values are UTC without a timezone marker; use matching timezone-naive UTC bounds. Filter the relevant entity’s `agent_id` to `''` for main-agent-only counts or text searches, otherwise child copies also count. Do not use latest-at filling for event totals.
+
+Session facts come from the segment table; no content scan is needed. The `optional` schema guard handles absent properties and content columns without inventing values for unknown facts.
+
+```python
+import pyarrow as pa
+from datafusion import col, lit, functions as F
+from rerun.catalog import CatalogClient
+
+client = CatalogClient(catalog_url)
+dataset = client.get_dataset(dataset_name)
+
+def optional(frame, name, dtype):
+    return col(name)[0] if name in frame.schema().names else lit(None).cast(dtype)
+
+segments = dataset.segment_table()
+sessions = segments.select(
+    "rerun_segment_id",
+    optional(segments, "property:session:n_turns", pa.int64()).alias("turns"),
+    optional(segments, "property:session:n_tool_calls", pa.int64()).alias("tool_calls"),
+    optional(segments, "property:session:n_subagents", pa.int64()).alias("subagents"),
+    optional(segments, "property:session:models", pa.string()).alias("models"),
+    optional(segments, "property:session:total_cost_usd", pa.float64()).alias("cost_usd"),
+).to_arrow_table()
+```
+
+Output tokens per model per UTC day include main and child requests. The unique event index puts each sample on its own row, so `coalesce` selects its main or child column. The guard also supports datasets with no child columns. Cache only this small projection: both this aggregate and the next recipe consume it.
+
+```python
+usage = dataset.filter_contents(["/usage/output_tokens/**"]).reader(index="event")
+main_tokens = optional(usage, "/usage/output_tokens:Scalars:scalars", pa.float64())
+child_tokens = optional(usage, "/usage/output_tokens/children:Scalars:scalars", pa.float64())
+usage_rows = usage.select(
+    "rerun_segment_id", F.date_trunc("day", col("wall")).alias("day"),
+    F.coalesce(main_tokens, child_tokens).alias("tokens"),
+    F.coalesce(optional(usage, "/usage/output_tokens:model", pa.string()),
+               optional(usage, "/usage/output_tokens/children:model", pa.string()), lit("")).alias("model"),
+    F.coalesce(child_tokens, lit(0.0)).alias("child_tokens"),
+).filter(col("tokens").is_not_null()).cache()
+output_per_model_day = usage_rows.aggregate(
+    group_by=[col("rerun_segment_id"), col("model"), col("day")],
+    aggs=[F.sum(col("tokens")).alias("output_tokens")],
+).to_arrow_table()
+```
+
+Subagent share of output tokens reuses the cached projection, with no second server read. Substitute another counter in the usage query to measure that counter. Zero total tokens gives a null share.
+
+```python
+subagent_share = usage_rows.aggregate(
+    group_by=[col("rerun_segment_id")],
+    aggs=[(F.sum(col("child_tokens")) / F.nullif(F.sum(col("tokens")), lit(0.0))).alias("share")],
+).to_arrow_table()
+```
+
+Calls, error rate, median latency, and approximate p90 latency per tool use only `tools` facts. The first aggregate combines multi-part results by agent and call ID; the second groups by tool within each segment. Error rate uses completed calls, and latency uses their known values. Calls without results still count. The schema guard supplies a typed null when no tool reports latency; empty columns need not be requested from the reader.
+
+```python
+tools = dataset.filter_contents(["/tools"]).reader(index="event")
+tool_rows = tools.select(
+    "rerun_segment_id", col("/tools:tool")[0].alias("tool"), col("/tools:phase")[0].alias("phase"),
+    col("/tools:agent_id")[0].alias("agent_id"), col("/tools:call_id")[0].alias("call_id"),
+    col("/tools:is_error")[0].alias("is_error"),
+    optional(tools, "/tools:elapsed_ms", pa.float64()).alias("elapsed_ms"),
+).filter(col("phase").is_not_null())
+calls = tool_rows.aggregate(
+    group_by=[col("rerun_segment_id"), col("tool"), col("agent_id"), col("call_id")],
+    aggs=[F.count(col("call_id"), distinct=True, filter=col("phase") == lit("call")).alias("calls"),
+          F.bool_or(col("phase") == lit("result")).alias("completed"),
+          F.bool_or(col("is_error"), filter=col("phase") == lit("result")).alias("error"),
+          F.max(col("elapsed_ms"), filter=col("phase") == lit("result")).alias("latency")],
+)
+tool_summary = calls.aggregate(
+    group_by=[col("rerun_segment_id"), col("tool")],
+    aggs=[F.sum(col("calls")).alias("calls"),
+          F.avg(col("error").cast(pa.float64()), filter=col("completed")).alias("error_rate"),
+          F.median(col("latency")).alias("median_latency_ms"),
+          F.approx_percentile_cont(col("latency"), 0.9).alias("p90_latency_ms")],
+).to_arrow_table()
+```
 
 ## Sessions from another computer
 
@@ -66,6 +166,13 @@ Then convert the copy with `--host` set to the computer's name, so the recording
 pixi run -e agent-traces agent-traces-convert-all --home <copy>/.claude --out ~/agent-traces/<computer> --host <computer>
 ```
 
+Register every computer's output folder in one command; matching profiles join the same datasets:
+
+```bash
+pixi run -e agent-traces agent-traces-register --catalog-url <catalog-url> --out ~/agent-traces/<computer-a> ~/agent-traces/<computer-b>
+```
+If one session appears on two computers, the copy registered first is kept and the other is counted as a skipped duplicate.
+
 ## Limits
 
 - In Rerun 0.38.1, a TextLog view can show an empty panel when the time cursor is after a very tall last row. Move the cursor onto the row or use Current message.
@@ -75,5 +182,5 @@ pixi run -e agent-traces agent-traces-convert-all --home <copy>/.claude --out ~/
 
 ## Validation
 
-Run `pixi run -e agent-traces-dev --frozen gate` for static checks, and unit tests.
+Run `pixi run -e agent-traces-dev --frozen gate` for static checks, unit tests, and the catalog integration test. The integration test starts its own server on a free local port and stops that process afterward.
 Run `pixi run -e agent-traces-dev --frozen tests-golden` for the saved child-row pixel check in the environment's headless Rerun 0.38.1 viewer. The tests report a skip when the required binary or graphics adapter is absent.

@@ -71,3 +71,11 @@ def session_blueprint(entities: Collection[str]) -> rrb.Blueprint:
         *([rrb.Vertical(*layout, row_shares=[4, 1][:len(layout)])] if layout else []),
         rrb.TimePanel(state="expanded", timeline="wall"), auto_views=False, auto_layout=False,
     )
+
+
+def catalog_blueprint() -> rrb.Blueprint:
+    """Show every supported family for browsing a catalog of recordings."""
+    return session_blueprint({
+        "conversation/user", "conversation/thinking", "conversation/current", "tools", "lifecycle", "media/images",
+        "usage/input_tokens", "usage/cache_read_tokens", "elapsed/tools", "turns",
+    })

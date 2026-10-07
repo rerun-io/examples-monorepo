@@ -2,7 +2,6 @@
 
 import base64
 import socket
-import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +9,7 @@ from pathlib import Path
 import orjson
 import pyarrow as pa
 import pytest
+import rerun_cli
 from rerun.chunk import RrdReader
 
 from agent_traces import claude
@@ -73,7 +73,7 @@ def png_block(png_base64: str) -> dict[str, object]:
 @pytest.fixture
 def rerun_binary() -> Path:
     """Use the active environment's viewer and catalog binary."""
-    binary: Path = Path(sys.executable).parent / "rerun"
+    binary: Path = Path(rerun_cli.__file__).parent / "rerun"
     if not binary.is_file():
         pytest.skip("Rerun binary missing from the active environment")
     return binary
@@ -85,6 +85,10 @@ def free_port() -> int:
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         return reservation.getsockname()[1]
+
+
+
+
 
 
 def read_entities(path: Path) -> dict[str, pa.Table]:
@@ -104,6 +108,8 @@ def read_entities(path: Path) -> dict[str, pa.Table]:
 def parse_session(path: Path) -> Session:
     """Parse the inventoried Claude source through the public provider boundary."""
     return claude.session_source(path).parse()
+
+
 
 
 def metadata_values(table: pa.Table, key: str) -> list[list[object]]:

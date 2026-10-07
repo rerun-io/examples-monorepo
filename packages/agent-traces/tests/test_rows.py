@@ -6,6 +6,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
+from agent_traces.blueprint import catalog_blueprint
 from agent_traces.events import Prompt, Session, TimedRecord, ToolCall, ToolResult, TurnBoundary, Usage, UsageSample
 from agent_traces.rerun_log import write_session_rrd
 from agent_traces.rows import collect_rows
@@ -41,27 +42,32 @@ def test_rows_keep_typed_provenance_and_full_current_message(session_builder: Se
 
 
 def test_saved_blueprints_select_children_and_omit_empty_views(session_builder: SessionBuilder, tmp_path: Path) -> None:
-    """Recording capabilities trim views to the available data."""
+    """Recording capabilities trim views; the catalog blueprint keeps the full layout."""
     from rerun.chunk import RrdReader
 
 
     session_builder.add("user", message={"content": "hello"})
     recording = write_session_rrd(parse_session(session_builder.path), tmp_path / "views.rrd").path
-    reader = RrdReader(recording)
-    names: set[str] = set()
-    expressions: list[str] = []
-    for chunk in reader.stream(store=reader.blueprints()[0]).to_chunks():
-        batch = chunk.to_record_batch()
-        if "ViewContents:query" in batch.schema.names:
-            expressions.extend(expression for row in batch.column("ViewContents:query").to_pylist() for expression in row)
-        if "ViewBlueprint:display_name" in batch.schema.names:
-            names.update(name for row in batch.column("ViewBlueprint:display_name").to_pylist() for name in row)
-    assert expressions
-    assert all("**" not in expression.removesuffix("/**") for expression in expressions)
-    assert {"Conversation", "Current message"} <= names
-    assert "Images" not in names
-    assert "Tool elapsed (ms)" not in names
-    assert names == {"Conversation", "Current message", "Turns"}
+    catalog = tmp_path / "catalog.rbl"
+    catalog_blueprint().save("agent_traces", catalog)
+    for path, full in ((recording, False), (catalog, True)):
+        reader = RrdReader(path)
+        names: set[str] = set()
+        expressions: list[str] = []
+        for chunk in reader.stream(store=reader.blueprints()[0]).to_chunks():
+            batch = chunk.to_record_batch()
+            if "ViewContents:query" in batch.schema.names:
+                expressions.extend(expression for row in batch.column("ViewContents:query").to_pylist() for expression in row)
+            if "ViewBlueprint:display_name" in batch.schema.names:
+                names.update(name for row in batch.column("ViewBlueprint:display_name").to_pylist() for name in row)
+        assert expressions
+        assert all("**" not in expression.removesuffix("/**") for expression in expressions)
+        assert {"Conversation", "Current message"} <= names
+        assert ("Images" in names) is full
+        assert ("Tool elapsed (ms)" in names) is full
+        assert names == ({"Conversation", "Thinking", "Current message", "Tools", "Lifecycle",
+                          "Images", "Tokens per request", "Cache tokens", "Tool elapsed (ms)", "Turns"} if full else
+                         {"Conversation", "Current message", "Turns"})
 
 
 def test_scalar_components_exclude_provider_extras(tmp_path: Path) -> None:
