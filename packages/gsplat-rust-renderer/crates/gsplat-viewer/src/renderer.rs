@@ -60,6 +60,9 @@ impl RenderView {
             Image::Complete { .. } => Some(self.target.composite.clone()),
         }
     }
+    fn is_current(&self, camera: &Camera, options: &RenderOptions) -> bool {
+        matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && old_options == options)
+    }
     pub(crate) fn prepare(
         &mut self,
         renderer: &GaussianRenderer,
@@ -67,8 +70,6 @@ impl RenderView {
         camera: &Camera,
         options: RenderOptions,
     ) -> Result<bool, gsplat_core::Error> {
-        camera.validate()?;
-        options.validate()?;
         if let Image::Capacity {
             required, limit, ..
         } = &self.image
@@ -103,8 +104,7 @@ impl RenderView {
         if self.core.has_pending_frames() {
             return Ok(true);
         }
-        if matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && *old_options == options)
-        {
+        if self.is_current(camera, &options) {
             return Ok(false);
         }
         renderer
@@ -125,9 +125,7 @@ impl RenderView {
         camera: &Camera,
         options: RenderOptions,
     ) -> Result<(), gsplat_core::Error> {
-        if self.core.has_pending_frames()
-            || matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && *old_options == options)
-        {
+        if self.core.has_pending_frames() || self.is_current(camera, &options) {
             return Ok(());
         }
         let previous = self.completed();
@@ -158,25 +156,10 @@ impl RenderView {
 
 #[derive(Clone)]
 pub struct GaussianDrawData {
-    view: Arc<Mutex<RenderView>>,
-    camera: Camera,
-    options: RenderOptions,
-    center: glam::Vec3A,
-}
-impl GaussianDrawData {
-    pub(crate) fn new(
-        view: Arc<Mutex<RenderView>>,
-        camera: Camera,
-        options: RenderOptions,
-        center: glam::Vec3A,
-    ) -> Self {
-        Self {
-            view,
-            camera,
-            options,
-            center,
-        }
-    }
+    pub(crate) view: Arc<Mutex<RenderView>>,
+    pub(crate) camera: Camera,
+    pub(crate) options: RenderOptions,
+    pub(crate) center: glam::Vec3A,
 }
 impl DrawData for GaussianDrawData {
     type Renderer = GaussianRenderer;
@@ -221,34 +204,29 @@ impl GaussianRenderer {
         })
     }
     fn target(&self, ctx: &re_renderer::RenderContext, size: glam::UVec2) -> TargetImage {
-        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("gsplat composite"),
-            size: wgpu::Extent3d {
-                width: size.x,
-                height: size.y,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        let [view, depth] = [
+            ("gsplat composite", wgpu::TextureFormat::Rgba8Unorm),
+            ("gsplat expected depth", wgpu::TextureFormat::R32Float),
+        ]
+        .map(|(label, format)| {
+            ctx.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: size.x,
+                        height: size.y,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
         });
-        let view = texture.create_view(&Default::default());
-        let depth = ctx
-            .device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("gsplat expected depth"),
-                size: texture.size(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R32Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-            .create_view(&Default::default());
         let layouts = ctx.gpu_resources.bind_group_layouts.resources();
         let layout = layouts
             .get(self.composite_bind_group_layout)

@@ -1,5 +1,5 @@
 //! Native archetype queries, memoized uploads, instance transforms and blueprint properties.
-use crate::cache::{Batch, BatchKey, GpuCache};
+use crate::cache::{BatchKey, GpuCache};
 use glam::UVec2;
 use gsplat_core::{Camera, RenderMode, RenderOptions, native::NativeSplats};
 use half::f16;
@@ -60,14 +60,16 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         let transforms = systems.get::<TransformTreeContext>(&output)?;
         let mut draw = Vec::new();
         for (data, instruction) in query.iter_visualizer_instruction_for(Self::identifier()) {
+            let report = |severity, message: String| {
+                output.report_unspecified_source(instruction.id, severity, message)
+            };
             if !crate::selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
                 continue;
             }
             let instances = match transforms.target_from_entity_path(data.entity_path.hash()) {
                 Some(Ok(transform)) => &transform.target_from_instances()[..],
                 Some(Err(error)) => {
-                    output.report_unspecified_source(
-                        instruction.id,
+                    report(
                         re_viewer_context::ViewerReportSeverity::Error,
                         format!("Invalid entity transform: {error:?}"),
                     );
@@ -89,8 +91,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             ) {
                 Ok(true) => ctx.egui_ctx().request_repaint(),
                 Ok(false) => {}
-                Err(error) => output.report_unspecified_source(
-                    instruction.id,
+                Err(error) => report(
                     re_viewer_context::ViewerReportSeverity::Error,
                     error.to_string(),
                 ),
@@ -117,7 +118,11 @@ fn draw_entity(
         instruction,
         instances,
     } = entity;
-    let components = GaussianSplats3D::all_component_identifiers();
+    let report = |severity, message: String| {
+        output.report_unspecified_source(instruction.id, severity, message)
+    };
+    let components =
+        GaussianSplats3D::all_component_identifiers().chain([render_mode_descriptor().component]);
     let query_results =
         data.query_components_with_history(ctx, query, components, instruction, None);
     let results = VisualizerInstructionQueryResults::new(instruction, &query_results, output);
@@ -128,15 +133,7 @@ fn draw_entity(
     let sh = results.iter_optional(GaussianSplats3D::descriptor_sh_coefficients().component);
     let degree =
         results.iter_optional(GaussianSplats3D::descriptor_spherical_harmonics_degree().component);
-    let mode_query = data.query_components_with_history(
-        ctx,
-        query,
-        [render_mode_descriptor().component],
-        instruction,
-        None,
-    );
-    let mode_results = VisualizerInstructionQueryResults::new(instruction, &mode_query, output);
-    let modes = mode_results.iter_optional(render_mode_descriptor().component);
+    let modes = results.iter_optional(render_mode_descriptor().component);
     let mode = modes
         .slice::<String>()
         .last()
@@ -145,8 +142,7 @@ fn draw_entity(
         Some("mip") => RenderMode::Mip,
         None | Some("default") => RenderMode::Default,
         Some(unknown) => {
-            output.report_unspecified_source(
-                instruction.id,
+            report(
                 re_viewer_context::ViewerReportSeverity::Warning,
                 format!("Unknown Gaussian render mode {unknown:?}; using default"),
             );
@@ -188,10 +184,9 @@ fn draw_entity(
         for (index, world_from_local) in instances.iter().enumerate() {
             let world_from_local = world_from_local.as_affine3a();
             if !world_from_local.inverse().is_finite() {
-                output.report_unspecified_source(
-                    instruction.id,
+                report(
                     re_viewer_context::ViewerReportSeverity::Error,
-                    "Non-invertible splat instance transform",
+                    "Non-invertible splat instance transform".into(),
                 );
                 continue;
             }
@@ -213,13 +208,11 @@ fn draw_entity(
                 .memoizer::<GpuCache, _>(|cache| {
                     cache.prepare(
                         ctx.render_ctx(),
-                        Batch {
-                            key: key.clone(),
-                            cloud: &native,
-                            generation: signature,
-                            camera,
-                            options,
-                        },
+                        key.clone(),
+                        &native,
+                        signature,
+                        camera,
+                        options,
                     )
                 });
             match prepared {
@@ -232,8 +225,7 @@ fn draw_entity(
                     @ (gsplat_core::Error::Capacity { .. } | gsplat_core::Error::Capabilities),
                 ) => {
                     re_log::warn_once!("Gaussian compute fallback: {error}");
-                    output.report_unspecified_source(
-                        instruction.id,
+                    report(
                         re_viewer_context::ViewerReportSeverity::Warning,
                         format!("{error}; using the native Gaussian renderer"),
                     );

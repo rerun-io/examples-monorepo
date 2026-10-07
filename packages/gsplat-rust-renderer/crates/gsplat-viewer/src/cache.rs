@@ -17,35 +17,11 @@ pub(crate) struct BatchKey {
     pub instance: usize,
     pub row: (re_log_types::TimeInt, re_sdk_types::RowId),
 }
-pub(crate) struct Batch<'a> {
-    pub key: BatchKey,
-    pub cloud: &'a NativeSplats<'a>,
-    pub generation: u64,
-    pub camera: &'a Camera,
-    pub options: RenderOptions,
-}
 struct CachedScene {
     last_frame: u64,
     scene: Arc<gsplat_core::Scene>,
     count: usize,
     bounds: [glam::Vec3; 2],
-}
-impl CachedScene {
-    fn upload(
-        core: &gsplat_core::Renderer,
-        cloud: &NativeSplats<'_>,
-        frame: u64,
-    ) -> Result<Self, gsplat_core::Error> {
-        let bounds = crate::bounds::from_splats(cloud);
-        let scene = core.upload(&cloud.to_core())?;
-        re_log::debug!("Uploaded {} Gaussian splats", cloud.centers.len());
-        Ok(Self {
-            last_frame: frame,
-            scene,
-            count: cloud.centers.len(),
-            bounds,
-        })
-    }
 }
 #[derive(Default)]
 struct Batches {
@@ -149,15 +125,12 @@ impl GpuCache {
     pub(crate) fn prepare(
         &mut self,
         ctx: &re_renderer::RenderContext,
-        batch: Batch<'_>,
+        key: BatchKey,
+        cloud: &NativeSplats<'_>,
+        generation: u64,
+        camera: &Camera,
+        options: RenderOptions,
     ) -> Result<(GaussianDrawData, bool), gsplat_core::Error> {
-        let Batch {
-            key,
-            cloud,
-            generation,
-            camera,
-            options,
-        } = batch;
         let renderer = ctx
             .renderer::<GaussianRenderer>()
             .expect("registered renderer");
@@ -183,7 +156,13 @@ impl GpuCache {
         let cache = self.0.get_mut().expect("GPU cache");
         let frame = cache.frame;
         if let std::collections::hash_map::Entry::Vacant(entry) = cache.scenes.entry(generation) {
-            entry.insert(CachedScene::upload(core, cloud, frame)?);
+            entry.insert(CachedScene {
+                last_frame: frame,
+                bounds: crate::bounds::from_splats(cloud),
+                scene: core.upload(&cloud.to_core())?,
+                count: cloud.centers.len(),
+            });
+            re_log::debug!("Uploaded {} Gaussian splats", cloud.centers.len());
         }
         let shared = cache.scenes.get_mut(&generation).expect("uploaded scene");
         shared.last_frame = frame;
@@ -217,12 +196,12 @@ impl GpuCache {
             .expect("render view")
             .prepare(renderer, ctx, camera, options)?;
         Ok((
-            GaussianDrawData::new(
-                entry.render.clone(),
-                *camera,
+            GaussianDrawData {
+                view: entry.render.clone(),
+                camera: *camera,
                 options,
-                ((bounds[0] + bounds[1]) * 0.5).into(),
-            ),
+                center: ((bounds[0] + bounds[1]) * 0.5).into(),
+            },
             retry,
         ))
     }
