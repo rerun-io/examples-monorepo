@@ -20,7 +20,6 @@ from rerun.experimental import ViewerClient
 from serde import serde
 from serde.json import to_json
 
-from gsplat_rust_renderer.apis.calibration_scene import look_at_c2w
 from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
 from gsplat_rust_renderer.scene_io import NerfFrame, NerfTransforms
 
@@ -216,6 +215,32 @@ def check_relog(viewer: ViewerClient, config: Config) -> None:
         print(f"relog {side * side}: {mean}", flush=True)
         assert int(np.argmax(mean)) == channel and mean[channel] > 0.2, "Stale or blank relog"
         assert np.delete(mean, channel).max() < 0.1, "Previous cloud color remains"
+
+
+def look_at_c2w(
+    position: Float64[np.ndarray, "3"],
+    target: Float64[np.ndarray, "3"],
+    world_up: Float64[np.ndarray, "3"],
+) -> Float64[np.ndarray, "4 4"]:
+    """Build an OpenGL-convention camera-to-world matrix (camera looks down −Z).
+
+    Args:
+        position: Float64[ndarray, "3"] camera center in world space.
+        target: Float64[ndarray, "3"] world point the camera looks at.
+        world_up: Float64[ndarray, "3"] approximate up direction.
+    """
+    forward: Float64[np.ndarray, "3"] = target - position
+    forward = forward / np.linalg.norm(forward)
+    right: Float64[np.ndarray, "3"] = np.cross(forward, world_up)
+    right = right / np.linalg.norm(right)
+    true_up: Float64[np.ndarray, "3"] = np.cross(right, forward)
+
+    c2w: Float64[np.ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = true_up
+    c2w[:3, 2] = -forward
+    c2w[:3, 3] = position
+    return c2w
 
 
 def check_pair(config: Config, image: UInt8[np.ndarray, "h w 3"], position: Float64[np.ndarray, "3"], target: Float64[np.ndarray, "3"], up: Float64[np.ndarray, "3"]) -> None:

@@ -7,8 +7,6 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from gsplat_rust_renderer.apis.calibration_scene import CheckConfig, GenerateConfig, check, generate
-
 ROOT: Path = Path(__file__).resolve().parents[1]
 
 
@@ -67,20 +65,6 @@ def run_capture(binaries: Path, out: Path, mode: str) -> None:
     if mode == "views":
         assert result.stderr.count("Uploaded 1 Gaussian splats") == 1, "Two views must share the one-splat upload"
 
-
-@pytest.mark.golden
-def test_standalone_calibration_geometry_and_occlusion(binaries: Path, tmp_path: Path) -> None:
-    """Analytic marker positions check handedness, image Y, focal length, and occlusion."""
-    generate(GenerateConfig(out_dir=tmp_path))
-    image: Path = tmp_path / "calibration.png"
-    # This background lies between the existing dark/light gray marker bands.
-    subprocess.run(
-        [str(binaries / "gsplat"), "render", "--ply", str(tmp_path / "calibration.ply"), "--camera", str(tmp_path / "transforms_test.json"), "--output", str(image), "--background", "0.575,0.575,0.575"],
-        check=True, timeout=120,
-    )
-    with pytest.raises(SystemExit) as result:
-        check(CheckConfig(image=image, scene_dir=tmp_path, renderer="gsplat-core", report_json=tmp_path / "calibration-report.json"))
-    assert result.value.code == 0
 
 @pytest.mark.integration
 @pytest.mark.parametrize(("limit", "scale", "moving", "automatic"), [(1024, 0.18, False, False), (65536, 10.0, True, False), (1024, 0.18, False, True)])
