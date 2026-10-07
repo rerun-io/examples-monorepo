@@ -187,6 +187,8 @@
     .tile .sub { white-space: normal; }
     .actions { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; margin: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
                background: color-mix(in srgb, var(--page) 92%, transparent); backdrop-filter: blur(8px); border-top: 1px solid var(--line); }
+    /* With the keyboard open the bar would sit on top of the field being typed in. */
+    body:has(input:focus) .actions { display: none; }
     .btn { min-height: 50px; font-size: 16px; }
   }
   @media (max-width: 700px) { .tiles { grid-template-columns: 1fr 1fr; } }
@@ -335,6 +337,13 @@ const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
 // A sparkline: 2px line, a 10% wash, an end dot with a surface ring, a crosshair and readout on hover. It redraws when a sample
 // comes, on hover (once per frame) and on resize.
 const tip = $("tip"), sparks = [];
+// The readout is fixed on the screen, so it goes when the page scrolls under it or a tap lands elsewhere (a touch has no hover to leave).
+function hideTip() {
+  tip.style.display = "none";
+  for (const spark of sparks) if (spark.cursor != null) { spark.cursor = null; spark.draw(); }
+}
+addEventListener("scroll", hideTip, { passive: true, capture: true });
+addEventListener("pointerdown", e => { if (!e.target.closest?.(".spark")) hideTip(); });
 class Spark {
   constructor(svg, { unit, digits = 1, floor = 0, limit = null }) {
     Object.assign(this, { svg, unit, digits, floor, limit, data: [], cursor: null, pointer: null, frame: 0 });
@@ -342,7 +351,9 @@ class Spark {
       this.pointer = e;
       this.frame ||= requestAnimationFrame(() => { this.frame = 0; this.hover(this.pointer); });
     });
-    svg.addEventListener("pointerleave", () => { tip.style.display = "none"; this.cursor = null; this.draw(); });
+    svg.addEventListener("pointerleave", hideTip);
+    // A finger that starts a scroll on the line cancels its pointer.
+    svg.addEventListener("pointercancel", hideTip);
     sparks.push(this);
   }
   push(v) { this.data.push(Number.isFinite(v) ? v : null); if (this.data.length > HISTORY) this.data.shift(); this.draw(); }
