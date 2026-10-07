@@ -111,3 +111,51 @@ each frame; these renderer-level comparisons do not measure the complete viewer.
 Readback and image encoding are outside the timed loop. Missing telemetry
 is recorded as unknown. Saved camera fixtures make the comparison path explicit;
 resolution changes scale focal lengths and principal points with the image.
+
+## Upstream subset
+
+These files are the inputs to five proposed Rerun changes. `core/` and `viewer/`
+refer to `crates/gsplat-core/` and `crates/gsplat-viewer/`; `cli/` is
+`crates/gsplat-cli/`. Counts are physical
+source lines, including inline tests. Partial-file entries count only the named
+functions and give the whole-file size for context; those sizes are not added twice.
+The map identifies adaptation work as well as files that can move.
+
+| Future PR | Current files and physical line counts |
+| --- | --- |
+| U1 infrastructure | `core/src/gpu.rs` (112); `core/src/lib.rs`: `check_adapter`, `compute_limits` (36 selected / 141 file lines); `viewer/src/application.rs`: `compute_wgpu_setup` (27 selected / 365 file lines) |
+| U2 sort, scan, dispatch | `core/src/primitives.rs` (6); `core/src/primitives/dispatch.rs` (199); `core/src/primitives/scan.rs` (122); `core/src/primitives/sort.rs` (169); `core/shader/counts.wgsl` (8); `core/shader/dispatch.wgsl` (25); `core/shader/scan.wgsl` (55); `core/shader/scan_common.wgsl` (61); `core/shader/sort.wgsl` (205) |
+| U3 forward renderer | `core/src/camera.rs` (49); `core/src/scene.rs` (68); `core/src/types.rs` (95); `core/src/renderer.rs` (66); `core/src/kernels.rs` (112); `core/src/view/mod.rs` (456); `core/src/view/encode.rs` (200); `core/shader/common.wgsl` (79); `core/shader/project.wgsl` (196); `core/shader/map.wgsl` (84); `core/shader/raster.wgsl` (15); `core/shader/raster_common.wgsl` (71); `core/shader/raster_depth.wgsl` (91); `viewer/src/renderer.rs` (392); `viewer/src/composite.wgsl` (19) |
+| U4 GaussianSplats3D wiring | `core/src/native.rs` (90); `viewer/src/cache.rs` (229); `viewer/src/visualizer.rs` (388) |
+| U5 precision fields | Future SDK/blueprint schema change; no implementation claimed here. Existing native conversion and archetype comparison tests supply evidence. |
+
+U1 replaces `gpu.rs` with renderer buffer/shader pools, a compute-pipeline pool
+with hot reload, and buffer readback. The named capability functions map to
+`DeviceCaps` and the viewer device descriptor; the rest of the application stays
+local. U2 introduces the primitives with only their pipeline initialization.
+U3 adds the forward pipelines, per-view scratch, texture targets, and transparent
+composite. Its resource handles must use the new pools. Uniforms already occupy
+256 bytes, and the WGSL import syntax is compatible with the renderer resolver.
+
+U4 adapts `cache.rs` to Rerun's retained-cache facilities and integrates native
+conversion into the existing Gaussian visualizer. It uses the current full view
+camera once U1 extends the collection context. The custom visualizer identifier,
+selection system, and fallback-bound providers are local compatibility code;
+upstream uses the existing visualizer and its normal bounds. U5 adds typed render
+mode and precision fields through SDK/blueprint schemas, with compatibility tests.
+It is separate from the compute renderer and is not implemented by this package.
+
+Primitive evidence lives in `core/src/primitive_tests.rs`, the inline dispatch
+contracts, and `core/tests/common/`. Forward evidence is in
+`core/tests/{render,views,indirect}.rs`; native precision contracts are in
+`core/tests/native.rs` and `cli/tests/archetype.rs`. The CLI's float parity suite
+and the Python viewer pixel tests exercise the integration boundaries.
+
+Local support remains outside this subset: `core/src/lens.rs` and
+`core/shader/lens.wgsl` for KB4/RT8/thin-prism; `core/src/output.rs` and
+`core/shader/raster_outputs.wgsl` for float/packed outputs; `core/src/timing.rs`;
+the local import resolver in `core/src/shader.rs`; CLI, training, application
+startup, frame probe, Python orchestration, and the patched-source package.
+The texture target definitions in `output.rs` must be adapted to pooled handles
+when moving the forward renderer. Core module wiring and error types likewise
+adapt to the renderer module rather than creating a new upstream crate.
