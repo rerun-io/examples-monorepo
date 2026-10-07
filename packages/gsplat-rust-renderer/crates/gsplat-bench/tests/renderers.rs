@@ -91,7 +91,6 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .evaluate_renders(&packed_pixels, &reference, 256, 256)
         .await
         .unwrap();
-    println!("ours packed target: {packed_core_score:?}");
     assert!(
         packed_core_score.minimum_psnr() > 35.0,
         "packed core readback: {packed_core_score:?}"

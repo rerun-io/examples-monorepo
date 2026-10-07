@@ -1,5 +1,5 @@
 //! One device-lifetime pipeline set, shared uploads, and independent asynchronous views.
-use gsplat_core::{Camera, RenderMode, RenderOptions, Splats, Target};
+use gsplat_core::{Camera, RenderOptions, Splats, Target};
 use std::sync::Arc;
 
 pub(crate) struct CoreRenderer(gsplat_core::Renderer);
@@ -30,7 +30,7 @@ impl CoreRenderer {
         Ok(Self(gsplat_core::Renderer::new(device, queue)?))
     }
     pub fn upload(&self, cloud: &Splats) -> Result<UploadedScene, gsplat_core::Error> {
-        let scene = UploadedScene(self.0.upload(cloud, RenderMode::Default)?);
+        let scene = UploadedScene(self.0.upload(cloud)?);
         if std::env::var_os("GSPLAT_UPLOAD_PROBE").is_some() {
             eprintln!("GSPLAT_UPLOAD count={}", cloud.transforms.len());
         }
@@ -74,8 +74,8 @@ impl CoreRenderer {
             camera,
             &options,
             Target::TextureDepth {
-                color: target,
-                depth,
+                color: target.clone(),
+                depth: depth.clone(),
             },
         )?;
         queue.submit([encoder.finish()]);

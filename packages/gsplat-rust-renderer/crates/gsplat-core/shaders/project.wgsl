@@ -33,7 +33,7 @@ fn project(id: u32) -> Projection {
             return result;
         }
     }
-    var scale = exp(vec3f(transforms[base + 7u], transforms[base + 8u], transforms[base + 9u]) + u.options.x);
+    var scale = exp(vec3f(transforms[base + 7u], transforms[base + 8u], transforms[base + 9u]) + u.options.log_splat_scale);
     if ! finite3(scale) {
         return result;
     }
@@ -43,7 +43,7 @@ fn project(id: u32) -> Projection {
         return result;
     }
     var opacity = 1.0 / (1.0 + exp(-raw_opacity[id]));
-    if u.options.z != 0.0 {
+    if u.options.has_min_scale != 0u {
         let floor = min_scale[id];
         let filtered = sqrt(scale * scale + floor * floor);
         let ratio = scale / filtered;
@@ -67,9 +67,9 @@ fn project(id: u32) -> Projection {
     let max_abs = max(max(abs(cov.x), abs(cov.y)), abs(cov.z));
     cov *= select(1.0, 1e18 / max_abs, max_abs > 1e18);
     let raw_cov = cov;
-    let blur = select(0.3, 0.1, u.options.y != 0.0);
+    let blur = select(0.3, 0.1, u.options.mip != 0u);
     cov += vec3f(blur, 0.0, blur);
-    if u.options.y != 0.0 {
+    if u.options.mip != 0u {
         let raw_det = raw_cov.x * raw_cov.z - raw_cov.y * raw_cov.y;
         let blurred_det = cov.x * cov.z - cov.y * cov.y;
         opacity *= sqrt(max(raw_det, 0.0) / blurred_det);

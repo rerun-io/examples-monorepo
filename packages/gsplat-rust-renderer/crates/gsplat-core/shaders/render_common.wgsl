@@ -1,3 +1,4 @@
+struct RenderFlags { log_splat_scale: f32, mip: u32, has_min_scale: u32, padding: u32, }
 // Forward math hand-ported from Brush 1388f74c.
 struct Uniforms {
     view: mat4x4f,
@@ -7,9 +8,9 @@ struct Uniforms {
     image: vec4u,
     // width, height, tiles_x, tiles_y
     scene: vec4u,
-    // splats, SH degree, coefficients, intersection capacity
+    // splats, SH degree, coefficients, reserved
     background: vec4f,
-    options: vec4f,
+    options: RenderFlags,
     coeff0: vec4f,
     coeff1: vec4f,
     lens: vec4u,

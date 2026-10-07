@@ -65,8 +65,8 @@ def test_core_matches_brush_float_channels(case: str, tmp_path: Path) -> None:
         arguments.extend(["--min-scale", "0.002", "--splat-scale", "1.3"])
     if case == "lego-indirect":
         arguments.extend(["--initial-capacity", "1"])
-    binary: Path = root / "target/release/gsplat-bench"
-    assert binary.is_file(), "Build the release benchmark with the tests-golden Pixi task"
+    binary: Path = Path(os.environ.get("GSPLAT_BENCH_BIN", str(root / "target/release/gsplat-bench")))
+    assert binary.is_file(), "Build gsplat-bench with tests-golden, or set GSPLAT_BENCH_BIN to a built benchmark"
     output: Path = tmp_path / f"{case}.json"
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [str(binary), "parity", "--impl", "ours", "--oracle", "brush", "--ply", str(ply), *arguments, "--out", str(output)],

@@ -1,6 +1,6 @@
 //! Analytic output formats and target validation through the public renderer API.
 mod common;
-use glam::{Quat, UVec2, Vec2, Vec3};
+use glam::{Quat, Vec3};
 use gsplat_core::{Camera, CameraModel, RenderMode, RenderOptions, Renderer, Splats, Target};
 
 #[test]
@@ -27,16 +27,13 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
         .inverse()
         .transform_point3(Vec3::new(0.0, 0.0, 2.0));
     let scene = renderer
-        .upload(
-            &Splats {
-                transforms: vec![[p.x, p.y, p.z, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0]],
-                raw_opacities: vec![0.0],
-                sh_coefficients: vec![[0.0; 3]],
-                sh_degree: 0,
-                min_scale: None,
-            },
-            RenderMode::Default,
-        )
+        .upload(&Splats {
+            transforms: vec![[p.x, p.y, p.z, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0]],
+            raw_opacities: vec![0.0],
+            sh_coefficients: vec![[0.0; 3]],
+            sh_degree: 0,
+            min_scale: None,
+        })
         .unwrap();
     let mut view = renderer.create_view(&scene, 64).unwrap();
     let queries = device
@@ -50,15 +47,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
             })
         });
     view.set_timestamp_queries(queries.clone()).unwrap();
-    let camera = Camera {
-        model: CameraModel::Pinhole,
-        position: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-        fov_x: 1.0,
-        fov_y: 1.0,
-        center_uv: Vec2::splat(0.5),
-        size: UVec2::splat(33),
-    };
+    let camera = common::pinhole_camera(33);
     let options = RenderOptions {
         world_from_local,
         background: Vec3::new(0.2, 0.4, 0.6),
@@ -66,43 +55,19 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
     };
     let float = common::upload(&device, &vec![[0.0f32; 4]; 33 * 33]);
     let packed = common::upload(&device, &vec![0u32; 33 * 33]);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: wgpu::Extent3d {
-            width: 33,
-            height: 33,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
+    let texture = texture(&device, wgpu::TextureFormat::Rgba8Unorm);
     let texture_view = texture.create_view(&Default::default());
     let texture_copy = common::upload(&device, &vec![0u8; 256 * 33]);
     for target in [
-        Target::Float(&float),
-        Target::Packed(&packed),
-        Target::Texture(&texture_view),
+        Target::Float(float.clone()),
+        Target::Packed(packed.clone()),
+        Target::Texture(texture_view.clone()),
     ] {
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
             .render(&mut encoder, &mut view, &camera, &options, target)
             .unwrap();
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &texture_copy,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256),
-                    rows_per_image: Some(33),
-                },
-            },
-            texture.size(),
-        );
+        copy_texture(&mut encoder, &texture, &texture_copy);
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
@@ -119,9 +84,9 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
             let ticks = common::read::<u64>(&device, &queue, &resolved, 10);
             assert!(ticks[0] > 0 && ticks[9] > ticks[0]);
             assert!(ticks.windows(2).all(|pair| pair[1] >= pair[0]), "{ticks:?}");
-            let total: u64 = gsplat_core::STAGE_QUERIES
-                .iter()
-                .map(|&(start, end)| ticks[end] - ticks[start])
+            let total: u64 = (0..gsplat_core::STAGE_NAMES.len())
+                .map(gsplat_core::stage_queries)
+                .map(|(start, end)| ticks[end] - ticks[start])
                 .sum();
             assert_eq!(total, ticks[9] - ticks[0]);
         }
@@ -146,7 +111,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
     if world_from_local == glam::Affine3A::IDENTITY {
         // The same uploaded scene supports two blueprint modes. For this
         // isotropic Gaussian mip compensation is v/(v+0.1), v=4.1769916755.
-        for (mode, alpha) in [(Some(RenderMode::Mip), 0.488_309_54), (None, 0.5)] {
+        for (mode, alpha) in [(RenderMode::Mip, 0.488_309_54), (RenderMode::Default, 0.5)] {
             let mut encoder = device.create_command_encoder(&Default::default());
             renderer
                 .render(
@@ -157,7 +122,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
                         render_mode: mode,
                         ..options
                     },
-                    Target::Float(&float),
+                    Target::Float(float.clone()),
                 )
                 .unwrap();
             queue.submit([encoder.finish()]);
@@ -176,7 +141,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
                 &mut view,
                 &camera,
                 &options,
-                Target::Float(&packed)
+                Target::Float(packed.clone())
             )
             .is_err()
     );
@@ -189,7 +154,7 @@ fn analytic_render(world_from_local: glam::Affine3A, alpha_three_pixels_right: f
                 &mut view,
                 &wrong_camera,
                 &options,
-                Target::Texture(&texture_view)
+                Target::Texture(texture_view.clone())
             )
             .is_err()
     );
@@ -207,47 +172,20 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
     let (device, queue) = common::gpu();
     let renderer = Renderer::new(&device, &queue).unwrap();
     let scene = renderer
-        .upload(
-            &Splats {
-                transforms: [2.0, 4.0]
-                    .map(|z| [0.0, 0.0, z, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0])
-                    .to_vec(),
-                raw_opacities: vec![0.0; 2],
-                sh_coefficients: vec![[0.0; 3]; 2],
-                sh_degree: 0,
-                min_scale: None,
-            },
-            RenderMode::Default,
-        )
+        .upload(&Splats {
+            transforms: [2.0, 4.0]
+                .map(|z| [0.0, 0.0, z, 1.0, 0.0, 0.0, 0.0, -2.0, -2.0, -2.0])
+                .to_vec(),
+            raw_opacities: vec![0.0; 2],
+            sh_coefficients: vec![[0.0; 3]; 2],
+            sh_degree: 0,
+            min_scale: None,
+        })
         .unwrap();
     let mut view = renderer.create_view(&scene, 64).unwrap();
-    let camera = Camera {
-        model: CameraModel::Pinhole,
-        position: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-        fov_x: 1.0,
-        fov_y: 1.0,
-        center_uv: Vec2::splat(0.5),
-        size: UVec2::splat(33),
-    };
-    let make_texture = |format| {
-        device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: 33,
-                height: 33,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        })
-    };
-    let color = make_texture(wgpu::TextureFormat::Rgba8Unorm);
-    let depth = make_texture(wgpu::TextureFormat::R32Float);
+    let camera = common::pinhole_camera(33);
+    let color = texture(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let depth = texture(&device, wgpu::TextureFormat::R32Float);
     let output = common::upload(&device, &vec![0.0f32; 64 * 33]);
     let color_output = common::upload(&device, &vec![0u8; 256 * 33]);
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -258,35 +196,13 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
             &camera,
             &RenderOptions::default(),
             Target::TextureDepth {
-                color: &color.create_view(&Default::default()),
-                depth: &depth.create_view(&Default::default()),
+                color: color.create_view(&Default::default()),
+                depth: depth.create_view(&Default::default()),
             },
         )
         .unwrap();
-    encoder.copy_texture_to_buffer(
-        depth.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &output,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(256),
-                rows_per_image: Some(33),
-            },
-        },
-        depth.size(),
-    );
-    encoder.copy_texture_to_buffer(
-        color.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &color_output,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(256),
-                rows_per_image: Some(33),
-            },
-        },
-        color.size(),
-    );
+    copy_texture(&mut encoder, &depth, &output);
+    copy_texture(&mut encoder, &color, &color_output);
     queue.submit([encoder.finish()]);
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
@@ -300,4 +216,40 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
     {
         assert!(actual.abs_diff(expected) <= 1);
     }
+}
+
+fn texture(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 33,
+            height: 33,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+fn copy_texture(
+    encoder: &mut wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
+    destination: &wgpu::Buffer,
+) {
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: destination,
+            // Both formats use four-byte texels; 33-pixel rows require padding.
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(33),
+            },
+        },
+        texture.size(),
+    );
 }

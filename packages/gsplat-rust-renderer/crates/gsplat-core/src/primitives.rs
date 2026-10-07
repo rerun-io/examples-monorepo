@@ -1,20 +1,33 @@
 //! Cached scan and stable 4-bit radix sort; counts stay on the GPU.
-use crate::gpu::{Dispatches, bind, storage, uniform};
+use crate::gpu::{CountSlot, DispatchPlan, DispatchSlot, Dispatches, bind, storage, uniform};
 use crate::kernels::Kernels;
 
+#[derive(Clone, Copy)]
+enum ScanDispatch {
+    Scan(usize),
+    AddOffsets(usize),
+}
+impl DispatchSlot for ScanDispatch {
+    fn index(self) -> u32 {
+        match self {
+            Self::Scan(level) => level as u32 * 2,
+            Self::AddOffsets(level) => level as u32 * 2 + 1,
+        }
+    }
+}
 pub(crate) struct Scan {
     output: wgpu::Buffer,
-    groups: Vec<[Option<wgpu::BindGroup>; 2]>,
-    dispatches: Dispatches,
+    groups: Vec<(wgpu::BindGroup, Option<wgpu::BindGroup>)>,
+    dispatches: Dispatches<ScanDispatch>,
 }
 impl Scan {
     pub fn new(
         device: &wgpu::Device,
         kernels: &Kernels,
         capacity: u32,
-        count_index: u32,
+        count: CountSlot,
         input: &wgpu::Buffer,
-        count: &wgpu::Buffer,
+        counts: &wgpu::Buffer,
     ) -> Self {
         let mut levels = Vec::new();
         let mut n = capacity.max(1);
@@ -25,10 +38,10 @@ impl Scan {
             levels.push((
                 storage(device, "scan output", u64::from(n) * 4),
                 storage(device, "scan block sums", u64::from(blocks) * 4),
-                uniform(device, &[count_index, divisor, capacity, 0]),
+                uniform(device, &[count.index(), divisor, capacity, 0]),
             ));
-            plans.push([count_index, capacity, divisor * 1024, 1]);
-            plans.push([count_index, capacity, divisor * 256, 1]);
+            plans.push(DispatchPlan::new(count, capacity, divisor * 1024, 1));
+            plans.push(DispatchPlan::new(count, capacity, divisor * 256, 1));
             if blocks == 1 {
                 break;
             }
@@ -42,9 +55,9 @@ impl Scan {
                 let source = if i == 0 { input } else { &levels[i - 1].1 };
                 let scan = bind(
                     device,
-                    &kernels.scan[0],
+                    &kernels.scan,
                     &[
-                        (0, count.as_entire_binding()),
+                        (0, counts.as_entire_binding()),
                         (1, source.as_entire_binding()),
                         (2, output.as_entire_binding()),
                         (3, sums.as_entire_binding()),
@@ -54,22 +67,22 @@ impl Scan {
                 let add = levels.get(i + 1).map(|next| {
                     bind(
                         device,
-                        &kernels.scan[1],
+                        &kernels.add_offsets,
                         &[
-                            (0, count.as_entire_binding()),
+                            (0, counts.as_entire_binding()),
                             (1, next.0.as_entire_binding()),
                             (2, output.as_entire_binding()),
                             (4, params.as_entire_binding()),
                         ],
                     )
                 });
-                [Some(scan), add]
+                (scan, add)
             })
             .collect();
         Self {
             output: levels[0].0.clone(),
             groups,
-            dispatches: Dispatches::new(device, &kernels.prepare, count, &plans),
+            dispatches: Dispatches::new(device, &kernels.prepare, counts, &plans),
         }
     }
     pub fn encode(
@@ -86,17 +99,17 @@ impl Scan {
         for (i, groups) in self.groups.iter().enumerate() {
             self.dispatches.dispatch_in_pass(
                 &mut pass,
-                i as u32 * 2,
-                &kernels.scan[0],
-                groups[0].as_ref().unwrap(),
+                ScanDispatch::Scan(i),
+                &kernels.scan,
+                &groups.0,
             );
         }
         for (i, groups) in self.groups.iter().enumerate().rev() {
-            if let Some(group) = &groups[1] {
+            if let Some(group) = &groups.1 {
                 self.dispatches.dispatch_in_pass(
                     &mut pass,
-                    i as u32 * 2 + 1,
-                    &kernels.scan[1],
+                    ScanDispatch::AddOffsets(i),
+                    &kernels.add_offsets,
                     group,
                 );
             }
@@ -107,21 +120,41 @@ impl Scan {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SortDispatch {
+    Blocks,
+    Reduced,
+}
+impl DispatchSlot for SortDispatch {
+    fn index(self) -> u32 {
+        match self {
+            Self::Blocks => 0,
+            Self::Reduced => 1,
+        }
+    }
+}
+struct SortGroups {
+    count_keys: wgpu::BindGroup,
+    reduce_counts: wgpu::BindGroup,
+    scan_counts: wgpu::BindGroup,
+    scan_add: wgpu::BindGroup,
+    scatter: wgpu::BindGroup,
+}
 pub(crate) struct RadixSort {
     keys: [wgpu::Buffer; 2],
     values: [wgpu::Buffer; 2],
-    groups: [[wgpu::BindGroup; 5]; 8],
-    dispatches: Dispatches,
+    groups: [SortGroups; 8],
+    dispatches: Dispatches<SortDispatch>,
 }
 impl RadixSort {
     pub fn new(
         device: &wgpu::Device,
         kernels: &Kernels,
         capacity: u32,
-        count_index: u32,
+        count: CountSlot,
         keys: &wgpu::Buffer,
         values: &wgpu::Buffer,
-        count: &wgpu::Buffer,
+        counts: &wgpu::Buffer,
     ) -> Self {
         let keys = [
             keys.clone(),
@@ -139,39 +172,54 @@ impl RadixSort {
             u64::from(blocks.div_ceil(1024)) * 64,
         );
         let groups = std::array::from_fn(|digit| {
-            let params = uniform(device, &[count_index, digit as u32 * 4, capacity, 0]);
+            let params = uniform(device, &[count.index(), digit as u32 * 4, capacity, 0]);
             let source = digit % 2;
             let dest = 1 - source;
-            let bindings = [
-                vec![
-                    (0, count),
-                    (1, &keys[source]),
-                    (3, &histogram),
-                    (7, &params),
-                ],
-                vec![(0, count), (3, &histogram), (4, &reduced), (7, &params)],
-                vec![(0, count), (4, &reduced), (7, &params)],
-                vec![(0, count), (3, &histogram), (4, &reduced), (7, &params)],
-                vec![
-                    (0, count),
-                    (1, &keys[source]),
-                    (2, &values[source]),
-                    (3, &histogram),
-                    (5, &keys[dest]),
-                    (6, &values[dest]),
-                    (7, &params),
-                ],
-            ];
-            std::array::from_fn(|stage| {
+            let group = |kernel: &wgpu::ComputePipeline, bindings: &[(u32, &wgpu::Buffer)]| {
                 bind(
                     device,
-                    &kernels.sort[stage],
-                    &bindings[stage]
+                    kernel,
+                    &bindings
                         .iter()
-                        .map(|(i, b)| (*i, b.as_entire_binding()))
+                        .map(|(slot, buffer)| (*slot, buffer.as_entire_binding()))
                         .collect::<Vec<_>>(),
                 )
-            })
+            };
+            SortGroups {
+                count_keys: group(
+                    &kernels.count_keys,
+                    &[
+                        (0, counts),
+                        (1, &keys[source]),
+                        (3, &histogram),
+                        (7, &params),
+                    ],
+                ),
+                reduce_counts: group(
+                    &kernels.reduce_counts,
+                    &[(0, counts), (3, &histogram), (4, &reduced), (7, &params)],
+                ),
+                scan_counts: group(
+                    &kernels.scan_counts,
+                    &[(0, counts), (4, &reduced), (7, &params)],
+                ),
+                scan_add: group(
+                    &kernels.scan_add,
+                    &[(0, counts), (3, &histogram), (4, &reduced), (7, &params)],
+                ),
+                scatter: group(
+                    &kernels.scatter,
+                    &[
+                        (0, counts),
+                        (1, &keys[source]),
+                        (2, &values[source]),
+                        (3, &histogram),
+                        (5, &keys[dest]),
+                        (6, &values[dest]),
+                        (7, &params),
+                    ],
+                ),
+            }
         });
         Self {
             keys,
@@ -180,10 +228,10 @@ impl RadixSort {
             dispatches: Dispatches::new(
                 device,
                 &kernels.prepare,
-                count,
+                counts,
                 &[
-                    [count_index, capacity, 1024, 1],
-                    [count_index, capacity, 1024 * 1024, 16],
+                    DispatchPlan::new(count, capacity, 1024, 1),
+                    DispatchPlan::new(count, capacity, 1024 * 1024, 16),
                 ],
             ),
         }
@@ -202,23 +250,33 @@ impl RadixSort {
             timestamp_writes,
         });
         for groups in &self.groups[..bits.div_ceil(4) as usize] {
-            for (stage, plan) in [Some(0), Some(1), None, Some(1), Some(0)]
-                .into_iter()
-                .enumerate()
-            {
-                if let Some(plan) = plan {
-                    self.dispatches.dispatch_in_pass(
-                        &mut pass,
-                        plan,
-                        &kernels.sort[stage],
-                        &groups[stage],
-                    );
-                } else {
-                    pass.set_pipeline(&kernels.sort[stage]);
-                    pass.set_bind_group(0, &groups[stage], &[]);
-                    pass.dispatch_workgroups(1, 1, 1);
-                }
-            }
+            self.dispatches.dispatch_in_pass(
+                &mut pass,
+                SortDispatch::Blocks,
+                &kernels.count_keys,
+                &groups.count_keys,
+            );
+            self.dispatches.dispatch_in_pass(
+                &mut pass,
+                SortDispatch::Reduced,
+                &kernels.reduce_counts,
+                &groups.reduce_counts,
+            );
+            pass.set_pipeline(&kernels.scan_counts);
+            pass.set_bind_group(0, &groups.scan_counts, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            self.dispatches.dispatch_in_pass(
+                &mut pass,
+                SortDispatch::Reduced,
+                &kernels.scan_add,
+                &groups.scan_add,
+            );
+            self.dispatches.dispatch_in_pass(
+                &mut pass,
+                SortDispatch::Blocks,
+                &kernels.scatter,
+                &groups.scatter,
+            );
         }
     }
     pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {

@@ -143,7 +143,7 @@ impl GaussianDrawData {
             }
             entry.insert(CachedScene {
                 last_frame: frame,
-                scene: renderer.core.upload(&cloud.to_core()?)?,
+                scene: renderer.core.upload(&cloud.to_core())?,
                 count: cloud.centers.len(),
                 bounds,
             });

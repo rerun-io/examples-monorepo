@@ -50,8 +50,9 @@ impl RenderSettings {
             Mode::Mip => gsplat_core::RenderMode::Mip,
         }
     }
-    pub fn options(&self) -> gsplat_core::RenderOptions {
+    pub fn options(&self, metadata: gsplat_core::RenderMode) -> gsplat_core::RenderOptions {
         gsplat_core::RenderOptions {
+            render_mode: self.mode(metadata),
             splat_scale: self.splat_scale,
             ..Default::default()
         }

@@ -10,8 +10,7 @@ fn native_upload_preserves_alpha_endpoints_and_decodes_dc() {
         sh: &[],
         degree: 0,
     }
-    .to_core()
-    .unwrap();
+    .to_core();
     assert_eq!(
         splats.transforms[0][..7],
         [1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0]
@@ -34,8 +33,7 @@ fn native_degree_selects_complete_bands_and_repeats_short_attributes() {
             sh: &[[[f16::from_f32(0.25); 3]; 15]],
             degree,
         }
-        .to_core()
-        .unwrap();
+        .to_core();
         assert_eq!(
             splats.sh_coefficients.len(),
             2 * (degree as usize + 1).pow(2)
@@ -59,8 +57,7 @@ fn missing_sh_is_dc_only_and_excess_degree_is_capped() {
             sh: &sh,
             degree: 99,
         }
-        .to_core()
-        .unwrap();
+        .to_core();
         assert_eq!(splats.sh_degree, if sh.is_empty() { 0 } else { 3 });
     }
 }

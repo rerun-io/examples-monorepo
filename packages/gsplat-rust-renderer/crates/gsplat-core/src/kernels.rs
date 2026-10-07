@@ -20,11 +20,22 @@ pub(crate) fn sources() -> [String; 6] {
 }
 
 pub(crate) struct Kernels {
-    pub projection: [wgpu::ComputePipeline; 2],
-    pub mapping: [wgpu::ComputePipeline; 3],
-    pub raster: [wgpu::ComputePipeline; 4],
-    pub scan: [wgpu::ComputePipeline; 2],
-    pub sort: [wgpu::ComputePipeline; 5],
+    pub project_forward: wgpu::ComputePipeline,
+    pub project_visible: wgpu::ComputePipeline,
+    pub gather: wgpu::ComputePipeline,
+    pub map_tiles: wgpu::ComputePipeline,
+    pub tile_offsets: wgpu::ComputePipeline,
+    pub float: wgpu::ComputePipeline,
+    pub packed: wgpu::ComputePipeline,
+    pub texture: wgpu::ComputePipeline,
+    pub texture_depth: wgpu::ComputePipeline,
+    pub scan: wgpu::ComputePipeline,
+    pub add_offsets: wgpu::ComputePipeline,
+    pub count_keys: wgpu::ComputePipeline,
+    pub reduce_counts: wgpu::ComputePipeline,
+    pub scan_counts: wgpu::ComputePipeline,
+    pub scan_add: wgpu::ComputePipeline,
+    pub scatter: wgpu::ComputePipeline,
     pub prepare: wgpu::ComputePipeline,
 }
 impl Kernels {
@@ -33,39 +44,41 @@ impl Kernels {
             sources().map(|s| module(device, &s));
         let depth = module(device, &depth_source());
         Self {
-            projection: ["project_forward", "project_visible"]
-                .map(|entry| pipeline(device, &projection, entry)),
-            mapping: ["gather", "map_tiles", "tile_offsets"]
-                .map(|entry| pipeline(device, &mapping, entry)),
-            raster: [
-                pipeline(device, &raster, "raster_float"),
-                pipeline(device, &raster, "raster_packed"),
-                pipeline(device, &raster, "raster_texture"),
-                pipeline(device, &depth, "raster_texture"),
-            ],
-            scan: ["scan", "add_offsets"].map(|entry| pipeline(device, &scan, entry)),
-            sort: [
-                "count_keys",
-                "reduce_counts",
-                "scan_counts",
-                "scan_add",
-                "scatter",
-            ]
-            .map(|entry| pipeline(device, &sort, entry)),
+            project_forward: pipeline(device, &projection, "project_forward"),
+            project_visible: pipeline(device, &projection, "project_visible"),
+            gather: pipeline(device, &mapping, "gather"),
+            map_tiles: pipeline(device, &mapping, "map_tiles"),
+            tile_offsets: pipeline(device, &mapping, "tile_offsets"),
+            float: pipeline(device, &raster, "raster_float"),
+            packed: pipeline(device, &raster, "raster_packed"),
+            texture: pipeline(device, &raster, "raster_texture"),
+            texture_depth: pipeline(device, &depth, "raster_texture_depth"),
+            scan: pipeline(device, &scan, "scan"),
+            add_offsets: pipeline(device, &scan, "add_offsets"),
+            count_keys: pipeline(device, &sort, "count_keys"),
+            reduce_counts: pipeline(device, &sort, "reduce_counts"),
+            scan_counts: pipeline(device, &sort, "scan_counts"),
+            scan_add: pipeline(device, &sort, "scan_add"),
+            scatter: pipeline(device, &sort, "scatter"),
             prepare: pipeline(device, &prepare, "prepare"),
         }
     }
+    pub fn raster(&self, kind: crate::types::RasterKind) -> &wgpu::ComputePipeline {
+        use crate::types::RasterKind;
+        match kind {
+            RasterKind::Float => &self.float,
+            RasterKind::Packed => &self.packed,
+            RasterKind::Texture => &self.texture,
+            RasterKind::TextureDepth => &self.texture_depth,
+        }
+    }
 }
-
-// Specialize only the optional viewer path; normal raster entry points do not bind
-// or read depth, and retain their original workgroup storage and arithmetic.
 fn depth_source() -> String {
-    format!("{}\n{}", include_str!("../shaders/render_common.wgsl"), include_str!("../shaders/raster.wgsl"))
-        .replace("// OPTIONAL_DEPTH_DECLARATIONS", "@group(0) @binding(7) var<storage, read> sorted_depth: array<u32>;\n@group(0) @binding(8) var out_depth: texture_storage_2d<r32float, write>;\nvar<workgroup> batch_depth: array<f32, 256>;")
-        .replace("// OPTIONAL_DEPTH_LOAD", "batch_depth[lid] = bitcast<f32>(sorted_depth[isect_ids[start + lid]]);")
-        .replace("// OPTIONAL_DEPTH_INIT", "var expected_depth = 0.0;")
-        .replace("// OPTIONAL_DEPTH_ACCUMULATE", "expected_depth += batch_depth[t] * alpha * transmittance;")
-        .replace("// OPTIONAL_DEPTH_STORE", "if inside { textureStore(out_depth, pix, vec4f(expected_depth / max(1.0 - transmittance, 1e-8))); }")
+    format!(
+        "{}\n{}",
+        include_str!("../shaders/render_common.wgsl"),
+        include_str!("../shaders/raster_depth.wgsl")
+    )
 }
 
 #[cfg(test)]
@@ -90,7 +103,7 @@ mod tests {
                 .map(|(_, variable)| layout[variable.ty].size)
                 .sum();
             assert!(
-                workgroup_bytes <= crate::renderer::REQUIRED_WORKGROUP_STORAGE_BYTES,
+                workgroup_bytes <= crate::REQUIRED_WORKGROUP_STORAGE_BYTES,
                 "shader needs {workgroup_bytes} workgroup bytes, exceeding the device guard"
             );
         }

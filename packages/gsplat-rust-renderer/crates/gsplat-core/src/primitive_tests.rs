@@ -1,4 +1,5 @@
 //! Primitive contracts against independent CPU references.
+use crate::gpu::CountSlot;
 use crate::kernels::Kernels;
 use crate::primitives::{RadixSort, Scan};
 use crate::test_utils::{gpu, read, upload};
@@ -21,7 +22,8 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
         1,
     );
     let scan = module(device, &scan);
-    kernels.scan = ["scan", "add_offsets"].map(|entry| pipeline(device, &scan, entry));
+    kernels.scan = pipeline(device, &scan, "scan");
+    kernels.add_offsets = pipeline(device, &scan, "add_offsets");
     let sort = sources[4].replace(
         "    let n = sort_length(lid);",
         &format!(
@@ -38,14 +40,11 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
         ),
     );
     let sort = module(device, &sort);
-    kernels.sort = [
-        "count_keys",
-        "reduce_counts",
-        "scan_counts",
-        "scan_add",
-        "scatter",
-    ]
-    .map(|entry| pipeline(device, &sort, entry));
+    kernels.count_keys = pipeline(device, &sort, "count_keys");
+    kernels.reduce_counts = pipeline(device, &sort, "reduce_counts");
+    kernels.scan_counts = pipeline(device, &sort, "scan_counts");
+    kernels.scan_add = pipeline(device, &sort, "scan_add");
+    kernels.scatter = pipeline(device, &sort, "scatter");
     kernels
 }
 
@@ -65,7 +64,14 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
             .collect();
         let values = upload(&device, &input);
         let count = upload(&device, &[n as u32, 0]);
-        let scan = Scan::new(&device, &kernels, n as u32, 0, &values, &count);
+        let scan = Scan::new(
+            &device,
+            &kernels,
+            n as u32,
+            CountSlot::Visible,
+            &values,
+            &count,
+        );
         let mut encoder = device.create_command_encoder(&Default::default());
         scan.encode(&mut encoder, &kernels, None);
         queue.submit([encoder.finish()]);
@@ -91,7 +97,15 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
         let keys = upload(&device, &input);
         let values = upload(&device, &(0..n).collect::<Vec<_>>());
         let count = upload(&device, &[n, 0]);
-        let sort = RadixSort::new(&device, &kernels, n, 0, &keys, &values, &count);
+        let sort = RadixSort::new(
+            &device,
+            &kernels,
+            n,
+            CountSlot::Visible,
+            &keys,
+            &values,
+            &count,
+        );
         // Odd and even pass counts must expose the correct ping-pong output without copies.
         for bits in [20, 32] {
             queue.write_buffer(&keys, 0, bytemuck::cast_slice(&input));
@@ -133,8 +147,23 @@ fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
     let keys = upload(&device, &input);
     let values = upload(&device, &ids);
     let count = upload(&device, &[0, capacity]);
-    let sort = RadixSort::new(&device, &kernels, capacity, 1, &keys, &values, &count);
-    let scan = Scan::new(&device, &kernels, capacity, 1, &keys, &count);
+    let sort = RadixSort::new(
+        &device,
+        &kernels,
+        capacity,
+        CountSlot::Intersections,
+        &keys,
+        &values,
+        &count,
+    );
+    let scan = Scan::new(
+        &device,
+        &kernels,
+        capacity,
+        CountSlot::Intersections,
+        &keys,
+        &count,
+    );
     for n in [capacity, 0, 17, 1025, 1] {
         queue.write_buffer(&keys, 0, bytemuck::cast_slice(&input));
         queue.write_buffer(&values, 0, bytemuck::cast_slice(&ids));
@@ -179,7 +208,15 @@ fn radix_sort_crosses_the_70m_reduced_histogram_boundary() {
     let keys = upload(&device, &input);
     let values = upload(&device, &(0..n).collect::<Vec<_>>());
     let count = upload(&device, &[n, 0]);
-    let sort = RadixSort::new(&device, &kernels, n, 0, &keys, &values, &count);
+    let sort = RadixSort::new(
+        &device,
+        &kernels,
+        n,
+        CountSlot::Visible,
+        &keys,
+        &values,
+        &count,
+    );
     let mut encoder = device.create_command_encoder(&Default::default());
     sort.encode(&mut encoder, &kernels, 4, None);
     queue.submit([encoder.finish()]);

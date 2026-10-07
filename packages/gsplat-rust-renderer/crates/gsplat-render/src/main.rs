@@ -90,20 +90,22 @@ async fn main() -> Result<()> {
     let frames = load_frames(&args.camera, Some((args.width, args.height))).await?;
     let size = glam::UVec2::new(args.width, args.height);
     args.settings.validate()?;
-    let mode = args.settings.mode(scene.mode);
     let mut splats = gsplat_render::raw_splats(&scene.data)?;
     if let Some(floor) = args.settings.min_scale {
         splats.min_scale = Some(vec![floor; splats.transforms.len()]);
     }
-    let mut renderer = Renderer::new(&splats, mode, size, args.settings.initial_capacity).await?;
-    renderer.options = args.settings.options();
-    renderer.options.background = args.background;
+    let options = gsplat_core::RenderOptions {
+        background: args.background,
+        ..args.settings.options(scene.mode)
+    };
+    let mut renderer =
+        Renderer::new(&splats, options, size, args.settings.initial_capacity).await?;
     eprintln!(
         "{} splats; {} ({:?}); {:?}",
         scene.data.num_splats(),
-        renderer.adapter.name,
-        renderer.adapter.backend,
-        mode
+        renderer.adapter_info().name,
+        renderer.adapter_info().backend,
+        options.render_mode
     );
     if let Some(root) = args.output_dir {
         for (index, frame) in frames.iter().enumerate() {

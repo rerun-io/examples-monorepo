@@ -1,7 +1,7 @@
 //! Overflow preserves the old image, then feedback grows and rerenders it exactly.
 mod common;
-use glam::{Quat, UVec2, Vec2, Vec3};
-use gsplat_core::{Camera, CameraModel, RenderMode, RenderOptions, Renderer, Splats, Target};
+use glam::UVec2;
+use gsplat_core::{Camera, CameraModel, RenderOptions, Renderer, Splats, Target};
 
 #[test]
 #[ignore = "integration: GPU"]
@@ -9,28 +9,17 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
     let (device, queue) = common::gpu();
     let renderer = Renderer::new(&device, &queue).unwrap();
     let scene = renderer
-        .upload(
-            &Splats {
-                transforms: vec![[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0]],
-                raw_opacities: vec![2.0],
-                sh_coefficients: vec![[0.0; 3]],
-                sh_degree: 0,
-                min_scale: None,
-            },
-            RenderMode::Default,
-        )
+        .upload(&Splats {
+            transforms: vec![[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0]],
+            raw_opacities: vec![2.0],
+            sh_coefficients: vec![[0.0; 3]],
+            sh_degree: 0,
+            min_scale: None,
+        })
         .unwrap();
     let mut small = renderer.create_view(&scene, 1).unwrap();
     let mut reference = renderer.create_view(&scene, 64).unwrap();
-    let camera = Camera {
-        model: CameraModel::Pinhole,
-        position: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-        fov_x: 1.0,
-        fov_y: 1.0,
-        center_uv: Vec2::splat(0.5),
-        size: UVec2::splat(64),
-    };
+    let camera = common::pinhole_camera(64);
     let target = common::upload(&device, &vec![[0.0f32; 4]; 64 * 64]);
     let mut outputs = Vec::new();
     for frame in 0..3 {
@@ -46,7 +35,7 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
                 view,
                 &camera,
                 &RenderOptions::default(),
-                Target::Float(&target),
+                Target::Float(target.clone()),
             )
             .unwrap();
         queue.submit([encoder.finish()]);
@@ -73,7 +62,7 @@ fn overflow_preserves_target_then_grows_and_rerenders_exactly() {
                 &mut small,
                 &camera,
                 &RenderOptions::default(),
-                Target::Float(&target),
+                Target::Float(target.clone()),
             )
             .unwrap();
         queue.submit([encoder.finish()]);

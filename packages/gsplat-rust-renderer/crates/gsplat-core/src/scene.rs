@@ -1,5 +1,5 @@
 //! Immutable GPU parameters shared by views without another upload.
-use crate::{Error, RenderMode, Splats};
+use crate::{Error, Splats};
 use wgpu::util::DeviceExt as _;
 
 pub struct Scene {
@@ -10,13 +10,11 @@ pub struct Scene {
     pub(crate) has_min_scale: bool,
     pub(crate) n: u32,
     pub(crate) degree: u32,
-    pub(crate) mode: RenderMode,
 }
 impl Scene {
     pub(crate) fn upload(
         device: &wgpu::Device,
         splats: &Splats,
-        mode: RenderMode,
         limit: u64,
     ) -> Result<Self, Error> {
         let n =
@@ -67,7 +65,6 @@ impl Scene {
             has_min_scale: splats.min_scale.is_some(),
             n,
             degree: splats.sh_degree,
-            mode,
         })
     }
 }

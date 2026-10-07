@@ -3,11 +3,14 @@
 use wgpu::util::DeviceExt as _;
 
 pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    println!("core test adapter: {:?}", adapter.get_info());
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: gsplat_core::required_features(&adapter),
-        required_limits: gsplat_core::required_limits(&adapter),
+        required_features: wgpu::Features::SUBGROUP
+            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
+        required_limits: adapter.limits(),
         ..Default::default()
     }))
     .unwrap()
@@ -48,4 +51,16 @@ pub fn read<T: bytemuck::Pod>(
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
     bytemuck::cast_slice(&staging.get_mapped_range(..).unwrap()).to_vec()
+}
+
+pub fn pinhole_camera(size: u32) -> crate::Camera {
+    crate::Camera {
+        model: crate::CameraModel::Pinhole,
+        position: glam::Vec3::ZERO,
+        rotation: glam::Quat::IDENTITY,
+        fov_x: 1.0,
+        fov_y: 1.0,
+        center_uv: glam::Vec2::splat(0.5),
+        size: glam::UVec2::splat(size),
+    }
 }

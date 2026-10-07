@@ -9,7 +9,7 @@ error. Stock Rerun 0.38.1 needs a custom eframe device descriptor for these limi
 
 ```rust,ignore
 let renderer = Renderer::new(&device, &queue)?;
-let scene = renderer.upload(&splats, RenderMode::Default)?;
+let scene = renderer.upload(&splats)?;
 let mut view = renderer.create_view(&scene, 1_048_576)?;
 renderer.render(&mut encoder, &mut view, &camera, &options, target)?;
 queue.submit([encoder.finish()]);

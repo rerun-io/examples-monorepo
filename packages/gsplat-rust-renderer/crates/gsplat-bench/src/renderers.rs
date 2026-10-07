@@ -62,15 +62,13 @@ impl Engine {
                     splats.min_scale = settings
                         .min_scale
                         .map(|floor| vec![floor; splats.transforms.len()]);
-                    let mut renderer = gsplat_render::Renderer::new(
+                    gsplat_render::Renderer::new(
                         &splats,
-                        settings.mode(scene.mode),
+                        settings.options(scene.mode),
                         glam::uvec2(camera.width, camera.height),
                         settings.initial_capacity,
                     )
-                    .await?;
-                    renderer.options = settings.options();
-                    renderer
+                    .await?
                 } else {
                     ours(scene, camera.width, camera.height, settings).await?
                 };
@@ -348,7 +346,7 @@ impl RenderEngine for gsplat_render::Renderer {
         Ok(self.read_rgba()?)
     }
     fn adapter(&self) -> Adapter {
-        self.adapter.clone().into()
+        self.adapter_info().clone().into()
     }
 }
 
@@ -363,14 +361,13 @@ pub async fn ours(
     if let Some(floor) = settings.min_scale {
         splats.min_scale = Some(vec![floor; scene.data.num_splats()]);
     }
-    let mut renderer = gsplat_render::Renderer::new(
+    let renderer = gsplat_render::Renderer::new(
         &splats,
-        settings.mode(scene.mode),
+        settings.options(scene.mode),
         glam::UVec2::new(width, height),
         settings.initial_capacity,
     )
     .await?;
-    renderer.options = settings.options();
     Ok(renderer)
 }
 

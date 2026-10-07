@@ -382,7 +382,7 @@ fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
         device_descriptor: Arc::new(|adapter| re_renderer::external::wgpu::DeviceDescriptor {
             label: Some("gsplat-rust-renderer device"),
             required_features: gsplat_core::required_features(adapter),
-            required_limits: gsplat_core::required_limits(adapter),
+            required_limits: adapter.limits(),
             memory_hints: re_renderer::external::wgpu::MemoryHints::MemoryUsage,
             trace: re_renderer::external::wgpu::Trace::Off,
             experimental_features: Default::default(),

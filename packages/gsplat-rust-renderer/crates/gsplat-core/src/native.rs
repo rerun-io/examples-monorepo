@@ -18,7 +18,7 @@ pub struct NativeSplats<'a> {
 impl NativeSplats<'_> {
     /// Undo the native activations without further quantization. Alpha endpoints
     /// use saturated finite logits so the core finite-input guard accepts them.
-    pub fn to_core(&self) -> Result<Splats, crate::Error> {
+    pub fn to_core(&self) -> Splats {
         let degree = if self.sh.is_empty() {
             0
         } else {
@@ -85,6 +85,6 @@ impl NativeSplats<'_> {
                     .push(rest.map_or([0.0; 3], |sh| sh[k].map(f16::to_f32)));
             }
         }
-        Ok(splats)
+        splats
     }
 }

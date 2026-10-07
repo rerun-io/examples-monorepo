@@ -58,7 +58,10 @@ async fn compare(
     }
     let mut ours = gsplat_render::Renderer::new(
         &raw,
-        scene.mode,
+        gsplat_core::RenderOptions {
+            render_mode: scene.mode,
+            ..Default::default()
+        },
         glam::uvec2(camera.width, camera.height),
         64,
     )

@@ -5,18 +5,20 @@
 //! fork commit `4db81837f`, and `enable subgroups;` prepended on WebGPU only.
 //! Naga 30 rejects that directive; no browser path is implemented here.
 
-extern crate self as gsplat_core;
+// Optional depth raster: 256 * (9 splat floats + 1 depth float), plus four shared scalars.
+pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_256;
 
 mod camera;
 mod gpu;
 mod kernels;
+pub mod native;
 mod primitives;
 mod renderer;
 mod scene;
 mod types;
 mod view;
 pub use camera::CameraModel;
-pub use renderer::{Renderer, STAGE_NAMES, STAGE_QUERIES};
+pub use renderer::{Renderer, STAGE_NAMES, stage_queries};
 pub use scene::Scene;
 pub use types::{Camera, FrameStats, RenderMode, RenderOptions, Splats, Target};
 pub use view::ViewState;
@@ -25,11 +27,13 @@ pub use view::ViewState;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "gsplat-core requires enabled SUBGROUP, eight storage buffers, 256 compute threads and 10 KiB workgroup memory; request these when creating the wgpu device"
+        "gsplat-core requires SUBGROUP, eight storage buffers, 256 threads and 10 KiB workgroup memory"
     )]
     Capabilities,
     #[error("invalid splat render input: {0}")]
     Input(&'static str),
+    #[error("view busy: {0}")]
+    Busy(&'static str),
     #[error(
         "GPU buffer requires {required} bytes, device allows {limit}; no splats were truncated"
     )]
@@ -46,11 +50,17 @@ mod primitive_tests;
 #[path = "../tests/common/mod.rs"]
 mod test_utils;
 
-pub mod native;
-
-/// Request the adapter's full limits, retaining stock viewer texture capabilities.
-pub fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
-    adapter.limits()
+/// Validate the enabled compute capabilities before creating pipelines.
+pub fn check_adapter(features: wgpu::Features, limits: &wgpu::Limits) -> Result<(), Error> {
+    if !features.contains(wgpu::Features::SUBGROUP)
+        || limits.max_storage_buffers_per_shader_stage < 8
+        || limits.max_compute_invocations_per_workgroup < 256
+        || limits.max_compute_workgroup_size_x < 256
+        || limits.max_compute_workgroup_storage_size < REQUIRED_WORKGROUP_STORAGE_BYTES
+    {
+        return Err(Error::Capabilities);
+    }
+    Ok(())
 }
 /// Subgroups are mandatory; timing is enabled only when supported.
 pub fn required_features(adapter: &wgpu::Adapter) -> wgpu::Features {

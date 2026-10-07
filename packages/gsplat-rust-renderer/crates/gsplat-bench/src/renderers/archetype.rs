@@ -49,7 +49,7 @@ pub fn archetype_splats(path: &Path) -> Result<gsplat_core::Splats> {
         GaussianSplats3D::from_ply_file_path(path)?
     };
     let decoded = super::decode(&native)?;
-    gsplat_core::native::NativeSplats {
+    Ok(gsplat_core::native::NativeSplats {
         centers: &decoded.centers,
         scales: &decoded.scales,
         quaternions: &decoded.quaternions,
@@ -57,6 +57,5 @@ pub fn archetype_splats(path: &Path) -> Result<gsplat_core::Splats> {
         sh: &decoded.sh,
         degree: decoded.degree,
     }
-    .to_core()
-    .map_err(|e| Error::Invalid(e.to_string()))
+    .to_core())
 }

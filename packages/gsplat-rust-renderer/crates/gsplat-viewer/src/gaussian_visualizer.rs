@@ -210,7 +210,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                                     signature,
                                     camera,
                                     RenderOptions {
-                                        render_mode: Some(render_mode),
+                                        render_mode,
                                         world_from_local,
                                         ..Default::default()
                                     },

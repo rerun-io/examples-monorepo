@@ -96,18 +96,21 @@ pub enum Output {
 }
 
 pub struct Renderer {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub adapter: wgpu::AdapterInfo,
-    pub core: gsplat_core::Renderer,
-    pub view: gsplat_core::ViewState,
-    pub options: RenderOptions,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    adapter: wgpu::AdapterInfo,
+    core: gsplat_core::Renderer,
+    view: gsplat_core::ViewState,
+    options: RenderOptions,
     float: wgpu::Buffer,
     packed: wgpu::Buffer,
     size: UVec2,
     last_output: Option<Output>,
 }
 impl Renderer {
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter
+    }
     /// GPU stage durations from a separate packed-output diagnostic frame.
     /// Pixel transfers and timestamp resolution never enter the benchmark loop.
     pub fn stage_ms(&mut self, camera: &CameraSpec) -> Result<Option<[f64; 8]>> {
@@ -165,13 +168,13 @@ impl Renderer {
         }
         let period = f64::from(self.queue.get_timestamp_period()) / 1e6;
         Ok(Some(std::array::from_fn(|i| {
-            (ticks[gsplat_core::STAGE_QUERIES[i].1] - ticks[gsplat_core::STAGE_QUERIES[i].0]) as f64
-                * period
+            let (start, end) = gsplat_core::stage_queries(i);
+            (ticks[end] - ticks[start]) as f64 * period
         })))
     }
     pub async fn new(
         splats: &Splats,
-        mode: RenderMode,
+        options: RenderOptions,
         size: UVec2,
         initial_capacity: u32,
     ) -> Result<Self> {
@@ -184,20 +187,17 @@ impl Renderer {
             })
             .await
             .map_err(|e| Error::Gpu(e.to_string()))?;
-        let features = adapter.features();
-        if !features.contains(wgpu::Features::SUBGROUP) {
-            return Err(gsplat_core::Error::Capabilities.into());
-        }
+        gsplat_core::check_adapter(adapter.features(), &adapter.limits())?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: gsplat_core::required_features(&adapter),
-                required_limits: gsplat_core::required_limits(&adapter),
+                required_limits: adapter.limits(),
                 ..Default::default()
             })
             .await
             .map_err(|e| Error::Gpu(e.to_string()))?;
         let core = gsplat_core::Renderer::new(&device, &queue)?;
-        let scene = core.upload(splats, mode)?;
+        let scene = core.upload(splats)?;
         let view = core.create_view(&scene, initial_capacity)?;
         let bytes = u64::from(size.x) * u64::from(size.y) * 16;
         if bytes == 0 || bytes > device.limits().max_storage_buffer_binding_size {
@@ -223,7 +223,7 @@ impl Renderer {
             adapter: adapter.get_info(),
             core,
             view,
-            options: RenderOptions::default(),
+            options,
             float,
             packed,
             size,
@@ -247,8 +247,8 @@ impl Renderer {
                 &camera.core_camera(),
                 &self.options,
                 match output {
-                    Output::Float => Target::Float(&self.float),
-                    Output::Packed => Target::Packed(&self.packed),
+                    Output::Float => Target::Float(self.float.clone()),
+                    Output::Packed => Target::Packed(self.packed.clone()),
                 },
             )?;
             self.queue.submit([encoder.finish()]);
