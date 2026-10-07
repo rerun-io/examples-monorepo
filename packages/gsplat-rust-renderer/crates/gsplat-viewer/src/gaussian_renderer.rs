@@ -8,30 +8,151 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct GaussianRenderer {
     composite_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
     render_pipeline_tile: re_renderer::GpuRenderPipelineHandle,
-    core: crate::core_adapter::CoreRenderer,
+    core: gsplat_core::Renderer,
+}
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BatchKey {
+    pub view_id: re_viewer_context::ViewId,
+    pub entity: re_log_types::EntityPath,
+    pub instruction: re_sdk_types::blueprint::components::VisualizerInstructionId,
+    pub instance: usize,
+    pub row: (re_log_types::TimeInt, re_sdk_types::RowId),
+}
+pub(crate) struct Batch<'a> {
+    pub key: BatchKey,
+    pub cloud: &'a NativeSplats<'a>,
+    pub generation: u64,
+    pub camera: &'a Camera,
+    pub options: RenderOptions,
+}
+struct TargetImage {
+    size: glam::UVec2,
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    composite: Arc<wgpu::BindGroup>,
+}
+// Only Pending can carry an in-flight eye; Dirty retains the previous image on overflow.
+enum Image {
+    Dirty(Option<Arc<wgpu::BindGroup>>),
+    Pending {
+        camera: Camera,
+        options: RenderOptions,
+        previous: Option<Arc<wgpu::BindGroup>>,
+    },
+    Complete {
+        camera: Camera,
+        options: RenderOptions,
+    },
 }
 struct CachedEntity {
     last_frame: u64,
     generation: u64,
-    core: crate::core_adapter::CoreView,
-    size: glam::UVec2,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    depth: wgpu::TextureView,
-    previous_composite: Option<Arc<wgpu::BindGroup>>,
-    composite: Arc<wgpu::BindGroup>,
+    core: gsplat_core::ViewState,
+    target: TargetImage,
+    image: Image,
+}
+impl CachedEntity {
+    fn completed(&self) -> Option<Arc<wgpu::BindGroup>> {
+        match &self.image {
+            Image::Dirty(previous) | Image::Pending { previous, .. } => previous.clone(),
+            Image::Complete { .. } => Some(self.target.composite.clone()),
+        }
+    }
+    fn render(
+        &mut self,
+        renderer: &GaussianRenderer,
+        ctx: &re_renderer::RenderContext,
+        camera: &Camera,
+        options: RenderOptions,
+    ) -> Result<bool, gsplat_core::Error> {
+        if let Some(stats) = self.core.poll_feedback()? {
+            let image = std::mem::replace(&mut self.image, Image::Dirty(None));
+            self.image = match image {
+                Image::Pending {
+                    camera, options, ..
+                } if !stats.needs_rerender => Image::Complete { camera, options },
+                Image::Pending { previous, .. } => Image::Dirty(previous),
+                other => other,
+            };
+        }
+        if self.core.has_pending_frames() {
+            return Ok(true);
+        }
+        if matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && *old_options == options)
+        {
+            return Ok(false);
+        }
+        let previous = self.completed();
+        if self.target.size != camera.size {
+            self.target = renderer.target(ctx, camera.size);
+        }
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        renderer.core.render(
+            &mut encoder,
+            &mut self.core,
+            camera,
+            &options,
+            gsplat_core::Target::TextureDepth {
+                color: self.target.color.clone(),
+                depth: self.target.depth.clone(),
+            },
+        )?;
+        ctx.queue.submit([encoder.finish()]);
+        self.image = Image::Pending {
+            camera: *camera,
+            options,
+            previous,
+        };
+        Ok(true)
+    }
 }
 struct CachedScene {
     last_frame: u64,
-    scene: crate::core_adapter::UploadedScene,
+    scene: Arc<gsplat_core::Scene>,
     count: usize,
     bounds: [glam::Vec3; 2],
+}
+impl CachedScene {
+    fn upload(
+        core: &gsplat_core::Renderer,
+        cloud: &NativeSplats<'_>,
+        frame: u64,
+    ) -> Result<Self, gsplat_core::Error> {
+        let mut bounds = [
+            glam::Vec3::splat(f32::INFINITY),
+            glam::Vec3::splat(f32::NEG_INFINITY),
+        ];
+        for (i, center) in cloud.centers.iter().enumerate() {
+            let center = glam::Vec3::from_array(*center);
+            let radius = glam::Vec3::from_array(
+                cloud
+                    .scales
+                    .get(i)
+                    .or_else(|| cloud.scales.last())
+                    .copied()
+                    .unwrap_or([0.01; 3]),
+            )
+            .abs()
+            .max_element()
+                * 3.0;
+            bounds[0] = bounds[0].min(center - radius);
+            bounds[1] = bounds[1].max(center + radius);
+        }
+        let scene = core.upload(&cloud.to_core())?;
+        re_log::debug!("Uploaded {} Gaussian splats", cloud.centers.len());
+        Ok(Self {
+            last_frame: frame,
+            scene,
+            count: cloud.centers.len(),
+            bounds,
+        })
+    }
 }
 #[derive(Default)]
 struct Batches {
     frame: u64,
     scenes: HashMap<u64, CachedScene>,
-    views: HashMap<String, CachedEntity>,
+    views: HashMap<BatchKey, CachedEntity>,
     bounds: HashMap<re_viewer_context::ViewId, ([glam::Vec3; 2], u64)>,
 }
 /// Store-owned cache: begin_frame also runs when the entity/view disappears.
@@ -103,50 +224,27 @@ impl DrawData for GaussianDrawData {
 }
 impl GaussianDrawData {
     /// Each view/instance owns its target so later views cannot overwrite earlier composites.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_batch(
         &mut self,
         ctx: &re_renderer::RenderContext,
         cache: &mut GpuCache,
-        key: String,
-        view_id: re_viewer_context::ViewId,
-        cloud: &NativeSplats<'_>,
-        generation: u64,
-        camera: &Camera,
-        options: RenderOptions,
-    ) -> Result<(bool, Option<Camera>), gsplat_core::Error> {
+        batch: Batch<'_>,
+    ) -> Result<bool, gsplat_core::Error> {
+        let Batch {
+            key,
+            cloud,
+            generation,
+            camera,
+            options,
+        } = batch;
+        let view_id = key.view_id;
         let renderer = ctx
             .renderer::<GaussianRenderer>()
             .expect("renderer registered at startup");
         let cache = cache.0.get_mut().expect("GPU cache");
         let frame = cache.frame;
         if let std::collections::hash_map::Entry::Vacant(entry) = cache.scenes.entry(generation) {
-            let mut bounds = [
-                glam::Vec3::splat(f32::INFINITY),
-                glam::Vec3::splat(f32::NEG_INFINITY),
-            ];
-            for (i, center) in cloud.centers.iter().enumerate() {
-                let center = glam::Vec3::from_array(*center);
-                let radius = glam::Vec3::from_array(
-                    cloud
-                        .scales
-                        .get(i)
-                        .or_else(|| cloud.scales.last())
-                        .copied()
-                        .unwrap_or([0.01; 3]),
-                )
-                .abs()
-                .max_element()
-                    * 3.0;
-                bounds[0] = bounds[0].min(center - radius);
-                bounds[1] = bounds[1].max(center + radius);
-            }
-            entry.insert(CachedScene {
-                last_frame: frame,
-                scene: renderer.core.upload(&cloud.to_core())?,
-                count: cloud.centers.len(),
-                bounds,
-            });
+            entry.insert(CachedScene::upload(&renderer.core, cloud, frame)?);
         }
         let shared = cache.scenes.get_mut(&generation).expect("uploaded scene");
         shared.last_frame = frame;
@@ -163,84 +261,38 @@ impl GaussianDrawData {
                 *seen = frame;
             })
             .or_insert((bounds, frame));
-        if !cache.views.contains_key(&key) {
-            let core = renderer.core.create_view(&shared.scene, shared.count)?;
-            let (texture, view, depth, composite) = renderer.target(ctx, camera.size);
-            cache.views.insert(
-                key.clone(),
-                CachedEntity {
-                    last_frame: frame,
-                    generation,
-                    core,
-                    size: camera.size,
-                    texture,
-                    view,
-                    depth,
-                    previous_composite: None,
-                    composite,
-                },
-            );
+        if let std::collections::hash_map::Entry::Vacant(entry) = cache.views.entry(key.clone()) {
+            entry.insert(CachedEntity {
+                last_frame: frame,
+                generation,
+                core: renderer
+                    .core
+                    .create_view(&shared.scene, (shared.count as u32).clamp(1, 1_048_576))?,
+                target: renderer.target(ctx, camera.size),
+                image: Image::Dirty(None),
+            });
         }
         let entry = cache.views.get_mut(&key).expect("inserted view");
         entry.last_frame = frame;
         if entry.generation != generation {
-            entry.core = renderer.core.create_view(&shared.scene, shared.count)?;
+            entry.core = renderer
+                .core
+                .create_view(&shared.scene, (shared.count as u32).clamp(1, 1_048_576))?;
             entry.generation = generation;
+            entry.image = Image::Dirty(entry.completed());
         }
-        // Retain the completed target while the previous encode is pending.
-        if !entry.core.ready()? {
-            self.batches.push((
-                entry
-                    .previous_composite
-                    .as_ref()
-                    .unwrap_or(&entry.composite)
-                    .clone(),
-                ((bounds[0] + bounds[1]) * 0.5).into(),
-            ));
-            return Ok((true, None));
-        }
-        if entry.core.has_complete_image() {
-            entry.previous_composite = None;
-        }
-        if entry.size != camera.size {
-            entry
-                .previous_composite
-                .get_or_insert_with(|| entry.composite.clone());
-            (entry.texture, entry.view, entry.depth, entry.composite) =
-                renderer.target(ctx, camera.size);
-            entry.size = camera.size;
-        }
-        let retry = renderer.core.render(
-            &ctx.queue,
-            &ctx.device,
-            &mut entry.core,
-            camera,
-            options,
-            &entry.view,
-            &entry.depth,
-        )?;
+        let retry = entry.render(renderer, ctx, camera, options)?;
         self.batches.push((
             entry
-                .previous_composite
-                .as_ref()
-                .unwrap_or(&entry.composite)
-                .clone(),
+                .completed()
+                .unwrap_or_else(|| entry.target.composite.clone()),
             ((bounds[0] + bounds[1]) * 0.5).into(),
         ));
         Ok(retry)
     }
 }
 impl GaussianRenderer {
-    fn target(
-        &self,
-        ctx: &re_renderer::RenderContext,
-        size: glam::UVec2,
-    ) -> (
-        wgpu::Texture,
-        wgpu::TextureView,
-        wgpu::TextureView,
-        Arc<wgpu::BindGroup>,
-    ) {
+    fn target(&self, ctx: &re_renderer::RenderContext, size: glam::UVec2) -> TargetImage {
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gsplat composite"),
             size: wgpu::Extent3d {
@@ -287,7 +339,12 @@ impl GaussianRenderer {
                 },
             ],
         });
-        (texture, view, depth, Arc::new(group))
+        TargetImage {
+            size,
+            color: view,
+            depth,
+            composite: Arc::new(group),
+        }
     }
 }
 impl Renderer for GaussianRenderer {
@@ -364,7 +421,7 @@ impl Renderer for GaussianRenderer {
         Self {
             composite_bind_group_layout,
             render_pipeline_tile,
-            core: crate::core_adapter::CoreRenderer::new(&ctx.device, &ctx.queue)
+            core: gsplat_core::Renderer::new(&ctx.device, &ctx.queue)
                 .expect("validated gsplat device"),
         }
     }
@@ -376,6 +433,9 @@ impl Renderer for GaussianRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         draw_instructions: &[DrawInstruction<'_, GaussianDrawData>],
     ) -> Result<(), DrawError> {
+        if phase != re_renderer::DrawPhase::Transparent {
+            return Ok(());
+        }
         let tile_pipeline = render_pipelines.get(self.render_pipeline_tile)?;
         for instruction in draw_instructions {
             for drawable in instruction.drawables {
@@ -384,11 +444,6 @@ impl Renderer for GaussianRenderer {
                     continue;
                 };
 
-                // The compute pipeline has already rasterized into an intermediate texture.
-                // The draw step is just a fullscreen composite of that texture into the viewport.
-                if phase != re_renderer::DrawPhase::Transparent {
-                    continue;
-                }
                 pass.set_pipeline(tile_pipeline);
                 pass.set_bind_group(1, batch.0.as_ref(), &[]);
                 pass.draw(0..3, 0..1);

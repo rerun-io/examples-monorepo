@@ -58,7 +58,7 @@ def run_capture(binaries: Path, out: Path, mode: str) -> None:
     if not ply.exists():
         pytest.skip(f"Required Lego native viewer asset missing: {ply}")
     environment: dict[str, str] = dict(os.environ)
-    environment["GSPLAT_UPLOAD_PROBE"] = "1"
+    environment["RUST_LOG"] = "info,gsplat_viewer::gaussian_renderer=debug"
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [sys.executable, "-m", "gsplat_rust_renderer.apis.viewer_check", "--binaries", str(binaries), "--ply", str(ply), "--out", str(out), "--mode", mode],
         check=False, timeout=180, capture_output=True, text=True, env=environment,
@@ -71,7 +71,7 @@ def run_capture(binaries: Path, out: Path, mode: str) -> None:
         names = ["framing.png", "depth.png", "bad-entity.png"]
     if mode == "portable":
         names = [f"{choice}-{viewer}.png" for choice in ("portable", "explicit-native", "explicit-compute") for viewer in ("compute", "stock")]
-        assert result.stderr.count("GSPLAT_UPLOAD count=") == 2, "Only automatic and explicit compute choices may upload"
+        assert result.stderr.count("Uploaded ") == 2, "Only automatic and explicit compute choices may upload"
         assert (out / "portable.rrd").stat().st_size > 0
     if mode == "relog":
         names += ["relog-r-64.png", "relog-g-64.png", "relog-b-256.png"]
@@ -81,7 +81,7 @@ def run_capture(binaries: Path, out: Path, mode: str) -> None:
         with Image.open(out / name) as screenshot:
             screenshot.verify()
     if mode == "views":
-        assert result.stderr.count("GSPLAT_UPLOAD count=1\n") == 1, "Two views must share the one-splat upload"
+        assert result.stderr.count("Uploaded 1 Gaussian splats") == 1, "Two views must share the one-splat upload"
 
 
 @pytest.mark.golden

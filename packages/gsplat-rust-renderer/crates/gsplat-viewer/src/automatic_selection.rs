@@ -1,9 +1,30 @@
 //! Process-local blueprint defaults. Explicit viewer choices always win.
 use re_sdk_types::blueprint::archetypes::ActiveVisualizers;
+
+pub const COMPUTE: &str = "ComputeGaussianSplats3D";
+pub const NATIVE: &str = "GaussianSplats3D";
 use re_viewer_context::{
     BlueprintContext as _, IdentifiedViewSystem, MissingChunkReporter, ViewContext,
     ViewContextSystem, ViewContextSystemOncePerFrameResult, ViewQuery, ViewSystemIdentifier,
 };
+
+/// Explicit native, compute, or empty instructions all override automatic selection.
+pub fn has_explicit_visualizers(
+    viewer: &re_viewer_context::ViewerContext<'_>,
+    data: &re_viewer_context::DataResult,
+) -> bool {
+    let component = ActiveVisualizers::descriptor_instruction_ids().component;
+    viewer
+        .store_context
+        .blueprint
+        .latest_at(
+            viewer.blueprint_query,
+            &data.override_base_path,
+            [component],
+        )
+        .get(component)
+        .is_some()
+}
 
 #[derive(Default)]
 pub struct AutomaticSplatSelection;
@@ -14,15 +35,15 @@ impl IdentifiedViewSystem for AutomaticSplatSelection {
 }
 
 fn select_default<'a>(explicit: bool, types: &[&'a str]) -> Option<Vec<&'a str>> {
-    if explicit || !types.contains(&"GaussianSplats3D") {
+    if explicit || !types.contains(&NATIVE) {
         return None;
     }
     let mut selected: Vec<_> = types
         .iter()
         .copied()
-        .filter(|name| *name != "GaussianSplats3D" && *name != "ComputeGaussianSplats3D")
+        .filter(|name| *name != NATIVE && *name != COMPUTE)
         .collect();
-    selected.push("ComputeGaussianSplats3D");
+    selected.push(COMPUTE);
     Some(selected)
 }
 impl ViewContextSystem for AutomaticSplatSelection {
@@ -34,18 +55,8 @@ impl ViewContextSystem for AutomaticSplatSelection {
         _: &ViewContextSystemOncePerFrameResult,
     ) {
         let viewer = ctx.viewer_ctx;
-        let component = ActiveVisualizers::descriptor_instruction_ids().component;
-        for (data, _) in query.iter_visualizer_instruction_for("GaussianSplats3D".into()) {
-            let explicit = viewer
-                .store_context
-                .blueprint
-                .latest_at(
-                    viewer.blueprint_query,
-                    &data.override_base_path,
-                    [component],
-                )
-                .get(component)
-                .is_some();
+        for (data, _) in query.iter_visualizer_instruction_for(NATIVE.into()) {
+            let explicit = has_explicit_visualizers(viewer, data);
             let types: Vec<_> = data
                 .visualizer_instructions
                 .iter()
@@ -57,11 +68,7 @@ impl ViewContextSystem for AutomaticSplatSelection {
             let instructions: Vec<_> = selected
                 .into_iter()
                 .map(|name| {
-                    let source = if name == "ComputeGaussianSplats3D" {
-                        "GaussianSplats3D"
-                    } else {
-                        name
-                    };
+                    let source = if name == COMPUTE { NATIVE } else { name };
                     let mut instruction = data
                         .visualizer_instructions
                         .iter()
@@ -89,19 +96,15 @@ mod tests {
     use super::*;
     #[test]
     fn defaults_replace_only_native_and_deduplicate_compute() {
-        let types = ["Points3D", "GaussianSplats3D", "ComputeGaussianSplats3D"];
+        let types = ["Points3D", NATIVE, COMPUTE];
         assert_eq!(
             select_default(false, &types),
-            Some(vec!["Points3D", "ComputeGaussianSplats3D"])
+            Some(vec!["Points3D", COMPUTE])
         );
     }
     #[test]
     fn explicit_native_compute_or_empty_selection_is_preserved() {
-        for types in [
-            vec!["GaussianSplats3D"],
-            vec!["ComputeGaussianSplats3D"],
-            vec![],
-        ] {
+        for types in [vec![NATIVE], vec![COMPUTE], vec![]] {
             assert_eq!(select_default(true, &types), None);
         }
         assert_eq!(select_default(false, &["Points3D"]), None);

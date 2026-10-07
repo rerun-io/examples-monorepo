@@ -1,29 +1,17 @@
 //! Opt-in headless frame timing. Includes UI, compute, composite, and GPU completion;
-//! excludes screenshot readback. GSPLAT_VIEWER_PROBE names the output JSON.
+//! excludes screenshot readback. The production viewer has no probe hooks.
+#[path = "../application.rs"]
+pub mod application;
+
+use gsplat_render::camera::CameraSpec;
 use re_viewer::external::{eframe, egui};
 use serde::Serialize;
 use std::time::Instant;
-
-pub fn observe(ctx: &egui::Context, camera: gsplat_core::Camera) {
-    ctx.data_mut(|data| data.insert_temp(egui::Id::new("gsplat submitted camera"), camera));
-}
 
 #[derive(Serialize)]
 struct Frame {
     ms: f64,
     camera: CameraSpec,
-}
-/// Matches gsplat-render's strict CameraSpec input, allowing identical camera replay.
-#[derive(Serialize)]
-struct CameraSpec {
-    world_from_camera: [[f32; 4]; 4],
-    width: u32,
-    height: u32,
-    fx: f32,
-    fy: f32,
-    cx: f32,
-    cy: f32,
-    model: &'static str,
 }
 #[derive(Serialize)]
 struct Report<'a> {
@@ -76,10 +64,7 @@ impl FrameProbe {
             started: Instant::now(),
         }
     }
-    pub fn begin_frame(&mut self, ctx: &egui::Context) {
-        ctx.data_mut(|data| {
-            data.remove::<gsplat_core::Camera>(egui::Id::new("gsplat submitted camera"))
-        });
+    fn begin_frame(&mut self) {
         self.started = Instant::now();
     }
     pub fn screenshot_path(&self) -> std::path::PathBuf {
@@ -90,19 +75,13 @@ impl FrameProbe {
         &mut self,
         ctx: &egui::Context,
         output: &egui::FullOutput,
+        camera: gsplat_core::Camera,
     ) -> anyhow::Result<bool> {
-        let Some(camera) = ctx.data(|data| {
-            data.get_temp::<gsplat_core::Camera>(egui::Id::new("gsplat submitted camera"))
-        }) else {
-            return Ok(false);
-        };
-        if camera.size != glam::uvec2(1920, 1080) {
+        if let Some(first) = self.frames.first() {
             anyhow::ensure!(
-                self.frames.is_empty(),
-                "measured viewport changed: {:?}",
-                camera.size
+                camera.size == glam::uvec2(first.camera.width, first.camera.height),
+                "measured viewport changed"
             );
-            return Ok(false); // Initial blueprint/layout is still settling.
         }
         let screen = eframe::egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.target.width(), self.target.height()],
@@ -168,7 +147,7 @@ impl FrameProbe {
                 fy: focal.y,
                 cx: camera.center_uv.x * camera.size.x as f32,
                 cy: camera.center_uv.y * camera.size.y as f32,
-                model: "Pinhole",
+                model: camera.model,
             },
         });
         self.measured_ms += ms;
@@ -189,5 +168,120 @@ impl FrameProbe {
             serde_json::to_vec_pretty(&self.frames.iter().map(|f| &f.camera).collect::<Vec<_>>())?,
         )?;
         Ok(true)
+    }
+}
+
+use clap::Parser as _;
+use re_sdk_types::View as _;
+use re_viewer_context::{IdentifiedViewSystem, ViewContextSystem};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
+
+#[derive(clap::Parser)]
+struct Cli {
+    rrd: PathBuf,
+    #[arg(long)]
+    out: PathBuf,
+    #[arg(long, default_value = "1920x1080", value_parser = application::parse_window_size)]
+    window_size: egui::Vec2,
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+}
+static CAMERAS: Mutex<Vec<gsplat_core::Camera>> = Mutex::new(Vec::new());
+#[derive(Default)]
+struct ProbeEye;
+impl IdentifiedViewSystem for ProbeEye {
+    fn identifier() -> re_viewer_context::ViewSystemIdentifier {
+        "ProbeEye".into()
+    }
+}
+impl ViewContextSystem for ProbeEye {
+    fn execute(
+        &mut self,
+        ctx: &re_viewer_context::ViewContext<'_>,
+        _: &re_viewer_context::MissingChunkReporter,
+        query: &re_viewer_context::ViewQuery<'_>,
+        _: &re_viewer_context::ViewContextSystemOncePerFrameResult,
+    ) {
+        if let Some(camera) = gsplat_viewer::gaussian_visualizer::camera_from_view(ctx, query) {
+            CAMERAS.lock().expect("probe camera").push(camera);
+        }
+    }
+}
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    anyhow::ensure!(
+        cli.rrd.is_file(),
+        "recording does not exist: {}",
+        cli.rrd.display()
+    );
+    if let Some(parent) = cli.out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    re_log::setup_logging();
+    let (rx, _server) = re_grpc_server::spawn_with_recv(
+        std::net::SocketAddr::from(([127, 0, 0, 1], cli.port)),
+        re_grpc_server::ServerOptions::default(),
+        re_grpc_server::shutdown::never(),
+    );
+    let state = Arc::new(OnceLock::new());
+    let setup_state = state.clone();
+    let token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
+    let mut harness = egui_kittest::Harness::<re_viewer::App>::builder()
+        .with_size(cli.window_size)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu_setup(application::full_limits_wgpu_setup())
+        .build_eframe(move |cc| {
+            let _ = setup_state.set(cc.wgpu_render_state.clone().expect("probe device"));
+            let mut app = application::create_app(
+                cc,
+                token,
+                re_viewer::AppEnvironment::Custom("Gaussian splat frame probe".into()),
+                re_viewer::StartupOptions {
+                    persist_state: false,
+                    hide_welcome_screen: true,
+                    ..Default::default()
+                },
+                rx,
+                Some(cli.rrd),
+            )
+            .expect("probe viewer");
+            app.app_options_mut().show_notification_toasts = false;
+            app.extend_view_class(
+                re_sdk_types::blueprint::views::Spatial3DView::identifier(),
+                |registrator| registrator.register_context_system::<ProbeEye>(),
+            )
+            .expect("probe eye system");
+            app
+        });
+    let mut probe = FrameProbe::new(
+        cli.out,
+        state.get().expect("created device").clone(),
+        cli.window_size,
+    );
+    let started = Instant::now();
+    loop {
+        CAMERAS.lock().expect("probe cameras").clear();
+        probe.begin_frame();
+        harness.step();
+        let cameras = std::mem::take(&mut *CAMERAS.lock().expect("probe cameras"));
+        anyhow::ensure!(cameras.len() <= 1, "the frame probe requires one 3D view");
+        let Some(camera) = cameras.first() else {
+            anyhow::ensure!(
+                started.elapsed().as_secs() < 120,
+                "no camera became available from the view state"
+            );
+            continue;
+        };
+        if probe.end_frame(&harness.ctx, harness.output(), *camera)? {
+            harness
+                .render()
+                .map_err(|error| anyhow::anyhow!(error))?
+                .save(probe.screenshot_path())?;
+            return Ok(());
+        }
     }
 }

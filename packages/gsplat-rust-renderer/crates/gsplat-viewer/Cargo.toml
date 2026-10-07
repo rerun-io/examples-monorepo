@@ -7,11 +7,17 @@ edition = "2024"
 name = "gsplat-rust-renderer"
 path = "src/main.rs"
 
+[[bin]]
+name = "gsplat-viewer-probe"
+path = "src/bin/probe.rs"
+required-features = ["probe"]
+
 [features]
-probe = ["dep:serde", "dep:serde_json"]
+probe = ["dep:serde", "dep:serde_json", "dep:gsplat-render"]
 
 [dependencies]
 gsplat-core = { path = "../gsplat-core" }
+gsplat-render = { path = "../gsplat-render", optional = true }
 anyhow.workspace = true
 clap.workspace = true
 glam.workspace = true
@@ -28,6 +34,7 @@ half = { version = "2.7", features = ["bytemuck"] }
 re_byte_size = { version = "=0.38.1" }
 re_crash_handler = { version = "=0.38.1" }
 re_grpc_server = { version = "=0.38.1" }
+re_log_types = "=0.38.1"
 re_log_channel = { version = "=0.38.1" }
 re_log = { version = "=0.38.1", features = ["setup"] }
 re_query = { version = "=0.38.1" }
