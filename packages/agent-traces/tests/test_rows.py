@@ -65,7 +65,7 @@ def test_saved_blueprints_select_children_and_omit_empty_views(session_builder: 
         assert {"Conversation", "Current message"} <= names
         assert ("Images" in names) is full
         assert ("Tool elapsed (ms)" in names) is full
-        assert names == ({"Conversation", "Thinking", "Current message", "Tools", "Lifecycle",
+        assert names == ({"Conversation", "Thinking", "Current message", "Tools", "Executions", "Context", "Lifecycle",
                           "Images", "Tokens per request", "Cache tokens", "Tool elapsed (ms)", "Turns"} if full else
                          {"Conversation", "Current message", "Turns"})
 

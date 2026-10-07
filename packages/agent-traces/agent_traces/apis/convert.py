@@ -1,4 +1,4 @@
-"""Convert one Claude session to a recording."""
+"""Convert one Claude or Codex session to a recording."""
 
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -6,10 +6,11 @@ from pathlib import Path
 
 import orjson
 
-from agent_traces.claude import session_source
+from agent_traces.errors import SkipSession
 from agent_traces.events import Session
+from agent_traces.providers import session_source
 from agent_traces.rerun_log import WrittenRecording, write_session_rrd
-from agent_traces.sources import SessionSource, fingerprint
+from agent_traces.sources import SessionSource, fingerprint, parse_fingerprinted
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +18,7 @@ class Config:
     """One-session conversion arguments."""
 
     session: Path
-    """Main Claude transcript JSONL path."""
+    """Main Claude transcript or Codex rollout JSONL path."""
     out: Path
     """Destination RRD path."""
     profile: str | None = None
@@ -42,13 +43,18 @@ class Summary:
 def main(config: Config) -> Summary:
     """Write a recording and print its entity and row counts.
 
+    Single-file Codex conversion reads every rollout header in the home to find children.
+
     Args:
         config: Input path, output path, and optional profile override.
     """
     try:
         source: SessionSource = session_source(config.session)
         transcript_hash: str = fingerprint(source.inputs)
-        session: Session = replace(source.parse(), source_sha256=transcript_hash)
+        session: Session = parse_fingerprinted(source, transcript_hash)
+    except SkipSession as error:
+        print(f"skipped reason={error}")
+        return Summary()
     except (ValueError, OSError) as error:
         print(f"FAILED {config.session}: {error}")
         return Summary(failed=1)

@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from dataclasses import dataclass, field, fields, replace
 
-from agent_traces.events import AssistantText, Image, Prompt, Thinking, TimedRecord, ToolCall, ToolResult, TurnBoundary, Usage, UsageSample
+from agent_traces.events import AssistantText, Execution, Image, Prompt, Thinking, TimedRecord, ToolCall, ToolResult, TurnBoundary, Usage, UsageSample
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +90,7 @@ def aggregate_turns(records: list[TimedRecord]) -> list[Turn]:
         current: Turn | None = by_id.get(timed.turn_id)
         if current is None:
             continue
-        if isinstance(timed.payload, (AssistantText, Thinking, ToolCall, ToolResult, UsageSample)):
+        if isinstance(timed.payload, (AssistantText, Thinking, ToolCall, ToolResult, UsageSample, Execution)):
             current.last_timestamp_ns = max(current.last_timestamp_ns, timed.timestamp_ns)
         current.model = current.model or timed.model
         current.effort = current.effort or timed.effort

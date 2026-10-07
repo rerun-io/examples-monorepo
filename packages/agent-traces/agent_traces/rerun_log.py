@@ -18,7 +18,7 @@ from agent_traces.writing import atomic_write
 PROPERTY_TYPES: dict[str, pa.DataType] = {
     **dict.fromkeys(("session_id", "profile", "agent", "source_path", "source_sha256", "host", "cwd", "git_branch",
                      "title", "cli_versions", "models", "provider", "originator", "thread_source", "forked_from", "parent_thread"), pa.string()),
-    **dict.fromkeys(("n_turns", "n_subagents", "n_tool_calls", "n_images", "n_inlined_outputs", "total_input_tokens", "total_output_tokens"), pa.int64()),
+    **dict.fromkeys(("n_turns", "n_subagents", "n_tool_calls", "n_images", "n_inlined_outputs", "total_input_tokens", "total_output_tokens", "total_cache_read_tokens"), pa.int64()),
     "total_cost_usd": pa.float64(),
 }
 """Stable catalog types, including properties whose current value is null."""

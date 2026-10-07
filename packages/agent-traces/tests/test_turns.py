@@ -61,3 +61,15 @@ def test_turn_fold_uses_typed_identity_and_sums_reported_usage() -> None:
     assert turns[0].usage.output_tokens is None
     assert turns[0].usage == Usage()
     assert turns[1].elapsed_ms == 2.0
+
+
+def test_interagent_ids_are_not_assistant_messages() -> None:
+    """Peer messages must not inflate assistant response counts."""
+    from agent_traces.events import InterAgent
+
+    records = [
+        TimedRecord(TurnBoundary("start"), 0, 0, turn_id="turn"),
+        TimedRecord(AssistantText("answer"), 1, 1, turn_id="turn", message_id="assistant"),
+        TimedRecord(InterAgent("peer"), 2, 2, turn_id="turn", message_id="peer"),
+    ]
+    assert aggregate_turns(records)[0].n_assistant_messages == 1

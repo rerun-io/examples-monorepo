@@ -35,6 +35,8 @@ class ManifestEntry:
     """Conversion content revision, independent of the manifest schema."""
     n_rows: int
     """Temporal rows in the saved recording, excluding properties."""
+    extra_inputs: tuple[str, ...] = ()
+    """Local image paths observed during parsing, checked on the next run."""
 
 
 @serde(deny_unknown_fields=True)

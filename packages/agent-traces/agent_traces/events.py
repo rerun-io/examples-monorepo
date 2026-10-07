@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 Scalar: TypeAlias = str | int | float | bool
-ToolKind: TypeAlias = Literal["shell", "file_read", "file_edit", "web_search", "mcp", "subagent", "other"]
+ToolKind: TypeAlias = Literal["shell", "file_read", "file_edit", "web_search", "mcp", "subagent", "plan", "image", "other"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,10 +35,10 @@ class Thinking:
     """Display text; encrypted content is never decoded."""
 
 
-def redacted(n_bytes: int) -> str:
+def redacted(n_bytes: int | None, *, kind: Literal["reasoning", "payload"] = "reasoning") -> str:
     """Show the kind and size of opaque content without decoding it."""
-    size: str = f"{n_bytes} bytes"
-    return f"<encrypted reasoning, {size}>"
+    size: str = f"{n_bytes} bytes" if n_bytes is not None else "size unknown"
+    return f"<encrypted {kind}, {size}>"
 
 
 def redacted_image(n_bytes: int) -> str:
@@ -82,6 +82,44 @@ class ToolResult:
     """Whether execution failed."""
     agent_id: str = ""
     """Child agent identifier if present."""
+
+
+@dataclass(frozen=True, slots=True)
+class ContextText:
+    """Instructions and environment context shown separately from conversation."""
+
+    kind: str
+    """Context category."""
+    text: str
+    """Full context text."""
+
+
+@dataclass(frozen=True, slots=True)
+class InterAgent:
+    """A message between agents."""
+
+    text: str
+    """Full message text."""
+
+
+@dataclass(frozen=True, slots=True)
+class Execution:
+    """A native execution detail, separate from a model tool call."""
+
+    kind: str
+    """Execution category."""
+    item_id: str
+    """Native item identity."""
+    text: str
+    """Full output text."""
+    input_json: str
+    """Native input fields."""
+    raw_json: str
+    """Native metadata without duplicated output."""
+    call_id: str = ""
+    """Model call identity only when explicitly present."""
+    is_error: bool = False
+    """Whether execution failed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +186,7 @@ class TurnBoundary:
     """Provider-reported completion duration; derived turn elapsed uses activity timestamps."""
 
 
-Payload: TypeAlias = Prompt | AssistantText | Thinking | ToolCall | ToolResult | Image | Lifecycle | UsageSample | TurnBoundary
+Payload: TypeAlias = ContextText | InterAgent | Execution | Prompt | AssistantText | Thinking | ToolCall | ToolResult | Image | Lifecycle | UsageSample | TurnBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,10 +241,12 @@ class Session:
     """Child events keyed by thread identifier."""
     skipped: Counter[str]
     """Omitted records by reason."""
-    agent: Literal["claude"] = "claude"
+    agent: Literal["claude", "codex"] = "claude"
     """Provider."""
     source_sha256: str = ""
     """Fingerprint of transcript inputs and consumed extra inputs."""
+    extra_inputs: dict[str, str] = field(default_factory=dict)
+    """Resolved local image paths and hashes of the bytes consumed (or missing)."""
     properties: dict[str, Scalar | None] = field(default_factory=dict)
     """Provider facts written as recording properties without interpretation."""
     agent_metadata: dict[str, AgentMetadata] = field(default_factory=dict)

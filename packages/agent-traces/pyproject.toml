@@ -1,7 +1,7 @@
 [project]
 name = "agent-traces"
 version = "0.1.0"
-description = "Convert one Claude Code session into one Rerun recording"
+description = "Convert one Claude or Codex session into one Rerun recording"
 requires-python = ">=3.12"
 dependencies = ["rerun-sdk", "pyserde", "orjson", "tyro", "numpy", "pyarrow"]
 
@@ -37,6 +37,4 @@ paths = ["agent_traces", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
-ignore_names = ["converted_at", "cache_read_tokens", "cache_creation_tokens", "SkipSession", "duration_ms"]  # Serialized fields.
-
-# SkipSession stays with the core error vocabulary; its policy users arrive with Codex.
+ignore_names = ["converted_at", "cache_read_tokens", "cache_creation_tokens"]  # Serialized fields.

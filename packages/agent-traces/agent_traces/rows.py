@@ -9,7 +9,10 @@ import pyarrow as pa
 from agent_traces.events import (
     AgentMetadata,
     AssistantText,
+    ContextText,
+    Execution,
     Image,
+    InterAgent,
     Lifecycle,
     Prompt,
     Scalar,
@@ -25,14 +28,14 @@ from agent_traces.turns import Turn, TurnTimeline, aggregate_turns
 TURN_TOKEN_KEYS: tuple[str, ...] = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "thinking_tokens")
 
 FACT_TYPES: dict[str, pa.DataType] = {
-    **dict.fromkeys(("agent_id", "turn_id", "call_id", "tool", "phase", "kind", "model", "effort", "input_json", "tool_use_result_json"), pa.string()),
+    **dict.fromkeys(("agent_id", "turn_id", "call_id", "tool", "phase", "kind", "model", "effort", "input_json", "tool_use_result_json", "native_json"), pa.string()),
     "is_error": pa.bool_(),
     "elapsed_ms": pa.float64(),
     **dict.fromkeys(("turn_index", "n_tool_calls", "n_assistant_messages", "n_images", *TURN_TOKEN_KEYS), pa.int64()),
 }
 """Typed query facts, including turn totals; all other provenance stays in metadata_json."""
 
-ROLE_COLORS: dict[str, int] = {"user": 0x8AB4F8FF, "assistant": 0xE8EAEDFF, "thinking": 0x9AA0A6FF, "compaction": 0xF5A623FF, "injected": 0xB5A1D8FF}
+ROLE_COLORS: dict[str, int] = {"user": 0x8AB4F8FF, "assistant": 0xE8EAEDFF, "thinking": 0x9AA0A6FF, "compaction": 0xF5A623FF, "injected": 0xB5A1D8FF, "inter_agent": 0xB5A1D8FF}
 """TextLog row colour (RGBA) per conversation entity, so roles read apart without the entity column."""
 CALL_COLOR: int = 0xF9D67AFF
 """Tool call rows; result rows keep the neutral assistant colour."""
@@ -164,6 +167,14 @@ def tool_result_row(timed: TimedRecord, result: ToolResult) -> TextRow:
                     "elapsed_ms": elapsed, "input_json": None, "child_agent_id": result.agent_id, "kind": result.kind})
 
 
+def execution_row(timed: TimedRecord, execution: Execution) -> TextRow:
+    """Render native execution details with only explicit call joins."""
+    return TextRow(timed.timestamp_ns, execution.text or execution.raw_json, "ERROR" if execution.is_error else "INFO",
+                   {**timed.extras, **provenance(timed), "item_id": execution.item_id, "input_json": execution.input_json,
+                    "native_json": execution.raw_json, "is_error": execution.is_error,
+                    **({"call_id": execution.call_id} if execution.call_id else {})})
+
+
 def child_turn_ids(session: Session, timeline: TurnTimeline) -> dict[str, str]:
     """Resolve explicit spawn links, including children spawned by another child."""
     records: dict[str, list[TimedRecord]] = {"": session.main, **session.subagents}
@@ -243,6 +254,12 @@ def collect_rows(session: Session) -> Rows:
                 case Image() as image:
                     add(images, "media/images", ImageRow(timed.timestamp_ns, image.blob, image.media_type,
                                  {**timed.extras, **provenance(timed), "call_id": image.call_id, "source": image.source}))
+                case ContextText() as context:
+                    add(texts, f"context/{context.kind}", TextRow(timed.timestamp_ns, context.text, values={**timed.extras, **provenance(timed)}))
+                case InterAgent(text=text):
+                    add_conversation(timed, text, "inter_agent", agent_id)
+                case Execution() as execution:
+                    add(texts, f"executions/{execution.kind}", execution_row(timed, execution))
     turns: list[Turn] = aggregate_turns(session.main)
     for turn in turns:
         turn_provenance: dict[str, Scalar] = {"turn_id": turn.turn_id, "model": turn.model, "effort": turn.effort, "agent_id": "",

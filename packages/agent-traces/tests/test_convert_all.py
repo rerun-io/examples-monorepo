@@ -13,7 +13,8 @@ from agent_traces.apis.convert_all import main as convert_all_main
 from agent_traces.events import Session
 from agent_traces.manifest import Manifest, load_manifest, save_manifest
 from agent_traces.rerun_log import WrittenRecording, write_session_rrd
-from tests.conftest import SessionBuilder, read_entities
+from agent_traces.sources import fingerprint
+from tests.conftest import RolloutBuilder, SessionBuilder, agent_rows, read_entities
 
 
 def test_batch_resumes_and_hashes_subagents(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -250,6 +251,169 @@ def test_manifest_failure_preserves_published_file(tmp_path: Path, monkeypatch: 
     assert set(tmp_path.iterdir()) == {path}
 
 
+def test_claude_transcript_in_codex_home(tmp_path: Path) -> None:
+    """Single-file detection is independent of the home layout policy."""
+    home = tmp_path / ".codex"
+    path = home / "sessions/a.jsonl"
+    SessionBuilder(path).add("user", message={"content": "hello"})
+    convert.main(convert.Config(session=path, out=tmp_path / "single.rrd"))
+    convert_all.main(convert_all.Config(home=home, out=tmp_path / "batch"))
+    single = read_entities(tmp_path / "single.rrd")["/__properties/session"]
+    assert single["agent"].to_pylist() == [["claude"]]
+    assert not list((tmp_path / "batch").rglob("*.rrd"))
+
+
+@pytest.mark.parametrize("target", ["main", "child", "image"])
+def test_changes_during_conversion_cannot_certify_newer_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], png_bytes: bytes, target: str,
+) -> None:
+    """A change after an input read must cause a later run to rebuild the RRD."""
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("AgentMessage", content=[{"type": "text", "text": "before"}])
+    child = RolloutBuilder(home / "sessions/child.jsonl")
+    child.meta("child", parent_thread_id="main")
+    child.item("AgentMessage", content=[{"type": "text", "text": "before"}])
+    image = tmp_path / "local.png"
+    image.write_bytes(png_bytes)
+    parent.add("event_msg", type="user_message", local_images=[str(image)])
+    config = convert_all.Config(home=home, out=tmp_path / "out")
+
+    def change_after_read(session: Session, out: Path, *, host: str | None = None) -> WrittenRecording:
+        if target == "image":
+            image.write_bytes(png_bytes + b"after")
+        else:
+            builder = parent if target == "main" else child
+            builder.item("AgentMessage", content=[{"type": "text", "text": "after"}])
+        return write_session_rrd(session, out, host=host)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(convert_all, "write_session_rrd", change_after_read)
+        convert_all.main(config)
+    capsys.readouterr()
+    convert_all.main(config)
+    assert "converted=1 skipped=1 failed=0" in capsys.readouterr().out
+    entities = read_entities(tmp_path / "out/codex/main.rrd")
+    if target != "image":
+        identity = "child" if target == "child" else ""
+        assert agent_rows(entities["/conversation/assistant"], identity)["TextLog:text"].to_pylist() == ([["[a0] before"], ["[a0] after"]] if identity else [["before"], ["after"]])
+    else:
+        assert entities["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"after")]]
+    convert_all.main(config)
+    assert "converted=0 skipped=2 failed=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("target", ["main", "child"])
+@pytest.mark.parametrize("single", [False, True])
+def test_transcript_append_during_parse_keeps_preparse_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, single: bool,
+) -> None:
+    """An append at the decode boundary must not advance the certified input hash."""
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("AgentMessage", content=[{"type": "text", "text": "main-before"}])
+    child = RolloutBuilder(home / "sessions/child.jsonl")
+    child.meta("child", parent_thread_id="main")
+    child.item("AgentMessage", content=[{"type": "text", "text": "child-before"}])
+    inputs = (parent.path, child.path)
+    expected = fingerprint(inputs)
+    builder = parent if target == "main" else child
+    import orjson
+
+    original = orjson.loads
+    changed = False
+
+    def append_during_decode(data: bytes) -> object:
+        nonlocal changed
+        decoded = original(data)
+        if not changed and (target + "-before").encode() in data:
+            changed = True
+            builder.item("AgentMessage", content=[{"type": "text", "text": "after"}])
+        return decoded
+
+    config = convert_all.Config(home=home, out=tmp_path / "out")
+    with monkeypatch.context() as patch:
+        patch.setattr(orjson, "loads", append_during_decode)
+        if single:
+            convert.main(convert.Config(session=parent.path, out=tmp_path / "single.rrd"))
+        else:
+            convert_all.main(config)
+    saved = tmp_path / "single.rrd" if single else tmp_path / "out/codex/main.rrd"
+    props = read_entities(saved)["/__properties/session"]
+    assert changed
+    assert props["source_sha256"].to_pylist() == [[expected]]
+    assert fingerprint(inputs) != expected
+    if not single:
+        assert load_manifest(saved.parent / "manifest.json").sessions["main"].source_sha256 == expected
+        convert_all.main(config)
+        assert load_manifest(saved.parent / "manifest.json").sessions["main"].source_sha256 == fingerprint(inputs)
+        identity = "child" if target == "child" else ""
+        assert agent_rows(read_entities(saved)["/conversation/assistant"], identity)["TextLog:text"].to_pylist()[-1] == (["[a0] after"] if identity else ["after"])
+
+
+def test_image_replacement_at_read_boundary_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], png_bytes: bytes,
+) -> None:
+    """Newly discovered images are hashed from consumed bytes, never a later read."""
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("Reasoning")
+    image = tmp_path / "image.png"
+    image.write_bytes(png_bytes)
+    parent.add("event_msg", type="user_message", local_images=[str(image)])
+    config = ConvertAllConfig(home=home, out=tmp_path / "out")
+    original = Path.read_bytes
+
+    def read_then_replace(path: Path) -> bytes:
+        data = original(path)
+        if path == image:
+            path.write_bytes(png_bytes + b"newer")
+        return data
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", read_then_replace)
+        convert_all_main(config)
+    capsys.readouterr()
+    saved = tmp_path / "out/codex/main.rrd"
+    assert load_manifest(saved.parent / "manifest.json").sessions["main"].extra_inputs == (str(image),)
+    assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes)]]
+    convert_all_main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"newer")]]
+    convert_all_main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("first_target", ["first.png", "absent.png"])
+def test_image_symlink_retarget_rebuilds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], png_bytes: bytes, first_target: str,
+) -> None:
+    """An image referenced through a symlink is re-read through that link, so retargeting it rebuilds."""
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("Reasoning")
+    (tmp_path / "first.png").write_bytes(png_bytes)
+    (tmp_path / "second.png").write_bytes(png_bytes + b"second")
+    link = tmp_path / "current.png"
+    link.symlink_to(tmp_path / first_target)
+    parent.add("event_msg", type="user_message", local_images=[str(link)])
+    config = ConvertAllConfig(home=home, out=tmp_path / "out")
+    convert_all_main(config)
+    capsys.readouterr()
+    link.unlink()
+    link.symlink_to(tmp_path / "second.png")
+    convert_all_main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    saved = tmp_path / "out/codex/main.rrd"
+    assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"second")]]
+    convert_all_main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out
+
+
 def test_concurrent_batches_wait_and_keep_both_entries(tmp_path: Path) -> None:
     """A writer holds the manifest transaction while another process waits."""
     import subprocess
@@ -361,3 +525,23 @@ def test_claude_discovery_requires_projects(tmp_path: Path, layout: str) -> None
             home.mkdir()
         with pytest.raises(ValueError, match="projects"):
             discover(home)
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_batch_rejects_transcript_as_home(tmp_path: Path, provider: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """Both provider files fail batch conversion through the API and CLI."""
+    path: Path = tmp_path / "transcript.jsonl"
+    if provider == "claude":
+        SessionBuilder(path).add("user", message={"content": "hello"})
+    else:
+        RolloutBuilder(path).meta()
+    out: Path = tmp_path / "out"
+    summary = convert_all_main(ConvertAllConfig(home=path, out=out))
+    assert summary.failed == summary.exit_code == 1
+    assert f"FAILED {path}:" in capsys.readouterr().out
+    assert not out.exists()
+    command: Path = Path(__file__).parents[1] / "tools/apps/convert_all.py"
+    result = subprocess.run([sys.executable, str(command), "--home", str(path), "--out", str(out)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert f"FAILED {path}:" in result.stdout
+    assert not out.exists()

@@ -13,7 +13,7 @@ def session_blueprint(entities: Collection[str]) -> rrb.Blueprint:
         return any(entity == prefix or entity.startswith(f"{prefix}/") for entity in entities for prefix in prefixes)
 
     conversation: list[rrb.View] = []
-    if has_data("conversation/user", "conversation/assistant", "conversation/injected", "conversation/compaction"):
+    if has_data("conversation/user", "conversation/assistant", "conversation/injected", "conversation/compaction", "conversation/inter_agent"):
         conversation.append(rrb.TextLogView(
             name="Conversation", origin="/",
             contents=["+ /conversation/**", "- /conversation/thinking/**", "- /conversation/current"],
@@ -27,6 +27,10 @@ def session_blueprint(entities: Collection[str]) -> rrb.Blueprint:
     tools: list[rrb.View] = []
     if has_data("tools"):
         tools.append(rrb.TextLogView(name="Tools", origin="/", contents=["+ /tools"]))
+    for name, prefix in (("Executions", "executions"), ("Context", "context")):
+        if has_data(prefix):
+            tools.append(rrb.TextLogView(name=name, origin="/", contents=[f"+ /{prefix}/**"]))
+
     if has_data("lifecycle"):
         tools.append(rrb.TextLogView(name="Lifecycle", origin="/", contents=["+ /lifecycle/**"]))
 
@@ -77,5 +81,5 @@ def catalog_blueprint() -> rrb.Blueprint:
     """Show every supported family for browsing a catalog of recordings."""
     return session_blueprint({
         "conversation/user", "conversation/thinking", "conversation/current", "tools", "lifecycle", "media/images",
-        "usage/input_tokens", "usage/cache_read_tokens", "elapsed/tools", "turns",
+        "usage/input_tokens", "usage/cache_read_tokens", "elapsed/tools", "turns", "executions", "context",
     })

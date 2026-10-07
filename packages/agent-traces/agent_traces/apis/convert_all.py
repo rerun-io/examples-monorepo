@@ -1,4 +1,4 @@
-"""Convert a Claude home incrementally using a content-hash manifest."""
+"""Convert a Claude or Codex home incrementally using a content-hash manifest."""
 
 import socket
 from collections import Counter
@@ -10,7 +10,7 @@ from time import perf_counter
 import orjson
 
 from agent_traces import manifest as manifest_contract
-from agent_traces.claude import discover
+from agent_traces.errors import SkipSession
 from agent_traces.events import Session
 from agent_traces.manifest import (
     Manifest,
@@ -19,10 +19,17 @@ from agent_traces.manifest import (
     manifest_lock,
     save_manifest,
 )
+from agent_traces.providers import discover
 from agent_traces.rerun_log import WrittenRecording, write_session_rrd
 from agent_traces.sources import (
+    FOLDED_SUBAGENT,
+    PARENT_FAILED,
+    PARENT_SKIPPED,
     Discovery,
     fingerprint,
+    fingerprint_with_extras,
+    input_digest,
+    parse_fingerprinted,
 )
 
 
@@ -31,7 +38,7 @@ class Config:
     """Batch conversion arguments."""
 
     home: Path
-    """Claude home directory; a leading tilde is expanded."""
+    """Claude or Codex home directory; a leading tilde is expanded."""
     out: Path
     """Required output directory."""
     profile: str | None = None
@@ -53,7 +60,7 @@ class Summary:
     converted: int
     """Recordings published."""
     skipped: int
-    """Unchanged inputs."""
+    """Unchanged inputs and policy exclusions."""
     failed: int
     """Sessions that failed conversion."""
 
@@ -90,7 +97,7 @@ def main(config: Config) -> Summary:
         for path, error in discovery.failed.items():
             failed += 1
             print(f"FAILED {path}: {error}")
-        reasons: Counter[str] = Counter()
+        reasons: Counter[str] = Counter(discovery.skipped.values())
         for source in discovery.sessions:
             path: Path = source.main
             session_id: str = source.session_id
@@ -104,29 +111,39 @@ def main(config: Config) -> Summary:
             try:
                 transcript_hash: str = fingerprint(source.inputs)
                 entry: ManifestEntry | None = manifest.sessions.get(session_id)
+                source_hash: str = fingerprint_with_extras(
+                    transcript_hash, {image: input_digest(Path(image)) for image in entry.extra_inputs} if entry is not None else {},
+                )
                 if (
                     entry is not None
-                    and entry.source_sha256 == transcript_hash
+                    and entry.source_sha256 == source_hash
                     and entry.host == host
                     and entry.revision == manifest_contract.CONVERSION_REVISION
                     and (out / entry.rrd).is_file()
                 ):
                     reasons["unchanged"] += 1
+                    reasons.update([FOLDED_SUBAGENT] * len(source.folded))
                     print(f"skipped {session_id} rows={entry.n_rows} seconds={perf_counter() - started:.3f}")
                     continue
-                session: Session = replace(source.parse(), source_sha256=transcript_hash, profile=profile)
+                session: Session = replace(parse_fingerprinted(source, transcript_hash), profile=profile)
                 written: WrittenRecording = write_session_rrd(session, out / f"{session_id}.rrd", host=host)
                 n_rows: int = sum(written.entity_rows.values())
                 manifest.sessions[session_id] = ManifestEntry(
-                    source_path=str(path), source_sha256=session.source_sha256, rrd=written.path.name,
+                    source_path=str(path), source_sha256=session.source_sha256, rrd=written.path.name, extra_inputs=tuple(sorted(session.extra_inputs)),
                     converted_at=datetime.now(UTC).isoformat(), n_rows=n_rows, host=host, revision=manifest_contract.CONVERSION_REVISION,
                 )
                 save_manifest(manifest, manifest_path)
+            except SkipSession as error:
+                reasons[str(error)] += 1
+                reasons.update([PARENT_SKIPPED] * len(source.folded))
+                continue
             except (ValueError, OSError, RuntimeError) as error:
                 failed += 1
+                reasons.update([PARENT_FAILED] * len(source.folded))
                 print(f"FAILED {path}: {error} session_id={session_id} rows=0 seconds={perf_counter() - started:.3f}")
                 continue
             converted += 1
+            reasons.update([FOLDED_SUBAGENT] * len(source.folded))
             print(f"converted {session_id} rows={n_rows} seconds={perf_counter() - started:.3f}")
             del session  # Release this recording tree before parsing the next one.
         print(f"skip_reasons={orjson.dumps(dict(sorted(reasons.items()))).decode()}")

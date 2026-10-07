@@ -9,6 +9,8 @@ from rerun.chunk import RrdReader
 
 from agent_traces.events import (
     AssistantText,
+    ContextText,
+    Execution,
     Image,
     Lifecycle,
     Payload,
@@ -28,6 +30,8 @@ from agent_traces.rerun_log import write_session_rrd
     (AssistantText("reply"), {"Conversation"}),
     (Thinking("reasoning"), {"Thinking"}),
     (ToolCall("Read", "call", "{}", "file_read"), {"Tools"}),
+    (Execution("command", "item", "output", "{}", "{}"), {"Executions"}),
+    (ContextText("developer", "instructions"), {"Context"}),
     (ToolResult("Read", "call", "result", "{}", "file_read", 250.0), {"Tools", "Tool elapsed (ms)"}),
     (ToolResult("Read", "call", "result", "{}", "file_read", None), {"Tools"}),
     (Lifecycle("system", "started"), {"Lifecycle"}),
@@ -53,3 +57,23 @@ def test_saved_views_require_matching_data(tmp_path: Path, payload: Payload | No
     if not child and isinstance(payload, AssistantText):
         expected = expected | {"Current message"}
     assert names == expected
+
+
+def test_codex_details_keep_tools_first(tmp_path: Path) -> None:
+    """Codex retains Executions and Context, with populated Tools selected first."""
+    session: Session = Session("synthetic", "codex", tmp_path / "source.jsonl", [
+        TimedRecord(ToolCall("exec", "call", "script", "other"), 1_000_000_000, 0),
+        TimedRecord(Execution("command", "item", "output", "{}", "{}"), 2_000_000_000, 1),
+        TimedRecord(ContextText("developer", "instructions"), 3_000_000_000, 2),
+    ], {}, Counter(), agent="codex")
+    reader: RrdReader = RrdReader(write_session_rrd(session, tmp_path / "codex.rrd").path)
+    views: dict[str, str] = {}
+    containers: list[list[str]] = []
+    for chunk in reader.stream(store=reader.blueprints()[0]).to_chunks():
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        if "ViewBlueprint:display_name" in batch.schema.names:
+            views[str(chunk.entity_path).lstrip("/")] = batch.column("ViewBlueprint:display_name").to_pylist()[0][0]
+        if "ContainerBlueprint:contents" in batch.schema.names:
+            containers.extend(batch.column("ContainerBlueprint:contents").to_pylist())
+    assert set(views.values()) == {"Tools", "Executions", "Context"}
+    assert ["Tools", "Executions", "Context"] in [[views.get(path, path) for path in contents] for contents in containers]

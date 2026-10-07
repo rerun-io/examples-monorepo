@@ -3262,7 +3262,7 @@ cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
 cwd = "packages/dataforge"
 description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep running to register/view)"
 
-# agent-traces — one Claude Code session per recording, without torch.
+# agent-traces — one Claude or Codex session per recording, without torch.
 [feature.agent-traces]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
