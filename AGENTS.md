@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A **Pixi workspace monorepo** of computer vision projects. Runnable Python projects live in `packages/<name>/` with their modules, CLI tools, and tests; the directory also contains build-only dependencies and vendored code. Root-managed dependencies, tasks, and environments live in `pixi.toml`. Runnable packages keep standard Python packaging metadata and package-specific tooling config such as `[tool.ruff]` and `[tool.vulture]` in `pyproject.toml`; Pixi-build packages such as `asmk`, `dpretrieval`, `mast3r`, and `slam-rs` have their own build manifests (see **Pixi-build packages**).
+A **Pixi workspace monorepo** of computer vision projects. Runnable Python projects live in `packages/<name>/` with their modules, CLI tools, and tests; the directory also contains build-only dependencies and vendored code. Root-managed dependencies, tasks, and environments live in `pixi.toml`. Runnable packages keep standard Python packaging metadata and package-specific tooling config such as `[tool.ruff]` and `[tool.vulture]` in `pyproject.toml`; Pixi-build packages such as `asmk`, `brush-src`, `dpretrieval`, `mast3r`, and `slam-rs` have their own build manifests (see **Pixi-build packages**).
 
 ## Environments
 
@@ -84,7 +84,7 @@ The workspace `platforms` list defines the full platform vocabulary: the plain `
 
 ## Pixi-build packages
 
-`asmk`, `dpretrieval`, `mast3r` and `slam-rs` are built by the `pixi-build-rattler-build` backend
+`asmk`, `brush-src`, `dpretrieval`, `mast3r` and `slam-rs` are built by the `pixi-build-rattler-build` backend
 from a `recipe.yaml` beside a `[package]` manifest, and consumed as source dependencies
 (`name = { path = "packages/<name>" }` inside the workspace; `name = { git = "<repo>", subdirectory =
 "packages/<name>" }` from another repo). `pixi lock` only renders the recipe; the compile happens at
@@ -315,6 +315,7 @@ linux-64 (pixi >= 0.73, as set by `requires-pixi`) and move back to a public rel
 
 - **kornia-staging patched CubeCL bootstrap** — run `pixi run -e kornia-staging --frozen kornia-staging-patch-deps` once per fresh checkout (also on macOS). Cargo's path override needs the prepared `packages/kornia-staging/target/patch/` tree; the Pixi Cargo tasks prepare it automatically. The bump runbook is beside `[patch.crates-io]` in the package's `Cargo.toml`.
 - **kornia-staging patched CubeCL offline test cache** — from `packages/kornia-staging`, run `pixi run -e kornia-staging --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml` and `pixi run -e kornia-staging --frozen cargo fetch --locked --manifest-path target/patch/cubecl-wgpu-0.11.0-pre.3/Cargo.toml` once per Cargo home before the CubeCL park and wgpu poll tests (also on macOS). The prepared crate resolves standalone; an offline `test-log` miss means this cache is incomplete.
+- **gsplat bare Cargo / rust-analyzer bootstrap** — activate a gsplat Pixi environment once per checkout to link the installed patched `brush-src` tree at `target/brush-src`; Cargo uses path overrides (bump runbook: `packages/gsplat-rust-renderer/Cargo.toml`).
 
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`

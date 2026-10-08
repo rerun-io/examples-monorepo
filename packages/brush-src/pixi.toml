@@ -1,0 +1,6 @@
+[package]
+name = "brush-src"
+version = "1.0.0"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

@@ -1929,14 +1929,14 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 # ═══════════════════════════════════════════════════════════════════════════
 # gsplat-rust-renderer
 # ═══════════════════════════════════════════════════════════════════════════
-# osx-arm64 included for the viewer + PLY-loading flows; the `brush` conda
-# package is linux-64-only.
+# Native viewer, render, evaluation and training tools share one workspace.
 [feature.gsplat-rust-renderer]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.gsplat-rust-renderer.dependencies]
+brush-src = { path = "packages/brush-src" }
 python = "3.12.*"
-# rerun 0.35 crates require rustc >= 1.95
+# Pinned Rerun and Brush crates share this Rust toolchain.
 rust = "1.98.*"
 clang = "*"
 cmake = "*"
@@ -1952,9 +1952,8 @@ tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.31.2,<0.32"
 tomli-w = ">=1.2,<2"
 orjson = ">=3.11,<4"
-# CPU-only PyTorch for lpips metrics (no CUDA requirement).
-pytorch-cpu = ">=2.8.0"
-torchvision = "*"
+scipy = "*"
+pillow = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
@@ -1966,9 +1965,7 @@ xorg-libxcursor = "*"
 xorg-libxi = "*"
 xorg-libxinerama = "*"
 xorg-libxrandr = "*"
-brush = "==0.3.0"
-
-# Same viewer build deps for aarch64; brush (linux-64-only) deliberately absent.
+# Same viewer build dependencies for aarch64.
 [feature.gsplat-rust-renderer.target.linux-aarch64.dependencies]
 libudev = "257.*"
 libxkbcommon = "*"
@@ -1981,13 +1978,19 @@ xorg-libxrandr = "*"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
-lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }
 
+[feature.gsplat-rust-renderer.activation]
+scripts = ["packages/gsplat-rust-renderer/activate.sh"]
+
 [feature.gsplat-rust-renderer.activation.env]
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
+PYREFLY_TARGET = "gsplat_rust_renderer tools tests"
+CARGO_PROFILE_DEV_DEBUG = "0"
+CARGO_PROFILE_TEST_DEBUG = "0"
+CARGO_INCREMENTAL = "0"
 # Make pixi's pkg-config files (libudev.pc) visible to cargo builds.
 PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 
@@ -1995,6 +1998,49 @@ PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 # nerfbaselines HF data: datasets from nerfbaselines/nerfbaselines-data
 # (blender/<scene>.zip), pretrained from nerfbaselines/nerfbaselines
 # (3dgs-mcmc/blender/<scene>.zip, INRIA layout). Extraction is idempotent.
+[feature.gsplat-rust-renderer.tasks.gsplat-download]
+args = [{ arg = "kind", default = "pretrained" }, { arg = "scene", default = "lego" }]
+cmd = "python tools/download.py {{ kind }} {{ scene }}"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download data, pretrained checkpoints, all Blender assets, or tandt"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-build]
+cmd = "cargo build --release --locked --workspace --bins --all-features"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build the gsplat CLI"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
+cmd = "cargo fmt -p gsplat-cli -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
+cwd = "packages/gsplat-rust-renderer"
+description = "Check our Rust formatting, run Clippy, and run Rust unit tests"
+
+[feature.gsplat-rust-renderer.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "gsplat-rust-check"]
+description = "Run Python, Rust and GPU integration author checks"
+
+[feature.gsplat-rust-renderer.tasks.tests-integration]
+cmd = "pytest -q -ra -m integration"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run Python and whole-target Rust integration contracts"
+
+[feature.gsplat-rust-renderer.tasks.tests-golden]
+cmd = "pytest -q -ra -m golden"
+cwd = "packages/gsplat-rust-renderer"
+depends-on = ["gsplat-build"]
+description = "Build release tools and compare against golden references"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-log-ply]
+cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }]
+cwd = "packages/gsplat-rust-renderer"
+description = "Log the pretrained Lego PLY to the running viewer"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-log-scene]
+cmd = "python tools/log_splats_with_cameras.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { task = "gsplat-download", args = ["data", "lego"] }]
+cwd = "packages/gsplat-rust-renderer"
+description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
+
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-lego]
 cmd = "python -m gsplat_rust_renderer.nerfbaselines data lego"
 cwd = "packages/gsplat-rust-renderer"

@@ -1,82 +1,39 @@
-[package]
-name = "gsplat-rust-renderer"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/gsplat-cli"]
+# Keep path dependencies in Brush's own workspace for inherited package metadata.
+exclude = ["target/brush-src"]
+resolver = "3"
 
-[lib]
-name = "gsplat_lib"
-path = "src/lib.rs"
-
-[[bin]]
-name = "gsplat-rust-renderer"
-path = "src/main.rs"
-required-features = ["viewer"]
-
-[[bin]]
-name = "gsplat-render"
-path = "src/render_cli.rs"
-
-[features]
-default = ["viewer"]
-viewer = [
-    "dep:egui_kittest",
-    "dep:half",
-    "dep:re_byte_size",
-    "dep:re_crash_handler",
-    "dep:re_grpc_server",
-    "dep:re_log_channel",
-    "dep:re_log_encoding",
-    "dep:re_log",
-    "dep:re_log_types",
-    "dep:re_query",
-    "dep:re_renderer",
-    "dep:re_sdk",
-    "dep:re_sdk_types",
-    "dep:re_view",
-    "dep:re_view_spatial",
-    "dep:re_viewer",
-    "dep:re_viewer_context",
-    "dep:rerun",
-    "dep:tokio",
-]
-
-[dependencies]
-# ── Always-on deps (core algorithm + CLI) ─────────────────────────────
+[workspace.dependencies]
 anyhow = "1.0"
-# `min_const_generics` supplies `Pod for [T; N]` at arbitrary N — needed to
-# slice the `SphericalHarmonics3` wire component as `[half::f16; 45]`.
 bytemuck = { version = "1.23", features = ["derive", "min_const_generics"] }
 clap = { version = "4", features = ["derive"] }
 glam = "0.30"
 image = "0.25"
-ply-rs = "0.1"
+half = "2.7"
+colmap-reader = { path = "target/brush-src/crates/colmap-reader" }
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
 wgpu = "=30.0.0"
+burn = { git = "https://github.com/tracel-ai/burn", branch = "main", version = "=0.22.0-pre.3", default-features = false, features = ["std", "wgpu"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "fs", "sync"] }
+brush-render = { path = "target/brush-src/crates/brush-render" }
+brush-serde = { path = "target/brush-src/crates/brush-serde" }
+brush-loss = { path = "target/brush-src/crates/brush-loss" }
+lpips = { path = "target/brush-src/crates/lpips" }
+brush-process = { path = "target/brush-src/crates/brush-process" }
+brush-train = { path = "target/brush-src/crates/brush-train" }
+brush-dataset = { path = "target/brush-src/crates/brush-dataset" }
 
-# ── Viewer-only deps (behind "viewer" feature flag) ───────────────────
-# Published Rerun 0.38.1 crates from crates.io — reproducible from a clean
-# checkout on any machine. Rerun 0.38 uses egui/eframe 0.36, so the headless
-# kittest harness must stay on the same egui family as re_viewer.
-egui_kittest = { version = "0.36.1", features = ["wgpu", "eframe"], optional = true }
-# `half::f16` decode for the `SphericalHarmonics3` wire component (viewer only).
-# `bytemuck` feature makes `f16: Pod` so `[f16; 45]` slices out of Arrow.
-half = { version = "2.7", features = ["bytemuck"], optional = true }
-re_byte_size = { version = "=0.38.1", optional = true }
-re_crash_handler = { version = "=0.38.1", optional = true }
-re_grpc_server = { version = "=0.38.1", optional = true }
-re_log_channel = { version = "=0.38.1", optional = true }
-re_log_encoding = { version = "=0.38.1", optional = true }
-re_log = { version = "=0.38.1", optional = true }
-re_log_types = { version = "=0.38.1", optional = true }
-re_query = { version = "=0.38.1", optional = true }
-re_renderer = { version = "=0.38.1", optional = true }
-re_sdk = { version = "=0.38.1", optional = true }
-re_sdk_types = { version = "=0.38.1", optional = true }
-re_view = { version = "=0.38.1", optional = true }
-re_view_spatial = { version = "=0.38.1", optional = true }
-re_viewer = { version = "=0.38.1", optional = true }
-re_viewer_context = { version = "=0.38.1", optional = true }
-rerun = { version = "=0.38.1", features = ["native_viewer", "log_setup"], optional = true }
-tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional = true }
+# Burn and CubeCL are pinned to Brush revisions in Cargo.lock.
+# Rerun 0.38.1 pins wasm-bindgen =0.2.126, requiring registry wgpu 30.0.0.
+# Match Brush: thin LTO; codegen-units keeps Cargo's release default (16).
+[profile.release]
+lto = "thin"
+codegen-units = 16
+
+# Brush sources and observer patch: packages/brush-src/recipe.yaml.
+# Bump the recipe rev, rebase its patch, re-lock/install Pixi, then resolve Cargo offline.
+# The reference brush-cli task uses its own unpatched upstream workspace.

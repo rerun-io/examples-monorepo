@@ -1,0 +1,22 @@
+[package]
+name = "gsplat-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "gsplat"
+path = "src/main.rs"
+
+[dependencies]
+brush-render.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+burn.workspace = true
+brush-dataset.workspace = true
+brush-loss.workspace = true
+lpips.workspace = true
+sha2 = "0.10"
