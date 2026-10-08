@@ -1,5 +1,6 @@
 //! robocap_track.py's `BarLetterbox`: a 16:9 camera into DetNet's 640x480 net frame (full-width resize by 1/3, 60-pixel black
-//! bars above and below), and the pixel-centre maps between full-resolution camera pixels and the net frame.
+//! bars above and below), and the pixel-centre maps between full-resolution camera pixels and the net frame. Written in
+//! kornia-rs style on `spatial_padding`; its upstream home is kornia-imgproc's `preprocess`.
 #![deny(missing_docs)]
 
 use kornia_image::{Image, ImageError, ImageSize};

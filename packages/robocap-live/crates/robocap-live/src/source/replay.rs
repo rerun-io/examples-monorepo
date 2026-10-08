@@ -1,4 +1,4 @@
-//! Replay of a `robocap-live-dump/1` directory (SPEC "The dump format") as a [`FrameSource`].
+//! Replay of a `robocap-live-dump/1` directory ([`crate::frame`] describes the files) as a [`FrameSource`].
 //!
 //! Events come out in time order: the IMU samples up to a frameset's time, then the frameset (on equal times the IMU sample
 //! first). Options:

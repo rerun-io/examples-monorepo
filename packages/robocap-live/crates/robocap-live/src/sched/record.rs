@@ -1,4 +1,4 @@
-//! What the output stage hands its sinks, the sink trait, and the `--record` JSONL writer (SPEC "Runtime").
+//! What the output stage hands its sinks, the sink trait, and the `--record` JSONL writer.
 
 use std::io::Write;
 use std::path::Path;
@@ -142,6 +142,8 @@ struct RecordView {
     pinch: Option<f32>,
 }
 
+/// One hand of a record line: `landmarks` are 21 world points in metres (null when not tracked), each view's `keypoints_px` the
+/// 21 keypoints in full-resolution pixels, and `detnet_circle` is `[cx, cy, r]` in DetNet's net frame.
 #[derive(Serialize)]
 struct RecordHand {
     tracked: bool,
@@ -152,6 +154,11 @@ struct RecordHand {
     detnet_circle: Option<[f32; 3]>,
 }
 
+/// One `--record` line: the frameset (`index`, `t_ns`); the pose used (`slam_index`, `slam_t_ns`, null without a pose;
+/// `world_from_rig` row-major, identity without a pose); `slam_status` (`no_visual_features`, `tracking`, `failed`, `off`,
+/// `reference`, or `none` before any pose), `slam_landmarks` (landmarks in the window) and `slam_tracked` (observations of
+/// them in this frameset); `hands` (empty when the hands stage did not run, else left then right); `detnet_camera` (the camera
+/// DetNet ran on, or null); `scale` (the hand scale in use, null without hands); `timings_ms` (null for a stage that did not run).
 #[derive(Serialize)]
 struct RecordLine<'a> {
     index: u64,
@@ -170,7 +177,7 @@ struct RecordLine<'a> {
     timings_ms: &'a FrameTimings,
 }
 
-/// The `--record` JSONL writer (SPEC "Runtime": one line per frameset).
+/// The `--record` JSONL writer: one `RecordLine` per frameset.
 pub struct RecordWriter {
     out: std::io::BufWriter<std::fs::File>,
     path: String,
