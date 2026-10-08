@@ -6,14 +6,14 @@
 //! - `GET /` the page; `GET /api/status` one JSON snapshot (cumulative counters; the page turns them into rates);
 //! - `GET /api/log` the run log's last lines; `POST /api/start` (form fields, see [`run::StartRequest`]); `POST /api/stop`.
 //!
-//! Start follows the same handoff + `run/live.{pid,log,cmd}` protocol as `scripts/start-live.sh`: `handoff-run.sh` (pauses the
-//! vendor recorder, always restores it, stops at 85 °C) around `bin/robocap-live`, detached in its own session, with the run
-//! files written the same way so `scripts/stop.sh` works on it too. The robocap-live command line is the panel's own, built
-//! from the form ([`run::StartRequest::command`]); it is not the one start-live.sh builds. Before it starts, it applies robocap-guard's
-//! default power limits and busy checks on the cap itself. Stop sends SIGINT to the run's robocap-live (never to the vendor
-//! recorder, never by name). Start, stop and the run's end share one record ([`run::Run`]). Nothing starts at boot.
+//! Start runs [`checks`], then spawns this same binary as the run supervisor (`robocap-panel handoff`, [`handoff`]: it pauses the
+//! vendor recorder, always restores it, stops the run at its temperature and time limits) around `bin/robocap-live`, detached in
+//! its own session, and writes `run/live.{pid,log,cmd}` so a restarted panel finds the run. The robocap-live command line is built
+//! from the form ([`run::StartRequest::command`]). Stop sends SIGTERM to the supervisor (never to the vendor recorder, never by
+//! name). Start, stop and the run's end share one record ([`run::Run`]). Nothing starts at boot.
 //!
 //! Usage: robocap-panel [--port 8090] [--bind 0.0.0.0] [--root /root/robocap-live]
+//!        robocap-panel handoff <max seconds> <command...>      (the run supervisor; the panel starts it)
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -25,24 +25,25 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+mod handoff;
 mod run;
 
-use run::{Owner, Phase, Run, StartRequest, alive, live_processes, phase, run_pid};
+use handoff::{LAUNCHER, MAX_START_TEMP_C, RECORDER, RUN_ENDED, STOP_TEMP_C};
+use run::{Checks, Owner, Phase, Run, StartRequest, alive, live_processes, phase, run_pid};
 
 const PAGE: &str = include_str!("panel.html");
 /// The regmap file of the bq25790 charger. Only registers 0x19-0x21 are read (as robocap-guard does): 0x22-0x27 clear on read.
 const CHARGER_REGMAP: &str = "/sys/kernel/debug/regmap/6-006b/registers";
-/// Start refuses below these (robocap-guard's defaults). `/api/status` hands every limit to the page, which colours from them.
+/// Start warns below this charger input limit and refuses below this battery voltage, with less free disk, or at
+/// [`MAX_START_TEMP_C`] ([`checks`]). `/api/status` hands every limit to the page, which colours from them.
 const MIN_INPUT_LIMIT_MA: u32 = 2000;
 const MIN_VBAT_V: f64 = 7.9;
-/// handoff-run.sh stops a run at this temperature (its `temp_limit_mc`)...
-const STOP_TEMP_C: f64 = 85.0;
-/// ...and refuses to start above it minus 10 °C; say so before trying.
-const MAX_START_TEMP_C: f64 = STOP_TEMP_C - 10.0;
 const MIN_FREE_BYTES: u64 = 1 << 30;
 
 struct Panel {
     root: PathBuf,
+    /// This binary and `handoff`: how start runs the supervisor.
+    supervisor: Vec<String>,
     /// The run this panel starts and stops.
     run: Arc<Run>,
     /// `df -k /` for the page, re-read every 30 s (start's own check reads it fresh).
@@ -77,7 +78,11 @@ impl<T: Clone> Cached<T> {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.first().is_some_and(|a| a == "handoff") {
+        std::process::exit(handoff::main(&all[1..]));
+    }
+    let mut args = all.into_iter();
     let (mut port, mut bind, mut root) = (8090u16, "0.0.0.0".to_string(), PathBuf::from("/root/robocap-live"));
     while let Some(arg) = args.next() {
         let value = args.next().unwrap_or_default();
@@ -99,8 +104,16 @@ fn main() {
         }
     };
     eprintln!("robocap-panel: http://{bind}:{port}/ (root {})", root.display());
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe.display().to_string(),
+        Err(error) => {
+            eprintln!("robocap-panel: cannot find its own binary for the run supervisor: {error}");
+            std::process::exit(1);
+        }
+    };
     let panel = Arc::new(Panel {
         root,
+        supervisor: vec![exe, "handoff".to_string()],
         run: Arc::default(),
         disk: Cached::new(Duration::from_secs(30)),
         wifi_link: Cached::new(Duration::from_secs(5)),
@@ -160,7 +173,8 @@ fn handle(mut stream: TcpStream, panel: &Arc<Panel>) -> std::io::Result<()> {
         ("GET", "/api/status") => respond(&mut stream, 200, "application/json", &status(panel).to_string()),
         ("GET", "/api/log") => respond(&mut stream, 200, "text/plain; charset=utf-8", &log_tail(panel, 60)),
         ("POST", "/api/start") => {
-            let result = StartRequest::parse(&body).and_then(|request| run::start(&panel.run, &panel.root, &request, || preflight(&panel.root)));
+            let preflight = || checks(&DeviceState::read(run_pid(&panel.root), &processes(), disk_bytes("/").1, hottest_c()));
+            let result = StartRequest::parse(&body).and_then(|request| run::start(&panel.run, &panel.root, &panel.supervisor, &request, preflight));
             respond_result(&mut stream, result)
         }
         ("POST", "/api/stop") => respond_result(&mut stream, run::stop(&panel.run, &panel.root)),
@@ -204,6 +218,11 @@ fn read_number(path: impl AsRef<Path>) -> Option<f64> {
     read_trim(path)?.parse().ok()
 }
 
+/// A program's stdout; empty when it cannot run.
+fn stdout_of(program: &str, args: &[&str]) -> String {
+    Command::new(program).args(args).stderr(Stdio::null()).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+}
+
 /// devfreq `load`: "37@300000000Hz" -> (37 %, 300 MHz).
 fn parse_devfreq_load(text: &str) -> Option<(u32, f64)> {
     let (load, hz) = text.trim().split_once('@')?;
@@ -238,13 +257,32 @@ fn read_charger() -> (Option<u32>, Option<bool>) {
     parse_charger(&text)
 }
 
-/// One process: pid, session, state, the first word of its command line, and the whole line.
+/// One process: pid, name (its `comm`), session, state, the first word of its command line, and the whole line.
 struct Process {
     pid: u32,
+    name: String,
     session: u32,
     state: char,
     program: String,
     args: String,
+}
+
+/// Fields shared by process discovery, identity checks, and session shutdown.
+struct Stat {
+    name: String,
+    state: char,
+    session: u32,
+}
+
+fn stat(pid: u32) -> Option<Stat> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // comm may contain spaces and parentheses.
+    let end = text.rfind(')')?;
+    let name = text.get(text.find('(')? + 1..end)?.to_owned();
+    let mut rest = text.get(end + 1..)?.split_whitespace();
+    let state = rest.next()?.chars().next()?;
+    let session = rest.nth(2)?.parse().ok()?;
+    Some(Stat { name, state, session })
 }
 
 fn processes() -> Vec<Process> {
@@ -253,32 +291,30 @@ fn processes() -> Vec<Process> {
         .flatten()
         .filter_map(|entry| {
             let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
-            // "pid (comm) state ppid pgrp session ..."; comm may hold spaces and parentheses.
-            let mut rest = stat.get(stat.rfind(')')? + 1..)?.split_whitespace();
-            let state = rest.next()?.chars().next()?;
-            let session: u32 = rest.nth(2)?.parse().ok()?;
+            let Stat { name, state, session } = stat(pid)?;
             let raw = fs::read(entry.path().join("cmdline")).ok()?;
             let words: Vec<String> = raw.split(|&b| b == 0).filter(|w| !w.is_empty()).map(|w| String::from_utf8_lossy(w).to_string()).collect();
             let program = words.first()?.clone();
-            Some(Process { pid, session, state, program, args: words.join(" ") })
+            Some(Process { pid, name, session, state, program, args: words.join(" ") })
         })
         .collect()
 }
 
-/// robocap-guard's notion of "busy": transfers, fstrim, or another heavy job.
-fn busy(processes: &[Process]) -> Vec<String> {
+/// robocap-guard's notion of "busy": transfers, fstrim, or another heavy job, by program name (the first two words of the command
+/// line, for a script under an interpreter), so a shell in /root/robocap-live or this panel does not count.
+fn busy<'a>(processes: impl IntoIterator<Item = &'a Process>) -> Vec<String> {
     const TRANSFERS: [&str; 10] = ["tar", "gzip", "gunzip", "zcat", "pigz", "unpigz", "scp", "sftp-server", "rsync", "dd"];
     const HEAVY: [&str; 9] = ["nets_bench", "robocap-live", "rknn", "gst-launch", "stress", "fitbench", "cold_bench", "npu-bench", "slam_bench"];
     processes
-        .iter()
+        .into_iter()
         .filter_map(|p| {
-            let name = p.program.rsplit('/').next().unwrap_or_default();
+            let names: Vec<&str> = p.args.split(' ').take(2).map(|word| word.rsplit('/').next().unwrap_or_default()).collect();
+            let name = names.first().copied().unwrap_or_default();
             let kind = if TRANSFERS.contains(&name) {
                 "transfer"
             } else if name == "fstrim" {
                 "fstrim"
-            } else if HEAVY.iter().any(|h| p.args.contains(h)) && !p.args.contains("robocap-panel") {
+            } else if names.iter().any(|n| HEAVY.iter().any(|h| n.starts_with(h))) {
                 "heavy"
             } else {
                 return None;
@@ -305,18 +341,24 @@ fn log_tail(panel: &Panel, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
+/// robocap-live's newest 1 Hz status line ("[  17.5 s] src 30.4/s ..."; past 999.9 s the bracket has no space).
+fn status_line(log: &str) -> Option<&str> {
+    log.lines().rev().find(|line| line.contains("] src "))
+}
+
 /// The newest log line that starts with `prefix` (after leading spaces).
 fn last_line<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     text.lines().rev().find(|line| line.trim_start().starts_with(prefix))
 }
 
 fn status(panel: &Panel) -> Value {
-    let thermal: Vec<Value> = (0..16)
+    let zones: Vec<(String, f64)> = (0..16)
         .map_while(|zone| {
             let base = format!("/sys/class/thermal/thermal_zone{zone}");
-            Some(json!({"name": read_trim(format!("{base}/type"))?, "c": read_number(format!("{base}/temp"))? / 1000.0}))
+            Some((read_trim(format!("{base}/type"))?, read_number(format!("{base}/temp"))? / 1000.0))
         })
         .collect();
+    let thermal: Vec<Value> = zones.iter().map(|(name, c)| json!({"name": name, "c": c})).collect();
     let cpu: Vec<Vec<u64>> = fs::read_to_string("/proc/stat")
         .unwrap_or_default()
         .lines()
@@ -334,28 +376,42 @@ fn status(panel: &Panel) -> Value {
         let base = format!("/sys/class/devfreq/{name}");
         match read_trim(format!("{base}/load")).as_deref().and_then(parse_devfreq_load) {
             Some((load, mhz)) => json!({"load": load, "mhz": mhz}),
-            None => json!({"load": null, "mhz": read_number(format!("{base}/cur_freq")).map(|hz| hz / 1e6)}),
+            None => {
+                json!({"load": null, "mhz": read_number(format!("{base}/cur_freq")).map(|hz| hz / 1e6)})
+            }
         }
     };
     let supply = |name: &str, field: &str| read_number(format!("/sys/class/power_supply/{name}/{field}"));
-    let (input_limit_ma, iindpm) = read_charger();
     let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let mem_kb = |key: &str| meminfo.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok());
     let (disk_total, disk_free) = panel.disk.get(|| disk_bytes("/"));
-    let iw = panel.wifi_link.get(|| {
-        Command::new("iw").args(["dev", "wlan0", "link"]).stderr(Stdio::null()).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
-    });
+    let iw = panel.wifi_link.get(|| stdout_of("iw", &["dev", "wlan0", "link"]));
     let iw_field = |key: &str| iw.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()));
     let procs = processes();
-    let recorder = procs.iter().find(|p| p.program.ends_with("omni-specs.bin"));
-    let launcher = procs.iter().find(|p| p.args.contains("frodobots.sh"));
+    let recorder = procs.iter().find(|p| p.name == RECORDER);
+    let launcher = procs.iter().find(|p| p.name == LAUNCHER);
     let record = panel.run.snapshot();
     let pid = record.session(&panel.root);
     let running = pid.is_some_and(alive);
+    let previous_session = read_trim(panel.root.join("run/live.pid")).and_then(|s| s.parse::<u32>().ok());
+    let session_alive = running || previous_session.is_some_and(|session| procs.iter().any(|p| p.session == session));
+    if vendor_orphaned(launcher.map(|p| p.state), session_alive, record.owner)
+        && let Ok(_lease) = handoff::lock(&panel.root)
+        && let Some(launcher) = launcher
+    {
+        match handoff::signal(launcher.pid as i32, libc::SIGCONT) {
+            Ok(()) => eprintln!("robocap-panel: resumed orphaned vendor launcher {}", launcher.pid),
+            Err(error) => eprintln!("robocap-panel: {error}"),
+        }
+    }
+    let hottest = zones.iter().map(|(_, c)| *c).fold(f64::MIN, f64::max);
+    let state = DeviceState::read(pid.filter(|_| running), &procs, disk_free, hottest);
     let log = log_text(panel, 32 * 1024);
-    let live_running = running && pid.is_some_and(|session| !live_processes(&panel.root, session).is_empty());
-    let ended = log.contains("robocap-live: stopping") || log.contains("robocap-live: capture stopped") || log.contains("launcher resumed");
-    let run_phase = if record.owner == Owner::Starting { Phase::Starting } else { phase(running, live_running, record.stop_requested || ended) };
+    let live_running = running && pid.is_some_and(|session| !live_processes(&procs, &panel.root, session).is_empty());
+    let ended = log.contains("robocap-live: stopping") || log.contains("robocap-live: capture stopped") || log.contains(RUN_ENDED);
+    let run_phase =
+        if matches!(record.owner, Owner::Starting { .. }) { Phase::Starting } else { phase(running, live_running, record.stopping() || ended) };
+    let checks = checks(&state);
     let uptime = read_trim("/proc/uptime").and_then(|u| u.split_whitespace().next()?.parse::<f64>().ok());
     json!({
         "time": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
@@ -370,13 +426,13 @@ fn status(panel: &Panel) -> Value {
         "ddr": devfreq("dmc"),
         "vpu": [devfreq("fdbd0000.rkvenc-core"), devfreq("fdbe0000.rkvenc-core")],
         "power": {
-            "battery_v": supply("bq25790-battery", "voltage_now").map(|uv| uv / 1e6),
+            "battery_v": state.battery_v,
             "battery_a": supply("bq25790-battery", "current_now").map(|ua| ua / 1e6),
             "input_v": supply("bq25790-charger", "voltage_now").map(|uv| uv / 1e6),
             "input_a": supply("bq25790-charger", "current_now").map(|ua| ua / 1e6),
             "status": read_trim("/sys/class/power_supply/bq25790-charger/status"),
-            "input_limit_ma": input_limit_ma,
-            "iindpm": iindpm,
+            "input_limit_ma": state.input_limit_ma,
+            "iindpm": state.iindpm,
         },
         "mem_kb": {"total": mem_kb("MemTotal:"), "available": mem_kb("MemAvailable:")},
         "disk": {"total": disk_total, "free": disk_free},
@@ -396,14 +452,14 @@ fn status(panel: &Panel) -> Value {
             "max_start_temp_c": MAX_START_TEMP_C,
             "stop_temp_c": STOP_TEMP_C,
         },
-        "busy": busy(&procs).into_iter().filter(|b| !running || !b.contains("robocap-live")).collect::<Vec<_>>(),
+        "checks": {"refusals": checks.refusals, "warnings": checks.warnings},
         "run": {
             "running": running,
             "phase": run_phase.as_str(),
             "pid": pid,
             "cmd": read_trim(panel.root.join("run/live.cmd")),
             "log": read_trim(panel.root.join("run/live.log")),
-            "status": last_line(&log, "[ ").or_else(|| last_line(&log, "[")).filter(|l| l.contains(" src ")),
+            "status": status_line(&log),
             "power": last_line(&log, "power:"),
             "threads": last_line(&log, "threads:"),
             "live": last_line(&log, "robocap-live: camera fps").or_else(|| last_line(&log, "robocap-live: capture stopped")),
@@ -415,47 +471,96 @@ fn status(panel: &Panel) -> Value {
     })
 }
 
+fn vendor_orphaned(state: Option<char>, session_alive: bool, owner: Owner) -> bool {
+    state == Some('T') && !session_alive && owner == Owner::Nobody
+}
+
 /// `df -k <path>`: (total, free) bytes.
 fn disk_bytes(path: &str) -> (Option<u64>, Option<u64>) {
-    let output = Command::new("df").args(["-k", path]).stderr(Stdio::null()).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let output = stdout_of("df", &["-k", path]);
     let fields: Vec<u64> = output.lines().nth(1).map(|l| l.split_whitespace().skip(1).take(3).filter_map(|v| v.parse().ok()).collect()).unwrap_or_default();
     (fields.first().map(|k| k * 1024), fields.get(2).map(|k| k * 1024))
 }
 
-/// robocap-guard's preflight, read on the cap: refusals as text (empty = go).
-fn preflight(root: &Path) -> Vec<String> {
-    let mut refusals = Vec::new();
-    if run_pid(root).is_some_and(alive) {
-        refusals.push("a run is already going (stop it first)".to_string());
+/// The hottest thermal zone, °C.
+fn hottest_c() -> f64 {
+    (0..16).map_while(|z| read_number(format!("/sys/class/thermal/thermal_zone{z}/temp"))).fold(f64::MIN, f64::max) / 1000.0
+}
+
+/// What start's checks look at.
+#[derive(Clone, Debug)]
+struct DeviceState {
+    run_going: bool,
+    /// [`busy`]'s list.
+    busy: Vec<String>,
+    input_limit_ma: Option<u32>,
+    iindpm: Option<bool>,
+    battery_v: Option<f64>,
+    hottest_c: f64,
+    disk_free: Option<u64>,
+}
+
+impl DeviceState {
+    /// The charger and battery read now; the rest from the caller, which already has it (`run`: the session of the run that is
+    /// going). The run's own processes (its session: the supervisor, robocap-live and its encoders) do not make the cap busy.
+    fn read(run: Option<u32>, processes: &[Process], disk_free: Option<u64>, hottest_c: f64) -> Self {
+        let (input_limit_ma, iindpm) = read_charger();
+        Self {
+            run_going: run.is_some(),
+            busy: busy(processes.iter().filter(|p| run.is_none_or(|session| p.session != session))),
+            input_limit_ma,
+            iindpm,
+            battery_v: read_number("/sys/class/power_supply/bq25790-battery/voltage_now").map(|uv| uv / 1e6),
+            hottest_c,
+            disk_free,
+        }
     }
-    refusals.extend(busy(&processes()).into_iter().map(|b| format!("busy: {b}")));
-    let (limit, iindpm) = read_charger();
-    match limit {
-        Some(ma) if ma < MIN_INPUT_LIMIT_MA => refusals.push(format!("charger input limit {ma} mA is below {MIN_INPUT_LIMIT_MA} mA (USB replug: reboot restores 2.3 A)")),
-        None => refusals.push("cannot read the charger's input limit".to_string()),
+}
+
+/// Start's rules: a busy cap, a low battery, a hot SoC or a full disk refuse; low charger input only warns (the battery then
+/// carries part of the load, so the run should be short).
+fn checks(state: &DeviceState) -> Checks {
+    let mut checks = Checks::default();
+    if state.run_going {
+        checks.refusals.push("a run is already going (stop it first)".to_string());
+    }
+    checks.refusals.extend(state.busy.iter().map(|b| format!("busy: {b}")));
+    match state.input_limit_ma {
+        Some(ma) if ma < MIN_INPUT_LIMIT_MA => checks.warnings.push(format!(
+            "charger input limit {ma} mA is below {MIN_INPUT_LIMIT_MA} mA: the battery carries part of the load, keep the run short \
+             (after a USB replug, a reboot restores 2.3 A)"
+        )),
+        None => checks.warnings.push("cannot read the charger's input limit".to_string()),
         _ => {}
     }
-    if iindpm == Some(true) {
-        refusals.push("the charger is in input current regulation (the battery carries part of the load)".to_string());
+    if state.iindpm == Some(true) {
+        checks.warnings.push("the charger is in input current regulation: the battery carries part of the load".to_string());
     }
-    if let Some(volts) = read_number("/sys/class/power_supply/bq25790-battery/voltage_now").map(|uv| uv / 1e6)
+    if let Some(volts) = state.battery_v
         && volts < MIN_VBAT_V
     {
-        refusals.push(format!("battery {volts:.2} V is below {MIN_VBAT_V} V"));
+        checks.refusals.push(format!("battery {volts:.2} V is below {MIN_VBAT_V} V"));
     }
-    let hottest = (0..16).map_while(|z| read_number(format!("/sys/class/thermal/thermal_zone{z}/temp"))).fold(f64::MIN, f64::max) / 1000.0;
-    if hottest >= MAX_START_TEMP_C {
-        refusals.push(format!("SoC {hottest:.1} °C: handoff-run.sh starts below {MAX_START_TEMP_C} °C"));
+    if state.hottest_c >= MAX_START_TEMP_C {
+        checks.refusals.push(format!("SoC {:.1} °C: a run starts below {MAX_START_TEMP_C} °C", state.hottest_c));
     }
-    if disk_bytes("/").1.is_some_and(|free| free < MIN_FREE_BYTES) {
-        refusals.push(format!("less than {} GiB free on /", MIN_FREE_BYTES >> 30));
+    if state.disk_free.is_some_and(|free| free < MIN_FREE_BYTES) {
+        checks.refusals.push(format!("less than {} GiB free on /", MIN_FREE_BYTES >> 30));
     }
-    refusals
+    checks
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_orphaned_paused_vendor_may_resume() {
+        assert!(vendor_orphaned(Some('T'), false, Owner::Nobody));
+        assert!(!vendor_orphaned(Some('T'), true, Owner::Nobody));
+        assert!(!vendor_orphaned(Some('S'), false, Owner::Nobody));
+        assert!(!vendor_orphaned(Some('T'), false, Owner::Starting { cancel: false }));
+    }
 
     #[test]
     fn device_files_parse_as_the_cap_writes_them() {
@@ -465,6 +570,36 @@ mod tests {
         // Cap B, 2026-10-01 16:5x: robocap-guard read 2610 mA, IINDPM 0 from these registers.
         assert_eq!(parse_charger("19: 01\n1a: 05\n1b: 0f\n1c: e7\n"), (Some(2610), Some(false)));
         assert_eq!(parse_charger("19: 00\n1a: 32\n1b: 8f\n"), (Some(500), Some(true)));
+    }
+
+    #[test]
+    fn low_charger_input_only_warns_and_a_low_battery_refuses() {
+        let quiet = DeviceState {
+            run_going: false,
+            busy: Vec::new(),
+            input_limit_ma: Some(2610),
+            iindpm: Some(false),
+            battery_v: Some(8.2),
+            hottest_c: 43.0,
+            disk_free: Some(5 << 30),
+        };
+        assert_eq!(checks(&quiet), Checks::default());
+        // Cap B after a USB replug: 500 mA and the battery helping.
+        let low_input = checks(&DeviceState { input_limit_ma: Some(500), iindpm: Some(true), ..quiet.clone() });
+        assert_eq!((low_input.refusals.len(), low_input.warnings.len()), (0, 2), "{low_input:?}");
+        assert!(low_input.warnings[0].contains("500 mA"), "{low_input:?}");
+        let unreadable = checks(&DeviceState { input_limit_ma: None, iindpm: None, ..quiet.clone() });
+        assert_eq!((unreadable.refusals.len(), unreadable.warnings.len()), (0, 1), "{unreadable:?}");
+        for refused in [
+            DeviceState { battery_v: Some(7.8), ..quiet.clone() },
+            DeviceState { hottest_c: 75.0, ..quiet.clone() },
+            DeviceState { disk_free: Some(1 << 29), ..quiet.clone() },
+            DeviceState { busy: vec!["transfer 812: tar -xf -".into()], ..quiet.clone() },
+            DeviceState { run_going: true, ..quiet.clone() },
+        ] {
+            let result = checks(&refused);
+            assert_eq!((result.refusals.len(), result.warnings.len()), (1, 0), "{refused:?} -> {result:?}");
+        }
     }
 
     #[test]
@@ -490,7 +625,10 @@ mod tests {
     #[test]
     fn the_status_line_is_the_newest_one() {
         let log = "[   1.0 s] src 30/s a\n           power: x\n[   2.0 s] src 30/s b\nrobocap-live: camera fps [30] live: 5.0 s\n";
-        assert_eq!(last_line(log, "[ ").map(|l| l.contains(" b")), Some(true));
+        assert_eq!(status_line(log).map(|l| l.contains(" b")), Some(true));
         assert_eq!(last_line(log, "power:").map(str::trim), Some("power: x"));
+        // A 30-minute run: from 1000 s on the bracket has no space, and the supervisor's lines come after the last status line.
+        let long = "[ 999.5 s] src 30/s a\n[1800.5 s] src 29/s b\n[handoff 23:38:33] run: exit status: 0\n";
+        assert_eq!(status_line(long).map(|l| l.starts_with("[1800.5 s]")), Some(true));
     }
 }

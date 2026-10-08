@@ -1,10 +1,9 @@
-# Sourced by deploy.sh, panel.sh, start-live.sh, stop.sh and viewer-mac.sh after they parse their arguments: which cap, and how
-# to reach it. The scripts set CAP from their required --cap a|b before sourcing; there is no default cap.
+# Sourced by deploy.sh and panel.sh after they parse their arguments: which cap, and how to reach it. The scripts set CAP from
+# their required --cap a|b before sourcing; there is no default cap.
 # cap_ssh runs a command on the cap through robocap-ssh (found on PATH; it takes a|b and holds the caps' ssh routes and
-# addresses). Nothing here names a host or an address: the scripts that need the cap's address or the viewer Mac take them as
-# arguments (--cap-address, --viewer-host, --viewer-if).
+# addresses). Nothing here names a host or an address: panel.sh takes the cap's address as an argument (--cap-address).
 # CAP_HOSTNAME is the hostname the cap must answer with (the scripts refuse any other device).
-# Remote layout on either cap: /root/robocap-live/{bin,models,assets,scripts,logs,run} (the scripts' --root moves it, e.g.
+# Remote layout on either cap: /root/robocap-live/{bin,lib,models,assets,logs,run} (deploy.sh's --root moves it, e.g.
 # /root/robocap-live/test for a test deploy that leaves the main binary alone).
 
 CAP_ROOT=/root/robocap-live

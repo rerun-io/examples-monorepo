@@ -4,7 +4,7 @@
 //! `src/camera.rs`, `src/device.rs`, `src/iio.rs`, `src/device_profile.rs`), the code that was verified on Cap A and Cap B. This
 //! crate copies what it needs instead of depending on `robocap-recorder`, which pins rerun 0.37 and links GStreamer.
 //!
-//! The ownership rules from PR #270 hold: the vendor recorder must be stopped first (`scripts/handoff-run.sh`), every
+//! The ownership rules from PR #270 hold: the vendor recorder must be stopped first (`robocap-panel handoff`), every
 //! changed IIO attribute is restored in reverse order on drop, and the frame trigger is stopped on drop.
 #![deny(missing_docs)]
 

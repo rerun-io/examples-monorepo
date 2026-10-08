@@ -1,10 +1,11 @@
 #!/bin/bash
 # The web panel on a cap (robocap-panel, port 8090): start/stop the live run, watch temperatures, CPU/NPU/GPU/DDR/VPU, power,
-# Wi-Fi and the pipeline. It runs detached on the cap until stopped or the cap reboots (nothing is added to the cap's boot).
+# Wi-Fi and the pipeline. It runs detached on the cap until stopped or the cap reboots (nothing is added to the cap's boot). The
+# same binary supervises each run (`robocap-panel handoff`), so a run outlives a panel stop or restart.
 #
 # Usage: panel.sh [deploy|start|stop|status|url] --cap a|b [--cap-address <ip>] [--port 8090]
-#   deploy  copy the stripped aarch64 binary (scripts/build-arm.sh builds it) to <root>/bin/robocap-panel through robocap-copy
-#           (found on PATH), then start
+#   deploy  put the aarch64 binary (scripts/build-arm.sh builds it) in place with `deploy.sh --panel-only` (sha256-checked, by
+#           rename; the old one becomes robocap-panel.prev), then restart the panel; a run that is going keeps its supervisor
 #   start   start it (no-op if it already runs); stop: SIGTERM to its pid (run/panel.pid), never a kill by name
 #   url     print http://<cap address>:<port>/
 #   --cap-address  the cap's address on the network the browser is on, for the printed URL (required by deploy, start and url)
@@ -33,7 +34,7 @@ start_on_cap() {
     cap_ssh bash -s -- "$CAP_ROOT" "$port" <<'EOF'
 root=$1; port=$2; pidfile=$root/run/panel.pid
 mkdir -p "$root/run" "$root/logs"
-if [[ -f $pidfile ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then echo "already running: pid $(cat "$pidfile")"; exit 0; fi
+if [[ -f $pidfile ]] && [[ $(head -z -n 1 "/proc/$(cat "$pidfile")/cmdline" 2>/dev/null | tr -d "\0") == "$root/bin/robocap-panel" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then echo "already running: pid $(cat "$pidfile")"; exit 0; fi
 # On the A55 cores (0-3), off the A76s that SLAM and the hands use. A run it starts inherits the mask; robocap-live pins its own threads.
 setsid nohup taskset -c 0-3 "$root/bin/robocap-panel" --port "$port" --root "$root" > "$root/logs/panel.log" 2>&1 < /dev/null &
 echo $! > "$pidfile"; sleep 1
@@ -43,29 +44,29 @@ EOF
 
 case $action in
     deploy)
-        binary=$here/../target/aarch64-unknown-linux-gnu/release/robocap-panel
-        [[ -x $binary ]] || { echo "no $binary: run scripts/build-arm.sh --arm-only" >&2; exit 1; }
-        copy=$(command -v robocap-copy) || { echo "robocap-copy is not on PATH (the helper that copies to a cap: robocap-copy a|b <src> <cap dir>)" >&2; exit 1; }
-        staged=$(mktemp -d)
-        cp "$binary" "$staged/robocap-panel"
-        # The strip comes from this checkout's robocap-cross env, as build-arm.sh's.
-        pixi run --manifest-path "$here/../../../pixi.toml" -e robocap-cross --frozen aarch64-conda-linux-gnu-strip "$staged/robocap-panel"
-        ls -la "$staged/robocap-panel"
+        "$here/deploy.sh" --cap "$CAP" --panel-only
         "$here/panel.sh" stop --cap "$CAP" --port "$port" || true
-        "$copy" "$CAP" "$staged/robocap-panel" "$CAP_ROOT/bin"
-        rm -r "$staged"
         start_on_cap
         echo "http://$cap_address:$port/"
         ;;
     start) start_on_cap; echo "http://$cap_address:$port/" ;;
     stop)
         cap_ssh bash -s -- "$CAP_ROOT" <<'EOF'
-pidfile=$1/run/panel.pid
-if [[ -f $pidfile ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then kill "$(cat "$pidfile")" && echo "stopped pid $(cat "$pidfile")"; else echo "not running"; fi
+root=$1; pidfile=$root/run/panel.pid
+if [[ -f $pidfile ]] && [[ $(head -z -n 1 "/proc/$(cat "$pidfile")/cmdline" 2>/dev/null | tr -d "\0") == "$root/bin/robocap-panel" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then kill "$(cat "$pidfile")" && echo "stopped pid $(cat "$pidfile")"; else echo "not running"; fi
 rm -f "$pidfile"
 EOF
         ;;
-    status) cap_ssh "f=$CAP_ROOT/run/panel.pid; [[ -f \$f ]] && kill -0 \$(cat \$f) 2>/dev/null && echo running: pid \$(cat \$f) || echo not running" ;;
+    status)
+        cap_ssh bash -s -- "$CAP_ROOT" <<'EOF'
+root=$1; pidfile=$root/run/panel.pid
+if [[ -f $pidfile ]] && [[ $(head -z -n 1 "/proc/$(cat "$pidfile")/cmdline" 2>/dev/null | tr -d "\0") == "$root/bin/robocap-panel" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    echo "running: pid $(cat "$pidfile")"
+else
+    echo "not running"
+fi
+EOF
+        ;;
     url) echo "http://$cap_address:$port/" ;;
     *) echo "panel.sh: unknown action $action" >&2; exit 2 ;;
 esac

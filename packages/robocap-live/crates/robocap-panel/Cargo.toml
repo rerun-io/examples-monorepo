@@ -7,4 +7,5 @@ publish.workspace = true
 description = "A small web panel on the cap: start and stop the live run; watch temperatures, CPU/NPU/GPU/DDR/VPU, power, Wi-Fi, disk and the pipeline."
 
 [dependencies]
+libc = "0.2"
 serde_json = { workspace = true }

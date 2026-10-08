@@ -12,7 +12,8 @@ This file holds what only it says: the dump format, the hands catalog layer, the
 - `crates/robocap-live/src/nets/mod.rs`: the `HandNets` trait and the raw net outputs; `models/MODELS.md` for the model files.
 - `crates/robocap-live/src/hands/mod.rs`: the tracker's inputs, config and per-frameset results.
 - `crates/robocap-live/src/sched/record.rs`: `RecordLine`, the record JSONL below.
-- `crates/robocap-live/src/main.rs`: the command line (`robocap-live --help`); `scripts/` for build, deploy, start and stop.
+- `crates/robocap-live/src/main.rs`: the command line (`robocap-live --help`); `scripts/` for build and deploy; the panel
+  (`crates/robocap-panel`) starts and stops runs (see **Running on a cap**).
 
 The small image: the runtime makes one 640x360 image per camera from the 1920x1080 frame, an exact area /3 (each output pixel is
 the rounded mean of a 3x3 block; `src/downsample.rs`). SLAM, DetNet's letterbox (`src/hands/letterbox.rs`) and the viewer use it.
@@ -64,7 +65,7 @@ and `slam_threads` report the actual lane, lag and worker count; those fields ar
 GPU defaults to one worker and `port.frontend_lag=true`; CPU defaults to two workers and lag off. `--slam-threads` accepts
 one or two workers; the existing cap affinity keeps SLAM and the threads it creates on cores 6–7.
 `--slam-set port.frontend_lag=true|false` overrides the lane default, including after fallback. The panel offers GPU/CPU and
-auto/on/off lag. `start-live.sh --slam-lag auto|true|false` offers the same selection; auto sends no lag override.
+auto/on/off lag; auto sends no lag override.
 
 SLAM consumes the front-left, front-right, left and right cameras, in that order (rig indices `[0, 1, 4, 5]`). The embedded
 Cap A and Cap B Basalt calibrations use the same order. The front stereo pair gives camera 0 overlapping views for initial
@@ -102,6 +103,27 @@ the track/flush call that produced it; with lag the frontend timers therefore de
 and frontend work overlap, so their times must not be added. Flush has zero frontend time. Summary `slam` rate and timings
 count track calls, including the buffered first call; `slam_flush` records drain work separately. Counters `slam_buffered`
 and `slam_lookahead` expose buffering and supplied hints. A supplied hint may be discarded if its queued frame later changes.
+
+## Running on a cap
+
+The panel (`robocap-panel`, `http://<cap address>:8090/`) is the one way to run robocap-live on a cap. Start checks the cap first:
+a busy cap, a battery below 7.9 V, a SoC at 75 °C or more, or less than 1 GiB free on `/` refuse; a charger input limit below
+2000 mA or input current regulation only warn (the battery then carries part of the load). It then starts the run supervisor,
+`robocap-panel handoff <max seconds> <command...>`, in a session of its own, so the run outlives a panel restart. The supervisor
+refuses unless the vendor recorder is idle, pauses the vendor launcher, runs robocap-live, stops it (SIGINT, then SIGKILL to its
+process group 20 s later) at 85 °C, at its time limit or on SIGTERM, and gives the cameras back once the run's whole process group
+(robocap-live and its encoders) is gone. Stop sends that SIGTERM. The same API works from a shell (`--data-urlencode` keeps the
+`+` of the viewer URL):
+
+```bash
+curl --data-urlencode viewer=rerun+http://<viewer>:9876/proxy -d video_cameras=0,1 -d duration_s=300 http://<cap>:8090/api/start
+curl -s http://<cap>:8090/api/status | jq '.run.phase, .checks'
+curl -X POST http://<cap>:8090/api/stop
+```
+
+To install: `pixi run -e robocap-cross robocap-live-build-arm`, then `robocap-live-deploy --cap a|b --models <dir> --display
+<asset.rrd>` (robocap-live and the panel) or `robocap-live-panel deploy --cap a|b --cap-address <ip>` (the panel alone, then a panel
+restart; a run that is going keeps its supervisor), in the same environment. Both reach the cap through `robocap-ssh` on `PATH`.
 
 ## Shipping the Vulkan loader
 

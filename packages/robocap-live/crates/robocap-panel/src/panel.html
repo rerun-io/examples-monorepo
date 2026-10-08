@@ -4,223 +4,556 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RoboCap live</title>
+<link rel="icon" href="data:,">
 <style>
-  :root { --bg:#111418; --card:#1a1f26; --line:#2a313b; --text:#d8dee6; --dim:#8a96a5; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; }
+  /* Colour roles (the dataviz reference palette): dark first, light from the OS setting. Status colours mean state only. */
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --card: #1a1a19; --raised: #232321; --line: #2c2c2a; --axis: #383835;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --series: #3987e5; --series-wash: rgba(57, 135, 229, .12); --track: rgba(57, 135, 229, .16);
+    --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --ring: rgba(255, 255, 255, .10);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page: #f9f9f7; --card: #fcfcfb; --raised: #f0efec; --line: #e1e0d9; --axis: #c3c2b7;
+      --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+      --series: #2a78d6; --series-wash: rgba(42, 120, 214, .10); --track: rgba(42, 120, 214, .14);
+      --ring: rgba(11, 11, 11, .10);
+    }
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font:13px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text); }
-  header { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
-  header h1 { font-size:16px; margin:0; }
-  .pill { padding:2px 10px; border-radius:10px; font-weight:600; }
-  .run { background:var(--ok); color:#000; } .idle { background:var(--line); } .busy { background:var(--warn); color:#000; }
-  main { display:grid; grid-template-columns:repeat(auto-fill, minmax(330px, 1fr)); gap:12px; padding:12px 16px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
-  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px; }
-  .wide { grid-column:1 / -1; }
-  .row { display:flex; justify-content:space-between; gap:8px; padding:1px 0; }
-  .row span:first-child { color:var(--dim); }
-  .bar { position:relative; height:14px; background:#0d1014; border-radius:3px; overflow:hidden; margin:2px 0; }
-  .bar i { position:absolute; inset:0 auto 0 0; background:var(--acc); }
-  .bar b { position:absolute; left:6px; top:0; font-size:11px; font-weight:500; }
-  .tiles { display:flex; flex-wrap:wrap; gap:6px; }
-  .tile { background:#0d1014; border-radius:4px; padding:4px 8px; font-family:ui-monospace, monospace; font-size:12px; }
-  label { display:inline-flex; gap:4px; align-items:center; margin:2px 8px 2px 0; }
-  input[type=text], input[type=number], select { background:#0d1014; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 6px; }
-  input[type=text] { width:100%; }
-  button { background:var(--acc); color:#000; border:0; border-radius:4px; padding:6px 14px; font-weight:600; cursor:pointer; margin-right:6px; }
-  button.stop { background:var(--bad); color:#fff; } button:disabled { opacity:.4; cursor:default; }
-  #msg { margin-top:6px; white-space:pre-wrap; } .err { color:var(--bad); } .note { color:var(--warn); }
-  canvas { width:100%; height:48px; background:#0d1014; border-radius:3px; }
-  pre { margin:0; max-height:280px; overflow:auto; font-size:11px; color:var(--dim); white-space:pre-wrap; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 14px; padding: 12px 24px;
+           background: color-mix(in srgb, var(--page) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; letter-spacing: -.01em; }
+  .brand svg { width: 26px; height: 26px; }
+  .brand span { color: var(--muted); font-weight: 500; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--raised);
+          box-shadow: inset 0 0 0 1px var(--ring); color: var(--ink-2); font-size: 12.5px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .spacer { flex: 1; }
+
+  main { max-width: 1480px; margin: 0 auto; padding: 20px 24px 40px; display: grid; gap: 16px; align-items: start;
+         grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); grid-template-areas: "run form" "tiles form" "detail form" "log log"; }
+  #run-card { grid-area: run; } #form-card { grid-area: form; position: sticky; top: 72px; } #dev-tiles { grid-area: tiles; }
+  .devgrid { grid-area: detail; } #log-box { grid-area: log; }
+  .card { background: var(--card); border-radius: 14px; box-shadow: inset 0 0 0 1px var(--ring); padding: 18px 20px; min-width: 0; }
+  .card h2 { margin: 0 0 14px; font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+
+  /* The run: phase, clock, progress, pipeline tiles. */
+  .hero-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .phase { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; font-size: 15px; letter-spacing: .04em; }
+  .phase .badge { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--raised); }
+  .phase .badge svg { width: 16px; height: 16px; }
+  .phase[data-phase=streaming] .badge { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--good); }
+  .phase[data-phase=starting] .badge { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+  .phase[data-phase=stopping] .badge { background: color-mix(in srgb, var(--serious) 22%, transparent); color: var(--serious); }
+  .phase[data-phase=idle] .badge, .phase[data-phase=offline] .badge { color: var(--muted); }
+  .phase[data-phase=streaming] .badge { animation: pulse 2s ease-in-out infinite; }
+  .phase[data-phase=starting] .badge svg, .phase[data-phase=stopping] .badge svg { animation: spin 1.1s linear infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--good) 12%, transparent); } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .phase-note { color: var(--ink-2); font-size: 13px; margin-top: 4px; }
+  .clock { text-align: right; }
+  .clock .big { font-size: 52px; font-weight: 650; line-height: 1; letter-spacing: -.02em; }
+  .clock .of { color: var(--muted); font-size: 18px; margin-left: 6px; }
+  .progress { height: 6px; border-radius: 3px; background: var(--track); margin: 16px 0 18px; overflow: hidden; }
+  .progress i { display: block; height: 100%; width: 0; background: var(--series); border-radius: 3px; transition: width .9s linear; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: var(--raised); border-radius: 11px; padding: 12px 14px 10px; position: relative; min-width: 0; }
+  .tile .label { color: var(--ink-2); font-size: 12.5px; display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 18px; }
+  .tile .value { font-size: 28px; font-weight: 650; letter-spacing: -.01em; margin-top: 2px; white-space: nowrap; }
+  .tile .unit { font-size: 13px; color: var(--muted); font-weight: 500; margin-left: 3px; }
+  .tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; min-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile.dim .value { color: var(--ink-2); }
+  .state { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--ink-2); }
+  .state svg { width: 12px; height: 12px; }
+  .good > svg { color: var(--good); } .warn > svg { color: var(--warn); } .bad > svg { color: var(--critical); } .info > svg { color: var(--muted); }
+
+  .spark { display: block; width: 100%; height: 44px; margin-top: 6px; overflow: visible; touch-action: none; }
+  .spark .area { fill: var(--series-wash); }
+  .spark .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .spark .end { fill: var(--series); stroke: var(--raised); stroke-width: 2; }
+  .spark .base { stroke: var(--axis); stroke-width: 1; }
+  .spark .limit { stroke: var(--critical); stroke-width: 1; opacity: .7; }
+  .spark .cross { stroke: var(--muted); stroke-width: 1; }
+  .tip { position: fixed; z-index: 20; pointer-events: none; background: var(--ink); color: var(--page); border-radius: 7px;
+         padding: 5px 9px; font-size: 12px; white-space: nowrap; transform: translate(-50%, calc(-100% - 10px)); display: none; }
+  .tip b { font-weight: 650; margin-right: 6px; }
+
+  .notes { display: grid; gap: 6px; margin-top: 14px; }
+  .note { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .note svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+  .note.bad { color: var(--ink); }
+
+  /* The start form. */
+  .field { margin-bottom: 14px; }
+  .field > .name { display: block; color: var(--ink-2); font-size: 12.5px; margin-bottom: 6px; }
+  input[type=text], input[type=number] { width: 100%; background: var(--page); color: var(--ink); border: 0; border-radius: 8px;
+         box-shadow: inset 0 0 0 1px var(--line); padding: 8px 10px; font: inherit; }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .cams .side { color: var(--muted); font-size: 11px; text-align: center; letter-spacing: .06em; text-transform: uppercase; }
+  .toggle { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px; border: 0; cursor: pointer; font: inherit;
+            background: var(--page); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line); text-align: left; }
+  .toggle .box { width: 16px; height: 16px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--axis); display: grid; place-items: center; flex: none; }
+  .toggle .box svg { width: 12px; height: 12px; opacity: 0; color: #fff; }
+  .toggle[aria-pressed=true] { color: var(--ink); box-shadow: inset 0 0 0 1px var(--series); }
+  .toggle[aria-pressed=true] .box { background: var(--series); box-shadow: none; }
+  .toggle[aria-pressed=true] .box svg { opacity: 1; }
+  .toggle .idx { margin-left: auto; color: var(--muted); font-size: 11.5px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
+  .seg { display: flex; background: var(--page); border-radius: 8px; padding: 3px; box-shadow: inset 0 0 0 1px var(--line); }
+  .seg button { flex: 1; border: 0; background: none; color: var(--ink-2); font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+  .seg button[aria-pressed=true] { background: var(--raised); color: var(--ink); box-shadow: inset 0 0 0 1px var(--ring), 0 1px 2px rgba(0,0,0,.25); font-weight: 600; }
+  .dur { display: flex; gap: 6px; align-items: center; }
+  .dur input { width: 74px; }
+  .dur .seg { flex: 1; }
+  .links { display: flex; gap: 10px; font-size: 12px; }
+  .links button { background: none; border: 0; color: var(--series); cursor: pointer; padding: 0; font: inherit; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+  .btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 10px; padding: 11px 16px;
+         font: inherit; font-weight: 650; cursor: pointer; }
+  .btn svg { width: 16px; height: 16px; }
+  .btn.go { background: var(--series); color: #fff; }
+  .btn.stop { background: color-mix(in srgb, var(--critical) 16%, var(--card)); color: var(--ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--critical) 55%, transparent); }
+  .btn:disabled { opacity: .38; cursor: default; }
+  #msg { margin-top: 10px; }
+
+  /* Device: tiles, meters, rows. */
+  .meters { display: grid; gap: 9px; }
+  .meter { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; row-gap: 4px; font-size: 12.5px; }
+  .meter .ml { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meter .mv { text-align: right; color: var(--ink); white-space: nowrap; }
+  .meter .mt { grid-column: 1 / -1; position: relative; height: 6px; border-radius: 3px; background: var(--track); }
+  .meter .mt i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--series); }
+  .meter .mt i.warn { background: var(--warn); } .meter .mt i.bad { background: var(--critical); }
+  .meter .mt b { position: absolute; top: -3px; bottom: -3px; width: 2px; border-radius: 1px; background: var(--axis); }
+  .group { color: var(--muted); font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; margin: 10px 0 2px; }
+  .group:first-child { margin-top: 0; }
+  .rows { display: grid; gap: 2px; }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .kv:last-child { border-bottom: 0; }
+  .kv > span:first-child { color: var(--ink-2); }
+  .kv > span:last-child { text-align: right; overflow-wrap: anywhere; }
+  .kv .warnv { color: var(--ink); } .kv .warnv::before { content: "▲ "; color: var(--warn); font-size: 10px; }
+  .kv .badv { color: var(--ink); } .kv .badv::before { content: "■ "; color: var(--critical); font-size: 10px; }
+  #dev-tiles .tile { background: var(--card); box-shadow: inset 0 0 0 1px var(--ring); border-radius: 14px; padding: 14px 16px 10px; }
+  #dev-tiles .spark .end { stroke: var(--card); }
+  .devgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+
+  details.card summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+  pre { margin: 12px 0 0; max-height: 360px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); white-space: pre-wrap; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-areas: "run" "form" "tiles" "detail" "log"; padding: 16px; }
+    #form-card { position: static; } header { padding: 10px 16px; } .clock .big { font-size: 44px; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
-<header><h1>RoboCap live</h1><span id="who"></span><span id="state" class="pill idle">…</span><span id="since" style="color:var(--dim)"></span></header>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-good" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor" opacity=".2"/><path d="M4.8 8.3l2.1 2.1 4.3-4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.6H1.4z" fill="currentColor" opacity=".25"/><path d="M8 6v3.6M8 11.6v.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-bad" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor" opacity=".25"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 7.4v4M8 4.9v.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.5 8.4l3 3 6-6.4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.2v9.6l8-4.8z" fill="currentColor"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-live" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4" fill="currentColor"/></symbol>
+  <symbol id="i-idle" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-spin" viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 1-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+</svg>
+
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8" fill="var(--series)"/><circle cx="11" cy="15" r="3.4" fill="#fff"/><circle cx="21" cy="15" r="3.4" fill="#fff"/><path d="M8 22.5h16" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+    RoboCap <span>live</span>
+  </div>
+  <span class="chip" id="device">…</span>
+  <span class="spacer"></span>
+  <span class="chip" id="uptime"></span>
+  <span class="chip" id="conn"><i class="dot"></i><span>connecting</span></span>
+</header>
+
 <main>
-  <section>
-    <h2>Run</h2>
-    <div>Viewer <input type="text" id="viewer" placeholder="rerun+http://<viewer address>:9876/proxy"></div>
-    <div id="cams" style="margin-top:6px">Video </div>
-    <div style="margin-top:4px">
-      <label>SLAM <select id="slam_hz"><option>15</option><option>30</option></select> Hz</label>
-      <label>SLAM lane <select id="slam_lane"><option value="gpu">Mali GPU</option><option value="cpu">CPU</option></select></label>
-      <label>One-frame lag <select id="slam_lag"><option value="auto">Auto (GPU on, CPU off)</option><option value="on">On</option><option value="off">Off</option></select></label>
-      <label>for <input type="number" id="minutes" value="30" min="1" max="120" style="width:60px"> min</label>
-      <label><input type="checkbox" id="hands" checked> hands</label>
-      <label>overlays <select id="hand_overlays" title="fit: the fitted hand in every camera + DetNet's box; debug: + every KeyNet view and DetNet answer; verbose: + relative depths and the predicted pose"><option>fit</option><option>debug</option><option>verbose</option></select></label>
-      <label><input type="checkbox" id="uclamp"> uclamp (faster, hotter)</label>
+  <section class="card" id="run-card" aria-labelledby="phase-label">
+    <div class="hero-top">
+      <div>
+        <div class="phase" id="phase" data-phase="idle"><span class="badge"><svg><use href="#i-idle"/></svg></span><span id="phase-label">IDLE</span></div>
+        <div class="phase-note" id="phase-note">Ready when the checks pass.</div>
+      </div>
+      <div class="clock"><span class="big num" id="elapsed">00:00</span><span class="of" id="of"></span></div>
     </div>
-    <div style="margin-top:8px"><button id="start">Start</button><button id="stop" class="stop">Stop</button></div>
-    <div id="msg"></div>
+    <div class="progress" role="progressbar" aria-label="run time"><i id="progress"></i></div>
+    <div class="tiles" id="pipe-tiles"></div>
+    <div class="notes" id="run-notes"></div>
   </section>
-  <section>
-    <h2>Pipeline</h2>
-    <div class="tiles" id="pipe"><span class="tile">no run</span></div>
-    <div id="capture" style="margin-top:6px; color:var(--dim); font-size:12px"></div>
-    <div id="runnote" style="margin-top:6px"></div>
+
+  <section class="card" id="form-card" aria-label="start a run">
+    <h2>Start a run</h2>
+    <div class="field">
+      <label class="name" for="viewer">Rerun viewer</label>
+      <input type="text" id="viewer" placeholder="rerun+http://<viewer address>:9876/proxy" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="field">
+      <div class="name" style="display:flex;justify-content:space-between">Video to the viewer <span class="links"><button type="button" id="cams-all">All</button><button type="button" id="cams-none">None</button></span></div>
+      <div class="cams" id="cams"><div class="side">Left</div><div class="side">Right</div></div>
+    </div>
+    <div class="row2">
+      <div class="field"><div class="name">SLAM rate</div><div class="seg" data-name="slam_hz"><button data-v="15">15 Hz</button><button data-v="30">30 Hz</button></div></div>
+      <div class="field"><div class="name">SLAM lane</div><div class="seg" data-name="slam_lane"><button data-v="gpu">Mali GPU</button><button data-v="cpu">CPU</button></div></div>
+      <div class="field"><div class="name" title="One-frame frontend lag: auto = on for GPU, off for CPU">Frame lag</div><div class="seg" data-name="slam_lag"><button data-v="auto">Auto</button><button data-v="on">On</button><button data-v="off">Off</button></div></div>
+      <div class="field"><div class="name" title="fit: the fitted hand in every camera and DetNet's box; debug: also every KeyNet view and DetNet answer; verbose: also relative depths and the predicted pose. Each level uses more Wi-Fi.">Hand overlays</div><div class="seg" data-name="hand_overlays"><button data-v="fit">Fit</button><button data-v="debug">Debug</button><button data-v="verbose">Verbose</button></div></div>
+    </div>
+    <div class="field">
+      <label class="name" for="minutes">Duration (minutes)</label>
+      <div class="dur"><input type="number" id="minutes" min="1" max="120" value="5" class="num"><div class="seg" id="dur-presets"><button data-v="2">2</button><button data-v="5">5</button><button data-v="10">10</button><button data-v="30">30</button></div></div>
+    </div>
+    <div class="row2">
+      <button type="button" class="toggle" id="hands" aria-pressed="true"><span class="box"><svg><use href="#i-check"/></svg></span>Hands</button>
+      <button type="button" class="toggle" id="uclamp" aria-pressed="false" title="uclamp.min 1024 for SLAM and hands: faster, hotter, more power"><span class="box"><svg><use href="#i-check"/></svg></span>uclamp boost</button>
+    </div>
+    <div class="notes" id="checks" aria-live="polite"></div>
+    <div class="actions">
+      <button class="btn go" id="start"><svg><use href="#i-play"/></svg>Start run</button>
+      <button class="btn stop" id="stop"><svg><use href="#i-stop"/></svg>Stop</button>
+    </div>
+    <div class="notes" id="msg" aria-live="polite"></div>
   </section>
-  <section>
-    <h2>Temperature</h2><div id="temps"></div><canvas id="c_temp"></canvas>
-  </section>
-  <section>
-    <h2>CPU</h2><div id="cpus"></div><div id="freqs" style="margin-top:4px"></div><canvas id="c_cpu"></canvas>
-  </section>
-  <section>
-    <h2>NPU · GPU · DDR · VPU</h2><div id="accel"></div><canvas id="c_npu"></canvas>
-  </section>
-  <section>
-    <h2>Power</h2><div id="power"></div>
-  </section>
-  <section>
-    <h2>Wi-Fi</h2><div id="net"></div><canvas id="c_net"></canvas>
-  </section>
-  <section>
-    <h2>Memory · disk · vendor</h2><div id="sys"></div>
-  </section>
-  <section class="wide"><details><summary>Run log (last 60 lines)</summary><pre id="log"></pre></details></section>
+
+  <section class="tiles" id="dev-tiles" aria-label="device"></section>
+
+  <div class="devgrid">
+    <section class="card"><h2>Temperature</h2><div class="meters" id="temps"></div></section>
+    <section class="card"><h2>CPU</h2><div class="meters" id="cpus"></div></section>
+    <section class="card"><h2>NPU · GPU · DDR · VPU</h2><div class="meters" id="accel"></div></section>
+    <section class="card"><h2>Power</h2><div class="rows" id="power"></div></section>
+    <section class="card"><h2>Wi-Fi</h2><div class="rows" id="net"></div></section>
+    <section class="card"><h2>System</h2><div class="rows" id="sys"></div></section>
+  </div>
+
+  <details class="card" id="log-box"><summary>Run log (last 60 lines)</summary><pre id="log"></pre></details>
 </main>
+<div class="tip" id="tip"></div>
+
 <script>
-const CAMS = ["left_front", "right_front", "left_eye", "right_eye", "left", "right"];
+"use strict";
+const CAMS = [["left_front", "Front"], ["right_front", "Front"], ["left_eye", "Eye"], ["right_eye", "Eye"], ["left", "Side"], ["right", "Side"]];
+const HISTORY = 300;  // samples (one per second): 5 minutes
+const SVG = "http://www.w3.org/2000/svg";
 const $ = id => document.getElementById(id);
-const hist = { temp: [], cpu: [], npu: [], net: [] };
-let prev = null, formLoaded = false, notesPrefix = "";
+// Every string from the cap goes in through textContent.
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function icon(name) { const s = document.createElementNS(SVG, "svg"), u = document.createElementNS(SVG, "use"); u.setAttribute("href", "#i-" + name); s.append(u); return s; }
+// A status mark: an icon and a text, never colour alone. kind: good, warn, bad or info; cls: note (a line) or state (a tag).
+function badge(cls, kind, text) { const b = el("div", `${cls} ${kind}`); b.append(icon(kind), el("span", null, text)); return b; }
+const note = (kind, text) => badge("note", kind, text);
+// Replace a live region's notes only when their text changes, so screen readers do not hear them again every second.
+function setNotes(host, notes) {
+  const key = notes.map(n => n.className + ":" + n.textContent).join("\n");
+  if (host.dataset.key !== key) { host.dataset.key = key; host.replaceChildren(...notes); }
+}
+const fmt = (v, d = 1) => v == null || Number.isNaN(v) ? "–" : v.toFixed(d);
+const mmss = s => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
 
-$("cams").innerHTML += CAMS.map((n, i) => `<label><input type="checkbox" class="cam" value="${i}" checked>${n}</label>`).join("");
+// A sparkline: 2px line, a 10% wash, an end dot with a surface ring, a crosshair and readout on hover. It redraws when a sample
+// comes, on hover (once per frame) and on resize.
+const tip = $("tip"), sparks = [];
+class Spark {
+  constructor(svg, { unit, digits = 1, floor = 0, limit = null }) {
+    Object.assign(this, { svg, unit, digits, floor, limit, data: [], cursor: null, pointer: null, frame: 0 });
+    svg.addEventListener("pointermove", e => {
+      this.pointer = e;
+      this.frame ||= requestAnimationFrame(() => { this.frame = 0; this.hover(this.pointer); });
+    });
+    svg.addEventListener("pointerleave", () => { tip.style.display = "none"; this.cursor = null; this.draw(); });
+    sparks.push(this);
+  }
+  push(v) { this.data.push(Number.isFinite(v) ? v : null); if (this.data.length > HISTORY) this.data.shift(); this.draw(); }
+  reset() { this.data = []; this.draw(); }
+  geometry() {
+    const w = this.svg.clientWidth || 200, h = this.svg.clientHeight || 44, vals = this.data.filter(v => v != null);
+    const top = Math.max(this.floor, this.limit ?? 0, ...vals) * 1.08 || 1;
+    return { w, h, x: i => w - (this.data.length - 1 - i) * (w / (HISTORY - 1)), y: v => h - 3 - (v / top) * (h - 8) };
+  }
+  draw() {
+    const { w, h, x, y } = this.geometry(), parts = [];
+    this.svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    const add = (tag, attrs) => { const n = document.createElementNS(SVG, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); parts.push(n); };
+    add("line", { class: "base", x1: 0, x2: w, y1: h - 0.5, y2: h - 0.5 });
+    if (this.limit != null) add("line", { class: "limit", x1: 0, x2: w, y1: y(this.limit), y2: y(this.limit) });
+    let line = "", area = "", last = null;
+    this.data.forEach((v, i) => {
+      if (v == null) { if (last != null) area += `L${x(last).toFixed(1)},${h}Z`; last = null; return; }
+      const p = `${x(i).toFixed(1)},${y(v).toFixed(1)}`;
+      if (last == null) { line += `M${p}`; area += `M${x(i).toFixed(1)},${h}L${p}`; } else { line += `L${p}`; area += `L${p}`; }
+      last = i;
+    });
+    if (last != null) area += `L${x(last).toFixed(1)},${h}Z`;
+    if (line) { add("path", { class: "area", d: area }); add("path", { class: "line", d: line }); }
+    const at = this.cursor ?? (this.data.length - 1), v = this.data[at];
+    if (this.cursor != null) add("line", { class: "cross", x1: x(at), x2: x(at), y1: 0, y2: h });
+    if (v != null) add("circle", { class: "end", cx: x(at), cy: y(v), r: 4 });
+    this.svg.replaceChildren(...parts);
+  }
+  hover(e) {
+    if (!this.data.length) return;
+    const r = this.svg.getBoundingClientRect(), { w } = this.geometry();
+    this.cursor = Math.max(0, Math.min(this.data.length - 1, Math.round(this.data.length - 1 - (r.right - e.clientX) / (w / (HISTORY - 1)))));
+    this.draw();
+    const v = this.data[this.cursor], ago = this.data.length - 1 - this.cursor;
+    tip.replaceChildren(el("b", null, v == null ? "–" : `${fmt(v, this.digits)} ${this.unit}`), document.createTextNode(ago ? `${ago} s ago` : "now"));
+    Object.assign(tip.style, { display: "block", left: `${e.clientX}px`, top: `${r.top}px` });
+  }
+}
+addEventListener("resize", () => sparks.forEach(s => s.draw()));
 
-const bar = (label, value, max, text, warn, bad) => {
-  const pct = Math.max(0, Math.min(100, 100 * value / max));
-  const color = bad != null && value >= bad ? "var(--bad)" : warn != null && value >= warn ? "var(--warn)" : "var(--acc)";
-  return `<div class="bar"><i style="width:${pct}%;background:${color}"></i><b>${label} ${text}</b></div>`;
-};
-const row = (k, v, cls) => `<div class="row"><span>${k}</span><span class="${cls || ""}">${v ?? "–"}</span></div>`;
-const fmt = (v, d = 1, unit = "") => v == null || Number.isNaN(v) ? "–" : v.toFixed(d) + unit;
-
-function push(series, value) { series.push(value); if (series.length > 300) series.shift(); }
-function chart(id, series, max, color, label) {
-  const c = $(id), ctx = c.getContext("2d"), w = c.width = c.clientWidth * devicePixelRatio, h = c.height = c.clientHeight * devicePixelRatio;
-  ctx.clearRect(0, 0, w, h);
-  const top = Math.max(max, ...series.filter(v => v != null));
-  ctx.strokeStyle = color; ctx.lineWidth = devicePixelRatio; ctx.beginPath();
-  series.forEach((v, i) => { const x = w - (series.length - 1 - i) * w / 300, y = h - (v ?? 0) / top * (h - 4) - 2; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-  ctx.stroke(); ctx.fillStyle = "#8a96a5"; ctx.font = `${10 * devicePixelRatio}px sans-serif`;
-  ctx.fillText(`${label} (5 min, max ${top.toFixed(0)})`, 4, 12 * devicePixelRatio);
+// Tiles: a label with an optional state tag, the value and its unit, the line under it, the sparkline.
+function tiles(host, specs) {
+  const out = {};
+  for (const [k, spec] of Object.entries(specs)) {
+    const t = el("div", "tile"), label = el("div", "label"), value = el("div", "value num"), num = el("span", null, "–"), state = el("span"), sub = el("div", "sub");
+    const svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("class", "spark"); svg.setAttribute("aria-hidden", "true");
+    label.append(el("span", null, spec.label), state);
+    value.append(num, el("span", "unit", spec.unit));
+    t.append(label, value, sub, svg);
+    host.append(t);
+    out[k] = { tile: t, num, state, sub, spark: new Spark(svg, spec) };
+    out[k].spark.draw();
+  }
+  return out;
+}
+const pipe = tiles($("pipe-tiles"), {
+  src: { label: "Cameras", unit: "fps", floor: 30 }, slam: { label: "SLAM", unit: "Hz", floor: 15 },
+  hands: { label: "Hands", unit: "fps", floor: 30 }, e2e: { label: "End-to-end", unit: "ms", floor: 33 },
+});
+const dev = tiles($("dev-tiles"), {
+  temp: { label: "Hottest zone", unit: "°C", floor: 60 }, cpu: { label: "CPU busy", unit: "%", digits: 0, floor: 100 },
+  npu: { label: "NPU load", unit: "%", digits: 0, floor: 100 }, power: { label: "USB input", unit: "W", digits: 2, floor: 5 },
+  net: { label: "Wi-Fi sending", unit: "Mbit/s", digits: 2, floor: 10 },
+});
+// A tile's value, the line under it, and an optional [kind, text] state in its label row.
+function setTile(t, value, digits, sub, state = null) {
+  t.num.textContent = fmt(value, digits);
+  t.sub.textContent = sub ?? "";
+  t.state.replaceChildren(...(state ? [badge("state", ...state)] : []));
 }
 
-// This browser's last form, else the last run the panel started (its start request, as JSON).
+// A meter: label and value over a same-ramp track with optional threshold ticks.
+function meter(label, value, max, text, warn, bad, ticks = []) {
+  const m = el("div", "meter"), track = el("span", "mt"), fill = el("i");
+  fill.style.width = `${Math.max(0, Math.min(100, 100 * (value ?? 0) / max))}%`;
+  if (bad != null && value >= bad) fill.className = "bad"; else if (warn != null && value >= warn) fill.className = "warn";
+  track.append(fill);
+  for (const t of ticks) { const b = el("b"); b.style.left = `calc(${100 * t / max}% - 1px)`; track.append(b); }
+  m.append(el("span", "ml", label), el("span", "mv num", text), track);
+  m.title = `${label}: ${text}`;
+  return m;
+}
+function kv(k, v, cls) { const r = el("div", "kv"); r.append(el("span", null, k), el("span", cls || null, v ?? "–")); return r; }
+
+// The start form: cameras, segmented choices, toggles.
+const pressed = b => b.getAttribute("aria-pressed") === "true";
+const setPressed = (b, on) => b.setAttribute("aria-pressed", String(on));
+const camButtons = CAMS.map(([name, kind], i) => {
+  const b = el("button", "toggle"), box = el("span", "box");
+  b.type = "button"; b.dataset.v = String(i); b.title = name;
+  box.append(icon("check"));
+  b.append(box, el("span", null, kind), el("span", "idx num", String(i)));
+  $("cams").append(b);
+  return b;
+});
+for (const b of document.querySelectorAll(".toggle")) b.onclick = () => setPressed(b, !pressed(b));
+$("cams-all").onclick = () => camButtons.forEach(b => setPressed(b, true));
+$("cams-none").onclick = () => camButtons.forEach(b => setPressed(b, false));
+const seg = name => document.querySelector(`.seg[data-name=${name}]`);
+function setSeg(host, v) { for (const b of host.querySelectorAll("button")) setPressed(b, b.dataset.v === String(v)); }
+const segValue = name => seg(name).querySelector("[aria-pressed=true]")?.dataset.v;
+for (const host of document.querySelectorAll(".seg")) for (const b of host.querySelectorAll("button")) {
+  b.type = "button";
+  b.onclick = () => { setSeg(host, b.dataset.v); if (host.id === "dur-presets") $("minutes").value = b.dataset.v; };
+}
+$("minutes").oninput = () => setSeg($("dur-presets"), $("minutes").value);
+
+// The form holds a start request (the /api/start fields); it starts from this browser's last one, else the panel's last run.
+let formLoaded = false;
 function loadForm(s) {
   if (formLoaded) return; formLoaded = true;
-  const saved = JSON.parse(localStorage.getItem("robocap-form") || "null"), last = s.run.request;
-  $("viewer").value = saved?.viewer ?? last?.viewer ?? "";
-  const cams = saved?.cams ?? last?.video_cameras.map(String) ?? ["0", "1", "2", "3", "4", "5"];
-  document.querySelectorAll(".cam").forEach(c => c.checked = cams.includes(c.value));
-  $("slam_hz").value = saved?.slam_hz ?? last?.slam_hz ?? "15";
-  $("slam_lane").value = saved?.slam_lane ?? last?.slam_lane ?? "gpu";
-  $("slam_lag").value = saved?.slam_lag ?? last?.slam_lag ?? "auto";
-  $("hand_overlays").value = saved?.hand_overlays ?? last?.hand_overlays ?? "fit";
-  if (saved) { $("minutes").value = saved.minutes; $("hands").checked = saved.hands; $("uclamp").checked = saved.uclamp; }
+  const r = JSON.parse(localStorage.getItem("robocap-request") || "null") ?? s.run.request ?? {};
+  $("viewer").value = r.viewer ?? "";
+  camButtons.forEach(b => setPressed(b, (r.video_cameras ?? [0, 1]).map(String).includes(b.dataset.v)));
+  for (const [name, fallback] of [["slam_hz", 15], ["slam_lane", "gpu"], ["slam_lag", "auto"], ["hand_overlays", "fit"]]) setSeg(seg(name), r[name] ?? fallback);
+  $("minutes").value = r.duration_s ? Math.max(1, Math.round(r.duration_s / 60)) : 5;
+  setSeg($("dur-presets"), $("minutes").value);
+  setPressed($("hands"), r.hands ?? true);
+  setPressed($("uclamp"), r.uclamp ?? false);
 }
 
+// robocap-live's 1 Hz line: "[  17.5 s] src 30.4/s imu 205/s | ds .. | slam 27.5 Hz  20.0/ 66.7 ms ok 100% drop 75 | hands 29.4/s  11.5 ms drop 3 | out 29.4/s e2e  15.3 ms drop 0 | ..."
+function parseStatus(line) {
+  if (!line) return null;
+  const n = re => { const m = line.match(re); return m ? m.slice(1).map(Number) : null; };
+  return { t: n(/^\s*\[\s*([\d.]+) s\]/)?.[0], src: n(/src ([\d.]+)\/s/), imu: n(/imu ([\d.]+)\/s/), slam: n(/slam ([\d.]+) Hz\s+([\d.]+)\/\s*([\d.]+) ms ok (\d+)% drop (\d+)/),
+           hands: n(/hands ([\d.]+)\/s\s+([\d.]+) ms drop (\d+)/), out: n(/out ([\d.]+)\/s e2e\s+([\d.]+) ms drop (\d+)/) };
+}
+
+const PHASES = {
+  idle: ["idle", "IDLE", "Ready when the checks pass."],
+  starting: ["spin", "STARTING", "The cap pauses its vendor recorder, then robocap-live opens the cameras."],
+  streaming: ["live", "STREAMING", ""],
+  stopping: ["spin", "STOPPING", "robocap-live drains, then the cap restarts its vendor recorder (about 15 s)."],
+  offline: ["bad", "NO CONNECTION", "The panel does not answer; the page retries every second."],
+};
+function setPhase(ph, text) {
+  const [ic, label, fallback] = PHASES[ph], phase = $("phase");
+  if (phase.dataset.phase !== ph) {
+    phase.dataset.phase = ph;
+    phase.querySelector(".badge").replaceChildren(icon(ic));
+    $("phase-label").textContent = label;
+  }
+  $("phase-note").textContent = text ?? fallback;
+}
+function setConn(ok) {
+  if ($("conn").dataset.ok === String(ok)) return;
+  $("conn").dataset.ok = String(ok);
+  $("conn").replaceChildren(Object.assign(el("i", "dot"), { style: `background:var(--${ok ? "good" : "critical"})` }), el("span", null, ok ? "connected" : "no connection"));
+}
+
+let prev = null;
 function render(s) {
   loadForm(s);
-  const dt = prev ? s.time - prev.time : 0, L = s.limits;  // the limits start applies
-  $("who").textContent = `${s.host || ""} · ${s.device || "?"}`;
-  const ph = s.run.phase || (s.run.running ? "streaming" : "idle");
-  const st = $("state"); st.textContent = ph.toUpperCase(); st.className = "pill " + (ph === "streaming" ? "run" : ph === "idle" ? "idle" : "busy");
-  $("since").textContent = `up ${fmt(s.uptime_s / 3600, 1)} h`;
-  $("start").disabled = ph !== "idle"; $("stop").disabled = ph === "idle" || ph === "stopping";
-  $("start").title = ph === "stopping" ? "the cap is restoring its vendor recorder (about 15 s)" : ph === "idle" ? "" : "a run is going";
+  const L = s.limits, dt = prev ? s.time - prev.time : 0, run = s.run, ph = run.phase;
+  $("device").textContent = `${s.host || "?"} · ${s.device || "no rig"}`;
+  $("uptime").textContent = `up ${fmt(s.uptime_s / 3600, 1)} h`;
+  setConn(true);
 
-  // Pipeline: robocap-live's 1 Hz line, split at "|".
-  if (ph === "stopping") notesPrefix = `<div class="note">stopping: robocap-live drains, then the cap restores its vendor recorder (about 15 s); Start comes back after that</div>`;
-  else if (ph === "starting") notesPrefix = `<div class="note">starting: the cap pauses its vendor recorder, then robocap-live opens the cameras</div>`;
-  else notesPrefix = "";
-  if (s.run.status) $("pipe").innerHTML = (ph === "streaming" ? "" : `<span class="tile" style="color:var(--warn)">${ph === "idle" ? "last run" : ph}</span>`) + s.run.status.split("|").map(t => `<span class="tile">${t.trim()}</span>`).join("");
-  else $("pipe").innerHTML = `<span class="tile">${s.run.running ? "starting…" : "no run"}</span>`;
-  const live = s.run.live || "";
-  const gaps = live.match(/seq_gaps \[[^\]]*\]/), skew = live.match(/future_skew \d+ dropped \d+ \(max [\d.]+ ms\)/), fsets = live.match(/framesets complete \d+ partial \d+/);
-  $("capture").textContent = [gaps, fsets, skew && "IMU " + skew].filter(Boolean).map(String).join(" · ");
+  // The run.
+  if (ph === "starting" && prev?.run.phase !== "starting") Object.values(pipe).forEach(t => t.spark.reset());
+  const st = parseStatus(run.status), req = run.request, live = ph === "streaming";
+  const cams = req?.video_cameras.length;
+  setPhase(ph, live && req ? `${cams ? `${cams} camera${cams > 1 ? "s" : ""} to the viewer` : "no video"} · SLAM ${req.slam_hz} Hz on ${req.slam_lane.toUpperCase()} · hands ${req.hands ? req.hand_overlays : "off"}` : null);
+  const elapsed = ph === "idle" ? 0 : st?.t ?? 0, total = req && ph !== "idle" ? req.duration_s : null;
+  $("elapsed").textContent = mmss(elapsed);
+  $("of").textContent = total ? `/ ${mmss(total)}` : "";
+  $("progress").style.width = total ? `${Math.min(100, 100 * elapsed / total)}%` : "0";
+  for (const t of Object.values(pipe)) t.tile.classList.toggle("dim", !live);
+  const rate = (v, target) => v == null || !live ? null : [v >= target * 0.95 ? "good" : v >= target * 0.8 ? "warn" : "bad", `target ${target}`];
+  setTile(pipe.src, st?.src?.[0], 1, st ? `IMU ${fmt(st.imu?.[0], 0)}/s` : "", rate(st?.src?.[0], 30));
+  setTile(pipe.slam, st?.slam?.[0], 1, st?.slam ? `${fmt(st.slam[1], 1)} ms mean · ${fmt(st.slam[2], 0)} max` : "", rate(st?.slam?.[0], req?.slam_hz ?? 15));
+  setTile(pipe.hands, st?.hands?.[0], 1, st?.hands ? `${fmt(st.hands[1], 1)} ms · drop ${st.hands[2]}` : "", rate(st?.hands?.[0], 30));
+  setTile(pipe.e2e, st?.out?.[1], 1, st?.out ? `out ${fmt(st.out[0], 1)}/s · drop ${st.out[2]}` : "");
+  if (live && st) { pipe.src.spark.push(st.src?.[0]); pipe.slam.spark.push(st.slam?.[0]); pipe.hands.spark.push(st.hands?.[0]); pipe.e2e.spark.push(st.out?.[1]); }
   const notes = [];
-  if (s.run.error) notes.push(`<div class="err">${s.run.error}</div>`);
-  if (!s.run.running && s.run.handoff) notes.push(`<div style="color:var(--dim)">${s.run.handoff}</div>`);
-  if (s.run.last_exit) notes.push(`<div style="color:var(--dim)">last run exited: ${s.run.last_exit}</div>`);
-  s.busy.forEach(b => notes.push(`<div class="note">${b}</div>`));
-  $("runnote").innerHTML = notesPrefix + notes.join("");
+  if (!live && st && ph === "idle") notes.push(note("info", "The tiles show the last run's final second."));
+  if (run.error) notes.push(note("bad", run.error));
+  const capture = run.live || "", gaps = capture.match(/seq_gaps \[[^\]]*\]/), fsets = capture.match(/framesets complete \d+ partial \d+/);
+  if (gaps || fsets) notes.push(note("info", [gaps, fsets].filter(Boolean).join(" · ")));
+  if (!run.running && run.handoff) notes.push(note(/WARNING|refus|not |expected/i.test(run.handoff) ? "warn" : "info", run.handoff.replace(/^\[handoff [\d:]+\]\s*/, "")));
+  if (run.last_exit) notes.push(note(/status: 0$/.test(run.last_exit) ? "good" : "info", `last run exited: ${run.last_exit}`));
+  setNotes($("run-notes"), notes);
 
-  // Temperatures.
-  const hottest = Math.max(...s.thermal.map(t => t.c));
-  $("temps").innerHTML = s.thermal.map(t => bar(t.name.replace("-thermal", ""), t.c, 90, fmt(t.c, 1, " °C"), L.max_start_temp_c, L.stop_temp_c)).join("");
-  push(hist.temp, hottest); chart("c_temp", hist.temp, 90, "#d29922", `hottest °C (stop at ${L.stop_temp_c})`);
+  // Readiness: what Start would say now (while a run goes, only its warnings).
+  const c = s.checks, idle = ph === "idle";
+  const checks = [...(idle ? c.refusals : []).map(r => note("bad", r)), ...c.warnings.map(w => note("warn", w))];
+  if (idle && !c.refusals.length && !c.warnings.length) checks.push(note("good", "Ready: the cap is idle, cool and powered."));
+  setNotes($("checks"), checks);
+  $("start").disabled = !idle || c.refusals.length > 0;
+  $("stop").disabled = idle || ph === "stopping";
+  $("start").title = !idle ? "A run is going." : c.refusals.length ? "The checks above refuse a start." : "";
 
-  // CPU: deltas of /proc/stat (user nice system idle iowait irq softirq steal).
-  let total = null;
+  // Device tiles.
+  const hottest = s.thermal.length ? Math.max(...s.thermal.map(t => t.c)) : null;
+  dev.temp.spark.limit = L.stop_temp_c;
+  const hot = hottest == null ? null : hottest >= L.stop_temp_c ? "bad" : hottest >= L.max_start_temp_c ? "warn" : "good";
+  setTile(dev.temp, hottest, 1, hottest == null ? "no thermal zones" : `run stops at ${L.stop_temp_c} °C`, hot && [hot, hot === "good" ? "ok" : "hot"]);
+  dev.temp.spark.push(hottest);
+  let busy = null;
   if (prev && prev.cpu.length === s.cpu.length) {
-    const busy = s.cpu.map((c, i) => {
-      const p = prev.cpu[i], sum = a => a.reduce((x, y) => x + y, 0), d = sum(c) - sum(p), idle = (c[3] + c[4]) - (p[3] + p[4]);
-      return d > 0 ? 100 * (d - idle) / d : 0;
+    busy = s.cpu.map((c, i) => {
+      const p = prev.cpu[i], sum = a => a.reduce((x, y) => x + y, 0), d = sum(c) - sum(p), idleTicks = (c[3] + c[4]) - (p[3] + p[4]);
+      return d > 0 ? 100 * (d - idleTicks) / d : 0;
     });
-    $("cpus").innerHTML = busy.map((b, i) => bar(`cpu${i} ${i < 4 ? "A55" : "A76"}`, b, 100, fmt(b, 0, " %"), 80, 95)).join("");
-    total = busy.reduce((a, b) => a + b, 0) / busy.length;
   }
-  $("freqs").innerHTML = s.cpufreq.map(p => row(`${p.name} (cpu ${p.cpus})`, fmt(p.mhz, 0, " MHz"))).join("");
-  push(hist.cpu, total); chart("c_cpu", hist.cpu, 100, "#58a6ff", "CPU busy % (all cores)");
-
-  // Accelerators.
+  setTile(dev.cpu, busy && mean(busy), 0, busy ? `A76 ${fmt(mean(busy.slice(4)), 0)} % · A55 ${fmt(mean(busy.slice(0, 4)), 0)} %` : "");
+  dev.cpu.spark.push(busy && mean(busy));
   const npu = s.npu.load || [];
-  const vpu = s.vpu.map((v, i) => row(`VPU ${i} clock`, `${fmt(v.mhz, 0, " MHz")} (governor load ${v.load ?? "–"} %, not encoder use)`)).join("");
-  $("accel").innerHTML = npu.map((l, i) => bar(`NPU ${i}`, l, 100, `${l} %`)).join("")
-    + row("NPU clock", `${fmt(s.npu.mhz, 0, " MHz")} · ${fmt(s.npu.mv, 0, " mV")}`)
-    + bar("GPU", s.gpu.load ?? 0, 100, `${s.gpu.load ?? "–"} % · ${fmt(s.gpu.mhz, 0, " MHz")}`)
-    + bar("DDR", s.ddr.load ?? 0, 100, `${s.ddr.load ?? "–"} % · ${fmt(s.ddr.mhz, 0, " MHz")}`) + vpu;
-  push(hist.npu, npu.length ? npu.reduce((a, b) => a + b, 0) / npu.length : null); chart("c_npu", hist.npu, 100, "#3fb950", "NPU load % (mean of cores)");
-
-  // Power.
-  const p = s.power, limitBad = p.input_limit_ma != null && p.input_limit_ma < L.min_input_limit_ma;
-  $("power").innerHTML = row("battery", `${fmt(p.battery_v, 2, " V")} · ${fmt(p.battery_a, 2, " A")}`, p.battery_v != null && p.battery_v < L.min_vbat_v ? "err" : "")
-    + row("USB input", `${fmt(p.input_v, 2, " V")} · ${fmt(p.input_a, 2, " A")} · ${fmt((p.input_v || 0) * (p.input_a || 0), 1, " W")}`)
-    + row("charger", p.status) + row("real input limit", p.input_limit_ma == null ? "–" : `${p.input_limit_ma} mA`, limitBad ? "err" : "")
-    + row("input regulation (IINDPM)", p.iindpm == null ? "–" : p.iindpm ? "yes: battery helping" : "no", p.iindpm ? "note" : "");
-
-  // Wi-Fi: rates from the interface counters.
+  setTile(dev.npu, mean(npu), 0, npu.length ? `cores ${npu.join(" · ")} %` : "no NPU reading");
+  dev.npu.spark.push(mean(npu));
+  const p = s.power, watts = p.input_v != null && p.input_a != null ? p.input_v * p.input_a : null;
+  const lowBattery = p.battery_v != null && p.battery_v < L.min_vbat_v, lowInput = p.input_limit_ma != null && p.input_limit_ma < L.min_input_limit_ma;
+  setTile(dev.power, watts, 2, `battery ${fmt(p.battery_v, 2)} V`, lowBattery ? ["bad", "battery"] : lowInput || p.iindpm ? ["warn", "low"] : ["good", "ok"]);
+  dev.power.spark.push(watts);
   let tx = null, rx = null;
   if (prev && dt > 0 && s.net.tx_bytes != null && prev.net.tx_bytes != null) { tx = (s.net.tx_bytes - prev.net.tx_bytes) * 8 / dt / 1e6; rx = (s.net.rx_bytes - prev.net.rx_bytes) * 8 / dt / 1e6; }
-  $("net").innerHTML = row("network", `${s.net.ssid || "–"} · ${s.net.freq || "–"} MHz`) + row("signal · link rate", `${s.net.signal || "–"} · ${s.net.tx_bitrate || "–"}`)
-    + row("sending · receiving", `${fmt(tx, 2, " Mbit/s")} · ${fmt(rx, 2, " Mbit/s")}`);
-  push(hist.net, tx); chart("c_net", hist.net, 20, "#58a6ff", "sent Mbit/s");
+  setTile(dev.net, tx, 2, `receiving ${fmt(rx, 2)}`);
+  dev.net.spark.push(tx);
 
-  // Memory, disk, vendor recorder.
+  // Device detail.
+  $("temps").replaceChildren(...s.thermal.map(t => meter(t.name.replace("-thermal", ""), t.c, 95, `${fmt(t.c, 1)} °C`, L.max_start_temp_c, L.stop_temp_c, [L.max_start_temp_c, L.stop_temp_c])));
+  const cpus = [el("div", "group", "A55 · cores 0–3")];
+  const freq = cpu => s.cpufreq.find(f => f.cpus.split(" ").includes(String(cpu)));
+  (busy || s.cpu.map(() => null)).forEach((b, i) => {
+    if (i === 4) cpus.push(el("div", "group", "A76 · cores 4–7"));
+    cpus.push(meter(`cpu${i}`, b ?? 0, 100, `${b == null ? "–" : fmt(b, 0)} % · ${fmt(freq(i)?.mhz, 0)} MHz`, 80, 95));
+  });
+  $("cpus").replaceChildren(...cpus);
+  $("accel").replaceChildren(
+    ...npu.map((l, i) => meter(`NPU ${i}`, l, 100, `${l} %`, 80, 95)),
+    meter("GPU", s.gpu.load ?? 0, 100, `${s.gpu.load ?? "–"} % · ${fmt(s.gpu.mhz, 0)} MHz`, 80, 95),
+    meter("DDR", s.ddr.load ?? 0, 100, `${s.ddr.load ?? "–"} % · ${fmt(s.ddr.mhz, 0)} MHz`, 80, 95),
+    ...s.vpu.map((v, i) => meter(`VPU ${i} clock`, v.mhz ?? 0, 1000, `${fmt(v.mhz, 0)} MHz`)));
+  $("power").replaceChildren(
+    kv("battery", `${fmt(p.battery_v, 2)} V · ${fmt(p.battery_a, 2)} A`, lowBattery ? "badv" : ""),
+    kv("USB input", `${fmt(p.input_v, 2)} V · ${fmt(p.input_a, 2)} A`),
+    kv("charger", p.status),
+    kv("real input limit", p.input_limit_ma == null ? "unreadable" : `${p.input_limit_ma} mA`, lowInput || p.input_limit_ma == null ? "warnv" : ""),
+    kv("input regulation", p.iindpm == null ? "–" : p.iindpm ? "yes: the battery helps" : "no", p.iindpm ? "warnv" : ""));
+  $("net").replaceChildren(kv("network", `${s.net.ssid || "–"} · ${s.net.freq || "–"} MHz`), kv("signal", s.net.signal), kv("link rate", s.net.tx_bitrate),
+    kv("sending · receiving", `${fmt(tx, 2)} · ${fmt(rx, 2)} Mbit/s`));
   const m = s.mem_kb, gib = b => b == null ? null : b / 2 ** 30;
-  $("sys").innerHTML = row("memory available", `${fmt(gib((m.available || 0) * 1024), 1)} / ${fmt(gib((m.total || 0) * 1024), 1)} GiB`)
-    + row("disk free (/)", `${fmt(gib(s.disk.free), 1)} / ${fmt(gib(s.disk.total), 1)} GiB`, s.disk.free != null && s.disk.free < L.min_free_bytes ? "err" : "")
-    + row("vendor recorder", s.vendor.recorder_pid ? `pid ${s.vendor.recorder_pid}` : "not running", "")
-    + row("vendor launcher", s.vendor.launcher_state);
+  $("sys").replaceChildren(
+    kv("memory available", `${fmt(gib((m.available || 0) * 1024), 1)} of ${fmt(gib((m.total || 0) * 1024), 1)} GiB`),
+    kv("disk free (/)", `${fmt(gib(s.disk.free), 1)} of ${fmt(gib(s.disk.total), 1)} GiB`, s.disk.free != null && s.disk.free < L.min_free_bytes ? "badv" : ""),
+    kv("vendor recorder", s.vendor.recorder_pid ? `running · pid ${s.vendor.recorder_pid}` : "not running", s.vendor.recorder_pid || !idle ? "" : "warnv"),
+    kv("vendor launcher", s.vendor.launcher_state));
   prev = s;
 }
 
+// One status request a second, none while the tab is hidden (each one costs the cap a /proc scan).
 async function poll() {
-  try { render(await (await fetch("api/status")).json()); }
-  catch (e) { $("state").textContent = "NO CONNECTION"; $("state").className = "pill idle"; }
+  if (!document.hidden) {
+    try { render(await (await fetch("api/status")).json()); }
+    catch (e) { setPhase("offline"); setConn(false); }
+  }
   setTimeout(poll, 1000);
 }
 async function pollLog() {
-  if (document.querySelector("details").open) { try { const t = await (await fetch("api/log")).text(); const pre = $("log"); pre.textContent = t; pre.scrollTop = pre.scrollHeight; } catch (e) {} }
+  if ($("log-box").open && !document.hidden) { try { const t = await (await fetch("api/log")).text(), pre = $("log"); pre.textContent = t; pre.scrollTop = pre.scrollHeight; } catch (e) {} }
   setTimeout(pollLog, 3000);
 }
-
 async function post(path, body) {
-  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
-  const reply = await response.json();
-  $("msg").className = reply.ok ? "" : "err";
-  $("msg").textContent = reply.ok ? (path.endsWith("start") ? `started: session ${reply.result.pid}`
-    : reply.result.pending ? "stop noted: robocap-live is not up yet; it is stopped as soon as it starts" : `stopping: signalled ${reply.result.signalled}`) : reply.error;
+  try {
+    const reply = await (await fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })).json();
+    if (!reply.ok) { $("msg").replaceChildren(note("bad", reply.error)); return; }
+    const r = reply.result;
+    $("msg").replaceChildren(path.endsWith("start") ? note("good", `Started: session ${r.pid}.`)
+      : note("info", r.pending ? "Stop noted: nothing starts." : "Stopping: robocap-live drains, then the cap gets its cameras back."),
+      ...(r.warnings || []).map(w => note("warn", w)));
+  } catch (e) { $("msg").replaceChildren(note("bad", `The panel did not answer: ${e}`)); }
 }
 $("start").onclick = () => {
-  const cams = [...document.querySelectorAll(".cam")].filter(c => c.checked).map(c => c.value);
-  const form = { viewer: $("viewer").value.trim(), cams, slam_hz: $("slam_hz").value, minutes: $("minutes").value, hands: $("hands").checked, uclamp: $("uclamp").checked,
-    hand_overlays: $("hand_overlays").value, slam_lane: $("slam_lane").value, slam_lag: $("slam_lag").value };
-  localStorage.setItem("robocap-form", JSON.stringify(form));
-  const body = new URLSearchParams({ viewer: form.viewer, video_cameras: cams.join(","), slam_hz: form.slam_hz,
-    slam_lane: form.slam_lane, slam_lag: form.slam_lag,
-    duration_s: Math.round(form.minutes * 60), hands: form.hands ? "on" : "off", uclamp: form.uclamp ? "on" : "off", hand_overlays: form.hand_overlays });
-  post("api/start", body.toString());
+  const request = { viewer: $("viewer").value.trim(), video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
+    slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
+    duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), uclamp: pressed($("uclamp")) };
+  localStorage.setItem("robocap-request", JSON.stringify(request));
+  post("api/start", new URLSearchParams({ ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" }).toString());
 };
 $("stop").onclick = () => post("api/stop", "");
 poll(); pollLog();

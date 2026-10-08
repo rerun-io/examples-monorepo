@@ -2633,7 +2633,7 @@ cwd = "packages/slam-rs"
 description = "Run native catalog tests and explicitly select fixture parity when its assets are configured"
 
 [feature.slam-rs.tasks.gate]
-depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test"]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test", "slam-rs-clippy", "slam-rs-wgpu-clippy"]
 description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
 
 [feature.slam-rs.tasks.slam-rs-fmt]
@@ -2772,6 +2772,22 @@ cmd = "bash crates/slam-rs-cli/scripts/build-catalog-arm.sh"
 cwd = "packages/slam-rs"
 depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
 description = "Build the ARM catalog replay CLI with dav1d headers and static OpenH264 C++ support"
+
+[feature.robocap-cross.tasks.robocap-live-build-arm]
+cmd = "bash scripts/build-arm.sh"
+cwd = "packages/robocap-live"
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+description = "Build robocap-live and robocap-panel for this host and for the caps (aarch64), and check the cap binary"
+
+[feature.robocap-cross.tasks.robocap-live-deploy]
+cmd = "bash scripts/deploy.sh"
+cwd = "packages/robocap-live"
+description = "Copy robocap-live, robocap-panel, the models and the display asset to a cap: --cap a|b --models <dir> --display <asset.rrd>"
+
+[feature.robocap-cross.tasks.robocap-live-panel]
+cmd = "bash scripts/panel.sh"
+cwd = "packages/robocap-live"
+description = "Deploy, start or stop the web panel on a cap: deploy|start|stop|status|url --cap a|b --cap-address <ip>"
 
 [feature.robocap-cross.tasks.robocap-direct-build]
 cmd = "bash crates/robocap-recorder/scripts/build-arm.sh"
@@ -3337,6 +3353,9 @@ inputs = [
 outputs = ["packages/handfit/handfit/_core.so"]
 description = "Build the native hand-pose fit and install handfit._core in place"
 
+[feature.handfit.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "handfit-cargo-test"]
+
 [feature.handfit.tasks.handfit-cargo-test]
 cmd = "cargo test --release --workspace"
 cwd = "packages/handfit"
@@ -3430,8 +3449,13 @@ depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
 cwd = "packages/robocap-live"
 description = "Run native scheduler, layer, SLAM and panel tests"
 
+[feature.robocap-live.tasks.robocap-live-clippy]
+cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cwd = "packages/robocap-live"
+description = "Lint the Rust capture workspace with warnings denied"
+
 [feature.robocap-live.tasks.gate]
-depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "robocap-live-rust-test"]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "robocap-live-rust-test", "robocap-live-clippy"]
 description = "Run Python and native author checks for robocap-live"
 
 [feature.robocap-live.tasks.robocap-hands-layer]
