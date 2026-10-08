@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gsplat-cli", "crates/gsplat-core", "crates/gsplat-viewer"]
+members = ["crates/*"]
 # Keep path dependencies in Brush's own workspace for inherited package metadata.
 exclude = ["target/brush-src"]
 resolver = "3"

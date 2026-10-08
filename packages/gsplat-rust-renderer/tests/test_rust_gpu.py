@@ -45,6 +45,8 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
 @pytest.mark.parametrize(
     ("package", "suite", "assets"),
     [
+        ("gsplat-train", "recording", ("GSPLAT_LEGO",)),
+        ("gsplat-train", "bin:gsplat-train", ()),
         ("gsplat-cli", "evaluation", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_GT")),
         ("gsplat-cli", "renderers", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_COLMAP")),
         ("gsplat-cli", "lib", ()),
@@ -57,3 +59,9 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
 def test_rust_gpu_contract(package: str, suite: str, assets: tuple[str, ...]) -> None:
     """Every ignored test in a selected target runs, including newly added tests."""
     run_rust_contract(package, suite, assets)
+
+
+@pytest.mark.golden
+def test_training_conversion_matches_rerun_loader() -> None:
+    """Compare every native component against the pretrained Lego PLY reference."""
+    run_rust_contract("gsplat-train", "conversion", ("GSPLAT_TEST_PLY",))

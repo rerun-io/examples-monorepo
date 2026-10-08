@@ -2007,10 +2007,29 @@ description = "Download data, pretrained checkpoints, all Blender assets, or tan
 [feature.gsplat-rust-renderer.tasks.gsplat-build]
 cmd = "cargo build --release --locked --workspace --bins --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Build the gsplat CLI"
+description = "Build the gsplat CLI with its probe subcommand, trainer and viewer"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-brush-cli-build]
+cmd = "cargo install --git https://github.com/ArthurBrussee/brush --rev 1388f74c6fe0236f68ee4915564bf00e9d2e3747 brush-cli --locked --root .brush"
+cwd = "packages/gsplat-rust-renderer"
+env = { CARGO_TARGET_DIR = "target/brush-cli" }
+description = "Build the pinned, unpatched Brush CLI for training comparisons"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-train]
+args = [{ arg = "scene", default = "lego" }, { arg = "iterations", default = "30000" }, { arg = "mode", default = "record" }]
+cmd = "python tools/train.py --scene {{ scene }} --iterations {{ iterations }} --mode {{ mode }}"
+depends-on = ["gsplat-build"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Prepare a scene and train; modes are record, live and video (extra flags follow --)"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-evaluate]
+cmd = "python tools/evaluate_nerfbaselines.py"
+depends-on = ["gsplat-build", { task = "gsplat-download", args = ["all", "all"] }]
+cwd = "packages/gsplat-rust-renderer"
+description = "Render and evaluate Blender test splits; --checkpoint-only checks bundled predictions"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
-cmd = "cargo fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
+cmd = "cargo fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
 description = "Check our Rust formatting, run Clippy including gsplat probe, and run Rust unit tests"
 
