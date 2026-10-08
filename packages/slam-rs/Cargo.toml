@@ -36,17 +36,17 @@ rayon = "1"
 approx = "0.5"
 proptest = "1"
 # FAST detection runs inside the frontend's grid. The pyramid tests also
-# compare with the independent `pyrdown_u8` kernel. Pin the revision and disable
+# compare with the independent `pyrdown_u8` kernel. Disable
 # upstream GPU features: this crate supplies its own CubeCL GPU implementation.
-kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
-kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
+kornia-image = { version = "0.2", default-features = false }
+kornia-imgproc = { version = "0.2", default-features = false }
 
-# SO(3)'s exp, log, matrix, inverse and action, at the same pinned rev. Already
+# SO(3)'s exp, log, matrix, inverse and action, at the same crates.io release. Already
 # in the lockfile as a dependency of `kornia-imgproc`; naming it here makes the
 # edge direct. `crate::lie` routes `So3` through `SO3F32`/`SO3F64` and keeps the
 # rest — SE(3), the decoupled pair, `apply_inc`, the four pose Jacobians —
 # because upstream's are `f32`-only or coupled (S33 audit A, row 5).
-kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
+kornia-algebra = { version = "0.2", default-features = false }
 
 # The GPU phase (decision D21, D70). CubeCL 0.11 prerelease with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
