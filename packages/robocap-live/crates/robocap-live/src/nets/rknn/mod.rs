@@ -4,7 +4,7 @@
 //!
 //! - [`RknnRuntime`] + [`RknnModel`]: a self-contained, model-agnostic binding (one context per model and NPU core, u8/f32
 //!   inputs, float outputs written into caller buffers, typed errors, `rknn_destroy` on drop). It has no robocap-specific code
-//!   and is the piece to upstream (kornia-rs has no inference crate; see UPSTREAM.md).
+//!   and is the piece to upstream: kornia-rs `examples/rknn` beside `examples/onnx`, or a runtime crate once kornia has one.
 //! - [`RknnNets`]: the [`HandNets`] backend. DetNet runs on core 0; KeyNet has one context on core 1 and one on core 2, and a
 //!   batch of more than one crop is split between them on scoped threads.
 //!
@@ -83,7 +83,7 @@ impl ImageFeed {
     }
 }
 
-// The CPU pre-processing (kornia-style free functions on slices; see UPSTREAM.md). The 4x4 pooling is `kornia_staging_imgproc::resize`.
+// The CPU pre-processing (kornia-style free functions on slices). The 4x4 pooling is `kornia_staging_imgproc::resize`.
 
 fn pool_error(error: kornia_image::ImageError) -> NetsError {
     NetsError::Input { net: "detnet", message: format!("pool4: {error}") }

@@ -3489,6 +3489,24 @@ cwd = "packages/robocap-live"
 depends-on = ["robocap-live-build"]
 description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
 
+[feature.robocap-live.tasks.robocap-live-download-sample]
+cmd = "test -e data/robocap-live-sample/capb-s14-445 || (hf download pablovela5620/robocap-live-sample --repo-type dataset --local-dir data/robocap-live-sample && rm -rf data/robocap-live-sample/.unzip && python -m zipfile -e data/robocap-live-sample/robocap-live-clip.zip data/robocap-live-sample/.unzip && mv data/robocap-live-sample/.unzip/capb-s14-445 data/robocap-live-sample/ && rm -rf data/robocap-live-sample/.unzip)"
+cwd = "packages/robocap-live"
+description = "Download the 5 s replay clip, the ONNX hand nets and the display asset from Hugging Face"
+
+[feature.robocap-live.tasks.robocap-live-build-host]
+cmd = "cargo build --release -p robocap-live --features ort --bin robocap-live"
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+cwd = "packages/robocap-live"
+description = "Build robocap-live for this host with the ONNX Runtime hand nets"
+
+# The ort feature loads ONNX Runtime at run time: the library of this env's onnxruntime package.
+[feature.robocap-live.tasks.robocap-live-demo]
+cmd = "bash -c 'ORT_DYLIB_PATH=$(ls $CONDA_PREFIX/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.*) LD_LIBRARY_PATH=$CONDA_PREFIX/lib target/release/robocap-live --source replay data/robocap-live-sample/capb-s14-445 --nets ort data/robocap-live-sample/models --display data/robocap-live-sample/robocap-live-display.rrd --save data/robocap-live-demo.rrd && rerun data/robocap-live-demo.rrd'"
+cwd = "packages/robocap-live"
+depends-on = ["robocap-live-download-sample", "robocap-live-build-host"]
+description = "Replay the sample clip through SLAM and hand tracking, save it, and open it in Rerun"
+
 # Python tests import robocap_live._core, so every tier needs the build first; these shadow the dev feature's tasks.
 [feature.robocap-live.tasks.tests]
 cmd = "pytest -q -ra"
