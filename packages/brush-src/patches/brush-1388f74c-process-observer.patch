@@ -1,0 +1,44 @@
+diff --git a/crates/brush-process/src/message.rs b/crates/brush-process/src/message.rs
+index 91d9d1ba..2c4db26f 100644
+--- a/crates/brush-process/src/message.rs
++++ b/crates/brush-process/src/message.rs
+@@ -19,6 +19,8 @@ pub enum TrainMessage {
+     TrainStep {
+         iter: u32,
+         total_elapsed: web_time::Duration,
++        stats: brush_train::msg::TrainStepStats,
++        step_duration: web_time::Duration,
+         /// If in LOD phase: `(current_lod_1_based, total_lod_levels)`.
+         lod_progress: Option<(u32, u32)>,
+     },
+@@ -27,6 +29,8 @@ pub enum TrainMessage {
+     RefineStep {
+         cur_splat_count: u32,
+         iter: u32,
++        refine: brush_train::msg::RefineStats,
++        refine_duration: web_time::Duration,
+     },
+     /// Eval was run successfully with these results.
+     #[allow(unused)]
+diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
+index abf9c0a4..0dbd69c4 100644
+--- a/crates/brush-process/src/train_stream.rs
++++ b/crates/brush-process/src/train_stream.rs
+@@ -469,6 +469,8 @@ pub(crate) async fn train_stream(
+                 .emit(ProcessMessage::TrainMessage(TrainMessage::RefineStep {
+                     cur_splat_count: refine.total_splats,
+                     iter,
++                    refine: refine.clone(),
++                    refine_duration: refine_dur,
+                 }))
+                 .await;
+         }
+@@ -496,6 +498,8 @@ pub(crate) async fn train_stream(
+                 .emit(ProcessMessage::TrainMessage(TrainMessage::TrainStep {
+                     iter,
+                     total_elapsed: train_duration,
++                    stats,
++                    step_duration: step_dur,
+                     lod_progress,
+                 }))
+                 .await;

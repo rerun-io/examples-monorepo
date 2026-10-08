@@ -1,20 +1,20 @@
 """Render and evaluate full nerfbaselines Blender test splits."""
 
-import dataclasses
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
+from serde.json import to_json
+
 from gsplat_rust_renderer.evaluation import (
+    GSPLAT_BIN,
     CheckpointEvaluation,
-    evaluate_checkpoint_predictions,
     evaluate_predictions_against_checkpoint,
     render_test_split,
 )
-from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES, scene_data_dir, scene_ply_path, scene_pretrained_dir
+from gsplat_rust_renderer.nerfbaselines import BLENDER_SCENES, BlenderScene, scene_data_dir, scene_ply_path, scene_pretrained_dir
 
-SceneChoice: TypeAlias = Literal["all", "lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship"]
+SceneChoice: TypeAlias = Literal["all", BlenderScene]
 
 
 @dataclass
@@ -25,8 +25,8 @@ class Config:
     """One Blender scene to evaluate, or ``all`` for the full benchmark."""
     checkpoint_only: bool = False
     """Validate bundled checkpoint predictions without running the renderer."""
-    render_binary: Path = Path("target/release/gsplat-render")
-    """Standalone renderer executable built without Rerun."""
+    render_binary: Path = GSPLAT_BIN
+    """The gsplat executable; rendering uses the standalone GPU path."""
     output_root: Path = Path("data/evaluation/standalone")
     """Root directory for standalone per-scene renders."""
     report: Path = Path("data/evaluation/metrics.json")
@@ -42,14 +42,7 @@ class Config:
 
 
 def selected_scenes(config: Config) -> tuple[str, ...]:
-    """Resolve a one-scene or all-scene CLI choice.
-
-    Args:
-        config: Evaluation command-line configuration.
-
-    Returns:
-        Ordered scene names to evaluate.
-    """
+    """Resolve a one-scene or all-scene CLI choice."""
     if config.scene == "all":
         return BLENDER_SCENES
     return (config.scene,)
@@ -67,17 +60,13 @@ def quality_guard_failures(reports: list[CheckpointEvaluation], config: Config) 
 
 
 def main(config: Config) -> None:
-    """Run checkpoint validation or standalone rendering plus evaluation.
-
-    Args:
-        config: Evaluation command-line configuration.
-    """
+    """Run checkpoint validation or standalone rendering plus evaluation."""
     reports: list[CheckpointEvaluation] = []
     scenes: tuple[str, ...] = selected_scenes(config)
     for scene in scenes:
         checkpoint_dir: Path = scene_pretrained_dir(scene)
         if config.checkpoint_only:
-            report: CheckpointEvaluation = evaluate_checkpoint_predictions(checkpoint_dir)
+            report: CheckpointEvaluation = evaluate_predictions_against_checkpoint(checkpoint_dir / "predictions/color", checkpoint_dir)
         else:
             rendered_dir: Path = config.output_root / scene
             render_test_split(
@@ -99,8 +88,7 @@ def main(config: Config) -> None:
         )
 
     config.report.parent.mkdir(parents=True, exist_ok=True)
-    report_data = [dataclasses.asdict(report) for report in reports]
-    config.report.write_text(json.dumps(report_data, indent=2) + "\n")
+    config.report.write_text(to_json(reports) + "\n")
     print(f"Wrote {config.report}")
     failures: list[str] = quality_guard_failures(reports, config)
     if failures:

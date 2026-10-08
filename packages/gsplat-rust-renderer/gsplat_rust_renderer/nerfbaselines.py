@@ -1,22 +1,4 @@
-"""nerfbaselines test-data layout + zip extraction for the gsplat demos.
-
-Two HuggingFace sources back the blender scenes (lego by default):
-
-- pretrained models: repo ``nerfbaselines/nerfbaselines`` (model), file
-  ``3dgs-mcmc/blender/<scene>.zip`` — an INRIA-layout ``point_cloud.ply`` under
-  ``checkpoint/point_cloud/iteration_30000/`` plus reference renders
-  (``predictions/color`` / ``predictions/gt-color``) and ``results.json``.
-- datasets: repo ``nerfbaselines/nerfbaselines-data`` (dataset), file
-  ``blender/<scene>.zip`` — standard nerf-synthetic ``<scene>/transforms_*.json``
-  + ``<scene>/{train,test,val}/*.png``.
-
-The pixi ``_gsplat-rust-renderer-download-*`` tasks run this module as a CLI
-(``python -m gsplat_rust_renderer.nerfbaselines {data,pretrained} <scene>``),
-which ``hf download``s the zip and unpacks it (stdlib zipfile) atomically
-behind an idempotence guard; the CLIs resolve their default paths through the
-helpers here. Replaces the old ``pablovela5620/splat-dataset`` +
-``pablovela5620/nerf-synthetic-mirror`` HuggingFace mirrors.
-"""
+"""Download and atomically extract benchmark datasets and pretrained checkpoints."""
 
 from __future__ import annotations
 
@@ -24,6 +6,8 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Literal, TypeAlias, get_args
+from urllib.request import urlretrieve
 
 PRETRAINED_REPO: str = "nerfbaselines/nerfbaselines"
 """HuggingFace model repo holding the pretrained 3dgs-mcmc checkpoints."""
@@ -31,7 +15,8 @@ DATA_REPO: str = "nerfbaselines/nerfbaselines-data"
 """HuggingFace dataset repo holding the nerf-synthetic scene captures."""
 DEFAULT_SCENE: str = "lego"
 """Default blender scene used by the demos."""
-BLENDER_SCENES: tuple[str, ...] = ("lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship")
+BlenderScene: TypeAlias = Literal["lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship"]
+BLENDER_SCENES: tuple[str, ...] = get_args(BlenderScene)
 """All scenes in the NeRF Synthetic Blender benchmark."""
 
 # Module lives at <package>/gsplat_rust_renderer/nerfbaselines.py, so parents[1]
@@ -57,20 +42,10 @@ def scene_ply_path(scene: str = DEFAULT_SCENE, root: Path = DATA_ROOT) -> Path:
 
 
 def extract_zip(zip_path: Path, dest_dir: Path, inner: str | None = None) -> None:
-    """Extract *zip_path* (or its *inner* top-level dir) to *dest_dir* atomically.
+    """Extract to a sibling directory, then atomically rename into dest_dir.
 
-    Extraction goes to a temp sibling directory; the result is published with a
-    single ``rename`` — never a merge into a shared parent — so an interrupted
-    or concurrent run can neither leave a partial tree that the idempotence
-    guards mistake for complete data nor nest content into a directory another
-    process just published. If *dest_dir* appears concurrently (a racing task
-    won), this extraction is discarded and the winner's tree is kept.
-
-    Args:
-        zip_path: Path to the downloaded ``.zip`` archive.
-        dest_dir: Final directory the content is published at.
-        inner: Optional top-level dir inside the archive to publish as
-            *dest_dir* (for zips that nest everything under ``<scene>/``).
+    Atomic publication prevents interrupted or concurrent runs from leaving
+    partial or nested data; if another extraction wins, keep its tree.
     """
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dest_dir.name}-extract-", dir=dest_dir.parent))
@@ -88,16 +63,7 @@ def extract_zip(zip_path: Path, dest_dir: Path, inner: str | None = None) -> Non
 
 
 def download_and_extract(kind: str, scene: str, root: Path = DATA_ROOT) -> Path:
-    """Fetch + unpack one nerfbaselines zip if its target dir is missing.
-
-    Args:
-        kind: ``"data"`` (nerf-synthetic capture) or ``"pretrained"`` (3dgs-mcmc checkpoint).
-        scene: Blender scene name, e.g. ``"lego"``.
-        root: Data root (overridable for tests).
-
-    Returns:
-        The extracted target directory.
-    """
+    """Fetch and unpack one scene archive if its target directory is missing."""
     from huggingface_hub import hf_hub_download
 
     if kind == "data":
@@ -118,7 +84,12 @@ def download_and_extract(kind: str, scene: str, root: Path = DATA_ROOT) -> Path:
     return target
 
 
-if __name__ == "__main__":
-    import sys
-
-    download_and_extract(sys.argv[1], sys.argv[2])
+def download_tandt(root: Path = DATA_ROOT.parent / "tandt") -> Path:
+    """Download the upstream COLMAP scenes through the same atomic extractor."""
+    if not root.is_dir():
+        with tempfile.TemporaryDirectory(prefix="gsplat-tandt-") as directory:
+            archive = Path(directory) / "tandt.zip"
+            print("Downloading Tanks and Temples scenes")
+            urlretrieve("https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip", archive)
+            extract_zip(archive, root, inner="tandt")
+    return root
