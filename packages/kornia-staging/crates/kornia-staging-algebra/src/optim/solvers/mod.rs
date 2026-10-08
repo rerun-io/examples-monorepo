@@ -1,7 +1,8 @@
 //! Extension kernels for nonlinear least-squares solvers.
 mod levenberg_marquardt;
 pub use levenberg_marquardt::{
-    marquardt_scaling, nielsen_damping, predicted_reduction, NielsenPolicy, ScalingFloor,
+    levenberg_marquardt, marquardt_scaling, nielsen_damping, predicted_reduction, DampingRule,
+    LmConfig, LmProblem, LmReport, LmTermination, NielsenPolicy, ScalingFloor,
 };
 
 mod damped_solve;

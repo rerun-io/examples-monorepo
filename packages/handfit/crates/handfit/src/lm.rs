@@ -5,11 +5,11 @@ use crate::{
         rigid_landmarks, JacobianRows, Residual, View, Views,
     },
 };
-use kornia_staging_algebra::optim::solvers::{marquardt_scaling, nielsen_damping};
+use kornia_staging_algebra::optim::solvers::{
+    levenberg_marquardt, marquardt_scaling, DampingRule, LmConfig, LmProblem, LmTermination,
+};
 use nalgebra::{SMatrix, SVector, SymmetricEigen};
 
-/// The damping grows by this factor after each rejected step in a row (reset on acceptance).
-pub(crate) const DAMPING_GROWTH: f64 = 2.0;
 /// Damping above this ends the loop with an undamped stationarity test.
 pub(crate) const MAX_DAMPING: f64 = 1e10;
 
@@ -73,7 +73,24 @@ pub enum Termination {
     NoEvidence,
 }
 
+impl From<LmTermination> for Termination {
+    fn from(reason: LmTermination) -> Self {
+        match reason {
+            LmTermination::Tolerance => Self::Tolerance,
+            LmTermination::Stationary => Self::Stationary,
+            LmTermination::Iterations => Self::Iterations,
+            LmTermination::Damping => Self::Damping,
+            LmTermination::NonFinite | LmTermination::SolveFailed => Self::NonFinite,
+        }
+    }
+}
+
 impl Termination {
+    /// Whether the final termination denotes convergence.
+    pub fn converged(self) -> bool {
+        matches!(self, Self::Tolerance | Self::Stationary)
+    }
+
     /// handtrack's name: `tolerance`, `stationary`, `iterations`, `damping`, `non_finite` or `no_evidence`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -199,18 +216,25 @@ pub struct FitResult {
 }
 /// `J^T J` and `J^T r` over the solve's free coordinates: all 26 (wrist rotation, translation, 20 finger angles), or the first
 /// 6 in a rigid solve, whose fingers are held.
-type Normal<const N: usize> = (SMatrix<f64, N, N>, SVector<f64, N>);
+type Gauss<const N: usize> = (SMatrix<f64, N, N>, SVector<f64, N>);
+
+struct PoseNormal<const N: usize> {
+    h: SMatrix<f64, N, N>,
+    g: SVector<f64, N>,
+    mask: SVector<f64, N>,
+    scaling: SVector<f64, N>,
+}
+
+struct PoseStep<const N: usize> {
+    tangent: SVector<f64, N>,
+    candidate: Pose,
+}
 
 fn equations<const N: usize>(
     pose: &Pose,
-    normal: &Normal<N>,
+    normal: &Gauss<N>,
     limits: &SMatrix<f64, 20, 2>,
-) -> (
-    SMatrix<f64, N, N>,
-    SVector<f64, N>,
-    SVector<f64, N>,
-    SVector<f64, N>,
-) {
+) -> PoseNormal<N> {
     let (mut h, mut g) = *normal;
     let mut mask = SVector::<f64, N>::repeat(1.0);
     for k in 6..N {
@@ -231,7 +255,7 @@ fn equations<const N: usize>(
             diagonal[i] = 1.0;
         }
     }
-    (h, g, mask, diagonal)
+    PoseNormal { h, g, mask, scaling: diagonal }
 }
 
 /// The 26-coordinate tangent step of an `N`-coordinate one (held fingers do not move).
@@ -241,7 +265,7 @@ fn widen<const N: usize>(step: &SVector<f64, N>) -> Step {
 
 /// Quadratic energy decrease for the applied step, the joint angles' effective (clamped) step included: coordinates 6..26 are
 /// the joint angles, a 27th (the scale solve's phi) keeps its step.
-pub(crate) fn predicted_reduction<const N: usize>(
+pub(crate) fn effective_predicted_reduction<const N: usize>(
     pose: &Pose,
     candidate: &Pose,
     step: &SVector<f64, N>,
@@ -374,7 +398,6 @@ pub fn solve(
         residual,
         energy,
         iterations,
-        mut converged,
         mut termination,
     } = outcome;
     // Rigid hypotheses feed the full stage before the reference's final polar correction.
@@ -405,14 +428,13 @@ pub fn solve(
         e2d + dist + temporal,
     ];
     if !energies[3].is_finite() {
-        converged = false;
         termination = Termination::NonFinite;
     }
     FitResult {
         pose,
         energies,
         iterations,
-        converged,
+        converged: termination.converged(),
         termination,
         solve_energy: energy,
         cold: None,
@@ -503,115 +525,154 @@ struct Outcome {
     residual: Residual,
     energy: f64,
     iterations: usize,
-    converged: bool,
     termination: Termination,
 }
 
-/// The damped LM loop over the first `N` tangent coordinates.
-///
-/// `residual` gives the energy of a candidate; `normal_equations` linearises an accepted pose, so a rejected step costs no
-/// Jacobian.
+/// Adapt the pose problem to the shared LM driver, retaining its static matrix sizes.
 fn iterate<const N: usize>(
     config: &Config,
-    mut pose: Pose,
+    pose: Pose,
     limits: &SMatrix<f64, 20, 2>,
     residual: &dyn Fn(&Pose) -> Residual,
-    normal_equations: &mut dyn FnMut(&Pose) -> Normal<N>,
+    normal_equations: &mut dyn FnMut(&Pose) -> Gauss<N>,
 ) -> Outcome
 where
     SMatrix<f64, N, N>: Dense<N>,
 {
-    let mut current = residual(&pose);
-    let mut energy = current.norm_squared();
-    // The normal equations at `pose`, built when an iteration needs them.
-    let mut normal: Option<Normal<N>> = None;
-    let mut damping = config.initial_damping;
-    let mut growth = DAMPING_GROWTH;
-    let mut iterations = 0;
-    let mut termination = if energy.is_finite() {
-        Termination::Iterations
-    } else {
-        Termination::NonFinite
-    };
-    let mut converged = false;
-    if energy.is_finite() {
-        'iterations: for _ in 0..config.max_iterations {
-            let linear = *normal.get_or_insert_with(|| normal_equations(&pose));
-            let (h, g, mask, d) = equations(&pose, &linear, limits);
-            let mut system = h;
-            for i in 0..N {
-                system[(i, i)] += damping * d[i] + (1.0 - mask[i]);
-                if !system[(i, i)].is_finite() {
-                    termination = Termination::NonFinite;
-                    break 'iterations;
-                }
-            }
-            let Some(step) = system.solve_damped(&(-g)) else {
-                termination = Termination::NonFinite;
-                break;
-            };
-            let candidate = retract(&pose, &widen(&step), limits);
-            let predicted = predicted_reduction(&pose, &candidate, &step, &h, &g);
-            let new_residual = residual(&candidate);
-            let new_energy = new_residual.norm_squared();
-            let reduction = energy - new_energy;
-            iterations += 1;
-            if !new_energy.is_finite() {
-                termination = Termination::NonFinite;
-                break;
-            }
-            let accept = reduction > 0.0;
-            let small = reduction <= config.relative_tolerance * energy + config.absolute_tolerance;
-            if accept {
-                pose = candidate;
-                current = new_residual;
-                normal = None;
-                energy = new_energy;
-                damping = nielsen_damping(damping, reduction, predicted, Default::default());
-                growth = DAMPING_GROWTH;
-                if small {
-                    converged = true;
-                    termination = Termination::Tolerance;
-                    break;
-                }
-            } else {
-                damping *= growth;
-                growth *= DAMPING_GROWTH;
-            }
-            if damping > MAX_DAMPING {
-                let linear = *normal.get_or_insert_with(|| normal_equations(&pose));
-                let (h, g, _, d) = equations(&pose, &linear, limits);
-                let units = d.map(|x| 1.0 / x.sqrt());
-                let normalized =
-                    SMatrix::<f64, N, N>::from_fn(|i, k| h[(i, k)] * units[i] * units[k]);
-                let (eigenvalues, eigenvectors) = normalized.eigenpairs();
-                let threshold = N as f64 * f64::EPSILON * eigenvalues.abs().max();
-                let inverse = eigenvalues.map(|x| if x.abs() > threshold { 1.0 / x } else { 0.0 });
-                let scaled_g = g.component_mul(&units);
-                let gn = -(eigenvectors
-                    * (inverse.component_mul(&(eigenvectors.transpose() * scaled_g))))
-                .component_mul(&units);
-                let candidate = retract(&pose, &widen(&gn), limits);
-                let predicted = predicted_reduction(&pose, &candidate, &gn, &h, &g);
-                converged = predicted.abs() <= config.relative_tolerance * energy
-                    || scaled_g.map(|x| x * x).max() <= f32::EPSILON as f64 * energy;
-                termination = if converged {
-                    Termination::Stationary
-                } else {
-                    Termination::Damping
-                };
-                break;
-            }
-        }
-    }
-    Outcome {
+    let current = residual(&pose);
+    let energy = current.norm_squared();
+    let mut problem = PoseProblem {
+        relative_tolerance: config.relative_tolerance,
         pose,
-        residual: current,
+        limits,
+        residual,
+        normal_equations,
+        current,
         energy,
-        iterations,
-        converged,
+        normal: None,
+        candidate: None,
+    };
+    let solver = LmConfig {
+        max_iterations: config.max_iterations,
+        relative_tolerance: config.relative_tolerance,
+        absolute_tolerance: config.absolute_tolerance,
+        initial_damping: config.initial_damping,
+        max_damping: MAX_DAMPING,
+    };
+    let report = levenberg_marquardt(
+        &mut problem,
+        &solver,
+        DampingRule::Nielsen {
+            policy: Default::default(),
+        },
+    );
+    let termination = Termination::from(report.termination);
+    Outcome {
+        pose: problem.pose,
+        residual: problem.current,
+        energy: report.final_energy,
+        iterations: report.iterations,
         termination,
     }
+}
+
+struct PoseProblem<'a, const N: usize> {
+    relative_tolerance: f64,
+    pose: Pose,
+    limits: &'a SMatrix<f64, 20, 2>,
+    residual: &'a dyn Fn(&Pose) -> Residual,
+    normal_equations: &'a mut dyn FnMut(&Pose) -> Gauss<N>,
+    current: Residual,
+    energy: f64,
+    normal: Option<Gauss<N>>,
+    candidate: Option<(Pose, Residual, f64)>,
+}
+
+impl<const N: usize> LmProblem<f64> for PoseProblem<'_, N>
+where
+    SMatrix<f64, N, N>: Dense<N>,
+{
+    type Normal = PoseNormal<N>;
+    type Step = PoseStep<N>;
+
+    fn energy(&self) -> f64 {
+        self.energy
+    }
+
+    #[inline]
+    fn linearize(&mut self) -> Self::Normal {
+        let linear = *self
+            .normal
+            .get_or_insert_with(|| (self.normal_equations)(&self.pose));
+        equations(&self.pose, &linear, self.limits)
+    }
+
+    fn solve_damped(&self, normal: &Self::Normal, damping: f64) -> Option<Self::Step> {
+        let PoseNormal { h, g, mask, scaling: d } = normal;
+        let mut system = *h;
+        for i in 0..N {
+            system[(i, i)] += damping * d[i] + (1.0 - mask[i]);
+            if !system[(i, i)].is_finite() {
+                return None;
+            }
+        }
+        let step = system.solve_damped(&(-g))?;
+        let candidate = retract(&self.pose, &widen(&step), self.limits);
+        Some(PoseStep { tangent: step, candidate })
+    }
+
+    fn predicted_reduction(&self, normal: &Self::Normal, step: &Self::Step) -> f64 {
+        effective_predicted_reduction(&self.pose, &step.candidate, &step.tangent, &normal.h, &normal.g)
+    }
+
+    fn try_step(&mut self, step: Self::Step) -> f64 {
+        let pose = step.candidate;
+        let residual = (self.residual)(&pose);
+        let energy = residual.norm_squared();
+        self.candidate = Some((pose, residual, energy));
+        energy
+    }
+
+    fn accept(&mut self) {
+        if let Some((pose, residual, energy)) = self.candidate.take() {
+            self.pose = pose;
+            self.energy = energy;
+            self.current = residual;
+            self.normal = None;
+        }
+    }
+
+    #[cold]
+    fn is_stationary(&mut self) -> bool {
+        let PoseNormal { h, g, scaling: d, .. } = self.linearize();
+        let units = d.map(|x| 1.0 / x.sqrt());
+        let normalized = SMatrix::<f64, N, N>::from_fn(|i, k| h[(i, k)] * units[i] * units[k]);
+        let (eigenvalues, eigenvectors) = normalized.eigenpairs();
+        let threshold = N as f64 * f64::EPSILON * eigenvalues.abs().max();
+        let inverse = eigenvalues.map(|x| if x.abs() > threshold { 1.0 / x } else { 0.0 });
+        let scaled_g = g.component_mul(&units);
+        let gn = -(eigenvectors * (inverse.component_mul(&(eigenvectors.transpose() * scaled_g))))
+            .component_mul(&units);
+        let candidate = retract(&self.pose, &widen(&gn), self.limits);
+        let predicted = effective_predicted_reduction(&self.pose, &candidate, &gn, &h, &g);
+        stationary(
+            predicted,
+            scaled_g.map(|x| x * x).max(),
+            self.relative_tolerance,
+            self.energy,
+        )
+    }
+}
+
+/// Handtrack's stationarity test at the damping limit.
+pub(crate) fn stationary(
+    gn_prediction: f64,
+    max_scaled_gradient_sq: f64,
+    relative_tolerance: f64,
+    energy: f64,
+) -> bool {
+    gn_prediction.abs() <= relative_tolerance * energy
+        || max_scaled_gradient_sq <= f32::EPSILON as f64 * energy
 }
 
 #[cfg(test)]
