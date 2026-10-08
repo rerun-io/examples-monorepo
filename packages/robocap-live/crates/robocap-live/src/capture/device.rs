@@ -140,6 +140,10 @@ impl ImuDevice {
 /// PR #270's ioctls: `0x7401` stop, `0x40047402` set fps (u32), `0x7400` start. Never read it without polling first.
 pub struct FrameTrigger(File);
 
+const TRIGGER_STOP: libc::c_ulong = 0x7401;
+const TRIGGER_SET_FPS: libc::c_ulong = 0x4004_7402;
+const TRIGGER_START: libc::c_ulong = 0x7400;
+
 impl FrameTrigger {
     /// Open the trigger and stop any previous run.
     ///
@@ -156,11 +160,20 @@ impl FrameTrigger {
                 what: "open /dev/frame_trigger".into(),
                 source,
             })?;
-        // SAFETY: our own descriptor; the stop request has no payload.
-        if unsafe { libc::ioctl(file.as_raw_fd(), 0x7401 as _) } != 0 {
+        let trigger = Self(file);
+        trigger.stop()?;
+        Ok(trigger)
+    }
+
+    /// Stop shared frame pulses before draining the six camera streams.
+    /// # Errors
+    /// Returns the driver's stop ioctl error.
+    pub fn stop(&self) -> Result<(), CaptureError> {
+        // SAFETY: live owned descriptor; this request has no payload.
+        if unsafe { libc::ioctl(self.0.as_raw_fd(), TRIGGER_STOP as _) } != 0 {
             return Err(CaptureError::last_os_error("stop the frame trigger"));
         }
-        Ok(Self(file))
+        Ok(())
     }
 
     /// Set 30 fps and start triggering.
@@ -172,10 +185,10 @@ impl FrameTrigger {
         let fps: u32 = 30;
         // SAFETY: the ioctl numbers and argument size (u32) are the installed driver's (PR #270); descriptor and pointer are live.
         unsafe {
-            if libc::ioctl(self.0.as_raw_fd(), 0x4004_7402 as _, &fps) != 0 {
+            if libc::ioctl(self.0.as_raw_fd(), TRIGGER_SET_FPS as _, &fps) != 0 {
                 return Err(CaptureError::last_os_error("set the frame trigger rate"));
             }
-            if libc::ioctl(self.0.as_raw_fd(), 0x7400 as _) != 0 {
+            if libc::ioctl(self.0.as_raw_fd(), TRIGGER_START as _) != 0 {
                 return Err(CaptureError::last_os_error("start the frame trigger"));
             }
         }
@@ -185,12 +198,8 @@ impl FrameTrigger {
 
 impl Drop for FrameTrigger {
     fn drop(&mut self) {
-        // SAFETY: a live descriptor; stop has no payload.
-        if unsafe { libc::ioctl(self.0.as_raw_fd(), 0x7401 as _) } != 0 {
-            eprintln!(
-                "robocap-live: frame trigger stop failed: {}",
-                std::io::Error::last_os_error()
-            );
+        if let Err(error) = self.stop() {
+            eprintln!("robocap-live: frame trigger stop failed: {error}");
         }
     }
 }

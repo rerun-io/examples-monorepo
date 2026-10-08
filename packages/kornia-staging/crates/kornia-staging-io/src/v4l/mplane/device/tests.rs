@@ -184,7 +184,12 @@ fn c_open_capture_queue_and_teardown_sequence_is_preserved() {
     assert_eq!(camera.count(), 2);
     let frame = camera.dequeue(200).unwrap().unwrap();
     assert_eq!(
-        (frame.index, frame.timestamp_ns, frame.sequence, frame.flags),
+        (
+            frame.meta.index,
+            frame.meta.timestamp_ns,
+            frame.meta.sequence,
+            frame.meta.flags
+        ),
         (1, 2_000_345_000, 17, 0x2000)
     );
     assert_eq!(&frame.lengths[..2], &[32, 32]);
@@ -192,7 +197,7 @@ fn c_open_capture_queue_and_teardown_sequence_is_preserved() {
     assert_eq!(frame.planes[0], pixels.pixels[2].as_ptr().wrapping_add(3));
     assert_eq!(frame.planes[1], pixels.pixels[3].as_ptr().wrapping_add(3));
     drop(pixels);
-    camera.queue(frame.index).unwrap();
+    camera.queue(frame.meta.index).unwrap();
     drop(camera);
     assert_eq!(
         driver.0.borrow().calls,
@@ -430,6 +435,45 @@ fn bad_dequeues_requeue_before_eio_and_queue_errors_take_precedence() {
         Some(libc::EIO)
     );
     assert_eq!(driver.0.borrow().calls, ["poll(0)", "DQBUF"]);
+}
+
+#[test]
+fn rejected_buffer_diagnostics_precede_requeue_and_preserve_raw_metadata() {
+    let driver = Fake::default();
+    let camera =
+        Device::open_with_syscalls(c"/test-camera", 2, requested(), driver.clone()).unwrap();
+    driver.0.borrow_mut().dequeue_edit = Some(|b, p| {
+        b.flags = 0x2040;
+        p[0].bytesused = 18;
+    });
+    driver.0.borrow_mut().calls.clear();
+    let seen = RefCell::new(Vec::new());
+    let observe = |meta| {
+        assert_eq!(driver.0.borrow().calls, ["poll(0)", "DQBUF"]);
+        seen.borrow_mut().push(meta);
+    };
+    assert_eq!(
+        camera
+            .dequeue_observed(0, Some(&observe))
+            .err()
+            .unwrap()
+            .raw_os_error(),
+        Some(libc::EIO)
+    );
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (
+            seen[0].index,
+            seen[0].sequence,
+            seen[0].flags,
+            seen[0].timestamp_ns
+        ),
+        (1, 17, 0x2040, 2_000_345_000)
+    );
+    assert_eq!(seen[0].bytesused[..2], [18, 35]);
+    assert!(seen[0].dequeue_ns > 0);
+    assert_eq!(driver.0.borrow().calls, ["poll(0)", "DQBUF", "QBUF(1)"]);
 }
 
 #[test]

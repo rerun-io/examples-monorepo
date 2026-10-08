@@ -89,6 +89,22 @@ impl<T> StageQueue<T> {
         }
     }
 
+    /// Receive up to a deadline; use the same FIFO and close semantics as pop.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock(&self.state);
+        loop {
+            if let Some(item) = state.items.pop_front() {
+                self.changed.notify_all();
+                return Ok(item);
+            }
+            if state.closed { return Err(std::sync::mpsc::RecvTimeoutError::Disconnected); }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(std::sync::mpsc::RecvTimeoutError::Timeout); }
+            state = self.changed.wait_timeout(state, remaining).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+        }
+    }
+
     /// No more items will be pushed; waiting consumers drain what is left and then get `None`.
     pub fn close(&self) {
         lock(&self.state).closed = true;
@@ -224,6 +240,19 @@ mod tests {
 
     use super::*;
     use crate::slam::SlamStatus;
+
+    #[test]
+    fn an_outage_retains_the_recent_imu_tail_and_counts_every_eviction() {
+        let queue = StageQueue::new(super::super::LIVE_IMU_CAPACITY, QueuePolicy::DropOldest);
+        // One minute without a valid camera set must not grow IMU storage.
+        let samples = 60 * 2000;
+        for stamp in 0..samples { assert!(queue.push(stamp)); }
+        assert_eq!(queue.dropped(), (samples - super::super::LIVE_IMU_CAPACITY) as u64);
+        queue.close();
+        let retained: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
+        assert_eq!(retained, (samples - super::super::LIVE_IMU_CAPACITY..samples).collect::<Vec<_>>());
+        assert!(retained.len() > 3 * 2000, "retain every sample needed before the gap reset threshold");
+    }
 
     #[test]
     fn a_drop_oldest_queue_keeps_the_newest_and_counts() {

@@ -22,7 +22,8 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::SourceError;
+use super::{SourceError, CaptureHealth, CaptureSync};
+use super::sync::{Recovery, SyncMonitor};
 use crate::capture::camera::{MIN_QUEUED, capture_format};
 use crate::capture::device::{
     FrameTrigger, ImuDevice, monotonic_ns, require_cap, require_vendor_recorder_stopped,
@@ -34,6 +35,7 @@ use crate::capture::{
     GYRO_SCALE, IMU0_ACCEL_IIO, IMU0_GYRO_IIO, ROBOT_JSON, vendor_turned_180,
 };
 use crate::frame::{NUM_CAMERAS, Rig};
+use crate::diagnostic::Storage;
 use crate::source::FrameSource;
 use kornia_staging_io::v4l::mplane::{Camera, CaptureMode, CaptureStream, LumaFrame};
 use kornia_staging_sensor_iio::IioScan;
@@ -47,6 +49,8 @@ use kornia_staging_sensors::imu::{GapPolicy, ImuCombiner, ImuCombinerConfig};
 /// Settings of the live source.
 #[derive(Clone, Debug)]
 pub struct LiveConfig {
+    /// Opt-in nonblocking per-dequeue and matcher diagnostics (`--frame-csv`).
+    pub diagnostic: Option<crate::diagnostic::DiagnosticSink>,
     /// The cap's `rig.json` (the hands need it; SLAM uses the cap's embedded calibration). Its `device` must be this cap's.
     pub rig_path: PathBuf,
     /// The IMU clock guard.
@@ -73,6 +77,7 @@ pub struct LiveConfig {
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
+            diagnostic: None,
             rig_path: PathBuf::from(DEFAULT_RIG_PATH),
             clock_guard: ClockGuard::default(),
             match_tolerance_ns: 3_000_000,
@@ -103,10 +108,13 @@ enum CaptureEvent {
 #[derive(Default)]
 struct Shared {
     frames: [AtomicU64; NUM_CAMERAS],
+    discarded: AtomicU64,
     sequence_gaps: [AtomicU64; NUM_CAMERAS],
     dropped_in_flight: [AtomicU64; NUM_CAMERAS],
     fallback_copies: [AtomicU64; NUM_CAMERAS],
     in_flight: AtomicU64,
+    draining: AtomicBool,
+    drained: [AtomicBool; NUM_CAMERAS],
     gyro: AtomicU64,
     accel: AtomicU64,
     future_skew: AtomicU64,
@@ -117,6 +125,10 @@ struct Shared {
 /// The six cameras and IMU0 of the cap as a [`FrameSource`].
 pub struct LiveSource {
     rig: Rig,
+    sync: SyncMonitor,
+    recovery: Recovery,
+    health: CaptureHealth,
+    deferred: VecDeque<CaptureEvent>,
     options: LiveConfig,
     rx: mpsc::Receiver<CaptureEvent>,
     matcher: FramesetMatcher,
@@ -199,6 +211,10 @@ impl LiveSource {
         let local_stop = Arc::new(AtomicBool::new(false));
         let mut source = Self {
             rig,
+            sync: SyncMonitor::new(options.match_tolerance_ns),
+            recovery: Recovery::default(),
+            health: CaptureHealth::default(),
+            deferred: VecDeque::new(),
             matcher: FramesetMatcher::new(MatcherConfig {
                 cameras: NUM_CAMERAS,
                 tolerance_ns: options.match_tolerance_ns,
@@ -228,14 +244,45 @@ impl LiveSource {
             imu_late_framesets: 0,
             turned_180,
         };
+        if let Some(sink) = source.options.diagnostic.clone() {
+            source.matcher.observe_emits(move |frameset, anchor, wait| {
+                sink.emit(
+                    frameset.index,
+                    anchor,
+                    std::array::from_fn(|c| {
+                        frameset.cameras[c].as_ref().map(|f| f.meta.timestamp_ns)
+                    }),
+                    std::array::from_fn(|c| frameset.cameras[c].as_ref().map(|f| f.meta.sequence)),
+                    wait.as_nanos().min(u64::MAX as u128) as u64,
+                );
+            });
+        }
+        let buffers: Vec<_> = cameras.iter().map(|camera| camera.buffer_count()).collect();
+        eprintln!("robocap-live: camera buffers {buffers:?}; min queued {MIN_QUEUED}");
         for (camera, device) in cameras.into_iter().enumerate() {
-            let device = CaptureStream::new(device, source.options.capture, MIN_QUEUED)
+            let mut device = CaptureStream::new(device, source.options.capture, MIN_QUEUED)
                 .map_err(device_error)?;
+            let diagnostic = source.options.diagnostic.clone();
+            if let Some(sink) = diagnostic.clone() {
+                device.observe_rejected(move |meta, held| {
+                    sink.frame(camera, meta, Storage::Rejected, held, None, false)
+                });
+            }
             let (tx, shared, stop) = (tx.clone(), source.shared.clone(), source.local_stop.clone());
             let max_in_flight = source.options.max_frames_in_flight;
             let handle = std::thread::Builder::new()
                 .name(format!("rl-cam-{camera}"))
-                .spawn(move || camera_thread(camera, device, &tx, &shared, &stop, max_in_flight))
+                .spawn(move || {
+                    camera_thread(
+                        camera,
+                        device,
+                        &tx,
+                        &shared,
+                        &stop,
+                        max_in_flight,
+                        diagnostic.as_ref(),
+                    )
+                })
                 .map_err(|e| SourceError::Device(format!("spawn camera thread: {e}")))?;
             source.threads.push(handle);
         }
@@ -260,12 +307,21 @@ impl LiveSource {
         if let Some(trigger) = &source.trigger {
             trigger.start().map_err(device_error)?;
         }
+        let stream_start_ns = monotonic_ns().map_err(device_error)?;
+        if let Some(sink) = &source.options.diagnostic {
+            sink.start(
+                stream_start_ns,
+                source.options.match_tolerance_ns,
+                source.options.match_max_wait_ns,
+            );
+        }
         source.started = Instant::now();
         source.last_report = Instant::now();
         eprintln!(
             "robocap-live: live capture started (6 cameras, {:?} capture, IMU0 gyro + accel, trigger 30 fps)",
             source.options.capture
         );
+        source.sync_event()?;
         Ok(source)
     }
 
@@ -298,7 +354,7 @@ impl LiveSource {
         let counts = self.matcher.counts;
         format!(
             "live: {:.1} s frames {frames:?} seq_gaps {gaps:?} dropped {dropped:?} fallback_copies {copies:?} | gyro {} accel {} future_skew {} dropped {} (max {:.3} ms) | \
-             framesets complete {} partial {} dup {} late {} imu_late {} | combiner {:?}",
+             framesets complete {} partial {} dup {} late {} imu_late {} | combiner {:?} | diagnostic_dropped {}",
             self.started.elapsed().as_secs_f64(),
             self.shared.gyro.load(Ordering::Relaxed),
             self.shared.accel.load(Ordering::Relaxed),
@@ -311,7 +367,38 @@ impl LiveSource {
             counts.late,
             self.imu_late_framesets,
             self.combiner.counts,
+            self.options.diagnostic.as_ref().map_or(0, |s| s.dropped()),
         )
+    }
+
+    fn update_sync(&mut self) -> Result<(), SourceError> {
+        self.health.discarded(self.shared.discarded.swap(0, Ordering::Relaxed));
+        let before = self.health.snapshot().capture_sync;
+        let hz = self.matcher.counts.complete as f64 / self.started.elapsed().as_secs_f64().max(0.001);
+        let delivered = self.shared.frames.iter().map(|count| count.load(Ordering::Relaxed)).sum();
+        self.sync.delivery(self.started.elapsed(), delivered);
+        if self.recovery.due(self.started.elapsed(), &self.sync) {
+            self.health.update(CaptureSync::Resyncing, self.recovery.total, hz);
+            self.sync_event()?;
+            self.stop_trigger()?;
+            let drained = self.drain();
+            // Even a timed-out attempt must restore the pulses before the next backoff.
+            self.start_trigger()?;
+            if drained? { self.sync.restart(); }
+            else { self.sync.missing(); }
+        }
+        self.health.update(self.sync.state(), self.recovery.total, hz);
+        if before != self.sync.state() { self.sync_event()?; }
+        Ok(())
+    }
+
+    fn sync_event(&self) -> Result<(), SourceError> {
+        let snapshot = self.health.snapshot();
+        eprintln!("robocap-live: capture_sync {}", serde_json::to_string(&snapshot).map_err(device_error)?);
+        if let Some(sink) = &self.options.diagnostic {
+            sink.sync(monotonic_ns().map_err(device_error)?, snapshot.capture_sync, snapshot.capture_resyncs);
+        }
+        Ok(())
     }
 
     fn periodic_report(&mut self) -> Result<(), SourceError> {
@@ -353,6 +440,7 @@ impl LiveSource {
 }
 
 impl FrameSource for LiveSource {
+    fn capture_health(&self) -> Option<CaptureHealth> { Some(self.health.clone()) }
     fn turned_180(&self) -> [bool; NUM_CAMERAS] {
         self.turned_180
     }
@@ -381,12 +469,18 @@ impl FrameSource for LiveSource {
                 }
             }
             self.periodic_report()?;
-            match self.rx.recv_timeout(Duration::from_millis(5)) {
+            match self.update_sync() {
+                Err(SourceError::Stopped(_)) => return Ok(None),
+                result => result?,
+            }
+            let event = self.deferred.pop_front().map(Ok).unwrap_or_else(|| self.rx.recv_timeout(Duration::from_millis(5)));
+            match event {
                 Ok(CaptureEvent::Frame { camera, frame }) => {
                     self.shared.in_flight.fetch_sub(1, Ordering::Relaxed);
+                    self.sync.frame(camera, frame.meta.timestamp_ns);
                     let meta = CaptureMeta {
-                        sequence: u64::from(frame.sequence),
-                        timestamp_ns: frame.timestamp_ns,
+                        sequence: u64::from(frame.meta.sequence),
+                        timestamp_ns: frame.meta.timestamp_ns,
                         camera_slot: camera,
                     };
                     let full = Arc::new(frame.luma);
@@ -421,14 +515,74 @@ impl FrameSource for LiveSource {
     }
 }
 
+impl LiveSource {
+    fn stop_trigger(&mut self) -> Result<(), SourceError> {
+        self.trigger.as_ref().ok_or_else(|| device_error("missing frame trigger"))?.stop().map_err(device_error)?;
+        self.shared.draining.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<bool, SourceError> {
+        // Drop source-held leases before asking threads to drain. flush preserves matcher indices
+        // and monotonic ordering across a restart; none of these stale frames reach consumers.
+        let mut discarded: Vec<_> = self.pending.drain(..).map(|(set, _)| set).collect();
+        self.matcher.flush(&mut discarded);
+        for set in discarded {
+            for frame in set.cameras.into_iter().flatten() {
+                self.health.discarded(1);
+                if let Some(sink) = &self.options.diagnostic {
+                    sink.discard(frame.meta.camera_slot, frame.meta.sequence, frame.meta.timestamp_ns);
+                }
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            self.drain_queued()?;
+            if self.shared.drained.iter().all(|ack| ack.load(Ordering::Acquire)) { break; }
+            if self.stop.load(Ordering::Relaxed) { return Err(SourceError::Stopped("capture resync cancelled".into())); }
+            if Instant::now() >= deadline {
+                eprintln!("robocap-live: camera drain timed out; resync attempt failed");
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // An ack follows the last send on every camera thread. Consume that last queued frame too.
+        self.drain_queued()?;
+        Ok(true)
+    }
+
+    fn drain_queued(&mut self) -> Result<(), SourceError> {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                CaptureEvent::Frame { camera, frame } => {
+                    self.shared.in_flight.fetch_sub(1, Ordering::Relaxed);
+                    self.health.discarded(1);
+                    if let Some(sink) = &self.options.diagnostic { sink.discard(camera, u64::from(frame.meta.sequence), frame.meta.timestamp_ns); }
+                }
+                CaptureEvent::Fault(message) => return Err(device_error(message)),
+                event @ CaptureEvent::Scans { .. } => self.deferred.push_back(event),
+            }
+        }
+        Ok(())
+    }
+
+    fn start_trigger(&mut self) -> Result<(), SourceError> {
+        self.trigger.as_ref().ok_or_else(|| device_error("missing frame trigger"))?.start().map_err(device_error)?;
+        self.shared.draining.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
 impl Drop for LiveSource {
     fn drop(&mut self) {
         self.local_stop.store(true, Ordering::Relaxed);
         drop(self.trigger.take());
+        self.health.discarded(self.shared.discarded.swap(0, Ordering::Relaxed));
+        self.health.finish();
         for handle in self.threads.drain(..) {
             let _ = handle.join();
         }
-        eprintln!("robocap-live: capture stopped; {}", self.report());
+        eprintln!("{}; {}", crate::log_markers::CAPTURE_STOPPED, self.report());
     }
 }
 
@@ -440,23 +594,63 @@ fn camera_thread(
     shared: &Shared,
     stop: &AtomicBool,
     max_in_flight: u64,
+    diagnostic: Option<&crate::diagnostic::DiagnosticSink>,
 ) {
     let mut previous: Option<u32> = None;
     while !stop.load(Ordering::Relaxed) {
+        if shared.draining.load(Ordering::Acquire) {
+            // No pulses are arriving. Drain completed buffers until a quiet interval, requeue
+            // returned leases, then acknowledge. Never STREAMOFF/unmap buffers still read downstream.
+            loop {
+                match device.next_frame(50) {
+                    Ok(Some(frame)) => {
+                        shared.frames[camera].fetch_add(1, Ordering::Relaxed);
+                        shared.discarded.fetch_add(1, Ordering::Relaxed);
+                        if let Some(last) = previous {
+                            shared.sequence_gaps[camera].fetch_add(u64::from(frame.meta.sequence.wrapping_sub(last).wrapping_sub(1)), Ordering::Relaxed);
+                        }
+                        previous = Some(frame.meta.sequence);
+                        if let Some(sink) = diagnostic {
+                            sink.frame(camera, frame.meta, Storage::Discarded, frame.held_buffers, Some(frame.unrequeued_buffers), false);
+                        }
+                    },
+                    Ok(None) => break,
+                    Err(error) => { let _ = tx.send(CaptureEvent::Fault(format!("camera {camera} drain: {error}"))); return; }
+                }
+                if stop.load(Ordering::Relaxed) { return; }
+            }
+            shared.drained[camera].store(true, Ordering::Release);
+            while shared.draining.load(Ordering::Acquire) && !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            shared.drained[camera].store(false, Ordering::Release);
+            continue;
+        }
         match device.next_frame(200) {
             Ok(Some(frame)) => {
                 if let Some(last) = previous
-                    && frame.sequence != last.wrapping_add(1)
+                    && frame.meta.sequence != last.wrapping_add(1)
                 {
                     shared.sequence_gaps[camera].fetch_add(
-                        u64::from(frame.sequence.wrapping_sub(last).wrapping_sub(1)),
+                        u64::from(frame.meta.sequence.wrapping_sub(last).wrapping_sub(1)),
                         Ordering::Relaxed,
                     );
                 }
-                previous = Some(frame.sequence);
+                previous = Some(frame.meta.sequence);
                 shared.frames[camera].fetch_add(1, Ordering::Relaxed);
                 shared.fallback_copies[camera].store(device.fallback_copies(), Ordering::Relaxed);
-                if shared.in_flight.load(Ordering::Relaxed) >= max_in_flight {
+                let admitted = shared.in_flight.load(Ordering::Relaxed) < max_in_flight;
+                if let Some(sink) = diagnostic {
+                    sink.frame(
+                        camera,
+                        frame.meta,
+                        if frame.leased { Storage::Leased } else { Storage::Copied },
+                        frame.held_buffers,
+                        Some(frame.unrequeued_buffers),
+                        admitted,
+                    );
+                }
+                if !admitted {
                     shared.dropped_in_flight[camera].fetch_add(1, Ordering::Relaxed);
                     continue;
                 }

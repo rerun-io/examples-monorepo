@@ -8,6 +8,10 @@ pub mod channel;
 #[cfg(target_os = "linux")]
 pub mod live;
 pub mod replay;
+pub(crate) mod sync;
+pub use sync::CaptureSync;
+mod health;
+pub use health::{CaptureHealth, CaptureSnapshot};
 
 use crate::frame::{FrameError, NUM_CAMERAS, Rig};
 use kornia_staging_sensors::SourceEvent;
@@ -34,6 +38,8 @@ pub trait FrameSource: Send {
     fn turned_180(&self) -> [bool; NUM_CAMERAS] {
         [false; NUM_CAMERAS]
     }
+    /// Live capture health shared with the monitor; replay never recovers a trigger.
+    fn capture_health(&self) -> Option<CaptureHealth> { None }
     /// Read the next event; `None` means EOF or requested stop.
     /// # Errors
     /// Returns a capture, replay, or source shutdown error.

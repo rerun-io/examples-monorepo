@@ -4,8 +4,11 @@ use kornia_staging_io::v4l::mplane::{CaptureFormat, MplaneError, PlaneLayout};
 
 /// Native luma bytes in one cap camera frame.
 pub const LUMA_BYTES: usize = FULL_SIZE.width * FULL_SIZE.height;
-/// Driver buffers retained while readers hold zero-copy images.
-pub const MIN_QUEUED: u32 = 2;
+/// Reserve three of eight buffers outside downstream leases. During the next DQBUF/copy,
+/// at least two remain driver-owned. Completed (not yet dequeued) buffers can still consume
+/// that reserve; this is not a promise about the driver's instantaneous empty queue.
+/// Five leases instead of six costs no extra mapped memory; pressure falls back to luma copies.
+pub const MIN_QUEUED: u32 = 3;
 
 /// The cap's one-plane NV12 layout.
 /// # Errors

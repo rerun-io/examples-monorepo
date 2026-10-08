@@ -110,9 +110,10 @@ The panel (`robocap-panel`, `http://<cap address>:8090/`) is the one way to run 
 a busy cap, a battery below 7.9 V, a SoC at 75 °C or more, or less than 1 GiB free on `/` refuse; a charger input limit below
 2000 mA or input current regulation only warn (the battery then carries part of the load). It then starts the run supervisor,
 `robocap-panel handoff <max seconds> <command...>`, in a session of its own, so the run outlives a panel restart. The supervisor
-refuses unless the vendor recorder is idle, pauses the vendor launcher, runs robocap-live, stops it (SIGINT, then SIGKILL to its
-process group 20 s later) at 85 °C, at its time limit or on SIGTERM, and gives the cameras back once the run's whole process group
-(robocap-live and its encoders) is gone. Stop sends that SIGTERM. The same API works from a shell (`--data-urlencode` keeps the
+refuses unless the vendor recorder is idle, pauses the vendor launcher, runs robocap-live, warns at 85 °C (the kernel throttles
+from there), stops it (SIGINT, then SIGKILL to its process group 20 s later) at 95 °C, at its time limit or on SIGTERM, and gives
+the cameras back once the run's whole process group (robocap-live and its encoders) is gone. Stop sends that SIGTERM. A run has no
+time limit unless the start asks for one (`duration_s`, 10-7200; 0 or absent = none). The same API works from a shell (`--data-urlencode` keeps the
 `+` of the viewer URL):
 
 ```bash

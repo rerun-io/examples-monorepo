@@ -4,8 +4,9 @@
 //! 1. refuse unless the host is a cap (`robocap_<device>`), the vendor launcher loop and recorder each run once, the recorder
 //!    reports `is_recording` and `is_recording_key_on` false over MQTT, and the SoC is below [`MAX_START_TEMP_C`];
 //! 2. pause the launcher loop (SIGSTOP) and kill the idle recorder (SIGKILL; SIGTERM hangs it);
-//! 3. run the command in its own process group; stop it (SIGINT, then SIGKILL to its group after a grace period) at the time
-//!    limit, at [`STOP_TEMP_C`], or when the supervisor itself gets SIGINT, SIGTERM or SIGHUP (the panel's Stop is a SIGTERM);
+//! 3. run the command in its own process group; log a warning at [`WARN_TEMP_C`]; stop it (SIGINT, then SIGKILL to its group
+//!    after a grace period) at the time limit if there is one, at [`STOP_TEMP_C`], or when the supervisor itself gets SIGINT,
+//!    SIGTERM or SIGHUP (the panel's Stop is a SIGTERM);
 //! 4. once all other processes in the session are gone, resume the launcher loop (SIGCONT); it restarts the vendor recorder after ~5 s;
 //! 5. check that the vendor recorder is back and idle, the IIO buffers are off and the kernel taint is unchanged.
 //!
@@ -25,10 +26,15 @@ use serde_json::Value;
 
 use crate::{hottest_c, processes, read_trim, stdout_of};
 
-/// The supervisor stops a run at this temperature...
-pub const STOP_TEMP_C: f64 = 85.0;
-/// ...and starts one only below this.
-pub const MAX_START_TEMP_C: f64 = STOP_TEMP_C - 10.0;
+/// From here the kernel's power allocator throttles the SoC (soc-thermal's 85 °C passive trip): a run logs a warning...
+pub const WARN_TEMP_C: f64 = 85.0;
+/// ...and stops here, well below soc-thermal's 115 °C critical trip.
+pub const STOP_TEMP_C: f64 = 95.0;
+/// A run starts only below this.
+pub const MAX_START_TEMP_C: f64 = 75.0;
+/// A warned run warns again only after cooling this far below [`WARN_TEMP_C`].
+const WARN_REARM_C: f64 = 2.0;
+const _: () = assert!(MAX_START_TEMP_C < WARN_TEMP_C && WARN_TEMP_C < STOP_TEMP_C);
 /// The vendor's launcher loop and recorder, by process name.
 pub const LAUNCHER: &str = "frodobots.sh";
 pub const RECORDER: &str = "omni-specs.bin";
@@ -56,12 +62,13 @@ pub trait Vendor {
     /// Resume the launcher loop (it restarts the recorder) and report whether the vendor has everything back, as log lines; the
     /// last one sums it up (the panel shows it).
     fn give_back(&self, held: &Held) -> Vec<String>;
-    fn hottest_c(&self) -> f64;
+    fn hottest_c(&self) -> Option<f64>;
+    fn warning(&self, line: &str) { log(line); }
 }
 
 pub struct Limits {
-    /// The time limit of the run.
-    pub max_run: Duration,
+    /// The time limit of the run; `None` runs until a stop or [`STOP_TEMP_C`].
+    pub max_run: Option<Duration>,
     /// From SIGINT to SIGKILL.
     pub grace: Duration,
     pub poll: Duration,
@@ -97,7 +104,7 @@ pub fn lock(root: &Path) -> Result<fs::File, String> {
 pub fn supervise(vendor: &impl Vendor, command: &[String], limits: &Limits, stop: &AtomicBool) -> Result<ExitStatus, String> {
     let (program, args) = command.split_first().ok_or("no command")?;
     let held = vendor.check_idle()?;
-    let hottest = vendor.hottest_c();
+    let hottest = vendor.hottest_c().filter(|c| c.is_finite()).ok_or("cannot read any thermal zone")?;
     if hottest >= MAX_START_TEMP_C {
         return Err(format!("SoC {hottest:.1} °C: a run starts below {MAX_START_TEMP_C} °C"));
     }
@@ -130,14 +137,15 @@ pub fn supervise(vendor: &impl Vendor, command: &[String], limits: &Limits, stop
 }
 
 /// Wait for the run to end: robocap-live and every other process left in its session (its encoders can outlive it for a moment). At the
-/// time limit, at [`STOP_TEMP_C`] or on `stop`: SIGINT to robocap-live. After that SIGINT, or once robocap-live has ended, the
+/// time limit (if any), at [`STOP_TEMP_C`] or on `stop`: SIGINT to robocap-live; at [`WARN_TEMP_C`] a warning line. After that SIGINT, or once robocap-live has ended, the
 /// group gets the grace period, then SIGKILL. The run's exit status is robocap-live's.
 fn watch(mut child: Child, vendor: &impl Vendor, limits: &Limits, stop: &AtomicBool) -> Result<ExitStatus, String> {
     let pid = i32::try_from(child.id()).map_err(|e| e.to_string())?;
     let session = crate::stat(child.id()).ok_or("cannot read run session")?.session;
     let supervisor = std::process::id();
     let started = Instant::now();
-    let (mut status, mut stopping, mut killed) = (None, None::<Instant>, false);
+    let mut failed_reads = 0;
+    let (mut status, mut stopping, mut killed, mut warned) = (None, None::<Instant>, false, false);
     loop {
         if status.is_none() {
             status = child.try_wait().map_err(|e| format!("waiting for the run: {e}"))?;
@@ -163,13 +171,22 @@ fn watch(mut child: Child, vendor: &impl Vendor, limits: &Limits, stop: &AtomicB
             Some(_) => {}
             None if status.is_some() => stopping = Some(Instant::now()),
             None => {
-                let hottest = vendor.hottest_c();
+                let hottest = vendor.hottest_c().filter(|c| c.is_finite());
+                failed_reads = if hottest.is_some() { 0 } else { failed_reads + 1 };
+                if let Some(hottest) = hottest.filter(|&c| !warned && c >= WARN_TEMP_C) {
+                    vendor.warning(&format!("WARNING: SoC {hottest:.1} °C >= {WARN_TEMP_C} °C: the kernel throttles from here; the run stops at {STOP_TEMP_C} °C"));
+                    warned = true;
+                } else if warned && hottest.is_some_and(|c| c < WARN_TEMP_C - WARN_REARM_C) {
+                    warned = false;
+                }
                 let reason = if stop.load(Ordering::SeqCst) {
                     Some("the supervisor was asked to stop".to_string())
-                } else if started.elapsed() >= limits.max_run {
-                    Some(format!("time limit {} s", limits.max_run.as_secs()))
+                } else if let Some(max) = limits.max_run.filter(|max| started.elapsed() >= *max) {
+                    Some(format!("time limit {} s", max.as_secs()))
+                } else if failed_reads >= 3 {
+                    Some("three consecutive thermal reads failed".into())
                 } else {
-                    (hottest >= STOP_TEMP_C).then(|| format!("SoC {hottest:.1} °C >= {STOP_TEMP_C} °C"))
+                    hottest.filter(|&c| c >= STOP_TEMP_C).map(|c| format!("SoC {c:.1} °C >= {STOP_TEMP_C} °C"))
                 };
                 if let Some(reason) = reason {
                     log(&format!("{reason}: stopping the run (SIGINT)"));
@@ -279,13 +296,13 @@ impl Vendor for CapVendor {
             lines.push(format!("WARNING: kernel taint changed {} -> {tainted}", held.tainted));
         }
         lines.push(match recorder_idle(&Self::props(&held.device)) {
-            Ok(()) => format!("vendor recorder back and idle; SoC {:.1} °C", self.hottest_c()),
-            Err(error) => format!("WARNING: vendor recorder state unknown ({error}); SoC {:.1} °C", self.hottest_c()),
+            Ok(()) => format!("vendor recorder back and idle; SoC {:?} °C", self.hottest_c()),
+            Err(error) => format!("WARNING: vendor recorder state unknown ({error}); SoC {:?} °C", self.hottest_c()),
         });
         lines
     }
 
-    fn hottest_c(&self) -> f64 {
+    fn hottest_c(&self) -> Option<f64> {
         hottest_c()
     }
 }
@@ -297,8 +314,8 @@ extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
-/// `robocap-panel handoff <max seconds> <command...>`: the exit code is the run's (128 + its signal if a signal ended it), or 2
-/// when nothing ran.
+/// `robocap-panel handoff <max seconds> <command...>` (0 seconds: no time limit): the exit code is the run's (128 + its signal
+/// if a signal ended it), or 2 when nothing ran.
 pub fn main(args: &[String]) -> i32 {
     let Some((max_seconds, command)) = args.split_first().and_then(|(max, command)| Some((max.parse::<u64>().ok()?, command))) else {
         eprintln!("usage: robocap-panel handoff <max seconds> <command...>");
@@ -308,7 +325,8 @@ pub fn main(args: &[String]) -> i32 {
         // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
         unsafe { libc::signal(signum, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
-    let limits = Limits { max_run: Duration::from_secs(max_seconds), grace: GRACE, poll: Duration::from_millis(500) };
+    let max_run = (max_seconds > 0).then(|| Duration::from_secs(max_seconds));
+    let limits = Limits { max_run, grace: GRACE, poll: Duration::from_millis(500) };
     let root = match std::env::current_dir() { Ok(root) => root, Err(error) => { log(&error.to_string()); return 2; } };
     let _lease = match lock(&root) { Ok(lease) => lease, Err(error) => { log(&error); return 2; } };
     match supervise(&CapVendor, command, &limits, &STOP) {
@@ -335,13 +353,14 @@ mod tests {
         hottest_c: Mutex<f64>,
         events: Mutex<Vec<String>>,
         run_pid_file: PathBuf,
+        warnings: Mutex<Vec<String>>,
     }
 
     impl FakeVendor {
         fn new(name: &str) -> Self {
             let run_pid_file = std::env::temp_dir().join(format!("robocap-handoff-{}-{name}.pid", std::process::id()));
             let _ = std::fs::remove_file(&run_pid_file);
-            Self { idle: Ok(()), hottest_c: Mutex::new(45.0), events: Mutex::default(), run_pid_file }
+            Self { idle: Ok(()), hottest_c: Mutex::new(45.0), events: Mutex::default(), run_pid_file, warnings: Mutex::default() }
         }
 
         /// A run that notes its pid, then does `then` (shell).
@@ -361,6 +380,7 @@ mod tests {
     }
 
     impl Vendor for FakeVendor {
+        fn warning(&self, line: &str) { self.warnings.lock().unwrap().push(line.into()); }
         fn check_idle(&self) -> Result<Held, String> {
             self.idle.clone().map(|()| Held { device: "fe62fa".into(), launcher: 11, recorder: 22, tainted: "0".into() })
         }
@@ -377,13 +397,13 @@ mod tests {
             Vec::new()
         }
 
-        fn hottest_c(&self) -> f64 {
-            self.hottest_c.lock().map_or(0.0, |t| *t)
+        fn hottest_c(&self) -> Option<f64> {
+            self.hottest_c.lock().ok().map(|t| *t).filter(|c| c.is_finite())
         }
     }
 
     fn quick() -> Limits {
-        Limits { max_run: Duration::from_secs(20), grace: Duration::from_millis(500), poll: Duration::from_millis(20) }
+        Limits { max_run: Some(Duration::from_secs(20)), grace: Duration::from_millis(500), poll: Duration::from_millis(20) }
     }
 
     #[test]
@@ -392,7 +412,11 @@ mod tests {
         let first = lock(&root)?;
         assert!(lock(&root).is_err());
         drop(first);
-        let second = lock(&root)?;
+        // Other tests fork concurrently; their CLOEXEC copies close as soon as exec completes.
+        let second = (0..100).find_map(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            lock(&root).ok()
+        }).ok_or("lock stayed held after release")?;
         drop(second);
         fs::remove_dir_all(root).map_err(|e| e.to_string())?;
         Ok(())
@@ -405,6 +429,14 @@ mod tests {
         assert!(result.is_err_and(|e| e.contains("is_recording")));
         assert!(vendor.events().is_empty());
         assert!(!vendor.run_pid_file.exists(), "the run never started");
+    }
+
+    #[test]
+    fn missing_temperature_refuses_the_start() {
+        let vendor = FakeVendor::new("missing-temperature");
+        vendor.set_hottest_c(f64::NAN);
+        assert!(supervise(&vendor, &vendor.run("exit 0"), &quick(), &AtomicBool::new(false)).is_err());
+        assert!(vendor.events().is_empty());
     }
 
     #[test]
@@ -421,6 +453,64 @@ mod tests {
         let status = supervise(&vendor, &vendor.run("sleep 0.3; exit 3"), &quick(), &AtomicBool::new(false))?;
         assert_eq!(status.code(), Some(3));
         assert_eq!(vendor.events(), ["take 11 22", "resume 11 (run alive: false)"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_without_a_time_limit_ends_on_its_own() -> Result<(), String> {
+        let vendor = FakeVendor::new("unlimited");
+        let limits = Limits { max_run: None, ..quick() };
+        let status = supervise(&vendor, &vendor.run("sleep 0.4; exit 0"), &limits, &AtomicBool::new(false))?;
+        assert_eq!(status.code(), Some(0), "no time limit: the run is not stopped");
+        Ok(())
+    }
+
+    #[test]
+    fn a_warm_soc_only_warns_and_the_run_goes_on() -> Result<(), String> {
+        let vendor = FakeVendor::new("throttling");
+        let status = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                vendor.set_hottest_c(WARN_TEMP_C);
+            });
+            supervise(&vendor, &vendor.run("sleep 0.5; exit 0"), &quick(), &AtomicBool::new(false))
+        })?;
+        assert_eq!(status.code(), Some(0), "below STOP_TEMP_C the run is not stopped");
+        assert_eq!(vendor.warnings.lock().unwrap().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lost_temperature_stops_an_active_run() -> Result<(), String> {
+        let vendor = FakeVendor::new("lost-temperature");
+        let status = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                vendor.set_hottest_c(f64::NAN);
+            });
+            supervise(&vendor, &vendor.run("exec sleep 30"), &quick(), &AtomicBool::new(false))
+        })?;
+        assert_eq!(status.signal(), Some(libc::SIGINT));
+        assert_eq!(vendor.events(), ["take 11 22", "resume 11 (run alive: false)"]);
+        Ok(())
+    }
+
+    #[test]
+    fn the_thermal_warning_rearms_only_after_cooling() -> Result<(), String> {
+        let vendor = FakeVendor::new("warning-rearm");
+        let status = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for c in [85.0, 85.0, 83.0, 85.0, 82.0, 85.0] {
+                    std::thread::sleep(Duration::from_millis(100));
+                    vendor.set_hottest_c(c);
+                }
+            });
+            supervise(&vendor, &vendor.run("sleep 0.8; exit 0"), &quick(), &AtomicBool::new(false))
+        })?;
+        assert_eq!(status.code(), Some(0));
+        let warnings = vendor.warnings.lock().unwrap();
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|line| line.contains("WARNING: SoC 85.0")));
         Ok(())
     }
 
@@ -442,14 +532,15 @@ mod tests {
     #[test]
     fn a_run_that_ignores_sigint_at_its_time_limit_is_killed_with_its_group() -> Result<(), String> {
         let vendor = FakeVendor::new("deaf");
-        let limits = Limits { max_run: Duration::from_millis(300), ..quick() };
+        let max_run = Duration::from_millis(300);
+        let limits = Limits { max_run: Some(max_run), ..quick() };
         let started = Instant::now();
         // The shell and its child both ignore SIGINT; only the group's SIGKILL ends them.
         let pids = vendor.run_pid_file.display().to_string();
         let run = vendor.run(&format!("trap '' INT; sleep 30 & echo $! >> {pids}; wait"));
         let status = supervise(&vendor, &run, &limits, &AtomicBool::new(false))?;
         assert_eq!(status.signal(), Some(libc::SIGKILL));
-        assert!(started.elapsed() >= limits.max_run + limits.grace, "SIGKILL only after the grace period");
+        assert!(started.elapsed() >= max_run + limits.grace, "SIGKILL only after the grace period");
         assert_eq!(vendor.events(), ["take 11 22", "resume 11 (run alive: false)"]);
         Ok(())
     }

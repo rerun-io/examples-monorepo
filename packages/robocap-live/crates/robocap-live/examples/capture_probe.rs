@@ -143,18 +143,18 @@ fn camera_thread(device: Camera, role: Role, count: u32) -> ProbeResult<CameraSt
         };
         let now = monotonic_ns()?;
         if let Some(last) = previous {
-            let gap = u64::from(buffer.sequence.wrapping_sub(last).wrapping_sub(1));
+            let gap = u64::from(buffer.meta().sequence.wrapping_sub(last).wrapping_sub(1));
             stats.sequence_gaps += gap;
             stats.max_gap = stats.max_gap.max(gap);
         }
-        previous = Some(buffer.sequence);
+        previous = Some(buffer.meta().sequence);
         if stats.frames == 0 {
-            stats.first_ns = buffer.timestamp_ns;
+            stats.first_ns = buffer.meta().timestamp_ns;
         }
-        stats.last_ns = buffer.timestamp_ns;
+        stats.last_ns = buffer.meta().timestamp_ns;
         stats
             .latency_ms
-            .push((now - buffer.timestamp_ns) as f64 / 1e6);
+            .push((now - buffer.meta().timestamp_ns) as f64 / 1e6);
         stats.frames += 1;
         stats.min_queued = stats
             .min_queued

@@ -1,6 +1,7 @@
 //! The pipeline's tests: queue policies end to end, missing cameras, network failures, stage start failures, the record.
 
 use super::*;
+use std::sync::mpsc;
 use crate::hands::HandOutput;
 use crate::nets::{DetNetRaw, KeyNetRaw, NetFrame, NetsError};
 use crate::source::replay::{ReplayConfig, ReplaySource, read_reference_poses};
@@ -825,6 +826,22 @@ fn runtime_camera_count_is_rejected_before_pipeline_indexing()
             crate::frame::FrameError::Invalid(_)
         )))
     ));
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn missing_slam_cameras_reset_the_world_before_a_complete_frame_returns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("robocap-live-split-gap-{}", std::process::id()));
+    crate::source::replay::tests::write_test_dump_with(&dir, 100, &|index, camera| index > 0 && camera == 4)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let source = ReplaySource::open(&dir, ReplayConfig::default(), stop.clone())?;
+    let (summary, rows) = lossless_slam_run(source, true, 30.0, stop, None)?;
+    assert_eq!(summary.counters.slam_missing_cameras, 99);
+    assert_eq!(summary.counters.slam_resets, 1, "the gap reset must run during the split");
+    assert_eq!(rows.len(), 100);
+    assert!(rows.last().unwrap().pose.is_none(), "old-world poses must not survive input loss");
     std::fs::remove_dir_all(dir)?;
     Ok(())
 }

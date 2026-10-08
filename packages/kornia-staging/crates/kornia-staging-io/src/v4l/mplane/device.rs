@@ -1,7 +1,7 @@
 //! MMAP device ownership and the kernel syscall boundary.
 
 use super::abi::*;
-use super::{RawFormat, MAX_PLANES};
+use super::{DequeueMeta, RawFormat, MAX_PLANES};
 use std::ffi::{c_int, c_ulong, c_void, CStr};
 use std::{fmt, io};
 
@@ -107,12 +107,9 @@ struct Mapping {
 }
 
 pub(super) struct Frame {
-    pub index: u32,
+    pub meta: DequeueMeta,
     pub planes: [*const u8; MAX_PLANES],
     pub lengths: [usize; MAX_PLANES],
-    pub timestamp_ns: i64,
-    pub sequence: u32,
-    pub flags: u32,
 }
 
 pub(super) struct Device<S: Syscalls = System> {
@@ -293,7 +290,16 @@ impl<S: Syscalls> Device<S> {
         unsafe { self.sys.ioctl(self.fd, QBUF, &mut buffer) }
     }
 
+    #[cfg(test)]
     pub(super) fn dequeue(&self, timeout: u16) -> io::Result<Option<Frame>> {
+        self.dequeue_observed(timeout, None)
+    }
+
+    pub(super) fn dequeue_observed(
+        &self,
+        timeout: u16,
+        rejected: Option<&dyn Fn(DequeueMeta)>,
+    ) -> io::Result<Option<Frame>> {
         let Some(events) = self.sys.poll(self.fd, timeout)? else {
             return Ok(None);
         };
@@ -304,7 +310,34 @@ impl<S: Syscalls> Device<S> {
         let mut buffer = self.buffer(0, &mut planes);
         // SAFETY: buffer holds a live plane array with the configured capacity.
         unsafe { self.sys.ioctl(self.fd, DQBUF, &mut buffer) }?;
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: Linux supports CLOCK_MONOTONIC and now is writable.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+            let error = io::Error::last_os_error();
+            if buffer.index < self.count {
+                self.queue(buffer.index)?;
+            }
+            return Err(error);
+        }
+        #[allow(clippy::unnecessary_cast)]
+        let diagnostic = DequeueMeta {
+            index: buffer.index,
+            sequence: buffer.sequence,
+            flags: buffer.flags,
+            timestamp_ns: (buffer.timestamp.tv_sec as i64)
+                .wrapping_mul(1_000_000_000)
+                .wrapping_add((buffer.timestamp.tv_usec as i64).wrapping_mul(1000)),
+            dequeue_ns: (now.tv_sec as i64) * 1_000_000_000 + now.tv_nsec as i64,
+            planes: buffer.length.min(MAX_PLANES as u32),
+            bytesused: std::array::from_fn(|p| planes[p].bytesused),
+        };
         if buffer.index >= self.count {
+            if let Some(observe) = rejected {
+                observe(diagnostic);
+            }
             return Err(io::Error::from_raw_os_error(libc::EIO));
         }
         let mappings = &self.mappings[buffer.index as usize];
@@ -319,21 +352,16 @@ impl<S: Syscalls> Device<S> {
             }
         }
         if bad {
+            if let Some(observe) = rejected {
+                observe(diagnostic);
+            }
             self.queue(buffer.index)?;
             return Err(io::Error::from_raw_os_error(libc::EIO));
         }
-        // timeval fields are native longs; widen before arithmetic on 32-bit targets.
-        #[allow(clippy::unnecessary_cast)]
-        let timestamp_ns = (buffer.timestamp.tv_sec as i64)
-            .wrapping_mul(1_000_000_000)
-            .wrapping_add((buffer.timestamp.tv_usec as i64).wrapping_mul(1000));
         let mut frame = Frame {
-            index: buffer.index,
+            meta: diagnostic,
             planes: [std::ptr::null(); MAX_PLANES],
             lengths: [0; MAX_PLANES],
-            timestamp_ns,
-            sequence: buffer.sequence,
-            flags: buffer.flags,
         };
         for (p, plane) in planes.iter().enumerate().take(self.format.planes as usize) {
             let mapping = mappings[p];

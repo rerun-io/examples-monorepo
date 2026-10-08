@@ -1,6 +1,7 @@
 //! Timestamp-tolerance grouping for runtime camera counts, independent of device sequence numbers.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::{CameraFrame, Frameset, SensorError};
 
@@ -48,6 +49,7 @@ struct Group {
 /// # Ok::<(), kornia_staging_sensors::SensorError>(())
 /// ```
 pub struct FramesetMatcher {
+    observer: Option<EmitObserver>,
     config: MatcherConfig,
     groups: VecDeque<Group>,
     newest_per_camera: Vec<Option<i64>>,
@@ -58,7 +60,16 @@ pub struct FramesetMatcher {
     pub counts: MatcherCounts,
 }
 
+type EmitObserver = Box<dyn Fn(&Frameset, i64, Duration) + Send>;
+
 impl FramesetMatcher {
+    /// Observe each emission without changing grouping, including flush emissions.
+    /// # Arguments
+    /// * `observer` - receives the frameset, first-arrival anchor and newest-member timestamp minus that anchor;
+    ///   must not block or retain images.
+    pub fn observe_emits(&mut self, observer: impl Fn(&Frameset, i64, Duration) + Send + 'static) {
+        self.observer = Some(Box::new(observer));
+    }
     /// Construct a matcher for a runtime number of cameras.
     /// # Arguments
     /// * `config` - camera count and nanosecond bounds.
@@ -71,6 +82,7 @@ impl FramesetMatcher {
             ));
         }
         Ok(Self {
+            observer: None,
             newest_per_camera: vec![None; config.cameras],
             config,
             groups: VecDeque::new(),
@@ -193,11 +205,19 @@ impl FramesetMatcher {
         self.last_emitted_ns = Some(self.last_emitted_ns.map_or(latest, |last| last.max(latest)));
         let index = self.next_index;
         self.next_index += 1;
-        Frameset {
+        let frameset = Frameset {
             index,
             timestamp_ns,
             cameras: group.cameras,
+        };
+        if let Some(observe) = &self.observer {
+            observe(
+                &frameset,
+                group.anchor_ns,
+                Duration::from_nanos(latest.saturating_sub(group.anchor_ns).max(0) as u64),
+            );
         }
+        frameset
     }
 }
 
@@ -275,6 +295,33 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].timestamp_ns < pair[1].timestamp_ns
                 && pair[0].index + 1 == pair[1].index));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_emits_keep_first_arrival_anchor_and_member_timestamps(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut matcher = FramesetMatcher::new(config(2, 3, 10))?;
+        let sink = seen.clone();
+        matcher.observe_emits(move |set, anchor, wait| {
+            sink.lock()
+                .unwrap()
+                .push((set.index, anchor, set.timestamp_ns, wait));
+        });
+        let mut out = Vec::new();
+        matcher.push(frame(0, 12)?, &mut out)?;
+        matcher.push(frame(1, 10)?, &mut out)?;
+        matcher.push(frame(0, 30)?, &mut out)?;
+        matcher.push(frame(1, 35)?, &mut out)?;
+        matcher.flush(&mut out);
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().map(|x| (x.0, x.1, x.2)).collect::<Vec<_>>(),
+            [(0, 12, 10), (1, 30, 30), (2, 35, 35)]
+        );
+        assert!(seen.iter().all(|row| row.3 == Duration::ZERO));
+        assert_eq!((matcher.counts.complete, matcher.counts.partial), (1, 2));
         Ok(())
     }
 
