@@ -10,11 +10,11 @@ import numpy as np
 import pytest
 from conftest import FIXTURES, raw_asset, read_chunks, vrs_file
 
-from dataforge import paths, schema
+from dataforge import aria, paths, schema
 from dataforge.datasets.egoexo4d import Egoexo4dConfig, Egoexo4dDataset
 from dataforge.datasets.egoexo4d_body import BODY_MESH_STRIDE, HM_FILE, SMPLH_FILE, SMPLX_FILE
 from dataforge.datasets.egoexo4d_download import ManifestPath
-from dataforge.datasets.egoexo4d_layers import EGO_RIG, SIDECAR, CamerasSidecar, FrameSidecar, read_sidecar, write_sidecar
+from dataforge.datasets.egoexo4d_layers import EGO_RIG, SIDECAR, CamerasSidecar, FrameSidecar, read_sidecar, restored_size, write_sidecar
 from dataforge.datasets.egoexo4d_source import Take
 
 TAKE: str = "cmu_bike02_4"
@@ -58,15 +58,18 @@ def write_video(ffmpeg: Path, path: Path, size: str, *, gray: bool, padded: bool
     )
 
 
-def synthetic_take(root: Path, ffmpeg: Path) -> list[str]:
-    """Lay out one take; return the take files a real manifest would list for it."""
+def synthetic_take(root: Path, ffmpeg: Path, *, slam_size: str = "480x640") -> list[str]:
+    """Lay out one take; return the take files a real manifest would list for it.
+
+    slam_size 640x480 ships the SLAM videos stretched to the readout's shape, as about one real take in seven does.
+    """
     take_dir: Path = root / "takes" / TAKE
     videos: dict[str, tuple[str, bool]] = {
         "cam01.mp4": ("3840x2160", False),
         "cam02.mp4": ("3840x2160", False),
         "aria01_214-1.mp4": ("1408x1408", False),
-        "aria01_1201-1.mp4": ("480x640", True),
-        "aria01_1201-2.mp4": ("480x640", True),
+        "aria01_1201-1.mp4": (slam_size, True),
+        "aria01_1201-2.mp4": (slam_size, True),
         "aria01_211-1.mp4": ("640x240", True),
     }
     for name, (size, gray) in videos.items():
@@ -137,11 +140,12 @@ def synthetic_take(root: Path, ffmpeg: Path) -> list[str]:
 
 
 @pytest.mark.integration
-def test_convert_writes_four_layers_and_prunes_the_take(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("slam_size", ["480x640", "640x480"])
+def test_convert_writes_four_layers_and_prunes_the_take(slam_size: str, tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (SMPLH_FILE, SMPLX_FILE):
         raw_asset("Ego-Exo4D-HM body model (dataforge-download egoexo4d)", MODEL_ROOT / name)
     root: Path = tmp_path / "raw"
-    take_files: list[str] = synthetic_take(root, nvenc_ffmpeg)
+    take_files: list[str] = synthetic_take(root, nvenc_ffmpeg, slam_size=slam_size)
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
     monkeypatch.setattr(Egoexo4dDataset, "fetch_take", lambda self, take: None)
     monkeypatch.setattr(Egoexo4dDataset, "take_files", lambda self, take: [ManifestPath(f"s3://x/{path}", path) for path in take_files])
@@ -165,6 +169,8 @@ def test_convert_writes_four_layers_and_prunes_the_take(tmp_path: Path, nvenc_ff
     assert sum(chunk.num_rows for chunk in mesh) == len(range(0, FRAMES, BODY_MESH_STRIDE))
     sidecars: Path = tmp_path / "out" / "sidecars" / identity.recording_id
     assert (sidecars / SIDECAR).is_file()
+    cameras: CamerasSidecar = read_sidecar(sidecars / SIDECAR, targets["base"])[1]
+    assert cameras.aria_sizes["camera-slam-left"] == (480, 640)  # a stretched SLAM video is stored upright again
     assert not any((root / path).exists() for path in take_files)  # raw pruned after base
     assert (root / "hm" / TAKE / HM_FILE).is_file()  # the fit stays
 
@@ -196,6 +202,14 @@ def test_a_source_longer_than_the_take_fails_before_anything_is_published(
         dataset.convert(identity, take, force=False)
     assert not any(target.exists() for target in dataset.targets(identity).values())
     assert all((root / path).exists() for path in take_files)
+
+
+def test_restored_size_undoes_the_release_stretch() -> None:
+    device = aria.DeviceCalibration.from_json((FIXTURES / "aria/gen1-hot3d-P0015_179e1b84-calib.json").read_text(), "fixture")
+    slam = device.camera("camera-slam-left")  # readout 640x480
+    assert restored_size(slam, 480, 640) is None  # the usual quarter-turned SLAM video
+    assert restored_size(slam, 640, 480) == (480, 640)  # the upright image resized back to the readout's shape
+    assert restored_size(device.camera("camera-rgb"), 1408, 1408) is None
 
 
 def test_a_sidecar_older_than_its_base_is_refused(tmp_path: Path) -> None:

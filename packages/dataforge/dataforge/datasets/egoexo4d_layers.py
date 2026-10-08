@@ -109,6 +109,18 @@ def logged_calibration(factory: Fisheye624Parameters, width: int, height: int) -
     return fisheye624.rotate_cw90(aria.rescale_to_stream(factory, height, width))
 
 
+def restored_size(readout: Fisheye624Parameters, width: int, height: int) -> tuple[int, int] | None:
+    """The upright size to store an Aria MP4 at when the release resized its upright image back to the readout's shape.
+
+    The MP4s are a quarter turn from the readout, so a non-square camera ships portrait (SLAM 480x640). About one take in
+    seven (seen at IIITH, NUS, Uniandes and UPenn) ships its SLAM videos at the readout's landscape 640x480 instead: the
+    upright image, stretched. None when the MP4 needs no rescale.
+    """
+    if width != height and (width > height) == (readout.width > readout.height):
+        return height, width
+    return None
+
+
 def video_size(path: Path) -> tuple[int, int]:
     """Width and height of an mp4's first video stream."""
     with av.open(str(path)) as container:
@@ -166,16 +178,16 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
     centers_xy: Float64[ndarray, "c 2"] = np.array([calib.world_T_cam[:2, 3] for calib in inputs.gopros])
     frustum_m: float = max(0.1, 0.05 * float(np.linalg.norm(centers_xy - centers_xy.mean(axis=0), axis=1).max()))
 
-    def log_aria(cam: int, stream: AriaStream, width: int, height: int) -> str:
+    def log_aria(cam: int, stream: AriaStream, size: tuple[int, int] | None, width: int, height: int) -> str:
         if stream.label is None:  # both eye cameras in one frame: no single calibration, so no pinhole
             rr.log(schema.cam_path(EGO_RIG, cam), rr.AnyValues(name="camera-et", kind="grayscale"), static=True, recording=recording)
         else:
-            aria_sizes[stream.label] = (width, height)
+            aria_sizes[stream.label] = size or (width, height)
             log_camera_node(
                 recording,
                 EGO_RIG,
                 cam,
-                logged_calibration(device.camera(stream.label), width, height).to_fisheye62(),
+                logged_calibration(device.camera(stream.label), *aria_sizes[stream.label]).to_fisheye62(),
                 name=stream.label,
                 kind="grayscale" if stream.gray else "rgb",
                 image_plane_distance=0.05,
@@ -190,6 +202,8 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
             name=name,
             source_width=width,
             source_height=height,
+            stored_width=None if size is None else size[0],
+            stored_height=None if size is None else size[1],
             video_codec="av1",
             cq=AV1_CQ,
             gop=AV1_GOP,
@@ -212,10 +226,11 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
             gop=AV1_GOP,
         )
 
-    slots: list[Slot] = [
-        Slot(EGO_RIG, cam, inputs.root / take.video(take.aria, stream.readable), stream.gray, None, stream.step, partial(log_aria, cam, stream))
-        for cam, stream in enumerate(ARIA_STREAMS)
-    ]
+    slots: list[Slot] = []
+    for cam, stream in enumerate(ARIA_STREAMS):
+        source: Path = inputs.root / take.video(take.aria, stream.readable)
+        restored: tuple[int, int] | None = None if stream.label is None else restored_size(device.camera(stream.label), *video_size(source))
+        slots.append(Slot(EGO_RIG, cam, source, stream.gray, restored, stream.step, partial(log_aria, cam, stream, restored)))
     for rig, calib in enumerate(inputs.gopros, start=1):
         size: tuple[int, int] = stored_size(calib)
         slots.append(Slot(rig, 0, inputs.root / take.video(calib.cam_uid, "0"), False, size, 1, partial(log_gopro, rig, calib, size)))
@@ -236,9 +251,13 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
 
         def encode(slot: Slot, kept: Int64[ndarray, "m"], clip: Path) -> None:
             every: tuple[int, int] | None = None if slot.step == 1 else (slot.step, int(kept[0]))
-            transcode_mp4(slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, every=every, decode="cuda")
+            transcode_mp4(
+                slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, every=every, decode="cuda"
+            )
 
-        jobs: list[tuple[Path, Callable[[], None]]] = [(clip, partial(encode, slot, kept, clip)) for slot, kept, clip in zip(slots, samples, clips, strict=True)]
+        jobs: list[tuple[Path, Callable[[], None]]] = [
+            (clip, partial(encode, slot, kept, clip)) for slot, kept, clip in zip(slots, samples, clips, strict=True)
+        ]
         with parallel_clips(jobs, timer, workers=6) as encoded:
             for slot, kept, clip in zip(slots, samples, encoded, strict=True):
                 resolutions.append(slot.log_node(*video_size(slot.source)))
