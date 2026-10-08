@@ -114,7 +114,7 @@ impl RenderOutput {
     /// Returns a flat byte array of length `width * height * 3` in row-major RGB order.
     pub fn to_rgb8(&self, background: [f32; 3]) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::with_capacity(self.width as usize * self.height as usize * 3);
-        for pixel in self.pixels.chunks_exact(4) {
+        for pixel in self.pixels.as_chunks::<4>().0 {
             let alpha: f32 = pixel[3] as f32 / 255.0;
             let r: f32 = pixel[0] as f32 / 255.0 + background[0] * (1.0 - alpha);
             let g: f32 = pixel[1] as f32 / 255.0 + background[1] * (1.0 - alpha);

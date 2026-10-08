@@ -82,7 +82,7 @@ fn sort_count_main(
     }
 
     if local_id.x < BIN_COUNT {
-        histogram[local_id.x] = 0u;
+        atomicStore(&histogram[local_id.x], 0u);
     }
     workgroupBarrier();
 
@@ -99,7 +99,7 @@ fn sort_count_main(
 
     workgroupBarrier();
     if local_id.x < BIN_COUNT {
-        sort_counts[local_id.x * num_wgs + group_id] = histogram[local_id.x];
+        sort_counts[local_id.x * num_wgs + group_id] = atomicLoad(&histogram[local_id.x]);
     }
 }
 
@@ -268,7 +268,7 @@ fn sort_scatter_main(
     }
 
     if local_id.x < BIN_COUNT {
-        scatter_local_histogram[local_id.x] = 0u;
+        atomicStore(&scatter_local_histogram[local_id.x], 0u);
     }
     workgroupBarrier();
 
