@@ -39,7 +39,7 @@ panel() { cap_ssh "$CAP_ROOT/bin/robocap-panel" "$@"; }
 case $action in
     deploy)
         "$here/deploy.sh" --cap "$CAP" --panel-only
-        panel stop || true
+        panel stop
         panel start --port "$port"
         echo "http://$cap_address:$port/"
         ;;

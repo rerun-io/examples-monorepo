@@ -121,19 +121,22 @@ pub struct Checks {
     pub warnings: Vec<String>,
 }
 
-/// The run supervisor's session in run/live.pid (written at every start, so a restarted panel finds the run).
+/// The run supervisor's session in run/live.pid (written at every start, so a restarted panel finds the run), while that pid is
+/// still a supervisor, started as `<program> handoff ...`.
 pub fn run_pid(root: &Path) -> Option<u32> {
-    session_pid(&root.join("run/live.pid"), "handoff")
+    let (pid, argv) = session_leader(&root.join("run/live.pid"))?;
+    (argv.get(1)?.rsplit('/').next() == Some("handoff")).then_some(pid)
 }
 
-/// The pid in `pid_file` while that pid is still what wrote it: the leader of its own session, started as `<program> <role> ...`.
-/// After a reboot or a pid reuse the file names some other program, which must never be signalled.
-pub fn session_pid(pid_file: &Path, role: &str) -> Option<u32> {
+/// The pid in `pid_file` and its command line, while that pid leads its own session. After a reboot or a pid reuse the file
+/// names some other program: the caller must recognize the command line before it signals anything.
+pub fn session_leader(pid_file: &Path) -> Option<(u32, Vec<String>)> {
     let pid: u32 = read_trim(pid_file)?.parse().ok()?;
-    let session = crate::stat(pid)?.session;
+    if crate::stat(pid)?.session != pid {
+        return None;
+    }
     let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let second = String::from_utf8_lossy(cmdline.split(|&b| b == 0).nth(1)?).to_string();
-    (session == pid && second.rsplit('/').next() == Some(role)).then_some(pid)
+    Some((pid, cmdline.split(|&b| b == 0).map(|arg| String::from_utf8_lossy(arg).into_owned()).collect()))
 }
 
 /// Whether `pid` runs (a zombie does not).
@@ -319,7 +322,10 @@ pub fn start(
         }
         record.owner = Owner::Starting { cancel: false };
     }
-    let Checks { refusals, warnings } = preflight();
+    let Checks { refusals, mut warnings } = preflight();
+    if request.viewer.is_empty() {
+        warnings.push("no viewer: nothing is recorded; the cap keeps only the run's log and summary".into());
+    }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // The supervisor, its time limit (0: none), then robocap-live: what is spawned and what run/live.cmd records.
     let mut argv = supervisor.to_vec();

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::run::{alive, session_pid, spawn_session};
+use crate::run::{alive, session_leader, spawn_session};
 
 /// rcS runs every `/etc/init.d/S??*` in order with `start` (one that is not a `.sh` file is executed, not sourced).
 const INIT_LINK: &str = "/etc/init.d/S87robocap-panel";
@@ -49,10 +49,12 @@ pub fn main(args: &[String]) -> Option<i32> {
     })
 }
 
-/// The panel's pid from `run/panel.pid` while that pid is still the panel (a stale file after a power cut may name another
-/// process, even this `robocap-panel start`).
+/// The panel's pid from `run/panel.pid` while that pid is still the panel, as `start` runs it: `<root>/bin/robocap-panel --port ..`
+/// (a stale file after a power cut may name any other process).
 fn running(root: &Path) -> Option<u32> {
-    session_pid(&root.join("run/panel.pid"), "--port")
+    let (pid, argv) = session_leader(&root.join("run/panel.pid"))?;
+    let panel = root.join("bin/robocap-panel").display().to_string();
+    (argv.first() == Some(&panel) && argv.get(1).is_some_and(|arg| arg == "--port")).then_some(pid)
 }
 
 fn start(exe: &Path, root: &Path, port: u16) -> Result<String, String> {
@@ -70,6 +72,7 @@ fn start(exe: &Path, root: &Path, port: u16) -> Result<String, String> {
         eprintln!("robocap-panel: the panel is not pinned to cores 0-3: {}", std::io::Error::last_os_error());
     }
     let log = root.join("logs/panel.log");
+    // `--port` first: running() knows the panel by its program and that argument.
     let argv = [exe.display().to_string(), "--port".into(), port.to_string(), "--root".into(), root.display().to_string()];
     let mut child = spawn_session(root, &argv, &log)?;
     // A panel that cannot bind its port exits at once: give it a second before calling it started.

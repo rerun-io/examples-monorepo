@@ -171,7 +171,7 @@
   .wrow:last-child { border-bottom: 0; }
   .wrow .ws { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .wrow .wm { color: var(--muted); font-size: 12px; white-space: nowrap; }
-  .wjoin { padding-bottom: 10px; }
+  .wjoin { padding-bottom: 10px; } .wjoin[hidden] { display: none; }
   details.card summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
   pre { margin: 12px 0 0; max-height: 360px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); white-space: pre-wrap; }
   @media (max-width: 980px), (max-height: 500px) { main { grid-template-columns: 1fr; grid-template-areas: "run" "form" "wifi" "tiles" "detail" "log"; padding: 16px; }
@@ -302,6 +302,7 @@
         <div class="group">Saved networks</div>
         <div id="wifi-saved"></div>
         <div class="group" style="display:flex;align-items:center;justify-content:space-between">Nearby <button type="button" class="wbtn" id="wifi-scan">Scan</button></div>
+        <div class="inline wjoin" id="wifi-join" hidden><input type="password" id="wifi-pw" autocomplete="off"><button type="button" class="wbtn primary" id="wifi-go">Join</button><button type="button" class="wbtn" id="wifi-cancel">Cancel</button></div>
         <div id="wifi-seen"></div>
       </div>
     </div>
@@ -657,13 +658,12 @@ async function post(path, fields) {
     ...(r.warnings || []).map(w => note("warn", w)));
 }
 $("start").onclick = async () => {
-  // The named viewer's current address wins; the typed address is the fallback; no viewer is allowed (the run still records).
+  // The named viewer's current address wins; the typed address is the fallback; no viewer is allowed (the reply warns).
   $("msg").replaceChildren(note("info", "Finding the viewer…"));
   const found = await checkViewer(), request = formRequest();
   localStorage.setItem("robocap-request", JSON.stringify({ ...request, form: 2 }));
   if (found?.found) request.viewer = found.url;
   await post("api/start", { ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" });
-  if (!request.viewer) $("msg").append(note("warn", "No viewer: the run records on the cap only."));
 };
 $("stop").onclick = () => post("api/stop", {});
 
@@ -685,7 +685,7 @@ $("viewer-save").onclick = async () => {
 };
 
 // The Wi-Fi card: the cap's network, its hotspot, saved and nearby networks. Changes only come from the hotspot.
-let wifi = null, joining = null, joined = null, wifiError = "", listsShown = "";
+let wifi = null, joined = null, wifiError = "", listsShown = "";
 async function loadWifi() {
   if (document.hidden) return;
   const reply = await api("api/wifi", null, 5000);
@@ -698,13 +698,13 @@ function renderWifi() {
     kv("the cap's hotspot", `${wifi.hotspot.ssid || "Robocap"} · ${wifi.hotspot.ip}`));
   const notes = [];
   if (!can) notes.push(note("info", `To change Wi-Fi, join the cap's hotspot and open http://${wifi.hotspot.ip}:${port} there.`));
-  if (joined && w.ssid === joined && w.ip) notes.push(note("good", `The cap is on ${w.ssid} at ${w.ip}: on that network, open http://${w.ip}:${port}`));
-  else if (joined) notes.push(note("info", `Saved ${joined}. The cap joins it when it is in range; its hotspot can drop for a moment while it moves to that network's channel.`));
+  if (w.ip && location.hostname !== w.ip) notes.push(note("good", `On ${w.ssid}, the panel is at http://${w.ip}:${port}`));
+  if (joined && w.ssid !== joined) notes.push(note("info", `Saved ${joined}. The cap joins it when it is in range; its hotspot can drop for a moment while it moves to that network's channel.`));
   setNotes($("wifi-msg"), [...notes, ...(wifiError ? [note("bad", wifiError)] : [])]);
   $("wifi-scan").disabled = !can;
-  // Rebuilt only when they change (a rebuild under a finger loses the tap), and never under a password being typed.
+  // Rebuilt only when they change: a rebuild under a finger loses the tap.
   const lists = JSON.stringify([can, w.ssid, w.saved, w.seen]);
-  if (joining || lists === listsShown) return;
+  if (lists === listsShown) return;
   listsShown = lists;
   const saved = (w.saved || []).map(n => {
     const row = el("div", "wrow"), forget = el("button", "wbtn", "Forget");
@@ -716,30 +716,33 @@ function renderWifi() {
   $("wifi-saved").replaceChildren(...(saved.length ? saved : [el("div", "wrow", "none")]));
   const seen = (w.seen || []).filter(n => !n.saved).slice(0, 12).map(n => {
     const row = el("div", "wrow"), join = el("button", "wbtn", "Join");
-    join.type = "button"; join.disabled = !can;
-    join.onclick = () => n.secured ? askPassword(n.ssid, row) : wifiPost("join", { ssid: n.ssid, password: "" });
-    row.append(el("span", "ws", n.ssid), el("span", "wm", `${n.signal} dBm · ${ghz(n.freq)}${n.secured ? "" : " · open"}`), join);
+    join.type = "button"; join.disabled = !can || n.auth === "other";
+    join.onclick = () => n.auth === "psk" ? askPassword(n.ssid) : wifiPost("join", { ssid: n.ssid, password: "" });
+    row.append(el("span", "ws", n.ssid), el("span", "wm", `${n.signal} dBm · ${ghz(n.freq)}${{ open: " · open", other: " · not supported" }[n.auth] ?? ""}`), join);
     return row;
   });
   $("wifi-seen").replaceChildren(...(seen.length ? seen : [el("div", "wrow", can ? "No other networks seen yet: tap Scan." : "No other networks seen yet.")]));
 }
-function askPassword(ssid, row) {
-  if (joining) return;  // one password form at a time
-  joining = ssid;
-  const form = el("div", "inline wjoin"), pw = el("input"), go = el("button", "wbtn primary", "Join"), cancel = el("button", "wbtn", "Cancel");
-  Object.assign(pw, { type: "password", placeholder: `Password for ${ssid}`, autocomplete: "off" });
-  go.type = cancel.type = "button";
-  const done = () => { joining = null; listsShown = ""; renderWifi(); };
-  go.onclick = async () => { go.disabled = true; await wifiPost("join", { ssid, password: pw.value }); pw.value = ""; done(); };
-  cancel.onclick = done;
-  form.append(pw, go, cancel);
-  row.after(form);
-  pw.focus();
+// One password form above the nearby list (the polled lists never hold it); it is locked while its join is under way.
+let joinSsid = null;
+function askPassword(ssid) {
+  if ($("wifi-go").disabled) return;
+  joinSsid = ssid;
+  Object.assign($("wifi-pw"), { value: "", placeholder: `Password for ${ssid}` });
+  $("wifi-join").hidden = false;
+  $("wifi-pw").focus();
 }
+$("wifi-cancel").onclick = () => { $("wifi-join").hidden = true; $("wifi-pw").value = ""; };
+$("wifi-go").onclick = async () => {
+  $("wifi-go").disabled = $("wifi-cancel").disabled = true;
+  await wifiPost("join", { ssid: joinSsid, password: $("wifi-pw").value });
+  $("wifi-go").disabled = $("wifi-cancel").disabled = false;
+  $("wifi-cancel").onclick();
+};
 async function wifiPost(action, fields) {
   const reply = await api(`api/wifi/${action}`, fields);
   wifiError = reply.ok ? "" : reply.error;
-  if (reply.ok && action === "join") joined = fields.ssid;
+  if (reply.ok && action !== "scan") joined = action === "join" ? fields.ssid : null;
   await loadWifi();
   setTimeout(loadWifi, action === "scan" ? 4000 : 2000);
 }

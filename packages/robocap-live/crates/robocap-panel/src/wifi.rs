@@ -26,8 +26,8 @@ impl Wpa {
         Self { ctrl: ctrl.into() }
     }
 
-    /// Saves `ssid` (or updates it if saved) with `password` (empty = an open network) and enables it; the saved networks
-    /// keep their entries. The password is never echoed back.
+    /// Saves the new network `ssid` with `password` (empty = an open network) and enables it; the saved networks keep their
+    /// entries, and a saved name is refused (forget it first to change its password). The password is never echoed back.
     pub fn join(&self, ssid: &str, password: &str) -> Result<Value, String> {
         // WPA2 passphrases are 8-63 printable ASCII characters; wpa_supplicant prints a bad one in its error line.
         if !password.is_empty() && !(8..=63).contains(&password.len()) || !password.bytes().all(|b| (0x20..0x7f).contains(&b)) {
@@ -36,10 +36,10 @@ impl Wpa {
         if ssid.is_empty() || ssid.len() > 32 {
             return Err("the network name must be 1-32 bytes".into());
         }
-        let (id, added) = match self.saved()?.into_iter().find(|n| n.ssid == ssid) {
-            Some(saved) => (saved.id, false),
-            None => (self.request("ADD_NETWORK")?.parse().map_err(|_| "wpa_supplicant did not add a network".to_string())?, true),
-        };
+        if self.saved()?.iter().any(|n| n.ssid == ssid) {
+            return Err(format!("{ssid} is saved already: forget it first to change its password"));
+        }
+        let id: u32 = self.request("ADD_NETWORK")?.parse().map_err(|_| "wpa_supplicant did not add a network".to_string())?;
         let configure = || -> Result<(), String> {
             self.ok(&format!("SET_NETWORK {id} ssid {}", hex(ssid)))?;
             if password.is_empty() {
@@ -48,16 +48,14 @@ impl Wpa {
                 self.ok(&format!("SET_NETWORK {id} key_mgmt WPA-PSK"))?;
                 self.ok(&format!("SET_NETWORK {id} psk \"{password}\""))?;
             }
-            self.ok(&format!("ENABLE_NETWORK {id}"))
+            self.ok(&format!("ENABLE_NETWORK {id}"))?;
+            self.ok("SAVE_CONFIG")
         };
-        if let Err(error) = configure() {
-            // A half-made entry must not reach the file at the next SAVE_CONFIG.
-            if added && let Err(undo) = self.ok(&format!("REMOVE_NETWORK {id}")) {
-                return Err(format!("{error}; {undo}"));
-            }
-            return Err(error);
-        }
-        self.ok("SAVE_CONFIG")?;
+        // A half-made entry must not stay in wpa_supplicant's memory, where the next SAVE_CONFIG would write it.
+        configure().map_err(|error| match self.ok(&format!("REMOVE_NETWORK {id}")) {
+            Ok(()) => error,
+            Err(undo) => format!("{error}; {undo}"),
+        })?;
         Ok(json!({"id": id, "ssid": ssid}))
     }
 
@@ -68,12 +66,17 @@ impl Wpa {
             self.request("STATUS")?.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let field = |key: &str| status.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
         let saved = self.saved()?;
-        let mut seen: Vec<(String, i32, u32, bool)> = Vec::new();
+        let mut seen: Vec<(String, i32, u32, &str)> = Vec::new();
         for line in self.request("SCAN_RESULTS")?.lines().skip(1) {
             let fields: Vec<&str> = line.splitn(5, '\t').collect();
             let [_, freq, signal, flags, ssid] = fields[..] else { continue };
-            let secured = ["WPA", "RSN", "WEP", "SAE"].iter().any(|k| flags.contains(k));
-            seen.push((unescape(ssid), signal.parse().unwrap_or(-100), freq.parse().unwrap_or(0), secured));
+            // What join can set up: an open network or a WPA/WPA2 passphrase; not WEP, enterprise (EAP) or WPA3-only (SAE).
+            let auth = match flags {
+                f if f.contains("PSK") => "psk",
+                f if ["WPA", "RSN", "WEP", "SAE", "EAP", "OWE"].iter().any(|k| f.contains(k)) => "other",
+                _ => "open",
+            };
+            seen.push((unescape(ssid), signal.parse().unwrap_or(-100), freq.parse().unwrap_or(0), auth));
         }
         // Strongest first; the sort is stable, so the first row of a name is its strongest.
         seen.sort_by_key(|(_, signal, ..)| -signal);
@@ -84,8 +87,8 @@ impl Wpa {
             "ip": field("ip_address"),
             "freq": field("freq").and_then(|f| f.parse::<u32>().ok()),
             "saved": saved.iter().map(|n| json!({"id": n.id, "ssid": n.ssid})).collect::<Vec<_>>(),
-            "seen": seen.iter().map(|(ssid, signal, freq, secured)| json!({
-                "ssid": ssid, "signal": signal, "freq": freq, "secured": secured, "saved": saved.iter().any(|n| n.ssid == *ssid),
+            "seen": seen.iter().map(|(ssid, signal, freq, auth)| json!({
+                "ssid": ssid, "signal": signal, "freq": freq, "auth": auth, "saved": saved.iter().any(|n| n.ssid == *ssid),
             })).collect::<Vec<_>>(),
         }))
     }
@@ -138,7 +141,8 @@ impl Wpa {
             socket.send(command.as_bytes())?;
             let mut buffer = vec![0u8; 64 * 1024];
             let n = socket.recv(&mut buffer)?;
-            Ok(String::from_utf8_lossy(&buffer[..n]).trim_end().to_string())
+            // Only the line end goes: the last SCAN_RESULTS column is an SSID, which may end in a space.
+            Ok(String::from_utf8_lossy(&buffer[..n]).trim_end_matches('\n').to_string())
         };
         let reply = exchange();
         let _ = fs::remove_file(&local);
@@ -194,6 +198,8 @@ mod tests {
         saves: u32,
         /// Answer FAIL to SET_NETWORK psk, as wpa_supplicant does for a passphrase it cannot use.
         refuse_psk: bool,
+        /// Answer FAIL to SAVE_CONFIG (a read-only or full /userdata).
+        refuse_save: bool,
     }
 
     /// Serves `fake` on `<dir>/wlan0` with wpa_supplicant's reply formats (ctrl_iface.c) until the test ends.
@@ -234,6 +240,7 @@ mod tests {
                             "OK\n".into()
                         }
                         ["SET_NETWORK", ..] | ["ENABLE_NETWORK", _] => "OK\n".into(),
+                        ["SAVE_CONFIG"] if fake.refuse_save => "FAIL\n".into(),
                         ["SAVE_CONFIG"] => {
                             fake.saves += 1;
                             "OK\n".into()
@@ -273,15 +280,21 @@ mod tests {
 
     #[test]
     fn a_refused_join_leaves_the_saved_networks_as_they_were() {
-        let fake = Arc::new(Mutex::new(Fake { networks: vec![(0, "PVWifi".into())], refuse_psk: true, ..Fake::default() }));
-        let wpa = Wpa::new(serve(&temp_dir("refused"), fake.clone()));
+        for (case, ssid, fake) in [
+            ("password refused", "GL-BE3600-7e5", Fake { refuse_psk: true, ..Fake::default() }),
+            ("save refused", "GL-BE3600-7e5", Fake { refuse_save: true, ..Fake::default() }),
+            ("already saved", "PVWifi", Fake::default()),
+        ] {
+            let fake = Arc::new(Mutex::new(Fake { networks: vec![(0, "PVWifi".into())], ..fake }));
+            let wpa = Wpa::new(serve(&temp_dir(&case.replace(' ', "-")), fake.clone()));
 
-        let error = wpa.join("GL-BE3600-7e5", "correct horse").expect_err("wpa_supplicant refused the password");
+            let error = wpa.join(ssid, "correct horse").expect_err(case);
 
-        let fake = fake.lock().unwrap();
-        assert_eq!(fake.networks, vec![(0, "PVWifi".to_string())]);
-        assert_eq!(fake.saves, 0);
-        assert!(!error.contains("correct horse"), "{error}");
+            let fake = fake.lock().unwrap();
+            assert_eq!(fake.networks, vec![(0, "PVWifi".to_string())], "{case}");
+            assert_eq!(fake.saves, 0, "{case}");
+            assert!(!error.contains("correct horse"), "{case}: {error}");
+        }
     }
 
     #[test]
