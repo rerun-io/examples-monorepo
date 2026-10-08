@@ -89,3 +89,6 @@ def test_brush_dependencies_use_recipe_tree() -> None:
     for name in brush:
         assert dependencies[name] == {"path": f"target/brush-src/crates/{name}"}
     assert "https://github.com/ArthurBrussee/brush" not in manifest.get("patch", {})
+    for crate in ("gsplat-core", "gsplat-cli"):
+        crate_manifest = tomllib.loads((root / "crates" / crate / "Cargo.toml").read_text())
+        assert crate_manifest["dependencies"]["half"]["workspace"] is True

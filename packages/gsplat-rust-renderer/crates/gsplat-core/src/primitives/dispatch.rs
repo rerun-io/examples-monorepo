@@ -144,3 +144,52 @@ impl Dispatches {
         pass.dispatch_workgroups_indirect(&self.args, u64::from(index) * 16);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::{module, pipeline};
+    use crate::test_utils::{gpu, read, upload};
+    #[test]
+    #[ignore = "integration: GPU"]
+    fn wrapped_intersection_count_cannot_enable_raster() {
+        let (device, queue) = &gpu();
+        let counts = upload(device, &[0u32, u32::MAX - 4]);
+        let source = format!(
+            "{}\n@compute @workgroup_size(1) fn test_counter() {{ add_intersections(8u); }}",
+            include_str!("../../shader/counts.wgsl")
+        );
+        let kernel = pipeline(
+            device,
+            &module(device, &source),
+            "test_counter",
+            &[(6, crate::kernels::W)],
+        );
+        let group = bind(device, &kernel.layout, &[(6, counts.as_entire_binding())]);
+        let kernels = crate::kernels::Kernels::new(device);
+        let raster = &kernels.float;
+        let mut words = [0u32; 64];
+        words[28..32].fill(1);
+        let uniform = crate::gpu::uniform(device, &words);
+        let scratch = upload(device, &[0u32; 10]);
+        let target = upload(device, &[[0.25f32; 4]]);
+        let raster_group = bind(
+            device,
+            &raster.layout,
+            &[
+                (0, uniform.as_entire_binding()),
+                (1, scratch.as_entire_binding()),
+                (2, scratch.as_entire_binding()),
+                (3, scratch.as_entire_binding()),
+                (4, target.as_entire_binding()),
+                (7, counts.as_entire_binding()),
+            ],
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        dispatch(&mut encoder, &kernel, &group, 1, None);
+        dispatch(&mut encoder, raster, &raster_group, 1, None);
+        queue.submit([encoder.finish()]);
+        assert_eq!(read::<u32>(device, queue, &counts, 2), [0x8000_0000, 3]);
+        assert_eq!(read::<[f32; 4]>(device, queue, &target, 1), [[0.25; 4]]);
+    }
+}
