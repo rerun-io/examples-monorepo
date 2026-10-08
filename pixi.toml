@@ -2010,9 +2010,9 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Build the gsplat CLI"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
-cmd = "cargo fmt -p gsplat-core -p gsplat-cli -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
+cmd = "cargo fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Check our Rust formatting, run Clippy, and run Rust unit tests"
+description = "Check our Rust formatting, run Clippy including gsplat probe, and run Rust unit tests"
 
 [feature.gsplat-rust-renderer.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "gsplat-rust-check"]
