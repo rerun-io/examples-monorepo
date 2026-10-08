@@ -45,8 +45,13 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
 @pytest.mark.parametrize(
     ("package", "suite", "assets"),
     [
-        ("gsplat-cli", "evaluation", ()),
+        ("gsplat-cli", "evaluation", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_GT")),
+        ("gsplat-cli", "renderers", ("GSPLAT_TEST_PLY", "GSPLAT_TEST_CAMERAS", "GSPLAT_TEST_COLMAP")),
+        ("gsplat-cli", "lib", ()),
         ("gsplat-core", "lib", ()),
+        ("gsplat-core", "render", ()),
+        ("gsplat-core", "views", ()),
+        ("gsplat-core", "indirect", ()),
     ],
 )
 def test_rust_gpu_contract(package: str, suite: str, assets: tuple[str, ...]) -> None:

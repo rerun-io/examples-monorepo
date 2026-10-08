@@ -1,9 +1,11 @@
 //! Offline image metrics. Brush is the default; `Published` preserves the
 //! white-background NeRF checkpoint guard's historical Python arithmetic.
 
+mod float;
 pub mod published;
 use crate::Error;
 use crate::Provenance;
+pub use float::RenderMetrics;
 use published::rgb as published_rgb;
 
 use std::collections::BTreeSet;

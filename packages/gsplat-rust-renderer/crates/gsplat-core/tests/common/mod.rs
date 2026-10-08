@@ -52,3 +52,26 @@ pub fn read<T: bytemuck::Pod>(
     rx.recv().unwrap().unwrap();
     bytemuck::cast_slice(&staging.get_mapped_range(..).unwrap()).to_vec()
 }
+
+pub fn pinhole_camera(size: u32) -> crate::Camera {
+    crate::Camera {
+        model: crate::CameraModel::Pinhole,
+        position: glam::Vec3::ZERO,
+        rotation: glam::Quat::IDENTITY,
+        fov_x: 1.0,
+        fov_y: 1.0,
+        center_uv: glam::Vec2::splat(0.5),
+        size: glam::UVec2::splat(size),
+    }
+}
+
+pub fn splat(pos: [f32; 3], log_scale: f32, raw_opacity: f32) -> crate::Splats {
+    let [x, y, z] = pos;
+    crate::Splats {
+        transforms: vec![[x, y, z, 1.0, 0.0, 0.0, 0.0, log_scale, log_scale, log_scale]],
+        raw_opacities: vec![raw_opacity],
+        sh_coefficients: vec![[0.0; 3]],
+        sh_degree: 0,
+        min_scale: None,
+    }
+}

@@ -1,6 +1,8 @@
 //! Raw resource operations; replace this file with re_renderer pools and belts upstream.
 use wgpu::util::DeviceExt as _;
 
+pub(crate) type Feedback = std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>;
+
 pub(crate) fn storage(device: &wgpu::Device, label: &str, bytes: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -94,4 +96,37 @@ pub(crate) fn bind(
             })
             .collect::<Vec<_>>(),
     })
+}
+pub(crate) fn feedback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frame feedback"),
+        size: 8,
+        mapped_at_creation: false,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    })
+}
+pub(crate) fn feedback(encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer) -> Feedback {
+    let (tx, rx) = std::sync::mpsc::channel();
+    encoder.map_buffer_on_submit(buffer, wgpu::MapMode::Read, .., move |result| {
+        let _ = tx.send(result);
+    });
+    rx
+}
+pub(crate) fn read_feedback(
+    buffer: &wgpu::Buffer,
+    receiver: &Feedback,
+) -> Option<Result<[u32; 2], crate::Error>> {
+    let status = match receiver.try_recv() {
+        Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+        Err(error) => Err(crate::Error::Readback(error.to_string())),
+        Ok(status) => status.map_err(|error| crate::Error::Readback(error.to_string())),
+    };
+    let result = status.and_then(|()| {
+        buffer
+            .get_mapped_range(..)
+            .map(|data| *bytemuck::from_bytes::<[u32; 2]>(&data))
+            .map_err(|error| crate::Error::Readback(error.to_string()))
+    });
+    buffer.unmap();
+    Some(result)
 }

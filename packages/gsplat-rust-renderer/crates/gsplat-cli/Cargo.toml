@@ -8,15 +8,33 @@ name = "gsplat"
 path = "src/main.rs"
 
 [dependencies]
+gsplat-core = { path = "../gsplat-core", features = ["serde"] }
+brush-serde.workspace = true
 brush-render.workspace = true
+colmap-reader.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 image.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 burn.workspace = true
+half.workspace = true
+re_renderer = "=0.38.1"
+re_sdk_types = "=0.38.1"
+re_types_core = "=0.38.1"
+re_log_encoding = { version = "=0.38.1", features = ["decoder"] }
+re_log_types = "=0.38.1"
+re_chunk = "=0.38.1"
+macaw = "0.30"
 brush-dataset.workspace = true
 brush-loss.workspace = true
 lpips.workspace = true
 sha2 = "0.10"
+
+[dev-dependencies]
+brush-train.workspace = true

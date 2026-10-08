@@ -72,3 +72,107 @@ async fn evaluator_lpips_matches_reference() {
         "{score:?}"
     );
 }
+
+#[tokio::test]
+#[ignore = "integration: GPU"]
+async fn float_parity_preserves_highlights_and_detects_alpha() {
+    let evaluator = Evaluator::new(false);
+    let a = [1.2, 1.2, 1.2, 0.5].repeat(16 * 16);
+    let b = [1.1, 1.1, 1.1, 1.0].repeat(16 * 16);
+    let score = evaluator.evaluate_renders(&a, &b, 16, 16).await.unwrap();
+    assert!((score.rgb.psnr - 20.0).abs() < 1e-4);
+    assert!((score.alpha_psnr - 6.020599913).abs() < 1e-4);
+    assert!((score.white_psnr - 4.43697499).abs() < 1e-4);
+    assert_eq!(score.minimum_psnr(), score.white_psnr);
+}
+
+#[tokio::test]
+#[ignore = "integration: GPU and Lego PLY/cameras/GT assets (selected by pytest)"]
+async fn lego_float_evaluation_matches_brush_eval_stats() {
+    let ply = std::env::var("GSPLAT_TEST_PLY")
+        .expect("asset GSPLAT_TEST_PLY is required; use tests-integration for skip handling");
+    let cameras = std::env::var("GSPLAT_TEST_CAMERAS").expect("asset GSPLAT_TEST_CAMERAS required");
+    let gt = std::env::var("GSPLAT_TEST_GT").expect("asset GSPLAT_TEST_GT required");
+    let loaded =
+        brush_serde::import::load_splat_from_ply(tokio::fs::File::open(ply).await.unwrap(), None)
+            .await
+            .unwrap();
+    let frames = gsplat_cli::camera::load_frames(std::path::Path::new(&cameras), Some((256, 256)))
+        .await
+        .unwrap();
+    let camera = frames[0].camera.brush_camera();
+    let gt = image::open(gt)
+        .unwrap()
+        .resize_exact(256, 256, image::imageops::FilterType::Triangle);
+    let device = burn::tensor::Device::default();
+    let splats = loaded.data.into_splats(
+        &device,
+        loaded
+            .meta
+            .render_mode
+            .unwrap_or(brush_render::gaussian_splats::SplatRenderMode::Default),
+    );
+    let reference = brush_train::eval::eval_stats(
+        splats,
+        &camera,
+        gt.clone(),
+        brush_render::AlphaMode::Transparent,
+        &device,
+    )
+    .await
+    .unwrap();
+    // Score exactly the tensor returned by the reference, with no PNG boundary.
+    let pixels = reference
+        .rendered
+        .into_data_async()
+        .await
+        .unwrap()
+        .try_into_vec::<f32>()
+        .unwrap();
+    let rendered =
+        DynamicImage::ImageRgb32F(image::Rgb32FImage::from_raw(256, 256, pixels).unwrap());
+    let psnr = reference.psnr.into_scalar_async::<f32>().await.unwrap();
+    let ssim = reference.ssim.into_scalar_async::<f32>().await.unwrap();
+    let actual = Evaluator::new(false)
+        .evaluate_pair(&rendered, &gt, Convention::Brush)
+        .await
+        .unwrap();
+    assert!(
+        (actual.psnr - f64::from(psnr)).abs() <= 1e-6,
+        "{actual:?} vs {psnr}"
+    );
+    assert!(
+        (actual.ssim - f64::from(ssim)).abs() <= 1e-7,
+        "{actual:?} vs {ssim}"
+    );
+    println!(
+        "Brush eval_stats equality: PSNR {} SSIM {}",
+        actual.psnr, actual.ssim
+    );
+}
+
+#[tokio::test]
+#[ignore = "integration: GPU"]
+async fn float_ssim_agrees_with_brush_on_byte_exact_inputs() {
+    let a: Vec<f32> = (0..16 * 16)
+        .flat_map(|i| [if i % 7 == 0 { 1.0 } else { 0.0 }, 0.0, 0.0, 1.0])
+        .collect();
+    let b: Vec<f32> = (0..16 * 16)
+        .flat_map(|i| [if i % 9 == 0 { 1.0 } else { 0.0 }, 0.0, 0.0, 1.0])
+        .collect();
+    let evaluator = Evaluator::new(false);
+    let float = evaluator.evaluate_renders(&a, &b, 16, 16).await.unwrap();
+    let image =
+        |p: Vec<f32>| DynamicImage::ImageRgba32F(image::Rgba32FImage::from_raw(16, 16, p).unwrap());
+    let brush = evaluator
+        .evaluate_pair(&image(a), &image(b), Convention::Brush)
+        .await
+        .unwrap();
+    assert!((float.rgb.psnr - brush.psnr).abs() < 1e-4);
+    assert!(
+        (float.rgb.ssim - brush.ssim).abs() < 1e-5,
+        "{} != {}",
+        float.rgb.ssim,
+        brush.ssim
+    );
+}
