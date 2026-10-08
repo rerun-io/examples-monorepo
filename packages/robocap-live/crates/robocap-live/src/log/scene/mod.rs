@@ -223,7 +223,7 @@ pub fn confidence_rgb(confidence: f32) -> [u8; 3] {
     if c <= 0.5 { [255, (c * 2.0 * 255.0) as u8, 0] } else { [((1.0 - (c - 0.5) * 2.0) * 255.0) as u8, 255, 0] }
 }
 
-/// Map a full-resolution pixel to the 640x360 small image (pixel centres: `(u + 0.5) * s - 0.5`, the area /3 of SPEC).
+/// Map a full-resolution pixel to the 640x360 small image (pixel centres: `(u + 0.5) * s - 0.5`, the area /3 of `downsample`).
 pub fn small_from_full(uv: [f32; 2], scale: [f32; 2]) -> [f32; 2] {
     [(uv[0] + 0.5) * scale[0] - 0.5, (uv[1] + 0.5) * scale[1] - 0.5]
 }

@@ -4,7 +4,7 @@ Everything comes from the Rerun catalog and nothing is written to disk on the wa
 fetched in one bulk query (simplecv's ``read_catalog_videos``, compressed, a few MB per second of video), decoded on the CPU
 in lockstep and handed to ``robocap_live._core`` one frameset at a time.
 
-Decisions that change the numbers. They are the ones a ``robocap-live-dump/1`` dump of the segment carries (SPEC.md), so the
+Decisions that change the numbers. They are the ones a ``robocap-live-dump/1`` dump of the segment carries (``frame.rs``), so the
 layer equals a ``robocap-live --source replay <dump> --slam reference`` run on such a dump:
 
 - **Luma is the decoder's raw Y plane** (libavcodec, no range or colour conversion). On the cap the hand pipeline reads the
