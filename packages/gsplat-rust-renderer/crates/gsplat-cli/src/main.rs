@@ -4,6 +4,7 @@ mod eval_command;
 mod parity;
 mod render_command;
 mod score;
+mod speed;
 use anyhow::Result;
 use camera_args::{CameraArgs, cameras};
 use clap::{Parser, Subcommand};
@@ -21,6 +22,8 @@ enum Action {
     Render(render_command::Args),
     /// Score matching rendered and ground-truth image directories.
     Eval(eval_command::Args),
+    /// Measure synchronized renderer time on repeated camera paths.
+    Speed(speed::SpeedArgs),
     /// Compare float renders against a reference renderer.
     Parity(parity::Args),
     /// Score a trained PLY without clipping or quantizing its float output.
@@ -38,12 +41,14 @@ async fn main() -> Result<()> {
     let action = Args::parse().command;
     let out = match &action {
         Action::Render(_) | Action::Eval(_) => None,
+        Action::Speed(a) => Some(a.out.clone()),
         Action::Parity(a) => Some(a.out.clone()),
         Action::Score(a) => Some(a.out.clone()),
     };
     let result = match action {
         Action::Render(a) => render_command::run(a).await,
         Action::Eval(a) => eval_command::run(a).await,
+        Action::Speed(a) => speed::run(a).await,
         Action::Parity(a) => parity::run(a).await,
         Action::Score(a) => score::run(a).await,
     };

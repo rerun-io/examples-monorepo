@@ -111,6 +111,43 @@ impl Renderer {
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter
     }
+    /// GPU stage durations from a separate packed-output diagnostic frame.
+    /// Pixel transfers and timestamp resolution never enter the benchmark loop.
+    pub fn stage_ms(&mut self, camera: &CameraSpec) -> Result<Option<[f64; 8]>> {
+        if !self
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            return Ok(None);
+        }
+        let query = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("gsplat stage times"),
+            ty: wgpu::QueryType::Timestamp,
+            count: gsplat_core::QUERY_COUNT,
+        });
+        self.view.set_timestamp_queries(Some(query.clone()))?;
+        let rendered = self.render(camera, Output::Packed);
+        self.view.set_timestamp_queries(None)?;
+        rendered?;
+        // Metal counter samples must complete before a later blit resolves them.
+        // This extra synchronization is outside the measured frame-time loop.
+        self.finish()?;
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stage timestamps"),
+            size: u64::from(gsplat_core::QUERY_COUNT) * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.resolve_query_set(&query, 0..gsplat_core::QUERY_COUNT, &resolve, 0);
+        let data = self.read_buffer(encoder, &resolve)?;
+        let ticks: &[u64] = bytemuck::cast_slice(&data);
+        Ok(Some(gsplat_core::stage_ms(
+            ticks,
+            self.queue.get_timestamp_period(),
+        )?))
+    }
     pub async fn new(
         splats: &Splats,
         options: RenderOptions,
