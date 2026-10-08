@@ -295,9 +295,10 @@ impl Vendor for CapVendor {
         if tainted != held.tainted {
             lines.push(format!("WARNING: kernel taint changed {} -> {tainted}", held.tainted));
         }
+        let soc = self.hottest_c().map_or("unknown".to_string(), |c| format!("{c:.1} °C"));
         lines.push(match recorder_idle(&Self::props(&held.device)) {
-            Ok(()) => format!("vendor recorder back and idle; SoC {:?} °C", self.hottest_c()),
-            Err(error) => format!("WARNING: vendor recorder state unknown ({error}); SoC {:?} °C", self.hottest_c()),
+            Ok(()) => format!("vendor recorder back and idle; SoC {soc}"),
+            Err(error) => format!("WARNING: vendor recorder state unknown ({error}); SoC {soc}"),
         });
         lines
     }

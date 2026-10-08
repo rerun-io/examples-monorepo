@@ -122,14 +122,21 @@ pub struct Checks {
 }
 
 /// The run supervisor's session in run/live.pid (written at every start, so a restarted panel finds the run), while that pid is
-/// still a supervisor: the leader of its own session, started as `<program> handoff ...`. After a reboot or a pid reuse the file
-/// names some other program, which is no run and must never be signalled.
+/// still a supervisor, started as `<program> handoff ...`.
 pub fn run_pid(root: &Path) -> Option<u32> {
-    let pid: u32 = read_trim(root.join("run/live.pid"))?.parse().ok()?;
-    let session = crate::stat(pid)?.session;
+    let (pid, argv) = session_leader(&root.join("run/live.pid"))?;
+    (argv.get(1)?.rsplit('/').next() == Some("handoff")).then_some(pid)
+}
+
+/// The pid in `pid_file` and its command line, while that pid leads its own session. After a reboot or a pid reuse the file
+/// names some other program: the caller must recognize the command line before it signals anything.
+pub fn session_leader(pid_file: &Path) -> Option<(u32, Vec<String>)> {
+    let pid: u32 = read_trim(pid_file)?.parse().ok()?;
+    if crate::stat(pid)?.session != pid {
+        return None;
+    }
     let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let second = String::from_utf8_lossy(cmdline.split(|&b| b == 0).nth(1)?).to_string();
-    (session == pid && second.rsplit('/').next() == Some("handoff")).then_some(pid)
+    Some((pid, cmdline.split(|&b| b == 0).map(|arg| String::from_utf8_lossy(arg).into_owned()).collect()))
 }
 
 /// Whether `pid` runs (a zombie does not).
@@ -166,12 +173,7 @@ pub struct StartRequest {
 impl StartRequest {
     /// Parse `application/x-www-form-urlencoded` fields; everything is checked, nothing is passed through a shell.
     pub fn parse(body: &str) -> Result<Self, String> {
-        let field = |name: &str| -> Option<String> {
-            body.split('&').find_map(|pair| {
-                let (key, value) = pair.split_once('=')?;
-                (key == name).then(|| decode(value))
-            })
-        };
+        let field = |name: &str| form_field(body, name);
         let viewer = field("viewer").unwrap_or_default();
         if !viewer.is_empty() {
             let host_port = viewer.strip_prefix("rerun+http://").and_then(|rest| rest.strip_suffix("/proxy")).ok_or("viewer: expected rerun+http://<host>:<port>/proxy")?;
@@ -265,6 +267,14 @@ impl StartRequest {
     }
 }
 
+/// Field `name` of an `application/x-www-form-urlencoded` body, decoded.
+pub fn form_field(body: &str, name: &str) -> Option<String> {
+    body.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| decode(value))
+    })
+}
+
 /// `%XX` and `+` decoding of one form value.
 fn decode(value: &str) -> String {
     let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
@@ -312,7 +322,10 @@ pub fn start(
         }
         record.owner = Owner::Starting { cancel: false };
     }
-    let Checks { refusals, warnings } = preflight();
+    let Checks { refusals, mut warnings } = preflight();
+    if request.viewer.is_empty() {
+        warnings.push("no viewer: nothing is recorded; the cap keeps only the run's log and summary".into());
+    }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // The supervisor, its time limit (0: none), then robocap-live: what is spawned and what run/live.cmd records.
     let mut argv = supervisor.to_vec();
@@ -325,7 +338,7 @@ pub fn start(
     } else if !refusals.is_empty() {
         Err(refusals.join("; "))
     } else {
-        spawn_supervisor(root, &argv, &log_path)
+        spawn_session(root, &argv, &log_path)
     };
     let mut child = match spawned {
         Ok(child) => child,
@@ -355,9 +368,9 @@ pub fn start(
     Ok(json!({"pid": pid, "log": log_path.display().to_string(), "cmd": command_line, "warnings": warnings}))
 }
 
-/// The supervisor becomes its own session leader before exec, with the same pid;
-/// its output goes to `log_path`.
-fn spawn_supervisor(root: &Path, argv: &[String], log_path: &Path) -> Result<Child, String> {
+/// `argv` in its own session (it becomes the session leader before exec, with the same pid), run from `root`, its output in
+/// `log_path`: the run supervisor, and the panel itself (`robocap-panel start`).
+pub fn spawn_session(root: &Path, argv: &[String], log_path: &Path) -> Result<Child, String> {
     fs::create_dir_all(root.join("logs")).and_then(|()| fs::create_dir_all(root.join("run"))).map_err(|e| format!("mkdir: {e}"))?;
     let log = fs::File::create(log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
     let log_err = log.try_clone().map_err(|e| e.to_string())?;
