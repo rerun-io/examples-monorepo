@@ -2982,6 +2982,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsplat-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "naga",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

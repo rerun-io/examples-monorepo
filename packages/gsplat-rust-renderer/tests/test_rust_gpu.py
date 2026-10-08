@@ -46,6 +46,7 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
     ("package", "suite", "assets"),
     [
         ("gsplat-cli", "evaluation", ()),
+        ("gsplat-core", "lib", ()),
     ],
 )
 def test_rust_gpu_contract(package: str, suite: str, assets: tuple[str, ...]) -> None:
