@@ -14,11 +14,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use robocap_live::nets::golden::{Comparison, Golden, default_dir, detnet_row, expand_pooled, f32_values, keynet_row};
-use robocap_live::nets::rknn::{InputData, NpuCore, POOLED_HEIGHT, POOLED_WIDTH, RknnModel, RknnNets, RknnRuntime, RunTiming, f16_bytes_from_f32};
 use robocap_live::kornia_ext::pool::{pool4_mean_f32, pool4_u8};
-use robocap_live::sched::soc_temperature_c;
+use robocap_live::nets::golden::{
+    Comparison, Golden, default_dir, detnet_row, expand_pooled, f32_values, keynet_row,
+};
+use robocap_live::nets::rknn::{
+    InputData, NpuCore, POOLED_HEIGHT, POOLED_WIDTH, RknnModel, RknnNets, RknnRuntime, RunTiming,
+    f16_bytes_from_f32,
+};
 use robocap_live::nets::{DETNET_HEIGHT, DETNET_WIDTH, HandNets, KEYNET_CROP, KeyNetRaw, NetFrame};
+use robocap_live::sched::soc_temperature_c;
 
 type BenchResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -49,11 +54,19 @@ impl Args {
             let value: String = items.next().ok_or_else(|| format!("{key} needs a value"))?;
             options.push((key.trim_start_matches("--").to_string(), value));
         }
-        Ok(Self { backend, models, options })
+        Ok(Self {
+            backend,
+            models,
+            options,
+        })
     }
 
     fn get(&self, key: &str) -> Option<&str> {
-        self.options.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.options
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -74,7 +87,10 @@ fn stats(name: &str, samples: &mut [f64]) -> String {
     )
 }
 
-fn time_calls<E: std::error::Error + 'static>(iters: usize, mut call: impl FnMut() -> Result<(), E>) -> BenchResult<Vec<f64>> {
+fn time_calls<E: std::error::Error + 'static>(
+    iters: usize,
+    mut call: impl FnMut() -> Result<(), E>,
+) -> BenchResult<Vec<f64>> {
     for _ in 0..iters.min(20) {
         call()?;
     }
@@ -94,7 +110,10 @@ fn print_comparison(label: &str, c: &Comparison) {
     println!("golden vs PyTorch [{label}]:");
     println!(
         "  detnet: centre max {:.3} px, radius max {:.3} px, presence logit max {:.4}, presence flips {}",
-        c.detnet_centre_px_max, c.detnet_radius_px_max, c.detnet_presence_logit_max, c.detnet_presence_flips
+        c.detnet_centre_px_max,
+        c.detnet_radius_px_max,
+        c.detnet_presence_logit_max,
+        c.detnet_presence_flips
     );
     println!(
         "  keynet: heatmap max {:.5}, distance max {:.5}, keypoint shift mean {:.4} / max {:.4} crop px, presence logit max {:.4}, pinch prob max {:.5}",
@@ -110,11 +129,20 @@ fn print_comparison(label: &str, c: &Comparison) {
 fn golden_check(nets: &mut dyn HandNets, dir: &Path) -> BenchResult<()> {
     let golden: Golden = Golden::load(dir)?;
     let frames: Vec<Vec<u8>> = golden.detnet_frames();
-    let frame_refs: Vec<NetFrame<'_>> = frames.iter().map(|frame| NetFrame { pixels: frame, top: 0 }).collect();
+    let frame_refs: Vec<NetFrame<'_>> = frames
+        .iter()
+        .map(|frame| NetFrame {
+            pixels: frame,
+            top: 0,
+        })
+        .collect();
     let detnet = nets.detnet(&frame_refs)?;
     let crops: Vec<&[f32]> = golden.keynet_crops.iter().map(Vec::as_slice).collect();
     let batched: Vec<KeyNetRaw> = nets.keynet(&crops, &golden.keynet_keypoints)?;
-    print_comparison("keynet as one batch", &Comparison::of(&golden, &detnet, &batched)?);
+    print_comparison(
+        "keynet as one batch",
+        &Comparison::of(&golden, &detnet, &batched)?,
+    );
     let mut single: Vec<KeyNetRaw> = Vec::new();
     for (crop, prior) in crops.iter().zip(&golden.keynet_keypoints) {
         single.extend(nets.keynet(&[crop], std::slice::from_ref(prior))?);
@@ -129,9 +157,23 @@ fn latency(nets: &mut dyn HandNets, iters: usize, golden_dir: &Path) -> BenchRes
     let frames: Vec<Vec<u8>> = golden.detnet_frames();
     let crop: &[f32] = &golden.keynet_crops[0];
     let prior: [f32; 63] = golden.keynet_keypoints[0];
-    let mut detnet = time_calls(iters, || nets.detnet(&[NetFrame { pixels: &frames[0], top: 0 }]).map(|_| ()))?;
-    println!("{}", stats("detnet 1 frame (trait, incl. pool)", &mut detnet));
-    let frame_refs: Vec<NetFrame<'_>> = (0..6).map(|i| NetFrame { pixels: &frames[i % frames.len()], top: 0 }).collect();
+    let mut detnet = time_calls(iters, || {
+        nets.detnet(&[NetFrame {
+            pixels: &frames[0],
+            top: 0,
+        }])
+        .map(|_| ())
+    })?;
+    println!(
+        "{}",
+        stats("detnet 1 frame (trait, incl. pool)", &mut detnet)
+    );
+    let frame_refs: Vec<NetFrame<'_>> = (0..6)
+        .map(|i| NetFrame {
+            pixels: &frames[i % frames.len()],
+            top: 0,
+        })
+        .collect();
     let mut detnet6 = time_calls(iters / 2, || nets.detnet(&frame_refs).map(|_| ()))?;
     println!("{}", stats("detnet 6 frames (trait)", &mut detnet6));
     for count in [1usize, 2, 4, 8] {
@@ -140,13 +182,25 @@ fn latency(nets: &mut dyn HandNets, iters: usize, golden_dir: &Path) -> BenchRes
         let mut samples = time_calls(iters, || nets.keynet(&crops, &priors).map(|_| ()))?;
         let line: String = stats(&format!("keynet {count} crop(s) (trait)"), &mut samples);
         let p50: f64 = samples[samples.len() / 2];
-        println!("{line}  -> {:.0} crops/s at p50", count as f64 / (p50 / 1e6));
+        println!(
+            "{line}  -> {:.0} crops/s at p50",
+            count as f64 / (p50 / 1e6)
+        );
     }
     Ok(())
 }
 
-fn rknn_phases(model: &mut RknnModel, inputs: &[InputData<'_>], iters: usize, label: &str) -> BenchResult<()> {
-    let mut buffers: Vec<Vec<f32>> = model.outputs().iter().map(|o| vec![0.0; o.n_elems]).collect();
+fn rknn_phases(
+    model: &mut RknnModel,
+    inputs: &[InputData<'_>],
+    iters: usize,
+    label: &str,
+) -> BenchResult<()> {
+    let mut buffers: Vec<Vec<f32>> = model
+        .outputs()
+        .iter()
+        .map(|o| vec![0.0; o.n_elems])
+        .collect();
     let mut timings: Vec<RunTiming> = Vec::with_capacity(iters);
     for i in 0..iters + 20 {
         if i % 100 == 0 {
@@ -165,7 +219,13 @@ fn rknn_phases(model: &mut RknnModel, inputs: &[InputData<'_>], iters: usize, la
     let mut get: Vec<f64> = column(|t| t.outputs_get_us);
     let mut npu: Vec<f64> = column(|t| t.npu_us);
     println!("{label} ({}):", model.name());
-    for (name, values) in [("  api total", &mut total), ("  inputs_set", &mut set), ("  rknn_run", &mut run), ("  outputs_get", &mut get), ("  npu (driver)", &mut npu)] {
+    for (name, values) in [
+        ("  api total", &mut total),
+        ("  inputs_set", &mut set),
+        ("  rknn_run", &mut run),
+        ("  outputs_get", &mut get),
+        ("  npu (driver)", &mut npu),
+    ] {
         println!("{}", stats(name, values));
     }
     Ok(())
@@ -176,7 +236,10 @@ fn parallel_keynet(runtime: &RknnRuntime, file: &Path, iters: usize) -> BenchRes
     let crop: Vec<u8> = vec![100; KEYNET_CROP * KEYNET_CROP];
     let crop_f32: Vec<f32> = vec![100.0; KEYNET_CROP * KEYNET_CROP];
     let prior: Vec<f32> = vec![0.25; 63];
-    let mut models: Vec<RknnModel> = vec![RknnModel::load(runtime, file, NpuCore::Core1)?, RknnModel::load(runtime, file, NpuCore::Core2)?];
+    let mut models: Vec<RknnModel> = vec![
+        RknnModel::load(runtime, file, NpuCore::Core1)?,
+        RknnModel::load(runtime, file, NpuCore::Core2)?,
+    ];
     let quantised: bool = models[0].inputs()[0].dtype == 2 || models[0].inputs()[0].dtype == 3;
     let started: Instant = Instant::now();
     let results: Vec<Result<f64, String>> = std::thread::scope(|scope| {
@@ -185,32 +248,53 @@ fn parallel_keynet(runtime: &RknnRuntime, file: &Path, iters: usize) -> BenchRes
             .map(|model| {
                 let (crop, crop_f32, prior) = (&crop, &crop_f32, &prior);
                 scope.spawn(move || -> Result<f64, String> {
-                    let mut buffers: Vec<Vec<f32>> = model.outputs().iter().map(|o| vec![0.0; o.n_elems]).collect();
+                    let mut buffers: Vec<Vec<f32>> = model
+                        .outputs()
+                        .iter()
+                        .map(|o| vec![0.0; o.n_elems])
+                        .collect();
                     let begun: Instant = Instant::now();
                     for _ in 0..iters {
-                        let mut outputs: Vec<&mut [f32]> = buffers.iter_mut().map(Vec::as_mut_slice).collect();
-                        let image: InputData<'_> = if quantised { InputData::U8(crop) } else { InputData::F32(crop_f32) };
-                        model.run(&[image, InputData::F32(prior)], &mut outputs).map_err(|e| e.to_string())?;
+                        let mut outputs: Vec<&mut [f32]> =
+                            buffers.iter_mut().map(Vec::as_mut_slice).collect();
+                        let image: InputData<'_> = if quantised {
+                            InputData::U8(crop)
+                        } else {
+                            InputData::F32(crop_f32)
+                        };
+                        model
+                            .run(&[image, InputData::F32(prior)], &mut outputs)
+                            .map_err(|e| e.to_string())?;
                     }
                     Ok(iters as f64 / begun.elapsed().as_secs_f64())
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("thread panicked".into()))).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("thread panicked".into())))
+            .collect()
     });
     let wall: f64 = started.elapsed().as_secs_f64();
     let mut total: f64 = 0.0;
     for (core, result) in [1, 2].iter().zip(results) {
         let rate: f64 = result?;
         total += rate;
-        println!("  keynet context on core {core}: {rate:.0} crops/s ({:.3} ms/crop)", 1e3 / rate);
+        println!(
+            "  keynet context on core {core}: {rate:.0} crops/s ({:.3} ms/crop)",
+            1e3 / rate
+        );
     }
-    println!("  two cores in parallel: {total:.0} crops/s aggregate, {:.0} crops/s by wall clock", (2 * iters) as f64 / wall);
+    println!(
+        "  two cores in parallel: {total:.0} crops/s aggregate, {:.0} crops/s by wall clock",
+        (2 * iters) as f64 / wall
+    );
     Ok(())
 }
 
 fn read_f32(path: &Path) -> BenchResult<Vec<f32>> {
-    Ok(f32_values(&std::fs::read(path)?).ok_or_else(|| format!("{}: not whole f32 values", path.display()))?)
+    Ok(f32_values(&std::fs::read(path)?)
+        .ok_or_else(|| format!("{}: not whole f32 values", path.display()))?)
 }
 
 /// Runs a whole evaluation set through the trait and writes the raw outputs. DetNet takes `detnet_frames_u8.bin` (640x480 net
@@ -220,9 +304,9 @@ fn heldout(nets: &mut dyn HandNets, dir: &Path, out: &Path) -> BenchResult<()> {
     std::fs::create_dir_all(out)?;
     let frames_path: PathBuf = dir.join("detnet_frames_u8.bin");
     let frames: Vec<Vec<u8>> = if frames_path.exists() {
-        std::fs::read(&frames_path)?.chunks_exact(DETNET_WIDTH * DETNET_HEIGHT).map(<[u8]>::to_vec).collect()
+        std::fs::read(&frames_path)?.as_chunks::<{ DETNET_WIDTH * DETNET_HEIGHT }>().0.iter().map(|row| row.to_vec()).collect()
     } else {
-        std::fs::read(dir.join("detnet_pooled_u8.bin"))?.chunks_exact(POOLED_WIDTH * POOLED_HEIGHT).map(expand_pooled).collect()
+        std::fs::read(dir.join("detnet_pooled_u8.bin"))?.as_chunks::<{ POOLED_WIDTH * POOLED_HEIGHT }>().0.iter().map(|row| expand_pooled(row)).collect()
     };
     let mut detnet_rows: Vec<u8> = Vec::new();
     let mut detnet_us: Vec<f64> = Vec::new();
@@ -231,25 +315,41 @@ fn heldout(nets: &mut dyn HandNets, dir: &Path, out: &Path) -> BenchResult<()> {
             check_temperature()?;
         }
         let started: Instant = Instant::now();
-        let raw = nets.detnet(&[NetFrame { pixels: frame, top: 0 }])?;
+        let raw = nets.detnet(&[NetFrame {
+            pixels: frame,
+            top: 0,
+        }])?;
         detnet_us.push(started.elapsed().as_secs_f64() * 1e6);
         for raw in &raw {
             detnet_rows.extend(detnet_row(raw).iter().flat_map(|v| v.to_le_bytes()));
         }
     }
     std::fs::write(out.join("detnet_out_f32.bin"), &detnet_rows)?;
-    println!("{}", stats(if frames_path.exists() { "eval detnet, 640x480 frames (trait)" } else { "eval detnet, expanded pools (trait)" }, &mut detnet_us));
+    println!(
+        "{}",
+        stats(
+            if frames_path.exists() {
+                "eval detnet, 640x480 frames (trait)"
+            } else {
+                "eval detnet, expanded pools (trait)"
+            },
+            &mut detnet_us
+        )
+    );
     let crops_f32_path: PathBuf = dir.join("keynet_crops_f32.bin");
     let crop_len: usize = KEYNET_CROP * KEYNET_CROP;
     let crops: Vec<Vec<f32>> = if crops_f32_path.exists() {
-        read_f32(&crops_f32_path)?.chunks_exact(crop_len).map(<[f32]>::to_vec).collect()
+        read_f32(&crops_f32_path)?.chunks_exact(crop_len).map(|row| row.to_vec()).collect()
     } else {
-        std::fs::read(dir.join("keynet_crops_u8.bin"))?.chunks_exact(crop_len).map(|crop| crop.iter().map(|&v| f32::from(v) / 255.0).collect()).collect()
+        std::fs::read(dir.join("keynet_crops_u8.bin"))?
+            .chunks_exact(crop_len)
+            .map(|crop| crop.iter().map(|&v| f32::from(v) / 255.0).collect())
+            .collect()
     };
     let priors: Vec<f32> = read_f32(&dir.join("keynet_keypoints_f32.bin"))?;
     let mut keynet_rows: Vec<u8> = Vec::new();
     let mut keynet_us: Vec<f64> = Vec::new();
-    for (i, (crop, prior)) in crops.iter().zip(priors.chunks_exact(63)).enumerate() {
+    for (i, (crop, prior)) in crops.iter().zip(priors.as_chunks::<63>().0.iter()).enumerate() {
         if i % 200 == 0 {
             check_temperature()?;
         }
@@ -262,15 +362,33 @@ fn heldout(nets: &mut dyn HandNets, dir: &Path, out: &Path) -> BenchResult<()> {
         }
     }
     std::fs::write(out.join("keynet_out_f32.bin"), &keynet_rows)?;
-    println!("{}", stats(if crops_f32_path.exists() { "eval keynet 1 f32 crop (trait)" } else { "eval keynet 1 u8 crop (trait)" }, &mut keynet_us));
+    println!(
+        "{}",
+        stats(
+            if crops_f32_path.exists() {
+                "eval keynet 1 f32 crop (trait)"
+            } else {
+                "eval keynet 1 u8 crop (trait)"
+            },
+            &mut keynet_us
+        )
+    );
     println!("eval outputs written to {}", out.display());
     Ok(())
 }
 
 fn rknn_backend(args: &Args, iters: usize) -> BenchResult<Box<dyn HandNets>> {
-    let lib: &str = args.get("lib").unwrap_or(robocap_live::nets::rknn::DEFAULT_LIBRARY);
-    let detnet: PathBuf = args.models.join(args.get("detnet").unwrap_or(robocap_live::nets::rknn::DEFAULT_DETNET));
-    let keynet: PathBuf = args.models.join(args.get("keynet").unwrap_or(robocap_live::nets::rknn::DEFAULT_KEYNET));
+    let lib: &str = args
+        .get("lib")
+        .unwrap_or(robocap_live::nets::rknn::DEFAULT_LIBRARY);
+    let detnet: PathBuf = args.models.join(
+        args.get("detnet")
+            .unwrap_or(robocap_live::nets::rknn::DEFAULT_DETNET),
+    );
+    let keynet: PathBuf = args.models.join(
+        args.get("keynet")
+            .unwrap_or(robocap_live::nets::rknn::DEFAULT_KEYNET),
+    );
     let contexts: usize = args.get("contexts").map_or(Ok(2), str::parse)?;
     let detnet_contexts: usize = args.get("detnet-contexts").map_or(Ok(3), str::parse)?;
     let rknn: RknnNets = RknnNets::with_files(lib, &detnet, &keynet, detnet_contexts, contexts)?;
@@ -281,12 +399,26 @@ fn rknn_backend(args: &Args, iters: usize) -> BenchResult<Box<dyn HandNets>> {
     let runtime: RknnRuntime = RknnRuntime::open(lib)?;
     let mut detnet_model = RknnModel::load(&runtime, &detnet, NpuCore::Core0)?;
     let detnet_image: InputData<'_> =
-        if detnet_model.inputs()[0].dtype == 2 || detnet_model.inputs()[0].dtype == 3 { InputData::U8(&pooled) } else { InputData::F32(&pooled_f32) };
-    rknn_phases(&mut detnet_model, &[detnet_image], iters, "detnet core 0 phases")?;
+        if detnet_model.inputs()[0].dtype == 2 || detnet_model.inputs()[0].dtype == 3 {
+            InputData::U8(&pooled)
+        } else {
+            InputData::F32(&pooled_f32)
+        };
+    rknn_phases(
+        &mut detnet_model,
+        &[detnet_image],
+        iters,
+        "detnet core 0 phases",
+    )?;
     if detnet_model.inputs()[0].dtype == 1 {
         let mut pooled_f16: Vec<u8> = vec![0; 2 * POOLED_WIDTH * POOLED_HEIGHT];
         f16_bytes_from_f32(&pooled_f32, 1.0 / 255.0, &mut pooled_f16)?;
-        rknn_phases(&mut detnet_model, &[InputData::Native(&pooled_f16)], iters, "detnet core 0 phases, fp16 pass-through (deployed)")?;
+        rknn_phases(
+            &mut detnet_model,
+            &[InputData::Native(&pooled_f16)],
+            iters,
+            "detnet core 0 phases, fp16 pass-through (deployed)",
+        )?;
     }
     let crop: Vec<u8> = vec![100; KEYNET_CROP * KEYNET_CROP];
     let crop_f32: Vec<f32> = vec![100.0; KEYNET_CROP * KEYNET_CROP];
@@ -294,44 +426,78 @@ fn rknn_backend(args: &Args, iters: usize) -> BenchResult<Box<dyn HandNets>> {
     {
         let mut model = RknnModel::load(&runtime, &keynet, NpuCore::Core1)?;
         let quantised: bool = model.inputs()[0].dtype == 2 || model.inputs()[0].dtype == 3;
-        let image: InputData<'_> = if quantised { InputData::U8(&crop) } else { InputData::F32(&crop_f32) };
-        rknn_phases(&mut model, &[image, InputData::F32(&prior)], iters, "keynet core 1 phases")?;
+        let image: InputData<'_> = if quantised {
+            InputData::U8(&crop)
+        } else {
+            InputData::F32(&crop_f32)
+        };
+        rknn_phases(
+            &mut model,
+            &[image, InputData::F32(&prior)],
+            iters,
+            "keynet core 1 phases",
+        )?;
         if !quantised {
             let mut crop_f16: Vec<u8> = vec![0; 2 * KEYNET_CROP * KEYNET_CROP];
             f16_bytes_from_f32(&crop_f32, 1.0 / 255.0, &mut crop_f16)?;
-            rknn_phases(&mut model, &[InputData::Native(&crop_f16), InputData::F32(&prior)], iters, "keynet core 1 phases, fp16 pass-through (deployed)")?;
+            rknn_phases(
+                &mut model,
+                &[InputData::Native(&crop_f16), InputData::F32(&prior)],
+                iters,
+                "keynet core 1 phases, fp16 pass-through (deployed)",
+            )?;
         }
     }
     if let Some(file) = args.get("keynet-b4") {
-        let mut model: RknnModel = RknnModel::load(&runtime, args.models.join(file), NpuCore::Core1)?;
+        let mut model: RknnModel =
+            RknnModel::load(&runtime, args.models.join(file), NpuCore::Core1)?;
         let crops: Vec<u8> = vec![100; 4 * KEYNET_CROP * KEYNET_CROP];
         let crops_f32: Vec<f32> = vec![100.0; 4 * KEYNET_CROP * KEYNET_CROP];
         let priors: Vec<f32> = vec![0.25; 4 * 63];
-        let image: InputData<'_> =
-            if model.inputs()[0].dtype == 2 || model.inputs()[0].dtype == 3 { InputData::U8(&crops) } else { InputData::F32(&crops_f32) };
-        rknn_phases(&mut model, &[image, InputData::F32(&priors)], iters, "keynet b4 core 1 phases (4 crops per call)")?;
+        let image: InputData<'_> = if model.inputs()[0].dtype == 2 || model.inputs()[0].dtype == 3 {
+            InputData::U8(&crops)
+        } else {
+            InputData::F32(&crops_f32)
+        };
+        rknn_phases(
+            &mut model,
+            &[image, InputData::F32(&priors)],
+            iters,
+            "keynet b4 core 1 phases (4 crops per call)",
+        )?;
     }
     println!("keynet throughput, contexts on cores 1 + 2:");
     parallel_keynet(&runtime, &keynet, iters * 3)?;
     let frame: Vec<u8> = vec![90; DETNET_WIDTH * DETNET_HEIGHT];
     let mut pooled_out: Vec<u8> = vec![0; POOLED_WIDTH * POOLED_HEIGHT];
-    let mut pool = time_calls(iters, || pool4_u8(&frame, DETNET_WIDTH, DETNET_HEIGHT, &mut pooled_out))?;
+    let mut pool = time_calls(iters, || {
+        pool4_u8(&frame, DETNET_WIDTH, DETNET_HEIGHT, &mut pooled_out)
+    })?;
     println!("{}", stats("cpu pool4_u8 640x480 -> 120x160", &mut pool));
     let mut pooled_mean: Vec<f32> = vec![0.0; POOLED_WIDTH * POOLED_HEIGHT];
-    let mut pool_f32 = time_calls(iters, || pool4_mean_f32(&frame, DETNET_WIDTH, DETNET_HEIGHT, &mut pooled_mean))?;
-    println!("{}", stats("cpu pool4_mean_f32 640x480 -> 120x160", &mut pool_f32));
+    let mut pool_f32 = time_calls(iters, || {
+        pool4_mean_f32(&frame, DETNET_WIDTH, DETNET_HEIGHT, &mut pooled_mean)
+    })?;
+    println!(
+        "{}",
+        stats("cpu pool4_mean_f32 640x480 -> 120x160", &mut pool_f32)
+    );
     Ok(Box::new(rknn))
 }
 
 #[cfg(feature = "ort")]
 fn ort_backend(args: &Args) -> BenchResult<Box<dyn HandNets>> {
-    use robocap_live::nets::ort::{OrtDevice, OrtNets, OrtConfig};
+    use robocap_live::nets::ort::{OrtConfig, OrtDevice, OrtNets};
     let device: OrtDevice = match args.get("device").unwrap_or("auto") {
         "cuda" => OrtDevice::Cuda(0),
         "cpu" => OrtDevice::Cpu,
         _ => OrtDevice::Auto,
     };
-    let options: OrtConfig = OrtConfig { device, dylib: args.get("dylib").map(PathBuf::from), intra_threads: 0 };
+    let options: OrtConfig = OrtConfig {
+        device,
+        dylib: args.get("dylib").map(PathBuf::from),
+        intra_threads: 0,
+    };
     let ort: OrtNets = OrtNets::new(&args.models, &options)?;
     println!("backend: {}", ort.describe());
     Ok(Box::new(ort))

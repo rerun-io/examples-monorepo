@@ -378,7 +378,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             if packed_count != 0 {
                 packed_offset += expected;
             }
-            for (index, point) in values.chunks_exact(FUSED_RUNS).enumerate() {
+            for (index, point) in values.as_chunks::<{ FUSED_RUNS }>().0.iter().enumerate() {
                 decode_point(point, &mut self.batch.slots[lane], index);
             }
             self.batch.slots[lane].finish(count);

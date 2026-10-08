@@ -65,7 +65,7 @@ pub fn remap_f32_from_u8<const C: usize>(
             f32::from(data[(y as usize * width + x as usize) * C + channel])
         }
     };
-    for ((out, &x), &y) in dst.as_slice_mut().chunks_exact_mut(C).zip(map_x.as_slice()).zip(map_y.as_slice()) {
+    for ((out, &x), &y) in dst.as_slice_mut().as_chunks_mut::<C>().0.iter_mut().zip(map_x.as_slice()).zip(map_y.as_slice()) {
         // Far outside (or NaN, which fails every comparison): all four taps are zero.
         if !(x > -1.0 && y > -1.0 && x < w && y < h) {
             out.fill(0.0);

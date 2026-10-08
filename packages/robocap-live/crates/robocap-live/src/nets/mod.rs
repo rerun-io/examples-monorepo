@@ -95,7 +95,7 @@ impl NetFrame<'_> {
     /// [`NetsError::Input`] when the pixels are not whole 640-wide rows or do not fit in the 480 rows below `top`.
     pub fn rows(&self) -> Result<usize, NetsError> {
         let rows: usize = self.pixels.len() / DETNET_WIDTH;
-        if self.pixels.len() % DETNET_WIDTH != 0 || self.top + rows > DETNET_HEIGHT {
+        if !self.pixels.len().is_multiple_of(DETNET_WIDTH) || self.top + rows > DETNET_HEIGHT {
             let message: String = format!("{} bytes at row {} do not fit the 640x480 frame", self.pixels.len(), self.top);
             return Err(NetsError::Input { net: "detnet", message });
         }

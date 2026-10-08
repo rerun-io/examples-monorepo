@@ -37,15 +37,14 @@ impl CellScores {
         });
         for (column, row) in grid.cells() {
             let index = row * cells_x + column;
-            if let Some((occupancy, masked)) = eligibility {
-                if masked[index]
+            if let Some((occupancy, masked)) = eligibility
+                && (masked[index]
                     || row >= occupancy.rows
                     || column >= occupancy.columns
-                    || occupancy.counts[row * occupancy.columns + column] >= 1
+                    || occupancy.counts[row * occupancy.columns + column] >= 1)
                 {
                     continue;
                 }
-            }
             let first_x = grid.x_start + column * grid.cell + FAST_BORDER;
             let first_y = grid.y_start + row * grid.cell + FAST_BORDER;
             let last_x =

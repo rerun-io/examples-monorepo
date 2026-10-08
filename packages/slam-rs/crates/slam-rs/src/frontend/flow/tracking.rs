@@ -55,7 +55,21 @@ impl<P: Pattern, F: FrameStages<Tracker: PatchTracker<Pattern = P>>> FrameToFram
                     continue;
                 }
                 let translation = if use_depth {
-                    project_between_cams(cameras, &position, *depth_guess, &t_c1_c2, cam1, camera).1
+                    let (valid, pixel) = project_between_cams(
+                        cameras,
+                        &position,
+                        *depth_guess,
+                        &t_c1_c2,
+                        cam1,
+                        camera,
+                    );
+                    if valid {
+                        pixel
+                    } else {
+                        // Stereo destinations share source patches and must keep their slots aligned.
+                        // A finite point outside every pyramid level makes KLT reject this guess.
+                        Vector2::repeat(-1.0e6)
+                    }
                 } else {
                     position
                 };
@@ -133,7 +147,7 @@ pub(super) fn cast_matrix4(matrix: &Matrix4<f64>) -> Matrix4<f32> {
 }
 
 /// Project between cameras, returning both validity and the written pixel.
-/// Tracking uses the pixel; overlap masking also checks validity.
+/// Both tracking and overlap masking must check validity before using the pixel.
 ///
 /// # Panics
 /// If either camera index is outside the rig.
@@ -157,6 +171,59 @@ pub fn project_between_cams(
     let cj_xyzw: Vector4<f32> = Vector4::new(point.x, point.y, point.z, ci_xyzw.w);
 
     let mut cj_uv: Vector2<f32> = Vector2::zeros();
-    valid &= cameras[j].model.project(&cj_xyzw, &mut cj_uv);
+    valid &= cameras[j].model.project_point(&cj_xyzw, &mut cj_uv, None);
     (valid, cj_uv)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::calib::Calibration;
+    use crate::camera::SlamCamera;
+    use kornia_staging_3d::camera::{CameraModelKind, KannalaBrandt4};
+    use crate::config::VioConfig;
+    use crate::frontend::flow::FrontendOptions;
+    use crate::frontend::patterns::Pattern51;
+    use crate::types::KeypointId;
+    use nalgebra::Matrix2;
+
+    #[test]
+    fn tracking_rejects_kb4_guesses_without_changing_source_slots() {
+        let calibration =
+            Calibration::from_json_str(include_str!("../../../tests/fixtures/msdmg_calib.json"))
+                .unwrap();
+        let mut flow = FrameToFrameOpticalFlow::<Pattern51>::new(
+            VioConfig::default(),
+            &calibration,
+            FrontendOptions::default(),
+        )
+        .unwrap();
+        flow.cameras[0].model = SlamCamera { inner: CameraModelKind::Kb4(
+            KannalaBrandt4::new([
+                100.0, 100.0, 480.0, 480.0, -1.0, 0.0, 0.0, 0.0,
+            ])
+            .unwrap(),
+        ) };
+        for (id, x) in [(1, 480.0), (2, 800.0)] {
+            flow.frame.cameras[0].set(
+                KeypointId(id),
+                &AffineCompact2f {
+                    linear: Matrix2::identity(),
+                    translation: Vector2::new(x, 480.0),
+                },
+                NO_RESPONSE,
+            );
+        }
+        flow.prepare_tracks(Some(&PosePrediction::default()));
+        assert_eq!(flow.passes[0].ids, vec![KeypointId(1), KeypointId(2)]);
+        assert_eq!(
+            flow.passes[0].guesses.get(1).translation,
+            Vector2::repeat(-1.0e6)
+        );
+        assert_eq!(
+            flow.passes[0].guesses.get(0).translation,
+            Vector2::new(480.0, 480.0)
+        );
+    }
 }

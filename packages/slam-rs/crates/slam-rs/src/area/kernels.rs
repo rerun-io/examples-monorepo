@@ -9,7 +9,7 @@ pub(super) fn area_row_generic<const C: usize>(
     out: &mut [u8],
 ) {
     let area = (kx * ky) as u32;
-    for (x, pixel) in out.chunks_exact_mut(C).enumerate() {
+    for (x, pixel) in out.as_chunks_mut::<{ C }>().0.iter_mut().enumerate() {
         for (channel, value) in pixel.iter_mut().enumerate() {
             let mut sum = 0u32;
             for dy in 0..ky {

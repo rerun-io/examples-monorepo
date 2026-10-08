@@ -3165,6 +3165,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-3d"
+version = "0.1.0"
+dependencies = [
+ "kornia-algebra",
+ "kornia-staging-algebra",
+ "nalgebra",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-algebra"
+version = "0.1.0"
+dependencies = [
+ "kornia-algebra",
+ "nalgebra",
+]
+
+[[package]]
 name = "kornia-tensor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6636,6 +6655,8 @@ dependencies = [
  "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
+ "kornia-staging-algebra",
  "log",
  "nalgebra",
  "proptest",

@@ -215,7 +215,7 @@ mod tests {
             let value: f32 = (index as f32 * 0.37).sin();
             (
                 [value, value * 2.0, value * 3.0, value, -value, value],
-                index % 5 != 0,
+                !index.is_multiple_of(5),
             )
         };
         let mut reference: Option<([Vec<f32>; 6], Vec<bool>)> = None;

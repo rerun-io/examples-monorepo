@@ -2586,6 +2586,16 @@ depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
     "packages/slam-rs/patches/**",
     "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
     "packages/slam-rs/tools/prepare_patched_deps.py",
@@ -2707,6 +2717,16 @@ depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu --target-dir target/wgpu && cp target/wgpu/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
     "packages/slam-rs/patches/**",
     "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
     "packages/slam-rs/tools/prepare_patched_deps.py",
@@ -3348,13 +3368,32 @@ inputs = [
     "packages/handfit/Cargo.toml",
     "packages/handfit/Cargo.lock",
     "packages/handfit/crates/*/Cargo.toml",
-    "packages/handfit/crates/*/src/**/*.rs",
+    "packages/handfit/crates/*/build.rs",
+    "packages/handfit/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
 ]
 outputs = ["packages/handfit/handfit/_core.so"]
 description = "Build the native hand-pose fit and install handfit._core in place"
 
 [feature.handfit.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "handfit-cargo-test"]
+
+# Both handfit and handtrack load handfit._core; rebuild before every Python test lane.
+[feature.handfit.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["handfit-build"]
+
+[feature.handfit.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["handfit-build"]
+
+[feature.handfit.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["handfit-build"]
 
 [feature.handfit.tasks.handfit-cargo-test]
 cmd = "cargo test --release --workspace"
@@ -3440,6 +3479,28 @@ PYREFLY_TARGET = "robocap_live tools/apps tests"
 depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
 cmd = "PYO3_BUILD_EXTENSION_MODULE=1 cargo build --release -p robocap-live-py && cp target/release/lib_core.so robocap_live/_core.so.new && mv robocap_live/_core.so.new robocap_live/_core.so"
 cwd = "packages/robocap-live"
+inputs = [
+    "packages/robocap-live/Cargo.toml",
+    "packages/robocap-live/Cargo.lock",
+    "packages/robocap-live/crates/*/Cargo.toml",
+    "packages/robocap-live/crates/*/build.rs",
+    "packages/robocap-live/crates/*/src/**",
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**",
+    "packages/handfit/Cargo.toml",
+    "packages/handfit/Cargo.lock",
+    "packages/handfit/crates/*/Cargo.toml",
+    "packages/handfit/crates/*/build.rs",
+    "packages/handfit/crates/*/src/**",
+    "packages/kornia-staging/Cargo.toml",
+    "packages/kornia-staging/Cargo.lock",
+    "packages/kornia-staging/crates/*/Cargo.toml",
+    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/crates/*/src/**",
+]
 description = "Build the Rust hands-layer core and install robocap_live._core in place"
 
 # The binding's test embeds this environment's Python: libpython from its lib dir, the standard library from its prefix.
@@ -3501,12 +3562,12 @@ cwd = "packages/kornia-staging"
 description = "Check Rust formatting"
 
 [feature.kornia-staging.tasks.kornia-staging-clippy]
-cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cmd = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo clippy --locked --workspace --all-targets --no-default-features -- -D warnings"
 cwd = "packages/kornia-staging"
 description = "Check all Rust targets with warnings denied"
 
 [feature.kornia-staging.tasks.kornia-staging-test]
-cmd = "cargo test --locked --workspace"
+cmd = "cargo test --locked --workspace --all-features && cargo test --locked --workspace --no-default-features"
 cwd = "packages/kornia-staging"
 description = "Run Rust workspace tests and doctests"
 

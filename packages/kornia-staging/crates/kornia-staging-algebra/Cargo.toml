@@ -1,0 +1,19 @@
+[package]
+name = "kornia-staging-algebra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kornia-algebra.workspace = true
+nalgebra.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+approx.workspace = true
+criterion.workspace = true
+
+[lints]
+workspace = true
+

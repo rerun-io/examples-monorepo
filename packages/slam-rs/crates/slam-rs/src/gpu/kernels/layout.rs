@@ -25,7 +25,7 @@ pub(crate) const FILTER_MARGIN: f32 = crate::frontend::tracker::FILTER_MARGIN;
 pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 =
     crate::frontend::tracker::MAX_INCREMENT_INFINITY_NORM;
 /// `Sophus::Constants<float>::epsilon()`.
-pub(crate) const SOPHUS_EPSILON: f32 = <f32 as crate::lie::LieScalar>::SOPHUS_EPSILON;
+pub(crate) const SOPHUS_EPSILON: f32 = <f32 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
 
 /// The smallest positive normal pivot, matching the CPU LDLT guard.
 pub(crate) const LDLT_TOLERANCE: f32 = f32::MIN_POSITIVE;

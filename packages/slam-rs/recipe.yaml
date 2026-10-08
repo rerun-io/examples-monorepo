@@ -3,20 +3,29 @@ recipe:
   version: "0.1.0"
 
 source:
-  path: .
-  filter:
-    exclude:
-      - target/**
-      - data/**
-      - .pixi/**
-      - '**/__pycache__/**'
-      - slam_rs/_core.so
+  - path: .
+    target_directory: slam-rs
+    filter:
+      exclude:
+        - target/**
+        - data/**
+        - .pixi/**
+        - '**/__pycache__/**'
+        - slam_rs/_core.so
+  - path: ../kornia-staging
+    target_directory: kornia-staging
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
 
 outputs:
   - package:
       name: slam-rs
     build:
       script:
+        - cd slam-rs
         - export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
         - python tools/prepare_patched_deps.py
         - cargo build --release -p slam-rs-py --locked
@@ -54,6 +63,7 @@ outputs:
       name: slam-rs-catalog
     build:
       script:
+        - cd slam-rs
         - python -m pip install . --no-deps --no-build-isolation -vv
         - export SP_DIR="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
         - rm -f "$SP_DIR"/slam_rs/_core* "$SP_DIR/slam_rs/py.typed" "$SP_DIR"/slam_rs/{__init__,rig,frontend_log,config,machine}.py

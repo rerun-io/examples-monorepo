@@ -61,6 +61,23 @@ fn convergence_exit_matches_one_step_when_every_update_is_small() {
     }
 }
 
+/// Invalid camera projections keep shared stereo source slots but must never track.
+#[test]
+fn finite_out_of_image_guesses_are_rejected_without_losing_source_slots() {
+    let levels = 3;
+    let mut scene = fixture(0.0, 0.0, levels);
+    let count = scene.positions.len();
+    let mut rejected = scene.transforms.get(0);
+    rejected.translation = Vector2::repeat(-1.0e6);
+    scene.transforms.set(0, &rejected);
+    let mut tracker = tracker(count, levels, 1);
+    let mut result = FlowResult::with_capacity(count);
+    tracker.track(&scene.prev, &scene.next, &scene.patches, &scene.transforms, &mut result).unwrap();
+    assert!(!result.is_valid(0));
+    assert!(!result.tracked().is_empty());
+    assert_eq!(scene.positions.len(), scene.transforms.len());
+}
+
 /// Compare the public scalar and four-point patch operations at the bit level.
 fn assert_group_bits<P: Pattern>(image: &ImageU16, positions: [Vector2<f32>; 4], angle: f32) {
     use nalgebra::Vector3;

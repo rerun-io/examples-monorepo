@@ -587,7 +587,7 @@ mod tests {
     use super::*;
     use crate::ba_base::compute_rel_pose;
     use crate::calib::Calibration;
-    use crate::camera::CameraEnum;
+    use crate::camera::SlamCamera;
     use crate::config::VioConfig;
     use crate::imu::{ImuNoise, ImuSample};
     use crate::landmark::{Landmark, StereographicParam};
@@ -704,7 +704,7 @@ mod tests {
         // Twelve landmarks in a grid two metres in front of the host camera,
         // each observed by every camera that can see it — at the pixel the truth
         // projects it to, which is what makes the truth a zero-cost point.
-        let cameras: Vec<CameraEnum<f64>> = vio.ba.cameras().to_vec();
+        let cameras: Vec<SlamCamera<f64>> = vio.ba.cameras().to_vec();
         let host: TimeCamId = TimeCamId::new(HOST_T_NS, 0);
         let mut next_id: u64 = 0;
         for row in -1..=1_i32 {

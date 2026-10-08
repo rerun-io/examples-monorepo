@@ -9,162 +9,32 @@
 //! Their small-angle Taylor branches stop one term earlier than the standalone
 //! SO(3) Jacobians, so each call retains its own formula.
 
-use kornia_algebra::{SO3F32, SO3F64, Vec3AF32, Vec3F64};
+#[cfg(test)]
+use kornia_staging_algebra::Scalar;
 use nalgebra::{
-    Matrix3, Matrix3x4, Matrix4, Matrix6, Quaternion, RealField, UnitQuaternion, Vector3, Vector6,
+    Matrix3, Matrix3x4, Matrix4, Matrix6, Quaternion, UnitQuaternion, Vector3, Vector6,
 };
 
-/// A scalar the Lie module can run in: `f32` and `f64`.
-///
-/// The extra methods carry `Sophus::Constants<Scalar>`,
-/// whose epsilon is `1e-10` in double and `1e-5` in float. `nalgebra`'s own
-/// `RealField::default_epsilon` is the machine epsilon and would move every
-/// small-angle branch, so it is not used.
-pub trait LieScalar: RealField + Copy {
-    /// `Sophus::Constants<Scalar>::epsilon()`.
-    ///
-    /// A `const` rather than a method so a context with no value to call it on
-    /// can still name it: `gpu::kernels` aliases it the way it aliases
-    /// `PATCH_BORDER`, instead of re-declaring `1e-5`.
-    const SOPHUS_EPSILON: Self;
-
-    /// `Sophus::Constants<Scalar>::epsilonSqrt()`.
-    fn sophus_epsilon_sqrt() -> Self {
-        Self::SOPHUS_EPSILON.sqrt()
-    }
-
-    /// Near-antiparallel tolerance: 1e-12 for f64 and 1e-5 for f32.
-    /// This is coarser than machine epsilon to stabilize gravity initialization.
+pub trait LieScalar: kornia_staging_algebra::Scalar {
+    /// Near-antiparallel tolerance used during gravity initialization.
     fn eigen_dummy_precision() -> Self;
-
-    /// Smallest positive normal scalar, used to give tiny LDLT pivots zero weight.
-    /// This is not the most negative finite value returned by `RealField::min_value`.
+    /// Smallest positive normal scalar used to weight LDLT pivots.
     fn min_positive() -> Self;
-
-    /// Largest finite scalar, used to initialize eviction score minima.
-    fn largest() -> Self;
-
-    /// SO(3) exponential through kornia-algebra, in `[qx, qy, qz, qw]` order.
-    /// The scalar adapters bridge concrete f32/f64 types without allocation.
-    /// Reported theta retains this module's small-angle convention even where the
-    /// underlying exponential uses a different Taylor threshold.
-    fn so3_exp(omega: &[Self; 3]) -> [Self; 4];
-
-    /// SO(3)'s logarithm, `SO3F32::log` or `SO3F64::log`, from `[qx, qy, qz, qw]`.
-    ///
-    /// Upstream folds `w < 0` by negating both parts before one `atan2`, where
-    /// Sophus folds it into `atan2(-n, -w)`; the two are the same expression.
-    /// See [`Self::so3_exp`] for the branch thresholds.
-    fn so3_log(quaternion_xyzw: &[Self; 4]) -> [Self; 3];
-
-    /// The 3x3 rotation matrix, `SO3F32::matrix` or `SO3F64::matrix`, **column
-    /// major**.
-    ///
-    fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9];
-
-    /// The group inverse, `SO3F32::inverse` or `SO3F64::inverse`: the conjugate
-    /// of a unit quaternion, which is what Sophus takes too.
-    fn so3_inverse(quaternion_xyzw: &[Self; 4]) -> [Self; 4];
-
-    /// The action on a point, `SO3F32 * Vec3AF32` or `SO3F64 * Vec3F64`.
-    fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3];
-
-    /// Convert a literal to the selected scalar as accurately as possible.
-    fn from_literal(value: f64) -> Self;
-
-    /// Convert to `f64` for diagnostics and scalar conversion.
-    fn to_f64(self) -> f64;
 }
-
 impl LieScalar for f64 {
-    const SOPHUS_EPSILON: Self = 1e-10;
-
     fn eigen_dummy_precision() -> Self {
         1e-12
     }
-
     fn min_positive() -> Self {
         Self::MIN_POSITIVE
     }
-
-    fn largest() -> Self {
-        Self::MAX
-    }
-
-    fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
-        SO3F64::exp(Vec3F64::from_array(*omega)).to_array()
-    }
-
-    fn so3_log(quaternion_xyzw: &[Self; 4]) -> [Self; 3] {
-        SO3F64::from_array(*quaternion_xyzw).log().to_array()
-    }
-
-    fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9] {
-        SO3F64::from_array(*quaternion_xyzw)
-            .matrix()
-            .to_cols_array()
-    }
-
-    fn so3_inverse(quaternion_xyzw: &[Self; 4]) -> [Self; 4] {
-        SO3F64::from_array(*quaternion_xyzw).inverse().to_array()
-    }
-
-    fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3] {
-        (SO3F64::from_array(*quaternion_xyzw) * Vec3F64::from_array(*point)).to_array()
-    }
-
-    fn from_literal(value: f64) -> Self {
-        value
-    }
-
-    fn to_f64(self) -> f64 {
-        self
-    }
 }
-
 impl LieScalar for f32 {
-    const SOPHUS_EPSILON: Self = 1e-5;
-
     fn eigen_dummy_precision() -> Self {
         1e-5
     }
-
     fn min_positive() -> Self {
         Self::MIN_POSITIVE
-    }
-
-    fn largest() -> Self {
-        Self::MAX
-    }
-
-    fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
-        SO3F32::exp(Vec3AF32::from_array(*omega)).to_array()
-    }
-
-    fn so3_log(quaternion_xyzw: &[Self; 4]) -> [Self; 3] {
-        SO3F32::from_array(*quaternion_xyzw).log().to_array()
-    }
-
-    fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9] {
-        SO3F32::from_array(*quaternion_xyzw)
-            .matrix()
-            .to_cols_array()
-    }
-
-    fn so3_inverse(quaternion_xyzw: &[Self; 4]) -> [Self; 4] {
-        SO3F32::from_array(*quaternion_xyzw).inverse().to_array()
-    }
-
-    fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3] {
-        (SO3F32::from_array(*quaternion_xyzw) * Vec3AF32::from_array(*point)).to_array()
-    }
-
-    fn from_literal(value: f64) -> Self {
-        value as Self
-    }
-
-    fn to_f64(self) -> f64 {
-        f64::from(self)
     }
 }
 

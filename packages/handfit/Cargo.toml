@@ -1,5 +1,5 @@
 # The native hand-pose fit: the handtrack Levenberg-Marquardt fit with SymForce-generated residuals and Jacobians.
-# Its own workspace (not inside slam-rs): no cubecl patch tree and no kornia, so it builds anywhere stable Rust does
+# Its own workspace (not inside slam-rs): no cubecl patch tree; shared camera models come from kornia-staging, supporting
 # (linux-64, linux-aarch64 for the RoboCap cap, osx-arm64). Versions match slam-rs's pins.
 [workspace]
 resolver = "2"
@@ -8,7 +8,7 @@ members = ["crates/handfit", "crates/handfit-py"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]

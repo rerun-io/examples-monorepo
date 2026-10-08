@@ -161,7 +161,7 @@ Vulkan is opened at runtime; the cap build still refuses a Vulkan, GStreamer, RK
   NEON and scalar paths.
 - Errors are `thiserror` enums per module. `anyhow` only in `main.rs`; no `unwrap`/`expect`/`panic!` in library code. Every
   `unsafe` block has a `// SAFETY:` comment.
-- Modules meant for upstream (UPSTREAM.md, `src/kornia_ext/*`) carry `#![deny(missing_docs)]`-level docs: each pub fn has
+- Modules staged in `../kornia-staging/` carry `#![deny(missing_docs)]`-level docs: each pub fn has
   `# Arguments`, `# Returns`, `# Errors` and, where cheap, a doctest.
 - The cap binary links neither GStreamer nor librknnrt (nor librga): librknnrt is dlopened at run time, and H.264 goes through
   `gst-launch-1.0` child processes fed by pipes. `scripts/build-arm.sh` checks the link-time dependencies and the glibc 2.34 floor.

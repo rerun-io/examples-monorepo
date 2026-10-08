@@ -4,8 +4,10 @@
 
 use nalgebra::{Vector2, Vector3};
 
+use crate::nets::{
+    DISTANCE_BINS, DISTANCE_LEN, HEATMAP_LEN, HEATMAP_SIDE, KEYNET_CROP, NUM_LANDMARKS,
+};
 use crate::kornia_ext::heatmap::{argmax_first, decode_peak_2d, refine_peak_log_quadratic};
-use crate::nets::{DISTANCE_BINS, DISTANCE_LEN, HEATMAP_LEN, HEATMAP_SIDE, KEYNET_CROP, NUM_LANDMARKS};
 
 /// Relative distances span `[-130, 130]` mm over the 18 bins (handtrack `DISTANCE_RANGE_MM`).
 pub const DISTANCE_RANGE_MM: f32 = 130.0;
@@ -41,7 +43,9 @@ pub fn crop_to_heatmap(p: f32) -> f32 {
 /// // Heatmap pixel 9 is crop pixel (9 + 0.5) * 96 / 18 - 0.5.
 /// assert!(points[0].iter().all(|v| (v - 50.1667).abs() < 1e-3) && peaks[0] == 1.0);
 /// ```
-pub fn decode_heatmaps(heatmaps: &[f32]) -> Option<([[f32; 2]; NUM_LANDMARKS], [f32; NUM_LANDMARKS])> {
+pub fn decode_heatmaps(
+    heatmaps: &[f32],
+) -> Option<([[f32; 2]; NUM_LANDMARKS], [f32; NUM_LANDMARKS])> {
     let side = HEATMAP_SIDE;
     if heatmaps.len() != HEATMAP_LEN {
         return None;
@@ -71,7 +75,7 @@ pub fn decode_distance(distance: &[f32]) -> Option<[f32; NUM_LANDMARKS]> {
     }
     let step = 2.0 * DISTANCE_RANGE_MM / (DISTANCE_BINS as f32 - 1.0);
     let mut out = [0f32; NUM_LANDMARKS];
-    for (landmark, bins) in distance.chunks_exact(DISTANCE_BINS).enumerate() {
+    for (landmark, bins) in distance.as_chunks::<{ DISTANCE_BINS }>().0.iter().enumerate() {
         let peak = argmax_first(bins)?;
         let index = refine_peak_log_quadratic(bins, peak).clamp(0.0, DISTANCE_BINS as f32 - 1.0);
         out[landmark] = index * step - DISTANCE_RANGE_MM;
@@ -89,7 +93,10 @@ pub fn decode_distance(distance: &[f32]) -> Option<[f32; NUM_LANDMARKS]> {
 /// # Returns
 ///
 /// Each landmark's distance from the camera minus their mean, in millimetres of the generic hand.
-pub fn relative_distances(points_cam: &[Vector3<f64>; NUM_LANDMARKS], phi: f64) -> [f64; NUM_LANDMARKS] {
+pub fn relative_distances(
+    points_cam: &[Vector3<f64>; NUM_LANDMARKS],
+    phi: f64,
+) -> [f64; NUM_LANDMARKS] {
     let norms = points_cam.map(|p| p.norm());
     let mean = norms.iter().sum::<f64>() / NUM_LANDMARKS as f64;
     norms.map(|d| (d - mean) * 1000.0 / phi)
@@ -97,7 +104,11 @@ pub fn relative_distances(points_cam: &[Vector3<f64>; NUM_LANDMARKS], phi: f64) 
 
 /// torch's `nan_to_num` for f32: NaN -> 0, +inf -> f32::MAX, -inf -> f32::MIN.
 pub fn nan_to_num(value: f32) -> f32 {
-    if value.is_nan() { 0.0 } else { value.clamp(f32::MIN, f32::MAX) }
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(f32::MIN, f32::MAX)
+    }
 }
 
 /// `keypoint_input`: KeyNet's 63-value keypoint prior.
@@ -111,7 +122,10 @@ pub fn nan_to_num(value: f32) -> f32 {
 ///
 /// Interleaved `((u + 0.5) / 96, (v + 0.5) / 96, d / 130)` per landmark; non-finite values made finite as torch's
 /// `nan_to_num` (the estimator applies it).
-pub fn keypoint_input(points_crop: &[Vector2<f64>; NUM_LANDMARKS], d_rel_mm: &[f64; NUM_LANDMARKS]) -> [f32; 3 * NUM_LANDMARKS] {
+pub fn keypoint_input(
+    points_crop: &[Vector2<f64>; NUM_LANDMARKS],
+    d_rel_mm: &[f64; NUM_LANDMARKS],
+) -> [f32; 3 * NUM_LANDMARKS] {
     let mut out = [0f32; 3 * NUM_LANDMARKS];
     for landmark in 0..NUM_LANDMARKS {
         let uv = points_crop[landmark];
@@ -145,7 +159,9 @@ mod tests {
             let (cx, cy) = (crop_to_heatmap(u), crop_to_heatmap(v));
             for r in 0..18 {
                 for c in 0..18 {
-                    heatmaps[landmark * 324 + r * 18 + c] = (-((c as f32 - cx).powi(2)) / 2.0).exp() * (-((r as f32 - cy).powi(2)) / 2.0).exp();
+                    heatmaps[landmark * 324 + r * 18 + c] = (-((c as f32 - cx).powi(2)) / 2.0)
+                        .exp()
+                        * (-((r as f32 - cy).powi(2)) / 2.0).exp();
                 }
             }
             let centre = (40.0f32 + DISTANCE_RANGE_MM) * (17.0 / (2.0 * DISTANCE_RANGE_MM));
@@ -156,17 +172,30 @@ mod tests {
         let (points, peaks) = decode_heatmaps(&heatmaps).unwrap_or(([[0.0; 2]; 21], [0.0; 21]));
         for landmark in 0..NUM_LANDMARKS {
             let [u, v] = truth[landmark % 2];
-            assert!((points[landmark][0] - u).abs() < 2e-3 && (points[landmark][1] - v).abs() < 2e-3, "{landmark}: {:?}", points[landmark]);
+            assert!(
+                (points[landmark][0] - u).abs() < 2e-3 && (points[landmark][1] - v).abs() < 2e-3,
+                "{landmark}: {:?}",
+                points[landmark]
+            );
             assert!(peaks[landmark] > 0.5);
         }
         let d = decode_distance(&distance).unwrap_or([0.0; 21]);
         assert!(d.iter().all(|mm| (mm - 40.0).abs() < 1e-2), "{d:?}");
-        assert!(decode_heatmaps(&heatmaps[1..]).is_none() && decode_distance(&distance[1..]).is_none());
+        assert!(
+            decode_heatmaps(&heatmaps[1..]).is_none() && decode_distance(&distance[1..]).is_none()
+        );
     }
 
     #[test]
     fn nan_to_num_matches_torch() {
-        let cases = [(f32::NAN, 0.0), (f32::INFINITY, f32::MAX), (f32::NEG_INFINITY, f32::MIN), (-0.0, -0.0), (1.5, 1.5), (f32::MAX, f32::MAX)];
+        let cases = [
+            (f32::NAN, 0.0),
+            (f32::INFINITY, f32::MAX),
+            (f32::NEG_INFINITY, f32::MIN),
+            (-0.0, -0.0),
+            (1.5, 1.5),
+            (f32::MAX, f32::MAX),
+        ];
         for (value, expected) in cases {
             assert_eq!(nan_to_num(value).to_bits(), expected.to_bits(), "{value}");
         }

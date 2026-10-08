@@ -148,7 +148,7 @@ impl HandNets for OrtNets {
         }
         let count: usize = frames.len();
         self.frames.resize(count * FRAME_LEN, 0.0);
-        for (frame, dst) in frames.iter().zip(self.frames.chunks_exact_mut(FRAME_LEN)) {
+        for (frame, dst) in frames.iter().zip(self.frames.as_chunks_mut::<{ FRAME_LEN }>().0.iter_mut()) {
             frame.write_unit_f32(dst)?;
         }
         let input = TensorRef::from_array_view(([count, 1, DETNET_HEIGHT, DETNET_WIDTH], self.frames.as_slice())).map_err(|e| run_error("detnet", e))?;

@@ -1,6 +1,6 @@
 //! The moving-ceiling fixture of the deferred-keyframe integration test.
 
-use super::api::calib::{Calibration, CameraModel, PinholeParams};
+use super::api::calib::{BasaltCamera, Calibration, PinholeParams};
 use super::api::config::VioConfig;
 use super::api::frontend::flow::FrontendOptions;
 use super::api::lie::{Se3, So3};
@@ -28,7 +28,7 @@ pub fn calibration() -> Calibration<f64> {
     for camera in 0..4 {
         calibration.t_i_c[camera] =
             Se3::new(So3::identity(), [camera as f64 * 0.08, 0.0, 0.0].into());
-        calibration.intrinsics[camera] = CameraModel::Pinhole(PinholeParams {
+        calibration.intrinsics[camera] = BasaltCamera::Pinhole(PinholeParams {
             fx: FOCAL,
             fy: FOCAL,
             cx: WIDTH as f64 / 2.0,
@@ -87,7 +87,7 @@ pub fn render(t_s: f64, camera: usize) -> Vec<u8> {
     let centre = position(t_s) + Vector3::new(camera as f64 * 0.08, 0.0, 0.0);
     let depth = CEILING_M - centre.z;
     let mut pixels = vec![0u8; WIDTH * HEIGHT];
-    for (v, row) in pixels.chunks_exact_mut(WIDTH).enumerate() {
+    for (v, row) in pixels.as_chunks_mut::<WIDTH>().0.iter_mut().enumerate() {
         for (u, pixel) in row.iter_mut().enumerate() {
             let x = centre.x + depth * (u as f64 - WIDTH as f64 / 2.0) / FOCAL;
             let y = centre.y + depth * (v as f64 - HEIGHT as f64 / 2.0) / FOCAL;

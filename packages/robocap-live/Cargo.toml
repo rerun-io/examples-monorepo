@@ -10,14 +10,14 @@ default-members = ["crates/robocap-live", "crates/robocap-panel", "crates/roboca
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
+kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d", features = ["virtual-camera"] }
 anyhow = "1"
 handfit = { path = "../handfit/crates/handfit" }
 # Match slam-rs on crates.io kornia 0.2 so both consumers share one Image type. See UPSTREAM.md.
-kornia-3d = { version = "0.2", default-features = false }
 kornia-algebra = { version = "0.2", default-features = false }
 kornia-image = { version = "0.2", default-features = false }
 kornia-imgproc = { version = "0.2", default-features = false }

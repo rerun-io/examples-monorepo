@@ -59,9 +59,8 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 fn checksum(luma: &[u8]) -> u64 {
-    let words = luma.chunks_exact(8);
-    let rest = words.remainder();
-    let sum = words.fold(0u64, |acc, word| acc.wrapping_add(u64::from_le_bytes(<[u8; 8]>::try_from(word).unwrap_or_default())));
+    let (words, rest) = luma.as_chunks::<8>();
+    let sum = words.iter().fold(0u64, |acc, word| acc.wrapping_add(u64::from_le_bytes(*word)));
     rest.iter().fold(sum, |acc, &b| acc.wrapping_add(u64::from(b)))
 }
 

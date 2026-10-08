@@ -22,9 +22,7 @@ fn problem() -> (Model, Pose, View) {
     let view = View {
         rotation: Matrix3::identity(),
         translation: Vector3::zeros(),
-        focal: Vector2::repeat(500.0),
-        principal: Vector2::new(320.0, 240.0),
-        distortion: None,
+        camera: handfit::residual::camera_model(&Vector2::repeat(500.0), &Vector2::new(320.0, 240.0), None).unwrap(),
         pixels: SMatrix::from_fn(|i, k| {
             500.0 * p[3 * i + k] / p[3 * i + 2] + if k == 0 { 320.0 } else { 240.0 }
         }),
@@ -84,7 +82,7 @@ fn stationary_iterations_and_limit_clamp() {
         angles: SVector::zeros(),
     };
     let mut exact_view = view.clone();
-    exact_view.pixels = SMatrix::from_fn(|_, k| exact_view.principal[k]);
+    exact_view.pixels = SMatrix::from_fn(|_, k| [320.0, 240.0][k]);
     exact_view.distances.fill(1000.0);
     let result = fit(
         &exact_model,
@@ -188,7 +186,6 @@ fn warm_without_observations_runs_prior_only() {
 #[test]
 fn cold_synthetic_one_and_two_views_both_lenses() {
     use handfit::cold::initial_pose;
-    use handfit::residual::project;
     let (model, mut target, view) = problem();
     target.angles.fill(0.12);
     for mirror in [1.0, -1.0] {
@@ -198,13 +195,14 @@ fn cold_synthetic_one_and_two_views_both_lenses() {
             views[1].translation.x = -0.15;
             for v in &mut views {
                 if fisheye {
-                    v.distortion = Some(SVector::from_row_slice(&[
+                    v.camera = handfit::residual::camera_model(&Vector2::repeat(500.0), &Vector2::new(320.0, 240.0), Some(&SVector::from_row_slice(&[
                         0.01, -0.002, 0.0, 0.0, 0.0, 0.0, 0.001, -0.002,
-                    ]));
+                    ]))).unwrap();
                 }
                 for i in 0..21 {
                     let p = v.rotation * points.fixed_rows::<3>(i * 3) + v.translation;
-                    let pixel = project(v, &p);
+                    let camera = v.camera;
+                    let pixel = handfit::residual::project_camera(&camera, &p, None);
                     v.pixels.row_mut(i).copy_from(&pixel.transpose());
                     v.distances[i] = p.norm() * 1000.0 - target.translation.norm() * 1000.0;
                 }
@@ -420,9 +418,9 @@ fn two_view_problem() -> (Model, Pose, Pose, Vec<View>) {
     pose.angles[3] += 0.05;
     let mut second = view.clone();
     second.translation.x = -0.15;
-    second.distortion = Some(SVector::from_row_slice(&[
+    second.camera = handfit::residual::camera_model(&Vector2::repeat(500.0), &Vector2::new(320.0, 240.0), Some(&SVector::from_row_slice(&[
         0.01, -0.002, 0.0005, 0.0, 0.0, 0.0, 0.001, -0.002,
-    ]));
+    ]))).unwrap();
     second.weights[5] = 0.0;
     second.weights[9] = 0.0;
     (model, pose, target, vec![view, second])
@@ -506,7 +504,6 @@ fn normal_equations_skip_only_rows_that_are_zero() {
 #[test]
 fn a_hand_takes_up_to_two_views_and_more_are_refused_at_every_entry_point() {
     use handfit::cold::{initial_pose, initial_pose_parallel};
-    use handfit::residual::project;
     use handfit::scale::{calibrate_scale, CalibrationBlock, CalibrationConfig, ScaleError};
     use handfit::FitError;
     let (model, target, view) = problem();
@@ -517,7 +514,9 @@ fn a_hand_takes_up_to_two_views_and_more_are_refused_at_every_entry_point() {
     for v in &mut views {
         for i in 0..21 {
             let p = v.rotation * points.fixed_rows::<3>(i * 3) + v.translation;
-            let pixel = project(v, &p);
+            let camera =
+                v.camera;
+            let pixel = handfit::residual::project_camera(&camera, &p, None);
             v.pixels.row_mut(i).copy_from(&pixel.transpose());
             v.distances[i] = p.norm() * 1000.0;
         }
@@ -525,7 +524,7 @@ fn a_hand_takes_up_to_two_views_and_more_are_refused_at_every_entry_point() {
     views.push(views[0].clone());
     for count in 0..=3 {
         assert_eq!(
-            Views::new(&views[..count]).is_some(),
+            Views::new(&views[..count]).is_ok(),
             count <= 2,
             "views={count}"
         );
@@ -564,7 +563,7 @@ fn a_hand_takes_up_to_two_views_and_more_are_refused_at_every_entry_point() {
     }
     assert_eq!(
         fit(&model, &config, &prior, 1.0, &views, mode).unwrap_err(),
-        FitError::TooManyViews { views: 3 }
+        FitError::Views(handfit::residual::ViewValidationError::TooManyViews { views: 3 })
     );
 
     // Cold: no views is no evidence; three are refused before any solve, on any thread count.
@@ -577,7 +576,7 @@ fn a_hand_takes_up_to_two_views_and_more_are_refused_at_every_entry_point() {
     for threads in [1, 4] {
         assert_eq!(
             initial_pose_parallel(&model, &config, 1.0, &views, mode, threads).unwrap_err(),
-            FitError::TooManyViews { views: 3 }
+            FitError::Views(handfit::residual::ViewValidationError::TooManyViews { views: 3 })
         );
     }
     // A config that asks for no full fit has no winner to return.
@@ -615,9 +614,21 @@ fn a_hand_takes_up_to_two_views_and_more_are_refused_at_every_entry_point() {
     assert_eq!((stereo.blocks, stereo.used.as_slice()), (1, &[0][..]));
     assert_eq!(
         calibrate_scale(&model, &[block(&views[..2]), block(&views)], &calibration).unwrap_err(),
-        ScaleError::TooManyViews {
+        ScaleError::Views {
             observation: 1,
-            views: 3
+            source: handfit::residual::ViewValidationError::TooManyViews { views: 3 }
         }
     );
+}
+
+#[test]
+fn invalid_calibration_is_refused_before_a_view_can_reach_a_fit() {
+    for focal in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(handfit::residual::camera_model(&Vector2::new(focal, 500.0), &Vector2::new(320.0, 240.0), None).is_err());
+    }
+    for distortion in [f64::NAN, f64::INFINITY, f64::MAX] {
+        let mut coefficients = SVector::<f64, 8>::zeros();
+        coefficients[0] = distortion;
+        assert!(handfit::residual::camera_model(&Vector2::repeat(500.0), &Vector2::new(320.0, 240.0), Some(&coefficients)).is_err());
+    }
 }

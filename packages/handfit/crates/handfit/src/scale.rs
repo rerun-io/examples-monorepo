@@ -16,7 +16,7 @@ use nalgebra::{SMatrix, SVector, SymmetricEigen};
 pub use crate::lm::Termination;
 use crate::lm::{nielsen_damping, predicted_reduction, DAMPING_GROWTH, MAX_DAMPING};
 use crate::model::{orthonormalize, retract, Step};
-use crate::residual::{evaluate, project_lens, Residual, View, Views, MAX_VIEWS};
+use crate::residual::{evaluate, project_camera, Residual, View, Views};
 use crate::{Config, Model, Pose};
 
 const LANDMARKS: usize = 21;
@@ -55,7 +55,7 @@ impl Default for CalibrationConfig {
 pub struct CalibrationBlock {
     /// +1 left hand, −1 right hand.
     pub mirror: f64,
-    /// At most [`MAX_VIEWS`] views; only an observation with two of them can enter the solve.
+    /// At most [`crate::residual::MAX_VIEWS`] views; only an observation with two of them can enter the solve.
     pub views: Vec<View>,
     /// The tracker's fitted pose (the solve's start).
     pub initial: Pose,
@@ -88,13 +88,13 @@ pub enum ScaleError {
     /// No observation had two views with enough keypoints.
     #[error("no observation is seen in stereo")]
     NoStereo,
-    /// An observation has more views than the residual has rows for.
-    #[error("observation {observation} has {views} views; at most {MAX_VIEWS}")]
-    TooManyViews {
+    /// Invalid views in one observation.
+    #[error("observation {observation}: {source}")]
+    Views {
         /// Its index in the input.
         observation: usize,
-        /// Its views.
-        views: usize,
+        /// View admission error.
+        source: crate::residual::ViewValidationError,
     },
     /// The scale left the finite numbers.
     #[error("the scale calibration diverged")]
@@ -150,13 +150,7 @@ fn linearize(
             let point = view.rotation * world + view.translation;
             let d_point = view.rotation * ((world - pose.translation) / scale);
             let mut projection = SMatrix::<f64, 2, 3>::zeros();
-            project_lens(
-                &point,
-                &view.focal,
-                &view.principal,
-                view.distortion.as_ref(),
-                Some(&mut projection),
-            );
+            project_camera(views.camera(v), &point, Some(&mut projection));
             let column = projection * d_point * view.weights[i].sqrt();
             jacobian[(42 * v + 2 * i, POSE)] = column[0];
             jacobian[(42 * v + 2 * i + 1, POSE)] = column[1];
@@ -343,7 +337,7 @@ fn pose_parts(
 /// # Arguments
 ///
 /// * `generic` - The model to scale (the generic hand at phi = 1).
-/// * `hands` - Observations of either hand in any frames, each with at most [`MAX_VIEWS`] views; only those with two views of
+/// * `hands` - Observations of either hand in any frames, each with at most [`crate::residual::MAX_VIEWS`] views; only those with two views of
 ///   `min_view_keypoints` observed keypoints enter the solve.
 /// * `config` - Solver settings.
 ///
@@ -353,7 +347,7 @@ fn pose_parts(
 ///
 /// # Errors
 ///
-/// [`ScaleError::TooManyViews`] when an observation has more than [`MAX_VIEWS`] views, [`ScaleError::NoStereo`] when no
+/// [`ScaleError::Views`] when an observation has more than [`crate::residual::MAX_VIEWS`] views, [`ScaleError::NoStereo`] when no
 /// observation is seen in stereo, [`ScaleError::Diverged`] when phi is not finite.
 pub fn calibrate_scale(
     generic: &Model,
@@ -364,10 +358,7 @@ pub fn calibrate_scale(
         .iter()
         .enumerate()
         .map(|(observation, hand)| {
-            Views::new(&hand.views).ok_or(ScaleError::TooManyViews {
-                observation,
-                views: hand.views.len(),
-            })
+            Views::new(&hand.views).map_err(|source| ScaleError::Views { observation, source })
         })
         .collect::<Result<_, _>>()?;
     let used: Vec<usize> = (0..hands.len())

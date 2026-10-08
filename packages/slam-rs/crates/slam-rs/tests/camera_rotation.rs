@@ -26,20 +26,26 @@
 
 #![allow(clippy::unwrap_used)]
 
+use kornia_staging_3d::camera::{BrownConrady, CameraModel};
 use nalgebra::{SVector, Vector2, Vector4};
 use proptest::prelude::*;
-use slam_rs::calib::{Calibration, CameraModel};
-use slam_rs::camera::{Camera, PinholeRadtan8};
+use slam_rs::calib::{BasaltCamera, Calibration};
 
 mod common;
 
+fn brown(params: SVector<f64, 12>, radius: f64) -> BrownConrady<f64> {
+    let mut full = [0.0; 18];
+    full[..12].copy_from_slice(params.as_slice());
+    BrownConrady::new(full, (radius != 0.0).then_some(radius)).unwrap()
+}
+
 /// The rotated model and its resolution, from the unrotated pair.
 fn rotate_clockwise(
-    camera: &PinholeRadtan8<f64>,
+    camera: &BrownConrady<f64>,
     resolution: [u32; 2],
     degrees: f64,
-) -> (PinholeRadtan8<f64>, [u32; 2]) {
-    let p: SVector<f64, 12> = camera.params();
+) -> (BrownConrady<f64>, [u32; 2]) {
+    let p = camera.params();
     let width: f64 = f64::from(resolution[0]);
     let height: f64 = f64::from(resolution[1]);
 
@@ -53,7 +59,7 @@ fn rotate_clockwise(
         p[1], p[0], cx, cy, p[4], p[5], p1, p2, p[8], p[9], p[10], p[11],
     ]);
     (
-        PinholeRadtan8::new(rotated, camera.rpmax()),
+        brown(rotated, camera.valid_radius().unwrap_or(0.0)),
         [resolution[1], resolution[0]],
     )
 }
@@ -76,7 +82,7 @@ fn rotate_pixel(uv: &Vector2<f64>, width: f64, height: f64, degrees: f64) -> Vec
     }
 }
 
-fn shipped_cameras() -> Vec<(PinholeRadtan8<f64>, [u32; 2])> {
+fn shipped_cameras() -> Vec<(BrownConrady<f64>, [u32; 2])> {
     let calibration: Calibration<f64> =
         Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
     calibration
@@ -84,8 +90,8 @@ fn shipped_cameras() -> Vec<(PinholeRadtan8<f64>, [u32; 2])> {
         .iter()
         .zip(calibration.resolution.iter())
         .map(|(model, resolution)| match model {
-            CameraModel::PinholeRadtan8(p) => (
-                PinholeRadtan8::new(
+            BasaltCamera::PinholeRadtan8(p) => (
+                brown(
                     SVector::<f64, 12>::from([
                         p.fx, p.fy, p.cx, p.cy, p.k1, p.k2, p.p1, p.p2, p.k3, p.k4, p.k5, p.k6,
                     ]),
@@ -106,10 +112,9 @@ proptest! {
             for degrees in [90.0, 270.0] {
                 let (rotated, rotated_resolution) = rotate_clockwise(&camera, resolution, degrees);
                 prop_assert_eq!(rotated_resolution, [resolution[1], resolution[0]]);
-                let mut landscape = Vector2::zeros();
-                prop_assert!(camera.project(&point, &mut landscape));
-                let mut portrait = Vector2::zeros();
-                prop_assert!(rotated.project(&rotate_point(&point, degrees), &mut portrait));
+                let landscape = Vector2::from(camera.project([point.x, point.y, point.z]).unwrap());
+                let p = rotate_point(&point, degrees);
+                let portrait = Vector2::from(rotated.project([p.x,p.y,p.z]).unwrap());
                 let expected = rotate_pixel(&landscape, f64::from(resolution[0]), f64::from(resolution[1]), degrees);
                 prop_assert!((portrait - expected).norm() < 1e-9);
             }

@@ -139,7 +139,7 @@ fn redetection_resumes_only_below_the_survivor_threshold() {
         flow.process_frame(0, &images, &PosePrediction::default(), &[])
             .unwrap();
         let count = flow.frame().cameras[0].len();
-        assert!(count >= 4 && count % 2 == 0);
+        assert!(count >= 4 && count.is_multiple_of(2));
         let survivors = (count as isize / 2 + offset) as usize;
         let masks = masks_leaving(flow.frame(), survivors);
         let watermark = flow.last_keypoint_id();

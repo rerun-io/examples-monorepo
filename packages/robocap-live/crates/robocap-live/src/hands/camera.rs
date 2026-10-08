@@ -1,20 +1,18 @@
 //! One rig camera for hand geometry ([`RigCameraModel`]), in the two precisions handtrack uses for it:
-//! - the lens (kornia-3d `FisheyeCamera`, KB4, or a plain pinhole) plus `cam_from_rig` in float64, for the KeyNet crops and the
+//! - the lens (kornia-staging-3d `KannalaBrandt4`, KB4, or a plain pinhole) plus `cam_from_rig` in float64, for the KeyNet crops and the
 //!   overlays (handtrack's `geometry/camera.py`);
 //! - [`FitParams`]: the same calibration rounded to float32, as handtrack's `CameraRig` holds it and handfit's Python binding
 //!   receives it, for the tracker's planning projections and the fit ([`fit_view`]). The model keeps the two apart, which keeps
 //!   both float contracts with Python exact.
 //!
 //! The port of handtrack's `geometry/camera.py` for the cameras RoboCap has: its Fisheye62 formula with `k5 = k6 = p1 = p2 = 0`
-//! is exactly kornia-3d's Kannala-Brandt `FisheyeCamera` (the `r^2 <= pi^2` clip never binds, since theta <= pi). Projection is
+//! is exactly kornia-staging-3d's Kannala-Brandt `KannalaBrandt4` (the `r^2 <= pi^2` clip never binds, since theta <= pi). Projection is
 //! unclipped (points behind the camera and outside the image still project), as in handtrack; use [`in_front`] for z > 0.
 
-use kornia_3d::camera::FisheyeCamera;
-use kornia_algebra::{Vec2F64, Vec3F64};
+use kornia_staging_3d::camera::{CameraModel, CameraModelKind, KannalaBrandt4, Pinhole, UnprojectError};
 use nalgebra::{Isometry3, Matrix3, Vector2, Vector3};
 
 use crate::frame::{NUM_CAMERAS, Rig, RigCamera};
-use crate::kornia_ext::fisheye::MonotonicFisheye;
 
 use handfit::View;
 use handfit::nalgebra::{Matrix4, SMatrix, SVector};
@@ -39,10 +37,10 @@ pub enum CameraError {
 /// The lens of one camera.
 #[derive(Clone, Debug)]
 pub enum Lens {
-    /// Kannala-Brandt KB4 fisheye (kornia-3d's `FisheyeCamera`, unprojected on its physical branch), RoboCap's model.
-    Fisheye(MonotonicFisheye),
+    /// Kannala-Brandt KB4 fisheye (staged `KannalaBrandt4`, unprojected on its physical branch), RoboCap's model.
+    Fisheye(KannalaBrandt4<f64>),
     /// A distortion-free pinhole (handtrack's SHOW3D lens).
-    Pinhole { fx: f64, fy: f64, cx: f64, cy: f64 },
+    Pinhole(Pinhole<f64>),
 }
 
 /// One rig camera: lens, image size and the rigid transform from the rig frame, its net-frame letterbox, and the same
@@ -67,28 +65,31 @@ pub struct RigCameraModel {
 #[derive(Clone, Debug)]
 pub struct FitParams {
     /// Camera from rig, metres.
-    pub cam_from_rig: Matrix4<f64>,
-    /// (fx, fy).
-    pub focal: Vector2<f64>,
-    /// (cx, cy).
-    pub principal: Vector2<f64>,
-    /// Fisheye62 `[k1..k6, p1, p2]`; `None` = pinhole.
-    pub distortion: Option<SVector<f64, 8>>,
+    cam_from_rig: Matrix4<f64>,
+    camera: CameraModelKind<f64>,
+
 }
 
 impl FitParams {
+    /// Whether the rounded fit lens has Fisheye62 distortion.
+    pub fn is_fisheye(&self) -> bool {
+        matches!(self.camera, CameraModelKind::Fisheye624(_))
+    }
+
     /// Unclipped projection into the camera's own pixels (handtrack `geometry.camera.project`: Fisheye62 or pinhole, through
     /// handfit's lens).
     pub fn project(&self, point_cam: &Vector3<f64>) -> Vector2<f64> {
-        handfit::residual::project_lens(point_cam, &self.focal, &self.principal, self.distortion.as_ref(), None)
+        handfit::residual::project_camera(&self.camera, point_cam, None)
     }
 
     /// A world point into the camera (handtrack `world_to_cameras`: p_cam = cam_from_rig · rig_from_world · p_world), with
     /// `world` the float32 headset pose ([`world_matrix`]).
     pub fn cam_from_world_point(&self, world: &Matrix4<f64>, point: &[f64; 3]) -> Vector3<f64> {
         let rotation = world.fixed_view::<3, 3>(0, 0);
-        let rig = rotation.transpose() * (Vector3::new(point[0], point[1], point[2]) - world.fixed_view::<3, 1>(0, 3));
-        self.cam_from_rig.fixed_view::<3, 3>(0, 0) * rig + self.cam_from_rig.fixed_view::<3, 1>(0, 3)
+        let rig = rotation.transpose()
+            * (Vector3::new(point[0], point[1], point[2]) - world.fixed_view::<3, 1>(0, 3));
+        self.cam_from_rig.fixed_view::<3, 3>(0, 0) * rig
+            + self.cam_from_rig.fixed_view::<3, 1>(0, 3)
     }
 }
 
@@ -101,14 +102,23 @@ impl RigCameraModel {
     /// (also after rounding to float32), a non-positive focal length, or an image size without a net-frame letterbox
     /// ([`BarLetterbox::for_size`]).
     pub fn from_rig_camera(camera: &RigCamera) -> Result<Self, CameraError> {
-        let invalid = |detail: &str| CameraError::Invalid { name: camera.name.clone(), detail: detail.to_string() };
+        let invalid = |detail: &str| CameraError::Invalid {
+            name: camera.name.clone(),
+            detail: detail.to_string(),
+        };
         let [fx, fy] = camera.focal;
         let [cx, cy] = camera.principal;
-        if !(fx.is_finite() && fy.is_finite() && cx.is_finite() && cy.is_finite()) || fx <= 0.0 || fy <= 0.0 {
+        if !(fx.is_finite() && fy.is_finite() && cx.is_finite() && cy.is_finite())
+            || fx <= 0.0
+            || fy <= 0.0
+        {
             return Err(invalid("focal/principal"));
         }
         let lens = match camera.fisheye62 {
-            None => Lens::Pinhole { fx, fy, cx, cy },
+            None => Lens::Pinhole(
+                Pinhole::new([fx, fy, cx, cy])
+                    .map_err(|_| invalid("camera calibration or branch overflow"))?,
+            ),
             Some(k) => {
                 if k.iter().any(|v| !v.is_finite()) {
                     return Err(invalid("fisheye62"));
@@ -116,30 +126,44 @@ impl RigCameraModel {
                 if k[4] != 0.0 || k[5] != 0.0 || k[6] != 0.0 || k[7] != 0.0 {
                     return Err(CameraError::UnsupportedLens {
                         name: camera.name.clone(),
-                        detail: format!("Fisheye62 with k5={} k6={} p1={} p2={} (only KB4 is ported)", k[4], k[5], k[6], k[7]),
+                        detail: format!(
+                            "Fisheye62 with k5={} k6={} p1={} p2={} (only KB4 is ported)",
+                            k[4], k[5], k[6], k[7]
+                        ),
                     });
                 }
-                Lens::Fisheye(MonotonicFisheye::new(FisheyeCamera { fx, fy, cx, cy, k1: k[0], k2: k[1], k3: k[2], k4: k[3] }))
+                Lens::Fisheye(
+                    KannalaBrandt4::new([fx, fy, cx, cy, k[0], k[1], k[2], k[3]])
+                        .map_err(|_| invalid("camera calibration or branch overflow"))?,
+                )
             }
         };
         let m = camera.cam_from_rig;
         if m.iter().flatten().any(|v| !v.is_finite()) {
             return Err(invalid("cam_from_rig"));
         }
-        let rotation = Matrix3::new(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2]);
+        let rotation = Matrix3::new(
+            m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
+        );
         let translation = Vector3::new(m[0][3], m[1][3], m[2][3]);
+        let focal = Vector2::new(f32_round(fx), f32_round(fy));
+        let principal = Vector2::new(f32_round(cx), f32_round(cy));
+        let distortion = camera.fisheye62.map(|k| SVector::<f64, 8>::from_fn(|i, _| f32_round(k[i])));
+        let rounded_camera = handfit::residual::camera_model(&focal, &principal, distortion.as_ref())
+            .map_err(|_| invalid("camera calibration or branch overflow"))?;
         let fit = FitParams {
             cam_from_rig: Matrix4::from_fn(|i, k| f32_round(m[i][k])),
-            focal: Vector2::new(f32_round(fx), f32_round(fy)),
-            principal: Vector2::new(f32_round(cx), f32_round(cy)),
-            distortion: camera.fisheye62.map(|k| SVector::<f64, 8>::from_fn(|i, _| f32_round(k[i]))),
+            camera: rounded_camera,
         };
-        let rounded = fit.cam_from_rig.iter().chain(fit.focal.iter()).chain(fit.principal.iter()).chain(fit.distortion.iter().flat_map(|d| d.iter()));
-        if rounded.into_iter().any(|x| !x.is_finite()) {
+        if fit.cam_from_rig.iter().any(|x| !x.is_finite()) {
             return Err(invalid("a value beyond float32"));
         }
-        let net = BarLetterbox::for_size(camera.width, camera.height)
-            .ok_or_else(|| invalid(&format!("no net-frame letterbox for a {}x{} camera", camera.width, camera.height)))?;
+        let net = BarLetterbox::for_size(camera.width, camera.height).ok_or_else(|| {
+            invalid(&format!(
+                "no net-frame letterbox for a {}x{} camera",
+                camera.width, camera.height
+            ))
+        })?;
         Ok(Self {
             name: camera.name.clone(),
             lens,
@@ -160,25 +184,34 @@ impl RigCameraModel {
     /// the negative optical axis).
     pub fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
         match &self.lens {
-            Lens::Fisheye(fisheye) => fisheye.camera.project(&Vec3F64::new(p_cam.x, p_cam.y, p_cam.z)).map(|(px, _)| Vector2::new(px.x, px.y)),
-            Lens::Pinhole { fx, fy, cx, cy } => {
-                // handtrack clamps |z| < 1e-9 to 1e-9 so the point stays finite (in_front rejects it).
-                let z = if p_cam.z.abs() < 1e-9 { 1e-9 } else { p_cam.z };
-                Some(Vector2::new(fx * p_cam.x / z + cx, fy * p_cam.y / z + cy))
+            Lens::Fisheye(fisheye) => {
+                let radius = p_cam.x.hypot(p_cam.y);
+                if radius < 1e-12 && p_cam.z < 1e-12 {
+                    return None;
+                }
+                let pixel = fisheye.project_unchecked([p_cam.x, p_cam.y, p_cam.z]);
+                pixel
+                    .iter()
+                    .all(|v| v.is_finite())
+                    .then(|| Vector2::from(pixel))
+            }
+            Lens::Pinhole(pinhole) => {
+                Some(handfit::residual::handtrack_pinhole_project(pinhole, p_cam, None))
             }
         }
     }
 
-    /// The unit camera-frame ray through a pixel: the KB4 inverse on the polynomial's increasing branch (`kornia_ext::fisheye`;
-    /// kornia-3d's own Newton start lands on the far branch near the image edge), exact for the pinhole.
+    /// Unit ray through a pixel. RoboCap saturates pixels outside the KB4 physical branch.
     pub fn unproject(&self, px: &Vector2<f64>) -> Vector3<f64> {
-        match &self.lens {
-            Lens::Fisheye(fisheye) => {
-                let ray = fisheye.unproject(&Vec2F64::new(px.x, px.y));
-                Vector3::new(ray.x, ray.y, ray.z)
-            }
-            Lens::Pinhole { fx, fy, cx, cy } => Vector3::new((px.x - cx) / fx, (px.y - cy) / fy, 1.0).normalize(),
-        }
+        let pixel = [px.x, px.y];
+        let ray = match &self.lens {
+            Lens::Fisheye(fisheye) => match fisheye.unproject(pixel) {
+                Err(UnprojectError::OutsideDomain) => fisheye.boundary_bearing(pixel),
+                result => result,
+            },
+            Lens::Pinhole(pinhole) => pinhole.unproject(pixel),
+        };
+        ray.unwrap_or([f64::NAN; 3]).into()
     }
 
     /// A rig-frame point into the camera frame, with the calibration matrix as stored (handtrack's `transform_points`).
@@ -187,8 +220,14 @@ impl RigCameraModel {
     }
 
     /// A world point into the camera frame: `cam_from_rig · rig_from_world · p` (handtrack's `world_to_cameras`).
-    pub fn cam_from_world_point(&self, world_from_rig: &Isometry3<f64>, p_world: &Vector3<f64>) -> Vector3<f64> {
-        let p_rig = world_from_rig.rotation.inverse_transform_vector(&(p_world - world_from_rig.translation.vector));
+    pub fn cam_from_world_point(
+        &self,
+        world_from_rig: &Isometry3<f64>,
+        p_world: &Vector3<f64>,
+    ) -> Vector3<f64> {
+        let p_rig = world_from_rig
+            .rotation
+            .inverse_transform_vector(&(p_world - world_from_rig.translation.vector));
         self.cam_from_rig_point(&p_rig)
     }
 
@@ -217,7 +256,10 @@ pub fn rig_models(rig: &Rig) -> Result<Vec<RigCameraModel>, CameraError> {
     if rig.cameras.len() != NUM_CAMERAS {
         return Err(CameraError::CameraCount(rig.cameras.len()));
     }
-    rig.cameras.iter().map(RigCameraModel::from_rig_camera).collect()
+    rig.cameras
+        .iter()
+        .map(RigCameraModel::from_rig_camera)
+        .collect()
 }
 
 /// A value rounded to float32 and back.
@@ -240,12 +282,22 @@ pub fn fit_view(
     View {
         rotation,
         translation,
-        focal: fit.focal,
-        principal: fit.principal,
-        distortion: fit.distortion,
-        pixels: SMatrix::from_fn(|i, k| if keypoints_px[i][k].is_finite() { f32_round(keypoints_px[i][k]) } else { 0.0 }),
+        camera: fit.camera,
+        pixels: SMatrix::from_fn(|i, k| {
+            if keypoints_px[i][k].is_finite() {
+                f32_round(keypoints_px[i][k])
+            } else {
+                0.0
+            }
+        }),
         weights: SVector::from_fn(|i, _| f32_round(weights[i])),
-        distances: SVector::from_fn(|i, _| if weights[i] > 0.0 { f32_round(d_rel_mm[i]) } else { 0.0 }),
+        distances: SVector::from_fn(|i, _| {
+            if weights[i] > 0.0 {
+                f32_round(d_rel_mm[i])
+            } else {
+                0.0
+            }
+        }),
     }
 }
 

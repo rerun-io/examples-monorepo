@@ -17,12 +17,6 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   validation, attribute save/restore), accel interpolated onto gyro stamps into combined `ImuMeasurement`-shaped samples, and a
   clock guard. Adapted from PR #270.
 - `src/capture/matcher.rs` -> kornia-sensors / sensor-rt: timestamp-tolerance multi-camera frameset assembly.
-- `src/kornia_ext/fisheye.rs` MonotonicFisheye -> kornia-3d `camera::fisheye` (bug report + fix): `FisheyeCamera::unproject` starts Newton
-  at `theta = theta_d`, so when the KB4 polynomial peaks before 90 deg (s66 right_front: ~84 deg) edge pixels converge on the far,
-  decreasing branch (7 deg off at pixel (100, 80), yet reprojecting onto it). The fix finds the peak once and solves on [0, theta_max].
-- `src/kornia_ext/virtual_camera/` maps_from_virtual_pinhole_f32 (+ `_kb4` f32/NEON fast path, `RayProjection` trait) -> kornia-3d `camera` /
-  kornia-imgproc `calibration`: remap maps for a rotated virtual pinhole sharing a source camera's centre (perspective crops of a
-  fisheye image), beside the undistort maps.
 - `src/kornia_ext/remap.rs` remap_f32_from_u8 -> kornia-imgproc `interpolation::remap`: u8 source to scaled f32 output (e.g. a [0, 1]
   network input) in one pass, zero padding per tap, matching torch `grid_sample(bilinear, zeros, align_corners=False)`.
 - `src/kornia_ext/heatmap.rs` argmax_first / refine_peak_log_quadratic / decode_peak_2d -> kornia-imgproc `features` (or
@@ -31,8 +25,6 @@ Each line: module in this crate -> target kornia crate/repo: what it is.
   (`to_net`/`from_net`), built on `spatial_padding`.
 - `src/hands/circles.rs` min_enclosing_circle -> kornia-imgproc (contours/features): OpenCV's `minEnclosingCircle` (Welzl, f64,
   deterministic), with docs, a doctest and unit tests.
-- `src/hands/scale.rs` calibrate_scale -> handfit (or kornia-3d's BA tooling): one shared model scale + per-frame poses by LM with a
-  Schur complement on the scale, analytic scale column.
 - `src/nets/rknn/api.rs` RknnRuntime / RknnModel -> kornia-rs `examples/rknn` (beside `examples/onnx`), or a small kornia runtime
   crate: a dlopened RKNN 2.x C-API binding (one context per NPU core, u8/f16/f32 inputs, float outputs into caller buffers,
   typed errors, rknn_destroy on drop). kornia has no inference crate, so this stays ours until one exists.

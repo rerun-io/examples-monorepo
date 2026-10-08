@@ -203,9 +203,7 @@ mod tests {
                 View {
                     rotation,
                     translation,
-                    focal: Vector2::repeat(500.0),
-                    principal: Vector2::new(320.0, 240.0),
-                    distortion: None,
+                    camera: handfit::residual::camera_model(&Vector2::repeat(500.0), &Vector2::new(320.0, 240.0), None).unwrap(),
                     pixels,
                     weights: SVector::repeat(1.0),
                     distances: SVector::zeros(),

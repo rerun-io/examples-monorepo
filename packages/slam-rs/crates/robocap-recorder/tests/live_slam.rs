@@ -2,7 +2,7 @@
 use anyhow::Result;
 use robocap_recorder::{ImuChannel, LiveSlam, LiveSlamOptions, SlamInput};
 use slam_rs::{
-    calib::{Calibration, CameraModel, PinholeParams},
+    calib::{BasaltCamera, Calibration, PinholeParams},
     config::VioConfig,
     lie::{Se3, So3},
 };
@@ -41,7 +41,7 @@ fn stationary_probe(gyro: [f64; 3], accel: [f64; 3], correct_bias: bool) -> Resu
     for camera in 0..4 {
         calibration.t_i_c[camera] =
             Se3::new(So3::identity(), [camera as f64 * 0.08, 0.0, 0.0].into());
-        calibration.intrinsics[camera] = CameraModel::Pinhole(PinholeParams {
+        calibration.intrinsics[camera] = BasaltCamera::Pinhole(PinholeParams {
             fx: 300.0,
             fy: 300.0,
             cx: 320.0,

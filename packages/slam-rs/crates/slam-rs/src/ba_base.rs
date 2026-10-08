@@ -24,7 +24,7 @@ use nalgebra::{
 use rayon::prelude::*;
 
 use crate::calib::Calibration;
-use crate::camera::{CameraEnum, CameraError};
+use crate::camera::{SlamCamera, CameraError};
 use crate::frontend::parallel::WorkPool;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
 use crate::lie::{LieScalar, Se3, So3, c};
@@ -177,7 +177,7 @@ pub fn linearize_point<S: LieScalar>(
     kpt_obs: &Vector2<S>,
     kpt_pos: &Landmark<S>,
     t_t_h: &Matrix4<S>,
-    cam: &CameraEnum<S>,
+    cam: &SlamCamera<S>,
     res: &mut Vector2<S>,
     out: &mut LinearizePointOut<'_, S>,
 ) -> bool {
@@ -191,7 +191,7 @@ pub fn linearize_point<S: LieScalar>(
     let p_t_3d: Vector4<S> = t_t_h * p_h_3d;
 
     let mut jp: Matrix2x4<S> = Matrix2x4::zeros();
-    let mut valid: bool = cam.project_with_jacobian(&p_t_3d, res, &mut jp);
+    let mut valid: bool = cam.project_point(&p_t_3d, res, Some(&mut jp));
     // `valid &= res.array().isFinite().all()`.
     valid &= res[0].to_f64().is_finite() && res[1].to_f64().is_finite();
 
@@ -389,18 +389,18 @@ pub struct BundleAdjustmentBase<S: LieScalar> {
     pub calib: Calibration<S>,
     /// Projection models resolved once when the window is built.
     ///
-    /// Resolving [`crate::calib::CameraModel`] into [`CameraEnum`] rejects unsupported
+    /// Resolving [`crate::calib::CameraModel`] into [`SlamCamera`] rejects unsupported
     /// models at construction, before the residual loop.
-    cameras: Vec<CameraEnum<S>>,
+    cameras: Vec<SlamCamera<S>>,
 }
 
 impl<S: LieScalar> BundleAdjustmentBase<S> {
     /// An empty window over one calibration.
     pub fn new(calib: Calibration<S>, obs_std_dev: S, huber_thresh: S) -> Result<Self, BaError> {
-        let cameras: Vec<CameraEnum<S>> = calib
+        let cameras: Vec<SlamCamera<S>> = calib
             .intrinsics
             .iter()
-            .map(CameraEnum::from_model)
+            .map(SlamCamera::from_model)
             .collect::<Result<_, CameraError>>()?;
         Ok(Self {
             frame_states: BTreeMap::new(),
@@ -414,7 +414,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 
     /// The projection models, in camera order.
-    pub fn cameras(&self) -> &[CameraEnum<S>] {
+    pub fn cameras(&self) -> &[SlamCamera<S>] {
         &self.cameras
     }
 
@@ -432,7 +432,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 
     /// The camera-to-IMU transform and the projection model of one image.
-    fn camera_of(&self, tcid: TimeCamId) -> Result<(&Se3<S>, &CameraEnum<S>), BaError> {
+    fn camera_of(&self, tcid: TimeCamId) -> Result<(&Se3<S>, &SlamCamera<S>), BaError> {
         let camera_count: usize = self.cameras.len();
         let t_i_c: &Se3<S> = self
             .calib
@@ -442,7 +442,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                 cam_id: tcid.cam_id,
                 camera_count,
             })?;
-        let cam: &CameraEnum<S> = self
+        let cam: &SlamCamera<S> = self
             .cameras
             .get(tcid.cam_id)
             .ok_or(BaError::UnknownCamera {
@@ -990,7 +990,7 @@ mod tests {
     fn linearize_point_jacobians_match_finite_differences() {
         for (name, text) in [("kb4 msdmi cam0", MSDMI), ("radtan8 msdmg cam0", MSDMG)] {
             let calibration: Calibration<f64> = calib(text);
-            let cam: CameraEnum<f64> = CameraEnum::from_model(&calibration.intrinsics[0]).unwrap();
+            let cam: SlamCamera<f64> = SlamCamera::from_model(&calibration.intrinsics[0]).unwrap();
 
             // `cam.unproject(Vector2d::Random() * 50, point3d)`.
             let mut point3d: Vector4<f64> = Vector4::zeros();
@@ -1019,7 +1019,7 @@ mod tests {
             p_trans[3] = kpt_pos.inv_dist;
             p_trans = t_t_h * p_trans;
             let mut kpt_obs: Vector2<f64> = Vector2::zeros();
-            assert!(cam.project(&p_trans, &mut kpt_obs), "{name}: observation");
+            assert!(cam.project_point(&p_trans, &mut kpt_obs, None), "{name}: observation");
 
             let mut res: Vector2<f64> = Vector2::zeros();
             let mut d_res_d_xi: Matrix2x6<f64> = Matrix2x6::zeros();
@@ -1194,7 +1194,7 @@ mod tests {
                     q[3] = inv_dist;
                     let in_target: Vector4<f64> = t_t_h * q;
                     let mut pixel: Vector2<f64> = Vector2::zeros();
-                    if !ba.cameras()[cam_id].project(&in_target, &mut pixel) {
+                    if !ba.cameras()[cam_id].project_point(&in_target, &mut pixel, None) {
                         continue;
                     }
                     let jitter: f64 = noise * ((i + cam_id) as f64).sin();
@@ -1254,7 +1254,7 @@ mod tests {
                     let mut q: Vector4<f64> = StereographicParam::unproject(&lm.direction);
                     q[3] = lm.inv_dist;
                     let mut pixel: Vector2<f64> = Vector2::zeros();
-                    assert!(ba.cameras()[target.cam_id].project(&(t_t_h * q), &mut pixel));
+                    assert!(ba.cameras()[target.cam_id].project_point(&(t_t_h * q), &mut pixel, None));
                     let r: Vector2<f64> = pixel - observed;
                     let e: f64 = r.norm();
                     largest = largest.max(e);
@@ -1297,7 +1297,7 @@ mod tests {
                 let mut q: Vector4<f64> = StereographicParam::unproject(&lm.direction);
                 q[3] = lm.inv_dist;
                 let mut pixel: Vector2<f64> = Vector2::zeros();
-                assert!(ba.cameras()[target.cam_id].project(&(t_t_h * q), &mut pixel));
+                assert!(ba.cameras()[target.cam_id].project_point(&(t_t_h * q), &mut pixel, None));
                 let r: Vector2<f64> = pixel - observed;
                 // Weight 1 everywhere: the plain squared error, whitened.
                 unweighted += 0.5 * r.dot(&r) / (ba.obs_std_dev * ba.obs_std_dev);

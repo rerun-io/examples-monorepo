@@ -238,7 +238,7 @@ fn the_cell_selection_applies_the_same_gates() {
     while y <= grid.y_stop {
         let mut x: usize = grid.x_start;
         while x <= grid.x_stop {
-            if index % 3 == 0 {
+            if index.is_multiple_of(3) {
                 masks.masks.push(Rect {
                     x: x as f32,
                     y: y as f32,

@@ -23,14 +23,14 @@ use std::time::Instant;
 use kornia_algebra::Vec3F64;
 use kornia_algebra::linalg::rigid::umeyama_f64;
 use kornia_image::Image;
-use robocap_live::capture::Cap;
 use robocap_live::downsample::resize_area_u8;
+use robocap_live::capture::Cap;
+use robocap_live::frame::matrix_from_isometry;
 use robocap_live::frame::{
-    CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, ImuSample, Luma, NUM_CAMERAS, Rig, SLAM_CAMERAS, SMALL_SIZE,
-    read_imu, write_small_dump,
+    CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, ImuSample, Luma,
+    NUM_CAMERAS, Rig, SLAM_CAMERAS, SMALL_SIZE, read_imu, write_small_dump,
 };
 use robocap_live::sched::{parse_cpu_list, pin_current_thread, set_uclamp_min};
-use robocap_live::frame::matrix_from_isometry;
 use robocap_live::slam::{ReferencePoses, SlamEstimator, SlamPose, SlamProfile, parse_override};
 use robocap_live::source::replay::read_reference_poses;
 
@@ -99,14 +99,18 @@ struct Frame {
 fn load(args: &Args) -> Result<Vec<Frame>, Error> {
     let size = DumpMeta::load(&args.dump)?.size();
     if size != FULL_SIZE && size != SMALL_SIZE {
-        return Err(format!("dump frames are {size:?}; expected {FULL_SIZE:?} or {SMALL_SIZE:?}").into());
+        return Err(
+            format!("dump frames are {size:?}; expected {FULL_SIZE:?} or {SMALL_SIZE:?}").into(),
+        );
     }
     let mut reader = FrameReader::open(&args.dump.join("frames.bin"), size)?;
     let mut frames = Vec::new();
     let mut skipped = 0;
     let mut seen = 0;
     while frames.len() < args.frames {
-        let Some(frameset) = reader.next_frameset()? else { break };
+        let Some(frameset) = reader.next_frameset()? else {
+            break;
+        };
         seen += 1;
         if seen <= args.start {
             continue;
@@ -114,7 +118,9 @@ fn load(args: &Args) -> Result<Vec<Frame>, Error> {
         let mut images = Vec::with_capacity(4);
         let mut cam_t_ns = [0; 4];
         for (slot, &camera) in SLAM_CAMERAS.iter().enumerate() {
-            let Some(frame) = &frameset.cameras[camera] else { break };
+            let Some(frame) = &frameset.cameras[camera] else {
+                break;
+            };
             cam_t_ns[slot] = frame.meta.pts_ns;
             if size == SMALL_SIZE {
                 images.push(frame.full.clone());
@@ -128,9 +134,18 @@ fn load(args: &Args) -> Result<Vec<Frame>, Error> {
             skipped += 1;
             continue;
         };
-        frames.push(Frame { index: frameset.index, t_ns: frameset.t_ns, cam_t_ns, images });
+        frames.push(Frame {
+            index: frameset.index,
+            t_ns: frameset.t_ns,
+            cam_t_ns,
+            images,
+        });
     }
-    eprintln!("loaded {} framesets ({} without all four SLAM cameras skipped)", frames.len(), skipped);
+    eprintln!(
+        "loaded {} framesets ({} without all four SLAM cameras skipped)",
+        frames.len(),
+        skipped
+    );
     Ok(frames)
 }
 
@@ -138,12 +153,29 @@ fn write_small(args: &Args, frames: &[Frame], out: &Path) -> Result<(), Error> {
     let framesets = frames.iter().map(|frame| {
         let mut cameras: [Option<CameraFrame>; NUM_CAMERAS] = Default::default();
         for (slot, &camera) in SLAM_CAMERAS.iter().enumerate() {
-            let meta = FrameMeta { seq: frame.index, pts_ns: frame.cam_t_ns[slot], source_id: camera as u32, turned_180: false };
-            cameras[camera] = Some(CameraFrame { meta, full: frame.images[slot].clone() });
+            let meta = FrameMeta {
+                seq: frame.index,
+                pts_ns: frame.cam_t_ns[slot],
+                source_id: camera as u32,
+                turned_180: false,
+            };
+            cameras[camera] = Some(CameraFrame {
+                meta,
+                full: frame.images[slot].clone(),
+            });
         }
-        Frameset { index: frame.index, t_ns: frame.t_ns, cameras }
+        Frameset {
+            index: frame.index,
+            t_ns: frame.t_ns,
+            cameras,
+        }
     });
-    let written = write_small_dump(&args.dump, out, framesets, "SLAM cameras only, area /3 to 640x360 by slam_bench --write-small")?;
+    let written = write_small_dump(
+        &args.dump,
+        out,
+        framesets,
+        "SLAM cameras only, area /3 to 640x360 by slam_bench --write-small",
+    )?;
     println!("wrote {written} framesets to {}", out.display());
     Ok(())
 }
@@ -154,7 +186,11 @@ fn ate(est: &[Vec3F64], reference: &[Vec3F64]) -> Option<(f64, f64)> {
         return None;
     }
     let (rotation, translation, _) = umeyama_f64(est, reference, false).ok()?;
-    let errors: Vec<f64> = est.iter().zip(reference).map(|(e, r)| (rotation * *e + translation - *r).length()).collect();
+    let errors: Vec<f64> = est
+        .iter()
+        .zip(reference)
+        .map(|(e, r)| (rotation * *e + translation - *r).length())
+        .collect();
     let rmse = (errors.iter().map(|e| e * e).sum::<f64>() / est.len() as f64).sqrt();
     Some((rmse, errors.iter().cloned().fold(0.0, f64::max)))
 }
@@ -173,14 +209,31 @@ fn quantiles(values: &[f64]) -> serde_json::Value {
     })
 }
 
-fn run(args: &Args, calibration: &str, frames: &[Frame], imu: &[ImuSample]) -> Result<(Vec<SlamPose>, f64), Error> {
+fn run(
+    args: &Args,
+    calibration: &str,
+    frames: &[Frame],
+    imu: &[ImuSample],
+) -> Result<(Vec<SlamPose>, f64), Error> {
     let mut poses = Vec::with_capacity(frames.len());
     let mut next_imu = 0;
     let started = Instant::now();
-    let mut slam = SlamEstimator::with_profile(calibration, args.threads, args.profile, &args.overrides)?;
+    let mut slam =
+        SlamEstimator::with_profile(calibration, args.threads, args.profile, &args.overrides)?;
     for frame in frames {
-        feed_imu_through(imu, &mut next_imu, frame.t_ns, |s| s.t_ns, |s| slam.push_imu(s))?;
-        let images = [&*frame.images[0], &*frame.images[1], &*frame.images[2], &*frame.images[3]];
+        feed_imu_through(
+            imu,
+            &mut next_imu,
+            frame.t_ns,
+            |s| s.t_ns,
+            |s| slam.push_imu(s),
+        )?;
+        let images = [
+            &*frame.images[0],
+            &*frame.images[1],
+            &*frame.images[2],
+            &*frame.images[3],
+        ];
         if let Some(pose) = slam.track(frame.index, frame.t_ns, images)? {
             poses.push(pose);
         }
@@ -202,8 +255,12 @@ fn main() -> Result<(), Error> {
     }
     let imu = read_imu(&args.dump.join("imu.bin"))?;
     let device = Rig::load(&args.dump.join("rig.json"))?.device;
-    let cap = Cap::from_device(&device).ok_or_else(|| format!("no factory SLAM calibration for device {device:?} (the dump's rig.json)"))?;
-    let reference = read_reference_poses(&args.dump).ok().map(|poses| ReferencePoses::new(poses, 0, None));
+    let cap = Cap::from_device(&device).ok_or_else(|| {
+        format!("no factory SLAM calibration for device {device:?} (the dump's rig.json)")
+    })?;
+    let reference = read_reference_poses(&args.dump)
+        .ok()
+        .map(|poses| ReferencePoses::new(poses, 0, None));
     if let Some(cpus) = &args.cpus {
         pin_current_thread(cpus)?;
     }
@@ -224,7 +281,10 @@ fn main() -> Result<(), Error> {
     if let Some(reference) = &reference {
         for pose in poses.iter().filter(|p| p.ok) {
             if let Some(at) = reference.at(pose.t_ns) {
-                let (e, r) = (pose.world_from_rig.translation.vector, at.translation.vector);
+                let (e, r) = (
+                    pose.world_from_rig.translation.vector,
+                    at.translation.vector,
+                );
                 est.push(Vec3F64::new(e.x, e.y, e.z));
                 matched.push(Vec3F64::new(r.x, r.y, r.z));
             }
@@ -234,7 +294,8 @@ fn main() -> Result<(), Error> {
 
     let ran: Vec<&SlamPose> = poses.iter().filter(|p| p.compute_ms > 0.0).collect();
     let tracking: Vec<&SlamPose> = ran.iter().copied().filter(|p| p.ok).collect();
-    let pick = |set: &[&SlamPose], f: fn(&SlamPose) -> f64| set.iter().map(|p| f(p)).collect::<Vec<f64>>();
+    let pick =
+        |set: &[&SlamPose], f: fn(&SlamPose) -> f64| set.iter().map(|p| f(p)).collect::<Vec<f64>>();
     let keyframes: Vec<&SlamPose> = ran.iter().copied().filter(|p| p.stages.keyframe).collect();
     let summary = serde_json::json!({
         "dump": args.dump.display().to_string(),

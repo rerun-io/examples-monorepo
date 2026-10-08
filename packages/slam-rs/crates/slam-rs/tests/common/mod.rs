@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector6};
 use serde::Deserialize;
-use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
+use slam_rs::calib::{BasaltCamera, Calibration, Kb4Params};
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::tracker::PointsSoA;
 use slam_rs::image::ImageU16;
@@ -411,7 +411,7 @@ pub fn test_calibration(rng: &mut Rng) -> Calibration<f64> {
         .collect();
     let p: [f64; 8] = KB4_TEST_PROJECTION;
     calib.intrinsics = vec![
-        CameraModel::Kb4(Kb4Params {
+        BasaltCamera::Kb4(Kb4Params {
             fx: p[0],
             fy: p[1],
             cx: p[2],
@@ -606,7 +606,7 @@ pub const FLOW_HEIGHT: usize = 200;
     reason = "used by flow_frontend; other binaries compile a subset"
 )]
 pub fn flow_rig(count: usize) -> Calibration<f64> {
-    let intrinsics: CameraModel<f64> = CameraModel::Pinhole(PinholeParams {
+    let intrinsics: BasaltCamera<f64> = BasaltCamera::Pinhole(PinholeParams {
         fx: 180.0,
         fy: 180.0,
         cx: FLOW_WIDTH as f64 / 2.0,

@@ -648,10 +648,12 @@ fn the_parallel_acquisition_fit_is_handfits_bit_for_bit() -> Result<(), Box<dyn 
                 View {
                     rotation,
                     translation,
-                    focal: Vector2::repeat(500.0),
-                    principal: Vector2::new(320.0, 240.0),
-                    distortion: None,
-                    pixels: SMatrix::from_fn(|i, c| 500.0 * cam[i][c] / cam[i][2] + if c == 0 { 320.0 } else { 240.0 } + 0.7 * ((i * 7 + c) as f64).sin()),
+                    camera: handfit::residual::camera_model(&Vector2::repeat(500.0), &Vector2::new(320.0, 240.0), None).unwrap(),
+                    pixels: SMatrix::from_fn(|i, c| {
+                        500.0 * cam[i][c] / cam[i][2]
+                            + if c == 0 { 320.0 } else { 240.0 }
+                            + 0.7 * ((i * 7 + c) as f64).sin()
+                    }),
                     weights: SVector::repeat(1.0),
                     distances: SVector::from_fn(|i, _| (cam[i].norm() - mean) * 1000.0),
                 }

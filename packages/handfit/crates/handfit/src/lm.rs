@@ -2,7 +2,7 @@ use crate::{
     model::{orthonormalize, retract, LandmarkJacobian, Model, Pose, Step},
     residual::{
         evaluate, evaluate_into, evaluate_rigid, evaluate_rigid_into, linearize, normal_equations,
-        rigid_landmarks, JacobianRows, Residual, View, Views, MAX_VIEWS,
+        rigid_landmarks, JacobianRows, Residual, View, Views,
     },
 };
 use nalgebra::{SMatrix, SVector, SymmetricEigen};
@@ -175,14 +175,11 @@ impl Config {
 }
 
 /// Why a fit refuses its input.
-#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq)]
 pub enum FitError {
-    /// More views of one hand than the residual has rows for.
-    #[error("{views} views of one hand; a fit takes at most {MAX_VIEWS}")]
-    TooManyViews {
-        /// The views given.
-        views: usize,
-    },
+    /// Invalid view count or calibration.
+    #[error(transparent)]
+    Views(#[from] crate::residual::ViewValidationError),
     /// A cold fit whose config asks for no full fit: `full_fit_hypotheses` or `finger_starts` is 0.
     #[error(
         "the cold fit config asks for no full fit (full_fit_hypotheses or finger_starts is 0)"
@@ -274,7 +271,7 @@ pub(crate) fn nielsen_damping(damping: f64, reduction: f64, predicted: f64) -> f
 /// * `config` - The residual weights and the solver settings.
 /// * `prior` - The previous frame's pose: the start (joint angles clamped to the widened limits) and the temporal prior.
 /// * `mirror` - +1 left hand, −1 right hand.
-/// * `views` - The hand's views, at most [`MAX_VIEWS`]; with none the solve runs on the temporal prior alone.
+/// * `views` - The hand's views, at most [`crate::residual::MAX_VIEWS`]; with none the solve runs on the temporal prior alone.
 /// * `mode` - The analytic Jacobian, or handtrack's central differences.
 ///
 /// # Returns
@@ -283,7 +280,7 @@ pub(crate) fn nielsen_damping(damping: f64, reduction: f64, predicted: f64) -> f
 ///
 /// # Errors
 ///
-/// [`FitError::TooManyViews`] for more than [`MAX_VIEWS`] views.
+/// [`FitError::Views`] for more than [`crate::residual::MAX_VIEWS`] views.
 pub fn fit(
     model: &Model,
     config: &Config,
@@ -292,7 +289,8 @@ pub fn fit(
     views: &[View],
     mode: JacobianMode,
 ) -> Result<FitResult, FitError> {
-    let checked = Views::new(views).ok_or(FitError::TooManyViews { views: views.len() })?;
+    let checked =
+        Views::new(views)?;
     Ok(solve(model, config, prior, mirror, checked, mode, false))
 }
 

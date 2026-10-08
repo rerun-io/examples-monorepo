@@ -61,7 +61,7 @@ fn catalog_camera_calib<'py>(
     kwargs.set_item("distortion_valid_radius", camera.distortion_valid_radius)?;
     let pose: Vec<Vec<f64>> = camera
         .imu_t_cam_row_major
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|r| r.to_vec())
         .collect();
     kwargs.set_item("imu_T_cam", PyArray2::from_vec2(py, &pose)?)?;

@@ -4,7 +4,7 @@ use crate::gpu::kernels::onewait::{CAMERA_PARAMS_START, PER_CAMERA_PARAMS};
 use cubecl::prelude::*;
 
 use super::GpuStages;
-use crate::camera::{Camera, CameraEnum};
+use kornia_staging_3d::camera::CameraModelKind;
 use crate::config::MatchingGuessType;
 use crate::frontend::detect::{CellGrid, CellSelect};
 use crate::frontend::patterns::Pattern;
@@ -65,7 +65,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                     || !selects.iter().all(|other| *other == Some(select))
                     || !cameras
                         .iter()
-                        .all(|camera| matches!(camera.model, CameraEnum::PinholeRadtan8(_)))
+                        .all(|camera| matches!(camera.model.inner, CameraModelKind::BrownConrady(_)))
                 {
                     return Ok(false);
                 }
@@ -121,8 +121,8 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                         0.0
                     },
                 ];
-                if let CameraEnum::PinholeRadtan8(camera) = cameras[0].model {
-                    params.extend(camera.params().iter());
+                if let CameraModelKind::BrownConrady(camera) = cameras[0].model.inner {
+                    params.extend(camera.params()[..12].iter());
                 }
                 self.geometry.clear();
                 for camera in 1..cameras.len() {
@@ -130,8 +130,8 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                     let transform = (calib.t_i_c[0].inverse() * calib.t_i_c[camera]).inverse();
                     params.extend(transform.rotation.quaternion_xyzw());
                     params.extend(transform.translation.iter());
-                    if let CameraEnum::PinholeRadtan8(model) = cameras[camera].model {
-                        params.extend(model.params().iter());
+                    if let CameraModelKind::BrownConrady(model) = cameras[camera].model.inner {
+                        params.extend(model.params()[..12].iter());
                     }
                     pyramids[0].append_geometry(&mut self.geometry, Some(arena));
                     pyramids[camera].append_geometry(&mut self.geometry, Some(arena));

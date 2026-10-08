@@ -118,7 +118,7 @@ mod tests {
             let mut fast = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
             resize_area_u8(&src, &mut fast)?;
             let mut reference = vec![0u8; 640 * 360];
-            for (y, row) in reference.chunks_exact_mut(640).enumerate() {
+            for (y, row) in reference.as_chunks_mut::<640>().0.iter_mut().enumerate() {
                 kernels::area_row_generic::<1>(
                     &src.as_slice()[3 * y * 1920..(3 * y + 3) * 1920],
                     1920,
@@ -158,7 +158,7 @@ mod tests {
         let mut out = Image::<u8, 1>::from_size_val(SMALL_SIZE, 0)?;
         resize_area_u8(&src, &mut out)?;
         assert_eq!(out.as_slice()[0], 1, "block sum 5: (5 + 4) / 9 = 1");
-        for (y, row) in out.as_slice().chunks_exact(640).enumerate() {
+        for (y, row) in out.as_slice().as_chunks::<640>().0.iter().enumerate() {
             for (x, &value) in row.iter().enumerate() {
                 if (x, y) != (0, 0) {
                     assert_eq!(value, (x % 200) as u8);

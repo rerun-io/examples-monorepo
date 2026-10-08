@@ -438,7 +438,7 @@ impl H264Encoder {
         stdin.write_all(luma.as_slice()).map_err(|e| io_error(e, &self.stderr_tail))?;
         stdin.write_all(&self.chroma).map_err(|e| io_error(e, &self.stderr_tail))?;
         self.frames_in += 1;
-        if self.frames_in % 30 == 0 {
+        if self.frames_in.is_multiple_of(30) {
             self.sample_cpu();
         }
         Ok(())

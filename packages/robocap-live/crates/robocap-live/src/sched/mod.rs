@@ -250,7 +250,7 @@ impl Shared {
             *counter += 1;
             *counter
         });
-        if count <= first || (every > 0 && count % every == 0) {
+        if count <= first || (every > 0 && count.is_multiple_of(every)) {
             eprintln!("robocap-live: {}", message(count));
         }
     }

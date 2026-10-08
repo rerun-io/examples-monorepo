@@ -162,7 +162,7 @@ mod tests {
     /// from `Sophus::Constants` rather than from the machine epsilon.
     #[test]
     fn the_small_angle_branch_is_the_one_that_survives_the_cancellation() {
-        let boundary: f64 = f64::SOPHUS_EPSILON;
+        let boundary: f64 = <f64 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
         let series: AffineCompact2<f64> = se2_exp(&Vector3::new(1.0, 2.0, boundary * 0.999));
         let closed: AffineCompact2<f64> = se2_exp(&Vector3::new(1.0, 2.0, boundary * 1.001));
         // `x = 1 * sin(t)/t - 2 * (1 - cos t)/t`, so the series carries `-2 * t/2`.
@@ -173,7 +173,7 @@ mod tests {
         );
         assert_eq!(closed.translation.x, 1.0);
 
-        let boundary: f32 = f32::SOPHUS_EPSILON;
+        let boundary: f32 = <f32 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
         let series: AffineCompact2f = se2_exp(&Vector3::new(1.0, 2.0, boundary * 0.999));
         let closed: AffineCompact2f = se2_exp(&Vector3::new(1.0, 2.0, boundary * 1.001));
         assert_abs_diff_eq!(series.translation.x, 1.0 - boundary * 0.999, epsilon = 1e-9);

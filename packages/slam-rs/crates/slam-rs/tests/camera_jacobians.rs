@@ -1,383 +1,60 @@
-//! Camera round trips and analytic Jacobians checked with central finite differences.
-//! Synthetic cameras exercise a full test grid. Shipped kb4 and radtan8 intrinsics
-//! are also checked within the sensor domain, where inverse iterations converge.
-//! Radtan8 uses a fixed valid-radius constant declared in this file; no external
-//! fixture supplies it. Pinhole cases use synthetic projections.
-//!
-//! Far off-axis fisheye unprojection may not converge in three Newton steps.
-//! Those points are outside the round-trip sweep. Explicit regression tests
-//! below cover selected edge cases; no deleted fixture suite supplies coverage.
-
-#![allow(clippy::unwrap_used)]
-// Retain the declared precision of regression constants.
-#![allow(clippy::excessive_precision)]
-
-use nalgebra::{Matrix2x4, Matrix4x2, SMatrix, SVector, Vector2, Vector4};
+//! Shipped-calibration round trips and the homogeneous SLAM point-Jacobian boundary.
+#![allow(clippy::unwrap_used, clippy::excessive_precision)]
+use kornia_staging_3d::camera::{CameraModelKind, Pinhole};
+use nalgebra::{Matrix2x4, Vector2, Vector4};
 use proptest::prelude::*;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use slam_rs::calib::Calibration;
-use slam_rs::camera::{
-    Camera, CameraEnum, KannalaBrandt4, Pinhole, PinholeRadtan8, RigCamera, UnprojectJacobians,
-};
+use slam_rs::camera::{SlamCamera, RigCamera};
 use slam_rs::lie::LieScalar;
-
 mod common;
 
-/// Fixed valid radius for the synthetic Odyssey+ radtan8 intrinsics.
-const ODYSSEY_COMPUTED_RPMAX: f64 = 2.5927503282280915;
+trait TestConstants: LieScalar + Serialize + DeserializeOwned {}
+impl TestConstants for f32 {}
+impl TestConstants for f64 {}
 
-/// `TestConstants<Scalar>`, plus the serde
-/// bounds the calibration reader needs so a sweep can be written once and run at
-/// both precisions.
-trait TestConstants: LieScalar + Serialize + DeserializeOwned {
-    /// Central difference step.
-    fn fd_epsilon() -> Self;
-    /// Relative tolerance for the comparison.
-    fn fd_max_norm() -> Self;
-}
-
-impl TestConstants for f64 {
-    fn fd_epsilon() -> Self {
-        1e-8
-    }
-    fn fd_max_norm() -> Self {
-        1e-3
-    }
-}
-
-impl TestConstants for f32 {
-    fn fd_epsilon() -> Self {
-        1e-2
-    }
-    fn fd_max_norm() -> Self {
-        1e-2
-    }
-}
-
-/// Every coefficient lies within `prec` of zero.
-fn is_zero<S: LieScalar, const R: usize, const C: usize>(m: &SMatrix<S, R, C>, prec: S) -> bool {
-    m.iter().all(|value| value.abs() <= prec)
-}
-
-/// Relative comparison: `(a-b).norm() <= prec * min(a.norm(), b.norm())`.
-fn is_approx<S: LieScalar, const R: usize, const C: usize>(
-    a: &SMatrix<S, R, C>,
-    b: &SMatrix<S, R, C>,
-    prec: S,
-) -> bool {
-    (a - b).norm() <= prec * a.norm().min(b.norm())
-}
-
-/// How far apart the `f32` and `f64` projections of one point may be, in pixels.
-///
-/// Not a constant, and not relative to the pixel either. Every projection ends
-/// in `u = fx * m + cx`, and near the principal point those two terms cancel:
-/// at `u = -32` on the msd-index calibration the summands are `-501` and `469`,
-/// so the last rounding step is an ulp of **501**, not of 32. The bound is
-/// therefore eight ulps of `|u| + |c|`, the magnitude the addition actually
-/// works at.
-///
-/// Eight rather than one: `f32` rounds at every step of the Horner chain, the
-/// `atan2` promotion and the divisions before it, and the point of this test is
-/// that `f32` stays far below the half pixel the KLT tracker cares about — not
-/// that it is correctly rounded. At a 960-pixel image edge the bound is 1.3e-3
-/// px; at the principal point it is 4.5e-4 px.
-fn f32_pixel_bound(value: f64, principal_point: f64) -> f64 {
-    8.0 * f64::from(f32::EPSILON) * (value.abs() + principal_point.abs())
-}
-
-/// `test_jacobian`, with `x0` always zero as
-/// every call site in passes `…::Zero()`.
-fn assert_jacobian<S: TestConstants, const R: usize, const C: usize>(
-    name: &str,
-    analytic: &SMatrix<S, R, C>,
-    f: impl Fn(&SVector<S, C>) -> SVector<S, R>,
-) {
-    let eps: S = S::fd_epsilon();
-    let max_norm: S = S::fd_max_norm();
-
-    let mut numeric: SMatrix<S, R, C> = SMatrix::<S, R, C>::zeros();
-    for column in 0..C {
-        let mut inc: SVector<S, C> = SVector::<S, C>::zeros();
-        inc[column] = eps;
-        let plus: SVector<S, R> = f(&inc);
-        let minus: SVector<S, R> = f(&(-inc));
-        numeric.set_column(column, &(plus - minus));
-    }
-    numeric /= eps + eps;
-
-    assert!(
-        analytic.iter().all(|value| value.is_finite()),
-        "{name}: analytic Jacobian is not finite:\n{analytic}"
-    );
-    assert!(
-        numeric.iter().all(|value| value.is_finite()),
-        "{name}: numeric Jacobian is not finite:\n{numeric}"
-    );
-
-    let agrees: bool = if is_zero(&numeric, max_norm) && is_zero(analytic, max_norm) {
-        is_zero(&(numeric - analytic), max_norm)
-    } else {
-        is_approx(&numeric, analytic, max_norm)
-    };
-    assert!(
-        agrees,
-        "{name}: analytic and numeric disagree (diff norm {})\nanalytic:\n{analytic}numeric:\n{numeric}",
-        (numeric - analytic).norm()
-    );
-}
-
-/// Select point and/or intrinsic Jacobians for the sweep.
-/// Radtan8 denominator-parameter columns can reach 1e4 near the valid-radius edge,
-/// where f32 finite differences lose derivative resolution. Check those parameter
-/// columns in f64; the estimator uses the point Jacobian.
-#[derive(Clone, Copy, PartialEq)]
-enum Check {
-    /// `d_proj_d_p3d` only.
-    Point,
-    /// Both Jacobians.
-    PointAndParam,
-}
-
-/// `testProjectJacobian` : the grid is
-/// `x, y in -10..=10`, `z in -1..=5`, homogeneous `w = 1`.
-///
-/// `domain` narrows the sweep to the pixels a camera can actually produce; the
-/// literal port passes `everywhere`.
-fn sweep_project_jacobians<S, const N: usize, Cam>(
-    camera: &Cam,
-    domain: impl Fn(&Vector2<S>) -> bool,
-    check: Check,
-) where
-    S: TestConstants,
-    Cam: Camera<S, Params = SVector<S, N>, ParamJacobian = SMatrix<S, 2, N>>,
-{
-    for x in -10..=10 {
-        for y in -10..=10 {
-            for z in -1..=5 {
-                let point: Vector4<S> = Vector4::new(
-                    S::from_literal(f64::from(x)),
-                    S::from_literal(f64::from(y)),
-                    S::from_literal(f64::from(z)),
-                    S::one(),
-                );
-
-                let mut proj: Vector2<S> = Vector2::zeros();
-                let mut d_proj_d_p3d: Matrix2x4<S> = Matrix2x4::zeros();
-                let mut d_proj_d_param: SMatrix<S, 2, N> = SMatrix::zeros();
-                let valid: bool = camera.project_with_jacobians(
-                    &point,
-                    &mut proj,
-                    Some(&mut d_proj_d_p3d),
-                    Some(&mut d_proj_d_param),
-                );
-                if !valid || !domain(&proj) {
-                    continue;
-                }
-
-                assert_jacobian("d_r_d_p", &d_proj_d_p3d, |inc: &Vector4<S>| {
-                    let mut res: Vector2<S> = Vector2::zeros();
-                    camera.project(&(point + inc), &mut res);
-                    res
-                });
-
-                if check == Check::PointAndParam {
-                    assert_jacobian("d_r_d_param", &d_proj_d_param, |inc: &SVector<S, N>| {
-                        let mut perturbed: Cam = *camera;
-                        perturbed.apply_inc(inc);
-                        let mut res: Vector2<S> = Vector2::zeros();
-                        perturbed.project(&point, &mut res);
-                        res
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// Projection ignores the input homogeneous component; unprojection returns it as
-/// zero and recovers the normalized spatial point within `epsilonSqrt`.
-fn sweep_project_unproject<S: TestConstants, Cam: Camera<S>>(
-    camera: &Cam,
-    domain: impl Fn(&Vector2<S>) -> bool,
-) {
-    for x in -10..=10 {
-        for y in -10..=10 {
-            for z in 0..=5 {
-                let point: Vector4<S> = Vector4::new(
-                    S::from_literal(f64::from(x)),
-                    S::from_literal(f64::from(y)),
-                    S::from_literal(f64::from(z)),
-                    S::from_literal(0.23424),
-                );
-                let mut normalized: Vector4<S> = Vector4::zeros();
-                normalized
-                    .fixed_rows_mut::<3>(0)
-                    .copy_from(&point.fixed_rows::<3>(0).normalize());
-
-                let mut proj: Vector2<S> = Vector2::zeros();
-                if !camera.project(&point, &mut proj) || !domain(&proj) {
-                    continue;
-                }
-
-                let mut bearing: Vector4<S> = Vector4::zeros();
-                camera.unproject(&proj, &mut bearing);
-                assert!(
-                    is_approx(&normalized, &bearing, S::sophus_epsilon_sqrt()),
-                    "normalized {} unprojected {}",
-                    normalized.transpose(),
-                    bearing.transpose()
-                );
-            }
-        }
-    }
-}
-
-/// `testUnprojectJacobians`.
-fn sweep_unproject_jacobians<S, const N: usize, Cam>(
-    camera: &Cam,
-    domain: impl Fn(&Vector2<S>) -> bool,
-) where
-    S: TestConstants,
-    Cam: UnprojectJacobians<S, Params = SVector<S, N>, UnprojectParamJacobian = SMatrix<S, 4, N>>,
-{
-    for x in -10..=10 {
-        for y in -10..=10 {
-            for z in 0..=5 {
-                let point: Vector4<S> = Vector4::new(
-                    S::from_literal(f64::from(x)),
-                    S::from_literal(f64::from(y)),
-                    S::from_literal(f64::from(z)),
-                    S::zero(),
-                );
-                let mut proj: Vector2<S> = Vector2::zeros();
-                if !camera.project(&point, &mut proj) || !domain(&proj) {
-                    continue;
-                }
-
-                let mut bearing: Vector4<S> = Vector4::zeros();
-                let mut d_p3d_d_proj: Matrix4x2<S> = Matrix4x2::zeros();
-                let mut d_p3d_d_param: SMatrix<S, 4, N> = SMatrix::zeros();
-                camera.unproject_with_jacobians(
-                    &proj,
-                    &mut bearing,
-                    Some(&mut d_p3d_d_proj),
-                    Some(&mut d_p3d_d_param),
-                );
-
-                assert_jacobian("d_r_d_p", &d_p3d_d_proj, |inc: &Vector2<S>| {
-                    let mut res: Vector4<S> = Vector4::zeros();
-                    camera.unproject(&(proj + inc), &mut res);
-                    res
-                });
-
-                assert_jacobian("d_r_d_param", &d_p3d_d_param, |inc: &SVector<S, N>| {
-                    let mut perturbed: Cam = *camera;
-                    perturbed.apply_inc(inc);
-                    let mut res: Vector4<S> = Vector4::zeros();
-                    perturbed.unproject(&proj, &mut res);
-                    res
-                });
-            }
-        }
-    }
-}
-
-/// `PinholeCamera::getTestProjections()` : EuRoC
-/// and TUM VI 512.
-fn basalt_pinholes<S: TestConstants>() -> Vec<Pinhole<S>> {
-    vec![
-        Pinhole::new(SVector::<S, 4>::from([
-            S::from_literal(460.76484651566468),
-            S::from_literal(459.4051018049483),
-            S::from_literal(365.8937161309615),
-            S::from_literal(249.33499869752445),
-        ])),
-        Pinhole::new(SVector::<S, 4>::from([
-            S::from_literal(191.14799816648748),
-            S::from_literal(191.13150946585135),
-            S::from_literal(254.95857715233118),
-            S::from_literal(256.8815466235898),
-        ])),
+fn basalt_pinholes<S: TestConstants>() -> Vec<SlamCamera<S>> {
+    [
+        [
+            460.76484651566468,
+            459.4051018049483,
+            365.8937161309615,
+            249.33499869752445,
+        ],
+        [
+            191.14799816648748,
+            191.13150946585135,
+            254.95857715233118,
+            256.8815466235898,
+        ],
     ]
+    .map(|params| SlamCamera {
+        inner: CameraModelKind::Pinhole(Pinhole::new(params.map(S::from_literal)).unwrap()),
+    })
+    .to_vec()
 }
 
-/// `KannalaBrandtCamera4::getTestProjections()`.
-fn basalt_kb4<S: TestConstants>() -> KannalaBrandt4<S> {
-    KannalaBrandt4::new(SVector::<S, 8>::from([
-        S::from_literal(379.045),
-        S::from_literal(379.008),
-        S::from_literal(505.512),
-        S::from_literal(509.969),
-        S::from_literal(0.00693023),
-        S::from_literal(-0.0013828),
-        S::from_literal(-0.000272596),
-        S::from_literal(-0.000452646),
-    ]))
-}
-
-/// `PinholeRadtan8Camera::getTestProjections()`,
-/// the Odyssey+, with the radius `computeRpmax()` estimates for it.
-fn basalt_radtan8<S: TestConstants>() -> PinholeRadtan8<S> {
-    PinholeRadtan8::new(
-        SVector::<S, 12>::from([
-            S::from_literal(269.0600776672363),
-            S::from_literal(269.1679859161377),
-            S::from_literal(324.3333053588867),
-            S::from_literal(245.22674560546875),
-            S::from_literal(0.6257319450378418),
-            S::from_literal(0.46612036228179932),
-            S::from_literal(-0.00018502399325370789),
-            S::from_literal(-4.2882973502855748e-5),
-            S::from_literal(0.0041795829311013222),
-            S::from_literal(0.89431935548782349),
-            S::from_literal(0.54253977537155151),
-            S::from_literal(0.0662121474742889),
-        ]),
-        S::from_literal(ODYSSEY_COMPUTED_RPMAX),
-    )
-}
-
-/// Every kb4 in the shipped calibrations, with the resolution of its images.
-fn shipped_kb4<S: TestConstants>() -> Vec<(KannalaBrandt4<S>, RigCamera<S>, f64)> {
-    let mut cameras: Vec<(KannalaBrandt4<S>, RigCamera<S>, f64)> = Vec::new();
-    for (text, safe_radius) in [
-        (common::calibration_text("msdmi"), MSDMI_SAFE_RADIUS),
-        (common::calibration_text("robocap"), ROBOCAP_SAFE_RADIUS),
-    ] {
-        let calibration: Calibration<S> = Calibration::from_json_str(text).unwrap();
-        for rig in RigCamera::from_calibration(&calibration).unwrap() {
-            match rig.model {
-                CameraEnum::Kb4(camera) => cameras.push((camera, rig, safe_radius)),
-                other => panic!("expected kb4, got {}", other.name()),
-            }
-        }
-    }
-    cameras
-}
-
-/// The four msd-g2 cameras, each with the `rpmax` its calibration carries.
-fn shipped_radtan8<S: TestConstants>() -> Vec<(PinholeRadtan8<S>, RigCamera<S>, f64)> {
+fn shipped<S: TestConstants>(name: &str, radius: f64) -> Vec<(SlamCamera<S>, RigCamera<S>, f64)> {
     let calibration: Calibration<S> =
-        Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
+        Calibration::from_json_str(common::calibration_text(name)).unwrap();
     RigCamera::from_calibration(&calibration)
         .unwrap()
         .into_iter()
-        .map(|rig| match rig.model {
-            CameraEnum::PinholeRadtan8(camera) => (camera, rig, MSDMG_SAFE_RADIUS),
-            other => panic!("expected pinhole-radtan8, got {}", other.name()),
-        })
+        .map(|rig| (rig.model, rig, radius))
         .collect()
 }
-
-/// Accept every point on the synthetic test grid.
-fn everywhere<S: LieScalar>(_proj: &Vector2<S>) -> bool {
-    true
+fn shipped_kb4<S: TestConstants>() -> Vec<(SlamCamera<S>, RigCamera<S>, f64)> {
+    shipped("msdmi", MSDMI_SAFE_RADIUS)
+        .into_iter()
+        .chain(shipped("robocap", ROBOCAP_SAFE_RADIUS))
+        .collect()
 }
-
-/// Operational keypoint domain: inside the image and configured safe radius.
-/// The radius masks fisheye corners: 472 for Index, 340 for G2 and 388 for RoboCap.
+fn shipped_radtan8<S: TestConstants>() -> Vec<(SlamCamera<S>, RigCamera<S>, f64)> {
+    shipped("msdmg", MSDMG_SAFE_RADIUS)
+}
+fn f32_pixel_bound(value: f64, principal_point: f64) -> f64 {
+    8.0 * f64::from(f32::EPSILON) * (value.abs() + principal_point.abs())
+}
 fn on_sensor<S: LieScalar>(
     rig: &RigCamera<S>,
     safe_radius: f64,
@@ -395,109 +72,6 @@ fn on_sensor<S: LieScalar>(
 const MSDMI_SAFE_RADIUS: f64 = 472.0;
 const MSDMG_SAFE_RADIUS: f64 = 340.0;
 const ROBOCAP_SAFE_RADIUS: f64 = 388.0;
-
-// Synthetic cameras on the full test grid.
-
-#[test]
-fn pinhole_project_jacobians() {
-    for camera in basalt_pinholes::<f64>() {
-        sweep_project_jacobians(&camera, everywhere, Check::PointAndParam);
-    }
-    for camera in basalt_pinholes::<f32>() {
-        sweep_project_jacobians(&camera, everywhere, Check::PointAndParam);
-    }
-}
-
-#[test]
-fn kb4_project_jacobians() {
-    sweep_project_jacobians(&basalt_kb4::<f64>(), everywhere, Check::PointAndParam);
-    sweep_project_jacobians(&basalt_kb4::<f32>(), everywhere, Check::PointAndParam);
-}
-
-#[test]
-fn radtan8_project_jacobians() {
-    sweep_project_jacobians(&basalt_radtan8::<f64>(), everywhere, Check::PointAndParam);
-    sweep_project_jacobians(&basalt_radtan8::<f32>(), everywhere, Check::PointAndParam);
-}
-
-#[test]
-fn pinhole_project_unproject() {
-    for camera in basalt_pinholes::<f64>() {
-        sweep_project_unproject(&camera, everywhere);
-    }
-    for camera in basalt_pinholes::<f32>() {
-        sweep_project_unproject(&camera, everywhere);
-    }
-}
-
-#[test]
-fn kb4_project_unproject() {
-    sweep_project_unproject(&basalt_kb4::<f64>(), everywhere);
-    sweep_project_unproject(&basalt_kb4::<f32>(), everywhere);
-}
-
-#[test]
-fn radtan8_project_unproject() {
-    sweep_project_unproject(&basalt_radtan8::<f64>(), everywhere);
-    sweep_project_unproject(&basalt_radtan8::<f32>(), everywhere);
-}
-
-#[test]
-fn pinhole_unproject_jacobians() {
-    for camera in basalt_pinholes::<f64>() {
-        sweep_unproject_jacobians(&camera, everywhere);
-    }
-    for camera in basalt_pinholes::<f32>() {
-        sweep_unproject_jacobians(&camera, everywhere);
-    }
-}
-
-/// Check kb4 unprojection Jacobians in f64.
-#[test]
-fn kb4_unproject_jacobians() {
-    sweep_unproject_jacobians(&basalt_kb4::<f64>(), everywhere);
-}
-
-// ─── the shipped intrinsics, on the sensor ────────────────────────────────
-
-#[test]
-fn shipped_kb4_project_jacobians() {
-    for (camera, rig, safe_radius) in shipped_kb4::<f64>() {
-        sweep_project_jacobians(&camera, on_sensor(&rig, safe_radius), Check::PointAndParam);
-    }
-    for (camera, rig, safe_radius) in shipped_kb4::<f32>() {
-        sweep_project_jacobians(&camera, on_sensor(&rig, safe_radius), Check::PointAndParam);
-    }
-}
-
-#[test]
-fn shipped_radtan8_project_jacobians() {
-    for (camera, rig, safe_radius) in shipped_radtan8::<f64>() {
-        sweep_project_jacobians(&camera, on_sensor(&rig, safe_radius), Check::PointAndParam);
-    }
-    for (camera, rig, safe_radius) in shipped_radtan8::<f32>() {
-        sweep_project_jacobians(&camera, on_sensor(&rig, safe_radius), Check::Point);
-    }
-}
-
-#[test]
-fn shipped_cameras_project_unproject() {
-    for (camera, rig, safe_radius) in shipped_kb4::<f64>() {
-        sweep_project_unproject(&camera, on_sensor(&rig, safe_radius));
-    }
-    for (camera, rig, safe_radius) in shipped_radtan8::<f64>() {
-        sweep_project_unproject(&camera, on_sensor(&rig, safe_radius));
-    }
-}
-
-#[test]
-fn shipped_kb4_unproject_jacobians() {
-    for (camera, rig, safe_radius) in shipped_kb4::<f64>() {
-        sweep_unproject_jacobians(&camera, on_sensor(&rig, safe_radius));
-    }
-}
-
-// ─── what unprojection actually delivers on real fisheye calibrations ─────
 
 /// Within safe radii, shipped calibrations should invert accurately except for
 /// the explicit regression cases below. Bearing errors affect both epipolar
@@ -540,7 +114,7 @@ fn the_round_trip_is_exact_inside_the_safe_radius() {
                             1.0,
                         );
                         let mut proj: Vector2<f64> = Vector2::zeros();
-                        if !rig.model.project(&point, &mut proj) || !domain(&proj) {
+                        if !rig.model.project_point(&point, &mut proj, None) || !domain(&proj) {
                             continue;
                         }
                         let mut bearing: Vector4<f64> = Vector4::zeros();
@@ -568,23 +142,17 @@ fn the_round_trip_is_exact_inside_the_safe_radius() {
     assert_eq!(worst_by_camera.len(), 10);
 }
 
-/// msd-g2 cam2 does not invert inside the safe radius.
-///
-/// The cause is `unproject`'s five Newton steps on a distortion whose radial
-/// numerator and denominator both change sign (`k2 = -0.46`, `k5 = -0.59`): the
-/// iteration lands on a different pre-image. The pixel is 337 px from the image
-/// centre, inside the 340 px safe radius, so nothing in the frontend masks it.
-/// It is recorded here because the estimator stage has to decide whether to
-/// widen the iteration.
+/// msd-g2 cam2 has multiple Brown pre-images inside its declared valid radius.
+/// A converged inverse must reproject even when it selects another pre-image.
 #[test]
-fn msd_g2_cam2_does_not_invert_inside_the_safe_radius() {
+fn msd_g2_cam2_robust_inverse_inside_the_safe_radius() {
     let calibration: Calibration<f64> =
         Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
     let rig: RigCamera<f64> = RigCamera::from_calibration(&calibration).unwrap()[2];
 
     let point: Vector4<f64> = Vector4::new(-9.1, 7.6, 4.25, 1.0);
     let mut proj: Vector2<f64> = Vector2::zeros();
-    assert!(rig.model.project(&point, &mut proj));
+    assert!(rig.model.project_point(&point, &mut proj, None));
     assert!(on_sensor(&rig, MSDMG_SAFE_RADIUS)(&proj));
 
     let mut bearing: Vector4<f64> = Vector4::zeros();
@@ -593,20 +161,25 @@ fn msd_g2_cam2_does_not_invert_inside_the_safe_radius() {
     expected
         .fixed_rows_mut::<3>(0)
         .copy_from(&point.fixed_rows::<3>(0).normalize());
+    // This Brown calibration has multiple roots inside rpmax. The inverse
+    // selects the root reached from the normalized pixel, and must reproject.
+    let mut reprojected = Vector2::zeros();
+    assert!(rig.model.project_point(&bearing, &mut reprojected, None));
+    assert!((reprojected - proj).norm() < 1e-6);
     assert!((bearing - expected).norm() > 0.12);
 }
 
 /// Pin the selected off-axis unprojection result where fixed Newton iterations
 /// leave a bearing error, independently of the ordinary sensor-domain sweep.
 #[test]
-fn robocap_front_left_inverts_backwards_outside_the_safe_radius() {
+fn robocap_front_left_robust_inverse_outside_the_safe_radius() {
     let calibration: Calibration<f64> =
         Calibration::from_json_str(common::calibration_text("robocap")).unwrap();
     let rig: RigCamera<f64> = RigCamera::from_calibration(&calibration).unwrap()[0];
 
     let point: Vector4<f64> = Vector4::new(-9.0, -4.3, 1.5, 1.0);
     let mut proj: Vector2<f64> = Vector2::zeros();
-    assert!(rig.model.project(&point, &mut proj));
+    assert!(rig.model.project_point(&point, &mut proj, None));
     assert!(rig.in_bounds(&proj, 0.0));
     assert!(!on_sensor(&rig, ROBOCAP_SAFE_RADIUS)(&proj));
 
@@ -615,16 +188,16 @@ fn robocap_front_left_inverts_backwards_outside_the_safe_radius() {
     assert!(bearing.iter().all(|value| value.is_finite()));
     assert!((bearing.norm() - 1.0).abs() < 1e-12);
     let mut reprojected = Vector2::zeros();
-    assert!(rig.model.project(&bearing, &mut reprojected));
-    // Outside the safe radius, this inverse is finite but does not round-trip.
-    assert!((reprojected - proj).norm() > 1.0);
+    assert!(rig.model.project_point(&bearing, &mut reprojected, None));
+    // The robust inverse also round-trips this pixel outside the old safe radius.
+    assert!((reprojected - proj).norm() < 1e-6);
 
-    // Not merely inaccurate: the bearing points back the way it came.
+    // The recovered bearing points in the original direction.
     let mut expected: Vector4<f64> = Vector4::zeros();
     expected
         .fixed_rows_mut::<3>(0)
         .copy_from(&point.fixed_rows::<3>(0).normalize());
-    assert!(bearing.dot(&expected) < -0.9);
+    assert!(bearing.dot(&expected) > 1.0 - 1e-12);
 }
 
 /// The case that made the old bound flaky, pinned.
@@ -637,17 +210,18 @@ fn robocap_front_left_inverts_backwards_outside_the_safe_radius() {
 /// around 500, and 1.2e-4 is two ulps of 500. The bound now says so.
 #[test]
 fn a_pixel_near_the_principal_point_still_agrees_between_the_precisions() {
-    let camera64: CameraEnum<f64> = CameraEnum::Kb4(shipped_kb4::<f64>()[0].0);
-    let camera32: CameraEnum<f32> = CameraEnum::Kb4(shipped_kb4::<f32>()[0].0);
+    let camera64: SlamCamera<f64> = shipped_kb4::<f64>()[0].0;
+    let camera32: SlamCamera<f32> = shipped_kb4::<f32>()[0].0;
 
     let (x, y, z): (f32, f32, f32) = (-1.1009091, 0.27731937, 0.52727574);
     let mut proj64: Vector2<f64> = Vector2::zeros();
     let mut proj32: Vector2<f32> = Vector2::zeros();
-    assert!(camera64.project(
+    assert!(camera64.project_point(
         &Vector4::new(f64::from(x), f64::from(y), f64::from(z), 1.0),
-        &mut proj64
+        &mut proj64,
+        None
     ));
-    assert!(camera32.project(&Vector4::new(x, y, z, 1.0), &mut proj32));
+    assert!(camera32.project_point(&Vector4::new(x, y, z, 1.0), &mut proj32, None));
 
     let principal_point: [f64; 4] = camera64.focal_and_principal_point();
     let difference: f64 = (proj64[0] - f64::from(proj32[0])).abs();
@@ -678,32 +252,32 @@ proptest! {
         z in 0.3f64..8.0,
         camera_index in 0usize..3,
     ) {
-        let cameras: [(CameraEnum<f64>, RigCamera<f64>, f64); 3] = [
+        let cameras: [(SlamCamera<f64>, RigCamera<f64>, f64); 3] = [
             (
-                CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]),
+                basalt_pinholes::<f64>()[0],
                 RigCamera {
-                    model: CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]),
+                    model: basalt_pinholes::<f64>()[0],
                     // `PinholeCamera::getTestResolutions()`.
                     resolution: [752, 480],
                 },
                 376.0,
             ),
             (
-                CameraEnum::Kb4(shipped_kb4::<f64>()[0].0),
+                shipped_kb4::<f64>()[0].0,
                 shipped_kb4::<f64>()[0].1,
                 MSDMI_SAFE_RADIUS,
             ),
             (
-                CameraEnum::PinholeRadtan8(shipped_radtan8::<f64>()[0].0),
+                shipped_radtan8::<f64>()[0].0,
                 shipped_radtan8::<f64>()[0].1,
                 MSDMG_SAFE_RADIUS,
             ),
         ];
-        let (camera, rig, safe_radius): (CameraEnum<f64>, RigCamera<f64>, f64) = cameras[camera_index];
+        let (camera, rig, safe_radius): (SlamCamera<f64>, RigCamera<f64>, f64) = cameras[camera_index];
         let point: Vector4<f64> = Vector4::new(x, y, z, 1.0);
 
         let mut proj: Vector2<f64> = Vector2::zeros();
-        prop_assume!(camera.project(&point, &mut proj));
+        prop_assume!(camera.project_point(&point, &mut proj, None));
         prop_assume!(on_sensor(&rig, safe_radius)(&proj));
 
         let mut bearing: Vector4<f64> = Vector4::zeros();
@@ -730,19 +304,19 @@ proptest! {
         // kb4 accepts points behind its own plane whenever the radius is large
         // so the negative-z rejection is
         // only meaningful near the optical axis for that model.
-        let pinhole: CameraEnum<f64> = CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]);
-        let radtan8: CameraEnum<f64> = CameraEnum::PinholeRadtan8(shipped_radtan8::<f64>()[0].0);
-        let kb4: CameraEnum<f64> = CameraEnum::Kb4(shipped_kb4::<f64>()[0].0);
+        let pinhole: SlamCamera<f64> = basalt_pinholes::<f64>()[0];
+        let radtan8: SlamCamera<f64> = shipped_radtan8::<f64>()[0].0;
+        let kb4: SlamCamera<f64> = shipped_kb4::<f64>()[0].0;
 
         let point: Vector4<f64> = Vector4::new(x, y, z, 1.0);
         let axial: Vector4<f64> = Vector4::new(0.0, 0.0, z, 1.0);
         let mut proj: Vector2<f64> = Vector2::zeros();
 
-        prop_assert!(!pinhole.project(&point, &mut proj));
+        prop_assert!(!pinhole.project_point(&point, &mut proj, None));
         prop_assert!(proj.iter().all(|value| value.is_finite()));
-        prop_assert!(!radtan8.project(&point, &mut proj));
+        prop_assert!(!radtan8.project_point(&point, &mut proj, None));
         prop_assert!(proj.iter().all(|value| value.is_finite()));
-        prop_assert!(!kb4.project(&axial, &mut proj));
+        prop_assert!(!kb4.project_point(&axial, &mut proj, None));
         prop_assert!(proj.iter().all(|value| value.is_finite()));
     }
 
@@ -769,20 +343,20 @@ proptest! {
 
         for (camera64, camera32) in [
             (
-                CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]),
-                CameraEnum::Pinhole(basalt_pinholes::<f32>()[0]),
+                basalt_pinholes::<f64>()[0],
+                basalt_pinholes::<f32>()[0],
             ),
             (
-                CameraEnum::Kb4(shipped_kb4::<f64>()[0].0),
-                CameraEnum::Kb4(shipped_kb4::<f32>()[0].0),
+                shipped_kb4::<f64>()[0].0,
+                shipped_kb4::<f32>()[0].0,
             ),
             (
-                CameraEnum::PinholeRadtan8(shipped_radtan8::<f64>()[0].0),
-                CameraEnum::PinholeRadtan8(shipped_radtan8::<f32>()[0].0),
+                shipped_radtan8::<f64>()[0].0,
+                shipped_radtan8::<f32>()[0].0,
             ),
         ] {
-            prop_assume!(camera64.project(&point64, &mut proj64));
-            prop_assert!(camera32.project(&point32, &mut proj32));
+            prop_assume!(camera64.project_point(&point64, &mut proj64, None));
+            prop_assert!(camera32.project_point(&point32, &mut proj32, None));
             let principal_point: [f64; 4] = camera64.focal_and_principal_point();
             for axis in 0..2 {
                 let bound: f64 = f32_pixel_bound(proj64[axis], principal_point[2 + axis]);
@@ -791,6 +365,44 @@ proptest! {
                     "{} axis {axis}: f64 {} f32 {} (bound {bound:e})",
                     camera64.name(), proj64[axis], proj32[axis]
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn homogeneous_point_jacobians_match_finite_differences() {
+    for (camera, _, _) in shipped::<f64>("msdmg", MSDMG_SAFE_RADIUS)
+        .into_iter()
+        .chain(shipped_kb4::<f64>())
+        .chain(basalt_pinholes::<f64>().into_iter().map(|camera| {
+            (
+                camera,
+                RigCamera {
+                    model: camera,
+                    resolution: [752, 480],
+                },
+                376.0,
+            )
+        }))
+    {
+        for point in [
+            Vector4::new(0.1, -0.2, 1.3, 1.0),
+            Vector4::new(-0.4, 0.3, 2.1, 0.2),
+        ] {
+            let mut pixel = Vector2::zeros();
+            let mut jacobian = Matrix2x4::zeros();
+            assert!(camera.project_point(&point, &mut pixel, Some(&mut jacobian)));
+            for col in 0..4 {
+                let mut plus = point;
+                let mut minus = point;
+                plus[col] += 1e-6;
+                minus[col] -= 1e-6;
+                let mut a = Vector2::zeros();
+                let mut b = Vector2::zeros();
+                assert!(camera.project_point(&plus, &mut a, None));
+                assert!(camera.project_point(&minus, &mut b, None));
+                assert!(((a - b) / 2e-6 - jacobian.column(col)).norm() < 1e-5);
             }
         }
     }

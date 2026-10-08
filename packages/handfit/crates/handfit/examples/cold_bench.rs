@@ -77,9 +77,7 @@ fn view(values: &[f64]) -> Result<View, String> {
     Ok(View {
         rotation,
         translation,
-        focal,
-        principal,
-        distortion: fisheye.then_some(distortion),
+        camera: handfit::residual::camera_model(&focal, &principal, fisheye.then_some(&distortion)).map_err(|e| e.to_string())?,
         pixels,
         weights,
         distances,

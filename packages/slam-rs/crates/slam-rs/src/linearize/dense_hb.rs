@@ -142,8 +142,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::calib::{CameraModel, PinholeParams};
-    use crate::camera::CameraEnum;
+    use crate::calib::{BasaltCamera, PinholeParams};
+    use crate::camera::SlamCamera;
     use crate::landmark::Landmark;
     use crate::lie::Se3;
     use crate::lie::So3;
@@ -192,7 +192,7 @@ mod tests {
     }
 
     fn compare_symmetric_dense<S: LieScalar>() {
-        use crate::camera::CameraEnum;
+        use crate::camera::SlamCamera;
         use crate::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
         use crate::types::KeypointId;
         use std::sync::Arc;
@@ -218,14 +218,10 @@ mod tests {
                 );
             for (cam, pixels) in observations.cameras.iter_mut().enumerate() {
                 let p = calibration.t_i_c[cam].inverse() * point;
-                let model = CameraEnum::from_model(&calibration.intrinsics[cam]).unwrap();
+                let model = SlamCamera::from_model(&calibration.intrinsics[cam]).unwrap();
                 let mut pixel = Vector2::zeros();
                 let mut jac = nalgebra::Matrix2x4::zeros();
-                assert!(model.project_with_jacobian(
-                    &nalgebra::Vector4::new(p.x, p.y, p.z, 1.0),
-                    &mut pixel,
-                    &mut jac
-                ));
+                assert!(model.project_point(&nalgebra::Vector4::new(p.x, p.y, p.z, 1.0), &mut pixel, Some(&mut jac)));
                 pixels.insert(KeypointId(id), pixel.cast());
             }
         }
@@ -313,15 +309,15 @@ mod tests {
                 d_rel_d_t: -Matrix6::identity(),
             },
         ];
-        let model: CameraModel<f64> = CameraModel::Pinhole(PinholeParams {
+        let model: BasaltCamera<f64> = BasaltCamera::Pinhole(PinholeParams {
             fx: 379.0,
             fy: 379.0,
             cx: 505.0,
             cy: 510.0,
         });
-        let cameras: Vec<CameraEnum<f64>> = vec![
-            CameraEnum::from_model(&model).unwrap(),
-            CameraEnum::from_model(&model).unwrap(),
+        let cameras: Vec<SlamCamera<f64>> = vec![
+            SlamCamera::from_model(&model).unwrap(),
+            SlamCamera::from_model(&model).unwrap(),
         ];
         let options: LandmarkBlockOptions<f64> = LandmarkBlockOptions {
             huber_parameter: 0.5,
