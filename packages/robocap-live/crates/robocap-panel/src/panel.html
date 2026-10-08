@@ -678,21 +678,20 @@ $("viewer-save").onclick = async () => {
   if (!reply.ok) setNotes($("viewer-status"), [note("bad", reply.error)]); else checkViewer();
 };
 
-// The Wi-Fi card: the cap's network, its hotspot, saved and nearby networks. Changes come from the hotspot, or from a browser that
-// opened this page over the hotspot once (the panel's cookie).
+// The Wi-Fi card: the cap's network, its hotspot, saved and nearby networks. Changes only come from the hotspot.
 let wifi = null, joining = null, joined = null;
 async function loadWifi() {
   if (document.hidden) return;
   try { wifi = await (await fetch("api/wifi", { signal: AbortSignal.timeout(5000) })).json(); renderWifi(); } catch (e) {}
 }
 function renderWifi() {
-  const w = wifi.wifi, you = wifi.you, can = you.may_change, ghz = f => f ? (f > 4000 ? "5 GHz" : "2.4 GHz") : "";
+  const w = wifi.wifi, you = wifi.you, can = you.on_hotspot, ghz = f => f ? (f > 4000 ? "5 GHz" : "2.4 GHz") : "";
   $("wifi-now").replaceChildren(
     kv("the cap's network", w.error ? w.error : w.ssid ? `${w.ssid}${w.ip ? ` · ${w.ip}` : " · no address yet"} · ${ghz(Number(w.freq))}` : "not connected", w.ssid ? "" : "warnv"),
     kv("the cap's hotspot", `${wifi.hotspot.ssid || "Robocap"} · ${wifi.hotspot.ip}`),
     kv("this device", you.on_hotspot ? "on the cap's hotspot" : `on the LAN · ${you.ip}`));
   const notes = [];
-  if (!can) notes.push(note("info", "To change Wi-Fi from here, open this page once while joined to the cap's hotspot."));
+  if (!can) notes.push(note("info", `To change Wi-Fi, join the cap's hotspot and open http://${wifi.hotspot.ip}:8090 there.`));
   if (joined && w.ssid === joined && w.ip) notes.push(note("good", `The cap is on ${w.ssid} at ${w.ip}: on that network, open http://${w.ip}:8090`));
   else if (joined) notes.push(note("info", `Saved ${joined}. The cap joins it when it is in range; its hotspot can drop for a moment while it moves to that network's channel.`));
   setNotes($("wifi-msg"), [...notes, ...($("wifi-msg").dataset.error ? [note("bad", $("wifi-msg").dataset.error)] : [])]);
