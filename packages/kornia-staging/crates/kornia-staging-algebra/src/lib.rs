@@ -9,3 +9,6 @@ pub mod lie;
 
 mod scalar;
 pub use scalar::Scalar;
+
+/// Optimization extensions.
+pub mod optim;

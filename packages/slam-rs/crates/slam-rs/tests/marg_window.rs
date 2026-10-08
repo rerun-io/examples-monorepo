@@ -9,15 +9,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::{BaError, BundleAdjustmentBase};
 use slam_rs::calib::Calibration;
-use slam_rs::imu::IntegratedImuMeasurement;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::marg::{
     MargError, MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule,
-    ScheduleSet, marginalize, marginalize_helper_sqrt_to_sqrt,
+    ScheduleSet, marginalize,
 };
 use slam_rs::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
@@ -446,8 +446,15 @@ fn the_prior_is_re_anchored_on_the_delta() {
     let out: MarginalizeOutput<f64> = run(&mut marginalized, MarginalizeOptions::default());
 
     // The helper's own output, un-anchored.
-    let raw =
-        marginalize_helper_sqrt_to_sqrt(q2jp, q2r, &out.idx_to_keep, &out.idx_to_marg).unwrap();
+    let raw = kornia_staging_algebra::optim::solvers::marginalize(
+        q2jp,
+        q2r,
+        &out.idx_to_keep,
+        &out.idx_to_marg,
+    )
+    .unwrap();
+    let raw_h = raw.h;
+    let raw_b = raw.b;
 
     let delta: DVector<f64> = marginalized
         .estimator
@@ -458,8 +465,8 @@ fn the_prior_is_re_anchored_on_the_delta() {
     assert!(delta.rows(0, POSE_SIZE).norm() > 1e-6);
     assert_eq!(delta.rows(POSE_SIZE, POSE_VEL_BIAS_SIZE).norm(), 0.0);
 
-    assert_eq!(raw.h.nrows(), marginalized.marg.h.nrows());
-    let expected: DVector<f64> = &raw.b - &raw.h * &delta;
+    assert_eq!(raw_h.nrows(), marginalized.marg.h.nrows());
+    let expected: DVector<f64> = &raw_b - &raw_h * &delta;
     for i in 0..expected.nrows() {
         assert!(
             (marginalized.marg.b[i] - expected[i]).abs() < 1e-12,
@@ -469,9 +476,9 @@ fn the_prior_is_re_anchored_on_the_delta() {
         );
     }
     // The Jacobian itself is untouched by the re-anchoring.
-    for i in 0..raw.h.nrows() {
-        for j in 0..raw.h.ncols() {
-            assert_eq!(marginalized.marg.h[(i, j)], raw.h[(i, j)]);
+    for i in 0..raw_h.nrows() {
+        for j in 0..raw_h.ncols() {
+            assert_eq!(marginalized.marg.h[(i, j)], raw_h[(i, j)]);
         }
     }
 }

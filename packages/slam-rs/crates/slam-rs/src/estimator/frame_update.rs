@@ -13,19 +13,23 @@
 //! elimination, predicted decrease is `−(inc·b + ½ incᵀ H inc)` directly.
 
 use kornia_staging_algebra::Scalar;
+#[cfg(test)]
+use kornia_staging_sensors::imu::CombinedImuSample;
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
 use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
 use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
-use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
+use crate::ba_base::{BundleAdjustmentBase, linearize_point};
 use crate::duration_ns;
-use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
+use crate::imu::{ImuBlock, ImuLinData};
 use crate::lie::{Se3, eigen_maxi};
 use crate::linearize::{LandmarkBlockOptions, compute_error_weight, linearize_relative_pose};
 use crate::types::{
     FrameId, LandmarkId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId,
     Vector15,
 };
+use kornia_staging_slam::factors::LinearizePointOut;
 
 /// Which precondition sent a frameset back to the joint solve.
 ///
@@ -114,7 +118,6 @@ pub(super) struct FrameUpdateScratch<S: Scalar> {
     /// See [`Self::h_trial`].
     b_trial: DVector<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
-    solve: DMatrix<f64>,
     /// The increment [`damped_solve`] writes and the loop then negates.
     increment: DVector<S>,
     /// The pairs [`linearize_state`] has already evaluated, kept for its
@@ -134,7 +137,6 @@ impl<S: Scalar> Default for FrameUpdateScratch<S> {
             b: DVector::zeros(POSE_VEL_BIAS_SIZE),
             h_trial: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
             b_trial: DVector::zeros(POSE_VEL_BIAS_SIZE),
-            solve: DMatrix::zeros(0, 0),
             increment: DVector::zeros(POSE_VEL_BIAS_SIZE),
             rel_poses: Vec::new(),
             observations: Vec::new(),
@@ -172,7 +174,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         let Some(meas) = self.imu_meas.get(&prev_t_ns) else {
             return Ok(Err(FrameUpdateDecline::NoImuFactor));
         };
-        if prev_t_ns.checked_add(meas.get_dt_ns()) != Some(t_ns) {
+        if prev_t_ns.checked_add(meas.dt_ns()) != Some(t_ns) {
             return Ok(Err(FrameUpdateDecline::ImuIntervalGap));
         }
         // The prior is a quadratic in blocks frozen at a linearization point and
@@ -204,7 +206,6 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             ref mut b,
             ref mut h_trial,
             ref mut b_trial,
-            ref mut solve,
             ref mut increment,
             ref mut rel_poses,
             ref mut observations,
@@ -239,12 +240,9 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         let mut backtrack: i32 = 0;
         while it <= config.port_frame_update_max_iterations && termination.is_none() {
             let mark: std::time::Instant = std::time::Instant::now();
-            let (inc_valid, solve_attempts): (bool, u32) =
-                damped_solve(h, b, damping, solve, increment);
+            let (inc_valid, solve_attempts): (bool, u32) = damped_solve(h, b, damping, increment);
             if !inc_valid {
-                log::warn!(
-                    "frame {t_ns} ns: the frame update's increment is still not finite after {solve_attempts} damped solves"
-                );
+                return Err(EstimatorError::NumericallyInvalid { t_ns });
             }
             timings.solver_ns += duration_ns(mark);
 
@@ -586,14 +584,14 @@ mod tests {
     use nalgebra::{Vector3, Vector4};
 
     use super::*;
-    use crate::ba_base::compute_rel_pose;
     use crate::calib::Calibration;
     use crate::camera::SlamCamera;
     use crate::config::VioConfig;
-    use crate::imu::{ImuNoise, ImuSample};
     use crate::landmark::{Landmark, StereographicParam};
     use crate::lie::So3;
     use crate::types::{LandmarkId, PoseStateWithLin, PoseVelBiasState};
+    use kornia_staging_sensors::imu::ImuNoise;
+    use kornia_staging_slam::factors::compute_rel_pose;
 
     const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
     const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
@@ -669,20 +667,19 @@ mod tests {
         // stiff enough that the whitened problem has no significant digits left.
         // Gravity is cancelled, so the motion is the previous velocity plus a
         // small turn.
-        let noise: ImuNoise<f64> = ImuNoise::from_calibration(&vio.ba.calib);
+        let noise: ImuNoise<f64> = crate::imu::noise_from_calibration(&vio.ba.calib).unwrap();
         let mut meas: IntegratedImuMeasurement<f64> =
             IntegratedImuMeasurement::new(PREV_T_NS, &zero, &zero);
         let step_ns: i64 = (1e9 / vio.ba.calib.imu_update_rate) as i64;
         let mut t_ns: i64 = PREV_T_NS + step_ns;
         while t_ns <= CURRENT_T_NS {
             meas.integrate(
-                &ImuSample {
-                    t_ns,
-                    gyro: Vector3::new(0.05, -0.03, 0.02),
-                    accel: Vector3::new(0.0, 0.0, 9.81),
+                &CombinedImuSample {
+                    timestamp_ns: t_ns,
+                    gyro: kornia_algebra::Vec3F64::new(0.05, -0.03, 0.02),
+                    accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
                 },
-                &noise.accel_cov,
-                &noise.gyro_cov,
+                &noise,
             )
             .unwrap();
             t_ns += step_ns;
@@ -772,6 +769,34 @@ mod tests {
     /// (2.0e6 -> 9.1e-2 -> 5.3e-9 -> 3.6e-17): 2.1e-13 m, 3.6e-15 rad and
     /// 1.9e-11 m/s.
     const CONVERGENCE_TOLERANCE: f64 = 1e-9;
+
+    #[test]
+    fn failed_steps_are_refused_before_state_mutation() {
+        for joint in [false, true] {
+            let (mut vio, _) = a_window(2);
+            // Force exhausted solve attempts after construction; production
+            // configuration validation normally excludes this input.
+            vio.config.vio_lm_lambda_initial = f64::NAN;
+            if joint {
+                vio.marg_data.order.push(HOST_T_NS, POSE_SIZE).unwrap();
+                vio.marg_data.h = DMatrix::zeros(0, POSE_SIZE);
+                vio.marg_data.b = DVector::zeros(0);
+            }
+            let states = vio.ba.frame_states.clone();
+            let poses = vio.ba.frame_poses.clone();
+            let result = if joint {
+                vio.optimize(CURRENT_T_NS, None).map(|_| ())
+            } else {
+                vio.frame_update(CURRENT_T_NS).map(|_| ())
+            };
+            assert_eq!(
+                result.unwrap_err(),
+                EstimatorError::NumericallyInvalid { t_ns: CURRENT_T_NS }
+            );
+            assert_eq!(vio.ba.frame_states, states);
+            assert_eq!(vio.ba.frame_poses, poses);
+        }
+    }
 
     /// The known answer: a state pushed off a zero-cost minimum comes back to it.
     ///
@@ -870,20 +895,19 @@ mod tests {
         // an interval is enough to see it.
         let (mut vio, _) = a_window(2);
         let short: IntegratedImuMeasurement<f64> = {
-            let noise = crate::imu::ImuNoise::from_calibration(&vio.ba.calib);
+            let noise = crate::imu::noise_from_calibration(&vio.ba.calib).unwrap();
             let zero: Vector3<f64> = Vector3::zeros();
             let mut meas = IntegratedImuMeasurement::new(PREV_T_NS, &zero, &zero);
             let step_ns: i64 = (1e9 / vio.ba.calib.imu_update_rate) as i64;
             let mut t_ns: i64 = PREV_T_NS + step_ns;
             while t_ns <= CURRENT_T_NS - step_ns {
                 meas.integrate(
-                    &ImuSample {
-                        t_ns,
-                        gyro: Vector3::zeros(),
-                        accel: Vector3::new(0.0, 0.0, 9.81),
+                    &CombinedImuSample {
+                        timestamp_ns: t_ns,
+                        gyro: kornia_algebra::Vec3F64::ZERO,
+                        accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
                     },
-                    &noise.accel_cov,
-                    &noise.gyro_cov,
+                    &noise,
                 )
                 .unwrap();
                 t_ns += step_ns;
@@ -891,7 +915,7 @@ mod tests {
             meas
         };
         assert_eq!(
-            PREV_T_NS + short.get_dt_ns(),
+            PREV_T_NS + short.dt_ns(),
             CURRENT_T_NS - (1e9 / vio.ba.calib.imu_update_rate) as i64,
             "the fixture has to end one IMU sample short of the frameset"
         );
@@ -1015,7 +1039,8 @@ mod tests {
                 &vio.ba.frame_states[&PREV_T_NS],
                 &vio.ba.frame_states[&CURRENT_T_NS],
             );
-            let full_gradient = block.jp.transpose() * block.r;
+            let full_gradient = nalgebra::SMatrix::<f64, 15, 30>::from(block.jp).transpose()
+                * nalgebra::SVector::<f64, 15>::from(block.r);
             let gradient: Vector15<f64> =
                 Vector15::from_fn(|i, _| b[i] - full_gradient[POSE_VEL_BIAS_SIZE + i]);
             (total - imu_error, gradient)

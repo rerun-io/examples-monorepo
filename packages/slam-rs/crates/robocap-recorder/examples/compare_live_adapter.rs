@@ -52,8 +52,8 @@ fn main() -> Result<()> {
             ensure!(fields.len() == 7, "invalid IMU row");
             Ok(Imu {
                 t: fields[0].parse()?,
-                gyro: [fields[1].parse()?, fields[2].parse()?, fields[3].parse()?],
-                accel: [fields[4].parse()?, fields[5].parse()?, fields[6].parse()?],
+                gyro: [fields[1].parse()?, fields[2].parse()?, fields[3].parse()?].into(),
+                accel: [fields[4].parse()?, fields[5].parse()?, fields[6].parse()?].into(),
             })
         })
         .collect::<Result<Vec<_>>>()?;

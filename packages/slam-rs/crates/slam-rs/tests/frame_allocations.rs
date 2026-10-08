@@ -454,7 +454,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
 /// and it used to take a fresh accumulator, a fresh subtree partial per
 /// recursion depth and a fresh leaf transpose every time: on a 55-landmark
 /// window seven `opt_size`-square matrices, or 38 allocations and their frees,
-/// per step. They are one `DenseHbWorkspace` now, and the assertion is that
+/// per step. They are one `DenseSystem` now, and the assertion is that
 /// the second call over the same workspace reaches the allocator zero times.
 ///
 /// The problem below is synthetic and small — three frames, twelve landmarks,
@@ -516,7 +516,7 @@ fn the_dense_reduction_allocates_nothing_after_its_first_call() {
     lqr.linearize_problem(&estimator, &inputs, None).unwrap();
     lqr.perform_qr(None).unwrap();
 
-    let mut workspace: slam_rs::linearize::DenseHbWorkspace<f32> = Default::default();
+    let mut workspace: slam_rs::linearize::DenseSystem<f32> = Default::default();
     // The first call is allowed to allocate, and does: this is where every
     // buffer reaches its size.
     let (_, first) = measure(|| {
@@ -573,8 +573,8 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
     .unwrap();
     for row in common::IMU.iter() {
         vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
-        estimator.push_imu(slam_rs::imu::ImuSample {
-            t_ns: row.t_ns,
+        estimator.push_imu(kornia_staging_sensors::imu::CombinedImuSample {
+            timestamp_ns: row.t_ns,
             gyro: row.gyro.into(),
             accel: row.accel.into(),
         });

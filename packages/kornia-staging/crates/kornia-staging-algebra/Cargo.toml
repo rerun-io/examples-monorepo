@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 kornia-algebra.workspace = true
 nalgebra.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
@@ -19,4 +20,20 @@ workspace = true
 
 [[bench]]
 name = "ldlt"
+harness = false
+
+[[bench]]
+name = "qr"
+harness = false
+
+[[bench]]
+name = "marginalization"
+harness = false
+
+[[bench]]
+name = "damped_solve"
+harness = false
+
+[[bench]]
+name = "levenberg_marquardt"
 harness = false

@@ -1,7 +1,7 @@
 //! Factor checks share the parent module's analytic trajectory fixtures.
 use super::*;
 use crate::imu::{ImuBlock, ImuLinData};
-use crate::types::{AbsOrderMap, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, Vector15};
+use crate::types::{POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, Vector15};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 
@@ -64,7 +64,7 @@ fn check_nullspace(
     result
 }
 
-/// `ScBundleAdjustmentBase::computeImuError`,
+/// `ScBundleAdjustmentBase::computeSensorError`,
 /// for the measurements the two IMU tests hold, summed into one number.
 ///
 /// Note `gyro_bias_weight / dt` here against `gyro_bias_weight_sqrt / sqrt(dt)`
@@ -79,11 +79,11 @@ fn compute_imu_error(
 ) -> f64 {
     let mut total: f64 = 0.0;
     for meas in measurements {
-        if meas.get_dt_ns() == 0 {
+        if meas.dt_ns() == 0 {
             continue;
         }
-        let start_t: i64 = meas.get_start_t_ns();
-        let end_t: i64 = start_t + meas.get_dt_ns();
+        let start_t: i64 = meas.start_timestamp_ns();
+        let end_t: i64 = start_t + meas.dt_ns();
         if !order.contains(start_t) || !order.contains(end_t) {
             continue;
         }
@@ -96,9 +96,9 @@ fn compute_imu_error(
             &start.bias_gyro,
             &start.bias_accel,
         );
-        total += 0.5 * res.dot(&(meas.get_cov_inv() * res));
+        total += 0.5 * res.dot(&(meas.cov_inv() * res));
 
-        let dt: f64 = meas.get_dt_ns() as f64 * 1e-9;
+        let dt: f64 = meas.dt_ns() as f64 * 1e-9;
         let res_bg: Vector3<f64> = start.bias_gyro - end.bias_gyro;
         total += 0.5 * res_bg.dot(&(gyro_bias_weight / dt).component_mul(&res_bg));
         let res_ba: Vector3<f64> = start.bias_accel - end.bias_accel;
@@ -115,14 +115,20 @@ fn noisy_samples(
     from_ns: i64,
     to_ns: i64,
     rng: &mut Rng,
-) -> Vec<ImuSample> {
+) -> Vec<CombinedImuSample> {
     let dt_ns: i64 = 10_000_000;
-    let mut samples: Vec<ImuSample> = Vec::new();
+    let mut samples: Vec<CombinedImuSample> = Vec::new();
     let mut t_ns: i64 = from_ns;
     while t_ns < to_ns {
-        let mut sample: ImuSample = trajectory.sample(t_ns, dt_ns);
-        sample.accel += ba + rng.vector3() * ACCEL_STD_DEV;
-        sample.gyro += bg + rng.vector3() * GYRO_STD_DEV;
+        let mut sample: CombinedImuSample = trajectory.sample(t_ns, dt_ns);
+        let shift = ba + rng.vector3() * ACCEL_STD_DEV;
+        sample.accel.x += shift.x;
+        sample.accel.y += shift.y;
+        sample.accel.z += shift.z;
+        let shift = bg + rng.vector3() * GYRO_STD_DEV;
+        sample.gyro.x += shift.x;
+        sample.gyro.y += shift.y;
+        sample.gyro.z += shift.z;
         samples.push(sample);
         t_ns += dt_ns;
     }
@@ -133,13 +139,12 @@ fn integrate_noisy(
     start_t_ns: i64,
     bg: &Vector3<f64>,
     ba: &Vector3<f64>,
-    samples: &[ImuSample],
+    samples: &[CombinedImuSample],
 ) -> IntegratedImuMeasurement<f64> {
     let noise: ImuNoise<f64> = noise_from_std_dev();
     let mut meas: IntegratedImuMeasurement<f64> = IntegratedImuMeasurement::new(start_t_ns, bg, ba);
     for sample in samples {
-        meas.integrate(sample, &noise.accel_cov, &noise.gyro_cov)
-            .unwrap();
+        meas.integrate(sample, &noise).unwrap();
     }
     meas
 }
@@ -166,13 +171,13 @@ fn imu_nullspace_2() {
     let bg: Vector3<f64> = rng.vector3() / 100.0;
     let ba: Vector3<f64> = rng.vector3() / 10.0;
 
-    let samples: Vec<ImuSample> =
+    let samples: Vec<CombinedImuSample> =
         noisy_samples(&trajectory, &bg, &ba, 5_000_000, 100_000_000, &mut rng);
     let meas: IntegratedImuMeasurement<f64> = integrate_noisy(0, &bg, &ba, &samples);
 
     let state0: PoseVelBiasState<f64> =
         PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
-    let end_t_ns: i64 = meas.get_dt_ns();
+    let end_t_ns: i64 = meas.dt_ns();
     let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
         end_t_ns,
         trajectory.pose(end_t_ns) * Se3::exp_decoupled(&(rng.vector6() / 10.0)),
@@ -250,12 +255,12 @@ fn imu_nullspace_3() {
     let bg: Vector3<f64> = rng.vector3() / 100.0;
     let ba: Vector3<f64> = rng.vector3() / 10.0;
 
-    let samples1: Vec<ImuSample> =
+    let samples1: Vec<CombinedImuSample> =
         noisy_samples(&trajectory, &bg, &ba, 5_000_000, 1_000_000_000, &mut rng);
     let meas1: IntegratedImuMeasurement<f64> = integrate_noisy(0, &bg, &ba, &samples1);
-    let t1_ns: i64 = meas1.get_dt_ns();
+    let t1_ns: i64 = meas1.dt_ns();
 
-    let samples2: Vec<ImuSample> = noisy_samples(
+    let samples2: Vec<CombinedImuSample> = noisy_samples(
         &trajectory,
         &bg,
         &ba,
@@ -264,7 +269,7 @@ fn imu_nullspace_3() {
         &mut rng,
     );
     let meas2: IntegratedImuMeasurement<f64> = integrate_noisy(t1_ns, &bg, &ba, &samples2);
-    let t2_ns: i64 = t1_ns + meas2.get_dt_ns();
+    let t2_ns: i64 = t1_ns + meas2.dt_ns();
 
     let state0: PoseVelBiasState<f64> =
         PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
@@ -331,9 +336,9 @@ fn the_block_ignores_offsets_that_do_not_fit() {
     let trajectory: Trajectory = Trajectory::new(&mut rng);
     let bg: Vector3<f64> = rng.vector3() / 100.0;
     let ba: Vector3<f64> = rng.vector3() / 10.0;
-    let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+    let samples: Vec<CombinedImuSample> = biased_samples(&trajectory, &bg, &ba);
     let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
-    let end_t_ns: i64 = meas.get_dt_ns();
+    let end_t_ns: i64 = meas.dt_ns();
 
     let state0: PoseVelBiasState<f64> =
         PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
@@ -385,9 +390,9 @@ fn the_imu_block_exports_agree_with_each_other() {
     let trajectory: Trajectory = Trajectory::new(&mut rng);
     let bg: Vector3<f64> = rng.vector3() / 100.0;
     let ba: Vector3<f64> = rng.vector3() / 10.0;
-    let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+    let samples: Vec<CombinedImuSample> = biased_samples(&trajectory, &bg, &ba);
     let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
-    let end_t_ns: i64 = meas.get_dt_ns();
+    let end_t_ns: i64 = meas.dt_ns();
     let state0: PoseVelBiasState<f64> =
         PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
     let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
@@ -450,9 +455,9 @@ fn the_block_re_evaluates_the_residual_at_a_linearized_state() {
     let trajectory: Trajectory = Trajectory::new(&mut rng);
     let bg: Vector3<f64> = rng.vector3() / 100.0;
     let ba: Vector3<f64> = rng.vector3() / 10.0;
-    let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+    let samples: Vec<CombinedImuSample> = biased_samples(&trajectory, &bg, &ba);
     let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
-    let end_t_ns: i64 = meas.get_dt_ns();
+    let end_t_ns: i64 = meas.dt_ns();
 
     let state0: PoseVelBiasState<f64> =
         PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
@@ -480,4 +485,29 @@ fn the_block_re_evaluates_the_residual_at_a_linearized_state() {
     assert_eq!(frozen.jp, reference.jp);
     // but the residual moved with the state.
     assert!((frozen.r - reference.r).norm() > 1e-6);
+}
+
+#[derive(Default)]
+struct AbsOrderMap(Vec<(i64, usize, usize)>);
+impl AbsOrderMap {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn push(&mut self, id: i64, size: usize) -> Result<(), &'static str> {
+        let offset = self.total_size();
+        self.0.push((id, offset, size));
+        Ok(())
+    }
+    fn total_size(&self) -> usize {
+        self.0.iter().map(|entry| entry.2).sum()
+    }
+    fn items(&self) -> usize {
+        self.0.len()
+    }
+    fn contains(&self, id: i64) -> bool {
+        self.0.iter().any(|entry| entry.0 == id)
+    }
+    fn iter(&self) -> impl Iterator<Item = (i64, usize, usize)> + '_ {
+        self.0.iter().copied()
+    }
 }

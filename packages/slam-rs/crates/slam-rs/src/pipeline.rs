@@ -28,13 +28,13 @@ pub struct Vio<S: Scalar = f32> {
     estimator: estimator::SqrtKeypointVio<S>,
     /// The frontend's own IMU buffer (D24). The same samples reach the
     /// estimator through its own queue.
-    frontend_imu: std::collections::VecDeque<imu::ImuSample>,
+    frontend_imu: std::collections::VecDeque<kornia_staging_sensors::imu::CombinedImuSample>,
     /// The frontend's already-popped sample, `processImu`'s `data`.
     frontend_pending: Option<imu::Popped<f64>>,
     /// Most recent estimated state; absent until the estimator publishes one.
     latest_state: Option<types::PoseVelBiasState<f64>>,
     /// The frontend's own accelerometer and gyroscope preintegration noise.
-    frontend_noise: imu::ImuNoise<f64>,
+    frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64>,
     /// The static bias calibration, applied to the frontend's samples in `f32`
     /// and cast back to `f64`.
     calib_f32: calib::Calibration<f32>,
@@ -117,7 +117,8 @@ impl<S: Scalar> Vio<S> {
         let camera_count: usize = calibration.t_i_c.len();
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
-        let frontend_noise: imu::ImuNoise<f64> = imu::ImuNoise::from_calibration(&calibration);
+        let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
+            crate::imu::noise_from_calibration(&calibration)?;
         let estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
         Ok(Self {
@@ -231,11 +232,12 @@ impl<S: Scalar> Vio<S> {
     /// timestamp, never a silent reorder, and a non-finite component.
     pub fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> Result<(), VioError> {
         check_imu_sample(t_ns, &gyro, &accel, self.last_imu_t_ns())?;
-        let sample: imu::ImuSample = imu::ImuSample {
-            t_ns,
-            gyro: Vector3::new(gyro[0], gyro[1], gyro[2]),
-            accel: Vector3::new(accel[0], accel[1], accel[2]),
-        };
+        let sample: kornia_staging_sensors::imu::CombinedImuSample =
+            kornia_staging_sensors::imu::CombinedImuSample {
+                timestamp_ns: t_ns,
+                gyro: gyro.into(),
+                accel: accel.into(),
+            };
         self.frontend_imu.push_back(sample);
         self.estimator.push_imu(sample);
         Ok(())
@@ -369,9 +371,9 @@ impl<S: Scalar> Vio<S> {
                 self.lagged_prediction(t_ns, &latest)?
             }
             Some(latest) => {
-                let pim: imu::IntegratedImuMeasurement<f64> =
+                let pim: kornia_staging_sensors::imu::IntegratedImuMeasurement<f64> =
                     self.frontend_preintegrate(t_ns, &latest)?;
-                let predicted: types::PoseVelState<f64> =
+                let predicted: kornia_staging_sensors::imu::NavState<f64> =
                     pim.predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>());
                 frontend::flow::PosePrediction {
                     t_w_i_previous: latest.t_w_i.cast(),
@@ -515,15 +517,20 @@ impl<S: Scalar> Vio<S> {
         &mut self,
         curr_t_ns: i64,
         latest: &types::PoseVelBiasState<f64>,
-    ) -> Result<imu::IntegratedImuMeasurement<f64>, VioError> {
+    ) -> Result<kornia_staging_sensors::imu::IntegratedImuMeasurement<f64>, VioError> {
         let prev_t_ns: i64 = self.last_frame_t_ns.unwrap_or(-1);
-        let mut pim: imu::IntegratedImuMeasurement<f64> =
-            imu::IntegratedImuMeasurement::new(prev_t_ns, &latest.bias_gyro, &latest.bias_accel);
+        let mut pim: kornia_staging_sensors::imu::IntegratedImuMeasurement<f64> =
+            kornia_staging_sensors::imu::IntegratedImuMeasurement::new(
+                prev_t_ns,
+                &latest.bias_gyro,
+                &latest.bias_accel,
+            );
         // the same three-part loop the estimator's own
         // preintegration runs, through `IntegratedImuMeasurement::accumulate_to`.
-        let noise: imu::ImuNoise<f64> = self.frontend_noise;
+        let noise: kornia_staging_sensors::imu::ImuNoise<f64> = self.frontend_noise;
         let pending: Option<imu::Popped<f64>> = self.frontend_pending.take();
-        self.frontend_pending = pim.accumulate_to(
+        self.frontend_pending = crate::imu::accumulate_to(
+            &mut pim,
             pending,
             || self.frontend_pop(),
             prev_t_ns,
@@ -539,27 +546,31 @@ impl<S: Scalar> Vio<S> {
         while self
             .frontend_imu
             .front()
-            .is_some_and(|sample| sample.t_ns <= t_ns)
+            .is_some_and(|sample| sample.timestamp_ns <= t_ns)
         {
             self.frontend_imu.pop_front();
         }
     }
 
     fn frontend_pop(&mut self) -> Option<imu::Popped<f64>> {
-        let sample: imu::ImuSample = self.frontend_imu.pop_front()?;
+        let sample: kornia_staging_sensors::imu::CombinedImuSample =
+            self.frontend_imu.pop_front()?;
         Some(self.calibrated(&sample))
     }
 
-    fn calibrated(&self, sample: &imu::ImuSample) -> imu::Popped<f64> {
+    fn calibrated(
+        &self,
+        sample: &kornia_staging_sensors::imu::CombinedImuSample,
+    ) -> imu::Popped<f64> {
         let accel: Vector3<f32> = self
             .calib_f32
             .calib_accel_bias
-            .calibrated(&sample.accel.cast());
+            .calibrated(&Vector3::from(sample.accel.to_array()).cast());
         let gyro: Vector3<f32> = self
             .calib_f32
             .calib_gyro_bias
-            .calibrated(&sample.gyro.cast());
-        (sample.t_ns, gyro.cast(), accel.cast())
+            .calibrated(&Vector3::from(sample.gyro.to_array()).cast());
+        (sample.timestamp_ns, gyro.cast::<f64>(), accel.cast::<f64>())
     }
 
     /// `opt_flow_state_queue->push(data)`.

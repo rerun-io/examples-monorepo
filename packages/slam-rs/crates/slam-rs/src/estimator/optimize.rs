@@ -10,8 +10,12 @@
 //! pose increment.
 
 use kornia_staging_algebra::Scalar;
+#[cfg(test)]
+use kornia_staging_sensors::imu::CombinedImuSample;
+use kornia_staging_sensors::imu::IntegratedImuMeasurement;
 use std::collections::BTreeMap;
 
+use kornia_staging_algebra::optim::solvers::solve_scaled_damped;
 use nalgebra::{DMatrix, DVector, Vector3};
 
 use super::{
@@ -19,10 +23,10 @@ use super::{
 };
 use crate::duration_ns;
 use crate::frontend::parallel::WorkPool;
-use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
+use crate::imu::ImuLinData;
 use crate::lie::{eigen_maxi};
 use crate::linearize::{
-    DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+    DenseSystem, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
 };
 use crate::types::{
     AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
@@ -43,9 +47,8 @@ const MAX_SOLVE_ATTEMPTS: u32 = 3;
 #[derive(Debug, Clone)]
 pub(super) struct OptimizeScratch<S: Scalar> {
     /// The dense accumulator and per-landmark transpose scratch.
-    pub(super) dense: DenseHbWorkspace<S>,
+    pub(super) dense: DenseSystem<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
-    pub(super) solve: DMatrix<f64>,
     /// The increment [`damped_solve`] writes and the loop then negates.
     pub(super) increment: DVector<S>,
 }
@@ -56,8 +59,7 @@ impl<S: Scalar> Default for OptimizeScratch<S> {
     /// not.
     fn default() -> Self {
         Self {
-            dense: DenseHbWorkspace::default(),
-            solve: DMatrix::zeros(0, 0),
+            dense: DenseSystem::default(),
             increment: DVector::zeros(0),
         }
     }
@@ -109,11 +111,11 @@ pub struct LmIteration<S: Scalar> {
     pub error_after: S,
     /// `computeError`'s reprojection cost after the increment.
     pub vision_error: S,
-    /// `computeImuError`'s `imu_error`.
+    /// `computeSensorError`'s `imu_error`.
     pub imu_error: S,
-    /// `computeImuError`'s `bg_error`.
+    /// `computeSensorError`'s `bg_error`.
     pub bias_gyro_error: S,
-    /// `computeImuError`'s `ba_error`.
+    /// `computeSensorError`'s `ba_error`.
     pub bias_accel_error: S,
     /// `computeMargPriorError` after the increment.
     pub marg_prior_error: S,
@@ -173,7 +175,6 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         } = *self;
         let OptimizeScratch {
             ref mut dense,
-            ref mut solve,
             ref mut increment,
         } = *scratch;
 
@@ -284,12 +285,9 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             while it <= config.vio_max_iterations && termination.is_none() {
                 let mark: std::time::Instant = std::time::Instant::now();
                 let (inc_valid, solve_attempts): (bool, u32) =
-                    damped_solve(h, b, damping, solve, increment);
-                // Continue with the non-finite increment after exhausting retries.
+                    damped_solve(h, b, damping, increment);
                 if !inc_valid {
-                    log::warn!(
-                        "frame {t_ns} ns: increment still not finite after {MAX_SOLVE_ATTEMPTS} damped solves"
-                    );
+                    return Err(EstimatorError::NumericallyInvalid { t_ns });
                 }
                 timings.solver_ns += duration_ns(mark);
 
@@ -340,7 +338,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
                     imu_meas,
                     &gyro_bias_weight,
                     &accel_bias_weight,
-                    &imu_lin.g,
+                    &Vector3::from(imu_lin.g),
                 )?;
                 // `vision += ((imu + bg) + ba)`, in that association.
                 let vision_and_inertial: S =
@@ -412,63 +410,18 @@ pub(super) fn damped_solve<S: Scalar>(
     h: &DMatrix<S>,
     b: &DVector<S>,
     damping: &mut LmDamping<S>,
-    working: &mut DMatrix<f64>,
     inc: &mut DVector<S>,
 ) -> (bool, u32) {
-    let size: usize = h.nrows();
-    let mut solve_attempts: u32 = 0;
-    // `MAX_SOLVE_ATTEMPTS` is three, so the first solve always happens and the
-    // increment never needs a placeholder value.
-    loop {
-        // Preserve NaNs in the diagonal so invalid inputs fail the finite check.
-        if working.nrows() != size {
-            working.resize_mut(size, size, 0.0);
-        }
-        for (dst, src) in working.iter_mut().zip(h.iter()) {
-            *dst = src.to_f64();
-        }
-        for i in 0..size {
-            let damped = eigen_maxi(h[(i, i)] * damping.lambda, damping.min_lambda);
-            working[(i, i)] += damped.to_f64();
-        }
-        // Floating-point normal matrices need not stay positive definite when
-        // the damping is below one ulp. Pivoted LU also handles that case.
-        // Solve (D^-1 H D^-1) y = D^-1 b, then recover x = D^-1 y.
-        // Keep the scaled input buffer; the library owns one factor copy.
-        let scales = DVector::from_iterator(
-            size,
-            (0..size).map(|i| {
-                let scale = working[(i, i)].abs().sqrt();
-                if scale > 0.0 { scale } else { 1.0 }
-            }),
-        );
-        for col in 0..size {
-            for row in 0..size {
-                working[(row, col)] /= scales[row] * scales[col];
-            }
-        }
-        let factor = nalgebra::linalg::FullPivLU::new(working.clone());
-        if inc.nrows() != size {
-            inc.resize_vertically_mut(size, S::zero());
-        }
-        let mut solution = b.map(|value| value.to_f64());
-        solution.component_div_assign(&scales);
-        if factor.solve_mut(&mut solution) {
-            for i in 0..size {
-                inc[i] = S::from_literal(solution[i] / scales[i]);
-            }
-        } else {
-            inc.fill(S::from_literal(f64::NAN));
-        }
-        solve_attempts += 1;
-        if inc.iter().all(|v| v.is_finite()) {
-            return (true, solve_attempts);
+    if inc.nrows() != h.nrows() {
+        inc.resize_vertically_mut(h.nrows(), S::zero());
+    }
+    for attempt in 1..=MAX_SOLVE_ATTEMPTS {
+        if solve_scaled_damped(h, b, damping.lambda, damping.min_lambda, inc).is_ok() {
+            return (true, attempt);
         }
         damping.escalate();
-        if solve_attempts >= MAX_SOLVE_ATTEMPTS {
-            return (false, solve_attempts);
-        }
     }
+    (false, MAX_SOLVE_ATTEMPTS)
 }
 
 /// IMU cost: whitened preintegration plus one random-walk term per bias.
@@ -488,11 +441,11 @@ fn compute_imu_error<S: Scalar>(
     let mut ba_error: S = S::zero();
 
     for meas in imu_meas.values() {
-        if meas.get_dt_ns() == 0 {
+        if meas.dt_ns() == 0 {
             continue;
         }
-        let start_t: i64 = meas.get_start_t_ns();
-        let end_t: i64 = start_t + meas.get_dt_ns();
+        let start_t: i64 = meas.start_timestamp_ns();
+        let end_t: i64 = start_t + meas.dt_ns();
         if !aom.contains(start_t) || !aom.contains(end_t) {
             continue;
         }
@@ -515,14 +468,14 @@ fn compute_imu_error<S: Scalar>(
 
         let start: &PoseVelBiasState<S> = start_state.state();
         let end: &PoseVelBiasState<S> = end_state.state();
-        let res: Vector9<S> = meas.residual(
+        let res: Vector9<S> = Vector9::from(meas.residual(
             &start.pose_vel_state(),
             g,
             &end.pose_vel_state(),
             &start.bias_gyro,
             &start.bias_accel,
-        );
-        let cov_inv: Matrix9<S> = meas.get_cov_inv();
+        ));
+        let cov_inv = meas.cov_inv();
         // Compute half the residual quadratic form.
         let mut row: [S; 9] = [S::zero(); 9];
         for (j, slot) in row.iter_mut().enumerate() {
@@ -539,7 +492,7 @@ fn compute_imu_error<S: Scalar>(
         imu_error += S::from_literal(0.5) * quadratic;
 
         // `dt` in seconds, formed as `int64 · Scalar(1e-9)`.
-        let dt: S = S::from_literal(meas.get_dt_ns() as f64) * S::from_literal(1e-9);
+        let dt: S = S::from_literal(meas.dt_ns() as f64) * S::from_literal(1e-9);
         let res_bg: Vector3<S> = start.bias_gyro - end.bias_gyro;
         let gyro_dt: Vector3<S> = gyro_bias_weight / dt;
         let mut bg: S = S::zero();
@@ -563,154 +516,14 @@ fn compute_imu_error<S: Scalar>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use crate::estimator::VEE_FACTOR;
 
     use super::*;
-    use crate::estimator::VEE_FACTOR;
-    use crate::imu::ImuSample;
+
     use crate::lie::Se3;
     use crate::types::PoseVelBiasState;
 
-    /// `lambda`, `min_lambda`, `max_lambda`, `lambda_vee` as `optimize` starts a
-    /// frame: `lambda_vee` is [`VEE_FACTOR`], as resets it.
-    fn damping(lambda: f64, min_lambda: f64) -> LmDamping<f64> {
-        LmDamping {
-            lambda,
-            min_lambda,
-            max_lambda: 1e6,
-            lambda_vee: VEE_FACTOR,
-        }
-    }
-
-    /// A finite first solve leaves the recorded lambda at its initial value.
-    #[test]
-    fn a_finite_solve_records_the_lambda_it_used() {
-        let h: DMatrix<f64> = DMatrix::identity(3, 3);
-        let b: DVector<f64> = DVector::from_element(3, 1.0);
-        let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
-        let mut ldlt: DMatrix<f64> = DMatrix::zeros(0, 0);
-        let mut inc: DVector<f64> = DVector::zeros(0);
-        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
-        assert!(valid);
-        assert_eq!(attempts, 1);
-        assert!(inc.iter().all(|v| v.is_finite()));
-        assert_eq!(lm.lambda, 1e-4);
-        assert_eq!(lm.lambda_vee, VEE_FACTOR);
-    }
-
-    #[test]
-    fn a_rounded_indefinite_system_still_has_a_finite_solve() {
-        // Rounding can leave a tiny negative eigenvalue in a normal matrix.
-        // Positive damping below one ulp does not guarantee a positive factor.
-        let off = 1.0f32 + f32::EPSILON;
-        let h = DMatrix::from_row_slice(2, 2, &[1.0, off, off, 1.0]);
-        let b = DVector::from_element(2, 1.0f32);
-        let mut lm = LmDamping {
-            lambda: 1e-9,
-            min_lambda: 1e-9,
-            max_lambda: 1e6,
-            lambda_vee: 2.0,
-        };
-        let mut working = DMatrix::zeros(0, 0);
-        let mut inc = DVector::zeros(0);
-        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut working, &mut inc);
-        assert!(valid);
-        assert_eq!(attempts, 1);
-        assert!((h * inc - b).norm() < 1e-6);
-    }
-
-    #[test]
-    fn damping_below_f32_precision_still_regularizes_a_singular_system() {
-        let h = DMatrix::from_element(2, 2, 1.0f32);
-        let b = DVector::from_vec(vec![1.0f32, -1.0]);
-        let mut lm = LmDamping {
-            lambda: 1e-9,
-            min_lambda: 1e-9,
-            max_lambda: 1e6,
-            lambda_vee: 2.0,
-        };
-        let mut working = DMatrix::zeros(0, 0);
-        let mut inc = DVector::zeros(0);
-        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut working, &mut inc);
-        assert!(valid);
-        assert_eq!(attempts, 1);
-        // Check in f64: rounding the damped matrix back to f32 removes its rank.
-        let mut damped = h.map(f64::from);
-        damped[(0, 0)] += f64::from(lm.lambda);
-        damped[(1, 1)] += f64::from(lm.lambda);
-        assert!((damped * inc.map(f64::from) - b.map(f64::from)).norm() < 1e-6);
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn damped_system_has_a_small_residual(
-            values in proptest::collection::vec(-1.0f64..1.0, 36),
-            rhs in proptest::collection::vec(-1.0f64..1.0, 6),
-            exponent in -10i32..0,
-        ) {
-            let g = DMatrix::from_row_slice(6, 6, &values);
-            let h = g.transpose() * g * 10.0f64.powi(exponent);
-            let b = DVector::from_vec(rhs);
-            let mut lm = damping(1e-3, 1e-8);
-            let mut solver = DMatrix::zeros(0, 0);
-            let mut inc = DVector::zeros(0);
-            let (valid, _) = damped_solve(&h, &b, &mut lm, &mut solver, &mut inc);
-            proptest::prop_assert!(valid);
-            let mut damped = h.clone();
-            for i in 0..6 {
-                damped[(i, i)] += (h[(i, i)] * lm.lambda).max(lm.min_lambda);
-            }
-            // The caller negates inc to solve H x = -b.
-            proptest::prop_assert!((damped * -inc + &b).norm() < 1e-8 * (1.0 + b.norm()));
-        }
-    }
-
-    /// Three failed attempts escalate lambda by `2 · 4 · 8`, including after the
-    /// last failure. The trace must record that final value.
-    #[test]
-    fn a_solve_that_never_becomes_finite_records_the_escalated_lambda() {
-        let h: DMatrix<f64> = DMatrix::identity(3, 3);
-        // Damping only touches the diagonal, so a non-finite right-hand side is
-        // a non-finite increment at every `lambda`.
-        let b: DVector<f64> = DVector::from_vec(vec![1.0, f64::NAN, 1.0]);
-        let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
-
-        let mut ldlt: DMatrix<f64> = DMatrix::zeros(0, 0);
-        let mut inc: DVector<f64> = DVector::zeros(0);
-        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
-        assert!(!valid, "a NaN right-hand side has to fail: {inc:?}");
-        assert_eq!(attempts, MAX_SOLVE_ATTEMPTS);
-        assert_eq!(lm.lambda, 1e-4 * 64.0);
-        assert_eq!(lm.lambda_vee, 16.0);
-    }
-
-    /// The two-attempt case: the increment of the 1x1 system `b / (H + H·λ)`
-    /// overflows `f32` at the first `lambda` and fits at the second, so the
-    /// trace records the doubled value, not the one the iteration started with.
-    ///
-    /// `1e10 / (1e-30 · 21) = 4.8e38` is past `f32::MAX` (3.4e38);
-    /// `1e10 / (1e-30 · 41) = 2.4e38` is inside it.
-    #[test]
-    fn a_retried_solve_records_the_lambda_of_the_attempt_that_worked() {
-        let h: DMatrix<f32> = DMatrix::from_element(1, 1, 1e-30);
-        let b: DVector<f32> = DVector::from_element(1, 1e10);
-        let mut lm: LmDamping<f32> = LmDamping {
-            lambda: 20.0,
-            min_lambda: 0.0,
-            max_lambda: 1e6,
-            lambda_vee: VEE_FACTOR as f32,
-        };
-
-        let mut ldlt: DMatrix<f64> = DMatrix::zeros(0, 0);
-        let mut inc: DVector<f32> = DVector::zeros(0);
-        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
-        assert!(valid);
-        assert_eq!(attempts, 2);
-        assert!(inc[0].is_finite());
-        assert_eq!(lm.lambda, 40.0);
-        assert_eq!(lm.lambda_vee, 4.0);
-    }
-
-    /// `computeImuError` reads both endpoints with `.at()`.
+    /// `computeSensorError` reads both endpoints with `.at()`.
     /// Skipping a factor whose state is gone understates the true cost and can
     /// flip the LM accept test, so the port refuses instead.
     ///
@@ -729,13 +542,12 @@ mod tests {
             IntegratedImuMeasurement::new(0, &zero, &zero);
         let cov: Vector3<f64> = Vector3::from_element(1e-6);
         meas.integrate(
-            &ImuSample {
-                t_ns: 100,
-                gyro: zero,
-                accel: Vector3::new(0.0, 0.0, 9.81),
+            &CombinedImuSample {
+                timestamp_ns: 100,
+                gyro: kornia_algebra::Vec3F64::ZERO,
+                accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
             },
-            &cov,
-            &cov,
+            &kornia_staging_sensors::imu::ImuNoise::new(cov, cov).unwrap(),
         )
         .unwrap();
         let imu_meas: BTreeMap<i64, IntegratedImuMeasurement<f64>> = BTreeMap::from([(0, meas)]);
@@ -788,5 +600,139 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// `lambda`, `min_lambda`, `max_lambda`, `lambda_vee` as `optimize` starts a
+    /// frame: `lambda_vee` is [`VEE_FACTOR`], as resets it.
+    fn damping(lambda: f64, min_lambda: f64) -> LmDamping<f64> {
+        LmDamping {
+            lambda,
+            min_lambda,
+            max_lambda: 1e6,
+            lambda_vee: VEE_FACTOR,
+        }
+    }
+
+    /// A finite first solve leaves the recorded lambda at its initial value.
+    #[test]
+    fn a_finite_solve_records_the_lambda_it_used() {
+        let h: DMatrix<f64> = DMatrix::identity(3, 3);
+        let b: DVector<f64> = DVector::from_element(3, 1.0);
+        let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
+        let mut inc: DVector<f64> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut inc);
+        assert!(valid);
+        assert_eq!(attempts, 1);
+        assert!(inc.iter().all(|v| v.is_finite()));
+        assert_eq!(lm.lambda, 1e-4);
+        assert_eq!(lm.lambda_vee, VEE_FACTOR);
+    }
+
+    #[test]
+    fn a_rounded_indefinite_system_still_has_a_finite_solve() {
+        // Rounding can leave a tiny negative eigenvalue in a normal matrix.
+        // Positive damping below one ulp does not guarantee a positive factor.
+        let off = 1.0f32 + f32::EPSILON;
+        let h = DMatrix::from_row_slice(2, 2, &[1.0, off, off, 1.0]);
+        let b = DVector::from_element(2, 1.0f32);
+        let mut lm = LmDamping {
+            lambda: 1e-9,
+            min_lambda: 1e-9,
+            max_lambda: 1e6,
+            lambda_vee: 2.0,
+        };
+        let mut inc = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut inc);
+        assert!(valid);
+        assert_eq!(attempts, 1);
+        assert!((h * inc - b).norm() < 1e-6);
+    }
+
+    #[test]
+    fn damping_below_f32_precision_still_regularizes_a_singular_system() {
+        let h = DMatrix::from_element(2, 2, 1.0f32);
+        let b = DVector::from_vec(vec![1.0f32, -1.0]);
+        let mut lm = LmDamping {
+            lambda: 1e-9,
+            min_lambda: 1e-9,
+            max_lambda: 1e6,
+            lambda_vee: 2.0,
+        };
+        let mut inc = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut inc);
+        assert!(valid);
+        assert_eq!(attempts, 1);
+        // Check in f64: rounding the damped matrix back to f32 removes its rank.
+        let mut damped = h.map(f64::from);
+        damped[(0, 0)] += f64::from(lm.lambda);
+        damped[(1, 1)] += f64::from(lm.lambda);
+        assert!((damped * inc.map(f64::from) - b.map(f64::from)).norm() < 1e-6);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn damped_system_has_a_small_residual(
+            values in proptest::collection::vec(-1.0f64..1.0, 36),
+            rhs in proptest::collection::vec(-1.0f64..1.0, 6),
+            exponent in -10i32..0,
+        ) {
+            let g = DMatrix::from_row_slice(6, 6, &values);
+            let h = g.transpose() * g * 10.0f64.powi(exponent);
+            let b = DVector::from_vec(rhs);
+            let mut lm = damping(1e-3, 1e-8);
+            let mut inc = DVector::zeros(0);
+            let (valid, _) = damped_solve(&h, &b, &mut lm, &mut inc);
+            proptest::prop_assert!(valid);
+            let mut damped = h.clone();
+            for i in 0..6 {
+                damped[(i, i)] += (h[(i, i)] * lm.lambda).max(lm.min_lambda);
+            }
+            // The caller negates inc to solve H x = -b.
+            proptest::prop_assert!((damped * -inc + &b).norm() < 1e-8 * (1.0 + b.norm()));
+        }
+    }
+
+    /// Three failed attempts escalate lambda by `2 · 4 · 8`, including after the
+    /// last failure. The trace must record that final value.
+    #[test]
+    fn a_solve_that_never_becomes_finite_records_the_escalated_lambda() {
+        let h: DMatrix<f64> = DMatrix::identity(3, 3);
+        // Damping only touches the diagonal, so a non-finite right-hand side is
+        // a non-finite increment at every `lambda`.
+        let b: DVector<f64> = DVector::from_vec(vec![1.0, f64::NAN, 1.0]);
+        let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
+
+        let mut inc: DVector<f64> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut inc);
+        assert!(!valid, "a NaN right-hand side has to fail: {inc:?}");
+        assert_eq!(attempts, MAX_SOLVE_ATTEMPTS);
+        assert_eq!(lm.lambda, 1e-4 * 64.0);
+        assert_eq!(lm.lambda_vee, 16.0);
+    }
+
+    /// The two-attempt case: the increment of the 1x1 system `b / (H + H·λ)`
+    /// overflows `f32` at the first `lambda` and fits at the second, so the
+    /// trace records the doubled value, not the one the iteration started with.
+    ///
+    /// `1e10 / (1e-30 · 21) = 4.8e38` is past `f32::MAX` (3.4e38);
+    /// `1e10 / (1e-30 · 41) = 2.4e38` is inside it.
+    #[test]
+    fn a_retried_solve_records_the_lambda_of_the_attempt_that_worked() {
+        let h: DMatrix<f32> = DMatrix::from_element(1, 1, 1e-30);
+        let b: DVector<f32> = DVector::from_element(1, 1e10);
+        let mut lm: LmDamping<f32> = LmDamping {
+            lambda: 20.0,
+            min_lambda: 0.0,
+            max_lambda: 1e6,
+            lambda_vee: VEE_FACTOR as f32,
+        };
+
+        let mut inc: DVector<f32> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut inc);
+        assert!(valid);
+        assert_eq!(attempts, 2);
+        assert!(inc[0].is_finite());
+        assert_eq!(lm.lambda, 40.0);
+        assert_eq!(lm.lambda_vee, 4.0);
     }
 }

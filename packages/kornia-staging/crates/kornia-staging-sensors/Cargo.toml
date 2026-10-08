@@ -6,9 +6,20 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+kornia-staging-algebra.workspace = true
 kornia-algebra.workspace = true
 kornia-image.workspace = true
+nalgebra.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 approx.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "imu"
+harness = false

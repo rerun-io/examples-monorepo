@@ -2,7 +2,8 @@
 
 use kornia_staging_algebra::Scalar;
 use super::{Vio, VioError, VioResult};
-use crate::{duration_ns, estimator, frontend, imu, types};
+use crate::imu;
+use crate::{duration_ns, estimator, frontend, types};
 
 /// Wall times for the estimator running beside the frontend, in nanoseconds.
 /// These overlap the frontend timers and must not be added to them.
@@ -120,12 +121,13 @@ impl<S: Scalar> Vio<S> {
                 return Ok(latest.t_w_i);
             }
             let mut samples = self.frontend_imu.iter();
-            let mut pim = imu::IntegratedImuMeasurement::new(
+            let mut pim = kornia_staging_sensors::imu::IntegratedImuMeasurement::new(
                 latest.t_ns,
                 &latest.bias_gyro,
                 &latest.bias_accel,
             );
-            pim.accumulate_to(
+            crate::imu::accumulate_to(
+                &mut pim,
                 None,
                 || samples.next().map(|sample| self.calibrated(sample)),
                 latest.t_ns,

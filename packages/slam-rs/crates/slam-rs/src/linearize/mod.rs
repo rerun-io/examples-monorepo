@@ -14,9 +14,9 @@ mod relative_pose;
 pub(crate) use relative_pose::linearize_relative_pose;
 
 pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-pub use dense_hb::DenseHbWorkspace;
+pub use dense_hb::DenseSystem;
 pub use landmark_block::{
-    DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
+    LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
 };
 
 use nalgebra::{Matrix4, Matrix6};
@@ -58,6 +58,16 @@ impl<S: Scalar> Default for RelPoseLin<S> {
 /// skip back-substitution with a warning; neither is a fatal error (trap 11).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LinearizeError {
+    /// A staged numerical block rejected its boundary inputs.
+    #[error(transparent)]
+    SqrtBa(#[from] kornia_staging_slam::sqrt_ba::SqrtBaError),
+    /// A landmark solve produced a non-finite increment or model-cost term.
+    #[error("non-finite landmark increment for {lm_id:?}")]
+    NonFiniteLandmarkStep {
+        /// Landmark left unchanged by the rejected solve.
+        lm_id: LandmarkId,
+    },
+
     /// A landmark's host frame is not in the absolute ordering
     /// ( asserts).
     #[error("landmark block host frame {frame_id} is not in the absolute ordering")]
@@ -96,15 +106,6 @@ pub enum LinearizeError {
         cam_id: CamId,
         /// How many the rig has.
         camera_count: usize,
-    },
-    /// The block layout arithmetic of overflowed.
-    #[error("landmark block layout arithmetic overflowed")]
-    LayoutOverflow,
-    /// Padded column count is not divisible by four.
-    #[error("landmark block has {num_cols} columns, which is not a multiple of 4")]
-    UnalignedBlock {
-        /// The column count that failed the check.
-        num_cols: usize,
     },
     /// A pose block would be written past the end of the pose columns.
     #[error("pose block at {offset} does not fit in {total_size} pose columns")]
@@ -165,15 +166,6 @@ pub enum LinearizeError {
         frame: FrameId,
         /// The size the ordering gave it.
         size: usize,
-    },
-    /// A landmark block's buffer would not fit in memory. `DMatrix::zeros`
-    /// multiplies the two dimensions unchecked.
-    #[error("a landmark block of {rows} x {cols} cannot be allocated")]
-    BlockTooLarge {
-        /// Rows asked for.
-        rows: usize,
-        /// Columns asked for.
-        cols: usize,
     },
     /// Prior and window block orderings disagree.
     #[error("the marginalization prior's ordering does not match the window's at frame {frame_id}")]

@@ -19,8 +19,6 @@ pub mod estimator;
 pub mod frontend;
 #[cfg(feature = "gpu-core")]
 pub mod gpu;
-pub(crate) mod qr;
-
 // `gpu-core` is the kernels and the seam; the runtime comes from `gpu-wgpu`. Enabled on its own there would be no client to build one on, and
 // the failure would be a wall of missing items rather than a sentence.
 #[cfg(all(feature = "gpu-core", not(feature = "gpu-wgpu")))]

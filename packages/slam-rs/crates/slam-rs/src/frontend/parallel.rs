@@ -54,6 +54,11 @@ impl WorkPool {
         self.pool.clone()
     }
 
+    /// Borrow the configured workers; `None` selects serial execution.
+    pub(crate) fn thread_pool(&self) -> Option<&ThreadPool> {
+        self.pool.as_deref()
+    }
+
     /// Workers this pool runs on.
     pub fn threads(&self) -> usize {
         self.threads

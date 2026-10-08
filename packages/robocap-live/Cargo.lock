@@ -2361,6 +2361,7 @@ name = "handfit"
 version = "0.1.0"
 dependencies = [
  "kornia-staging-3d",
+ "kornia-staging-algebra",
  "nalgebra",
  "thiserror",
 ]
@@ -3002,6 +3003,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-algebra",
  "nalgebra",
+ "thiserror",
 ]
 
 [[package]]
@@ -3035,14 +3037,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kornia-staging-slam"
-version = "0.1.0"
-dependencies = [
- "kornia-staging-imgproc",
- "rayon",
-]
-
-[[package]]
 name = "kornia-staging-io"
 version = "0.1.0"
 dependencies = [
@@ -3065,6 +3059,20 @@ version = "0.1.0"
 dependencies = [
  "kornia-algebra",
  "kornia-image",
+ "kornia-staging-algebra",
+ "nalgebra",
+ "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-slam"
+version = "0.1.0"
+dependencies = [
+ "kornia-staging-3d",
+ "kornia-staging-algebra",
+ "kornia-staging-imgproc",
+ "nalgebra",
+ "rayon",
  "thiserror",
 ]
 
@@ -6069,6 +6077,7 @@ dependencies = [
  "kornia-staging-algebra",
  "kornia-staging-gpu",
  "kornia-staging-imgproc",
+ "kornia-staging-sensors",
  "kornia-staging-slam",
  "log",
  "nalgebra",

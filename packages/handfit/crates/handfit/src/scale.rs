@@ -14,10 +14,11 @@
 use nalgebra::{SMatrix, SVector, SymmetricEigen};
 
 pub use crate::lm::Termination;
-use crate::lm::{nielsen_damping, predicted_reduction, DAMPING_GROWTH, MAX_DAMPING};
+use crate::lm::{predicted_reduction, DAMPING_GROWTH, MAX_DAMPING};
 use crate::model::{orthonormalize, retract, Step};
 use crate::residual::{evaluate, project_camera, Residual, View, Views};
 use crate::{Config, Model, Pose};
+use kornia_staging_algebra::optim::solvers::nielsen_damping;
 
 const LANDMARKS: usize = 21;
 const POSE: usize = 26;
@@ -192,8 +193,12 @@ fn marquardt_scaling(
     diagonal: &SVector<f64, POSE>,
     mask: &SVector<f64, POSE>,
 ) -> SVector<f64, POSE> {
-    let floor = 1e-9 * diagonal.max().max(1e-12);
-    SVector::from_fn(|i, _| diagonal[i].max(floor) * mask[i] + (1.0 - mask[i]))
+    let mut scaled = *diagonal;
+    kornia_staging_algebra::optim::solvers::marquardt_scaling(&mut scaled, Default::default());
+    for i in 0..POSE {
+        scaled[i] = scaled[i] * mask[i] + (1.0 - mask[i]);
+    }
+    scaled
 }
 
 /// The pseudo-inverse of the column-normalised pose block (handtrack `undamped_inverse`).
@@ -458,7 +463,7 @@ pub fn calibrate_scale(
             poses = candidates;
             scale = candidate_scale;
             lin = new_lin;
-            damping = nielsen_damping(damping, reduction, predicted);
+            damping = nielsen_damping(damping, reduction, predicted, Default::default());
             growth = DAMPING_GROWTH;
         } else {
             damping *= growth;

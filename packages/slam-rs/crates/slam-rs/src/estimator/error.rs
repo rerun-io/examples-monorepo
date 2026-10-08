@@ -4,11 +4,11 @@
 use super::{FrameOutcome, SqrtKeypointVio};
 use crate::ba_base::BaError;
 use crate::config::LinearizationType;
-use crate::imu::ImuError;
 use crate::landmark::LandmarkError;
 use crate::linearize::LinearizeError;
 use crate::marg::MargError;
 use crate::types::{FrameId, KeypointId, StateError};
+use kornia_staging_sensors::SensorError;
 
 /// What the eviction score wanted a keyframe as, for
 /// [`EstimatorError::KeyframeNotInWindow`].
@@ -138,9 +138,9 @@ pub enum EstimatorError {
     /// Skipping it would silently change the objective and the accepted LM step.
     #[error("the imu factor over ({start_t_ns}, {end_t_ns}] ns has no state at {missing_t_ns} ns")]
     ImuFactorStateMissing {
-        /// `get_start_t_ns()`.
+        /// `start_timestamp_ns()`.
         start_t_ns: i64,
-        /// `get_start_t_ns() + get_dt_ns()`.
+        /// `start_timestamp_ns() + dt_ns()`.
         end_t_ns: i64,
         /// Whichever endpoint the window is missing; the start when both are.
         missing_t_ns: i64,
@@ -189,7 +189,10 @@ pub enum EstimatorError {
     Landmark(#[from] LandmarkError),
     /// The preintegration refused a sample.
     #[error("imu: {0}")]
-    Imu(#[from] ImuError),
+    Imu(#[from] SensorError),
+    /// Frame-boundary IMU accumulation failed.
+    #[error(transparent)]
+    Accumulate(#[from] crate::imu::AccumulateError),
     /// A fixed-linearization state was frozen twice, or a delta was not zero
     /// when it was frozen.
     #[error("state: {0}")]

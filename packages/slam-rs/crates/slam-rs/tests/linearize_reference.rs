@@ -9,12 +9,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_staging_sensors::imu::{CombinedImuSample, IntegratedImuMeasurement};
+use kornia_staging_slam::factors::LinearizePointOut;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::BaError;
-use slam_rs::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
+use slam_rs::ba_base::{BundleAdjustmentBase, linearize_point};
 use slam_rs::calib::Calibration;
 use slam_rs::frontend::parallel::WorkPool;
-use slam_rs::imu::{ImuLinData, ImuSample, IntegratedImuMeasurement};
+use slam_rs::imu::ImuLinData;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::linearize::{
@@ -196,7 +198,7 @@ fn dense_schur_reference(
             } else {
                 let mut d_h = nalgebra::Matrix6::zeros();
                 let mut d_t = nalgebra::Matrix6::zeros();
-                let lin: Se3<f64> = slam_rs::ba_base::compute_rel_pose(
+                let lin: Se3<f64> = kornia_staging_slam::factors::compute_rel_pose(
                     state_h.pose_lin(),
                     &t_i_c_h,
                     state_t.pose_lin(),
@@ -205,7 +207,7 @@ fn dense_schur_reference(
                     Some(&mut d_t),
                 );
                 let value: Se3<f64> = if state_h.is_linearized() || state_t.is_linearized() {
-                    slam_rs::ba_base::compute_rel_pose(
+                    kornia_staging_slam::factors::compute_rel_pose(
                         state_h.pose(),
                         &t_i_c_h,
                         state_t.pose(),
@@ -690,7 +692,7 @@ fn pooled_linearization_preserves_bits() {
             .unwrap();
             let pool = WorkPool::new(threads).unwrap();
             let mut pooled = serial.clone();
-            let mut dense = slam_rs::linearize::DenseHbWorkspace::default();
+            let mut dense = slam_rs::linearize::DenseSystem::default();
             // Repeat to exercise clearing and reuse of the per-block buffers.
             for _ in 0..2 {
                 let (error, valid) = serial
@@ -796,16 +798,15 @@ fn an_imu_factor_over_pose_sized_slots_is_refused() {
     let mut meas: IntegratedImuMeasurement<f64> =
         IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
     meas.integrate(
-        &ImuSample {
-            t_ns: 1,
-            gyro: Vector3::new(0.01, -0.02, 0.03),
-            accel: Vector3::new(0.0, 0.0, 9.81),
+        &CombinedImuSample {
+            timestamp_ns: 1,
+            gyro: kornia_algebra::Vec3F64::new(0.01, -0.02, 0.03),
+            accel: kornia_algebra::Vec3F64::new(0.0, 0.0, 9.81),
         },
-        &noise,
-        &noise,
+        &kornia_staging_sensors::imu::ImuNoise::new(noise, noise).unwrap(),
     )
     .unwrap();
-    assert_eq!(meas.get_dt_ns(), 1);
+    assert_eq!(meas.dt_ns(), 1);
 
     let problem: Problem = vo_problem(2, 0x4444_5555);
     assert_eq!(problem.aom.get(0), Some((0, POSE_SIZE)));

@@ -7,10 +7,8 @@
 //! number. Only square-root priors are supported (D68). Scheduling and keyframe
 //! scores belong to the estimator module.
 
-mod helper;
 mod window;
 
-pub use helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 pub use window::{
     MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule, marginalize,
 };
@@ -50,39 +48,9 @@ impl std::fmt::Display for ScheduleSet {
 /// Typed marginalization failures prevent data-dependent panics (D32).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MargError {
-    /// Kept and marginalized counts do not cover the system.
-    #[error("{keep} kept plus {marg} marginalized indices do not cover {total} columns")]
-    IndexCountMismatch {
-        /// Size of `idx_to_keep`.
-        keep: usize,
-        /// Size of `idx_to_marg`.
-        marg: usize,
-        /// Columns of the system.
-        total: usize,
-    },
-    /// An index names a nonexistent system column.
-    #[error("index {index} is out of range for a system of {total} columns")]
-    IndexOutOfRange {
-        /// The offending index.
-        index: usize,
-        /// Columns of the system.
-        total: usize,
-    },
-    /// An index is in both sets, which would double-count a column.
-    #[error("index {index} is both kept and marginalized")]
-    IndexInBothSets {
-        /// The offending index.
-        index: usize,
-    },
-    /// `Q2Jp.rows() == Q2r.rows()`, or a right-hand
-    /// side that does not match a square system.
-    #[error("the system has {rows} rows and the right-hand side {rhs}")]
-    RhsLengthMismatch {
-        /// Rows of the matrix.
-        rows: usize,
-        /// Rows of the vector.
-        rhs: usize,
-    },
+    /// Numerical marginalization rejected the input system.
+    #[error(transparent)]
+    Numerical(#[from] kornia_staging_algebra::optim::solvers::MarginalizationError),
     /// The prior ordering disagrees with the window ordering.
     #[error("the marginalization prior's ordering does not match the window at frame {frame_id}")]
     PriorOrderMismatch {

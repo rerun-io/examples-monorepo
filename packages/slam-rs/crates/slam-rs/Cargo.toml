@@ -29,6 +29,7 @@ kornia-staging-slam.workspace = true
 kornia-staging-3d.workspace = true
 kornia-staging-algebra.workspace = true
 kornia-staging-imgproc.workspace = true
+kornia-staging-sensors.workspace = true
 cubecl = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }

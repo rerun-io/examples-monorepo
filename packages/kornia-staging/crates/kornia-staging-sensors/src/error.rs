@@ -22,30 +22,6 @@ pub enum SensorError {
         /// Timestamp of the rejected sample, on the same clock.
         timestamp_ns: i64,
     },
-    /// Two frame timestamps that are equal or go backwards.
-    ///
-    /// Zero or negative duration cannot define a preintegrated measurement.
-    #[error("frame interval [{t0_ns}, {t1_ns}] ns is empty or reversed")]
-    NonMonotonicFrames {
-        /// Timestamp of the previous frame.
-        t0_ns: i64,
-        /// Timestamp of the current frame.
-        t1_ns: i64,
-    },
-    /// The requested interval starts at a different time from the measurement.
-    #[error("interval starts at {t0_ns} ns but the measurement starts at {start_timestamp_ns} ns")]
-    StartTimeMismatch {
-        /// Start time the measurement was constructed with.
-        start_timestamp_ns: i64,
-        /// Start of the interval the caller asked for.
-        t0_ns: i64,
-    },
-    /// No sample follows the frame to close the integration interval.
-    #[error("no imu sample after {t1_ns} ns to close the interval with")]
-    MissingSampleAfterFrame {
-        /// Timestamp the interval had to reach.
-        t1_ns: i64,
-    },
     /// A timestamp difference does not fit in an `i64`.
     #[error("timestamps {a_ns} and {b_ns} ns are too far apart to subtract")]
     TimestampOverflow {
