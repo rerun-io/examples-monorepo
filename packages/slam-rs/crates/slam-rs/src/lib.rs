@@ -10,7 +10,6 @@ pub use pipeline::{
     VioError, VioPose, VioResult, VioStatus, check_imu_sample,
 };
 
-pub mod area;
 pub mod ba_base;
 pub mod calib;
 pub mod camera;
@@ -20,7 +19,6 @@ pub mod estimator;
 pub mod frontend;
 #[cfg(feature = "gpu-core")]
 pub mod gpu;
-mod ldlt;
 pub(crate) mod qr;
 
 // `gpu-core` is the kernels and the seam; the runtime comes from `gpu-wgpu`. Enabled on its own there would be no client to build one on, and
@@ -68,3 +66,4 @@ pub const GPU_BACKEND: Option<&str> = None;
 pub(crate) fn duration_ns(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
+

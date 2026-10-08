@@ -1,11 +1,12 @@
 //! Estimator state values, block indices and frozen-linearization bookkeeping.
 //! Correct offsets and increment conventions prevent silent trajectory drift.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::HashMap;
 
 use nalgebra::{DMatrix, DVector, SVector, Vector3, Vector6};
 
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{Se3};
 
 /// Degrees of freedom of a pose block.
 pub const POSE_SIZE: usize = 6;
@@ -177,7 +178,7 @@ impl AbsOrderMap {
 /// and `b` stores residual `r_m`. Only this form is supported (D68).
 /// Its ordering must be a prefix of the window ordering.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MargLinData<S: LieScalar> {
+pub struct MargLinData<S: Scalar> {
     /// The prior's ordering.
     pub order: AbsOrderMap,
     /// `J_m`.
@@ -186,7 +187,7 @@ pub struct MargLinData<S: LieScalar> {
     pub b: DVector<S>,
 }
 
-impl<S: LieScalar> Default for MargLinData<S> {
+impl<S: Scalar> Default for MargLinData<S> {
     /// An empty square-root prior.
     fn default() -> Self {
         Self {
@@ -199,14 +200,14 @@ impl<S: LieScalar> Default for MargLinData<S> {
 
 /// An SE(3) pose at a timestamp.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PoseState<S: LieScalar> {
+pub struct PoseState<S: Scalar> {
     /// Timestamp of the state, in nanoseconds.
     pub t_ns: i64,
     /// Pose of the IMU (rig) frame in the world frame.
     pub t_w_i: Se3<S>,
 }
 
-impl<S: LieScalar> Default for PoseState<S> {
+impl<S: Scalar> Default for PoseState<S> {
     fn default() -> Self {
         Self {
             t_ns: 0,
@@ -215,7 +216,7 @@ impl<S: LieScalar> Default for PoseState<S> {
     }
 }
 
-impl<S: LieScalar> PoseState<S> {
+impl<S: Scalar> PoseState<S> {
     /// A state at a timestamp.
     pub fn new(t_ns: i64, t_w_i: Se3<S>) -> Self {
         Self { t_ns, t_w_i }
@@ -225,7 +226,7 @@ impl<S: LieScalar> PoseState<S> {
 /// Pose and world-frame velocity at a timestamp.
 /// Preintegrated delta states use elapsed nanoseconds instead of absolute time.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PoseVelState<S: LieScalar> {
+pub struct PoseVelState<S: Scalar> {
     /// Timestamp of the state, in nanoseconds.
     pub t_ns: i64,
     /// Pose of the IMU (rig) frame in the world frame.
@@ -234,7 +235,7 @@ pub struct PoseVelState<S: LieScalar> {
     pub vel_w_i: Vector3<S>,
 }
 
-impl<S: LieScalar> Default for PoseVelState<S> {
+impl<S: Scalar> Default for PoseVelState<S> {
     fn default() -> Self {
         Self {
             t_ns: 0,
@@ -244,7 +245,7 @@ impl<S: LieScalar> Default for PoseVelState<S> {
     }
 }
 
-impl<S: LieScalar> PoseVelState<S> {
+impl<S: Scalar> PoseVelState<S> {
     /// A pose-velocity state from its parts.
     pub fn new(t_ns: i64, t_w_i: Se3<S>, vel_w_i: Vector3<S>) -> Self {
         Self {
@@ -285,7 +286,7 @@ impl<S: LieScalar> PoseVelState<S> {
 /// Pose, velocity and the two IMU biases at a timestamp
 /// the block the estimator actually optimizes.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PoseVelBiasState<S: LieScalar> {
+pub struct PoseVelBiasState<S: Scalar> {
     /// Timestamp of the state, in nanoseconds.
     pub t_ns: i64,
     /// Pose of the IMU (rig) frame in the world frame.
@@ -298,7 +299,7 @@ pub struct PoseVelBiasState<S: LieScalar> {
     pub bias_accel: Vector3<S>,
 }
 
-impl<S: LieScalar> Default for PoseVelBiasState<S> {
+impl<S: Scalar> Default for PoseVelBiasState<S> {
     fn default() -> Self {
         Self {
             t_ns: 0,
@@ -310,7 +311,7 @@ impl<S: LieScalar> Default for PoseVelBiasState<S> {
     }
 }
 
-impl<S: LieScalar> PoseVelBiasState<S> {
+impl<S: Scalar> PoseVelBiasState<S> {
     /// A full state from its parts.
     pub fn new(
         t_ns: i64,
@@ -380,7 +381,7 @@ impl<S: LieScalar> PoseVelBiasState<S> {
 /// which is why the failure looks like drift instead of a crash (trap 7 of the
 /// architecture dossier).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PoseStateWithLin<S: LieScalar> {
+pub struct PoseStateWithLin<S: Scalar> {
     linearized: bool,
     delta: Vector6<S>,
     pose_linearized: PoseState<S>,
@@ -390,7 +391,7 @@ pub struct PoseStateWithLin<S: LieScalar> {
     backup_t_w_i_current: Se3<S>,
 }
 
-impl<S: LieScalar> Default for PoseStateWithLin<S> {
+impl<S: Scalar> Default for PoseStateWithLin<S> {
     fn default() -> Self {
         Self {
             linearized: false,
@@ -404,7 +405,7 @@ impl<S: LieScalar> Default for PoseStateWithLin<S> {
     }
 }
 
-impl<S: LieScalar> PoseStateWithLin<S> {
+impl<S: Scalar> PoseStateWithLin<S> {
     /// A pose block at a timestamp.
     pub fn new(t_ns: i64, t_w_i: Se3<S>, linearized: bool) -> Self {
         Self {
@@ -512,7 +513,7 @@ impl<S: LieScalar> PoseStateWithLin<S> {
 ///
 /// The same fixed-linearization rule as [`PoseStateWithLin`], on the 15-vector.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PoseVelBiasStateWithLin<S: LieScalar> {
+pub struct PoseVelBiasStateWithLin<S: Scalar> {
     linearized: bool,
     delta: Vector15<S>,
     state_linearized: PoseVelBiasState<S>,
@@ -522,7 +523,7 @@ pub struct PoseVelBiasStateWithLin<S: LieScalar> {
     backup_state_current: PoseVelBiasState<S>,
 }
 
-impl<S: LieScalar> Default for PoseVelBiasStateWithLin<S> {
+impl<S: Scalar> Default for PoseVelBiasStateWithLin<S> {
     fn default() -> Self {
         Self {
             linearized: false,
@@ -536,7 +537,7 @@ impl<S: LieScalar> Default for PoseVelBiasStateWithLin<S> {
     }
 }
 
-impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
+impl<S: Scalar> PoseVelBiasStateWithLin<S> {
     /// A state block from a plain state.
     pub fn new(state: PoseVelBiasState<S>, linearized: bool) -> Self {
         Self {

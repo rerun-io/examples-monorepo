@@ -9,7 +9,7 @@ use std::time::Instant;
 use kornia_image::Image;
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_imgproc::resize::resize_fast_mono_aa;
-use robocap_live::downsample::resize_area_u8;
+use kornia_staging_imgproc::resize::resize_area_u8;
 use robocap_live::downsample::{SmallImagePool, small_images};
 use robocap_live::frame::{
     CameraFrame, FULL_SIZE, FrameMeta, FrameReader, Frameset, NUM_CAMERAS, SMALL_SIZE,

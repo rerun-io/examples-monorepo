@@ -3,7 +3,7 @@
 //! A crop camera shares its source camera's centre and looks at the hand: the minimal rotation taking the optical axis to the
 //! target direction, then a roll about the new axis by the camera's mounting angle, then an optional x mirror (right hands, so
 //! KeyNet sees left hands only). Its pinhole focal fits the hand in the 96 x 96 crop with a margin. Every crop pixel's ray goes
-//! back through the source lens and samples the native 1920x1080 frame (kornia-style maps + bilinear remap in `kornia_ext`).
+//! back through the source lens and samples the native 1920x1080 frame (maps in `kornia_staging_3d::camera::virtual_camera` and remap in `kornia_staging_imgproc::interpolation`).
 //! Crop pixel centres are 0..95 with the centre at 47.5.
 
 use kornia_image::{Image, ImageError, ImageSize};
@@ -15,7 +15,7 @@ use crate::nets::{KEYNET_CROP, NUM_LANDMARKS};
 use kornia_staging_3d::camera::virtual_camera::{
     VirtualPinhole, maps_from_virtual_pinhole_f32, maps_from_virtual_pinhole_kb4_f32,
 };
-use crate::kornia_ext::remap::remap_f32_from_u8 as remap_f32_from_u8_zero_border;
+use kornia_staging_imgproc::interpolation::remap_f32_from_u8_zero_border;
 
 /// Crop side in pixels.
 pub const CROP_SIZE: usize = KEYNET_CROP;

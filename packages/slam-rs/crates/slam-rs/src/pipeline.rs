@@ -1,5 +1,6 @@
 //! Vio sequencing, optional frontend lag, and deferred-solver ownership.
 
+use kornia_staging_algebra::Scalar;
 mod boundary;
 mod lag;
 mod lane;
@@ -10,7 +11,7 @@ pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioRe
 pub use lane::FrontendLane;
 use lane::build_frontend;
 
-use crate::{calib, config, duration_ns, estimator, frontend, image, imu, lie, types};
+use crate::{calib, config, duration_ns, estimator, frontend, image, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 
 /// Frameset pipeline with optional one-frame estimator lag (D17, D24, M7).
@@ -22,7 +23,7 @@ use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 /// With `port.frontend_lag`, frontend(t) runs beside estimator(t-1); results
 /// carry t-1's timestamp. Drain the final result with [`Self::flush`].
 #[derive(Debug)]
-pub struct Vio<S: lie::LieScalar = f32> {
+pub struct Vio<S: Scalar = f32> {
     frontend: FrontendLane,
     estimator: estimator::SqrtKeypointVio<S>,
     /// The frontend's own IMU buffer (D24). The same samples reach the
@@ -66,13 +67,13 @@ pub use lag::OverlapTimings;
 ///
 /// The mutable borrow prevents another call from replacing those pixels before
 /// computation finishes. No source image borrow is retained.
-pub struct PreparedTrack<'a, S: lie::LieScalar> {
+pub struct PreparedTrack<'a, S: Scalar> {
     vio: &'a mut Vio<S>,
     t_ns: i64,
     prediction: Option<frontend::flow::PosePrediction>,
 }
 
-impl<S: lie::LieScalar> PreparedTrack<'_, S> {
+impl<S: Scalar> PreparedTrack<'_, S> {
     /// Finish tracking, or return the unchanged IMU-coverage refusal.
     ///
     /// # Errors
@@ -86,7 +87,7 @@ impl<S: lie::LieScalar> PreparedTrack<'_, S> {
     }
 }
 
-impl<S: lie::LieScalar> Vio<S> {
+impl<S: Scalar> Vio<S> {
     /// Build the pipeline from configuration and calibration (D18).
     ///
     /// # Errors

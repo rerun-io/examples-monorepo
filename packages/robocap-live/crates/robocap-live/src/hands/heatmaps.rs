@@ -7,7 +7,7 @@ use nalgebra::{Vector2, Vector3};
 use crate::nets::{
     DISTANCE_BINS, DISTANCE_LEN, HEATMAP_LEN, HEATMAP_SIDE, KEYNET_CROP, NUM_LANDMARKS,
 };
-use crate::kornia_ext::heatmap::{argmax_first, decode_peak_2d, refine_peak_log_quadratic};
+use kornia_staging_imgproc::features::{argmax_first, decode_peak_2d, refine_peak_log_quadratic};
 
 /// Relative distances span `[-130, 130]` mm over the 18 bins (handtrack `DISTANCE_RANGE_MM`).
 pub const DISTANCE_RANGE_MM: f32 = 130.0;

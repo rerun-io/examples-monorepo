@@ -17,6 +17,7 @@ publish = false
 [workspace.dependencies]
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d", features = ["serde"] }
 kornia-staging-algebra = { path = "../kornia-staging/crates/kornia-staging-algebra" }
+kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }
 anyhow = "1"
 libc = "0.2"
 cc = "1"

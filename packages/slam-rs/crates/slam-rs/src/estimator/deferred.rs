@@ -1,5 +1,6 @@
 //! The deferred keyframe solve (D84).
 
+use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -9,12 +10,11 @@ use super::{
 };
 use crate::duration_ns;
 use crate::frontend::parallel::WorkPool;
-use crate::lie::LieScalar;
 use crate::types::{FrameId, KeypointId, LandmarkId};
 
 /// What a deferred keyframe's second half did (D84).
 #[derive(Debug, Clone, PartialEq)]
-pub struct DeferredKeyframeStats<S: LieScalar> {
+pub struct DeferredKeyframeStats<S: Scalar> {
     /// The keyframe frameset's timestamp.
     pub t_ns: i64,
     /// Landmarks the keyframe triangulated.
@@ -45,7 +45,7 @@ pub(super) struct DeferredKeyframe {
     pub(super) lost_landmarks: BTreeSet<LandmarkId>,
 }
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// Every landmark `frame` did not see, in any camera, when
     /// `vio_marg_lost_landmarks` asks for them; empty otherwise.
     pub(super) fn lost_landmarks(&self, frame: &FlowObservations) -> BTreeSet<LandmarkId> {

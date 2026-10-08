@@ -59,8 +59,11 @@ pub const SLAM_PIXELS: usize = (FRAME_WIDTH / SLAM_DOWNSCALE) * (FRAME_HEIGHT / 
 #[cfg(feature = "live-slam")]
 pub fn slam_luma(nv12: &[u8]) -> Result<Vec<u8>> {
     let mut pixels = vec![0; SLAM_PIXELS];
-    slam_rs::area::resize_area_u8_into::<1>(
-        nv12, (FRAME_WIDTH, FRAME_HEIGHT), FRAME_WIDTH, &mut pixels,
+    kornia_staging_imgproc::resize::resize_area_u8_into::<1>(
+        nv12,
+        (FRAME_WIDTH, FRAME_HEIGHT),
+        FRAME_WIDTH,
+        &mut pixels,
         (FRAME_WIDTH / SLAM_DOWNSCALE, FRAME_HEIGHT / SLAM_DOWNSCALE),
     )?;
     Ok(pixels)

@@ -2,12 +2,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_staging_algebra::Scalar;
 use std::path::PathBuf;
 
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::FrameUpdateOutcome;
 use slam_rs::frontend::flow::{FrontendError, FrontendOptions};
-use slam_rs::lie::LieScalar;
 use slam_rs::{Backend, ImageView, Vio, VioError, VioResult, VioStatus};
 
 mod common;
@@ -41,7 +41,7 @@ const COMMITTED_IMU_HORIZON_NS: i64 = 40_000_000;
 
 /// The pipeline both tests drive: the fixture's config and calibration, one
 /// frontend thread so the reduction shape is fixed (D31).
-fn pipeline<S: LieScalar>() -> Vio<S> {
+fn pipeline<S: Scalar>() -> Vio<S> {
     Vio::new(
         common::config(),
         common::calibration(),
@@ -104,7 +104,7 @@ fn view(pgm: &Pgm) -> ImageView<'_> {
 /// estimator sees anything, and a constant frame detects no corners. Three is
 /// what `tests/fixtures/flow/frames/` carries, so this cannot reach
 /// `opt_started` (five states). The schedule test extends the input by holding the last image.
-fn drive_the_committed_framesets<S: LieScalar>(vio: &mut Vio<S>) -> Vec<VioResult> {
+fn drive_the_committed_framesets<S: Scalar>(vio: &mut Vio<S>) -> Vec<VioResult> {
     let directory: PathBuf = common::fixtures().join("flow/frames");
     let cameras: usize = common::calibration().t_i_c.len();
     let framesets: usize = common::available_framesets(&directory, cameras, COMMITTED_FRAMESETS);
@@ -142,7 +142,7 @@ fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
     check_pipeline::<f64>();
 }
 
-fn check_pipeline<S: LieScalar>() {
+fn check_pipeline<S: Scalar>() {
     let mut vio: Vio<S> = pipeline();
     let results: Vec<VioResult> = drive_the_committed_framesets(&mut vio);
 
@@ -205,7 +205,7 @@ fn frontend_lag_returns_estimates_one_call_late() {
 
 #[test]
 fn frontend_lag_retries_and_thread_counts_preserve_order_and_results() {
-    fn run<S: LieScalar>(threads: usize, retry: bool) -> Vec<VioResult> {
+    fn run<S: Scalar>(threads: usize, retry: bool) -> Vec<VioResult> {
         let mut config = common::config();
         config.port_frontend_lag = true;
         config.port_frame_update_max_iterations = 5;
@@ -497,7 +497,7 @@ fn a_refused_frameset_is_retried_bit_identically() {
 
 #[test]
 fn the_frame_update_lane_is_deterministic_and_takes_its_branch() {
-    fn drive<S: LieScalar>() -> Vec<(VioResult, FrameUpdateOutcome, bool, usize)> {
+    fn drive<S: Scalar>() -> Vec<(VioResult, FrameUpdateOutcome, bool, usize)> {
         let mut config = common::config();
         config.port_frame_update_max_iterations = 5;
         let mut vio =

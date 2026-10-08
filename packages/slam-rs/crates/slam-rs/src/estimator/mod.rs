@@ -26,6 +26,7 @@
 //! state before its first ordering entry. That ordering insertion cannot fail
 //! for a fresh map and fixed block size, but still uses a typed result (D32).
 
+use kornia_staging_algebra::Scalar;
 mod deferred;
 mod error;
 mod frame_update;
@@ -51,7 +52,7 @@ use crate::imu::{
     ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, Popped, gravity,
     gravity_from_first_accel,
 };
-use crate::lie::{LieScalar, Se3, eigen_maxi};
+use crate::lie::{Se3, eigen_maxi};
 use crate::types::{
     AbsOrderMap, FrameId, KeypointId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE,
     PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, TimeCamId,
@@ -71,7 +72,7 @@ pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 
 /// LM damping, the four fields of in one place.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct LmDamping<S: LieScalar> {
+struct LmDamping<S: Scalar> {
     /// `lambda`, reset to `vio_lm_lambda_initial` every frame (D11).
     lambda: S,
     /// `min_lambda`, the floor of the damped diagonal.
@@ -88,7 +89,7 @@ const VEE_FACTOR: f64 = 2.0;
 /// Minimum landmark support for a world start or a deferred keyframe solve.
 pub(crate) const MIN_LANDMARK_SUPPORT: usize = 10;
 
-impl<S: LieScalar> LmDamping<S> {
+impl<S: Scalar> LmDamping<S> {
     /// Nielsen's update after an accepted step.
     /// The cubic and subtraction run in f64 before narrowing. Both maxima retain
     /// a NaN on the left, allowing the caller to detect non-finite damping.
@@ -115,14 +116,14 @@ impl<S: LieScalar> LmDamping<S> {
 
 /// Shared convergence predicate for the window and frame-update schedules.
 /// Both use the same fixed cost and infinity-norm tolerances.
-fn lm_converged<S: LieScalar>(f_diff: S, step_norminf: S) -> bool {
+fn lm_converged<S: Scalar>(f_diff: S, step_norminf: S) -> bool {
     (f_diff > S::zero() && f_diff < S::from_literal(optimize::FUNCTION_TOLERANCE))
         || step_norminf < S::from_literal(optimize::STEP_TOLERANCE)
 }
 
 /// `SqrtKeypointVioEstimator<Scalar>`.
 #[derive(Debug, Clone)]
-pub struct SqrtKeypointVio<S: LieScalar> {
+pub struct SqrtKeypointVio<S: Scalar> {
     /// The sliding window: `frame_states`, `frame_poses`, `lmdb` and the
     /// calibration. Crate-visible because [`crate::marg::marginalize`] takes
     /// it by `&mut` and [`Self::snapshot`] reads it; outside the crate the
@@ -227,7 +228,7 @@ pub struct SqrtKeypointVio<S: LieScalar> {
 /// must be refused before they create NaNs or infinities in a live prior.
 /// Parsers remain syntax-only because these constraints belong to the consuming
 /// algorithm. The Nielsen factor is a compile-time constant, not a config field.
-fn validate_scalars<S: LieScalar>(
+fn validate_scalars<S: Scalar>(
     calibration: &Calibration<S>,
     config: &VioConfig,
 ) -> Result<(), EstimatorError> {
@@ -275,7 +276,7 @@ fn validate_scalars<S: LieScalar>(
     Ok(())
 }
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// `SqrtKeypointVioEstimator(g, calib, config)`.
     ///
     /// Sets the square-root gauge prior on the first state: `sqrt(init_pose_weight)`
@@ -928,7 +929,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
 /// What the two ends of `measure` (a deferred keyframe, or the solve and the
 /// marginalization now) hand its report.
-struct MeasureTail<S: LieScalar> {
+struct MeasureTail<S: Scalar> {
     lm: Vec<LmIteration<S>>,
     termination: LmTermination,
     timings: StageTimings,
@@ -951,7 +952,7 @@ fn fixed_keyframes<'a>(
 }
 
 /// `AffineCompact2f::translation().cast<Scalar>()`.
-fn cast_pixel<S: LieScalar>(pixel: &Vector2<f32>) -> Vector2<S> {
+fn cast_pixel<S: Scalar>(pixel: &Vector2<f32>) -> Vector2<S> {
     Vector2::new(
         S::from_literal(f64::from(pixel.x)),
         S::from_literal(f64::from(pixel.y)),

@@ -1,0 +1,1 @@
+OpenCV 4.13.0: INTER_AREA, 9x6 RGB uint8 to 3x2, integer factor 3. Input: numpy default_rng(42).integers(0, 256, (6, 9, 3), dtype=uint8). Odd area avoids the half-even/half-up tie difference in OpenCV general integer factors. Raw HWC bytes.

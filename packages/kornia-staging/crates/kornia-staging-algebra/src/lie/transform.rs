@@ -1,0 +1,624 @@
+//! Scalar-preserving rigid transforms with normalized composition.
+use crate::Scalar;
+use nalgebra::{
+    Matrix3, Matrix3x4, Matrix4, Matrix6, Quaternion, UnitQuaternion, Vector3, Vector6,
+};
+/// A rotation, stored as a unit quaternion exactly as `Sophus::SO3` does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rotation3<S: Scalar> {
+    quaternion: UnitQuaternion<S>,
+}
+
+impl<S: Scalar> Default for Rotation3<S> {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl<S: Scalar> Rotation3<S> {
+    /// The identity rotation.
+    pub fn identity() -> Self {
+        Self {
+            quaternion: UnitQuaternion::identity(),
+        }
+    }
+
+    /// Wrap a quaternion that is already of unit length.
+    pub fn from_unit_quaternion(quaternion: UnitQuaternion<S>) -> Self {
+        Self { quaternion }
+    }
+
+    /// Normalize `(x, y, z, w)` into a rotation, correcting small calibration drift.
+    /// Return `None` for a zero-norm quaternion rather than producing NaNs.
+    pub fn from_quaternion_xyzw(x: S, y: S, z: S, w: S) -> Option<Self> {
+        let quaternion: Quaternion<S> = Quaternion::new(w, x, y, z);
+        if !quaternion.norm().is_finite() || quaternion.norm() <= S::zero() {
+            return None;
+        }
+        Some(Self {
+            quaternion: UnitQuaternion::new_normalize(quaternion),
+        })
+    }
+
+    /// `Sophus::SO3::cast` : the same rotation in
+    /// another scalar.
+    ///
+    /// Sophus casts the four coefficients and hands them to the quaternion
+    /// constructor, which normalizes; the narrowing is what makes that
+    /// normalization not a no-op. A rotation that cannot be normalized in the
+    /// target scalar — only reachable from a non-finite input — comes back as
+    /// the identity, which is what `Calibration::cast` needs to stay total.
+    pub fn cast<T: Scalar>(&self) -> Rotation3<T> {
+        let [x, y, z, w]: [S; 4] = self.quaternion_xyzw();
+        Rotation3::from_quaternion_xyzw(
+            T::from_literal(x.to_f64()),
+            T::from_literal(y.to_f64()),
+            T::from_literal(z.to_f64()),
+            T::from_literal(w.to_f64()),
+        )
+        .unwrap_or_else(Rotation3::identity)
+    }
+
+    /// The underlying unit quaternion.
+    pub fn quaternion(&self) -> &UnitQuaternion<S> {
+        &self.quaternion
+    }
+
+    /// Quaternion coefficients in JSON order `(qx, qy, qz, qw)`.
+    pub fn quaternion_xyzw(&self) -> [S; 4] {
+        let q = self.quaternion.as_ref();
+        [q.i, q.j, q.k, q.w]
+    }
+
+    /// The 3x3 skew-symmetric matrix of a vector, `Sophus::SO3::hat`.
+    pub fn hat(v: &Vector3<S>) -> Matrix3<S> {
+        super::core::hat(v)
+    }
+
+    /// The exponential map, `kornia_algebra::lie::SO3F32::exp` / `SO3F64::exp`.
+    pub fn exp(omega: &Vector3<S>) -> Self {
+        Self::from_kornia_quaternion(S::so3_exp(&[omega.x, omega.y, omega.z]))
+    }
+
+    /// A `[qx, qy, qz, qw]` from `kornia-algebra` as an `Rotation3`.
+    ///
+    /// `new_unchecked` because every upstream operation that produces one starts
+    /// from a unit quaternion and stays on the sphere to within rounding — the
+    /// same assumption Sophus makes when it asserts rather than normalises
+    /// The one place the assumption is not free is
+    /// composition, which is why [`Rotation3::mul`] normalises.
+    #[inline]
+    pub fn from_kornia_quaternion(xyzw: [S; 4]) -> Self {
+        Self {
+            quaternion: UnitQuaternion::new_unchecked(Quaternion::new(
+                xyzw[3], xyzw[0], xyzw[1], xyzw[2],
+            )),
+        }
+    }
+
+    /// The logarithm, `kornia_algebra::lie::SO3F32::log` / `SO3F64::log`.
+    pub fn log(&self) -> Vector3<S> {
+        Vector3::from(S::so3_log(&self.quaternion_xyzw()))
+    }
+
+    /// The inverse rotation, `kornia_algebra::lie::SO3F32::inverse` /
+    /// `SO3F64::inverse` — the conjugate of a unit quaternion, which is what
+    /// Sophus takes too.
+    ///
+    /// Sophus's constructor then renormalizes, so this one does
+    /// too. Conjugating only flips signs, so the renormalization is a no-op
+    /// here — it is kept for the same reason Sophus keeps it: every path that
+    /// produces an `Rotation3` leaves it unit length.
+    pub fn inverse(&self) -> Self {
+        let [x, y, z, w]: [S; 4] = S::so3_inverse(&self.quaternion_xyzw());
+        Self {
+            quaternion: normalized(Quaternion::new(w, x, y, z)),
+        }
+    }
+
+    /// The rotation as a 3x3 matrix, `kornia_algebra::lie::SO3F32::matrix` /
+    /// `SO3F64::matrix`.
+    ///
+    pub fn matrix(&self) -> Matrix3<S> {
+        // Both `glam` and nalgebra store column major, so the array transfers
+        // without a transpose.
+        Matrix3::from_column_slice(&S::so3_matrix(&self.quaternion_xyzw()))
+    }
+}
+
+impl<S: Scalar> std::ops::Mul for Rotation3<S> {
+    type Output = Self;
+
+    /// Compose two rotations, renormalizing the product.
+    ///
+    /// Sophus's `operator*` hands the raw quaternion product to the `SO3`
+    /// quaternion constructor, which calls
+    /// `normalize()`. `nalgebra`'s
+    /// `UnitQuaternion * UnitQuaternion` does not: it trusts the invariant and
+    /// lets rounding accumulate. Over a long chain that matters — composing one
+    /// small rotation 100,000 times in `f32` drifts the norm to 1.00105 without
+    /// the renormalization and stays at 1 with it.
+    fn mul(self, rhs: Self) -> Self {
+        Self {
+            quaternion: normalized(self.quaternion.into_inner() * rhs.quaternion.into_inner()),
+        }
+    }
+}
+
+/// `Sophus::SO3::normalize()`.
+///
+/// Sophus refuses a quaternion shorter than its epsilon; here the inputs are
+/// always products or conjugates of unit quaternions, so the norm is within a
+/// few ulps of 1 and `new_normalize` cannot divide by zero.
+#[inline]
+fn normalized<S: Scalar>(quaternion: Quaternion<S>) -> UnitQuaternion<S> {
+    UnitQuaternion::new_normalize(quaternion)
+}
+
+impl<S: Scalar> std::ops::Mul<Vector3<S>> for Rotation3<S> {
+    type Output = Vector3<S>;
+
+    /// Rotate a point, `SO3F32 * Vec3AF32` / `SO3F64 * Vec3F64`.
+    ///
+    /// Rotate a point with the scalar-specific kornia quaternion action.
+    fn mul(self, rhs: Vector3<S>) -> Vector3<S> {
+        Vector3::from(S::so3_act(&self.quaternion_xyzw(), &[rhs.x, rhs.y, rhs.z]))
+    }
+}
+
+/// A rigid transform, `Sophus::SE3` as a rotation plus a translation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RigidTransform<S: Scalar> {
+    /// The rotation part.
+    pub rotation: Rotation3<S>,
+    /// The translation part.
+    pub translation: Vector3<S>,
+}
+
+impl<S: Scalar> Default for RigidTransform<S> {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl<S: Scalar> RigidTransform<S> {
+    /// A transform from its two parts.
+    pub fn new(rotation: Rotation3<S>, translation: Vector3<S>) -> Self {
+        Self {
+            rotation,
+            translation,
+        }
+    }
+
+    /// The identity transform.
+    pub fn identity() -> Self {
+        Self {
+            rotation: Rotation3::identity(),
+            translation: Vector3::zeros(),
+        }
+    }
+
+    /// Coupled exponential: translation is `V(omega) upsilon`.
+    /// State updates use [`RigidTransform::exp_decoupled`] and [`RigidTransform::apply_inc`] instead.
+    pub fn exp(tangent: &Vector6<S>) -> Self {
+        let u = tangent.fixed_rows::<3>(0).into_owned();
+        let w = tangent.fixed_rows::<3>(3).into_owned();
+        let (rotation, translation) = super::core::exp(&u, &w);
+        Self {
+            rotation,
+            translation,
+        }
+    }
+
+    /// Coupled logarithm.
+    pub fn log(&self) -> Vector6<S> {
+        let (u, w) = super::core::log(&self.rotation, &self.translation);
+        Vector6::new(u[0], u[1], u[2], w[0], w[1], w[2])
+    }
+
+    /// Decoupled exponential: tangent head becomes translation and the tail uses SO(3) exp.
+    pub fn exp_decoupled(tangent: &Vector6<S>) -> Self {
+        Self {
+            rotation: Rotation3::exp(&tangent.fixed_rows::<3>(3).into_owned()),
+            translation: tangent.fixed_rows::<3>(0).into_owned(),
+        }
+    }
+
+    /// Decoupled logarithm, inverse to [`Self::exp_decoupled`].
+    /// Used by round-trip and finite-difference tests; production updates do not read tangents back.
+    pub fn log_decoupled(&self) -> Vector6<S> {
+        let omega: Vector3<S> = self.rotation.log();
+        Vector6::new(
+            self.translation.x,
+            self.translation.y,
+            self.translation.z,
+            omega.x,
+            omega.y,
+            omega.z,
+        )
+    }
+
+    /// `Sophus::SE3::cast`: the same transform in another scalar.
+    pub fn cast<T: Scalar>(&self) -> RigidTransform<T> {
+        RigidTransform {
+            rotation: self.rotation.cast(),
+            translation: Vector3::new(
+                T::from_literal(self.translation.x.to_f64()),
+                T::from_literal(self.translation.y.to_f64()),
+                T::from_literal(self.translation.z.to_f64()),
+            ),
+        }
+    }
+
+    /// The homogeneous 4x4 matrix, `Sophus::SE3::matrix()`
+    ///
+    /// The rotation block uses [`Rotation3::matrix`]; the final column is translation.
+    pub fn matrix(&self) -> Matrix4<S> {
+        let mut res: Matrix4<S> = Matrix4::zeros();
+        res.fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&self.rotation.matrix());
+        res.fixed_view_mut::<3, 1>(0, 3)
+            .copy_from(&self.translation);
+        res[(3, 3)] = S::one();
+        res
+    }
+
+    /// The affine 3x4 matrix, `Sophus::SE3::matrix3x4()`
+    /// `[R | t]`.
+    pub fn matrix3x4(&self) -> Matrix3x4<S> {
+        let mut res: Matrix3x4<S> = Matrix3x4::zeros();
+        res.fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&self.rotation.matrix());
+        res.fixed_view_mut::<3, 1>(0, 3)
+            .copy_from(&self.translation);
+        res
+    }
+
+    /// The inverse transform.
+    pub fn inverse(&self) -> Self {
+        let rotation: Rotation3<S> = self.rotation.inverse();
+        Self {
+            translation: -(rotation * self.translation),
+            rotation,
+        }
+    }
+
+    /// Adjoint for translation-first tangents: `[[R, hat(t) R], [0, R]]`.
+    /// It satisfies `Adj(T) xi = log(T exp(xi) T^-1)`.
+    pub fn adjoint(&self) -> Matrix6<S> {
+        let r: Matrix3<S> = self.rotation.matrix();
+        let mut res: Matrix6<S> = Matrix6::zeros();
+        res.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
+        res.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
+        res.fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(Rotation3::hat(&self.translation) * r));
+        res
+    }
+
+    /// Pose increment: `t += inc[0..3]`, `R = exp(inc[3..6]) R`.
+    /// State blocks, Jacobians and priors all require this left-multiplied rotation convention.
+    pub fn apply_inc(&mut self, inc: &Vector6<S>) {
+        self.translation += inc.fixed_rows::<3>(0).into_owned();
+        self.rotation = Rotation3::exp(&inc.fixed_rows::<3>(3).into_owned()) * self.rotation;
+    }
+}
+
+impl<S: Scalar> std::ops::Mul for RigidTransform<S> {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        Self {
+            rotation: self.rotation * rhs.rotation,
+            translation: self.translation + self.rotation * rhs.translation,
+        }
+    }
+}
+
+impl<S: Scalar> std::ops::Mul<Vector3<S>> for RigidTransform<S> {
+    type Output = Vector3<S>;
+
+    fn mul(self, rhs: Vector3<S>) -> Vector3<S> {
+        self.rotation * rhs + self.translation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use nalgebra::Vector6;
+
+    use super::super::core::{right_jacobian_inv_so3, right_jacobian_so3};
+    use super::*;
+    use approx::assert_abs_diff_eq;
+    use proptest::prelude::*;
+
+    /// Keeps the whole Rust suite in the "runs in seconds" band.
+    const CASES: u32 = 256;
+
+    fn config() -> ProptestConfig {
+        ProptestConfig::with_cases(CASES)
+    }
+
+    /// Tangent vectors up to about 1.7 rad, well inside the `|phi| < pi` domain
+    /// the inverse Jacobians are defined on.
+    fn tangent3() -> impl Strategy<Value = Vector3<f64>> {
+        (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0).prop_map(|(x, y, z)| Vector3::new(x, y, z))
+    }
+
+    fn tangent6() -> impl Strategy<Value = Vector6<f64>> {
+        (
+            -2.0f64..2.0,
+            -2.0f64..2.0,
+            -2.0f64..2.0,
+            -1.0f64..1.0,
+            -1.0f64..1.0,
+            -1.0f64..1.0,
+        )
+            .prop_map(|(a, b, c, d, e, f)| Vector6::new(a, b, c, d, e, f))
+    }
+
+    /// Central-difference Jacobian of a map from R^3 to R^3.
+    fn numeric_jacobian3<F>(at: &Vector3<f64>, f: F) -> Matrix3<f64>
+    where
+        F: Fn(&Vector3<f64>) -> Vector3<f64>,
+    {
+        let h: f64 = 1e-6;
+        let mut j: Matrix3<f64> = Matrix3::zeros();
+        for i in 0..3 {
+            let mut plus: Vector3<f64> = *at;
+            let mut minus: Vector3<f64> = *at;
+            plus[i] += h;
+            minus[i] -= h;
+            let column: Vector3<f64> = (f(&plus) - f(&minus)) / (2.0 * h);
+            j.set_column(i, &column);
+        }
+        j
+    }
+
+    /// The one value in this module checked by hand rather than against a
+    /// finite difference: `SO3::exp([0.1, 0.2, 0.3])` under Sophus's formula
+    /// `w = cos(theta/2)`, `v = sin(theta/2)/theta * omega`
+    ///  with `theta = |omega|`.
+    #[test]
+    fn exp_matches_the_hand_computed_sophus_quaternion() {
+        let rotation: Rotation3<f64> = Rotation3::exp(&Vector3::new(0.1, 0.2, 0.3));
+        let [qx, qy, qz, qw] = rotation.quaternion_xyzw();
+        assert_abs_diff_eq!(qw, 0.982_550_982_155_258_9, epsilon = 1e-15);
+        assert_abs_diff_eq!(qx, 0.049_708_843_324_859_475, epsilon = 1e-15);
+        assert_abs_diff_eq!(qy, 0.099_417_686_649_718_95, epsilon = 1e-15);
+        assert_abs_diff_eq!(qz, 0.149_126_529_974_578_43, epsilon = 1e-15);
+    }
+
+    /// The rotation is a quarter turn about z, so the matrix is exact.
+    #[test]
+    fn exp_of_a_quarter_turn_about_z_is_the_expected_matrix() {
+        let rotation: Rotation3<f64> =
+            Rotation3::exp(&Vector3::new(0.0, 0.0, std::f64::consts::FRAC_PI_2));
+        let m: Matrix3<f64> = rotation.matrix();
+        assert_abs_diff_eq!(m[(0, 0)], 0.0, epsilon = 1e-15);
+        assert_abs_diff_eq!(m[(0, 1)], -1.0, epsilon = 1e-15);
+        assert_abs_diff_eq!(m[(1, 0)], 1.0, epsilon = 1e-15);
+        assert_abs_diff_eq!(m[(2, 2)], 1.0, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn exp_and_log_agree_at_exactly_zero() {
+        let zero: Vector3<f64> = Vector3::zeros();
+        let rotation: Rotation3<f64> = Rotation3::exp(&zero);
+        assert_abs_diff_eq!(rotation.log().norm(), 0.0, epsilon = 1e-18);
+        assert_abs_diff_eq!(rotation.quaternion_xyzw()[3], 1.0, epsilon = 1e-18);
+    }
+
+    /// The Taylor branches must join the closed forms: just under the threshold
+    /// and just over it, the results agree.
+    #[test]
+    fn the_small_angle_branches_join_the_closed_forms() {
+        let below: Vector3<f64> = Vector3::new(1e-9, 0.0, 0.0);
+        let above: Vector3<f64> = Vector3::new(1e-3, 0.0, 0.0);
+        for phi in [below, above] {
+            let j_right: Matrix3<f64> = right_jacobian_so3(&phi);
+            let j_right_inv: Matrix3<f64> = right_jacobian_inv_so3(&phi);
+            assert_abs_diff_eq!(j_right_inv * j_right, Matrix3::identity(), epsilon = 1e-12);
+        }
+    }
+
+    /// A long chain of compositions must not leak unit length.
+    ///
+    /// `nalgebra`'s `UnitQuaternion * UnitQuaternion` skips the renormalization
+    /// Sophus does on every product, and
+    /// 100,000 `f32` compositions of one small rotation take the norm to
+    /// 1.0010456 without it — a rotation matrix off by 7e-3, which the
+    /// estimator's window would carry straight into the residuals.
+    #[test]
+    fn a_hundred_thousand_compositions_stay_unit_length() {
+        let step32: Rotation3<f32> = Rotation3::exp(&Vector3::new(0.001, 0.002, -0.0015));
+        let mut chain32: Rotation3<f32> = Rotation3::identity();
+        let step64: Rotation3<f64> = Rotation3::exp(&Vector3::new(0.001, 0.002, -0.0015));
+        let mut chain64: Rotation3<f64> = Rotation3::identity();
+        for _ in 0..100_000 {
+            chain32 = chain32 * step32;
+            chain64 = chain64 * step64;
+        }
+
+        let norm32: f32 = chain32
+            .quaternion_xyzw()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        assert_abs_diff_eq!(norm32, 1.0, epsilon = 1e-6);
+        let m: Matrix3<f32> = chain32.matrix();
+        assert!((m.transpose() * m - Matrix3::identity()).norm() < 1e-5);
+
+        let norm64: f64 = chain64
+            .quaternion_xyzw()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        assert_abs_diff_eq!(norm64, 1.0, epsilon = 1e-12);
+        let m: Matrix3<f64> = chain64.matrix();
+        assert!((m.transpose() * m - Matrix3::identity()).norm() < 1e-12);
+    }
+
+    #[test]
+    fn se3_exp_of_a_pure_translation_is_that_translation() {
+        let tangent: Vector6<f64> = Vector6::new(1.0, 2.0, 3.0, 0.0, 0.0, 0.0);
+        let pose: RigidTransform<f64> = RigidTransform::exp(&tangent);
+        assert_abs_diff_eq!(
+            pose.translation,
+            Vector3::new(1.0, 2.0, 3.0),
+            epsilon = 1e-15
+        );
+    }
+
+    /// The decoupled exponential puts the tangent head into the translation
+    /// untouched, which the coupled one does not.
+    #[test]
+    fn the_decoupled_exponential_differs_from_the_coupled_one() {
+        let tangent: Vector6<f64> = Vector6::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let coupled: RigidTransform<f64> = RigidTransform::exp(&tangent);
+        let decoupled: RigidTransform<f64> = RigidTransform::exp_decoupled(&tangent);
+        assert_abs_diff_eq!(
+            decoupled.translation,
+            Vector3::new(1.0, 0.0, 0.0),
+            epsilon = 1e-15
+        );
+        assert!((coupled.translation - decoupled.translation).norm() > 0.1);
+    }
+
+    /// `apply_inc` is neither exponential: the rotation multiplies from the left
+    /// and the translation is added in the world frame
+    #[test]
+    fn apply_inc_left_multiplies_the_rotation() {
+        let base: RigidTransform<f64> = RigidTransform::new(
+            Rotation3::exp(&Vector3::new(0.3, -0.2, 0.1)),
+            Vector3::new(1.0, 2.0, 3.0),
+        );
+        let inc: Vector6<f64> = Vector6::new(0.1, 0.2, 0.3, 0.01, -0.02, 0.03);
+        let mut moved: RigidTransform<f64> = base;
+        moved.apply_inc(&inc);
+
+        assert_abs_diff_eq!(
+            moved.translation,
+            base.translation + Vector3::new(0.1, 0.2, 0.3),
+            epsilon = 1e-15
+        );
+        let expected: Rotation3<f64> =
+            Rotation3::exp(&Vector3::new(0.01, -0.02, 0.03)) * base.rotation;
+        assert_abs_diff_eq!(moved.rotation.matrix(), expected.matrix(), epsilon = 1e-15);
+        // A right-multiplied increment would give a different rotation.
+        let right: Rotation3<f64> =
+            base.rotation * Rotation3::exp(&Vector3::new(0.01, -0.02, 0.03));
+        assert!((moved.rotation.matrix() - right.matrix()).norm() > 1e-4);
+    }
+
+    /// f32 carries the same code path with Sophus's larger epsilon.
+    #[test]
+    fn exp_and_log_round_trip_in_f32() {
+        for phi in [
+            Vector3::<f32>::new(0.1, 0.2, 0.3),
+            Vector3::<f32>::new(0.0, 0.0, 0.0),
+            Vector3::<f32>::new(1e-7, 0.0, 0.0),
+            Vector3::<f32>::new(0.0, -1.5, 0.0),
+        ] {
+            let back: Vector3<f32> = Rotation3::exp(&phi).log();
+            assert_abs_diff_eq!(back, phi, epsilon = 1e-5);
+        }
+    }
+
+    #[test]
+    fn se3_exp_and_log_round_trip_in_f32() {
+        let tangent: Vector6<f32> = Vector6::new(0.5, -0.25, 1.5, 0.1, 0.2, 0.3);
+        assert_abs_diff_eq!(RigidTransform::exp(&tangent).log(), tangent, epsilon = 1e-5);
+        assert_abs_diff_eq!(
+            RigidTransform::exp_decoupled(&tangent).log_decoupled(),
+            tangent,
+            epsilon = 1e-5
+        );
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+
+
+        #[test]
+        fn so3_exp_then_log_is_the_identity(phi in tangent3()) {
+            let back: Vector3<f64> = Rotation3::exp(&phi).log();
+            prop_assert!((back - phi).norm() < 1e-12);
+        }
+
+        #[test]
+        fn so3_inverse_undoes_the_rotation(phi in tangent3(), v in tangent3()) {
+            let rotation: Rotation3<f64> = Rotation3::exp(&phi);
+            let round_trip: Vector3<f64> = rotation.inverse() * (rotation * v);
+            prop_assert!((round_trip - v).norm() < 1e-12);
+        }
+
+        #[test]
+        fn so3_adjoint_is_conjugation(phi in tangent3(), v in tangent3()) {
+            let rotation: Rotation3<f64> = Rotation3::exp(&phi);
+            let lhs: Matrix3<f64> = rotation.matrix() * Rotation3::hat(&v) * rotation.matrix().transpose();
+            let rhs: Matrix3<f64> = Rotation3::hat(&(rotation * v));
+            prop_assert!((lhs - rhs).norm() < 1e-12);
+        }
+
+        #[test]
+        fn se3_exp_then_log_is_the_identity(tangent in tangent6()) {
+            let back: Vector6<f64> = RigidTransform::exp(&tangent).log();
+            prop_assert!((back - tangent).norm() < 1e-10);
+        }
+
+        #[test]
+        fn se3_decoupled_exp_then_log_is_the_identity(tangent in tangent6()) {
+            let back: Vector6<f64> = RigidTransform::exp_decoupled(&tangent).log_decoupled();
+            prop_assert!((back - tangent).norm() < 1e-12);
+        }
+
+        #[test]
+        fn se3_inverse_undoes_the_transform(tangent in tangent6(), v in tangent3()) {
+            let pose: RigidTransform<f64> = RigidTransform::exp(&tangent);
+            let round_trip: Vector3<f64> = pose.inverse() * (pose * v);
+            prop_assert!((round_trip - v).norm() < 1e-11);
+        }
+
+        /// `Adj(T) xi = log(T exp(xi) T^-1)`, the defining property.
+        #[test]
+        fn se3_adjoint_is_conjugation(pose_tangent in tangent6(), xi in tangent6()) {
+            let pose: RigidTransform<f64> = RigidTransform::exp(&pose_tangent);
+            let small: Vector6<f64> = xi * 1e-5;
+            let conjugated: Vector6<f64> = (pose * RigidTransform::exp(&small) * pose.inverse()).log();
+            let predicted: Vector6<f64> = pose.adjoint() * small;
+            prop_assert!((conjugated - predicted).norm() < 1e-12);
+        }
+
+        /// `J_r(phi) = d/d eps log(exp(phi)^-1 exp(phi + eps))` at `eps = 0`.
+        #[test]
+        fn right_jacobian_so3_matches_finite_differences(phi in tangent3()) {
+            let base_inverse: Rotation3<f64> = Rotation3::exp(&phi).inverse();
+            let numeric: Matrix3<f64> = numeric_jacobian3(&phi, |p| (base_inverse * Rotation3::exp(p)).log());
+            prop_assert!((numeric - right_jacobian_so3(&phi)).norm() < 1e-7);
+        }
+
+
+
+        /// The same identities in f32, where Sophus's epsilon is 1e-5.
+        #[test]
+        fn so3_exp_then_log_is_the_identity_in_f32(phi in tangent3()) {
+            let phi32: Vector3<f32> = Vector3::new(phi.x as f32, phi.y as f32, phi.z as f32);
+            let back: Vector3<f32> = Rotation3::exp(&phi32).log();
+            prop_assert!((back - phi32).norm() < 1e-5);
+        }
+
+        #[test]
+        fn se3_decoupled_exp_then_log_is_the_identity_in_f32(tangent in tangent6()) {
+            let mut tangent32: Vector6<f32> = Vector6::zeros();
+            for i in 0..6 {
+                tangent32[i] = tangent[i] as f32;
+            }
+            let back: Vector6<f32> = RigidTransform::exp_decoupled(&tangent32).log_decoupled();
+            prop_assert!((back - tangent32).norm() < 1e-5);
+        }
+    }
+}

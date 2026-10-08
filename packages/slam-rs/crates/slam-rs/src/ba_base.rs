@@ -15,6 +15,7 @@
 //! Error accumulation uses a fixed-order fold over host-frame partial results
 //! (decision D31). This keeps the floating-point sum deterministic.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::BTreeMap;
 
 use nalgebra::{
@@ -27,7 +28,7 @@ use crate::calib::Calibration;
 use crate::camera::{SlamCamera, CameraError};
 use crate::frontend::parallel::WorkPool;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
-use crate::lie::{LieScalar, Se3, So3, c};
+use crate::lie::{Se3, So3, c};
 use crate::types::{
     AbsOrderMap, CamId, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE,
     PoseStateWithLin, PoseVelBiasStateWithLin, TimeCamId,
@@ -100,7 +101,7 @@ pub enum BaError {
 ///
 /// The composition is decoupled: rotation is a product, while translation is
 /// `R_t^-1 (t_h - t_t)`. Its Jacobians use the decoupled, left-multiplied increment.
-pub fn compute_rel_pose<S: LieScalar>(
+pub fn compute_rel_pose<S: Scalar>(
     t_w_i_h: &Se3<S>,
     t_i_c_h: &Se3<S>,
     t_w_i_t: &Se3<S>,
@@ -147,7 +148,7 @@ pub fn compute_rel_pose<S: LieScalar>(
 /// Borrowed fixed-size matrices let callers request only the outputs they need
 /// without allocation.
 #[derive(Debug)]
-pub struct LinearizePointOut<'a, S: LieScalar> {
+pub struct LinearizePointOut<'a, S: Scalar> {
     /// `d_res_d_xi` (2x6): the residual against the relative-pose increment.
     pub d_res_d_xi: Option<&'a mut Matrix2x6<S>>,
     /// `d_res_d_p` (2x3): the residual against `[direction(2), inv_dist]`.
@@ -156,7 +157,7 @@ pub struct LinearizePointOut<'a, S: LieScalar> {
     pub proj: Option<&'a mut Vector4<S>>,
 }
 
-impl<S: LieScalar> Default for LinearizePointOut<'_, S> {
+impl<S: Scalar> Default for LinearizePointOut<'_, S> {
     /// Request only the residual.
     fn default() -> Self {
         Self {
@@ -173,7 +174,7 @@ impl<S: LieScalar> Default for LinearizePointOut<'_, S> {
 /// `[unproject(direction), inv_dist]`. See the module docs for the sign convention.
 /// Returns `false` if the camera rejects the point or the pixel is non-finite.
 /// In that case the caller must ignore `res`, which may still have been written.
-pub fn linearize_point<S: LieScalar>(
+pub fn linearize_point<S: Scalar>(
     kpt_obs: &Vector2<S>,
     kpt_pos: &Landmark<S>,
     t_t_h: &Matrix4<S>,
@@ -191,9 +192,7 @@ pub fn linearize_point<S: LieScalar>(
     let p_t_3d: Vector4<S> = t_t_h * p_h_3d;
 
     let mut jp: Matrix2x4<S> = Matrix2x4::zeros();
-    let mut valid: bool = cam.project_point(&p_t_3d, res, Some(&mut jp));
-    // `valid &= res.array().isFinite().all()`.
-    valid &= res[0].to_f64().is_finite() && res[1].to_f64().is_finite();
+    let valid: bool = cam.project_point(&p_t_3d, res, Some(&mut jp));
 
     if !valid {
         return false;
@@ -235,105 +234,6 @@ pub fn linearize_point<S: LieScalar>(
     true
 }
 
-// ─── triangulation ─────────────────────────────────────────────────────────
-
-/// The implicit-shift sweep budget [`triangulate`] gives its 4x4 SVD.
-///
-/// nalgebra treats `0` as "iterate until convergence"; a tracker that has to
-/// return a frame in a few milliseconds cannot. Four rows converge in a handful
-/// of sweeps, so this is a refusal threshold rather than a tuning knob — a
-/// matrix that reaches it is degenerate, and `None` is the honest answer.
-const SVD_MAX_ITERATIONS: usize = 64;
-
-/// DLT triangulation, returning `[unit direction (3), inverse distance]` in frame 0.
-///
-/// `f0` and `f1` are bearing vectors; `T_0_1` maps frame 1 to frame 0.
-/// The 4x4 system is built from the two projection matrices. Its null vector is
-/// the last column of `V`, with sign chosen to point towards `f0`.
-///
-/// The caller accepts finite results with `0 < inv_dist < 3`, so points must be
-/// farther than 1/3 m. Exactly parallel bearings are refused before decomposition.
-/// The SVD runs in f64 even for f32 inputs to reduce cancellation. Invalid inputs,
-/// non-convergence and vectors without a spatial direction return `None`.
-pub fn triangulate<S: LieScalar>(
-    f0: &Vector3<S>,
-    f1: &Vector3<S>,
-    t_0_1: &Se3<S>,
-) -> Option<Vector4<S>> {
-    // Compare bearings in frame 0. An exact zero cross product is a point at
-    // infinity; SVD roundoff must not turn it into a tiny positive inverse depth.
-    let f1_in_0 = t_0_1.rotation * *f1;
-    if f0.cross(&f1_in_0).iter().all(|value| *value == S::zero()) {
-        return None;
-    }
-    // `P1.setIdentity()`, `P2 = T_0_1.inverse().matrix3x4()`.
-    let p1: nalgebra::Matrix3x4<S> = {
-        let mut m: nalgebra::Matrix3x4<S> = nalgebra::Matrix3x4::zeros();
-        m.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&Matrix3::identity());
-        m
-    };
-    let p2: nalgebra::Matrix3x4<S> = t_0_1.inverse().matrix3x4();
-
-    let mut a: Matrix4<S> = Matrix4::zeros();
-    a.row_mut(0)
-        .copy_from(&(p1.row(2) * f0[0] - p1.row(0) * f0[2]));
-    a.row_mut(1)
-        .copy_from(&(p1.row(2) * f0[1] - p1.row(1) * f0[2]));
-    a.row_mut(2)
-        .copy_from(&(p2.row(2) * f1[0] - p2.row(0) * f1[2]));
-    a.row_mut(3)
-        .copy_from(&(p2.row(2) * f1[1] - p2.row(1) * f1[2]));
-
-    let wide: Matrix4<f64> = a.map(|value| value.to_f64());
-    if wide.iter().any(|value| !value.is_finite()) {
-        return None;
-    }
-
-    // `max_niter` bounds the total implicit-shift sweeps: a 4x4 that has not
-    // converged in `SVD_MAX_ITERATIONS` is not going to, and a landmark that
-    // does not exist is a better answer than an unbounded loop in the tracker.
-    let svd: nalgebra::SVD<f64, nalgebra::U4, nalgebra::U4> =
-        nalgebra::SVD::try_new_unordered(wide, false, true, f64::EPSILON, SVD_MAX_ITERATIONS)?;
-    if svd.singular_values.iter().any(|value| !value.is_finite()) {
-        return None;
-    }
-    // A DLT whose largest singular value is zero carries no constraint at all —
-    // two zero bearing vectors build a zero `A` — so *every* direction is a null
-    // direction and the one the decomposition happens to return is fabricated.
-    if svd.singular_values.max() <= 0.0 {
-        return None;
-    }
-    // The null vector is the right-singular vector of the *smallest* singular
-    // value, and `v_t` holds the right-singular vectors as its **rows**. The
-    // decomposition is unordered, so the row is found rather than assumed.
-    let mut smallest: usize = 0;
-    for i in 1..4 {
-        if svd.singular_values[i] < svd.singular_values[smallest] {
-            smallest = i;
-        }
-    }
-    let v_t: nalgebra::Matrix4<f64> = svd.v_t?;
-
-    let mut world_point: Vector4<S> = v_t.row(smallest).transpose().map(|value| c::<S>(value));
-    let norm: S = world_point.fixed_rows::<3>(0).norm();
-    // A homogeneous vector with no spatial part has no direction: dividing by
-    // its norm used to hand the caller `[NaN, NaN, NaN, inf]`.
-    if norm <= S::zero() {
-        return None;
-    }
-    for i in 0..4 {
-        world_point[i] /= norm;
-    }
-
-    // `if (f0.dot(worldPoint.head<3>()) < 0) worldPoint *= -1`.
-    let dot: S = f0[0] * world_point[0] + f0[1] * world_point[1] + f0[2] * world_point[2];
-    if dot < S::zero() {
-        world_point = -world_point;
-    }
-    Some(world_point)
-}
-
 // ─── the Huber-weighted cost of one observation ───────────────────────────
 
 /// The robust weight and cost of one observation, accumulated in fixed order.
@@ -350,7 +250,7 @@ pub fn triangulate<S: LieScalar>(
 /// the unscaled residual. Reassociating to scale the dot product changes rounding
 /// and can change the LM acceptance test near its threshold.
 #[inline]
-pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
+pub fn huber_cost<S: Scalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
     let huber_weight: S = if e < huber_thresh {
         S::one()
     } else {
@@ -374,7 +274,7 @@ pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std
 /// landmarks hosted by live keyframes. A frame is in exactly one of the two
 /// maps; [`Self::get_pose_state_with_lin`] hides which.
 #[derive(Debug, Clone)]
-pub struct BundleAdjustmentBase<S: LieScalar> {
+pub struct BundleAdjustmentBase<S: Scalar> {
     /// Full states, newest frames.
     pub frame_states: BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
     /// Pose-only blocks, keyframes.
@@ -389,12 +289,12 @@ pub struct BundleAdjustmentBase<S: LieScalar> {
     pub calib: Calibration<S>,
     /// Projection models resolved once when the window is built.
     ///
-    /// Resolving [`crate::calib::CameraModel`] into [`SlamCamera`] rejects unsupported
+    /// Resolving [`crate::calib::BasaltCamera`] into [`SlamCamera`] rejects unsupported
     /// models at construction, before the residual loop.
     cameras: Vec<SlamCamera<S>>,
 }
 
-impl<S: LieScalar> BundleAdjustmentBase<S> {
+impl<S: Scalar> BundleAdjustmentBase<S> {
     /// An empty window over one calibration.
     pub fn new(calib: Calibration<S>, obs_std_dev: S, huber_thresh: S) -> Result<Self, BaError> {
         let cameras: Vec<SlamCamera<S>> = calib
@@ -856,7 +756,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 
 /// Evaluate the prior cost as `lhsᵀ (0.5 h_delta + b)`.
 /// The fixed left fold keeps repeated calls deterministic.
-fn prior_error<S: LieScalar>(
+fn prior_error<S: Scalar>(
     lhs: &DVector<S>,
     h_delta: &DVector<S>,
     b: &DVector<S>,
@@ -875,7 +775,6 @@ mod tests {
     use crate::types::{PoseVelBiasState, TimeCamId};
     use approx::assert_abs_diff_eq;
     use nalgebra::Vector6;
-    use proptest::prelude::*;
 
     const MSDMI: &str = include_str!("../tests/fixtures/msdmi_calib.json");
     const MSDMG: &str = include_str!("../tests/fixtures/msdmg_calib.json");
@@ -1073,73 +972,7 @@ mod tests {
 
     // ─── stereographic Jacobians ───────────────────────────────────────────
 
-    #[test]
-    fn stereographic_jacobians_match_finite_differences() {
-        for &(x, y, z) in &[(0.2, -0.3, 1.0), (-1.0, 0.5, 2.0), (0.0, 0.0, 1.0)] {
-            let p: Vector4<f64> = Vector4::new(x, y, z, 1.0);
-            let mut d_r_d_p: Matrix2x4<f64> = Matrix2x4::zeros();
-            StereographicParam::project_with_jacobian(&p, &mut d_r_d_p);
-            test_jacobian("project", &d_r_d_p, |inc| {
-                StereographicParam::project(&(p + inc))
-            });
-
-            let proj: Vector2<f64> = StereographicParam::project(&p);
-            let mut d_u_d_p: Matrix4x2<f64> = Matrix4x2::zeros();
-            StereographicParam::unproject_with_jacobian(&proj, &mut d_u_d_p);
-            test_jacobian("unproject", &d_u_d_p, |inc| {
-                StereographicParam::unproject(&(proj + inc))
-            });
-        }
-    }
-
     // ─── triangulation ─────────────────────────────────────────────────────
-
-    #[test]
-    fn triangulate_recovers_a_known_depth() {
-        // A stereo pair with a 10 cm baseline along +x, looking down +z.
-        let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-        for depth in [0.5f64, 1.0, 3.0, 12.0] {
-            let point0: Vector3<f64> = Vector3::new(0.2, -0.1, depth);
-            let point1: Vector3<f64> = point0 - Vector3::new(0.1, 0.0, 0.0);
-            let f0: Vector3<f64> = point0.normalize();
-            let f1: Vector3<f64> = point1.normalize();
-            let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1).unwrap();
-            assert_abs_diff_eq!(result.fixed_rows::<3>(0).norm(), 1.0, epsilon = 1e-12);
-            // The homogeneous point is `[unit direction, 1/|point|]`.
-            let recovered: Vector3<f64> = result.fixed_rows::<3>(0) / result[3];
-            assert_abs_diff_eq!(recovered, point0, epsilon = 1e-9);
-            assert!(result[3] > 0.0);
-        }
-    }
-
-    #[test]
-    fn triangulate_at_infinity_is_refused() {
-        let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-        let f0: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
-        let f1: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
-        // S34: refuse the degenerate observation before SVD roundoff reaches the gate.
-        assert!(triangulate(&f0, &f1, &t_0_1).is_none());
-    }
-
-    /// Invalid triangulation inputs are refused explicitly.
-    #[test]
-    fn a_non_finite_input_is_rejected_instead_of_read_uninitialized() {
-        let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-        assert_eq!(
-            triangulate(
-                &Vector3::new(f64::NAN, 0.0, 1.0),
-                &Vector3::new(0.0, 0.0, 1.0),
-                &t_0_1,
-            ),
-            None
-        );
-        // Two zero bearing vectors build a zero `A`: rank zero, so no direction
-        // is more null than any other and there is no landmark to report.
-        assert_eq!(
-            triangulate::<f64>(&Vector3::zeros(), &Vector3::zeros(), &Se3::identity()),
-            None
-        );
-    }
 
     // ─── the window ────────────────────────────────────────────────────────
 
@@ -1662,82 +1495,5 @@ mod tests {
                 size: 9
             })
         );
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-
-        /// The stereographic Jacobians are the derivative of the port's own
-        /// `project`/`unproject`, in both precisions.
-        #[test]
-        fn stereographic_jacobians_are_the_derivative(
-            x in -2.0f64..2.0,
-            y in -2.0f64..2.0,
-            z in 0.2f64..3.0,
-        ) {
-            let p: Vector4<f64> = Vector4::new(x, y, z, 1.0);
-            let mut d_r_d_p: Matrix2x4<f64> = Matrix2x4::zeros();
-            StereographicParam::project_with_jacobian(&p, &mut d_r_d_p);
-            for i in 0..4 {
-                let mut inc: Vector4<f64> = Vector4::zeros();
-                inc[i] = 1e-7;
-                let numeric: Vector2<f64> = (StereographicParam::project(&(p + inc))
-                    - StereographicParam::project(&(p - inc)))
-                    / 2e-7;
-                prop_assert!((numeric - d_r_d_p.column(i)).norm() <= 1e-5 * (1.0 + d_r_d_p.column(i).norm()));
-            }
-
-            let proj: Vector2<f64> = StereographicParam::project(&p);
-            let mut d_u_d_p: Matrix4x2<f64> = Matrix4x2::zeros();
-            StereographicParam::unproject_with_jacobian(&proj, &mut d_u_d_p);
-            for i in 0..2 {
-                let mut inc: Vector2<f64> = Vector2::zeros();
-                inc[i] = 1e-7;
-                let numeric: Vector4<f64> = (StereographicParam::unproject(&(proj + inc))
-                    - StereographicParam::unproject(&(proj - inc)))
-                    / 2e-7;
-                prop_assert!((numeric - d_u_d_p.column(i)).norm() <= 1e-5 * (1.0 + d_u_d_p.column(i).norm()));
-            }
-
-            // The same in f32, at f32 tolerances (`TestConstants<float>`:
-            // eps 1e-2, max_norm 1e-2).
-            let p32: Vector4<f32> = Vector4::new(x as f32, y as f32, z as f32, 1.0);
-            let mut d32: Matrix2x4<f32> = Matrix2x4::zeros();
-            StereographicParam::project_with_jacobian(&p32, &mut d32);
-            for i in 0..3 {
-                let mut inc: Vector4<f32> = Vector4::zeros();
-                inc[i] = 1e-2;
-                let numeric: Vector2<f32> = (StereographicParam::project(&(p32 + inc))
-                    - StereographicParam::project(&(p32 - inc)))
-                    / 2e-2;
-                prop_assert!((numeric - d32.column(i)).norm() <= 1e-2 * (1.0 + d32.column(i).norm()));
-            }
-        }
-
-        /// Triangulation recovers the depth of a point seen by two cameras with
-        /// a real baseline, whatever the rotation between them.
-        #[test]
-        fn triangulate_recovers_synthetic_depths(
-            depth in 0.4f64..20.0,
-            u in -0.6f64..0.6,
-            v in -0.6f64..0.6,
-            baseline in 0.05f64..0.5,
-            yaw in -0.3f64..0.3,
-        ) {
-            let t_0_1: Se3<f64> = Se3::new(
-                So3::exp(&Vector3::new(0.0, yaw, 0.0)),
-                Vector3::new(baseline, 0.02, -0.01),
-            );
-            let point0: Vector3<f64> = Vector3::new(u * depth, v * depth, depth);
-            let point1: Vector3<f64> = t_0_1.inverse() * point0;
-            let f0: Vector3<f64> = point0.normalize();
-            let f1: Vector3<f64> = point1.normalize();
-            let Some(result): Option<Vector4<f64>> = triangulate(&f0, &f1, &t_0_1) else {
-                return Err(TestCaseError::fail("the DLT refused a well-conditioned pair"));
-            };
-            prop_assert!(result[3] > 0.0);
-            let recovered: Vector3<f64> = result.fixed_rows::<3>(0) / result[3];
-            prop_assert!((recovered - point0).norm() <= 1e-7 * point0.norm());
-        }
     }
 }

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kornia_image::Image;
-use robocap_live::downsample::resize_area_u8;
+use kornia_staging_imgproc::resize::resize_area_u8;
 use robocap_live::frame::isometry_from_matrix;
 use robocap_live::frame::{
     CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, Luma, NUM_CAMERAS, Rig,

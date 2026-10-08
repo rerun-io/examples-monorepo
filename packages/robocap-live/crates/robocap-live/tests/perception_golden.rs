@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use kornia_image::{Image, ImageSize};
 use kornia_staging_3d::camera::virtual_camera::maps_from_virtual_pinhole_f32;
-use robocap_live::downsample::resize_area_u8;
+use kornia_staging_imgproc::resize::resize_area_u8;
 use nalgebra::{Matrix3, Vector2, Vector3};
 use robocap_live::frame::isometry_from_matrix;
 use robocap_live::frame::{CameraFrame, FULL_SIZE, FrameMeta, Luma, NUM_CAMERAS, Rig, SMALL_SIZE};

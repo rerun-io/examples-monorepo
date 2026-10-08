@@ -42,7 +42,7 @@ use super::{
 };
 use crate::frame::{CameraFrame, Luma, NUM_CAMERAS, Rig};
 use crate::nets::{HandNets, NUM_LANDMARKS};
-use crate::hands::circles::min_enclosing_circle;
+use kornia_staging_imgproc::contours::min_enclosing_circle;
 
 /// The tracker's thresholds: the fields of handtrack's `TrackerConfig` that `ROBUST_TRACKER_CONFIG` uses or sets.
 /// [`TrackerConfig::robust`] (the [`Default`]) is `ROBUST_TRACKER_CONFIG` exactly; [`TrackerConfig::handtrack_default`] is

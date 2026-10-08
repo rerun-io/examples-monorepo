@@ -2,19 +2,20 @@
 //! Three reflections triangularize landmark columns. The first three rows
 //! support back-substitution; remaining rows form the reduced camera system.
 
+use kornia_staging_algebra::Scalar;
 use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3};
 
 use crate::ba_base::{LinearizePointOut, linearize_point};
 use crate::camera::SlamCamera;
 use crate::landmark::Landmark;
-use crate::lie::{LieScalar, c};
+use crate::lie::{c};
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::qr::{apply_householder_on_the_left, make_givens, make_householder};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
 
 /// `LandmarkBlock<Scalar>::Options`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LandmarkBlockOptions<S: LieScalar> {
+pub struct LandmarkBlockOptions<S: Scalar> {
     /// Select Householder instead of Givens elimination; defaults to true.
     pub use_householder: bool,
     /// Zero the residual and Jacobian of a projection the camera rejected
@@ -26,7 +27,7 @@ pub struct LandmarkBlockOptions<S: LieScalar> {
     pub obs_std_dev: S,
 }
 
-impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
+impl<S: Scalar> Default for LandmarkBlockOptions<S> {
     /// Default landmark-block options.
     fn default() -> Self {
         Self {
@@ -58,14 +59,14 @@ const LANES: usize = 8;
 /// which each accumulator still walks in row order — the same additions in the
 /// same order — and which vectorises, where the dot product does not.
 #[derive(Debug, Clone)]
-pub struct DenseHbScratch<S: LieScalar> {
+pub struct DenseHbScratch<S: Scalar> {
     /// The `Q2` rows of `storage` over the written columns then the residual,
     /// row-major so one row is contiguous, and padded to a whole number of
     /// [`LANES`] with `+0.0`.
     rows: Vec<S>,
 }
 
-impl<S: LieScalar> Default for DenseHbScratch<S> {
+impl<S: Scalar> Default for DenseHbScratch<S> {
     fn default() -> Self {
         Self { rows: Vec::new() }
     }
@@ -121,7 +122,7 @@ struct BlockObservation {
 /// Storage is column major. Each reflection updates views of the existing
 /// matrix using a preallocated unit-axis buffer.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LandmarkBlock<S: LieScalar> {
+pub struct LandmarkBlock<S: Scalar> {
     /// `storage` : `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
     storage: DMatrix<S>,
     /// One entry per observation, in `lm.obs` order.
@@ -175,7 +176,7 @@ pub struct LandmarkBlock<S: LieScalar> {
 /// frame update weights its residuals with the same rule and the same
 /// association (D76), and one reprojection model in the crate means one Huber
 /// in the crate.
-pub fn compute_error_weight<S: LieScalar>(
+pub fn compute_error_weight<S: Scalar>(
     res_squared: S,
     options: &LandmarkBlockOptions<S>,
 ) -> (S, S) {
@@ -192,7 +193,7 @@ pub fn compute_error_weight<S: LieScalar>(
     }
 }
 
-impl<S: LieScalar> LandmarkBlock<S> {
+impl<S: Scalar> LandmarkBlock<S> {
     /// Allocate a landmark block from the ordering and relative-pose index table.
     /// Targets outside the ordering retain zero-contribution observations with no
     /// relative pose. A missing host or required pose returns a typed error (D32).

@@ -8,6 +8,7 @@ description = "Live SLAM + hand tracking on the RoboCap cap, and the same core r
 
 [dependencies]
 kornia-staging-3d.workspace = true
+kornia-staging-imgproc.workspace = true
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 handfit = { workspace = true }

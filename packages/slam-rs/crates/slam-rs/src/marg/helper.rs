@@ -4,18 +4,18 @@
 //! QR left to right; rows below their rank constrain only kept variables.
 //! Only square-root marginalization is supported (D68).
 
+use kornia_staging_algebra::Scalar;
 use std::collections::BTreeSet;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::lie::LieScalar;
 use crate::marg::MargError;
 use crate::qr::{apply_householder_on_the_left, make_householder};
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReducedSystem<S: LieScalar> {
+pub struct ReducedSystem<S: Scalar> {
     /// `marg_sqrt_H` (`J_m`).
     pub h: DMatrix<S>,
     /// `marg_sqrt_b` (`r_m`).
@@ -64,7 +64,7 @@ fn check_indices(
 /// The rank policy uses the absolute threshold `sqrt(epsilon)` on `beta`.
 /// It therefore depends on the units of the scaled problem. A rejected
 /// column is zeroed without advancing the rank.
-pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
+pub fn marginalize_helper_sqrt_to_sqrt<S: Scalar>(
     mut q2jp: DMatrix<S>,
     mut q2r: DVector<S>,
     idx_to_keep: &BTreeSet<usize>,

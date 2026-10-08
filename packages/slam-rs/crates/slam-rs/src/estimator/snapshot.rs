@@ -1,8 +1,9 @@
 //! Construction of the public window snapshot.
 
+use kornia_staging_algebra::Scalar;
 use super::SqrtKeypointVio;
 use crate::landmark::StereographicParam;
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{Se3};
 use crate::types::{FrameId, LandmarkId, PoseVelBiasState, TimeCamId};
 use nalgebra::{Vector3, Vector4};
 
@@ -12,7 +13,7 @@ use nalgebra::{Vector3, Vector4};
 /// (`frame_states`) has all three, so they travel as one value rather than as
 /// three `Option`s that are always all-`Some` or all-`None`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VelBias<S: LieScalar> {
+pub struct VelBias<S: Scalar> {
     /// World-frame velocity.
     pub vel_w_i: Vector3<S>,
     /// Gyroscope bias.
@@ -23,7 +24,7 @@ pub struct VelBias<S: LieScalar> {
 
 /// One window state, as the S9 Rerun rung needs it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WindowState<S: LieScalar> {
+pub struct WindowState<S: Scalar> {
     /// State timestamp.
     pub t_ns: i64,
     /// `T_w_i`, the rig pose in the world frame.
@@ -46,7 +47,7 @@ pub struct WindowState<S: LieScalar> {
 /// that hosts it: the position alone cannot say which frame's bearing it is a
 /// distance along, and `lmdb` keys on the host rather than storing it per point.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SnapshotLandmark<S: LieScalar> {
+pub struct SnapshotLandmark<S: Scalar> {
     /// The landmark's id, which is the id of the keypoint that spawned it.
     pub id: LandmarkId,
     /// Host keyframe and camera: the image the inverse distance is measured from.
@@ -61,7 +62,7 @@ pub struct SnapshotLandmark<S: LieScalar> {
 ///  collapsed into one value the caller reads once per frame. The
 /// core emits no visualization data itself (D03).
 #[derive(Debug, Clone, PartialEq)]
-pub struct WindowSnapshot<S: LieScalar> {
+pub struct WindowSnapshot<S: Scalar> {
     /// Frameset timestamp of the newest state.
     pub t_ns: i64,
     /// The 15-dof states, oldest first.
@@ -74,7 +75,7 @@ pub struct WindowSnapshot<S: LieScalar> {
     pub marginalized: Vec<FrameId>,
 }
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// The window, its landmarks in the world frame and the frames the last
     /// marginalization removed, for the V2 Rerun rung (D51).
     ///

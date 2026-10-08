@@ -7,122 +7,57 @@
 //! an id-sorted vector with an id-to-index map, supporting contiguous access.
 //! Insertion and removal rebuild index entries affected by the shift.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use nalgebra::{Matrix2x4, Matrix4x2, Vector2, Vector4};
 
-use crate::lie::{LieScalar, c};
+use crate::lie::{c};
 use crate::types::{FrameId, LandmarkId, TimeCamId};
 
 /// Two-parameter stereographic chart on the unit sphere.
 /// It is smooth and bijective except at the projection point, permitting additive
 /// direction increments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct StereographicParam<S: LieScalar> {
+pub struct StereographicParam<S: Scalar> {
     _scalar: PhantomData<S>,
 }
 
-impl<S: LieScalar> StereographicParam<S> {
-    /// Project as `[x, y] / (z + |p|)`, ignoring the homogeneous fourth component.
-    #[inline]
+impl<S: Scalar> StereographicParam<S> {
+    /// Project through staging; invalid directions retain the estimator's NaN sentinel.
     pub fn project(p3d: &Vector4<S>) -> Vector2<S> {
-        // Use only the spatial three-vector's norm.
-        let sqrt: S = p3d.fixed_rows::<3>(0).norm();
-        let norm: S = p3d[2] + sqrt;
-        let norm_inv: S = S::one() / norm;
-        Vector2::new(p3d[0] * norm_inv, p3d[1] * norm_inv)
-    }
-
-    /// [`Self::project`] with the 2x4 Jacobian `d_r_d_p`
-    #[inline]
-    pub fn project_with_jacobian(p3d: &Vector4<S>, d_r_d_p: &mut Matrix2x4<S>) -> Vector2<S> {
-        let sqrt: S = p3d.fixed_rows::<3>(0).norm();
-        let norm: S = p3d[2] + sqrt;
-        let norm_inv: S = S::one() / norm;
-        let res: Vector2<S> = Vector2::new(p3d[0] * norm_inv, p3d[1] * norm_inv);
-
-        let norm_inv2: S = norm_inv * norm_inv;
-        let tmp: S = -norm_inv2 / sqrt;
-
-        d_r_d_p.fill(S::zero());
-        d_r_d_p[(0, 0)] = norm_inv + p3d[0] * p3d[0] * tmp;
-        d_r_d_p[(1, 0)] = p3d[0] * p3d[1] * tmp;
-
-        d_r_d_p[(1, 1)] = norm_inv + p3d[1] * p3d[1] * tmp;
-        d_r_d_p[(0, 1)] = p3d[0] * p3d[1] * tmp;
-
-        d_r_d_p[(0, 2)] = p3d[0] * norm * tmp;
-        d_r_d_p[(1, 2)] = p3d[1] * norm * tmp;
-
-        d_r_d_p[(0, 3)] = S::zero();
-        d_r_d_p[(1, 3)] = S::zero();
-
-        res
-    }
-
-    /// `unproject` :
-    /// `eta * [u, v, 1] - [0, 0, 1]` with `eta = 2 / (1 + u^2 + v^2)`.
-    ///
-    /// The fourth component comes back **zero**, not one: the caller overwrites
-    /// it with the landmark's inverse distance, which is what
-    /// makes the 4-vector a homogeneous point.
-    #[inline]
-    pub fn unproject(proj: &Vector2<S>) -> Vector4<S> {
-        let x2: S = proj[0] * proj[0];
-        let y2: S = proj[1] * proj[1];
-        let r2: S = x2 + y2;
-
-        let norm_inv: S = c::<S>(2.0) / (S::one() + r2);
-
-        Vector4::new(
-            proj[0] * norm_inv,
-            proj[1] * norm_inv,
-            norm_inv - S::one(),
-            S::zero(),
+        Vector2::from(
+            kornia_staging_3d::pose::stereographic_project((*p3d).into())
+                .unwrap_or([c::<S>(f64::NAN); 2]),
         )
     }
-
-    /// [`Self::unproject`] with the 4x2 Jacobian `d_r_d_p`
-    ///
-    /// Row 3 is zero: the homogeneous slot does not depend on the direction, so
-    /// the inverse-distance column of the residual Jacobian is separate
-    #[inline]
-    pub fn unproject_with_jacobian(proj: &Vector2<S>, d_r_d_p: &mut Matrix4x2<S>) -> Vector4<S> {
-        let x2: S = proj[0] * proj[0];
-        let y2: S = proj[1] * proj[1];
-        let r2: S = x2 + y2;
-
-        let norm_inv: S = c::<S>(2.0) / (S::one() + r2);
-        let res: Vector4<S> = Vector4::new(
-            proj[0] * norm_inv,
-            proj[1] * norm_inv,
-            norm_inv - S::one(),
-            S::zero(),
-        );
-
-        let norm_inv2: S = norm_inv * norm_inv;
-        let xy: S = proj[0] * proj[1];
-
-        d_r_d_p[(0, 0)] = norm_inv - x2 * norm_inv2;
-        d_r_d_p[(0, 1)] = -xy * norm_inv2;
-
-        d_r_d_p[(1, 0)] = -xy * norm_inv2;
-        d_r_d_p[(1, 1)] = norm_inv - y2 * norm_inv2;
-
-        d_r_d_p[(2, 0)] = -proj[0] * norm_inv2;
-        d_r_d_p[(2, 1)] = -proj[1] * norm_inv2;
-
-        d_r_d_p[(3, 0)] = S::zero();
-        d_r_d_p[(3, 1)] = S::zero();
-
-        res
+    /// Project with a 2x4 Jacobian; invalid directions produce NaN sentinels.
+    pub fn project_with_jacobian(p3d: &Vector4<S>, jacobian: &mut Matrix2x4<S>) -> Vector2<S> {
+        let (value, j) =
+            kornia_staging_3d::pose::stereographic_project_with_jacobian((*p3d).into())
+                .unwrap_or(([c::<S>(f64::NAN); 2], [[c::<S>(f64::NAN); 2]; 4]));
+        jacobian.data.0 = j;
+        Vector2::from(value)
+    }
+    /// Unit spatial bearing with a zero inverse-distance component.
+    pub fn unproject(point: &Vector2<S>) -> Vector4<S> {
+        Vector4::from(kornia_staging_3d::pose::stereographic_unproject(
+            (*point).into(),
+        ))
+    }
+    /// Unit bearing and its 4x2 Jacobian; the fourth row is zero.
+    pub fn unproject_with_jacobian(point: &Vector2<S>, jacobian: &mut Matrix4x2<S>) -> Vector4<S> {
+        let (value, j) =
+            kornia_staging_3d::pose::stereographic_unproject_with_jacobian((*point).into());
+        jacobian.data.0 = j;
+        Vector4::from(value)
     }
 }
 
 /// One landmark: three optimised parameters, a host image, and its observations
 #[derive(Debug, Clone, PartialEq)]
-pub struct Landmark<S: LieScalar> {
+pub struct Landmark<S: Scalar> {
     /// Stereographic direction in the host camera frame, `direction`.
     pub direction: Vector2<S>,
     /// Inverse distance along that direction, `inv_dist`. Never negative: the
@@ -138,7 +73,7 @@ pub struct Landmark<S: LieScalar> {
     backup_inv_dist: S,
 }
 
-impl<S: LieScalar> Landmark<S> {
+impl<S: Scalar> Landmark<S> {
     /// A landmark with no observations yet.
     ///
     /// The four fields here are exactly the four `addLandmark` copies
@@ -188,20 +123,20 @@ const MIN_NUM_OBS: usize = 2;
 /// own `obs` maps — an empty target set drops the target, an empty target map
 /// drops the host.
 #[derive(Debug, Clone)]
-pub struct LandmarkDatabase<S: LieScalar> {
+pub struct LandmarkDatabase<S: Scalar> {
     /// Sorted by `LandmarkId`; `index` maps an id to a position here.
     kpts: Vec<Landmark<S>>,
     index: BTreeMap<LandmarkId, usize>,
     observations: BTreeMap<TimeCamId, BTreeMap<TimeCamId, BTreeSet<LandmarkId>>>,
 }
 
-impl<S: LieScalar> Default for LandmarkDatabase<S> {
+impl<S: Scalar> Default for LandmarkDatabase<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: LieScalar> LandmarkDatabase<S> {
+impl<S: Scalar> LandmarkDatabase<S> {
     /// An empty database.
     pub fn new() -> Self {
         Self {
@@ -498,7 +433,7 @@ fn detach_one(
 }
 
 /// The same for every target of one landmark, `removeLandmarkHelper`
-fn detach_landmark<S: LieScalar>(
+fn detach_landmark<S: Scalar>(
     observations: &mut BTreeMap<TimeCamId, BTreeMap<TimeCamId, BTreeSet<LandmarkId>>>,
     host: TimeCamId,
     obs: &BTreeMap<TimeCamId, Vector2<S>>,
@@ -519,7 +454,6 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use approx::assert_abs_diff_eq;
     use proptest::prelude::*;
 
     const CASES: u32 = 128;
@@ -594,15 +528,17 @@ mod tests {
     }
 
     #[test]
-    fn unproject_inverts_project() {
-        for &(u, v) in &[(0.0, 0.0), (0.3, -0.7), (-1.2, 0.4), (2.0, 2.0)] {
-            let proj: Vector2<f64> = Vector2::new(u, v);
-            let bearing: Vector4<f64> = StereographicParam::unproject(&proj);
-            assert_abs_diff_eq!(bearing.fixed_rows::<3>(0).norm(), 1.0, epsilon = 1e-15);
-            assert_eq!(bearing[3], 0.0);
-            let back: Vector2<f64> = StereographicParam::project(&bearing);
-            assert_abs_diff_eq!(back, proj, epsilon = 1e-14);
-        }
+    fn rejected_chart_projection_writes_the_nan_sentinel() {
+        let south_pole = Vector4::new(0.0f64, 0.0, -1.0, 0.0);
+        assert!(
+            StereographicParam::project(&south_pole)
+                .iter()
+                .all(|v| v.is_nan())
+        );
+        let mut jacobian = nalgebra::Matrix2x4::zeros();
+        let pixel = StereographicParam::project_with_jacobian(&south_pole, &mut jacobian);
+        assert!(pixel.iter().all(|v| v.is_nan()));
+        assert!(jacobian.iter().all(|v| v.is_nan()));
     }
 
     #[test]
@@ -700,37 +636,7 @@ mod tests {
     proptest! {
         #![proptest_config(config())]
 
-        /// `unproject` is the inverse of `project` on the unit sphere, in both
-        /// precisions, and the bearing always has unit norm.
-        #[test]
-        fn stereographic_round_trips(u in -8.0f64..8.0, v in -8.0f64..8.0) {
-            let proj: Vector2<f64> = Vector2::new(u, v);
-            let bearing: Vector4<f64> = StereographicParam::unproject(&proj);
-            prop_assert!((bearing.fixed_rows::<3>(0).norm() - 1.0).abs() < 1e-14);
-            let back: Vector2<f64> = StereographicParam::project(&bearing);
-            prop_assert!((back - proj).norm() < 1e-12);
 
-            let proj32: Vector2<f32> = Vector2::new(u as f32, v as f32);
-            let bearing32: Vector4<f32> = StereographicParam::unproject(&proj32);
-            let back32: Vector2<f32> = StereographicParam::project(&bearing32);
-            prop_assert!((back32 - proj32).norm() < 1e-4);
-        }
-
-        /// `project` also inverts `unproject` when it starts from a 3-D point
-        /// that is not unit norm: the chart only sees the direction.
-        #[test]
-        fn project_ignores_the_length(
-            x in -3.0f64..3.0,
-            y in -3.0f64..3.0,
-            z in 0.05f64..4.0,
-            scale in 0.1f64..10.0,
-        ) {
-            let p: Vector4<f64> = Vector4::new(x, y, z, 1.0);
-            let scaled: Vector4<f64> = Vector4::new(x * scale, y * scale, z * scale, 1.0);
-            let a: Vector2<f64> = StereographicParam::project(&p);
-            let b: Vector2<f64> = StereographicParam::project(&scaled);
-            prop_assert!((a - b).norm() < 1e-12);
-        }
 
         /// A landmark hosted by a removed keyframe never survives, no
         /// observation from a removed frame survives, and everything left has at

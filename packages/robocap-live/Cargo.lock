@@ -3003,6 +3003,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-imgproc"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "rayon",
+]
+
+[[package]]
 name = "kornia-tensor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5551,6 +5559,7 @@ dependencies = [
  "kornia-image",
  "kornia-imgproc",
  "kornia-staging-3d",
+ "kornia-staging-imgproc",
  "libc",
  "libloading 0.8.9",
  "nalgebra",

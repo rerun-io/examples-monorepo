@@ -23,7 +23,7 @@ use std::time::Instant;
 use kornia_algebra::Vec3F64;
 use kornia_algebra::linalg::rigid::umeyama_f64;
 use kornia_image::Image;
-use robocap_live::downsample::resize_area_u8;
+use kornia_staging_imgproc::resize::resize_area_u8;
 use robocap_live::capture::Cap;
 use robocap_live::frame::matrix_from_isometry;
 use robocap_live::frame::{

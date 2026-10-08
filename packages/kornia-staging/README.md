@@ -65,3 +65,11 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Fisheye624 / Fisheye62, analytic derivatives and robust inverse | simplecv fisheye624.py; handfit SymForce test oracles | kornia-rs / kornia-3d / camera | staged | - |
 | Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
+| Integer area resize | slam-rs `area.rs`, `area/kernels.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
+| 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
+| Scaled zero-border bilinear remap | robocap-live `kornia_ext/remap.rs` | kornia-rs / kornia-imgproc / interpolation::remap | staged | - |
+| Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |
+| Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |
+| Pivoted fixed-size LDLT | slam-rs `ldlt.rs` | kornia-rs / kornia-algebra / linalg::ldlt | staged | - |
+| Lie precision and update extensions (proposes the documented Sophus Taylor branches upstream) | slam-rs `lie.rs` | kornia-rs / kornia-algebra / lie | staged | - |
+| Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |

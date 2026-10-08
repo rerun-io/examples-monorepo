@@ -1,19 +1,19 @@
 //! Reusable storage for deterministic dense landmark reduction.
 
+use kornia_staging_algebra::Scalar;
 use nalgebra::{DMatrix, DVector};
 
 use super::LinearizeError;
 use super::landmark_block::{DenseHbScratch, LandmarkBlock};
-use crate::lie::LieScalar;
 
 /// Dense accumulator, reset to positive zero before each assembly.
 #[derive(Debug, Clone)]
-struct DensePartial<S: LieScalar> {
+struct DensePartial<S: Scalar> {
     h: DMatrix<S>,
     b: DVector<S>,
 }
 
-impl<S: LieScalar> DensePartial<S> {
+impl<S: Scalar> DensePartial<S> {
     fn zeros(n: usize) -> Self {
         Self {
             h: DMatrix::zeros(n, n),
@@ -93,7 +93,7 @@ impl<S: LieScalar> DensePartial<S> {
 /// Blocks scatter in their existing order. Buffers resize with the window
 /// ordering and are cleared before each assembly.
 #[derive(Debug, Clone)]
-pub struct DenseHbWorkspace<S: LieScalar> {
+pub struct DenseHbWorkspace<S: Scalar> {
     /// What the reduction accumulates into and the caller reads.
     accumulator: DensePartial<S>,
     /// One transpose buffer reused across blocks on the serial path.
@@ -102,7 +102,7 @@ pub struct DenseHbWorkspace<S: LieScalar> {
     rows: Vec<S>,
 }
 
-impl<S: LieScalar> Default for DenseHbWorkspace<S> {
+impl<S: Scalar> Default for DenseHbWorkspace<S> {
     fn default() -> Self {
         Self {
             accumulator: DensePartial::zeros(0),
@@ -112,7 +112,7 @@ impl<S: LieScalar> Default for DenseHbWorkspace<S> {
     }
 }
 
-impl<S: LieScalar> DenseHbWorkspace<S> {
+impl<S: Scalar> DenseHbWorkspace<S> {
     /// Accumulate landmark blocks in their existing order.
     pub(super) fn reduce(
         &mut self,
@@ -154,7 +154,7 @@ mod tests {
     use nalgebra::{Vector2, Vector3};
 
     /// Scalar reference: every coefficient uses the original row and landmark order.
-    fn reference_reduce<S: LieScalar>(
+    fn reference_reduce<S: Scalar>(
         n: usize,
         blocks: &[LandmarkBlock<S>],
     ) -> (DMatrix<S>, DVector<S>) {
@@ -191,7 +191,7 @@ mod tests {
         compare_symmetric_dense::<f64>();
     }
 
-    fn compare_symmetric_dense<S: LieScalar>() {
+    fn compare_symmetric_dense<S: Scalar>() {
         use crate::camera::SlamCamera;
         use crate::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
         use crate::types::KeypointId;

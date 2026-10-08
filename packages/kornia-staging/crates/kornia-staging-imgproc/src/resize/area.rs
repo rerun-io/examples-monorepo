@@ -1,19 +1,39 @@
-//! Exact integer area downsampling for capture and catalog decoders.
+//! Exact integer area downsampling.
 
 use kornia_image::{Image, ImageError};
 use rayon::prelude::*;
 
-mod kernels;
+use super::kernels;
 
-/// Output rows per rayon task, shared with the live downsample stage.
+/// Output rows per rayon task.
 const ROWS_PER_TASK: usize = 16;
 
 /// Downsample an image by integer factors using the rounded (half up) area mean.
 /// Returns an image-size error when either factor is not a positive integer.
+///
+/// # Arguments
+/// * `src` - CPU image to reduce.
+/// * `dst` - CPU output whose dimensions divide the source dimensions.
+///
+/// # Errors
+/// Invalid dimensions, overflowing geometry, or device-resident storage.
+///
+/// ```
+/// use kornia_image::{Image, ImageSize};
+/// use kornia_staging_imgproc::resize::resize_area_u8;
+/// let src = Image::<u8, 1>::new(ImageSize { width: 2, height: 2 }, vec![0, 1, 0, 1])?;
+/// let mut dst = Image::from_size_val(ImageSize { width: 1, height: 1 }, 0)?;
+/// resize_area_u8(&src, &mut dst)?;
+/// assert_eq!(dst.as_slice(), &[1]); // half up, not half even
+/// # Ok::<(), kornia_image::ImageError>(())
+/// ```
 pub fn resize_area_u8<const C: usize>(
     src: &Image<u8, C>,
     dst: &mut Image<u8, C>,
 ) -> Result<(), ImageError> {
+    if !src.storage.domain().is_host_accessible() || !dst.storage.domain().is_host_accessible() {
+        return Err(ImageError::UnsupportedDevice);
+    }
     let dst_size = (dst.width(), dst.height());
     resize_area_u8_into::<C>(
         src.as_slice(),
@@ -27,6 +47,16 @@ pub fn resize_area_u8<const C: usize>(
 /// Write an integer area mean from a strided plane into a tight caller buffer.
 /// Padding bytes, including padding after the last visible row, are not read.
 /// Returns an image-size or buffer-length error for invalid geometry.
+///
+/// # Arguments
+/// * `src` - Strided interleaved source pixels, with optional row padding.
+/// * `src_size` - Visible source width and height.
+/// * `stride` - Source row stride in bytes.
+/// * `dst` - Tight interleaved destination pixels.
+/// * `dst_size` - Destination width and height.
+///
+/// # Errors
+/// Invalid integer factors, overflowing dimensions or insufficient buffer lengths.
 pub fn resize_area_u8_into<const C: usize>(
     src: &[u8],
     (sw, sh): (usize, usize),
@@ -34,6 +64,10 @@ pub fn resize_area_u8_into<const C: usize>(
     dst: &mut [u8],
     (dw, dh): (usize, usize),
 ) -> Result<(), ImageError> {
+    let invalid = || ImageError::InvalidImageSize(sw, sh, dw, dh);
+    let src_stride = sw.checked_mul(C).ok_or_else(invalid)?;
+    let dst_stride = dw.checked_mul(C).ok_or_else(invalid)?;
+    let dst_len = dst_stride.checked_mul(dh).ok_or_else(invalid)?;
     if C == 0
         || dw == 0
         || dh == 0
@@ -41,20 +75,27 @@ pub fn resize_area_u8_into<const C: usize>(
         || sh % dh != 0
         || sw < dw
         || sh < dh
-        || stride < sw * C
+        || stride < src_stride
     {
         return Err(ImageError::InvalidImageSize(sw, sh, dw, dh));
     }
-    let needed = (sh - 1) * stride + sw * C;
+    let needed = (sh - 1)
+        .checked_mul(stride)
+        .and_then(|n| n.checked_add(src_stride))
+        .ok_or_else(invalid)?;
     if src.len() < needed {
         return Err(ImageError::InvalidChannelShape(src.len(), needed));
     }
-    if dst.len() != dw * dh * C {
-        return Err(ImageError::InvalidChannelShape(dst.len(), dw * dh * C));
+    if dst.len() != dst_len {
+        return Err(ImageError::InvalidChannelShape(dst.len(), dst_len));
     }
     let (kx, ky) = (sw / dw, sh / dh);
-    let dst_stride = dw * C;
-    dst.par_chunks_mut(ROWS_PER_TASK * dst_stride)
+    let area = kx.checked_mul(ky).ok_or_else(invalid)?;
+    if area > (u32::MAX / 256) as usize {
+        return Err(invalid());
+    }
+    let task_stride = ROWS_PER_TASK.checked_mul(dst_stride).ok_or_else(invalid)?;
+    dst.par_chunks_mut(task_stride)
         .enumerate()
         .for_each(|(chunk, rows)| {
             for (r, out) in rows.chunks_exact_mut(dst_stride).enumerate() {
@@ -80,8 +121,24 @@ mod tests {
     use super::*;
     use kornia_image::{Image, ImageError, ImageSize};
     #[test]
-    fn strided_input_ignores_padding_and_needs_only_the_last_visible_pixel()
-    -> Result<(), ImageError> {
+    fn opencv_integer_area_rgb() -> Result<(), ImageError> {
+        let src = include_bytes!("../../tests/fixtures/area3-rgb-input.bin");
+        let expected = include_bytes!("../../tests/fixtures/area3-rgb-opencv.bin");
+        let mut dst = [0; 18];
+        resize_area_u8_into::<3>(src, (9, 6), 27, &mut dst, (3, 2))?;
+        assert_eq!(&dst, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn overflowing_geometry_is_rejected() {
+        assert!(
+            resize_area_u8_into::<3>(&[], (usize::MAX, 2), usize::MAX, &mut [], (1, 1)).is_err()
+        );
+    }
+    #[test]
+    fn strided_input_ignores_padding_and_needs_only_the_last_visible_pixel(
+    ) -> Result<(), ImageError> {
         let src = [
             0, 3, 6, 9, 9, 9, 255, 255, 0, 3, 6, 9, 9, 9, 255, 255, 0, 3, 6, 9, 9, 9,
         ];

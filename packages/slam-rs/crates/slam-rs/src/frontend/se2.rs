@@ -3,13 +3,13 @@
 //! homogeneous matrix product. Tracking needs only the exponential.
 //! The frontend uses f32; f64 supports sharp finite-difference Jacobian tests.
 
+use kornia_staging_algebra::Scalar;
 use nalgebra::{Matrix2, Vector2, Vector3};
 
-use crate::lie::LieScalar;
 
 /// A 2x2 linear part and a translation, stored as separate blocks.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AffineCompact2<S: LieScalar> {
+pub struct AffineCompact2<S: Scalar> {
     /// `transform.linear()`, the 2x2 block.
     pub linear: Matrix2<S>,
     /// `transform.translation()`, the last column.
@@ -19,13 +19,13 @@ pub struct AffineCompact2<S: LieScalar> {
 /// The frontend's f32 affine warp.
 pub type AffineCompact2f = AffineCompact2<f32>;
 
-impl<S: LieScalar> Default for AffineCompact2<S> {
+impl<S: Scalar> Default for AffineCompact2<S> {
     fn default() -> Self {
         Self::identity()
     }
 }
 
-impl<S: LieScalar> AffineCompact2<S> {
+impl<S: Scalar> AffineCompact2<S> {
     /// Identity warp.
     pub fn identity() -> Self {
         Self {
@@ -88,7 +88,7 @@ impl<S: LieScalar> AffineCompact2<S> {
 /// The small-angle thresholds are `1e-10` in f64 and `1e-5` in f32.
 /// Translation is `V(theta) * upsilon`, evaluated as two scalar expressions.
 #[inline]
-pub fn se2_exp<S: LieScalar>(tangent: &Vector3<S>) -> AffineCompact2<S> {
+pub fn se2_exp<S: Scalar>(tangent: &Vector3<S>) -> AffineCompact2<S> {
     let one: S = S::one();
     let theta: S = tangent[2];
     // `SO2<Scalar>::exp(theta)` — cos/sin, then normalise.

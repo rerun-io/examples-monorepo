@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use handfit::Pose;
 use kornia_image::Image;
-use robocap_live::hands::circles::min_enclosing_circle;
+use kornia_staging_imgproc::contours::min_enclosing_circle;
 use nalgebra::{
     Isometry3, Matrix3, Matrix4, Rotation3, SVector, Translation3, UnitQuaternion, Vector3,
 };

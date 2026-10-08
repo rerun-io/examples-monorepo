@@ -9,6 +9,7 @@
 //! including the eliminated landmarks' own gain, which can be positive at zero
 //! pose increment.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::BTreeMap;
 
 use nalgebra::{DMatrix, DVector, Vector3};
@@ -19,7 +20,7 @@ use super::{
 use crate::duration_ns;
 use crate::frontend::parallel::WorkPool;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
-use crate::lie::{LieScalar, eigen_maxi};
+use crate::lie::{eigen_maxi};
 use crate::linearize::{
     DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
 };
@@ -40,7 +41,7 @@ const MAX_SOLVE_ATTEMPTS: u32 = 3;
 /// [`super::SqrtKeypointVio`] has one thing to name and the destructuring at
 /// the top of [`SqrtKeypointVio::optimize`] stays one line.
 #[derive(Debug, Clone)]
-pub(super) struct OptimizeScratch<S: LieScalar> {
+pub(super) struct OptimizeScratch<S: Scalar> {
     /// The dense accumulator and per-landmark transpose scratch.
     pub(super) dense: DenseHbWorkspace<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
@@ -49,9 +50,9 @@ pub(super) struct OptimizeScratch<S: LieScalar> {
     pub(super) increment: DVector<S>,
 }
 
-impl<S: LieScalar> Default for OptimizeScratch<S> {
+impl<S: Scalar> Default for OptimizeScratch<S> {
     /// Empty buffers, sized on the first call. Written out rather than derived:
-    /// `#[derive(Default)]` would demand `S: Default`, which `LieScalar` does
+    /// `#[derive(Default)]` would demand `S: Default`, which `Scalar` does
     /// not.
     fn default() -> Self {
         Self {
@@ -97,7 +98,7 @@ pub enum LmTermination {
 /// Separate error components make changes in the objective attributable. The
 /// prior omits `½rᵀr` and can be negative (D20), so its term remains visible.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LmIteration<S: LieScalar> {
+pub struct LmIteration<S: Scalar> {
     /// `it` when this step ran.
     pub iteration: i32,
     /// `j`, the backtracking index inside this linearization.
@@ -136,7 +137,7 @@ pub struct LmIteration<S: LieScalar> {
     pub accepted: bool,
 }
 
-impl<S: LieScalar> SqrtKeypointVio<S> {
+impl<S: Scalar> SqrtKeypointVio<S> {
     /// Optimize and return the LM trail, stop reason and stage durations.
     /// `self.opt_started` records whether optimization ran.
     ///
@@ -407,7 +408,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 /// Symmetric diagonal scaling handles the different units and fixed-pose weights.
 /// A failed attempt escalates lambda, including the final failed attempt.
 /// The caller negates the returned increment before applying it.
-pub(super) fn damped_solve<S: LieScalar>(
+pub(super) fn damped_solve<S: Scalar>(
     h: &DMatrix<S>,
     b: &DVector<S>,
     damping: &mut LmDamping<S>,
@@ -474,7 +475,7 @@ pub(super) fn damped_solve<S: LieScalar>(
 /// Skip zero-length intervals and intervals not fully in the ordering. A missing
 /// state for an ordered endpoint returns [`EstimatorError::ImuFactorStateMissing`].
 /// Quadratic forms use fixed-order residual folds.
-fn compute_imu_error<S: LieScalar>(
+fn compute_imu_error<S: Scalar>(
     aom: &AbsOrderMap,
     states: &BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
     imu_meas: &BTreeMap<i64, IntegratedImuMeasurement<S>>,

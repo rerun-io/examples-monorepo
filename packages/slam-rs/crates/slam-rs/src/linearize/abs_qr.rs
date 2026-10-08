@@ -3,6 +3,7 @@
 //! Inputs are borrowed per call, allowing the estimator to retain the linearizer
 //! while updating the window without self-referential storage.
 
+use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Matrix4, Matrix6};
@@ -12,7 +13,7 @@ use crate::ba_base::BundleAdjustmentBase;
 use crate::frontend::parallel::WorkPool;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{Se3};
 use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
 use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin, linearize_relative_pose};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
@@ -20,13 +21,13 @@ use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_
 /// `LinearizationBase<Scalar, POSE_SIZE>::Options`,
 /// without the `linearization_type` field: only `ABS_QR` is ported (decision D13).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LinearizationOptions<S: LieScalar> {
+pub struct LinearizationOptions<S: Scalar> {
     /// The landmark blocks' options.
     pub lb_options: LandmarkBlockOptions<S>,
 }
 
-impl<S: LieScalar> Default for LinearizationOptions<S> {
-    /// Explicit defaults avoid requiring `S: Default` beyond `LieScalar`.
+impl<S: Scalar> Default for LinearizationOptions<S> {
+    /// Explicit defaults avoid requiring `S: Default` beyond `Scalar`.
     fn default() -> Self {
         Self {
             lb_options: LandmarkBlockOptions::default(),
@@ -36,7 +37,7 @@ impl<S: LieScalar> Default for LinearizationOptions<S> {
 
 /// IMU measurements indexed by start timestamp; end time is start plus duration.
 #[derive(Debug, Clone)]
-pub struct ImuInput<'a, S: LieScalar> {
+pub struct ImuInput<'a, S: Scalar> {
     /// Gravity and the two bias random-walk square-root weights.
     pub lin_data: ImuLinData<S>,
     /// The preintegrated intervals, in start-timestamp order.
@@ -45,7 +46,7 @@ pub struct ImuInput<'a, S: LieScalar> {
 
 /// Borrowed inputs needed for a linearization call.
 #[derive(Debug)]
-pub struct LinearizationInputs<'a, S: LieScalar> {
+pub struct LinearizationInputs<'a, S: Scalar> {
     /// The square-root marginalization prior, if there is one.
     pub marg: Option<&'a MargLinData<S>>,
     /// The preintegrated IMU intervals, if the estimator is inertial.
@@ -59,7 +60,7 @@ pub struct LinearizationInputs<'a, S: LieScalar> {
     pub fixed_frames: Option<&'a BTreeSet<FrameId>>,
 }
 
-impl<S: LieScalar> Default for LinearizationInputs<'_, S> {
+impl<S: Scalar> Default for LinearizationInputs<'_, S> {
     /// An unrestricted visual-only problem without an IMU factor or prior.
     fn default() -> Self {
         Self {
@@ -83,7 +84,7 @@ struct ImuMeta {
 
 /// The linearizer: one landmark block per landmark, plus IMU and prior.
 #[derive(Debug, Clone)]
-pub struct LinearizationAbsQR<S: LieScalar> {
+pub struct LinearizationAbsQR<S: Scalar> {
     options: LinearizationOptions<S>,
     /// `landmark_ids`, sorted.
     landmark_ids: Vec<LandmarkId>,
@@ -107,7 +108,7 @@ pub struct LinearizationAbsQR<S: LieScalar> {
     aom: AbsOrderMap,
 }
 
-impl<S: LieScalar> LinearizationAbsQR<S> {
+impl<S: Scalar> LinearizationAbsQR<S> {
     /// Allocate relative poses and landmark blocks in sorted landmark order,
     /// then build the prefix sum of reduced row counts. Sorting fixes row order.
     /// Copy Huber threshold and observation deviation from the estimator so options

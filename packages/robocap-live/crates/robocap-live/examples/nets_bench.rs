@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use robocap_live::kornia_ext::pool::{pool4_mean_f32, pool4_u8};
+use kornia_staging_imgproc::resize::{pool4_mean_f32, pool4_u8};
 use robocap_live::nets::golden::{
     Comparison, Golden, default_dir, detnet_row, expand_pooled, f32_values, keynet_row,
 };
