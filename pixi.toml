@@ -3484,11 +3484,44 @@ cwd = "packages/robocap-live"
 description = "Build the core, then run the package golden reference tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# kornia-staging
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.kornia-staging]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.kornia-staging.dependencies]
+rust = "1.98.*"
+
+[feature.kornia-staging.activation.env]
+PACKAGE_DIR = "packages/kornia-staging"
+
+[feature.kornia-staging.tasks.kornia-staging-fmt-check]
+cmd = "cargo fmt --all -- --check"
+cwd = "packages/kornia-staging"
+description = "Check Rust formatting"
+
+[feature.kornia-staging.tasks.kornia-staging-clippy]
+cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cwd = "packages/kornia-staging"
+description = "Check all Rust targets with warnings denied"
+
+[feature.kornia-staging.tasks.kornia-staging-test]
+cmd = "cargo test --locked --workspace"
+cwd = "packages/kornia-staging"
+description = "Run Rust workspace tests and doctests"
+
+[feature.kornia-staging.tasks.gate]
+depends-on = ["kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test"]
+description = "Run the Rust author checks for staged Kornia code"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
 agent-traces = { features = ["agent-traces"], solve-group = "agent-traces", no-default-feature = true }
 agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-traces", no-default-feature = true }
+kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
+kornia-staging-dev = { features = ["kornia-staging", "dev"], solve-group = "kornia-staging", no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
     "arkitscenes-download",

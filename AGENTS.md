@@ -142,6 +142,15 @@ packages/<name>/
   tests/
 ```
 
+### kornia-staging
+
+`packages/kornia-staging/` holds Rust code prepared for the Kornia organization.
+Each crate and module mirrors its upstream destination and uses Kornia conventions;
+consumers depend on staging, never the reverse. Track each item and its upstream
+issue/PR in the package README table. When it lands, bump the dependency, swap
+imports, and delete the staged code in one change. Run
+`pixi run -e kornia-staging-dev --frozen gate` and each affected consumer's gate.
+
 ## Adding a model
 
 Bringing an upstream research model in (fork + pixify, then a vendor → predictor → typed PR stack with

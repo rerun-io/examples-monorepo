@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/kornia-staging-3d"]
+default-members = ["crates/kornia-staging-3d"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+kornia-image = { version = "0.2", default-features = false }
+kornia-imgproc = { version = "0.2", default-features = false }
+kornia-3d = { version = "0.2", default-features = false }
+kornia-algebra = { version = "0.2", default-features = false }
+kornia-tensor = { version = "0.2", default-features = false }
+thiserror = "2"
+rayon = "1.12"
+# Inherit these only in member dev-dependencies.
+approx = "0.5"
+criterion = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
