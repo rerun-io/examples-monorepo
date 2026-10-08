@@ -67,6 +67,13 @@ impl Engine {
             ))),
         }
     }
+    pub fn output_format(&self) -> &'static str {
+        match self {
+            Self::Brush(_) => "Brush Packed",
+            Self::Ours(_) => "Packed RGBA8",
+            Self::Native(_) => "Rerun RGBA8UnormSrgb/MSAA4, opaque black background",
+        }
+    }
 
     pub async fn capture(&mut self, camera: &CameraSpec, parity: bool) -> Result<Vec<f32>> {
         self.capture_next_frame();
@@ -119,6 +126,13 @@ impl Engine {
             Self::Brush(r) => r.adapter(),
             Self::Ours(r) => r.adapter_info().clone().into(),
             Self::Native(r) => r.adapter(),
+        }
+    }
+    pub async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
+        match self {
+            Self::Brush(r) => r.stages(camera).await,
+            Self::Ours(r) => r.stages(camera).await,
+            Self::Native(_) => Ok(None),
         }
     }
 }
@@ -246,8 +260,51 @@ impl Brush {
             values
         })
     }
+    pub async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
+        use burn::cubecl::{Device as CubeDevice, wgpu::WgpuDevice};
+        use burn::tensor::TimingMethod;
+        self.finish()?;
+        let client = CubeDevice::Wgpu(WgpuDevice::default()).client();
+        let window = client.profile_start()?;
+        if let Err(error) = self.render(camera, false).await {
+            client.profile_abandon(window);
+            return Err(error);
+        }
+        let duration = client.profile_end(window)?;
+        if duration.timing_method() != TimingMethod::Device {
+            return Err(crate::Unsupported("Brush device timestamps unavailable".into()).into());
+        }
+        let ticks = duration
+            .resolve()
+            .await
+            .context("empty Brush profile window")?;
+        Ok(Some(vec![StageTiming {
+            name: "Brush GPU device window".into(),
+            ms: ticks.duration().as_secs_f64() * 1000.0,
+        }]))
+    }
     pub fn adapter(&self) -> Adapter {
         self.adapter.clone()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StageTiming {
+    pub name: String,
+    pub ms: f64,
+}
+impl crate::Renderer {
+    pub async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
+        Ok(self.stage_ms(camera)?.map(|times| {
+            gsplat_core::STAGE_NAMES
+                .into_iter()
+                .zip(times)
+                .map(|(name, ms)| StageTiming {
+                    name: name.into(),
+                    ms,
+                })
+                .collect()
+        }))
     }
 }
 

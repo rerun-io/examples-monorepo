@@ -10,6 +10,8 @@ target/release/gsplat render --ply scene.ply --camera transforms_test.json \
 target/release/gsplat eval --render renders --gt ground-truth \
   --convention brush --lpips --out metrics.json
 target/release/gsplat score --ply export_7000.ply --dataset SCENE --out score.json
+target/release/gsplat speed --impl ours,brush,native \
+  --ply scene.ply --path orbit:300 --res 1920x1080 --out speed.json
 target/release/gsplat parity --impl ours --oracle brush \
   --ply scene.ply --path transforms_test.json --holdout-every 8 --out parity.json
 target/release/gsplat parity --impl ours --archetype recording.rrd \
@@ -17,7 +19,7 @@ target/release/gsplat parity --impl ours --archetype recording.rrd \
 ```
 
 Camera files accept NeRF transforms, CameraSpec JSON arrays, or COLMAP model
-directories. `--res native` retains input
+directories. Speed and parity also accept `orbit:N`; `--res native` retains input
 dimensions. `--render-mode auto|default|mip`, `--splat-scale`, `--min-scale`, and
 `--initial-capacity` control compute/Brush rendering.
 

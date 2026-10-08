@@ -103,6 +103,17 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .unwrap();
     println!("ours off-centre float parity: {score:?}");
     assert!(score.minimum_psnr() >= 40.0);
+    let stages = ours
+        .stages(&camera)
+        .await
+        .unwrap()
+        .expect("ours GPU stage timings");
+    assert_eq!(stages.len(), 8);
+    assert!(stages.iter().all(|s| s.ms.is_finite() && s.ms > 0.0));
+    let stages = brush.stages(&camera).await.unwrap().unwrap();
+    assert_eq!(stages.len(), 1);
+    assert!(stages[0].ms > 0.0);
+    println!("Brush device window: {} ms", stages[0].ms);
     let evaluator = Evaluator::new(false);
     let mut native = Engine::Native(Box::new(
         Native::new(&ply, scene.data.num_splats()).await.unwrap(),
