@@ -2,33 +2,12 @@
 //! and [`FlowTransforms`] (warps), each coordinate in its own flat array with
 //! the keypoint index varying fastest.
 
-use nalgebra::{Matrix2, Vector2};
-
-use crate::frontend::se2::AffineCompact2f;
-use crate::types::KeypointId;
-
-/// One camera's inputs and output slot in a submitted tracking batch.
-/// IDs and positions are in the same order as the initial guesses.
-#[derive(Debug, Default)]
-pub struct TrackInput {
-    /// Source camera index in the supplied previous pyramid set.
-    pub source: usize,
-    /// Destination camera index in the current pyramid set.
-    pub destination: usize,
-    /// Keypoint identities, ascending, after source masking.
-    pub ids: Vec<KeypointId>,
-    /// Source template positions at level zero.
-    pub positions: PointsSoA,
-    /// Source linear transforms with predicted destination positions.
-    pub guesses: FlowTransforms,
-    /// Result slot set by batch submission.
-    pub result: usize,
-}
+use crate::optical_flow::patch_se2::AffineCompact2f;
 
 /// A list of 2-D points with the coordinates in two flat arrays.
 ///
 /// `Vec<Vector2<f32>>` would give one coordinate a stride of two floats; here a
-/// warp reading every patch's `x` reads consecutive addresses (§12.2 item 1).
+/// warp reading every patch's `x` reads consecutive addresses.
 #[derive(Debug, Default, PartialEq)]
 pub struct PointsSoA {
     x: Vec<f32>,
@@ -40,8 +19,7 @@ pub struct PointsSoA {
 /// `#[derive(Clone)]` only writes `clone`; `clone_from` then falls back to
 /// `*self = source.clone()`, which drops both buffers and allocates two more.
 /// Copying field by field lets `Vec::clone_from` overwrite in place, which is
-/// what makes the frontend's per-frame snapshot allocation-free (see
-/// [`crate::frontend::flow::FrameToFrameOpticalFlow::process_frame`]).
+/// what makes the frontend's per-frame snapshot allocation-free.
 impl Clone for PointsSoA {
     fn clone(&self) -> Self {
         Self {
@@ -80,9 +58,10 @@ impl PointsSoA {
     }
 
     /// Append one point.
-    pub fn push(&mut self, point: Vector2<f32>) {
-        self.x.push(point.x);
-        self.y.push(point.y);
+    pub fn push(&mut self, point: impl Into<[f32; 2]>) {
+        let point = point.into();
+        self.x.push(point[0]);
+        self.y.push(point[1]);
     }
 
     /// Overwrite point `index`.
@@ -90,9 +69,10 @@ impl PointsSoA {
     /// # Panics
     ///
     /// If `index` is past the end.
-    pub fn set(&mut self, index: usize, point: Vector2<f32>) {
-        self.x[index] = point.x;
-        self.y[index] = point.y;
+    pub fn set(&mut self, index: usize, point: impl Into<[f32; 2]>) {
+        let point = point.into();
+        self.x[index] = point[0];
+        self.y[index] = point[1];
     }
 
     /// Grow to `len` points, filling with the origin.
@@ -106,8 +86,9 @@ impl PointsSoA {
     /// # Panics
     ///
     /// If `index` is past the end.
-    pub fn get(&self, index: usize) -> Vector2<f32> {
-        Vector2::new(self.x[index], self.y[index])
+    #[inline]
+    pub fn get(&self, index: usize) -> [f32; 2] {
+        [self.x[index], self.y[index]]
     }
 
     /// Every `x` coordinate, patch index fast-varying.
@@ -197,12 +178,19 @@ impl FlowTransforms {
 
     /// Append one warp.
     pub fn push(&mut self, warp: &AffineCompact2f) {
-        self.m00.push(warp.linear[(0, 0)]);
-        self.m01.push(warp.linear[(0, 1)]);
-        self.m10.push(warp.linear[(1, 0)]);
-        self.m11.push(warp.linear[(1, 1)]);
-        self.tx.push(warp.translation.x);
-        self.ty.push(warp.translation.y);
+        for (column, value) in [
+            &mut self.m00,
+            &mut self.m01,
+            &mut self.m10,
+            &mut self.m11,
+            &mut self.tx,
+            &mut self.ty,
+        ]
+        .into_iter()
+        .zip(warp.coefficients())
+        {
+            column.push(value);
+        }
     }
 
     /// Insert one warp at `index`, shifting the rest up.
@@ -211,12 +199,19 @@ impl FlowTransforms {
     ///
     /// If `index` is past the end.
     pub fn insert(&mut self, index: usize, warp: &AffineCompact2f) {
-        self.m00.insert(index, warp.linear[(0, 0)]);
-        self.m01.insert(index, warp.linear[(0, 1)]);
-        self.m10.insert(index, warp.linear[(1, 0)]);
-        self.m11.insert(index, warp.linear[(1, 1)]);
-        self.tx.insert(index, warp.translation.x);
-        self.ty.insert(index, warp.translation.y);
+        for (column, value) in [
+            &mut self.m00,
+            &mut self.m01,
+            &mut self.m10,
+            &mut self.m11,
+            &mut self.tx,
+            &mut self.ty,
+        ]
+        .into_iter()
+        .zip(warp.coefficients())
+        {
+            column.insert(index, value);
+        }
     }
 
     /// Remove the warp at `index`, shifting the rest down.
@@ -239,12 +234,19 @@ impl FlowTransforms {
     ///
     /// If `index` is past the end.
     pub fn set(&mut self, index: usize, warp: &AffineCompact2f) {
-        self.m00[index] = warp.linear[(0, 0)];
-        self.m01[index] = warp.linear[(0, 1)];
-        self.m10[index] = warp.linear[(1, 0)];
-        self.m11[index] = warp.linear[(1, 1)];
-        self.tx[index] = warp.translation.x;
-        self.ty[index] = warp.translation.y;
+        for (column, value) in [
+            &mut self.m00,
+            &mut self.m01,
+            &mut self.m10,
+            &mut self.m11,
+            &mut self.tx,
+            &mut self.ty,
+        ]
+        .into_iter()
+        .zip(warp.coefficients())
+        {
+            column[index] = value;
+        }
     }
 
     /// The warp at `index`, reassembled.
@@ -252,16 +254,9 @@ impl FlowTransforms {
     /// # Panics
     ///
     /// If `index` is past the end.
+    #[inline]
     pub fn get(&self, index: usize) -> AffineCompact2f {
-        AffineCompact2f {
-            linear: Matrix2::new(
-                self.m00[index],
-                self.m01[index],
-                self.m10[index],
-                self.m11[index],
-            ),
-            translation: Vector2::new(self.tx[index], self.ty[index]),
-        }
+        AffineCompact2f::from_coefficients(self.coefficients(index))
     }
 
     /// The translation at `index`, without reassembling the linear part.
@@ -269,8 +264,9 @@ impl FlowTransforms {
     /// # Panics
     ///
     /// If `index` is past the end.
-    pub fn translation(&self, index: usize) -> Vector2<f32> {
-        Vector2::new(self.tx[index], self.ty[index])
+    #[inline]
+    pub fn translation(&self, index: usize) -> [f32; 2] {
+        [self.tx[index], self.ty[index]]
     }
 
     /// The six coefficients at `index`, in the order
@@ -279,6 +275,8 @@ impl FlowTransforms {
     /// # Panics
     ///
     /// If `index` is past the end.
+    // Keep these six loads in cross-crate point loops; an outlined call adds a return buffer.
+    #[inline(always)]
     pub fn coefficients(&self, index: usize) -> [f32; 6] {
         [
             self.m00[index],
@@ -296,8 +294,7 @@ impl FlowTransforms {
     /// This is how a backend writes a whole camera's warps without going through
     /// one warp at a time: each array is contiguous with the patch index
     /// fast-varying, which is what a device copy and a rayon `par_chunks_mut`
-    /// both want. [`crate::frontend::parallel::WorkPool::for_each_warp`] takes
-    /// exactly this shape.
+    /// both want.
     pub fn coefficients_mut(&mut self) -> [&mut [f32]; 6] {
         [
             &mut self.m00,
@@ -311,7 +308,7 @@ impl FlowTransforms {
 
     /// The first `len` entries of the six coefficient arrays, mutably.
     ///
-    /// The prefix [`crate::frontend::parallel::WorkPool::for_each_warp`] wants
+    /// The prefix [`Self::fill_with`] wants
     /// when a capacity-sized buffer is carrying `len` live warps, which is the
     /// tracker's shape on both of its passes.
     ///
@@ -337,5 +334,96 @@ impl FlowTransforms {
     /// Every translation `y`, patch index fast-varying.
     pub fn translations_y(&self) -> &[f32] {
         &self.ty
+    }
+}
+
+impl FlowTransforms {
+    /// Fill a prefix from independent warp calculations using a caller-owned pool.
+    ///
+    /// Each slot is evaluated once; None executes sequentially. `init` creates
+    /// local state once per worker chunk, allowing borrowed image views to be
+    /// reused across points without sharing mutable state between workers.
+    /// # Panics
+    /// If count exceeds the stored warp or validity length.
+    pub fn fill_with<S>(
+        &mut self,
+        pool: Option<&rayon::ThreadPool>,
+        count: usize,
+        valid: &mut [bool],
+        init: impl Fn() -> S + Sync + Send,
+        body: impl Fn(&mut S, usize) -> ([f32; 6], bool) + Sync + Send,
+    ) {
+        assert!(
+            valid.len() >= count,
+            "validity storage is shorter than the requested prefix"
+        );
+        use rayon::prelude::*;
+        let [m00, m01, m10, m11, tx, ty] = self.coefficients_prefix_mut(count);
+        let len = count;
+
+        let Some(pool) = pool else {
+            let mut state = init();
+            for index in 0..len {
+                let (warp, flag) = body(&mut state, index);
+                m00[index] = warp[0];
+                m01[index] = warp[1];
+                m10[index] = warp[2];
+                m11[index] = warp[3];
+                tx[index] = warp[4];
+                ty[index] = warp[5];
+                valid[index] = flag;
+            }
+            return;
+        };
+
+        // A fixed split for a given (len, threads): eight chunks per worker of
+        // at least eight warps, so a worker that drew the expensive points does
+        // not hold the others up. Which worker runs a chunk is rayon's choice
+        // and cannot matter: every index is a pure function of itself.
+        let chunk: usize = len.div_ceil(pool.current_num_threads() * 8).max(8);
+        pool.install(|| {
+            m00[..len]
+                .par_chunks_mut(chunk)
+                .zip(m01[..len].par_chunks_mut(chunk))
+                .zip(m10[..len].par_chunks_mut(chunk))
+                .zip(m11[..len].par_chunks_mut(chunk))
+                .zip(tx[..len].par_chunks_mut(chunk))
+                .zip(ty[..len].par_chunks_mut(chunk))
+                .zip(valid[..len].par_chunks_mut(chunk))
+                .enumerate()
+                .for_each(|(block, ((((((m00, m01), m10), m11), tx), ty), valid))| {
+                    let base: usize = block * chunk;
+                    let mut state = init();
+                    for offset in 0..valid.len() {
+                        let (warp, flag) = body(&mut state, base + offset);
+                        m00[offset] = warp[0];
+                        m01[offset] = warp[1];
+                        m10[offset] = warp[2];
+                        m11[offset] = warp[3];
+                        tx[offset] = warp[4];
+                        ty[offset] = warp[5];
+                        valid[offset] = flag;
+                    }
+                });
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "validity storage is shorter than the requested prefix")]
+    fn a_short_validity_buffer_is_rejected_before_writes() {
+        let mut warps = FlowTransforms::with_capacity(2);
+        warps.resize(2);
+        warps.fill_with(
+            None,
+            2,
+            &mut [false],
+            || (),
+            |_, _| panic!("must not write"),
+        );
     }
 }

@@ -6,12 +6,13 @@ use cubecl::prelude::*;
 use super::GpuStages;
 use kornia_staging_3d::camera::CameraModelKind;
 use crate::config::MatchingGuessType;
-use crate::frontend::detect::{CellGrid, CellSelect};
-use crate::frontend::patterns::Pattern;
+use crate::frontend::flow::FrontendError;
 use crate::frontend::stages::StereoContext;
-use crate::frontend::tracker::{TrackInput, TrackerError};
 use crate::gpu::kernels::klt_fused::{CachedU32Upload, FUSED_RUNS, decode_point, launch_fused};
 use crate::gpu::{GpuError, guarded, kernels, pyramid::GpuPyramid, submission};
+use kornia_staging_imgproc::features::{CellGrid, CellSelect};
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
+use kornia_staging_slam::tracking::optical_flow::TrackPhase;
 
 pub(super) enum Phase {
     Off,
@@ -38,7 +39,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         &mut self,
         context: StereoContext<'_>,
         selects: &[Option<CellSelect>],
-    ) -> Result<bool, TrackerError> {
+    ) -> Result<bool, FrontendError> {
         let StereoContext {
             cameras,
             calib,
@@ -147,7 +148,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         )
     }
 
-    pub(super) fn submit_stereo(&mut self) -> Result<(), TrackerError> {
+    pub(super) fn submit_stereo(&mut self) -> Result<(), FrontendError> {
         let pyramids = &self.current.pyramids;
         let params = self.tracker.fused_params();
         let Some(state) = self
@@ -164,7 +165,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         let Some(keys) = self
             .current
             .detector
-            .scanner
+            .scanner_mut()
             .staged_handles()
             .filter(|keys| keys.len() == 1)
         else {
@@ -195,7 +196,20 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         Ok(())
     }
 
-    pub(super) fn take_stereo(&mut self, inputs: &mut [TrackInput]) -> Result<bool, TrackerError> {
+    pub(super) fn take_stereo(
+        &mut self,
+        phase: TrackPhase<'_>,
+        slots: &mut [usize],
+    ) -> Result<bool, FrontendError> {
+        use crate::pyramid::Pyramid;
+        let inputs = phase.validate(
+            self.tracker.capacity,
+            self.tracker.num_levels,
+            slots.len(),
+            None,
+            |i| self.current.pyramids.get(i).map(Pyramid::num_levels),
+            |i| self.current.pyramids.get(i).map(Pyramid::num_levels),
+        )?;
         let Some(state) = &mut self.one_wait else {
             return Ok(false);
         };
@@ -213,7 +227,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             .into());
         }
         let values = f32::from_bytes(&bytes);
-        for (lane, input) in inputs.iter_mut().enumerate() {
+        for (lane, input) in inputs.iter().enumerate() {
             let count = input.positions.len();
             if count > state.cells {
                 return Err(GpuError::DeviceReadFailed {
@@ -222,12 +236,12 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 .into());
             }
             self.tracker.batch.slot_mut(lane, self.tracker.capacity);
-            input.result = lane;
-            self.tracker.batch.slots[lane].reset(count);
+            slots[lane] = lane;
+            self.tracker.batch.result_mut(lane).reset(count);
             for index in 0..count {
                 let base = FUSED_RUNS * (lane * state.cells + index);
                 let source = input.positions.get(index);
-                if values[base + 7] != source.x || values[base + 8] != source.y {
+                if values[base + 7] != source[0] || values[base + 8] != source[1] {
                     return Err(GpuError::DeviceReadFailed {
                         what: "one-wait corner order",
                     }
@@ -235,11 +249,11 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 }
                 decode_point(
                     &values[base..base + FUSED_RUNS],
-                    &mut self.tracker.batch.slots[lane],
+                    self.tracker.batch.result_mut(lane),
                     index,
                 );
             }
-            self.tracker.batch.slots[lane].finish(count);
+            self.tracker.batch.result_mut(lane).finish();
         }
         Ok(true)
     }

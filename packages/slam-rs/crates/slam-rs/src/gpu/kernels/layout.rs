@@ -17,13 +17,14 @@ pub const TILE_H: u32 = 8;
 // re-declared: a kernel that drifted from its reference by a constant would
 // still compile, and `FILTER_LANES` below already shows the shape.
 /// `border` on every patch tap, `PATCH_BORDER`.
-pub(crate) const PATCH_BORDER: f32 = crate::frontend::patch::PATCH_BORDER;
+pub(crate) const PATCH_BORDER: f32 = kornia_staging_imgproc::optical_flow::patch_se2::PATCH_BORDER;
 /// `const int filter_margin = 2`.
-pub(crate) const FILTER_MARGIN: f32 = crate::frontend::tracker::FILTER_MARGIN;
+pub(crate) const FILTER_MARGIN: f32 =
+    kornia_staging_imgproc::optical_flow::patch_tracker::limits::FILTER_MARGIN;
 /// Upper bound for a valid increment, aliased from the CPU tracker so both
 /// lanes share one number.
 pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 =
-    crate::frontend::tracker::MAX_INCREMENT_INFINITY_NORM;
+    kornia_staging_imgproc::optical_flow::patch_tracker::limits::MAX_INCREMENT_INFINITY_NORM;
 /// `Sophus::Constants<float>::epsilon()`.
 pub(crate) const SOPHUS_EPSILON: f32 = <f32 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
 

@@ -158,7 +158,7 @@ pub enum VioError {
     Estimator(#[from] estimator::EstimatorError),
     /// An image could not be widened into the frontend's `u16` buffer.
     #[error("image: {0}")]
-    Image(#[from] image::ImageError),
+    Image(#[from] image::IngestError),
     /// The frontend's own preintegration (D24) refused a sample.
     #[error("imu: {0}")]
     Imu(#[from] imu::ImuError),

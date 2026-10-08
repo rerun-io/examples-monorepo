@@ -294,7 +294,7 @@ def test_more_workers_than_the_ceiling_is_refused(camera: CameraFactory, imu: Im
 @pytest.mark.parametrize("levels", [24, 1_000, 10**9])
 def test_a_pyramid_deeper_than_the_ceiling_is_refused(camera: CameraFactory, imu: ImuCalib, levels: int) -> None:
     """``optical_flow_levels`` sizes every per-patch buffer; an absurd one aborted the process."""
-    with pytest.raises(ValueError, match="optical_flow_levels"):
+    with pytest.raises(ValueError, match=rf"tracker:.*{levels + 1} pyramid levels.*ceiling"):
         _core.OpticalFlow(
             _core.Calibration.from_catalog([camera(0, 0.0)], imu),
             _core.VioConfig.from_json(config_with("config.optical_flow_levels", levels)),

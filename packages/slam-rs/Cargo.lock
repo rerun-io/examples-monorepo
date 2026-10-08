@@ -698,6 +698,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "c2rust-bitfields"
@@ -1330,6 +1333,7 @@ dependencies = [
  "async-channel",
  "backtrace",
  "bytemuck",
+ "bytes",
  "cfg-if",
  "cfg_aliases",
  "ciborium",
@@ -1564,8 +1568,6 @@ dependencies = [
 [[package]]
 name = "cubecl-wgpu"
 version = "0.11.0-pre.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68a70096df8a1a1a327ffcc3327bbc4a9b2ba461c25e0e7863806721f8601664"
 dependencies = [
  "ash",
  "bytemuck",
@@ -3188,6 +3190,18 @@ name = "kornia-staging-imgproc"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-imgproc",
+ "kornia-staging-algebra",
+ "nalgebra",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-slam"
+version = "0.1.0"
+dependencies = [
+ "kornia-staging-imgproc",
  "rayon",
 ]
 
@@ -6659,13 +6673,17 @@ name = "slam-rs"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "bytes",
  "cubecl",
+ "cubecl-environment",
  "cubecl-wgpu",
  "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",
  "kornia-staging-3d",
  "kornia-staging-algebra",
+ "kornia-staging-imgproc",
+ "kornia-staging-slam",
  "log",
  "nalgebra",
  "proptest",
@@ -6701,6 +6719,8 @@ dependencies = [
 name = "slam-rs-py"
 version = "0.1.0"
 dependencies = [
+ "kornia-image",
+ "kornia-staging-imgproc",
  "numpy",
  "pyo3",
  "slam-rs",

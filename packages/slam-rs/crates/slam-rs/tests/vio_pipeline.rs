@@ -280,7 +280,7 @@ fn frontend_lag_retries_and_thread_counts_preserve_order_and_results() {
 
 /// Every field of the pipeline as one number.
 ///
-/// `Vio` derives `Debug`, so this reads all of them — the frontend's pyramids,
+/// `Vio` formats every field in `Debug`, so this reads all of them — the frontend's pyramids,
 /// clock, counter, cells and keypoints, both IMU buffers and their popped
 /// samples, the published state and depth guess, the whole estimator window.
 /// 85 MB of text, so it is hashed rather than kept.

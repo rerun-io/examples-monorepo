@@ -7,6 +7,8 @@
 
 mod catalog;
 
+use kornia_image::Image;
+use kornia_staging_imgproc::features::CellGrid;
 use numpy::{
     PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
     ToPyArray,
@@ -17,12 +19,10 @@ use slam_rs::calib::{
     Calibration as CoreCalibration, CameraParts as CoreCameraParts, ImuParts as CoreImuParts,
 };
 use slam_rs::config::VioConfig as CoreVioConfig;
-use slam_rs::frontend::detect::CellGrid;
 use slam_rs::frontend::flow::{
     FlowFrame as CoreFlowFrame, FrameToFrameOpticalFlow, FrontendError, FrontendOptions,
     PosePrediction,
 };
-use slam_rs::image::ImageU16;
 use slam_rs::{Backend, FrontendLane, ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
@@ -664,7 +664,7 @@ where
 
 /// Borrow one `uint8[h, w]` array out of Python: rank and dtype checked.
 ///
-/// Consumers either copy the bytes or widen them into reused [`ImageU16`]
+/// Consumers either copy the bytes or widen them into reused [`Image<u16, 1>`]
 /// storage. The layout is [`gray_pixels`]' half of the same pair.
 fn gray_array<'py>(
     object: &Bound<'py, PyAny>,
@@ -1052,7 +1052,7 @@ impl FlowFrame {
 pub struct OpticalFlow {
     inner: FrontendLane,
     /// The widened frameset, reused so a steady stream never reallocates.
-    images: Vec<ImageU16>,
+    images: Vec<Image<u16, 1>>,
 }
 
 #[pymethods]
@@ -1079,7 +1079,7 @@ impl OpticalFlow {
         let cameras: usize = inner.camera_count();
         Ok(Self {
             inner,
-            images: vec![ImageU16::default(); cameras],
+            images: vec![slam_rs::image::empty(); cameras],
         })
     }
 
@@ -1132,9 +1132,14 @@ impl OpticalFlow {
         for (index, image) in images.iter().enumerate() {
             let readonly: PyReadonlyArray2<'_, u8> = gray_array(image, index)?;
             let (pixels, width, height) = gray_pixels(&readonly, index)?;
-            self.images[index]
-                .fill_from_u8_strided(pixels, width, height, width)
-                .map_err(|error| PyValueError::new_err(format!("image {index}: {error}")))?;
+            slam_rs::image::fill_from_u8_strided(
+                &mut self.images[index],
+                pixels,
+                width,
+                height,
+                width,
+            )
+            .map_err(|error| PyValueError::new_err(format!("image {index}: {error}")))?;
         }
 
         let Self { inner, images } = self;

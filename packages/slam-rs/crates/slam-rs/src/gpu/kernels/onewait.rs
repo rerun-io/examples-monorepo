@@ -8,8 +8,8 @@
 use super::klt_fused::FUSED_RUNS;
 use crate::frontend::detect::NO_CELL_WINNER;
 
-const KEY_ROW_SHIFT: u32 = crate::frontend::cell::KEY_ROW_SHIFT;
-const KEY_FIELD_MASK: u32 = crate::frontend::cell::KEY_FIELD_MASK;
+const KEY_ROW_SHIFT: u32 = crate::frontend::detect::KEY_ROW_SHIFT;
+const KEY_FIELD_MASK: u32 = crate::frontend::detect::KEY_FIELD_MASK;
 
 pub(crate) const PARAM_HEADER: usize = 5;
 pub(crate) const RADTAN8_PARAMS: usize = 12;

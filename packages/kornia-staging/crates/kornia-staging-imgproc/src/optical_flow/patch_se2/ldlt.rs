@@ -22,21 +22,11 @@ pub fn ldlt_inverse3(a: &Matrix3<f32>) -> Matrix3<f32> {
 fn ldlt_solve3(mat: &Matrix3<f32>, transpositions: &[usize; 3], rhs_and_result: &mut Matrix3<f32>) {
     const SIZE: usize = 3;
 
-    for (k, target) in transpositions.iter().enumerate() {
-        if *target != k {
-            rhs_and_result.swap_rows(k, *target);
-        }
-    }
-
-    for row in 1..SIZE {
-        for column in 0..row {
-            let factor: f32 = mat[(row, column)];
-            for j in 0..SIZE {
-                let value: f32 = rhs_and_result[(column, j)];
-                rhs_and_result[(row, j)] -= factor * value;
-            }
-        }
-    }
+    kornia_staging_algebra::linalg::ldlt::ldlt_forward_in_place(
+        &mat.data.0,
+        transpositions,
+        &mut rhs_and_result.data.0,
+    );
 
     // Zero subnormal pivots instead of dividing by them.
     let tolerance: f32 = f32::MIN_POSITIVE;

@@ -2,14 +2,15 @@
 //! the frontend refuses, on the synthetic rig of `tests/common`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use kornia_image::Image;
+use kornia_staging_imgproc::features::{CpuCornerScan, LOWEST_THRESHOLD_RUNG, MAX_CELLS};
+use kornia_staging_imgproc::optical_flow::patch_se2::{Pattern51, Pattern52};
+use kornia_staging_imgproc::optical_flow::patch_tracker::limits::{MAX_CAPACITY, MAX_LEVELS};
+use kornia_staging_slam::tracking::optical_flow::CpuPatchTracker;
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::{CpuCornerScan, LOWEST_THRESHOLD_RUNG, MAX_CELLS};
 use slam_rs::frontend::flow::*;
 use slam_rs::frontend::parallel::{MAX_THREADS, WorkPool};
-use slam_rs::frontend::patterns::{Pattern51, Pattern52};
-use slam_rs::frontend::tracker::{CpuPatchTracker, MAX_CAPACITY, MAX_LEVELS};
-use slam_rs::image::ImageU16;
 use slam_rs::pyramid::CpuPyramidBuilder;
 
 mod common;
@@ -50,7 +51,7 @@ fn a_config_that_names_another_flow_type_is_refused() {
 #[test]
 fn a_frameset_of_the_wrong_width_is_refused() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-    let images: [ImageU16; 1] = [dotted_image(0)];
+    let images: [Image<u16, 1>; 1] = [dotted_image(0)];
     let error = flow
         .process_frame(0, &images, &PosePrediction::default(), &[])
         .unwrap_err();
@@ -130,10 +131,10 @@ fn a_budget_over_the_ceiling_is_refused() {
         .unwrap_err();
         assert_eq!(
             error,
-            FrontendError::TooManyKeypoints {
-                max_keypoints,
+            FrontendError::Tracker(kornia_staging_imgproc::optical_flow::patch_tracker::TrackerError::CapacityTooLarge {
+                capacity: max_keypoints,
                 ceiling: MAX_CAPACITY,
-            }
+            })
         );
     }
 }
@@ -208,11 +209,10 @@ fn a_config_asking_for_more_levels_than_the_ceiling_is_refused() {
                 .unwrap_err();
         assert_eq!(
             error,
-            FrontendError::TooManyLevels {
-                levels,
+            FrontendError::Tracker(kornia_staging_imgproc::optical_flow::patch_tracker::TrackerError::TooManyLevels {
                 num_levels: levels as usize + 1,
                 ceiling: MAX_LEVELS,
-            }
+            })
         );
     }
     // The shipped depth is three levels plus the base.
@@ -232,9 +232,9 @@ fn a_config_asking_for_more_levels_than_the_ceiling_is_refused() {
 fn a_frame_that_is_not_the_calibrated_size_is_refused() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
     for (width, height) in [(64, 64), (WIDTH - 1, HEIGHT - 1), (250, 250), (WIDTH, 250)] {
-        let odd: ImageU16 = ImageU16::zeros(width, height).unwrap();
+        let odd: Image<u16, 1> = slam_rs::image::zeros(width, height).unwrap();
         // Camera 1 is the wrong one here, so the error must name camera 1.
-        let images: [ImageU16; 2] = [dotted_image(0), odd];
+        let images: [Image<u16, 1>; 2] = [dotted_image(0), odd];
         let error = flow
             .process_frame(0, &images, &PosePrediction::default(), &[])
             .unwrap_err();
@@ -260,7 +260,7 @@ fn a_frame_that_is_not_the_calibrated_size_is_refused() {
 #[test]
 fn a_frameset_that_does_not_follow_the_last_one_is_refused() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(1, FrontendOptions::default());
-    let images: [ImageU16; 1] = [dotted_image(0)];
+    let images: [Image<u16, 1>; 1] = [dotted_image(0)];
     flow.process_frame(1_000, &images, &PosePrediction::default(), &[])
         .unwrap();
     let before: FlowFrame = flow.frame().clone();
@@ -302,7 +302,7 @@ fn a_budget_larger_than_the_tracker_is_refused() {
         slam_rs::frontend::stages::CpuStages::new(
             CpuPyramidBuilder::new(),
             tracker,
-            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+            kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                 CpuCornerScan::default(),
             )),
         )
@@ -347,12 +347,11 @@ fn a_camera_smaller_than_a_cell_is_refused() {
             .unwrap_err();
     assert_eq!(
         error,
-        FrontendError::FrameTooSmall {
-            camera: 1,
+        FrontendError::Grid(kornia_staging_imgproc::features::CellGridError::InvalidGeometry {
             width: 30,
             height: 30,
             cell: 50
-        }
+        })
     );
 }
 
@@ -371,12 +370,11 @@ fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
         vast.resolution = vec![[side, side]; 2];
         let mut fine: VioConfig = config();
         fine.optical_flow_detection_grid_size = 1;
-        let expected: FrontendError = FrontendError::TooManyCells {
-            camera: 0,
+        let expected: FrontendError = FrontendError::Grid(kornia_staging_imgproc::features::CellGridError::TooManyCells {
             rows: side as usize + 1,
             columns: side as usize + 1,
             ceiling: MAX_CELLS,
-        };
+        });
         let error = FrameToFrameOpticalFlow::<Pattern51>::new(
             fine.clone(),
             &vast,
@@ -394,7 +392,7 @@ fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
             slam_rs::frontend::stages::CpuStages::new(
                 CpuPyramidBuilder::new(),
                 tracker,
-                slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+                kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                     CpuCornerScan::default(),
                 )),
             )

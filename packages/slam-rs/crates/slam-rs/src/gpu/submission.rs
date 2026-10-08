@@ -23,7 +23,7 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
                     .map_err(|error| read_failed("frontend dispatch", &error))
             },
         );
-        result.map_err(crate::frontend::tracker::TrackerError::from)?
+        result.map_err(crate::frontend::flow::FrontendError::from)?
     }
 }
 
@@ -121,7 +121,7 @@ impl FrameBatch {
     pub(super) fn finish<R: cubecl::prelude::Runtime>(
         self,
         client: &cubecl::prelude::ComputeClient<R>,
-    ) -> Result<(), crate::frontend::tracker::TrackerError> {
+    ) -> Result<(), crate::frontend::flow::FrontendError> {
         super::guarded(
             GpuError::DeviceLost {
                 what: "frame dispatch",
@@ -209,34 +209,13 @@ pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
 
 /// One frame on the device, and how many pixels it holds.
 ///
-/// The upload owns one aligned copy of the slice before submitting it to
-/// CubeCL. It is exactly as long as the frame and nothing more: an unstrided
-/// frame goes straight out of the caller's buffer with no staging copy at all,
-/// and only a strided one — dav1d's shape — is repacked row by row into
-/// `scratch`, which the caller owns so the per-frame path never allocates.
-///
-/// Both the pyramid builder's level-0 upload and the corner scanner's own frame
-/// upload are this, which is why it is here and not in either.
+/// Upload a dense Kornia frame, with one aligned transfer copy and no row repacking.
 #[cfg(feature = "gpu-core")]
 pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     client: &cubecl::prelude::ComputeClient<R>,
-    image: &crate::image::ImageU16,
-    scratch: &mut Vec<u16>,
+    image: &kornia_image::Image<u16, 1>,
 ) -> (cubecl::server::Handle, usize) {
     use cubecl::prelude::CubeElement;
-
-    let (width, height): (usize, usize) = (image.width(), image.height());
-    let pixels: usize = width * height;
-    if image.stride() == width {
-        return (
-            upload(client, u16::as_bytes(&image.data()[..pixels])),
-            pixels,
-        );
-    }
-    scratch.clear();
-    scratch.reserve(pixels);
-    for y in 0..height {
-        scratch.extend_from_slice(image.row(y));
-    }
-    (upload(client, u16::as_bytes(scratch)), pixels)
+    let pixels = image.as_slice();
+    (upload(client, u16::as_bytes(pixels)), pixels.len())
 }

@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use kornia_image::Image;
+use kornia_staging_imgproc::optical_flow::patch_tracker::PointsSoA;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector6};
 use serde::Deserialize;
 use slam_rs::calib::{BasaltCamera, Calibration, Kb4Params};
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::tracker::PointsSoA;
-use slam_rs::image::ImageU16;
 use slam_rs::lie::Se3;
 
 #[allow(
@@ -275,12 +275,14 @@ pub fn read_pgm(directory: &Path, frame: usize, camera: usize) -> Pgm {
     dead_code,
     reason = "used by gpu_detect; other binaries compile a subset"
 )]
-pub fn mio10_frame(frame: usize, camera: usize) -> ImageU16 {
+pub fn mio10_frame(frame: usize, camera: usize) -> Image<u16, 1> {
     let pgm: Pgm = read_pgm(&fixtures().join("flow/frames"), frame, camera);
-    let mut image: ImageU16 = ImageU16::zeros(pgm.width, pgm.height).unwrap();
+    let mut image: Image<u16, 1> = slam_rs::image::zeros(pgm.width, pgm.height).unwrap();
     for y in 0..pgm.height {
         for x in 0..pgm.width {
-            image.set(x, y, u16::from(pgm.pixels[y * pgm.width + x]) << 8);
+            image
+                .set_pixel(x, y, 0, u16::from(pgm.pixels[y * pgm.width + x]) << 8)
+                .unwrap();
         }
     }
     image
@@ -499,13 +501,16 @@ pub fn texture(x: f64, y: f64) -> f64 {
     dead_code,
     reason = "used by gpu_kernels; other binaries compile a subset"
 )]
-pub fn textured_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(width, height).expect("a valid image geometry");
+pub fn textured_image(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
+    let mut image: Image<u16, 1> =
+        slam_rs::image::zeros(width, height).expect("a valid image geometry");
     for y in 0..height {
         for x in 0..width {
             let value: f64 = texture(x as f64 - f64::from(dx), y as f64 - f64::from(dy));
             let scaled: f64 = (value * 0.4 + 0.5) * 65535.0;
-            image.set(x, y, scaled.clamp(0.0, 65535.0) as u16);
+            image
+                .set_pixel(x, y, 0, scaled.clamp(0.0, 65535.0) as u16)
+                .unwrap();
         }
     }
     image
@@ -541,12 +546,15 @@ pub fn cornered_bytes(width: usize, height: usize) -> Vec<u8> {
     dead_code,
     reason = "used by gpu_detect; other binaries compile a subset"
 )]
-pub fn cornered_image(width: usize, height: usize) -> ImageU16 {
+pub fn cornered_image(width: usize, height: usize) -> Image<u16, 1> {
     let bytes: Vec<u8> = cornered_bytes(width, height);
-    let mut image: ImageU16 = ImageU16::zeros(width, height).expect("a valid image geometry");
+    let mut image: Image<u16, 1> =
+        slam_rs::image::zeros(width, height).expect("a valid image geometry");
     for y in 0..height {
         for x in 0..width {
-            image.set(x, y, u16::from(bytes[y * width + x]) << 8);
+            image
+                .set_pixel(x, y, 0, u16::from(bytes[y * width + x]) << 8)
+                .unwrap();
         }
     }
     image
@@ -583,7 +591,6 @@ pub fn grid_positions(size: usize) -> PointsSoA {
 use slam_rs::calib::{CalibAccelBias, CalibGyroBias, PinholeParams};
 use slam_rs::config::MatchingGuessType;
 use slam_rs::lie::So3;
-use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
 use std::collections::BTreeMap;
 
 /// The synthetic rig's frame size, shared by `flow_rig` and `dotted_image`.
@@ -650,14 +657,15 @@ pub fn flow_config() -> VioConfig {
     dead_code,
     reason = "used by flow_frontend; other binaries compile a subset"
 )]
-pub fn dotted_image(shift: i32) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(FLOW_WIDTH, FLOW_HEIGHT).expect("a valid geometry");
+pub fn dotted_image(shift: i32) -> Image<u16, 1> {
+    let mut image: Image<u16, 1> =
+        slam_rs::image::zeros(FLOW_WIDTH, FLOW_HEIGHT).expect("a valid geometry");
     for y in 0..FLOW_HEIGHT {
         for x in 0..FLOW_WIDTH {
             let fx: f64 = f64::from(x as i32 - shift);
             let fy: f64 = f64::from(y as i32);
             let base: f64 = 18_000.0 + 5_000.0 * (fx * 0.07).sin() * (fy * 0.05).cos();
-            image.set(x, y, base as u16);
+            image.set_pixel(x, y, 0, base as u16).unwrap();
         }
     }
     let mut cy: usize = 14;
@@ -668,7 +676,7 @@ pub fn dotted_image(shift: i32) -> ImageU16 {
                 for dx in 0..5 {
                     let x: i32 = (cx + dx) as i32 + shift;
                     if x >= 0 && (x as usize) < FLOW_WIDTH {
-                        image.set(x as usize, cy + dy, 0xF000);
+                        image.set_pixel(x as usize, cy + dy, 0, 0xF000).unwrap();
                     }
                 }
             }
@@ -677,20 +685,6 @@ pub fn dotted_image(shift: i32) -> ImageU16 {
         cy += 17;
     }
     image
-}
-
-/// A CPU pyramid of `image` with `levels` halvings on top of level 0.
-#[allow(
-    dead_code,
-    reason = "used by klt_tracker; other binaries compile a subset"
-)]
-pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
-    let mut pyramid: PyramidU16 =
-        PyramidU16::with_capacity(image.width(), image.height(), levels).expect("a valid geometry");
-    CpuPyramidBuilder::new()
-        .build(0, image, &mut pyramid)
-        .expect("the geometry the pyramid was allocated for");
-    pyramid
 }
 
 pub mod flow;

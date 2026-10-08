@@ -44,15 +44,15 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
+use kornia_image::Image;
+use kornia_staging_imgproc::features::{CellGrid, CpuCornerScan};
+use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
+use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 use slam_rs::config::VioConfig;
-use slam_rs::frontend::detect::{CellGrid, CpuCornerScan};
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
 };
-use slam_rs::frontend::patterns::Pattern51;
-use slam_rs::frontend::se2::AffineCompact2f;
-use slam_rs::frontend::tracker::FlowTransforms;
-use slam_rs::image::ImageU16;
 
 mod common;
 
@@ -158,7 +158,7 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
 fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
     use slam_rs::gpu::{GpuPyramidBuilder, GpuRuntime, gpu_client};
 
-    let image = ImageU16::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
+    let image = slam_rs::image::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
     let mut builder: GpuPyramidBuilder<GpuRuntime> =
         GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
     builder
@@ -289,7 +289,7 @@ fn a_steady_state_frame_reports_its_allocation_count() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
         FrameToFrameOpticalFlow::new(flow_config(), &flow_rig(2), FrontendOptions::default())
             .unwrap();
-    let frames: Vec<[ImageU16; 2]> = (0..6)
+    let frames: Vec<[Image<u16, 1>; 2]> = (0..6)
         .map(|step| [dotted_image(step), dotted_image(step)])
         .collect();
 
@@ -332,16 +332,17 @@ fn a_flat_frame_has_the_expected_detector_allocation_cost() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
         FrameToFrameOpticalFlow::new(flow_config(), &flow_rig(2), FrontendOptions::default())
             .unwrap();
-    let flat: ImageU16 = {
-        let mut image: ImageU16 = ImageU16::zeros(common::FLOW_WIDTH, common::FLOW_HEIGHT).unwrap();
+    let flat: Image<u16, 1> = {
+        let mut image: Image<u16, 1> =
+            slam_rs::image::zeros(common::FLOW_WIDTH, common::FLOW_HEIGHT).unwrap();
         for y in 0..common::FLOW_HEIGHT {
             for x in 0..common::FLOW_WIDTH {
-                image.set(x, y, 100u16 << 8);
+                image.set_pixel(x, y, 0, 100u16 << 8).unwrap();
             }
         }
         image
     };
-    let images: [ImageU16; 2] = [flat.clone(), flat];
+    let images: [Image<u16, 1>; 2] = [flat.clone(), flat];
 
     for step in 0..3 {
         flow.process_frame(step, &images, &PosePrediction::default(), &[])
@@ -404,7 +405,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
         slam_rs::frontend::stages::CpuStages::new(
             CpuPyramidBuilder::new(),
             FailingTracker::fail_from(inner, 8),
-            slam_rs::frontend::detect::DetectorScratch::with_scanner(Box::new(
+            kornia_staging_imgproc::features::DetectorScratch::with_scanner(Box::new(
                 CpuCornerScan::default(),
             )),
         )
@@ -413,7 +414,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
     )
     .unwrap();
 
-    let frames: Vec<[ImageU16; 2]> = (0..8)
+    let frames: Vec<[Image<u16, 1>; 2]> = (0..8)
         .map(|step| [dotted_image(step), dotted_image(step)])
         .collect();
     for (step, images) in frames.iter().enumerate().take(3) {
@@ -618,7 +619,7 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
         let mut observations = slam_rs::estimator::FlowObservations::new(t_ns, cameras.len());
         for (slot, keypoints) in observations.cameras.iter_mut().zip(cameras) {
             for (index, id) in keypoints.ids.iter().enumerate() {
-                slot.insert(*id, keypoints.transform(index).translation);
+                slot.insert(*id, keypoints.transform(index).translation.into());
             }
         }
         let observations = std::sync::Arc::new(observations);

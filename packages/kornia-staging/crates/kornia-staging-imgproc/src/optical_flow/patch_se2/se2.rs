@@ -3,17 +3,17 @@
 //! homogeneous matrix product. Tracking needs only the exponential.
 //! The frontend uses f32; f64 supports sharp finite-difference Jacobian tests.
 
-use kornia_staging_algebra::Scalar;
-use nalgebra::{Matrix2, Vector2, Vector3};
+use nalgebra::{Matrix2, Vector2};
 
+use kornia_staging_algebra::Scalar;
 
 /// A 2x2 linear part and a translation, stored as separate blocks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineCompact2<S: Scalar> {
-    /// `transform.linear()`, the 2x2 block.
-    pub linear: Matrix2<S>,
+    /// `transform.linear()`, the 2x2 block in column-major order.
+    pub linear: [[S; 2]; 2],
     /// `transform.translation()`, the last column.
-    pub translation: Vector2<S>,
+    pub translation: [S; 2],
 }
 
 /// The frontend's f32 affine warp.
@@ -29,42 +29,65 @@ impl<S: Scalar> AffineCompact2<S> {
     /// Identity warp.
     pub fn identity() -> Self {
         Self {
-            linear: Matrix2::identity(),
-            translation: Vector2::zeros(),
+            linear: [[S::one(), S::zero()], [S::zero(), S::one()]],
+            translation: [S::zero(); 2],
         }
     }
 
-    /// An identity rotation at `position`, as `addPointsForCamera` builds one
-    pub fn at(position: Vector2<S>) -> Self {
+    /// An identity rotation at `position`.
+    ///
+    /// # Arguments
+    /// * `position` - Translation in image pixels.
+    pub fn at(position: impl Into<[S; 2]>) -> Self {
         Self {
-            linear: Matrix2::identity(),
-            translation: position,
+            linear: [[S::one(), S::zero()], [S::zero(), S::one()]],
+            translation: position.into(),
         }
     }
 
     /// Compose warps: `linear = self.linear * other.linear` and
     /// `translation = self.linear * other.translation + self.translation`.
+    ///
+    /// # Arguments
+    /// * `other` - Warp applied before this warp.
     #[inline]
     pub fn compose(&self, other: &Self) -> Self {
         Self {
-            linear: self.linear * other.linear,
-            translation: self.linear * other.translation + self.translation,
+            linear: (Matrix2::from(self.linear) * Matrix2::from(other.linear))
+                .data
+                .0,
+            translation: (Matrix2::from(self.linear) * Vector2::from(other.translation)
+                + Vector2::from(self.translation))
+            .into(),
+        }
+    }
+
+    /// Build a warp from row-major linear coefficients followed by translation.
+    ///
+    /// # Arguments
+    /// * `coefficients` - `[m00, m01, m10, m11, tx, ty]`.
+    #[inline]
+    pub fn from_coefficients(coefficients: [S; 6]) -> Self {
+        let [m00, m01, m10, m11, tx, ty] = coefficients;
+        Self {
+            linear: [[m00, m10], [m01, m11]],
+            translation: [tx, ty],
         }
     }
 
     /// The six coefficients, `[m00, m01, m10, m11, tx, ty]`.
     ///
     /// The order the structure-of-arrays layout stores them in
-    /// ([`crate::frontend::tracker::FlowTransforms`]): row-major linear part,
+    /// (the caller's flow-transform storage): row-major linear part,
     /// then the translation.
     pub fn coefficients(&self) -> [S; 6] {
         [
-            self.linear[(0, 0)],
-            self.linear[(0, 1)],
-            self.linear[(1, 0)],
-            self.linear[(1, 1)],
-            self.translation.x,
-            self.translation.y,
+            self.linear[0][0],
+            self.linear[1][0],
+            self.linear[0][1],
+            self.linear[1][1],
+            self.translation[0],
+            self.translation[1],
         ]
     }
 
@@ -74,11 +97,14 @@ impl<S: Scalar> AffineCompact2<S> {
     /// (`transform.linear().matrix() * pattern2`, then `colwise() += translation`),
     /// in the same multiply-then-add order, so fusing the two statements into
     /// this call is bit-identical to materialising the 2xP matrix first.
+    ///
+    /// # Arguments
+    /// * `tap` - Sampling offset in pixel coordinates.
     #[inline]
     pub fn warp_tap(&self, tap: [S; 2]) -> [S; 2] {
         [
-            self.linear[(0, 0)] * tap[0] + self.linear[(0, 1)] * tap[1] + self.translation.x,
-            self.linear[(1, 0)] * tap[0] + self.linear[(1, 1)] * tap[1] + self.translation.y,
+            self.linear[0][0] * tap[0] + self.linear[1][0] * tap[1] + self.translation[0],
+            self.linear[0][1] * tap[0] + self.linear[1][1] * tap[1] + self.translation[1],
         ]
     }
 }
@@ -88,7 +114,7 @@ impl<S: Scalar> AffineCompact2<S> {
 /// The small-angle thresholds are `1e-10` in f64 and `1e-5` in f32.
 /// Translation is `V(theta) * upsilon`, evaluated as two scalar expressions.
 #[inline]
-pub fn se2_exp<S: Scalar>(tangent: &Vector3<S>) -> AffineCompact2<S> {
+pub(crate) fn se2_exp<S: Scalar>(tangent: &[S; 3]) -> AffineCompact2<S> {
     let one: S = S::one();
     let theta: S = tangent[2];
     // `SO2<Scalar>::exp(theta)` — cos/sin, then normalise.
@@ -111,11 +137,11 @@ pub fn se2_exp<S: Scalar>(tangent: &Vector3<S>) -> AffineCompact2<S> {
 
     AffineCompact2 {
         // `SO2::matrix()` is `[[re, -im], [im, re]]`.
-        linear: Matrix2::new(real, -imaginary, imaginary, real),
-        translation: Vector2::new(
+        linear: [[real, imaginary], [-imaginary, real]],
+        translation: [
             sin_theta_by_theta * tangent[0] - one_minus_cos_theta_by_theta * tangent[1],
             one_minus_cos_theta_by_theta * tangent[0] + sin_theta_by_theta * tangent[1],
-        ),
+        ],
     }
 }
 
@@ -125,29 +151,38 @@ mod tests {
     use approx::assert_abs_diff_eq;
 
     #[test]
+    fn coefficients_preserve_the_linear_layout_and_translation() {
+        let warp = AffineCompact2f::from_coefficients([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(warp.linear, [[1.0, 3.0], [2.0, 4.0]]);
+        assert_eq!(warp.translation, [5.0, 6.0]);
+        assert_eq!(warp.coefficients(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(warp.warp_tap([7.0, 8.0]), [28.0, 59.0]);
+    }
+
+    #[test]
     fn exp_of_zero_is_the_identity() {
-        let warp: AffineCompact2f = se2_exp(&Vector3::zeros());
-        assert_eq!(warp.linear, Matrix2::identity());
-        assert_eq!(warp.translation, Vector2::zeros());
+        let warp: AffineCompact2f = se2_exp(&[0.0; 3]);
+        assert_eq!(warp.linear, [[1.0, 0.0], [0.0, 1.0]]);
+        assert_eq!(warp.translation, [0.0; 2]);
     }
 
     #[test]
     fn pure_translation_passes_straight_through() {
-        let warp: AffineCompact2f = se2_exp(&Vector3::new(0.25, -0.5, 0.0));
-        assert_eq!(warp.linear, Matrix2::identity());
-        assert_eq!(warp.translation, Vector2::new(0.25, -0.5));
+        let warp: AffineCompact2f = se2_exp(&[0.25, -0.5, 0.0]);
+        assert_eq!(warp.linear, [[1.0, 0.0], [0.0, 1.0]]);
+        assert_eq!(warp.translation, [0.25, -0.5]);
     }
 
     /// A pure rotation of `theta` rotates by `theta` and leaves the origin fixed.
     #[test]
     fn pure_rotation_rotates_and_does_not_translate() {
         let theta: f32 = 0.3;
-        let warp: AffineCompact2f = se2_exp(&Vector3::new(0.0, 0.0, theta));
-        assert_abs_diff_eq!(warp.translation.x, 0.0, epsilon = 1e-7);
-        assert_abs_diff_eq!(warp.translation.y, 0.0, epsilon = 1e-7);
-        assert_abs_diff_eq!(warp.linear[(0, 0)], theta.cos(), epsilon = 1e-6);
-        assert_abs_diff_eq!(warp.linear[(1, 0)], theta.sin(), epsilon = 1e-6);
-        assert_abs_diff_eq!(warp.linear[(0, 1)], -theta.sin(), epsilon = 1e-6);
+        let warp: AffineCompact2f = se2_exp(&[0.0, 0.0, theta]);
+        assert_abs_diff_eq!(warp.translation[0], 0.0, epsilon = 1e-7);
+        assert_abs_diff_eq!(warp.translation[1], 0.0, epsilon = 1e-7);
+        assert_abs_diff_eq!(warp.linear[0][0], theta.cos(), epsilon = 1e-6);
+        assert_abs_diff_eq!(warp.linear[0][1], theta.sin(), epsilon = 1e-6);
+        assert_abs_diff_eq!(warp.linear[1][0], -theta.sin(), epsilon = 1e-6);
     }
 
     /// The small-angle branch is not a cosmetic optimisation: it is the only
@@ -163,30 +198,35 @@ mod tests {
     #[test]
     fn the_small_angle_branch_is_the_one_that_survives_the_cancellation() {
         let boundary: f64 = <f64 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
-        let series: AffineCompact2<f64> = se2_exp(&Vector3::new(1.0, 2.0, boundary * 0.999));
-        let closed: AffineCompact2<f64> = se2_exp(&Vector3::new(1.0, 2.0, boundary * 1.001));
+        let series: AffineCompact2<f64> = se2_exp(&[1.0, 2.0, boundary * 0.999]);
+        let closed: AffineCompact2<f64> = se2_exp(&[1.0, 2.0, boundary * 1.001]);
         // `x = 1 * sin(t)/t - 2 * (1 - cos t)/t`, so the series carries `-2 * t/2`.
         assert_abs_diff_eq!(
-            series.translation.x,
+            series.translation[0],
             1.0 - boundary * 0.999,
             epsilon = 1e-20
         );
-        assert_eq!(closed.translation.x, 1.0);
+        assert_eq!(closed.translation[0], 1.0);
 
         let boundary: f32 = <f32 as kornia_staging_algebra::Scalar>::SOPHUS_EPSILON;
-        let series: AffineCompact2f = se2_exp(&Vector3::new(1.0, 2.0, boundary * 0.999));
-        let closed: AffineCompact2f = se2_exp(&Vector3::new(1.0, 2.0, boundary * 1.001));
-        assert_abs_diff_eq!(series.translation.x, 1.0 - boundary * 0.999, epsilon = 1e-9);
-        assert_eq!(closed.translation.x, 1.0);
+        let series: AffineCompact2f = se2_exp(&[1.0, 2.0, boundary * 0.999]);
+        let closed: AffineCompact2f = se2_exp(&[1.0, 2.0, boundary * 1.001]);
+        assert_abs_diff_eq!(
+            series.translation[0],
+            1.0 - boundary * 0.999,
+            epsilon = 1e-9
+        );
+        assert_eq!(closed.translation[0], 1.0);
     }
 
     /// `warp_tap` is the fused form of `linear * pattern2` then `+= translation`.
     #[test]
     fn warp_tap_matches_the_matrix_form() {
-        let warp: AffineCompact2f = se2_exp(&Vector3::new(3.0, -1.0, 0.2));
+        let warp: AffineCompact2f = se2_exp(&[3.0, -1.0, 0.2]);
         let tap: [f32; 2] = [-3.5, 2.5];
         let warped: [f32; 2] = warp.warp_tap(tap);
-        let expected: Vector2<f32> = warp.linear * Vector2::new(tap[0], tap[1]) + warp.translation;
+        let expected: Vector2<f32> = Matrix2::from(warp.linear) * Vector2::new(tap[0], tap[1])
+            + Vector2::from(warp.translation);
         assert_abs_diff_eq!(warped[0], expected.x, epsilon = 1e-6);
         assert_abs_diff_eq!(warped[1], expected.y, epsilon = 1e-6);
     }

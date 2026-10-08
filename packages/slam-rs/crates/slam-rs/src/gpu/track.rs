@@ -1,6 +1,7 @@
 //! The GPU [`PatchTracker`]: both passes and the recovered-distance test on the
 //! device, one wait per call.
 
+use crate::frontend::flow::FrontendError;
 mod batch;
 
 use cubecl::prelude::*;
@@ -11,11 +12,10 @@ use super::kernels::klt_fused::{
 use super::patches::GpuPatchSources;
 use super::pyramid::GpuPyramid;
 use super::{GpuError, guarded};
-use crate::frontend::patterns::Pattern;
-use crate::frontend::tracker::{
-    FlowTransforms, PatchTracker, SourcePatches, TrackInput, TrackerError, check_track_inputs,
-};
 use crate::pyramid::Pyramid;
+use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackPhase};
+use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowTransforms, TrackerError};
 
 pub(super) struct FusedLaunch {
     pub(super) buffers: [(cubecl::server::Handle, usize); 4],
@@ -80,7 +80,7 @@ pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     /// The keypoint counts of the passes submitted since the last collect, in
     /// submission order, which is also their lane order.
     pub(super) pending: Vec<usize>,
-    pub(super) batch: crate::frontend::tracker::TrackBatch,
+    pub(super) batch: kornia_staging_slam::tracking::optical_flow::TrackBatch,
     /// The staging buffer the transform inputs are uploaded from.
     staging: Vec<f32>,
     pub(super) packed_fused: PackedFused,
@@ -110,13 +110,21 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         max_recovered_dist2: f32,
         lanes: usize,
         launches: super::submission::LaunchList,
-    ) -> Result<Self, TrackerError> {
+    ) -> Result<Self, FrontendError> {
         guarded(
             GpuError::DeviceLost {
                 what: "tracker allocation",
             },
             || {
-                crate::frontend::tracker::checked_patch_shape(capacity, num_levels, P::SIZE)?;
+                kornia_staging_imgproc::optical_flow::patch_tracker::limits::validate_tracking_parameters(
+                    max_iterations,
+                    max_recovered_dist2,
+                )?;
+                kornia_staging_imgproc::optical_flow::patch_tracker::limits::checked_patch_shape(
+                    capacity,
+                    num_levels,
+                    P::SIZE,
+                )?;
                 super::runtime::probe_subgroups(&client)?;
 
                 let lanes = lanes.max(1);
@@ -147,7 +155,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     exit_step_px: None,
                     results,
                     pending: Vec::with_capacity(lanes),
-                    batch: crate::frontend::tracker::TrackBatch::default(),
+                    batch: kornia_staging_slam::tracking::optical_flow::TrackBatch::default(),
                     staging: vec![0.0; FUSED_RUNS * capacity],
                     packed_fused,
                     fused_meta,
@@ -161,17 +169,20 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
 }
 
 impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
-    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) {
+    fn set_klt_exit_step_px(&mut self, threshold: Option<f32>) -> Result<(), FrontendError> {
+        kornia_staging_imgproc::optical_flow::patch_tracker::limits::validate_exit_step(threshold)?;
         self.exit_step_px = threshold;
+        Ok(())
     }
 
-    fn batch(&self) -> &crate::frontend::tracker::TrackBatch {
+    fn batch(&self) -> &kornia_staging_slam::tracking::optical_flow::TrackBatch {
         &self.batch
     }
-    fn batch_mut(&mut self) -> &mut crate::frontend::tracker::TrackBatch {
+    fn batch_mut(&mut self) -> &mut kornia_staging_slam::tracking::optical_flow::TrackBatch {
         &mut self.batch
     }
 
+    type Error = FrontendError;
     type Pattern = P;
     type Pyramid = GpuPyramid<R>;
     type Patches = GpuPatchSources<P, R>;
@@ -184,19 +195,91 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         self.num_levels
     }
 
-    fn make_patches(&self) -> Result<GpuPatchSources<P, R>, TrackerError> {
+    fn make_patches(&self) -> Result<GpuPatchSources<P, R>, FrontendError> {
         GpuPatchSources::new(self.capacity, self.num_levels)
     }
 
+    fn submit_batch(
+        &mut self,
+        prev: &[GpuPyramid<R>],
+        next: &[GpuPyramid<R>],
+        phase: TrackPhase<'_>,
+        patches: &mut GpuPatchSources<P, R>,
+        slots: &mut [usize],
+    ) -> Result<(), FrontendError> {
+        use crate::pyramid::Pyramid;
+        let inputs = phase.validate(
+            self.capacity,
+            self.num_levels,
+            slots.len(),
+            Some(patches.num_levels()),
+            |i| prev.get(i).map(Pyramid::num_levels),
+            |i| next.get(i).map(Pyramid::num_levels),
+        )?;
+        if self.pending.len() + inputs.len() > self.results.len() {
+            return Err(TrackerError::TooManyPasses {
+                submitted: self.pending.len() + inputs.len(),
+                lanes: self.results.len(),
+            }
+            .into());
+        }
+        if self.submit_packed(prev, next, inputs, slots)? {
+            return Ok(());
+        }
+        kornia_staging_slam::tracking::optical_flow::submit_each(inputs, slots, |input| {
+            use kornia_staging_slam::tracking::optical_flow::SourcePatches;
+            if inputs.is_temporal() || input.destination == 1 {
+                patches.build(&prev[input.source], input.positions, None)?;
+            }
+            self.submit_pass(
+                &prev[input.source],
+                &next[input.destination],
+                patches,
+                input.guesses,
+            )
+        })
+    }
+
+    /// Every submitted pass's result in one download, decoded in order.
+    fn collect(&mut self) -> Result<(), FrontendError> {
+        // The one call per frameset that waits on the device, and the one the
+        // frontend makes with the GIL released: a lost device panics inside
+        // CubeCL's own client, and the guard is what turns that into this
+        // method's error rather than a `PanicException` in Python (decision D32).
+        let outcome: Result<(), FrontendError> =
+            guarded(GpuError::DeviceLost { what: "tracker" }, || {
+                let reads = self.read_handles();
+                let bytes = if reads.is_empty() {
+                    Vec::new()
+                } else {
+                    super::submission::read_blocking(
+                        &self.client,
+                        &self.launches,
+                        reads,
+                        "the tracker result",
+                    )?
+                };
+                self.decode_results(&bytes)
+            });
+        self.reset_batch();
+        outcome
+    }
+
+    fn discard(&mut self) {
+        self.reset_batch();
+    }
+}
+
+impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     /// `trackPoints` on the device,
     /// launched into the next free lane and left there.
-    fn submit(
+    fn submit_pass(
         &mut self,
         prev: &GpuPyramid<R>,
         next: &GpuPyramid<R>,
         patches: &GpuPatchSources<P, R>,
         transforms_in: &FlowTransforms,
-    ) -> Result<usize, TrackerError> {
+    ) -> Result<usize, FrontendError> {
         // Launches only, but they still reach the device, and a lost one panics
         // inside CubeCL's own client: the guard is what turns that into this
         // method's error rather than a `PanicException` through the released GIL
@@ -219,7 +302,8 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
                 return Err(TrackerError::TooManyPasses {
                     submitted: lane + 1,
                     lanes: self.results.len(),
-                });
+                }
+                .into());
             }
             self.batch.slot_mut(lane, self.capacity);
             self.pending.push(count);
@@ -256,51 +340,6 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         })
     }
 
-    fn submit_batch(
-        &mut self,
-        prev: &[GpuPyramid<R>],
-        next: &[GpuPyramid<R>],
-        inputs: &mut [TrackInput],
-        patches: &mut GpuPatchSources<P, R>,
-        temporal: bool,
-    ) -> Result<(), TrackerError> {
-        if self.submit_packed(prev, next, inputs)? {
-            return Ok(());
-        }
-        crate::frontend::tracker::submit_each(self, prev, next, inputs, patches, temporal)
-    }
-
-    /// Every submitted pass's result in one download, decoded in order.
-    fn collect(&mut self) -> Result<(), TrackerError> {
-        // The one call per frameset that waits on the device, and the one the
-        // frontend makes with the GIL released: a lost device panics inside
-        // CubeCL's own client, and the guard is what turns that into this
-        // method's error rather than a `PanicException` in Python (decision D32).
-        let outcome: Result<(), TrackerError> =
-            guarded(GpuError::DeviceLost { what: "tracker" }, || {
-                let reads = self.read_handles();
-                let bytes = if reads.is_empty() {
-                    Vec::new()
-                } else {
-                    super::submission::read_blocking(
-                        &self.client,
-                        &self.launches,
-                        reads,
-                        "the tracker result",
-                    )?
-                };
-                self.decode_results(&bytes)
-            });
-        self.reset_batch();
-        outcome
-    }
-
-    fn discard(&mut self) {
-        self.reset_batch();
-    }
-}
-
-impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     fn reset_batch(&mut self) {
         self.launches.clear();
         self.pending.clear();
@@ -313,7 +352,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         self.launches.flush(&self.client);
 
         for (lane, count) in self.pending.iter().enumerate() {
-            self.batch.slots[lane].reset(*count);
+            self.batch.result_mut(lane).reset(*count);
         }
         // A pass that offered nothing launched nothing, so it has no buffer to
         // read; the download is over the lanes that do.
@@ -344,14 +383,14 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     pub(super) fn decode_results(
         &mut self,
         bytes: &[cubecl::bytes::Bytes],
-    ) -> Result<(), TrackerError> {
+    ) -> Result<(), FrontendError> {
         let packed_count = self.packed_fused.count;
         let mut read: usize = 0;
         let mut packed_offset = 0;
         for (lane, count) in self.pending.iter().enumerate() {
             let count: usize = *count;
             if count == 0 {
-                self.batch.slots[lane].finish(0);
+                self.batch.result_mut(lane).clear();
                 continue;
             }
             let expected: usize = FUSED_RUNS * count * size_of::<f32>();
@@ -372,16 +411,18 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     first: expected,
                     second_name: "returned",
                     second: buffer.len(),
-                });
+                }
+                .into());
             }
             let values: &[f32] = f32::from_bytes(&buffer[packed_offset..packed_offset + expected]);
             if packed_count != 0 {
                 packed_offset += expected;
             }
-            for (index, point) in values.as_chunks::<{ FUSED_RUNS }>().0.iter().enumerate() {
-                decode_point(point, &mut self.batch.slots[lane], index);
+            self.batch.result_mut(lane).reset(count);
+            for (index, point) in values.as_chunks::<FUSED_RUNS>().0.iter().enumerate() {
+                decode_point(point, self.batch.result_mut(lane), index);
             }
-            self.batch.slots[lane].finish(count);
+            self.batch.result_mut(lane).finish();
         }
         Ok(())
     }
@@ -404,7 +445,7 @@ fn stage_points(
     staging: &mut Vec<f32>,
     guesses: &FlowTransforms,
     camera: usize,
-    source: impl Fn(usize) -> (f32, nalgebra::Vector2<f32>),
+    source: impl Fn(usize) -> (f32, [f32; 2]),
 ) {
     for index in 0..guesses.len() {
         let (selected, position) = source(index);
@@ -416,3 +457,5 @@ fn stage_points(
         ));
     }
 }
+
+use kornia_staging_imgproc::optical_flow::patch_tracker::limits::check_track_inputs;

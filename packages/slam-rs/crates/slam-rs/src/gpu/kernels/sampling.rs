@@ -7,7 +7,7 @@ use cubecl::prelude::*;
 // together. The storage probe alone retains checked launch mode.
 // ── sampling ─────────────────────────────────────────────────────────────────
 
-/// `ImageU16::in_bounds`.
+/// `Image<u16, 1>::in_bounds`.
 #[cube]
 pub(crate) fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bool {
     border <= x

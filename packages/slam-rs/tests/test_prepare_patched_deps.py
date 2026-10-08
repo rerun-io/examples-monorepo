@@ -68,11 +68,11 @@ def test_applies_inside_ignored_git_target(tmp_path: Path, crate: PatchedCrate) 
 
 @pytest.mark.skipif(shutil.which('cargo') is None, reason='real patch smoke test requires cargo on PATH')
 @pytest.mark.integration
-def test_real_patch_and_locked_cargo_resolution(tmp_path: Path) -> None:
+@pytest.mark.parametrize('crate', PATCHED_CRATES, ids=lambda crate: crate.name)
+def test_real_patch_and_locked_cargo_resolution(tmp_path: Path, crate: PatchedCrate) -> None:
     """The shipped patch matches the fork and Cargo uses the prepared crate."""
     package_dir: Path = Path(__file__).resolve().parents[1]
     cargo_home: Path = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
-    crate: PatchedCrate = PATCHED_CRATES[0]
     patch: Path = tmp_path / crate.patch
     patch.parent.mkdir(parents=True)
     shutil.copyfile(package_dir / crate.patch, patch)
@@ -84,10 +84,11 @@ def test_real_patch_and_locked_cargo_resolution(tmp_path: Path) -> None:
     except (urllib.error.URLError, TimeoutError) as error:
         pytest.skip(f'pinned crate archive is not cached and download is unavailable: {error}')
     stem: str = f'{crate.name}-{crate.version}'
-    channel: Path = tmp_path / 'target/patch' / stem / 'src/device/handle/channel.rs'
-    assert hashlib.sha256(channel.read_bytes()).hexdigest() == CHANNEL_SHA256
-    main_channel: Path = package_dir / 'target/patch' / stem / 'src/device/handle/channel.rs'
-    assert hashlib.sha256(main_channel.read_bytes()).hexdigest() == CHANNEL_SHA256
+    if crate.name == 'cubecl-common':
+        channel: Path = tmp_path / 'target/patch' / stem / 'src/device/handle/channel.rs'
+        assert hashlib.sha256(channel.read_bytes()).hexdigest() == CHANNEL_SHA256
+        main_channel: Path = package_dir / 'target/patch' / stem / 'src/device/handle/channel.rs'
+        assert hashlib.sha256(main_channel.read_bytes()).hexdigest() == CHANNEL_SHA256
     result: subprocess.CompletedProcess[str] = subprocess.run(
         # CubeCL is optional; select its lane so it appears in the resolved graph.
         ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--features', 'slam-rs/gpu-wgpu'],

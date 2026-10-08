@@ -11,7 +11,7 @@ pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioRe
 pub use lane::FrontendLane;
 use lane::build_frontend;
 
-use crate::{calib, config, duration_ns, estimator, frontend, image, imu, types};
+use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 
 /// Frameset pipeline with optional one-frame estimator lag (D17, D24, M7).
@@ -38,12 +38,12 @@ pub struct Vio<S: Scalar = f32> {
     /// The static bias calibration, applied to the frontend's samples in `f32`
     /// and cast back to `f64`.
     calib_f32: calib::Calibration<f32>,
-    /// Owned frames: reusable widened buffers on CPU, dense bytes on GPU.
-    frames: Vec<image::ImageU16>,
+    /// Owned dense CPU inputs or retained packed GPU inputs.
+    frames: frontend::input::FrameStorage,
     /// Reusable lookahead input, filled by the same lane as the current frame.
-    next_frames: Vec<image::ImageU16>,
+    next_frames: frontend::input::PackedImages,
     /// `img->masks`, always empty here: masks come from Monado.
-    masks: Vec<frontend::detect::Masks>,
+    masks: Vec<kornia_staging_imgproc::features::CellMasks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
     camera_count: usize,
     /// The last frameset's timestamp, `t_ns` in the frontend.
@@ -128,9 +128,9 @@ impl<S: Scalar> Vio<S> {
             latest_state: None,
             frontend_noise,
             calib_f32,
-            frames: Vec::new(),
-            next_frames: Vec::new(),
-            masks: vec![frontend::detect::Masks::default(); camera_count],
+            frames: frontend::input::FrameStorage::new(backend == Backend::Gpu),
+            next_frames: frontend::input::PackedImages::default(),
+            masks: vec![kornia_staging_imgproc::features::CellMasks::default(); camera_count],
             camera_count,
             last_frame_t_ns: None,
             last_stats: None,
@@ -306,11 +306,7 @@ impl<S: Scalar> Vio<S> {
             && let Some((next_t_ns, next_images)) = lookahead
         {
             let vio = &mut *prepared.vio;
-            vio.next_frames
-                .resize_with(next_images.len(), image::ImageU16::default);
-            for (frame, view) in vio.next_frames.iter_mut().zip(next_images) {
-                vio.frontend.fill_frame(frame, view)?;
-            }
+            vio.next_frames.fill(next_images);
             vio.frontend
                 .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
         }
@@ -392,13 +388,7 @@ impl<S: Scalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        // Keep GPU input packed until its first pyramid dispatch. CPU callers
-        // retain the existing widening into reusable image buffers.
-        self.frames
-            .resize_with(images.len(), image::ImageU16::default);
-        for (frame, view) in self.frames.iter_mut().zip(images.iter()) {
-            self.frontend.fill_frame(frame, view)?;
-        }
+        self.frames.fill(images)?;
         Ok(PreparedTrack {
             vio: self,
             t_ns,
@@ -429,8 +419,9 @@ impl<S: Scalar> Vio<S> {
             .zip(self.frontend.frame().cameras.iter())
         {
             for (index, id) in keypoints.ids.iter().enumerate() {
-                let warp: frontend::se2::AffineCompact2f = keypoints.transform(index);
-                slot.insert(*id, warp.translation);
+                let warp: kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f =
+                    keypoints.transform(index);
+                slot.insert(*id, warp.translation.into());
             }
         }
         let observations = std::sync::Arc::new(observations);

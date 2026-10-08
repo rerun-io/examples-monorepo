@@ -4,8 +4,8 @@ use super::*;
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn default_cell_selection_follows_kornias_neon_gate() {
-    use slam_rs::frontend::detect::SelectionStatus;
-    let image = ImageU16::zeros(64, 64).unwrap();
+    use kornia_staging_imgproc::features::SelectionStatus;
+    let image = slam_rs::image::zeros(64, 64).unwrap();
     let select = CellSelect {
         grid: CellGrid::new(64, 64, 32).unwrap(),
         threshold: 5,
@@ -26,13 +26,13 @@ fn default_cell_selection_follows_kornias_neon_gate() {
 
 #[test]
 fn cell_selection_refuses_unrepresentable_keys_and_thresholds() {
-    use slam_rs::frontend::detect::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
+    use kornia_staging_imgproc::features::{LOWEST_THRESHOLD_RUNG, SelectionStatus};
     for (width, height, threshold) in [
         (CELL_KEY_LIMIT, 64, 5),
         (64, CELL_KEY_LIMIT, 5),
         (64, 64, LOWEST_THRESHOLD_RUNG - 1),
     ] {
-        let image = ImageU16::zeros(width, height).unwrap();
+        let image = slam_rs::image::zeros(width, height).unwrap();
         let grid = CellGrid::new(width, height, 32).unwrap();
         let select = CellSelect {
             grid,
@@ -78,23 +78,29 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
         (817, 127, 60),
         (960, 129, 50),
     ] {
-        let mut image = ImageU16::zeros_with_stride(width, height, width + 13).unwrap();
+        let mut image = slam_rs::image::from_u8_strided(
+            &vec![0; (width + 13) * height],
+            width,
+            height,
+            width + 13,
+        )
+        .unwrap();
         for y in 0..height {
             for x in 0..width {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                image.set(x, y, (state >> 16) as u16);
+                image.set_pixel(x, y, 0, (state >> 16) as u16).unwrap();
             }
         }
         let grid = CellGrid::new(width, height, cell).unwrap();
         let counts: Vec<i32> = (0..grid.rows * grid.columns)
             .map(|i| i32::from(i % 5 == 0))
             .collect();
-        let masks = Masks {
+        let masks = CellMasks {
             masks: grid
                 .cells()
                 .enumerate()
                 .filter(|(i, _)| i % 3 == 0)
-                .map(|(_, (column, row))| Rect {
+                .map(|(_, (column, row))| MaskRect {
                     x: (grid.x_start + column * cell) as f32,
                     y: (grid.y_start + row * cell) as f32,
                     w: cell as f32,
@@ -108,7 +114,7 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
                     image: &image,
                     grid: &grid,
                     counts: &counts,
-                    config: &DetectorConfig {
+                    config: &CenteredCellConfig {
                         min_threshold: threshold,
                         max_threshold: threshold,
                         ..detector_config(0.0)
@@ -125,32 +131,32 @@ fn cell_selection_matches_the_band_walk_on_random_strided_images() {
 
 #[test]
 fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
-    let mut image = ImageU16::zeros(100, 100).unwrap();
+    let mut image = slam_rs::image::zeros(100, 100).unwrap();
     for y in 0..100 {
         for x in 0..100 {
-            image.set(x, y, 128 << 8);
+            image.set_pixel(x, y, 0, 128 << 8).unwrap();
         }
     }
     for (x, y) in [(35, 35), (65, 35), (35, 65)] {
-        image.set(x, y, 0);
+        image.set_pixel(x, y, 0, 0).unwrap();
     }
     let grid = CellGrid::new(100, 100, 100).unwrap();
     let counts = vec![0; grid.rows * grid.columns];
-    let detect = |image: &ImageU16| {
+    let detect = |image: &Image<u16, 1>| {
         detect_with(
-            Box::new(CpuCornerScan::with_cell_selection(true)),
+            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
             image,
             &grid,
             &counts,
             &detector_config(0.0),
-            &Masks::default(),
+            &CellMasks::default(),
             1,
         )
     };
     let tied = detect(&image);
     assert_eq!(tied.corners, [[35.0, 35.0]]);
     assert_eq!(tied.responses, [127.0]);
-    image.set(36, 35, 0);
+    image.set_pixel(36, 35, 0, 0).unwrap();
     let plateau = detect(&image);
     assert_eq!(plateau.corners, [[65.0, 35.0]]);
     assert_eq!(plateau.responses, [127.0]);
@@ -159,9 +165,9 @@ fn cell_selection_keeps_scan_order_for_ties_and_rejects_plateaus() {
 /// Every cell of a real MIO10 frameset, both cameras, empty and half full.
 #[test]
 fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
-    let config: DetectorConfig = detector_config(472.0);
+    let config: CenteredCellConfig = detector_config(472.0);
     for camera in 0..2 {
-        let image: ImageU16 = common::mio10_frame(0, camera);
+        let image: Image<u16, 1> = common::mio10_frame(0, camera);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let cells: usize = grid.rows * grid.columns;
 
@@ -173,7 +179,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
                 grid: &grid,
                 counts: &empty,
                 config: &config,
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("cam{camera} empty"),
             },
@@ -189,7 +195,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
         // skip has to land on the same cells on both lanes.
         let mut busy: Vec<i32> = vec![0; cells];
         for (index, count) in busy.iter_mut().enumerate() {
-            *count = i32::from(index % 3 == 0);
+            *count = i32::from(index.is_multiple_of(3));
         }
         detection_agrees(
             DetectionCase {
@@ -197,7 +203,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
                 grid: &grid,
                 counts: &busy,
                 config: &config,
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("cam{camera} occupied"),
             },
@@ -209,7 +215,7 @@ fn the_cell_selection_matches_the_host_walk_on_a_real_frameset() {
 /// The gates the kernel took over, one at a time, and the budget the host keeps.
 #[test]
 fn the_cell_selection_applies_the_same_gates() {
-    let image: ImageU16 = common::mio10_frame(1, 0);
+    let image: Image<u16, 1> = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
@@ -222,7 +228,7 @@ fn the_cell_selection_applies_the_same_gates() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(radius),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("safe radius {radius}"),
             },
@@ -232,14 +238,14 @@ fn the_cell_selection_applies_the_same_gates() {
 
     // `cam0OverlapCellsMasksForCam`'s own shape: `cell` x `cell` rectangles at
     // the cell origins. Every third one, so masked and clear cells interleave.
-    let mut masks: Masks = Masks::default();
+    let mut masks: CellMasks = CellMasks::default();
     let mut index: usize = 0;
     let mut y: usize = grid.y_start;
     while y <= grid.y_stop {
         let mut x: usize = grid.x_start;
         while x <= grid.x_stop {
             if index.is_multiple_of(3) {
-                masks.masks.push(Rect {
+                masks.masks.push(MaskRect {
                     x: x as f32,
                     y: y as f32,
                     w: grid.cell as f32,
@@ -267,8 +273,8 @@ fn the_cell_selection_applies_the_same_gates() {
     // A rectangle that straddles a cell boundary is the mixed-geometry rig's
     // shape: the device path has to refuse it and the band walk has to answer,
     // which is the same answer either way.
-    let mut straddling: Masks = Masks::default();
-    straddling.masks.push(Rect {
+    let mut straddling: CellMasks = CellMasks::default();
+    straddling.masks.push(MaskRect {
         x: (grid.x_start + 17) as f32,
         y: (grid.y_start + 21) as f32,
         w: grid.cell as f32,
@@ -295,7 +301,7 @@ fn the_cell_selection_applies_the_same_gates() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(472.0),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget,
                 label: &format!("budget {budget}"),
             },
@@ -322,7 +328,7 @@ fn the_cell_selection_matches_the_host_walk_on_uneven_frames() {
         (640, 480, 50),
         (641, 479, 64),
     ] {
-        let image: ImageU16 = cornered_image(width, height);
+        let image: Image<u16, 1> = cornered_image(width, height);
         let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
         // The precondition the clamp test below needs and this one does not
         // have: `CellGrid::new` cannot produce a cell that runs past the image.
@@ -334,7 +340,7 @@ fn the_cell_selection_matches_the_host_walk_on_uneven_frames() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(0.0),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &format!("{width}x{height} cell {cell}"),
             },
@@ -385,7 +391,7 @@ fn caller_grid(
 #[test]
 fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
     let (width, height, cell): (usize, usize, usize) = (200, 150, 50);
-    let image: ImageU16 = cornered_image(width, height);
+    let image: Image<u16, 1> = cornered_image(width, height);
 
     // Cells at x = 20, 70, 120, 170 and y = 10, 60, 110: the last column ends at
     // 220 and the last row at 160, both past the frame.
@@ -422,7 +428,7 @@ fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
                 grid: &grid,
                 counts: &counts,
                 config: &detector_config(0.0),
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label,
             },
@@ -442,12 +448,12 @@ fn the_cell_selection_matches_the_host_walk_on_overhanging_cells() {
 /// vacuously.
 #[test]
 fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
-    let image: ImageU16 = common::mio10_frame(0, 0);
+    let image: Image<u16, 1> = common::mio10_frame(0, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
     for (max_threshold, min_threshold, last_rung) in [(40i32, 6i32, 10i32), (32, 5, 8)] {
-        let config: DetectorConfig = DetectorConfig {
+        let config: CenteredCellConfig = CenteredCellConfig {
             max_threshold,
             min_threshold,
             ..detector_config(472.0)
@@ -456,18 +462,18 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
 
         // The ladder that stops at the configured minimum instead: one rung, at
         // `min_threshold`. This is what a device given the wrong bound detects.
-        let at_the_minimum: DetectorConfig = DetectorConfig {
+        let at_the_minimum: CenteredCellConfig = CenteredCellConfig {
             max_threshold: min_threshold,
             ..config
         };
         assert_eq!(threshold_rungs(&at_the_minimum).last(), Some(min_threshold));
         let admitted: usize = detect_with(
-            Box::new(CpuCornerScan::with_cell_selection(true)),
+            Box::new(AppScan(CpuCornerScan::with_cell_selection(true))),
             &image,
             &grid,
             &counts,
             &at_the_minimum,
-            &Masks::default(),
+            &CellMasks::default(),
             4096,
         )
         .corners
@@ -480,7 +486,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
                 grid: &grid,
                 counts: &counts,
                 config: &config,
-                masks: &Masks::default(),
+                masks: &CellMasks::default(),
                 budget: 4096,
                 label: &label,
             },
@@ -504,7 +510,7 @@ fn the_cell_selection_stops_at_the_last_rung_the_walk_visits() {
 #[test]
 fn a_frame_at_the_key_limit_takes_the_band_walk() {
     let (width, height, cell): (usize, usize, usize) = (CELL_KEY_LIMIT, 96, 32);
-    let image: ImageU16 = cornered_image(width, height);
+    let image: Image<u16, 1> = cornered_image(width, height);
     let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
     let agreed: usize = detection_agrees(
@@ -513,7 +519,7 @@ fn a_frame_at_the_key_limit_takes_the_band_walk() {
             grid: &grid,
             counts: &counts,
             config: &detector_config(0.0),
-            masks: &Masks::default(),
+            masks: &CellMasks::default(),
             budget: 4096,
             label: "a frame at the key limit",
         },
@@ -528,10 +534,10 @@ fn a_frame_at_the_key_limit_takes_the_band_walk() {
 /// the ladder decides how many corners a cell contributes and one key cannot say.
 #[test]
 fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
-    let image: ImageU16 = common::mio10_frame(1, 0);
+    let image: Image<u16, 1> = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
-    let config: DetectorConfig = DetectorConfig {
+    let config: CenteredCellConfig = CenteredCellConfig {
         num_points_cell: 2,
         ..detector_config(472.0)
     };
@@ -541,7 +547,7 @@ fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
             grid: &grid,
             counts: &counts,
             config: &config,
-            masks: &Masks::default(),
+            masks: &CellMasks::default(),
             budget: 4096,
             label: "two points per cell",
         },

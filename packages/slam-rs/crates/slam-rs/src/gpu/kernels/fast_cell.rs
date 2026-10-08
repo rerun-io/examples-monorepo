@@ -6,8 +6,8 @@ use super::{
 use cubecl::prelude::*;
 
 const UNITS: usize = 128;
-const BORDER: usize = crate::frontend::detect::FAST_BORDER;
-const EDGE: f32 = crate::frontend::detect::EDGE_THRESHOLD;
+const BORDER: usize = kornia_staging_imgproc::features::FAST_BORDER;
+const EDGE: f32 = kornia_staging_imgproc::features::EDGE_THRESHOLD;
 
 #[cube]
 fn tile_pixel(tile: &Shared<[u32]>, slot: usize) -> u32 {

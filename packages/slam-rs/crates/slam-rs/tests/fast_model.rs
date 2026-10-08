@@ -10,9 +10,9 @@
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{FastCorner, Rect as KorniaRect, fast_detect_rect_u8};
-use slam_rs::frontend::detect::{
-    CellGrid, CornerScan, CpuCornerScan, DetectorConfig, FAST_BORDER, FAST_FILTER_LANES,
-    FAST_RING_COLUMN, FAST_RING_ROW, Occupancy, SelectionStatus, block_filter_end, cell_select,
+use kornia_staging_imgproc::features::{
+    CellGrid, CenteredCellConfig, CornerScan, CpuCornerScan, FAST_BORDER, Occupancy,
+    SelectionStatus, cell_select,
 };
 
 mod common;
@@ -24,9 +24,9 @@ fn cpu_selects_cells_without_a_band_scan() {
     let image = common::cornered_image(640, 480);
     let grid = CellGrid::new(640, 480, 50).unwrap();
     let select = cell_select(
-        &image,
+        image.size(),
         &grid,
-        &DetectorConfig {
+        &CenteredCellConfig {
             num_points_cell: 1,
             min_threshold: 5,
             max_threshold: 40,
@@ -42,7 +42,7 @@ fn cpu_selects_cells_without_a_band_scan() {
         SelectionStatus::Selected
     );
     assert_eq!(keys.len(), 12 * 9);
-    assert!(keys.iter().any(|&key| key != u32::MAX));
+    assert!(keys.iter().any(|&key| key.is_some()));
 }
 
 #[test]
@@ -50,9 +50,9 @@ fn cpu_selection_omits_occupied_masked_and_out_of_occupancy_cells() {
     let image = common::cornered_image(640, 480);
     let grid = CellGrid::new(640, 480, 50).unwrap();
     let select = cell_select(
-        &image,
+        image.size(),
         &grid,
-        &DetectorConfig {
+        &CenteredCellConfig {
             num_points_cell: 1,
             min_threshold: 5,
             max_threshold: 40,
@@ -67,7 +67,7 @@ fn cpu_selection_omits_occupied_masked_and_out_of_occupancy_cells() {
         .unwrap();
     let counts: Vec<i32> = (0..7 * 10).map(|i| i32::from(i % 3 == 0)).collect();
     let masked: Vec<bool> = (0..12 * 9).map(|i| i % 5 == 0).collect();
-    let mut selected = vec![0; 200];
+    let mut selected = vec![None; 200];
     scanner
         .select_cells(
             3,
@@ -90,7 +90,7 @@ fn cpu_selection_omits_occupied_masked_and_out_of_occupancy_cells() {
             let i = row * 12 + column;
             let expected =
                 if row >= 7 || column >= 10 || masked[i] || counts[row * 10 + column] != 0 {
-                    u32::MAX
+                    None
                 } else {
                     all[i]
                 };
@@ -114,7 +114,7 @@ fn cpu_selection_omits_occupied_masked_and_out_of_occupancy_cells() {
             &mut selected,
         )
         .unwrap();
-    assert!(selected.iter().all(|&key| key == u32::MAX));
+    assert!(selected.iter().all(|&key| key.is_none()));
     scanner
         .select_cells(2, &image, &select, None, &mut selected)
         .unwrap();
@@ -242,3 +242,7 @@ fn the_model_reproduces_kornia() {
         }
     }
 }
+
+use slam_rs::frontend::detect::{
+    FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
+};
