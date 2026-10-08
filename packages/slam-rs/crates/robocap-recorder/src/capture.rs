@@ -1,3 +1,4 @@
+use kornia_staging_io::video::has_nal;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};
@@ -392,12 +393,4 @@ impl DirectWriter {
 
 fn field(name: &'static str, array: ArrayRef) -> SerializedComponentBatch {
     SerializedComponentBatch::new(array, ComponentDescriptor::partial(name))
-}
-
-fn has_nal(bytes: &[u8], kind: u8) -> bool {
-    // A four-byte start code includes the three-byte suffix. Emulation
-    // prevention keeps this delimiter out of an encoded NAL payload.
-    bytes
-        .windows(4)
-        .any(|window| window[..3] == [0, 0, 1] && window[3] & 0x1f == kind)
 }

@@ -20,13 +20,14 @@ use std::time::{Duration, Instant};
 
 use kornia_image::Image;
 use kornia_staging_imgproc::resize::resize_area_u8;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta, Frameset};
+use robocap_live::frame::Luma;
 use robocap_live::frame::isometry_from_matrix;
 use robocap_live::frame::{
-    CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, Luma, NUM_CAMERAS, Rig,
-    SMALL_SIZE, write_small_dump,
+    DumpMeta, FULL_SIZE, FrameReader, NUM_CAMERAS, Rig, SMALL_SIZE, write_small_dump,
 };
 use robocap_live::hands::{HandFrameResult, HandOutput};
-use robocap_live::log::video::{EncoderConfig, EncoderKind};
+use robocap_live::log::video::{EncoderKind, encoder_config};
 use robocap_live::log::{FrameLog, Logger, LoggerConfig, VideoMode};
 use robocap_live::sched::FrameTimings;
 use serde::Deserialize;
@@ -203,10 +204,10 @@ fn main() -> Result<(), Error> {
             }
         }
         let cam_t_ns =
-            std::array::from_fn(|c| frameset.cameras[c].as_ref().map_or(0, |f| f.meta.pts_ns));
+            std::array::from_fn(|c| frameset.cameras[c].as_ref().map_or(0, |f| f.meta.timestamp_ns));
         frames.push(Frame {
             index: frameset.index,
-            t_ns: frameset.t_ns,
+            t_ns: frameset.timestamp_ns,
             cam_t_ns,
             small,
         });
@@ -224,18 +225,19 @@ fn main() -> Result<(), Error> {
     if let Some(out) = &args.write_small {
         let framesets = frames.iter().map(|frame| Frameset {
             index: frame.index,
-            t_ns: frame.t_ns,
-            cameras: std::array::from_fn(|c| {
-                frame.small[c].as_ref().map(|full| CameraFrame {
-                    meta: FrameMeta {
-                        seq: frame.index,
-                        pts_ns: frame.cam_t_ns[c],
-                        source_id: c as u32,
-                        turned_180: false,
-                    },
-                    full: full.clone(),
+            timestamp_ns: frame.t_ns,
+            cameras: (0..NUM_CAMERAS)
+                .map(|c| {
+                    frame.small[c].as_ref().map(|full| CameraFrame {
+                        meta: CaptureMeta {
+                            sequence: frame.index,
+                            timestamp_ns: frame.cam_t_ns[c],
+                            camera_slot: c,
+                        },
+                        full: full.clone(),
+                    })
                 })
-            }),
+                .collect(),
         });
         let written = write_small_dump(
             &args.dump,
@@ -251,7 +253,7 @@ fn main() -> Result<(), Error> {
         viewer: args.viewer.clone(),
         save: args.save.clone(),
         video: args.video,
-        encoder: EncoderConfig::for_kind(args.encoder, SMALL_SIZE, 30, args.bps, 30),
+        encoder: encoder_config(args.encoder, SMALL_SIZE, 30, args.bps, 30)?,
         display: args.display.clone(),
         video_cameras: args.video_cameras.clone(),
         preview_flush: Duration::from_millis(args.flush_ms),
@@ -358,9 +360,9 @@ fn main() -> Result<(), Error> {
         for (camera, e) in encoders.iter().enumerate() {
             println!(
                 "encoder {camera}: {} in, {} out, {:.2} Mbit/s, CPU {:.1}% of a core",
-                e.frames_in,
-                e.samples_out,
-                e.bytes_out as f64 * 8.0 / e.wall_seconds.max(1e-9) / 1e6,
+                e.stats.frames_in,
+                e.stats.samples_out,
+                e.stats.bytes_out as f64 * 8.0 / e.stats.wall_seconds.max(1e-9) / 1e6,
                 robocap_live::log::encoder_cpu_percent(e)
             );
         }

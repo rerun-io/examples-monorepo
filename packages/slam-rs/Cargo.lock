@@ -3224,6 +3224,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-io"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "kornia-image",
+ "libc",
+ "openh264",
+ "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-sensor-iio"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-sensors"
+version = "0.1.0"
+dependencies = [
+ "kornia-algebra",
+ "kornia-image",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-tensor"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6256,10 +6284,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
- "cc",
  "gstreamer",
  "gstreamer-app",
+ "kornia-image",
  "kornia-staging-imgproc",
+ "kornia-staging-io",
+ "kornia-staging-sensor-iio",
+ "kornia-staging-sensors",
  "libc",
  "re_build_info 0.37.0",
  "re_log_encoding 0.37.0",
@@ -6716,11 +6747,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
- "cc",
  "clap",
+ "kornia-image",
  "kornia-staging-imgproc",
- "libc",
- "openh264",
+ "kornia-staging-io",
  "re_chunk 0.38.1",
  "re_log_encoding 0.38.1",
  "re_protos 0.38.1",

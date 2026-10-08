@@ -1,5 +1,6 @@
 //! Bounded live input adapter for the existing four-camera CPU estimator.
 use anyhow::{Context, Result, ensure};
+use kornia_staging_sensors::imu::{GapPolicy, ImuCombiner, ImuCombinerConfig};
 use serde::{Deserialize, Serialize};
 use slam_rs::{
     ImageView, Vio, VioStatus, calib::Calibration, config::VioConfig,
@@ -69,7 +70,6 @@ struct Frame {
     timestamp_ns: i64,
     pixels: Vec<u8>,
 }
-type ImuSample = (i64, [f64; 3]);
 
 #[derive(Default)]
 pub struct LiveSlamOptions {
@@ -81,8 +81,7 @@ pub struct LiveSlam {
     vio: Vio<f32>,
     resolution: [[u32; 2]; 4],
     frames: [VecDeque<Frame>; 4],
-    gyro: VecDeque<ImuSample>,
-    accel: VecDeque<ImuSample>,
+    imu: ImuCombiner,
     last_imu: Option<i64>,
     last_frame: Option<i64>,
     updates: u64,
@@ -133,8 +132,11 @@ impl LiveSlam {
             vio,
             resolution,
             frames: std::array::from_fn(|_| VecDeque::new()),
-            gyro: VecDeque::new(),
-            accel: VecDeque::new(),
+            imu: ImuCombiner::new(ImuCombinerConfig {
+                max_accel_gap_ns: 50_000_000,
+                max_queue_len: 512,
+                gap_policy: GapPolicy::Error,
+            })?,
             last_imu: None,
             last_frame: None,
             updates: 0,
@@ -176,18 +178,11 @@ impl LiveSlam {
                 timestamp_ns,
                 xyz,
             } => {
-                ensure!(xyz.iter().all(|v| v.is_finite()), "nonfinite SLAM IMU");
-                let queue = match channel {
-                    ImuChannel::Gyro => &mut self.gyro,
-                    ImuChannel::Accel => &mut self.accel,
-                };
-                ensure!(
-                    queue.back().is_none_or(|last| timestamp_ns > last.0),
-                    "unordered SLAM IMU"
-                );
                 // Failure is contained in the SLAM child. Raw recording continues.
-                ensure!(queue.len() < 512, "SLAM IMU backlog exceeded its bound");
-                queue.push_back((timestamp_ns, xyz));
+                match channel {
+                    ImuChannel::Gyro => self.imu.push_gyro(timestamp_ns, xyz.into()),
+                    ImuChannel::Accel => self.imu.push_accel(timestamp_ns, xyz.into()),
+                }?;
             }
         }
         loop {
@@ -215,26 +210,12 @@ impl LiveSlam {
             // Interpolate accelerometer samples onto each gyro timestamp. Keep
             // the bracketing sample, and only advance the estimator just past t.
             while self.last_imu.is_none_or(|last| last <= t) {
-                let Some(&(gt, gyro)) = self.gyro.front() else {
+                let Some(sample) = self.imu.pop()? else {
                     return Ok(None);
                 };
-                if self.accel.front().is_some_and(|a| a.0 > gt) {
-                    self.gyro.pop_front();
-                    continue;
-                }
-                while self.accel.get(1).is_some_and(|a| a.0 <= gt) {
-                    self.accel.pop_front();
-                }
-                let (Some(&(at, a)), Some(&(bt, b))) = (self.accel.front(), self.accel.get(1))
-                else {
-                    return Ok(None);
-                };
-                ensure!(bt - at <= 50_000_000, "SLAM accelerometer gap");
-                let alpha = (gt - at) as f64 / (bt - at) as f64;
-                let accel = std::array::from_fn(|i| a[i] + alpha * (b[i] - a[i]));
-                self.vio.push_imu(gt, gyro, accel)?;
-                self.last_imu = Some(gt);
-                self.gyro.pop_front();
+                self.vio
+                    .push_imu(sample.timestamp_ns, sample.gyro.to_array(), sample.accel.to_array())?;
+                self.last_imu = Some(sample.timestamp_ns);
             }
             let frames = self
                 .frames

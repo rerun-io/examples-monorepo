@@ -75,7 +75,6 @@ pub struct SensorChannel {
     pub device: u8,
     pub kind: MotionKind,
     pub prefix: &'static str,
-    pub packet_size: usize,
     /// Dataforge entity the samples are logged under.
     pub entity: &'static str,
 }
@@ -87,7 +86,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Gyro,
         prefix: "in_anglvel",
         entity: "/world/rig_00/imu_00/gyro",
-        packet_size: 16,
     },
     SensorChannel {
         iio_index: 2,
@@ -95,7 +93,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Accel,
         prefix: "in_accel",
         entity: "/world/rig_00/imu_00/accel",
-        packet_size: 16,
     },
     SensorChannel {
         iio_index: 3,
@@ -103,7 +100,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Gyro,
         prefix: "in_anglvel",
         entity: "/world/rig_00/imu_01/gyro",
-        packet_size: 16,
     },
     SensorChannel {
         iio_index: 4,
@@ -111,7 +107,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Accel,
         prefix: "in_accel",
         entity: "/world/rig_00/imu_01/accel",
-        packet_size: 16,
     },
     SensorChannel {
         iio_index: 5,
@@ -119,7 +114,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Gyro,
         prefix: "in_anglvel",
         entity: "/world/rig_00/imu_02/gyro",
-        packet_size: 16,
     },
     SensorChannel {
         iio_index: 6,
@@ -127,7 +121,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Accel,
         prefix: "in_accel",
         entity: "/world/rig_00/imu_02/accel",
-        packet_size: 16,
     },
     SensorChannel {
         iio_index: 7,
@@ -135,7 +128,6 @@ pub const SENSORS: [SensorChannel; 7] = [
         kind: MotionKind::Mag,
         prefix: "in_magn",
         entity: "/world/rig_00/mag_00",
-        packet_size: 24,
     },
 ];
 

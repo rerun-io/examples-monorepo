@@ -7,8 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::Duration;
 
-use super::{FrameSource, SourceError, SourceEvent};
-use crate::frame::{Frameset, Rig};
+use super::SourceError;
+use crate::frame::Rig;
+use crate::source::FrameSource;
+use kornia_staging_sensors::Frameset;
+use kornia_staging_sensors::SourceEvent;
 
 /// How often a source waiting for the next frameset looks at the stop flag.
 const STOP_POLL: Duration = Duration::from_millis(50);
@@ -21,9 +24,20 @@ pub struct ChannelSource {
 }
 
 /// A source for `rig` and the sender that feeds it; a send blocks while `depth` framesets wait.
-pub fn channel(rig: Rig, depth: usize, stop: Arc<AtomicBool>) -> (SyncSender<Frameset>, ChannelSource) {
+pub fn channel(
+    rig: Rig,
+    depth: usize,
+    stop: Arc<AtomicBool>,
+) -> (SyncSender<Frameset>, ChannelSource) {
     let (sender, framesets) = sync_channel(depth);
-    (sender, ChannelSource { rig, framesets, stop })
+    (
+        sender,
+        ChannelSource {
+            rig,
+            framesets,
+            stop,
+        },
+    )
 }
 
 impl FrameSource for ChannelSource {

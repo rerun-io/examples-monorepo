@@ -24,11 +24,14 @@ use kornia_algebra::Vec3F64;
 use kornia_algebra::linalg::rigid::umeyama_f64;
 use kornia_image::Image;
 use kornia_staging_imgproc::resize::resize_area_u8;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta, Frameset};
+use kornia_staging_sensors::imu::{CombinedImuSample};
 use robocap_live::capture::Cap;
+use robocap_live::frame::Luma;
 use robocap_live::frame::matrix_from_isometry;
 use robocap_live::frame::{
-    CameraFrame, DumpMeta, FULL_SIZE, FrameMeta, FrameReader, Frameset, ImuSample, Luma,
-    NUM_CAMERAS, Rig, SLAM_CAMERAS, SMALL_SIZE, read_imu, write_small_dump,
+    DumpMeta, FULL_SIZE, FrameReader, NUM_CAMERAS, Rig, SLAM_CAMERAS, SMALL_SIZE, read_imu,
+    write_small_dump,
 };
 use robocap_live::sched::{parse_cpu_list, pin_current_thread, set_uclamp_min};
 use robocap_live::slam::{ReferencePoses, SlamEstimator, SlamPose, SlamProfile, parse_override};
@@ -121,7 +124,7 @@ fn load(args: &Args) -> Result<Vec<Frame>, Error> {
             let Some(frame) = &frameset.cameras[camera] else {
                 break;
             };
-            cam_t_ns[slot] = frame.meta.pts_ns;
+            cam_t_ns[slot] = frame.meta.timestamp_ns;
             if size == SMALL_SIZE {
                 images.push(frame.full.clone());
             } else {
@@ -136,7 +139,7 @@ fn load(args: &Args) -> Result<Vec<Frame>, Error> {
         };
         frames.push(Frame {
             index: frameset.index,
-            t_ns: frameset.t_ns,
+            t_ns: frameset.timestamp_ns,
             cam_t_ns,
             images,
         });
@@ -151,13 +154,12 @@ fn load(args: &Args) -> Result<Vec<Frame>, Error> {
 
 fn write_small(args: &Args, frames: &[Frame], out: &Path) -> Result<(), Error> {
     let framesets = frames.iter().map(|frame| {
-        let mut cameras: [Option<CameraFrame>; NUM_CAMERAS] = Default::default();
+        let mut cameras = vec![None; NUM_CAMERAS];
         for (slot, &camera) in SLAM_CAMERAS.iter().enumerate() {
-            let meta = FrameMeta {
-                seq: frame.index,
-                pts_ns: frame.cam_t_ns[slot],
-                source_id: camera as u32,
-                turned_180: false,
+            let meta = CaptureMeta {
+                sequence: frame.index,
+                timestamp_ns: frame.cam_t_ns[slot],
+                camera_slot: camera,
             };
             cameras[camera] = Some(CameraFrame {
                 meta,
@@ -166,7 +168,7 @@ fn write_small(args: &Args, frames: &[Frame], out: &Path) -> Result<(), Error> {
         }
         Frameset {
             index: frame.index,
-            t_ns: frame.t_ns,
+            timestamp_ns: frame.t_ns,
             cameras,
         }
     });
@@ -213,7 +215,7 @@ fn run(
     args: &Args,
     calibration: &str,
     frames: &[Frame],
-    imu: &[ImuSample],
+    imu: &[CombinedImuSample],
 ) -> Result<(Vec<SlamPose>, f64), Error> {
     let mut poses = Vec::with_capacity(frames.len());
     let mut next_imu = 0;
@@ -225,7 +227,7 @@ fn run(
             imu,
             &mut next_imu,
             frame.t_ns,
-            |s| s.t_ns,
+            |s| s.timestamp_ns,
             |s| slam.push_imu(s),
         )?;
         let images = [

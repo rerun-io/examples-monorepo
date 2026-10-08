@@ -96,3 +96,9 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Fused forward/backward SE(2) KLT, persistent dispatch storage and finite/trig helpers | slam-rs `gpu/kernels/klt_fused.rs`, reusable parts of `gpu/track*` | proposed kornia-gpu / `optical_flow` | staged | - |
 | Checked GPU transfers, readback lookahead and exclusive execution | slam-rs `gpu/submission.rs` (generic part) | proposed kornia-gpu / `transfer` | staged | - |
 | Brown8 GPU projection and robust damped inverse with CPU validity rules | slam-rs `gpu/kernels/onewait.rs`; staged CPU camera | proposed kornia-gpu / `camera` | staged | - |
+| IIO scan decoder and configurable Linux RAII buffer owner | robocap-recorder `iio.rs`, `device.rs`; robocap-live `capture/iio.rs`, `capture/device.rs` | sensor-rt / sensor-iio | staged | - |
+| Rust MPLANE capture (no C), clock flags, leased MMAP planes and copied/borrowed luma | robocap-live `capture/camera.rs`, `v4l2_mplane.c`; robocap-recorder `camera.rs`, `native/camera.c` (C cores ported to Rust) | kornia-rs / kornia-io / v4l::mplane | staged | - |
+| Annex-B splitter and subprocess H.264 encoder | robocap-live log/video.rs | kornia-rs / kornia-io::video | staged; upstream fit open: overlaps kornia_io gstreamer::VideoWriter; Pablo decides at landing (D6) | - |
+| H.264/AV1 packets to borrowed luma planes with explicit limited/full/unknown range | slam-rs-cli decode.rs + native/dav1d.c | kornia-rs / kornia-io::video | staged | - |
+| N-camera body rig and IMU corrections | slam-rs calib.rs, robocap-live frame.rs | kornia-slam / kornia-sensors::rig | deferred: no consumer reads it | - |
+| Runtime frames, IMU combiner and timestamp matcher | `robocap-types`, `robocap-live/{source,capture}` + `robocap-recorder/live_slam.rs` | kornia-slam `kornia-sensors` (`imu` module and frame exports) | staged | - |

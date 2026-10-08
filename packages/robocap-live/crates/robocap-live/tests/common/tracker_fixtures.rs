@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex};
 use handfit::Pose;
 use kornia_image::Image;
 use kornia_staging_imgproc::contours::min_enclosing_circle;
+use kornia_staging_sensors::CameraFrame;
 use nalgebra::{
     Isometry3, Matrix3, Matrix4, Rotation3, SVector, Translation3, UnitQuaternion, Vector3,
 };
+use robocap_live::frame::Luma;
 use robocap_live::frame::isometry_from_matrix;
-use robocap_live::frame::{CameraFrame, Luma, NUM_CAMERAS, Rig};
+use robocap_live::frame::{NUM_CAMERAS, Rig};
 use robocap_live::hands::camera::{RigCameraModel, fit_view, in_front, rig_models};
 use robocap_live::hands::detect::{Detections, detect};
 use robocap_live::hands::estimator::{KeypointEstimate, PerspectiveKeyNet, ViewRequest};
@@ -281,6 +283,7 @@ impl Perception for TablePerception {
         &mut self,
         _nets: &mut dyn HandNets,
         _full: &[Option<&CameraFrame>; NUM_CAMERAS],
+        _turned_180: &[bool; NUM_CAMERAS],
         _world_from_rig: &Isometry3<f64>,
         views: &[ViewRequest],
     ) -> Result<(Vec<KeypointEstimate>, f64), HandsError> {
@@ -567,6 +570,7 @@ impl Perception for RenderedPerception {
         &mut self,
         nets: &mut dyn HandNets,
         full: &[Option<&CameraFrame>; NUM_CAMERAS],
+        turned_180: &[bool; NUM_CAMERAS],
         world: &Isometry3<f64>,
         requests: &[ViewRequest],
     ) -> Result<(Vec<KeypointEstimate>, f64), HandsError> {
@@ -593,7 +597,8 @@ impl Perception for RenderedPerception {
                 .keynet
                 .push_back(raw);
         }
-        self.estimator.estimate(nets, full, world, requests)
+        self.estimator
+            .estimate(nets, full, turned_180, world, requests)
     }
 
     fn set_phi(&mut self, phi: f64) {

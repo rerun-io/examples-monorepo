@@ -20,11 +20,13 @@ use clap::{Parser, ValueEnum};
 use robocap_live::capture::Cap;
 use robocap_live::frame::{NUM_CAMERAS, SMALL_SIZE};
 use robocap_live::hands::{self, HandsConfig, ScaleMode};
-use robocap_live::log::video::{EncoderConfig, EncoderKind};
+use robocap_live::log::video::{EncoderKind, encoder_config};
 use robocap_live::log::{Logger, LoggerConfig, LoggerSink, VideoMode};
 use robocap_live::nets::{HandNets, NetsError, NoNets};
 use robocap_live::sched::{self, FramesetSink, HandsStage, PipelineConfig, RecordWriter};
-use robocap_live::slam::{ReferencePoses, SlamConfig, SlamLane, SlamMode, SlamProfile, parse_override};
+use robocap_live::slam::{
+    ReferencePoses, SlamConfig, SlamLane, SlamMode, SlamProfile, parse_override,
+};
 use robocap_live::source::FrameSource;
 use robocap_live::source::replay::{ReplayConfig, ReplaySource, read_reference_poses};
 
@@ -67,8 +69,13 @@ impl FromStr for Cameras {
     type Err = String;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let cameras = text.split(',').map(|c| c.trim().parse::<usize>().ok().filter(|&c| c < NUM_CAMERAS)).collect::<Option<Vec<_>>>();
-        cameras.map(Self).ok_or_else(|| "a comma list of 0..5".into())
+        let cameras = text
+            .split(',')
+            .map(|c| c.trim().parse::<usize>().ok().filter(|&c| c < NUM_CAMERAS))
+            .collect::<Option<Vec<_>>>();
+        cameras
+            .map(Self)
+            .ok_or_else(|| "a comma list of 0..5".into())
     }
 }
 
@@ -85,7 +92,10 @@ impl FromStr for ScaleArg {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
             "auto" => Ok(Self::Auto),
-            phi => phi.parse().map(Self::Fixed).map_err(|_| "expected auto or a number".into()),
+            phi => phi
+                .parse()
+                .map(Self::Fixed)
+                .map_err(|_| "expected auto or a number".into()),
         }
     }
 }
@@ -104,7 +114,9 @@ impl FromStr for Cores {
         if text == "auto" {
             return Ok(Self::Auto);
         }
-        sched::parse_cpu_list(text).map(Self::List).map_err(|e| e.to_string())
+        sched::parse_cpu_list(text)
+            .map(Self::List)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -147,6 +159,12 @@ impl std::fmt::Display for Uclamp {
 }
 
 /// RoboCap live pipeline: cameras + IMU -> slam-rs VIO + hand tracking -> Rerun, live on Cap A or Cap B or replaying a dump.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CaptureArg {
+    Copy,
+    ZeroCopy,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
@@ -272,7 +290,7 @@ struct Cli {
     /// Live: `zero-copy` (frames are read-only images over the capture buffers) or `copy` (each luma plane copied out).
     #[cfg(target_os = "linux")]
     #[arg(long, default_value = "zero-copy")]
-    capture: robocap_live::capture::camera::CaptureMode,
+    capture: CaptureArg,
     /// Video in the Rerun stream: `h264` (encoder child processes), `raw` (640x360 luma images, local viewers) or `off`.
     #[arg(long, default_value = if cfg!(target_arch = "aarch64") { "h264" } else { "raw" })]
     video: VideoMode,
@@ -311,11 +329,15 @@ static FIRST_SIGNAL_NS: AtomicU64 = AtomicU64::new(0);
 const REPEAT_WINDOW_NS: u64 = 500_000_000;
 
 extern "C" fn on_signal(_: libc::c_int) {
-    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: clock_gettime is async-signal-safe and `now` is a valid timespec.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     let now_ns = (now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64).max(1);
-    if let Err(first_ns) = FIRST_SIGNAL_NS.compare_exchange(0, now_ns, Ordering::SeqCst, Ordering::SeqCst)
+    if let Err(first_ns) =
+        FIRST_SIGNAL_NS.compare_exchange(0, now_ns, Ordering::SeqCst, Ordering::SeqCst)
         && now_ns - first_ns >= REPEAT_WINDOW_NS
     {
         // A second request: give up on the clean shutdown.
@@ -338,23 +360,31 @@ fn install_signal_handlers() {
 }
 
 fn build_nets(spec: &[String]) -> Result<Option<Box<dyn HandNets>>> {
-    let dir = |kind: &str| spec.get(1).map(PathBuf::from).with_context(|| format!("--nets {kind} needs a models directory"));
+    let dir = |kind: &str| {
+        spec.get(1)
+            .map(PathBuf::from)
+            .with_context(|| format!("--nets {kind} needs a models directory"))
+    };
     match spec.first().map(String::as_str) {
         None | Some("none") => Ok(None),
         Some("rknn") => {
             let dir = dir("rknn")?;
-            let nets = robocap_live::nets::rknn::RknnNets::open(&dir).with_context(|| format!("load RKNN models from {}", dir.display()))?;
+            let nets = robocap_live::nets::rknn::RknnNets::open(&dir)
+                .with_context(|| format!("load RKNN models from {}", dir.display()))?;
             Ok(Some(Box::new(nets)))
         }
         #[cfg(feature = "ort")]
         Some("ort") => {
             let dir = dir("ort")?;
             let options = robocap_live::nets::ort::OrtConfig::default();
-            let nets = robocap_live::nets::ort::OrtNets::new(&dir, &options).with_context(|| format!("load ONNX models from {}", dir.display()))?;
+            let nets = robocap_live::nets::ort::OrtNets::new(&dir, &options)
+                .with_context(|| format!("load ONNX models from {}", dir.display()))?;
             Ok(Some(Box::new(nets)))
         }
         #[cfg(not(feature = "ort"))]
-        Some("ort") => bail!("--nets ort: this build has no ONNX Runtime (build with --features ort)"),
+        Some("ort") => {
+            bail!("--nets ort: this build has no ONNX Runtime (build with --features ort)")
+        }
         Some(other) => bail!("--nets {other}: expected none, rknn <dir> or ort <dir>"),
     }
 }
@@ -365,8 +395,14 @@ fn nets_factory(spec: &[String]) -> Option<sched::NetsFactory> {
     matches!(spec.first().map(String::as_str), Some("rknn" | "ort")).then(|| {
         let factory: sched::NetsFactory = Box::new(move || match build_nets(&spec) {
             Ok(Some(nets)) => Ok(nets),
-            Ok(None) => Err(NetsError::Load { what: "nets".into(), message: "no backend".into() }),
-            Err(error) => Err(NetsError::Load { what: format!("{spec:?}"), message: format!("{error:#}") }),
+            Ok(None) => Err(NetsError::Load {
+                what: "nets".into(),
+                message: "no backend".into(),
+            }),
+            Err(error) => Err(NetsError::Load {
+                what: format!("{spec:?}"),
+                message: format!("{error:#}"),
+            }),
         });
         factory
     })
@@ -378,26 +414,41 @@ fn main() -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
-        std::thread::Builder::new().name("rl-signal".into()).spawn(move || {
-            loop {
-                if FIRST_SIGNAL_NS.load(Ordering::SeqCst) != 0 {
-                    eprintln!("robocap-live: stopping (signal)");
-                    stop.store(true, Ordering::SeqCst);
-                    break;
+        std::thread::Builder::new()
+            .name("rl-signal".into())
+            .spawn(move || {
+                loop {
+                    if FIRST_SIGNAL_NS.load(Ordering::SeqCst) != 0 {
+                        eprintln!("robocap-live: stopping (signal)");
+                        stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        })?;
+            })?;
     }
 
     let layout = sched::detect_big_little();
     let other_big = layout
         .as_ref()
-        .map(|layout| layout.big.iter().copied().filter(|c| !layout.fastest.contains(c)).collect::<Vec<_>>())
+        .map(|layout| {
+            layout
+                .big
+                .iter()
+                .copied()
+                .filter(|c| !layout.fastest.contains(c))
+                .collect::<Vec<_>>()
+        })
         .filter(|cores| !cores.is_empty());
-    let cpus_big = cli.threads_a76.or_auto(layout.as_ref().map(|layout| layout.fastest.clone()));
-    let cpus_little = cli.threads_a55.or_auto(layout.as_ref().map(|layout| layout.little.clone()));
-    let cpus_downsample = cli.threads_ds.or_auto(other_big.or_else(|| cpus_little.clone()));
+    let cpus_big = cli
+        .threads_a76
+        .or_auto(layout.as_ref().map(|layout| layout.fastest.clone()));
+    let cpus_little = cli
+        .threads_a55
+        .or_auto(layout.as_ref().map(|layout| layout.little.clone()));
+    let cpus_downsample = cli
+        .threads_ds
+        .or_auto(other_big.or_else(|| cpus_little.clone()));
     let cpus_hands = cli.threads_hands.or_auto(cpus_downsample.clone());
     // The frequency caps cover every core of the kind (all four A76s), not only the stage masks: hands and the downsample pool run
     // on the A76 pair SLAM does not use.
@@ -406,7 +457,10 @@ fn main() -> Result<()> {
         None => (cpus_big.clone(), cpus_little.clone()),
     };
     let mut freq_caps = Vec::new();
-    for (khz, cpus, what) in [(cli.max_a76_khz, &all_a76, "--max-a76-khz"), (cli.max_a55_khz, &all_a55, "--max-a55-khz")] {
+    for (khz, cpus, what) in [
+        (cli.max_a76_khz, &all_a76, "--max-a76-khz"),
+        (cli.max_a55_khz, &all_a55, "--max-a55-khz"),
+    ] {
         if let Some(khz) = khz {
             let cpus = cpus.as_ref().with_context(|| format!("{what} needs the core list (big.LITTLE detection or --threads-a76/--threads-a55)"))?;
             freq_caps.push(sched::CpuFreqCap::apply(cpus, khz)?);
@@ -427,9 +481,18 @@ fn main() -> Result<()> {
     let realtime;
     let source: Box<dyn FrameSource> = match kind {
         Some("replay") => {
-            let dir = PathBuf::from(cli.source.get(1).context("--source replay needs a dump directory")?);
-            let options = ReplayConfig { realtime: cli.realtime, looping: cli.looping, preload: cli.preload };
-            let replay = ReplaySource::open(&dir, options, stop.clone()).with_context(|| format!("open dump {}", dir.display()))?;
+            let dir = PathBuf::from(
+                cli.source
+                    .get(1)
+                    .context("--source replay needs a dump directory")?,
+            );
+            let options = ReplayConfig {
+                realtime: cli.realtime,
+                looping: cli.looping,
+                preload: cli.preload,
+            };
+            let replay = ReplaySource::open(&dir, options, stop.clone())
+                .with_context(|| format!("open dump {}", dir.display()))?;
             let meta = replay.meta();
             eprintln!(
                 "robocap-live: replay {} ({} framesets, {:.1} s, {}){}{}",
@@ -437,12 +500,20 @@ fn main() -> Result<()> {
                 meta.frames,
                 (meta.last_t_ns - meta.first_t_ns) as f64 / 1e9,
                 meta.segment,
-                if cli.realtime { ", realtime" } else { ", lossless" },
+                if cli.realtime {
+                    ", realtime"
+                } else {
+                    ", lossless"
+                },
                 if cli.looping { ", looping" } else { "" }
             );
             if slam_mode == SlamMode::Reference {
                 let poses = read_reference_poses(&dir)?;
-                reference = Some(ReferencePoses::new(poses, replay.first_t_ns(), cli.looping.then(|| replay.loop_span_ns())));
+                reference = Some(ReferencePoses::new(
+                    poses,
+                    replay.first_t_ns(),
+                    cli.looping.then(|| replay.loop_span_ns()),
+                ));
             }
             realtime = cli.realtime;
             Box::new(replay)
@@ -464,11 +535,17 @@ fn main() -> Result<()> {
         DetNetArg::RoundRobin => detnet_cameras.as_ref().unwrap_or(&hand_cameras).len(),
     };
     let scale = match cli.scale {
-        ScaleArg::Auto => ScaleMode::Auto { seconds: cli.scale_seconds },
+        ScaleArg::Auto => ScaleMode::Auto {
+            seconds: cli.scale_seconds,
+        },
         ScaleArg::Fixed(phi) => ScaleMode::Fixed(phi),
     };
     let nets = build_nets(&cli.nets)?;
-    let hands_mode = cli.hands.unwrap_or(if nets.is_some() { HandsArg::On } else { HandsArg::Off });
+    let hands_mode = cli.hands.unwrap_or(if nets.is_some() {
+        HandsArg::On
+    } else {
+        HandsArg::Off
+    });
     let hands = match hands_mode {
         HandsArg::Off => None,
         HandsArg::On => {
@@ -497,7 +574,11 @@ fn main() -> Result<()> {
                 nets.describe()
             );
             let tracker = hands::new_tracker(source.rig(), config)?;
-            Some(HandsStage { tracker, nets, nets_factory: nets_factory(&cli.nets) })
+            Some(HandsStage {
+                tracker,
+                nets,
+                nets_factory: nets_factory(&cli.nets),
+            })
         }
     };
 
@@ -506,7 +587,7 @@ fn main() -> Result<()> {
         sinks.push(Box::new(RecordWriter::create(path)?));
     }
     if cli.viewer.is_some() || cli.save.is_some() {
-        let encoder = EncoderConfig::for_kind(cli.encoder, SMALL_SIZE, 30, cli.video_bps, 30);
+        let encoder = encoder_config(cli.encoder, SMALL_SIZE, 30, cli.video_bps, 30)?;
         let Cameras(video_cameras) = cli.video_cameras.clone();
         let options = LoggerConfig {
             viewer: cli.viewer.clone(),
@@ -515,11 +596,13 @@ fn main() -> Result<()> {
             encoder,
             display: cli.display.clone(),
             video_cameras,
-            hand_overlays: cli.hand_overlays.unwrap_or(if kind == Some("replay") && !cli.looping {
-                robocap_live::log::scene::HandOverlays::Debug
-            } else {
-                robocap_live::log::scene::HandOverlays::Fit
-            }),
+            hand_overlays: cli
+                .hand_overlays
+                .unwrap_or(if kind == Some("replay") && !cli.looping {
+                    robocap_live::log::scene::HandOverlays::Debug
+                } else {
+                    robocap_live::log::scene::HandOverlays::Fit
+                }),
             ..LoggerConfig::default()
         };
         let options_overlays = options.hand_overlays;
@@ -540,7 +623,11 @@ fn main() -> Result<()> {
         hz: cli.slam_hz,
         frontend_threads: cli.slam_threads.map(usize::from),
         profile: cli.slam_profile,
-        overrides: cli.slam_set.iter().map(|setting| parse_override(setting).with_context(|| format!("--slam-set {setting}"))).collect::<Result<_>>()?,
+        overrides: cli
+            .slam_set
+            .iter()
+            .map(|setting| parse_override(setting).with_context(|| format!("--slam-set {setting}")))
+            .collect::<Result<_>>()?,
         ..SlamConfig::default()
     };
     if slam_mode == SlamMode::On {
@@ -548,7 +635,8 @@ fn main() -> Result<()> {
         let device = &source.rig().device;
         let calibration_from = match &cli.slam_calibration {
             Some(path) => {
-                slam.calibration = std::fs::read_to_string(path).with_context(|| format!("read --slam-calibration {}", path.display()))?;
+                slam.calibration = std::fs::read_to_string(path)
+                    .with_context(|| format!("read --slam-calibration {}", path.display()))?;
                 path.display().to_string()
             }
             None => {
@@ -558,7 +646,11 @@ fn main() -> Result<()> {
                 format!("the {device} factory calibration")
             }
         };
-        eprintln!("robocap-live: slam profile {}, overrides {:?}, calibration {calibration_from}", cli.slam_profile.as_str(), slam.overrides);
+        eprintln!(
+            "robocap-live: slam profile {}, overrides {:?}, calibration {calibration_from}",
+            cli.slam_profile.as_str(),
+            slam.overrides
+        );
     }
     let small_cameras = match cli.small {
         SmallArg::All => None,
@@ -594,7 +686,11 @@ fn main() -> Result<()> {
         cpus_hands,
         cli.hands_uclamp,
         cpus_little,
-        if realtime { "realtime (latest-wins queues)" } else { "lossless (blocking queues)" }
+        if realtime {
+            "realtime (latest-wins queues)"
+        } else {
+            "lossless (blocking queues)"
+        }
     );
     let summary = sched::run(source, config, sinks, stop)?;
     let json = serde_json::to_string_pretty(&summary)?;
@@ -602,7 +698,10 @@ fn main() -> Result<()> {
     if let Some(object) = brief.as_object_mut() {
         object.remove("power");
     }
-    eprintln!("robocap-live: summary (power samples in --summary-json)\n{}", serde_json::to_string(&brief)?);
+    eprintln!(
+        "robocap-live: summary (power samples in --summary-json)\n{}",
+        serde_json::to_string(&brief)?
+    );
     if let Some(path) = &cli.summary_json {
         std::fs::write(path, json).with_context(|| format!("write {}", path.display()))?;
     }
@@ -613,8 +712,19 @@ fn main() -> Result<()> {
 #[cfg(target_os = "linux")]
 fn live_source(cli: &Cli, stop: Arc<AtomicBool>) -> Result<Box<dyn FrameSource>> {
     use robocap_live::source::live::{LiveConfig, LiveSource};
-    let options = LiveConfig { rig_path: cli.rig.clone(), imu_time_offset_ns: cli.imu_time_offset_ns, capture: cli.capture, ..LiveConfig::default() };
-    eprintln!("robocap-live: live IMU time offset {} ns", options.imu_time_offset_ns);
+    let options = LiveConfig {
+        rig_path: cli.rig.clone(),
+        imu_time_offset_ns: cli.imu_time_offset_ns,
+        capture: match cli.capture {
+            CaptureArg::Copy => kornia_staging_io::v4l::mplane::CaptureMode::Copy,
+            CaptureArg::ZeroCopy => kornia_staging_io::v4l::mplane::CaptureMode::ZeroCopy,
+        },
+        ..LiveConfig::default()
+    };
+    eprintln!(
+        "robocap-live: live IMU time offset {} ns",
+        options.imu_time_offset_ns
+    );
     Ok(Box::new(LiveSource::open(options, stop)?))
 }
 

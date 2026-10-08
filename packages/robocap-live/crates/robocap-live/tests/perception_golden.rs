@@ -23,9 +23,11 @@ use std::sync::Arc;
 use kornia_image::{Image, ImageSize};
 use kornia_staging_3d::camera::virtual_camera::maps_from_virtual_pinhole_f32;
 use kornia_staging_imgproc::resize::resize_area_u8;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta};
 use nalgebra::{Matrix3, Vector2, Vector3};
+use robocap_live::frame::Luma;
 use robocap_live::frame::isometry_from_matrix;
-use robocap_live::frame::{CameraFrame, FULL_SIZE, FrameMeta, Luma, NUM_CAMERAS, Rig, SMALL_SIZE};
+use robocap_live::frame::{FULL_SIZE, NUM_CAMERAS, Rig, SMALL_SIZE};
 use robocap_live::hands::CropSource;
 use robocap_live::hands::camera::{Lens, rig_models};
 use robocap_live::hands::detect::{decode_detections, detect};
@@ -487,7 +489,7 @@ fn perspective_keynet_matches_handtrack_end_to_end() -> TestResult {
         let frames: Vec<CameraFrame> = frames
             .into_iter()
             .map(|full| CameraFrame {
-                meta: FrameMeta::default(),
+                meta: CaptureMeta::default(),
                 full,
             })
             .collect();
@@ -563,7 +565,13 @@ fn perspective_keynet_matches_handtrack_end_to_end() -> TestResult {
                 call["crop_mirror"][i].as_bool().unwrap_or(false)
             );
         }
-        let (estimates, _) = estimator.estimate(&mut nets, &full, &world_from_rig, &requests)?;
+        let (estimates, _) = estimator.estimate(
+            &mut nets,
+            &full,
+            &[false; NUM_CAMERAS],
+            &world_from_rig,
+            &requests,
+        )?;
         println!(
             "{name}: crops worst |diff| {:.2e} (mean {:.2e}), keypoint input worst {:.2e}",
             nets.worst_crop, nets.mean_crop, nets.worst_feature

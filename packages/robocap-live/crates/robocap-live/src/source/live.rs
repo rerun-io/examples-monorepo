@@ -22,17 +22,27 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::{FrameSource, SourceError, SourceEvent};
-use crate::capture::camera::{Camera, CaptureMode, CaptureStream, LumaFrame};
-use crate::capture::device::{FrameTrigger, IioDevice, monotonic_ns, require_cap, require_vendor_recorder_stopped};
-use crate::capture::iio::{IioScan, MotionKind};
-use crate::capture::imu::{ClockCheck, ClockGuard, ImuCombiner};
-use crate::capture::matcher::FramesetMatcher;
-use crate::capture::{
-    ACCEL_SCALE, CAMERA_DEVICES, CaptureError, DATAFORGE_IMU_TIME_OFFSET_NS, DEFAULT_RIG_PATH, GYRO_SCALE, IMU0_ACCEL_IIO, IMU0_GYRO_IIO, ROBOT_JSON,
-    vendor_turned_180,
+use super::SourceError;
+use crate::capture::camera::{MIN_QUEUED, capture_format};
+use crate::capture::device::{
+    FrameTrigger, ImuDevice, monotonic_ns, require_cap, require_vendor_recorder_stopped,
 };
-use crate::frame::{CameraFrame, FrameMeta, Frameset, NUM_CAMERAS, Rig};
+use crate::capture::iio::MotionKind;
+use crate::capture::imu::{ClockCheck, ClockGuard, MAX_ACCEL_GAP_NS};
+use crate::capture::{
+    ACCEL_SCALE, CAMERA_DEVICES, CaptureError, DATAFORGE_IMU_TIME_OFFSET_NS, DEFAULT_RIG_PATH,
+    GYRO_SCALE, IMU0_ACCEL_IIO, IMU0_GYRO_IIO, ROBOT_JSON, vendor_turned_180,
+};
+use crate::frame::{NUM_CAMERAS, Rig};
+use crate::source::FrameSource;
+use kornia_staging_io::v4l::mplane::{Camera, CaptureMode, CaptureStream, LumaFrame};
+use kornia_staging_sensor_iio::IioScan;
+use kornia_staging_sensors::SourceEvent;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta, Frameset};
+use kornia_staging_sensors::{
+    FramesetMatcher, MatcherConfig,
+};
+use kornia_staging_sensors::imu::{GapPolicy, ImuCombiner, ImuCombinerConfig};
 
 /// Settings of the live source.
 #[derive(Clone, Debug)]
@@ -77,8 +87,15 @@ impl Default for LiveConfig {
 }
 
 enum CaptureEvent {
-    Frame { camera: usize, frame: LumaFrame },
-    Scans { kind: MotionKind, scale: f64, scans: Vec<IioScan> },
+    Frame {
+        camera: usize,
+        frame: LumaFrame,
+    },
+    Scans {
+        kind: MotionKind,
+        scale: f64,
+        scans: Vec<IioScan>,
+    },
     Fault(String),
 }
 
@@ -117,11 +134,11 @@ pub struct LiveSource {
     last_frames: [u64; NUM_CAMERAS],
     last_imu: (u64, u64),
     imu_late_framesets: u64,
-    /// The cameras the vendor turns 180 degrees (`/userdata/robot.json`): their frames are stamped [`FrameMeta::turned_180`].
+    /// The cameras the vendor turns 180 degrees (`/userdata/robot.json`): exposed through the source's application mounting metadata.
     turned_180: [bool; NUM_CAMERAS],
 }
 
-fn device_error(error: CaptureError) -> SourceError {
+fn device_error(error: impl std::fmt::Display) -> SourceError {
     SourceError::Device(error.to_string())
 }
 
@@ -145,20 +162,36 @@ impl LiveSource {
                 cap.device()
             )));
         }
-        let robot = std::fs::read_to_string(ROBOT_JSON).map_err(|source| device_error(CaptureError::Io { what: format!("read {ROBOT_JSON}"), source }))?;
+        let robot = std::fs::read_to_string(ROBOT_JSON).map_err(|source| {
+            device_error(CaptureError::Io {
+                what: format!("read {ROBOT_JSON}"),
+                source,
+            })
+        })?;
         let turned_180 = vendor_turned_180(&robot).map_err(device_error)?;
-        let turned: Vec<&str> = (0..NUM_CAMERAS).filter(|&c| turned_180[c]).map(|c| crate::frame::CAMERA_NAMES[c]).collect();
-        eprintln!("robocap-live: the vendor turns {turned:?} 180 degrees ({ROBOT_JSON}): their frames are read upright");
+        let turned: Vec<&str> = (0..NUM_CAMERAS)
+            .filter(|&c| turned_180[c])
+            .map(|c| crate::frame::CAMERA_NAMES[c])
+            .collect();
+        eprintln!(
+            "robocap-live: the vendor turns {turned:?} 180 degrees ({ROBOT_JSON}): their frames are read upright"
+        );
         let trigger = FrameTrigger::stopped().map_err(device_error)?;
         let mut cameras = Vec::with_capacity(NUM_CAMERAS);
         for path in CAMERA_DEVICES {
-            cameras.push(Camera::open(path).map_err(device_error)?);
+            cameras.push(
+                Camera::open(path, capture_format().map_err(device_error)?)
+                    .map_err(device_error)?,
+            );
         }
-        let gyro = IioDevice::start(IMU0_GYRO_IIO, MotionKind::Gyro).map_err(device_error)?;
-        let accel = IioDevice::start(IMU0_ACCEL_IIO, MotionKind::Accel).map_err(device_error)?;
+        let gyro = ImuDevice::start(IMU0_GYRO_IIO, MotionKind::Gyro).map_err(device_error)?;
+        let accel = ImuDevice::start(IMU0_ACCEL_IIO, MotionKind::Accel).map_err(device_error)?;
         for (device, expected) in [(&gyro, GYRO_SCALE), (&accel, ACCEL_SCALE)] {
             if (device.scale - expected).abs() > 1e-9 {
-                eprintln!("robocap-live: iio:device{} scale {} differs from PR #270's {expected}", device.index, device.scale);
+                eprintln!(
+                    "robocap-live: iio:device{} scale {} differs from PR #270's {expected}",
+                    device.index, device.scale
+                );
             }
         }
         let (tx, rx) = mpsc::channel();
@@ -166,10 +199,20 @@ impl LiveSource {
         let local_stop = Arc::new(AtomicBool::new(false));
         let mut source = Self {
             rig,
-            matcher: FramesetMatcher::new(options.match_tolerance_ns, options.match_max_wait_ns),
+            matcher: FramesetMatcher::new(MatcherConfig {
+                cameras: NUM_CAMERAS,
+                tolerance_ns: options.match_tolerance_ns,
+                max_wait_ns: options.match_max_wait_ns,
+            })
+            .map_err(device_error)?,
             options,
             rx,
-            combiner: ImuCombiner::default(),
+            combiner: ImuCombiner::new(ImuCombinerConfig {
+                max_accel_gap_ns: MAX_ACCEL_GAP_NS,
+                max_queue_len: usize::MAX,
+                gap_policy: GapPolicy::DropAndCount,
+            })
+            .map_err(device_error)?,
             ready: VecDeque::new(),
             pending: VecDeque::new(),
             newest_imu_ns: None,
@@ -186,7 +229,8 @@ impl LiveSource {
             turned_180,
         };
         for (camera, device) in cameras.into_iter().enumerate() {
-            let device = CaptureStream::new(device, source.options.capture);
+            let device = CaptureStream::new(device, source.options.capture, MIN_QUEUED)
+                .map_err(device_error)?;
             let (tx, shared, stop) = (tx.clone(), source.shared.clone(), source.local_stop.clone());
             let max_in_flight = source.options.max_frames_in_flight;
             let handle = std::thread::Builder::new()
@@ -196,7 +240,12 @@ impl LiveSource {
             source.threads.push(handle);
         }
         for (device, kind) in [(gyro, MotionKind::Gyro), (accel, MotionKind::Accel)] {
-            let (tx, shared, stop, guard) = (tx.clone(), source.shared.clone(), source.local_stop.clone(), source.options.clock_guard);
+            let (tx, shared, stop, guard) = (
+                tx.clone(),
+                source.shared.clone(),
+                source.local_stop.clone(),
+                source.options.clock_guard,
+            );
             let name = match kind {
                 MotionKind::Gyro => "rl-iio-gyro",
                 MotionKind::Accel => "rl-iio-accel",
@@ -213,16 +262,39 @@ impl LiveSource {
         }
         source.started = Instant::now();
         source.last_report = Instant::now();
-        eprintln!("robocap-live: live capture started (6 cameras, {:?} capture, IMU0 gyro + accel, trigger 30 fps)", source.options.capture);
+        eprintln!(
+            "robocap-live: live capture started (6 cameras, {:?} capture, IMU0 gyro + accel, trigger 30 fps)",
+            source.options.capture
+        );
         Ok(source)
     }
 
     /// A one-line summary of the capture counters.
     pub fn report(&self) -> String {
-        let frames: Vec<u64> = self.shared.frames.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-        let gaps: Vec<u64> = self.shared.sequence_gaps.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-        let dropped: Vec<u64> = self.shared.dropped_in_flight.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-        let copies: Vec<u64> = self.shared.fallback_copies.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+        let frames: Vec<u64> = self
+            .shared
+            .frames
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect();
+        let gaps: Vec<u64> = self
+            .shared
+            .sequence_gaps
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect();
+        let dropped: Vec<u64> = self
+            .shared
+            .dropped_in_flight
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect();
+        let copies: Vec<u64> = self
+            .shared
+            .fallback_copies
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect();
         let counts = self.matcher.counts;
         format!(
             "live: {:.1} s frames {frames:?} seq_gaps {gaps:?} dropped {dropped:?} fallback_copies {copies:?} | gyro {} accel {} future_skew {} dropped {} (max {:.3} ms) | \
@@ -247,9 +319,17 @@ impl LiveSource {
         if elapsed < self.options.report_every {
             return Ok(());
         }
-        let frames: [u64; NUM_CAMERAS] = std::array::from_fn(|c| self.shared.frames[c].load(Ordering::Relaxed));
-        let fps: Vec<String> = frames.iter().zip(self.last_frames.iter()).map(|(a, b)| format!("{:.1}", (a - b) as f64 / elapsed.as_secs_f64())).collect();
-        let imu = (self.shared.gyro.load(Ordering::Relaxed), self.shared.accel.load(Ordering::Relaxed));
+        let frames: [u64; NUM_CAMERAS] =
+            std::array::from_fn(|c| self.shared.frames[c].load(Ordering::Relaxed));
+        let fps: Vec<String> = frames
+            .iter()
+            .zip(self.last_frames.iter())
+            .map(|(a, b)| format!("{:.1}", (a - b) as f64 / elapsed.as_secs_f64()))
+            .collect();
+        let imu = (
+            self.shared.gyro.load(Ordering::Relaxed),
+            self.shared.accel.load(Ordering::Relaxed),
+        );
         eprintln!(
             "robocap-live: camera fps [{}] gyro {:.0} Hz accel {:.0} Hz | {}",
             fps.join(", "),
@@ -257,8 +337,13 @@ impl LiveSource {
             (imu.1 - self.last_imu.1) as f64 / elapsed.as_secs_f64(),
             self.report()
         );
-        if self.started.elapsed() > Duration::from_secs(3) && (frames.contains(&0) || imu.0 == 0 || imu.1 == 0) {
-            return Err(SourceError::Device(format!("a stream failed to start after 3 s: {}", self.report())));
+        if self.started.elapsed() > Duration::from_secs(3)
+            && (frames.contains(&0) || imu.0 == 0 || imu.1 == 0)
+        {
+            return Err(SourceError::Device(format!(
+                "a stream failed to start after 3 s: {}",
+                self.report()
+            )));
         }
         self.last_frames = frames;
         self.last_imu = imu;
@@ -268,6 +353,9 @@ impl LiveSource {
 }
 
 impl FrameSource for LiveSource {
+    fn turned_180(&self) -> [bool; NUM_CAMERAS] {
+        self.turned_180
+    }
     fn rig(&self) -> &Rig {
         &self.rig
     }
@@ -281,7 +369,7 @@ impl FrameSource for LiveSource {
                 return Ok(None);
             }
             if let Some((frameset, waiting)) = self.pending.front() {
-                let covered = self.newest_imu_ns.is_some_and(|t| t >= frameset.t_ns);
+                let covered = self.newest_imu_ns.is_some_and(|t| t >= frameset.timestamp_ns);
                 if covered || waiting.elapsed() >= self.options.imu_catchup {
                     if !covered {
                         self.imu_late_framesets += 1;
@@ -296,24 +384,32 @@ impl FrameSource for LiveSource {
             match self.rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(CaptureEvent::Frame { camera, frame }) => {
                     self.shared.in_flight.fetch_sub(1, Ordering::Relaxed);
-                    let meta = FrameMeta { seq: u64::from(frame.sequence), pts_ns: frame.timestamp_ns, source_id: camera as u32, turned_180: self.turned_180[camera] };
+                    let meta = CaptureMeta {
+                        sequence: u64::from(frame.sequence),
+                        timestamp_ns: frame.timestamp_ns,
+                        camera_slot: camera,
+                    };
                     let full = Arc::new(frame.luma);
                     let mut out = Vec::new();
-                    self.matcher.push(camera, CameraFrame { meta, full }, &mut out);
+                    self.matcher
+                        .push(CameraFrame { meta, full }, &mut out)
+                        .map_err(device_error)?;
                     let now = Instant::now();
-                    self.pending.extend(out.into_iter().map(|frameset| (frameset, now)));
+                    self.pending
+                        .extend(out.into_iter().map(|frameset| (frameset, now)));
                 }
                 Ok(CaptureEvent::Scans { kind, scale, scans }) => {
                     for scan in scans {
                         let xyz = scan.raw.map(|v| f64::from(v) * scale);
                         let t_ns = scan.timestamp_ns + self.options.imu_time_offset_ns;
                         match kind {
-                            MotionKind::Gyro => self.combiner.push_gyro(t_ns, xyz),
-                            MotionKind::Accel => self.combiner.push_accel(t_ns, xyz),
+                            MotionKind::Gyro => self.combiner.push_gyro(t_ns, xyz.into()),
+                            MotionKind::Accel => self.combiner.push_accel(t_ns, xyz.into()),
                         }
+                        .map_err(device_error)?;
                     }
-                    while let Some(sample) = self.combiner.pop() {
-                        self.newest_imu_ns = Some(sample.t_ns);
+                    while let Some(sample) = self.combiner.pop().map_err(device_error)? {
+                        self.newest_imu_ns = Some(sample.timestamp_ns);
                         self.ready.push_back(SourceEvent::Imu(sample));
                     }
                 }
@@ -352,7 +448,10 @@ fn camera_thread(
                 if let Some(last) = previous
                     && frame.sequence != last.wrapping_add(1)
                 {
-                    shared.sequence_gaps[camera].fetch_add(u64::from(frame.sequence.wrapping_sub(last).wrapping_sub(1)), Ordering::Relaxed);
+                    shared.sequence_gaps[camera].fetch_add(
+                        u64::from(frame.sequence.wrapping_sub(last).wrapping_sub(1)),
+                        Ordering::Relaxed,
+                    );
                 }
                 previous = Some(frame.sequence);
                 shared.frames[camera].fetch_add(1, Ordering::Relaxed);
@@ -368,7 +467,10 @@ fn camera_thread(
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = tx.send(CaptureEvent::Fault(format!("camera {camera} ({}): {error}", CAMERA_DEVICES[camera])));
+                let _ = tx.send(CaptureEvent::Fault(format!(
+                    "camera {camera} ({}): {error}",
+                    CAMERA_DEVICES[camera]
+                )));
                 break;
             }
         }
@@ -379,7 +481,7 @@ fn camera_thread(
 /// passes the clock guard: future skew is counted (and kept or dropped), a wrong clock or a backlog ends the run.
 fn iio_thread(
     kind: MotionKind,
-    mut device: IioDevice,
+    mut device: ImuDevice,
     tx: &mpsc::Sender<CaptureEvent>,
     shared: &Shared,
     stop: &AtomicBool,
@@ -395,7 +497,12 @@ fn iio_thread(
     let mut read = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         read.clear();
-        let now = match device.read_scans(100, &mut read).and_then(|()| monotonic_ns()) {
+        let now = match device
+            .owner
+            .read_scans(&mut read)
+            .map_err(CaptureError::from)
+            .and_then(|()| monotonic_ns())
+        {
             Ok(now) => now,
             Err(error) => return fault(error.to_string()),
         };
@@ -406,24 +513,43 @@ fn iio_thread(
                 ClockCheck::Ok => scans.push(scan),
                 ClockCheck::FutureSkew => {
                     shared.future_skew.fetch_add(1, Ordering::Relaxed);
-                    shared.max_future_skew_ns.fetch_max(u64::try_from(ahead_ns).unwrap_or(0), Ordering::Relaxed);
+                    shared
+                        .max_future_skew_ns
+                        .fetch_max(u64::try_from(ahead_ns).unwrap_or(0), Ordering::Relaxed);
                     scans.push(scan);
                 }
                 ClockCheck::FutureDropped => {
                     shared.future_dropped.fetch_add(1, Ordering::Relaxed);
-                    shared.max_future_skew_ns.fetch_max(u64::try_from(ahead_ns).unwrap_or(0), Ordering::Relaxed);
+                    shared
+                        .max_future_skew_ns
+                        .fetch_max(u64::try_from(ahead_ns).unwrap_or(0), Ordering::Relaxed);
                 }
                 ClockCheck::WrongClock => {
-                    return fault(format!("sample {:.3} ms in the future of CLOCK_MONOTONIC (wrong clock)", ahead_ns as f64 / 1e6));
+                    return fault(format!(
+                        "sample {:.3} ms in the future of CLOCK_MONOTONIC (wrong clock)",
+                        ahead_ns as f64 / 1e6
+                    ));
                 }
-                ClockCheck::TooOld => return fault(format!("sample {:.1} ms old (clock mismatch or backlog)", -ahead_ns as f64 / 1e6)),
+                ClockCheck::TooOld => {
+                    return fault(format!(
+                        "sample {:.1} ms old (clock mismatch or backlog)",
+                        -ahead_ns as f64 / 1e6
+                    ));
+                }
             }
         }
         if scans.is_empty() {
             continue;
         }
         counter.fetch_add(scans.len() as u64, Ordering::Relaxed);
-        if tx.send(CaptureEvent::Scans { kind, scale: device.scale, scans }).is_err() {
+        if tx
+            .send(CaptureEvent::Scans {
+                kind,
+                scale: device.scale,
+                scans,
+            })
+            .is_err()
+        {
             break;
         }
     }

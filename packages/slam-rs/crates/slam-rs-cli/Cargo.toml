@@ -11,12 +11,14 @@ name = "slam-rs"
 path = "src/main.rs"
 
 [features]
-catalog = ["dep:anyhow", "dep:arrow", "dep:re_protos", "dep:re_log_encoding", "dep:re_chunk", "dep:tonic", "dep:tokio", "dep:openh264", "dep:libc", "dep:cc"]
+catalog = ["dep:anyhow", "dep:arrow", "dep:re_protos", "dep:re_log_encoding", "dep:re_chunk", "dep:tonic", "dep:tokio", "kornia-staging-io/decoder", "dep:kornia-image", "dep:kornia-staging-imgproc"]
 # The CubeCL frontend through wgpu, for `replay --lane gpu`.
 gpu-wgpu = ["slam-rs/gpu-wgpu"]
 
 [dependencies]
-kornia-staging-imgproc.workspace = true
+kornia-staging-io = { workspace = true, optional = true }
+kornia-image = { workspace = true, optional = true }
+kornia-staging-imgproc = { workspace = true, optional = true }
 slam-rs = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
@@ -30,8 +32,3 @@ re_log_encoding = { version = "=0.38.1", default-features = false, optional = tr
 re_chunk = { version = "=0.38.1", default-features = false, optional = true }
 tonic = { version = "=0.14.6", default-features = false, features = ["transport"], optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
-openh264 = { version = "=0.9.8", default-features = false, features = ["source"], optional = true }
-libc = { workspace = true, optional = true }
-
-[build-dependencies]
-cc = { workspace = true, optional = true }

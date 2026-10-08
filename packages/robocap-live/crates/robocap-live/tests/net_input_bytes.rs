@@ -19,7 +19,7 @@ use kornia_imgproc::padding::{Padding2D, PaddingMode, spatial_padding};
 use kornia_staging_imgproc::resize::resize_area_u8;
 use kornia_staging_imgproc::resize::{pool4_mean_f32, pool4_u8};
 use robocap_live::downsample::{SmallImagePool, small_images};
-use robocap_live::frame::{FULL_SIZE, FrameReader, SMALL_SIZE};
+use robocap_live::frame::{FULL_SIZE, FrameReader, NUM_CAMERAS, SMALL_SIZE};
 use robocap_live::hands::letterbox::{BarLetterbox, NET_SIZE};
 use robocap_live::nets::rknn::{
     CropInput, ImageFeed, InputData, POOLED_LEN, PooledInput, f16_bytes_from_f32, u8_from_unit_f32,
@@ -232,9 +232,14 @@ fn detnet_input_matches_the_padded_chain_on_a_dump() -> TestResult {
     let mut reader = FrameReader::open(&dir.join("frames.bin"), FULL_SIZE)?;
     let mut checked: usize = 0;
     while let Some(frameset) = reader.next_frameset()? {
-        for (camera, small) in small_images(&frameset, None, &mut SmallImagePool::default())?
-            .iter()
-            .enumerate()
+        for (camera, small) in small_images(
+            &frameset,
+            &[false; NUM_CAMERAS],
+            None,
+            &mut SmallImagePool::default(),
+        )?
+        .iter()
+        .enumerate()
         {
             if let Some(small) = small {
                 assert_detnet_inputs_match(

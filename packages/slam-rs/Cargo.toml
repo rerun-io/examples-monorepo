@@ -16,6 +16,9 @@ publish = false
 kornia-staging-gpu = { path = "../kornia-staging/crates/kornia-staging-gpu" }
 bytes = "1"
 kornia-staging-slam = { path = "../kornia-staging/crates/kornia-staging-slam" }
+kornia-staging-sensors = { path = "../kornia-staging/crates/kornia-staging-sensors" }
+kornia-staging-io = { path = "../kornia-staging/crates/kornia-staging-io" }
+kornia-staging-sensor-iio = { path = "../kornia-staging/crates/kornia-staging-sensor-iio" }
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d", features = ["serde"] }
 kornia-staging-algebra = { path = "../kornia-staging/crates/kornia-staging-algebra" }
 kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }

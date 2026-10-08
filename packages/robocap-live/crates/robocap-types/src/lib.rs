@@ -1,87 +1,32 @@
-//! robocap-types: the RoboCap's data types, with no runtime, no device and no estimator. A frameset of six cameras with its
-//! frames' capture metadata, an IMU sample, what a source yields, and what one SLAM step produced. Drivers produce them, the
-//! pipeline passes them on, and sinks read them; nothing here starts a thread or touches a device.
-//!
-//! The split follows kornia: `cu-stereo-payloads` (cu-kornia-vio) and sensor-rt's types keep the wire types apart from the
-//! estimator and from any runtime, so a driver can name what it produces without depending on the pipeline. These are the
-//! types `UPSTREAM.md` proposes for kornia-sensors.
+//! RoboCap camera constants and SLAM result types. Sensor payloads live in kornia-staging-sensors.
 
-use std::sync::Arc;
-
-use kornia_image::{Image, ImageSize};
+use kornia_image::ImageSize;
 use nalgebra::Isometry3;
 use serde::Serialize;
 
 /// Number of cameras on the RoboCap.
 pub const NUM_CAMERAS: usize = 6;
 /// Camera names in index order (= catalog `/world/rig_00/cam_00..cam_05`; V4L2 mainpaths 75, 111, 84, 66, 102, 93).
-pub const CAMERA_NAMES: [&str; NUM_CAMERAS] = ["left_front", "right_front", "left_eye", "right_eye", "left", "right"];
+pub const CAMERA_NAMES: [&str; NUM_CAMERAS] = [
+    "left_front",
+    "right_front",
+    "left_eye",
+    "right_eye",
+    "left",
+    "right",
+];
 /// The cameras slam-rs uses, in its input order (left_front, right_front, left, right), with the front stereo pair first.
 pub const SLAM_CAMERAS: [usize; 4] = [0, 1, 4, 5];
 /// Native capture size.
-pub const FULL_SIZE: ImageSize = ImageSize { width: 1920, height: 1080 };
+pub const FULL_SIZE: ImageSize = ImageSize {
+    width: 1920,
+    height: 1080,
+};
 /// The "small" image: SLAM input, DetNet letterbox content and viewer video.
-pub const SMALL_SIZE: ImageSize = ImageSize { width: 640, height: 360 };
-
-/// An 8-bit luma image (kornia-rs), shared.
-pub type Luma = Arc<Image<u8, 1>>;
-
-/// Where and when a frame was captured (the shape of sensor-rt's `FrameMeta`, with slam-rs's `i64` nanoseconds). The default is
-/// camera 0's upright frame 0 at time 0.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FrameMeta {
-    /// The driver's frame sequence number (replay: the frameset index).
-    pub seq: u64,
-    /// Capture time, nanoseconds: CLOCK_MONOTONIC on the cap; the catalog's video time in replay.
-    pub pts_ns: i64,
-    /// Camera index 0..6 (see [`CAMERA_NAMES`]).
-    pub source_id: u32,
-    /// The image is the camera's view turned 180 degrees (live: a camera the vendor turns, robocap-live's `capture::vendor_turned_180`);
-    /// its consumers read it upright. Replay frames are upright.
-    pub turned_180: bool,
-}
-
-/// One camera's frame of a frameset.
-#[derive(Clone)]
-pub struct CameraFrame {
-    /// Sequence number, capture time and camera.
-    pub meta: FrameMeta,
-    /// Full-resolution luma, 1920x1080.
-    pub full: Luma,
-}
-
-/// The six cameras' frames of one trigger instant (cameras whose frame is missing are `None`).
-#[derive(Clone)]
-pub struct Frameset {
-    /// Running frameset number from the source's start.
-    pub index: u64,
-    /// The frameset's time: the earliest present camera's `t_ns`.
-    pub t_ns: i64,
-    /// The frames by camera index; `None` for a camera whose frame is missing.
-    pub cameras: [Option<CameraFrame>; NUM_CAMERAS],
-}
-
-/// One IMU0 measurement in the IMU frame, SI units: gyro and accel together, accel interpolated onto the gyro timestamp, as PR #270's
-/// live adapter feeds slam-rs (`Vio::push_imu`) and as kornia-sensors' `ImuMeasurement` holds them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ImuSample {
-    /// Time of the gyro sample, nanoseconds (the frames' clock).
-    pub t_ns: i64,
-    /// rad/s
-    pub gyro: [f64; 3],
-    /// m/s^2
-    pub accel: [f64; 3],
-}
-
-/// What a source yields, in time order (IMU samples up to a frameset's time come before it).
-#[derive(Clone)]
-pub enum SourceEvent {
-    /// One trigger instant's frames.
-    Frameset(Frameset),
-    /// One IMU0 sample.
-    Imu(ImuSample),
-}
-
+pub const SMALL_SIZE: ImageSize = ImageSize {
+    width: 640,
+    height: 360,
+};
 
 /// What one SLAM step produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

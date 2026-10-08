@@ -6,9 +6,13 @@ publish.workspace = true
 
 [features]
 gstreamer-capture = ["dep:gstreamer", "dep:gstreamer-app"]
-live-slam = ["dep:slam-rs"]
+live-slam = ["dep:slam-rs", "dep:kornia-staging-sensors"]
 
 [dependencies]
+kornia-staging-sensors = { workspace = true, optional = true }
+kornia-image.workspace = true
+kornia-staging-io = { workspace = true, features = ["v4l"] }
+kornia-staging-sensor-iio.workspace = true
 kornia-staging-imgproc.workspace = true
 anyhow = { workspace = true }
 arrow-array = "58.3"
@@ -23,9 +27,6 @@ re_log_types = "=0.37.0"
 rerun = { version = "=0.37.0", default-features = false, features = ["sdk"] }
 gstreamer = { version = "0.24", features = ["v1_24"], optional = true }
 gstreamer-app = { version = "0.24", features = ["v1_24"], optional = true }
-
-[build-dependencies]
-cc = { workspace = true }
 
 [[bin]]
 name = "robocap-direct"

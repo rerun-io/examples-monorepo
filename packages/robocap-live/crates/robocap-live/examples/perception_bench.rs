@@ -15,8 +15,10 @@ use kornia_imgproc::padding::{Padding2D, PaddingMode, spatial_padding};
 use kornia_staging_3d::camera::virtual_camera::maps_from_virtual_pinhole_kb4_f32;
 use kornia_staging_imgproc::interpolation::remap_f32_from_u8_zero_border;
 use kornia_staging_imgproc::resize::pool4_mean_f32;
+use kornia_staging_sensors::{CameraFrame, CaptureMeta};
+use robocap_live::frame::Luma;
 use robocap_live::frame::isometry_from_matrix;
-use robocap_live::frame::{CameraFrame, FULL_SIZE, FrameMeta, Luma, NUM_CAMERAS, Rig, SMALL_SIZE};
+use robocap_live::frame::{FULL_SIZE, NUM_CAMERAS, Rig, SMALL_SIZE};
 use robocap_live::hands::CropSource;
 use robocap_live::hands::camera::Lens;
 use robocap_live::hands::estimator::{PerspectiveKeyNet, ViewRequest};
@@ -132,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let camera_frames: Vec<CameraFrame> = frames
         .iter()
         .map(|full| CameraFrame {
-            meta: FrameMeta::default(),
+            meta: CaptureMeta::default(),
             full: full.clone(),
         })
         .collect();
@@ -163,8 +165,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let plan_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = Instant::now();
-        let (estimates, crops_ms) =
-            estimator.estimate(&mut nets, &full, &world_from_rig, &requests)?;
+        let (estimates, crops_ms) = estimator.estimate(
+            &mut nets,
+            &full,
+            &[false; NUM_CAMERAS],
+            &world_from_rig,
+            &requests,
+        )?;
         let elapsed = start.elapsed().as_secs_f64() * 1e3;
         let start = Instant::now();
         spatial_padding(

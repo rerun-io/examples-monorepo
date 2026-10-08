@@ -12,13 +12,19 @@ use nalgebra::{Isometry3, Vector2, Vector3};
 
 use super::HandsError;
 use super::camera::{CameraError, RigCameraModel, in_front, rig_models};
-use super::heatmaps::{decode_distance, decode_heatmaps, keypoint_input, nan_to_num, relative_distances};
-use super::letterbox::BarLetterbox;
-use super::perspective::{CROP_IMAGE_SIZE, CROP_MARGIN, CropCamera, CropMaps, crop_camera_from_circle, crop_camera_from_points, placeholder_crop, sample_crop};
 use super::detect::sigmoid;
+use super::heatmaps::{
+    decode_distance, decode_heatmaps, keypoint_input, nan_to_num, relative_distances,
+};
+use super::letterbox::BarLetterbox;
+use super::perspective::{
+    CROP_IMAGE_SIZE, CROP_MARGIN, CropCamera, CropMaps, crop_camera_from_circle,
+    crop_camera_from_points, placeholder_crop, sample_crop,
+};
 use super::{CropSource, RIGHT};
-use crate::frame::{CameraFrame, NUM_CAMERAS, Rig};
+use crate::frame::{NUM_CAMERAS, Rig};
 use crate::nets::{HandNets, NUM_LANDMARKS};
+use kornia_staging_sensors::CameraFrame;
 
 /// One KeyNet view to estimate: tracker.py's `CropRequest` row.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,7 +90,8 @@ impl PerspectiveKeyNet {
     ///
     /// [`HandsError::Invalid`] when the rig's cameras are not supported (see [`CameraError`]).
     pub fn new(rig: &Rig, phi: f64) -> Result<Self, HandsError> {
-        let models = rig_models(rig).map_err(|error: CameraError| HandsError::Invalid(error.to_string()))?;
+        let models =
+            rig_models(rig).map_err(|error: CameraError| HandsError::Invalid(error.to_string()))?;
         let maps = CropMaps::new().map_err(|error| HandsError::Invalid(error.to_string()))?;
         Ok(Self {
             models,
@@ -126,24 +133,43 @@ impl PerspectiveKeyNet {
     /// # Errors
     ///
     /// [`HandsError::Invalid`] for a bad camera index, or an acquisition (or unusable tracked view) without a circle.
-    pub fn plan(&self, world_from_rig: &Isometry3<f64>, request: &ViewRequest) -> Result<PlannedView, HandsError> {
-        let model = self.models.get(request.camera).ok_or_else(|| HandsError::Invalid(format!("camera {} out of range", request.camera)))?;
+    pub fn plan(
+        &self,
+        world_from_rig: &Isometry3<f64>,
+        request: &ViewRequest,
+    ) -> Result<PlannedView, HandsError> {
+        let model = self.models.get(request.camera).ok_or_else(|| {
+            HandsError::Invalid(format!("camera {} out of range", request.camera))
+        })?;
         let mirror = request.side == RIGHT;
         // RoboCap's cameras need no crop roll (handtrack's per-camera angle is for UmeTrack's rig).
         let roll = 0.0;
         if let Some(world) = &request.planning_pose_landmarks_world {
-            let points_cam: [Vector3<f64>; NUM_LANDMARKS] =
-                std::array::from_fn(|i| model.cam_from_world_point(world_from_rig, &Vector3::new(world[i][0], world[i][1], world[i][2])));
+            let points_cam: [Vector3<f64>; NUM_LANDMARKS] = std::array::from_fn(|i| {
+                model.cam_from_world_point(
+                    world_from_rig,
+                    &Vector3::new(world[i][0], world[i][1], world[i][2]),
+                )
+            });
             let valid: [bool; NUM_LANDMARKS] = std::array::from_fn(|i| in_front(&points_cam[i]));
             let crop = crop_camera_from_points(&points_cam, &valid, roll, mirror, CROP_MARGIN);
             if crop.focal.is_finite() {
-                let uv: [Vector2<f64>; NUM_LANDMARKS] = std::array::from_fn(|i| crop.to_crop(&points_cam[i]).0);
+                let uv: [Vector2<f64>; NUM_LANDMARKS] =
+                    std::array::from_fn(|i| crop.to_crop(&points_cam[i]).0);
                 let input = keypoint_input(&uv, &relative_distances(&points_cam, self.phi));
-                return Ok(PlannedView { crop, keypoint_input: input });
+                return Ok(PlannedView {
+                    crop,
+                    keypoint_input: input,
+                });
             }
         }
-        let circle = request.circle_net.ok_or_else(|| HandsError::Invalid("an untracked view needs its DetNet circle".into()))?;
-        Ok(PlannedView { crop: crop_camera_from_circle(model, &self.letterbox, circle, roll, mirror), keypoint_input: [0.0; 3 * NUM_LANDMARKS] })
+        let circle = request.circle_net.ok_or_else(|| {
+            HandsError::Invalid("an untracked view needs its DetNet circle".into())
+        })?;
+        Ok(PlannedView {
+            crop: crop_camera_from_circle(model, &self.letterbox, circle, roll, mirror),
+            keypoint_input: [0.0; 3 * NUM_LANDMARKS],
+        })
     }
 
     /// Estimate keypoints for `requests` (at most a few views; one batched KeyNet call).
@@ -159,48 +185,93 @@ impl PerspectiveKeyNet {
     /// # Errors
     ///
     /// [`HandsError::Invalid`] for bad requests or images, [`HandsError::Nets`] when the backend fails.
-    pub fn estimate(&mut self, nets: &mut dyn HandNets, full: &[Option<&CameraFrame>; NUM_CAMERAS], world_from_rig: &Isometry3<f64>,
-                    requests: &[ViewRequest]) -> Result<(Vec<KeypointEstimate>, f64), HandsError> {
-        let invalid = |error: kornia_image::ImageError| HandsError::Invalid(format!("KeyNet crop: {error}"));
+    pub fn estimate(
+        &mut self,
+        nets: &mut dyn HandNets,
+        full: &[Option<&CameraFrame>; NUM_CAMERAS],
+        turned_180: &[bool; NUM_CAMERAS],
+        world_from_rig: &Isometry3<f64>,
+        requests: &[ViewRequest],
+    ) -> Result<(Vec<KeypointEstimate>, f64), HandsError> {
+        let invalid =
+            |error: kornia_image::ImageError| HandsError::Invalid(format!("KeyNet crop: {error}"));
         let start = Instant::now();
-        let planned = requests.iter().map(|request| self.plan(world_from_rig, request)).collect::<Result<Vec<_>, _>>()?;
+        let planned = requests
+            .iter()
+            .map(|request| self.plan(world_from_rig, request))
+            .collect::<Result<Vec<_>, _>>()?;
         while self.crops.len() < requests.len() {
-            self.crops.push(Image::from_size_val(CROP_IMAGE_SIZE, 0.0).map_err(invalid)?);
+            self.crops
+                .push(Image::from_size_val(CROP_IMAGE_SIZE, 0.0).map_err(invalid)?);
         }
         self.active = requests.len();
         let mut usable: Vec<bool> = Vec::with_capacity(requests.len());
-        for ((request, plan), crop) in requests.iter().zip(&planned).zip(self.crops[..self.active].iter_mut()) {
+        for ((request, plan), crop) in requests
+            .iter()
+            .zip(&planned)
+            .zip(self.crops[..self.active].iter_mut())
+        {
             let model = &self.models[request.camera];
             let frame = full[request.camera];
             usable.push(plan.crop.usable() && frame.is_some());
             match frame {
                 Some(frame) => {
-                    let camera = if plan.crop.usable() { plan.crop } else { placeholder_crop(plan.crop.mirror) };
-                    sample_crop(&frame.full, model, &camera, &mut self.maps, crop, frame.meta.turned_180).map_err(invalid)?;
+                    let camera = if plan.crop.usable() {
+                        plan.crop
+                    } else {
+                        placeholder_crop(plan.crop.mirror)
+                    };
+                    sample_crop(
+                        &frame.full,
+                        model,
+                        &camera,
+                        &mut self.maps,
+                        crop,
+                        turned_180[request.camera],
+                    )
+                    .map_err(invalid)?;
                 }
                 None => crop.as_slice_mut().fill(0.0),
             }
         }
         let crops_ms = start.elapsed().as_secs_f64() * 1e3;
 
-        let inputs: Vec<&[f32]> = self.crops[..self.active].iter().map(|crop| crop.as_slice()).collect();
-        let features: Vec<[f32; 3 * NUM_LANDMARKS]> = planned.iter().map(|plan| plan.keypoint_input).collect();
-        let raw = if requests.is_empty() { Vec::new() } else { nets.keynet(&inputs, &features)? };
+        let inputs: Vec<&[f32]> = self.crops[..self.active]
+            .iter()
+            .map(|crop| crop.as_slice())
+            .collect();
+        let features: Vec<[f32; 3 * NUM_LANDMARKS]> =
+            planned.iter().map(|plan| plan.keypoint_input).collect();
+        let raw = if requests.is_empty() {
+            Vec::new()
+        } else {
+            nets.keynet(&inputs, &features)?
+        };
         if raw.len() != requests.len() {
-            return Err(HandsError::Invalid(format!("KeyNet returned {} outputs for {} crops", raw.len(), requests.len())));
+            return Err(HandsError::Invalid(format!(
+                "KeyNet returned {} outputs for {} crops",
+                raw.len(),
+                requests.len()
+            )));
         }
 
         let mut out = Vec::with_capacity(requests.len());
-        for (((request, plan), raw), usable) in requests.iter().zip(&planned).zip(&raw).zip(usable) {
+        for (((request, plan), raw), usable) in requests.iter().zip(&planned).zip(&raw).zip(usable)
+        {
             let model = &self.models[request.camera];
-            let (points_crop, confidence) =
-                decode_heatmaps(&raw.heatmaps).ok_or_else(|| HandsError::Invalid(format!("KeyNet heatmaps: {} values", raw.heatmaps.len())))?;
-            let d_rel = decode_distance(&raw.distance).ok_or_else(|| HandsError::Invalid(format!("KeyNet distance: {} values", raw.distance.len())))?;
+            let (points_crop, confidence) = decode_heatmaps(&raw.heatmaps).ok_or_else(|| {
+                HandsError::Invalid(format!("KeyNet heatmaps: {} values", raw.heatmaps.len()))
+            })?;
+            let d_rel = decode_distance(&raw.distance).ok_or_else(|| {
+                HandsError::Invalid(format!("KeyNet distance: {} values", raw.distance.len()))
+            })?;
             let mut points_net = [[f32::NAN; 2]; NUM_LANDMARKS];
             let mut points_px = [[f32::NAN; 2]; NUM_LANDMARKS];
             for landmark in 0..NUM_LANDMARKS {
                 let [u, v] = points_crop[landmark];
-                let ray = plan.crop.from_crop(&Vector2::new(f64::from(u), f64::from(v)));
+                let ray = plan
+                    .crop
+                    .from_crop(&Vector2::new(f64::from(u), f64::from(v)));
                 if let Some(native) = model.project(&ray) {
                     let net = self.letterbox.to_net(&native);
                     points_net[landmark] = [net.x as f32, net.y as f32];
@@ -212,8 +283,16 @@ impl PerspectiveKeyNet {
                 points_net: points_net.map(|p| p.map(nan_to_num)),
                 points_px: points_px.map(|p| p.map(nan_to_num)),
                 d_rel_mm: d_rel.map(nan_to_num),
-                presence: if usable { sigmoid(raw.presence_logit) } else { 0.0 },
-                confidence: if usable { confidence } else { [0.0; NUM_LANDMARKS] },
+                presence: if usable {
+                    sigmoid(raw.presence_logit)
+                } else {
+                    0.0
+                },
+                confidence: if usable {
+                    confidence
+                } else {
+                    [0.0; NUM_LANDMARKS]
+                },
                 pinch: raw.pinch_logit.map(sigmoid),
                 usable,
                 crop: Some(plan.crop),

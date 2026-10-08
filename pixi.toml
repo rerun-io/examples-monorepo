@@ -2585,19 +2585,12 @@ inputs = [
     "packages/slam-rs/crates/*/Cargo.toml",
     "packages/slam-rs/crates/*/build.rs",
     "packages/slam-rs/crates/*/src/**",
-    "packages/kornia-staging/Cargo.toml",
-    "packages/kornia-staging/Cargo.lock",
-    "packages/kornia-staging/crates/*/Cargo.toml",
-    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/Cargo.{toml,lock}",
+    "packages/kornia-staging/crates/*/{Cargo.toml,build.rs}",
     "packages/kornia-staging/crates/*/src/**",
     "packages/kornia-staging/patches/**",
     "packages/kornia-staging/scripts/prepare_patched_deps.py",
     "packages/kornia-staging/target/patch/**",
-    "packages/slam-rs/Cargo.toml",
-    "packages/slam-rs/Cargo.lock",
-    "packages/slam-rs/crates/*/Cargo.toml",
-    "packages/slam-rs/crates/*/build.rs",
-    "packages/slam-rs/crates/*/src/**/*.rs",
 ]
 outputs = ["packages/slam-rs/slam_rs/_core.so"]
 description = "Build the Rust VIO core and install slam_rs._core in place"
@@ -2705,19 +2698,12 @@ inputs = [
     "packages/slam-rs/crates/*/Cargo.toml",
     "packages/slam-rs/crates/*/build.rs",
     "packages/slam-rs/crates/*/src/**",
-    "packages/kornia-staging/Cargo.toml",
-    "packages/kornia-staging/Cargo.lock",
-    "packages/kornia-staging/crates/*/Cargo.toml",
-    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/Cargo.{toml,lock}",
+    "packages/kornia-staging/crates/*/{Cargo.toml,build.rs}",
     "packages/kornia-staging/crates/*/src/**",
     "packages/kornia-staging/patches/**",
     "packages/kornia-staging/scripts/prepare_patched_deps.py",
     "packages/kornia-staging/target/patch/**",
-    "packages/slam-rs/Cargo.toml",
-    "packages/slam-rs/Cargo.lock",
-    "packages/slam-rs/crates/*/Cargo.toml",
-    "packages/slam-rs/crates/*/build.rs",
-    "packages/slam-rs/crates/*/src/**/*.rs",
 ]
 outputs = ["packages/slam-rs/slam_rs/_core.so"]
 description = "Build the Rust VIO core with the portable wgpu CubeCL frontend and install it in place"
@@ -3349,10 +3335,8 @@ inputs = [
     "packages/handfit/crates/*/Cargo.toml",
     "packages/handfit/crates/*/build.rs",
     "packages/handfit/crates/*/src/**",
-    "packages/kornia-staging/Cargo.toml",
-    "packages/kornia-staging/Cargo.lock",
-    "packages/kornia-staging/crates/*/Cargo.toml",
-    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/Cargo.{toml,lock}",
+    "packages/kornia-staging/crates/*/{Cargo.toml,build.rs}",
     "packages/kornia-staging/crates/*/src/**",
 ]
 outputs = ["packages/handfit/handfit/_core.so"]
@@ -3474,10 +3458,8 @@ inputs = [
     "packages/handfit/crates/*/Cargo.toml",
     "packages/handfit/crates/*/build.rs",
     "packages/handfit/crates/*/src/**",
-    "packages/kornia-staging/Cargo.toml",
-    "packages/kornia-staging/Cargo.lock",
-    "packages/kornia-staging/crates/*/Cargo.toml",
-    "packages/kornia-staging/crates/*/build.rs",
+    "packages/kornia-staging/Cargo.{toml,lock}",
+    "packages/kornia-staging/crates/*/{Cargo.toml,build.rs}",
     "packages/kornia-staging/crates/*/src/**",
     "packages/kornia-staging/patches/**",
     "packages/kornia-staging/scripts/prepare_patched_deps.py",
@@ -3536,6 +3518,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 rust = "1.98.*"
 python = "3.12.*"
 git = "*"
+dav1d = "1.2.*"
 
 [feature.kornia-staging.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
@@ -3561,6 +3544,7 @@ cwd = "packages/kornia-staging"
 description = "Verify pinned patch archives and patched Cargo resolution"
 
 [feature.kornia-staging.tasks.kornia-staging-cubecl-park-test]
+# Cross-environment callers require the transitive task environment explicitly.
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml park"
 cwd = "packages/kornia-staging"

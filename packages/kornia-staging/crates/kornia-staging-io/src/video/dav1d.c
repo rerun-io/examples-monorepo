@@ -9,7 +9,7 @@
 #include <string.h>
 
 #if DAV1D_API_VERSION_MAJOR != 6
-#error "catalog replay requires dav1d 1.2.x headers (libdav1d.so.6 ABI)"
+#error "video decoder requires dav1d 1.2.x headers (libdav1d.so.6 ABI)"
 #endif
 
 typedef struct {
@@ -26,7 +26,7 @@ typedef struct {
     void (*close)(Dav1dContext **);
 } Decoder;
 
-void *catalog_av1_open(const char *path) {
+void *ks_av1_open(const char *path) {
     Decoder *d = calloc(1, sizeof(*d));
     if (!d) return NULL;
     d->lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -60,7 +60,7 @@ void *catalog_av1_open(const char *path) {
     return d;
 }
 
-int catalog_av1_send(void *decoder, const uint8_t *bytes, size_t length) {
+int ks_av1_send(void *decoder, const uint8_t *bytes, size_t length) {
     Decoder *d = decoder;
     Dav1dData data = {0};
     uint8_t *target = d->create(&data, length);
@@ -71,7 +71,7 @@ int catalog_av1_send(void *decoder, const uint8_t *bytes, size_t length) {
     return status;
 }
 
-int catalog_av1_get(void *decoder, const uint8_t **bytes, int *width,
+int ks_av1_get(void *decoder, const uint8_t **bytes, int *width,
                    int *height, ptrdiff_t *stride, int *full_range) {
     Decoder *d = decoder;
     d->unref(&d->pic);
@@ -86,7 +86,7 @@ int catalog_av1_get(void *decoder, const uint8_t **bytes, int *width,
     return 0;
 }
 
-void catalog_av1_close(void *decoder) {
+void ks_av1_close(void *decoder) {
     Decoder *d = decoder;
     d->unref(&d->pic);
     d->close(&d->ctx);

@@ -15,7 +15,7 @@ pub use display::DisplayAssets;
 #[cfg(target_os = "linux")]
 mod device;
 mod durable_rrd;
-mod iio;
+#[cfg(target_os = "linux")]
 #[cfg(feature = "live-slam")]
 mod live_slam;
 #[cfg(feature = "gstreamer-capture")]
@@ -36,9 +36,8 @@ pub use capture::{
     CalibrationSource, CaptureIdentity, DirectWriter, MotionKind, MotionSample, VideoSample,
 };
 #[cfg(target_os = "linux")]
-pub use device::{FrameTrigger, IioDevice, monotonic_ns};
+pub use device::{FrameTrigger, monotonic_ns, start_imu};
 pub use durable_rrd::DurableRrdSink;
-pub use iio::{IioScan, IioScanLayout};
 #[cfg(feature = "gstreamer-capture")]
 pub use pipeline::{CapturedBuffer, SamplePipeline};
 pub use segments::SegmentedWriter;

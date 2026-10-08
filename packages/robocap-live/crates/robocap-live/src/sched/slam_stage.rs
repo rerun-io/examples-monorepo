@@ -4,15 +4,27 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::downsample::SmallImages;
-use crate::frame::{ImuSample, SLAM_CAMERAS};
+use crate::frame::SLAM_CAMERAS;
 use crate::slam::{RateSelector, SlamConfig, SlamEstimator, SlamLane, SlamPose, SlamStatus};
+use kornia_staging_sensors::imu::CombinedImuSample;
 
 use super::{SchedError, Shared, Stage, stage_error};
 
 /// The SLAM stage (A76): rate selection, IMU coverage, `Vio::track`, and the poses published for hands and output.
-pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config: SlamConfig, lossless: bool, imu_wait: Duration) -> Result<(), SchedError> {
+pub(super) fn slam_loop(
+    shared: &Shared,
+    imu: &mpsc::Receiver<CombinedImuSample>,
+    config: SlamConfig,
+    lossless: bool,
+    imu_wait: Duration,
+) -> Result<(), SchedError> {
     let mut slam = SlamEstimator::new(&config).map_err(|e| stage_error("slam", e))?;
-    eprintln!("robocap-live: SLAM lane {:?}, frontend_lag={}, threads={}", slam.lane(), slam.frontend_lag(), slam.threads());
+    eprintln!(
+        "robocap-live: SLAM lane {:?}, frontend_lag={}, threads={}",
+        slam.lane(),
+        slam.frontend_lag(),
+        slam.threads()
+    );
     shared.stats.with(|s| {
         s.slam_lane = Some(slam.lane());
         s.slam_frontend_lag = Some(slam.frontend_lag());
@@ -22,10 +34,12 @@ pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config
     let mut last_t: Option<i64> = None;
     let mut imu_rewind: Option<i64> = None;
     let mut imu_open = true;
-    let push = |slam: &mut SlamEstimator, sample: ImuSample| slam.push_imu(&sample).map_err(|e| stage_error("slam", e));
+    let push = |slam: &mut SlamEstimator, sample: CombinedImuSample| {
+        slam.push_imu(&sample).map_err(|e| stage_error("slam", e))
+    };
     let (stats, poses) = (&shared.stats, &shared.poses);
     while let Some(item) = shared.slam.pop() {
-        let (index, t) = (item.frameset.index, item.frameset.t_ns);
+        let (index, t) = (item.frameset.index, item.frameset.timestamp_ns);
         let backwards = last_t.is_some_and(|last| t < last);
         if !backwards && !selector.due(t) {
             stats.with(|s| s.counters.slam_rate_skipped += 1);
@@ -37,15 +51,26 @@ pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config
             skip_frame(shared, &mut slam, lossless, index)?;
             continue;
         };
-        if let Some(last) = last_t.filter(|&last| backwards || t - last > crate::slam::RESET_GAP_NS) {
+        if let Some(last) = last_t.filter(|&last| backwards || t - last > crate::slam::RESET_GAP_NS)
+        {
             flush_slam(shared, &mut slam)?;
             if backwards {
-                restart_slam(shared, &mut slam, index, format_args!("backwards timestamp: {last} -> {t}"))?;
+                restart_slam(
+                    shared,
+                    &mut slam,
+                    index,
+                    format_args!("backwards timestamp: {last} -> {t}"),
+                )?;
                 // Discard the previous world's queued IMU tail until timestamps return to the earlier range.
                 // The new world's first sample may already be just after this frame, which supplies coverage.
                 imu_rewind = Some(last);
             } else {
-                restart_slam(shared, &mut slam, index, format_args!("input gap {:.3} ms", (t - last) as f64 / 1e6))?;
+                restart_slam(
+                    shared,
+                    &mut slam,
+                    index,
+                    format_args!("input gap {:.3} ms", (t - last) as f64 / 1e6),
+                )?;
             }
             last_t = None;
             selector = RateSelector::new(config.hz, config.rate_tolerance_ns);
@@ -60,7 +85,7 @@ pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config
             };
             match next {
                 Ok(sample) => {
-                    if imu_rewind.is_some_and(|previous_t| sample.t_ns > previous_t) {
+                    if imu_rewind.is_some_and(|previous_t| sample.timestamp_ns > previous_t) {
                         continue;
                     }
                     imu_rewind = None;
@@ -80,13 +105,15 @@ pub(super) fn slam_loop(shared: &Shared, imu: &mpsc::Receiver<ImuSample>, config
         // Snapshot only an already queued, selected, complete frameset. No wait and no IMU requirement for a hint.
         let next = if slam.lane() == SlamLane::Gpu {
             shared.slam.peek_matching(|next| {
-                let next_t = next.frameset.t_ns;
+                let next_t = next.frameset.timestamp_ns;
                 selector.due(next_t) && next_t > t && next_t - t <= crate::slam::RESET_GAP_NS
             })
         } else {
             None
         };
-        let lookahead = next.as_ref().and_then(|next| Some((next.frameset.t_ns, slam_images(&next.small)?)));
+        let lookahead = next
+            .as_ref()
+            .and_then(|next| Some((next.frameset.timestamp_ns, slam_images(&next.small)?)));
         if lookahead.is_some() {
             stats.with(|s| s.counters.slam_lookahead += 1);
         }
@@ -140,7 +167,10 @@ fn slam_images(small: &SmallImages) -> Option<[&kornia_image::Image<u8, 1>; 4]> 
 
 fn publish_slam(shared: &Shared, pose: SlamPose) {
     shared.stats.with(|s| {
-        *s.counters.slam_status.entry(pose.status.as_str()).or_default() += 1;
+        *s.counters
+            .slam_status
+            .entry(pose.status.as_str())
+            .or_default() += 1;
         if pose.ok {
             s.counters.slam_ok += 1;
             s.slam_ok_window += 1;
@@ -149,16 +179,32 @@ fn publish_slam(shared: &Shared, pose: SlamPose) {
     shared.poses.publish(pose);
 }
 
-fn restart_slam(shared: &Shared, slam: &mut SlamEstimator, fallback_index: u64, cause: std::fmt::Arguments<'_>) -> Result<(), SchedError> {
-    let reset_at = slam.pending_index().map_or(fallback_index, |pending| pending.min(fallback_index));
+fn restart_slam(
+    shared: &Shared,
+    slam: &mut SlamEstimator,
+    fallback_index: u64,
+    cause: std::fmt::Arguments<'_>,
+) -> Result<(), SchedError> {
+    let reset_at = slam
+        .pending_index()
+        .map_or(fallback_index, |pending| pending.min(fallback_index));
     slam.reset().map_err(|e| stage_error("slam", e))?;
     shared.poses.reset(reset_at);
     shared.stats.with(|s| s.counters.slam_resets += 1);
-    eprintln!("robocap-live: SLAM reset {}: {}", slam.resets, cause.to_string().replace(['\r', '\n'], " "));
+    eprintln!(
+        "robocap-live: SLAM reset {}: {}",
+        slam.resets,
+        cause.to_string().replace(['\r', '\n'], " ")
+    );
     Ok(())
 }
 
-fn skip_frame(shared: &Shared, slam: &mut SlamEstimator, lossless: bool, index: u64) -> Result<(), SchedError> {
+fn skip_frame(
+    shared: &Shared,
+    slam: &mut SlamEstimator,
+    lossless: bool,
+    index: u64,
+) -> Result<(), SchedError> {
     if lossless {
         flush_slam(shared, slam)?;
     }
@@ -178,7 +224,12 @@ fn flush_slam(shared: &Shared, slam: &mut SlamEstimator) -> Result<(), SchedErro
             Ok(None) => {}
             Err(error) => {
                 shared.stats.with(|s| s.counters.slam_failures += 1);
-                restart_slam(shared, slam, pending_index, format_args!("estimator error during flush: {error}"))?;
+                restart_slam(
+                    shared,
+                    slam,
+                    pending_index,
+                    format_args!("estimator error during flush: {error}"),
+                )?;
             }
         }
     }

@@ -8,10 +8,10 @@ use nalgebra::Isometry3;
 use serde::Serialize;
 
 use crate::downsample::SmallImages;
-use crate::frame::Frameset;
-use crate::hands::HandFrameResult;
 use crate::frame::matrix_from_isometry;
+use crate::hands::HandFrameResult;
 use crate::slam::SlamPose;
+use kornia_staging_sensors::Frameset;
 
 /// Per-frameset stage timings, milliseconds; NaN (`null` in the record) for a stage that did not run for this frameset.
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -103,7 +103,8 @@ pub struct OutputRecord<'a> {
 impl OutputRecord<'_> {
     /// `world_from_rig` of the record (identity without a pose).
     pub fn world_from_rig(&self) -> Isometry3<f64> {
-        self.pose.map_or_else(Isometry3::identity, |pose| pose.world_from_rig)
+        self.pose
+            .map_or_else(Isometry3::identity, |pose| pose.world_from_rig)
     }
 }
 
@@ -182,8 +183,14 @@ impl RecordWriter {
     ///
     /// [`SinkError`] when it cannot be created.
     pub fn create(path: &Path) -> Result<Self, SinkError> {
-        let file = std::fs::File::create(path).map_err(|e| SinkError { sink: "record".into(), message: format!("{}: {e}", path.display()) })?;
-        Ok(Self { out: std::io::BufWriter::new(file), path: path.display().to_string() })
+        let file = std::fs::File::create(path).map_err(|e| SinkError {
+            sink: "record".into(),
+            message: format!("{}: {e}", path.display()),
+        })?;
+        Ok(Self {
+            out: std::io::BufWriter::new(file),
+            path: path.display().to_string(),
+        })
     }
 }
 
@@ -201,7 +208,12 @@ impl FramesetSink for RecordWriter {
                         landmarks: hand.landmarks_world.map(|l| l.to_vec()),
                         views: hand
                             .fitted_views()
-                            .map(|v| RecordView { camera: v.camera, keypoints_px: v.keypoints_px.to_vec(), presence: v.presence, pinch: v.pinch })
+                            .map(|v| RecordView {
+                                camera: v.camera,
+                                keypoints_px: v.keypoints_px.to_vec(),
+                                presence: v.presence,
+                                pinch: v.pinch,
+                            })
                             .collect(),
                         detnet_camera: hand.detnet_camera,
                         detnet_circle: hand.detnet_circle,
@@ -211,7 +223,7 @@ impl FramesetSink for RecordWriter {
             .unwrap_or_default();
         let line = RecordLine {
             index: record.frameset.index,
-            t_ns: record.frameset.t_ns,
+            t_ns: record.frameset.timestamp_ns,
             slam_index: record.pose.map(|pose| pose.index),
             slam_t_ns: record.pose.map(|pose| pose.t_ns),
             world_from_rig: matrix_from_isometry(&record.world_from_rig()),
@@ -225,12 +237,18 @@ impl FramesetSink for RecordWriter {
             scale: record.hands.map(|h| h.scale),
             timings_ms: record.timings,
         };
-        let error = |e: &dyn std::fmt::Display| SinkError { sink: "record".into(), message: format!("{}: {e}", self.path) };
+        let error = |e: &dyn std::fmt::Display| SinkError {
+            sink: "record".into(),
+            message: format!("{}: {e}", self.path),
+        };
         serde_json::to_writer(&mut self.out, &line).map_err(|e| error(&e))?;
         self.out.write_all(b"\n").map_err(|e| error(&e))
     }
 
     fn finish(&mut self) -> Result<(), SinkError> {
-        self.out.flush().map_err(|e| SinkError { sink: "record".into(), message: format!("{}: {e}", self.path) })
+        self.out.flush().map_err(|e| SinkError {
+            sink: "record".into(),
+            message: format!("{}: {e}", self.path),
+        })
     }
 }
