@@ -22,7 +22,7 @@
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -53,8 +53,8 @@ const CHARGER_REGMAP: &str = "/sys/kernel/debug/regmap/6-006b/registers";
 const MIN_INPUT_LIMIT_MA: u32 = 2000;
 const MIN_VBAT_V: f64 = 7.9;
 const MIN_FREE_BYTES: u64 = 1 << 30;
-/// The cap's hotspot subnet (192.168.11.0/24, the vendor's dnsmasq range).
-const HOTSPOT_NET: [u8; 3] = [192, 168, 11];
+/// The cap's address on its own hotspot (the vendor's dnsmasq hands out the rest of 192.168.11.0/24).
+const HOTSPOT_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 11, 1);
 
 struct Panel {
     root: PathBuf,
@@ -100,8 +100,8 @@ fn main() {
     if all.first().is_some_and(|a| a == "handoff") {
         std::process::exit(handoff::main(&all[1..]));
     }
-    if let Some(action) = all.first().filter(|a| ["start", "stop", "status", "install-boot", "remove-boot"].contains(&a.as_str())) {
-        std::process::exit(service::main(action, &all[1..]));
+    if let Some(code) = service::main(&all) {
+        std::process::exit(code);
     }
     let mut args = all.into_iter();
     let (mut port, mut bind, mut root) = (8090u16, "0.0.0.0".to_string(), PathBuf::from("/root/robocap-live"));
@@ -188,24 +188,22 @@ fn handle(mut stream: TcpStream, panel: &Arc<Panel>) -> std::io::Result<()> {
     }
     let body = String::from_utf8_lossy(&buffer[head_end..(head_end + length).min(buffer.len())]).to_string();
     let peer = stream.peer_addr().map(|a| a.ip()).unwrap_or(IpAddr::from([0, 0, 0, 0]));
-    let field = |name: &str| body.split('&').find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| run::decode(v)));
+    let field = |name: &str| run::form_field(&body, name);
     let wifi_allowed = may_change_wifi(peer);
     if method == "POST" && !same_origin(header("origin").as_deref(), header("host").as_deref()) {
         return respond(&mut stream, 403, "text/plain", "cross-origin request refused");
     }
     match (method.as_str(), path.split('?').next().unwrap_or_default()) {
         ("GET", "/") => respond(&mut stream, 200, "text/html; charset=utf-8", PAGE),
-        ("GET", "/icon-180.png") => respond_bytes(&mut stream, 200, "image/png", ICON),
+        ("GET", "/icon-180.png") => respond(&mut stream, 200, "image/png", ICON),
         ("GET", "/api/wifi") => {
             let state = panel.wpa.state().unwrap_or_else(|error| json!({"error": error}));
-            let hotspot = json!({"ssid": hotspot_ssid(), "ip": format!("{}.1", HOTSPOT_NET.map(|b| b.to_string()).join("."))});
-            let you = json!({"ip": peer.to_string(), "on_hotspot": wifi_allowed});
-            respond(&mut stream, 200, "application/json", &json!({"wifi": state, "hotspot": hotspot, "you": you}).to_string())
+            let hotspot = json!({"ssid": hotspot_ssid(), "ip": HOTSPOT_IP.to_string()});
+            respond(&mut stream, 200, "application/json", json!({"wifi": state, "hotspot": hotspot, "may_change": wifi_allowed}).to_string())
         }
-        ("POST", "/api/wifi/scan" | "/api/wifi/join" | "/api/wifi/forget") if !wifi_allowed => respond_result(
-            &mut stream,
-            Err("Wi-Fi changes only work over the cap's hotspot: join it, then open http://192.168.11.1:8090".into()),
-        ),
+        ("POST", "/api/wifi/scan" | "/api/wifi/join" | "/api/wifi/forget") if !wifi_allowed => {
+            respond_result(&mut stream, Err("Wi-Fi changes only work over the cap's hotspot".into()))
+        }
         ("POST", "/api/wifi/scan") => respond_result(&mut stream, panel.wpa.scan()),
         ("POST", "/api/wifi/join") => {
             let result = panel.wpa.join(&field("ssid").unwrap_or_default(), &field("password").unwrap_or_default());
@@ -215,10 +213,10 @@ fn handle(mut stream: TcpStream, panel: &Arc<Panel>) -> std::io::Result<()> {
             let result = field("id").and_then(|id| id.parse().ok()).ok_or("forget: no network id".to_string()).and_then(|id| panel.wpa.forget(id));
             respond_result(&mut stream, result)
         }
-        ("GET", "/api/viewer") => respond(&mut stream, 200, "application/json", &viewer::find(&panel.root).to_string()),
+        ("GET", "/api/viewer") => respond(&mut stream, 200, "application/json", viewer::find(&panel.root).to_string()),
         ("POST", "/api/viewer") => respond_result(&mut stream, viewer::save_name(&panel.root, &field("name").unwrap_or_default())),
-        ("GET", "/api/status") => respond(&mut stream, 200, "application/json", &status(panel).to_string()),
-        ("GET", "/api/log") => respond(&mut stream, 200, "text/plain; charset=utf-8", &log_tail(panel, 60)),
+        ("GET", "/api/status") => respond(&mut stream, 200, "application/json", status(panel).to_string()),
+        ("GET", "/api/log") => respond(&mut stream, 200, "text/plain; charset=utf-8", log_tail(panel, 60)),
         ("POST", "/api/start") => {
             let preflight = || checks(&DeviceState::read(run_pid(&panel.root), &processes(), disk_bytes("/").1, hottest_c()));
             let result = StartRequest::parse(&body).and_then(|request| run::start(&panel.run, &panel.root, &panel.supervisor, &request, preflight));
@@ -238,27 +236,24 @@ fn same_origin(origin: Option<&str>, host: Option<&str>) -> bool {
     }
 }
 
-/// Who may change the cap's Wi-Fi: a device on the cap's own hotspot (the vendor's dnsmasq hands out 192.168.11.0/24) or the
-/// cap itself. A change made from the LAN could cut that browser off from the cap.
+/// Who may change the cap's Wi-Fi: a device on the cap's own hotspot or the cap itself. A change made from the LAN could cut that
+/// browser off from the cap.
 fn may_change_wifi(peer: IpAddr) -> bool {
     match peer {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.octets()[..3] == HOTSPOT_NET,
+        IpAddr::V4(v4) => v4.is_loopback() || v4.octets()[..3] == HOTSPOT_IP.octets()[..3],
         IpAddr::V6(v6) => v6.is_loopback(),
     }
 }
 
 fn respond_result(stream: &mut TcpStream, result: Result<Value, String>) -> std::io::Result<()> {
     match result {
-        Ok(value) => respond(stream, 200, "application/json", &json!({"ok": true, "result": value}).to_string()),
-        Err(error) => respond(stream, 409, "application/json", &json!({"ok": false, "error": error}).to_string()),
+        Ok(value) => respond(stream, 200, "application/json", json!({"ok": true, "result": value}).to_string()),
+        Err(error) => respond(stream, 409, "application/json", json!({"ok": false, "error": error}).to_string()),
     }
 }
 
-fn respond(stream: &mut TcpStream, code: u16, kind: &str, body: &str) -> std::io::Result<()> {
-    respond_bytes(stream, code, kind, body.as_bytes())
-}
-
-fn respond_bytes(stream: &mut TcpStream, code: u16, kind: &str, body: &[u8]) -> std::io::Result<()> {
+fn respond(stream: &mut TcpStream, code: u16, kind: &str, body: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let body = body.as_ref();
     let reason = match code {
         200 => "OK",
         403 => "Forbidden",
@@ -505,7 +500,7 @@ fn status(panel: &Panel) -> Value {
         "net": {
             "tx_bytes": read_number("/sys/class/net/wlan0/statistics/tx_bytes"),
             "rx_bytes": read_number("/sys/class/net/wlan0/statistics/rx_bytes"),
-            "ssid": iw_field("SSID:"), "freq": iw_field("freq:"), "signal": iw_field("signal:"), "tx_bitrate": iw_field("tx bitrate:"),
+            "signal": iw_field("signal:"), "tx_bitrate": iw_field("tx bitrate:"),
         },
         "vendor": {
             "recorder_pid": recorder.map(|p| p.pid),

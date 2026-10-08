@@ -5,17 +5,16 @@
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-pub const VIEWER_PORT: u16 = 9876;
+const VIEWER_PORT: u16 = 9876;
 const MDNS: (Ipv4Addr, u16) = (Ipv4Addr::new(224, 0, 0, 251), 5353);
 
 /// The saved viewer name, or the default.
-pub fn name(root: &Path) -> String {
-    std::fs::read_to_string(root.join("run/viewer-name")).map(|t| t.trim().to_string()).ok().filter(|n| valid(n)).unwrap_or_else(|| "MacBook-Pro-4".into())
+fn name(root: &Path) -> String {
+    crate::read_trim(root.join("run/viewer-name")).filter(|n| valid(n)).unwrap_or_else(|| "MacBook-Pro-4".into())
 }
 
 pub fn save_name(root: &Path, name: &str) -> Result<Value, String> {
@@ -34,39 +33,41 @@ fn valid(name: &str) -> bool {
 /// Where the named viewer is now: its address on a network the cap shares with it, and whether the viewer port answers.
 pub fn find(root: &Path) -> Value {
     let name = name(root);
-    let Some((address, network)) = resolve(&name) else {
+    let Some(address) = resolve(&name) else {
         return json!({"name": name, "found": false, "error": format!("{name} not found on the cap's networks (is the Mac awake and on the same Wi-Fi?)")});
     };
     let running = TcpStream::connect_timeout(&SocketAddr::from((address, VIEWER_PORT)), Duration::from_millis(800)).is_ok();
     json!({
-        "name": name, "found": true, "address": address.to_string(), "network": network, "running": running,
+        "name": name, "found": true, "address": address.to_string(), "running": running,
         "url": format!("rerun+http://{address}:{VIEWER_PORT}/proxy"),
-        "error": (!running).then(|| format!("{name} ({address}) has no Rerun viewer on port {VIEWER_PORT}")),
     })
 }
 
 /// Asks all of the cap's IPv4 networks at once for `<name>.local` and waits up to 1.5 s (a Mac on Wi-Fi took 291 ms to
-/// answer at home); the first answer wins. Returns the address and the interface it came in on.
-fn resolve(name: &str) -> Option<(Ipv4Addr, String)> {
+/// answer at home); the first answer wins.
+fn resolve(name: &str) -> Option<Ipv4Addr> {
     let query = query(name);
-    let sockets: Vec<(String, UdpSocket)> = interfaces()
+    let sockets: Vec<UdpSocket> = addresses()
         .into_iter()
-        .filter_map(|(interface, local)| {
+        .filter_map(|local| {
             // Bound to the interface's own address, the multicast goes out of that interface.
             let socket = UdpSocket::bind((local, 0)).ok()?;
             let _ = socket.set_multicast_ttl_v4(255);
             socket.send_to(&query, MDNS).ok()?;
             socket.set_nonblocking(true).ok()?;
-            Some((interface, socket))
+            Some(socket)
         })
         .collect();
+    if sockets.is_empty() {
+        return None;
+    }
     let deadline = Instant::now() + Duration::from_millis(1500);
     let mut buffer = [0u8; 1500];
     while Instant::now() < deadline {
-        for (interface, socket) in &sockets {
+        for socket in &sockets {
             while let Ok(n) = socket.recv(&mut buffer) {
                 if let Some(address) = answer(&buffer[..n], name) {
-                    return Some((address, interface.clone()));
+                    return Some(address);
                 }
             }
         }
@@ -75,18 +76,12 @@ fn resolve(name: &str) -> Option<(Ipv4Addr, String)> {
     None
 }
 
-/// The cap's IPv4 interfaces except loopback, from `ip -4 -o addr` ("3: wlan0    inet 192.168.1.218/24 brd ...").
-fn interfaces() -> Vec<(String, Ipv4Addr)> {
-    let output = Command::new("ip").args(["-4", "-o", "addr"]).stderr(Stdio::null()).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string());
-    output
-        .unwrap_or_default()
+/// The cap's IPv4 addresses except loopback, from `ip -4 -o addr` ("3: wlan0    inet 192.168.1.218/24 brd ...").
+fn addresses() -> Vec<Ipv4Addr> {
+    crate::stdout_of("ip", &["-4", "-o", "addr"])
         .lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace().skip(1);
-            let interface = words.next()?.to_string();
-            let address = words.skip_while(|w| *w != "inet").nth(1)?.split('/').next()?.parse::<Ipv4Addr>().ok()?;
-            (!address.is_loopback()).then_some((interface, address))
-        })
+        .filter_map(|line| line.split_whitespace().skip_while(|w| *w != "inet").nth(1)?.split('/').next()?.parse::<Ipv4Addr>().ok())
+        .filter(|address| !address.is_loopback())
         .collect()
 }
 

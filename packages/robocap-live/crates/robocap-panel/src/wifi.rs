@@ -2,6 +2,7 @@
 //! the cap's config has `ctrl_interface` and `update_config=1`, so SAVE_CONFIG writes `/userdata/wpa_supplicant.conf`).
 //! The vendor's own MQTT path is not used: it can delete network 0 and add nothing, and it logs the password.
 
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
@@ -15,9 +16,9 @@ pub struct Wpa {
 }
 
 /// A saved network: its wpa_supplicant id and SSID.
-pub struct Saved {
-    pub id: u32,
-    pub ssid: String,
+struct Saved {
+    id: u32,
+    ssid: String,
 }
 
 impl Wpa {
@@ -50,8 +51,9 @@ impl Wpa {
             self.ok(&format!("ENABLE_NETWORK {id}"))
         };
         if let Err(error) = configure() {
-            if added {
-                let _ = self.ok(&format!("REMOVE_NETWORK {id}"));
+            // A half-made entry must not reach the file at the next SAVE_CONFIG.
+            if added && let Err(undo) = self.ok(&format!("REMOVE_NETWORK {id}")) {
+                return Err(format!("{error}; {undo}"));
             }
             return Err(error);
         }
@@ -70,21 +72,17 @@ impl Wpa {
         for line in self.request("SCAN_RESULTS")?.lines().skip(1) {
             let fields: Vec<&str> = line.splitn(5, '\t').collect();
             let [_, freq, signal, flags, ssid] = fields[..] else { continue };
-            let (ssid, signal, freq) = (unescape(ssid), signal.parse().unwrap_or(-100), freq.parse().unwrap_or(0));
             let secured = ["WPA", "RSN", "WEP", "SAE"].iter().any(|k| flags.contains(k));
-            if ssid.is_empty() || seen.iter().any(|(s, best, _, _)| *s == ssid && *best >= signal) {
-                continue;
-            }
-            seen.retain(|(s, ..)| *s != ssid);
-            seen.push((ssid, signal, freq, secured));
+            seen.push((unescape(ssid), signal.parse().unwrap_or(-100), freq.parse().unwrap_or(0), secured));
         }
+        // Strongest first; the sort is stable, so the first row of a name is its strongest.
         seen.sort_by_key(|(_, signal, ..)| -signal);
+        let mut names = HashSet::new();
+        seen.retain(|(ssid, ..)| !ssid.is_empty() && names.insert(ssid.clone()));
         Ok(json!({
-            "state": field("wpa_state"),
             "ssid": field("ssid").map(|s| unescape(&s)),
             "ip": field("ip_address"),
-            "freq": field("freq"),
-            "mac": field("address"),
+            "freq": field("freq").and_then(|f| f.parse::<u32>().ok()),
             "saved": saved.iter().map(|n| json!({"id": n.id, "ssid": n.ssid})).collect::<Vec<_>>(),
             "seen": seen.iter().map(|(ssid, signal, freq, secured)| json!({
                 "ssid": ssid, "signal": signal, "freq": freq, "secured": secured, "saved": saved.iter().any(|n| n.ssid == *ssid),
@@ -108,7 +106,7 @@ impl Wpa {
     }
 
     /// The saved networks (LIST_NETWORKS: a header line, then `id \t ssid \t bssid \t flags`).
-    pub fn saved(&self) -> Result<Vec<Saved>, String> {
+    fn saved(&self) -> Result<Vec<Saved>, String> {
         Ok(self
             .request("LIST_NETWORKS")?
             .lines()

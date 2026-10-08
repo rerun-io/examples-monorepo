@@ -127,7 +127,7 @@
   .btn svg { width: 16px; height: 16px; }
   .btn.go { background: var(--series); color: #fff; }
   .btn.stop { background: color-mix(in srgb, var(--critical) 16%, var(--card)); color: var(--ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--critical) 55%, transparent); }
-  .btn:disabled { opacity: .38; cursor: default; }
+  .btn:disabled, .wbtn:disabled { opacity: .38; cursor: default; }
   #msg { margin-top: 10px; }
 
   /* Device: tiles, meters, rows. */
@@ -163,7 +163,6 @@
   .wbtn { border: 0; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; background: var(--raised); color: var(--ink);
           box-shadow: inset 0 0 0 1px var(--line); white-space: nowrap; }
   .wbtn.primary { background: var(--series); color: #fff; box-shadow: none; }
-  .wbtn:disabled { opacity: .38; cursor: default; }
   #viewer-more { margin-top: 8px; font-size: 12.5px; }
   #viewer-more summary { cursor: pointer; color: var(--series); }
   #viewer-more .name { margin: 10px 0 6px; }
@@ -172,17 +171,16 @@
   .wrow:last-child { border-bottom: 0; }
   .wrow .ws { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .wrow .wm { color: var(--muted); font-size: 12px; white-space: nowrap; }
-  .wjoin { display: flex; gap: 8px; padding: 0 0 10px; }
-  .wjoin input { flex: 1; min-width: 0; }
+  .wjoin { padding-bottom: 10px; }
   details.card summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
   pre { margin: 12px 0 0; max-height: 360px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); white-space: pre-wrap; }
-  @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-areas: "run" "form" "wifi" "tiles" "detail" "log"; padding: 16px; }
+  @media (max-width: 980px), (max-height: 500px) { main { grid-template-columns: 1fr; grid-template-areas: "run" "form" "wifi" "tiles" "detail" "log"; padding: 16px; }
     #form-card { position: static; } header { padding: 10px 16px; } .clock .big { font-size: 44px; } }
   /* A phone (narrow, or short in landscape): one column in the order run, start, Wi-Fi, device; Start/Stop in a bar on the bottom edge. */
   @media (max-width: 700px), (max-height: 500px) {
     header { flex-wrap: wrap; gap: 6px 8px; padding: 8px 12px; } .spacer, #uptime { display: none; }
     #device { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-    main { grid-template-areas: "run" "form" "wifi" "tiles" "detail" "log"; padding: 12px 12px calc(92px + env(safe-area-inset-bottom)); gap: 12px; }
+    main { padding: 12px 12px calc(92px + env(safe-area-inset-bottom)); gap: 12px; }
     .card { padding: 14px 14px; } .clock .big { font-size: 36px; }
     .tile .sub { white-space: normal; }
     .actions { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; margin: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
@@ -337,10 +335,13 @@ const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
 // A sparkline: 2px line, a 10% wash, an end dot with a surface ring, a crosshair and readout on hover. It redraws when a sample
 // comes, on hover (once per frame) and on resize.
 const tip = $("tip"), sparks = [];
-// The readout is fixed on the screen, so it goes when the page scrolls under it or a tap lands elsewhere (a touch has no hover to leave).
+// The readout is fixed on the screen, so it also goes when the page scrolls under it or a tap lands elsewhere.
 function hideTip() {
   tip.style.display = "none";
-  for (const spark of sparks) if (spark.cursor != null) { spark.cursor = null; spark.draw(); }
+  for (const spark of sparks) {
+    cancelAnimationFrame(spark.frame); spark.frame = 0;
+    if (spark.cursor != null) { spark.cursor = null; spark.draw(); }
+  }
 }
 addEventListener("scroll", hideTip, { passive: true, capture: true });
 addEventListener("pointerdown", e => { if (!e.target.closest?.(".spark")) hideTip(); });
@@ -352,8 +353,6 @@ class Spark {
       this.frame ||= requestAnimationFrame(() => { this.frame = 0; this.hover(this.pointer); });
     });
     svg.addEventListener("pointerleave", hideTip);
-    // A finger that starts a scroll on the line cancels its pointer.
-    svg.addEventListener("pointercancel", hideTip);
     sparks.push(this);
   }
   push(v) { this.data.push(Number.isFinite(v) ? v : null); if (this.data.length > HISTORY) this.data.shift(); this.draw(); }
@@ -461,14 +460,14 @@ for (const host of document.querySelectorAll(".seg")) for (const b of host.query
   b.type = "button";
   b.onclick = () => { setSeg(host, b.dataset.v); if (host.id === "dur-presets") $("minutes").value = b.dataset.v; };
 }
-$("minutes").oninput = () => setSeg($("dur-presets"), $("minutes").value);
+$("minutes").oninput = () => { setSeg($("dur-presets"), $("minutes").value); summarize(); };
 
 // The form holds a start request (the /api/start fields); it starts from this browser's last one, else the panel's last run.
 let formLoaded = false;
 function loadForm(s) {
   if (formLoaded) return; formLoaded = true;
   const saved = JSON.parse(localStorage.getItem("robocap-request") || "null"), r = saved ?? s.run.request ?? {};
-  $("viewer").value = r.viewer ?? "";
+  $("viewer").value = saved?.viewer ?? "";  // what this browser typed, never the address a name resolved to
   camButtons.forEach(b => setPressed(b, (r.video_cameras ?? [0, 1]).map(String).includes(b.dataset.v)));
   for (const [name, fallback] of [["slam_hz", 15], ["slam_lane", "gpu"], ["slam_lag", "auto"], ["hand_overlays", "fit"]]) setSeg(seg(name), r[name] ?? fallback);
   // Form 2 made "no time limit" the default: a request this browser saved before it starts unlimited too.
@@ -480,15 +479,21 @@ function loadForm(s) {
   summarize();
 }
 
-// The folded settings line ("2 cameras · SLAM 15 Hz GPU · hands fit · no limit"); a phone starts with them folded.
-function summarize() {
-  const cams = camButtons.filter(pressed).length, minutes = Number($("minutes").value);
-  $("settings-line").textContent = `${cams ? `${cams} camera${cams > 1 ? "s" : ""}` : "no video"} · SLAM ${segValue("slam_hz")} Hz ${(segValue("slam_lane") || "").toUpperCase()} · `
-    + `hands ${pressed($("hands")) ? segValue("hand_overlays") : "off"} · ${minutes ? `${minutes} min` : "no limit"}`;
+// The request the form holds (the /api/start fields), and a request in one line ("2 cameras · SLAM 15 Hz GPU · hands fit").
+const formRequest = () => ({ viewer: $("viewer").value.trim(), video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
+  slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
+  duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), frame_csv: pressed($("frame_csv")), uclamp: pressed($("uclamp")) });
+function describe(r) {
+  const cams = r.video_cameras.length;
+  return `${cams ? `${cams} camera${cams > 1 ? "s" : ""}` : "no video"} · SLAM ${r.slam_hz} Hz ${r.slam_lane.toUpperCase()} · hands ${r.hands ? r.hand_overlays : "off"}`;
 }
-if (matchMedia("(max-width: 700px), (max-height: 500px)").matches) $("settings").open = false;
-$("settings").addEventListener("click", () => setTimeout(summarize));
-$("minutes").addEventListener("input", summarize);
+// The folded settings line; a phone (the layout with the Start/Stop bar) starts with the settings folded.
+function summarize() {
+  const r = formRequest();
+  $("settings-line").textContent = `${describe(r)} · ${r.duration_s ? `${r.duration_s / 60} min` : "no limit"}`;
+}
+if (getComputedStyle(document.querySelector(".actions")).position === "fixed") $("settings").open = false;
+$("settings").addEventListener("click", summarize);  // bubbles up after each control's own click
 
 // robocap-live's 1 Hz line: "[  17.5 s] src 30.4/s imu 205/s | ds .. | slam 27.5 Hz  20.0/ 66.7 ms ok 100% drop 75 | hands 29.4/s  11.5 ms drop 3 | out 29.4/s e2e  15.3 ms drop 0 | ..."
 function parseStatus(line) {
@@ -531,8 +536,7 @@ function render(s) {
   // The run.
   if (ph === "starting" && prev?.run.phase !== "starting") Object.values(pipe).forEach(t => t.spark.reset());
   const st = parseStatus(run.status), req = run.request, live = ph === "streaming";
-  const cams = req?.video_cameras.length;
-  setPhase(ph, live && req ? `${cams ? `${cams} camera${cams > 1 ? "s" : ""} to the viewer` : "no video"} · SLAM ${req.slam_hz} Hz on ${req.slam_lane.toUpperCase()} · hands ${req.hands ? req.hand_overlays : "off"}` : null);
+  setPhase(ph, live && req ? describe(req) : null);
   const elapsed = ph === "idle" ? 0 : st?.t ?? 0, total = req && ph !== "idle" ? req.duration_s : null;
   $("elapsed").textContent = mmss(elapsed);
   $("of").textContent = total ? `/ ${mmss(total)}` : req && ph !== "idle" ? "/ no limit" : "";
@@ -637,102 +641,105 @@ async function pollLog() {
   if ($("log-box").open && !document.hidden) { try { const t = await (await fetch("api/log")).text(), pre = $("log"); pre.textContent = t; pre.scrollTop = pre.scrollHeight; } catch (e) {} }
   setTimeout(pollLog, 3000);
 }
-async function post(path, body) {
+// One request to the panel: a form POST when there are fields, else a GET. No answer in time reads as {ok: false, error}.
+async function api(path, fields, ms = 10000) {
   try {
-    const reply = await (await fetch(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })).json();
-    if (!reply.ok) { $("msg").replaceChildren(note("bad", reply.error)); return; }
-    const r = reply.result;
-    $("msg").replaceChildren(path.endsWith("start") ? note("good", `Started: session ${r.pid}.`)
-      : note("info", r.pending ? "Stop noted: nothing starts." : "Stopping: robocap-live drains, then the cap gets its cameras back."),
-      ...(r.warnings || []).map(w => note("warn", w)));
-  } catch (e) { $("msg").replaceChildren(note("bad", `The panel did not answer: ${e}`)); }
+    const post = fields ? { method: "POST", body: new URLSearchParams(fields) } : {};
+    return await (await fetch(path, { ...post, signal: AbortSignal.timeout(ms) })).json();
+  } catch (e) { return { ok: false, error: `The panel did not answer: ${e}` }; }
+}
+async function post(path, fields) {
+  const reply = await api(path, fields);
+  if (!reply.ok) { $("msg").replaceChildren(note("bad", reply.error)); return; }
+  const r = reply.result;
+  $("msg").replaceChildren(path.endsWith("start") ? note("good", `Started: session ${r.pid}.`)
+    : note("info", r.pending ? "Stop noted: nothing starts." : "Stopping: robocap-live drains, then the cap gets its cameras back."),
+    ...(r.warnings || []).map(w => note("warn", w)));
 }
 $("start").onclick = async () => {
   // The named viewer's current address wins; the typed address is the fallback; no viewer is allowed (the run still records).
-  const found = await checkViewer(), typed = $("viewer").value.trim();
-  const request = { viewer: found?.found ? found.url : typed, video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
-    slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
-    duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), frame_csv: pressed($("frame_csv")), uclamp: pressed($("uclamp")) };
-  localStorage.setItem("robocap-request", JSON.stringify({ ...request, viewer: typed, form: 2 }));
-  await post("api/start", new URLSearchParams({ ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" }).toString());
+  $("msg").replaceChildren(note("info", "Finding the viewer…"));
+  const found = await checkViewer(), request = formRequest();
+  localStorage.setItem("robocap-request", JSON.stringify({ ...request, form: 2 }));
+  if (found?.found) request.viewer = found.url;
+  await post("api/start", { ...request, video_cameras: request.video_cameras.join(","), hands: request.hands ? "on" : "off", uclamp: request.uclamp ? "on" : "off" });
   if (!request.viewer) $("msg").append(note("warn", "No viewer: the run records on the cap only."));
 };
-$("stop").onclick = () => post("api/stop", "");
+$("stop").onclick = () => post("api/stop", {});
 
 // The viewer, by the Mac's name: the cap finds its address on whatever network they share and checks port 9876.
 async function checkViewer() {
-  try {
-    const v = await (await fetch("api/viewer", { signal: AbortSignal.timeout(5000) })).json();
-    if (!$("viewer-name").value) $("viewer-name").value = v.name;
-    const typed = $("viewer").value.trim();
-    setNotes($("viewer-status"), [!v.found ? note("bad", `${v.error}${typed ? ` · using ${typed}` : ""}`)
-      : v.running ? note("good", `${v.name} · ${v.address} · viewer running`)
-      : note("warn", `${v.name} · ${v.address} · no viewer yet: open Rerun on the Mac, the cap connects when it starts`)]);
-    return v;
-  } catch (e) { setNotes($("viewer-status"), [note("bad", `The viewer check did not answer: ${e}`)]); return null; }
+  const v = await api("api/viewer", null, 5000);
+  if (v.ok === false) { setNotes($("viewer-status"), [note("bad", v.error)]); return null; }
+  if (!$("viewer-name").value) $("viewer-name").value = v.name;
+  const typed = $("viewer").value.trim();
+  setNotes($("viewer-status"), [!v.found ? note("bad", `${v.error}${typed ? ` · using ${typed}` : ""}`)
+    : v.running ? note("good", `${v.name} · ${v.address} · viewer running`)
+    : note("warn", `${v.name} · ${v.address} · no viewer yet: open Rerun on the Mac, the cap connects when it starts`)]);
+  return v;
 }
 $("viewer-check").onclick = checkViewer;
 $("viewer-save").onclick = async () => {
-  const reply = await (await fetch("api/viewer", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ name: $("viewer-name").value.trim() }).toString() })).json();
+  const reply = await api("api/viewer", { name: $("viewer-name").value.trim() });
   if (!reply.ok) setNotes($("viewer-status"), [note("bad", reply.error)]); else checkViewer();
 };
 
 // The Wi-Fi card: the cap's network, its hotspot, saved and nearby networks. Changes only come from the hotspot.
-let wifi = null, joining = null, joined = null;
+let wifi = null, joining = null, joined = null, wifiError = "", listsShown = "";
 async function loadWifi() {
   if (document.hidden) return;
-  try { wifi = await (await fetch("api/wifi", { signal: AbortSignal.timeout(5000) })).json(); renderWifi(); } catch (e) {}
+  const reply = await api("api/wifi", null, 5000);
+  if (reply.ok !== false) { wifi = reply; renderWifi(); }
 }
 function renderWifi() {
-  const w = wifi.wifi, you = wifi.you, can = you.on_hotspot, ghz = f => f ? (f > 4000 ? "5 GHz" : "2.4 GHz") : "";
+  const w = wifi.wifi, can = wifi.may_change, ghz = f => f ? (f > 4000 ? "5 GHz" : "2.4 GHz") : "", port = location.port;
   $("wifi-now").replaceChildren(
-    kv("the cap's network", w.error ? w.error : w.ssid ? `${w.ssid}${w.ip ? ` · ${w.ip}` : " · no address yet"} · ${ghz(Number(w.freq))}` : "not connected", w.ssid ? "" : "warnv"),
-    kv("the cap's hotspot", `${wifi.hotspot.ssid || "Robocap"} · ${wifi.hotspot.ip}`),
-    kv("this device", you.on_hotspot ? "on the cap's hotspot" : `on the LAN · ${you.ip}`));
+    kv("the cap's network", w.error ? w.error : w.ssid ? `${w.ssid}${w.ip ? ` · ${w.ip}` : " · no address yet"} · ${ghz(w.freq)}` : "not connected", w.ssid ? "" : "warnv"),
+    kv("the cap's hotspot", `${wifi.hotspot.ssid || "Robocap"} · ${wifi.hotspot.ip}`));
   const notes = [];
-  if (!can) notes.push(note("info", `To change Wi-Fi, join the cap's hotspot and open http://${wifi.hotspot.ip}:8090 there.`));
-  if (joined && w.ssid === joined && w.ip) notes.push(note("good", `The cap is on ${w.ssid} at ${w.ip}: on that network, open http://${w.ip}:8090`));
+  if (!can) notes.push(note("info", `To change Wi-Fi, join the cap's hotspot and open http://${wifi.hotspot.ip}:${port} there.`));
+  if (joined && w.ssid === joined && w.ip) notes.push(note("good", `The cap is on ${w.ssid} at ${w.ip}: on that network, open http://${w.ip}:${port}`));
   else if (joined) notes.push(note("info", `Saved ${joined}. The cap joins it when it is in range; its hotspot can drop for a moment while it moves to that network's channel.`));
-  setNotes($("wifi-msg"), [...notes, ...($("wifi-msg").dataset.error ? [note("bad", $("wifi-msg").dataset.error)] : [])]);
+  setNotes($("wifi-msg"), [...notes, ...(wifiError ? [note("bad", wifiError)] : [])]);
   $("wifi-scan").disabled = !can;
-  if (joining) return;  // keep a password field that is being typed in
-  $("wifi-saved").replaceChildren(...(w.saved || []).map(n => {
+  // Rebuilt only when they change (a rebuild under a finger loses the tap), and never under a password being typed.
+  const lists = JSON.stringify([can, w.ssid, w.saved, w.seen]);
+  if (joining || lists === listsShown) return;
+  listsShown = lists;
+  const saved = (w.saved || []).map(n => {
     const row = el("div", "wrow"), forget = el("button", "wbtn", "Forget");
     forget.type = "button"; forget.disabled = !can;
     forget.onclick = () => confirm(`Forget ${n.ssid} on the cap?`) && wifiPost("forget", { id: n.id });
     row.append(el("span", "ws", n.ssid), el("span", "wm", n.ssid === w.ssid ? "connected" : ""), forget);
     return row;
-  }));
-  if (!(w.saved || []).length) $("wifi-saved").replaceChildren(el("div", "wrow", "none"));
-  $("wifi-seen").replaceChildren(...(w.seen || []).filter(n => !n.saved).slice(0, 12).flatMap(n => {
+  });
+  $("wifi-saved").replaceChildren(...(saved.length ? saved : [el("div", "wrow", "none")]));
+  const seen = (w.seen || []).filter(n => !n.saved).slice(0, 12).map(n => {
     const row = el("div", "wrow"), join = el("button", "wbtn", "Join");
     join.type = "button"; join.disabled = !can;
     join.onclick = () => n.secured ? askPassword(n.ssid, row) : wifiPost("join", { ssid: n.ssid, password: "" });
     row.append(el("span", "ws", n.ssid), el("span", "wm", `${n.signal} dBm · ${ghz(n.freq)}${n.secured ? "" : " · open"}`), join);
-    return [row];
-  }));
-  if (!$("wifi-seen").children.length) $("wifi-seen").replaceChildren(el("div", "wrow", can ? "No other networks seen yet: tap Scan." : "No other networks seen yet."));
+    return row;
+  });
+  $("wifi-seen").replaceChildren(...(seen.length ? seen : [el("div", "wrow", can ? "No other networks seen yet: tap Scan." : "No other networks seen yet.")]));
 }
 function askPassword(ssid, row) {
+  if (joining) return;  // one password form at a time
   joining = ssid;
-  const form = el("div", "wjoin"), pw = el("input"), go = el("button", "wbtn primary", "Join"), cancel = el("button", "wbtn", "Cancel");
+  const form = el("div", "inline wjoin"), pw = el("input"), go = el("button", "wbtn primary", "Join"), cancel = el("button", "wbtn", "Cancel");
   Object.assign(pw, { type: "password", placeholder: `Password for ${ssid}`, autocomplete: "off" });
   go.type = cancel.type = "button";
-  const done = () => { joining = null; renderWifi(); };
-  go.onclick = async () => { await wifiPost("join", { ssid, password: pw.value }); pw.value = ""; done(); };
+  const done = () => { joining = null; listsShown = ""; renderWifi(); };
+  go.onclick = async () => { go.disabled = true; await wifiPost("join", { ssid, password: pw.value }); pw.value = ""; done(); };
   cancel.onclick = done;
   form.append(pw, go, cancel);
   row.after(form);
   pw.focus();
 }
 async function wifiPost(action, fields) {
-  try {
-    const reply = await (await fetch(`api/wifi/${action}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(fields).toString(), signal: AbortSignal.timeout(10000) })).json();
-    $("wifi-msg").dataset.error = reply.ok ? "" : reply.error;
-    if (reply.ok && action === "join") joined = fields.ssid;
-  } catch (e) { $("wifi-msg").dataset.error = `The panel did not answer: ${e}`; }
+  const reply = await api(`api/wifi/${action}`, fields);
+  wifiError = reply.ok ? "" : reply.error;
+  if (reply.ok && action === "join") joined = fields.ssid;
   await loadWifi();
   setTimeout(loadWifi, action === "scan" ? 4000 : 2000);
 }

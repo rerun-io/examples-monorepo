@@ -7,114 +7,106 @@
 //! threads), logs to `<root>/logs/panel.log` and writes `<root>/run/panel.pid`.
 
 use std::fs;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::run::{alive, session_pid, spawn_session};
 
 /// rcS runs every `/etc/init.d/S??*` in order with `start` (one that is not a `.sh` file is executed, not sourced).
 const INIT_LINK: &str = "/etc/init.d/S87robocap-panel";
 
-/// `robocap-panel <action> [--port 8090]`: the exit code.
-pub fn main(action: &str, args: &[String]) -> i32 {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => return fail(&format!("cannot find this binary: {error}")),
+/// `robocap-panel <action> [--port 8090]`: the exit code, or None when `args` names no service action.
+pub fn main(args: &[String]) -> Option<i32> {
+    let (action, rest) = args.split_first()?;
+    let action: fn(&Path, &Path, u16) -> Result<String, String> = match action.as_str() {
+        "start" => start,
+        "stop" => |_, root, _| stop(root),
+        "status" => |_, root, _| Ok(running(root).map_or("not running".into(), |pid| format!("running: pid {pid}"))),
+        "install-boot" => |exe, _, _| install_boot(exe),
+        "remove-boot" => |exe, _, _| remove_boot(exe),
+        _ => return None,
     };
-    // <root>/bin/robocap-panel
-    let Some(root) = exe.parent().and_then(Path::parent).map(Path::to_path_buf) else { return fail("this binary is not in <root>/bin") };
-    let port = match args {
-        [] => 8090,
-        [flag, port] if flag == "--port" => match port.parse::<u16>() {
-            Ok(port) => port,
-            Err(_) => return fail(&format!("bad port {port}")),
-        },
-        _ => return fail("usage: robocap-panel start|stop|status|install-boot|remove-boot [--port 8090]"),
+    let context = || -> Result<(PathBuf, PathBuf, u16), String> {
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find this binary: {e}"))?;
+        // <root>/bin/robocap-panel
+        let root = exe.parent().and_then(Path::parent).ok_or("this binary is not in <root>/bin")?.to_path_buf();
+        let port = match rest {
+            [] => 8090,
+            [flag, port] if flag == "--port" => port.parse().map_err(|_| format!("bad port {port}"))?,
+            _ => return Err("usage: robocap-panel start|stop|status|install-boot|remove-boot [--port 8090]".into()),
+        };
+        Ok((exe, root, port))
     };
-    let result = match action {
-        "start" => start(&exe, &root, port),
-        "stop" => stop(&root),
-        "status" => Ok(match running(&root, &exe) {
-            Some(pid) => format!("running: pid {pid}"),
-            None => "not running".into(),
-        }),
-        "install-boot" => install_boot(&exe),
-        "remove-boot" => remove_boot(&exe),
-        _ => Err(format!("unknown action {action}")),
-    };
-    match result {
+    Some(match context().and_then(|(exe, root, port)| action(&exe, &root, port)) {
         Ok(text) => {
             println!("{text}");
             0
         }
-        Err(error) => fail(&error),
-    }
+        Err(error) => {
+            eprintln!("robocap-panel: {error}");
+            1
+        }
+    })
 }
 
-fn fail(error: &str) -> i32 {
-    eprintln!("robocap-panel: {error}");
-    1
-}
-
-/// The panel's pid from `run/panel.pid`, if that process is this binary (a stale pid file may name another process).
-fn running(root: &Path, exe: &Path) -> Option<u32> {
-    let pid: u32 = fs::read_to_string(root.join("run/panel.pid")).ok()?.trim().parse().ok()?;
-    let target = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    // A binary replaced by a deploy shows as "<path> (deleted)".
-    (target == exe || target.to_string_lossy().strip_suffix(" (deleted)") == Some(&*exe.to_string_lossy())).then_some(pid)
+/// The panel's pid from `run/panel.pid` while that pid is still the panel (a stale file after a power cut may name another
+/// process, even this `robocap-panel start`).
+fn running(root: &Path) -> Option<u32> {
+    session_pid(&root.join("run/panel.pid"), "--port")
 }
 
 fn start(exe: &Path, root: &Path, port: u16) -> Result<String, String> {
-    if let Some(pid) = running(root, exe) {
+    if let Some(pid) = running(root) {
         return Ok(format!("already running: pid {pid}"));
     }
-    fs::create_dir_all(root.join("run")).and_then(|()| fs::create_dir_all(root.join("logs"))).map_err(|e| format!("mkdir: {e}"))?;
-    let log = fs::File::create(root.join("logs/panel.log")).map_err(|e| format!("panel.log: {e}"))?;
-    let log_err = log.try_clone().map_err(|e| e.to_string())?;
-    let mut command = Command::new(exe);
-    // SAFETY: setsid and sched_setaffinity are async-signal-safe and the closure touches no shared state.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut cpus: libc::cpu_set_t = std::mem::zeroed();
-            for cpu in 0..4 {
-                libc::CPU_SET(cpu, &mut cpus);
-            }
-            // A failed pin is not worth a missing panel.
-            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpus);
-            Ok(())
-        });
+    // The mask is set on this process before the spawn, and the panel inherits it.
+    // SAFETY: a zeroed cpu_set_t is a valid empty set, and the calls only read or write that local set.
+    let pinned = unsafe {
+        let mut cpus: libc::cpu_set_t = std::mem::zeroed();
+        (0..4).for_each(|cpu| libc::CPU_SET(cpu, &mut cpus));
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpus) == 0
+    };
+    if !pinned {
+        eprintln!("robocap-panel: the panel is not pinned to cores 0-3: {}", std::io::Error::last_os_error());
     }
-    let child = command
-        .args(["--port", &port.to_string(), "--root", &root.display().to_string()])
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(log_err)
-        .spawn()
-        .map_err(|e| format!("start {}: {e}", exe.display()))?;
+    let log = root.join("logs/panel.log");
+    let argv = [exe.display().to_string(), "--port".into(), port.to_string(), "--root".into(), root.display().to_string()];
+    let mut child = spawn_session(root, &argv, &log)?;
+    // A panel that cannot bind its port exits at once: give it a second before calling it started.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("the panel exited ({status}): {}", fs::read_to_string(&log).unwrap_or_default().trim()));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     fs::write(root.join("run/panel.pid"), child.id().to_string()).map_err(|e| format!("panel.pid: {e}"))?;
     Ok(format!("started: pid {} on port {port}", child.id()))
 }
 
-/// SIGTERM to the panel (never by name). A run it started keeps going: its supervisor has its own session.
+/// SIGTERM to the panel (never by name), then up to 3 s for it to go. A run it started keeps going: its supervisor has its own
+/// session.
 fn stop(root: &Path) -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let Some(pid) = running(root, &exe) else { return Ok("not running".into()) };
+    let Some(pid) = running(root) else { return Ok("not running".into()) };
     crate::handoff::signal(pid as i32, libc::SIGTERM)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if alive(pid) {
+        return Err(format!("pid {pid} is still running 3 s after SIGTERM"));
+    }
     let _ = fs::remove_file(root.join("run/panel.pid"));
     Ok(format!("stopped pid {pid}"))
 }
 
 fn install_boot(exe: &Path) -> Result<String, String> {
-    let link = PathBuf::from(INIT_LINK);
-    match fs::symlink_metadata(&link) {
+    match fs::symlink_metadata(INIT_LINK) {
         Ok(meta) if !meta.file_type().is_symlink() => return Err(format!("{INIT_LINK} exists and is not our symlink; left alone")),
-        Ok(_) => fs::remove_file(&link).map_err(|e| format!("{INIT_LINK}: {e}"))?,
+        Ok(_) => fs::remove_file(INIT_LINK).map_err(|e| format!("{INIT_LINK}: {e}"))?,
         Err(_) => {}
     }
-    std::os::unix::fs::symlink(exe, &link).map_err(|e| format!("{INIT_LINK}: {e}"))?;
+    std::os::unix::fs::symlink(exe, INIT_LINK).map_err(|e| format!("{INIT_LINK}: {e}"))?;
     Ok(format!("installed {INIT_LINK} -> {}", exe.display()))
 }
 
