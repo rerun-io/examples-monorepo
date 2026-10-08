@@ -7,7 +7,16 @@ edition = "2024"
 name = "gsplat"
 path = "src/main.rs"
 
+[features]
+probe = ["dep:gsplat-viewer", "dep:re_viewer", "dep:egui_kittest", "dep:re_grpc_server", "dep:re_viewer_context", "dep:re_log"]
+
 [dependencies]
+gsplat-viewer = { path = "../gsplat-viewer", optional = true }
+re_viewer = { version = "=0.38.1", optional = true }
+egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe"], optional = true }
+re_grpc_server = { version = "=0.38.1", optional = true }
+re_viewer_context = { version = "=0.38.1", optional = true }
+re_log = { version = "=0.38.1", features = ["setup"], optional = true }
 gsplat-core = { path = "../gsplat-core", features = ["serde"] }
 brush-serde.workspace = true
 brush-render.workspace = true
