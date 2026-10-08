@@ -18,7 +18,16 @@ pub enum FrontendError {
     /// Device backend failure, retained at the application boundary.
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
-    Gpu(#[from] crate::gpu::GpuError),
+    Gpu(#[from] kornia_staging_gpu::runtime::GpuError),
+
+    /// Staged corner extraction failure.
+    #[cfg(feature = "gpu-core")]
+    #[error(transparent)]
+    GpuScan(#[from] kornia_staging_gpu::features::ScanError),
+    /// A frame scope was entered before the prior scope ended.
+    #[cfg(feature = "gpu-core")]
+    #[error("nested GPU frontend frame")]
+    NestedGpuFrame,
 
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]

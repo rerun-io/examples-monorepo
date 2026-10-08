@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-m 'not integration and not golden'"
+markers = ["integration: requires cached Cargo archives or network", "golden: reference output comparisons"]
+
+[tool.vulture]
+paths = ["scripts"]
+min_confidence = 100

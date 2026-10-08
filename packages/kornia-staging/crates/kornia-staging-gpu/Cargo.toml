@@ -1,0 +1,69 @@
+[package]
+name = "kornia-staging-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Separate buffers avoid CubeCL's shared-page alignment using uniform limits
+# on adapters whose storage-buffer alignment is larger.
+wgpu = ["dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
+
+[dependencies]
+bytes.workspace = true
+kornia-image.workspace = true
+kornia-imgproc.workspace = true
+cubecl.workspace = true
+# Enables shared-bytes for zero-copy bytes::Bytes uploads.
+cubecl-environment.workspace = true
+kornia-staging-imgproc.workspace = true
+kornia-staging-algebra.workspace = true
+kornia-staging-3d.workspace = true
+thiserror.workspace = true
+log.workspace = true
+wgpu = { workspace = true, optional = true }
+
+# Select MSL on Apple and SPIR-V elsewhere from the same kernel source.
+# The WGSL fallback lacks u8/u16 storage and is rejected by the storage probe.
+[target.'cfg(target_os = "macos")'.dependencies]
+cubecl-wgpu = { workspace = true, optional = true, features = ["msl"] }
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
+
+[dev-dependencies]
+kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
+serde.workspace = true
+serde_json.workspace = true
+nalgebra.workspace = true
+approx.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "pyramid"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "features"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "optical_flow"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "transfer"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "camera"
+harness = false
+required-features = ["wgpu"]

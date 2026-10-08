@@ -156,11 +156,10 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
 #[cfg(feature = "gpu-wgpu")]
 #[test]
 fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
-    use slam_rs::gpu::{GpuPyramidBuilder, GpuRuntime, gpu_client};
+    use kornia_staging_gpu::{GpuRuntime, pyramid::GpuPyramidBuilder, runtime::gpu_client};
 
     let image = slam_rs::image::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
-    let mut builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
+    let mut builder: GpuPyramidBuilder<GpuRuntime> = GpuPyramidBuilder::new(gpu_client().unwrap());
     builder
         .prepare_images(std::slice::from_ref(&image))
         .unwrap();
@@ -580,13 +579,14 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
             accel: row.accel.into(),
         });
     }
-    let timestamps: Vec<i64> = include_str!("fixtures/flow/frames/timestamps.txt")
-        .lines()
-        .map(|line| line.parse().unwrap())
-        .collect();
+    let timestamps: Vec<i64> =
+        include_str!("../../../../kornia-staging/fixtures/frames/timestamps.txt")
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
     let last = timestamps.len() - 1;
     let interval = timestamps[last] - timestamps[last - 1];
-    let directory = common::fixtures().join("flow/frames");
+    let directory = common::shared_frames();
     let rasters: Vec<Vec<common::Pgm>> = (0..3)
         .map(|frame| {
             (0..2)

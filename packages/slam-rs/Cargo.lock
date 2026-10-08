@@ -3186,6 +3186,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cubecl",
+ "cubecl-environment",
+ "cubecl-wgpu",
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-staging-3d",
+ "kornia-staging-algebra",
+ "kornia-staging-imgproc",
+ "log",
+ "thiserror",
+ "wgpu",
+]
+
+[[package]]
 name = "kornia-staging-imgproc"
 version = "0.1.0"
 dependencies = [
@@ -6675,13 +6693,12 @@ dependencies = [
  "approx",
  "bytes",
  "cubecl",
- "cubecl-environment",
- "cubecl-wgpu",
  "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",
  "kornia-staging-3d",
  "kornia-staging-algebra",
+ "kornia-staging-gpu",
  "kornia-staging-imgproc",
  "kornia-staging-slam",
  "log",
@@ -6691,7 +6708,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "wgpu",
 ]
 
 [[package]]

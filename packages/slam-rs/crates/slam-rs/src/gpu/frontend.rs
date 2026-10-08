@@ -3,8 +3,7 @@
 pub(super) mod onewait;
 
 use super::{
-    GpuCornerScan, GpuError, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder,
-    guarded, submission,
+    GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, submission,
 };
 use crate::frontend::detect::FrameCornerScan;
 use crate::frontend::flow::{FlowTimings, FrontendError};
@@ -14,6 +13,8 @@ use crate::frontend::stages::{FrameStages, StereoContext};
 use crate::pyramid::ensure_pyramid_sizes;
 use crate::{VioError, duration_ns};
 use cubecl::prelude::*;
+use kornia_staging_gpu::runtime::GpuError;
+use kornia_staging_gpu::runtime::guarded;
 use kornia_staging_imgproc::features::{CellSelect, DetectorScratch};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
@@ -51,6 +52,8 @@ impl<R: Runtime> GpuFrame<R> {
     }
 
     fn build(&mut self, images: FrameImages<'_>, levels: usize) -> Result<(), FrontendError> {
+        // Occupied cells can leave unused selections; they belong to the previous frame.
+        self.detector.scanner_mut().inner.abort_selection();
         ensure_pyramid_sizes(
             &self.builder,
             &mut self.pyramids,
@@ -61,7 +64,10 @@ impl<R: Runtime> GpuFrame<R> {
             FrameImages::Dense(images) => self.builder.build_images(images, &mut self.pyramids)?,
             FrameImages::Packed(images) => self.builder.build_packed(images, &mut self.pyramids)?,
         }
-        self.detector.scanner_mut().use_level0(&mut self.builder);
+        self.detector
+            .scanner_mut()
+            .inner
+            .use_level0(&mut self.builder.inner);
         Ok(())
     }
 }
@@ -74,8 +80,7 @@ pub struct GpuStages<P: Pattern, R: Runtime> {
     previous: Vec<GpuPyramid<R>>,
     tracker: GpuPatchTracker<P, R>,
     patches: GpuPatchSources<P, R>,
-    one_wait: Option<onewait::OneWait>,
-    geometry: Vec<u32>,
+    one_wait: Option<onewait::OneWait<P, R>>,
     guard: Option<submission::FrameBatch>,
     launches: submission::LaunchList,
 }
@@ -95,7 +100,6 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             previous: Vec::new(),
             next: None,
             one_wait: None,
-            geometry: Vec::new(),
             guard: None,
             launches,
         })
@@ -108,16 +112,11 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         selects: &[Option<CellSelect>],
     ) -> Result<(), VioError> {
         if self.next.is_none() {
-            self.next = Some(
-                self.client
-                    .exclusive(|| GpuFrame::new(self.client.clone(), &self.launches))
-                    .map_err(|error| {
-                        FrontendError::from(submission::read_failed(
-                            "lookahead construction",
-                            &error,
-                        ))
-                    })??,
-            );
+            self.next = Some(kornia_staging_gpu::transfer::execute_exclusive(
+                &self.client,
+                "lookahead construction",
+                || GpuFrame::new(self.client.clone(), &self.launches),
+            )?);
         }
         if let Some(next) = &mut self.next {
             std::mem::swap(&mut next.images, images);
@@ -135,8 +134,8 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         }
     }
 
-    fn submit_lookahead(&mut self) -> Result<(), FrontendError> {
-        let Some(next) = &mut self.next else {
+    fn submit_lookahead(next: &mut Option<GpuFrame<R>>, levels: usize, client: &ComputeClient<R>, launches: &submission::LaunchList) -> Result<(), FrontendError> {
+        let Some(next) = next else {
             return Ok(());
         };
         let Some(FrameInput::Queued(t_ns)) = next.input else {
@@ -145,19 +144,19 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         next.input = None;
         // Move the owned input aside while building through the same frame method.
         let images = std::mem::take(&mut next.images);
-        let outcome = next.build(FrameImages::Packed(&images), self.tracker.num_levels() - 1);
+        let outcome = next.build(FrameImages::Packed(&images), levels);
         next.images = images;
         outcome?;
         next.detector
             .scanner_mut()
             .submit_cells(FrameImages::Packed(&next.images), &next.selects)?;
+        launches.flush(client)?;
         guarded(
             GpuError::DeviceLost {
                 what: "lookahead submission",
             },
             || {
-                self.launches.flush(&self.client);
-                self.client.flush().map_err(|error| {
+                client.flush().map_err(|error| {
                     FrontendError::from(submission::read_failed("lookahead submission", &error))
                 })?;
 
@@ -173,61 +172,30 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         timings: &mut FlowTimings,
         overlap_lookahead: bool,
     ) -> Result<(), FrontendError> {
-        let outcome = guarded(GpuError::DeviceLost { what: "tracker" }, || {
-            let mut reads = self.tracker.read_handles();
-            let lanes = reads.len();
-            let stereo_read = self
-                .one_wait
-                .as_ref()
-                .is_some_and(|state| matches!(state.phase, onewait::Phase::Submitted));
-            if let Some(state) = self.one_wait.as_ref().filter(|_| stereo_read) {
-                reads.push(state.io.clone());
+        let stereo_read = self.one_wait.as_ref().is_some_and(|state| matches!(state.phase, onewait::Phase::Submitted));
+        let mut reads = Vec::new();
+        if let Some(state) = self.one_wait.as_ref().filter(|_| stereo_read) { reads.push(state.io.clone()); }
+        let mut staged = self.current.detector.scanner_mut().inner.take_staged();
+        if let Some(selection) = &mut staged { reads.extend(selection.take_handles()); }
+        let levels = self.tracker.num_levels() - 1;
+        let mut bytes = self.tracker.collect_with(reads, || {
+            if stereo_read || overlap_lookahead {
+                Self::submit_lookahead(&mut self.next, levels, &self.client, &self.launches).map_err(|error| {
+                    log::warn!("lookahead preparation failed: {error}");
+                    GpuError::DeviceLost { what: "lookahead preparation" }
+                })?;
             }
-            let staged = self.current.detector.scanner_mut().take_staged();
-            let selected = staged.is_some();
-            if let Some(handles) = staged {
-                reads.extend(handles);
-            }
-            let mut bytes = if reads.is_empty() {
-                Vec::new()
-            } else {
-                submission::read_with_lookahead(
-                    &self.client.clone(),
-                    &self.launches.clone(),
-                    reads,
-                    "the tracker result",
-                    || {
-                        if stereo_read || overlap_lookahead {
-                            self.submit_lookahead().map_err(|error| {
-                                log::warn!("lookahead preparation failed: {error}");
-                                GpuError::DeviceLost {
-                                    what: "lookahead preparation",
-                                }
-                            })?;
-                        }
-                        Ok(())
-                    },
-                )?
-            };
-            let outputs = lanes + usize::from(stereo_read);
-            if selected && bytes.len() >= outputs {
-                self.current
-                    .detector
-                    .scanner_mut()
-                    .deliver(bytes.split_off(outputs));
-            }
-            if stereo_read && bytes.len() == outputs {
-                timings.gpu_one_wait = true;
-                if let Some(state) = &mut self.one_wait
-                    && let Some(bytes) = bytes.pop()
-                {
-                    state.phase = onewait::Phase::Ready(bytes);
-                }
-            }
-            self.tracker.decode_results(&bytes)
-        });
-        self.tracker.discard();
-        outcome
+            Ok(())
+        })?;
+        let outputs = usize::from(stereo_read);
+        if let Some(selection) = staged.filter(|_| bytes.len() >= outputs) {
+            self.current.detector.scanner_mut().inner.deliver(selection, bytes.split_off(outputs))?;
+        }
+        if stereo_read && bytes.len() == outputs {
+            timings.gpu_one_wait = true;
+            if let Some(state) = &mut self.one_wait && let Some(bytes) = bytes.pop() { state.phase = onewait::Phase::Ready(bytes); }
+        }
+        Ok(())
     }
 }
 
@@ -348,6 +316,8 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
             let mark = std::time::Instant::now();
             self.current.selects.copy_from_slice(selects);
             self.current.selects[0] = None;
+            // The primary-camera pass is complete; unused results must not block side cameras.
+            self.current.detector.scanner_mut().inner.abort_selection();
             self.current
                 .detector
                 .scanner_mut()
@@ -368,7 +338,7 @@ impl<P: Pattern, R: Runtime> FrameStages for GpuStages<P, R> {
         if let Some(guard) = self.guard.take() {
             guard.finish(&self.client)?;
         }
-        self.submit_lookahead()?;
+        Self::submit_lookahead(&mut self.next, self.tracker.num_levels() - 1, &self.client, &self.launches)?;
         std::mem::swap(&mut self.previous, &mut self.current.pyramids);
         // Keep the completed hint in current while the next call queues its successor.
         if let Some(next) = &mut self.next
@@ -392,5 +362,30 @@ impl<P: Pattern, R: Runtime> std::fmt::Debug for GpuStages<P, R> {
         f.debug_struct("GpuStages")
             .field("tracker", &self.tracker)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, feature = "gpu-wgpu"))]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the validation host"]
+#[allow(clippy::unwrap_used)]
+fn rebuilding_a_frame_discards_unused_detector_results() {
+    use kornia_image::{Image, ImageSize};
+    use kornia_staging_imgproc::features::CellGrid;
+
+    let client = kornia_staging_gpu::runtime::gpu_client().unwrap();
+    let launches = submission::LaunchList::default();
+    let mut frame = GpuFrame::new(client, &launches).unwrap();
+    let images = [Image::from_size_val(ImageSize { width: 64, height: 64 }, 0u16).unwrap()];
+    let selects = [Some(CellSelect {
+        grid: CellGrid::new(64, 64, 16).unwrap(),
+        threshold: 5,
+        safe_radius: 0.0,
+    })];
+    for _ in 0..2 {
+        frame.build(FrameImages::Dense(&images), 3).unwrap();
+        frame.detector.scanner_mut().submit_cells(FrameImages::Dense(&images), &selects).unwrap();
+        frame.detector.scanner_mut().take_cells().unwrap();
+        // A full occupancy grid can leave these results unused until this frame slot is rebuilt.
     }
 }

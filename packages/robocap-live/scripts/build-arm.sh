@@ -25,8 +25,8 @@ for arg in "$@"; do
     esac
 done
 cd "$here"
-[[ -d $repo/packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3 ]] || {
-    echo "missing slam-rs patch tree: run 'pixi run -e slam-rs-dev --frozen slam-rs-patch-deps' once" >&2; exit 2; }
+[[ -d $repo/packages/kornia-staging/target/patch/cubecl-common-0.11.0-pre.3 ]] || {
+    echo "missing staging patch tree: run 'pixi run -e kornia-staging --frozen kornia-staging-patch-deps' once" >&2; exit 2; }
 
 # The env's CC is the aarch64 compiler; the host build's C shim needs the host one.
 export CC_x86_64_unknown_linux_gnu=${CC_x86_64_unknown_linux_gnu:-x86_64-conda-linux-gnu-cc}

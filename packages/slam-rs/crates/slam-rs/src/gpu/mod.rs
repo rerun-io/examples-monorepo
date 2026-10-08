@@ -8,31 +8,25 @@
 //! arenas; other rigs retain independent per-camera bindings.
 
 mod detect;
-mod finite;
 mod kernels;
 mod patches;
 mod pyramid;
 mod submission;
 pub use submission::LaunchList;
-use submission::{read_blocking, read_failed, upload_frame};
-mod runtime;
-pub use runtime::{BACKEND_NAME, GpuError, gpu_client, probe_storage};
 #[cfg(test)]
-use runtime::{BLOCKING_READ, CORNER_SCAN_READ, arm_fault_at, fire_if_armed};
-use runtime::{RUNTIME_NAME, guarded};
+mod runtime;
+use kornia_staging_gpu::runtime::gpu_client;
+use kornia_staging_gpu::runtime::probe_storage;
 mod frontend;
 pub use frontend::GpuStages;
 mod track;
-mod trig;
 
 pub use detect::GpuCornerScan;
 pub use patches::GpuPatchSources;
 pub use pyramid::{GpuPyramid, GpuPyramidBuilder};
 pub use track::GpuPatchTracker;
 
-/// The runtime this build's GPU lane runs on: the portable one.
-#[cfg(feature = "gpu-wgpu")]
-pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
+use kornia_staging_gpu::GpuRuntime;
 
 /// Construct the frame-stage owner on the selected device.
 pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
@@ -42,28 +36,19 @@ pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
     max_recovered_dist2: f32,
     cameras: usize,
 ) -> Result<GpuStages<P, GpuRuntime>, crate::frontend::flow::FrontendError> {
-    guarded(
-        GpuError::ClientPanicked {
-            runtime: RUNTIME_NAME,
-        },
-        || {
-            let client = gpu_client()?;
-            client
-                .exclusive(|| {
-                    probe_storage(&client)?;
-                    let launches = LaunchList::default();
-                    let tracker = GpuPatchTracker::new(
-                        client.clone(),
-                        capacity,
-                        num_levels,
-                        max_iterations,
-                        max_recovered_dist2,
-                        cameras,
-                        launches.clone(),
-                    )?;
-                    GpuStages::new(client.clone(), tracker, launches)
-                })
-                .map_err(|error| submission::read_failed("frontend construction", &error))?
-        },
-    )
+    let client = gpu_client()?;
+    kornia_staging_gpu::transfer::execute_exclusive(&client, "frontend construction", || {
+        probe_storage(&client)?;
+        let launches = LaunchList::default();
+        let tracker = GpuPatchTracker::new(
+            client.clone(),
+            capacity,
+            num_levels,
+            max_iterations,
+            max_recovered_dist2,
+            cameras,
+            launches.clone(),
+        )?;
+        GpuStages::new(client.clone(), tracker, launches)
+    })
 }

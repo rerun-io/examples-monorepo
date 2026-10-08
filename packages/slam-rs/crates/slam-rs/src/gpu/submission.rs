@@ -1,6 +1,6 @@
 //! Frame dispatch, uploads, and fallible device downloads.
 
-use super::GpuError;
+use kornia_staging_gpu::runtime::GpuError;
 
 /// A frame can use CubeCL's existing server thread for all host-side GPU work.
 /// Nested client operations then execute directly, without channel round trips.
@@ -13,34 +13,28 @@ impl<R: cubecl::prelude::Runtime> crate::frontend::stages::FrameExecutor for Fra
         self,
         body: impl FnOnce() -> Result<(), crate::frontend::flow::FrontendError> + Send,
     ) -> Result<(), crate::frontend::flow::FrontendError> {
-        let result = super::guarded(
-            GpuError::DeviceLost {
-                what: "frontend dispatch",
-            },
-            || {
-                self.client
-                    .exclusive(body)
-                    .map_err(|error| read_failed("frontend dispatch", &error))
-            },
-        );
-        result.map_err(crate::frontend::flow::FrontendError::from)?
+        kornia_staging_gpu::transfer::execute_exclusive(&self.client, "frontend dispatch", body)
     }
 }
 
 /// All deferred GPU work for a frame, in upload/launch order.
 pub(super) enum Launch {
-    Pyramid(super::pyramid::PyramidLaunch),
-    Corners(super::detect::batch::CornerLaunch),
-    Klt(super::track::FusedLaunch),
+    Pyramid(kornia_staging_gpu::pyramid::PyramidLaunch),
+    Corners(kornia_staging_gpu::features::CornerLaunch),
+    Klt(kornia_staging_gpu::optical_flow::FusedLaunch),
     Stereo(super::frontend::onewait::StereoLaunch),
 }
 
 impl Launch {
     fn run<R: cubecl::prelude::Runtime>(self, client: &cubecl::prelude::ComputeClient<R>) {
         match self {
-            Self::Pyramid(launch) => launch.run(client),
-            Self::Corners(launch) => launch.run(client),
-            Self::Klt(launch) => launch.run(client),
+            // SAFETY: The frame prepares and runs these launches on its exclusive
+            // client stream, before any later frame can reuse the upload.
+            Self::Pyramid(launch) => unsafe { launch.run(client) },
+            // SAFETY: The frame queues this work after its pyramid on the same client stream.
+            Self::Corners(launch) => unsafe { launch.run(client) },
+            // SAFETY: The frame runs validated KLT work on its preparation stream.
+            Self::Klt(launch) => unsafe { launch.run(client) },
             Self::Stereo(launch) => launch.run(client),
         }
     }
@@ -58,10 +52,10 @@ struct LaunchState {
 pub struct LaunchList(std::sync::Arc<std::sync::Mutex<LaunchState>>);
 
 impl LaunchList {
-    pub(super) fn begin(&self) -> Result<FrameBatch, GpuError> {
+    pub(super) fn begin(&self) -> Result<FrameBatch, crate::frontend::flow::FrontendError> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if state.active {
-            return Err(GpuError::NestedFrame);
+            return Err(crate::frontend::flow::FrontendError::NestedGpuFrame);
         }
         state.active = true;
         Ok(FrameBatch(self.clone()))
@@ -71,14 +65,23 @@ impl LaunchList {
         &self,
         client: &cubecl::prelude::ComputeClient<R>,
         launch: Launch,
-    ) {
+    ) -> Result<(), GpuError> {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if state.active {
             state.commands.push(launch);
         } else {
             drop(state);
-            launch.run(client);
+            kornia_staging_gpu::runtime::guarded(
+                GpuError::DeviceLost {
+                    what: "queued launch",
+                },
+                || {
+                    launch.run(client);
+                    Ok(())
+                },
+            )?;
         }
+        Ok(())
     }
 
     pub(super) fn clear(&self) {
@@ -100,7 +103,7 @@ impl LaunchList {
     pub(super) fn flush<R: cubecl::prelude::Runtime>(
         &self,
         client: &cubecl::prelude::ComputeClient<R>,
-    ) {
+    ) -> Result<(), GpuError> {
         let commands = std::mem::take(
             &mut self
                 .0
@@ -108,9 +111,19 @@ impl LaunchList {
                 .unwrap_or_else(|error| error.into_inner())
                 .commands,
         );
-        for command in commands {
-            command.run(client);
-        }
+        kornia_staging_gpu::runtime::guarded(
+            GpuError::DeviceLost {
+                what: "queued launch",
+            },
+            || {
+                #[cfg(test)]
+                super::runtime::fire_if_armed("queued launch");
+                for command in commands {
+                    command.run(client);
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -122,15 +135,7 @@ impl FrameBatch {
         self,
         client: &cubecl::prelude::ComputeClient<R>,
     ) -> Result<(), crate::frontend::flow::FrontendError> {
-        super::guarded(
-            GpuError::DeviceLost {
-                what: "frame dispatch",
-            },
-            || {
-                self.0.flush(client);
-                Ok(())
-            },
-        )
+        self.0.flush(client).map_err(Into::into)
     }
 }
 
@@ -142,49 +147,7 @@ impl Drop for FrameBatch {
     }
 }
 
-/// Storage binding alignment and maximum size, in bytes.
-pub(super) fn binding_limits<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-) -> (usize, usize) {
-    let memory = &client.properties().memory;
-    (
-        (memory.alignment as usize).max(256),
-        memory.max_page_size as usize,
-    )
-}
-
-/// Upload a host slice through one aligned allocation.
-pub(super) fn upload<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    bytes: &[u8],
-) -> cubecl::server::Handle {
-    // Copy directly into aligned owned storage; create_from_slice copies
-    // through two Vecs before allocating this same aligned storage.
-    let mut data = cubecl::bytes::Bytes::from_elems(Vec::<u8>::new());
-    data.extend_from_byte_slice(bytes);
-    client.create(data)
-}
-
-/// A failed device read as a typed error, with the runtime's own reason logged.
-///
-/// [`GpuError`] is `Copy`, so it cannot carry the `ServerError`'s reason and
-/// backtrace; the warning is where they are kept, and the returned variant is
-/// what the stage errors carry to the caller.
-pub(super) fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuError {
-    log::warn!("reading {what} from the device failed: {error}");
-    GpuError::DeviceReadFailed { what }
-}
-
-/// Download every handle together and map device errors at one boundary.
-#[cfg(feature = "gpu-core")]
-pub(super) fn read_blocking<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    launches: &LaunchList,
-    handles: Vec<cubecl::server::Handle>,
-    what: &'static str,
-) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
-    read_with_lookahead(client, launches, handles, what, || Ok(()))
-}
+pub(super) use kornia_staging_gpu::transfer::read_failed;
 
 /// Submit the current readback, then queue independent work before its wait.
 #[cfg(feature = "gpu-core")]
@@ -195,27 +158,10 @@ pub(super) fn read_with_lookahead<R: cubecl::prelude::Runtime>(
     what: &'static str,
     after_copy: impl FnOnce() -> Result<(), GpuError>,
 ) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
-    launches.flush(client);
+    launches.flush(client)?;
     #[cfg(test)]
     if super::runtime::armed(super::runtime::BLOCKING_READ) {
         return Err(GpuError::DeviceReadFailed { what });
     }
-    // `read_async` sends the copy and submits it before returning the future.
-    // Work queued now goes in a later submission, independent of this copy.
-    let pending = client.read_async(handles);
-    after_copy()?;
-    cubecl::future::reader::read_sync(pending).map_err(|error| read_failed(what, &error))
-}
-
-/// One frame on the device, and how many pixels it holds.
-///
-/// Upload a dense Kornia frame, with one aligned transfer copy and no row repacking.
-#[cfg(feature = "gpu-core")]
-pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    image: &kornia_image::Image<u16, 1>,
-) -> (cubecl::server::Handle, usize) {
-    use cubecl::prelude::CubeElement;
-    let pixels = image.as_slice();
-    (upload(client, u16::as_bytes(pixels)), pixels.len())
+    kornia_staging_gpu::transfer::read_with_lookahead(client, handles, what, after_copy)
 }

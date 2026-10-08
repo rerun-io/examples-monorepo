@@ -15,7 +15,7 @@ use common::{IMU, Pgm};
 use std::sync::LazyLock;
 
 static TIMESTAMPS: LazyLock<Vec<i64>> = LazyLock::new(|| {
-    include_str!("fixtures/flow/frames/timestamps.txt")
+    include_str!("../../../../kornia-staging/fixtures/frames/timestamps.txt")
         .lines()
         .map(|line| line.parse().unwrap())
         .collect()
@@ -105,7 +105,7 @@ fn view(pgm: &Pgm) -> ImageView<'_> {
 /// what `tests/fixtures/flow/frames/` carries, so this cannot reach
 /// `opt_started` (five states). The schedule test extends the input by holding the last image.
 fn drive_the_committed_framesets<S: Scalar>(vio: &mut Vio<S>) -> Vec<VioResult> {
-    let directory: PathBuf = common::fixtures().join("flow/frames");
+    let directory: PathBuf = common::shared_frames();
     let cameras: usize = common::calibration().t_i_c.len();
     let framesets: usize = common::available_framesets(&directory, cameras, COMMITTED_FRAMESETS);
     assert_eq!(framesets, COMMITTED_FRAMESETS, "{}", directory.display());
@@ -220,7 +220,7 @@ fn frontend_lag_retries_and_thread_counts_preserve_order_and_results() {
         .unwrap();
         assert_eq!(vio.pending_t_ns(), None);
         assert_eq!(vio.flush().unwrap(), None);
-        let directory = common::fixtures().join("flow/frames");
+        let directory = common::shared_frames();
         let mut cursor = 0;
         let mut results = Vec::new();
         for (index, &t_ns) in TIMESTAMPS.iter().enumerate() {
@@ -351,7 +351,7 @@ fn push_imu_through(vio: &mut Vio<f32>, next: usize, horizon: i64) -> usize {
 /// from yet — so the probe is made against all three, initialized or not.
 #[test]
 fn a_wrong_size_frameset_is_refused_without_moving_the_pipeline() {
-    let directory: PathBuf = common::fixtures().join("flow/frames");
+    let directory: PathBuf = common::shared_frames();
     let cameras: usize = common::calibration().t_i_c.len();
     let rasters: Vec<Vec<Pgm>> = (0..COMMITTED_FRAMESETS)
         .map(|frame| {
@@ -430,7 +430,7 @@ fn a_wrong_size_frameset_is_refused_without_moving_the_pipeline() {
 /// preintegration interval as well.
 #[test]
 fn a_refused_frameset_is_retried_bit_identically() {
-    let directory: PathBuf = common::fixtures().join("flow/frames");
+    let directory: PathBuf = common::shared_frames();
     let cameras: usize = common::calibration().t_i_c.len();
     let rasters: Vec<Vec<Pgm>> = (0..COMMITTED_FRAMESETS)
         .map(|frame| {
@@ -505,7 +505,7 @@ fn the_frame_update_lane_is_deterministic_and_takes_its_branch() {
         for row in IMU.iter() {
             vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
         }
-        let directory = common::fixtures().join("flow/frames");
+        let directory = common::shared_frames();
         let mut output = Vec::new();
         let mut optimized = false;
         for (index, &time) in TIMESTAMPS.iter().enumerate() {

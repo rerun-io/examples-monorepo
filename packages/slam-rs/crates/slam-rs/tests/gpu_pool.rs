@@ -3,14 +3,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::Image;
+use kornia_staging_gpu::runtime::gpu_client;
 use kornia_staging_imgproc::features::CornerScan;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
-use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
 use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowTransforms, PointsSoA};
-use slam_rs::gpu::{
-    GpuCornerScan, GpuPatchSources, GpuPatchTracker, GpuPyramidBuilder, gpu_client,
-};
-use slam_rs::pyramid::PyramidBuilder;
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput, TrackPhase};
+use slam_rs::gpu::{GpuPatchSources, GpuPatchTracker};
 
 mod common;
 
@@ -43,16 +41,9 @@ fn fused_tracker_fits_the_point_buffer_budget() {
 
 /// The whole GPU path keeps CubeCL's pool bounded: it plateaus and holds flat.
 ///
-/// **Bounded pool growth, not zero device allocations** — the distinction
-/// matters and the earlier version of this test could not tell them apart.
-/// CubeCL 0.10's only host-to-device write is `create*`
-/// (`cubecl-runtime/src/client.rs`: `create_from_slice`, `create`, the tensor
-/// forms, and `empty`; there is no write into an existing handle), so three
-/// allocations are unavoidably per-frame: the frame upload per camera
-/// (`GpuPyramidBuilder::build`), the positions buffer per patch build
-/// (`GpuPatchSources::upload_staging`) and the transform buffer per tracking call
-/// (`GpuPatchTracker::track`). What the design can promise is that the pool
-/// they come out of stops growing, and that is what this measures.
+/// This measures stable reserved and live device bytes after warm-up. Uploads
+/// and result buffers may be reused or allocated from the pool; neither may
+/// cause its retained storage to grow with the frame count.
 ///
 /// Pool growth matters on shared-memory devices. The caller controls the
 /// number of per-frame allocations and their sizes.
@@ -61,7 +52,7 @@ fn fused_tracker_fits_the_point_buffer_budget() {
 /// patch build and the KLT tracker, two cameras, 200 framesets — and the
 /// assertion is that after a warm-up both the reserved bytes and the bytes in
 /// use are *constant*, not merely under a ceiling. A ceiling alone passed while
-/// each of the three per-frame allocations went unexercised.
+/// some frame operations went unexercised.
 #[test]
 fn the_whole_gpu_path_holds_the_pool_flat() {
     const FRAMES: usize = 200;
@@ -79,9 +70,8 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
     const IN_USE_CEILING: u64 = 32 * 1024 * 1024;
 
     let client = gpu_client().unwrap();
-    let mut builder = GpuPyramidBuilder::new(client.clone(), Default::default());
-    let mut scanner: GpuCornerScan<_> =
-        GpuCornerScan::new(client.clone(), Default::default()).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone());
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone()).unwrap();
 
     let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
@@ -193,3 +183,5 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
          ceiling of {IN_USE_CEILING}"
     );
 }
+
+use kornia_staging_gpu::{features::GpuCornerScan, pyramid::GpuPyramidBuilder};

@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use cubecl::prelude::*;
 
-use super::{FUSED_RUNS, FusedLaunch, GpuPatchTracker, stage_points};
-use crate::gpu::{GpuError, guarded, pyramid::GpuPyramid, submission};
+use super::GpuPatchTracker;
+use crate::gpu::{pyramid::GpuPyramid, submission};
+
+use kornia_staging_gpu::optical_flow::TrackPoints;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
-use kornia_staging_imgproc::optical_flow::patch_tracker::{TrackerError};
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     pub(super) fn submit_packed(
@@ -18,7 +19,6 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         inputs: ValidatedPhase<'_>,
         slots: &mut [usize],
     ) -> Result<bool, FrontendError> {
-        let params = self.fused_params();
         let Some(first) = inputs.iter().next() else {
             return Ok(true);
         };
@@ -39,62 +39,30 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             return Ok(false);
         }
         let packed = &mut self.packed_fused;
-        if inputs.len() > self.results.len() {
-            return Err(TrackerError::TooManyPasses {
-                submitted: inputs.len(),
-                lanes: self.results.len(),
-            }
-            .into());
+        let pairs: Vec<_> = inputs
+            .iter()
+            .map(|input| (&prev[input.source], &next[input.destination]))
+            .collect();
+        let points: Vec<_> = inputs
+            .iter()
+            .map(|input| TrackPoints {
+                positions: input.positions,
+                guesses: input.guesses,
+                selected: None,
+            })
+            .collect();
+        packed.count = inputs.iter().map(|input| input.guesses.len()).sum();
+        let launch = packed.plan.prepare(&pairs, Some((a, b)), &points)?;
+        for (lane, input) in inputs.iter().enumerate() {
+            slots[lane] = lane;
+            self.batch.slot_mut(lane, self.capacity);
+            self.pending.push(input.guesses.len());
         }
-        guarded(
-            GpuError::DeviceLost {
-                what: "packed tracker",
-            },
-            || {
-                self.geometry.clear();
-                self.staging.clear();
-                for (lane, input) in inputs.iter().enumerate() {
-                    prev[input.source].append_geometry(&mut self.geometry, Some(a));
-                    next[input.destination].append_geometry(&mut self.geometry, Some(b));
-                    let count = input.guesses.len();
-                    stage_points(&mut self.staging, input.guesses, lane, |index| {
-                        (1.0, input.positions.get(index))
-                    });
-                    slots[lane] = lane;
-                    self.batch.slot_mut(lane, self.capacity);
-                    self.pending.push(count);
-                }
-                self.geometry
-                    .extend(P::OFFSETS.iter().flat_map(|tap| tap.map(f32::to_bits)));
-                packed.meta.update(&self.client, &self.geometry);
-                packed.count = self.staging.len() / FUSED_RUNS;
-                if packed.count == 0 {
-                    return Ok(true);
-                }
-                self.client.write(
-                    &packed.io,
-                    cubecl::bytes::Bytes::from_elems(self.staging.clone()),
-                );
-                self.launches.dispatch(
-                    &self.client,
-                    submission::Launch::Klt(FusedLaunch::new(
-                        [
-                            a.bindings()[0],
-                            a.bindings()[1],
-                            b.bindings()[0],
-                            b.bindings()[1],
-                        ],
-                        &packed.meta,
-                        &packed.io,
-                        packed.count,
-                        inputs.len(),
-                        params,
-                    )),
-                );
-                Ok(true)
-            },
-        )
+        if packed.count != 0 {
+            self.launches
+                .dispatch(&self.client, submission::Launch::Klt(launch))?;
+        }
+        Ok(true)
     }
 }
-
 use kornia_staging_slam::tracking::optical_flow::ValidatedPhase;

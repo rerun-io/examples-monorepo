@@ -18,15 +18,15 @@ mod band;
 mod grid;
 mod scores;
 use self::grid::cell_masks;
-use self::grid::NO_CELL_WINNER;
 pub use self::grid::{
-    cell_select, threshold_rungs, CellGrid, CellGridError, CellMasks, CellSelect,
-    CenteredCellConfig, MaskRect, Occupancy, SelectionStatus, EDGE_THRESHOLD,
-    LOWEST_THRESHOLD_RUNG, MAX_CELLS,
+    cell_select, decode_cell_key, threshold_rungs, CellGrid, CellGridError, CellMasks, CellSelect,
+    CenteredCellConfig, MaskRect, Occupancy, SelectionStatus, CELL_KEY_LIMIT, EDGE_THRESHOLD,
+    KEY_FIELD_MASK, KEY_ROW_SHIFT, KEY_SCORE_SHIFT, LOWEST_THRESHOLD_RUNG, MAX_CELLS,
+    NO_CELL_WINNER,
 };
 use band::suppress_non_maxima;
 pub use band::BandCache;
-use band::{block_filter_end, FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW};
+pub use band::{block_filter_end, FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW};
 pub use band::{opencv_corner_score, CpuCornerScan, FAST_BORDER};
 
 /// kornia's FAST corner, re-exported because [`CornerScan::band`] hands it back:

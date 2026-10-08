@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use kornia_image::Image;
-use kornia_staging_imgproc::optical_flow::patch_tracker::PointsSoA;
-use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, Vector3, Vector6};
 use serde::Deserialize;
 use slam_rs::calib::{BasaltCamera, Calibration, Kb4Params};
 use slam_rs::config::VioConfig;
@@ -219,73 +218,17 @@ pub fn config_for(dataset_name: &str) -> VioConfig {
     dead_code,
     reason = "used by vio_pipeline; other binaries compile a subset"
 )]
-pub struct Pgm {
-    pub width: usize,
-    pub height: usize,
-    pub pixels: Vec<u8>,
-}
+pub use kornia_staging_imgproc::test_fixtures::Pgm;
 
-/// `frame_<NNN>_cam<C>.pgm` under `directory`, in 's
-/// layout.
-#[allow(
-    dead_code,
-    reason = "used by vio_pipeline; other binaries compile a subset"
-)]
+#[allow(dead_code)]
+pub fn shared_frames() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../kornia-staging/fixtures/frames")
+}
+#[allow(dead_code)]
 pub fn read_pgm(directory: &Path, frame: usize, camera: usize) -> Pgm {
-    let path: PathBuf = directory.join(format!("frame_{frame:03}_cam{camera}.pgm"));
-    let bytes: Vec<u8> = std::fs::read(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-
-    // "P5\n<w> <h>\n255\n" then the raster; the writer emits exactly that.
-    let mut fields: Vec<usize> = Vec::new();
-    let mut cursor: usize = 2;
-    while fields.len() < 3 {
-        while bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        let start: usize = cursor;
-        while !bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        fields.push(
-            std::str::from_utf8(&bytes[start..cursor])
-                .unwrap()
-                .parse()
-                .unwrap(),
-        );
-    }
-    cursor += 1;
-    assert_eq!(fields[2], 255, "{} is not an 8-bit PGM", path.display());
-    Pgm {
-        width: fields[0],
-        height: fields[1],
-        pixels: bytes[cursor..].to_vec(),
-    }
-}
-
-/// One committed MIO10 frameset as the frontend and the detector take it:
-/// 960x960, the msd-index rig's geometry, each PGM byte in the high half of a
-/// `u16`.
-///
-/// The GPU exactness gate and the host-seam bench drive the same three
-/// framesets, so the fixture location and the widening live here rather than
-/// once per binary. They stay separate binaries: D72 wants the shared CubeCL
-/// pool isolated per test process.
-#[allow(
-    dead_code,
-    reason = "used by gpu_detect; other binaries compile a subset"
-)]
-pub fn mio10_frame(frame: usize, camera: usize) -> Image<u16, 1> {
-    let pgm: Pgm = read_pgm(&fixtures().join("flow/frames"), frame, camera);
-    let mut image: Image<u16, 1> = slam_rs::image::zeros(pgm.width, pgm.height).unwrap();
-    for y in 0..pgm.height {
-        for x in 0..pgm.width {
-            image
-                .set_pixel(x, y, 0, u16::from(pgm.pixels[y * pgm.width + x]) << 8)
-                .unwrap();
-        }
-    }
-    image
+    kornia_staging_imgproc::test_fixtures::read_pgm(
+        &directory.join(format!("frame_{frame:03}_cam{camera}.pgm")),
+    )
 }
 
 /// How many consecutive framesets `directory` covers, up to `limit`: a
@@ -465,100 +408,12 @@ pub fn dense_schur(
 // every patch is well conditioned, and a corner-rich one where FAST has plenty
 // to find.
 
-/// Twelve plane waves between 16 and 56 pixels, in fixed pseudo-random
-/// directions and phases: band-limited, so a shift really does survive down a
-/// pyramid and every patch's `H_se2` is well conditioned.
 #[allow(
-    dead_code,
-    reason = "used by gpu_kernels; other binaries compile a subset"
+    unused_imports,
+    reason = "integration binaries use different fixture subsets"
 )]
-pub fn texture(x: f64, y: f64) -> f64 {
-    const WAVES: [(f64, f64, f64); 12] = [
-        (16.0, 0.031, 0.11),
-        (19.0, 0.187, 0.37),
-        (23.0, 0.311, 0.63),
-        (27.0, 0.451, 0.05),
-        (31.0, 0.077, 0.81),
-        (35.0, 0.229, 0.29),
-        (39.0, 0.383, 0.55),
-        (43.0, 0.497, 0.73),
-        (47.0, 0.143, 0.19),
-        (51.0, 0.271, 0.91),
-        (54.0, 0.419, 0.43),
-        (56.0, 0.353, 0.67),
-    ];
-    let mut total: f64 = 0.0;
-    for (wavelength, direction, phase) in WAVES {
-        let angle: f64 = std::f64::consts::TAU * direction;
-        let projection: f64 = x * angle.cos() + y * angle.sin();
-        total += (std::f64::consts::TAU * (projection / wavelength + phase)).sin();
-    }
-    total / WAVES.len() as f64
-}
-
-/// [`texture`] rendered into a `u16` image, shifted by `(dx, dy)`.
-#[allow(
-    dead_code,
-    reason = "used by gpu_kernels; other binaries compile a subset"
-)]
-pub fn textured_image(width: usize, height: usize, dx: f32, dy: f32) -> Image<u16, 1> {
-    let mut image: Image<u16, 1> =
-        slam_rs::image::zeros(width, height).expect("a valid image geometry");
-    for y in 0..height {
-        for x in 0..width {
-            let value: f64 = texture(x as f64 - f64::from(dx), y as f64 - f64::from(dy));
-            let scaled: f64 = (value * 0.4 + 0.5) * 65535.0;
-            image
-                .set_pixel(x, y, 0, scaled.clamp(0.0, 65535.0) as u16)
-                .unwrap();
-        }
-    }
-    image
-}
-
-/// A textured 8-bit field with fine detail, so FAST has plenty to find: the
-/// smooth plane-wave texture above gives almost no corners.
-///
-/// One LCG plus a `sin`/`cos` wave, so it is the same field on every machine.
-#[allow(
-    dead_code,
-    reason = "used by fast_model; other binaries compile a subset"
-)]
-pub fn cornered_bytes(width: usize, height: usize) -> Vec<u8> {
-    let mut out: Vec<u8> = vec![0u8; width * height];
-    let mut state: u32 = 0x1234_5678;
-    for y in 0..height {
-        for x in 0..width {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let wave: i32 = ((x as f64 / 11.0).sin() * 60.0 + (y as f64 / 7.0).cos() * 50.0) as i32;
-            let noise: i32 = (state >> 24) as i32 / 4;
-            out[y * width + x] = (128 + wave + noise).clamp(0, 255) as u8;
-        }
-    }
-    out
-}
-
-/// [`cornered_bytes`] as a `u16` image, the byte in the high half.
-///
-/// The detector reads `pixel >> 8`, so this is the same field the CPU sweep and
-/// the GPU score kernel see.
-#[allow(
-    dead_code,
-    reason = "used by gpu_detect; other binaries compile a subset"
-)]
-pub fn cornered_image(width: usize, height: usize) -> Image<u16, 1> {
-    let bytes: Vec<u8> = cornered_bytes(width, height);
-    let mut image: Image<u16, 1> =
-        slam_rs::image::zeros(width, height).expect("a valid image geometry");
-    for y in 0..height {
-        for x in 0..width {
-            image
-                .set_pixel(x, y, 0, u16::from(bytes[y * width + x]) << 8)
-                .unwrap();
-        }
-    }
-    image
-}
+pub use images::{cornered_bytes, cornered_image, texture, textured_image};
+use kornia_staging_imgproc::test_fixtures as images;
 
 /// A grid of source positions well inside a `size` x `size` frame, spaced so no
 /// two patches overlap and every one is far enough from the border for the
@@ -567,19 +422,9 @@ pub fn cornered_image(width: usize, height: usize) -> Image<u16, 1> {
     dead_code,
     reason = "used by gpu_kernels; other binaries compile a subset"
 )]
-pub fn grid_positions(size: usize) -> PointsSoA {
-    let mut positions: PointsSoA = PointsSoA::with_capacity(256);
-    let mut y: usize = 96;
-    while y + 96 < size {
-        let mut x: usize = 96;
-        while x + 96 < size {
-            positions.push(Vector2::new(x as f32 + 0.37, y as f32 - 0.21));
-            x += 71;
-        }
-        y += 71;
-    }
-    positions
-}
+#[allow(unused_imports, reason = "integration binaries use different fixtures")]
+pub use gpu_flow::grid_positions;
+use kornia_staging_imgproc::test_fixtures as gpu_flow;
 
 // ---- frontend fixtures (S25 FRONT) ----------------------------------------
 //

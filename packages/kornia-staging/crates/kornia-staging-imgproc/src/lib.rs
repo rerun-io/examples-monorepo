@@ -1,9 +1,6 @@
 //! Image processing extensions prepared for kornia-imgproc.
 #![deny(missing_docs)]
 
-#[cfg(test)]
-mod test_images;
-
 /// Image resizing and pooling.
 pub mod resize;
 
@@ -24,3 +21,6 @@ pub mod pyramid;
 
 /// Sparse optical flow.
 pub mod optical_flow;
+
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures;

@@ -136,5 +136,21 @@ mod kb4;
 mod pinhole;
 mod regressions;
 
+#[test]
+fn inverse_stops_backtracking_when_the_candidate_cannot_move() {
+    let calls = std::cell::Cell::new(0usize);
+    let result = super::newton2([1.0f32, 0.0], |_, jacobian| {
+        calls.set(calls.get() + 1);
+        *jacobian = [[1e20, 0.0], [0.0, 1e10]];
+        [1.001, 0.0]
+    });
+    assert_eq!(result, Err(super::UnprojectError::NoConvergence));
+    assert!(
+        calls.get() <= 2,
+        "{} identical candidates evaluated",
+        calls.get()
+    );
+}
+
 #[cfg(feature = "serde")]
 mod basalt;

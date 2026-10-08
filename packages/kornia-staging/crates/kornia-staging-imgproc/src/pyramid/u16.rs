@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    use crate::test_images::{random_image, zeros};
+    use crate::test_fixtures::{random_image, zeros};
 
     #[test]
     fn checked_boundary_rejects_invalid_geometry_before_writing() {

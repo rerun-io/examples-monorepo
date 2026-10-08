@@ -145,7 +145,7 @@ struct FrameState {
 
 #[cfg(feature = "gpu-wgpu")]
 impl<P: crate::frontend::patterns::ConfiguredPattern>
-    FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, crate::gpu::GpuRuntime>>
+    FrameToFrameOpticalFlow<P, crate::gpu::GpuStages<P, kornia_staging_gpu::GpuRuntime>>
 {
     pub(crate) fn discard_lookahead(&mut self) {
         self.stages.discard_lookahead();

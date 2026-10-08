@@ -1,8 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use crate::gpu::GpuCornerScan;
 use crate::gpu::submission::read_failed;
-use crate::gpu::{GpuCornerScan, GpuPatchTracker, GpuPyramid, GpuPyramidBuilder, gpu_stages};
+use kornia_staging_gpu::runtime::GpuError;
+use kornia_staging_gpu::runtime::gpu_client;
 
 /// A read that fails is a typed error at every boundary, never a panic.
 ///
@@ -38,189 +40,118 @@ fn a_failed_device_read_is_a_typed_error_at_every_stage() {
     }
 }
 
-/// A panic inside a stage is a typed error, not an unwind into Python.
-///
-/// What a lost device does to a per-frame call, on the real stage and the
-/// real client: `arm_fault_at` panics where the runtime would, at the
-/// top of the guarded region, and what comes back is the stage's own error
-/// type. The unguarded call on either side of it is the control — the path
-/// works, so the middle line is measuring the guard and not a broken build.
 #[test]
-fn a_panic_inside_a_stage_is_a_typed_error() {
-    use crate::pyramid::PyramidBuilder;
-
-    let mut builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(gpu_client().unwrap(), Default::default());
-    let mut pyramid: GpuPyramid<GpuRuntime> = builder.allocate(64, 64, 2).unwrap();
-    let image: kornia_image::Image<u16, 1> = crate::image::zeros(64, 64).unwrap();
-    builder.build(0, &image, &mut pyramid).unwrap();
-
-    arm_fault_at(GUARDED_REGION);
-    let error: crate::pyramid::PyramidError = builder.build(0, &image, &mut pyramid).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            crate::pyramid::PyramidError::Gpu(GpuError::DeviceLost {
-                what: "pyramid build"
-            })
-        ),
-        "a panicking stage gave {error}"
-    );
-
-    // One call, and only that one: the flag is consumed where it fires.
-    builder.build(0, &image, &mut pyramid).unwrap();
-}
-
-/// A panic anywhere in the bring-up is a typed error, not an unwind.
-///
-/// Two guards, because the bring-up has two layers now. `gpu_stages`
-/// itself is guarded from its first line to the returned backends, and a
-/// fault at the top of that region — before any client exists — comes back
-/// as `ClientPanicked`. Inside it, `probe_storage` and the three
-/// constructors each carry their own guard, because each is also a public
-/// entry a caller reaches on its own, and a fault at the probe's site comes
-/// back as that guard's `DeviceLost`. Either way nothing unwinds past the
-/// constructor (decision D32).
-#[test]
-fn a_panic_after_the_client_is_built_is_a_typed_error() {
-    arm_fault_at(GUARDED_REGION);
-    let outer: crate::frontend::flow::FrontendError =
-        gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(64, 3, 5, 4.0, 2)
-            .unwrap_err();
-    assert!(
-        matches!(
-            outer,
-            crate::frontend::flow::FrontendError::Gpu(GpuError::ClientPanicked { .. })
-        ),
-        "a panic in the outer region gave {outer}"
-    );
-
-    let probe: crate::frontend::flow::FrontendError = gpu_client()
-        .unwrap()
-        .exclusive(|| {
-            arm_fault_at(STORAGE_PROBE);
-            gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(
-                64, 3, 5, 4.0, 2,
-            )
-        })
-        .unwrap()
-        .unwrap_err();
-    assert!(
-        matches!(
-            probe,
-            crate::frontend::flow::FrontendError::Gpu(GpuError::DeviceLost {
-                what: "the storage probe"
-            })
-        ),
-        "a panic in the storage probe gave {probe}"
-    );
-
-    // And the same call with nothing armed builds the three backends, so
-    // what the lines above measure is the guards.
-    gpu_stages::<kornia_staging_imgproc::optical_flow::patch_se2::Pattern51>(64, 3, 5, 4.0, 2)
-        .unwrap();
-}
-
-/// A panic in an exported constructor is a typed error, not an unwind.
-///
-/// Three of them touch the device before they return — the corner scanner
-/// uploads the FAST ring, the patch set allocates its store and its
-/// positions, the tracker allocates both transform buffers — and each is a
-/// public entry a caller outside `gpu_stages` can reach. Armed at the
-/// guard, each returns its own error type; unarmed, each builds, so what
-/// the armed lines measure is the guard and not a broken build (decision
-/// D32).
-#[test]
-fn a_panic_in_an_exported_constructor_is_a_typed_error() {
-    use crate::frontend::flow::FrontendError;
-    use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
-
-    let client = gpu_client().unwrap();
-
-    arm_fault_at(GUARDED_REGION);
-    let scan: GpuError =
-        GpuCornerScan::<GpuRuntime>::new(client.clone(), Default::default()).unwrap_err();
-    assert_eq!(
-        scan,
-        GpuError::DeviceLost {
-            what: "corner scan setup"
-        }
-    );
-
-    arm_fault_at(GUARDED_REGION);
-    let tracker: FrontendError = GpuPatchTracker::<Pattern51, GpuRuntime>::new(
-        client.clone(),
-        64,
-        4,
-        5,
-        4.0,
-        2,
-        Default::default(),
+fn a_failed_corner_queue_flush_is_typed_and_invalidates_old_bands() {
+    use kornia_image::{Image, ImageSize};
+    use kornia_staging_imgproc::features::{BandRequest, CornerScan};
+    let mut scan = GpuCornerScan::new(gpu_client().unwrap(), Default::default()).unwrap();
+    let image = Image::from_size_val(
+        ImageSize {
+            width: 64,
+            height: 64,
+        },
+        0u16,
     )
-    .unwrap_err();
-    assert!(
-        matches!(
-            tracker,
-            FrontendError::Gpu(GpuError::DeviceLost {
-                what: "tracker allocation"
-            })
-        ),
-        "a panicking tracker allocation gave {tracker}"
-    );
+    .unwrap();
+    let band = BandRequest {
+        row: 0,
+        rung: 0,
+        y: 3,
+        rows: 44,
+        threshold: 5,
+    };
+    scan.scan(0, &image).unwrap();
+    assert!(scan.band(band).is_ok());
+    arm_fault_at("queued launch");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan.scan(0, &image)));
+    assert!(outcome.is_ok(), "the device panic must be converted");
+    assert!(outcome.unwrap().is_err());
+    assert!(scan.band(band).is_err(), "old bands must be invalidated");
+}
 
-    GpuCornerScan::<GpuRuntime>::new(client.clone(), Default::default()).unwrap();
-    GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0, 2, Default::default())
+#[test]
+fn a_failed_cell_queue_flush_cannot_publish_previous_frame_keys() {
+    use crate::frontend::input::PackedImages;
+    use crate::frontend::{detect::FrameCornerScan, input::FrameImages};
+    use crate::gpu::pyramid::GpuPyramidBuilder;
+    use crate::pyramid::PyramidBuilder;
+    use kornia_image::{Image, ImageSize};
+    use kornia_staging_imgproc::features::{CellGrid, CellSelect, CornerScan};
+    use kornia_staging_imgproc::test_fixtures::cornered_image;
+
+    let client = gpu_client().unwrap();
+    let launches = crate::gpu::LaunchList::default();
+    let mut scan = GpuCornerScan::new(client.clone(), launches.clone()).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone(), launches.clone());
+    let mut pyramids = vec![builder.allocate(640, 480, 1).unwrap()];
+    let frame_a = [cornered_image(640, 480)];
+    let frame_b = [Image::from_size_val(
+        ImageSize {
+            width: 640,
+            height: 480,
+        },
+        0u16,
+    )
+    .unwrap()];
+    let select = CellSelect {
+        grid: CellGrid::new(640, 480, 50).unwrap(),
+        threshold: 5,
+        safe_radius: 0.0,
+    };
+    let bytes_a: Vec<u8> = frame_a[0]
+        .as_slice()
+        .iter()
+        .map(|pixel| (pixel >> 8) as u8)
+        .collect();
+    let bytes_b = vec![0u8; 640 * 480];
+    let mut packed_a = PackedImages::default();
+    packed_a.fill(&[crate::ImageView {
+        data: &bytes_a,
+        width: 640,
+        height: 480,
+        stride: 640,
+    }]);
+    let mut packed_b = PackedImages::default();
+    packed_b.fill(&[crate::ImageView {
+        data: &bytes_b,
+        width: 640,
+        height: 480,
+        stride: 640,
+    }]);
+    builder.build_packed(&packed_a, &mut pyramids).unwrap();
+    scan.inner.use_level0(&mut builder.inner);
+    scan.submit_cells(FrameImages::Packed(&packed_a), &[Some(select)])
         .unwrap();
-}
+    scan.take_cells().unwrap();
+    let mut previous = Vec::new();
+    scan.select_cells(0, &frame_a[0], &select, None, &mut previous)
+        .unwrap();
+    assert!(previous.iter().any(Option::is_some));
 
-/// A panic in the public storage probe is a typed error, not an unwind.
-///
-/// [`probe_storage`] is public and it allocates, launches and downloads, so
-/// it is a device operation a caller reaches without going through
-/// `gpu_stages` and its guard. The fault is armed at the probe's own
-/// site — the same one `a_panic_after_the_client_is_built_is_a_typed_error`
-/// uses through the constructor path — and here the call is direct.
-#[test]
-fn a_panic_in_the_public_storage_probe_is_a_typed_error() {
-    let client = gpu_client().unwrap();
-
-    arm_fault_at(STORAGE_PROBE);
-    assert_eq!(
-        probe_storage(&client).unwrap_err(),
-        GpuError::DeviceLost {
-            what: "the storage probe"
-        }
-    );
-
-    // Unarmed the same probe passes on this host, so the line above is the
-    // guard and not a runtime that cannot store these widths.
-    probe_storage(&client).unwrap();
-}
-
-/// A panic in an exported read is a typed error, not an unwind.
-///
-/// Exported pyramid reads have their own guard, outside the frame scope.
-#[test]
-fn a_panic_in_an_exported_read_is_a_typed_error() {
-    use crate::pyramid::{Pyramid, PyramidBuilder, PyramidError};
-
-    let client = gpu_client().unwrap();
-    let builder: GpuPyramidBuilder<GpuRuntime> =
-        GpuPyramidBuilder::new(client.clone(), Default::default());
-    let pyramid: GpuPyramid<GpuRuntime> = builder.allocate(64, 64, 2).unwrap();
-    let mut level: kornia_image::Image<u16, 1> = crate::image::empty();
-
-    arm_fault_at(GUARDED_REGION);
-    let read: PyramidError = pyramid.copy_level_into(0, &mut level).unwrap_err();
+    let batch = launches.begin().unwrap();
+    builder.build_packed(&packed_b, &mut pyramids).unwrap();
+    scan.inner.use_level0(&mut builder.inner);
+    scan.submit_cells(FrameImages::Packed(&packed_b), &[Some(select)])
+        .unwrap();
+    arm_fault_at("queued launch");
+    assert!(scan.take_cells().is_err());
+    scan.take_cells().unwrap();
+    batch.finish(&client).unwrap();
+    // Re-submit the dropped pyramid, without submitting a fresh selection. A stale
+    // Ready selection must not mask these new pixels after the second take_cells.
+    builder.build_packed(&packed_b, &mut pyramids).unwrap();
+    scan.inner.use_level0(&mut builder.inner);
+    let mut current = Vec::new();
+    scan.select_cells(0, &frame_b[0], &select, None, &mut current)
+        .unwrap();
     assert!(
-        matches!(
-            read,
-            PyramidError::Gpu(GpuError::DeviceLost {
-                what: "a pyramid level read"
-            })
-        ),
-        "a panicking level read gave {read}"
+        current.iter().all(Option::is_none),
+        "failed frame B published frame A's keys"
     );
-
-    pyramid.copy_level_into(0, &mut level).unwrap();
+    scan.submit_cells(FrameImages::Packed(&packed_b), &[Some(select)])
+        .unwrap();
+    scan.take_cells().unwrap();
+    scan.select_cells(0, &frame_b[0], &select, None, &mut current)
+        .unwrap();
+    assert!(current.iter().all(Option::is_none));
 }

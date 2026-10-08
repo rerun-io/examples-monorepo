@@ -29,13 +29,13 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 slam-rs = { path = "../slam-rs/crates/slam-rs" }
 thiserror = "2"
 
-# slam-rs's patched cubecl-common (see packages/slam-rs/Cargo.toml); the tree is prepared by slam-rs-patch-deps.
+# kornia-staging's patched cubecl-common (see packages/slam-rs/Cargo.toml); the tree is prepared by kornia-staging-patch-deps.
 [patch.crates-io]
-cubecl-wgpu = { path = "../slam-rs/target/patch/cubecl-wgpu-0.11.0-pre.3" }
-cubecl-common = { path = "../slam-rs/target/patch/cubecl-common-0.11.0-pre.3" }
-# The Mali shader-compiler fix (slam-rs patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch): without it the
-# GPU lane's first kernel crashes libmali's compiler on the caps. Same patched tree as slam-rs's own workspace.
-cubecl-spirv = { path = "../slam-rs/target/patch/cubecl-spirv-0.11.0-pre.3" }
+cubecl-wgpu = { path = "../kornia-staging/target/patch/cubecl-wgpu-0.11.0-pre.3" }
+cubecl-common = { path = "../kornia-staging/target/patch/cubecl-common-0.11.0-pre.3" }
+# The Mali shader-compiler fix (kornia-staging patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch): without it the
+# GPU lane's first kernel crashes libmali's compiler on the caps. All three CubeCL patches are owned by kornia-staging (see its Cargo.toml).
+cubecl-spirv = { path = "../kornia-staging/target/patch/cubecl-spirv-0.11.0-pre.3" }
 
 [profile.dev]
 opt-level = 2

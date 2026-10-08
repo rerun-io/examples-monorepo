@@ -86,7 +86,7 @@ impl<'a> FrameImages<'a> {
             }
         }
     }
-    pub fn iter(self) -> impl ExactSizeIterator<Item = FrameImage<'a>> {
+    pub fn iter(self) -> impl ExactSizeIterator<Item = FrameImage<'a>> + Clone {
         (0..self.len()).map(move |camera| self.get(camera))
     }
 }
