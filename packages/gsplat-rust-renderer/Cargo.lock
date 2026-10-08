@@ -248,6 +248,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alphanumeric-sort"
+version = "1.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a97de3ad85c4425a2c267a5e91adbe49f9f14e650bd9c78e96b6bc00e5f6673a"
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1438,6 +1444,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "brush-process"
+version = "1.0.0"
+dependencies = [
+ "alphanumeric-sort",
+ "anyhow",
+ "async-fn-stream",
+ "brush-async",
+ "brush-dataset",
+ "brush-render",
+ "brush-rerun",
+ "brush-serde",
+ "brush-train",
+ "brush-vfs",
+ "burn",
+ "burn-wgpu",
+ "clap",
+ "glam",
+ "log",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
 name = "brush-render"
 version = "1.0.0"
 dependencies = [
@@ -1455,6 +1490,24 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "brush-rerun"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "brush-dataset",
+ "brush-render",
+ "brush-train",
+ "burn",
+ "clap",
+ "glam",
+ "image",
+ "log",
+ "rerun 0.36.3",
+ "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -1563,6 +1616,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
  "tinyvec",
+]
+
+[[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "regex-automata",
+ "serde_core",
 ]
 
 [[package]]
@@ -2534,6 +2598,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.15.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "once_cell",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "console"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "unicode-width 0.2.2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2574,6 +2662,27 @@ name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
+
+[[package]]
+name = "const_format"
+version = "0.2.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4481a617ad9a412be3b97c5d403fef8ed023103368908b9c50af598ff467cc1e"
+dependencies = [
+ "const_format_proc_macros",
+ "konst",
+]
+
+[[package]]
+name = "const_format_proc_macros"
+version = "0.2.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d57c2eccfb16dbac1f4e61e206105db5820c9d26c3c472bc17c774259ef7744"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-xid",
+]
 
 [[package]]
 name = "const_soft_float"
@@ -4820,6 +4929,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5831,14 +5946,14 @@ dependencies = [
  "image",
  "lpips",
  "macaw",
- "re_chunk",
+ "re_chunk 0.38.1",
  "re_grpc_server",
- "re_log",
- "re_log_encoding",
- "re_log_types",
+ "re_log 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
  "re_renderer",
- "re_sdk_types",
- "re_types_core",
+ "re_sdk_types 0.38.1",
+ "re_types_core 0.38.1",
  "re_viewer",
  "re_viewer_context",
  "serde",
@@ -5864,6 +5979,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsplat-train"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brush-dataset",
+ "brush-process",
+ "brush-render",
+ "brush-serde",
+ "brush-train",
+ "burn",
+ "clap",
+ "glam",
+ "image",
+ "re_chunk 0.38.1",
+ "re_log_encoding 0.38.1",
+ "rerun 0.38.1",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "gsplat-viewer"
 version = "0.1.0"
 dependencies = [
@@ -5873,15 +6010,15 @@ dependencies = [
  "glam",
  "gsplat-core",
  "half",
- "re_byte_size",
+ "re_byte_size 0.38.1",
  "re_crash_handler",
  "re_grpc_server",
- "re_log",
- "re_log_channel",
- "re_log_types",
- "re_query",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
  "re_renderer",
- "re_sdk_types",
+ "re_sdk_types 0.38.1",
  "re_view",
  "re_view_spatial",
  "re_viewer",
@@ -6490,6 +6627,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "indicatif"
+version = "0.18.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
+dependencies = [
+ "console 0.16.4",
+ "portable-atomic",
+ "unicode-width 0.2.2",
+ "unit-prefix",
+ "web-time",
+]
+
+[[package]]
 name = "infer"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6808,6 +6958,21 @@ dependencies = [
  "accesskit",
  "accesskit_consumer 0.35.0",
 ]
+
+[[package]]
+name = "konst"
+version = "0.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "128133ed7824fcd73d6e7b17957c5eb7bacb885649bd8c69708b2331a10bcefb"
+dependencies = [
+ "konst_macro_rules",
+]
+
+[[package]]
+name = "konst_macro_rules"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
 name = "kqueue"
@@ -9108,12 +9273,33 @@ dependencies = [
 
 [[package]]
 name = "quiver"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d45b102e73d519fc2b42a01f7e5ea3703087a84c6ac530f9bc7a013ed187c12"
+dependencies = [
+ "quiver_derive 0.5.0",
+ "quiver_types 0.5.0",
+]
+
+[[package]]
+name = "quiver"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4b67ff3fc53fdac8d985bbd8db693a0b1ca2860bdc7598fd04318f69e8b4f4"
 dependencies = [
- "quiver_derive",
- "quiver_types",
+ "quiver_derive 0.6.1",
+ "quiver_types 0.6.1",
+]
+
+[[package]]
+name = "quiver_derive"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4908b6ee5c1792ad8fe4c98fa5a4d674205754bbbd4d1f7967e62e820b2add41"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -9125,6 +9311,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "quiver_types"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1fec5e9c41b28a71f8721ea034c03ac0ef2faf28d461c248b9abfcdfec6a784"
+dependencies = [
+ "arrow",
+ "half",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -9372,7 +9569,7 @@ checksum = "980c7fa81ae29f7000981194d4630e06b6bcdb8f71bebd99c8704e2e91356373"
 dependencies = [
  "agent-client-protocol",
  "futures",
- "re_log",
+ "re_log 0.38.1",
  "serde",
  "serde_json",
  "shell-words",
@@ -9396,6 +9593,28 @@ dependencies = [
 
 [[package]]
 name = "re_analytics"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c093e4f8140c6e9d8e786346914d47a3ef350fcb5db140ccdb1d93927903e80"
+dependencies = [
+ "crossbeam",
+ "directories",
+ "ehttp",
+ "jiff",
+ "re_build_info 0.36.3",
+ "re_log 0.36.3",
+ "re_quota_channel 0.36.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "url",
+ "uuid",
+ "web-sys",
+]
+
+[[package]]
+name = "re_analytics"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d56a9eedf861f16fce0d19aab93e1d695630b9ea6d14a2022df6ca7286eb801"
@@ -9404,9 +9623,9 @@ dependencies = [
  "directories",
  "ehttp",
  "jiff",
- "re_build_info",
- "re_log",
- "re_quota_channel",
+ "re_build_info 0.38.1",
+ "re_log 0.38.1",
+ "re_quota_channel 0.38.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -9426,11 +9645,29 @@ dependencies = [
  "egui",
  "itertools 0.15.0",
  "jiff",
- "re_format",
- "re_log_types",
- "re_span",
- "re_tracing",
+ "re_format 0.38.1",
+ "re_log_types 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
+]
+
+[[package]]
+name = "re_arrow_util"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "229a2ff19e8ab9ade110e2bc9fdebb8977f8bb4bb6f43a975192375cdff727a5"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "comfy-table",
+ "half",
+ "itertools 0.15.0",
+ "re_log 0.36.3",
+ "re_tracing 0.36.3",
+ "re_tuid 0.36.3",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -9444,12 +9681,28 @@ dependencies = [
  "comfy-table",
  "half",
  "itertools 0.15.0",
- "re_log",
- "re_span",
- "re_tracing",
- "re_tuid",
+ "re_log 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_tuid 0.38.1",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_async"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77b3e572e85f1e9d56e7a9c7ea7cf29a4ec2d7f8ba2f53a55993100a556428b8"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "js-sys",
+ "thiserror 2.0.20",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -9462,10 +9715,47 @@ dependencies = [
  "bytes",
  "futures",
  "js-sys",
- "re_span",
+ "re_span 0.38.1",
  "thiserror 2.0.20",
  "tokio",
  "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "re_auth"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "538817b54455600cce328fe97ed663991b2e13e5869796be1f56425e032e034f"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "directories",
+ "ehttp",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "hmac",
+ "http",
+ "jiff",
+ "jsonwebtoken",
+ "parking_lot",
+ "rand 0.9.5",
+ "re_analytics 0.36.3",
+ "re_int 0.36.3",
+ "re_log 0.36.3",
+ "re_web 0.36.3",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "signature",
+ "thiserror 2.0.20",
+ "tiny_http",
+ "tokio",
+ "tonic",
+ "tower",
+ "url",
+ "uuid",
  "web-sys",
 ]
 
@@ -9487,11 +9777,11 @@ dependencies = [
  "jsonwebtoken",
  "parking_lot",
  "rand 0.9.5",
- "re_analytics",
- "re_byte_size",
- "re_int",
- "re_log",
- "re_web",
+ "re_analytics 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
+ "re_web 0.38.1",
  "ring",
  "serde",
  "serde_json",
@@ -9509,13 +9799,24 @@ dependencies = [
 
 [[package]]
 name = "re_backoff"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d31ee9a951020a5b684d712545138226150fb4660cfca5c780184b15f3d581d7"
+dependencies = [
+ "getrandom 0.3.4",
+ "rand 0.9.5",
+ "re_async 0.36.3",
+]
+
+[[package]]
+name = "re_backoff"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0898c3a5313f3c9561a946a8139160cc9157af60a3fd3d28ecb6e4dbe636b440"
 dependencies = [
  "getrandom 0.3.4",
  "rand 0.9.5",
- "re_async",
+ "re_async 0.38.1",
 ]
 
 [[package]]
@@ -9529,11 +9830,11 @@ dependencies = [
  "itertools 0.15.0",
  "re_context_menu",
  "re_data_ui",
- "re_entity_db",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_tracing",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_viewer_context",
  "re_viewport_blueprint",
@@ -9542,12 +9843,37 @@ dependencies = [
 
 [[package]]
 name = "re_build_info"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ca123833b8187fa2dcbf6bcdbca071a6ac98999ec585f9762b0f74fb173cfe8"
+dependencies = [
+ "re_byte_size 0.36.3",
+ "serde",
+]
+
+[[package]]
+name = "re_build_info"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d74c67dffeac4d3853fc7310000f54cecaadd3acddaa1dd4919c5621d198fc0"
 dependencies = [
- "re_byte_size",
+ "re_byte_size 0.38.1",
  "serde",
+]
+
+[[package]]
+name = "re_build_tools"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f99e3d0fc60e7dee496b8e119795ca7e0c242e61ceae359c904b311f5c33fba2"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+ "glob",
+ "jiff",
+ "sha2 0.10.9",
+ "unindent",
+ "walkdir",
 ]
 
 [[package]]
@@ -9567,6 +9893,21 @@ dependencies = [
 
 [[package]]
 name = "re_byte_size"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dae151a7781e6cf5fa940adeff80498c12c27b6b5b6084aad65c779a283a6b5"
+dependencies = [
+ "arrow",
+ "glam",
+ "half",
+ "parking_lot",
+ "re_byte_size_derive 0.36.3",
+ "smallvec",
+ "vec1",
+]
+
+[[package]]
+name = "re_byte_size"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9245525b4b9a9a5efcc8e8985d0d3e8fadf35e1da0bedeaba758979b249183f"
@@ -9578,9 +9919,21 @@ dependencies = [
  "half",
  "macaw",
  "parking_lot",
- "re_byte_size_derive",
+ "re_byte_size_derive 0.38.1",
  "smallvec",
  "vec1",
+]
+
+[[package]]
+name = "re_byte_size_derive"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c19026af391ad8832fcca708df5c361fa41d39ac4a1644d322558d78bad376d"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -9597,14 +9950,34 @@ dependencies = [
 
 [[package]]
 name = "re_capabilities"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71c731b0b9c8b98f42df8ac358f16f8f994ae9ff0f4e3d5db1292fd724b1277d"
+dependencies = [
+ "document-features",
+ "re_log 0.36.3",
+ "static_assertions",
+]
+
+[[package]]
+name = "re_capabilities"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a45120039abdfd707b950c33bd9924fe155c8b7afb5a03ff8cff7e71d2dfcfa3"
 dependencies = [
  "document-features",
  "egui",
- "re_log",
+ "re_log 0.38.1",
  "static_assertions",
+]
+
+[[package]]
+name = "re_case"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7273514c09aa07240eb6f605d0d16e41d5be74a31a539efde34461c2d98a55ce"
+dependencies = [
+ "convert_case 0.11.0",
 ]
 
 [[package]]
@@ -9630,6 +10003,36 @@ dependencies = [
 
 [[package]]
 name = "re_chunk"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3de759eda8bc21eb1f63599210fda25b6a851c026c2aacea37ce1a802d0a3724"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "arrow",
+ "bytemuck",
+ "crossbeam",
+ "document-features",
+ "half",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "rand 0.9.5",
+ "re_arrow_util 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_error 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_span 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_chunk"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a26821ad80f308b8beb8644b569f4f6b15eb9812fedb76e43ec2febe135adab5"
@@ -9644,18 +10047,49 @@ dependencies = [
  "itertools 0.15.0",
  "nohash-hasher",
  "rand 0.9.5",
- "re_arrow_util",
- "re_byte_size",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_quota_channel",
- "re_sorbet",
- "re_span",
- "re_tracing",
- "re_types_core",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_chunk_store"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "994eb9c02d596dbe62f0c65ce567c0f8d48f76bc81d910da689e6f6191a97c03"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "arrow",
+ "document-features",
+ "futures",
+ "indent",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "parking_lot",
+ "re_arrow_util 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_format 0.36.3",
+ "re_int 0.36.3",
+ "re_log 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_sdk_types 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "thiserror 2.0.20",
+ "web-time",
 ]
 
 [[package]]
@@ -9674,18 +10108,18 @@ dependencies = [
  "itertools 0.15.0",
  "nohash-hasher",
  "parking_lot",
- "re_arrow_util",
- "re_byte_size",
- "re_chunk",
- "re_format",
- "re_int",
- "re_log",
- "re_log_encoding",
- "re_log_types",
- "re_sdk_types",
- "re_sorbet",
- "re_tracing",
- "re_types_core",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_format 0.38.1",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "thiserror 2.0.20",
  "web-time",
 ]
@@ -9701,13 +10135,13 @@ dependencies = [
  "egui_extras",
  "itertools 0.15.0",
  "re_arrow_ui",
- "re_arrow_util",
- "re_byte_size",
- "re_chunk_store",
- "re_format",
- "re_log",
- "re_log_types",
- "re_types_core",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
  "re_viewer_context",
 ]
@@ -9718,10 +10152,10 @@ version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "084d3cf8ab56ee36c14deb32327e9c79d6f6794a739ac22cce304718bc6428ac"
 dependencies = [
- "re_log_types",
- "re_rvl",
- "re_sdk_types",
- "re_video",
+ "re_log_types 0.38.1",
+ "re_rvl 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_video 0.38.1",
  "re_viewer_context",
 ]
 
@@ -9737,17 +10171,17 @@ dependencies = [
  "egui_extras",
  "egui_plot",
  "re_arrow_ui",
- "re_arrow_util",
+ "re_arrow_util 0.38.1",
  "re_data_ui",
- "re_format",
- "re_log",
- "re_log_types",
- "re_protos",
- "re_sdk_types",
- "re_tracing",
- "re_types_core",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_protos 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
- "re_uri",
+ "re_uri 0.38.1",
  "re_viewer_context",
 ]
 
@@ -9761,17 +10195,17 @@ dependencies = [
  "egui_tiles",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_entity_db",
- "re_log",
- "re_log_channel",
- "re_log_types",
- "re_sdk_types",
- "re_tracing",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
- "re_uri",
+ "re_uri 0.38.1",
  "re_viewer_context",
  "re_viewport_blueprint",
- "re_web",
+ "re_web 0.38.1",
  "smallvec",
  "static_assertions",
 ]
@@ -9787,8 +10221,8 @@ dependencies = [
  "itertools 0.15.0",
  "libc",
  "parking_lot",
- "re_analytics",
- "re_build_info",
+ "re_analytics 0.38.1",
+ "re_build_info 0.38.1",
 ]
 
 [[package]]
@@ -9800,18 +10234,18 @@ dependencies = [
  "anyhow",
  "ehttp",
  "rayon",
- "re_async",
- "re_format",
- "re_grpc_client",
+ "re_async 0.38.1",
+ "re_format 0.38.1",
+ "re_grpc_client 0.38.1",
  "re_importer",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_redap_client",
- "re_tracing",
- "re_uri",
- "re_web",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_redap_client 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
+ "re_web 0.38.1",
  "url",
  "web-sys",
 ]
@@ -9831,22 +10265,22 @@ dependencies = [
  "itertools 0.15.0",
  "jiff",
  "re_arrow_ui",
- "re_capabilities",
- "re_chunk_store",
- "re_entity_db",
- "re_format",
- "re_log",
- "re_log_channel",
- "re_log_types",
- "re_query",
+ "re_capabilities 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
  "re_renderer",
- "re_sdk_types",
- "re_sorbet",
- "re_tracing",
- "re_types_core",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
- "re_uri",
- "re_video",
+ "re_uri 0.38.1",
+ "re_video 0.38.1",
  "re_viewer_context",
  "re_viewport_blueprint",
  "rexif",
@@ -9864,16 +10298,16 @@ dependencies = [
  "itertools 0.15.0",
  "nohash-hasher",
  "rayon",
- "re_arrow_util",
- "re_chunk",
- "re_chunk_store",
- "re_log",
- "re_log_types",
- "re_query",
- "re_sorbet",
- "re_span",
- "re_tracing",
- "re_types_core",
+ "re_arrow_util 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "tracing",
 ]
 
@@ -9897,27 +10331,27 @@ dependencies = [
  "jiff",
  "nohash-hasher",
  "ordered-float 5.5.0",
- "re_arrow_util",
- "re_async",
- "re_chunk_store",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_component_ui",
  "re_data_source",
  "re_dataframe",
- "re_entity_db",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_mutex",
- "re_protos",
- "re_quota_channel",
- "re_redap_client",
- "re_sdk_types",
- "re_sorbet",
- "re_tracing",
- "re_types_core",
+ "re_entity_db 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_redap_client 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
- "re_uri",
+ "re_uri 0.38.1",
  "re_view",
  "re_viewer_context",
  "re_viewport_blueprint",
@@ -9946,31 +10380,69 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-proto",
  "parking_lot",
- "quiver",
- "re_analytics",
- "re_arrow_util",
- "re_async",
- "re_backoff",
- "re_byte_size",
+ "quiver 0.6.1",
+ "re_analytics 0.38.1",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_backoff 0.38.1",
+ "re_byte_size 0.38.1",
  "re_dataframe",
- "re_format",
- "re_int",
- "re_log",
- "re_log_encoding",
- "re_log_types",
+ "re_format 0.38.1",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
  "re_perf_telemetry",
- "re_protos",
- "re_redap_client",
- "re_sorbet",
- "re_span",
- "re_tracing",
- "re_types_core",
- "re_uri",
+ "re_protos 0.38.1",
+ "re_redap_client 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
+ "re_uri 0.38.1",
  "reqwest 0.12.28",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "re_entity_db"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "988b85e58377c2dda08402603ea29a5293b6cbd76e6414294544352b6f0d0b0a"
+dependencies = [
+ "ahash",
+ "arrow",
+ "document-features",
+ "emath",
+ "indexmap 2.14.0",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "poll-promise",
+ "re_arrow_util 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_chunk_store 0.36.3",
+ "re_format 0.36.3",
+ "re_int 0.36.3",
+ "re_log 0.36.3",
+ "re_log_channel 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_mutex 0.36.3",
+ "re_query 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "re_uri 0.36.3",
+ "serde",
+ "static_assertions",
+ "tap",
+ "thiserror 2.0.20",
+ "vec1",
  "web-time",
 ]
 
@@ -9988,22 +10460,22 @@ dependencies = [
  "itertools 0.15.0",
  "nohash-hasher",
  "poll-promise",
- "re_arrow_util",
- "re_byte_size",
- "re_chunk",
- "re_chunk_store",
- "re_format",
- "re_int",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_mutex",
- "re_query",
- "re_sorbet",
- "re_tracing",
- "re_types_core",
- "re_uri",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_format 0.38.1",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_query 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
+ "re_uri 0.38.1",
  "serde",
  "static_assertions",
  "tap",
@@ -10014,9 +10486,28 @@ dependencies = [
 
 [[package]]
 name = "re_error"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dc83ee6de734ea3689fe3cb8ac0b8150e788c3a12c5d1a76d0968dcbc8b0047"
+
+[[package]]
+name = "re_error"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "675602fd62d84c4c037dfe763898ea0cd8edd7271821d39a96e3a4f79f47588e"
+
+[[package]]
+name = "re_format"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52787b696e1ed28e7395684fef88394c4b33f0dd67e717c913dc9f8be03017e0"
+dependencies = [
+ "half",
+ "itertools 0.15.0",
+ "num-traits",
+ "re_int 0.36.3",
+ "re_log 0.36.3",
+]
 
 [[package]]
 name = "re_format"
@@ -10027,8 +10518,8 @@ dependencies = [
  "half",
  "itertools 0.15.0",
  "num-traits",
- "re_int",
- "re_log",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
 ]
 
 [[package]]
@@ -10040,7 +10531,35 @@ dependencies = [
  "gilrs",
  "glam",
  "parking_lot",
- "re_log",
+ "re_log 0.38.1",
+]
+
+[[package]]
+name = "re_grpc_client"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4d96aaec5d52a7fb8de175574ea0bb062a3ed1e2b8e465bb32c7a6bf8a4892d"
+dependencies = [
+ "async-stream",
+ "crossbeam",
+ "re_async 0.36.3",
+ "re_chunk 0.36.3",
+ "re_error 0.36.3",
+ "re_log 0.36.3",
+ "re_log_channel 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_protos 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_uri 0.36.3",
+ "rerun-tonic-web-wasm-client",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "web-time",
 ]
 
 [[package]]
@@ -10051,24 +10570,36 @@ checksum = "c7eae805346a9f2bd3b5c9f9c1fbad8549b64703e6a663f80c959ab6a3a9af3a"
 dependencies = [
  "async-stream",
  "crossbeam",
- "re_async",
- "re_chunk",
- "re_error",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_protos",
- "re_quota_channel",
- "re_sorbet",
- "re_tracing",
- "re_uri",
+ "re_async 0.38.1",
+ "re_chunk 0.38.1",
+ "re_error 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
  "rerun-tonic-web-wasm-client",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tonic",
  "web-time",
+]
+
+[[package]]
+name = "re_grpc_headers"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e4a37d381dbdf8b5cfcf922d5d9e313d65c86ea0dcb2d6a096e67e7baad5bd0"
+dependencies = [
+ "http",
+ "pin-project-lite",
+ "tonic",
+ "tower",
 ]
 
 [[package]]
@@ -10094,21 +10625,21 @@ dependencies = [
  "futures",
  "itertools 0.15.0",
  "parking_lot",
- "re_byte_size",
- "re_chunk",
- "re_error",
- "re_format",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_memory",
- "re_protos",
- "re_quota_channel",
- "re_sdk_types",
- "re_sorbet",
- "re_tracing",
- "re_uri",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_memory 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -10137,23 +10668,23 @@ dependencies = [
  "parking_lot",
  "parquet",
  "rayon",
- "re_arrow_util",
- "re_chunk",
- "re_error",
- "re_format",
- "re_lenses",
+ "re_arrow_util 0.38.1",
+ "re_chunk 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_lenses 0.38.1",
  "re_lerobot",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_mcap",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mcap 0.38.1",
  "re_mp4_reader",
  "re_parquet",
- "re_quota_channel",
- "re_sdk_types",
- "re_span",
- "re_tracing",
+ "re_quota_channel 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
  "serde",
  "thiserror 2.0.20",
  "urdf-rs",
@@ -10163,9 +10694,32 @@ dependencies = [
 
 [[package]]
 name = "re_int"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0596201869ad8f6765dc3b74a20f8acf2d86f62d0c7475a9be90dd2bfbfb4e"
+
+[[package]]
+name = "re_int"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0123e93fef153f70efa17fe24435ecb5a8458f69ed72b0c4d05aeb1c30fd5ad5"
+
+[[package]]
+name = "re_lenses"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed9d26d8a86cfe98a66f0d37a0699ea4891d735fa156593b82fe746c063dfff2"
+dependencies = [
+ "arrow",
+ "itertools 0.15.0",
+ "re_int 0.36.3",
+ "re_lenses_core 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_mcap 0.36.3",
+ "re_sdk_types 0.36.3",
+ "re_tracing 0.36.3",
+]
 
 [[package]]
 name = "re_lenses"
@@ -10176,14 +10730,34 @@ dependencies = [
  "arrow",
  "document-features",
  "itertools 0.15.0",
- "re_arrow_util",
- "re_int",
- "re_lenses_core",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_tracing",
+ "re_arrow_util 0.38.1",
+ "re_int 0.38.1",
+ "re_lenses_core 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "strum 0.26.3",
+]
+
+[[package]]
+name = "re_lenses_core"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37736e46f43bccced64feecd131b4fbb85858da9bed790a5adde902b6ed5c412"
+dependencies = [
+ "ahash",
+ "arrow",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "re_arrow_util 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_sdk_types 0.36.3",
+ "thiserror 2.0.20",
+ "vec1",
 ]
 
 [[package]]
@@ -10196,13 +10770,13 @@ dependencies = [
  "arrow",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_arrow_util",
- "re_byte_size",
- "re_chunk",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_span",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
  "thiserror 2.0.20",
  "vec1",
 ]
@@ -10217,19 +10791,34 @@ dependencies = [
  "arrow",
  "itertools 0.15.0",
  "parquet",
- "re_arrow_util",
- "re_chunk",
- "re_lenses",
- "re_lenses_core",
- "re_log",
- "re_log_types",
+ "re_arrow_util 0.38.1",
+ "re_chunk 0.38.1",
+ "re_lenses 0.38.1",
+ "re_lenses_core 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
  "re_mp4_reader",
  "re_parquet",
- "re_sdk_types",
- "re_span",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_log"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7410a0c8f1571edfa4326fb8212df334e1adb3f8042c65cb58dc6c1b437ce2a5"
+dependencies = [
+ "crossbeam",
+ "log",
+ "parking_lot",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "tracing-web",
 ]
 
 [[package]]
@@ -10249,21 +10838,77 @@ dependencies = [
 
 [[package]]
 name = "re_log_channel"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "412281c8cb9dcfa26f9c2f9dc52cfe347626b61ecb7035ece9e0ff46cb1743ad"
+dependencies = [
+ "camino",
+ "crossbeam",
+ "futures",
+ "parking_lot",
+ "re_byte_size 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_protos 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_tracing 0.36.3",
+ "re_uri 0.36.3",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_log_channel"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34c969b5db62b62d09dd98ed5c87e9dad4ff668439d6e428cf5e6d59aede1da7"
 dependencies = [
  "crossbeam",
  "parking_lot",
- "re_byte_size",
- "re_log_encoding",
- "re_log_types",
- "re_protos",
- "re_quota_channel",
- "re_tracing",
- "re_uri",
+ "re_byte_size 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
  "serde",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_log_encoding"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ed12613c93d5355042bbfa52f6ac16641d619690675e001df326706af6fc162"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytes",
+ "crossbeam",
+ "futures",
+ "itertools 0.15.0",
+ "jiff",
+ "lz4_flex",
+ "parking_lot",
+ "re_arrow_util 0.36.3",
+ "re_async 0.36.3",
+ "re_build_info 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_protos 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_span 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tracing",
+ "url",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -10284,26 +10929,65 @@ dependencies = [
  "js-sys",
  "lz4_flex",
  "parking_lot",
- "quiver",
- "re_arrow_util",
- "re_async",
- "re_build_info",
- "re_byte_size",
- "re_chunk",
- "re_log",
- "re_log_types",
- "re_protos",
- "re_quota_channel",
- "re_sorbet",
- "re_span",
- "re_tracing",
- "re_types_core",
+ "quiver 0.6.1",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_build_info 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
  "url",
  "wasm-bindgen",
  "web-sys",
+ "web-time",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "re_log_types"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ce82b36e856c6f19e6679b849e31defc77c2d0ff82559767f5c00709e0e2dfe"
+dependencies = [
+ "ahash",
+ "arrow",
+ "bytemuck",
+ "clean-path",
+ "document-features",
+ "fixed",
+ "half",
+ "itertools 0.15.0",
+ "jiff",
+ "natord",
+ "nohash-hasher",
+ "num-derive",
+ "num-traits",
+ "parking_lot",
+ "quiver 0.5.0",
+ "re_arrow_util 0.36.3",
+ "re_build_info 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_string_interner 0.36.3",
+ "re_tracing 0.36.3",
+ "re_tuid 0.36.3",
+ "re_types_core 0.36.3",
+ "serde",
+ "static_assertions",
+ "thiserror 2.0.20",
+ "typenum",
+ "uuid",
  "web-time",
  "xxhash-rust",
 ]
@@ -10328,16 +11012,16 @@ dependencies = [
  "num-derive",
  "num-traits",
  "parking_lot",
- "quiver",
- "re_arrow_util",
- "re_build_info",
- "re_byte_size",
- "re_format",
- "re_log",
- "re_string_interner",
- "re_tracing",
- "re_tuid",
- "re_types_core",
+ "quiver 0.6.1",
+ "re_arrow_util 0.38.1",
+ "re_build_info 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_string_interner 0.38.1",
+ "re_tracing 0.38.1",
+ "re_tuid 0.38.1",
+ "re_types_core 0.38.1",
  "serde",
  "static_assertions",
  "thiserror 2.0.20",
@@ -10345,6 +11029,39 @@ dependencies = [
  "uuid",
  "web-time",
  "xxhash-rust",
+]
+
+[[package]]
+name = "re_mcap"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86f42c929143877111ae35bb9bcac12b3625c3eb8296fe60605c9a08030d5ac7"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "arrow",
+ "byteorder",
+ "crossbeam",
+ "itertools 0.15.0",
+ "mcap",
+ "parking_lot",
+ "prost-reflect",
+ "rayon",
+ "re_arrow_util 0.36.3",
+ "re_cdr",
+ "re_chunk 0.36.3",
+ "re_int 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_ros_msg 0.36.3",
+ "re_sdk_types 0.36.3",
+ "re_tracing 0.36.3",
+ "regex-lite",
+ "serde",
+ "serde_bytes",
+ "strum 0.26.3",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -10363,21 +11080,45 @@ dependencies = [
  "parking_lot",
  "prost-reflect",
  "rayon",
- "re_arrow_util",
+ "re_arrow_util 0.38.1",
  "re_cdr",
- "re_chunk",
- "re_int",
- "re_log",
- "re_log_types",
- "re_quota_channel",
- "re_ros_msg",
- "re_sdk_types",
- "re_span",
- "re_tracing",
+ "re_chunk 0.38.1",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_ros_msg 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
  "regex-lite",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_memory"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "262fbdd398b12e13f9de397f704725614749091f1c4bd6be5bc3a1133bceaa43"
+dependencies = [
+ "ahash",
+ "backtrace",
+ "crossbeam",
+ "itertools 0.15.0",
+ "memory-stats",
+ "nohash-hasher",
+ "parking_lot",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_tracing 0.36.3",
+ "serde",
+ "smallvec",
+ "sysinfo",
+ "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]
@@ -10393,10 +11134,10 @@ dependencies = [
  "memory-stats",
  "nohash-hasher",
  "parking_lot",
- "re_format",
- "re_log",
- "re_quota_channel",
- "re_tracing",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_tracing 0.38.1",
  "serde",
  "smallvec",
  "sysinfo",
@@ -10411,8 +11152,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b21865d90f117bf050ed3b84c8fac36d95de5220ccc2bb983e14a03f400d5987"
 dependencies = [
  "egui",
- "re_byte_size",
- "re_format",
+ "re_byte_size 0.38.1",
+ "re_format 0.38.1",
 ]
 
 [[package]]
@@ -10437,14 +11178,25 @@ checksum = "cc1f609737c28ccf82f1ffb5bee2a116f17d61a4db4c2913ce5d515d042378fa"
 dependencies = [
  "arrow",
  "itertools 0.15.0",
- "re_chunk",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_span",
- "re_tracing",
- "re_video",
+ "re_chunk 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_video 0.38.1",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_mutex"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "893809971c8ab46ab4fd271475e1398e217cbe8ee4aafaf1b3ed73eae2036fdc"
+dependencies = [
+ "parking_lot",
+ "re_byte_size 0.36.3",
+ "re_log 0.36.3",
 ]
 
 [[package]]
@@ -10454,8 +11206,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843fe3df56806e358dd07efd868e8efd994372868342a53a559444567548b596"
 dependencies = [
  "parking_lot",
- "re_byte_size",
- "re_log",
+ "re_byte_size 0.38.1",
+ "re_log 0.38.1",
 ]
 
 [[package]]
@@ -10467,13 +11219,13 @@ dependencies = [
  "arrow",
  "bytes",
  "parquet",
- "re_arrow_util",
- "re_chunk",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_span",
- "re_tracing",
+ "re_arrow_util 0.38.1",
+ "re_chunk 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
  "thiserror 2.0.20",
 ]
 
@@ -10498,8 +11250,8 @@ dependencies = [
  "parking_lot",
  "prometheus-client",
  "rand 0.9.5",
- "re_auth",
- "re_grpc_headers",
+ "re_auth 0.38.1",
+ "re_grpc_headers 0.38.1",
  "serde",
  "serde_json",
  "tokio",
@@ -10525,6 +11277,40 @@ dependencies = [
 
 [[package]]
 name = "re_protos"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6562031c6f604920d60cd93427667191aa4bd919f9e654a09899d867e97bf50"
+dependencies = [
+ "arrow",
+ "http",
+ "itertools 0.15.0",
+ "jiff",
+ "lz4_flex",
+ "opentelemetry",
+ "prost",
+ "prost-types",
+ "quiver 0.5.0",
+ "re_arrow_util 0.36.3",
+ "re_build_info 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_grpc_headers 0.36.3",
+ "re_log_types 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_tuid 0.36.3",
+ "re_types_core 0.36.3",
+ "serde",
+ "thiserror 2.0.20",
+ "tonic",
+ "tonic-prost",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "re_protos"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cc4b84ba97dcf59f5126a070d749eb2c9dc2fa7f0862f88bc0f10b6803f0669"
@@ -10538,18 +11324,18 @@ dependencies = [
  "prost",
  "prost-reflect",
  "prost-types",
- "quiver",
- "re_arrow_util",
- "re_build_info",
- "re_byte_size",
- "re_chunk",
- "re_grpc_headers",
- "re_log_types",
- "re_sorbet",
- "re_span",
- "re_tracing",
- "re_tuid",
- "re_types_core",
+ "quiver 0.6.1",
+ "re_arrow_util 0.38.1",
+ "re_build_info 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_grpc_headers 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_tuid 0.38.1",
+ "re_types_core 0.38.1",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -10559,6 +11345,33 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "re_query"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e106aea3f00e30f73fac92a7134b12449255d9793933db6d482eda6080ec8b15"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "arrow",
+ "indent",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "parking_lot",
+ "paste",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_chunk_store 0.36.3",
+ "re_error 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "seq-macro",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -10575,17 +11388,30 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "paste",
- "re_byte_size",
- "re_chunk",
- "re_chunk_store",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_tracing",
- "re_types_core",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "seq-macro",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_quota_channel"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9ca8bc2d837d9ef0adfd8b68c0ed1c7bab9e20d2d7f91b16d2bd5a42e51cd85"
+dependencies = [
+ "crossbeam",
+ "parking_lot",
+ "re_byte_size 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
 ]
 
 [[package]]
@@ -10596,9 +11422,9 @@ checksum = "108580c63f27ba957d2e2a674e6fe0319987be2f2bbfdeb5184c075098fe3b40"
 dependencies = [
  "crossbeam",
  "parking_lot",
- "re_byte_size",
- "re_format",
- "re_log",
+ "re_byte_size 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
  "tokio",
 ]
 
@@ -10635,15 +11461,15 @@ dependencies = [
  "egui",
  "itertools 0.15.0",
  "re_data_ui",
- "re_entity_db",
- "re_log",
- "re_log_channel",
- "re_log_types",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_types 0.38.1",
  "re_redap_browser",
- "re_sdk_types",
- "re_tracing",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
- "re_uri",
+ "re_uri 0.38.1",
  "re_viewer_context",
 ]
 
@@ -10660,23 +11486,23 @@ dependencies = [
  "egui_extras",
  "futures",
  "itertools 0.15.0",
- "re_async",
- "re_auth",
- "re_backoff",
+ "re_async 0.38.1",
+ "re_auth 0.38.1",
+ "re_backoff 0.38.1",
  "re_dataframe_ui",
  "re_datafusion",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_mutex",
- "re_protos",
- "re_quota_channel",
- "re_redap_client",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_redap_client 0.38.1",
  "re_ui",
- "re_uri",
+ "re_uri 0.38.1",
  "re_viewer_context",
- "re_web",
+ "re_web 0.38.1",
  "rfd",
  "serde",
  "serde_json",
@@ -10685,6 +11511,54 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "webbrowser",
+]
+
+[[package]]
+name = "re_redap_client"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39ca0c91e209bee7101a44ecd09758498f148501b4f3f3468c035af78c8508f3"
+dependencies = [
+ "ahash",
+ "arrow",
+ "async-trait",
+ "bitflags 2.13.1",
+ "ehttp",
+ "futures",
+ "http",
+ "http-body",
+ "itertools 0.15.0",
+ "jiff",
+ "opentelemetry",
+ "opentelemetry-proto",
+ "quiver 0.5.0",
+ "re_arrow_util 0.36.3",
+ "re_async 0.36.3",
+ "re_auth 0.36.3",
+ "re_backoff 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_error 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_log_channel 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_protos 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "re_uri 0.36.3",
+ "rerun-tonic-web-wasm-client",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tower",
+ "tracing",
+ "url",
+ "web-time",
 ]
 
 [[package]]
@@ -10705,25 +11579,25 @@ dependencies = [
  "jiff",
  "opentelemetry",
  "opentelemetry-proto",
- "quiver",
- "re_arrow_util",
- "re_async",
- "re_auth",
- "re_backoff",
- "re_byte_size",
- "re_chunk",
- "re_error",
- "re_format",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_mutex",
- "re_protos",
- "re_span",
- "re_tracing",
- "re_types_core",
- "re_uri",
+ "quiver 0.6.1",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_auth 0.38.1",
+ "re_backoff 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_protos 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
+ "re_uri 0.38.1",
  "rerun-tonic-web-wasm-client",
  "serde",
  "thiserror 2.0.20",
@@ -10766,16 +11640,16 @@ dependencies = [
  "parking_lot",
  "pathdiff",
  "profiling",
- "re_build_tools",
- "re_byte_size",
- "re_error",
- "re_log",
- "re_mutex",
- "re_quota_channel",
- "re_span",
- "re_tracing",
- "re_video",
- "re_web",
+ "re_build_tools 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_error 0.38.1",
+ "re_log 0.38.1",
+ "re_mutex 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_video 0.38.1",
+ "re_web 0.38.1",
  "regex-lite",
  "serde",
  "slotmap",
@@ -10791,6 +11665,18 @@ dependencies = [
 
 [[package]]
 name = "re_ros_msg"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d84d965ef44d9ddc962579b46d92ae3fa4160452992d4dfa4502c8a36774f745"
+dependencies = [
+ "anyhow",
+ "itertools 0.15.0",
+ "re_cdr",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_ros_msg"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a506e58974c1f75a1a077aead42d250221c925e6257f709a867fc44a2282a1ac"
@@ -10799,11 +11685,21 @@ dependencies = [
  "arrow",
  "byteorder",
  "itertools 0.15.0",
- "re_arrow_util",
+ "re_arrow_util 0.38.1",
  "re_cdr",
- "re_log",
- "re_span",
+ "re_log 0.38.1",
+ "re_span 0.38.1",
  "strum 0.26.3",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_rvl"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d322bab28f55e3ea191d224fb3c3efc5c40725cfebd656b85cf415319355a3aa"
+dependencies = [
+ "byteorder",
  "thiserror 2.0.20",
 ]
 
@@ -10815,6 +11711,113 @@ checksum = "673ea39253625c9b2d001b0743da57f6f06c79412934d3576b62daaa1db00281"
 dependencies = [
  "byteorder",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_sdk"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e45c439c88f371f610b06a5c895d611e2b26dcd4af0667f8904df621cfca1024"
+dependencies = [
+ "ahash",
+ "const_format",
+ "crossbeam",
+ "document-features",
+ "itertools 0.15.0",
+ "libc",
+ "nohash-hasher",
+ "parking_lot",
+ "percent-encoding",
+ "re_build_info 0.36.3",
+ "re_build_tools 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_chunk 0.36.3",
+ "re_grpc_client 0.36.3",
+ "re_lenses 0.36.3",
+ "re_lenses_core 0.36.3",
+ "re_log 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_sdk_types 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_uri 0.36.3",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "re_sdk"
+version = "0.38.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1702edd2dda5f791ef0cd27fc3763a305d114db665c7d34c360f0c934ec2dbbe"
+dependencies = [
+ "ahash",
+ "const_format",
+ "crossbeam",
+ "document-features",
+ "itertools 0.15.0",
+ "libc",
+ "nohash-hasher",
+ "parking_lot",
+ "percent-encoding",
+ "re_build_info 0.38.1",
+ "re_build_tools 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_grpc_client 0.38.1",
+ "re_lenses 0.38.1",
+ "re_lenses_core 0.38.1",
+ "re_log 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "re_sdk_types"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bbe65711ee422e61581927ba293dd5a3a41f78cb13411bd29ecc3215caa8d37"
+dependencies = [
+ "array-init",
+ "arrow",
+ "bytemuck",
+ "document-features",
+ "ecolor",
+ "emath",
+ "glam",
+ "half",
+ "image",
+ "infer",
+ "itertools 0.15.0",
+ "macaw",
+ "mime_guess2",
+ "ndarray 0.16.1",
+ "nohash-hasher",
+ "ply-rs-bw",
+ "re_byte_size 0.36.3",
+ "re_error 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_rvl 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_types_core 0.36.3",
+ "re_video 0.36.3",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.20",
+ "tiff",
+ "uuid",
 ]
 
 [[package]]
@@ -10840,17 +11843,17 @@ dependencies = [
  "ndarray 0.16.1",
  "nohash-hasher",
  "ply-rs-bw",
- "re_arrow_util",
- "re_byte_size",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_rvl",
- "re_sorbet",
- "re_tracing",
- "re_types_core",
- "re_video",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_rvl 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
+ "re_video 0.38.1",
  "serde",
  "smallvec",
  "thiserror 2.0.20",
@@ -10869,18 +11872,18 @@ dependencies = [
  "egui_tiles",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_case",
- "re_chunk",
- "re_chunk_store",
+ "re_case 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_context_menu",
  "re_data_ui",
- "re_entity_db",
- "re_format",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_tracing",
- "re_types_core",
+ "re_entity_db 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -10915,24 +11918,24 @@ dependencies = [
  "opentelemetry",
  "parking_lot",
  "percent-encoding",
- "re_arrow_util",
- "re_async",
- "re_build_info",
- "re_build_tools",
- "re_byte_size",
- "re_chunk_store",
- "re_entity_db",
- "re_format",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_build_info 0.38.1",
+ "re_build_tools 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_format 0.38.1",
  "re_grpc_server",
- "re_log",
- "re_log_encoding",
- "re_log_types",
- "re_protos",
- "re_sorbet",
- "re_span",
- "re_tuid",
- "re_types_core",
- "re_web",
+ "re_log 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_protos 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tuid 0.38.1",
+ "re_types_core 0.38.1",
+ "re_web 0.38.1",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
@@ -10949,6 +11952,29 @@ dependencies = [
 
 [[package]]
 name = "re_sorbet"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af39e0a005fa2b9cfb668c18199953cdcdaed6ab655e355a6c7dadf935b224f1"
+dependencies = [
+ "arrow",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "re_arrow_util 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_tracing 0.36.3",
+ "re_tuid 0.36.3",
+ "re_types_core 0.36.3",
+ "semver",
+ "strum 0.26.3",
+ "thiserror 2.0.20",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "re_sorbet"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b774386606c8e495fa222df86dad32aab092202897e7611a147e91e0253afd8"
@@ -10956,18 +11982,27 @@ dependencies = [
  "arrow",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_arrow_util",
- "re_byte_size",
- "re_log",
- "re_log_types",
- "re_tracing",
- "re_tuid",
- "re_types_core",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_tracing 0.38.1",
+ "re_tuid 0.38.1",
+ "re_types_core 0.38.1",
  "semver",
  "strum 0.26.3",
  "thiserror 2.0.20",
  "tracing",
  "web-time",
+]
+
+[[package]]
+name = "re_span"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44838a7048a364a24c47843b3fd6f2a8dc97b87d16f546738ebc8a5828ff6ce9"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -10981,6 +12016,21 @@ dependencies = [
 
 [[package]]
 name = "re_string_interner"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e3c457d16541c0735db97eff48e79811089c76d36fb147b05e8354d32da248d"
+dependencies = [
+ "ahash",
+ "nohash-hasher",
+ "parking_lot",
+ "paste",
+ "re_byte_size 0.36.3",
+ "serde",
+ "static_assertions",
+]
+
+[[package]]
+name = "re_string_interner"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a03474505e0673ace136a6b3c492dc1892bc9bcb0e30a71d595b49dc3d68863d"
@@ -10989,7 +12039,7 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "paste",
- "re_byte_size",
+ "re_byte_size 0.38.1",
  "serde",
  "static_assertions",
 ]
@@ -11007,16 +12057,16 @@ dependencies = [
  "itertools 0.15.0",
  "nohash-hasher",
  "parking_lot",
- "re_arrow_util",
- "re_byte_size",
- "re_chunk_store",
- "re_entity_db",
- "re_log",
- "re_log_encoding",
- "re_log_types",
- "re_mutex",
- "re_sdk_types",
- "re_tracing",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "thiserror 2.0.20",
 ]
 
@@ -11030,18 +12080,18 @@ dependencies = [
  "egui",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_byte_size",
- "re_chunk",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_context_menu",
  "re_data_ui",
- "re_entity_db",
- "re_format",
- "re_log",
- "re_log_types",
- "re_sdk_types",
+ "re_entity_db 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
  "re_time_ruler",
- "re_tracing",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_viewer_context",
  "re_viewport_blueprint",
@@ -11058,13 +12108,23 @@ checksum = "f98ee4d680a63a70285778f031e8be7b011cacfd1bbc05c4e29614c69f2197ae"
 dependencies = [
  "egui",
  "itertools 0.15.0",
- "re_format",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_tracing",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_viewer_context",
+]
+
+[[package]]
+name = "re_tracing"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1425d638a15ec44a84883378f59531890ac3c4dfa290374b1374718089239487"
+dependencies = [
+ "parking_lot",
+ "puffin",
 ]
 
 [[package]]
@@ -11076,9 +12136,25 @@ dependencies = [
  "parking_lot",
  "puffin",
  "puffin_http",
- "re_log",
+ "re_log 0.38.1",
  "rfd",
  "wayland-sys",
+]
+
+[[package]]
+name = "re_tuid"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "510b152ad1f664a7652bce9b74cfc11b6170a3e338a2a2497c86db67f73837ae"
+dependencies = [
+ "bytemuck",
+ "document-features",
+ "getrandom 0.3.4",
+ "quiver 0.5.0",
+ "re_byte_size 0.36.3",
+ "re_log 0.36.3",
+ "serde",
+ "web-time",
 ]
 
 [[package]]
@@ -11089,12 +12165,39 @@ checksum = "f7270d79c59a381531c1116ba30712cc42ae1e028d1c69e02385df5a2dcb3947"
 dependencies = [
  "bytemuck",
  "getrandom 0.3.4",
- "quiver",
- "re_byte_size",
- "re_log",
+ "quiver 0.6.1",
+ "re_byte_size 0.38.1",
+ "re_log 0.38.1",
  "serde",
  "thiserror 2.0.20",
  "web-time",
+]
+
+[[package]]
+name = "re_types_core"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2874b066533bcb0c1f18f82d469529af45eba0e1bea8fed448ac9e215bac85c"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "bitflags 2.13.1",
+ "bytemuck",
+ "document-features",
+ "half",
+ "itertools 0.15.0",
+ "nohash-hasher",
+ "quiver 0.5.0",
+ "re_arrow_util 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_case 0.36.3",
+ "re_error 0.36.3",
+ "re_log 0.36.3",
+ "re_string_interner 0.36.3",
+ "re_tracing 0.36.3",
+ "re_tuid 0.36.3",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -11111,15 +12214,15 @@ dependencies = [
  "half",
  "itertools 0.15.0",
  "nohash-hasher",
- "quiver",
- "re_arrow_util",
- "re_byte_size",
- "re_case",
- "re_error",
- "re_log",
- "re_string_interner",
- "re_tracing",
- "re_tuid",
+ "quiver 0.6.1",
+ "re_arrow_util 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_case 0.38.1",
+ "re_error 0.38.1",
+ "re_log 0.38.1",
+ "re_string_interner 0.38.1",
+ "re_tracing 0.38.1",
+ "re_tuid 0.38.1",
  "serde",
  "thiserror 2.0.20",
 ]
@@ -11145,19 +12248,19 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "raw-window-handle",
- "re_analytics",
- "re_async",
- "re_build_tools",
- "re_entity_db",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_mutex",
- "re_quota_channel",
- "re_span",
- "re_tracing",
- "re_uri",
+ "re_analytics 0.38.1",
+ "re_async 0.38.1",
+ "re_build_tools 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
  "ron",
  "serde",
  "smallvec",
@@ -11172,20 +12275,78 @@ dependencies = [
 
 [[package]]
 name = "re_uri"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c638b2889bfc5d4c7b620068829b1b91d812fd29e22904cdc1e6cd94bca032"
+dependencies = [
+ "percent-encoding",
+ "re_byte_size 0.36.3",
+ "re_log 0.36.3",
+ "re_log_types 0.36.3",
+ "re_tuid 0.36.3",
+ "re_types_core 0.36.3",
+ "serde",
+ "static_assertions",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
+name = "re_uri"
 version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0def79760bf893019611e8626881bcfddec712986d85ea1ba6477f49dce01e89"
 dependencies = [
  "percent-encoding",
- "re_byte_size",
- "re_log",
- "re_log_types",
- "re_tuid",
- "re_types_core",
+ "re_byte_size 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_tuid 0.38.1",
+ "re_types_core 0.38.1",
  "serde",
  "static_assertions",
  "thiserror 2.0.20",
  "url",
+]
+
+[[package]]
+name = "re_video"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8098699888a4fcac7a483341295649016fc40d8002978187e15ba36051cd63db"
+dependencies = [
+ "ahash",
+ "bit-vec",
+ "bytemuck",
+ "cfg_aliases",
+ "cros-codecs",
+ "econtext",
+ "getrandom 0.3.4",
+ "h264-reader",
+ "image",
+ "itertools 0.15.0",
+ "js-sys",
+ "poll-promise",
+ "re_async 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_int 0.36.3",
+ "re_log 0.36.3",
+ "re_mp4",
+ "re_mutex 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_rvl 0.36.3",
+ "re_span 0.36.3",
+ "re_tracing 0.36.3",
+ "re_tuid 0.36.3",
+ "re_web 0.36.3",
+ "scuffle-av1",
+ "scuffle-bytes-util",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.20",
+ "wasm-bindgen",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -11207,19 +12368,19 @@ dependencies = [
  "itertools 0.15.0",
  "js-sys",
  "poll-promise",
- "re_async",
- "re_byte_size",
- "re_int",
- "re_log",
+ "re_async 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
  "re_mp4",
- "re_mutex",
- "re_quota_channel",
+ "re_mutex 0.38.1",
+ "re_quota_channel 0.38.1",
  "re_rav1d",
- "re_rvl",
- "re_span",
- "re_tracing",
- "re_tuid",
- "re_web",
+ "re_rvl 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_tuid 0.38.1",
+ "re_web 0.38.1",
  "scuffle-av1",
  "scuffle-bytes-util",
  "serde",
@@ -11244,19 +12405,19 @@ dependencies = [
  "itertools 0.15.0",
  "nohash-hasher",
  "rayon",
- "re_arrow_util",
- "re_chunk",
- "re_chunk_store",
- "re_entity_db",
- "re_format",
- "re_lenses_core",
- "re_log",
- "re_log_types",
- "re_query",
+ "re_arrow_util 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_format 0.38.1",
+ "re_lenses_core 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
  "re_renderer",
- "re_sdk_types",
- "re_tracing",
- "re_types_core",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
  "re_viewer_context",
  "re_viewport_blueprint",
@@ -11274,12 +12435,12 @@ dependencies = [
  "egui",
  "egui_plot",
  "itertools 0.15.0",
- "re_chunk_store",
- "re_format",
- "re_log_types",
+ "re_chunk_store 0.38.1",
+ "re_format 0.38.1",
+ "re_log_types 0.38.1",
  "re_plot",
- "re_sdk_types",
- "re_tracing",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11298,18 +12459,18 @@ dependencies = [
  "egui_dnd",
  "egui_table",
  "itertools 0.15.0",
- "re_byte_size",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_dataframe",
  "re_dataframe_ui",
- "re_error",
- "re_format",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_sorbet",
- "re_tracing",
- "re_types_core",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
  "re_viewer_context",
  "re_viewport_blueprint",
@@ -11326,16 +12487,16 @@ dependencies = [
  "fjadra",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_byte_size",
- "re_chunk",
+ "re_byte_size 0.38.1",
+ "re_chunk 0.38.1",
  "re_data_ui",
- "re_entity_db",
- "re_format",
- "re_log",
- "re_log_types",
- "re_query",
- "re_sdk_types",
- "re_tracing",
+ "re_entity_db 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11353,16 +12514,16 @@ dependencies = [
  "glam",
  "itertools 0.15.0",
  "macaw",
- "re_byte_size",
+ "re_byte_size 0.38.1",
  "re_data_ui",
- "re_entity_db",
- "re_log",
- "re_log_types",
- "re_query",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
  "re_renderer",
- "re_sdk_types",
- "re_span",
- "re_tracing",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11391,25 +12552,25 @@ dependencies = [
  "nohash-hasher",
  "ordered-float 5.5.0",
  "parking_lot",
- "re_byte_size",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_data_ui",
- "re_entity_db",
- "re_error",
- "re_format",
+ "re_entity_db 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
  "re_gamepad",
- "re_int",
- "re_log",
- "re_log_types",
- "re_query",
+ "re_int 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
  "re_renderer",
- "re_rvl",
- "re_sdk_types",
- "re_span",
+ "re_rvl 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
  "re_tf",
- "re_tracing",
+ "re_tracing 0.38.1",
  "re_ui",
- "re_video",
+ "re_video 0.38.1",
  "re_view",
  "re_viewer_context",
  "re_viewport_blueprint",
@@ -11427,13 +12588,13 @@ checksum = "f13f7bb26d4a4748a3e4111d9e4eed0ac5e94253d2b3a84b811bd54a85af2535"
 dependencies = [
  "egui",
  "nohash-hasher",
- "re_byte_size",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_component_ui",
- "re_log_types",
- "re_sdk_types",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
  "re_time_ruler",
- "re_tracing",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11451,14 +12612,14 @@ dependencies = [
  "egui",
  "half",
  "ndarray 0.16.1",
- "re_byte_size",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_data_ui",
- "re_log_types",
- "re_query",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
  "re_renderer",
- "re_sdk_types",
- "re_tracing",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11475,10 +12636,10 @@ checksum = "1cef47dfa26e206c9d5c55b80f32fb3c1718fcb3123ca5872a268d7862e5ba38"
 dependencies = [
  "egui",
  "egui_commonmark",
- "re_byte_size",
- "re_chunk_store",
- "re_sdk_types",
- "re_tracing",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11494,15 +12655,15 @@ dependencies = [
  "egui",
  "egui_extras",
  "itertools 0.15.0",
- "re_byte_size",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_data_ui",
- "re_entity_db",
- "re_log",
- "re_log_types",
- "re_query",
- "re_sdk_types",
- "re_tracing",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_query 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11524,17 +12685,17 @@ dependencies = [
  "macaw",
  "nohash-hasher",
  "rayon",
- "re_byte_size",
- "re_chunk_store",
+ "re_byte_size 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_component_ui",
- "re_format",
- "re_log",
- "re_log_types",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
  "re_plot",
- "re_query",
+ "re_query 0.38.1",
  "re_renderer",
- "re_sdk_types",
- "re_tracing",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11576,51 +12737,51 @@ dependencies = [
  "poll-promise",
  "rayon",
  "re_agent_ui",
- "re_analytics",
- "re_async",
- "re_auth",
+ "re_analytics 0.38.1",
+ "re_async 0.38.1",
+ "re_auth 0.38.1",
  "re_blueprint_tree",
- "re_build_info",
- "re_build_tools",
- "re_byte_size",
- "re_capabilities",
- "re_chunk",
- "re_chunk_store",
+ "re_build_info 0.38.1",
+ "re_build_tools 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_capabilities 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_chunk_store_ui",
  "re_component_fallbacks",
  "re_component_ui",
  "re_data_source",
  "re_data_ui",
  "re_dataframe_ui",
- "re_entity_db",
- "re_error",
- "re_format",
+ "re_entity_db 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
  "re_gamepad",
  "re_importer",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_memory",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_memory 0.38.1",
  "re_memory_view",
- "re_mutex",
- "re_protos",
- "re_query",
+ "re_mutex 0.38.1",
+ "re_protos 0.38.1",
+ "re_query 0.38.1",
  "re_recording_panel",
  "re_redap_browser",
- "re_redap_client",
+ "re_redap_client 0.38.1",
  "re_renderer",
- "re_sdk_types",
+ "re_sdk_types 0.38.1",
  "re_selection_panel",
  "re_server",
- "re_sorbet",
- "re_string_interner",
+ "re_sorbet 0.38.1",
+ "re_string_interner 0.38.1",
  "re_time_panel",
- "re_tracing",
- "re_types_core",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
- "re_uri",
- "re_video",
+ "re_uri 0.38.1",
+ "re_video 0.38.1",
  "re_view",
  "re_view_bar_chart",
  "re_view_dataframe",
@@ -11635,7 +12796,7 @@ dependencies = [
  "re_viewer_context",
  "re_viewport",
  "re_viewport_blueprint",
- "re_web",
+ "re_web 0.38.1",
  "rfd",
  "ron",
  "serde",
@@ -11686,38 +12847,38 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "rayon",
- "re_arrow_util",
- "re_async",
- "re_byte_size",
- "re_capabilities",
- "re_chunk",
- "re_chunk_store",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_capabilities 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
  "re_data_source",
- "re_entity_db",
- "re_error",
- "re_format",
- "re_lenses_core",
- "re_log",
- "re_log_channel",
- "re_log_encoding",
- "re_log_types",
- "re_memory",
- "re_mutex",
- "re_query",
- "re_quota_channel",
- "re_redap_client",
+ "re_entity_db 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_lenses_core 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_memory 0.38.1",
+ "re_mutex 0.38.1",
+ "re_query 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_redap_client 0.38.1",
  "re_renderer",
- "re_rvl",
- "re_sdk_types",
- "re_span",
- "re_string_interner",
+ "re_rvl 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_span 0.38.1",
+ "re_string_interner 0.38.1",
  "re_tf",
- "re_tracing",
- "re_types_core",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
- "re_uri",
- "re_video",
- "re_web",
+ "re_uri 0.38.1",
+ "re_video 0.38.1",
+ "re_web 0.38.1",
  "rfd",
  "serde",
  "slotmap",
@@ -11742,11 +12903,11 @@ dependencies = [
  "egui_tiles",
  "rayon",
  "re_context_menu",
- "re_format",
- "re_log",
- "re_log_types",
- "re_sdk_types",
- "re_tracing",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
  "re_ui",
  "re_view",
  "re_viewer_context",
@@ -11766,20 +12927,34 @@ dependencies = [
  "egui_tiles",
  "itertools 0.15.0",
  "nohash-hasher",
- "re_chunk",
- "re_chunk_store",
- "re_entity_db",
- "re_log",
- "re_log_types",
- "re_mutex",
- "re_sdk_types",
- "re_tracing",
- "re_types_core",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_log 0.38.1",
+ "re_log_types 0.38.1",
+ "re_mutex 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_tracing 0.38.1",
+ "re_types_core 0.38.1",
  "re_ui",
  "re_viewer_context",
  "slotmap",
  "smallvec",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "re_web"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c9de69967aa97af97bee02a970859aa061340207de7d61ed42958229187978b"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "js-sys",
+ "re_async 0.36.3",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -11791,8 +12966,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "js-sys",
- "re_async",
- "re_span",
+ "re_async 0.38.1",
+ "re_span 0.38.1",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -12014,6 +13189,102 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tower-service",
+]
+
+[[package]]
+name = "rerun"
+version = "0.36.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71d46e61e7376d117b7a70c10834f9b5b38ded83a0f8591bad6113fc745d5764"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "arrow",
+ "camino",
+ "crossbeam",
+ "document-features",
+ "indexmap 2.14.0",
+ "indicatif",
+ "itertools 0.15.0",
+ "parking_lot",
+ "puffin",
+ "rayon",
+ "re_arrow_util 0.36.3",
+ "re_async 0.36.3",
+ "re_build_info 0.36.3",
+ "re_build_tools 0.36.3",
+ "re_byte_size 0.36.3",
+ "re_capabilities 0.36.3",
+ "re_chunk 0.36.3",
+ "re_chunk_store 0.36.3",
+ "re_entity_db 0.36.3",
+ "re_error 0.36.3",
+ "re_format 0.36.3",
+ "re_log 0.36.3",
+ "re_log_channel 0.36.3",
+ "re_log_encoding 0.36.3",
+ "re_log_types 0.36.3",
+ "re_memory 0.36.3",
+ "re_protos 0.36.3",
+ "re_quota_channel 0.36.3",
+ "re_redap_client 0.36.3",
+ "re_sdk 0.36.3",
+ "re_sdk_types 0.36.3",
+ "re_sorbet 0.36.3",
+ "re_tracing 0.36.3",
+ "re_uri 0.36.3",
+ "re_video 0.36.3",
+ "similar-asserts",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
+name = "rerun"
+version = "0.38.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743e0dc78970bc01864c7ce65a309060e3b97470e3ef1b0d5f0860b6f3325543"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "arrow",
+ "camino",
+ "crossbeam",
+ "document-features",
+ "indexmap 2.14.0",
+ "indicatif",
+ "itertools 0.15.0",
+ "parking_lot",
+ "puffin",
+ "rayon",
+ "re_arrow_util 0.38.1",
+ "re_async 0.38.1",
+ "re_build_info 0.38.1",
+ "re_build_tools 0.38.1",
+ "re_byte_size 0.38.1",
+ "re_capabilities 0.38.1",
+ "re_chunk 0.38.1",
+ "re_chunk_store 0.38.1",
+ "re_entity_db 0.38.1",
+ "re_error 0.38.1",
+ "re_format 0.38.1",
+ "re_log 0.38.1",
+ "re_log_channel 0.38.1",
+ "re_log_encoding 0.38.1",
+ "re_log_types 0.38.1",
+ "re_memory 0.38.1",
+ "re_protos 0.38.1",
+ "re_quota_channel 0.38.1",
+ "re_redap_client 0.38.1",
+ "re_sdk 0.38.1",
+ "re_sdk_types 0.38.1",
+ "re_sorbet 0.38.1",
+ "re_span 0.38.1",
+ "re_tracing 0.38.1",
+ "re_uri 0.38.1",
+ "similar-asserts",
+ "tokio",
+ "walkdir",
 ]
 
 [[package]]
@@ -12808,6 +14079,26 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+dependencies = [
+ "bstr",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "similar-asserts"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5b441962c817e33508847a22bd82f03a30cff43642dc2fae8b050566121eb9a"
+dependencies = [
+ "console 0.15.11",
+ "similar",
+]
 
 [[package]]
 name = "simple-easing"
@@ -13947,6 +15238,12 @@ name = "unindent"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
+
+[[package]]
+name = "unit-prefix"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "unsynn"

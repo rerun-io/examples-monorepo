@@ -75,6 +75,7 @@ def test_brush_manifests_use_one_installed_tree() -> None:
     )
     assert all(p.source is None or "github.com/ArthurBrussee/brush" not in p.source for p in metadata.packages)
     brush = [p for p in metadata.packages if p.name.startswith("brush-") or p.name in ("lpips", "colmap-reader", "rrfd")]
+    assert len(brush) == 16
     for package in brush:
         assert package.source is None
         assert package.manifest_path is not None and package.manifest_path.resolve().is_relative_to(tree.resolve())

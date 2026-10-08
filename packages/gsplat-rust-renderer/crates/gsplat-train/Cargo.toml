@@ -1,0 +1,24 @@
+[package]
+name = "gsplat-train"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+brush-process.workspace = true
+brush-render.workspace = true
+brush-train.workspace = true
+brush-dataset.workspace = true
+burn.workspace = true
+glam.workspace = true
+image.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+rerun = { version = "=0.38.1", default-features = false, features = ["sdk", "glam", "image"] }
+
+[dev-dependencies]
+brush-serde.workspace = true
+re_log_encoding = "=0.38.1"
+re_chunk = "=0.38.1"
