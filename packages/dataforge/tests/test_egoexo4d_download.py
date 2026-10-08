@@ -18,7 +18,7 @@ TAKE: dict[str, object] = {
     "capture_uid": "capture-uid",
     "timesync_start_idx": 0,
     "timesync_end_idx": 10,
-    "capture": {"capture_name": "cmu_bike02", "cameras": [{"cam_id": "aria01", "is_ego": True}]},
+    "capture": {"capture_name": "cmu_bike02", "cameras": [{"cam_id": "cam01", "is_ego": False}, {"cam_id": "aria01", "is_ego": True}]},
     "frame_aligned_videos": {
         "cam01": {"0": {"relative_path": "frame_aligned_videos/cam01.mp4", "readable_stream_id": "0"}},
         "aria01": {

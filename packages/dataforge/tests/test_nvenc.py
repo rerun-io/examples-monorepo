@@ -131,6 +131,26 @@ def test_color_rescale_command(decode: Literal["cpu", "cuda"], tmp_path: Path, m
     assert "format=gray" not in filters
 
 
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
+def test_every_selects_source_frames_before_any_other_filter(decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
+    monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
+    monkeypatch.setattr(video, "NVENC_SLOT_DIR", tmp_path / "slots")
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(video.subprocess, "run", run)
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, every=(3, 1), decode=decode)
+    (command,) = commands
+    filters = command[command.index("-vf") + 1]
+    assert filters.startswith("select='eq(mod(n,3),1)'")
+    assert command[command.index("-frames:v") + 1] == "4"
+
+
 def test_nvdec_failure_falls_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
     monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
@@ -226,6 +246,29 @@ def test_cuda_gray_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: 
     assert decoded[0].shape == decoded[1].shape == (12, 160, 256)
     mse = np.mean((decoded[0] - decoded[1]) ** 2)
     assert mse == 0.0 or 10 * np.log10(255**2 / mse) >= 40.0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
+def test_every_keeps_exactly_the_selected_frames(decode: Literal["cpu", "cuda"], tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import av
+    import numpy as np
+
+    monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [str(nvenc_ffmpeg), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=256x160:rate=30,format=gray", "-frames:v", "12",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+        check=True,
+    )  # fmt: skip
+    target = tmp_path / "every.mp4"
+    assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=4, gray=True, every=(3, 1), decode=decode) == 4
+    with av.open(str(source)) as container:
+        originals = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
+    with av.open(str(target)) as container:
+        kept = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
+    nearest = [int(np.argmin(((originals - frame) ** 2).mean(axis=(1, 2)))) for frame in kept]
+    assert nearest == [1, 4, 7, 10]
 
 
 def test_session_failure_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,6 +15,7 @@ from dataforge.datasets.egoexo4d_source import (
     read_gopro_calibs,
     read_take_clock,
     read_takes,
+    sample_phase,
     stored_size,
 )
 
@@ -55,6 +56,8 @@ def take_entry(**overrides: object) -> dict[str, object]:
         "frame_aligned_videos": {
             "cam01": {"0": {"relative_path": "frame_aligned_videos/cam01.mp4", "readable_stream_id": "0", "clip_uid": "x"}},
             "aria01": {"rgb": {"relative_path": "frame_aligned_videos/aria01_214-1.mp4", "readable_stream_id": "rgb"}},
+            # The release's placeholder for the best exo view, a collage with no file (1,583 of 5,035 takes in v2).
+            "best_exo": {"0": {"clip_uid": None, "stream_id": "0", "readable_stream_id": "0", "is_collage": True, "relative_path": None}},
         },
     }
     entry.update(overrides)
@@ -69,6 +72,45 @@ def test_takes_json(tmp_path: Path) -> None:
     assert take.video("aria01", "rgb") == "takes/cmu_bike01_2/frame_aligned_videos/aria01_214-1.mp4"
     with pytest.raises(ValueError, match="slam-left"):
         take.video("aria01", "slam-left")
+    with pytest.raises(ValueError, match="best_exo/0 ships no file"):
+        take.video("best_exo", "0")
+
+
+def test_exo_cameras_follow_the_capture_not_the_name(tmp_path: Path) -> None:
+    # UPenn's layout: GoPros are gp01.., the head-mounted gp05 is ego, the phone ships no frame-aligned video.
+    gopro: dict[str, object] = {"relative_path": "frame_aligned_videos/gp01.mp4", "readable_stream_id": "0"}
+    cameras: list[dict[str, object]] = [
+        {"cam_id": cam_id, "is_ego": cam_id in ("aria01", "gp05")} for cam_id in ("aria01", "gp05", "gp06", "gp01", "mobile")
+    ]
+    videos: dict[str, object] = {
+        "aria01": {"rgb": {"relative_path": "frame_aligned_videos/aria01_214-1.mp4", "readable_stream_id": "rgb"}},
+        **{cam_id: {"0": gopro} for cam_id in ("gp01", "gp05", "gp06")},
+        "collage": {"0": {"relative_path": "ego_preview.mp4", "readable_stream_id": "0"}},
+        "best_exo": {"0": {"relative_path": None, "readable_stream_id": "0"}},
+    }
+    take: Take = read_takes_entry(tmp_path, take_entry(capture={"capture_name": "upenn_0701", "cameras": cameras}, frame_aligned_videos=videos))
+    assert take.exo_cameras == ("gp01", "gp06")
+    assert read_takes_entry(tmp_path, take_entry()).exo_cameras == ("cam01",)
+
+
+def test_sample_phase_finds_the_real_frame_of_each_three() -> None:
+    # cmu_bike02_4's eye video: black, image, black, ... (luma peaks 0 and 239-255).
+    assert sample_phase(np.array([0, 250, 0, 0, 239, 0, 0, 255], dtype=np.int64), 3, "et.mp4") == 1
+    assert sample_phase(np.array([250, 0, 0, 250, 0], dtype=np.int64), 3, "et.mp4") == 0
+    assert sample_phase(np.array([250, 240, 255], dtype=np.int64), 1, "rgb.mp4") == 0
+
+
+@pytest.mark.parametrize(
+    "peaks",
+    [
+        [0, 250, 0, 0, 0, 0, 0, 250, 0],  # a sample is missing
+        [0, 250, 250, 0, 250, 0],  # a padding frame carries an image
+        [0, 0, 0, 0, 0, 0],  # no image at all
+    ],
+)
+def test_sample_phase_refuses_an_irregular_padding(peaks: list[int]) -> None:
+    with pytest.raises(ValueError, match="et.mp4: real frames are not exactly one in every 3"):
+        sample_phase(np.array(peaks, dtype=np.int64), 3, "et.mp4")
 
 
 def test_gopro_calibs_keep_localized_cameras_in_file_order(tmp_path: Path) -> None:

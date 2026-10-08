@@ -46,11 +46,11 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
 
 | Shipped file or stream | Rate / clock | Layer | Entity or not ingested: reason |
 | --- | --- | --- | --- |
-| `takes/<t>/frame_aligned_videos/camNN.mp4` (quality-1 GoPros) | 30 Hz frame-aligned | base | `/world/rig_NN/cam_00/pinhole/video`, 1080p AV1 |
+| `takes/<t>/frame_aligned_videos/camNN.mp4` (`gpNN` at UPenn; the capture's non-ego cameras, quality-1 GoPros) | 30 Hz frame-aligned | base | `/world/rig_NN/cam_00/pinhole/video`, 1080p AV1 |
 | same, GoPros with `quality != 1` | — | — | not ingested: Ego-Exo4D could not localize them (no pose) |
 | `aria01_214-1.mp4` (RGB) | 30 Hz | base | `/world/rig_00/cam_00/pinhole/video` |
 | `aria01_1201-1.mp4`, `aria01_1201-2.mp4` (SLAM) | 30 Hz | base | `/world/rig_00/cam_01`, `cam_02` |
-| `aria01_211-1.mp4` (both eye cameras in one frame) | 30 Hz | base | `/world/rig_00/cam_03/pinhole/video`, video only: no single calibration describes the paired image |
+| `aria01_211-1.mp4` (both eye cameras in one frame) | 10 Hz images in a 30 Hz video: two frames of three are black padding | base | `/world/rig_00/cam_03/pinhole/video`, the real images only, at their own times (a take whose padding breaks the one-in-three pattern is refused); video only: no single calibration describes the paired image |
 | `trajectory/gopro_calibs.csv` | static | base | GoPro `world_T_cam` and KB4 lens |
 | `trajectory/closed_loop_trajectory.csv` | ~1 kHz device clock | base | `/world/rig_00` `world_T_device` at each frame, interpolated inside ≤ 2 ms brackets by the shared MPS reader (`aria.read_trajectory`), else NaN |
 | other `trajectory/` files, semidense points, eye gaze, audio, full VRS, annotations | — | — | not ingested: outside this port (the ego_pose GT layer was declined) |

@@ -100,7 +100,7 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
         """Every release file only this take's conversion reads: frame-aligned videos, two trajectory files, the image-less VRS."""
         release: Release = self.open_release()
         wanted: set[str] = {take.video(take.aria, stream.readable) for stream in ARIA_STREAMS}
-        wanted |= {take.video(cam_id, "0") for cam_id in take.frame_aligned_videos if cam_id.startswith("cam")}
+        wanted |= {take.video(cam_id, "0") for cam_id in take.exo_cameras}
         return [
             *(path for path in release.manifest("takes")[take.take_uid].paths if path.relative_path in wanted),
             *(path for path in release.manifest("take_trajectory")[take.take_uid].paths if Path(path.relative_path).name in TRAJECTORY_FILES),

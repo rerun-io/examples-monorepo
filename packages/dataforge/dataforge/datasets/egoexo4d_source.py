@@ -1,4 +1,4 @@
-"""Ego-Exo4D raw tree readers: take metadata, GoPro calibration, the take clock and the Aria trajectory.
+"""Ego-Exo4D raw tree readers: take metadata, GoPro calibration, the take clock, the Aria trajectory and the eye video's padding.
 
 Layout as the official ``egoexo`` CLI writes it under the raw root: ``takes.json``,
 ``takes/<take>/frame_aligned_videos/*.mp4``, ``takes/<take>/trajectory/{gopro_calibs,closed_loop_trajectory}.csv``,
@@ -8,9 +8,11 @@ public docs (docs.ego-exo4d-data.org) and projectaria-tools' MPS readers.
 
 import csv
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import NamedTuple
 
+import av
 import numpy as np
 import pyarrow as pa
 from jaxtyping import Bool, Float64, Int64
@@ -26,6 +28,8 @@ FPS: int = 30
 """Rate of every frame-aligned video and of the HM fits."""
 EXO_SIZE: tuple[int, int] = (1920, 1080)
 """Stored size of a landscape GoPro (native 3840x2160): the size the HM fits were made at."""
+PADDING_PEAK: int = 16
+"""Brightest luma of a padding frame (video black); a real eye frame carries IR glints near 255."""
 KB4: str = "kb4"
 """``camera_model`` of the GoPros: OpenCV fisheye, gopro_calibs' ``KANNALABRANDTK3`` (four radial terms)."""
 
@@ -35,8 +39,8 @@ KB4: str = "kb4"
 class AlignedVideo:
     """One frame-aligned stream of a camera (unknown keys allowed: the release's schema, not ours)."""
 
-    relative_path: str
-    """Path under the take's ``root_dir``."""
+    relative_path: str | None
+    """Path under the take's ``root_dir``; None for the ``best_exo`` collage placeholder, which ships no file."""
 
 
 @serde
@@ -45,7 +49,7 @@ class CaptureCamera:
     """One device of the capture."""
 
     cam_id: str
-    """``cam01`` … for GoPros, ``aria01`` … for the headset."""
+    """``cam01`` … (``gp01`` … at UPenn) for GoPros, ``aria01`` … for the headset."""
     is_ego: bool
     """True for the wearer's Aria."""
 
@@ -97,12 +101,43 @@ class Take:
             raise ValueError(f"{self.take_name}: expected one ego Aria, found {ids}")
         return ids[0]
 
+    @property
+    def exo_cameras(self) -> tuple[str, ...]:
+        """The static GoPros with a frame-aligned video: the capture's non-ego cameras, whatever the lab named them.
+
+        Most labs say ``cam01``…; UPenn says ``gp01``… and marks its head-mounted ``gp05`` ego. These are the cameras
+        ``gopro_calibs.csv`` can localize.
+        """
+        return tuple(sorted(camera.cam_id for camera in self.capture.cameras if not camera.is_ego and camera.cam_id in self.frame_aligned_videos))
+
     def video(self, cam_id: str, stream: str) -> str:
         """Raw-root-relative path of one frame-aligned stream."""
         try:
-            return f"{self.root_dir}/{self.frame_aligned_videos[cam_id][stream].relative_path}"
+            relative_path: str | None = self.frame_aligned_videos[cam_id][stream].relative_path
         except KeyError:
             raise ValueError(f"{self.take_name}: takes.json lists no frame-aligned {cam_id}/{stream} video") from None
+        if relative_path is None:
+            raise ValueError(f"{self.take_name}: frame-aligned {cam_id}/{stream} ships no file")
+        return f"{self.root_dir}/{relative_path}"
+
+
+def frame_peaks(path: Path, frames: int) -> Int64[ndarray, "n"]:
+    """Brightest luma of each of a video's first ``frames`` frames."""
+    with av.open(str(path)) as container:
+        return np.array([frame.to_ndarray(format="gray").max() for frame in islice(container.decode(video=0), frames)], dtype=np.int64)
+
+
+def sample_phase(peaks: Int64[ndarray, "n"], step: int, where: str) -> int:
+    """Which frame of every ``step`` holds a stream's real sample; every other frame must be padding.
+
+    The 10 Hz eye cameras ship as a 30 Hz frame-aligned video: one frame of three is the image, the two between are video
+    black. A missing sample or an image where padding belongs refuses the take rather than guessing.
+    """
+    real: Bool[ndarray, "n"] = peaks > PADDING_PEAK
+    for phase in range(step):
+        if np.array_equal(real, np.arange(len(peaks)) % step == phase):
+            return phase
+    raise ValueError(f"{where}: real frames are not exactly one in every {step} ({int(real.sum())} of {len(peaks)} carry an image)")
 
 
 def read_takes(path: Path) -> dict[str, Take]:

@@ -299,11 +299,14 @@ def transcode_mp4(
     gray: bool,
     size: tuple[int, int] | None = None,
     crop: tuple[int, int, int, int] | None = None,
+    every: tuple[int, int] | None = None,
     decode: Literal["cpu", "cuda"] = "cpu",
 ) -> int:
     """Decode a file and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
+    every (step, phase) keeps only the source frames n with n % step == phase, before any
+    other filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
     which for a gray source carry neutral chroma. size (width, height) rescales, on the GPU
@@ -315,13 +318,15 @@ def transcode_mp4(
         raise ValueError("frames must be positive")
     if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
+    select: list[str] = [] if every is None else [f"select='eq(mod(n,{every[0]}),{every[1]})'"]
     cpu_filters: list[str] = [
+        *select,
         *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),
         *([] if size is None else [f"scale={size[0]}:{size[1]}"]),
         *(["format=gray"] if gray else []),
         EVEN_DIMENSION_AND_PIXEL_FORMAT,
     ]
-    cuda_filters: list[str] = [] if size is None else [f"scale_cuda={size[0]}:{size[1]}"]
+    cuda_filters: list[str] = [*select, *([] if size is None else [f"scale_cuda={size[0]}:{size[1]}"])]
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     def run(*, cuda: bool) -> subprocess.CompletedProcess[str]:

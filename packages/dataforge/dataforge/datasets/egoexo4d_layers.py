@@ -28,7 +28,7 @@ from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge import aria, hands, schema, writing
 from dataforge.datasets.egoexo4d_body import HmFit, coco133_from_openpose67
-from dataforge.datasets.egoexo4d_source import FPS, KB4, GoproCalib, Take, stored_size
+from dataforge.datasets.egoexo4d_source import FPS, KB4, GoproCalib, Take, frame_peaks, sample_phase, stored_size
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_dense_pose_track, log_rig_node, log_video_stream
 from dataforge.records import decode
@@ -58,13 +58,15 @@ class AriaStream(NamedTuple):
     """Factory calibration label; None for the eye cameras, which share one frame and so have no single calibration."""
     gray: bool
     """Monochrome sensor."""
+    step: int
+    """Frame-aligned frames per real sample: 3 for the 10 Hz eye cameras, whose 30 Hz video pads each image with black."""
 
 
 ARIA_STREAMS: tuple[AriaStream, ...] = (
-    AriaStream("rgb", aria.RGB_STREAM_ID, aria.STREAM_LABELS[aria.RGB_STREAM_ID], False),
-    AriaStream("slam-left", aria.SLAM_LEFT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_LEFT_STREAM_ID], True),
-    AriaStream("slam-right", aria.SLAM_RIGHT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_RIGHT_STREAM_ID], True),
-    AriaStream("et", "211-1", None, True),
+    AriaStream("rgb", aria.RGB_STREAM_ID, aria.STREAM_LABELS[aria.RGB_STREAM_ID], False, 1),
+    AriaStream("slam-left", aria.SLAM_LEFT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_LEFT_STREAM_ID], True, 1),
+    AriaStream("slam-right", aria.SLAM_RIGHT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_RIGHT_STREAM_ID], True, 1),
+    AriaStream("et", "211-1", None, True, 3),
 )
 """The Aria cameras in ``cam_MM`` order."""
 
@@ -144,6 +146,8 @@ class Slot(NamedTuple):
     gray: bool
     size: tuple[int, int] | None
     """Stored size when rescaled (the GoPros)."""
+    step: int
+    """Frame-aligned frames per real sample (``AriaStream.step``)."""
     log_node: Callable[[int, int], str]
     """Logs the camera node given the source width and height; returns its ``source_resolution`` entry."""
 
@@ -209,32 +213,37 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         )
 
     slots: list[Slot] = [
-        Slot(EGO_RIG, cam, inputs.root / take.video(take.aria, stream.readable), stream.gray, None, partial(log_aria, cam, stream))
+        Slot(EGO_RIG, cam, inputs.root / take.video(take.aria, stream.readable), stream.gray, None, stream.step, partial(log_aria, cam, stream))
         for cam, stream in enumerate(ARIA_STREAMS)
     ]
     for rig, calib in enumerate(inputs.gopros, start=1):
         size: tuple[int, int] = stored_size(calib)
-        slots.append(Slot(rig, 0, inputs.root / take.video(calib.cam_uid, "0"), False, size, partial(log_gopro, rig, calib, size)))
+        slots.append(Slot(rig, 0, inputs.root / take.video(calib.cam_uid, "0"), False, size, 1, partial(log_gopro, rig, calib, size)))
     log_rig_node(recording, EGO_RIG, reference=None, num_cameras=len(ARIA_STREAMS), name=take.aria, kind="ego")
     for rig, calib in enumerate(inputs.gopros, start=1):
         log_rig_node(recording, rig, reference=None, num_cameras=1, name=calib.cam_uid, kind="exo")
 
+    samples: list[Int64[ndarray, "m"]] = []
     for slot in slots:  # -frames:v would silently cut a longer source, which is then deleted
         count: int = mp4_frame_count(slot.source)
         if count != inputs.take_frames:
             raise ValueError(f"{slot.source}: {count} frames, the take's timesync rows give {inputs.take_frames}")
+        phase: int = 0 if slot.step == 1 else sample_phase(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
+        samples.append(frames[phase :: slot.step])
     resolutions: list[str] = []
     with work_dir("egoexo4d-") as work:
         clips: list[Path] = [work / f"rig_{slot.rig:02d}_cam_{slot.cam:02d}.mp4" for slot in slots]
 
-        def encode(slot: Slot, clip: Path) -> None:
-            transcode_mp4(slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(times), gray=slot.gray, size=slot.size, decode="cuda")
+        def encode(slot: Slot, kept: Int64[ndarray, "m"], clip: Path) -> None:
+            every: tuple[int, int] | None = None if slot.step == 1 else (slot.step, int(kept[0]))
+            transcode_mp4(slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, every=every, decode="cuda")
 
-        with parallel_clips([(clip, partial(encode, slot, clip)) for slot, clip in zip(slots, clips, strict=True)], timer, workers=6) as encoded:
-            for slot, clip in zip(slots, encoded, strict=True):
+        jobs: list[tuple[Path, Callable[[], None]]] = [(clip, partial(encode, slot, kept, clip)) for slot, kept, clip in zip(slots, samples, clips, strict=True)]
+        with parallel_clips(jobs, timer, workers=6) as encoded:
+            for slot, kept, clip in zip(slots, samples, encoded, strict=True):
                 resolutions.append(slot.log_node(*video_size(slot.source)))
-                with timer.stage("write:video"):
-                    log_video_stream(recording, clip, schema.video_path(slot.rig, slot.cam), times_ns=times, frame_indices=frames)
+                with timer.stage("write:video"):  # a padded stream keeps its real samples' times on the shared frame timeline
+                    log_video_stream(recording, clip, schema.video_path(slot.rig, slot.cam), times_ns=times[kept], frame_indices=kept)
     log_dense_pose_track(recording, schema.rig_path(EGO_RIG), times_ns=times, frame_indices=frames, transforms=inputs.frames.world_T_device)
     writing.send_capture_properties(
         recording,
