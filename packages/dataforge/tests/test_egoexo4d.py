@@ -31,10 +31,10 @@ def write_video(ffmpeg: Path, path: Path, size: str, *, gray: bool, padded: bool
     """A 12-frame H.264 clip with B-frames, as the release encodes its frame-aligned videos.
 
     padded blacks out two frames of every three, the image in the middle one, as the release pads the 10 Hz eye cameras,
-    and every frame before 4 and after 9, as when the eye camera starts late and stops early: images in frames 4 and 7.
+    plus frame 4, a dropped sample: images in frames 1, 7 and 10.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    padding: str = ",format=yuv420p,lutyuv=y=0:u=128:v=128:enable='not(eq(mod(n,3),1))+lt(n,4)+gt(n,9)'" if padded else ""
+    padding: str = ",format=yuv420p,lutyuv=y=0:u=128:v=128:enable='not(eq(mod(n,3),1))+eq(n,4)'" if padded else ""
     source: str = f"testsrc2=size={size}:rate=30" + padding + (",format=gray" if gray else "")
     subprocess.run(
         [
@@ -162,7 +162,7 @@ def test_convert_writes_four_layers_and_prunes_the_take(slam_size: str, tmp_path
     expected = [schema.video_path(rig, 0) for rig in (1, 2)] + [schema.video_path(EGO_RIG, cam) for cam in range(4)]
     assert sorted(samples) == sorted(expected)  # the unlocalized cam03 is left out
     eye: str = schema.video_path(EGO_RIG, 3)
-    assert samples.pop(eye) == 2  # the eye cameras' real 10 Hz images (frames 4 and 7), not the black padding
+    assert samples.pop(eye) == 3  # the eye cameras' real 10 Hz images (frames 1, 7, 10), not the padding or the dropped sample
     assert set(samples.values()) == {FRAMES}
     projections = {str(chunk.entity_path) for chunk in read_chunks(targets["projections"]) if not chunk.is_static}
     assert projections == {schema.coco133_uv_projected_path(rig, cam) for rig, cam in ((1, 0), (2, 0), (EGO_RIG, 0), (EGO_RIG, 1), (EGO_RIG, 2))}

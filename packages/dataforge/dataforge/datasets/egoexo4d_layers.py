@@ -239,24 +239,25 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         log_rig_node(recording, rig, reference=None, num_cameras=1, name=calib.cam_uid, kind="exo")
 
     samples: list[Int64[ndarray, "m"]] = []
+    keeps: list[list[range] | None] = []  # the transcode's frame selection for a padded stream
     for slot in slots:  # -frames:v would silently cut a longer source, which is then deleted
         count: int = mp4_frame_count(slot.source)
         if count != inputs.take_frames:
             raise ValueError(f"{slot.source}: {count} frames, the take's timesync rows give {inputs.take_frames}")
-        span: range = range(len(times)) if slot.step == 1 else sample_frames(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
-        samples.append(frames[span.start : span.stop : span.step])
+        runs: list[range] = [range(len(times))] if slot.step == 1 else sample_frames(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
+        samples.append(np.concatenate([frames[run.start : run.stop : run.step] for run in runs]))
+        keeps.append(None if slot.step == 1 else runs)
     resolutions: list[str] = []
     with work_dir("egoexo4d-") as work:
         clips: list[Path] = [work / f"rig_{slot.rig:02d}_cam_{slot.cam:02d}.mp4" for slot in slots]
 
-        def encode(slot: Slot, kept: Int64[ndarray, "m"], clip: Path) -> None:
-            every: tuple[int, int] | None = None if slot.step == 1 else (slot.step, int(kept[0]))
+        def encode(slot: Slot, kept: Int64[ndarray, "m"], keep: list[range] | None, clip: Path) -> None:
             transcode_mp4(
-                slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, every=every, decode="cuda"
+                slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, keep=keep, decode="cuda"
             )
 
         jobs: list[tuple[Path, Callable[[], None]]] = [
-            (clip, partial(encode, slot, kept, clip)) for slot, kept, clip in zip(slots, samples, clips, strict=True)
+            (clip, partial(encode, slot, kept, keep, clip)) for slot, kept, keep, clip in zip(slots, samples, keeps, clips, strict=True)
         ]
         with parallel_clips(jobs, timer, workers=6) as encoded:
             for slot, kept, clip in zip(slots, samples, encoded, strict=True):

@@ -132,7 +132,7 @@ def test_color_rescale_command(decode: Literal["cpu", "cuda"], tmp_path: Path, m
 
 
 @pytest.mark.parametrize("decode", ["cpu", "cuda"])
-def test_every_selects_source_frames_before_any_other_filter(decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_keep_selects_source_frames_before_any_other_filter(decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
     monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
     monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
@@ -144,10 +144,11 @@ def test_every_selects_source_frames_before_any_other_filter(decode: Literal["cp
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(video.subprocess, "run", run)
-    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, every=(3, 4), decode=decode)
+    keep = [range(4, 8, 3), range(13, 17, 3)]
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, keep=keep, decode=decode)
     (command,) = commands
     filters = command[command.index("-vf") + 1]
-    assert filters.startswith("select='gte(n,4)*not(mod(n-4,3))'")
+    assert filters.startswith("select='between(n,4,7)*not(mod(n-4,3))+between(n,13,16)*not(mod(n-13,3))'")
     assert command[command.index("-frames:v") + 1] == "4"
 
 
@@ -250,7 +251,7 @@ def test_cuda_gray_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("decode", ["cpu", "cuda"])
-def test_every_keeps_exactly_the_selected_frames(decode: Literal["cpu", "cuda"], tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_keep_keeps_exactly_the_selected_frames(decode: Literal["cpu", "cuda"], tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import av
     import numpy as np
 
@@ -261,14 +262,15 @@ def test_every_keeps_exactly_the_selected_frames(decode: Literal["cpu", "cuda"],
          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
         check=True,
     )  # fmt: skip
-    target = tmp_path / "every.mp4"
-    assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=3, gray=True, every=(3, 4), decode=decode) == 3
+    target = tmp_path / "keep.mp4"
+    keep = [range(1, 5, 3), range(10, 11, 3)]  # frames 1, 4 and 10: the sample at 7 was dropped
+    assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=3, gray=True, keep=keep, decode=decode) == 3
     with av.open(str(source)) as container:
         originals = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
     with av.open(str(target)) as container:
         kept = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
     nearest = [int(np.argmin(((originals - frame) ** 2).mean(axis=(1, 2)))) for frame in kept]
-    assert nearest == [4, 7, 10]  # from the first kept frame, every third, as many as asked
+    assert nearest == [1, 4, 10]
 
 
 def test_session_failure_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

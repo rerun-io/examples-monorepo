@@ -299,14 +299,14 @@ def transcode_mp4(
     gray: bool,
     size: tuple[int, int] | None = None,
     crop: tuple[int, int, int, int] | None = None,
-    every: tuple[int, int] | None = None,
+    keep: list[range] | None = None,
     decode: Literal["cpu", "cuda"] = "cpu",
 ) -> int:
     """Decode a file and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
-    every (step, first) keeps only the source frames first, first + step, ..., before any
-    other filter, for a stream whose real samples are padded to a higher frame rate.
+    keep, runs of evenly spaced source frames, keeps only those frames, before any other
+    filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
     which for a gray source carry neutral chroma. size (width, height) rescales, on the GPU
@@ -318,7 +318,8 @@ def transcode_mp4(
         raise ValueError("frames must be positive")
     if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
-    select: list[str] = [] if every is None else [f"select='gte(n,{every[1]})*not(mod(n-{every[1]},{every[0]}))'"]
+    runs: str = "+".join(f"between(n,{run.start},{run[-1]})*not(mod(n-{run.start},{run.step}))" for run in keep or [])
+    select: list[str] = [f"select='{runs}'"] if keep is not None else []
     cpu_filters: list[str] = [
         *select,
         *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),

@@ -28,8 +28,9 @@ FPS: int = 30
 """Rate of every frame-aligned video and of the HM fits."""
 EXO_SIZE: tuple[int, int] = (1920, 1080)
 """Stored size of a landscape GoPro (native 3840x2160): the size the HM fits were made at."""
-PADDING_PEAK: int = 16
-"""Brightest luma of a padding frame (video black); a real eye frame carries IR glints near 255."""
+PADDING_PEAK: int = 0
+"""Brightest luma of a padding frame: the release pads with exact black, while a real eye frame, even a dark one, has some light
+(upenn_0629_Dance_2_7 has eye frames peaking at 8)."""
 KB4: str = "kb4"
 """``camera_model`` of the GoPros: OpenCV fisheye, gopro_calibs' ``KANNALABRANDTK3`` (four radial terms)."""
 
@@ -127,24 +128,23 @@ def frame_peaks(path: Path, frames: int) -> Int64[ndarray, "n"]:
         return np.array([frame.to_ndarray(format="gray").max() for frame in islice(container.decode(video=0), frames)], dtype=np.int64)
 
 
-def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> range:
-    """The frames that hold a stream's real samples: every ``step``-th frame from its first image to its last.
+def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> list[range]:
+    """The frames that hold a stream's real samples, as runs of every ``step``-th frame split where samples are missing.
 
     The 10 Hz eye cameras ship as a 30 Hz frame-aligned video: one frame of three is the image, the two between are video
-    black. Black frames before the first image and after the last mean the eye camera started late or stopped early (no
-    eye data then); a missing sample or an image where padding belongs between them refuses the take rather than guessing.
+    black. The camera may start late, stop early or drop samples (seen: 1 to 8 in a row), which leaves black where an image
+    belongs, but every image stays on one phase. An image off that phase refuses the take rather than guessing.
     """
-    real: Bool[ndarray, "n"] = peaks > PADDING_PEAK
-    if not real.any():
+    real: Int64[ndarray, "m"] = np.flatnonzero(peaks > PADDING_PEAK)
+    if not len(real):
         raise ValueError(f"{where}: no frame carries an image")
-    first: int = int(np.argmax(real))
-    last: int = len(real) - 1 - int(np.argmax(real[::-1]))
-    kept: range = range(first, last + 1, step)
-    expected: Bool[ndarray, "n"] = np.zeros(len(real), dtype=bool)
-    expected[first : last + 1 : step] = True
-    if not np.array_equal(real, expected):
-        raise ValueError(f"{where}: real frames are not exactly one in every {step} between the first image (frame {first}) and the last ({last})")
-    return kept
+    off: Int64[ndarray, "k"] = real[(real - real[0]) % step != 0]
+    if len(off):
+        raise ValueError(f"{where}: the image in frame {off[0]} is off the one-in-{step} phase of frame {real[0]}")
+    breaks: Int64[ndarray, "b"] = np.flatnonzero(np.diff(real) != step)  # a run ends before each dropped sample
+    starts: list[int] = [int(real[0]), *(int(real[index + 1]) for index in breaks)]
+    ends: list[int] = [*(int(real[index]) for index in breaks), int(real[-1])]
+    return [range(start, end + 1, step) for start, end in zip(starts, ends, strict=True)]
 
 
 def read_takes(path: Path) -> dict[str, Take]:

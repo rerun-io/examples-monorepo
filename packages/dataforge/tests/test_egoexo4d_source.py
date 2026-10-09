@@ -95,27 +95,31 @@ def test_exo_cameras_follow_the_capture_not_the_name(tmp_path: Path) -> None:
 
 def test_sample_frames_finds_the_real_frame_of_each_three() -> None:
     # cmu_bike02_4's eye video: black, image, black, ... (luma peaks 0 and 239-255).
-    assert sample_frames(np.array([0, 250, 0, 0, 239, 0, 0, 255], dtype=np.int64), 3, "et.mp4") == range(1, 8, 3)
-    assert sample_frames(np.array([250, 0, 0, 250, 0], dtype=np.int64), 3, "et.mp4") == range(0, 4, 3)
-    assert sample_frames(np.array([250, 240, 255], dtype=np.int64), 1, "rgb.mp4") == range(0, 3, 1)
+    assert sample_frames(np.array([0, 250, 0, 0, 239, 0, 0, 255], dtype=np.int64), 3, "et.mp4") == [range(1, 8, 3)]
+    assert sample_frames(np.array([250, 0, 0, 250, 0], dtype=np.int64), 3, "et.mp4") == [range(0, 4, 3)]
+    assert sample_frames(np.array([250, 240, 255], dtype=np.int64), 1, "rgb.mp4") == [range(0, 3, 1)]
 
 
 def test_sample_frames_allows_a_late_start_and_an_early_stop() -> None:
     # uniandes_dance_016_46: eye images in frames 2..1649 of 1835, then the eye camera stops; black outside means no eye data.
     peaks = np.array([0, 0, 0, 0, 250, 0, 0, 250, 0, 0, 0, 0, 0], dtype=np.int64)
-    assert sample_frames(peaks, 3, "et.mp4") == range(4, 8, 3)
+    assert sample_frames(peaks, 3, "et.mp4") == [range(4, 8, 3)]
 
 
-@pytest.mark.parametrize(
-    "peaks",
-    [
-        [0, 250, 0, 0, 0, 0, 0, 250, 0],  # a sample is missing between two images
-        [0, 250, 250, 0, 250, 0],  # a padding frame carries an image
-    ],
-)
-def test_sample_frames_refuses_an_irregular_padding(peaks: list[int]) -> None:
-    with pytest.raises(ValueError, match="et.mp4: real frames are not exactly one in every 3"):
-        sample_frames(np.array(peaks, dtype=np.int64), 3, "et.mp4")
+def test_sample_frames_splits_runs_at_dropped_samples() -> None:
+    # iiith_cooking_97_2 drops one eye sample at 56.3 s (a gap of 6 frames); upenn_0629_Dance_2_7 drops up to 8 in a row.
+    peaks = np.array([0, 250, 0, 0, 250, 0, 0, 0, 0, 0, 250, 0, 0, 250], dtype=np.int64)
+    assert sample_frames(peaks, 3, "et.mp4") == [range(1, 5, 3), range(10, 14, 3)]
+
+
+def test_a_dark_eye_frame_is_an_image_not_padding() -> None:
+    # upenn_0629_Dance_2_7 at 4-6 s: on-phase eye frames peak at 8-16 luma while the padding stays exactly 0.
+    assert sample_frames(np.array([250, 0, 0, 8, 0, 0, 13, 0, 0, 250], dtype=np.int64), 3, "et.mp4") == [range(0, 10, 3)]
+
+
+def test_sample_frames_refuses_an_image_off_the_phase() -> None:
+    with pytest.raises(ValueError, match="et.mp4: the image in frame 2 is off the one-in-3 phase of frame 1"):
+        sample_frames(np.array([0, 250, 250, 0, 250, 0], dtype=np.int64), 3, "et.mp4")
 
 
 def test_sample_frames_refuses_a_video_without_an_image() -> None:
