@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from huggingface_hub import HfApi
-from huggingface_hub.hf_api import RepoFile
 from serde import serde
 
 from dataforge import transports
@@ -31,11 +29,10 @@ Part: TypeAlias = Literal["metadata", "takes", "take_trajectory", "captures", "t
 
 def hm_fits() -> dict[str, HfFileInfo]:
     """Every take the pinned HM release ships a fit for, keyed by take name; one recursive listing call."""
-    entries = HfApi().list_repo_tree(HM_REPO, repo_type="dataset", revision=HM_REVISION, recursive=True)
     return {
-        entry.path.split("/")[0]: transports.hf_file_info(entry)
-        for entry in entries
-        if isinstance(entry, RepoFile) and entry.path.endswith(f"/{HM_FILE}") and entry.path.count("/") == 1
+        file.path.split("/")[0]: file
+        for file in transports.hf_list_files(HM_REPO, HM_REVISION)
+        if file.path.endswith(f"/{HM_FILE}") and file.path.count("/") == 1
     }
 
 

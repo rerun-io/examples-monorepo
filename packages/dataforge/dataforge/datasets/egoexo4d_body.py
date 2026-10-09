@@ -43,8 +43,7 @@ BODY_MESH_STRIDE: int = 3
 one logged mesh, so each posed frame costs 82 KB. Parameters and keypoints (body_pose) stay at full rate."""
 MESH_BATCH_ROWS: int = 64
 """Mesh rows per chunk: one chunk is ~5 MB and carries its own copy of the 165 KB triangle list."""
-BODY_ALBEDO: tuple[int, int, int, int] = (160, 190, 200, 110)
-"""Body mesh RGBA, as EPFL's SMPL body."""
+SMPLH_VERTICES: int = 6890
 
 OPENPOSE67_SOURCE: Int64[ndarray, "k"] = np.array(
     [0, 16, 15, 18, 17, 5, 2, 6, 3, 7, 4, 12, 9, 13, 10, 14, 11, 19, 20, 21, 22, 23, 24, *range(25, 67)]
@@ -112,6 +111,13 @@ def coco133_from_openpose67(joints: Float32[ndarray, "t 67 3"]) -> Float32[ndarr
     coco: Float32[ndarray, "t 133 3"] = np.full((len(joints), 133, 3), np.nan, dtype=np.float32)
     coco[:, OPENPOSE67_DESTINATION] = joints[:, OPENPOSE67_SOURCE]
     return coco
+
+
+def fit_keypoints(fit: HmFit, frames: Int64[ndarray, "t"]) -> Float32[ndarray, "t 133 3"]:
+    """Rows ``frames`` of the fit's keypoints as COCO-133; invalid frames are NaN."""
+    keypoints: Float32[ndarray, "t 133 3"] = coco133_from_openpose67(fit.joints3d[frames])
+    keypoints[~fit.valid[frames]] = np.nan
+    return keypoints
 
 
 class SmplhModel:
@@ -185,9 +191,7 @@ def write_body_pose(recording: rr.RecordingStream, fit: HmFit, times: Int64[ndar
     rr.send_columns(path, indexes=indexes, columns=rr.AnyValues.columns(**columns), recording=recording)
     valid: Bool[ndarray, "t"] = fit.valid[frames]
     rr.send_columns(f"{path}/valid", indexes=indexes, columns=rr.Scalars.columns(scalars=valid.astype(np.float64)), recording=recording)
-    keypoints: Float32[ndarray, "t 133 3"] = coco133_from_openpose67(fit.joints3d[frames])
-    keypoints[~valid] = np.nan
-    hands.log_keypoints3d(recording, times_ns=times, frame_indices=frames, positions=keypoints, confidence=None)
+    hands.log_keypoints3d(recording, times_ns=times, frame_indices=frames, positions=fit_keypoints(fit, frames), confidence=None)
 
 
 def write_body_mesh(recording: rr.RecordingStream, model: SmplhModel, fit: HmFit, times: Int64[ndarray, "t"], frames: Int64[ndarray, "t"]) -> None:
@@ -196,19 +200,19 @@ def write_body_mesh(recording: rr.RecordingStream, model: SmplhModel, fit: HmFit
     The change rows keep a stale mesh from showing through an invalid stretch that starts or ends between two stride frames.
     """
     path: str = schema.body_path("mesh")
-    meshes.log_mesh_static(recording, path, albedo_factor=BODY_ALBEDO)
+    meshes.log_mesh_static(recording, path, albedo_factor=hands.BODY_ALBEDO)
     valid: Bool[ndarray, "t"] = fit.valid[frames]
     changed: Bool[ndarray, "t"] = np.concatenate([[False], valid[1:] != valid[:-1]])
     kept: Int64[ndarray, "k"] = np.flatnonzero((frames % BODY_MESH_STRIDE == 0) | changed)
     for start in range(0, len(kept), MESH_BATCH_ROWS):
         rows: Int64[ndarray, "b"] = kept[start : start + MESH_BATCH_ROWS]
-        trusted: Bool[ndarray, "b"] = fit.valid[frames[rows]]
+        trusted: Bool[ndarray, "b"] = valid[rows]
         meshes.log_mesh_batch(
             recording,
             path,
             times_ns=times[rows],
             frame_indices=frames[rows],
-            vertices=model.forward(fit, frames[rows][trusted]).vertices if trusted.any() else np.empty((0, 6890, 3), dtype=np.float32),
+            vertices=model.forward(fit, frames[rows][trusted]).vertices if trusted.any() else np.empty((0, SMPLH_VERTICES, 3), dtype=np.float32),
             trusted=trusted.tolist(),
             topology=model.faces,
         )

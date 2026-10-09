@@ -82,7 +82,9 @@ class Take:
     timesync_start_idx: int
     """Row of ``timesync.csv`` holding the take's first frame."""
     timesync_end_idx: int
-    """Row one past the take's last frame (HM's convention; see ``take_rows``)."""
+    """Row one past the take's last frame. The public sources disagree on the end bound (inclusive in the metadata docs,
+    exclusive in HM and the official pose code); this follows HM, whose fits index the frames. ``convert`` checks the count
+    against every video."""
     capture: TakeCapture
     """The capture and its devices."""
     frame_aligned_videos: dict[str, dict[str, AlignedVideo]]
@@ -125,7 +127,9 @@ class Take:
 def frame_peaks(path: Path, frames: int) -> Int64[ndarray, "n"]:
     """Brightest luma of each of a video's first ``frames`` frames."""
     with av.open(str(path)) as container:
-        return np.array([frame.to_ndarray(format="gray").max() for frame in islice(container.decode(video=0), frames)], dtype=np.int64)
+        stream: av.video.stream.VideoStream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        return np.array([frame.to_ndarray(format="gray").max() for frame in islice(container.decode(stream), frames)], dtype=np.int64)
 
 
 def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> list[range]:
@@ -241,16 +245,6 @@ def stored_size(calib: GoproCalib) -> tuple[int, int]:
     return EXO_SIZE if calib.image_width >= calib.image_height else (EXO_SIZE[1], EXO_SIZE[0])
 
 
-def take_rows(take: Take) -> range:
-    """timesync.csv data rows of the take's frames, frame ``i`` at row ``start + i``.
-
-    The public sources disagree on the end bound (inclusive in the metadata docs, exclusive in HM and the
-    official pose code); this follows HM, whose fits index the frames. ``convert`` checks the count
-    against every video.
-    """
-    return range(take.timesync_start_idx, take.timesync_end_idx)
-
-
 class TakeClock(NamedTuple):
     """The take's frame times and how many of them repeat an earlier stamp."""
 
@@ -268,7 +262,7 @@ def read_take_clock(path: Path, take: Take) -> TakeClock:
     """
     column: str = f"{take.aria}_{aria.RGB_STREAM_ID}_capture_timestamp_ns"
     table: pa.Table = read_csv_columns(path, {column: pa.float64()})  # float: a missing stamp is an empty cell
-    rows: range = take_rows(take)
+    rows: range = range(take.timesync_start_idx, take.timesync_end_idx)  # frame i at row start + i
     if rows.stop > table.num_rows:
         raise ValueError(f"{path}: take {take.take_name} needs rows {rows.start}..{rows.stop - 1}, the file has {table.num_rows}")
     stamps: Float64[ndarray, "n"] = table.column(column).to_numpy(zero_copy_only=False)[rows.start : rows.stop]

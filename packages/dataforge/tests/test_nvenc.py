@@ -107,9 +107,9 @@ def test_gray_transcode_command(
     assert commands == [expected]
 
 
-@pytest.mark.parametrize("decode", ["cpu", "cuda"])
-def test_color_rescale_command(decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A color source keeps its chroma; the rescale runs on the GPU under CUDA decode and on the CPU otherwise."""
+@pytest.fixture
+def ffmpeg_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Every command transcode_mp4 runs, captured instead of run (4-frame source)."""
     monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
     monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
     monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
@@ -121,8 +121,14 @@ def test_color_rescale_command(decode: Literal["cpu", "cuda"], tmp_path: Path, m
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(video.subprocess, "run", run)
+    return commands
+
+
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
+def test_color_rescale_command(decode: Literal["cpu", "cuda"], ffmpeg_commands: list[list[str]]) -> None:
+    """A color source keeps its chroma; the rescale runs on the GPU under CUDA decode and on the CPU otherwise."""
     video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=False, size=(1920, 1080), decode=decode)
-    (command,) = commands
+    (command,) = ffmpeg_commands
     filters = command[command.index("-vf") + 1]
     if decode == "cuda":
         assert filters == "scale_cuda=1920:1080"
@@ -132,21 +138,10 @@ def test_color_rescale_command(decode: Literal["cpu", "cuda"], tmp_path: Path, m
 
 
 @pytest.mark.parametrize("decode", ["cpu", "cuda"])
-def test_keep_selects_source_frames_before_any_other_filter(decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
-    monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
-    monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
-    monkeypatch.setattr(video, "NVENC_SLOT_DIR", tmp_path / "slots")
-    commands: list[list[str]] = []
-
-    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr(video.subprocess, "run", run)
+def test_keep_selects_source_frames_before_any_other_filter(decode: Literal["cpu", "cuda"], ffmpeg_commands: list[list[str]]) -> None:
     keep = [range(4, 8, 3), range(13, 17, 3)]
     video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, keep=keep, decode=decode)
-    (command,) = commands
+    (command,) = ffmpeg_commands
     filters = command[command.index("-vf") + 1]
     assert filters.startswith("select='between(n,4,7)*not(mod(n-4,3))+between(n,13,16)*not(mod(n-13,3))'")
     assert command[command.index("-frames:v") + 1] == "4"

@@ -24,7 +24,6 @@ from dataforge.datasets.epfl_download import (
     FetchError,
     complete_sessions,
     fetch,
-    list_source,
     session_files,
 )
 from dataforge.datasets.epfl_layers import start_parameters, write_actions, write_base, write_hand_pose, write_pose, write_projections
@@ -42,7 +41,7 @@ from dataforge.datasets.epfl_source import (
     read_timestamps,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.transports import FetchReport
+from dataforge.transports import FetchReport, hf_list_files
 
 KITCHEN_UP: tuple[float, float, float] = (-0.03, -0.81, -0.58)
 """World up in output0's camera frame. The world frame moves between sessions, but the nine
@@ -111,7 +110,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
 
     def remote_sequences(self) -> list[RemoteSequence]:
         """One entry per session the pinned mirror ships complete; one Hub listing call, nothing downloaded."""
-        sessions = complete_sessions(list_source(SOURCE_REPO, SOURCE_REVISION))
+        sessions = complete_sessions(hf_list_files(SOURCE_REPO, SOURCE_REVISION))
         return [RemoteSequence(key, sum(file.size_bytes for file in files), tuple(file.path for file in files)) for key, files in sessions.items()]
 
     def download(self) -> None:
@@ -119,7 +118,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
 
         Files already complete are skipped. Failures are collected and raised once, after every other file ran.
         """
-        sessions = complete_sessions(list_source(SOURCE_REPO, SOURCE_REVISION))
+        sessions = complete_sessions(hf_list_files(SOURCE_REPO, SOURCE_REVISION))
         keys = list(sessions) if self.config.sequences is None else list(self.config.sequences)
         unknown = sorted(set(keys) - set(sessions))
         if unknown:
@@ -134,7 +133,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
         if not smpl_dest.is_file():
             # The model repo is private: a stranger places the official neutral model at smpl_dest instead.
             try:
-                (smpl,) = [file for file in list_source(SMPL_REPO, SMPL_REVISION, SMPL_FILE.rsplit("/", 1)[0]) if file.path == SMPL_FILE]
+                (smpl,) = [file for file in hf_list_files(SMPL_REPO, SMPL_REVISION, SMPL_FILE.rsplit("/", 1)[0]) if file.path == SMPL_FILE]
                 jobs.append((SMPL_REPO, SMPL_REVISION, smpl, smpl_dest, self.config.smpl_root / ".download"))
             except HfHubHTTPError as error:
                 failures.append(

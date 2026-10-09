@@ -10,7 +10,6 @@ release metadata and base's small sidecars stay. See ``docs/egoexo4d.md``.
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from functools import cache
 from pathlib import Path
 from typing import ClassVar
 
@@ -51,6 +50,19 @@ SCENE_EYE: rrb.EyeControls3D = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital)
 pitch, and one rooted at a GoPro inherits its tilt (down to -65 degrees on the piano takes)."""
 UNCALIBRATED: list[str] = [f"- {schema.cam_path(EGO_RIG, cam)}/**" for cam, stream in enumerate(ARIA_STREAMS) if stream.label is None]
 """3D-view exclusions of the eye-tracking camera: its video has no pinhole, so a 3D view cannot place it."""
+SLOTS: list[tuple[int, int]] = [(rig, 0) for rig in range(1, EXO_SLOTS + 1)] + [(EGO_RIG, cam) for cam in range(len(ARIA_STREAMS))]
+"""Every (rig, cam) the blueprints lay out: the GoPro rigs, then the Aria's cameras."""
+
+
+def scene_view(*hidden: str) -> rrb.Spatial3DView:
+    """The 3D scene without the 2D keypoint projections and the uncalibrated eye camera, nor ``hidden``."""
+    return rrb.Spatial3DView(
+        name="Scene",
+        origin="/world",
+        contents=["+ /world/**", *(f"- {schema.coco133_uv_projected_path(rig, cam)}" for rig, cam in SLOTS), *hidden, *UNCALIBRATED],
+        eye_controls=SCENE_EYE,
+        line_grid=False,
+    )
 
 
 @dataclass
@@ -194,18 +206,15 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         base: Path = targets[paths.BASE_LAYER]
         sidecar: Path = paths.sidecar_path(base.parents[1], identity, SIDECAR)  # a preview's root holds its own sidecar
-        if base.exists() and paths.BASE_LAYER not in pending:
-            # Ages, not just existence: a rebuild interrupted after base was published leaves base without a newer
-            # sidecar (redo the take), or derived layers older than base (redo those).
+        if paths.BASE_LAYER in pending or not sidecar.is_file() or sidecar.stat().st_mtime_ns < base.stat().st_mtime_ns:
+            # Every derived layer is stamped on base's clock, so a new base rebuilds them all; so does a rebuild interrupted
+            # after base was published, which leaves base without a newer sidecar.
+            pending = list(targets)
+        else:  # ages, not just existence: a derived layer older than base is redone
             published: int = base.stat().st_mtime_ns
-            if not sidecar.is_file() or sidecar.stat().st_mtime_ns < published:
-                pending = list(targets)
-            else:
-                pending = [layer for layer, target in targets.items() if layer in pending or target.stat().st_mtime_ns < published]
-        if not pending:
-            return base
-        if paths.BASE_LAYER in pending:
-            pending = list(targets)  # every derived layer is stamped on base's clock: a new base rebuilds them all
+            pending = [layer for layer, target in targets.items() if layer in pending or target.stat().st_mtime_ns < published]
+            if not pending:
+                return base
         if paths.BODY_MESH_LAYER in pending and self.model is None:
             self.model = SmplhModel(self.config.models)  # fails on a missing model before any fetch or encode
         if paths.BASE_LAYER in pending:
@@ -223,73 +232,43 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
             if not self.config.keep_raw:
                 for path in self.take_files(source):
                     (self.config.root / path.relative_path).unlink(missing_ok=True)
-            self.timer.capture_s = len(inputs.frames.times_ns) / FPS
 
-        @cache
-        def fit_rows() -> tuple[FrameSidecar, CamerasSidecar, HmFit, Int64[ndarray, "t"]]:
-            """The sidecars, the fit, and the frames both cover; read once, after base."""
-            frames, cameras = read_sidecar(sidecar, base)
-            fit: HmFit = read_fit(fit_path(self.config.root, source.take_name))
-            count: int = min(len(fit.trans), len(frames.times_ns))
-            if len(fit.trans) != len(frames.times_ns) and self.config.frame_limit is None:
-                print(f"  {source.take_name}: the HM fit has {len(fit.trans)} frames, the take {len(frames.times_ns)}; converting {count}")
-            return frames, cameras, fit, np.arange(count, dtype=np.int64)
-
-        def body_pose(recording: rr.RecordingStream) -> None:
-            frames, _, fit, rows = fit_rows()
-            write_body_pose(recording, fit, frames.times_ns[rows], rows)
+        frames, cameras = read_sidecar(sidecar, base)
+        fit: HmFit = read_fit(fit_path(self.config.root, source.take_name))
+        count: int = min(len(fit.trans), len(frames.times_ns))
+        if len(fit.trans) != len(frames.times_ns) and self.config.frame_limit is None:
+            print(f"  {source.take_name}: the HM fit has {len(fit.trans)} frames, the take {len(frames.times_ns)}; converting {count}")
+        rows: Int64[ndarray, "t"] = np.arange(count, dtype=np.int64)
+        model: SmplhModel | None = self.model
 
         def body_mesh(recording: rr.RecordingStream) -> None:
-            frames, _, fit, rows = fit_rows()
-            assert self.model is not None
-            write_body_mesh(recording, self.model, fit, frames.times_ns[rows], rows)
+            assert model is not None
+            write_body_mesh(recording, model, fit, frames.times_ns[rows], rows)
 
-        def projections(recording: rr.RecordingStream) -> None:
-            frames, cameras, fit, rows = fit_rows()
-            write_projections(recording, fit, frames, cameras, rows)
-
-        derived: list[str] = [layer for layer in pending if layer != paths.BASE_LAYER]
         self.write_layers(
-            identity, targets, derived, {paths.BODY_POSE_LAYER: body_pose, paths.BODY_MESH_LAYER: body_mesh, paths.PROJECTIONS_LAYER: projections}
+            identity,
+            targets,
+            [layer for layer in pending if layer != paths.BASE_LAYER],
+            {
+                paths.BODY_POSE_LAYER: lambda recording: write_body_pose(recording, fit, frames.times_ns[rows], rows),
+                paths.BODY_MESH_LAYER: body_mesh,
+                paths.PROJECTIONS_LAYER: lambda recording: write_projections(recording, fit, frames, cameras, rows),
+            },
         )
-        if paths.BASE_LAYER not in pending:
-            self.timer.capture_s = len(fit_rows()[0].times_ns) / FPS
-        return targets[paths.BASE_LAYER]
+        self.timer.capture_s = len(frames.times_ns) / FPS
+        return base
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Scene, z up; the Aria's cameras in a column; the GoPros along the bottom (lens-projected keypoints)."""
-        projected: list[str] = [f"- {schema.coco133_uv_projected_path(rig, 0)}" for rig in range(1, EXO_SLOTS + 1)]
-        projected += [f"- {schema.coco133_uv_projected_path(EGO_RIG, cam)}" for cam in range(len(ARIA_STREAMS))]
         return blueprints.exoego_blueprint(
-            rrb.Spatial3DView(
-                name="Scene",
-                origin="/world",
-                contents=["+ /world/**", *projected, *UNCALIBRATED],
-                eye_controls=SCENE_EYE,
-                line_grid=False,
-            ),
-            ego_panes=[blueprints.camera_view(stream.label or "camera-et", EGO_RIG, cam) for cam, stream in enumerate(ARIA_STREAMS)],
+            scene_view(),
+            ego_panes=[blueprints.camera_view(stream.name, EGO_RIG, cam) for cam, stream in enumerate(ARIA_STREAMS)],
             exo_panes=[blueprints.camera_view(f"GoPro {rig}", rig, 0) for rig in range(1, EXO_SLOTS + 1)],
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Card: the scene without video beside GoPro 1."""
-        slots: list[tuple[int, int]] = [(rig, 0) for rig in range(1, EXO_SLOTS + 1)] + [(EGO_RIG, cam) for cam in range(len(ARIA_STREAMS))]
-        return blueprints.exoego_table_blueprint(
-            rrb.Spatial3DView(
-                name="Scene",
-                origin="/world",
-                contents=[
-                    "+ /world/**",
-                    *(f"- {schema.coco133_uv_projected_path(rig, cam)}" for rig, cam in slots),
-                    *blueprints.video_exclusions(slots),
-                    *UNCALIBRATED,
-                ],
-                eye_controls=SCENE_EYE,
-                line_grid=False,
-            ),
-            blueprints.camera_view("GoPro 1", 1, 0),
-        )
+        return blueprints.exoego_table_blueprint(scene_view(*blueprints.video_exclusions(SLOTS)), blueprints.camera_view("GoPro 1", 1, 0))
 
     def table_fields(self) -> writing.TableFields:
         fields = tuple(writing.TableField(f"property:episode:{name}", name) for name in ("activity", "task", "university")) + (

@@ -84,6 +84,8 @@ ignore_names = [
     "host",
     # MagicMock configuration in the fake catalog (tests/test_register.py).
     "return_value",
+    # PyAV decoder setting, read by the decoder.
+    "thread_type",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

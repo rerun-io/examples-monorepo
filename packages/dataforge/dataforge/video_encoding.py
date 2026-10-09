@@ -469,3 +469,10 @@ def mp4_frame_count(path: Path) -> int:
         if stream.frames:
             return stream.frames
         return sum(1 for packet in container.demux(stream) if packet.pts is not None)
+
+
+def video_size(path: Path) -> tuple[int, int]:
+    """Width and height of an mp4's first video stream."""
+    with av.open(str(path)) as container:
+        stream: av.video.stream.VideoStream = container.streams.video[0]
+        return stream.codec_context.width, stream.codec_context.height

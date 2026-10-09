@@ -36,8 +36,8 @@ from dataforge.vrs import ImuRecords, VrsFile, VrsImageReader
 
 # ── streams ───────────────────────────────────────────────────────────────
 
-AriaStreamId: TypeAlias = Literal["1201-1", "1201-2", "214-1", "1202-1", "1202-2"]
-"""The five Aria Gen1 streams a converter reads (Gen2 reuses the ids); the rest (magnetometer,
+AriaStreamId: TypeAlias = Literal["1201-1", "1201-2", "214-1", "211-1", "1202-1", "1202-2"]
+"""The Aria Gen1 streams a converter reads (Gen2 reuses the ids); the rest (magnetometer,
 barometer, GPS, WiFi, Bluetooth) are left in the file."""
 
 SLAM_LEFT_STREAM_ID: AriaStreamId = "1201-1"
@@ -46,6 +46,8 @@ SLAM_RIGHT_STREAM_ID: AriaStreamId = "1201-2"
 """camera-slam-right: 640x480 gray at 20 fps."""
 RGB_STREAM_ID: AriaStreamId = "214-1"
 """camera-rgb: 1408x1408 RGB at 10 fps, stored JPEG-compressed in the VRS."""
+ET_STREAM_ID: AriaStreamId = "211-1"
+"""camera-et: both eye-tracking cameras side by side in one 640x240 gray frame, at 10 fps."""
 IMU_RIGHT_STREAM_ID: AriaStreamId = "1202-1"
 """imu-right at 1 kHz (LaMAria's body frame)."""
 IMU_LEFT_STREAM_ID: AriaStreamId = "1202-2"

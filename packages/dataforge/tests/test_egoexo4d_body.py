@@ -1,5 +1,6 @@
 """Ego-Exo4D-HM fits: npz decode, OpenPose-67 -> COCO-133, the body_pose layer, and SMPL-H parity with the release."""
 
+import dataclasses
 import os
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def test_body_pose_layer(tmp_path: Path) -> None:
     fit: HmFit = read_fit(FIT)
     invalid: np.ndarray = fit.valid.copy()
     invalid[3] = False
-    fit = HmFit(**{**{name: getattr(fit, name) for name in HmFit.__dataclass_fields__}, "valid": invalid})
+    fit = dataclasses.replace(fit, valid=invalid)
     times, frames = frame_clock(12)
     target: Path = tmp_path / "body_pose.rrd"
     with writing.atomic_recording(target, recording_id="egoexo4d__cmu_bike02_4", default_blueprint=None, send_properties=False) as recording:
@@ -118,7 +119,7 @@ def test_body_mesh_layer_is_10hz_with_empty_invalid_rows(tmp_path: Path) -> None
     fit: HmFit = read_fit(FIT)
     invalid: np.ndarray = fit.valid.copy()
     invalid[[1, 2, 6]] = False  # 1-2 lie between stride frames: their start and end still get rows
-    fit = HmFit(**{**{name: getattr(fit, name) for name in HmFit.__dataclass_fields__}, "valid": invalid})
+    fit = dataclasses.replace(fit, valid=invalid)
     times, frames = frame_clock(12)
     target: Path = tmp_path / "body_mesh.rrd"
     with writing.atomic_recording(target, recording_id="egoexo4d__cmu_bike02_4", default_blueprint=None, send_properties=False) as recording:
