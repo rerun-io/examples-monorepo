@@ -101,16 +101,23 @@ No simplecv reference. Parity is held against the release itself: the SMPL-H joi
 
 ## Timing
 
-Not measured on real takes yet. Synthetic 109-frame take (4 GoPros 4K, 4 Aria streams), 5090: 2.2 s for all four layers.
+Full run (2026-10-08/09, RTX 5090, prod env, batches of 40, rrds shipped to the NAS while the next batch converts): 2,649 takes,
+104.6 h of capture in 18.2 h of conversion, 5.7× real time (median take 5.8×), including 2.2 h waiting on downloads. Download
+speed depends on the lab's bucket: about 10 MB/s for UNC and Uniandes, up to 180 MB/s elsewhere; 4.97 TB raw in total, about
+1.2 TB of rrds.
 
 ## Known gaps
 
-Checked only against public format docs and synthetic takes until the first real take; verify on it:
+Settled on the full run:
 
-- the timesync end bound (the sources disagree; the HM convention is used) and that every video has the take's frame count;
-- that the Aria MP4s, SLAM and eye streams included, are quarter-turned from the sensor and the RGB MP4 is 1408×1408;
-- that every MP4's frame count equals the timesync rows (base refuses otherwise) and the HM fit's (a fit mismatch is printed and
-  the shorter one is converted).
+- Timesync rows `timesync_start_idx`..`timesync_end_idx - 1` give every take's frame count, and every MP4 holds exactly that many
+  frames (base refuses otherwise; no take failed on it). The HM fit is one frame shorter in 2,640 takes and 3–6 frames shorter
+  in 7; base and the layers keep the fit's length.
+- The Aria MP4s are a quarter turn from the readout; RGB is 1408×1408, SLAM 480×640 (or 640×480 stretched, restored), the eye
+  video 640×240 and not turned.
+
+Still open: the GoPro overlay was not compared with HM's own render (`scripts/run_mesh_vis_hands_egoexo.py`); the golden test
+checks the calibration against the fit's cameras and `joints2d` instead.
 
 Source faults kept as shipped: `unc_soccer_09-21-23_01_7`'s GoPro 1 is 7 m below the pitch, looking up (its pose in the HM fit is
 the same).
