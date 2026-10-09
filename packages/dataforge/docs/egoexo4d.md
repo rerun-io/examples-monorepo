@@ -33,9 +33,10 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
 
 - `download` fetches the shared files only: the two body models (pinned, sha256-verified), the release `metadata` part
   (`takes.json`, `captures.json`) and the selected fits into `<root>/hm/<take>/`.
-- `convert` fetches each take's files from the release manifests, exactly what base reads: the frame-aligned videos of every
-  GoPro and of the Aria's four streams (`takes`), `closed_loop_trajectory.csv` and `gopro_calibs.csv` (`take_trajectory`),
-  the image-less VRS for the Aria calibration (`take_vrs_noimagestream`, path from its manifest), and the capture's `timesync.csv` (`captures`).
+- `convert` fetches each take's files from the release manifests, exactly what base reads: first `closed_loop_trajectory.csv`
+  and `gopro_calibs.csv` (`take_trajectory`), which name the localized GoPros; then the frame-aligned videos of those GoPros and
+  of the Aria's four streams (`takes`), the image-less VRS for the Aria calibration (`take_vrs_noimagestream`, path from its
+  manifest), and the capture's `timesync.csv` (`captures`). A take without a localized GoPro is refused before its videos.
   `prefetch` fetches the next take while one converts. A file lands under `<root>/.dataforge-staging` and is renamed into place
   only at the manifest's size.
 - Right after base is written the take files are deleted (`--keep-raw` keeps them). The fits, models, metadata and base's
@@ -50,7 +51,7 @@ pixi run -e dataforge dataforge-convert egoexo4d --sequences cmu_bike02_4
 | same, GoPros with `quality != 1` | — | — | not ingested: Ego-Exo4D could not localize them (no pose) |
 | `aria01_214-1.mp4` (RGB) | 30 Hz | base | `/world/rig_00/cam_00/pinhole/video` |
 | `aria01_1201-1.mp4`, `aria01_1201-2.mp4` (SLAM) | 30 Hz | base | `/world/rig_00/cam_01`, `cam_02`; about one take in seven (IIITH, NUS, Uniandes, UPenn) ships them 640x480, the upright image resized to the readout's shape: base stores them 480x640 again (`stored_width/height`) |
-| `aria01_211-1.mp4` (both eye cameras in one frame) | 10 Hz images in a 30 Hz video: two frames of three are black padding | base | `/world/rig_00/cam_03/pinhole/video`, the real images only, at their own times; black where an image belongs means the eye camera started late, stopped early or dropped samples (seen: 1 to 8 in a row), and the viewer holds the last image; an image off the one-in-three phase refuses the take; video only: no single calibration describes the paired image |
+| `aria01_211-1.mp4` (both eye cameras in one frame) | 10 Hz images in a 30 Hz video: two frames of three are black padding | base | `/world/rig_00/cam_03/pinhole/video`, the real images only, at their own times; black where an image belongs means the eye camera started late, stopped early or dropped samples (seen: 1 to 8 in a row), and the viewer holds the last image; an image off the one-in-three phase refuses the take, and so does a take with no image at all (a preview that ends before the first image logs the camera without video); video only: no single calibration describes the paired image |
 | `trajectory/gopro_calibs.csv` | static | base | GoPro `world_T_cam` and KB4 lens |
 | `trajectory/closed_loop_trajectory.csv` | ~1 kHz device clock | base | `/world/rig_00` `world_T_device` at each frame, interpolated inside ≤ 2 ms brackets by the shared MPS reader (`aria.read_trajectory`), else NaN |
 | other `trajectory/` files, semidense points, eye gaze, audio, full VRS, annotations | — | — | not ingested: outside this port (the ego_pose GT layer was declined) |
@@ -72,17 +73,17 @@ the HM fit is row `timesync_start_idx + i`; `frame_index` is `i`. The trajectory
 ## Layers and entities
 
 - **base**: the cameras and videos above, the Aria pose, capture and episode properties (`source_num_frames`: every source video must
-  hold exactly the take's frame count, or base refuses before anything is published or deleted). Right after base is published,
-  one sidecar `<output_root>/sidecars/<recording_id>/take.npz` (`times_ns`, `world_T_device` per frame, and the camera record as
-  JSON: GoPro rows, the Aria `calib_json`, stored Aria stream sizes). Staleness goes by file age, so a plain retry finishes an
-  interrupted rebuild: a base without a newer sidecar redoes the take (re-fetching it), a derived layer older than base is
-  rebuilt, and a new base rebuilds every derived layer. A copy of the output tree must keep mtimes (`rsync -a`, `tar`).
+  hold exactly the take's frame count, or base refuses before anything is published or deleted). Published with base (base
+  first, or neither): one sidecar `<output_root>/sidecars/<recording_id>/take.npz` (`times_ns`, `world_T_device` per frame, and
+  the camera record as JSON: GoPro rows, the Aria `calib_json`, stored Aria stream sizes). A base without its sidecar redoes the
+  take (re-fetching it), and a new base rebuilds every derived layer. Otherwise a layer that exists is done, as in every
+  dataset: a `--force` run that stops after base leaves the old derived layers, and a second `--force` rebuilds them.
 - **body_pose**: raw SMPL-H parameters (`hand_pose` = 45 PCA coefficients per hand in SMPL-X's MANO basis, mean added), `valid`,
   and `coco133_xyz`: body 0–16 and feet 17–22 from BODY_25 (neck and mid-hip have no slot), hands 91–132, face empty. No shipped
   confidence, so 1.0; frames with `valid == 0` are NaN with confidence 0.
 - **body_mesh**: SMPL-H male mesh every third frame (10 Hz display layer) plus every frame where `valid` changes (so an invalid
   stretch between stride frames still clears the mesh), from SLAHMR's model (shape basis padded to 300 columns so
-  `smplx` keeps 16 betas). Its regressed joints match the shipped `joints3d` to 1e-6 m (`test_smplh_reproduces_shipped_joints`).
+  `smplx` keeps 16 betas; a model file with fewer than 16 shape bases is refused). Its regressed joints match the shipped `joints3d` to 1e-6 m (`test_smplh_reproduces_shipped_joints`).
 - **projections**: `coco133_xyz` through each GoPro's KB4 lens (OpenCV fisheye; checked against `cv2.fisheye.projectPoints`) and
   each calibrated Aria camera's FISHEYE624, at `<pinhole>/coco133_uv_projected`. No measured 2D.
 - Fisheye rule: every camera pane shows the video and the projections only; the mesh is in the 3D view.
@@ -116,8 +117,12 @@ Settled on the full run:
 - The Aria MP4s are a quarter turn from the readout; RGB is 1408×1408, SLAM 480×640 (or 640×480 stretched, restored), the eye
   video 640×240 and not turned.
 
+Kept as converted: the SLAM camera nodes' `source_width/height` give the release MP4's size (480×640, after the quarter turn), not
+the readout's 640×480 that the shared key defines (before any rotation). Changing it means converting the 2,649 takes again, so
+base keeps it and the corpus stays consistent; `image_rotation_cw_deg` (90) on the node states the turn.
+
 Still open: the GoPro overlay was not compared with HM's own render (`scripts/run_mesh_vis_hands_egoexo.py`); the golden test
-checks the calibration against the fit's cameras and `joints2d` instead.
+checks the camera nodes base logs against the fit's cameras, and the KB4 projection against `joints2d`, instead.
 
 Source faults kept as shipped: `unc_soccer_09-21-23_01_7`'s GoPro 1 is 7 m below the pitch, looking up (its pose in the HM fit is
 the same).

@@ -107,7 +107,8 @@ class Release:
         """Fetch one listed file to ``root/<relative_path>`` unless it already has the listed size; return whether bytes moved.
 
         The object lands under ``root/.dataforge-staging`` and is renamed into place only at the listed size, so a
-        destination of that size was complete when it landed.
+        destination of that size was complete when it landed. The staging name is unique per call because convert and the
+        next take's prefetch can fetch the same capture's ``timesync.csv`` at once.
         """
         dest: Path = root / file.relative_path
         size: int = file.size if file.size is not None else int(self.fs.size(file.source_path))

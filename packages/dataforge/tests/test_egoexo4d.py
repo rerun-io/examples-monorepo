@@ -9,13 +9,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 from conftest import FIXTURES, raw_asset, read_chunks, vrs_file
+from test_egoexo4d_download import entry, release
 
 from dataforge import aria, paths, schema
 from dataforge.datasets.egoexo4d import Egoexo4dConfig, Egoexo4dDataset
-from dataforge.datasets.egoexo4d_body import BODY_MESH_STRIDE, HM_FILE, SMPLH_FILE, SMPLX_FILE
-from dataforge.datasets.egoexo4d_download import ManifestPath
+from dataforge.datasets.egoexo4d_body import HM_FILE, SMPLH_FILE, SMPLX_FILE
 from dataforge.datasets.egoexo4d_layers import EGO_RIG, SIDECAR, CamerasSidecar, FrameSidecar, read_sidecar, restored_size, write_sidecar
 from dataforge.datasets.egoexo4d_source import Take
+from dataforge.meshes import BODY_MESH_STRIDE
 
 TAKE: str = "cmu_bike02_4"
 FRAMES: int = 12
@@ -140,26 +141,42 @@ def synthetic_take(root: Path, ffmpeg: Path, *, slam_size: str = "480x640") -> l
     ]
 
 
-def staged_take(tmp_path: Path, ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, *, slam_size: str = "480x640") -> tuple[Path, list[str]]:
-    """The synthetic take under ``tmp_path/raw``, served as already fetched, converting into ``tmp_path/out``.
+def staged_take(
+    tmp_path: Path,
+    ffmpeg: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    slam_size: str = "480x640",
+    keep_raw: bool = False,
+    frame_limit: int | None = None,
+) -> tuple[Egoexo4dDataset, Path, list[str]]:
+    """The synthetic take under ``tmp_path/raw`` and its dataset, converting into ``tmp_path/out``.
 
-    Returns the raw root and the take files.
+    The release's manifests list the take's files at their sizes on disk, so every fetch finds them complete. Returns the
+    dataset, the raw root and the take files.
     """
     for name in (SMPLH_FILE, SMPLX_FILE):
         raw_asset("Ego-Exo4D-HM body model (dataforge-download egoexo4d)", MODEL_ROOT / name)
     root: Path = tmp_path / "raw"
     take_files: list[str] = synthetic_take(root, ffmpeg, slam_size=slam_size)
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
-    monkeypatch.setattr(Egoexo4dDataset, "fetch_take", lambda self, take: None)
-    monkeypatch.setattr(Egoexo4dDataset, "take_files", lambda self, take: [ManifestPath(f"s3://x/{path}", path) for path in take_files])
-    return root, take_files
+    dataset = Egoexo4dConfig(root=root, keep_raw=keep_raw, frame_limit=frame_limit).setup()
+    assert isinstance(dataset, Egoexo4dDataset)
+    parts: dict[str, list[str]] = {
+        "takes": [path for path in take_files if "/frame_aligned_videos/" in path],
+        "take_trajectory": [path for path in take_files if "/trajectory/" in path],
+        "take_vrs_noimagestream": [path for path in take_files if path.endswith(".vrs")],
+    }
+    manifests = {part: [entry("take-uid", [(path, (root / path).stat().st_size) for path in files])] for part, files in parts.items()}
+    manifests["captures"] = [entry("capture-uid", [("captures/cmu_bike02/timesync.csv", (root / "captures/cmu_bike02/timesync.csv").stat().st_size)])]
+    dataset.release = release({}, manifests)
+    return dataset, root, take_files
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("slam_size", ["480x640", "640x480"])
 def test_convert_writes_four_layers_and_prunes_the_take(slam_size: str, tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root, take_files = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch, slam_size=slam_size)
-    dataset = Egoexo4dConfig(root=root).setup()
+    dataset, root, take_files = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch, slam_size=slam_size)
     ((identity, take),) = dataset.discover()
     assert isinstance(take, Take) and identity.recording_id == f"egoexo4d__{TAKE}"
     dataset.convert(identity, take, force=False)
@@ -179,7 +196,7 @@ def test_convert_writes_four_layers_and_prunes_the_take(slam_size: str, tmp_path
     assert sum(chunk.num_rows for chunk in mesh) == len(range(0, FRAMES, BODY_MESH_STRIDE))
     sidecars: Path = tmp_path / "out" / "sidecars" / identity.recording_id
     assert (sidecars / SIDECAR).is_file()
-    cameras: CamerasSidecar = read_sidecar(sidecars / SIDECAR, targets["base"])[1]
+    cameras: CamerasSidecar = read_sidecar(sidecars / SIDECAR)[1]
     assert cameras.aria_sizes["camera-slam-left"] == (480, 640)  # a stretched SLAM video is stored upright again
     assert not any((root / path).exists() for path in take_files)  # raw pruned after base
     assert (root / "hm" / TAKE / HM_FILE).is_file()  # the fit stays
@@ -192,19 +209,32 @@ def test_convert_writes_four_layers_and_prunes_the_take(slam_size: str, tmp_path
 
 
 @pytest.mark.integration
+def test_a_preview_that_ends_before_the_first_eye_image_converts(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frame 0 of the eye video is padding, so a one-frame preview holds no eye image: no fault of the take."""
+    dataset, _, _ = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch, keep_raw=True, frame_limit=1)
+    ((identity, take),) = dataset.discover()
+    dataset.convert(identity, take, force=False)
+    base = read_chunks(dataset.targets(identity)["base"])
+    samples = {str(chunk.entity_path): chunk.num_rows for chunk in base if "VideoStream:sample" in chunk.to_record_batch().schema.names}
+    assert sorted(samples) == sorted([schema.video_path(rig, 0) for rig in (1, 2)] + [schema.video_path(EGO_RIG, cam) for cam in range(3)])
+    assert set(samples.values()) == {1}
+    assert schema.cam_path(EGO_RIG, 3) in {str(chunk.entity_path) for chunk in base}  # the eye camera keeps its node
+
+
+@pytest.mark.integration
 def test_a_source_longer_than_the_take_fails_before_anything_is_published(
     tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """-frames:v would cut the extra frames and the prune would delete the originals: the count check refuses first."""
-    root, take_files = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch)
-    entry = json.loads((root / "takes.json").read_text())
-    entry[0]["timesync_end_idx"] -= 1  # the timesync rows now cover one frame less than the videos hold
-    (root / "takes.json").write_text(json.dumps(entry))
-    dataset = Egoexo4dConfig(root=root).setup()
+    dataset, root, take_files = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch)
+    takes = json.loads((root / "takes.json").read_text())
+    takes[0]["timesync_end_idx"] -= 1  # the timesync rows now cover one frame less than the videos hold
+    (root / "takes.json").write_text(json.dumps(takes))
     ((identity, take),) = dataset.discover()
     with pytest.raises(ValueError, match=f"{FRAMES} frames, the take's timesync rows give {FRAMES - 1}"):
         dataset.convert(identity, take, force=False)
     assert not any(target.exists() for target in dataset.targets(identity).values())
+    assert not any((tmp_path / "out").rglob(f"*{SIDECAR}*"))
     assert all((root / path).exists() for path in take_files)
 
 
@@ -216,47 +246,26 @@ def test_restored_size_undoes_the_release_stretch() -> None:
     assert restored_size(device.camera("camera-rgb"), 1408, 1408) is None
 
 
-def test_a_sidecar_older_than_its_base_is_refused(tmp_path: Path) -> None:
+def test_the_sidecar_reads_back_what_was_written(tmp_path: Path) -> None:
     sidecar: Path = tmp_path / SIDECAR
-    base: Path = tmp_path / "base.rrd"
     frames = FrameSidecar(np.arange(3, dtype=np.int64), np.tile(np.eye(4), (3, 1, 1)))
     cameras = CamerasSidecar(gopros=[], aria_calib_json="{}", aria_sizes={"camera-rgb": (1408, 1408)})
-    base.write_bytes(b"base")
     write_sidecar(sidecar, cameras, frames)
-    read_frames, read_cameras = read_sidecar(sidecar, base)
+    read_frames, read_cameras = read_sidecar(sidecar)
     np.testing.assert_array_equal(read_frames.times_ns, frames.times_ns)
     assert read_cameras == cameras
-    os.utime(base, ns=(sidecar.stat().st_mtime_ns + 1, sidecar.stat().st_mtime_ns + 1))  # base rebuilt, sidecar not
-    with pytest.raises(ValueError, match="predates"):
-        read_sidecar(sidecar, base)
 
 
 @pytest.mark.integration
-def test_a_normal_retry_finishes_an_interrupted_rebuild(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Base newer than its sidecar redoes the take; a derived layer older than base is rebuilt alone."""
-    root, take_files = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch)
-    dataset = Egoexo4dConfig(root=root, keep_raw=True).setup()
+def test_a_base_without_its_sidecar_redoes_the_take(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Base and its sidecar are published together; a base found alone (a copy that left the sidecars out) is redone with every layer."""
+    dataset, _, _ = staged_take(tmp_path, nvenc_ffmpeg, monkeypatch, keep_raw=True)
     ((identity, take),) = dataset.discover()
     dataset.convert(identity, take, force=False)
     targets = dataset.targets(identity)
+    before = {layer: target.stat().st_mtime_ns for layer, target in targets.items()}
     sidecar: Path = tmp_path / "out" / "sidecars" / identity.recording_id / SIDECAR
-
-    def age(path: Path) -> int:
-        return path.stat().st_mtime_ns
-
-    def make_newest(path: Path) -> None:
-        latest: int = max(age(target) for target in [*targets.values(), sidecar]) + 1_000_000
-        os.utime(path, ns=(latest, latest))
-
-    make_newest(targets["base"])  # base republished, then the sidecar write failed
-    stale = {layer: age(target) for layer, target in targets.items()}
+    sidecar.unlink()
     dataset.convert(identity, take, force=False)
-    assert all(age(target) > stale[layer] for layer, target in targets.items())
-    assert age(sidecar) >= age(targets["base"])
-
-    make_newest(targets["base"])
-    make_newest(sidecar)  # base and sidecar republished, then every derived write failed
-    before = {layer: age(target) for layer, target in targets.items()}
-    dataset.convert(identity, take, force=False)
-    assert age(targets["base"]) == before["base"]
-    assert all(age(targets[layer]) > before["base"] for layer in ("body_pose", "body_mesh", "projections"))
+    assert sidecar.is_file()
+    assert all(target.stat().st_mtime_ns > before[layer] for layer, target in targets.items())

@@ -12,7 +12,6 @@ from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 
 from dataforge import paths, schema, writing
 from dataforge.datasets.egoexo4d_body import (
-    BODY_MESH_STRIDE,
     SMPLH_FILE,
     SMPLX_FILE,
     HmFit,
@@ -22,6 +21,7 @@ from dataforge.datasets.egoexo4d_body import (
     write_body_mesh,
     write_body_pose,
 )
+from dataforge.meshes import BODY_MESH_STRIDE
 
 FIT: Path = FIXTURES / "egoexo4d" / "cmu_bike02_4-first12.npz"
 MODEL_ROOT: Path = Path(os.environ.get("DATAFORGE_EGOEXO4D_MODEL_ROOT", str(paths.raw_root() / "egoexo4d")))
@@ -38,6 +38,17 @@ def frame_clock(count: int) -> tuple[Int64[np.ndarray, "t"], Int64[np.ndarray, "
     """A 30 fps clock starting at 1 s, and the frame indices it stamps."""
     frames: Int64[np.ndarray, "t"] = np.arange(count, dtype=np.int64)
     return 1_000_000_000 + frames * 1_000_000_000 // 30, frames
+
+
+def test_a_body_model_with_too_few_shape_bases_is_refused(tmp_path: Path) -> None:
+    """Padded to smplx's 300 columns, a 10-basis model would let the fit's last six betas do nothing."""
+    for name in (SMPLH_FILE, SMPLX_FILE):
+        (tmp_path / name).parent.mkdir(parents=True)
+    np.savez(tmp_path / SMPLH_FILE, shapedirs=np.zeros((6890, 3, 10)))
+    hand: np.ndarray = np.zeros(1)
+    np.savez(tmp_path / SMPLX_FILE, hands_componentsl=hand, hands_componentsr=hand, hands_meanl=hand, hands_meanr=hand)
+    with pytest.raises(ValueError, match="10 shape bases, the fit needs 16"):
+        SmplhModel(tmp_path)
 
 
 def test_read_fit_drops_the_person_axis() -> None:

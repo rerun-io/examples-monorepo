@@ -12,7 +12,7 @@ import rerun.blueprint as rrb
 from huggingface_hub.errors import HfHubHTTPError
 from jaxtyping import Int64
 
-from dataforge import blueprints, paths, schema, writing
+from dataforge import blueprints, meshes, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig, RemoteSequence
 from dataforge.datasets.epfl_actions import read_actions
 from dataforge.datasets.epfl_download import (
@@ -50,12 +50,6 @@ SCENE_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((0.63, -0.53, -
 """Tightest oblique eye with all nine exo cameras and the walking area (a standing person) in a 2:1 card, in output0's frame."""
 KITCHEN_GRID: rrb.LineGrid3D = rrb.LineGrid3D(visible=True, plane=rr.components.Plane3D(normal=KITCHEN_UP, distance=-1.82))
 """The floor (shipped ankle height) in output0's frame."""
-BODY_MESH_STRIDE: int = 3
-"""body_mesh keeps every third 30 Hz frame (10 Hz): a display layer, by decision (2026-09-25).
-
-Full-rate SMPL vertices cost 82 KB per frame (4.3 GB for a 29-min session, 4x its videos), and
-Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. The SMPL
-parameters (body_pose) and the keypoints (hand_pose) stay at full rate."""
 
 
 @dataclass
@@ -214,7 +208,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                 for layer, write in layer_writers.items():
                     with self.timer.stage(f"write:{layer}"):
                         if layer == paths.BODY_MESH_LAYER:
-                            keep: Int64[np.ndarray, "k"] = np.flatnonzero(frames[start:stop] % BODY_MESH_STRIDE == 0)
+                            keep: Int64[np.ndarray, "k"] = np.flatnonzero(frames[start:stop] % meshes.BODY_MESH_STRIDE == 0)
                             write([rows[i] for i in keep], times[start:stop][keep], frames[start:stop][keep])
                         else:
                             write(rows, times[start:stop], frames[start:stop])

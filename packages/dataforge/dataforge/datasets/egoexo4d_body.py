@@ -38,9 +38,6 @@ SMPLX_FILE: str = "body_models/smplx/SMPLX_NEUTRAL.npz"
 """SMPL-X neutral; only its MANO hand PCA basis and mean are read."""
 NUM_BETAS: int = 16
 HAND_PCA_COMPONENTS: int = 45
-BODY_MESH_STRIDE: int = 3
-"""body_mesh keeps every third 30 Hz frame (10 Hz), the display-layer rule of 2026-09-25: Rerun 0.38 cannot skin
-one logged mesh, so each posed frame costs 82 KB. Parameters and keypoints (body_pose) stay at full rate."""
 MESH_BATCH_ROWS: int = 64
 """Mesh rows per chunk: one chunk is ~5 MB and carries its own copy of the 165 KB triangle list."""
 SMPLH_VERTICES: int = 6890
@@ -135,7 +132,10 @@ class SmplhModel:
             for key in ("hands_componentsl", "hands_componentsr", "hands_meanl", "hands_meanr"):
                 parts[key] = smplx_model[key]
         # smplx keeps only 10 betas unless the shape basis has SHAPE_SPACE_DIM (300) columns; SLAHMR pads it the same way.
+        # Padding cannot stand in for a missing basis: the fit's extra betas would do nothing.
         shapedirs: ndarray = parts["shapedirs"]
+        if shapedirs.shape[2] < NUM_BETAS:
+            raise ValueError(f"{model_root / SMPLH_FILE}: {shapedirs.shape[2]} shape bases, the fit needs {NUM_BETAS}")
         padding: ndarray = np.zeros((*shapedirs.shape[:2], smplx.SMPLH.SHAPE_SPACE_DIM - shapedirs.shape[2]), dtype=shapedirs.dtype)
         parts["shapedirs"] = np.concatenate([shapedirs, padding], axis=-1)
         self.layer = smplx.SMPLH(
@@ -195,7 +195,7 @@ def write_body_pose(recording: rr.RecordingStream, fit: HmFit, times: Int64[ndar
 
 
 def write_body_mesh(recording: rr.RecordingStream, model: SmplhModel, fit: HmFit, times: Int64[ndarray, "t"], frames: Int64[ndarray, "t"]) -> None:
-    """The posed mesh every BODY_MESH_STRIDE-th frame and wherever validity changes; invalid frames are empty rows.
+    """The posed mesh every ``meshes.BODY_MESH_STRIDE``-th frame and wherever validity changes; invalid frames are empty rows.
 
     The change rows keep a stale mesh from showing through an invalid stretch that starts or ends between two stride frames.
     """
@@ -203,7 +203,7 @@ def write_body_mesh(recording: rr.RecordingStream, model: SmplhModel, fit: HmFit
     meshes.log_mesh_static(recording, path, albedo_factor=hands.BODY_ALBEDO)
     valid: Bool[ndarray, "t"] = fit.valid[frames]
     changed: Bool[ndarray, "t"] = np.concatenate([[False], valid[1:] != valid[:-1]])
-    kept: Int64[ndarray, "k"] = np.flatnonzero((frames % BODY_MESH_STRIDE == 0) | changed)
+    kept: Int64[ndarray, "k"] = np.flatnonzero((frames % meshes.BODY_MESH_STRIDE == 0) | changed)
     for start in range(0, len(kept), MESH_BATCH_ROWS):
         rows: Int64[ndarray, "b"] = kept[start : start + MESH_BATCH_ROWS]
         trusted: Bool[ndarray, "b"] = valid[rows]

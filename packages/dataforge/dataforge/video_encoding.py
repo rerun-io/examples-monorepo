@@ -82,7 +82,8 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
     """Encode with the requested workers; yield clips in submission order while later jobs run.
 
     Each clip is deleted when the caller requests the next one, so at most one finished clip waits on disk
-    for logging. Cleanup waits for encoders and removes every leftover, including on failure.
+    for logging; a job may write no clip (nothing to encode). Cleanup waits for encoders and removes every
+    leftover, including on failure.
     Transcode measures first submit to final encode completion, excluding logging.
     """
     finished: list[float] = []
@@ -102,7 +103,7 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
                 for (clip, _), future in zip(jobs, futures, strict=True):
                     future.result()
                     yield clip
-                    clip.unlink()
+                    clip.unlink(missing_ok=True)
 
             yield ready()
     finally:

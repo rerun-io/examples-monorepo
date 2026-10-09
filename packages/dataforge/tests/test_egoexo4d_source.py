@@ -122,9 +122,16 @@ def test_sample_frames_refuses_an_image_off_the_phase() -> None:
         sample_frames(np.array([0, 250, 250, 0, 250, 0], dtype=np.int64), 3, "et.mp4")
 
 
-def test_sample_frames_refuses_a_video_without_an_image() -> None:
-    with pytest.raises(ValueError, match="et.mp4: no frame carries an image"):
-        sample_frames(np.zeros(6, dtype=np.int64), 3, "et.mp4")
+def test_a_video_without_an_image_has_no_samples() -> None:
+    """A preview may end before the first eye image; whether that refuses the take is base's rule, not this one's."""
+    assert sample_frames(np.zeros(6, dtype=np.int64), 3, "et.mp4") == []
+
+
+def test_a_take_without_a_localized_gopro_is_refused(tmp_path: Path) -> None:
+    path: Path = tmp_path / "gopro_calibs.csv"
+    path.write_text("\n".join([GOPRO_HEADER, GOPRO_ROWS[1]]) + "\n")
+    with pytest.raises(ValueError, match=r"no GoPro is localized \(quality 1\) among \['cam02'\]"):
+        localized(read_gopro_calibs(path))
 
 
 def test_gopro_calibs_keep_localized_cameras_in_file_order(tmp_path: Path) -> None:

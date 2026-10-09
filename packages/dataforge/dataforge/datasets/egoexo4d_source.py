@@ -137,11 +137,12 @@ def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> list[ran
 
     The 10 Hz eye cameras ship as a 30 Hz frame-aligned video: one frame of three is the image, the two between are video
     black. The camera may start late, stop early or drop samples (seen: 1 to 8 in a row), which leaves black where an image
-    belongs, but every image stays on one phase. An image off that phase refuses the take rather than guessing.
+    belongs, but every image stays on one phase. An image off that phase refuses the take rather than guessing. No image at
+    all gives no runs.
     """
     real: Int64[ndarray, "m"] = np.flatnonzero(peaks > PADDING_PEAK)
     if not len(real):
-        raise ValueError(f"{where}: no frame carries an image")
+        return []
     off: Int64[ndarray, "k"] = real[(real - real[0]) % step != 0]
     if len(off):
         raise ValueError(f"{where}: the image in frame {off[0]} is off the one-in-{step} phase of frame {real[0]}")
@@ -236,8 +237,11 @@ def read_gopro_calibs(path: Path) -> list[GoproCalib]:
 
 
 def localized(calibs: list[GoproCalib]) -> list[GoproCalib]:
-    """The GoPros Ego-Exo4D localized (quality 1): the exo cameras HM fit with, in file order."""
-    return [calib for calib in calibs if calib.quality == 1.0]
+    """The GoPros Ego-Exo4D localized (quality 1): the exo cameras HM fit with, in file order. A take needs at least one."""
+    kept: list[GoproCalib] = [calib for calib in calibs if calib.quality == 1.0]
+    if not kept:
+        raise ValueError(f"no GoPro is localized (quality 1) among {[calib.cam_uid for calib in calibs]}")
+    return kept
 
 
 def stored_size(calib: GoproCalib) -> tuple[int, int]:

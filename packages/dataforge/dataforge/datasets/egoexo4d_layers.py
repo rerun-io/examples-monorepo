@@ -4,8 +4,8 @@ Rig 0 is the wearer's Aria (moving, device frame, the closed-loop trajectory as 
 RGB, SLAM left/right and the eye-tracking camera; rigs 1..N are the localized GoPros, static, in
 ``gopro_calibs.csv`` order. Every stream logs on the take clock (Aria RGB capture time) at 30 Hz.
 
-Right after base is published the dataset writes one sidecar, ``take.npz``, so the derived layers never read the raw take:
-the frame times, the device pose at each, and the camera record (GoPro rows, Aria calibration document) as JSON.
+With base the dataset publishes one sidecar, ``take.npz``, so the derived layers never read the raw take: the frame times,
+the device pose at each, and the camera record (GoPro rows, Aria calibration document) as JSON.
 """
 
 from collections.abc import Callable, Iterator
@@ -53,24 +53,21 @@ class AriaStream(NamedTuple):
     """Its key in takes.json ``frame_aligned_videos``."""
     stream_id: str
     """VRS stream id, also the MP4 name suffix."""
-    label: str | None
-    """Factory calibration label; None for the eye cameras, which share one frame and so have no single calibration."""
+    name: str
+    """Node and pane name; a calibrated stream's factory calibration label."""
+    calibrated: bool
+    """False for the eye cameras: both share one frame, which so has no single calibration."""
     gray: bool
     """Monochrome sensor."""
     step: int
     """Frame-aligned frames per real sample: 3 for the 10 Hz eye cameras, whose 30 Hz video pads each image with black."""
 
-    @property
-    def name(self) -> str:
-        """Node and pane name: the calibration label, ``camera-et`` for the eye cameras."""
-        return self.label or "camera-et"
-
 
 ARIA_STREAMS: tuple[AriaStream, ...] = (
-    AriaStream("rgb", aria.RGB_STREAM_ID, aria.STREAM_LABELS[aria.RGB_STREAM_ID], False, 1),
-    AriaStream("slam-left", aria.SLAM_LEFT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_LEFT_STREAM_ID], True, 1),
-    AriaStream("slam-right", aria.SLAM_RIGHT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_RIGHT_STREAM_ID], True, 1),
-    AriaStream("et", aria.ET_STREAM_ID, None, True, 3),
+    AriaStream("rgb", aria.RGB_STREAM_ID, aria.STREAM_LABELS[aria.RGB_STREAM_ID], True, False, 1),
+    AriaStream("slam-left", aria.SLAM_LEFT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_LEFT_STREAM_ID], True, True, 1),
+    AriaStream("slam-right", aria.SLAM_RIGHT_STREAM_ID, aria.STREAM_LABELS[aria.SLAM_RIGHT_STREAM_ID], True, True, 1),
+    AriaStream("et", aria.ET_STREAM_ID, "camera-et", False, True, 3),
 )
 """The Aria cameras in ``cam_MM`` order."""
 
@@ -166,16 +163,16 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         source: Path = inputs.root / take.video(take.aria, stream.readable)
         width, height = video_size(source)
         restored: tuple[int, int] | None = None
-        if stream.label is None:  # both eye cameras in one frame: no single calibration, so no pinhole
+        if not stream.calibrated:  # no pinhole without a calibration
             rr.log(schema.cam_path(EGO_RIG, cam), rr.AnyValues(name=stream.name, kind="grayscale"), static=True, recording=recording)
         else:
-            restored = restored_size(device.camera(stream.label), width, height)
-            aria_sizes[stream.label] = restored or (width, height)
+            restored = restored_size(device.camera(stream.name), width, height)
+            aria_sizes[stream.name] = restored or (width, height)
             log_camera_node(
                 recording,
                 EGO_RIG,
                 cam,
-                logged_calibration(device.camera(stream.label), *aria_sizes[stream.label]).to_fisheye62(),
+                logged_calibration(device.camera(stream.name), *aria_sizes[stream.name]).to_fisheye62(),
                 name=stream.name,
                 kind="grayscale" if stream.gray else "rgb",
                 image_plane_distance=0.05,
@@ -226,33 +223,37 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         )
         slots.append(Slot(rig, 0, source, False, size, 1))
 
-    samples: list[Int64[ndarray, "m"]] = []
-    keeps: list[list[range] | None] = []  # the transcode's frame selection for a padded stream
     with timer.stage("probe"):
         for slot in slots:  # -frames:v would silently cut a longer source, which is then deleted
             count: int = mp4_frame_count(slot.source)
             if count != inputs.take_frames:
                 raise ValueError(f"{slot.source}: {count} frames, the take's timesync rows give {inputs.take_frames}")
-            runs: list[range] = (
-                [range(len(times))] if slot.step == 1 else sample_frames(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
-            )
-            samples.append(np.concatenate([frames[run.start : run.stop : run.step] for run in runs]))
-            keeps.append(None if slot.step == 1 else runs)
+    samples: dict[Path, Int64[ndarray, "m"]] = {}  # each clip's source frames, set by its encode job
     with work_dir("egoexo4d-") as work:
         clips: list[Path] = [work / f"rig_{slot.rig:02d}_cam_{slot.cam:02d}.mp4" for slot in slots]
 
-        def encode(slot: Slot, kept: Int64[ndarray, "m"], keep: list[range] | None, clip: Path) -> None:
-            transcode_mp4(
-                slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, keep=keep, decode="cuda"
-            )
+        def encode(slot: Slot, clip: Path) -> None:
+            """Encode the stream's real samples; a padded stream is scanned for them here, beside the other encodes."""
+            runs: list[range] = [range(len(times))]
+            if slot.step > 1:
+                runs = sample_frames(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
+                if not runs and len(times) == inputs.take_frames:  # a preview may end before the first image; a whole take may not
+                    raise ValueError(f"{slot.source}: no frame carries an image")
+            kept: Int64[ndarray, "m"] = np.concatenate([frames[run.start : run.stop : run.step] for run in runs]) if runs else frames[:0]
+            samples[clip] = kept
+            if len(kept):
+                keep: list[range] | None = None if slot.step == 1 else runs
+                transcode_mp4(
+                    slot.source, clip, gop=AV1_GOP, cq=AV1_CQ, fps=FPS, frames=len(kept), gray=slot.gray, size=slot.size, keep=keep, decode="cuda"
+                )
 
-        jobs: list[tuple[Path, Callable[[], None]]] = [
-            (clip, partial(encode, slot, kept, keep, clip)) for slot, kept, keep, clip in zip(slots, samples, keeps, clips, strict=True)
-        ]
+        jobs: list[tuple[Path, Callable[[], None]]] = [(clip, partial(encode, slot, clip)) for slot, clip in zip(slots, clips, strict=True)]
         with parallel_clips(jobs, timer, workers=6) as encoded:
-            for slot, kept, clip in zip(slots, samples, encoded, strict=True):
-                with timer.stage("write:video"):  # a padded stream keeps its real samples' times on the shared frame timeline
-                    log_video_stream(recording, clip, schema.video_path(slot.rig, slot.cam), times_ns=times[kept], frame_indices=kept)
+            for slot, clip in zip(slots, encoded, strict=True):
+                kept = samples[clip]
+                if len(kept):  # a preview without an eye image keeps the camera node and logs no video
+                    with timer.stage("write:video"):  # a padded stream keeps its real samples' times on the shared frame timeline
+                        log_video_stream(recording, clip, schema.video_path(slot.rig, slot.cam), times_ns=times[kept], frame_indices=kept)
     log_dense_pose_track(recording, schema.rig_path(EGO_RIG), times_ns=times, frame_indices=frames, transforms=inputs.frames.world_T_device)
     writing.send_capture_properties(
         recording,
@@ -281,17 +282,15 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
 
 
 def write_sidecar(path: Path, cameras: CamerasSidecar, frames: FrameSidecar) -> None:
-    """Publish the take's sidecar atomically; call it after base is published (``read_sidecar`` relies on the order)."""
-    with writing.atomic_write(path) as staged, staged.open("wb") as stream:
+    """Write the take's sidecar to ``path``: the dataset stages it beside base and publishes the two together."""
+    with path.open("wb") as stream:
         np.savez(stream, times_ns=frames.times_ns, world_T_device=frames.world_T_device, cameras_json=np.array(to_json(cameras)))
 
 
-def read_sidecar(path: Path, base: Path) -> tuple[FrameSidecar, CamerasSidecar]:
-    """The sidecar of the base at ``base``; one written before that base (a rebuild that failed in between) is refused."""
+def read_sidecar(path: Path) -> tuple[FrameSidecar, CamerasSidecar]:
+    """The sidecar published with base."""
     if not path.is_file():
         raise FileNotFoundError(f"{path} is missing: convert the base layer first (--force rebuilds it from the raw take)")
-    if path.stat().st_mtime_ns < base.stat().st_mtime_ns:
-        raise ValueError(f"{path} predates {base}, so it may describe an older base: reconvert base with --force")
     with np.load(path, allow_pickle=False) as npz:
         try:
             frames: FrameSidecar = from_dict(FrameSidecar, {"times_ns": npz["times_ns"], "world_T_device": npz["world_T_device"]})
@@ -314,8 +313,8 @@ def write_projections(recording: rr.RecordingStream, fit: HmFit, frames: FrameSi
             yield (rig, 0), project_fisheye62(flat @ cam_T_world[:3, :3].T + cam_T_world[:3, 3], camera).reshape(-1, 133, 2).astype(np.float32)
         device: aria.DeviceCalibration = aria.DeviceCalibration.from_json(cameras.aria_calib_json, SIDECAR)
         for cam, stream in enumerate(ARIA_STREAMS):
-            if stream.label in cameras.aria_sizes:  # the calibrated cameras, in the stored (rotated) orientation
-                calibration: Fisheye624Parameters = logged_calibration(device.camera(stream.label), *cameras.aria_sizes[stream.label])
+            if stream.calibrated:  # in the stored (rotated) orientation
+                calibration: Fisheye624Parameters = logged_calibration(device.camera(stream.name), *cameras.aria_sizes[stream.name])
                 yield (EGO_RIG, cam), aria.project_frames(calibration, world_T_device, positions)
 
     hands.log_projections(
