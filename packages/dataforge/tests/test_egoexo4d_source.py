@@ -15,7 +15,7 @@ from dataforge.datasets.egoexo4d_source import (
     read_gopro_calibs,
     read_take_clock,
     read_takes,
-    sample_phase,
+    sample_frames,
     stored_size,
 )
 
@@ -93,24 +93,34 @@ def test_exo_cameras_follow_the_capture_not_the_name(tmp_path: Path) -> None:
     assert read_takes_entry(tmp_path, take_entry()).exo_cameras == ("cam01",)
 
 
-def test_sample_phase_finds_the_real_frame_of_each_three() -> None:
+def test_sample_frames_finds_the_real_frame_of_each_three() -> None:
     # cmu_bike02_4's eye video: black, image, black, ... (luma peaks 0 and 239-255).
-    assert sample_phase(np.array([0, 250, 0, 0, 239, 0, 0, 255], dtype=np.int64), 3, "et.mp4") == 1
-    assert sample_phase(np.array([250, 0, 0, 250, 0], dtype=np.int64), 3, "et.mp4") == 0
-    assert sample_phase(np.array([250, 240, 255], dtype=np.int64), 1, "rgb.mp4") == 0
+    assert sample_frames(np.array([0, 250, 0, 0, 239, 0, 0, 255], dtype=np.int64), 3, "et.mp4") == range(1, 8, 3)
+    assert sample_frames(np.array([250, 0, 0, 250, 0], dtype=np.int64), 3, "et.mp4") == range(0, 4, 3)
+    assert sample_frames(np.array([250, 240, 255], dtype=np.int64), 1, "rgb.mp4") == range(0, 3, 1)
+
+
+def test_sample_frames_allows_a_late_start_and_an_early_stop() -> None:
+    # uniandes_dance_016_46: eye images in frames 2..1649 of 1835, then the eye camera stops; black outside means no eye data.
+    peaks = np.array([0, 0, 0, 0, 250, 0, 0, 250, 0, 0, 0, 0, 0], dtype=np.int64)
+    assert sample_frames(peaks, 3, "et.mp4") == range(4, 8, 3)
 
 
 @pytest.mark.parametrize(
     "peaks",
     [
-        [0, 250, 0, 0, 0, 0, 0, 250, 0],  # a sample is missing
+        [0, 250, 0, 0, 0, 0, 0, 250, 0],  # a sample is missing between two images
         [0, 250, 250, 0, 250, 0],  # a padding frame carries an image
-        [0, 0, 0, 0, 0, 0],  # no image at all
     ],
 )
-def test_sample_phase_refuses_an_irregular_padding(peaks: list[int]) -> None:
+def test_sample_frames_refuses_an_irregular_padding(peaks: list[int]) -> None:
     with pytest.raises(ValueError, match="et.mp4: real frames are not exactly one in every 3"):
-        sample_phase(np.array(peaks, dtype=np.int64), 3, "et.mp4")
+        sample_frames(np.array(peaks, dtype=np.int64), 3, "et.mp4")
+
+
+def test_sample_frames_refuses_a_video_without_an_image() -> None:
+    with pytest.raises(ValueError, match="et.mp4: no frame carries an image"):
+        sample_frames(np.zeros(6, dtype=np.int64), 3, "et.mp4")
 
 
 def test_gopro_calibs_keep_localized_cameras_in_file_order(tmp_path: Path) -> None:

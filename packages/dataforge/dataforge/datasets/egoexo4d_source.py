@@ -127,17 +127,24 @@ def frame_peaks(path: Path, frames: int) -> Int64[ndarray, "n"]:
         return np.array([frame.to_ndarray(format="gray").max() for frame in islice(container.decode(video=0), frames)], dtype=np.int64)
 
 
-def sample_phase(peaks: Int64[ndarray, "n"], step: int, where: str) -> int:
-    """Which frame of every ``step`` holds a stream's real sample; every other frame must be padding.
+def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> range:
+    """The frames that hold a stream's real samples: every ``step``-th frame from its first image to its last.
 
     The 10 Hz eye cameras ship as a 30 Hz frame-aligned video: one frame of three is the image, the two between are video
-    black. A missing sample or an image where padding belongs refuses the take rather than guessing.
+    black. Black frames before the first image and after the last mean the eye camera started late or stopped early (no
+    eye data then); a missing sample or an image where padding belongs between them refuses the take rather than guessing.
     """
     real: Bool[ndarray, "n"] = peaks > PADDING_PEAK
-    for phase in range(step):
-        if np.array_equal(real, np.arange(len(peaks)) % step == phase):
-            return phase
-    raise ValueError(f"{where}: real frames are not exactly one in every {step} ({int(real.sum())} of {len(peaks)} carry an image)")
+    if not real.any():
+        raise ValueError(f"{where}: no frame carries an image")
+    first: int = int(np.argmax(real))
+    last: int = len(real) - 1 - int(np.argmax(real[::-1]))
+    kept: range = range(first, last + 1, step)
+    expected: Bool[ndarray, "n"] = np.zeros(len(real), dtype=bool)
+    expected[first : last + 1 : step] = True
+    if not np.array_equal(real, expected):
+        raise ValueError(f"{where}: real frames are not exactly one in every {step} between the first image (frame {first}) and the last ({last})")
+    return kept
 
 
 def read_takes(path: Path) -> dict[str, Take]:

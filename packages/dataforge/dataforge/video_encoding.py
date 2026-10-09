@@ -305,7 +305,7 @@ def transcode_mp4(
     """Decode a file and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
-    every (step, phase) keeps only the source frames n with n % step == phase, before any
+    every (step, first) keeps only the source frames first, first + step, ..., before any
     other filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
@@ -318,7 +318,7 @@ def transcode_mp4(
         raise ValueError("frames must be positive")
     if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
-    select: list[str] = [] if every is None else [f"select='eq(mod(n,{every[0]}),{every[1]})'"]
+    select: list[str] = [] if every is None else [f"select='gte(n,{every[1]})*not(mod(n-{every[1]},{every[0]}))'"]
     cpu_filters: list[str] = [
         *select,
         *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),

@@ -28,7 +28,7 @@ from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge import aria, hands, schema, writing
 from dataforge.datasets.egoexo4d_body import HmFit, coco133_from_openpose67
-from dataforge.datasets.egoexo4d_source import FPS, KB4, GoproCalib, Take, frame_peaks, sample_phase, stored_size
+from dataforge.datasets.egoexo4d_source import FPS, KB4, GoproCalib, Take, frame_peaks, sample_frames, stored_size
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_dense_pose_track, log_rig_node, log_video_stream
 from dataforge.records import decode
@@ -243,8 +243,8 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
         count: int = mp4_frame_count(slot.source)
         if count != inputs.take_frames:
             raise ValueError(f"{slot.source}: {count} frames, the take's timesync rows give {inputs.take_frames}")
-        phase: int = 0 if slot.step == 1 else sample_phase(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
-        samples.append(frames[phase :: slot.step])
+        span: range = range(len(times)) if slot.step == 1 else sample_frames(frame_peaks(slot.source, len(times)), slot.step, str(slot.source))
+        samples.append(frames[span.start : span.stop : span.step])
     resolutions: list[str] = []
     with work_dir("egoexo4d-") as work:
         clips: list[Path] = [work / f"rig_{slot.rig:02d}_cam_{slot.cam:02d}.mp4" for slot in slots]

@@ -144,10 +144,10 @@ def test_every_selects_source_frames_before_any_other_filter(decode: Literal["cp
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(video.subprocess, "run", run)
-    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, every=(3, 1), decode=decode)
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, every=(3, 4), decode=decode)
     (command,) = commands
     filters = command[command.index("-vf") + 1]
-    assert filters.startswith("select='eq(mod(n,3),1)'")
+    assert filters.startswith("select='gte(n,4)*not(mod(n-4,3))'")
     assert command[command.index("-frames:v") + 1] == "4"
 
 
@@ -262,13 +262,13 @@ def test_every_keeps_exactly_the_selected_frames(decode: Literal["cpu", "cuda"],
         check=True,
     )  # fmt: skip
     target = tmp_path / "every.mp4"
-    assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=4, gray=True, every=(3, 1), decode=decode) == 4
+    assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=3, gray=True, every=(3, 4), decode=decode) == 3
     with av.open(str(source)) as container:
         originals = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
     with av.open(str(target)) as container:
         kept = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
     nearest = [int(np.argmin(((originals - frame) ** 2).mean(axis=(1, 2)))) for frame in kept]
-    assert nearest == [1, 4, 7, 10]
+    assert nearest == [4, 7, 10]  # from the first kept frame, every third, as many as asked
 
 
 def test_session_failure_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
