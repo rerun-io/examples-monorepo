@@ -1,10 +1,16 @@
-"""Typed record boundaries shared by dataset readers: one decode door that names the source on failure."""
+"""Typed record boundaries shared by dataset readers: one decode door that names the source on failure.
+
+Records go through pyserde. A numeric CSV table (an MPS trajectory, a timesync file) is a stream of rows, so
+``read_csv_columns`` parses only the named columns into typed Arrow arrays instead (CSV has no pyserde codec, and
+``DictReader`` + ``from_dict`` per row is ~80x slower on a 250k-row trajectory)."""
 
 from pathlib import Path
 from types import GenericAlias
 from typing import Literal, TypeVar
 from zipfile import ZipFile
 
+import pyarrow as pa
+import pyarrow.csv as pacsv
 from serde import SerdeError
 from serde.json import from_json
 from serde.yaml import from_yaml
@@ -37,3 +43,19 @@ def read_json(path: Path, cls: type[SourceT] | GenericAlias, *, text: str | None
 def read_member(archive: ZipFile, member: str, cls: type[SourceT], *, fmt: Literal["json", "yaml"] = "yaml") -> SourceT:  # noqa: UP047 — beartype requires legacy generics
     """Decode one archive member, naming ``<archive>:<member>`` on errors."""
     return decode(cls, archive.read(member).decode(), source=f"{archive.filename}:{member}", fmt=fmt)
+
+
+def read_csv_columns(path: Path, columns: dict[str, pa.DataType]) -> pa.Table:
+    """Only ``columns`` of a headed CSV, each parsed to its Arrow type, in the order of ``columns``.
+
+    Empty and ``nan`` float cells read as NaN. A missing column, a cell that does not parse as its type (``0.5`` in an
+    int64 column) and an empty integer cell raise ``ValueError`` naming ``path``.
+    """
+    try:
+        table: pa.Table = pacsv.read_csv(path, convert_options=pacsv.ConvertOptions(include_columns=list(columns), column_types=columns))
+    except (pa.ArrowInvalid, pa.ArrowKeyError) as error:
+        raise ValueError(f"{path}: {error}") from error
+    for name, kind in columns.items():
+        if pa.types.is_integer(kind) and table.column(name).null_count:
+            raise ValueError(f"{path}: {name} has empty cells")
+    return table

@@ -408,7 +408,7 @@ def test_camera_logging_overlaps_remaining_encodes(tmp_path: Path, tiny_scene: P
             # Logging time after the last encoder must not enter transcode time.
             clock[0] = 100.0
 
-    monkeypatch.setattr(show3d_layers, "transcode_mp4_gray", encode)
+    monkeypatch.setattr(show3d_layers, "transcode_mp4", encode)
     monkeypatch.setattr(show3d_layers, "log_video_stream", log_video)
     monkeypatch.setattr(video_encoding, "perf_counter", lambda: clock[0])
     scene = show3d_layers.read_scene(tiny_scene, scene_key="synthetic")
@@ -528,7 +528,7 @@ def test_test_split_converts_only_base_and_captions(tmp_path: Path, tiny_scene: 
                 output.mux(packet)
         return count
 
-    monkeypatch.setattr(show3d_layers, "transcode_mp4_gray", encode)
+    monkeypatch.setattr(show3d_layers, "transcode_mp4", encode)
     source = index_row(
         subject_id="S",
         scene_id="none_wave_abcd",
