@@ -83,6 +83,8 @@ def test_gray_transcode_command(
     expected += ["-r", "60", "-i", "in.mp4", "-map", "0:v:0", "-an"]
     if decode == "cpu" or crop is not None:
         expected += ["-vf", ("crop=32:32:0:0," if crop else "") + "format=gray,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"]
+    else:  # NVENC's AV1 takes 4:2:0 only: a 4:4:4 source (MAMMA's HEVC) is converted on the GPU
+        expected += ["-vf", "scale_cuda=format=yuv420p"]
     expected += [
         "-fps_mode",
         "passthrough",
@@ -131,7 +133,7 @@ def test_color_rescale_command(decode: Literal["cpu", "cuda"], ffmpeg_commands: 
     (command,) = ffmpeg_commands
     filters = command[command.index("-vf") + 1]
     if decode == "cuda":
-        assert filters == "scale_cuda=1920:1080"
+        assert filters == "scale_cuda=1920:1080:format=yuv420p"
     else:
         assert filters == "scale=1920:1080,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"
     assert "format=gray" not in filters
@@ -160,8 +162,8 @@ def test_nvdec_failure_falls_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setattr(video.subprocess, "run", run)
     video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode="cuda")
     assert len(commands) == 2
-    assert "-hwaccel" in commands[0] and "-vf" not in commands[0]
-    assert "-hwaccel" not in commands[1] and "-vf" in commands[1]
+    assert "-hwaccel" in commands[0] and commands[0][commands[0].index("-vf") + 1] == "scale_cuda=format=yuv420p"
+    assert "-hwaccel" not in commands[1] and "format=gray" in commands[1][commands[1].index("-vf") + 1]
     assert "NVDEC path failed (decoder failed); CPU decode" in capsys.readouterr().out
 
 
@@ -282,7 +284,7 @@ def test_session_failure_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: py
     with pytest.raises(RuntimeError, match="OpenEncodeSessionEx failed"):
         video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode="cuda")
     assert len(commands) == 6
-    assert all("-hwaccel" in command and "-vf" not in command for command in commands)
+    assert all("-hwaccel" in command and command[command.index("-vf") + 1] == "scale_cuda=format=yuv420p" for command in commands)
 
 
 def test_slot_released_after_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

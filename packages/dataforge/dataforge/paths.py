@@ -47,6 +47,10 @@ ACTIONS_LAYER: str = "actions"
 
 PROJECTIONS_LAYER: str = "projections"
 """Derived 2D: 3D keypoints projected through each camera's full lens model."""
+MASKS_LAYER: str = "masks"
+"""Shipped per-person segmentation masks, one image per camera and frame."""
+MARKERS_LAYER: str = "markers"
+"""Shipped motion-capture marker positions."""
 
 LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""
