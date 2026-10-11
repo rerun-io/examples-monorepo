@@ -23,7 +23,8 @@
   tar header walk is one random read per member (50 to 120 ms each under load). So a render sequence's shards are read in order
   first, 4 spans of 256 MB at a time, while the sequence before it converts; its header walk and member reads then come from the
   page cache. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each
-  shard's size and mtime. BEDLAM's discovery walks every batch's headers (4 batches at once) on its first run.
+  shard's size and mtime. BEDLAM's discovery walks every batch's headers (4 batches at once) on its first run; the one or two shards
+  holding a clip are read ahead the same way, and the clips after it mostly share them.
 - Body models: each person is posed with the neutral model whose forward gives back the shipped `joints3d` at its first labelled
   row. In a sample of one sequence per dataset directory, Interhand and MoYo were rendered with the locked-head neutral
   (`model` = `body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz`); Harmony4D, Inter-X, InteractionCouple, LatinDance10 and the BEDLAM
