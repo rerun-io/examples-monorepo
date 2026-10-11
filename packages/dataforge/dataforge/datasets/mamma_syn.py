@@ -8,7 +8,7 @@ release repacked) is the other family. The shards are read in place and never mo
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -39,7 +39,7 @@ from dataforge.datasets.mamma_layers import (
     write_body_pose,
     write_projections,
 )
-from dataforge.datasets.mamma_source import MammaCamera, PersonFit, SequenceLabels
+from dataforge.datasets.mamma_source import MammaCamera, PersonFit, SequenceLabels, SmplxModel
 from dataforge.datasets.mamma_syn_download import MAMMASYN_REPO, MAMMASYN_REVISION, fetch_proof, verify_syn
 from dataforge.datasets.mamma_syn_source import (
     BEDLAM_DATASET,
@@ -79,9 +79,12 @@ from dataforge.timing import SequenceTimer
 from dataforge.transports import HfFileInfo
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, work_dir
 
-JOINT_TOLERANCE_M: float = 1e-3
-"""Largest gap allowed between the shipped joints3d and the same joints posed from the shipped parameters. Measured on the
-release: 0.00 mm (the renders were made from exactly these parameters with the locked-head neutral)."""
+JOINT_TOLERANCE_M: float = 1e-4
+"""Largest gap allowed between the shipped joints3d and the same joints posed from the shipped parameters with the person's
+model. Measured on the release: under 0.001 mm with the right model, 0.58 mm or more with the other one."""
+MODEL_CANDIDATES: tuple[SmplxModel, ...] = ("locked_head_neutral", "v1_1_neutral")
+"""The neutral models MammaSyn's bodies were rendered with: the locked head (Interhand) or v1.1 (Inter-X, BEDLAM, ...); the
+shards do not say which, so each person takes the one whose forward gives back the shipped joints."""
 MESH_STRIDE: int = 1
 """Every frame keeps its mesh: at 6 fps a coarser stride would leave the body still for half a second."""
 
@@ -158,6 +161,20 @@ def read_cameras(  # noqa: UP047 — beartype requires legacy generics
 def person_ids(people: list[PersonFit]) -> list[int]:
     """Each person's index in the release (``person_NN``): the entity it is logged under and its instance mask value - 1."""
     return [int(person.subject.removeprefix("person_")) for person in people]
+
+
+def fit_model(body: SmplxBody, person: PersonFit, joints3d: Float64[ndarray, "t 127 3"], cam_T_body: Float64[ndarray, "t 4 4"] | None = None) -> PersonFit:
+    """``person`` with the candidate model whose forward is closest to the shipped joints at the first row it is present
+    (moved into the camera frame first when ``cam_T_body`` is given, as BEDLAM's joints are)."""
+    assert person.present is not None and person.present.any()  # MammaSyn fits always carry their presence
+    row: Int64[ndarray, "1"] = np.flatnonzero(person.present)[:1]
+    gaps: dict[SmplxModel, float] = {}
+    for model in MODEL_CANDIDATES:
+        posed: PosedPerson = body.pose(replace(person, model=model), row, mesh_stride=1)
+        if cam_T_body is not None:
+            posed = in_camera(posed, cam_T_body[row])
+        gaps[model] = float(np.abs(posed.joints[0, :127] - joints3d[row[0]]).max())
+    return replace(person, model=min(gaps, key=lambda model: gaps[model]))
 
 
 def check_joints(people: list[PersonFit], people_posed: list[PosedPerson], joints3d: list[Float64[ndarray, "t 127 3"]]) -> float:
@@ -343,8 +360,9 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                 self.body = SmplxBody(self.config.model_root)
             body: SmplxBody = self.body
             with self.timer.stage("smplx"):
-                posed: list[PosedPerson] = [body.pose(person, clock.rows, mesh_stride=MESH_STRIDE) for person in labels.people]
-                joint_error_m: float = check_joints(labels.people, posed, labels.joints3d)
+                people: list[PersonFit] = [fit_model(body, person, joints) for person, joints in zip(labels.people, labels.joints3d, strict=True)]
+                posed: list[PosedPerson] = [body.pose(person, clock.rows, mesh_stride=MESH_STRIDE) for person in people]
+                joint_error_m: float = check_joints(people, posed, labels.joints3d)
             if paths.BASE_LAYER in pending:
                 with (
                     self.timer.stage(f"write:{paths.BASE_LAYER}"),
@@ -358,10 +376,8 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                     write_render_base(
                         recording, identity, source, labels, reads, work, shard_samples=len(samples), joint_error_m=joint_error_m, timer=self.timer
                     )
-        sequence_labels: SequenceLabels = SequenceLabels(
-            name=source.directory.name, fps=RENDER_FPS, frames=len(labels.frames), method="mamma_render", people=labels.people
-        )
-        ids: list[int] = person_ids(labels.people)
+        sequence_labels: SequenceLabels = SequenceLabels(name=source.directory.name, fps=RENDER_FPS, frames=len(labels.frames), method="mamma_render", people=people)
+        ids: list[int] = person_ids(people)
         self.write_layers(
             identity,
             targets,
@@ -431,7 +447,7 @@ def write_bedlam_base(
     rr.log("/", annotation_context(), static=True, recording=recording)
     log_rig_node(recording, 1, reference=None, num_cameras=1, name="camera", kind="ego")
     rr.log(schema.cam_path(1, 0), rr.AnyValues(name="camera", kind="rgb", camera_model="pinhole"), static=True, recording=recording)
-    rr.log(schema.cam_path(1, 0), rr.Transform3D(translation=np.zeros(3), mat3x3=np.eye(3), from_parent=True), static=True, recording=recording)
+    rr.log(schema.cam_path(1, 0), rr.Transform3D(translation=[0.0, 0.0, 0.0]), static=True, recording=recording)  # the world is this camera
     # K changes every frame on a zoom clip, so it is temporal; the resolution rides in the same rows (Rerun 0.38.1 reports an
     # "invalid pinhole resolution" for a temporal K beside a static resolution). A static K would hide the per-frame one.
     rr.log(
@@ -549,10 +565,14 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
                 self.body = SmplxBody(self.config.model_root)
             body: SmplxBody = self.body
             with self.timer.stage("smplx"):
-                posed: list[PosedPerson] = [
-                    in_camera(body.pose(person, clock.rows, mesh_stride=MESH_STRIDE), transforms) for person, transforms in zip(labels.people, labels.cam_T_body, strict=True)
+                people: list[PersonFit] = [
+                    fit_model(body, person, joints, transforms) for person, joints, transforms in zip(labels.people, labels.joints3d, labels.cam_T_body, strict=True)
                 ]
-                joint_error_m: float = check_joints(labels.people, posed, labels.joints3d)
+                labels = replace(labels, people=people)
+                posed: list[PosedPerson] = [
+                    in_camera(body.pose(person, clock.rows, mesh_stride=MESH_STRIDE), transforms) for person, transforms in zip(people, labels.cam_T_body, strict=True)
+                ]
+                joint_error_m: float = check_joints(people, posed, labels.joints3d)
             if paths.BASE_LAYER in pending:
                 with (
                     self.timer.stage(f"write:{paths.BASE_LAYER}"),

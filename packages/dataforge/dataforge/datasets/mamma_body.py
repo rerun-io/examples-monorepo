@@ -101,11 +101,16 @@ class SmplxBody:
         self.model_root: Path = model_root
         with np.load(MODEL_FILES["locked_head_neutral"].local(model_root), allow_pickle=False) as model:
             self.faces: UInt32[ndarray, "20908 3"] = model["f"].astype(np.uint32)  # every SMPL-X file shares this topology
+        self.layers: dict[tuple[SmplxModel, bool, int], torch.nn.Module] = {}
+        """Layers by (model, flat hand mean, betas): loading one costs 0.35 s, a 26-frame forward 0.02 s."""
 
-    def pose(self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE) -> PosedPerson:
-        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row."""
+    def layer(self, person: PersonFit) -> torch.nn.Module:
+        """The smplx layer for ``person``'s settings; one of its own when it carries a template, which replaces the model's."""
         import smplx
 
+        key: tuple[SmplxModel, bool, int] = (person.model, person.flat_hand_mean, len(person.betas))
+        if person.v_template is None and key in self.layers:
+            return self.layers[key]
         layer = smplx.create(
             str(MODEL_FILES[person.model].local(self.model_root)),
             model_type="smplx",
@@ -117,6 +122,13 @@ class SmplxBody:
             use_face_contour=True,
             v_template=None if person.v_template is None else torch.from_numpy(person.v_template.astype(np.float32)),
         )
+        if person.v_template is None:
+            self.layers[key] = layer
+        return layer
+
+    def pose(self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE) -> PosedPerson:
+        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row."""
+        layer: torch.nn.Module = self.layer(person)
         present: Bool[ndarray, "t"] = np.ones(len(rows), dtype=bool) if person.present is None else person.present[rows]
         posed: Int64[ndarray, "p"] = np.flatnonzero(present)
         mesh_rows: Int64[ndarray, "k"] = np.flatnonzero(rows % mesh_stride == 0)

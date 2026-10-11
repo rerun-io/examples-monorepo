@@ -18,6 +18,7 @@ from dataforge import paths, schema
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import MODEL_FILES
+from dataforge.datasets.mamma_source import SmplxModel
 from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset
 
 pytestmark = pytest.mark.integration
@@ -40,9 +41,13 @@ def body_params(person: int, frame: int) -> tuple[np.ndarray, np.ndarray, np.nda
     return pose, np.full(16, 0.1 * person), trans
 
 
-def shipped_joints(pose: np.ndarray, betas: np.ndarray, trans: np.ndarray) -> np.ndarray:
-    """The render's joints3d: the locked-head neutral's 127 joints (no face contour), flat hand mean, world frame."""
-    model = smplx.create(str(MODEL_FILES["locked_head_neutral"].local(MODEL_ROOT)), model_type="smplx", use_pca=False, flat_hand_mean=True, num_betas=16)
+RENDER_MODELS: tuple[SmplxModel, SmplxModel] = ("locked_head_neutral", "v1_1_neutral")
+"""The model each person was rendered with: MAMMA's datasets use one or the other (Interhand the locked head, Inter-X v1.1)."""
+
+
+def shipped_joints(person: int, pose: np.ndarray, betas: np.ndarray, trans: np.ndarray) -> np.ndarray:
+    """The render's joints3d: the person's model's 127 joints (no face contour), flat hand mean, world frame."""
+    model = smplx.create(str(MODEL_FILES[RENDER_MODELS[person]].local(MODEL_ROOT)), model_type="smplx", use_pca=False, flat_hand_mean=True, num_betas=16)
     tensor: torch.Tensor = torch.from_numpy(pose[None].astype(np.float32))
     with torch.no_grad():
         output = model(
@@ -78,7 +83,7 @@ def write_sequence(root: Path, *, joint_error_m: float = 0.0) -> Path:
     directory: Path = root / "MammaSyn" / "MammaSyn-Hands" / DATASET / SEQUENCE
     directory.mkdir(parents=True)
     joints: dict[tuple[int, int], np.ndarray] = {
-        (person, frame): shipped_joints(*body_params(person, frame)) for person in (0, 1) for frame in FRAMES
+        (person, frame): shipped_joints(person, *body_params(person, frame)) for person in (0, 1) for frame in FRAMES
     }
     members: list[tuple[str, bytes]] = []
     for name, (width, height) in CAMERAS.items():
@@ -169,7 +174,9 @@ def test_a_render_sequence_converts_onto_its_source_frames(tmp_path: Path, nvenc
             assert np.isnan(stored[1]).all()  # absent at frame 1
             shipped, stored = shipped[[0, 2]], stored[[0, 2]]
         np.testing.assert_array_equal(stored, shipped)
-        assert static_values(pose, schema.person_path(person))["source"] == "synthetic_gt"
+        values = static_values(pose, schema.person_path(person))
+        assert values["source"] == "synthetic_gt"
+        assert values["model"] == MODEL_FILES[RENDER_MODELS[person]].path  # the model whose forward gives the shipped joints back
 
     mesh = read_back(targets["body_mesh"])
     rows = column_rows(mesh, f"{schema.person_body_path(1, 'mesh')}:Mesh3D:vertex_positions")
