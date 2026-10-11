@@ -60,6 +60,7 @@ from dataforge.datasets.mamma_syn_source import (
     assemble_render,
     discover_bedlam,
     discover_renders,
+    read_ahead,
     read_bedlam_view,
     read_metadata,
     read_render_view,
@@ -336,8 +337,10 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
         return pairs
 
     def prefetch(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> None:
-        """Index the shard headers of a sequence still to convert while the one before it converts (about 3 s per shard over NFS)."""
+        """Read the shards of a sequence still to convert into the page cache and index them while the one before it converts: a
+        tar header walk over NFS is one random read per member, so the shards are read in order first (``read_ahead``)."""
         if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
+            read_ahead(source.shards)
             sequence_samples(source.directory, self.config.index_root, identity.sequence_key)
 
     def convert(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> Path:
@@ -346,6 +349,7 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
         if not pending:
             return targets[paths.BASE_LAYER]
         with self.timer.stage("read"):
+            read_ahead(source.shards)  # from the page cache when prefetched
             samples: list[SynSample] = sequence_samples(source.directory, self.config.index_root, identity.sequence_key)
             shipped: SynMetadata = read_metadata(source.metadata)
         if shipped.num_samples != len(samples):

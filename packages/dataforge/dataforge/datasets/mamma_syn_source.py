@@ -37,6 +37,11 @@ RENDER_FPS: int = 6
 
 MEMBER_KINDS: tuple[str, ...] = ("png", "mask.png", "data.pyd")
 """The three members of every sample: render, instance mask, labels."""
+READ_STREAMS: int = 4
+"""Spans of a sequence's shards read at once ahead of its convert. Measured on the NAS (2026-10-11): sequential reads give about
+180 MB/s with 1 stream, 340 with 4, 300 with 8; random reads (a tar header walk, member by member) about 250 per second."""
+READ_SPAN: int = 256 << 20
+"""Bytes of a shard one stream reads in order."""
 PICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
     {(module, name) for module in ("numpy.core.multiarray", "numpy._core.multiarray") for name in ("_reconstruct", "scalar")}
     | {("numpy", "dtype"), ("numpy", "ndarray")}
@@ -162,6 +167,22 @@ def index_shards(shards: list[Path]) -> list[SynSample]:
             raise ValueError(f"{shard_of[(camera, frame)]}: sample {camera}/{frame:04d} has no {', '.join(missing)}")
         samples.append(SynSample(camera, frame, found["png"], found["mask.png"], found["data.pyd"]))
     return samples
+
+
+def read_ahead(shards: list[Path]) -> None:
+    """Read ``shards`` once in order, ``READ_STREAMS`` spans at a time, so the page cache serves their members and headers after."""
+
+    def read_span(span: tuple[Path, int]) -> None:
+        buffer: bytearray = bytearray(8 << 20)
+        with span[0].open("rb", buffering=0) as stream:
+            stream.seek(span[1])
+            left: int = READ_SPAN
+            while left > 0 and (count := stream.readinto(memoryview(buffer)[: min(len(buffer), left)])):
+                left -= count
+
+    spans: list[tuple[Path, int]] = [(shard, start) for shard in shards for start in range(0, shard.stat().st_size, READ_SPAN)]
+    with ThreadPoolExecutor(max_workers=READ_STREAMS) as executor:
+        list(executor.map(read_span, spans))
 
 
 def read_member(directory: Path, member: ShardMember) -> bytes:

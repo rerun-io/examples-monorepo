@@ -17,9 +17,13 @@
   of the people that view labels). The pickles refer to numpy arrays and scalars only; they are read with an unpickler that
   refuses anything else.
 - A render key is `.../<sequence>/<camera>/<frame>`; within a camera the frames ascend, and a camera may straddle shards. A
-  BEDLAM key is `.../png/<clip>/<clip>_<frame>`, the clips' samples unsorted in their batch's shards. Discovery reads every
-  shard's headers once (about 3 s per shard over NFS) and caches the index as JSON under `--index-root` (local disk), keyed by
-  each shard's size and mtime.
+  BEDLAM key is `.../png/<clip>/<clip>_<frame>`, the clips' samples unsorted in their batch's shards. Within a render shard each
+  camera is one run, a sample's members in the order labels, render, mask.
+- Reading over NFS: the NAS gives about 340 MB/s to 4 sequential streams (180 to one) and about 250 random reads per second, and a
+  tar header walk is one random read per member (50 to 120 ms each under load). So a render sequence's shards are read in order
+  first, 4 spans of 256 MB at a time, while the sequence before it converts; its header walk and member reads then come from the
+  page cache. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each
+  shard's size and mtime. BEDLAM's discovery walks every batch's headers (4 batches at once) on its first run.
 - Body models: each person is posed with the neutral model whose forward gives back the shipped `joints3d` at its first labelled
   row. In a sample of one sequence per dataset directory, Interhand and MoYo were rendered with the locked-head neutral
   (`model` = `body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz`); Harmony4D, Inter-X, InteractionCouple, LatinDance10 and the BEDLAM
