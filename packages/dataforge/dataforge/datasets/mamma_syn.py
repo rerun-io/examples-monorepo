@@ -20,11 +20,11 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 
-from dataforge import blueprints, hands, paths, schema, writing
+from dataforge import blueprints, hands, paths, schema, transports, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.mamma import FAMILY_PANES, FAMILY_RIGS, MammaConfig, layout, scene_view
-from dataforge.datasets.mamma_body import PosedPerson, SmplxBody
+from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models
 from dataforge.datasets.mamma_layers import (
     MASK_DOWNSCALE,
     MASK_WORKERS,
@@ -40,16 +40,19 @@ from dataforge.datasets.mamma_layers import (
     write_projections,
 )
 from dataforge.datasets.mamma_source import MammaCamera, PersonFit, SequenceLabels
+from dataforge.datasets.mamma_syn_download import MAMMASYN_REPO, MAMMASYN_REVISION, fetch_proof, verify_syn
 from dataforge.datasets.mamma_syn_source import (
     BEDLAM_DATASET,
     BEDLAM_NUMBERING_FPS,
     RENDER_FPS,
+    SYN_DIR,
     BedlamClip,
     BedlamLabels,
     BedlamView,
     RenderLabels,
     RenderView,
     ShardReader,
+    SynFamily,
     SynMetadata,
     SynSample,
     SynSequence,
@@ -73,6 +76,7 @@ from dataforge.logging_toolkit import (
     time_column,
 )
 from dataforge.timing import SequenceTimer
+from dataforge.transports import HfFileInfo
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, work_dir
 
 JOINT_TOLERANCE_M: float = 1e-3
@@ -261,6 +265,28 @@ def write_instance_masks(
             log_person_masks(recording, rig, person, stored, size, blobs, [time_column(clock.times_ns), frame_index_column(clock.frames)])
 
 
+def syn_download(config: MammaConfig, family: SynFamily, selected: Callable[[], list[tuple[Path, list[SynSample]]]]) -> None:
+    """Fetch the SMPL-X models and verify the family's shards in place against the pinned Hub listing; with ``fetch_into``,
+    fetch the shards holding the chosen sequences (``selected``: each one's directory and samples) and compare them."""
+    fetched: int = fetch_models(config.model_root)
+    listing: list[HfFileInfo] = transports.hf_list_files(MAMMASYN_REPO, MAMMASYN_REVISION)
+    files, problems = verify_syn(config.root, family, listing)
+    print(f"{config.name} download: {files} shard and metadata files verified in place under {config.root / SYN_DIR}; {fetched} SMPL-X file(s) fetched")
+    if config.fetch_into is not None:
+        if config.sequences is None:
+            raise ValueError("--fetch-into proves the Hub download on chosen sequences: name them with --sequences (MammaSyn is 6.63 TB)")
+        paths.require_outside([config.fetch_into], roots=[paths.NAS_ROOT, config.root])
+        for directory, samples in selected():
+            shards: list[str] = sorted({member.shard for sample in samples for member in (sample.image, sample.mask, sample.labels)})
+            mismatches: list[str] = fetch_proof(config.root, directory, shards, config.fetch_into)
+            problems += mismatches
+            print(f"  fetched {len(shards)} shard(s) of {directory.name} from the Hub: {mismatches or 'identical to the release copy'}")
+    for problem in problems:
+        print(f"  problem: {problem}")
+    if problems:
+        raise ValueError(f"{config.name}: {len(problems)} problem(s), listed above")
+
+
 class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
     """Convert one MammaSyn sequence at a time from the shards in place."""
 
@@ -271,7 +297,13 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
         self.body: SmplxBody | None = None
 
     def download(self) -> None:
-        raise NotImplementedError("mamma syn download: not written yet")
+        syn_download(
+            self.config,
+            "syn",
+            lambda: [
+                (sequence.directory, sequence_samples(sequence.directory, self.config.index_root, identity.sequence_key)) for identity, sequence in self.discover()
+            ],
+        )
 
     def discover(self) -> list[tuple[SequenceIdentity, SynSequence]]:
         found, skipped = discover_renders(self.config.root)
@@ -486,7 +518,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         self.body: SmplxBody | None = None
 
     def download(self) -> None:
-        raise NotImplementedError("mamma syn-bedlam download: not written yet")
+        syn_download(self.config, "syn-bedlam", lambda: [(clip.directory, clip.samples) for _, clip in self.discover()])
 
     def discover(self) -> list[tuple[SequenceIdentity, BedlamClip]]:
         batches: set[str] | None = None if self.config.sequences is None else {key.split("/")[0] for key in self.config.sequences}
