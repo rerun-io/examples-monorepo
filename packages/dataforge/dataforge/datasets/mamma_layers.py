@@ -23,7 +23,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from dataforge import hands, meshes, paths, schema, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson
-from dataforge.datasets.mamma_source import MARKER_FILES, MammaCamera, MammaSequence, Method, SequenceLabels
+from dataforge.datasets.mamma_source import MARKER_FILES, MammaCamera, MammaSequence, Method, PersonFit, SequenceLabels
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     annotation_context,
@@ -57,7 +57,9 @@ MASK_DOWNSCALE: int = 4
 needs no more, and at the video's size they would weigh as much as the video."""
 MASK_WORKERS: int = 16
 """Threads re-encoding mask PNGs. Decoding the shipped PNG is the whole cost (~11 ms at 2056x1504, ~40 ms at eval Singles'
-12 MP) and OpenCV releases the GIL for it: 16 threads cut it 6.6x. Processes lose to their start-up (each imports torch)."""
+12 MP) and OpenCV releases the GIL for it: 16 threads cut it 6.6x. Processes lose to their start-up (each imports torch). The
+pools run OpenCV single-threaded (``cv2.setNumThreads(1)``): otherwise each worker's ``cv2.resize`` starts an OpenMP team of
+its own, and the threads spin in system time (2.3x slower on MammaSyn masks, the same bytes)."""
 PERSON_COLOURS: list[tuple[int, int, int]] = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240)]
 """Mask colour of each person, cycled."""
 MASK_OPACITY: float = 0.5
@@ -228,18 +230,20 @@ def write_base(
     )
 
 
-def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed: list[PosedPerson], clock: Clock, ids: list[int] | None = None) -> None:
+def write_body_pose(
+    recording: rr.RecordingStream, people: list[PersonFit], method: Method, posed: list[PosedPerson], clock: Clock, ids: list[int] | None = None
+) -> None:
     """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model; NaN rows where
     a person is absent. ``ids`` names each person's entity (default: the list order; MammaSyn: the release's person index)."""
     indexes: list[rr.TimeColumn] = clock.indexes
-    for index, person, pose in zip(ids or range(len(posed)), labels.people, posed, strict=True):
+    for index, person, pose in zip(ids or range(len(posed)), people, posed, strict=True):
         rr.log(
             schema.person_path(index),
             rr.AnyValues(
                 subject=person.subject,
                 gender=person.gender,
-                source=SOURCE_TAGS[labels.method],
-                fit_method=labels.method,
+                source=SOURCE_TAGS[method],
+                fit_method=method,
                 model=MODEL_FILES[person.model].path,
             ),
             static=True,
@@ -306,15 +310,13 @@ def write_projections(
     posed: list[PosedPerson],
     clock: Clock,
     *,
+    camera_model: str,
     calibration_source: str,
     ids: list[int] | None = None,
 ) -> None:
     """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels; ``ids`` names
     each person's entity (default: the list order)."""
-    models: list[str] = sorted({"pinhole" if camera.lens is None else "vicon_radial_2" for camera in cameras})
-    recording.send_property(
-        paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=", ".join(models), calibration_source=calibration_source)
-    )
+    recording.send_property(paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source))
     for rig, camera in enumerate(cameras, start=1):
         scale: float = stored_size(camera.width, camera.height)[0] / camera.width
         for index, pose in zip(ids or range(len(posed)), posed, strict=True):
@@ -387,6 +389,7 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
         ),
     )
     indexes: list[rr.TimeColumn] = clock.indexes
+    cv2.setNumThreads(1)  # see MASK_WORKERS
     with ThreadPoolExecutor(max_workers=MASK_WORKERS) as executor:
         for rig, camera in enumerate(cameras, start=1):
             stored: tuple[int, int] = stored_size(camera.width, camera.height)

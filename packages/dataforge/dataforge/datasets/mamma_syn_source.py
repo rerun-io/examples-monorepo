@@ -8,7 +8,6 @@ one camera per clip. See ``docs/mamma.md``.
 """
 
 import io
-import json
 import os
 import pickle
 import tarfile
@@ -23,10 +22,11 @@ import numpy as np
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from serde import serde
-from serde.json import from_json, to_json
+from serde.json import to_json
 
 from dataforge import writing
 from dataforge.datasets.mamma_source import Gender, MammaCamera, PersonFit, decode
+from dataforge.records import read_json
 
 SynFamily: TypeAlias = Literal["syn", "syn-bedlam"]
 SYN_DIR: str = "MammaSyn"
@@ -83,16 +83,6 @@ class SynMetadata:
     format: str
     num_samples: int
     """Camera-view samples in the directory's shards."""
-
-
-def read_metadata(path: Path) -> SynMetadata:
-    try:
-        values: object = json.loads(path.read_text())
-    except json.JSONDecodeError as error:
-        raise ValueError(f"{path}: {error}") from error
-    if not isinstance(values, dict):
-        raise ValueError(f"{path}: not a JSON object")
-    return decode(SynMetadata, path, values)
 
 
 def discover_renders(root: Path) -> tuple[list[SynSequence], list[tuple[Path, str]]]:
@@ -170,20 +160,23 @@ def index_shards(shards: list[Path]) -> list[SynSample]:
     return samples
 
 
-def stage_shards(shards: list[Path], into: Path) -> list[Path]:
+def stage_shards(shards: list[Path], into: Path) -> None:
     """Copy ``shards`` into ``into`` in order, ``READ_STREAMS`` spans of ``READ_SPAN`` at a time, each copy keeping its shard's size
-    and mtime (the stamps the index cache is keyed on); a copy already there with them is kept. Returns the copies.
+    and mtime (the stamps the index cache is keyed on); a copy already there with them is kept.
 
     A sequence is read from a local copy because a header walk over NFS is one random read per member, and the page cache does
     not keep a read-ahead: on dl-server kswapd reclaims it within seconds while the convert's encoders run, with memory free.
     """
     into.mkdir(parents=True, exist_ok=True)
-    pending: list[Path] = [
-        shard for shard in shards if not ((copy := into / shard.name).is_file() and copy.stat().st_size == shard.stat().st_size and copy.stat().st_mtime_ns == shard.stat().st_mtime_ns)
-    ]
-    for shard in pending:
-        with (into / f".{shard.name}.part").open("wb") as created:
-            created.truncate(shard.stat().st_size)
+    stats: dict[Path, os.stat_result] = {shard: shard.stat() for shard in shards}
+    pending: list[Path] = []
+    for shard, stat in stats.items():
+        copy: Path = into / shard.name
+        kept: os.stat_result | None = copy.stat() if copy.is_file() else None
+        if kept is None or (kept.st_size, kept.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+            pending.append(shard)
+            with (into / f".{shard.name}.part").open("wb") as created:
+                created.truncate(stat.st_size)
 
     def copy_span(span: tuple[Path, int]) -> None:
         shard, start = span
@@ -196,28 +189,46 @@ def stage_shards(shards: list[Path], into: Path) -> list[Path]:
                 target.write(memoryview(buffer)[:count])
                 left -= count
 
-    spans: list[tuple[Path, int]] = [(shard, start) for shard in pending for start in range(0, shard.stat().st_size, READ_SPAN)]
+    spans: list[tuple[Path, int]] = [(shard, start) for shard in pending for start in range(0, stats[shard].st_size, READ_SPAN)]
     with ThreadPoolExecutor(max_workers=READ_STREAMS) as executor:
         list(executor.map(copy_span, spans))
     for shard in pending:
         part: Path = into / f".{shard.name}.part"
-        stat = shard.stat()
-        os.utime(part, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        os.utime(part, ns=(stats[shard].st_atime_ns, stats[shard].st_mtime_ns))
         part.rename(into / shard.name)
-    return [into / shard.name for shard in shards]
 
 
-def read_member(directory: Path, member: ShardMember) -> bytes:
-    """One member's bytes from the shard in ``directory``."""
+READ_GAP: int = 1 << 20
+"""Bytes of other members a read runs through rather than seek past: a seek on the NAS costs more than reading ~1 MB."""
+
+
+def read_members(directory: Path, members: list[ShardMember]) -> dict[tuple[str, int], bytes]:
+    """``members`` read into memory in shard order, keyed by (shard, offset): members less than ``READ_GAP`` apart come in one
+    read, so a BEDLAM clip, whose samples lie in a few runs of its batch's shards, costs a few reads instead of three per sample."""
+    runs: list[list[ShardMember]] = []
+    for member in sorted(members, key=lambda member: (member.shard, member.offset)):
+        last: ShardMember | None = runs[-1][-1] if runs else None
+        if last is not None and last.shard == member.shard and member.offset - (last.offset + last.size) <= READ_GAP:
+            runs[-1].append(member)
+        else:
+            runs.append([member])
+    found: dict[tuple[str, int], bytes] = {}
     with ShardReader(directory) as reader:
-        return reader.read(member)
+        for run in runs:
+            start: int = run[0].offset
+            payload: bytes = reader.read(ShardMember(run[0].shard, start, max(member.offset + member.size for member in run) - start))
+            for member in run:
+                found[(member.shard, member.offset)] = payload[member.offset - start : member.offset - start + member.size]
+    return found
 
 
 class ShardReader:
-    """Reads members from a sequence's shards, each shard opened once (an open per member would cost the NAS an NFS lookup)."""
+    """Reads members from a sequence's shards, each shard opened once (an open per member would cost the NAS an NFS lookup), or
+    from ``members`` already read (``read_members``)."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, members: dict[tuple[str, int], bytes] | None = None) -> None:
         self.directory: Path = directory
+        self.members: dict[tuple[str, int], bytes] | None = members
         self.stack: ExitStack = ExitStack()
         self.streams: dict[str, BinaryIO] = {}
 
@@ -228,6 +239,8 @@ class ShardReader:
         self.stack.close()
 
     def read(self, member: ShardMember) -> bytes:
+        if self.members is not None:
+            return self.members[(member.shard, member.offset)]
         stream: BinaryIO | None = self.streams.get(member.shard)
         if stream is None:
             stream = self.streams[member.shard] = self.stack.enter_context((self.directory / member.shard).open("rb"))
@@ -259,13 +272,14 @@ class ShardIndex:
 
 def sequence_samples(directory: Path, index_root: Path, key: str) -> list[SynSample]:
     """The samples of the shards in ``directory``, from the index cached at ``index_root/<key>.json`` unless a shard changed."""
-    stamps: list[ShardStamp] = [ShardStamp(shard.name, (stat := shard.stat()).st_size, stat.st_mtime_ns) for shard in sorted(directory.glob("*.tar"))]
+    shards: list[Path] = sorted(directory.glob("*.tar"))
+    stamps: list[ShardStamp] = [ShardStamp(shard.name, (stat := shard.stat()).st_size, stat.st_mtime_ns) for shard in shards]
     cache: Path = index_root / f"{key}.json"
     if cache.is_file():
-        index: ShardIndex = from_json(ShardIndex, cache.read_text())
+        index: ShardIndex = read_json(cache, ShardIndex)
         if index.shards == stamps:
             return index.samples
-    samples: list[SynSample] = index_shards(sorted(directory.glob("*.tar")))
+    samples: list[SynSample] = index_shards(shards)
     with writing.atomic_write(cache) as temp:
         temp.write_text(to_json(ShardIndex(stamps, samples)))
     return samples
@@ -337,6 +351,8 @@ class RenderLabels:
     """Each person's shipped joints over the rows, NaN where absent."""
     cameras: list[MammaCamera]
     """The fixed cameras, in name order (pinhole: a render has no lens)."""
+    ids: list[int]
+    """Each person's index in the release: the entity it is logged under (``person_NN``) and its instance mask value - 1."""
 
 
 def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) -> RenderLabels:
@@ -362,7 +378,8 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
 
     people: list[PersonFit] = []
     joints3d: list[Float64[ndarray, "t 127 3"]] = []
-    for key in sorted({key for view in views for key in view.people}):
+    ids: list[int] = sorted({key for view in views for key in view.people})
+    for key in ids:
         pose: Float64[ndarray, "t 165"] = np.zeros((len(frames), 165))
         trans: Float64[ndarray, "t 3"] = np.zeros((len(frames), 3))
         joints: Float64[ndarray, "t 127 3"] = np.full((len(frames), 127, 3), np.nan)
@@ -398,7 +415,7 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
             )
         )
         joints3d.append(joints)
-    return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras)
+    return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras, ids=ids)
 
 
 @serde
@@ -512,6 +529,8 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
 
 BEDLAM_NUMBERING_FPS: int = 30
 """BEDLAM numbers its frames at its 30 fps render rate and ships every 5th: frame N is at N / 30 s, samples 6 Hz apart."""
+BEDLAM_STRIDE: int = BEDLAM_NUMBERING_FPS // RENDER_FPS
+"""Numbered frames between two shipped BEDLAM samples."""
 INDEX_WORKERS: int = 4
 """Batches whose shard headers are read at once on the first discovery (about 3 s per shard over NFS; cached after)."""
 
@@ -546,7 +565,7 @@ def discover_bedlam(root: Path, index_root: Path, batches: set[str] | None = Non
     problems: list[str] = []
     with ThreadPoolExecutor(max_workers=INDEX_WORKERS) as executor:
         for directory, samples in executor.map(index, directories):
-            declared: int = read_metadata(directory / "metadata.json").num_samples
+            declared: int = read_json(directory / "metadata.json", SynMetadata).num_samples
             if declared != len(samples):
                 problems.append(f"{directory}: {len(samples)} samples in the shards, metadata.json declares {declared}")
                 continue

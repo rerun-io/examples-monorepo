@@ -26,7 +26,8 @@
   cache cannot stand in for the copy: on dl-server kswapd reclaimed a read-ahead within seconds while the encoders ran, with
   70 GB free. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each shard's
   size and mtime, which the copies keep. BEDLAM's discovery walks every batch's headers over NFS (4 batches at once) on its
-  first run; a clip's members are read in place.
+  first run; while one clip converts, the next clip's members are read into memory in shard order, members less than 1 MB apart
+  in one read (a clip lies in a few runs of its batch's shards).
 - Body models: each person is posed with the neutral model whose forward gives back the shipped `joints3d` at its first labelled
   row. In a sample of one sequence per dataset directory, Interhand and MoYo were rendered with the locked-head neutral
   (`model` = `body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz`); Harmony4D, Inter-X, InteractionCouple, LatinDance10 and the BEDLAM

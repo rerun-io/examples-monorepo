@@ -15,12 +15,14 @@ from dataforge.datasets.mamma_syn_source import (
     BedlamView,
     RenderLabels,
     RenderView,
+    ShardMember,
+    ShardReader,
     SynSample,
     assemble_bedlam,
     assemble_render,
     index_shards,
     read_bedlam_view,
-    read_member,
+    read_members,
     read_render_view,
     sequence_samples,
     stage_shards,
@@ -39,6 +41,11 @@ def write_shard(path: Path, members: list[tuple[str, bytes]]) -> Path:
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
     return path
+
+
+def read_member(directory: Path, member: ShardMember) -> bytes:
+    with ShardReader(directory) as reader:
+        return reader.read(member)
 
 
 def sample_members(key: str) -> list[tuple[str, bytes]]:
@@ -70,10 +77,35 @@ def test_staged_shards_are_identical_copies_the_cached_index_still_describes(tmp
     first: Path = write_shard(nas / "000000.tar", [member for frame in (0, 1) for member in sample_members(f"{RENDER_PREFIX}/IOI_01/{frame:04d}")])
     second: Path = write_shard(nas / "000001.tar", sample_members(f"{RENDER_PREFIX}/IOI_01/0003"))
     indexed: list[SynSample] = sequence_samples(nas, tmp_path / "index", "sequence")
-    staged: list[Path] = stage_shards([first, second], tmp_path / "stage")
-    assert [path.read_bytes() for path in staged] == [first.read_bytes(), second.read_bytes()]
+    stage_shards([first, second], tmp_path / "stage")
+    assert [(tmp_path / "stage" / shard.name).read_bytes() for shard in (first, second)] == [first.read_bytes(), second.read_bytes()]
     assert sequence_samples(tmp_path / "stage", tmp_path / "index", "sequence") == indexed
     assert read_member(tmp_path / "stage", indexed[2].labels) == f"{RENDER_PREFIX}/IOI_01/0003 data.pyd".encode()
+
+
+def test_members_read_ahead_in_runs_are_the_members_read_one_by_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A BEDLAM clip's samples lie in a few runs of its batch's shards, between other clips' samples; adjacent members come in one read.
+    # These tiny members sit ~2 kB apart (long-name tar headers); another clip's sample between two is a gap of ~8 kB.
+    monkeypatch.setattr(mamma_syn_source, "READ_GAP", 4096)
+    order: list[tuple[str, int]] = [("seq_000000", 0), ("seq_000000", 5), ("seq_000001", 0), ("seq_000000", 10)]
+    write_shard(tmp_path / "000000.tar", [member for clip, frame in order for member in sample_members(f"{BEDLAM_PREFIX}/{clip}/{clip}_{frame:04d}")])
+    write_shard(tmp_path / "000001.tar", sample_members(f"{BEDLAM_PREFIX}/seq_000000/seq_000000_0015"))
+    clip: list[SynSample] = [sample for sample in index_shards(sorted(tmp_path.glob("*.tar"))) if sample.camera == "seq_000000"]
+    members: list[ShardMember] = [member for sample in clip for member in (sample.labels, sample.image, sample.mask)]
+    reads: list[ShardMember] = []
+    original = ShardReader.read
+
+    def counted(reader: ShardReader, member: ShardMember) -> bytes:
+        reads.append(member)
+        return original(reader, member)
+
+    monkeypatch.setattr(ShardReader, "read", counted)
+    read: dict[tuple[str, int], bytes] = read_members(tmp_path, members)
+    monkeypatch.setattr(ShardReader, "read", original)
+    assert len(read) == len(members) == 12
+    assert [member.shard for member in reads] == ["000000.tar", "000000.tar", "000001.tar"]  # frames 0 and 5 in one read, 10, 15
+    with ShardReader(tmp_path, read) as cached:
+        assert [cached.read(member) for member in members] == [read_member(tmp_path, member) for member in members]
 
 
 def test_bedlam_shards_index_each_clip_as_its_own_camera(tmp_path: Path) -> None:

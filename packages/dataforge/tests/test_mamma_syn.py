@@ -297,6 +297,9 @@ def test_a_bedlam_clip_converts_in_its_camera_frame(tmp_path: Path, nvenc_ffmpeg
     pairs = dataset.discover()
     assert [identity.recording_id for identity, _ in pairs] == [f"mamma-syn-bedlam__{BATCH}__seq_000000", f"mamma-syn-bedlam__{BATCH}__seq_000001"]
     identity, clip = pairs[0]
+    dataset.prefetch(identity, clip, force=False)  # the runner reads the next clip's members while one converts
+    for shard in clip.directory.glob("*.tar"):
+        shard.rename(shard.with_suffix(".moved"))  # the convert reads the clip from the prefetch alone
     dataset.convert(identity, clip, force=False)
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
     assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])
