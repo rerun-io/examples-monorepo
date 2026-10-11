@@ -55,8 +55,10 @@ pixi run -e dataforge dataforge-convert mamma --family syn-bedlam --root /mnt/na
   shard of BEDLAM clip `20221024_10_100_batch01handhair_zoom_suburb_d/seq_000000` came back identical.
 - Every sequence's samples must number what its `metadata.json` declares, or it fails; a BEDLAM batch that does not fails the
   family's discovery, naming the batch. One render directory,
-  `interactions_couple_1_C_200_00_contact/be_TyJqNcw9QoeT_seq_000161`, has shards and no `metadata.json` (on the Hub too): it is
-  skipped and reported.
+  `interactions_couple_1_C_200_00_contact/be_TyJqNcw9QoeT_seq_000161`, has shards and no `metadata.json` (on the Hub too), and two
+  ship empty (one 1 KiB empty tar, `num_samples: 0`: `interactions_couple_1_C_200_00_contact/be_TyJqNcw9QoeT_seq_000148`,
+  `latindance10_1_NC_entire_dataset_00_contact/be_dkrWAwL7TcOZ_seq_000003`): discovery skips and reports all three, so the family
+  is 2,112 sequences.
 
 ## Raw inventory
 

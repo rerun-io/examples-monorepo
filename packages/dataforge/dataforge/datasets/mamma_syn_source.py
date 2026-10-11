@@ -86,7 +86,8 @@ class SynMetadata:
 
 
 def discover_renders(root: Path) -> tuple[list[SynSequence], list[tuple[Path, str]]]:
-    """Every render sequence under ``root/MammaSyn``, and each other sequence directory with why it was skipped."""
+    """Every render sequence under ``root/MammaSyn``, and each other sequence directory with why it was skipped (no shards, no
+    ``metadata.json``, or one that declares no samples: the release ships two such empty directories)."""
     found: list[SynSequence] = []
     skipped: list[tuple[Path, str]] = []
     for group_dir in sorted((root / SYN_DIR).glob("MammaSyn-*")):
@@ -99,6 +100,8 @@ def discover_renders(root: Path) -> tuple[list[SynSequence], list[tuple[Path, st
                     skipped.append((directory, "no shards"))
                 elif not sequence.metadata.is_file():
                     skipped.append((directory, "no metadata.json"))
+                elif read_json(sequence.metadata, SynMetadata).num_samples == 0:
+                    skipped.append((directory, "empty: metadata.json declares no samples"))
                 else:
                     found.append(sequence)
     return found, skipped

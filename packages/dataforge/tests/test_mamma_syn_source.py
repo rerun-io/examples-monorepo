@@ -28,6 +28,7 @@ from dataforge.datasets.mamma_syn_source import (
     assemble_bedlam,
     assemble_render,
     copy_span,
+    discover_renders,
     index_shards,
     read_bedlam_view,
     read_members,
@@ -318,3 +319,17 @@ def test_the_joints_check_fails_a_present_row_with_non_finite_joints() -> None:
     shipped[1, 5] = np.nan
     with pytest.raises(ValueError, match=r"person_03: frame 10"):
         check_joints([person], [posed], [shipped], frames)
+
+
+def test_a_render_sequence_the_release_ships_empty_is_skipped_and_named(tmp_path: Path) -> None:
+    # Two release directories hold one empty tar and a metadata.json declaring 0 samples: nothing to convert, not a failure.
+    dataset: Path = tmp_path / SYN_DIR / "MammaSyn-Interactions" / "latindance10_1_NC_entire_dataset_00_contact"
+    full: Path = dataset / "be_dkrWAwL7TcOZ_seq_000002"
+    empty: Path = dataset / "be_dkrWAwL7TcOZ_seq_000003"
+    for directory, members, count in ((full, sample_members(f"{RENDER_PREFIX}/IOI_01/0000"), 1), (empty, [], 0)):
+        directory.mkdir(parents=True)
+        write_shard(directory / "000000.tar", members)
+        (directory / "metadata.json").write_text(json.dumps({"format": "webdataset", "num_samples": count, "count_crop": 0}))
+    found, skipped = discover_renders(tmp_path)
+    assert [sequence.directory for sequence in found] == [full]
+    assert skipped == [(empty, "empty: metadata.json declares no samples")]
