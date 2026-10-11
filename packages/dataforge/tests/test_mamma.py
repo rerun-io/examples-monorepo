@@ -170,15 +170,19 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
     masks = read_back(targets["masks"])
     for rig, (width, height) in enumerate(CAMERAS.values(), start=1):
         stored = (width // 2, height // 2) if width * height > 3_200_000 else (width, height)
+        small = (stored[0] // 4, stored[1] // 4)  # a quarter of the video's size, scaled back over it
         for person in range(2):
-            rows = column_rows(masks, f"{schema.person_mask_path(rig, 0, person)}:EncodedImage:blob")
+            path: str = schema.person_mask_path(rig, 0, person)
+            rows = column_rows(masks, f"{path}:EncodedImage:blob")
             assert rows[schema.TIMELINE].cast("int64").to_pylist() == expected_times
             image = Image.open(io.BytesIO(bytes(rows.column(1)[0].as_py()[0])))
-            assert image.mode == "P" and image.size == stored
+            assert image.mode == "P" and image.size == small
             ids = np.asarray(image)  # palette indices are the mask: 1 inside, 0 (transparent) outside
-            expected = np.zeros(stored[::-1], dtype=np.uint8)
-            expected[: stored[1] // 2, person * stored[0] // 2 : (person + 1) * stored[0] // 2] = 1
+            expected = np.zeros(small[::-1], dtype=np.uint8)
+            expected[: small[1] // 2, person * small[0] // 2 : (person + 1) * small[0] // 2] = 1
             np.testing.assert_array_equal(ids, expected)
+            scale = masks.reader(index=None, contents=path).to_arrow_table().column(f"{path}:Transform3D:scale").to_pylist()[0][0]
+            assert scale == pytest.approx([stored[0] / small[0], stored[1] / small[1], 1.0])
 
     markers = read_back(targets["markers"])
     rows = column_rows(markers, f"{schema.markers_path('vicon')}:Points3D:positions")

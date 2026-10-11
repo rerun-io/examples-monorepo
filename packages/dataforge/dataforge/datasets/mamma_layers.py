@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Float32, Float64, Int64, UInt8
+from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -42,8 +43,12 @@ SOURCE_TAGS: dict[Method, str] = {"mosh_v_template": "mosh_gt", "mosh_betas": "m
 """Where a sequence's bodies come from: MoSh++ fits to Vicon markers, or the MAMMA model's markerless prediction."""
 MESH_BATCH_ROWS: int = 32
 """Mesh rows per chunk: one SMPL-X row is 126 KB, so a chunk is ~4 MB plus its triangle list."""
-MASK_WORKERS: int = 8
-"""Threads re-encoding mask PNGs (zlib releases the GIL)."""
+MASK_DOWNSCALE: int = 4
+"""Masks are stored at a quarter of their video's width and height and scaled back over it (Pablo, 2026-10-11): an overlay
+needs no more, and at the video's size they would weigh as much as the video."""
+MASK_WORKERS: int = 16
+"""Threads re-encoding mask PNGs. Decoding the shipped PNG is the whole cost (~11 ms at 2056x1504, ~40 ms at eval Singles'
+12 MP) and OpenCV releases the GIL for it: 16 threads cut it 6.6x. Processes lose to their start-up (each imports torch)."""
 PERSON_COLOURS: list[tuple[int, int, int]] = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240)]
 """Mask colour of each person, cycled."""
 MASK_ALPHA: int = 128
@@ -291,14 +296,15 @@ def write_projections(recording: rr.RecordingStream, cameras: list[MammaCamera],
 def mask_png(source: bytes, size: tuple[int, int], colour: tuple[int, int, int]) -> bytes:
     """A shipped 0/255 mask as a two-colour palette PNG at ``size``: index 1 inside (``colour``, half opaque), 0 transparent outside.
 
-    The palette indices are the mask, exactly; a viewer draws the colours.
+    A pixel is inside when most of the source pixels it covers are. The palette indices are the mask; a viewer draws the colours.
     """
-    with Image.open(io.BytesIO(source)) as image:
-        inside: Bool[ndarray, "h w"] = np.asarray(image.convert("L")) > 0
-    ids: UInt8[ndarray, "h w"] = inside.astype(np.uint8)
-    paletted: Image.Image = Image.frombuffer("P", (ids.shape[1], ids.shape[0]), ids, "raw", "P", 0, 1)
-    if paletted.size != size:
-        paletted = paletted.resize(size, Image.Resampling.NEAREST)
+    gray: UInt8[ndarray, "h w"] | None = cv2.imdecode(np.frombuffer(source, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        raise ValueError("not a decodable image")
+    if gray.shape[::-1] != size:
+        gray = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+    ids: UInt8[ndarray, "h w"] = (gray >= 128).astype(np.uint8)
+    paletted: Image.Image = Image.frombuffer("P", size, ids, "raw", "P", 0, 1)
     paletted.putpalette([0, 0, 0, *colour])
     buffer = io.BytesIO()
     paletted.save(buffer, format="PNG", transparency=bytes([0, MASK_ALPHA]))
@@ -309,12 +315,17 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
     """Every camera's shipped per-person masks (``mask_<frame>_<person>.png``, person from 1), one palette PNG per person and frame."""
     recording.send_property(
         paths.MASKS_LAYER,
-        rr.AnyValues(encoding="palette PNG: index 1 = the person, index 0 = background (transparent)", person_ids="person_NN = mask _NN+1"),
+        rr.AnyValues(
+            encoding=f"palette PNG at 1/{MASK_DOWNSCALE} of the stored video's width and height, scaled over it by a Transform3D: "
+            "index 1 = the person, index 0 = background (transparent)",
+            person_ids="person_NN = the release's mask _NN+1",
+        ),
     )
     indexes: list[rr.TimeColumn] = [time_column(clock.times_ns), frame_index_column(clock.frames)]
     with ThreadPoolExecutor(max_workers=MASK_WORKERS) as executor:
         for rig, camera in enumerate(cameras, start=1):
-            size: tuple[int, int] = stored_size(camera.width, camera.height)
+            stored: tuple[int, int] = stored_size(camera.width, camera.height)
+            size: tuple[int, int] = (stored[0] // MASK_DOWNSCALE, stored[1] // MASK_DOWNSCALE)
             tar_path: Path = sequence.mask_tar(camera.name)
             with tarfile.open(tar_path) as tar:
                 members: dict[str, tarfile.TarInfo] = {member.name: member for member in tar.getmembers()}
@@ -328,6 +339,8 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
                     blobs: list[bytes] = list(executor.map(partial(mask_png, size=size, colour=colour), sources))
                     path: str = schema.person_mask_path(rig, 0, person)
                     rr.log(path, rr.EncodedImage.from_fields(media_type="image/png", draw_order=10.0), static=True, recording=recording)
+                    # The scale lays the small mask over the stored video in the pinhole's image space.
+                    rr.log(path, rr.Transform3D(scale=[stored[0] / size[0], stored[1] / size[1], 1.0]), static=True, recording=recording)
                     rr.send_columns(path, indexes=indexes, columns=rr.EncodedImage.columns(blob=blobs), recording=recording)
 
 
