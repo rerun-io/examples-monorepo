@@ -119,7 +119,23 @@ template-variant, marker and mask tests above).
 
 ## Timing
 
-TODO
+Full run (2026-10-11, pablo-dl-server, RTX 5090, prod env, `d46e20e3`, the release read in place from the NAS, rrds written to
+local disk and shipped afterwards): all 251 sequences, 0 failed, 108 min of capture in 154 min of conversion; 220 GB of release
+files became 77 GB of rrds (2.9×). Each sequence's total is its in-process time in `timing/convert.jsonl`.
+
+| Family | Sequences | Capture | Convert | × real time | Release read | rrds | Ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| eval | 52 | 23 min | 75 min | 3.21 | 79.6 GB | 9.2 GB | 8.7× |
+| markerless-dance | 123 | 67 min | 64 min | 0.96 | 107.8 GB | 54.3 GB | 2.0× |
+| markerless-multiple-people | 34 | 8 min | 12 min | 1.43 | 15.5 GB | 11.2 GB | 1.4× |
+| markerless-iphones | 42 | 10 min | 3 min | 0.33 | 17.5 GB | 2.2 GB | 8.1× |
+
+- Stages: the transcode (NVDEC 4:4:4 → NVENC AV1) dominates every markerless family (Dance 53.8 of 64 min); eval spends 53.0 of
+  75 min on masks (the shipped PNG decode, 16 threads), 19.9 on the transcode. SMPL-X and projections take under 10% everywhere.
+- Output by layer (GB): eval base 5.3, body_mesh 2.1, projections 1.1, masks 0.5, body_pose 0.2, markers < 0.1; Dance base 35.7,
+  body_mesh 10.0, projections 8.0, body_pose 0.6; multiple people base 5.8, body_mesh 2.9, projections 2.3, body_pose 0.2;
+  iPhones body_mesh 1.1, base 0.9, projections 0.1, body_pose 0.1. The meshes and projections (one 133-point row per person,
+  camera and frame) are a third to a half of each family's output.
 
 ## Known gaps
 
