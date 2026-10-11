@@ -20,11 +20,13 @@
   BEDLAM key is `.../png/<clip>/<clip>_<frame>`, the clips' samples unsorted in their batch's shards. Within a render shard each
   camera is one run, a sample's members in the order labels, render, mask.
 - Reading over NFS: the NAS gives about 340 MB/s to 4 sequential streams (180 to one) and about 250 random reads per second, and a
-  tar header walk is one random read per member (50 to 120 ms each under load). So a render sequence's shards are read in order
-  first, 4 spans of 256 MB at a time, while the sequence before it converts; its header walk and member reads then come from the
-  page cache. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each
-  shard's size and mtime. BEDLAM's discovery walks every batch's headers (4 batches at once) on its first run; the one or two shards
-  holding a clip are read ahead the same way, and the clips after it mostly share them.
+  tar header walk is one random read per member (50 to 120 ms each under load). So while one render sequence converts, the next
+  one's shards are copied to local disk in order, 4 spans of 256 MB at a time (`work/mamma-syn-stage/<recording>`, about
+  340 MB/s); its header walk (0.1 s) and member reads come from that copy, which is removed once the cameras are read. The page
+  cache cannot stand in for the copy: on dl-server kswapd reclaimed a read-ahead within seconds while the encoders ran, with
+  70 GB free. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each shard's
+  size and mtime, which the copies keep. BEDLAM's discovery walks every batch's headers over NFS (4 batches at once) on its
+  first run; a clip's members are read in place.
 - Body models: each person is posed with the neutral model whose forward gives back the shipped `joints3d` at its first labelled
   row. In a sample of one sequence per dataset directory, Interhand and MoYo were rendered with the locked-head neutral
   (`model` = `body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz`); Harmony4D, Inter-X, InteractionCouple, LatinDance10 and the BEDLAM

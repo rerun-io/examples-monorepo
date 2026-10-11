@@ -1,7 +1,6 @@
 """MammaSyn shard readers against hand-built WebDataset tars laid out as the release ships them."""
 
 import io
-import json
 import pickle
 import tarfile
 from pathlib import Path
@@ -9,10 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from dataforge.datasets import mamma_syn_source
 from dataforge.datasets.mamma_source import MammaCamera
 from dataforge.datasets.mamma_syn_source import (
-    BEDLAM_DATASET,
-    SYN_DIR,
     BedlamLabels,
     BedlamView,
     RenderLabels,
@@ -20,11 +18,12 @@ from dataforge.datasets.mamma_syn_source import (
     SynSample,
     assemble_bedlam,
     assemble_render,
-    discover_bedlam,
     index_shards,
     read_bedlam_view,
     read_member,
     read_render_view,
+    sequence_samples,
+    stage_shards,
 )
 
 RENDER_PREFIX: str = "/tmp/bedlam_lab_20251031_191434/interhand_2-6_NC_200_00/png/be_NB-NZj2zRkeQ_seq_000002"
@@ -63,6 +62,20 @@ def test_render_shards_index_one_sample_per_camera_and_frame_in_frame_order(tmp_
     assert read_member(tmp_path, one.labels) == f"{RENDER_PREFIX}/IOI_01/0001 data.pyd".encode()
 
 
+def test_staged_shards_are_identical_copies_the_cached_index_still_describes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A sequence is copied to local disk before its convert reads it: spans of a few bytes stitch back into the same shards.
+    monkeypatch.setattr(mamma_syn_source, "READ_SPAN", 7)
+    nas: Path = tmp_path / "nas"
+    nas.mkdir()
+    first: Path = write_shard(nas / "000000.tar", [member for frame in (0, 1) for member in sample_members(f"{RENDER_PREFIX}/IOI_01/{frame:04d}")])
+    second: Path = write_shard(nas / "000001.tar", sample_members(f"{RENDER_PREFIX}/IOI_01/0003"))
+    indexed: list[SynSample] = sequence_samples(nas, tmp_path / "index", "sequence")
+    staged: list[Path] = stage_shards([first, second], tmp_path / "stage")
+    assert [path.read_bytes() for path in staged] == [first.read_bytes(), second.read_bytes()]
+    assert sequence_samples(tmp_path / "stage", tmp_path / "index", "sequence") == indexed
+    assert read_member(tmp_path / "stage", indexed[2].labels) == f"{RENDER_PREFIX}/IOI_01/0003 data.pyd".encode()
+
+
 def test_bedlam_shards_index_each_clip_as_its_own_camera(tmp_path: Path) -> None:
     # BEDLAM names its frames <clip>_<frame> at 30 fps numbering and ships them unsorted.
     shard: Path = write_shard(
@@ -70,19 +83,6 @@ def test_bedlam_shards_index_each_clip_as_its_own_camera(tmp_path: Path) -> None
         [member for clip, frame in [("seq_000001", 10), ("seq_000000", 5), ("seq_000000", 0)] for member in sample_members(f"{BEDLAM_PREFIX}/{clip}/{clip}_{frame:04d}")],
     )
     assert [(sample.camera, sample.frame) for sample in index_shards([shard])] == [("seq_000000", 0), ("seq_000000", 5), ("seq_000001", 10)]
-
-
-def test_a_bedlam_clip_names_the_batch_shards_holding_its_samples(tmp_path: Path) -> None:
-    # A clip lives in one or two shards of its batch; the converter reads just those ahead of the clip.
-    batch: Path = tmp_path / SYN_DIR / BEDLAM_DATASET / "20221010_3-10_500_batch01hand_zoom_suburb_d"
-    batch.mkdir(parents=True)
-    write_shard(batch / "000000.tar", [member for clip, frame in [("seq_000000", 0), ("seq_000001", 0)] for member in sample_members(f"{BEDLAM_PREFIX}/{clip}/{clip}_{frame:04d}")])
-    write_shard(batch / "000001.tar", sample_members(f"{BEDLAM_PREFIX}/seq_000001/seq_000001_0005"))
-    (batch / "metadata.json").write_text(json.dumps({"format": "webdataset", "num_samples": 3}))
-    clips, problems = discover_bedlam(tmp_path, tmp_path / "index")
-    assert problems == []
-    shards: dict[str, list[Path]] = {clip.clip: clip.shards for clip in clips}
-    assert shards == {"seq_000000": [batch / "000000.tar"], "seq_000001": [batch / "000000.tar", batch / "000001.tar"]}
 
 
 def test_a_sample_missing_a_member_names_its_shard(tmp_path: Path) -> None:

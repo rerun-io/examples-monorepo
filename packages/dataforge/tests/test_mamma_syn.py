@@ -19,7 +19,7 @@ from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import MODEL_FILES
 from dataforge.datasets.mamma_source import SmplxModel
-from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset
+from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset, stage_dir
 
 pytestmark = pytest.mark.integration
 
@@ -146,9 +146,10 @@ def test_a_render_sequence_converts_onto_its_source_frames(tmp_path: Path, nvenc
     dataset: MammaSynDataset = syn_dataset(tmp_path / "raw", tmp_path, monkeypatch, models)
     ((identity, sequence),) = dataset.discover()
     assert identity.recording_id == f"mamma-syn__{DATASET}__{SEQUENCE}"
-    dataset.prefetch(identity, sequence, force=False)  # the runner indexes the next sequence's shards while one converts
+    dataset.prefetch(identity, sequence, force=False)  # the runner copies and indexes the next sequence's shards while one converts
     assert (tmp_path / "index" / f"{identity.sequence_key}.json").is_file()
     dataset.convert(identity, sequence, force=False)
+    assert not stage_dir(identity).exists()  # the local copy goes once the cameras are read
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
     assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])
     times: list[int] = frame_times(np.array(FRAMES, dtype=np.int64), 6).tolist()

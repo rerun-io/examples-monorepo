@@ -5,6 +5,7 @@ AV1 video, the parameters the render was made from as body_pose, and its instanc
 release repacked) is the other family. The shards are read in place and never modified. See ``docs/mamma.md``.
 """
 
+import shutil
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -60,11 +61,11 @@ from dataforge.datasets.mamma_syn_source import (
     assemble_render,
     discover_bedlam,
     discover_renders,
-    read_ahead,
     read_bedlam_view,
     read_metadata,
     read_render_view,
     sequence_samples,
+    stage_shards,
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
@@ -305,6 +306,11 @@ def syn_download(config: MammaConfig, family: SynFamily, selected: Callable[[], 
         raise ValueError(f"{config.name}: {len(problems)} problem(s), listed above")
 
 
+def stage_dir(identity: SequenceIdentity) -> Path:
+    """Where a render sequence's shards are copied for its convert: local disk beside the rrd tree, removed once read."""
+    return paths.work_root() / "mamma-syn-stage" / identity.recording_id
+
+
 class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
     """Convert one MammaSyn sequence at a time from the shards in place."""
 
@@ -337,32 +343,36 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
         return pairs
 
     def prefetch(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> None:
-        """Read the shards of a sequence still to convert into the page cache and index them while the one before it converts: a
-        tar header walk over NFS is one random read per member, so the shards are read in order first (``read_ahead``)."""
+        """Copy the shards of a sequence still to convert to local disk, and index the copy, while the one before it converts."""
         if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
-            read_ahead(source.shards)
-            sequence_samples(source.directory, self.config.index_root, identity.sequence_key)
+            staged: Path = stage_dir(identity)
+            stage_shards(source.shards, staged)
+            sequence_samples(staged, self.config.index_root, identity.sequence_key)
 
     def convert(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> Path:
         """Read every camera once (encoding its renders when base is pending), assemble and check the labels, write the layers."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
-        with self.timer.stage("read"):
-            read_ahead(source.shards)  # from the page cache when prefetched
-            samples: list[SynSample] = sequence_samples(source.directory, self.config.index_root, identity.sequence_key)
-            shipped: SynMetadata = read_metadata(source.metadata)
-        if shipped.num_samples != len(samples):
-            raise ValueError(f"{source.directory}: {len(samples)} samples in the shards, metadata.json declares {shipped.num_samples}")
-        frames: list[int] = sorted({sample.frame for sample in samples})
-        kept: set[int] = set(frames[: self.config.frame_limit or len(frames)])
-        by_camera: dict[str, list[SynSample]] = defaultdict(list)
-        for sample in samples:
-            if sample.frame in kept:
-                by_camera[sample.camera].append(sample)
+        staged: Path = stage_dir(identity)
         with work_dir("mamma-syn-") as work:
-            with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
-                reads: list[CameraRead[RenderView]] = read_cameras(source.directory, by_camera, work if paths.BASE_LAYER in pending else None, parse_render)
+            try:
+                with self.timer.stage("read"):
+                    stage_shards(source.shards, staged)  # the prefetch's copy, unless this is the run's first sequence
+                    samples: list[SynSample] = sequence_samples(staged, self.config.index_root, identity.sequence_key)
+                    shipped: SynMetadata = read_metadata(source.metadata)
+                if shipped.num_samples != len(samples):
+                    raise ValueError(f"{source.directory}: {len(samples)} samples in the shards, metadata.json declares {shipped.num_samples}")
+                frames: list[int] = sorted({sample.frame for sample in samples})
+                kept: set[int] = set(frames[: self.config.frame_limit or len(frames)])
+                by_camera: dict[str, list[SynSample]] = defaultdict(list)
+                for sample in samples:
+                    if sample.frame in kept:
+                        by_camera[sample.camera].append(sample)
+                with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
+                    reads: list[CameraRead[RenderView]] = read_cameras(staged, by_camera, work if paths.BASE_LAYER in pending else None, parse_render)
+            finally:
+                shutil.rmtree(staged, ignore_errors=True)
             labels: RenderLabels = assemble_render([view for read in reads for view in read.views], {read.camera: read.size for read in reads if read.size})
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, RENDER_FPS))
             if self.body is None:
@@ -559,12 +569,6 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
             pairs = [(identity, clip) for identity, clip in pairs if identity.sequence_key in self.config.sequences]
         return pairs
 
-    def prefetch(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> None:
-        """Read the batch shards holding a clip still to convert into the page cache while the clip before it converts (the next
-        clip mostly shares them, so a shard comes from the NAS once, in order)."""
-        if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
-            read_ahead(source.shards)
-
     def convert(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> Path:
         """Read the clip once (encoding it when base is pending), pose every person and move them into the camera frame, write."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
@@ -573,7 +577,6 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         samples: list[SynSample] = source.samples[: self.config.frame_limit or len(source.samples)]
         with work_dir("mamma-bedlam-") as work:
             with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
-                read_ahead(source.shards)  # from the page cache when prefetched
                 (read,) = read_cameras(source.directory, {source.clip: samples}, work if paths.BASE_LAYER in pending else None, parse_bedlam)
             labels: BedlamLabels = assemble_bedlam(read.views)
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, BEDLAM_NUMBERING_FPS))

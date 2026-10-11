@@ -9,6 +9,7 @@ one camera per clip. See ``docs/mamma.md``.
 
 import io
 import json
+import os
 import pickle
 import tarfile
 from collections import defaultdict
@@ -38,10 +39,10 @@ RENDER_FPS: int = 6
 MEMBER_KINDS: tuple[str, ...] = ("png", "mask.png", "data.pyd")
 """The three members of every sample: render, instance mask, labels."""
 READ_STREAMS: int = 4
-"""Spans of a sequence's shards read at once ahead of its convert. Measured on the NAS (2026-10-11): sequential reads give about
+"""Spans of a sequence's shards copied at once to local disk ahead of its convert. Measured on the NAS (2026-10-11): sequential reads give about
 180 MB/s with 1 stream, 340 with 4, 300 with 8; random reads (a tar header walk, member by member) about 250 per second."""
 READ_SPAN: int = 256 << 20
-"""Bytes of a shard one stream reads in order."""
+"""Bytes of a shard one stream copies in order."""
 PICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
     {(module, name) for module in ("numpy.core.multiarray", "numpy._core.multiarray") for name in ("_reconstruct", "scalar")}
     | {("numpy", "dtype"), ("numpy", "ndarray")}
@@ -169,20 +170,41 @@ def index_shards(shards: list[Path]) -> list[SynSample]:
     return samples
 
 
-def read_ahead(shards: list[Path]) -> None:
-    """Read ``shards`` once in order, ``READ_STREAMS`` spans at a time, so the page cache serves their members and headers after."""
+def stage_shards(shards: list[Path], into: Path) -> list[Path]:
+    """Copy ``shards`` into ``into`` in order, ``READ_STREAMS`` spans of ``READ_SPAN`` at a time, each copy keeping its shard's size
+    and mtime (the stamps the index cache is keyed on); a copy already there with them is kept. Returns the copies.
 
-    def read_span(span: tuple[Path, int]) -> None:
+    A sequence is read from a local copy because a header walk over NFS is one random read per member, and the page cache does
+    not keep a read-ahead: on dl-server kswapd reclaims it within seconds while the convert's encoders run, with memory free.
+    """
+    into.mkdir(parents=True, exist_ok=True)
+    pending: list[Path] = [
+        shard for shard in shards if not ((copy := into / shard.name).is_file() and copy.stat().st_size == shard.stat().st_size and copy.stat().st_mtime_ns == shard.stat().st_mtime_ns)
+    ]
+    for shard in pending:
+        with (into / f".{shard.name}.part").open("wb") as created:
+            created.truncate(shard.stat().st_size)
+
+    def copy_span(span: tuple[Path, int]) -> None:
+        shard, start = span
         buffer: bytearray = bytearray(8 << 20)
-        with span[0].open("rb", buffering=0) as stream:
-            stream.seek(span[1])
+        with shard.open("rb", buffering=0) as source, (into / f".{shard.name}.part").open("r+b", buffering=0) as target:
+            source.seek(start)
+            target.seek(start)
             left: int = READ_SPAN
-            while left > 0 and (count := stream.readinto(memoryview(buffer)[: min(len(buffer), left)])):
+            while left > 0 and (count := source.readinto(memoryview(buffer)[: min(len(buffer), left)])):
+                target.write(memoryview(buffer)[:count])
                 left -= count
 
-    spans: list[tuple[Path, int]] = [(shard, start) for shard in shards for start in range(0, shard.stat().st_size, READ_SPAN)]
+    spans: list[tuple[Path, int]] = [(shard, start) for shard in pending for start in range(0, shard.stat().st_size, READ_SPAN)]
     with ThreadPoolExecutor(max_workers=READ_STREAMS) as executor:
-        list(executor.map(read_span, spans))
+        list(executor.map(copy_span, spans))
+    for shard in pending:
+        part: Path = into / f".{shard.name}.part"
+        stat = shard.stat()
+        os.utime(part, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        part.rename(into / shard.name)
+    return [into / shard.name for shard in shards]
 
 
 def read_member(directory: Path, member: ShardMember) -> bytes:
@@ -508,11 +530,6 @@ class BedlamClip:
     @property
     def parts(self) -> tuple[str, str]:
         return (self.directory.name, self.clip)
-
-    @property
-    def shards(self) -> list[Path]:
-        """The batch shards holding the clip's samples (one or two)."""
-        return [self.directory / name for name in sorted({member.shard for sample in self.samples for member in (sample.image, sample.mask, sample.labels)})]
 
 
 def discover_bedlam(root: Path, index_root: Path, batches: set[str] | None = None) -> tuple[list[BedlamClip], list[str]]:
