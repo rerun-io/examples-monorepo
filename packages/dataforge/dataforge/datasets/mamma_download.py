@@ -7,14 +7,14 @@ proof that the download path still works. The MPI server takes the account (``MA
 body; it served Python clients HTML in July 2026 and serves them the files in October 2026.
 """
 
-import hashlib
+import filecmp
 import os
 from pathlib import Path
 from urllib.parse import quote
 
 import requests
 
-from dataforge.datasets.mamma_source import FAMILY_COLLECTIONS, Family, MammaSequence, discover_sequences
+from dataforge.datasets.mamma_source import FAMILY_COLLECTIONS, KNOWN_INCOMPLETE, MARKER_FILES, Family, MammaSequence, discover_sequences
 from dataforge.transports import CHUNK_BYTES
 
 MPI_URL: str = "https://download.is.tue.mpg.de/download.php?domain=mamma&resume=1"
@@ -34,13 +34,13 @@ TIMEOUT_S: float = 120.0
 
 def sequence_files(sequence: MammaSequence) -> list[Path]:
     """Every release file the converter reads for ``sequence``."""
-    files: list[Path] = [sequence.labels_dir / "global.npz", *sequence.predictions]
+    files: list[Path] = [sequence.global_npz, *sequence.predictions]
     for camera in sequence.cameras:
         files += [sequence.calibration(camera), sequence.video(camera)]
-        if sequence.collection.startswith("mamma_eval_"):
+        if sequence.is_eval:
             files.append(sequence.mask_tar(camera))
-    if sequence.markers_dir.is_dir():
-        files += [sequence.markers_dir / name for name in ("labels_m37.npy", "vicon_m37.npy", "baseline_m37.npy")]
+    if sequence.has_markers:
+        files += [sequence.markers_dir / name for name in MARKER_FILES]
     return files
 
 
@@ -58,17 +58,18 @@ def file_problem(path: Path) -> str | None:
     return None
 
 
-def verify_release(root: Path, family: Family, *, expected: dict[str, int] = EXPECTED_SEQUENCES) -> tuple[list[MammaSequence], list[str]]:
-    """The family's convertible sequences under ``root``, and every problem found: skipped directories, partial rigs, bad files,
-    missing sequences. Opens every file the converter reads and reads 256 bytes of it; nothing is written."""
+def verify_release(root: Path, family: Family) -> tuple[list[MammaSequence], list[str]]:
+    """The family's convertible sequences under ``root``, and every problem found: skipped directories (but the release's known
+    incomplete ones), partial rigs, missing people, bad files, missing sequences. Opens every file the converter reads and reads
+    256 bytes of it; nothing is written."""
     sequences, skipped = discover_sequences(root, family)
-    problems: list[str] = [reason for reason in skipped if "bachata_improv_2p_32cam" not in reason]  # a CRF 24 variant tree without labels
+    problems: list[str] = [f"{directory}: {reason}" for directory, reason in skipped if directory.name not in KNOWN_INCOMPLETE]
     for sequence in sequences:
         problems += [problem for path in sequence_files(sequence) if (problem := file_problem(path)) is not None]
     for collection in FAMILY_COLLECTIONS[family]:
         found: int = sum(sequence.collection == collection for sequence in sequences)
-        if found != expected.get(collection, found):
-            problems.append(f"{collection}: {found} sequences, the release has {expected[collection]}")
+        if found != EXPECTED_SEQUENCES[collection]:
+            problems.append(f"{collection}: {found} sequences, the release has {EXPECTED_SEQUENCES[collection]}")
     return sequences, problems
 
 
@@ -79,14 +80,6 @@ def post_to_file(url: str, data: dict[str, str], target: Path) -> None:
         with target.open("wb") as stream:
             for block in response.iter_content(CHUNK_BYTES):
                 stream.write(block)
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while block := stream.read(8 * CHUNK_BYTES):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def fetch_sequence(root: Path, sequence: MammaSequence, into: Path) -> list[str]:
@@ -108,6 +101,6 @@ def fetch_sequence(root: Path, sequence: MammaSequence, into: Path) -> list[str]
             part.unlink()
             raise RuntimeError(f"MPI fetch of {relative}: {problem.removeprefix(f'{part}: ')}")
         part.rename(target)
-        if target.stat().st_size != path.stat().st_size or sha256(target) != sha256(path):
+        if not filecmp.cmp(target, path, shallow=False):
             mismatches.append(f"{relative}: {target.stat().st_size} bytes fetched differ from the release copy")
     return mismatches

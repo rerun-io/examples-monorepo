@@ -5,9 +5,10 @@ markerless ones) beside a ``global.npz``. Calibration is in native pixels and wo
 ``cam_ext`` is world-to-camera (OpenCV axes), and IOI cameras add ``vicon_radial_2``. See ``docs/mamma.md``.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, TypeVar
 
 import numpy as np
 from jaxtyping import Bool, Float64
@@ -28,6 +29,30 @@ FAMILY_COLLECTIONS: dict[Family, tuple[str, ...]] = {
 VIDEO_DIRS: tuple[str, ...] = ("videos_crf16", "videos")
 """Where a sequence keeps its source videos: the IOI rigs' CRF 16 clips, the iPhones' clips."""
 EVAL_PREFIX: str = "mamma_eval_"
+MARKERS_COLLECTION: str = "mamma_eval_extra"
+"""The one collection that ships Vicon markers."""
+MARKER_FILES: tuple[str, str, str] = ("labels_m37.npy", "vicon_m37.npy", "baseline_m37.npy")
+"""An Extra sequence's ``markers/``: the 37 held-out marker names, their Vicon positions, the MoSh++ baseline's."""
+KNOWN_INCOMPLETE: frozenset[str] = frozenset({"bachata_improv_2p_32cam"})
+"""Sequence directories the release ships incomplete on purpose: a markerless-dance variant with CRF 24 clips and no predictions."""
+IPHONE_TWO_PEOPLE: frozenset[str] = frozenset(
+    {
+        "indoors/grappling",
+        "indoors/holding_person_lifted",
+        "indoors/hugging",
+        "indoors/lean_on_shoulder_tap",
+        "indoors/person_lift_from_ground",
+        "outdoors/MANUAL_START_bumping_to_eachother",
+        "outdoors/MANUAL_START_two_friends",
+        "outdoors/greeting_interaction",
+        "outdoors/passing_ball",
+        "outdoors/pushing_and_lifting_from_ground",
+        "outdoors/spinning_together",
+        "outdoors/tapping_on_shoulder",
+        "outdoors/wheelbarrow_walk",
+    }
+)
+"""The iPhone scenes with two predicted people (the release manifest, ``packages/mamma``'s ``IPHONE_*_SEQUENCES``); the rest have one."""
 
 MILLIMETRE_THRESHOLD: float = 200.0
 """An extrinsic translation larger than this many units is in millimetres: no MAMMA camera stands 200 m away."""
@@ -35,6 +60,10 @@ LENS_ITERATIONS: int = 50
 """Fixed-point steps of the lens inversion; converged points stop moving after a few."""
 LENS_TOLERANCE_PX: float = 1e-9
 """Largest step, in pixels, of a converged lens inversion."""
+LENS_RESIDUAL_PX: float = 1e-6
+"""Largest error, in pixels, of an inverted point mapped back; a point that misses it did not converge."""
+
+RecordT = TypeVar("RecordT")
 
 
 @serde
@@ -67,10 +96,11 @@ class ViconLens:
         for _ in range(LENS_ITERATIONS):
             step: Float64[ndarray, "n 2"] = target / self.scale(offset) - offset
             offset = offset + step
-            if not np.abs(step).max(initial=0.0) > LENS_TOLERANCE_PX:
+            if not np.abs(step[np.isfinite(step)]).max(initial=0.0) > LENS_TOLERANCE_PX:  # NaN points (behind the camera) stop no one
                 break
-        converged: Bool[ndarray, "n"] = np.abs(self.centre + offset * self.scale(offset) - undistorted).max(axis=-1) <= 1e-6
-        return np.where(converged[:, None], self.centre + offset, np.nan)
+        distorted: Float64[ndarray, "n 2"] = self.centre + offset
+        converged: Bool[ndarray, "n"] = np.abs(self.undistort(distorted) - undistorted).max(axis=-1) <= LENS_RESIDUAL_PX
+        return np.where(converged[:, None], distorted, np.nan)
 
 
 @serde
@@ -87,11 +117,13 @@ class MammaCamera:
     width: int
     """Native image width, pixels."""
     height: int
-    """Native image height, pixels."""
-    portrait: bool
-    """The release's ``cam_portrait`` flag; the size already describes the upright image."""
+    """Native image height, pixels (portrait cameras ship upright)."""
     lens: ViconLens | None
     """The Vicon radial lens; None for the iPhones, which ship none."""
+
+    @property
+    def world_T_cam(self) -> Float64[ndarray, "4 4"]:
+        return np.linalg.inv(self.cam_T_world)
 
     def project(self, points: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 2"]:
         """World points to native image pixels through the pinhole and the lens; points behind the camera are NaN."""
@@ -146,9 +178,10 @@ class SequenceLabels:
                 raise ValueError(f"{person.subject}: a {self.method} fit {'needs' if person.v_template is None else 'has no use for'} a template")
 
 
-def decode_labels(path: Path, values: dict[str, object]) -> SequenceLabels:
+def decode(cls: type[RecordT], path: Path, values: dict[str, object]) -> RecordT:  # noqa: UP047 — beartype requires legacy generics
+    """One record from an NPZ's values, naming the file on schema and ``__post_init__`` errors."""
     try:
-        return from_dict(SequenceLabels, values)
+        return from_dict(cls, values)
     except (SerdeError, ValueError) as error:
         raise ValueError(f"{path}: {error}") from error
 
@@ -176,7 +209,7 @@ def read_eval_labels(path: Path) -> SequenceLabels:
             "method": str(npz["method_used"]),
             "people": people,
         }
-    return decode_labels(path, values)
+    return decode(SequenceLabels, path, values)
 
 
 def read_pred_labels(global_path: Path, pred_paths: list[Path]) -> SequenceLabels:
@@ -200,7 +233,7 @@ def read_pred_labels(global_path: Path, pred_paths: list[Path]) -> SequenceLabel
                     "v_template": None,
                 }
             )
-    return decode_labels(global_path, {**values, "people": people})
+    return decode(SequenceLabels, global_path, {**values, "people": people})
 
 
 def read_camera(path: Path) -> MammaCamera:
@@ -216,13 +249,26 @@ def read_camera(path: Path) -> MammaCamera:
             "cam_T_world": cam_T_world,
             "width": int(npz["cam_img_w"]),
             "height": int(npz["cam_img_h"]),
-            "portrait": bool(npz["cam_portrait"]),
             "lens": None if lens is None else {"centre": lens[:2], "radial": lens[2:]},
         }
-    try:
-        return from_dict(MammaCamera, values)
-    except (SerdeError, ValueError) as error:
-        raise ValueError(f"{path}: {error}") from error
+    return decode(MammaCamera, path, values)
+
+
+def expected_people(collection: str, relative: str) -> int:
+    """How many prediction files a markerless sequence ships, from the release's naming (checked against every sequence).
+
+    A couple dance names both dancers' 5-digit ids, a multiple-people capture its head count (``MultiMama_3``); the iPhone
+    scenes are listed.
+    """
+    name: str = Path(relative).name
+    if collection == "mamma_markerless_dance":
+        return 2 if re.search(r"_[0-9]{5}_[0-9]{5}(?:_[0-9]+){1,3}$", name) else 1
+    if collection == "mamma_markerless_multiple_people":
+        count: re.Match[str] | None = re.search(r"MultiMama_([0-9]+)_", name)
+        if count is None:
+            raise ValueError(f"{collection}/{relative}: no MultiMama_<people> in the name")
+        return int(count.group(1))
+    return 2 if relative in IPHONE_TWO_PEOPLE else 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,29 +279,27 @@ class MammaSequence:
     """Release collection (``mamma_eval_singles``, ``mamma_markerless_iphones`` ...)."""
     directory: Path
     """The sequence directory."""
+    parts: tuple[str, ...]
+    """Identity parts: the path under the collection, after the eval set's short name (``singles``) for eval."""
     labels_dir: Path
     """``gt/`` (eval) or ``meta/`` (markerless): ``global.npz`` and one calibration NPZ per camera."""
     video_dir: Path
     cameras: tuple[str, ...]
     """Cameras with both a calibration and a video, in name order."""
     predictions: tuple[Path, ...]
-    """Markerless ``pred/params_XX.npz``, one per person in name order; empty for eval."""
+    """Markerless ``pred/params_XX.npz``, one per person in order; empty for eval."""
 
     @property
-    def parts(self) -> tuple[str, ...]:
-        """Identity parts: the path under the collection, after the eval set's short name (``singles``) for eval."""
-        relative: tuple[str, ...] = self.directory.relative_to(self.directory.parents[self.depth]).parts
-        return (self.collection.removeprefix(EVAL_PREFIX), *relative) if self.collection.startswith(EVAL_PREFIX) else relative
+    def is_eval(self) -> bool:
+        """MoSh++ ground truth with per-camera masks, rather than the MAMMA model's predictions."""
+        return self.collection.startswith(EVAL_PREFIX)
 
     @property
-    def depth(self) -> int:
-        """Directories between the collection and the sequence: 1, or 2 for the iPhones' ``indoors/<scene>``."""
-        return next(index for index, parent in enumerate(self.directory.parents) if parent.name == self.collection)
+    def global_npz(self) -> Path:
+        return self.labels_dir / "global.npz"
 
     def labels(self) -> SequenceLabels:
-        if self.predictions:
-            return read_pred_labels(self.labels_dir / "global.npz", list(self.predictions))
-        return read_eval_labels(self.labels_dir / "global.npz")
+        return read_eval_labels(self.global_npz) if self.is_eval else read_pred_labels(self.global_npz, list(self.predictions))
 
     def calibration(self, camera: str) -> Path:
         return self.labels_dir / f"{camera}.npz"
@@ -264,42 +308,51 @@ class MammaSequence:
         return self.video_dir / f"{camera}.mp4"
 
     def mask_tar(self, camera: str) -> Path:
-        """Eval only: the camera's per-person mask PNGs."""
+        """Eval: the camera's per-person mask PNGs."""
         return self.directory / "masks" / f"{camera}_masks.tar"
 
     @property
     def markers_dir(self) -> Path:
-        """Eval Extra only: held-out Vicon markers and the MoSh++ baseline's."""
+        """Eval Extra: held-out Vicon markers and the MoSh++ baseline's (``MARKER_FILES``)."""
         return self.directory / "markers"
 
+    @property
+    def has_markers(self) -> bool:
+        return self.collection == MARKERS_COLLECTION
 
-def discover_sequences(root: Path, family: Family) -> tuple[list[MammaSequence], list[str]]:
-    """Every convertible sequence of ``family`` under the release ``root``, and why each other sequence directory was skipped.
 
-    A sequence needs a ``global.npz``, a video directory, at least one camera with both a calibration and a video, and,
-    when markerless, prediction files (the bachata_improv_2p_32cam variant tree has CRF 24 clips and no predictions).
+def discover_sequences(root: Path, family: Family) -> tuple[list[MammaSequence], list[tuple[Path, str]]]:
+    """Every convertible sequence of ``family`` under the release ``root``, and each other sequence directory with why it was skipped.
+
+    A sequence needs a ``global.npz``, a video directory, at least one camera with both a calibration and a video, and, when
+    markerless, exactly the prediction files its name implies (a missing one would renumber the people after it).
     """
     found: list[MammaSequence] = []
-    skipped: list[str] = []
+    skipped: list[tuple[Path, str]] = []
     for collection in FAMILY_COLLECTIONS[family]:
         base: Path = root / collection
         for global_path in sorted([*base.glob("*/gt/global.npz"), *base.glob("*/meta/global.npz"), *base.glob("*/*/meta/global.npz")]):
             labels_dir: Path = global_path.parent
             directory: Path = labels_dir.parent
+            relative: tuple[str, ...] = directory.relative_to(base).parts
             video_dir: Path | None = next((directory / name for name in VIDEO_DIRS if (directory / name).is_dir()), None)
-            predictions: tuple[Path, ...] = tuple(sorted((directory / "pred").glob("params_*.npz")))
             if video_dir is None:
-                skipped.append(f"{directory}: no {' or '.join(VIDEO_DIRS)} directory")
+                skipped.append((directory, f"no {' or '.join(VIDEO_DIRS)} directory"))
                 continue
-            if labels_dir.name == "meta" and not predictions:
-                skipped.append(f"{directory}: no pred/params_*.npz")
-                continue
+            predictions: tuple[Path, ...] = ()
+            if not collection.startswith(EVAL_PREFIX):
+                predictions = tuple(sorted((directory / "pred").glob("params_*.npz")))
+                expected: list[str] = [f"params_{index:02d}" for index in range(expected_people(collection, "/".join(relative)))]
+                if [path.stem for path in predictions] != expected:
+                    skipped.append((directory, f"predictions {[path.stem for path in predictions]}, the release ships {expected}"))
+                    continue
             calibrated: set[str] = {path.stem for path in labels_dir.glob("*.npz")} - {"global"}
             cameras: tuple[str, ...] = tuple(sorted(calibrated & {path.stem for path in video_dir.glob("*.mp4")}))
             if not cameras:
-                skipped.append(f"{directory}: no camera has both a calibration and a video")
+                skipped.append((directory, "no camera has both a calibration and a video"))
                 continue
             if set(cameras) != calibrated:
-                skipped.append(f"{directory}: cameras without a video left out: {sorted(calibrated - set(cameras))}")
-            found.append(MammaSequence(collection, directory, labels_dir, video_dir, cameras, predictions))
+                skipped.append((directory, f"cameras without a video left out: {sorted(calibrated - set(cameras))}"))
+            parts: tuple[str, ...] = (collection.removeprefix(EVAL_PREFIX), *relative) if collection.startswith(EVAL_PREFIX) else relative
+            found.append(MammaSequence(collection, directory, parts, labels_dir, video_dir, cameras, predictions))
     return found, skipped

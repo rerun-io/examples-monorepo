@@ -37,9 +37,12 @@ pixi run -e dataforge dataforge-convert mamma --family eval --root /mnt/nas/data
 
 - `download` never re-downloads the release. It fetches the three model files (pinned, sha256-verified) and verifies the
   family in place: every file the converter reads opens and is not empty or an MPI error page, every rig has a video per
-  calibrated camera, and each collection has its manifest's sequence count (22, 12, 18, 123, 34, 42). Nothing is written.
+  calibrated camera, every markerless sequence has the prediction files its name implies (a couple dance names both dancers'
+  ids, a multiple-people capture its head count, the 13 two-person iPhone scenes are listed; a missing `params_00` would
+  otherwise renumber everyone after it), and each collection has its manifest's sequence count (22, 12, 18, 123, 34, 42).
+  Nothing is written.
 - `--fetch-into` with `--sequences` downloads those sequences from the MPI server (`MAMMA_USERNAME`, `MAMMA_PASSWORD` in the
-  environment; the account goes in a POST body) and compares every file with the release copy by sha256. It refuses to run
+  environment; the account goes in a POST body) and compares every file with the release copy byte for byte. It refuses to run
   without `--sequences`. 2026-10-10: `indoors/crossing_arms` (387 MB, 72 s) and eval Dance `Basic_Whip` (1.5 GB, 370 s) came back
   byte-identical. The server sent Python clients HTML in July 2026, which is why `mamma-download-dataset` uses wget; it no
   longer does.
@@ -59,12 +62,13 @@ pixi run -e dataforge dataforge-convert mamma --family eval --root /mnt/nas/data
 | `pred/params_XX.npz`: `poses`, `trans`, `betas` (16), `gender`, `flat_hand_mean`, `mocap_frame_rate` | 30 Hz | body_pose | `/world/gt/people/person_NN/body/smplx`, one person per file in name order; `mocap_frame_rate` must equal `fps` |
 | `masks/IOI_NN_masks.tar` (eval): `mask_<frame>_<person>.png`, 0/255 at the native size | 30 Hz | masks | `/world/rig_NN/cam_00/pinhole/masks/person_NN`, a two-colour palette PNG at a quarter of the stored size |
 | `markers/labels_m37.npy`, `vicon_m37.npy`, `baseline_m37.npy` (eval Extra) | 30 Hz | markers | `/world/gt/markers/vicon` and `/world/gt/markers/mosh_baseline`, 37 labelled points, world metres |
-| `mamma_markerless_dance/bachata_improv_2p_32cam` | — | — | not ingested: a CRF 24 variant tree without predictions |
+| `mamma_markerless_dance/bachata_improv_2p_32cam` | — | — | not ingested: a variant tree with only `videos_crf24`, `proxies_720p` and `meta` (no CRF 16 clips, no predictions) |
 
 ## Clocks
 
 The release has no capture timestamps. `video_time` is `frame × 10⁹ / fps` ns from the sequence's own `global.npz` `fps` (30 in
-every MPI collection; MammaSyn renders at 6), origin at frame 0; `frame_index` is the frame. Every camera's video, every
+every MPI collection; MammaSyn renders at 6), rounded to the nearest nanosecond, origin at frame 0; `frame_index` is the
+frame. Every camera's video, every
 label array and every mask tar holds exactly `frames_len` frames; base refuses a video with another count.
 
 ## Layers and entities
@@ -83,16 +87,19 @@ label array and every mask tar holds exactly `frames_len` frames; base refuses a
   against the eval Dance masks: on the 12 most distorted unoccluded person views the GT silhouettes reach IoU 0.920 with the
   lens and 0.894 without (`test_the_vicon_lens_fits_the_eval_masks_better_than_a_pinhole`). The upstream `capture/undistort.py`
   applies the polynomial in the other direction. The iPhones ship no lens: pinhole. No measured 2D.
-- **masks** (eval): one palette PNG per person, camera and frame: index 1 is the person (half-opaque colour), index 0 the
+- **masks** (eval): one palette PNG per person, camera and frame: index 1 is the person (a colour per person), index 0 the
   transparent background, so the ids stay exact. Stored at a quarter of the video's width and height (Pablo's call, 2026-10-11:
-  an overlay needs no more) and laid over it by a static `Transform3D` scale; area downscale with a majority threshold. Mask
-  `_NN+1` is `person_NN`: the release numbers its masks in subject order (checked by silhouette overlap on Dance).
+  an overlay needs no more) and laid over it by a static `Transform3D` scale; area downscale with a majority threshold. The
+  image is drawn at `opacity` 0.5, set explicitly (at the default 1.0 Rerun 0.38 can draw a translucent PNG's transparent pixels
+  black), and each person has its own draw order. Mask `_NN+1` is `person_NN`: the release numbers its masks in subject order
+  (checked by silhouette overlap on Dance). An eval sequence missing a mask tar fails its masks layer rather than skipping it.
 - **markers** (eval Extra): the 37 Vicon markers MoSh++ held out, and the MoSh++ baseline's prediction of them. They sit at a
   median 15.1 mm from the GT mesh (`test_the_held_out_vicon_markers_sit_on_the_extra_mesh`).
 - A layer a sequence has no source for (masks outside eval, markers outside Extra) is not written; register skips absent layers.
 - Default blueprint: the scene (z up, orbital eye; projections and masks stay in the panes) above a strip of camera panes: all
   cameras of a rig of up to 16, eight evenly spaced ones of a 32-camera rig (every 4th). Each base rrd embeds its own sequence's
-  layout; the catalog default is the family's (eval: the first 16, which every eval rig has). On rigs of more than four cameras the
+  layout; the catalog default is the family's (eval: panes for the first 16 cameras, which every eval rig has, with the scene's
+  rules covering all 32 of Dance). On rigs of more than four cameras the
   videos are in the 3D view but hidden: toggle them in the blueprint panel. A hidden 3D video is not decoded (Rerun 0.38.1, Dance
   sample: viewer CPU 0.5 s over 30 time steps hidden, 128.5 s visible). Table card: the scene without video beside camera 1.
 

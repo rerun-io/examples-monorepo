@@ -29,7 +29,15 @@ from dataforge import aria, hands, schema, writing
 from dataforge.datasets.egoexo4d_body import HmFit, fit_keypoints
 from dataforge.datasets.egoexo4d_source import FPS, KB4, GoproCalib, Take, frame_peaks, sample_frames, stored_size
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_dense_pose_track, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import (
+    annotation_context,
+    layout_frustum_m,
+    log_camera_node,
+    log_camera_source,
+    log_dense_pose_track,
+    log_rig_node,
+    log_video_stream,
+)
 from dataforge.records import decode
 from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, mp4_frame_count, parallel_clips, transcode_mp4, video_size, work_dir
@@ -196,10 +204,7 @@ def write_base(recording: rr.RecordingStream, identity: SequenceIdentity, inputs
             )
         )
         slots.append(Slot(EGO_RIG, cam, source, stream.gray, restored, stream.step))
-    # The viewer fits its eye to the layout (a kitchen, a soccer pitch), so a GoPro frustum keeps one on-screen size only if it
-    # grows with the layout.
-    centers_xy: Float64[ndarray, "c 2"] = np.array([calib.world_T_cam[:2, 3] for calib in inputs.gopros])
-    frustum_m: float = max(0.1, 0.05 * float(np.linalg.norm(centers_xy - centers_xy.mean(axis=0), axis=1).max()))
+    frustum_m: float = layout_frustum_m(np.array([calib.world_T_cam[:2, 3] for calib in inputs.gopros]))
     for rig, calib in enumerate(inputs.gopros, start=1):
         size: tuple[int, int] = stored_size(calib)
         source = inputs.root / take.video(calib.cam_uid, "0")

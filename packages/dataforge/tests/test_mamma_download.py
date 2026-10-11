@@ -24,17 +24,19 @@ def release(root: Path) -> Path:
     return root
 
 
-def test_a_complete_release_verifies(tmp_path: Path) -> None:
-    sequences, problems = verify_release(release(tmp_path), "markerless-dance", expected={"mamma_markerless_dance": 2})
+def test_a_complete_release_verifies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(mamma_download.EXPECTED_SEQUENCES, "mamma_markerless_dance", 2)
+    sequences, problems = verify_release(release(tmp_path), "markerless-dance")
     assert len(sequences) == 2 and problems == []
 
 
-def test_verify_names_missing_empty_and_html_files(tmp_path: Path) -> None:
+def test_verify_names_missing_empty_and_html_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(mamma_download.EXPECTED_SEQUENCES, "mamma_markerless_dance", 3)
     root: Path = release(tmp_path)
     (root / "mamma_markerless_dance/050825_Swing_A_1/videos_crf16/IOI_02.mp4").unlink()
     (root / "mamma_markerless_dance/050825_Swing_A_1/pred/params_00.npz").write_bytes(b"")
     (root / "mamma_markerless_dance/050825_Swing_B_1/videos_crf16/IOI_01.mp4").write_bytes(b"<!DOCTYPE html><html>login</html>")
-    _, problems = verify_release(root, "markerless-dance", expected={"mamma_markerless_dance": 3})
+    _, problems = verify_release(root, "markerless-dance")
     text: str = "\n".join(problems)
     assert "Swing_A_1: cameras without a video left out: ['IOI_02']" in text
     assert "Swing_A_1/pred/params_00.npz: empty" in text

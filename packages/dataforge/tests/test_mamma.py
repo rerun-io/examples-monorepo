@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties
+from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties, static_values
 from PIL import Image
 
 from dataforge import paths, schema
@@ -29,6 +29,15 @@ CAMERAS: dict[str, tuple[int, int]] = {"IOI_01": (320, 240), "IOI_02": (240, 320
 MARKERS: int = 4
 
 
+def hevc444(ffmpeg: Path, path: Path, width: int, height: int) -> None:
+    """A test-pattern clip encoded as the release encodes its videos: HEVC 4:4:4."""
+    subprocess.run(
+        [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate={FPS}", "-frames:v", str(FRAMES)]
+        + ["-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv444p", "-x265-params", "log-level=error", str(path)],
+        check=True,
+    )
+
+
 def look_at(position: np.ndarray) -> np.ndarray:
     """World-to-camera (OpenCV axes) of a camera at ``position`` looking at the origin's vertical axis, z up."""
     forward: np.ndarray = np.array([-position[0], -position[1], 0.0]) / np.linalg.norm(position[:2])
@@ -42,8 +51,8 @@ def look_at(position: np.ndarray) -> np.ndarray:
 
 
 def write_sequence(root: Path, ffmpeg: Path) -> Path:
-    """One eval Dance-like sequence: two people, three cameras, masks and markers."""
-    directory: Path = root / "mamma_eval_dance" / SEQUENCE
+    """One eval sequence under Extra (the collection with markers): two people, three cameras, masks and markers."""
+    directory: Path = root / "mamma_eval_extra" / SEQUENCE
     for sub in ("gt", "videos_crf16", "masks", "markers"):
         (directory / sub).mkdir(parents=True)
     rng: np.random.Generator = np.random.default_rng(1)
@@ -82,21 +91,7 @@ def write_sequence(root: Path, ffmpeg: Path) -> Path:
             is_body_in_img=np.ones((FRAMES, 2), dtype=bool),
             vicon_radial_2=np.array([width / 2, height / 2, 1e-9, 0.0, 0.0]),
         )
-        subprocess.run(
-            [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate={FPS}", "-frames:v", str(FRAMES)]
-            + [
-                "-c:v",
-                "libx265",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv444p",
-                "-x265-params",
-                "log-level=error",
-                str(directory / f"videos_crf16/{name}.mp4"),
-            ],
-            check=True,
-        )
+        hevc444(ffmpeg, directory / f"videos_crf16/{name}.mp4", width, height)
         with tarfile.open(directory / f"masks/{name}_masks.tar", "w") as tar:
             for frame in range(FRAMES):
                 for person in (1, 2):
@@ -130,7 +125,7 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
     dataset, directory = staged
     ((identity, sequence),) = dataset.discover()
     assert isinstance(sequence, MammaSequence)
-    assert identity.recording_id == f"mamma-eval__dance__{SEQUENCE}"
+    assert identity.recording_id == f"mamma-eval__extra__{SEQUENCE}"
     dataset.convert(identity, sequence, force=False)
     targets: dict[str, Path] = dataset.targets(identity)
     assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks", "markers"])
@@ -142,8 +137,7 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
         stored: tuple[int, int] = (width // 2, height // 2) if width * height > 3_200_000 else (width, height)
         samples = column_rows(base, f"{schema.video_path(rig, 0)}:VideoStream:sample")
         assert samples[schema.TIMELINE].cast("int64").to_pylist() == expected_times
-        node = base.reader(index=None, contents=schema.cam_path(rig, 0)).to_arrow_table().to_pylist()[0]
-        values = {key.split(":")[-1]: value[0] for key, value in node.items() if value}
+        values = static_values(base, schema.cam_path(rig, 0))
         assert (values["name"], values["source_width"], values["source_height"]) == (name, width, height)
         assert (values.get("stored_width", width), values.get("stored_height", height)) == stored
     assert recording_properties(base, "capture")["num_frames"] == FRAMES
@@ -156,8 +150,7 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
             np.testing.assert_array_equal(np.array(rows.column(1).to_pylist())[:, 0], source["pose_world"][:, person])
             keypoints = column_rows(pose, f"{schema.person_coco133_xyz_path(person)}:Points3D:positions")
             assert len(keypoints) == FRAMES
-            tag = pose.reader(index=None, contents=schema.person_path(person)).to_arrow_table().to_pylist()[0]
-            assert {key.split(":")[-1]: value[0] for key, value in tag.items() if value}["source"] == "mosh_gt"
+            assert static_values(pose, schema.person_path(person))["source"] == "mosh_gt"
 
     mesh = read_back(targets["body_mesh"])
     for person in range(2):
@@ -168,6 +161,7 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
     assert projected == {schema.person_projection_path(rig, 0, person) for rig in (1, 2, 3) for person in range(2)}
 
     masks = read_back(targets["masks"])
+    draw_orders: set[float] = set()
     for rig, (width, height) in enumerate(CAMERAS.values(), start=1):
         stored = (width // 2, height // 2) if width * height > 3_200_000 else (width, height)
         small = (stored[0] // 4, stored[1] // 4)  # a quarter of the video's size, scaled back over it
@@ -181,8 +175,13 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
             expected = np.zeros(small[::-1], dtype=np.uint8)
             expected[: small[1] // 2, person * small[0] // 2 : (person + 1) * small[0] // 2] = 1
             np.testing.assert_array_equal(ids, expected)
-            scale = masks.reader(index=None, contents=path).to_arrow_table().column(f"{path}:Transform3D:scale").to_pylist()[0][0]
-            assert scale == pytest.approx([stored[0] / small[0], stored[1] / small[1], 1.0])
+            static = masks.reader(index=None, contents=path).to_arrow_table()
+            assert static.column(f"{path}:Transform3D:scale").to_pylist()[0][0] == pytest.approx([stored[0] / small[0], stored[1] / small[1], 1.0])
+            # Explicitly translucent: at the default opacity the viewer may draw the transparent background black.
+            assert static.column(f"{path}:EncodedImage:opacity").to_pylist()[0][0] == pytest.approx(0.5)
+            draw_orders.add(static.column(f"{path}:EncodedImage:draw_order").to_pylist()[0][0])
+
+    assert len(draw_orders) == 2  # one person's mask never covers another's
 
     markers = read_back(targets["markers"])
     rows = column_rows(markers, f"{schema.markers_path('vicon')}:Points3D:positions")
@@ -191,12 +190,12 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
 
 def write_iphone_scene(root: Path, ffmpeg: Path) -> Path:
     """One markerless iPhone scene: two predicted people, two lens-less cameras (one 4K, stored at 1920x1080)."""
-    directory: Path = root / "mamma_markerless_iphones" / "indoors" / "crossing_arms"
+    directory: Path = root / "mamma_markerless_iphones" / "indoors" / "hugging"
     for sub in ("meta", "pred", "videos"):
         (directory / sub).mkdir(parents=True)
     np.savez(
         directory / "meta/global.npz",
-        seq_name=np.array("crossing_arms"),
+        seq_name=np.array("hugging"),
         frames_len=np.array(FRAMES),
         fps=np.array(FPS),
         frame_start=np.array(0),
@@ -230,21 +229,7 @@ def write_iphone_scene(root: Path, ffmpeg: Path) -> Path:
             is_body_in_img=np.zeros(0),
             bbox=np.zeros(0),
         )
-        subprocess.run(
-            [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate={FPS}", "-frames:v", str(FRAMES)]
-            + [
-                "-c:v",
-                "libx265",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv444p",
-                "-x265-params",
-                "log-level=error",
-                str(directory / f"videos/{name}.mp4"),
-            ],
-            check=True,
-        )
+        hevc444(ffmpeg, directory / f"videos/{name}.mp4", width, height)
     return directory
 
 
@@ -257,19 +242,27 @@ def test_a_markerless_scene_has_predicted_bodies_and_no_masks(tmp_path: Path, nv
     dataset = MammaConfig(family="markerless-iphones", root=tmp_path / "raw", model_root=MODEL_ROOT).setup()
     assert isinstance(dataset, MammaDataset)
     ((identity, sequence),) = dataset.discover()
-    assert identity.recording_id == "mamma-markerless-iphones__indoors__crossing_arms"
+    assert identity.recording_id == "mamma-markerless-iphones__indoors__hugging"
     dataset.convert(identity, sequence, force=False)
-    targets: dict[str, Path] = dataset.targets(identity)
-    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections"])
+    targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
+    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections"])  # no masks or markers outside eval
     base = read_back(targets["base"])
-    node = base.reader(index=None, contents=schema.cam_path(1, 0)).to_arrow_table().to_pylist()[0]
-    values = {key.split(":")[-1]: value[0] for key, value in node.items() if value}
+    values = static_values(base, schema.cam_path(1, 0))
     assert (values["stored_width"], values["stored_height"], values["camera_model"]) == (1920, 1080, "pinhole")
     pose = read_back(targets["body_pose"])
     for person in range(2):
-        tag = pose.reader(index=None, contents=schema.person_path(person)).to_arrow_table().to_pylist()[0]
-        assert {key.split(":")[-1]: value[0] for key, value in tag.items() if value}["source"] == "mamma_pred"
+        assert static_values(pose, schema.person_path(person))["source"] == "mamma_pred"
     projected = column_rows(read_back(targets["projections"]), f"{schema.person_projection_path(1, 0, 0)}:Points2D:positions")
     pixels = np.array(projected.column(1).to_pylist())
     assert pixels.shape == (FRAMES, 133, 2)
     assert np.isfinite(pixels).all() and (pixels.max(axis=(0, 1)) < [1920, 1080]).all()  # the whole body, in stored pixels (not 4K)
+
+
+def test_an_eval_sequence_missing_a_mask_archive_fails_the_masks_layer(staged: tuple[MammaDataset, Path]) -> None:
+    dataset, directory = staged
+    ((identity, sequence),) = dataset.discover()
+    dataset.convert(identity, sequence, force=False)
+    dataset.targets(identity)["masks"].unlink()
+    (directory / "masks/IOI_02_masks.tar").unlink()
+    with pytest.raises(FileNotFoundError, match="IOI_02_masks.tar"):
+        dataset.convert(identity, sequence, force=False)

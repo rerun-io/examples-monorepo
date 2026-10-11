@@ -15,18 +15,20 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float32, Float64, Int64, UInt8
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
 from dataforge import hands, meshes, paths, schema, writing
+from dataforge.clocks import frame_times
 from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson
-from dataforge.datasets.mamma_source import MammaCamera, MammaSequence, Method, SequenceLabels
+from dataforge.datasets.mamma_source import MARKER_FILES, MammaCamera, MammaSequence, Method, SequenceLabels
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     annotation_context,
     frame_index_column,
+    layout_frustum_m,
     log_camera_node,
     log_camera_source,
     log_rig_node,
@@ -51,8 +53,9 @@ MASK_WORKERS: int = 16
 12 MP) and OpenCV releases the GIL for it: 16 threads cut it 6.6x. Processes lose to their start-up (each imports torch)."""
 PERSON_COLOURS: list[tuple[int, int, int]] = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240)]
 """Mask colour of each person, cycled."""
-MASK_ALPHA: int = 128
-"""Opacity of a mask's foreground; its background is transparent."""
+MASK_OPACITY: float = 0.5
+"""Opacity the viewer draws a mask with; its background palette entry is transparent. Set explicitly: at the default (1.0)
+Rerun 0.38 can draw a translucent PNG's transparent pixels black."""
 MARKER_COLOURS: dict[str, tuple[int, int, int]] = {"vicon": (40, 220, 40), "mosh_baseline": (255, 150, 0)}
 
 
@@ -66,7 +69,7 @@ def stored_size(width: int, height: int) -> tuple[int, int]:
 def pinhole(camera: MammaCamera, width: int, height: int) -> PinholeParameters:
     """The camera's pinhole (K and pose) at its stored size; the Vicon lens is not part of a Rerun pinhole."""
     scale: float = width / camera.width
-    world_T_cam: Float64[ndarray, "4 4"] = np.linalg.inv(camera.cam_T_world)
+    world_T_cam: Float64[ndarray, "4 4"] = camera.world_T_cam
     return PinholeParameters(
         name=camera.name,
         extrinsics=Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3]),
@@ -94,7 +97,12 @@ class Clock:
     @classmethod
     def of(cls, labels: SequenceLabels, frame_limit: int | None) -> "Clock":
         frames: Int64[ndarray, "t"] = np.arange(min(labels.frames, frame_limit or labels.frames), dtype=np.int64)
-        return cls(frames, frames * 1_000_000_000 // labels.fps)
+        return cls(frames, frame_times(frames, labels.fps))
+
+    @property
+    def indexes(self) -> list[rr.TimeColumn]:
+        """Both recording clocks at every frame."""
+        return [time_column(self.times_ns), frame_index_column(self.frames)]
 
 
 def write_base(
@@ -109,13 +117,13 @@ def write_base(
     """Cameras (pinhole at the stored size, Vicon lens as data) and every camera's video, re-encoded to AV1 4:2:0."""
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
     rr.log("/", annotation_context(), static=True, recording=recording)
-    centres: Float64[ndarray, "c 3"] = np.array([np.linalg.inv(camera.cam_T_world)[:3, 3] for camera in cameras])
-    frustum_m: float = max(0.1, 0.05 * float(np.linalg.norm(centres[:, :2] - centres[:, :2].mean(axis=0), axis=1).max()))
+    frustum_m: float = layout_frustum_m(np.array([camera.world_T_cam[:2, 3] for camera in cameras]))
     resolutions: list[str] = []
-    sizes: list[tuple[int, int]] = []
+    rescales: list[tuple[int, int] | None] = []
     for rig, camera in enumerate(cameras, start=1):
         size: tuple[int, int] = stored_size(camera.width, camera.height)
-        sizes.append(size)
+        rescale: tuple[int, int] | None = None if size == (camera.width, camera.height) else size
+        rescales.append(rescale)
         log_rig_node(recording, rig, reference=None, num_cameras=1, name=camera.name, kind="exo")
         log_camera_node(
             recording,
@@ -134,7 +142,6 @@ def write_base(
                 static=True,
                 recording=recording,
             )
-        rescaled: bool = size != (camera.width, camera.height)
         resolutions.append(
             log_camera_source(
                 recording,
@@ -143,8 +150,8 @@ def write_base(
                 name=camera.name,
                 source_width=camera.width,
                 source_height=camera.height,
-                stored_width=size[0] if rescaled else None,
-                stored_height=size[1] if rescaled else None,
+                stored_width=None if rescale is None else rescale[0],
+                stored_height=None if rescale is None else rescale[1],
                 video_codec="av1",
                 cq=AV1_CQ,
                 gop=AV1_GOP,
@@ -158,8 +165,7 @@ def write_base(
     with work_dir("mamma-") as work:
         clips: list[Path] = [work / f"rig_{rig:02d}.mp4" for rig in range(1, len(cameras) + 1)]
 
-        def encode(camera: MammaCamera, clip: Path, size: tuple[int, int]) -> None:
-            rescale: tuple[int, int] | None = None if size == (camera.width, camera.height) else size
+        def encode(camera: MammaCamera, clip: Path, rescale: tuple[int, int] | None) -> None:
             transcode_mp4(
                 sequence.video(camera.name),
                 clip,
@@ -173,7 +179,7 @@ def write_base(
             )
 
         jobs: list[tuple[Path, Callable[[], None]]] = [
-            (clip, partial(encode, camera, clip, size)) for camera, clip, size in zip(cameras, clips, sizes, strict=True)
+            (clip, partial(encode, camera, clip, rescale)) for camera, clip, rescale in zip(cameras, clips, rescales, strict=True)
         ]
         with parallel_clips(jobs, timer, workers=6) as encoded:
             for rig, clip in enumerate(encoded, start=1):
@@ -206,7 +212,7 @@ def write_base(
 
 def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed: list[PosedPerson], clock: Clock) -> None:
     """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model."""
-    indexes: list[rr.TimeColumn] = [time_column(clock.times_ns), frame_index_column(clock.frames)]
+    indexes: list[rr.TimeColumn] = clock.indexes
     for index, (person, pose) in enumerate(zip(labels.people, posed, strict=True)):
         rr.log(
             schema.person_path(index),
@@ -251,7 +257,7 @@ def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed
         )
 
 
-def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], faces: Int64[ndarray, "f 3"] | ndarray, clock: Clock) -> None:
+def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clock: Clock) -> None:
     """Every person's posed SMPL-X mesh every ``meshes.BODY_MESH_STRIDE``-th frame."""
     for index, pose in enumerate(posed):
         path: str = schema.person_body_path(index, "mesh")
@@ -266,7 +272,7 @@ def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], fac
                 frame_indices=pose.mesh_frames[rows],
                 vertices=pose.vertices[rows],
                 trusted=[True] * len(pose.mesh_frames[rows]),
-                topology=faces,
+                topology=pose.faces,
             )
 
 
@@ -289,25 +295,27 @@ def write_projections(recording: rr.RecordingStream, cameras: list[MammaCamera],
                 times_ns=clock.times_ns,
                 frame_indices=clock.frames,
                 positions=positions,
-                confidence=np.isfinite(positions).all(axis=-1).astype(np.float32),
+                confidence=None,  # 1 where the lens put the point, 0 where it is NaN
             )
 
 
 def mask_png(source: bytes, size: tuple[int, int], colour: tuple[int, int, int]) -> bytes:
-    """A shipped 0/255 mask as a two-colour palette PNG at ``size``: index 1 inside (``colour``, half opaque), 0 transparent outside.
+    """A shipped 0/255 mask as a two-colour palette PNG at ``size``: index 1 inside (``colour``), index 0 transparent outside.
 
     A pixel is inside when most of the source pixels it covers are. The palette indices are the mask; a viewer draws the colours.
     """
-    gray: UInt8[ndarray, "h w"] | None = cv2.imdecode(np.frombuffer(source, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    # No jaxtyping annotations on these locals: this runs on MASK_WORKERS threads, and the dev env's per-call check of a fresh
+    # jaxtyping hint grows beartype's cache from every thread at once ("dictionary changed size during iteration").
+    gray = cv2.imdecode(np.frombuffer(source, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         raise ValueError("not a decodable image")
     if gray.shape[::-1] != size:
         gray = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
-    ids: UInt8[ndarray, "h w"] = (gray >= 128).astype(np.uint8)
+    ids = (gray >= 128).astype(np.uint8)
     paletted: Image.Image = Image.frombuffer("P", size, ids, "raw", "P", 0, 1)
     paletted.putpalette([0, 0, 0, *colour])
     buffer = io.BytesIO()
-    paletted.save(buffer, format="PNG", transparency=bytes([0, MASK_ALPHA]))
+    paletted.save(buffer, format="PNG", transparency=bytes([0, 255]))
     return buffer.getvalue()
 
 
@@ -321,7 +329,7 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
             person_ids="person_NN = the release's mask _NN+1",
         ),
     )
-    indexes: list[rr.TimeColumn] = [time_column(clock.times_ns), frame_index_column(clock.frames)]
+    indexes: list[rr.TimeColumn] = clock.indexes
     with ThreadPoolExecutor(max_workers=MASK_WORKERS) as executor:
         for rig, camera in enumerate(cameras, start=1):
             stored: tuple[int, int] = stored_size(camera.width, camera.height)
@@ -338,7 +346,12 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
                     colour: tuple[int, int, int] = PERSON_COLOURS[person % len(PERSON_COLOURS)]
                     blobs: list[bytes] = list(executor.map(partial(mask_png, size=size, colour=colour), sources))
                     path: str = schema.person_mask_path(rig, 0, person)
-                    rr.log(path, rr.EncodedImage.from_fields(media_type="image/png", draw_order=10.0), static=True, recording=recording)
+                    rr.log(
+                        path,
+                        rr.EncodedImage.from_fields(media_type="image/png", opacity=MASK_OPACITY, draw_order=10.0 + person),
+                        static=True,
+                        recording=recording,
+                    )
                     # The scale lays the small mask over the stored video in the pinhole's image space.
                     rr.log(path, rr.Transform3D(scale=[stored[0] / size[0], stored[1] / size[1], 1.0]), static=True, recording=recording)
                     rr.send_columns(path, indexes=indexes, columns=rr.EncodedImage.columns(blob=blobs), recording=recording)
@@ -346,9 +359,10 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
 
 def write_markers(recording: rr.RecordingStream, sequence: MammaSequence, clock: Clock) -> None:
     """The held-out Vicon markers and the MoSh++ baseline's markers (eval Extra), labelled, world metres."""
-    labels: list[str] = [str(label) for label in np.load(sequence.markers_dir / "labels_m37.npy", allow_pickle=False)]
-    indexes: list[rr.TimeColumn] = [time_column(clock.times_ns), frame_index_column(clock.frames)]
-    for kind, name in (("vicon", "vicon_m37.npy"), ("mosh_baseline", "baseline_m37.npy")):
+    names, vicon, baseline = MARKER_FILES
+    labels: list[str] = [str(label) for label in np.load(sequence.markers_dir / names, allow_pickle=False)]
+    indexes: list[rr.TimeColumn] = clock.indexes
+    for kind, name in (("vicon", vicon), ("mosh_baseline", baseline)):
         positions: Float32[ndarray, "f m 3"] = np.load(sequence.markers_dir / name, allow_pickle=False)
         if positions.shape[1:] != (len(labels), 3) or len(positions) < len(clock.frames):
             raise ValueError(f"{sequence.markers_dir / name}: shape {positions.shape} for {len(labels)} labels and {len(clock.frames)} frames")

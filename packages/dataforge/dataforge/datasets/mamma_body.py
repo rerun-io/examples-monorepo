@@ -80,6 +80,8 @@ class PosedPerson:
     """Frames of ``vertices``: every ``meshes.BODY_MESH_STRIDE``-th one."""
     vertices: Float32[ndarray, "k 10475 3"]
     """Posed vertices at ``mesh_frames``, world metres."""
+    faces: UInt32[ndarray, "20908 3"]
+    """The mesh triangles (one array every person shares)."""
 
 
 class SmplxBody:
@@ -90,7 +92,8 @@ class SmplxBody:
         if missing:
             raise FileNotFoundError(f"MAMMA needs the SMPL-X files {missing}; run dataforge-download mamma or set --model-root")
         self.model_root: Path = model_root
-        self.faces: UInt32[ndarray, "20908 3"] | None = None
+        with np.load(MODEL_FILES["neutral"].local(model_root), allow_pickle=False) as model:
+            self.faces: UInt32[ndarray, "20908 3"] = model["f"].astype(np.uint32)  # every SMPL-X file shares this topology
 
     def pose(self, person: PersonFit, frames: Int64[ndarray, "t"]) -> PosedPerson:
         """Pose ``person`` at ``frames`` (sequence frame indices), keeping the meshes of the stride frames."""
@@ -108,7 +111,6 @@ class SmplxBody:
             use_face_contour=True,
             v_template=None if person.v_template is None else torch.from_numpy(person.v_template.astype(np.float32)),
         )
-        self.faces = np.asarray(layer.faces, dtype=np.uint32)
         kept: Int64[ndarray, "k"] = np.flatnonzero(frames % meshes.BODY_MESH_STRIDE == 0)
         coco133: list[Float32[ndarray, "b 133 3"]] = []
         vertices: list[Float32[ndarray, "c 10475 3"]] = []
@@ -132,4 +134,4 @@ class SmplxBody:
             coco133.append(smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3])
             in_batch: Int64[ndarray, "c"] = kept[(kept >= start) & (kept < start + len(rows))] - start
             vertices.append(output.vertices.numpy()[in_batch])
-        return PosedPerson(coco133=np.concatenate(coco133), mesh_frames=frames[kept], vertices=np.concatenate(vertices))
+        return PosedPerson(coco133=np.concatenate(coco133), mesh_frames=frames[kept], vertices=np.concatenate(vertices), faces=self.faces)

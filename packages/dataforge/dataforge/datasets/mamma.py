@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-import rerun as rr
 import rerun.blueprint as rrb
 
 from dataforge import blueprints, paths, schema, writing
@@ -26,8 +25,11 @@ PANES: int = 8
 """Camera panes of the default layout; a rig with more cameras shows every n-th one (Pablo, 2026-10-10)."""
 VISIBLE_3D_VIDEOS: int = 4
 """Rigs with more cameras log their videos into the 3D view hidden (toggle them in the blueprint panel): the iPhones show theirs."""
-FAMILY_RIGS: dict[Family, int] = {"eval": 16, "markerless-dance": 32, "markerless-multiple-people": 32, "markerless-iphones": 4}
-"""Cameras the catalog dataset's default layout is built for: every eval rig has the first 16 (Dance has 32)."""
+FAMILY_RIGS: dict[Family, int] = {"eval": 32, "markerless-dance": 32, "markerless-multiple-people": 32, "markerless-iphones": 4}
+"""Most cameras a rig of the family has (eval Dance 32, Singles and Extra 16): the catalog layouts' scene rules cover them all
+(rules on absent entities do nothing)."""
+FAMILY_PANES: dict[Family, int] = {"eval": 16, "markerless-dance": 32, "markerless-multiple-people": 32, "markerless-iphones": 4}
+"""Cameras the catalog default lays panes out for: eval shows the first 16, which every eval rig has."""
 SCENE_EYE: rrb.EyeControls3D = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital)
 
 
@@ -36,22 +38,31 @@ def pane_rigs(cameras: int) -> list[int]:
     return list(range(1, cameras + 1)) if cameras <= 16 else list(range(1, cameras + 1, cameras // PANES))[:PANES]
 
 
-def layout(cameras: int, names: list[str] | None = None) -> rrb.Blueprint:
-    """The scene (z up, projections and masks left to the panes) above a strip of camera panes."""
-    rigs: range = range(1, cameras + 1)
-    scene = rrb.Spatial3DView(
+def scene_view(rigs: int, *, card: bool = False) -> rrb.Spatial3DView:
+    """The scene (z up) of a rig of up to ``rigs`` cameras: projections and masks stay in the panes, and a card drops every video
+    while a layout hides them on rigs of more than ``VISIBLE_3D_VIDEOS`` cameras (a hidden video is not decoded)."""
+    numbers: range = range(1, rigs + 1)
+    contents: list[str] = [
+        "+ /world/**",
+        *(f"- {schema.coco133_uv_projected_path(rig, 0)}/**" for rig in numbers),
+        *(f"- {schema.pinhole_path(rig, 0)}/masks/**" for rig in numbers),
+        *(blueprints.video_exclusions((rig, 0) for rig in numbers) if card else []),
+    ]
+    return rrb.Spatial3DView(
         name="Scene",
         origin="/world",
-        contents=[
-            "+ /world/**",
-            *(f"- {schema.coco133_uv_projected_path(rig, 0)}/**" for rig in rigs),
-            *(f"- {schema.pinhole_path(rig, 0)}/masks/**" for rig in rigs),
-        ],
-        overrides={schema.video_path(rig, 0): rrb.EntityBehavior(visible=False) for rig in rigs} if cameras > VISIBLE_3D_VIDEOS else None,
+        contents=contents,
+        overrides=None if card or rigs <= VISIBLE_3D_VIDEOS else {schema.video_path(rig, 0): rrb.EntityBehavior(visible=False) for rig in numbers},
         eye_controls=SCENE_EYE,
     )
-    panes: list[rrb.Spatial2DView] = [blueprints.camera_view(names[rig - 1] if names else f"Camera {rig}", rig, 0) for rig in pane_rigs(cameras)]
-    return blueprints.exoego_blueprint(scene, ego_panes=[], exo_panes=panes)
+
+
+def layout(rigs: int, names: list[str] | None = None, *, panes: int | None = None) -> rrb.Blueprint:
+    """The scene above a strip of camera panes, for ``panes`` of the cameras (all ``rigs`` by default)."""
+    views: list[rrb.Spatial2DView] = [
+        blueprints.camera_view(names[rig - 1] if names else f"Camera {rig}", rig, 0) for rig in pane_rigs(panes or rigs)
+    ]
+    return blueprints.exoego_blueprint(scene_view(rigs), ego_panes=[], exo_panes=views)
 
 
 @dataclass
@@ -82,14 +93,12 @@ class MammaConfig(FrameLimitedConfig):
 class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
     """Convert one sequence at a time from the release in place."""
 
+    layers = (paths.BASE_LAYER, paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER, paths.MASKS_LAYER, paths.MARKERS_LAYER)
+    """masks and markers only where the release ships them (eval, eval Extra); register skips a layer no segment has."""
+
     def __init__(self, config: MammaConfig) -> None:
         super().__init__(config)
         self.body: SmplxBody | None = None
-
-    @property
-    def layers(self) -> tuple[str, ...]:  # type: ignore[override]
-        derived: tuple[str, ...] = (paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER)
-        return (paths.BASE_LAYER, *derived, *((paths.MASKS_LAYER, paths.MARKERS_LAYER) if self.config.family == "eval" else ()))
 
     def download(self) -> None:
         """Fetch the SMPL-X models and verify the release in place; with ``fetch_into``, prove the MPI download on ``sequences``."""
@@ -102,17 +111,19 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
             if self.config.sequences is None:
                 raise ValueError("--fetch-into proves the MPI download on chosen sequences: name them with --sequences (the release is ~221 GB)")
             paths.require_outside([self.config.fetch_into], roots=[paths.NAS_ROOT, self.config.root])
-            for identity, sequence in self.discover():
-                mismatches: list[str] = fetch_sequence(self.config.root, sequence, self.config.fetch_into)
-                problems += mismatches
-                print(f"  fetched {identity.sequence_key} from the MPI server: {mismatches or 'identical to the release copy'}")
+            for sequence in sequences:
+                key: str = SequenceIdentity(self.config.name, sequence.parts).sequence_key
+                if key in self.config.sequences:
+                    mismatches: list[str] = fetch_sequence(self.config.root, sequence, self.config.fetch_into)
+                    problems += mismatches
+                    print(f"  fetched {key} from the MPI server: {mismatches or 'identical to the release copy'}")
         if problems:
             raise ValueError(f"{self.config.name}: {len(problems)} problem(s) in the release, listed above")
 
     def discover(self) -> list[tuple[SequenceIdentity, MammaSequence]]:
         found, skipped = discover_sequences(self.config.root, self.config.family)
-        for reason in skipped:
-            print(f"  mamma: skipped {reason}")
+        for directory, reason in skipped:
+            print(f"  mamma: skipped {directory}: {reason}")
         pairs: list[tuple[SequenceIdentity, MammaSequence]] = [(SequenceIdentity(self.config.name, sequence.parts), sequence) for sequence in found]
         if self.config.sequences is not None:
             known: set[str] = {identity.sequence_key for identity, _ in pairs}
@@ -125,11 +136,9 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
     def convert(self, identity: SequenceIdentity, source: MammaSequence, *, force: bool) -> Path:
         """Base, then the body, projection, mask and marker layers, all from the release in place."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
-        shipped: dict[str, bool] = {
-            paths.MASKS_LAYER: all(source.mask_tar(camera).is_file() for camera in source.cameras),
-            paths.MARKERS_LAYER: source.markers_dir.is_dir(),
-        }
-        pending = [layer for layer in pending if shipped.get(layer, True)]
+        # By collection, not by file presence: a missing mask tar or marker file fails its layer instead of skipping it.
+        ships: dict[str, bool] = {paths.MASKS_LAYER: source.is_eval, paths.MARKERS_LAYER: source.has_markers}
+        pending = [layer for layer in pending if ships.get(layer, True)]
         if not pending:
             return targets[paths.BASE_LAYER]
         with self.timer.stage("read"):
@@ -156,17 +165,13 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
             with self.timer.stage("smplx"):
                 posed = [body.pose(person, clock.frames) for person in labels.people]
 
-        def body_mesh(recording: rr.RecordingStream) -> None:
-            assert self.body is not None and self.body.faces is not None
-            write_body_mesh(recording, posed, self.body.faces, clock)
-
         self.write_layers(
             identity,
             targets,
             [layer for layer in pending if layer != paths.BASE_LAYER],
             {
                 paths.BODY_POSE_LAYER: lambda recording: write_body_pose(recording, labels, posed, clock),
-                paths.BODY_MESH_LAYER: body_mesh,
+                paths.BODY_MESH_LAYER: lambda recording: write_body_mesh(recording, posed, clock),
                 paths.PROJECTIONS_LAYER: lambda recording: write_projections(recording, cameras, posed, clock),
                 paths.MASKS_LAYER: lambda recording: write_masks(recording, source, cameras, len(labels.people), clock),
                 paths.MARKERS_LAYER: lambda recording: write_markers(recording, source, clock),
@@ -177,23 +182,11 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
 
     def default_blueprint(self) -> rrb.Blueprint:
         """The family's layout, registered on its catalog dataset; each base rrd embeds its own sequence's."""
-        return layout(FAMILY_RIGS[self.config.family])
+        return layout(FAMILY_RIGS[self.config.family], panes=FAMILY_PANES[self.config.family])
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Card: the scene without video beside the first camera."""
-        rigs: int = FAMILY_RIGS[self.config.family]
-        scene = rrb.Spatial3DView(
-            name="Scene",
-            origin="/world",
-            contents=[
-                "+ /world/**",
-                *blueprints.video_exclusions((rig, 0) for rig in range(1, rigs + 1)),
-                *(f"- {schema.coco133_uv_projected_path(rig, 0)}/**" for rig in range(1, rigs + 1)),
-                *(f"- {schema.pinhole_path(rig, 0)}/masks/**" for rig in range(1, rigs + 1)),
-            ],
-            eye_controls=SCENE_EYE,
-        )
-        return blueprints.exoego_table_blueprint(scene, blueprints.camera_view("Camera 1", 1, 0))
+        return blueprints.exoego_table_blueprint(scene_view(FAMILY_RIGS[self.config.family], card=True), blueprints.camera_view("Camera 1", 1, 0))
 
     def table_fields(self) -> writing.TableFields:
         fields = tuple(writing.TableField(f"property:episode:{name}", name) for name in ("collection", "num_people", "body_source")) + (

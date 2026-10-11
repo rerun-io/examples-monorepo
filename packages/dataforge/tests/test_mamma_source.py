@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dataforge.datasets.mamma_source import MammaCamera, SequenceLabels, read_camera, read_eval_labels, read_pred_labels
+from dataforge.datasets.mamma_source import MammaCamera, SequenceLabels, discover_sequences, read_camera, read_eval_labels, read_pred_labels
 
 K: list[list[float]] = [[1000.0, 0.0, 100.0], [0.0, 1000.0, 50.0], [0.0, 0.0, 1.0]]
 
@@ -59,6 +59,17 @@ def test_the_vicon_lens_maps_distorted_to_undistorted_pixels(tmp_path: Path) -> 
     assert camera.lens is not None
     np.testing.assert_allclose(camera.lens.undistort(np.array([[110.0, 50.0]])), [[110.1, 50.0]])
     np.testing.assert_allclose(camera.lens.distort(np.array([[110.1, 50.0]])), [[110.0, 50.0]], atol=1e-9)
+
+
+def test_a_point_behind_the_camera_leaves_the_rest_of_the_batch_projected(tmp_path: Path) -> None:
+    # A whole sequence of keypoints goes through one call: one invalid point must not stop the others' iterations.
+    camera: MammaCamera = read_camera(write_camera(tmp_path / "IOI_03.npz"))
+    edge: np.ndarray = np.array([[0.04, 0.03, 1.0]])
+    alone: np.ndarray = camera.project(edge)
+    together: np.ndarray = camera.project(np.concatenate([edge, [[0.0, 0.0, -1.0]]]))
+    assert np.isfinite(alone).all()
+    np.testing.assert_allclose(together[0], alone[0])
+    assert np.isnan(together[1]).all()
 
 
 def test_project_applies_the_pinhole_then_the_lens(tmp_path: Path) -> None:
@@ -123,8 +134,8 @@ def test_labels_shorter_than_the_sequence_name_the_file(tmp_path: Path) -> None:
 
 
 def write_pred(path: Path, *, frames: int = 4, rate: float = 30.0) -> Path:
-    """A markerless ``pred/params_XX.npz`` (float32, 16 betas, mean hand added)."""
-    rng: np.random.Generator = np.random.default_rng(len(path.name))
+    """A markerless ``pred/params_XX.npz`` (float32, 16 betas, mean hand added); each file's values are its own."""
+    rng: np.random.Generator = np.random.default_rng(int(path.stem.removeprefix("params_")))
     np.savez(
         path,
         betas=rng.normal(size=16).astype(np.float32),
@@ -157,10 +168,26 @@ def test_read_pred_labels_takes_one_person_per_file(tmp_path: Path) -> None:
     for path, person in zip(pred, labels.people, strict=True):
         with np.load(path) as source:
             np.testing.assert_array_equal(person.pose, source["poses"])
+            np.testing.assert_array_equal(person.trans, source["trans"])
             np.testing.assert_array_equal(person.betas, source["betas"])
         assert person.gender == "neutral" and not person.flat_hand_mean and person.v_template is None
+    assert not np.array_equal(labels.people[0].pose, labels.people[1].pose)
 
 
 def test_a_prediction_at_another_rate_names_its_file(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="params_00.npz"):
         read_pred_labels(write_meta_global(tmp_path / "global.npz"), [write_pred(tmp_path / "params_00.npz", rate=60.0)])
+
+
+def test_a_markerless_sequence_missing_a_person_is_skipped(tmp_path: Path) -> None:
+    # The release names a couple dance with both dancers' ids; it ships params_00 and params_01.
+    directory: Path = tmp_path / "mamma_markerless_dance" / "050825_WestCoastSwing_CutOff_03688_03689_1"
+    for sub in ("meta", "pred", "videos_crf16"):
+        (directory / sub).mkdir(parents=True)
+    write_meta_global(directory / "meta/global.npz")
+    write_camera(directory / "meta/IOI_01.npz")
+    (directory / "videos_crf16/IOI_01.mp4").write_bytes(b"stand-in")
+    write_pred(directory / "pred/params_01.npz")
+    found, skipped = discover_sequences(tmp_path, "markerless-dance")
+    assert found == []
+    assert skipped == [(directory, "predictions ['params_01'], the release ships ['params_00', 'params_01']")]

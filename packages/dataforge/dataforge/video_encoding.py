@@ -328,8 +328,9 @@ def transcode_mp4(
         *(["format=gray"] if gray else []),
         EVEN_DIMENSION_AND_PIXEL_FORMAT,
     ]
-    # NVENC's AV1 takes 4:2:0 only, as the CPU path's last filter ensures; a 4:4:4 source (MAMMA's HEVC) fails without this.
-    cuda_filters: list[str] = [*select, f"scale_cuda={'' if size is None else f'{size[0]}:{size[1]}:'}format=yuv420p"]
+    # NVENC's AV1 takes 4:2:0 only, as the CPU path's last filter ensures: a 4:4:4 source (MAMMA's HEVC) fails without this.
+    # nv12 is what NVDEC hands over for 8-bit 4:2:0, so for such a source scale_cuda passes the frames through untouched.
+    cuda_filters: list[str] = [*select, f"scale_cuda={'' if size is None else f'{size[0]}:{size[1]}:'}format=nv12"]
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     def run(*, cuda: bool) -> subprocess.CompletedProcess[str]:

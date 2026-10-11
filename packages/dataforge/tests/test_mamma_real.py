@@ -3,12 +3,13 @@
 import io
 import os
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
-from conftest import column_rows, raw_asset, read_back, recording_properties
+from conftest import column_rows, raw_asset, read_back, recording_properties, static_values
 from PIL import Image
 
 from dataforge import paths, schema
@@ -61,10 +62,10 @@ def test_a_preview_of_each_family_converts(sample: str, tmp_path: Path, nvenc_ff
     for rig, name in enumerate(sequence.cameras, start=1):
         camera: MammaCamera = read_camera(sequence.calibration(name))
         samples = column_rows(base, f"{schema.video_path(rig, 0)}:VideoStream:sample")
-        assert samples[schema.TIMELINE].cast("int64").to_pylist() == [frame * 1_000_000_000 // labels.fps for frame in range(PREVIEW)]
-        node = base.reader(index=None, contents=schema.cam_path(rig, 0)).to_arrow_table().to_pylist()[0]
-        values = {key.split(":")[-1]: value[0] for key, value in node.items() if value}
-        width, height = values.get("stored_width", camera.width), values.get("stored_height", camera.height)
+        assert samples[schema.TIMELINE].cast("int64").to_pylist() == [round(frame * 10**9 / labels.fps) for frame in range(PREVIEW)]  # nearest ns
+        values = static_values(base, schema.cam_path(rig, 0))
+        width: int = int(values.get("stored_width", camera.width))  # pyrefly: ignore[bad-argument-type] (an Arrow integer)
+        height: int = int(values.get("stored_height", camera.height))  # pyrefly: ignore[bad-argument-type] (an Arrow integer)
         assert width * height <= MAX_PIXELS
     pose = read_back(targets["body_pose"])
     for person in range(len(labels.people)):
@@ -98,7 +99,7 @@ def test_the_vicon_lens_fits_the_eval_masks_better_than_a_pinhole() -> None:
     for path in sorted((directory / "gt").glob("IOI_*.npz")):
         camera: MammaCamera = read_camera(path)
         assert camera.lens is not None
-        pinhole_camera = MammaCamera(camera.name, camera.K, camera.cam_T_world, camera.width, camera.height, camera.portrait, None)
+        pinhole_camera: MammaCamera = replace(camera, lens=None)
         cameras[camera.name] = (camera, pinhole_camera)
         for row in range(len(frames)):
             boxes: list[tuple[np.ndarray, np.ndarray]] = []
