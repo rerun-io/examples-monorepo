@@ -1,6 +1,8 @@
 """MammaSyn shard readers against hand-built WebDataset tars laid out as the release ships them."""
 
 import io
+import json
+import os
 import pickle
 import tarfile
 from pathlib import Path
@@ -9,8 +11,13 @@ import numpy as np
 import pytest
 
 from dataforge.datasets import mamma_syn_source
-from dataforge.datasets.mamma_source import MammaCamera
+from dataforge.datasets.mamma import MammaConfig
+from dataforge.datasets.mamma_body import PosedPerson
+from dataforge.datasets.mamma_source import MammaCamera, PersonFit
+from dataforge.datasets.mamma_syn import MammaSynDataset, check_joints
 from dataforge.datasets.mamma_syn_source import (
+    BEDLAM_DATASET,
+    SYN_DIR,
     BedlamLabels,
     BedlamView,
     RenderLabels,
@@ -20,6 +27,7 @@ from dataforge.datasets.mamma_syn_source import (
     SynSample,
     assemble_bedlam,
     assemble_render,
+    copy_span,
     index_shards,
     read_bedlam_view,
     read_members,
@@ -76,10 +84,10 @@ def test_staged_shards_are_identical_copies_the_cached_index_still_describes(tmp
     nas.mkdir()
     first: Path = write_shard(nas / "000000.tar", [member for frame in (0, 1) for member in sample_members(f"{RENDER_PREFIX}/IOI_01/{frame:04d}")])
     second: Path = write_shard(nas / "000001.tar", sample_members(f"{RENDER_PREFIX}/IOI_01/0003"))
-    indexed: list[SynSample] = sequence_samples(nas, tmp_path / "index", "sequence")
-    stage_shards([first, second], tmp_path / "stage")
-    assert [(tmp_path / "stage" / shard.name).read_bytes() for shard in (first, second)] == [first.read_bytes(), second.read_bytes()]
-    assert sequence_samples(tmp_path / "stage", tmp_path / "index", "sequence") == indexed
+    indexed: list[SynSample] = sequence_samples([first, second], tmp_path / "index", "sequence")
+    copies: list[Path] = stage_shards([first, second], tmp_path / "stage")
+    assert [copy.read_bytes() for copy in copies] == [first.read_bytes(), second.read_bytes()]
+    assert sequence_samples(copies, tmp_path / "index", "sequence") == indexed
     assert read_member(tmp_path / "stage", indexed[2].labels) == f"{RENDER_PREFIX}/IOI_01/0003 data.pyd".encode()
 
 
@@ -243,7 +251,7 @@ def test_bedlam_views_keep_each_persons_camera_and_the_zoom() -> None:
     labels: BedlamLabels = assemble_bedlam(views)
     np.testing.assert_array_equal(labels.frames, [0, 5, 10])
     np.testing.assert_array_equal(labels.K[:, 0, 0], [1010.0, 1200.0, 1500.0])
-    assert labels.ids == [0, 2]
+    assert [person.index for person in labels.people] == [0, 2]
     first, second = labels.people
     assert (first.model, first.gender, first.flat_hand_mean, len(first.betas)) == ("v1_1_neutral", "female", True, 11)
     np.testing.assert_array_equal(second.present, [True, True, False])
@@ -257,3 +265,56 @@ def test_people_in_one_bedlam_view_that_disagree_on_the_intrinsics_raise() -> No
     views: list[BedlamView] = [BedlamView(0, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=0), 1: bedlam_person(offset=1.0, frame=0, focal=999.0)}), "x"))]
     with pytest.raises(ValueError, match=r"frame 0.*person 1.*intrinsics"):
         assemble_bedlam(views)
+
+
+def test_a_short_read_while_staging_fails_instead_of_keeping_a_padded_copy(tmp_path: Path) -> None:
+    # The copy is pre-sized, so a span cut short (a source truncated mid-copy) would otherwise pass the size and mtime check.
+    (tmp_path / "000000.tar").write_bytes(b"abcd")
+    (tmp_path / "copy").write_bytes(bytes(8))
+    with pytest.raises(ValueError, match=r"000000.tar: 4 of 8 bytes at 0"):
+        copy_span(tmp_path / "000000.tar", tmp_path / "copy", 0, 8)
+
+
+def test_each_run_stages_in_a_directory_of_its_own_and_removes_those_of_runs_that_died(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    parent: Path = tmp_path / "out" / "work" / "mamma-syn-stage"
+    dead: Path = parent / "999999999" / "mamma-syn__dataset__sequence"  # a pid no process has
+    dead.mkdir(parents=True)
+    alive: Path = parent / str(os.getppid())
+    alive.mkdir()
+    dataset = MammaConfig(family="syn", root=tmp_path, index_root=tmp_path / "index").setup()
+    assert isinstance(dataset, MammaSynDataset)
+    assert dataset.stage_root == parent / str(os.getpid()) and dataset.stage_root.is_dir()
+    assert not dead.parent.exists() and alive.is_dir()
+
+
+def test_a_bedlam_batch_whose_shards_miss_its_metadata_count_fails_discovery(tmp_path: Path) -> None:
+    batch: Path = tmp_path / SYN_DIR / BEDLAM_DATASET / "20221010_3-10_500_batch01hand_zoom_suburb_d"
+    batch.mkdir(parents=True)
+    write_shard(batch / "000000.tar", sample_members(f"{BEDLAM_PREFIX}/seq_000000/seq_000000_0000"))
+    (batch / "metadata.json").write_text(json.dumps({"format": "webdataset", "num_samples": 2}))
+    dataset = MammaConfig(family="syn-bedlam", root=tmp_path, index_root=tmp_path / "index").setup()
+    with pytest.raises(ValueError, match=r"1 samples in the shards, metadata.json declares 2"):
+        dataset.discover()
+
+
+def test_the_joints_check_fails_a_present_row_with_non_finite_joints() -> None:
+    # Absent rows are NaN by design; a NaN in a row the labels name is a broken label, not a match.
+    present: np.ndarray = np.array([True, True, False])
+    person = PersonFit(
+        subject="person_03", index=3, gender="neutral", model="locked_head_neutral", flat_hand_mean=True,
+        pose=np.zeros((3, 165)), trans=np.zeros((3, 3)), betas=np.zeros(16), v_template=None, present=present,
+    )
+    joints: np.ndarray = np.zeros((3, 144, 3), dtype=np.float32)
+    joints[2] = np.nan
+    posed = PosedPerson(
+        index=3, coco133=np.zeros((3, 133, 3), dtype=np.float32), joints=joints, mesh_rows=np.arange(3), mesh_present=present,
+        vertices=np.zeros((2, 10475, 3), dtype=np.float32), faces=np.zeros((20908, 3), dtype=np.uint32),
+    )
+    shipped: np.ndarray = np.zeros((3, 127, 3))
+    shipped[2] = np.nan
+    frames: np.ndarray = np.array([0, 10, 20])
+    assert check_joints([person], [posed], [shipped], frames) == 0.0
+    shipped[1, 5] = np.nan
+    with pytest.raises(ValueError, match=r"person_03: frame 10"):
+        check_joints([person], [posed], [shipped], frames)

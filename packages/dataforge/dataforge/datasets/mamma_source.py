@@ -144,6 +144,8 @@ class PersonFit:
 
     subject: str
     """The eval subject id, the prediction file's stem (``params_00``), or a MammaSyn person (``person_00``)."""
+    index: int
+    """The person's entity, ``person_NN``: the release's order (MPI) or its person index (MammaSyn: instance mask value - 1)."""
     gender: Gender
     """The person's gender as the labels state it."""
     model: SmplxModel
@@ -158,8 +160,8 @@ class PersonFit:
     """Shape coefficients: 300 for the eval GT, 16 for the predictions."""
     v_template: Float64[ndarray, "10475 3"] | None
     """The subject's registered template mesh, which replaces the model's (``mosh_v_template``); None for beta-only fits."""
-    present: Bool[ndarray, "t"] | None = None
-    """Rows at which any view labels the person (MammaSyn); None when present throughout. Absent rows hold zeros."""
+    present: Bool[ndarray, "t"]
+    """Rows at which the person is there (MPI: every row; MammaSyn: rows a view labels them). Absent rows hold zeros."""
 
 
 @serde
@@ -180,7 +182,7 @@ class SequenceLabels:
 
     def __post_init__(self) -> None:
         for person in self.people:
-            if len(person.pose) != self.frames or len(person.trans) != self.frames:
+            if len(person.pose) != self.frames or len(person.trans) != self.frames or len(person.present) != self.frames:
                 raise ValueError(f"{person.subject}: {len(person.pose)} poses and {len(person.trans)} translations for {self.frames} frames")
             if (self.method == "mosh_v_template") != (person.v_template is not None):
                 raise ValueError(f"{person.subject}: a {self.method} fit {'needs' if person.v_template is None else 'has no use for'} a template")
@@ -201,6 +203,7 @@ def read_eval_labels(path: Path) -> SequenceLabels:
         people: list[dict[str, object]] = [
             {
                 "subject": str(subject),
+                "index": index,
                 "gender": str(npz["gender"][index]),
                 "model": GENDER_MODELS.get(str(npz["gender"][index]), str(npz["gender"][index])),
                 "flat_hand_mean": bool(npz["flat_hand_mean"]),
@@ -208,6 +211,7 @@ def read_eval_labels(path: Path) -> SequenceLabels:
                 "trans": npz["pose_trans_world"][:, index].astype(np.float64),
                 "betas": npz["shape"][index].astype(np.float64),
                 "v_template": None if templates is None else templates[index].astype(np.float64),
+                "present": np.ones(int(npz["frames_len"]), dtype=bool),
             }
             for index, subject in enumerate(npz["subject_name"])
         ]
@@ -225,15 +229,17 @@ def read_pred_labels(global_path: Path, pred_paths: list[Path]) -> SequenceLabel
     """Decode a markerless ``meta/global.npz`` and its ``pred/params_XX.npz`` files, one person each, in the given order."""
     with np.load(global_path, allow_pickle=False) as npz:
         fps: int = int(npz["fps"])
-        values: dict[str, object] = {"name": str(npz["seq_name"]), "fps": fps, "frames": int(npz["frames_len"]), "method": str(npz["method_used"])}
+        frames: int = int(npz["frames_len"])
+        values: dict[str, object] = {"name": str(npz["seq_name"]), "fps": fps, "frames": frames, "method": str(npz["method_used"])}
     people: list[dict[str, object]] = []
-    for path in pred_paths:
+    for index, path in enumerate(pred_paths):
         with np.load(path, allow_pickle=False) as npz:
             if float(npz["mocap_frame_rate"]) != fps:
                 raise ValueError(f"{path}: labels at {float(npz['mocap_frame_rate'])} fps in a {fps} fps sequence")
             people.append(
                 {
                     "subject": path.stem,
+                    "index": index,
                     "gender": str(npz["gender"]),
                     "model": GENDER_MODELS.get(str(npz["gender"]), str(npz["gender"])),
                     "flat_hand_mean": bool(npz["flat_hand_mean"]),
@@ -241,6 +247,7 @@ def read_pred_labels(global_path: Path, pred_paths: list[Path]) -> SequenceLabel
                     "trans": npz["trans"].astype(np.float64),
                     "betas": npz["betas"].astype(np.float64),
                     "v_template": None,
+                    "present": np.ones(frames, dtype=bool),
                 }
             )
     return decode(SequenceLabels, global_path, {**values, "people": people})

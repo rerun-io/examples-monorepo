@@ -76,6 +76,8 @@ def fetch_models(model_root: Path) -> int:
 class PosedPerson:
     """One person's forward over a sequence's rows: keypoints at every row, meshes at the display rows."""
 
+    index: int
+    """The person's entity, ``person_NN`` (``PersonFit.index``)."""
     coco133: Float32[ndarray, "t 133 3"]
     """COCO-133 keypoints regressed from the posed model (all 133 mapped, face contour included), world metres; NaN where the
     person is absent."""
@@ -129,7 +131,7 @@ class SmplxBody:
     def pose(self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE) -> PosedPerson:
         """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row."""
         layer: torch.nn.Module = self.layer(person)
-        present: Bool[ndarray, "t"] = np.ones(len(rows), dtype=bool) if person.present is None else person.present[rows]
+        present: Bool[ndarray, "t"] = person.present[rows]
         posed: Int64[ndarray, "p"] = np.flatnonzero(present)
         mesh_rows: Int64[ndarray, "k"] = np.flatnonzero(rows % mesh_stride == 0)
         coco133: Float32[ndarray, "t 133 3"] = np.full((len(rows), 133, 3), np.nan, dtype=np.float32)
@@ -156,6 +158,7 @@ class SmplxBody:
             coco133[batch] = smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3]
             vertices.append(output.vertices.numpy()[np.isin(batch, mesh_rows)])
         return PosedPerson(
+            index=person.index,
             coco133=coco133,
             joints=joints,
             mesh_rows=mesh_rows,

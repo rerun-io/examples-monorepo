@@ -19,7 +19,7 @@ from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import MODEL_FILES
 from dataforge.datasets.mamma_source import SmplxModel
-from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset, stage_dir
+from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset
 
 pytestmark = pytest.mark.integration
 
@@ -149,7 +149,7 @@ def test_a_render_sequence_converts_onto_its_source_frames(tmp_path: Path, nvenc
     dataset.prefetch(identity, sequence, force=False)  # the runner copies and indexes the next sequence's shards while one converts
     assert (tmp_path / "index" / f"{identity.sequence_key}.json").is_file()
     dataset.convert(identity, sequence, force=False)
-    assert not stage_dir(identity).exists()  # the local copy goes once the cameras are read
+    assert not (dataset.stage_root / identity.recording_id).exists()  # the local copy goes once the cameras are read
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
     assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])
     times: list[int] = frame_times(np.array(FRAMES, dtype=np.int64), 6).tolist()
@@ -307,6 +307,7 @@ def test_a_bedlam_clip_converts_in_its_camera_frame(tmp_path: Path, nvenc_ffmpeg
     times: list[int] = frame_times(np.array(frames, dtype=np.int64), 30).tolist()
 
     base = read_back(targets["base"])
+    assert recording_properties(base, "capture")["fps"] == 6  # the stream's rate; the 30 fps numbering is in clock_source
     assert column_rows(base, f"{schema.video_path(1, 0)}:VideoStream:sample")[schema.TIMELINE].cast("int64").to_pylist() == times
     intrinsics = column_rows(base, f"{schema.pinhole_path(1, 0)}:Pinhole:image_from_camera")
     assert [row[0][0] for row in intrinsics.column(1).to_pylist()] == [300.0, 350.0, 400.0]  # one K per row; fx leads either order

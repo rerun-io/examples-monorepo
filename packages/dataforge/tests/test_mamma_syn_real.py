@@ -53,7 +53,7 @@ def body() -> SmplxBody:
 
 def first_sample(directory: Path, key: str, tmp_path: Path) -> tuple[SynSample, bytes]:
     raw_asset("MammaSyn shards", directory / "metadata.json")
-    sample: SynSample = sequence_samples(directory, tmp_path / "index", key)[0]
+    sample: SynSample = sequence_samples(sorted(directory.glob("*.tar")), tmp_path / "index", key)[0]
     with ShardReader(directory) as shards:
         return sample, shards.read(sample.labels)
 
@@ -80,10 +80,10 @@ def test_a_bedlam_body_is_the_v1_1_neutral_forward_moved_by_its_own_cam_ext(tmp_
     shipped: dict[int, dict[str, object]] = load_people(payload, "first sample")
     labels: BedlamLabels = assemble_bedlam([BedlamView(sample.frame, read_bedlam_view(payload, "first sample"))])
     smplx_body: SmplxBody = body()
-    for person, transforms, key in zip(labels.people, labels.cam_T_body, labels.ids, strict=True):
+    for person, transforms in zip(labels.people, labels.cam_T_body, strict=True):
         posed: PosedPerson = in_camera(smplx_body.pose(person, np.zeros(1, dtype=np.int64), mesh_stride=1), transforms)
         pixels: np.ndarray = posed.vertices[0].astype(np.float64) @ labels.K[0].T
-        assert np.abs(pixels[:, :2] / pixels[:, 2:] - shipped[key]["vertices2d"]).max() < 0.05
+        assert np.abs(pixels[:, :2] / pixels[:, 2:] - shipped[person.index]["vertices2d"]).max() < 0.05
 
 
 @pytest.mark.parametrize("sample", list(SAMPLES))

@@ -21,8 +21,9 @@
   camera is one run, a sample's members in the order labels, render, mask.
 - Reading over NFS: the NAS gives about 340 MB/s to 4 sequential streams (180 to one) and about 250 random reads per second, and a
   tar header walk is one random read per member (50 to 120 ms each under load). So while one render sequence converts, the next
-  one's shards are copied to local disk in order, 4 spans of 256 MB at a time (`work/mamma-syn-stage/<recording>`, about
-  340 MB/s); its header walk (0.1 s) and member reads come from that copy, which is removed once the cameras are read. The page
+  one's shards are copied to local disk in order, 4 spans of 256 MB at a time (`work/mamma-syn-stage/<pid>/<recording>`, about
+  340 MB/s; each span must copy its full length); its header walk (0.1 s) and member reads come from that copy, which is removed
+  once the cameras are read. Each run stages under its own process id, and a run removes the directories of runs that died. The page
   cache cannot stand in for the copy: on dl-server kswapd reclaimed a read-ahead within seconds while the encoders ran, with
   70 GB free. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each shard's
   size and mtime, which the copies keep. BEDLAM's discovery walks every batch's headers over NFS (4 batches at once) on its
@@ -34,8 +35,8 @@
   bodies (`b1_all`, `BEDLAM_MASKS_WD`) with SMPL-X v1.1 neutral (`model` = `SMPLX_NEUTRAL.npz` of the v1.1 mirror). The matching
   model reproduces the shipped joints, 3D vertices and 2D vertices exactly (under 0.001 mm, 0.05 px); the other one misses by
   0.6 mm or more. Flat hand mean, 16 betas (BEDLAM: 11; its gender labels are not the model).
-  Every conversion checks every person and frame against the shipped joints (0.1 mm) and records the largest gap as
-  `property:episode:joints3d_max_error_mm`.
+  Every conversion checks every person at every frame a view labels them against the shipped joints (finite, within 0.1 mm;
+  a failure names the person and frame) and records the largest gap as `property:episode:joints3d_max_error_mm`.
 
 ## Get the raw data
 
@@ -52,7 +53,8 @@ pixi run -e dataforge dataforge-convert mamma --family syn-bedlam --root /mnt/na
   their size). With `--sequences --fetch-into` it fetches the shards holding those sequences (a BEDLAM clip lives in one or two
   shards of its batch) and compares them byte for byte; `interhand.../be_NB-NZj2zRkeQ_seq_000002` (2 shards, 1.95 GB) and the
   shard of BEDLAM clip `20221024_10_100_batch01handhair_zoom_suburb_d/seq_000000` came back identical.
-- Every sequence's samples must number what its `metadata.json` declares, or it fails. One render directory,
+- Every sequence's samples must number what its `metadata.json` declares, or it fails; a BEDLAM batch that does not fails the
+  family's discovery, naming the batch. One render directory,
   `interactions_couple_1_C_200_00_contact/be_TyJqNcw9QoeT_seq_000161`, has shards and no `metadata.json` (on the Hub too): it is
   skipped and reported.
 
@@ -75,7 +77,8 @@ pixi run -e dataforge dataforge-convert mamma --family syn-bedlam --root /mnt/na
 
 The shards carry no timestamps; the member names carry the source frame numbers. MAMMA renders MammaSyn at 6 fps (MAMMA paper,
 `docs/DATASETS.md` upstream): `video_time` is frame / 6 s. BEDLAM numbers its frames at its 30 fps render rate and ships every
-5th: `video_time` is frame / 30 s, samples 1/6 s apart. `frame_index` is the source frame number. A frame the shards do not hold
+5th: `video_time` is frame / 30 s, samples 1/6 s apart (`property:capture:fps` is the stream's 6; `clock_source` names the 30 fps
+numbering). `frame_index` is the source frame number. A frame the shards do not hold
 is a gap on the clock, not a renumbering (the sampled Hands sequence lacks frame 2 in every camera); a camera may lack a frame
 another camera has.
 

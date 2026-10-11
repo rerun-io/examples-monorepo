@@ -230,13 +230,12 @@ def write_base(
     )
 
 
-def write_body_pose(
-    recording: rr.RecordingStream, people: list[PersonFit], method: Method, posed: list[PosedPerson], clock: Clock, ids: list[int] | None = None
-) -> None:
-    """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model; NaN rows where
-    a person is absent. ``ids`` names each person's entity (default: the list order; MammaSyn: the release's person index)."""
+def write_body_pose(recording: rr.RecordingStream, people: list[PersonFit], method: Method, posed: list[PosedPerson], clock: Clock) -> None:
+    """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model, under the
+    person's entity (``PersonFit.index``); NaN rows where a person is absent."""
     indexes: list[rr.TimeColumn] = clock.indexes
-    for index, person, pose in zip(ids or range(len(posed)), people, posed, strict=True):
+    for person, pose in zip(people, posed, strict=True):
+        index: int = person.index
         rr.log(
             schema.person_path(index),
             rr.AnyValues(
@@ -263,7 +262,7 @@ def write_body_pose(
             static=True,
             recording=recording,
         )
-        present: Bool[ndarray, "t 1"] = (np.ones(len(clock.rows), dtype=bool) if person.present is None else person.present[clock.rows])[:, None]
+        present: Bool[ndarray, "t 1"] = person.present[clock.rows][:, None]
         pose_rows: Float64[ndarray, "t 165"] = np.where(present, person.pose[clock.rows], np.nan)
         trans_rows: Float64[ndarray, "t 3"] = np.where(present, person.trans[clock.rows], np.nan)
         columns = rr.AnyValues.columns(
@@ -281,10 +280,10 @@ def write_body_pose(
         )
 
 
-def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clock: Clock, ids: list[int] | None = None) -> None:
+def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clock: Clock) -> None:
     """Every person's posed SMPL-X mesh at its mesh rows, an empty mesh where the person is absent."""
-    for index, pose in zip(ids or range(len(posed)), posed, strict=True):
-        path: str = schema.person_body_path(index, "mesh")
+    for pose in posed:
+        path: str = schema.person_body_path(pose.index, "mesh")
         meshes.log_mesh_static(recording, path, albedo_factor=hands.BODY_ALBEDO)
         times: Int64[ndarray, "k"] = clock.times_ns[pose.mesh_rows]
         frames: Int64[ndarray, "k"] = clock.frames[pose.mesh_rows]
@@ -312,19 +311,17 @@ def write_projections(
     *,
     camera_model: str,
     calibration_source: str,
-    ids: list[int] | None = None,
 ) -> None:
-    """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels; ``ids`` names
-    each person's entity (default: the list order)."""
+    """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels."""
     recording.send_property(paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source))
     for rig, camera in enumerate(cameras, start=1):
         scale: float = stored_size(camera.width, camera.height)[0] / camera.width
-        for index, pose in zip(ids or range(len(posed)), posed, strict=True):
+        for pose in posed:
             pixels: Float64[ndarray, "n 2"] = camera.project(pose.coco133.reshape(-1, 3).astype(np.float64)) * scale
             positions: Float32[ndarray, "t 133 2"] = pixels.reshape(-1, 133, 2).astype(np.float32)
             hands.log_keypoints2d(
                 recording,
-                schema.person_projection_path(rig, 0, index),
+                schema.person_projection_path(rig, 0, pose.index),
                 times_ns=clock.times_ns,
                 frame_indices=clock.frames,
                 positions=positions,

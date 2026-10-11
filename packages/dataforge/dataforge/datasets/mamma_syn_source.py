@@ -12,7 +12,7 @@ import os
 import pickle
 import tarfile
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -160,9 +160,9 @@ def index_shards(shards: list[Path]) -> list[SynSample]:
     return samples
 
 
-def stage_shards(shards: list[Path], into: Path) -> None:
+def stage_shards(shards: list[Path], into: Path) -> list[Path]:
     """Copy ``shards`` into ``into`` in order, ``READ_STREAMS`` spans of ``READ_SPAN`` at a time, each copy keeping its shard's size
-    and mtime (the stamps the index cache is keyed on); a copy already there with them is kept.
+    and mtime (the stamps the index cache is keyed on); a copy already there with them is kept. Returns the copies.
 
     A sequence is read from a local copy because a header walk over NFS is one random read per member, and the page cache does
     not keep a read-ahead: on dl-server kswapd reclaims it within seconds while the convert's encoders run, with memory free.
@@ -178,24 +178,37 @@ def stage_shards(shards: list[Path], into: Path) -> None:
             with (into / f".{shard.name}.part").open("wb") as created:
                 created.truncate(stat.st_size)
 
-    def copy_span(span: tuple[Path, int]) -> None:
-        shard, start = span
-        buffer: bytearray = bytearray(8 << 20)
-        with shard.open("rb", buffering=0) as source, (into / f".{shard.name}.part").open("r+b", buffering=0) as target:
-            source.seek(start)
-            target.seek(start)
-            left: int = READ_SPAN
-            while left > 0 and (count := source.readinto(memoryview(buffer)[: min(len(buffer), left)])):
-                target.write(memoryview(buffer)[:count])
-                left -= count
-
-    spans: list[tuple[Path, int]] = [(shard, start) for shard in pending for start in range(0, stats[shard].st_size, READ_SPAN)]
     with ThreadPoolExecutor(max_workers=READ_STREAMS) as executor:
-        list(executor.map(copy_span, spans))
+        spans: list[Future[None]] = [
+            executor.submit(copy_span, shard, into / f".{shard.name}.part", start, min(READ_SPAN, stats[shard].st_size - start))
+            for shard in pending
+            for start in range(0, stats[shard].st_size, READ_SPAN)
+        ]
+        for span in spans:
+            span.result()
     for shard in pending:
         part: Path = into / f".{shard.name}.part"
         os.utime(part, ns=(stats[shard].st_atime_ns, stats[shard].st_mtime_ns))
         part.rename(into / shard.name)
+    return [into / shard.name for shard in shards]
+
+
+def copy_span(source: Path, target: Path, start: int, length: int) -> None:
+    """Copy ``length`` bytes at ``start`` of ``source`` into the same place of the existing file ``target``.
+
+    Raises:
+        ValueError: ``source`` ends first (it changed since it was sized); the pre-sized ``target`` would otherwise keep zeros.
+    """
+    buffer: memoryview = memoryview(bytearray(8 << 20))
+    copied: int = 0
+    with source.open("rb", buffering=0) as reader, target.open("r+b") as writer:
+        reader.seek(start)
+        writer.seek(start)
+        while copied < length and (count := reader.readinto(buffer[: min(len(buffer), length - copied)])):
+            writer.write(buffer[:count])  # buffered: writes all of it
+            copied += count
+    if copied != length:
+        raise ValueError(f"{source}: {copied} of {length} bytes at {start}")
 
 
 READ_GAP: int = 1 << 20
@@ -270,9 +283,9 @@ class ShardIndex:
     samples: list[SynSample]
 
 
-def sequence_samples(directory: Path, index_root: Path, key: str) -> list[SynSample]:
-    """The samples of the shards in ``directory``, from the index cached at ``index_root/<key>.json`` unless a shard changed."""
-    shards: list[Path] = sorted(directory.glob("*.tar"))
+def sequence_samples(shards: list[Path], index_root: Path, key: str) -> list[SynSample]:
+    """The samples of ``shards`` (a directory's tars in name order, or their local copies), from the index cached at
+    ``index_root/<key>.json`` unless a shard changed."""
     stamps: list[ShardStamp] = [ShardStamp(shard.name, (stat := shard.stat()).st_size, stat.st_mtime_ns) for shard in shards]
     cache: Path = index_root / f"{key}.json"
     if cache.is_file():
@@ -351,8 +364,6 @@ class RenderLabels:
     """Each person's shipped joints over the rows, NaN where absent."""
     cameras: list[MammaCamera]
     """The fixed cameras, in name order (pinhole: a render has no lens)."""
-    ids: list[int]
-    """Each person's index in the release: the entity it is logged under (``person_NN``) and its instance mask value - 1."""
 
 
 def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) -> RenderLabels:
@@ -378,8 +389,7 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
 
     people: list[PersonFit] = []
     joints3d: list[Float64[ndarray, "t 127 3"]] = []
-    ids: list[int] = sorted({key for view in views for key in view.people})
-    for key in ids:
+    for key in sorted({key for view in views for key in view.people}):
         pose: Float64[ndarray, "t 165"] = np.zeros((len(frames), 165))
         trans: Float64[ndarray, "t 3"] = np.zeros((len(frames), 3))
         joints: Float64[ndarray, "t 127 3"] = np.full((len(frames), 127, 3), np.nan)
@@ -404,6 +414,7 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
         people.append(
             PersonFit(
                 subject=f"person_{key:02d}",
+                index=key,
                 gender=first.gender,
                 model="locked_head_neutral",
                 flat_hand_mean=True,
@@ -415,7 +426,7 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
             )
         )
         joints3d.append(joints)
-    return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras, ids=ids)
+    return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras)
 
 
 @serde
@@ -460,8 +471,6 @@ class BedlamLabels:
     """Source frame numbers (30 fps numbering, every 5th shipped)."""
     K: Float64[ndarray, "t 3 3"]
     """The camera's intrinsics at each row; a row whose view labels nobody takes the nearest labelled row's."""
-    ids: list[int]
-    """Each person's index in the clip (entity ``person_NN``, mask value NN + 1)."""
     people: list[PersonFit]
     """One fit per person, parameters in the person's own world; absent where the view leaves them out."""
     cam_T_body: list[Float64[ndarray, "t 4 4"]]
@@ -488,11 +497,11 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
         raise ValueError("no view of the clip labels anyone")
     K: Float64[ndarray, "t 3 3"] = np.stack([known[min(known, key=lambda labelled: abs(labelled - row))] for row in range(len(ordered))])
 
-    ids: list[int] = sorted({key for view in ordered for key in view.people})
+    keys: list[int] = sorted({key for view in ordered for key in view.people})
     people: list[PersonFit] = []
     cam_T_body: list[Float64[ndarray, "t 4 4"]] = []
     joints3d: list[Float64[ndarray, "t 127 3"]] = []
-    for key in ids:
+    for key in keys:
         pose: Float64[ndarray, "t 165"] = np.zeros((len(ordered), 165))
         trans: Float64[ndarray, "t 3"] = np.zeros((len(ordered), 3))
         transforms: Float64[ndarray, "t 4 4"] = np.full((len(ordered), 4, 4), np.nan)
@@ -512,6 +521,7 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
         people.append(
             PersonFit(
                 subject=f"person_{key:02d}",
+                index=key,
                 gender=first.gender,
                 model="v1_1_neutral",
                 flat_hand_mean=True,
@@ -524,7 +534,7 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
         )
         cam_T_body.append(transforms)
         joints3d.append(joints)
-    return BedlamLabels(frames=frames, K=K, ids=ids, people=people, cam_T_body=cam_T_body, joints3d=joints3d)
+    return BedlamLabels(frames=frames, K=K, people=people, cam_T_body=cam_T_body, joints3d=joints3d)
 
 
 BEDLAM_NUMBERING_FPS: int = 30
@@ -559,7 +569,7 @@ def discover_bedlam(root: Path, index_root: Path, batches: set[str] | None = Non
     directories: list[Path] = sorted(path for path in (root / SYN_DIR / BEDLAM_DATASET).iterdir() if path.is_dir() and (batches is None or path.name in batches))
 
     def index(directory: Path) -> tuple[Path, list[SynSample]]:
-        return directory, sequence_samples(directory, index_root, f"{BEDLAM_DATASET}/{directory.name}")
+        return directory, sequence_samples(sorted(directory.glob("*.tar")), index_root, f"{BEDLAM_DATASET}/{directory.name}")
 
     clips: list[BedlamClip] = []
     problems: list[str] = []
