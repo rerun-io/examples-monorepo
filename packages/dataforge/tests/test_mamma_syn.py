@@ -146,6 +146,8 @@ def test_a_render_sequence_converts_onto_its_source_frames(tmp_path: Path, nvenc
     dataset: MammaSynDataset = syn_dataset(tmp_path / "raw", tmp_path, monkeypatch, models)
     ((identity, sequence),) = dataset.discover()
     assert identity.recording_id == f"mamma-syn__{DATASET}__{SEQUENCE}"
+    dataset.prefetch(identity, sequence, force=False)  # the runner indexes the next sequence's shards while one converts
+    assert (tmp_path / "index" / f"{identity.sequence_key}.json").is_file()
     dataset.convert(identity, sequence, force=False)
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
     assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])

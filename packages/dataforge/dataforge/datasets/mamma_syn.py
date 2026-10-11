@@ -335,6 +335,11 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
             pairs = [(identity, sequence) for identity, sequence in pairs if identity.sequence_key in self.config.sequences]
         return pairs
 
+    def prefetch(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> None:
+        """Index the shard headers of a sequence still to convert while the one before it converts (about 3 s per shard over NFS)."""
+        if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
+            sequence_samples(source.directory, self.config.index_root, identity.sequence_key)
+
     def convert(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> Path:
         """Read every camera once (encoding its renders when base is pending), assemble and check the labels, write the layers."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
