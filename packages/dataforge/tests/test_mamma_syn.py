@@ -18,7 +18,7 @@ from dataforge import paths, schema
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import MODEL_FILES
-from dataforge.datasets.mamma_syn import MammaSynDataset
+from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset
 
 pytestmark = pytest.mark.integration
 
@@ -201,3 +201,121 @@ def test_parameters_that_do_not_reproduce_the_shipped_joints_fail_the_sequence(
     ((identity, sequence),) = dataset.discover()
     with pytest.raises(ValueError, match=r"person_00.*joints3d.*10\.0 mm"):
         dataset.convert(identity, sequence, force=False)
+
+
+BATCH: str = "20221010_3-10_500_batch01hand_zoom_suburb_d"
+CLIPS: dict[str, tuple[int, ...]] = {"seq_000000": (10, 0, 5), "seq_000001": (0, 5)}
+"""Frames in shard order: BEDLAM ships a clip's samples unsorted, numbered at 30 fps, every 5th."""
+BEDLAM_SIZE: tuple[int, int] = (320, 240)
+
+
+def bedlam_forward(frame: int, person: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """A body in its own world: pose, betas, transl, and the v1.1 neutral's vertices and 127 joints (flat hand mean, 11 betas)."""
+    pose: np.ndarray = np.zeros(165, dtype=np.float32)
+    pose[0] = np.pi
+    pose[3 + 3 * person] = 0.02 * frame
+    betas: np.ndarray = np.full(11, 0.2 * person, dtype=np.float32)
+    trans: np.ndarray = np.array([0.0, 0.0, 0.0])
+    model = smplx.create(str(MODEL_FILES["v1_1_neutral"].local(MODEL_ROOT)), model_type="smplx", use_pca=False, flat_hand_mean=True, num_betas=11)
+    tensor: torch.Tensor = torch.from_numpy(pose[None])
+    with torch.no_grad():
+        output = model(
+            betas=torch.from_numpy(betas[None]),
+            global_orient=tensor[:, :3],
+            body_pose=tensor[:, 3:66],
+            jaw_pose=tensor[:, 66:69],
+            leye_pose=tensor[:, 69:72],
+            reye_pose=tensor[:, 72:75],
+            left_hand_pose=tensor[:, 75:120],
+            right_hand_pose=tensor[:, 120:165],
+            transl=torch.from_numpy(trans[None].astype(np.float32)),
+        )
+    return pose, betas, trans, output.vertices[0].numpy().astype(np.float64), output.joints[0, :127].numpy().astype(np.float64)
+
+
+def bedlam_camera(frame: int, person: int) -> tuple[np.ndarray, np.ndarray]:
+    """The zoom: K changes every frame; each person's world sits at its own place in front of the camera."""
+    focal: float = 300.0 + 10.0 * frame
+    cam_ext: np.ndarray = np.eye(4)
+    cam_ext[:3, 3] = [0.8 * person - 0.4, 0.0, 5.0]
+    return np.array([[focal, 0.0, 160.0], [0.0, focal, 120.0], [0.0, 0.0, 1.0]]), cam_ext
+
+
+def write_bedlam_batch(root: Path) -> Path:
+    directory: Path = root / "MammaSyn" / "MammaSyn-Singles" / "BEDLAM_MASKS_WD" / BATCH
+    directory.mkdir(parents=True)
+    members: list[tuple[str, bytes]] = []
+    width, height = BEDLAM_SIZE
+    for clip, frames in CLIPS.items():
+        for frame in frames:
+            people: dict[int, dict[str, object]] = {}
+            mask: np.ndarray = np.zeros((height, width), dtype=np.uint8)
+            for person in (0, 1):
+                mask[: height // 2, person * width // 2 : (person + 1) * width // 2] = person + 1  # the mask shows both, always
+                if (clip, frame, person) == ("seq_000000", 10, 1):
+                    continue  # BEDLAM's labels leave out a person its mask still has
+                pose, betas, trans, _, joints = bedlam_forward(frame, person)
+                cam_int, cam_ext = bedlam_camera(frame, person)
+                people[person] = {
+                    "pose_world": pose,
+                    "shape": betas,
+                    "trans_world": trans,
+                    "cam_int": cam_int,
+                    "cam_ext": cam_ext,
+                    "gender": "female" if person == 0 else "male",
+                    "joints3d": joints @ cam_ext[:3, :3].T + cam_ext[:3, 3],
+                    "person_idx": f"{person:02d}",
+                }
+            key: str = f"/ps/project/bedlam/public/b0_all/{BATCH}/png/{clip}/{clip}_{frame:04d}"
+            rgba: np.ndarray = np.full((height, width, 4), 255, dtype=np.uint8)
+            members += [(f"{key}.data.pyd", pickle.dumps(people, protocol=4)), (f"{key}.png", png(rgba)), (f"{key}.mask.png", png(mask))]
+    with tarfile.open(directory / "000000.tar", "w") as tar:
+        for name, payload in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    (directory / "metadata.json").write_text(json.dumps({"format": "webdataset", "num_samples": len(members) // 3, "count_crop": 9}))
+    return directory
+
+
+def test_a_bedlam_clip_converts_in_its_camera_frame(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path) -> None:
+    del nvenc_ffmpeg
+    write_bedlam_batch(tmp_path / "raw")
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = MammaConfig(family="syn-bedlam", root=tmp_path / "raw", model_root=models, index_root=tmp_path / "index").setup()
+    assert isinstance(dataset, MammaBedlamDataset)
+    pairs = dataset.discover()
+    assert [identity.recording_id for identity, _ in pairs] == [f"mamma-syn-bedlam__{BATCH}__seq_000000", f"mamma-syn-bedlam__{BATCH}__seq_000001"]
+    identity, clip = pairs[0]
+    dataset.convert(identity, clip, force=False)
+    targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
+    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])
+    frames: list[int] = [0, 5, 10]
+    times: list[int] = frame_times(np.array(frames, dtype=np.int64), 30).tolist()
+
+    base = read_back(targets["base"])
+    assert column_rows(base, f"{schema.video_path(1, 0)}:VideoStream:sample")[schema.TIMELINE].cast("int64").to_pylist() == times
+    intrinsics = column_rows(base, f"{schema.pinhole_path(1, 0)}:Pinhole:image_from_camera")
+    assert [row[0][0] for row in intrinsics.column(1).to_pylist()] == [300.0, 350.0, 400.0]  # one K per row; fx leads either order
+
+    mesh = read_back(targets["body_mesh"])
+    rows = column_rows(mesh, f"{schema.person_body_path(0, 'mesh')}:Mesh3D:vertex_positions")
+    first: np.ndarray = np.array(rows.column(1).to_pylist()[0])
+    _, _, _, vertices, _ = bedlam_forward(0, 0)
+    _, cam_ext = bedlam_camera(0, 0)
+    np.testing.assert_allclose(first, vertices @ cam_ext[:3, :3].T + cam_ext[:3, 3], atol=1e-4)  # posed in the camera frame
+    absent = column_rows(mesh, f"{schema.person_body_path(1, 'mesh')}:Mesh3D:vertex_positions").column(1).to_pylist()
+    assert len(absent[2]) == 0
+
+    pose = read_back(targets["body_pose"])
+    keypoints = np.array(column_rows(pose, f"{schema.person_coco133_xyz_path(0)}:Points3D:positions").column(1).to_pylist())
+    projected = np.array(column_rows(read_back(targets["projections"]), f"{schema.person_projection_path(1, 0, 0)}:Points2D:positions").column(1).to_pylist())
+    for row, frame in enumerate(frames):
+        cam_int, _ = bedlam_camera(frame, 0)
+        expected: np.ndarray = keypoints[row] @ cam_int.T
+        np.testing.assert_allclose(projected[row], expected[:, :2] / expected[:, 2:], rtol=1e-4)  # each frame through its own K
+
+    masks = read_back(targets["masks"])
+    for person in (0, 1):
+        blobs = column_rows(masks, f"{schema.person_mask_path(1, 0, person)}:EncodedImage:blob").column(1).to_pylist()
+        assert len(blobs) == 3 and np.asarray(Image.open(io.BytesIO(bytes(blobs[2][0])))).any()  # person 1's mask stays at frame 10

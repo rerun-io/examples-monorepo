@@ -228,11 +228,11 @@ def write_base(
     )
 
 
-def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed: list[PosedPerson], clock: Clock) -> None:
+def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed: list[PosedPerson], clock: Clock, ids: list[int] | None = None) -> None:
     """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model; NaN rows where
-    a person is absent."""
+    a person is absent. ``ids`` names each person's entity (default: the list order; MammaSyn: the release's person index)."""
     indexes: list[rr.TimeColumn] = clock.indexes
-    for index, (person, pose) in enumerate(zip(labels.people, posed, strict=True)):
+    for index, person, pose in zip(ids or range(len(posed)), labels.people, posed, strict=True):
         rr.log(
             schema.person_path(index),
             rr.AnyValues(
@@ -277,9 +277,9 @@ def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed
         )
 
 
-def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clock: Clock) -> None:
+def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clock: Clock, ids: list[int] | None = None) -> None:
     """Every person's posed SMPL-X mesh at its mesh rows, an empty mesh where the person is absent."""
-    for index, pose in enumerate(posed):
+    for index, pose in zip(ids or range(len(posed)), posed, strict=True):
         path: str = schema.person_body_path(index, "mesh")
         meshes.log_mesh_static(recording, path, albedo_factor=hands.BODY_ALBEDO)
         times: Int64[ndarray, "k"] = clock.times_ns[pose.mesh_rows]
@@ -301,16 +301,23 @@ def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clo
 
 
 def write_projections(
-    recording: rr.RecordingStream, cameras: list[MammaCamera], posed: list[PosedPerson], clock: Clock, *, calibration_source: str
+    recording: rr.RecordingStream,
+    cameras: list[MammaCamera],
+    posed: list[PosedPerson],
+    clock: Clock,
+    *,
+    calibration_source: str,
+    ids: list[int] | None = None,
 ) -> None:
-    """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels."""
+    """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels; ``ids`` names
+    each person's entity (default: the list order)."""
     models: list[str] = sorted({"pinhole" if camera.lens is None else "vicon_radial_2" for camera in cameras})
     recording.send_property(
         paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=", ".join(models), calibration_source=calibration_source)
     )
     for rig, camera in enumerate(cameras, start=1):
         scale: float = stored_size(camera.width, camera.height)[0] / camera.width
-        for index, pose in enumerate(posed):
+        for index, pose in zip(ids or range(len(posed)), posed, strict=True):
             pixels: Float64[ndarray, "n 2"] = camera.project(pose.coco133.reshape(-1, 3).astype(np.float64)) * scale
             positions: Float32[ndarray, "t 133 2"] = pixels.reshape(-1, 133, 2).astype(np.float32)
             hands.log_keypoints2d(

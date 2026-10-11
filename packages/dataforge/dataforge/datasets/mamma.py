@@ -101,10 +101,12 @@ class MammaConfig(FrameLimitedConfig):
 
     def setup(self) -> DataforgeDataset:
         """The MPI families' dataset, or MammaSyn's for ``syn`` and ``syn-bedlam``."""
-        if self.family in ("syn", "syn-bedlam"):
-            from dataforge.datasets.mamma_syn import MammaSynDataset  # imports this module
+        from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset  # imports this module
 
+        if self.family == "syn":
             return MammaSynDataset(self)
+        if self.family == "syn-bedlam":
+            return MammaBedlamDataset(self)
         return MammaDataset(self)
 
 

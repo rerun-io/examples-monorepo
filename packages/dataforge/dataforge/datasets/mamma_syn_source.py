@@ -8,16 +8,18 @@ one camera per clip. See ``docs/mamma.md``.
 """
 
 import io
+import json
 import pickle
 import tarfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal, TypeAlias
 
 import numpy as np
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from serde import serde
 from serde.json import from_json, to_json
@@ -65,6 +67,26 @@ class SynSequence:
     @property
     def metadata(self) -> Path:
         return self.directory / "metadata.json"
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class SynMetadata:
+    """A sequence or batch directory's ``metadata.json`` (third party: unknown fields allowed)."""
+
+    format: str
+    num_samples: int
+    """Camera-view samples in the directory's shards."""
+
+
+def read_metadata(path: Path) -> SynMetadata:
+    try:
+        values: object = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path}: {error}") from error
+    if not isinstance(values, dict):
+        raise ValueError(f"{path}: not a JSON object")
+    return decode(SynMetadata, path, values)
 
 
 def discover_renders(root: Path) -> tuple[list[SynSequence], list[tuple[Path, str]]]:
@@ -334,3 +356,159 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
         )
         joints3d.append(joints)
     return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras)
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class BedlamPersonLabel:
+    """One person in one BEDLAM view: the fields the converter keeps."""
+
+    pose_world: Float32[ndarray, "165"]
+    """SMPL-X axis-angle pose in the person's own world."""
+    shape: Float32[ndarray, "11"]
+    """Betas of SMPL-X v1.1 neutral (BEDLAM fits every body to the neutral model, whatever its gender label)."""
+    trans_world: Float64[ndarray, "3"]
+    """smplx ``transl`` in the person's own world, metres."""
+    cam_int: Float64[ndarray, "3 3"]
+    """The view's K, native pixels (a zoom clip's changes every frame)."""
+    cam_ext: Float64[ndarray, "4 4"]
+    """The person's world to the camera: BEDLAM places each body in a world of its own (OpenCV axes)."""
+    gender: Gender
+    """The body's gender as BEDLAM labels it; not the model."""
+    joints3d: Float64[ndarray, "127 3"]
+    """The model's joints (no face contour) in the camera frame: the check that the parameters reproduce the render's body."""
+
+
+def read_bedlam_view(payload: bytes, origin: str) -> dict[int, BedlamPersonLabel]:
+    """The people of one BEDLAM view, typed."""
+    return {key: decode(BedlamPersonLabel, origin, record) for key, record in load_people(payload, origin).items()}
+
+
+@dataclass(frozen=True, slots=True)
+class BedlamView:
+    """One sample of a BEDLAM clip: the people its one camera sees at one frame."""
+
+    frame: int
+    people: dict[int, BedlamPersonLabel]
+
+
+@dataclass(frozen=True, slots=True)
+class BedlamLabels:
+    """A BEDLAM clip's labels on its frame rows, in the camera frame (the only frame every body shares)."""
+
+    frames: Int64[ndarray, "t"]
+    """Source frame numbers (30 fps numbering, every 5th shipped)."""
+    K: Float64[ndarray, "t 3 3"]
+    """The camera's intrinsics at each row; a row whose view labels nobody takes the nearest labelled row's."""
+    ids: list[int]
+    """Each person's index in the clip (entity ``person_NN``, mask value NN + 1)."""
+    people: list[PersonFit]
+    """One fit per person, parameters in the person's own world; absent where the view leaves them out."""
+    cam_T_body: list[Float64[ndarray, "t 4 4"]]
+    """Each person's world to the camera at each row, NaN where absent."""
+    joints3d: list[Float64[ndarray, "t 127 3"]]
+    """Each person's shipped joints in the camera frame, NaN where absent."""
+
+
+def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
+    """Join a BEDLAM clip's views (one per frame, in any order) into per-person fits and per-row camera intrinsics.
+
+    Raises:
+        ValueError: The people of one view disagree on the intrinsics, a person's shape or gender changes, or no view labels anyone.
+    """
+    ordered: list[BedlamView] = sorted(views, key=lambda view: view.frame)
+    frames: Int64[ndarray, "t"] = np.array([view.frame for view in ordered], dtype=np.int64)
+    known: dict[int, Float64[ndarray, "3 3"]] = {}
+    for row, view in enumerate(ordered):
+        for key, person in sorted(view.people.items()):
+            first_K: Float64[ndarray, "3 3"] = known.setdefault(row, person.cam_int)
+            if not np.array_equal(first_K, person.cam_int):
+                raise ValueError(f"frame {view.frame}: person {key} has other intrinsics than the view's first person")
+    if not known:
+        raise ValueError("no view of the clip labels anyone")
+    K: Float64[ndarray, "t 3 3"] = np.stack([known[min(known, key=lambda labelled: abs(labelled - row))] for row in range(len(ordered))])
+
+    ids: list[int] = sorted({key for view in ordered for key in view.people})
+    people: list[PersonFit] = []
+    cam_T_body: list[Float64[ndarray, "t 4 4"]] = []
+    joints3d: list[Float64[ndarray, "t 127 3"]] = []
+    for key in ids:
+        pose: Float64[ndarray, "t 165"] = np.zeros((len(ordered), 165))
+        trans: Float64[ndarray, "t 3"] = np.zeros((len(ordered), 3))
+        transforms: Float64[ndarray, "t 4 4"] = np.full((len(ordered), 4, 4), np.nan)
+        joints: Float64[ndarray, "t 127 3"] = np.full((len(ordered), 127, 3), np.nan)
+        present: Bool[ndarray, "t"] = np.zeros(len(ordered), dtype=bool)
+        first: BedlamPersonLabel | None = None
+        for row, view in enumerate(ordered):
+            label: BedlamPersonLabel | None = view.people.get(key)
+            if label is None:
+                continue
+            if first is None:
+                first = label
+            if not (np.array_equal(label.shape, first.shape) and label.gender == first.gender):
+                raise ValueError(f"person {key}: the shape or gender changes at frame {view.frame}")
+            pose[row], trans[row], transforms[row], joints[row], present[row] = label.pose_world, label.trans_world, label.cam_ext, label.joints3d, True
+        assert first is not None  # every key comes from some view
+        people.append(
+            PersonFit(
+                subject=f"person_{key:02d}",
+                gender=first.gender,
+                model="v1_1_neutral",
+                flat_hand_mean=True,
+                pose=pose,
+                trans=trans,
+                betas=first.shape.astype(np.float64),
+                v_template=None,
+                present=present,
+            )
+        )
+        cam_T_body.append(transforms)
+        joints3d.append(joints)
+    return BedlamLabels(frames=frames, K=K, ids=ids, people=people, cam_T_body=cam_T_body, joints3d=joints3d)
+
+
+BEDLAM_NUMBERING_FPS: int = 30
+"""BEDLAM numbers its frames at its 30 fps render rate and ships every 5th: frame N is at N / 30 s, samples 6 Hz apart."""
+INDEX_WORKERS: int = 4
+"""Batches whose shard headers are read at once on the first discovery (about 3 s per shard over NFS; cached after)."""
+
+
+@dataclass(frozen=True, slots=True)
+class BedlamClip:
+    """One BEDLAM clip: one camera, its samples in a batch directory's shards."""
+
+    directory: Path
+    """The batch directory (``20221010_3-10_500_batch01hand_zoom_suburb_d``: people, clips, camera motion, scene)."""
+    clip: str
+    """``seq_000123``."""
+    samples: list[SynSample]
+    """The clip's samples in frame order."""
+
+    @property
+    def parts(self) -> tuple[str, str]:
+        return (self.directory.name, self.clip)
+
+
+def discover_bedlam(root: Path, index_root: Path, batches: set[str] | None = None) -> tuple[list[BedlamClip], list[str]]:
+    """Every clip of the BEDLAM batches (or of ``batches``) and the problems found; indexes uncached batches' shard headers.
+
+    A batch's samples must number what its ``metadata.json`` declares; a batch that does not is a problem, not a source of clips.
+    """
+    directories: list[Path] = sorted(path for path in (root / SYN_DIR / BEDLAM_DATASET).iterdir() if path.is_dir() and (batches is None or path.name in batches))
+
+    def index(directory: Path) -> tuple[Path, list[SynSample]]:
+        return directory, sequence_samples(directory, index_root, f"{BEDLAM_DATASET}/{directory.name}")
+
+    clips: list[BedlamClip] = []
+    problems: list[str] = []
+    with ThreadPoolExecutor(max_workers=INDEX_WORKERS) as executor:
+        for directory, samples in executor.map(index, directories):
+            declared: int = read_metadata(directory / "metadata.json").num_samples
+            if declared != len(samples):
+                problems.append(f"{directory}: {len(samples)} samples in the shards, metadata.json declares {declared}")
+                continue
+            by_clip: dict[str, list[SynSample]] = defaultdict(list)
+            for sample in samples:
+                by_clip[sample.camera].append(sample)
+            clips += [BedlamClip(directory, clip, by_clip[clip]) for clip in sorted(by_clip)]
+    return clips, problems

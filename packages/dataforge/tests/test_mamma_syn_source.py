@@ -9,7 +9,19 @@ import numpy as np
 import pytest
 
 from dataforge.datasets.mamma_source import MammaCamera
-from dataforge.datasets.mamma_syn_source import RenderLabels, RenderView, SynSample, assemble_render, index_shards, read_member, read_render_view
+from dataforge.datasets.mamma_syn_source import (
+    BedlamLabels,
+    BedlamView,
+    RenderLabels,
+    RenderView,
+    SynSample,
+    assemble_bedlam,
+    assemble_render,
+    index_shards,
+    read_bedlam_view,
+    read_member,
+    read_render_view,
+)
 
 RENDER_PREFIX: str = "/tmp/bedlam_lab_20251031_191434/interhand_2-6_NC_200_00/png/be_NB-NZj2zRkeQ_seq_000002"
 BEDLAM_PREFIX: str = "/ps/project/bedlam/public/b0_all/20221010_3-10_500_batch01hand_zoom_suburb_d/png"
@@ -149,3 +161,50 @@ def test_a_render_camera_that_moves_raises() -> None:
     ]
     with pytest.raises(ValueError, match=r"IOI_01.*frame 1.*moves"):
         assemble_render(views, {"IOI_01": (2056, 1504)})
+
+
+def bedlam_person(*, offset: float, frame: int, focal: float = 1010.0) -> dict[str, object]:
+    """One person of a BEDLAM view: float32 pose and 11 betas, its own world (cam_ext), joints in the camera frame."""
+    cam_ext: np.ndarray = np.eye(4)
+    cam_ext[:3, 3] = [offset, 0.0, 4.0 + 0.1 * frame]  # each person's world sits elsewhere; the orbit moves the camera
+    return {
+        "pose_world": np.full(165, 0.01 * frame, dtype=np.float32),
+        "shape": np.arange(11, dtype=np.float32),
+        "trans_world": np.array([0.0, -0.6, 0.0]),
+        "pose_cam": np.zeros(165, dtype=np.float32),
+        "trans_cam": np.zeros(3),
+        "cam_int": np.array([[focal, 0.0, 640.0], [0.0, focal, 360.0], [0.0, 0.0, 1.0]]),
+        "cam_ext": cam_ext,
+        "gender": "female",
+        "joints3d": np.full((127, 3), offset + frame),
+        "vertices2d": np.zeros((10475, 2), dtype=np.float32),
+        "motion_info": np.array(["kick", "29", "amass.npz", "120.0", "0", "526"]),
+        "sub": "rp_christine_posed_013",
+        "person_idx": "00",
+        "race": "asian",
+    }
+
+
+def test_bedlam_views_keep_each_persons_camera_and_the_zoom() -> None:
+    views: list[BedlamView] = [
+        BedlamView(0, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=0), 2: bedlam_person(offset=1.5, frame=0)}), "seq_000000/0000")),
+        BedlamView(10, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=10, focal=1500.0)}), "seq_000000/0010")),
+        BedlamView(5, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=5, focal=1200.0), 2: bedlam_person(offset=1.5, frame=5, focal=1200.0)}), "seq_000000/0005")),
+    ]
+    labels: BedlamLabels = assemble_bedlam(views)
+    np.testing.assert_array_equal(labels.frames, [0, 5, 10])
+    np.testing.assert_array_equal(labels.K[:, 0, 0], [1010.0, 1200.0, 1500.0])
+    assert labels.ids == [0, 2]
+    first, second = labels.people
+    assert (first.model, first.gender, first.flat_hand_mean, len(first.betas)) == ("v1_1_neutral", "female", True, 11)
+    np.testing.assert_array_equal(second.present, [True, True, False])
+    np.testing.assert_allclose(first.pose[:, 0], [0.0, 0.05, 0.1], rtol=1e-6)
+    np.testing.assert_array_equal(labels.cam_T_body[1][1][:3, 3], [1.5, 0.0, 4.5])
+    assert np.isnan(labels.cam_T_body[1][2]).all() and np.isnan(labels.joints3d[1][2]).all()
+    assert (labels.joints3d[0][2] == 10.0).all()
+
+
+def test_people_in_one_bedlam_view_that_disagree_on_the_intrinsics_raise() -> None:
+    views: list[BedlamView] = [BedlamView(0, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=0), 1: bedlam_person(offset=1.0, frame=0, focal=999.0)}), "x"))]
+    with pytest.raises(ValueError, match=r"frame 0.*person 1.*intrinsics"):
+        assemble_bedlam(views)
