@@ -310,7 +310,7 @@ def transcode_mp4(
     filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
-    which for a gray source carry neutral chroma. size (width, height) rescales, on the GPU
+    which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales, on the GPU
     under CUDA decode. Optional crop is (width, height, x, y), applied first, and always
     uses CPU decode. Other NVDEC failures fall back to CPU; session failures retry the same
     command and never trigger that fallback.
@@ -328,7 +328,9 @@ def transcode_mp4(
         *(["format=gray"] if gray else []),
         EVEN_DIMENSION_AND_PIXEL_FORMAT,
     ]
-    cuda_filters: list[str] = [*select, *([] if size is None else [f"scale_cuda={size[0]}:{size[1]}"])]
+    # NVENC's AV1 takes 4:2:0 only, as the CPU path's last filter ensures: a 4:4:4 source (MAMMA's HEVC) fails without this.
+    # nv12 is what NVDEC hands over for 8-bit 4:2:0, so for such a source scale_cuda passes the frames through untouched.
+    cuda_filters: list[str] = [*select, f"scale_cuda={'' if size is None else f'{size[0]}:{size[1]}:'}format=nv12"]
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     def run(*, cuda: bool) -> subprocess.CompletedProcess[str]:

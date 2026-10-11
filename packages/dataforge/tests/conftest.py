@@ -176,6 +176,12 @@ def recording_properties(store: rrc.ChunkStore, group: str) -> dict[str, object]
     return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
 
 
+def static_values(store: rrc.ChunkStore, path: str) -> dict[str, object]:
+    """The static component values logged at one entity, keyed by field name (``name``, ``source_width`` ...)."""
+    row: dict[str, list[object] | None] = store.reader(index=None, contents=path).to_arrow_table().to_pylist()[0]
+    return {column.split(":")[-1]: values[0] for column, values in row.items() if values}
+
+
 def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
     """Read one three-component field back out of an ``EyeControls3D`` archetype.
 

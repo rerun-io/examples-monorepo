@@ -12,6 +12,7 @@ from dataforge.datasets.epfl import EpflConfig
 from dataforge.datasets.hocap import HocapConfig
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
 from dataforge.datasets.lamaria import LamariaConfig
+from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.msd import MsdConfig
 from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
@@ -20,13 +21,13 @@ from dataforge.datasets.umetrack import UmetrackConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), UmetrackConfig(), WildcapConfig())
+    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), UmetrackConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
 ``config.name`` — the catalog dataset — equals the command for fixed datasets and
 is derived per instance where one command serves several layouts: wildcap
-(``wildcap-<corpus>``) and msd (``msd-<device>``)."""
+(``wildcap-<corpus>``), msd (``msd-<device>``) and mamma (``mamma-<family>``)."""
 
 DatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)
 """Config type every verb's ``Config.dataset`` field uses (one tyro subcommand per registry key).

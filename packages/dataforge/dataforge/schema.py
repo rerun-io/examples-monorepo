@@ -219,3 +219,33 @@ def rig_quality_path(rig: int) -> str:
 def quality_flag_path(rig: int, cam: int, name: str) -> str:
     """A shipped per-camera quality flag under the shared GT namespace."""
     return f"/world/gt/quality/rig_{_index(rig, 'rig')}/cam_{_index(cam, 'cam')}/{name}"
+
+
+def person_path(person: int) -> str:
+    """``/world/gt/people/person_NN`` — one person of a multi-person sequence; carries who it is and where its labels come from."""
+    return f"/world/gt/people/person_{_index(person, 'person')}"
+
+
+def person_body_path(person: int, model: str) -> str:
+    """A person's fitted body model (``smplx``) or its skinned ``mesh``, world frame."""
+    return f"{person_path(person)}/body/{model}"
+
+
+def person_coco133_xyz_path(person: int) -> str:
+    """A person's COCO-133 keypoints in world metres."""
+    return f"{person_path(person)}/coco133_xyz"
+
+
+def person_projection_path(rig: int, cam: int, person: int) -> str:
+    """A person's COCO-133 keypoints projected through a camera's full lens model."""
+    return f"{coco133_uv_projected_path(rig, cam)}/person_{_index(person, 'person')}"
+
+
+def person_mask_path(rig: int, cam: int, person: int) -> str:
+    """A person's shipped segmentation mask in a camera's image."""
+    return f"{pinhole_path(rig, cam)}/masks/person_{_index(person, 'person')}"
+
+
+def markers_path(kind: str) -> str:
+    """``/world/gt/markers/<kind>`` — motion-capture marker positions (``vicon`` measured, ``mosh_baseline`` fitted), world metres."""
+    return f"/world/gt/markers/{kind}"

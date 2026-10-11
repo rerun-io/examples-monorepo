@@ -187,8 +187,8 @@ def headset_eye_controls(forward: tuple[float, float, float], up: tuple[float, f
 def video_exclusions(slots: Iterable[tuple[int, int]]) -> list[str]:
     """Content rules that drop each ``(rig, cam)`` video, and anything beneath it, from a view.
 
-    A segment-table card excludes every video but the one its pane decodes: excluded, not
-    hidden, because a hidden entity is still decoded.
+    A segment-table card excludes every video but the one its pane decodes. (Rerun 0.38.1 does
+    not decode a video hidden in a 3D view either: docs/mamma.md.)
 
     Args:
         slots: ``(rig, cam)`` of each camera whose video is dropped.
