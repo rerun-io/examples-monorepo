@@ -16,7 +16,8 @@ from numpy import ndarray
 from serde import SerdeError, from_dict, serde
 
 Gender: TypeAlias = Literal["neutral", "male", "female"]
-Method: TypeAlias = Literal["mosh_v_template", "mosh_betas", "mamma_pred"]
+SmplxModel: TypeAlias = Literal["locked_head_neutral", "v1_1_male", "v1_1_female", "v1_1_neutral"]
+Method: TypeAlias = Literal["mosh_v_template", "mosh_betas", "mamma_pred", "mamma_render", "bedlam_render"]
 Family: TypeAlias = Literal["eval", "markerless-dance", "markerless-multiple-people", "markerless-iphones"]
 
 FAMILY_COLLECTIONS: dict[Family, tuple[str, ...]] = {
@@ -53,6 +54,9 @@ IPHONE_TWO_PEOPLE: frozenset[str] = frozenset(
     }
 )
 """The iPhone scenes with two predicted people (the release manifest, ``packages/mamma``'s ``IPHONE_*_SEQUENCES``); the rest have one."""
+GENDER_MODELS: dict[str, SmplxModel] = {"neutral": "locked_head_neutral", "male": "v1_1_male", "female": "v1_1_female"}
+"""The model each gender's fits in the MPI collections use: every fit with betas is neutral (locked head); the gendered fits are
+subject templates with zero betas, exact with v1.1 (``docs/mamma.md``)."""
 
 MILLIMETRE_THRESHOLD: float = 200.0
 """An extrinsic translation larger than this many units is in millimetres: no MAMMA camera stands 200 m away."""
@@ -139,9 +143,11 @@ class PersonFit:
     """One person's SMPL-X parameters over the whole sequence, as the release ships them (float64; predictions upcast exactly)."""
 
     subject: str
-    """The eval subject id, or the prediction file's stem (``params_00``)."""
+    """The eval subject id, the prediction file's stem (``params_00``), or a MammaSyn person (``person_00``)."""
     gender: Gender
-    """Model the parameters belong to."""
+    """The person's gender as the labels state it."""
+    model: SmplxModel
+    """The SMPL-X model the parameters belong to (``mamma_body.MODEL_FILES``)."""
     flat_hand_mean: bool
     """True when the hand poses are absolute; False when SMPL-X's mean hand is added to them."""
     pose: Float64[ndarray, "t 165"]
@@ -152,6 +158,8 @@ class PersonFit:
     """Shape coefficients: 300 for the eval GT, 16 for the predictions."""
     v_template: Float64[ndarray, "10475 3"] | None
     """The subject's registered template mesh, which replaces the model's (``mosh_v_template``); None for beta-only fits."""
+    present: Bool[ndarray, "t"] | None = None
+    """Rows at which any view labels the person (MammaSyn); None when present throughout. Absent rows hold zeros."""
 
 
 @serde
@@ -178,12 +186,12 @@ class SequenceLabels:
                 raise ValueError(f"{person.subject}: a {self.method} fit {'needs' if person.v_template is None else 'has no use for'} a template")
 
 
-def decode(cls: type[RecordT], path: Path, values: dict[str, object]) -> RecordT:  # noqa: UP047 — beartype requires legacy generics
-    """One record from an NPZ's values, naming the file on schema and ``__post_init__`` errors."""
+def decode(cls: type[RecordT], source: Path | str, values: dict[str, object]) -> RecordT:  # noqa: UP047 — beartype requires legacy generics
+    """One record from a file's values, naming the file (or shard member) on schema and ``__post_init__`` errors."""
     try:
         return from_dict(cls, values)
     except (SerdeError, ValueError) as error:
-        raise ValueError(f"{path}: {error}") from error
+        raise ValueError(f"{source}: {error}") from error
 
 
 def read_eval_labels(path: Path) -> SequenceLabels:
@@ -194,6 +202,7 @@ def read_eval_labels(path: Path) -> SequenceLabels:
             {
                 "subject": str(subject),
                 "gender": str(npz["gender"][index]),
+                "model": GENDER_MODELS.get(str(npz["gender"][index]), str(npz["gender"][index])),
                 "flat_hand_mean": bool(npz["flat_hand_mean"]),
                 "pose": npz["pose_world"][:, index].astype(np.float64),
                 "trans": npz["pose_trans_world"][:, index].astype(np.float64),
@@ -226,6 +235,7 @@ def read_pred_labels(global_path: Path, pred_paths: list[Path]) -> SequenceLabel
                 {
                     "subject": path.stem,
                     "gender": str(npz["gender"]),
+                    "model": GENDER_MODELS.get(str(npz["gender"]), str(npz["gender"])),
                     "flat_hand_mean": bool(npz["flat_hand_mean"]),
                     "pose": npz["poses"].astype(np.float64),
                     "trans": npz["trans"].astype(np.float64),

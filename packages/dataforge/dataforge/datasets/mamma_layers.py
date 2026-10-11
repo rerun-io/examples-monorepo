@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -41,8 +41,15 @@ from dataforge.video_encoding import AV1_CQ, AV1_GOP, mp4_frame_count, parallel_
 MAX_PIXELS: int = 3_200_000
 """Videos above this many pixels are stored at half size, repeatedly (Pablo's ~3 MP cap): 4K iPhones at 1920x1080 and eval
 Singles' 4112x3008 at 2056x1504; every other rig is 2056x1504 or 2048x1504 and stays native."""
-SOURCE_TAGS: dict[Method, str] = {"mosh_v_template": "mosh_gt", "mosh_betas": "mosh_gt", "mamma_pred": "mamma_pred"}
-"""Where a sequence's bodies come from: MoSh++ fits to Vicon markers, or the MAMMA model's markerless prediction."""
+SOURCE_TAGS: dict[Method, str] = {
+    "mosh_v_template": "mosh_gt",
+    "mosh_betas": "mosh_gt",
+    "mamma_pred": "mamma_pred",
+    "mamma_render": "synthetic_gt",
+    "bedlam_render": "synthetic_gt",
+}
+"""Where a sequence's bodies come from: MoSh++ fits to Vicon markers, the MAMMA model's markerless prediction, or the
+parameters a synthetic render was made from (MammaSyn)."""
 MESH_BATCH_ROWS: int = 32
 """Mesh rows per chunk: one SMPL-X row is 126 KB, so a chunk is ~4 MB plus its triangle list."""
 MASK_DOWNSCALE: int = 4
@@ -100,24 +107,19 @@ class Clock:
         return cls(frames, frame_times(frames, labels.fps))
 
     @property
+    def rows(self) -> Int64[ndarray, "t"]:
+        """Row of each frame in the labels' arrays (MPI: the frame itself; MammaSyn: its place among the source frames)."""
+        return np.arange(len(self.frames), dtype=np.int64)
+
+    @property
     def indexes(self) -> list[rr.TimeColumn]:
         """Both recording clocks at every frame."""
         return [time_column(self.times_ns), frame_index_column(self.frames)]
 
 
-def write_base(
-    recording: rr.RecordingStream,
-    identity: SequenceIdentity,
-    sequence: MammaSequence,
-    labels: SequenceLabels,
-    cameras: list[MammaCamera],
-    clock: Clock,
-    timer: SequenceTimer,
-) -> None:
-    """Cameras (pinhole at the stored size, Vicon lens as data) and every camera's video, re-encoded to AV1 4:2:0."""
-    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
-    rr.log("/", annotation_context(), static=True, recording=recording)
-    frustum_m: float = layout_frustum_m(np.array([camera.world_T_cam[:2, 3] for camera in cameras]))
+def log_cameras(recording: rr.RecordingStream, cameras: list[MammaCamera], frustum_m: float) -> tuple[list[str], list[tuple[int, int] | None]]:
+    """One rig per camera (pinhole at the stored size, the Vicon lens as data where there is one); returns each camera's
+    resolution summary and its rescale (None when stored native)."""
     resolutions: list[str] = []
     rescales: list[tuple[int, int] | None] = []
     for rig, camera in enumerate(cameras, start=1):
@@ -157,6 +159,22 @@ def write_base(
                 gop=AV1_GOP,
             )
         )
+    return resolutions, rescales
+
+
+def write_base(
+    recording: rr.RecordingStream,
+    identity: SequenceIdentity,
+    sequence: MammaSequence,
+    labels: SequenceLabels,
+    cameras: list[MammaCamera],
+    clock: Clock,
+    timer: SequenceTimer,
+) -> None:
+    """Cameras (pinhole at the stored size, Vicon lens as data) and every camera's video, re-encoded to AV1 4:2:0."""
+    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
+    rr.log("/", annotation_context(), static=True, recording=recording)
+    resolutions, rescales = log_cameras(recording, cameras, layout_frustum_m(np.array([camera.world_T_cam[:2, 3] for camera in cameras])))
     with timer.stage("probe"):
         for camera in cameras:  # -frames:v would silently cut a longer video
             count: int = mp4_frame_count(sequence.video(camera.name))
@@ -211,7 +229,8 @@ def write_base(
 
 
 def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed: list[PosedPerson], clock: Clock) -> None:
-    """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model."""
+    """Every person's SMPL-X parameters at full rate, as shipped, and the COCO-133 keypoints of the posed model; NaN rows where
+    a person is absent."""
     indexes: list[rr.TimeColumn] = clock.indexes
     for index, (person, pose) in enumerate(zip(labels.people, posed, strict=True)):
         rr.log(
@@ -221,7 +240,7 @@ def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed
                 gender=person.gender,
                 source=SOURCE_TAGS[labels.method],
                 fit_method=labels.method,
-                model=MODEL_FILES[person.gender].path,
+                model=MODEL_FILES[person.model].path,
             ),
             static=True,
             recording=recording,
@@ -240,8 +259,9 @@ def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed
             static=True,
             recording=recording,
         )
-        pose_rows: Float64[ndarray, "t 165"] = person.pose[clock.frames]
-        trans_rows: Float64[ndarray, "t 3"] = person.trans[clock.frames]
+        present: Bool[ndarray, "t 1"] = (np.ones(len(clock.rows), dtype=bool) if person.present is None else person.present[clock.rows])[:, None]
+        pose_rows: Float64[ndarray, "t 165"] = np.where(present, person.pose[clock.rows], np.nan)
+        trans_rows: Float64[ndarray, "t 3"] = np.where(present, person.trans[clock.rows], np.nan)
         columns = rr.AnyValues.columns(
             pose=pa.FixedSizeListArray.from_arrays(pa.array(pose_rows.reshape(-1)), 165),
             trans=pa.FixedSizeListArray.from_arrays(pa.array(trans_rows.reshape(-1)), 3),
@@ -258,31 +278,35 @@ def write_body_pose(recording: rr.RecordingStream, labels: SequenceLabels, posed
 
 
 def write_body_mesh(recording: rr.RecordingStream, posed: list[PosedPerson], clock: Clock) -> None:
-    """Every person's posed SMPL-X mesh every ``meshes.BODY_MESH_STRIDE``-th frame."""
+    """Every person's posed SMPL-X mesh at its mesh rows, an empty mesh where the person is absent."""
     for index, pose in enumerate(posed):
         path: str = schema.person_body_path(index, "mesh")
         meshes.log_mesh_static(recording, path, albedo_factor=hands.BODY_ALBEDO)
-        times: Int64[ndarray, "k"] = clock.times_ns[pose.mesh_frames]
-        for start in range(0, len(pose.mesh_frames), MESH_BATCH_ROWS):
+        times: Int64[ndarray, "k"] = clock.times_ns[pose.mesh_rows]
+        frames: Int64[ndarray, "k"] = clock.frames[pose.mesh_rows]
+        before: Int64[ndarray, "k"] = np.cumsum(pose.mesh_present) - pose.mesh_present  # posed meshes ahead of each row
+        for start in range(0, len(pose.mesh_rows), MESH_BATCH_ROWS):
             rows: slice = slice(start, start + MESH_BATCH_ROWS)
+            trusted: list[bool] = pose.mesh_present[rows].tolist()
+            first: int = int(before[start])
             meshes.log_mesh_batch(
                 recording,
                 path,
                 times_ns=times[rows],
-                frame_indices=pose.mesh_frames[rows],
-                vertices=pose.vertices[rows],
-                trusted=[True] * len(pose.mesh_frames[rows]),
+                frame_indices=frames[rows],
+                vertices=pose.vertices[first : first + sum(trusted)],
+                trusted=trusted,
                 topology=pose.faces,
             )
 
 
-def write_projections(recording: rr.RecordingStream, cameras: list[MammaCamera], posed: list[PosedPerson], clock: Clock) -> None:
-    """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole for the iPhones), in stored pixels."""
+def write_projections(
+    recording: rr.RecordingStream, cameras: list[MammaCamera], posed: list[PosedPerson], clock: Clock, *, calibration_source: str
+) -> None:
+    """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels."""
+    models: list[str] = sorted({"pinhole" if camera.lens is None else "vicon_radial_2" for camera in cameras})
     recording.send_property(
-        paths.PROJECTIONS_LAYER,
-        rr.AnyValues(
-            derived_from="coco133_xyz", camera_model="vicon_radial_2 (IOI cameras), pinhole (iPhones)", calibration_source="per-camera release NPZ"
-        ),
+        paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=", ".join(models), calibration_source=calibration_source)
     )
     for rig, camera in enumerate(cameras, start=1):
         scale: float = stored_size(camera.width, camera.height)[0] / camera.width
@@ -299,16 +323,13 @@ def write_projections(recording: rr.RecordingStream, cameras: list[MammaCamera],
             )
 
 
-def mask_png(source: bytes, size: tuple[int, int], colour: tuple[int, int, int]) -> bytes:
-    """A shipped 0/255 mask as a two-colour palette PNG at ``size``: index 1 inside (``colour``), index 0 transparent outside.
+def palette_png(gray: ndarray, size: tuple[int, int], colour: tuple[int, int, int]) -> bytes:
+    """A 0/255 mask as a two-colour palette PNG at ``size``: index 1 inside (``colour``), index 0 transparent outside.
 
     A pixel is inside when most of the source pixels it covers are. The palette indices are the mask; a viewer draws the colours.
     """
     # No jaxtyping annotations on these locals: this runs on MASK_WORKERS threads, and the dev env's per-call check of a fresh
     # jaxtyping hint grows beartype's cache from every thread at once ("dictionary changed size during iteration").
-    gray = cv2.imdecode(np.frombuffer(source, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-    if gray is None:
-        raise ValueError("not a decodable image")
     if gray.shape[::-1] != size:
         gray = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
     ids = (gray >= 128).astype(np.uint8)
@@ -317,6 +338,35 @@ def mask_png(source: bytes, size: tuple[int, int], colour: tuple[int, int, int])
     buffer = io.BytesIO()
     paletted.save(buffer, format="PNG", transparency=bytes([0, 255]))
     return buffer.getvalue()
+
+
+def decode_gray(source: bytes) -> ndarray:
+    """An 8-bit gray PNG, decoded (OpenCV releases the GIL for it)."""
+    gray = cv2.imdecode(np.frombuffer(source, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        raise ValueError("not a decodable image")
+    return gray
+
+
+def mask_png(source: bytes, size: tuple[int, int], colour: tuple[int, int, int]) -> bytes:
+    """A shipped 0/255 mask of one person as a palette PNG at ``size`` (``palette_png``)."""
+    return palette_png(decode_gray(source), size, colour)
+
+
+def log_person_masks(
+    recording: rr.RecordingStream, rig: int, person: int, stored: tuple[int, int], size: tuple[int, int], blobs: list[bytes], indexes: list[rr.TimeColumn]
+) -> None:
+    """One person's mask PNGs in one camera, at ``size``, scaled over the camera's stored video."""
+    path: str = schema.person_mask_path(rig, 0, person)
+    rr.log(
+        path,
+        rr.EncodedImage.from_fields(media_type="image/png", opacity=MASK_OPACITY, draw_order=10.0 + person),
+        static=True,
+        recording=recording,
+    )
+    # The scale lays the small mask over the stored video in the pinhole's image space.
+    rr.log(path, rr.Transform3D(scale=[stored[0] / size[0], stored[1] / size[1], 1.0]), static=True, recording=recording)
+    rr.send_columns(path, indexes=indexes, columns=rr.EncodedImage.columns(blob=blobs), recording=recording)
 
 
 def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras: list[MammaCamera], people: int, clock: Clock) -> None:
@@ -345,16 +395,7 @@ def write_masks(recording: rr.RecordingStream, sequence: MammaSequence, cameras:
                     sources: list[bytes] = [tar.extractfile(members[name]).read() for name in names]  # type: ignore[union-attr]
                     colour: tuple[int, int, int] = PERSON_COLOURS[person % len(PERSON_COLOURS)]
                     blobs: list[bytes] = list(executor.map(partial(mask_png, size=size, colour=colour), sources))
-                    path: str = schema.person_mask_path(rig, 0, person)
-                    rr.log(
-                        path,
-                        rr.EncodedImage.from_fields(media_type="image/png", opacity=MASK_OPACITY, draw_order=10.0 + person),
-                        static=True,
-                        recording=recording,
-                    )
-                    # The scale lays the small mask over the stored video in the pinhole's image space.
-                    rr.log(path, rr.Transform3D(scale=[stored[0] / size[0], stored[1] / size[1], 1.0]), static=True, recording=recording)
-                    rr.send_columns(path, indexes=indexes, columns=rr.EncodedImage.columns(blob=blobs), recording=recording)
+                    log_person_masks(recording, rig, person, stored, size, blobs, indexes)
 
 
 def write_markers(recording: rr.RecordingStream, sequence: MammaSequence, clock: Clock) -> None:

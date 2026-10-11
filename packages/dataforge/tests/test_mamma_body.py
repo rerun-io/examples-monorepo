@@ -9,7 +9,7 @@ from conftest import raw_asset
 from scipy.spatial import KDTree
 
 from dataforge import paths
-from dataforge.datasets.mamma_body import MODEL_FILES, V1_1_MIRROR, V1_1_REVISION, ModelFile, PosedPerson, SmplxBody
+from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson, SmplxBody
 from dataforge.datasets.mamma_source import PersonFit, SequenceLabels, read_eval_labels
 
 pytestmark = pytest.mark.golden
@@ -18,8 +18,6 @@ MAMMA_ROOT: Path = Path(os.environ.get("DATAFORGE_MAMMA_ROOT", "/mnt/nas/dataset
 MODEL_ROOT: Path = Path(os.environ.get("DATAFORGE_MAMMA_MODEL_ROOT", str(paths.raw_root() / "mamma-body-models")))
 EXTRA: str = "mamma_eval_extra/070525_BedlamLab_Eval_Solo_Dancing_00202_1"
 DANCE: str = "mamma_eval_dance/250225_WestCoastSwing_Basic_Whip_03675_03676_1"
-V1_1_NEUTRAL: ModelFile = ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_NEUTRAL.npz", "smplx_v1_1")
-"""SMPL-X v1.1 neutral, which MAMMA does not use: the reference the template test compares against."""
 
 
 def body() -> SmplxBody:
@@ -33,11 +31,10 @@ def test_a_template_fit_does_not_depend_on_the_model_variant(monkeypatch: pytest
     # the locked head differs from v1.1. So the gendered (Singles) template fits are exact with v1.1 male and female.
     labels: SequenceLabels = read_eval_labels(raw_asset("MAMMA eval Dance GT", MAMMA_ROOT / DANCE / "gt/global.npz"))
     person: PersonFit = labels.people[0]
-    assert labels.method == "mosh_v_template" and person.gender == "neutral" and not person.betas.any()
+    assert labels.method == "mosh_v_template" and person.model == "locked_head_neutral" and not person.betas.any()
     frames: np.ndarray = np.arange(0, labels.frames, 15, dtype=np.int64)
     locked: PosedPerson = body().pose(person, frames)
-    raw_asset("SMPL-X v1.1 neutral (DATAFORGE_MAMMA_MODEL_ROOT/smplx_v1_1)", V1_1_NEUTRAL.local(MODEL_ROOT))
-    monkeypatch.setitem(MODEL_FILES, "neutral", V1_1_NEUTRAL)
+    monkeypatch.setitem(MODEL_FILES, "locked_head_neutral", MODEL_FILES["v1_1_neutral"])
     v1_1: PosedPerson = SmplxBody(MODEL_ROOT).pose(person, frames)
     assert np.abs(locked.vertices - v1_1.vertices).max() < 1e-5
     assert np.nanmax(np.abs(locked.coco133 - v1_1.coco133)) < 1e-5

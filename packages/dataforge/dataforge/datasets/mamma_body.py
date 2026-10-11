@@ -11,12 +11,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from jaxtyping import Float32, Int64, UInt32
+from jaxtyping import Bool, Float32, Int64, UInt32
 from numpy import ndarray
 from simplecv.ops.smplx.smplx_coco133 import smplx_joints_to_coco133_xyzc
 
 from dataforge import meshes, transports
-from dataforge.datasets.mamma_source import Gender, PersonFit
+from dataforge.datasets.mamma_source import PersonFit, SmplxModel
 from dataforge.transports import HfRepoType
 
 
@@ -41,18 +41,20 @@ class ModelFile:
 V1_1_MIRROR: str = "camenduru/SMPLer-X"
 """Public model repo with SMPL-X v1.1 for all three genders at its root."""
 V1_1_REVISION: str = "9e5548b70b48efe6992faa3b2a418df108542bf7"
-MODEL_FILES: dict[Gender, ModelFile] = {
-    "neutral": ModelFile(
+MODEL_FILES: dict[SmplxModel, ModelFile] = {
+    "locked_head_neutral": ModelFile(
         "pablovela5620/mamma-streaming-data",
         "dataset",
         "0a961eedf02e2fb3d32929b11cef625661dffc60",
         "body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz",
         "",
     ),
-    "male": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_MALE.npz", "smplx_v1_1"),
-    "female": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_FEMALE.npz", "smplx_v1_1"),
+    "v1_1_male": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_MALE.npz", "smplx_v1_1"),
+    "v1_1_female": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_FEMALE.npz", "smplx_v1_1"),
+    "v1_1_neutral": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_NEUTRAL.npz", "smplx_v1_1"),
 }
-"""The model each gender's fits use: the locked-head neutral (private repo), v1.1 male and female (public mirror)."""
+"""Every model a MAMMA fit uses: the locked-head neutral (private repo; MPI neutral fits, MammaSyn renders) and v1.1 male,
+female (MPI gendered template fits) and neutral (BEDLAM) from the public mirror."""
 EXPRESSION_COEFFS: int = 10
 """Expression coefficients of the model; the release fits none, so they stay zero."""
 FORWARD_BATCH: int = 256
@@ -72,14 +74,19 @@ def fetch_models(model_root: Path) -> int:
 
 @dataclass(frozen=True, slots=True)
 class PosedPerson:
-    """One person's forward over a sequence: keypoints at every frame, meshes at the display rows."""
+    """One person's forward over a sequence's rows: keypoints at every row, meshes at the display rows."""
 
     coco133: Float32[ndarray, "t 133 3"]
-    """COCO-133 keypoints regressed from the posed model (all 133 mapped, face contour included), world metres."""
-    mesh_frames: Int64[ndarray, "k"]
-    """Frames of ``vertices``: every ``meshes.BODY_MESH_STRIDE``-th one."""
-    vertices: Float32[ndarray, "k 10475 3"]
-    """Posed vertices at ``mesh_frames``, world metres."""
+    """COCO-133 keypoints regressed from the posed model (all 133 mapped, face contour included), world metres; NaN where the
+    person is absent."""
+    joints: Float32[ndarray, "t 144 3"]
+    """The model's joints (127, then the 17 face-contour points), world metres; NaN where absent."""
+    mesh_rows: Int64[ndarray, "k"]
+    """Rows of the mesh timeline: every ``mesh_stride``-th one, absent rows included (they clear the mesh)."""
+    mesh_present: Bool[ndarray, "k"]
+    """Whether the person is there at each mesh row."""
+    vertices: Float32[ndarray, "m 10475 3"]
+    """Posed vertices at the mesh rows where the person is present, world metres."""
     faces: UInt32[ndarray, "20908 3"]
     """The mesh triangles (one array every person shares)."""
 
@@ -92,17 +99,16 @@ class SmplxBody:
         if missing:
             raise FileNotFoundError(f"MAMMA needs the SMPL-X files {missing}; run dataforge-download mamma or set --model-root")
         self.model_root: Path = model_root
-        with np.load(MODEL_FILES["neutral"].local(model_root), allow_pickle=False) as model:
+        with np.load(MODEL_FILES["locked_head_neutral"].local(model_root), allow_pickle=False) as model:
             self.faces: UInt32[ndarray, "20908 3"] = model["f"].astype(np.uint32)  # every SMPL-X file shares this topology
 
-    def pose(self, person: PersonFit, frames: Int64[ndarray, "t"]) -> PosedPerson:
-        """Pose ``person`` at ``frames`` (sequence frame indices), keeping the meshes of the stride frames."""
+    def pose(self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE) -> PosedPerson:
+        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row."""
         import smplx
 
         layer = smplx.create(
-            str(MODEL_FILES[person.gender].local(self.model_root)),
+            str(MODEL_FILES[person.model].local(self.model_root)),
             model_type="smplx",
-            gender=person.gender,
             ext="npz",
             use_pca=False,
             flat_hand_mean=person.flat_hand_mean,
@@ -111,16 +117,19 @@ class SmplxBody:
             use_face_contour=True,
             v_template=None if person.v_template is None else torch.from_numpy(person.v_template.astype(np.float32)),
         )
-        kept: Int64[ndarray, "k"] = np.flatnonzero(frames % meshes.BODY_MESH_STRIDE == 0)
-        coco133: list[Float32[ndarray, "b 133 3"]] = []
+        present: Bool[ndarray, "t"] = np.ones(len(rows), dtype=bool) if person.present is None else person.present[rows]
+        posed: Int64[ndarray, "p"] = np.flatnonzero(present)
+        mesh_rows: Int64[ndarray, "k"] = np.flatnonzero(rows % mesh_stride == 0)
+        coco133: Float32[ndarray, "t 133 3"] = np.full((len(rows), 133, 3), np.nan, dtype=np.float32)
+        joints: Float32[ndarray, "t 144 3"] = np.full((len(rows), 144, 3), np.nan, dtype=np.float32)
         vertices: list[Float32[ndarray, "c 10475 3"]] = []
         betas: torch.Tensor = torch.from_numpy(person.betas.astype(np.float32))[None]
-        for start in range(0, len(frames), FORWARD_BATCH):
-            rows: Int64[ndarray, "b"] = frames[start : start + FORWARD_BATCH]
-            pose: torch.Tensor = torch.from_numpy(person.pose[rows].astype(np.float32))
+        for start in range(0, len(posed), FORWARD_BATCH):
+            batch: Int64[ndarray, "b"] = posed[start : start + FORWARD_BATCH]
+            pose: torch.Tensor = torch.from_numpy(person.pose[rows[batch]].astype(np.float32))
             with torch.no_grad():
                 output = layer(
-                    betas=betas.expand(len(rows), -1),
+                    betas=betas.expand(len(batch), -1),
                     global_orient=pose[:, 0:3],
                     body_pose=pose[:, 3:66],
                     jaw_pose=pose[:, 66:69],
@@ -128,10 +137,17 @@ class SmplxBody:
                     reye_pose=pose[:, 72:75],
                     left_hand_pose=pose[:, 75:120],
                     right_hand_pose=pose[:, 120:165],
-                    transl=torch.from_numpy(person.trans[rows].astype(np.float32)),
-                    expression=torch.zeros(len(rows), EXPRESSION_COEFFS),
+                    transl=torch.from_numpy(person.trans[rows[batch]].astype(np.float32)),
+                    expression=torch.zeros(len(batch), EXPRESSION_COEFFS),
                 )
-            coco133.append(smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3])
-            in_batch: Int64[ndarray, "c"] = kept[(kept >= start) & (kept < start + len(rows))] - start
-            vertices.append(output.vertices.numpy()[in_batch])
-        return PosedPerson(coco133=np.concatenate(coco133), mesh_frames=frames[kept], vertices=np.concatenate(vertices), faces=self.faces)
+            joints[batch] = output.joints.numpy()
+            coco133[batch] = smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3]
+            vertices.append(output.vertices.numpy()[np.isin(batch, mesh_rows)])
+        return PosedPerson(
+            coco133=coco133,
+            joints=joints,
+            mesh_rows=mesh_rows,
+            mesh_present=present[mesh_rows],
+            vertices=np.concatenate(vertices) if vertices else np.zeros((0, 10475, 3), dtype=np.float32),
+            faces=self.faces,
+        )
