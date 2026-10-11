@@ -509,6 +509,11 @@ class BedlamClip:
     def parts(self) -> tuple[str, str]:
         return (self.directory.name, self.clip)
 
+    @property
+    def shards(self) -> list[Path]:
+        """The batch shards holding the clip's samples (one or two)."""
+        return [self.directory / name for name in sorted({member.shard for sample in self.samples for member in (sample.image, sample.mask, sample.labels)})]
+
 
 def discover_bedlam(root: Path, index_root: Path, batches: set[str] | None = None) -> tuple[list[BedlamClip], list[str]]:
     """Every clip of the BEDLAM batches (or of ``batches``) and the problems found; indexes uncached batches' shard headers.

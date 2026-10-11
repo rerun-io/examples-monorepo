@@ -559,6 +559,12 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
             pairs = [(identity, clip) for identity, clip in pairs if identity.sequence_key in self.config.sequences]
         return pairs
 
+    def prefetch(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> None:
+        """Read the batch shards holding a clip still to convert into the page cache while the clip before it converts (the next
+        clip mostly shares them, so a shard comes from the NAS once, in order)."""
+        if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
+            read_ahead(source.shards)
+
     def convert(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> Path:
         """Read the clip once (encoding it when base is pending), pose every person and move them into the camera frame, write."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
@@ -567,6 +573,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         samples: list[SynSample] = source.samples[: self.config.frame_limit or len(source.samples)]
         with work_dir("mamma-bedlam-") as work:
             with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
+                read_ahead(source.shards)  # from the page cache when prefetched
                 (read,) = read_cameras(source.directory, {source.clip: samples}, work if paths.BASE_LAYER in pending else None, parse_bedlam)
             labels: BedlamLabels = assemble_bedlam(read.views)
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, BEDLAM_NUMBERING_FPS))
