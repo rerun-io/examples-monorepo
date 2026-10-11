@@ -8,10 +8,10 @@
   [mamma.md](mamma.md).
 - Two families of the `mamma` command, one catalog dataset each:
   - `--family syn` (`dataforge-mamma-syn`): MAMMA's own renders, 14 dataset directories in three groups (Hands: Interhand;
-    Interactions: Harmony4D, Inter-X, InteractionCouple, LatinDance10; Singles: BEDLAM bodies, MoYo), 2,144 sequence directories,
+    Interactions: Harmony4D, Inter-X, InteractionCouple, LatinDance10; Singles: BEDLAM bodies, MoYo), 2,115 sequence directories,
     each one scene seen by 2 to 8 fixed cameras of MAMMA's 32-camera IOI rig. Identity `mamma-syn__<dataset>__<sequence>`.
   - `--family syn-bedlam` (`dataforge-mamma-syn-bedlam`): `MammaSyn-Singles/BEDLAM_MASKS_WD`, the BEDLAM release repacked: 30
-    batch directories of short single-camera clips (about 10,000). Identity `mamma-syn-bedlam__<batch>__<clip>`.
+    batch directories of short single-camera clips (10,450). Identity `mamma-syn-bedlam__<batch>__<clip>`.
 - A sample is one camera view of one frame, three shard members under one key: `<key>.png` (2056x1504 or 1504x2056 RGBA render;
   BEDLAM 1280x720), `<key>.mask.png` (8-bit instance mask: person index + 1, 0 = background) and `<key>.data.pyd` (a pickled dict
   of the people that view labels). The pickles refer to numpy arrays and scalars only; they are read with an unpickler that
@@ -103,7 +103,20 @@ another camera has.
 
 ## Timing
 
-TODO
+pablo-dl-server (Ryzen 9 9950X3D, RTX 5090, prod env), 2026-10-11; the release read in place from the NAS over NFSv3.
+
+- **Renders** (2,112 sequences, 781,366 samples, 4.5 h of capture at 6 fps): 5.68 TB of shards became 58.8 GB of rrds (97x).
+  The NAS sets the pace: the next sequence's local copy runs at about 310 MB/s (4 sequential streams; the NAS peaks near
+  340 MB/s), about 5.1 h for the family. Per sequence over the last 909 (MoYo and LatinDance included), 10.5 s: 6.0 s waiting
+  for the copy, 3.4 s transcode (ffmpeg's frame-threaded PNG decode on the CPU and NVENC AV1, 8 cameras at once), 0.8 s masks,
+  0.1 s SMPL-X. A faster PNG decode would not shorten the run: the copy, not the decode, is the bound (and no GPU PNG decoder
+  exists: nvImageCodec decodes PNG on the CPU).
+- **BEDLAM** (10,450 clips, 317,602 samples, 14.8 h of capture): 0.94 TB became 152.7 GB (6.2x). The first discovery walks the
+  headers of 1,603 tars (82 min, sharing the NAS with a copy; cached after). Converting took 58 min in 4 processes on disjoint
+  batches, one NVENC session each: 1.18 s per clip, 0.6 s transcode, 0.3 s waiting for the prefetched members, 0.2 s SMPL-X.
+- Size by layer: renders 39.3 GB meshes, 14.3 GB video, 3.0 GB projections, 1.3 GB masks, 0.9 GB body pose; BEDLAM 142.7 GB
+  meshes (up to 10 people at every frame), 4.2 GB video, 3.7 GB body pose, 1.5 GB projections, 0.6 GB masks. Meshes are kept at
+  every 6 Hz frame (below the 10 Hz display cap of `meshes.BODY_MESH_STRIDE`).
 
 ## Known gaps
 
