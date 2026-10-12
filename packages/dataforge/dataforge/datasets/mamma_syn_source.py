@@ -358,7 +358,7 @@ class RenderPersonLabel:
     gender: Gender
     joints3d: Float64[ndarray, "127 3"]
     """The model's joints (no face contour), world metres: the check that the parameters reproduce the render's body."""
-    person_visitiblity_rate: float
+    person_visitiblity_rate: float = field(deserializer=float)
     """The release's per-view visibility score, under its own name and definition."""
     floor_contact_mask: Bool[ndarray, "10475"]
     """True where the vertex touches the floor; the same in every view of a frame."""
@@ -512,8 +512,8 @@ class BedlamPersonLabel:
     """The model's joints (no face contour) in the camera frame: the check that the parameters reproduce the render's body."""
     motion_info: list[str]
     """Where the motion comes from, six strings: the action, a number, the AMASS file, then three numbers."""
-    person_visitiblity_rate: float
-    """The release's per-view visibility score, under its own name and definition."""
+    person_visitiblity_rate: float = field(deserializer=float)
+    """The release's per-view visibility score, under its own name and definition (BEDLAM writes an unseen person's as the int 0)."""
     floor_contact_mask: Bool[ndarray, "10475"]
     """True where the vertex touches the floor."""
     vertex_visibility: Bool[ndarray, "10475"] = field(deserializer=vertex_flags)

@@ -351,6 +351,14 @@ def test_bedlam_views_carry_each_persons_floor_contact_and_motion_source() -> No
     assert np.flatnonzero(views[0].people[0].vertex_visibility).tolist() == [5]
 
 
+def test_a_bedlam_view_that_ships_its_visibility_rate_as_the_integer_0_decodes() -> None:
+    # BEDLAM writes a person the camera does not see with the Python int 0, not a float.
+    person: dict[str, object] = bedlam_person(offset=0.0, frame=0, seen=[])
+    person["person_visitiblity_rate"] = 0
+    (label,) = read_bedlam_view(pickled({0: person}), "seq_000000/0120").values()
+    assert label.person_visitiblity_rate == 0.0 and isinstance(label.person_visitiblity_rate, float)
+
+
 def test_people_in_one_bedlam_view_that_disagree_on_the_intrinsics_raise() -> None:
     views: list[BedlamView] = [BedlamView(0, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=0), 1: bedlam_person(offset=1.0, frame=0, focal=999.0)}), "x"))]
     with pytest.raises(ValueError, match=r"frame 0.*person 1.*intrinsics"):
