@@ -8,8 +8,9 @@ verifies it and proves a fetch on one or two sequences. See ``docs/mamma.md``.
 """
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, TypeVar
 
 import rerun.blueprint as rrb
 
@@ -19,6 +20,7 @@ from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models
 from dataforge.datasets.mamma_download import fetch_sequence, verify_release
 from dataforge.datasets.mamma_layers import Clock, write_base, write_body_mesh, write_body_pose, write_markers, write_masks, write_projections
 from dataforge.datasets.mamma_source import Family, MammaCamera, MammaSequence, SequenceLabels, discover_sequences, read_camera
+from dataforge.datasets.mamma_syn_source import SynFamily
 from dataforge.identity import SequenceIdentity
 
 PANES: int = 8
@@ -28,7 +30,7 @@ VISIBLE_3D_VIDEOS: int = 4
 FAMILY_RIGS: dict[Family, int] = {"eval": 32, "markerless-dance": 32, "markerless-multiple-people": 32, "markerless-iphones": 4}
 """Most cameras a rig of the family has (eval Dance 32, Singles and Extra 16): the catalog layouts' scene rules cover them all
 (rules on absent entities do nothing)."""
-FAMILY_PANES: dict[Family, int] = {"eval": 16, "markerless-dance": 32, "markerless-multiple-people": 32, "markerless-iphones": 4}
+FAMILY_PANES: dict[Family, int] = {**FAMILY_RIGS, "eval": 16}
 """Cameras the catalog default lays panes out for: eval shows the first 16, which every eval rig has."""
 SCENE_EYE: rrb.EyeControls3D = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital)
 
@@ -72,14 +74,16 @@ class MammaConfig(FrameLimitedConfig):
     command: ClassVar[str] = "mamma"
     """Registry key and CLI subcommand; ``--family`` picks the catalog dataset."""
     _target: type = field(default_factory=lambda: MammaDataset)
-    family: Family = "eval"
-    """Catalog family to work on; also the catalog dataset (``mamma-<family>``)."""
+    family: Family | SynFamily = "eval"
+    """Catalog family to work on; also the catalog dataset (``mamma-<family>``). ``syn`` and ``syn-bedlam`` are MammaSyn."""
     root: Path = field(default_factory=lambda: paths.raw_root() / "mamma")
     """Release root, read only."""
     model_root: Path = field(default_factory=lambda: paths.raw_root() / "mamma-body-models")
     """Where the SMPL-X model files go (``dataforge-download mamma`` fetches them)."""
     sequences: tuple[str, ...] | None = None
     """Sequence keys (``singles/230929_WhiteRabbit_CatchBall_50048_1``, ``indoors/crossing_arms``); None selects all."""
+    index_root: Path = field(default_factory=lambda: paths.raw_root() / "mamma-syn-index")
+    """MammaSyn: where each sequence directory's shard index is cached (local disk; rebuilt when a shard changes)."""
     fetch_into: Path | None = None
     """Download: also fetch the ``sequences`` from the MPI server into this directory and compare every file with the release
     copy, as a proof that the download path works (needs MAMMA_USERNAME and MAMMA_PASSWORD). Never the whole release."""
@@ -89,21 +93,52 @@ class MammaConfig(FrameLimitedConfig):
         """Catalog dataset and identity ``dataset`` part: one per family."""
         return f"{self.command}-{self.family}"
 
+    def setup(self) -> DataforgeDataset:
+        """The MPI families' dataset, or MammaSyn's for ``syn`` and ``syn-bedlam``."""
+        from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset  # imports this module
+
+        if self.family == "syn":
+            return MammaSynDataset(self)
+        if self.family == "syn-bedlam":
+            return MammaBedlamDataset(self)
+        return MammaDataset(self)
+
+
+SourceT = TypeVar("SourceT")
+
+
+def select_sequences(config: MammaConfig, pairs: list[tuple[SequenceIdentity, SourceT]], noun: str) -> list[tuple[SequenceIdentity, SourceT]]:  # noqa: UP047 — beartype requires legacy generics
+    """``pairs`` narrowed to ``config.sequences`` when given; raises when one of them is not there (``noun``: sequence, clip)."""
+    if config.sequences is None:
+        return pairs
+    missing: set[str] = set(config.sequences) - {identity.sequence_key for identity, _ in pairs}
+    if missing:
+        raise ValueError(f"{config.name}: no {noun} {sorted(missing)} under {config.root}")
+    return [(identity, source) for identity, source in pairs if identity.sequence_key in config.sequences]
+
 
 class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
     """Convert one sequence at a time from the release in place."""
 
+    @property
+    def family(self) -> Family:
+        """The MPI family (``MammaConfig.setup`` gives the MammaSyn families their own dataset)."""
+        family: Family | SynFamily = self.config.family
+        if family == "syn" or family == "syn-bedlam":
+            raise ValueError(f"{family} is a MammaSyn family: MammaConfig.setup builds MammaSynDataset for it")
+        return family
+
     layers = (paths.BASE_LAYER, paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER, paths.MASKS_LAYER, paths.MARKERS_LAYER)
     """masks and markers only where the release ships them (eval, eval Extra); register skips a layer no segment has."""
 
-    def __init__(self, config: MammaConfig) -> None:
-        super().__init__(config)
-        self.body: SmplxBody | None = None
+    @cached_property
+    def body(self) -> SmplxBody:
+        return SmplxBody(self.config.model_root)
 
     def download(self) -> None:
         """Fetch the SMPL-X models and verify the release in place; with ``fetch_into``, prove the MPI download on ``sequences``."""
         fetched: int = fetch_models(self.config.model_root)
-        sequences, problems = verify_release(self.config.root, self.config.family)
+        sequences, problems = verify_release(self.config.root, self.family)
         print(f"{self.config.name} download: {len(sequences)} sequences verified in place under {self.config.root}; {fetched} SMPL-X file(s) fetched")
         for problem in problems:
             print(f"  problem: {problem}")
@@ -121,17 +156,10 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
             raise ValueError(f"{self.config.name}: {len(problems)} problem(s) in the release, listed above")
 
     def discover(self) -> list[tuple[SequenceIdentity, MammaSequence]]:
-        found, skipped = discover_sequences(self.config.root, self.config.family)
+        found, skipped = discover_sequences(self.config.root, self.family)
         for directory, reason in skipped:
             print(f"  mamma: skipped {directory}: {reason}")
-        pairs: list[tuple[SequenceIdentity, MammaSequence]] = [(SequenceIdentity(self.config.name, sequence.parts), sequence) for sequence in found]
-        if self.config.sequences is not None:
-            known: set[str] = {identity.sequence_key for identity, _ in pairs}
-            missing: set[str] = set(self.config.sequences) - known
-            if missing:
-                raise ValueError(f"mamma-{self.config.family}: no sequence {sorted(missing)} under {self.config.root}")
-            pairs = [(identity, sequence) for identity, sequence in pairs if identity.sequence_key in self.config.sequences]
-        return pairs
+        return select_sequences(self.config, [(SequenceIdentity(self.config.name, sequence.parts), sequence) for sequence in found], "sequence")
 
     def convert(self, identity: SequenceIdentity, source: MammaSequence, *, force: bool) -> Path:
         """Base, then the body, projection, mask and marker layers, all from the release in place."""
@@ -159,20 +187,19 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
                 write_base(recording, identity, source, labels, cameras, clock, self.timer)
         posed: list[PosedPerson] = []
         if {paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER} & set(pending):
-            if self.body is None:
-                self.body = SmplxBody(self.config.model_root)
-            body: SmplxBody = self.body
             with self.timer.stage("smplx"):
-                posed = [body.pose(person, clock.frames) for person in labels.people]
+                posed = [self.body.pose(person, clock.rows) for person in labels.people]
 
         self.write_layers(
             identity,
             targets,
             [layer for layer in pending if layer != paths.BASE_LAYER],
             {
-                paths.BODY_POSE_LAYER: lambda recording: write_body_pose(recording, labels, posed, clock),
+                paths.BODY_POSE_LAYER: lambda recording: write_body_pose(recording, labels.people, labels.method, posed, clock),
                 paths.BODY_MESH_LAYER: lambda recording: write_body_mesh(recording, posed, clock),
-                paths.PROJECTIONS_LAYER: lambda recording: write_projections(recording, cameras, posed, clock),
+                paths.PROJECTIONS_LAYER: lambda recording: write_projections(
+                    recording, cameras, posed, clock, camera_model="vicon_radial_2 (IOI cameras), pinhole (iPhones)", calibration_source="per-camera release NPZ"
+                ),
                 paths.MASKS_LAYER: lambda recording: write_masks(recording, source, cameras, len(labels.people), clock),
                 paths.MARKERS_LAYER: lambda recording: write_markers(recording, source, clock),
             },
@@ -182,11 +209,11 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
 
     def default_blueprint(self) -> rrb.Blueprint:
         """The family's layout, registered on its catalog dataset; each base rrd embeds its own sequence's."""
-        return layout(FAMILY_RIGS[self.config.family], panes=FAMILY_PANES[self.config.family])
+        return layout(FAMILY_RIGS[self.family], panes=FAMILY_PANES[self.family])
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Card: the scene without video beside the first camera."""
-        return blueprints.exoego_table_blueprint(scene_view(FAMILY_RIGS[self.config.family], card=True), blueprints.camera_view("Camera 1", 1, 0))
+        return blueprints.exoego_table_blueprint(scene_view(FAMILY_RIGS[self.family], card=True), blueprints.camera_view("Camera 1", 1, 0))
 
     def table_fields(self) -> writing.TableFields:
         fields = tuple(writing.TableField(f"property:episode:{name}", name) for name in ("collection", "num_people", "body_source")) + (

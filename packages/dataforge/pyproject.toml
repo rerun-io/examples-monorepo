@@ -35,6 +35,9 @@ ignore_names = [
     # VRS binary header fields retained to match FileFormat.h positional unpacking.
     "previous_record_size",
     "uncompressed_size",
+    # MammaSyn: a cached shard index compares stamps whole; a context manager's __exit__ takes the exception triple.
+    "mtime_ns",
+    "exc",
     "main",
     "rr_config",
     "sequence",

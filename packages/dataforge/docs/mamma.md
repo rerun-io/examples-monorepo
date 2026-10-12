@@ -5,7 +5,7 @@
 - MAMMA (MPI for Intelligent Systems, https://mamma.is.tue.mpg.de): markerless multi-person capture with 16- and
   32-camera IOI rigs and four iPhones. Access needs an MPI account. The six MPI collections (~221 GB, every video HEVC Rext
   4:4:4 CRF 16 at 30 fps) were downloaded 2026-07-27..29 to `/mnt/nas/datasets/mamma` and verified complete. MammaSyn, the
-  synthetic WebDataset part, is a second PR.
+  synthetic WebDataset part, is in [mamma-syn.md](mamma-syn.md).
 - One command, one catalog dataset per family (`--family`): `dataforge-mamma-eval` (`mamma_eval_singles`, `_extra`, `_dance`:
   MoSh++ ground truth from Vicon markers), `dataforge-mamma-markerless-dance`, `dataforge-mamma-markerless-multiple-people` and
   `dataforge-mamma-markerless-iphones` (the MAMMA model's own predictions). Identity `mamma-<family>__<path>`: the sequence
