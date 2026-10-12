@@ -55,9 +55,10 @@ pixi run -e dataforge dataforge-convert mamma --family eval --root /mnt/nas/data
 | `videos_crf16/IOI_NN.mp4`, `videos/<iphone>.mp4` | 30 Hz, frame `i` | base | `/world/rig_NN/cam_00/pinhole/video`, AV1 4:2:0 (NVDEC decodes the 4:4:4 source, `scale_cuda` converts it) |
 | `gt/IOI_NN.npz`, `meta/<cam>.npz`: `cam_int`, `cam_ext`, `cam_img_w/h`, `cam_portrait` | static | base | `Pinhole` (K scaled to the stored size) and `world_T_cam`; translations over 200 units would be read as millimetres (none are) |
 | same, `vicon_radial_2` (IOI only) | static | base | `/world/rig_NN/cam_00` `vicon_radial_2`; used by projections |
-| same, eval `is_body_in_img` (frames × people), Dance `visibility` (frames × people × 10,475, float64) | per frame | — | not ingested: derived from the GT meshes; the MPI raw stays |
+| same, eval `is_body_in_img` (frames × people), Dance `visibility` (frames × people × 10,475, float64 0/1) | per frame | visibility | `/world/rig_NN/cam_00/pinhole/visibility/person_NN`: `in_image` (all 52 eval sequences), `visible` (list<bool>, the 18 Dance ones), MammaNet's 512 landmarks drawn on Dance |
 | same, iPhone `img_abs_path`, `img_rel_path`, empty `bbox` | — | — | not ingested: the upstream JPEG names |
 | `gt/global.npz` (eval): `pose_world`, `pose_trans_world`, `shape`, `gender`, `v_template`, `flat_hand_mean`, `subject_name`, `method_used` | 30 Hz | body_pose | `/world/gt/people/person_NN/body/smplx` (`pose`, `trans` per frame, float64 as shipped; `betas`, `v_template` static) |
+| same, `keywords` (eval: the sequence's words, e.g. `WestCoastSwing`, `Whip`, `Side`) | — | base | `property:episode:keywords` |
 | `meta/global.npz` (markerless): `fps`, `frames_len`, `seq_name`, `method_used` (iPhones: `frame_start/end`, `ioi_dir`, `c3d_path`) | — | base | the clock and the episode properties; upstream paths not ingested |
 | `pred/params_XX.npz`: `poses`, `trans`, `betas` (16), `gender`, `flat_hand_mean`, `mocap_frame_rate` | 30 Hz | body_pose | `/world/gt/people/person_NN/body/smplx`, one person per file in name order; `mocap_frame_rate` must equal `fps` |
 | `masks/IOI_NN_masks.tar` (eval): `mask_<frame>_<person>.png`, 0/255 at the native size | 30 Hz | masks | `/world/rig_NN/cam_00/pinhole/masks/person_NN`, a two-colour palette PNG at a quarter of the stored size |
@@ -95,7 +96,11 @@ label array and every mask tar holds exactly `frames_len` frames; base refuses a
   (checked by silhouette overlap on Dance). An eval sequence missing a mask tar fails its masks layer rather than skipping it.
 - **markers** (eval Extra): the 37 Vicon markers MoSh++ held out, and the MoSh++ baseline's prediction of them. They sit at a
   median 15.1 mm from the GT mesh (`test_the_held_out_vicon_markers_sit_on_the_extra_mesh`).
-- A layer a sequence has no source for (masks outside eval, markers outside Extra) is not written; register skips absent layers.
+- **visibility** (eval, exoego spec §15): per camera and person, `in_image` on every frame; on Dance also the per-vertex
+  `visible` and MammaNet's 512 landmarks (the release's `verts_512.pkl`), posed at every frame (not only at the mesh's third)
+  and drawn through the Vicon lens, yellow where seen and near black where hidden.
+- A layer a sequence has no source for (masks and visibility outside eval, markers outside Extra) is not written; register skips
+  absent layers.
 - Default blueprint: the scene (z up, orbital eye; projections and masks stay in the panes) above a strip of camera panes: all
   cameras of a rig of up to 16, eight evenly spaced ones of a 32-camera rig (every 4th). Each base rrd embeds its own sequence's
   layout; the catalog default is the family's (eval: panes for the first 16 cameras, which every eval rig has, with the scene's
@@ -140,5 +145,4 @@ files became 77 GB of rrds (2.9×). Each sequence's total is its in-process time
 ## Known gaps
 
 - The 3D view draws each camera's video through its pinhole without the Vicon lens.
-- Eval `is_body_in_img` and Dance per-vertex `visibility` are not ingested (both follow from the GT meshes and the calibration).
 - simplecv parity was not run.
