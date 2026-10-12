@@ -18,8 +18,8 @@ from PIL import Image
 from dataforge import paths, schema
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig
-from dataforge.datasets.mamma_body import LANDMARK_FILE, MODEL_FILES, landmark_vertices
-from dataforge.datasets.mamma_source import SmplxModel
+from dataforge.datasets.mamma_body import BODY_FILES, MODEL_FILES, landmark_vertices
+from dataforge.datasets.mamma_source import VERTICES, SmplxModel
 from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset
 
 pytestmark = pytest.mark.integration
@@ -34,7 +34,6 @@ ABSENT: tuple[int, int] = (1, 1)
 """(person, frame): nobody's view labels person 1 at frame 1."""
 
 
-VERTICES: int = 10475
 
 
 def floor_mask(person: int, frame: int) -> np.ndarray:
@@ -157,7 +156,7 @@ def write_sequence(root: Path, *, joint_error_m: float = 0.0) -> Path:
 
 @pytest.fixture
 def models() -> Path:
-    for model in [*MODEL_FILES.values(), LANDMARK_FILE]:
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     return MODEL_ROOT
 

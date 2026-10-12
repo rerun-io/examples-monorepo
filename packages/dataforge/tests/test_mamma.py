@@ -13,8 +13,8 @@ from PIL import Image
 
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig, MammaDataset
-from dataforge.datasets.mamma_body import LANDMARK_FILE, MODEL_FILES, landmark_vertices
-from dataforge.datasets.mamma_source import MammaCamera, MammaSequence, read_camera
+from dataforge.datasets.mamma_body import BODY_FILES, landmark_vertices
+from dataforge.datasets.mamma_source import VERTICES, MammaCamera, MammaSequence, read_camera
 from dataforge.meshes import BODY_MESH_STRIDE
 
 pytestmark = pytest.mark.integration
@@ -27,7 +27,6 @@ FPS: int = 25
 CAMERAS: dict[str, tuple[int, int]] = {"IOI_01": (320, 240), "IOI_02": (240, 320), "IOI_03": (2400, 1600)}
 """Native sizes: landscape, portrait, and one above the 3.2 MP cap (stored at half size)."""
 MARKERS: int = 4
-VERTICES: int = 10475
 OUT_OF_VIEW: tuple[str, int, int] = ("IOI_02", 1, 2)
 """(camera, person, frame): the one view a body is not in."""
 
@@ -129,7 +128,7 @@ def write_sequence(root: Path, ffmpeg: Path) -> Path:
 
 @pytest.fixture
 def staged(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[MammaDataset, Path]:
-    for model in [*MODEL_FILES.values(), LANDMARK_FILE]:
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     root: Path = tmp_path / "raw"
     directory: Path = write_sequence(root, nvenc_ffmpeg)
@@ -254,7 +253,7 @@ def write_iphone_scene(root: Path, ffmpeg: Path) -> Path:
 
 
 def test_a_markerless_scene_has_predicted_bodies_and_no_masks(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for model in MODEL_FILES.values():
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     write_iphone_scene(tmp_path / "raw", nvenc_ffmpeg)
     (tmp_path / "raw/mamma_markerless_iphones/outdoors/empty/meta").mkdir(parents=True)  # a scene without labels or videos is skipped

@@ -5,7 +5,7 @@ Every stream logs on ``video_time`` = frame / fps from the sequence's own rate, 
 
 import io
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -76,8 +76,10 @@ MASK_OPACITY: float = 0.5
 """Opacity the viewer draws a mask with; its background palette entry is transparent. Set explicitly: at the default (1.0)
 Rerun 0.38 can draw a translucent PNG's transparent pixels black."""
 MARKER_COLOURS: dict[str, tuple[int, int, int]] = {"vicon": (40, 220, 40), "mosh_baseline": (255, 150, 0)}
-LANDMARK_COLOURS: dict[bool, tuple[int, int, int]] = {True: (255, 220, 0), False: (25, 25, 25)}
-"""A landmark the camera sees (yellow) or does not (near black): neither is a ``PERSON_COLOURS`` mask colour."""
+SEEN_COLOUR: tuple[int, int, int] = (255, 220, 0)
+"""A landmark the camera sees (yellow); neither landmark colour is a ``PERSON_COLOURS`` mask colour."""
+HIDDEN_COLOUR: tuple[int, int, int] = (25, 25, 25)
+"""A landmark the camera does not see (near black)."""
 LANDMARKS_SOURCE: str = "MammaNet's 512 surface landmarks (farthest-point samples of SMPL-X, MAMMA paper Fig. 3)"
 
 
@@ -329,16 +331,13 @@ def write_projections(
     """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels."""
     recording.send_property(paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source))
     for rig, camera in enumerate(cameras, start=1):
-        scale: float = stored_size(camera.width, camera.height)[0] / camera.width
         for pose in posed:
-            pixels: Float64[ndarray, "n 2"] = camera.project(pose.coco133.reshape(-1, 3).astype(np.float64)) * scale
-            positions: Float32[ndarray, "t 133 2"] = pixels.reshape(-1, 133, 2).astype(np.float32)
             hands.log_keypoints2d(
                 recording,
                 schema.person_projection_path(rig, 0, pose.index),
                 times_ns=clock.times_ns,
                 frame_indices=clock.frames,
-                positions=positions,
+                positions=stored_pixels(camera, pose.coco133),
                 confidence=None,  # 1 where the lens put the point, 0 where it is NaN
             )
 
@@ -443,11 +442,11 @@ def write_markers(recording: rr.RecordingStream, sequence: MammaSequence, clock:
         )
 
 
-def landmark_pixels(camera: MammaCamera, landmarks: Float32[ndarray, "t l 3"]) -> Float32[ndarray, "t l 2"]:
-    """World landmarks through a camera's full lens model, in stored-image pixels; NaN where a landmark is NaN or behind it."""
+def stored_pixels(camera: MammaCamera, points: Float32[ndarray, "t n 3"]) -> Float32[ndarray, "t n 2"]:
+    """World points through a camera's full lens model, in stored-image pixels; NaN where a point is NaN or behind the camera."""
     scale: float = stored_size(camera.width, camera.height)[0] / camera.width
-    pixels: Float64[ndarray, "n 2"] = camera.project(landmarks.reshape(-1, 3).astype(np.float64)) * scale
-    return pixels.reshape(*landmarks.shape[:2], 2).astype(np.float32)
+    pixels: Float64[ndarray, "m 2"] = camera.project(points.reshape(-1, 3).astype(np.float64)) * scale
+    return pixels.reshape(*points.shape[:2], 2).astype(np.float32)
 
 
 def write_eval_visibility(
@@ -459,24 +458,20 @@ def write_eval_visibility(
     landmarks: Int64[ndarray, "l"],
     clock: Clock,
 ) -> None:
-    """Every camera's ``is_body_in_img`` for every person, and on Dance its per-vertex ``visibility`` with the landmarks drawn."""
-    found: list[CameraVisibility] = []
-    for rig, camera in enumerate(cameras, start=1):
-        sight: CameraSight = read_camera_sight(sequence.calibration(camera.name), labels.frames, len(labels.people))
-        for column, pose in enumerate(posed):
-            assert pose.landmarks is not None  # the converter poses the landmarks when this layer is pending
-            found.append(
-                CameraVisibility(
-                    rig,
-                    pose.index,
-                    np.ones(len(clock.frames), dtype=bool),
-                    None if sight.visibility is None else sight.visibility[clock.rows, column],
-                    sight.is_body_in_img[clock.rows, column],
-                    None,
-                    landmark_pixels(camera, pose.landmarks),
+    """Every camera's ``is_body_in_img`` for every person, and on Dance its per-vertex ``visibility`` with the landmarks drawn; one
+    camera's NPZ in memory at a time."""
+
+    def found() -> Iterator[CameraVisibility]:
+        for rig, camera in enumerate(cameras, start=1):
+            sight: CameraSight = read_camera_sight(sequence.calibration(camera.name), labels.frames, len(labels.people))
+            for column, pose in enumerate(posed):
+                visible: Bool[ndarray, "t 10475"] | None = None if sight.visibility is None else sight.visibility[clock.rows, column]
+                landmarks_uv: Float32[ndarray, "t 512 2"] | None = None if visible is None else stored_pixels(camera, pose.landmarks)
+                yield CameraVisibility(
+                    rig, pose.index, np.ones(len(clock.frames), dtype=bool), visible, sight.is_body_in_img[clock.rows, column], None, landmarks_uv
                 )
-            )
-    write_visibility(recording, found, landmarks, clock, source="each camera's gt/IOI_NN.npz: is_body_in_img; visibility (Dance)")
+
+    write_visibility(recording, found(), landmarks, clock, source="each camera's gt/IOI_NN.npz: is_body_in_img; visibility (Dance)")
 
 
 def vertex_rows(values: ndarray, kept: Bool[ndarray, "t"]) -> pa.ListArray:
@@ -504,16 +499,15 @@ class CameraVisibility:
     """The landmark vertices of the posed body through the camera, stored-image pixels; drawn where ``visible`` is known."""
 
 
-def write_visibility(recording: rr.RecordingStream, cameras: list[CameraVisibility], landmarks: Int64[ndarray, "l"], clock: Clock, *, source: str) -> None:
-    """Every camera's per-vertex visibility of every person, one row per frame (an empty one where the person is not labelled), and
-    the landmarks drawn green where seen, red where not."""
+def write_visibility(recording: rr.RecordingStream, cameras: Iterable[CameraVisibility], landmarks: Int64[ndarray, "l"], clock: Clock, *, source: str) -> None:
+    """Every camera's visibility of every person, one row per frame (an empty one where the person is not labelled), and where the
+    source ships per-vertex visibility, the landmarks drawn yellow where seen, near black where not."""
     recording.send_property(
         paths.VISIBILITY_LAYER,
         rr.AnyValues(source=source, landmarks=LANDMARKS_SOURCE, landmark_colours="yellow: the camera sees the vertex; near black: it does not"),
     )
     for camera in cameras:
         path: str = schema.person_visibility_path(camera.rig, 0, camera.person)
-        rr.log(path, rr.AnyValues(n_vertices=VERTICES, topology="smplx", landmark_vertex_ids=landmarks), static=True, recording=recording)
         components: dict[str, pa.Array] = {}
         if camera.visible is not None:
             components["visible"] = vertex_rows(camera.visible, camera.labelled)
@@ -525,9 +519,10 @@ def write_visibility(recording: rr.RecordingStream, cameras: list[CameraVisibili
         rr.send_columns(path, indexes=clock.indexes, columns=columns, recording=recording)
         if camera.visible is None or camera.landmarks_uv is None:
             continue
+        rr.log(path, rr.AnyValues(n_vertices=VERTICES, topology="smplx", landmark_vertex_ids=landmarks), static=True, recording=recording)
         drawn: Bool[ndarray, "t"] = camera.labelled
         seen: Bool[ndarray, "k l"] = camera.visible[drawn][:, landmarks]
-        colours: UInt8[ndarray, "n 3"] = np.where(seen.reshape(-1, 1), LANDMARK_COLOURS[True], LANDMARK_COLOURS[False]).astype(np.uint8)
+        colours: UInt8[ndarray, "n 3"] = np.where(seen.reshape(-1, 1), SEEN_COLOUR, HIDDEN_COLOUR).astype(np.uint8)
         rr.log(path, rr.Points2D.from_fields(radii=rr.Radius.ui_points(2.5), draw_order=30.0), static=True, recording=recording)
         rr.send_columns(
             path,

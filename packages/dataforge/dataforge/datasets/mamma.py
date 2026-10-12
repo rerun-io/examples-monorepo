@@ -13,12 +13,10 @@ from pathlib import Path
 from typing import ClassVar, TypeVar
 
 import rerun.blueprint as rrb
-from jaxtyping import Int64
-from numpy import ndarray
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
-from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models, landmark_vertices
+from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models
 from dataforge.datasets.mamma_download import fetch_sequence, verify_release
 from dataforge.datasets.mamma_layers import (
     Clock,
@@ -154,9 +152,6 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
     def body(self) -> SmplxBody:
         return SmplxBody(self.config.model_root)
 
-    @cached_property
-    def landmarks(self) -> Int64[ndarray, "512"]:
-        return landmark_vertices(self.config.model_root)
 
     def download(self) -> None:
         """Fetch the SMPL-X models and verify the release in place; with ``fetch_into``, prove the MPI download on ``sequences``."""
@@ -211,8 +206,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
         posed: list[PosedPerson] = []
         if {paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER, paths.VISIBILITY_LAYER} & set(pending):
             with self.timer.stage("smplx"):
-                landmarks: Int64[ndarray, "512"] | None = self.landmarks if paths.VISIBILITY_LAYER in pending else None
-                posed = [self.body.pose(person, clock.rows, landmarks=landmarks) for person in labels.people]
+                posed = [self.body.pose(person, clock.rows) for person in labels.people]
 
         self.write_layers(
             identity,
@@ -226,7 +220,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
                 ),
                 paths.MASKS_LAYER: lambda recording: write_masks(recording, source, cameras, len(labels.people), clock),
                 paths.MARKERS_LAYER: lambda recording: write_markers(recording, source, clock),
-                paths.VISIBILITY_LAYER: lambda recording: write_eval_visibility(recording, source, cameras, labels, posed, self.landmarks, clock),
+                paths.VISIBILITY_LAYER: lambda recording: write_eval_visibility(recording, source, cameras, labels, posed, self.body.landmarks, clock),
             },
         )
         self.timer.capture_s = len(clock.frames) / labels.fps

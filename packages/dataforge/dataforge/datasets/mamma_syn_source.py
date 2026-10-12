@@ -221,14 +221,14 @@ RUN_READS: int = 8
 2026-10-12): read one after another, a BEDLAM clip's ~30 label pickles took about 10 s."""
 
 
-def read_members(directory: Path, members: list[ShardMember]) -> dict[tuple[str, int], bytes]:
-    """``members`` read into memory, keyed by (shard, offset): members less than ``READ_GAP`` apart come in one read, so a BEDLAM
-    clip, whose samples lie in a few runs of its batch's shards, costs a few reads instead of three per sample; ``RUN_READS``
-    runs at once."""
+def read_members(directory: Path, members: list[ShardMember], gap: int = READ_GAP) -> dict[tuple[str, int], bytes]:
+    """``members`` read into memory, keyed by (shard, offset): members less than ``gap`` apart come in one read, so a BEDLAM clip,
+    whose samples lie in a few runs of its batch's shards, costs a few reads instead of three per sample; ``RUN_READS`` runs at
+    once. A gap of 0 reads no bytes but the members' (the label pickles alone, between PNGs that can be under ``READ_GAP``)."""
     runs: list[list[ShardMember]] = []
     for member in sorted(members, key=lambda member: (member.shard, member.offset)):
         last: ShardMember | None = runs[-1][-1] if runs else None
-        if last is not None and last.shard == member.shard and member.offset - (last.offset + last.size) <= READ_GAP:
+        if last is not None and last.shard == member.shard and member.offset - (last.offset + last.size) <= gap:
             runs[-1].append(member)
         else:
             runs.append([member])
@@ -618,7 +618,7 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
         cam_T_body.append(transforms)
         joints3d.append(joints)
         contacts.append(PersonContact(floor, None, None))
-        motions.append([str(part) for part in first.motion_info])
+        motions.append(first.motion_info)
     return BedlamLabels(frames=frames, K=K, people=people, cam_T_body=cam_T_body, joints3d=joints3d, contacts=contacts, motions=motions)
 
 

@@ -13,7 +13,7 @@ import pytest
 from dataforge.datasets import mamma_syn_source
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import PosedPerson
-from dataforge.datasets.mamma_source import MammaCamera, PersonFit
+from dataforge.datasets.mamma_source import VERTICES, MammaCamera, PersonFit
 from dataforge.datasets.mamma_syn import MammaSynDataset, check_joints
 from dataforge.datasets.mamma_syn_source import (
     BEDLAM_DATASET,
@@ -96,7 +96,6 @@ def test_staged_shards_are_identical_copies_the_cached_index_still_describes(tmp
 def test_members_read_ahead_in_runs_are_the_members_read_one_by_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A BEDLAM clip's samples lie in a few runs of its batch's shards, between other clips' samples; adjacent members come in one read.
     # These tiny members sit ~2 kB apart (long-name tar headers); another clip's sample between two is a gap of ~8 kB.
-    monkeypatch.setattr(mamma_syn_source, "READ_GAP", 4096)
     order: list[tuple[str, int]] = [("seq_000000", 0), ("seq_000000", 5), ("seq_000001", 0), ("seq_000000", 10)]
     write_shard(tmp_path / "000000.tar", [member for clip, frame in order for member in sample_members(f"{BEDLAM_PREFIX}/{clip}/{clip}_{frame:04d}")])
     write_shard(tmp_path / "000001.tar", sample_members(f"{BEDLAM_PREFIX}/seq_000000/seq_000000_0015"))
@@ -110,7 +109,7 @@ def test_members_read_ahead_in_runs_are_the_members_read_one_by_one(tmp_path: Pa
         return original(reader, member)
 
     monkeypatch.setattr(ShardReader, "read", counted)
-    read: dict[tuple[str, int], bytes] = read_members(tmp_path, members)
+    read: dict[tuple[str, int], bytes] = read_members(tmp_path, members, gap=4096)
     monkeypatch.setattr(ShardReader, "read", original)
     assert len(read) == len(members) == 12
     assert sorted(member.shard for member in reads) == ["000000.tar", "000000.tar", "000001.tar"]  # frames 0 and 5 in one read, 10, 15
@@ -138,9 +137,6 @@ def test_a_duplicate_member_names_its_shard(tmp_path: Path) -> None:
     second: Path = write_shard(tmp_path / "000001.tar", sample_members(f"{RENDER_PREFIX}/IOI_01/0000")[:1])
     with pytest.raises(ValueError, match=r"000001\.tar.*IOI_01/0000\.png.*twice"):
         index_shards([first, second])
-
-
-VERTICES: int = 10475
 
 
 def vertex_mask(vertices: list[int], dtype: type = bool) -> np.ndarray:
@@ -404,6 +400,7 @@ def test_the_joints_check_fails_a_present_row_with_non_finite_joints() -> None:
     posed = PosedPerson(
         index=3, coco133=np.zeros((3, 133, 3), dtype=np.float32), joints=joints, mesh_rows=np.arange(3), mesh_present=present,
         vertices=np.zeros((2, 10475, 3), dtype=np.float32), faces=np.zeros((20908, 3), dtype=np.uint32),
+        landmarks=np.zeros((3, 512, 3), dtype=np.float32),
     )
     shipped: np.ndarray = np.zeros((3, 127, 3))
     shipped[2] = np.nan

@@ -625,12 +625,14 @@ so a per-camera label lands on that image and on nothing else (§13).
 - `contact/person_MM`: `signed_distance` (list<float16>, metres) is each
   vertex's distance to person `MM`'s surface as the source shipped it, negative
   inside (interpenetration). `in_contact` is derived: `signed_distance <
-  contact_threshold_m`, so interpenetration counts as contact. The threshold is
+  contact_threshold_m`, so interpenetration counts as contact, computed on the
+  distance as shipped before it is stored at lower precision. The threshold is
   a static `AnyValues{contact_threshold_m}` on the entity. A source distance
   that does not name its partner is written only for two-person scenes, where
   the partner is the other person; a writer refuses it in a larger scene.
 - `visibility/person_NN`: each component is optional; a source writes the
-  ones it ships. `visible` (list<bool>) is true where the camera sees the
+  ones it ships, and `AnyValues{n_vertices, topology, landmark_vertex_ids}`
+  only beside a per-vertex `visible`. `visible` (list<bool>) is true where the camera sees the
   vertex. `in_image` (bool) says whether the body is in the camera's image at
   all. `visibility_rate` (float32) is the source's per-view score, verbatim
   under its own definition. `Points2D` draws a fixed vertex subset (static

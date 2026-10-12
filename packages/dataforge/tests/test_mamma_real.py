@@ -14,7 +14,7 @@ from PIL import Image
 
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig, MammaDataset
-from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson, SmplxBody
+from dataforge.datasets.mamma_body import BODY_FILES, PosedPerson, SmplxBody
 from dataforge.datasets.mamma_layers import MAX_PIXELS
 from dataforge.datasets.mamma_source import Family, MammaCamera, SequenceLabels, read_camera, read_eval_labels
 
@@ -35,7 +35,7 @@ SAMPLES: dict[str, tuple[Family, str]] = {
 
 
 def models() -> None:
-    for model in MODEL_FILES.values():
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
 
 

@@ -9,7 +9,7 @@ from conftest import raw_asset
 from scipy.spatial import KDTree
 
 from dataforge import paths
-from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson, SmplxBody
+from dataforge.datasets.mamma_body import BODY_FILES, MODEL_FILES, PosedPerson, SmplxBody
 from dataforge.datasets.mamma_source import PersonFit, SequenceLabels, read_eval_labels
 
 pytestmark = pytest.mark.golden
@@ -21,7 +21,7 @@ DANCE: str = "mamma_eval_dance/250225_WestCoastSwing_Basic_Whip_03675_03676_1"
 
 
 def body() -> SmplxBody:
-    for model in MODEL_FILES.values():
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     return SmplxBody(MODEL_ROOT)
 

@@ -11,7 +11,7 @@ from PIL import Image
 
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig
-from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson, SmplxBody
+from dataforge.datasets.mamma_body import BODY_FILES, PosedPerson, SmplxBody
 from dataforge.datasets.mamma_syn import in_camera
 from dataforge.datasets.mamma_syn_source import (
     BEDLAM_DATASET,
@@ -48,7 +48,7 @@ SAMPLES: dict[str, tuple[SynFamily, str]] = {
 
 
 def body() -> SmplxBody:
-    for model in MODEL_FILES.values():
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     return SmplxBody(MODEL_ROOT)
 

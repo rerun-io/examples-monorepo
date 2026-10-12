@@ -27,7 +27,7 @@ from dataforge import blueprints, hands, paths, schema, transports, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.mamma import MammaConfig, layout, scene_view, select_sequences
-from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models, landmark_vertices
+from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models
 from dataforge.datasets.mamma_layers import (
     MASK_DOWNSCALE,
     MASK_WORKERS,
@@ -36,10 +36,10 @@ from dataforge.datasets.mamma_layers import (
     CameraVisibility,
     Clock,
     decode_gray,
-    landmark_pixels,
     log_cameras,
     log_person_masks,
     palette_png,
+    stored_pixels,
     stored_size,
     vertex_rows,
     write_body_mesh,
@@ -57,9 +57,11 @@ from dataforge.datasets.mamma_syn_source import (
     SYN_DIR,
     BedlamClip,
     BedlamLabels,
+    BedlamPersonLabel,
     BedlamView,
     PersonContact,
     RenderLabels,
+    RenderPersonLabel,
     RenderView,
     ShardMember,
     ShardReader,
@@ -115,8 +117,10 @@ PNG_HEADER_BYTES: int = 24
 """The bytes of a PNG that hold its width and height."""
 CONTACT_THRESHOLD_M: float = 0.01
 """A vertex nearer the other person's surface than this, or inside it, is in contact with them."""
-CONTACT_COLOURS: dict[str, tuple[int, int, int]] = {"floor": (255, 140, 0), "person": (230, 50, 200)}
+FLOOR_CONTACT_COLOUR: tuple[int, int, int] = (255, 140, 0)
+PARTNER_CONTACT_COLOUR: tuple[int, int, int] = (230, 50, 200)
 CONTACT_RADIUS_M: float = 0.006
+VISIBILITY_SOURCE: str = "each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)"
 SYN_RIGS: int = 8
 """Most cameras a MammaSyn render sequence has; the family layout's scene rules cover them all."""
 VIDEO_SOURCE: str = f"AV1 NVENC encode (CQ {AV1_CQ}, 4:2:0) of the shards' RGBA PNG renders, alpha dropped"
@@ -210,8 +214,6 @@ def read_cameras(  # noqa: UP047 — beartype requires legacy generics
 ) -> list[CameraRead[ViewT]]:
     """Every camera's pass, in parallel; with ``work``, each camera's renders are encoded to ``work/<camera>.mp4`` on the way,
     turned ``turns`` quarters clockwise. Without ``pixels`` (and so without ``work``), the labels alone (``stream_camera``)."""
-    if work is not None and not pixels:
-        raise ValueError("encoding a camera needs its pixels")
 
     def run(camera: str) -> CameraRead[ViewT]:
         read: CameraRead[ViewT] = CameraRead(camera, turns=turns)
@@ -274,15 +276,13 @@ def pose_people(
     joints3d: list[Float64[ndarray, "t 127 3"]],
     clock: Clock,
     cam_T_body: list[Float64[ndarray, "t 4 4"]] | None = None,
-    *,
-    landmarks: Int64[ndarray, "l"],
 ) -> tuple[list[PersonFit], list[PosedPerson], float]:
-    """Each person with the model that gives back their shipped joints, posed over the clock's rows with their ``landmarks``
-    (moved into the camera frame by ``cam_T_body``, as BEDLAM's are), and the largest joint gap (``check_joints``)."""
+    """Each person with the model that gives back their shipped joints, posed over the clock's rows (moved into the camera frame
+    by ``cam_T_body``, as BEDLAM's are), and the largest joint gap (``check_joints``)."""
     rows: Int64[ndarray, "t"] = clock.rows
     transforms: list[Float64[ndarray, "t 4 4"]] | list[None] = [None] * len(people) if cam_T_body is None else cam_T_body
     fitted: list[PersonFit] = [fit_model(body, person, joints, moved) for person, joints, moved in zip(people, joints3d, transforms, strict=True)]
-    posed: list[PosedPerson] = [body.pose(person, rows, mesh_stride=MESH_STRIDE, landmarks=landmarks) for person in fitted]
+    posed: list[PosedPerson] = [body.pose(person, rows, mesh_stride=MESH_STRIDE) for person in fitted]
     posed = [pose if moved is None else in_camera(pose, moved) for pose, moved in zip(posed, transforms, strict=True)]
     return fitted, posed, check_joints(fitted, posed, joints3d, clock.frames)
 
@@ -385,35 +385,27 @@ def log_contact(
     recording: rr.RecordingStream,
     path: str,
     pose: PosedPerson,
+    mesh_of: Int64[ndarray, "t"],
     kept: Bool[ndarray, "t"],
     in_contact: Bool[ndarray, "t 10475"],
     clock: Clock,
     *,
     colour: tuple[int, int, int],
-    shipped: dict[str, pa.Array],
-    statics: rr.AnyValues | None = None,
+    statics: rr.AnyValues,
+    shipped: dict[str, pa.Array] | None = None,
 ) -> None:
     """One contact entity: the shipped columns and ``in_contact`` at the ``kept`` rows (empty elsewhere), and the contacting
-    vertices of the posed body drawn as points.
-
-    Raises:
-        ValueError: A kept row has no posed body (the person is absent there).
-    """
-    posed_rows: Bool[ndarray, "t"] = np.zeros(len(clock.frames), dtype=bool)
-    posed_rows[pose.mesh_rows[pose.mesh_present]] = True
-    if (kept & ~posed_rows).any():
-        raise ValueError(f"{path}: contact at frame {clock.frames[np.flatnonzero(kept & ~posed_rows)[0]]}, where the person has no posed body")
-    rr.log(path, rr.AnyValues(n_vertices=VERTICES, topology="smplx"), static=True, recording=recording)
-    if statics is not None:
-        rr.log(path, statics, static=True, recording=recording)
-    columns = rr.DynamicArchetype.columns(archetype="dataforge.VertexContact", components={**shipped, "in_contact": vertex_rows(in_contact, kept)})
+    vertices of the posed body drawn as points. ``mesh_of`` gives each row's posed mesh in ``pose.vertices``; every kept row has
+    one."""
+    rr.log(path, statics, static=True, recording=recording)
+    columns = rr.DynamicArchetype.columns(archetype="dataforge.VertexContact", components={**(shipped or {}), "in_contact": vertex_rows(in_contact, kept)})
     rr.send_columns(path, indexes=clock.indexes, columns=columns, recording=recording)
-    vertices: Float32[ndarray, "k 10475 3"] = pose.vertices[kept[posed_rows]]
+    rows, vertices = np.nonzero(in_contact & kept[:, None])  # row-major, so the points come row by row
     rr.log(path, rr.Points3D.from_fields(colors=colour, radii=CONTACT_RADIUS_M), static=True, recording=recording)
     rr.send_columns(
         path,
         indexes=clock.indexes,
-        columns=rr.Points3D.columns(positions=vertices[in_contact[kept]]).partition(np.where(kept, in_contact.sum(axis=1), 0)),
+        columns=rr.Points3D.columns(positions=pose.vertices[mesh_of[rows], vertices]).partition(np.where(kept, in_contact.sum(axis=1), 0)),
         recording=recording,
     )
 
@@ -430,10 +422,19 @@ def write_contacts(recording: rr.RecordingStream, posed: list[PosedPerson], cont
         ),
     )
     for pose, contact in zip(posed, contacts, strict=True):
-        present: Bool[ndarray, "t"] = np.zeros(len(clock.frames), dtype=bool)
-        present[pose.mesh_rows[pose.mesh_present]] = True
+        mesh_of: Int64[ndarray, "t"] = np.full(len(clock.frames), -1, dtype=np.int64)
+        mesh_of[pose.mesh_rows[pose.mesh_present]] = np.arange(len(pose.vertices))
+        present: Bool[ndarray, "t"] = mesh_of >= 0  # every row the person is at (MESH_STRIDE keeps a mesh on each)
         log_contact(
-            recording, schema.person_floor_contact_path(pose.index), pose, present, contact.floor, clock, colour=CONTACT_COLOURS["floor"], shipped={}
+            recording,
+            schema.person_floor_contact_path(pose.index),
+            pose,
+            mesh_of,
+            present,
+            contact.floor,
+            clock,
+            colour=FLOOR_CONTACT_COLOUR,
+            statics=rr.AnyValues(n_vertices=VERTICES, topology="smplx"),
         )
         if contact.partner is None or contact.partner_distance_m is None:
             continue
@@ -442,40 +443,43 @@ def write_contacts(recording: rr.RecordingStream, posed: list[PosedPerson], cont
             recording,
             schema.person_contact_path(pose.index, contact.partner),
             pose,
+            mesh_of,
             shipped,
-            np.nan_to_num(contact.partner_distance_m, nan=np.inf) < CONTACT_THRESHOLD_M,
+            np.nan_to_num(contact.partner_distance_m, nan=np.inf) < CONTACT_THRESHOLD_M,  # on the shipped float32 distance
             clock,
-            colour=CONTACT_COLOURS["person"],
+            colour=PARTNER_CONTACT_COLOUR,
+            statics=rr.AnyValues(
+                n_vertices=VERTICES, topology="smplx", contact_threshold_m=CONTACT_THRESHOLD_M, unit="metres, negative inside the other person"
+            ),
             shipped={"signed_distance": vertex_rows(contact.partner_distance_m.astype(np.float16), shipped)},
-            statics=rr.AnyValues(contact_threshold_m=CONTACT_THRESHOLD_M, unit="metres, negative inside the other person"),
         )
 
 
-def camera_visibility(rig: int, person: int, views: list[tuple[int, Bool[ndarray, "10475"], float]], landmarks_uv: Float32[ndarray, "t l 2"]) -> CameraVisibility:
-    """One camera's visibility of one person from its labelled ``views`` (row, visible vertices, rate), with the landmarks' pixels."""
-    labelled: Bool[ndarray, "t"] = np.zeros(len(landmarks_uv), dtype=bool)
-    visible: Bool[ndarray, "t 10475"] = np.zeros((len(landmarks_uv), VERTICES), dtype=bool)
-    rate: Float32[ndarray, "t"] = np.full(len(landmarks_uv), np.nan, dtype=np.float32)
-    for row, seen, score in views:
-        labelled[row], visible[row], rate[row] = True, seen, score
+def camera_visibility(
+    rig: int, person: int, views: list[RenderView] | list[BedlamView], frames: Int64[ndarray, "t"], landmarks_uv: Float32[ndarray, "t l 2"]
+) -> CameraVisibility:
+    """One camera's visibility of one person over the sequence's ``frames``, from the camera's views that label them, with the
+    landmarks' pixels."""
+    row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(frames)}
+    labelled: Bool[ndarray, "t"] = np.zeros(len(frames), dtype=bool)
+    visible: Bool[ndarray, "t 10475"] = np.zeros((len(frames), VERTICES), dtype=bool)
+    rate: Float32[ndarray, "t"] = np.full(len(frames), np.nan, dtype=np.float32)
+    for view in views:
+        label: RenderPersonLabel | BedlamPersonLabel | None = view.people.get(person)
+        if label is not None:
+            row: int = row_of[view.frame]
+            labelled[row], visible[row], rate[row] = True, label.vertex_visibility, label.person_visitiblity_rate
     return CameraVisibility(rig, person, labelled, visible, None, rate, landmarks_uv)
 
 
 def render_visibility(reads: list[CameraRead[RenderView]], labels: RenderLabels, posed: list[PosedPerson]) -> list[CameraVisibility]:
     """What each camera sees of each person, from the camera's own views; the landmarks through its pinhole, at the stored size."""
-    row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(labels.frames)}
     by_camera: dict[str, CameraRead[RenderView]] = {read.camera: read for read in reads}
-    found: list[CameraVisibility] = []
-    for rig, camera in enumerate(labels.cameras, start=1):
-        for pose in posed:
-            assert pose.landmarks is not None  # pose_people poses the landmarks
-            views: list[tuple[int, Bool[ndarray, "10475"], float]] = [
-                (row_of[view.frame], label.vertex_visibility, label.person_visitiblity_rate)
-                for view in by_camera[camera.name].views
-                if (label := view.people.get(pose.index)) is not None
-            ]
-            found.append(camera_visibility(rig, pose.index, views, landmark_pixels(camera, pose.landmarks)))
-    return found
+    return [
+        camera_visibility(rig, pose.index, by_camera[camera.name].views, labels.frames, stored_pixels(camera, pose.landmarks))
+        for rig, camera in enumerate(labels.cameras, start=1)
+        for pose in posed
+    ]
 
 
 def syn_download(config: MammaConfig, family: SynFamily, selected: Callable[[], list[tuple[Path, list[str]]]]) -> None:
@@ -507,10 +511,6 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
     @cached_property
     def body(self) -> SmplxBody:
         return SmplxBody(self.config.model_root)
-
-    @cached_property
-    def landmarks(self) -> Int64[ndarray, "512"]:
-        return landmark_vertices(self.config.model_root)
 
     @cached_property
     def stage_root(self) -> Path:
@@ -584,7 +584,7 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
             labels: RenderLabels = assemble_render([view for read in reads for view in read.views], {read.camera: read.size for read in reads if read.size})
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, RENDER_FPS))
             with self.timer.stage("smplx"):
-                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, landmarks=self.landmarks)
+                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock)
                 labels = replace(labels, people=people)
             if paths.BASE_LAYER in pending:
                 with (
@@ -614,9 +614,9 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                 paths.VISIBILITY_LAYER: lambda recording: write_visibility(
                     recording,
                     render_visibility(reads, labels, posed),
-                    self.landmarks,
+                    self.body.landmarks,
                     clock,
-                    source="each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)",
+                    source=VISIBILITY_SOURCE,
                 ),
             },
         )
@@ -656,7 +656,7 @@ def in_camera(posed: PosedPerson, cam_T_body: Float64[ndarray, "t 4 4"]) -> Pose
         mesh_present=posed.mesh_present,
         vertices=moved(posed.vertices, posed.mesh_rows[posed.mesh_present]),
         faces=posed.faces,
-        landmarks=None if posed.landmarks is None else moved(posed.landmarks, rows),
+        landmarks=moved(posed.landmarks, rows),
     )
 
 
@@ -745,34 +745,30 @@ def write_bedlam_pose(recording: rr.RecordingStream, labels: BedlamLabels, posed
         )
 
 
+def frame_pixels(K: Float64[ndarray, "t 3 3"], points: Float32[ndarray, "t n 3"]) -> Float32[ndarray, "t n 2"]:
+    """Camera-frame points through each row's K, in pixels; NaN behind the camera."""
+    pixels: Float64[ndarray, "t n 3"] = np.einsum("tij,tnj->tni", K, points.astype(np.float64))
+    depth: Float64[ndarray, "t n 1"] = pixels[..., 2:]
+    return (pixels[..., :2] / np.where(depth > 0, depth, np.nan)).astype(np.float32)
+
+
 def write_bedlam_projections(recording: rr.RecordingStream, labels: BedlamLabels, posed: list[PosedPerson], clock: Clock) -> None:
     """Every person's camera-frame keypoints through the camera's K at each frame."""
     recording.send_property(paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model="pinhole", calibration_source="each frame's label cam_int"))
     for pose in posed:
-        pixels: Float64[ndarray, "t 133 3"] = np.einsum("tij,tnj->tni", labels.K, pose.coco133.astype(np.float64))
-        depth: Float64[ndarray, "t 133 1"] = pixels[..., 2:]
         hands.log_keypoints2d(
             recording,
             schema.person_projection_path(1, 0, pose.index),
             times_ns=clock.times_ns,
             frame_indices=clock.frames,
-            positions=(pixels[..., :2] / np.where(depth > 0, depth, np.nan)).astype(np.float32),
+            positions=frame_pixels(labels.K, pose.coco133),
             confidence=None,
         )
 
 
 def bedlam_visibility(read: CameraRead[BedlamView], labels: BedlamLabels, posed: list[PosedPerson]) -> list[CameraVisibility]:
     """What the clip's camera sees of each person; the landmarks of the camera-frame body through each frame's K."""
-    row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(labels.frames)}
-    found: list[CameraVisibility] = []
-    for pose in posed:
-        assert pose.landmarks is not None  # pose_people poses the landmarks
-        pixels: Float64[ndarray, "t l 3"] = np.einsum("tij,tlj->tli", labels.K, pose.landmarks.astype(np.float64))
-        views: list[tuple[int, Bool[ndarray, "10475"], float]] = [
-            (row_of[view.frame], label.vertex_visibility, label.person_visitiblity_rate) for view in read.views if (label := view.people.get(pose.index)) is not None
-        ]
-        found.append(camera_visibility(1, pose.index, views, (pixels[..., :2] / pixels[..., 2:]).astype(np.float32)))
-    return found
+    return [camera_visibility(1, pose.index, read.views, labels.frames, frame_pixels(labels.K, pose.landmarks)) for pose in posed]
 
 
 class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
@@ -788,10 +784,6 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
     @cached_property
     def body(self) -> SmplxBody:
         return SmplxBody(self.config.model_root)
-
-    @cached_property
-    def landmarks(self) -> Int64[ndarray, "512"]:
-        return landmark_vertices(self.config.model_root)
 
     def download(self) -> None:
         syn_download(
@@ -817,10 +809,11 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         pending: list[str] = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]
         if pending:
             samples: list[SynSample] = self.clip_samples(source)
-            members: list[ShardMember] = (
-                [member for sample in samples for member in (sample.image, sample.mask, sample.labels)] if PIXEL_LAYERS.intersection(pending) else label_members(samples)
-            )
-            self.prefetched[identity.recording_id] = read_members(source.directory, members)
+            if PIXEL_LAYERS.intersection(pending):
+                members: dict[tuple[str, int], bytes] = read_members(source.directory, [member for sample in samples for member in (sample.image, sample.mask, sample.labels)])
+            else:
+                members = read_members(source.directory, label_members(samples), gap=0)
+            self.prefetched[identity.recording_id] = members
 
     def convert(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> Path:
         """Read the clip once (encoding it when base is pending), pose every person and move them into the camera frame, write."""
@@ -849,7 +842,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
                 raise ValueError(f"{source.directory}/{source.clip}: principal point ({cx}, {cy}) is not the centre of the {width}x{height} image")
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, BEDLAM_NUMBERING_FPS))
             with self.timer.stage("smplx"):
-                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, labels.cam_T_body, landmarks=self.landmarks)
+                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, labels.cam_T_body)
                 labels = replace(labels, people=people)
             if paths.BASE_LAYER in pending:
                 with (
@@ -870,9 +863,9 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
                 paths.VISIBILITY_LAYER: lambda recording: write_visibility(
                     recording,
                     bedlam_visibility(read, labels, posed),
-                    self.landmarks,
+                    self.body.landmarks,
                     clock,
-                    source="each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)",
+                    source=VISIBILITY_SOURCE,
                 ),
             },
         )
