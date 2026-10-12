@@ -263,13 +263,15 @@ class ShardReader:
         self.stack.close()
 
     def read(self, member: ShardMember) -> bytes:
+        """The member's bytes; a member read ahead must be the whole member (a labels-only read caches only a PNG's header)."""
         if self.members is not None:
-            return self.members[(member.shard, member.offset)]
-        stream: BinaryIO | None = self.streams.get(member.shard)
-        if stream is None:
-            stream = self.streams[member.shard] = self.stack.enter_context((self.directory / member.shard).open("rb"))
-        stream.seek(member.offset)
-        payload: bytes = stream.read(member.size)
+            payload: bytes = self.members[(member.shard, member.offset)]
+        else:
+            stream: BinaryIO | None = self.streams.get(member.shard)
+            if stream is None:
+                stream = self.streams[member.shard] = self.stack.enter_context((self.directory / member.shard).open("rb"))
+            stream.seek(member.offset)
+            payload = stream.read(member.size)
         if len(payload) != member.size:
             raise ValueError(f"{self.directory / member.shard}: {len(payload)} of {member.size} bytes at {member.offset}")
         return payload
@@ -335,8 +337,14 @@ def vertex_flags(value: object) -> Bool[ndarray, "n"]:
 
 
 def partner_distance(value: object) -> Float32[ndarray, "n"] | None:
-    """``sdf_vertices``: one distance per vertex, or None for the empty list the release ships where it has none."""
+    """``sdf_vertices``: one distance per vertex, or None for the empty list the release ships where it has none.
+
+    Raises:
+        ValueError: A shipped distance is not finite (only the empty list means none was shipped).
+    """
     distances: ndarray = np.asarray(value, dtype=np.float32).reshape(-1)
+    if not np.isfinite(distances).all():
+        raise ValueError(f"sdf_vertices holds {int((~np.isfinite(distances)).sum())} non-finite distances")
     return distances if len(distances) else None
 
 

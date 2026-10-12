@@ -148,12 +148,12 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
         paths.MARKERS_LAYER,
         paths.VISIBILITY_LAYER,
     )
-    """masks, markers and visibility only where the release ships them (eval, eval Extra, eval); register skips a layer no segment has."""
+    """masks and visibility only where the release ships them (eval), markers only in eval Extra; register skips a layer no
+    segment has."""
 
     @cached_property
     def body(self) -> SmplxBody:
         return SmplxBody(self.config.model_root)
-
 
     def download(self) -> None:
         """Fetch the SMPL-X models and verify the release in place; with ``fetch_into``, prove the MPI download on ``sequences``."""
@@ -182,7 +182,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
         return select_sequences(self.config, [(SequenceIdentity(self.config.name, sequence.parts), sequence) for sequence in found], "sequence")
 
     def convert(self, identity: SequenceIdentity, source: MammaSequence, *, force: bool) -> Path:
-        """Base, then the body, projection, mask and marker layers, all from the release in place."""
+        """Base, then the body, projection, mask, marker and visibility layers, all from the release in place."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         # By collection, not by file presence: a missing mask tar or marker file fails its layer instead of skipping it.
         ships: dict[str, bool] = {paths.MASKS_LAYER: source.is_eval, paths.MARKERS_LAYER: source.has_markers, paths.VISIBILITY_LAYER: source.is_eval}
@@ -222,7 +222,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
                 ),
                 paths.MASKS_LAYER: lambda recording: write_masks(recording, source, cameras, len(labels.people), clock),
                 paths.MARKERS_LAYER: lambda recording: write_markers(recording, source, clock),
-                paths.VISIBILITY_LAYER: lambda recording: write_eval_visibility(recording, source, cameras, labels, posed, self.body.landmarks, clock),
+                paths.VISIBILITY_LAYER: lambda recording: write_eval_visibility(recording, source, cameras, labels, posed, self.body.landmark_ids, clock),
             },
         )
         self.timer.capture_s = len(clock.frames) / labels.fps

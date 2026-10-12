@@ -9,10 +9,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import rerun as rr
 
 from dataforge.datasets import mamma_syn_source
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import PosedPerson
+from dataforge.datasets.mamma_layers import Clock, write_contacts
 from dataforge.datasets.mamma_source import VERTICES, MammaCamera, PersonFit
 from dataforge.datasets.mamma_syn import MammaSynDataset, check_joints
 from dataforge.datasets.mamma_syn_source import (
@@ -20,6 +22,7 @@ from dataforge.datasets.mamma_syn_source import (
     SYN_DIR,
     BedlamLabels,
     BedlamView,
+    PersonContact,
     RenderLabels,
     RenderPersonLabel,
     RenderView,
@@ -274,6 +277,21 @@ def test_a_distance_to_the_other_person_in_a_scene_of_three_raises() -> None:
         assemble_render(views, {"IOI_01": (2056, 1504)})
 
 
+def test_a_distance_with_a_non_finite_value_names_its_sample() -> None:
+    # Only the empty list means "no distance shipped"; a NaN inside a shipped one is a broken label, not a missing frame.
+    distance: np.ndarray = np.zeros(VERTICES)
+    distance[7] = np.nan
+    with pytest.raises(ValueError, match=r"IOI_01/0004.*non-finite"):
+        read_render_view(pickled({0: render_person(distance=distance)}), "IOI_01/0004")
+
+
+def test_a_cached_member_shorter_than_asked_for_is_refused(tmp_path: Path) -> None:
+    # A labels-only prefetch caches a PNG's 24-byte header under the PNG's own (shard, offset): never serve it as the PNG.
+    header: bytes = b"\x89PNG\r\n\x1a\n" + bytes(16)
+    with ShardReader(tmp_path, {("000000.tar", 512): header}) as cached, pytest.raises(ValueError, match=r"24 of 1000 bytes"):
+        cached.read(ShardMember("000000.tar", 512, 1000))
+
+
 def test_a_vertex_visibility_other_than_0_or_1_names_its_sample() -> None:
     person: dict[str, object] = render_person()
     person["vertex_visibility"] = np.full((VERTICES, 1), 0.5)
@@ -417,6 +435,24 @@ def test_the_joints_check_fails_a_present_row_with_non_finite_joints() -> None:
     shipped[1, 5] = np.nan
     with pytest.raises(ValueError, match=r"person_03: frame 10"):
         check_joints([person], [posed], [shipped], frames)
+
+
+def test_contacts_fail_a_frame_where_the_person_is_present_without_a_posed_mesh() -> None:
+    # Presence comes from the fit; the drawing needs a mesh at every present row (MESH_STRIDE 1), so a gap is an error, not an empty row.
+    present: np.ndarray = np.array([True, True, True])
+    person = PersonFit(
+        subject="person_00", index=0, gender="neutral", model="locked_head_neutral", flat_hand_mean=True,
+        pose=np.zeros((3, 165)), trans=np.zeros((3, 3)), betas=np.zeros(16), v_template=None, present=present,
+    )
+    posed = PosedPerson(
+        index=0, coco133=np.zeros((3, 133, 3), dtype=np.float32), joints=np.zeros((3, 144, 3), dtype=np.float32),
+        mesh_rows=np.array([0, 2]), mesh_present=np.array([True, True]), vertices=np.zeros((2, VERTICES, 3), dtype=np.float32),
+        faces=np.zeros((20908, 3), dtype=np.uint32), landmarks=np.zeros((3, 512, 3), dtype=np.float32),
+    )
+    contact = PersonContact(np.zeros((3, VERTICES), dtype=bool), None, None)
+    clock = Clock(np.array([0, 1, 2]), np.array([0, 166_666_667, 333_333_333]))
+    with pytest.raises(ValueError, match=r"person_00.*frame 1.*no posed mesh"):
+        write_contacts(rr.RecordingStream("contacts-test"), [person], [posed], [contact], clock)
 
 
 def test_a_render_sequence_the_release_ships_empty_is_skipped_and_named(tmp_path: Path) -> None:

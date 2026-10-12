@@ -128,7 +128,7 @@ class PosedPerson:
     faces: UInt32[ndarray, "20908 3"]
     """The mesh triangles (one array every person shares)."""
     landmarks: Float32[ndarray, "t 512 3"]
-    """The posed landmark vertices (``SmplxBody.landmarks``) at every row, world metres; NaN where the person is absent."""
+    """The posed landmark vertices (``SmplxBody.landmark_ids``) at every row, world metres; NaN where the person is absent."""
 
 
 class SmplxBody:
@@ -139,7 +139,7 @@ class SmplxBody:
         if missing:
             raise FileNotFoundError(f"MAMMA needs the SMPL-X files {missing}; run dataforge-download mamma or set --model-root")
         self.model_root: Path = model_root
-        self.landmarks: Int64[ndarray, "512"] = landmark_vertices(model_root)
+        self.landmark_ids: Int64[ndarray, "512"] = landmark_vertices(model_root)
         """MammaNet's landmarks as vertex ids; every pose keeps them at every row."""
         with np.load(MODEL_FILES["locked_head_neutral"].local(model_root), allow_pickle=False) as model:
             self.faces: UInt32[ndarray, "20908 3"] = model["f"].astype(np.uint32)  # every SMPL-X file shares this topology
@@ -178,7 +178,7 @@ class SmplxBody:
         coco133: Float32[ndarray, "t 133 3"] = np.full((len(rows), 133, 3), np.nan, dtype=np.float32)
         joints: Float32[ndarray, "t 144 3"] = np.full((len(rows), 144, 3), np.nan, dtype=np.float32)
         vertices: list[Float32[ndarray, "c 10475 3"]] = []
-        landmarks: Float32[ndarray, "t 512 3"] = np.full((len(rows), len(self.landmarks), 3), np.nan, dtype=np.float32)
+        landmarks: Float32[ndarray, "t 512 3"] = np.full((len(rows), len(self.landmark_ids), 3), np.nan, dtype=np.float32)
         betas: torch.Tensor = torch.from_numpy(person.betas.astype(np.float32))[None]
         for start in range(0, len(posed), FORWARD_BATCH):
             batch: Int64[ndarray, "b"] = posed[start : start + FORWARD_BATCH]
@@ -198,8 +198,9 @@ class SmplxBody:
                 )
             joints[batch] = output.joints.numpy()
             coco133[batch] = smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3]
-            vertices.append(output.vertices.numpy()[np.isin(batch, mesh_rows)])
-            landmarks[batch] = output.vertices.numpy()[:, self.landmarks]
+            posed_vertices: Float32[ndarray, "b 10475 3"] = output.vertices.numpy()
+            vertices.append(posed_vertices[np.isin(batch, mesh_rows)])
+            landmarks[batch] = posed_vertices[:, self.landmark_ids]
         return PosedPerson(
             index=person.index,
             coco133=coco133,
