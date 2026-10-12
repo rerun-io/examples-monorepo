@@ -76,8 +76,8 @@ MASK_OPACITY: float = 0.5
 """Opacity the viewer draws a mask with; its background palette entry is transparent. Set explicitly: at the default (1.0)
 Rerun 0.38 can draw a translucent PNG's transparent pixels black."""
 MARKER_COLOURS: dict[str, tuple[int, int, int]] = {"vicon": (40, 220, 40), "mosh_baseline": (255, 150, 0)}
-LANDMARK_COLOURS: dict[bool, tuple[int, int, int]] = {True: (60, 200, 90), False: (220, 50, 50)}
-"""A landmark the camera sees (green) or does not (red)."""
+LANDMARK_COLOURS: dict[bool, tuple[int, int, int]] = {True: (255, 220, 0), False: (25, 25, 25)}
+"""A landmark the camera sees (yellow) or does not (near black): neither is a ``PERSON_COLOURS`` mask colour."""
 LANDMARKS_SOURCE: str = "MammaNet's 512 surface landmarks (farthest-point samples of SMPL-X, MAMMA paper Fig. 3)"
 
 
@@ -509,7 +509,7 @@ def write_visibility(recording: rr.RecordingStream, cameras: list[CameraVisibili
     the landmarks drawn green where seen, red where not."""
     recording.send_property(
         paths.VISIBILITY_LAYER,
-        rr.AnyValues(source=source, landmarks=LANDMARKS_SOURCE, landmark_colours="green: the camera sees the vertex; red: it does not"),
+        rr.AnyValues(source=source, landmarks=LANDMARKS_SOURCE, landmark_colours="yellow: the camera sees the vertex; near black: it does not"),
     )
     for camera in cameras:
         path: str = schema.person_visibility_path(camera.rig, 0, camera.person)

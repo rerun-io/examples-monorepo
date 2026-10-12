@@ -98,7 +98,7 @@ def test_a_preview_of_each_group_converts(sample: str, tmp_path: Path, nvenc_ffm
     ((identity, source),) = dataset.discover()
     dataset.convert(identity, source, force=False)
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
-    assert set(targets) == {"base", "body_pose", "body_mesh", "projections", "masks"}
+    assert set(targets) == {"base", "body_pose", "body_mesh", "projections", "masks", "contacts", "visibility"}
     base = read_back(targets["base"])
     capture = recording_properties(base, "capture")
     episode = recording_properties(base, "episode")

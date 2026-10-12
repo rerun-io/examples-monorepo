@@ -51,9 +51,13 @@ def test_a_preview_of_each_family_converts(sample: str, tmp_path: Path, nvenc_ff
     dataset.convert(identity, sequence, force=False)
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
     expected: set[str] = {"base", "body_pose", "body_mesh", "projections"}
-    expected |= {"masks"} if sample in ("singles", "extra", "dance") else set()
+    expected |= {"masks", "visibility"} if sample in ("singles", "extra", "dance") else set()
     expected |= {"markers"} if sample == "extra" else set()
     assert set(targets) == expected
+    if "visibility" in targets:  # every eval camera ships is_body_in_img; only Dance ships per-vertex visibility
+        columns: list[str] = read_back(targets["visibility"]).reader(index=schema.TIMELINE).to_arrow_table().column_names
+        assert any(name.endswith(":dataforge.VertexVisibility:in_image") for name in columns)
+        assert any(name.endswith(":dataforge.VertexVisibility:visible") for name in columns) == (sample == "dance")
 
     labels: SequenceLabels = sequence.labels()
     base = read_back(targets["base"])
