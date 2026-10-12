@@ -13,12 +13,23 @@ from pathlib import Path
 from typing import ClassVar, TypeVar
 
 import rerun.blueprint as rrb
+from jaxtyping import Int64
+from numpy import ndarray
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
-from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models
+from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models, landmark_vertices
 from dataforge.datasets.mamma_download import fetch_sequence, verify_release
-from dataforge.datasets.mamma_layers import Clock, write_base, write_body_mesh, write_body_pose, write_markers, write_masks, write_projections
+from dataforge.datasets.mamma_layers import (
+    Clock,
+    write_base,
+    write_body_mesh,
+    write_body_pose,
+    write_eval_visibility,
+    write_markers,
+    write_masks,
+    write_projections,
+)
 from dataforge.datasets.mamma_source import Family, MammaCamera, MammaSequence, SequenceLabels, discover_sequences, read_camera
 from dataforge.datasets.mamma_syn_source import SynFamily
 from dataforge.identity import SequenceIdentity
@@ -128,12 +139,24 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
             raise ValueError(f"{family} is a MammaSyn family: MammaConfig.setup builds MammaSynDataset for it")
         return family
 
-    layers = (paths.BASE_LAYER, paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER, paths.MASKS_LAYER, paths.MARKERS_LAYER)
-    """masks and markers only where the release ships them (eval, eval Extra); register skips a layer no segment has."""
+    layers = (
+        paths.BASE_LAYER,
+        paths.BODY_POSE_LAYER,
+        paths.BODY_MESH_LAYER,
+        paths.PROJECTIONS_LAYER,
+        paths.MASKS_LAYER,
+        paths.MARKERS_LAYER,
+        paths.VISIBILITY_LAYER,
+    )
+    """masks, markers and visibility only where the release ships them (eval, eval Extra, eval); register skips a layer no segment has."""
 
     @cached_property
     def body(self) -> SmplxBody:
         return SmplxBody(self.config.model_root)
+
+    @cached_property
+    def landmarks(self) -> Int64[ndarray, "512"]:
+        return landmark_vertices(self.config.model_root)
 
     def download(self) -> None:
         """Fetch the SMPL-X models and verify the release in place; with ``fetch_into``, prove the MPI download on ``sequences``."""
@@ -165,7 +188,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
         """Base, then the body, projection, mask and marker layers, all from the release in place."""
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         # By collection, not by file presence: a missing mask tar or marker file fails its layer instead of skipping it.
-        ships: dict[str, bool] = {paths.MASKS_LAYER: source.is_eval, paths.MARKERS_LAYER: source.has_markers}
+        ships: dict[str, bool] = {paths.MASKS_LAYER: source.is_eval, paths.MARKERS_LAYER: source.has_markers, paths.VISIBILITY_LAYER: source.is_eval}
         pending = [layer for layer in pending if ships.get(layer, True)]
         if not pending:
             return targets[paths.BASE_LAYER]
@@ -186,9 +209,10 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
             ):
                 write_base(recording, identity, source, labels, cameras, clock, self.timer)
         posed: list[PosedPerson] = []
-        if {paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER} & set(pending):
+        if {paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER, paths.VISIBILITY_LAYER} & set(pending):
             with self.timer.stage("smplx"):
-                posed = [self.body.pose(person, clock.rows) for person in labels.people]
+                landmarks: Int64[ndarray, "512"] | None = self.landmarks if paths.VISIBILITY_LAYER in pending else None
+                posed = [self.body.pose(person, clock.rows, landmarks=landmarks) for person in labels.people]
 
         self.write_layers(
             identity,
@@ -202,6 +226,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
                 ),
                 paths.MASKS_LAYER: lambda recording: write_masks(recording, source, cameras, len(labels.people), clock),
                 paths.MARKERS_LAYER: lambda recording: write_markers(recording, source, clock),
+                paths.VISIBILITY_LAYER: lambda recording: write_eval_visibility(recording, source, cameras, labels, posed, self.landmarks, clock),
             },
         )
         self.timer.capture_s = len(clock.frames) / labels.fps

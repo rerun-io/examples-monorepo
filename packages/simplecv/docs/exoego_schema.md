@@ -635,9 +635,10 @@ so a per-camera label lands on that image and on nothing else (§13).
   all. `visibility_rate` (float32) is the source's per-view score, verbatim
   under its own definition. `Points2D` draws a fixed vertex subset (static
   `AnyValues{landmark_vertex_ids}`; MAMMA: MammaNet's 512 landmarks) in
-  stored-image pixels, coloured visible or hidden. It uses the source's own
-  2D projection when the source ships one, else the lens projection of
-  `body/mesh`. A source without `visible` draws no landmarks.
+  stored-image pixels, coloured visible or hidden: the lens projection of
+  `body/mesh` at those vertices. A source that also ships its own 2D
+  projection must agree with it (MAMMA's `vertices2d` do, to 0.0004 px), so
+  the record is not duplicated. A source without `visible` draws no landmarks.
 - Contact a source did not ship (self-contact, contact computed from our
   meshes) is an estimate: it goes under
   `/world/pred/<name>/people/person_NN/contact/...` (§3, Layers versus paths).

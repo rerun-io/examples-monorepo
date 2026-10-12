@@ -36,6 +36,7 @@ from dataforge.datasets.mamma_layers import (
     CameraVisibility,
     Clock,
     decode_gray,
+    landmark_pixels,
     log_cameras,
     log_person_masks,
     palette_png,
@@ -273,16 +274,16 @@ def pose_people(
     joints3d: list[Float64[ndarray, "t 127 3"]],
     clock: Clock,
     cam_T_body: list[Float64[ndarray, "t 4 4"]] | None = None,
+    *,
+    landmarks: Int64[ndarray, "l"],
 ) -> tuple[list[PersonFit], list[PosedPerson], float]:
-    """Each person with the model that gives back their shipped joints, posed over the clock's rows (moved into the camera frame
-    by ``cam_T_body``, as BEDLAM's are), and the largest joint gap (``check_joints``)."""
+    """Each person with the model that gives back their shipped joints, posed over the clock's rows with their ``landmarks``
+    (moved into the camera frame by ``cam_T_body``, as BEDLAM's are), and the largest joint gap (``check_joints``)."""
     rows: Int64[ndarray, "t"] = clock.rows
     transforms: list[Float64[ndarray, "t 4 4"]] | list[None] = [None] * len(people) if cam_T_body is None else cam_T_body
     fitted: list[PersonFit] = [fit_model(body, person, joints, moved) for person, joints, moved in zip(people, joints3d, transforms, strict=True)]
-    posed: list[PosedPerson] = [
-        body.pose(person, rows, mesh_stride=MESH_STRIDE) if moved is None else in_camera(body.pose(person, rows, mesh_stride=MESH_STRIDE), moved)
-        for person, moved in zip(fitted, transforms, strict=True)
-    ]
+    posed: list[PosedPerson] = [body.pose(person, rows, mesh_stride=MESH_STRIDE, landmarks=landmarks) for person in fitted]
+    posed = [pose if moved is None else in_camera(pose, moved) for pose, moved in zip(posed, transforms, strict=True)]
     return fitted, posed, check_joints(fitted, posed, joints3d, clock.frames)
 
 
@@ -450,40 +451,30 @@ def write_contacts(recording: rr.RecordingStream, posed: list[PosedPerson], cont
         )
 
 
-def camera_visibility(
-    rig: int,
-    pose: PosedPerson,
-    views: list[tuple[int, Bool[ndarray, "10475"], float]],
-    landmarks_uv: Float32[ndarray, "p l 2"],
-    rows: int,
-) -> CameraVisibility:
-    """One camera's visibility of one person over ``rows`` rows from its labelled ``views`` (row, visible vertices, rate), with the
-    landmarks' pixels at the person's posed rows."""
-    labelled: Bool[ndarray, "t"] = np.zeros(rows, dtype=bool)
-    visible: Bool[ndarray, "t 10475"] = np.zeros((rows, VERTICES), dtype=bool)
-    rate: Float32[ndarray, "t"] = np.full(rows, np.nan, dtype=np.float32)
+def camera_visibility(rig: int, person: int, views: list[tuple[int, Bool[ndarray, "10475"], float]], landmarks_uv: Float32[ndarray, "t l 2"]) -> CameraVisibility:
+    """One camera's visibility of one person from its labelled ``views`` (row, visible vertices, rate), with the landmarks' pixels."""
+    labelled: Bool[ndarray, "t"] = np.zeros(len(landmarks_uv), dtype=bool)
+    visible: Bool[ndarray, "t 10475"] = np.zeros((len(landmarks_uv), VERTICES), dtype=bool)
+    rate: Float32[ndarray, "t"] = np.full(len(landmarks_uv), np.nan, dtype=np.float32)
     for row, seen, score in views:
         labelled[row], visible[row], rate[row] = True, seen, score
-    uv: Float32[ndarray, "t l 2"] = np.full((rows, landmarks_uv.shape[1], 2), np.nan, dtype=np.float32)
-    uv[pose.mesh_rows[pose.mesh_present]] = landmarks_uv
-    return CameraVisibility(rig, pose.index, labelled, visible, None, rate, uv)
+    return CameraVisibility(rig, person, labelled, visible, None, rate, landmarks_uv)
 
 
-def render_visibility(reads: list[CameraRead[RenderView]], labels: RenderLabels, posed: list[PosedPerson], landmarks: Int64[ndarray, "l"]) -> list[CameraVisibility]:
+def render_visibility(reads: list[CameraRead[RenderView]], labels: RenderLabels, posed: list[PosedPerson]) -> list[CameraVisibility]:
     """What each camera sees of each person, from the camera's own views; the landmarks through its pinhole, at the stored size."""
     row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(labels.frames)}
     by_camera: dict[str, CameraRead[RenderView]] = {read.camera: read for read in reads}
     found: list[CameraVisibility] = []
     for rig, camera in enumerate(labels.cameras, start=1):
-        scale: float = stored_size(camera.width, camera.height)[0] / camera.width
         for pose in posed:
-            pixels: Float64[ndarray, "n 2"] = camera.project(pose.vertices[:, landmarks].reshape(-1, 3).astype(np.float64)) * scale
+            assert pose.landmarks is not None  # pose_people poses the landmarks
             views: list[tuple[int, Bool[ndarray, "10475"], float]] = [
                 (row_of[view.frame], label.vertex_visibility, label.person_visitiblity_rate)
                 for view in by_camera[camera.name].views
                 if (label := view.people.get(pose.index)) is not None
             ]
-            found.append(camera_visibility(rig, pose, views, pixels.reshape(-1, len(landmarks), 2).astype(np.float32), len(labels.frames)))
+            found.append(camera_visibility(rig, pose.index, views, landmark_pixels(camera, pose.landmarks)))
     return found
 
 
@@ -593,7 +584,7 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
             labels: RenderLabels = assemble_render([view for read in reads for view in read.views], {read.camera: read.size for read in reads if read.size})
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, RENDER_FPS))
             with self.timer.stage("smplx"):
-                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock)
+                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, landmarks=self.landmarks)
                 labels = replace(labels, people=people)
             if paths.BASE_LAYER in pending:
                 with (
@@ -622,7 +613,7 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                 paths.CONTACTS_LAYER: lambda recording: write_contacts(recording, posed, labels.contacts, clock),
                 paths.VISIBILITY_LAYER: lambda recording: write_visibility(
                     recording,
-                    render_visibility(reads, labels, posed, self.landmarks),
+                    render_visibility(reads, labels, posed),
                     self.landmarks,
                     clock,
                     source="each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)",
@@ -665,6 +656,7 @@ def in_camera(posed: PosedPerson, cam_T_body: Float64[ndarray, "t 4 4"]) -> Pose
         mesh_present=posed.mesh_present,
         vertices=moved(posed.vertices, posed.mesh_rows[posed.mesh_present]),
         faces=posed.faces,
+        landmarks=None if posed.landmarks is None else moved(posed.landmarks, rows),
     )
 
 
@@ -769,17 +761,17 @@ def write_bedlam_projections(recording: rr.RecordingStream, labels: BedlamLabels
         )
 
 
-def bedlam_visibility(read: CameraRead[BedlamView], labels: BedlamLabels, posed: list[PosedPerson], landmarks: Int64[ndarray, "l"]) -> list[CameraVisibility]:
+def bedlam_visibility(read: CameraRead[BedlamView], labels: BedlamLabels, posed: list[PosedPerson]) -> list[CameraVisibility]:
     """What the clip's camera sees of each person; the landmarks of the camera-frame body through each frame's K."""
     row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(labels.frames)}
     found: list[CameraVisibility] = []
     for pose in posed:
-        rows: Int64[ndarray, "p"] = pose.mesh_rows[pose.mesh_present]
-        pixels: Float64[ndarray, "p l 3"] = np.einsum("pij,plj->pli", labels.K[rows], pose.vertices[:, landmarks].astype(np.float64))
+        assert pose.landmarks is not None  # pose_people poses the landmarks
+        pixels: Float64[ndarray, "t l 3"] = np.einsum("tij,tlj->tli", labels.K, pose.landmarks.astype(np.float64))
         views: list[tuple[int, Bool[ndarray, "10475"], float]] = [
             (row_of[view.frame], label.vertex_visibility, label.person_visitiblity_rate) for view in read.views if (label := view.people.get(pose.index)) is not None
         ]
-        found.append(camera_visibility(1, pose, views, (pixels[..., :2] / pixels[..., 2:]).astype(np.float32), len(labels.frames)))
+        found.append(camera_visibility(1, pose.index, views, (pixels[..., :2] / pixels[..., 2:]).astype(np.float32)))
     return found
 
 
@@ -857,7 +849,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
                 raise ValueError(f"{source.directory}/{source.clip}: principal point ({cx}, {cy}) is not the centre of the {width}x{height} image")
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, BEDLAM_NUMBERING_FPS))
             with self.timer.stage("smplx"):
-                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, labels.cam_T_body)
+                people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, labels.cam_T_body, landmarks=self.landmarks)
                 labels = replace(labels, people=people)
             if paths.BASE_LAYER in pending:
                 with (
@@ -877,7 +869,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
                 paths.CONTACTS_LAYER: lambda recording: write_contacts(recording, posed, labels.contacts, clock),
                 paths.VISIBILITY_LAYER: lambda recording: write_visibility(
                     recording,
-                    bedlam_visibility(read, labels, posed, self.landmarks),
+                    bedlam_visibility(read, labels, posed),
                     self.landmarks,
                     clock,
                     source="each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)",

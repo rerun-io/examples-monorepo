@@ -13,8 +13,8 @@ from PIL import Image
 
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig, MammaDataset
-from dataforge.datasets.mamma_body import MODEL_FILES
-from dataforge.datasets.mamma_source import MammaSequence
+from dataforge.datasets.mamma_body import LANDMARK_FILE, MODEL_FILES, landmark_vertices
+from dataforge.datasets.mamma_source import MammaCamera, MammaSequence, read_camera
 from dataforge.meshes import BODY_MESH_STRIDE
 
 pytestmark = pytest.mark.integration
@@ -27,6 +27,23 @@ FPS: int = 25
 CAMERAS: dict[str, tuple[int, int]] = {"IOI_01": (320, 240), "IOI_02": (240, 320), "IOI_03": (2400, 1600)}
 """Native sizes: landscape, portrait, and one above the 3.2 MP cap (stored at half size)."""
 MARKERS: int = 4
+VERTICES: int = 10475
+OUT_OF_VIEW: tuple[str, int, int] = ("IOI_02", 1, 2)
+"""(camera, person, frame): the one view a body is not in."""
+
+
+def in_image(camera: str) -> np.ndarray:
+    """A camera's ``is_body_in_img``: frames x people."""
+    shipped: np.ndarray = np.ones((FRAMES, 2), dtype=bool)
+    if camera == OUT_OF_VIEW[0]:
+        shipped[OUT_OF_VIEW[2], OUT_OF_VIEW[1]] = False
+    return shipped
+
+
+def vertex_visibility(camera: str) -> np.ndarray:
+    """A camera's per-vertex ``visibility`` as the Dance release ships it: frames x people x vertices, float64 0/1."""
+    frame, person, vertex = np.meshgrid(np.arange(FRAMES), np.arange(2), np.arange(VERTICES), indexing="ij")
+    return ((vertex + 5 * frame + 2 * person + list(CAMERAS).index(camera)) % 3 == 0).astype(np.float64)
 
 
 def hevc444(ffmpeg: Path, path: Path, width: int, height: int) -> None:
@@ -88,7 +105,8 @@ def write_sequence(root: Path, ffmpeg: Path) -> Path:
             cam_img_w=np.array(float(width)),
             cam_img_h=np.array(float(height)),
             cam_portrait=np.array(height > width),
-            is_body_in_img=np.ones((FRAMES, 2), dtype=bool),
+            is_body_in_img=in_image(name),
+            visibility=vertex_visibility(name),
             vicon_radial_2=np.array([width / 2, height / 2, 1e-9, 0.0, 0.0]),
         )
         hevc444(ffmpeg, directory / f"videos_crf16/{name}.mp4", width, height)
@@ -111,7 +129,7 @@ def write_sequence(root: Path, ffmpeg: Path) -> Path:
 
 @pytest.fixture
 def staged(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[MammaDataset, Path]:
-    for model in MODEL_FILES.values():
+    for model in [*MODEL_FILES.values(), LANDMARK_FILE]:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     root: Path = tmp_path / "raw"
     directory: Path = write_sequence(root, nvenc_ffmpeg)
@@ -128,7 +146,7 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
     assert identity.recording_id == f"mamma-eval__extra__{SEQUENCE}"
     dataset.convert(identity, sequence, force=False)
     targets: dict[str, Path] = dataset.targets(identity)
-    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks", "markers"])
+    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks", "markers", "visibility"])
     assert all(target.is_file() for target in targets.values())
     expected_times: list[int] = [frame * 1_000_000_000 // FPS for frame in range(FRAMES)]
 
@@ -141,6 +159,8 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
         assert (values["name"], values["source_width"], values["source_height"]) == (name, width, height)
         assert (values.get("stored_width", width), values.get("stored_height", height)) == stored
     assert recording_properties(base, "capture")["num_frames"] == FRAMES
+    episode = base.reader(index=None, contents="/__properties/**").to_arrow_table()
+    assert episode["property:episode:keywords"].to_pylist()[0] == ["Whip", "Basic"]
 
     pose = read_back(targets["body_pose"])
     with np.load(directory / "gt/global.npz") as source:
@@ -266,3 +286,30 @@ def test_an_eval_sequence_missing_a_mask_archive_fails_the_masks_layer(staged: t
     (directory / "masks/IOI_02_masks.tar").unlink()
     with pytest.raises(FileNotFoundError, match="IOI_02_masks.tar"):
         dataset.convert(identity, sequence, force=False)
+
+
+def test_an_eval_sequence_carries_what_each_camera_sees_of_each_person(staged: tuple[MammaDataset, Path]) -> None:
+    dataset, _ = staged
+    ((identity, sequence),) = dataset.discover()
+    dataset.convert(identity, sequence, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+    visibility = read_back(targets["visibility"])
+    mesh = read_back(targets["body_mesh"])
+    landmarks: np.ndarray = landmark_vertices(MODEL_ROOT)
+    expected_times: list[int] = [frame * 1_000_000_000 // FPS for frame in range(FRAMES)]
+    for rig, (name, (width, height)) in enumerate(CAMERAS.items(), start=1):
+        camera: MammaCamera = read_camera(sequence.calibration(name))
+        scale: float = 0.5 if width * height > 3_200_000 else 1.0
+        for person in range(2):
+            path: str = schema.person_visibility_path(rig, 0, person)
+            rows = column_rows(visibility, f"{path}:dataforge.VertexVisibility:in_image")
+            assert rows[schema.TIMELINE].cast("int64").to_pylist() == expected_times
+            assert [row[0] for row in rows.column(1).to_pylist()] == in_image(name)[:, person].tolist()
+            visible = column_rows(visibility, f"{path}:dataforge.VertexVisibility:visible").column(1).to_pylist()
+            assert visible == (vertex_visibility(name)[:, person] == 1).tolist()
+            drawn = column_rows(visibility, f"{path}:Points2D:positions").column(1).to_pylist()
+            assert [len(row) for row in drawn] == [512] * FRAMES  # every frame, though the mesh is kept at every 3rd
+            vertices = column_rows(mesh, f"{schema.person_body_path(person, 'mesh')}:Mesh3D:vertex_positions").column(1).to_pylist()
+            for row, posed in zip(range(0, FRAMES, BODY_MESH_STRIDE), vertices, strict=True):
+                expected: np.ndarray = camera.project(np.array(posed, dtype=np.float64)[landmarks]) * scale  # through the Vicon lens
+                np.testing.assert_allclose(np.array(drawn[row]), expected, atol=1e-3)

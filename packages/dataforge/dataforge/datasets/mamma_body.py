@@ -124,6 +124,8 @@ class PosedPerson:
     """Posed vertices at the mesh rows where the person is present, world metres."""
     faces: UInt32[ndarray, "20908 3"]
     """The mesh triangles (one array every person shares)."""
+    landmarks: Float32[ndarray, "t l 3"] | None = None
+    """The posed vertices a caller asked for (``SmplxBody.pose``'s ``landmarks``) at every row, world metres; NaN where absent."""
 
 
 class SmplxBody:
@@ -161,8 +163,11 @@ class SmplxBody:
             self.layers[key] = layer
         return layer
 
-    def pose(self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE) -> PosedPerson:
-        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row."""
+    def pose(
+        self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE, landmarks: Int64[ndarray, "l"] | None = None
+    ) -> PosedPerson:
+        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row and the
+        ``landmarks`` vertices at every row."""
         layer: torch.nn.Module = self.layer(person)
         present: Bool[ndarray, "t"] = person.present[rows]
         posed: Int64[ndarray, "p"] = np.flatnonzero(present)
@@ -170,6 +175,7 @@ class SmplxBody:
         coco133: Float32[ndarray, "t 133 3"] = np.full((len(rows), 133, 3), np.nan, dtype=np.float32)
         joints: Float32[ndarray, "t 144 3"] = np.full((len(rows), 144, 3), np.nan, dtype=np.float32)
         vertices: list[Float32[ndarray, "c 10475 3"]] = []
+        kept: Float32[ndarray, "t l 3"] | None = None if landmarks is None else np.full((len(rows), len(landmarks), 3), np.nan, dtype=np.float32)
         betas: torch.Tensor = torch.from_numpy(person.betas.astype(np.float32))[None]
         for start in range(0, len(posed), FORWARD_BATCH):
             batch: Int64[ndarray, "b"] = posed[start : start + FORWARD_BATCH]
@@ -190,6 +196,8 @@ class SmplxBody:
             joints[batch] = output.joints.numpy()
             coco133[batch] = smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3]
             vertices.append(output.vertices.numpy()[np.isin(batch, mesh_rows)])
+            if kept is not None:
+                kept[batch] = output.vertices.numpy()[:, landmarks]
         return PosedPerson(
             index=person.index,
             coco133=coco133,
@@ -198,4 +206,5 @@ class SmplxBody:
             mesh_present=present[mesh_rows],
             vertices=np.concatenate(vertices) if vertices else np.zeros((0, 10475, 3), dtype=np.float32),
             faces=self.faces,
+            landmarks=kept,
         )

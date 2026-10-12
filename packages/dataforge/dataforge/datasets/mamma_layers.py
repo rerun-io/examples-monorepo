@@ -23,7 +23,17 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from dataforge import hands, meshes, paths, schema, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson
-from dataforge.datasets.mamma_source import MARKER_FILES, VERTICES, MammaCamera, MammaSequence, Method, PersonFit, SequenceLabels
+from dataforge.datasets.mamma_source import (
+    MARKER_FILES,
+    VERTICES,
+    CameraSight,
+    MammaCamera,
+    MammaSequence,
+    Method,
+    PersonFit,
+    SequenceLabels,
+    read_camera_sight,
+)
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     annotation_context,
@@ -229,6 +239,7 @@ def write_base(
             fit_method=labels.method,
             num_people=len(labels.people),
             subjects=pa.array([person.subject for person in labels.people]),
+            keywords=pa.array(labels.keywords, type=pa.string()),
         ),
     )
 
@@ -430,6 +441,42 @@ def write_markers(recording: rr.RecordingStream, sequence: MammaSequence, clock:
             columns=rr.Points3D.columns(positions=positions[clock.frames].reshape(-1, 3)).partition([len(labels)] * len(clock.frames)),
             recording=recording,
         )
+
+
+def landmark_pixels(camera: MammaCamera, landmarks: Float32[ndarray, "t l 3"]) -> Float32[ndarray, "t l 2"]:
+    """World landmarks through a camera's full lens model, in stored-image pixels; NaN where a landmark is NaN or behind it."""
+    scale: float = stored_size(camera.width, camera.height)[0] / camera.width
+    pixels: Float64[ndarray, "n 2"] = camera.project(landmarks.reshape(-1, 3).astype(np.float64)) * scale
+    return pixels.reshape(*landmarks.shape[:2], 2).astype(np.float32)
+
+
+def write_eval_visibility(
+    recording: rr.RecordingStream,
+    sequence: MammaSequence,
+    cameras: list[MammaCamera],
+    labels: SequenceLabels,
+    posed: list[PosedPerson],
+    landmarks: Int64[ndarray, "l"],
+    clock: Clock,
+) -> None:
+    """Every camera's ``is_body_in_img`` for every person, and on Dance its per-vertex ``visibility`` with the landmarks drawn."""
+    found: list[CameraVisibility] = []
+    for rig, camera in enumerate(cameras, start=1):
+        sight: CameraSight = read_camera_sight(sequence.calibration(camera.name), labels.frames, len(labels.people))
+        for column, pose in enumerate(posed):
+            assert pose.landmarks is not None  # the converter poses the landmarks when this layer is pending
+            found.append(
+                CameraVisibility(
+                    rig,
+                    pose.index,
+                    np.ones(len(clock.frames), dtype=bool),
+                    None if sight.visibility is None else sight.visibility[clock.rows, column],
+                    sight.is_body_in_img[clock.rows, column],
+                    None,
+                    landmark_pixels(camera, pose.landmarks),
+                )
+            )
+    write_visibility(recording, found, landmarks, clock, source="each camera's gt/IOI_NN.npz: is_body_in_img; visibility (Dance)")
 
 
 def vertex_rows(values: ndarray, kept: Bool[ndarray, "t"]) -> pa.ListArray:

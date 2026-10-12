@@ -25,7 +25,7 @@ from serde import field, serde
 from serde.json import to_json
 
 from dataforge import writing
-from dataforge.datasets.mamma_source import VERTICES, Gender, MammaCamera, PersonFit, decode
+from dataforge.datasets.mamma_source import VERTICES, Gender, MammaCamera, PersonFit, decode, flags
 from dataforge.records import read_json
 
 SynFamily: TypeAlias = Literal["syn", "syn-bedlam"]
@@ -322,15 +322,8 @@ def load_people(payload: bytes, origin: str) -> dict[int, dict[str, object]]:
 
 
 def vertex_flags(value: object) -> Bool[ndarray, "n"]:
-    """A per-vertex 0/1 column (the release ships int32 in its renders, float64 in BEDLAM) as one flag per vertex.
-
-    Raises:
-        ValueError: A value is neither 0 nor 1.
-    """
-    flags: ndarray = np.asarray(value).reshape(-1)
-    if not np.isin(flags, (0, 1)).all():
-        raise ValueError(f"a per-vertex flag column holds values other than 0 and 1: {np.unique(flags)[:6].tolist()}")
-    return flags.astype(bool)
+    """A per-vertex 0/1 column (the release ships int32 in its renders, float64 in BEDLAM) as one flag per vertex."""
+    return flags(value).reshape(-1)
 
 
 def partner_distance(value: object) -> Float32[ndarray, "n"] | None:
