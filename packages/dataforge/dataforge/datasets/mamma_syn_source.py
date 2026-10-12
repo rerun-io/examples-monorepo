@@ -216,11 +216,15 @@ def copy_span(source: Path, target: Path, start: int, length: int) -> None:
 
 READ_GAP: int = 1 << 20
 """Bytes of other members a read runs through rather than seek past: a seek on the NAS costs more than reading ~1 MB."""
+RUN_READS: int = 8
+"""Runs ``read_members`` reads at once. Its runs are short random reads, one NAS round trip each (over 250 ms under load,
+2026-10-12): read one after another, a BEDLAM clip's ~30 label pickles took about 10 s."""
 
 
 def read_members(directory: Path, members: list[ShardMember]) -> dict[tuple[str, int], bytes]:
-    """``members`` read into memory in shard order, keyed by (shard, offset): members less than ``READ_GAP`` apart come in one
-    read, so a BEDLAM clip, whose samples lie in a few runs of its batch's shards, costs a few reads instead of three per sample."""
+    """``members`` read into memory, keyed by (shard, offset): members less than ``READ_GAP`` apart come in one read, so a BEDLAM
+    clip, whose samples lie in a few runs of its batch's shards, costs a few reads instead of three per sample; ``RUN_READS``
+    runs at once."""
     runs: list[list[ShardMember]] = []
     for member in sorted(members, key=lambda member: (member.shard, member.offset)):
         last: ShardMember | None = runs[-1][-1] if runs else None
@@ -228,13 +232,17 @@ def read_members(directory: Path, members: list[ShardMember]) -> dict[tuple[str,
             runs[-1].append(member)
         else:
             runs.append([member])
-    found: dict[tuple[str, int], bytes] = {}
-    with ShardReader(directory) as reader:
-        for run in runs:
-            start: int = run[0].offset
+
+    def read_run(run: list[ShardMember]) -> dict[tuple[str, int], bytes]:
+        start: int = run[0].offset
+        with ShardReader(directory) as reader:
             payload: bytes = reader.read(ShardMember(run[0].shard, start, max(member.offset + member.size for member in run) - start))
-            for member in run:
-                found[(member.shard, member.offset)] = payload[member.offset - start : member.offset - start + member.size]
+        return {(member.shard, member.offset): payload[member.offset - start : member.offset - start + member.size] for member in run}
+
+    found: dict[tuple[str, int], bytes] = {}
+    with ThreadPoolExecutor(max_workers=RUN_READS) as executor:
+        for read in executor.map(read_run, runs):
+            found.update(read)
     return found
 
 

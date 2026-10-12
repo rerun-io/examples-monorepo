@@ -113,7 +113,7 @@ def test_members_read_ahead_in_runs_are_the_members_read_one_by_one(tmp_path: Pa
     read: dict[tuple[str, int], bytes] = read_members(tmp_path, members)
     monkeypatch.setattr(ShardReader, "read", original)
     assert len(read) == len(members) == 12
-    assert [member.shard for member in reads] == ["000000.tar", "000000.tar", "000001.tar"]  # frames 0 and 5 in one read, 10, 15
+    assert sorted(member.shard for member in reads) == ["000000.tar", "000000.tar", "000001.tar"]  # frames 0 and 5 in one read, 10, 15
     with ShardReader(tmp_path, read) as cached:
         assert [cached.read(member) for member in members] == [read_member(tmp_path, member) for member in members]
 
