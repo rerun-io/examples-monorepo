@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -23,7 +23,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from dataforge import hands, meshes, paths, schema, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson
-from dataforge.datasets.mamma_source import MARKER_FILES, MammaCamera, MammaSequence, Method, PersonFit, SequenceLabels
+from dataforge.datasets.mamma_source import MARKER_FILES, VERTICES, MammaCamera, MammaSequence, Method, PersonFit, SequenceLabels
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     annotation_context,
@@ -66,6 +66,9 @@ MASK_OPACITY: float = 0.5
 """Opacity the viewer draws a mask with; its background palette entry is transparent. Set explicitly: at the default (1.0)
 Rerun 0.38 can draw a translucent PNG's transparent pixels black."""
 MARKER_COLOURS: dict[str, tuple[int, int, int]] = {"vicon": (40, 220, 40), "mosh_baseline": (255, 150, 0)}
+LANDMARK_COLOURS: dict[bool, tuple[int, int, int]] = {True: (60, 200, 90), False: (220, 50, 50)}
+"""A landmark the camera sees (green) or does not (red)."""
+LANDMARKS_SOURCE: str = "MammaNet's 512 surface landmarks (farthest-point samples of SMPL-X, MAMMA paper Fig. 3)"
 
 
 def stored_size(width: int, height: int) -> tuple[int, int]:
@@ -425,5 +428,63 @@ def write_markers(recording: rr.RecordingStream, sequence: MammaSequence, clock:
             path,
             indexes=indexes,
             columns=rr.Points3D.columns(positions=positions[clock.frames].reshape(-1, 3)).partition([len(labels)] * len(clock.frames)),
+            recording=recording,
+        )
+
+
+def vertex_rows(values: ndarray, kept: Bool[ndarray, "t"]) -> pa.ListArray:
+    """One list per row of ``values`` (rows x vertices): the row where ``kept``, an empty list elsewhere."""
+    lengths: Int64[ndarray, "t"] = np.where(kept, values.shape[1], 0)
+    offsets: Int64[ndarray, "t1"] = np.concatenate([[0], np.cumsum(lengths)])
+    return pa.ListArray.from_arrays(pa.array(offsets.astype(np.int32)), pa.array(values[kept].reshape(-1)))
+
+
+@dataclass(frozen=True, slots=True)
+class CameraVisibility:
+    """What one camera sees of one person over a sequence's rows; a component the source does not ship is None."""
+
+    rig: int
+    person: int
+    labelled: Bool[ndarray, "t"]
+    """Rows at which the source labels the person in this camera."""
+    visible: Bool[ndarray, "t 10475"] | None
+    """True where the camera sees the vertex (rows outside ``labelled`` are ignored)."""
+    in_image: Bool[ndarray, "t"] | None
+    """Whether the body is in the camera's image at all."""
+    rate: Float32[ndarray, "t"] | None
+    """The source's per-view visibility score."""
+    landmarks_uv: Float32[ndarray, "t l 2"] | None
+    """The landmark vertices of the posed body through the camera, stored-image pixels; drawn where ``visible`` is known."""
+
+
+def write_visibility(recording: rr.RecordingStream, cameras: list[CameraVisibility], landmarks: Int64[ndarray, "l"], clock: Clock, *, source: str) -> None:
+    """Every camera's per-vertex visibility of every person, one row per frame (an empty one where the person is not labelled), and
+    the landmarks drawn green where seen, red where not."""
+    recording.send_property(
+        paths.VISIBILITY_LAYER,
+        rr.AnyValues(source=source, landmarks=LANDMARKS_SOURCE, landmark_colours="green: the camera sees the vertex; red: it does not"),
+    )
+    for camera in cameras:
+        path: str = schema.person_visibility_path(camera.rig, 0, camera.person)
+        rr.log(path, rr.AnyValues(n_vertices=VERTICES, topology="smplx", landmark_vertex_ids=landmarks), static=True, recording=recording)
+        components: dict[str, pa.Array] = {}
+        if camera.visible is not None:
+            components["visible"] = vertex_rows(camera.visible, camera.labelled)
+        if camera.in_image is not None:
+            components["in_image"] = vertex_rows(camera.in_image[:, None], camera.labelled)
+        if camera.rate is not None:
+            components["visibility_rate"] = vertex_rows(camera.rate[:, None], camera.labelled)
+        columns = rr.DynamicArchetype.columns(archetype="dataforge.VertexVisibility", components=components)
+        rr.send_columns(path, indexes=clock.indexes, columns=columns, recording=recording)
+        if camera.visible is None or camera.landmarks_uv is None:
+            continue
+        drawn: Bool[ndarray, "t"] = camera.labelled
+        seen: Bool[ndarray, "k l"] = camera.visible[drawn][:, landmarks]
+        colours: UInt8[ndarray, "n 3"] = np.where(seen.reshape(-1, 1), LANDMARK_COLOURS[True], LANDMARK_COLOURS[False]).astype(np.uint8)
+        rr.log(path, rr.Points2D.from_fields(radii=rr.Radius.ui_points(2.5), draw_order=30.0), static=True, recording=recording)
+        rr.send_columns(
+            path,
+            indexes=clock.indexes,
+            columns=rr.Points2D.columns(positions=camera.landmarks_uv[drawn].reshape(-1, 2), colors=colours).partition(np.where(drawn, len(landmarks), 0)),
             recording=recording,
         )

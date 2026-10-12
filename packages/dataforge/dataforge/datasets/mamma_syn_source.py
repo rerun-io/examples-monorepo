@@ -21,11 +21,11 @@ from typing import BinaryIO, Literal, TypeAlias
 import numpy as np
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
-from serde import serde
+from serde import field, serde
 from serde.json import to_json
 
 from dataforge import writing
-from dataforge.datasets.mamma_source import Gender, MammaCamera, PersonFit, decode
+from dataforge.datasets.mamma_source import VERTICES, Gender, MammaCamera, PersonFit, decode
 from dataforge.records import read_json
 
 SynFamily: TypeAlias = Literal["syn", "syn-bedlam"]
@@ -321,6 +321,24 @@ def load_people(payload: bytes, origin: str) -> dict[int, dict[str, object]]:
     return people
 
 
+def vertex_flags(value: object) -> Bool[ndarray, "n"]:
+    """A per-vertex 0/1 column (the release ships int32 in its renders, float64 in BEDLAM) as one flag per vertex.
+
+    Raises:
+        ValueError: A value is neither 0 nor 1.
+    """
+    flags: ndarray = np.asarray(value).reshape(-1)
+    if not np.isin(flags, (0, 1)).all():
+        raise ValueError(f"a per-vertex flag column holds values other than 0 and 1: {np.unique(flags)[:6].tolist()}")
+    return flags.astype(bool)
+
+
+def partner_distance(value: object) -> Float32[ndarray, "n"] | None:
+    """``sdf_vertices``: one distance per vertex, or None for the empty list the release ships where it has none."""
+    distances: ndarray = np.asarray(value, dtype=np.float32).reshape(-1)
+    return distances if len(distances) else None
+
+
 @serde
 @dataclass(frozen=True, slots=True)
 class RenderPersonLabel:
@@ -339,6 +357,15 @@ class RenderPersonLabel:
     gender: Gender
     joints3d: Float64[ndarray, "127 3"]
     """The model's joints (no face contour), world metres: the check that the parameters reproduce the render's body."""
+    person_visitiblity_rate: float
+    """The release's per-view visibility score, under its own name and definition."""
+    floor_contact_mask: Bool[ndarray, "10475"]
+    """True where the vertex touches the floor; the same in every view of a frame."""
+    vertex_visibility: Bool[ndarray, "10475"] = field(deserializer=vertex_flags)
+    """True where this view sees the vertex."""
+    sdf_vertices: Float32[ndarray, "10475"] | None = field(default=None, deserializer=partner_distance)
+    """Each vertex's signed distance to the other person's surface, metres, negative inside; the same in every view of a frame.
+    Only Harmony4D, Inter-X, InteractionCouple and LatinDance10 ship it."""
 
 
 def read_render_view(payload: bytes, origin: str) -> dict[int, RenderPersonLabel]:
@@ -356,6 +383,18 @@ class RenderView:
 
 
 @dataclass(frozen=True, slots=True)
+class PersonContact:
+    """One person's shipped contact over a sequence's rows."""
+
+    floor: Bool[ndarray, "t 10475"]
+    """True where a vertex touches the floor; all False where the person is absent."""
+    partner: int | None
+    """The person a distance is to: the other one of a two-person scene; None where the source ships no distance."""
+    partner_distance_m: Float32[ndarray, "t 10475"] | None
+    """Each vertex's signed distance to ``partner``'s surface, metres, negative inside; NaN rows where none is shipped."""
+
+
+@dataclass(frozen=True, slots=True)
 class RenderLabels:
     """A render sequence's labels on its frame rows: every person, every camera."""
 
@@ -367,6 +406,8 @@ class RenderLabels:
     """Each person's shipped joints over the rows, NaN where absent."""
     cameras: list[MammaCamera]
     """The fixed cameras, in name order (pinhole: a render has no lens)."""
+    contacts: list[PersonContact]
+    """Each person's contact over the rows, in ``people`` order."""
 
 
 def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) -> RenderLabels:
@@ -374,7 +415,8 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
     calibration in every frame. ``sizes`` gives each camera's image width and height (from its PNGs).
 
     Raises:
-        ValueError: Two views disagree on a person, a camera moves, or a camera sees nobody (no calibration).
+        ValueError: Two views disagree on a person (contact included), a camera moves, a camera sees nobody (no calibration), or a
+            scene without exactly two people ships a distance to the other person.
     """
     ordered: list[RenderView] = sorted(views, key=lambda view: (view.camera, view.frame))
     frames: Int64[ndarray, "t"] = np.array(sorted({view.frame for view in views}), dtype=np.int64)
@@ -390,12 +432,18 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
         raise ValueError(f"cameras {blind} see nobody in any frame: their labels carry no calibration")
     cameras: list[MammaCamera] = [MammaCamera(name, K, cam_T_world, *sizes[name], lens=None) for name, (K, cam_T_world) in sorted(calibration.items())]
 
+    keys: list[int] = sorted({key for view in views for key in view.people})
+    if len(keys) != 2 and any(label.sdf_vertices is not None for view in views for label in view.people.values()):
+        raise ValueError(f"{len(keys)} people ship a distance to the other person: only a two-person scene says whom it is to")
     people: list[PersonFit] = []
     joints3d: list[Float64[ndarray, "t 127 3"]] = []
-    for key in sorted({key for view in views for key in view.people}):
+    contacts: list[PersonContact] = []
+    for key in keys:
         pose: Float64[ndarray, "t 165"] = np.zeros((len(frames), 165))
         trans: Float64[ndarray, "t 3"] = np.zeros((len(frames), 3))
         joints: Float64[ndarray, "t 127 3"] = np.full((len(frames), 127, 3), np.nan)
+        floor: Bool[ndarray, "t 10475"] = np.zeros((len(frames), VERTICES), dtype=bool)
+        distance: Float32[ndarray, "t 10475"] = np.full((len(frames), VERTICES), np.nan, dtype=np.float32)
         present: Bool[ndarray, "t"] = np.zeros(len(frames), dtype=bool)
         seen_by: dict[int, str] = {}
         first: RenderPersonLabel | None = None
@@ -408,11 +456,19 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
                 first = label
             if not (np.array_equal(label.shape, first.shape) and label.gender == first.gender):
                 raise ValueError(f"person {key}: the shape or gender changes at frame {view.frame} ({view.camera})")
+            shipped: Float32[ndarray, "10475"] = np.full(VERTICES, np.nan, dtype=np.float32) if label.sdf_vertices is None else label.sdf_vertices
             if present[row]:
-                if not (np.array_equal(pose[row], label.pose_world) and np.array_equal(trans[row], label.trans_world) and np.array_equal(joints[row], label.joints3d)):
+                if not (
+                    np.array_equal(pose[row], label.pose_world)
+                    and np.array_equal(trans[row], label.trans_world)
+                    and np.array_equal(joints[row], label.joints3d)
+                    and np.array_equal(floor[row], label.floor_contact_mask)
+                    and np.array_equal(distance[row], shipped, equal_nan=True)
+                ):
                     raise ValueError(f"person {key}: the views disagree at frame {view.frame}: {seen_by[row]} and {view.camera}")
                 continue
             pose[row], trans[row], joints[row], present[row], seen_by[row] = label.pose_world, label.trans_world, label.joints3d, True, view.camera
+            floor[row], distance[row] = label.floor_contact_mask, shipped
         assert first is not None  # every key comes from some view
         people.append(
             PersonFit(
@@ -429,7 +485,9 @@ def assemble_render(views: list[RenderView], sizes: dict[str, tuple[int, int]]) 
             )
         )
         joints3d.append(joints)
-    return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras)
+        shipped_any: bool = bool(np.isfinite(distance).any())
+        contacts.append(PersonContact(floor, (set(keys) - {key}).pop() if shipped_any else None, distance if shipped_any else None))
+    return RenderLabels(frames=frames, people=people, joints3d=joints3d, cameras=cameras, contacts=contacts)
 
 
 @serde
@@ -451,6 +509,18 @@ class BedlamPersonLabel:
     """The body's gender as BEDLAM labels it; not the model."""
     joints3d: Float64[ndarray, "127 3"]
     """The model's joints (no face contour) in the camera frame: the check that the parameters reproduce the render's body."""
+    motion_info: list[str]
+    """Where the motion comes from, six strings: the action, a number, the AMASS file, then three numbers."""
+    person_visitiblity_rate: float
+    """The release's per-view visibility score, under its own name and definition."""
+    floor_contact_mask: Bool[ndarray, "10475"]
+    """True where the vertex touches the floor."""
+    vertex_visibility: Bool[ndarray, "10475"] = field(deserializer=vertex_flags)
+    """True where the camera sees the vertex."""
+
+    def __post_init__(self) -> None:
+        if len(self.motion_info) != 6:
+            raise ValueError(f"motion_info holds {len(self.motion_info)} strings, BEDLAM ships 6")
 
 
 def read_bedlam_view(payload: bytes, origin: str) -> dict[int, BedlamPersonLabel]:
@@ -480,13 +550,18 @@ class BedlamLabels:
     """Each person's world to the camera at each row, NaN where absent."""
     joints3d: list[Float64[ndarray, "t 127 3"]]
     """Each person's shipped joints in the camera frame, NaN where absent."""
+    contacts: list[PersonContact]
+    """Each person's floor contact over the rows (BEDLAM ships no distance between people)."""
+    motions: list[list[str]]
+    """Each person's ``motion_info``."""
 
 
 def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
     """Join a BEDLAM clip's views (one per frame, in any order) into per-person fits and per-row camera intrinsics.
 
     Raises:
-        ValueError: The people of one view disagree on the intrinsics, a person's shape or gender changes, or no view labels anyone.
+        ValueError: The people of one view disagree on the intrinsics, a person's shape, gender or motion changes, or no view labels
+            anyone.
     """
     ordered: list[BedlamView] = sorted(views, key=lambda view: view.frame)
     frames: Int64[ndarray, "t"] = np.array([view.frame for view in ordered], dtype=np.int64)
@@ -504,11 +579,14 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
     people: list[PersonFit] = []
     cam_T_body: list[Float64[ndarray, "t 4 4"]] = []
     joints3d: list[Float64[ndarray, "t 127 3"]] = []
+    contacts: list[PersonContact] = []
+    motions: list[list[str]] = []
     for key in keys:
         pose: Float64[ndarray, "t 165"] = np.zeros((len(ordered), 165))
         trans: Float64[ndarray, "t 3"] = np.zeros((len(ordered), 3))
         transforms: Float64[ndarray, "t 4 4"] = np.full((len(ordered), 4, 4), np.nan)
         joints: Float64[ndarray, "t 127 3"] = np.full((len(ordered), 127, 3), np.nan)
+        floor: Bool[ndarray, "t 10475"] = np.zeros((len(ordered), VERTICES), dtype=bool)
         present: Bool[ndarray, "t"] = np.zeros(len(ordered), dtype=bool)
         first: BedlamPersonLabel | None = None
         for row, view in enumerate(ordered):
@@ -517,9 +595,10 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
                 continue
             if first is None:
                 first = label
-            if not (np.array_equal(label.shape, first.shape) and label.gender == first.gender):
-                raise ValueError(f"person {key}: the shape or gender changes at frame {view.frame}")
+            if not (np.array_equal(label.shape, first.shape) and label.gender == first.gender and label.motion_info == first.motion_info):
+                raise ValueError(f"person {key}: the shape, gender or motion changes at frame {view.frame}")
             pose[row], trans[row], transforms[row], joints[row], present[row] = label.pose_world, label.trans_world, label.cam_ext, label.joints3d, True
+            floor[row] = label.floor_contact_mask
         assert first is not None  # every key comes from some view
         people.append(
             PersonFit(
@@ -537,7 +616,9 @@ def assemble_bedlam(views: list[BedlamView]) -> BedlamLabels:
         )
         cam_T_body.append(transforms)
         joints3d.append(joints)
-    return BedlamLabels(frames=frames, K=K, people=people, cam_T_body=cam_T_body, joints3d=joints3d)
+        contacts.append(PersonContact(floor, None, None))
+        motions.append([str(part) for part in first.motion_info])
+    return BedlamLabels(frames=frames, K=K, people=people, cam_T_body=cam_T_body, joints3d=joints3d, contacts=contacts, motions=motions)
 
 
 BEDLAM_NUMBERING_FPS: int = 30

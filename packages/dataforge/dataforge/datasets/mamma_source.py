@@ -16,6 +16,8 @@ from numpy import ndarray
 from serde import SerdeError, from_dict, serde
 
 Gender: TypeAlias = Literal["neutral", "male", "female"]
+VERTICES: int = 10475
+"""SMPL-X vertices (every model a fit uses shares the topology): the length of every per-vertex label."""
 SmplxModel: TypeAlias = Literal["locked_head_neutral", "v1_1_male", "v1_1_female", "v1_1_neutral"]
 Method: TypeAlias = Literal["mosh_v_template", "mosh_betas", "mamma_pred", "mamma_render", "bedlam_render"]
 Family: TypeAlias = Literal["eval", "markerless-dance", "markerless-multiple-people", "markerless-iphones"]

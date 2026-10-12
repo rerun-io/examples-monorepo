@@ -20,30 +20,33 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 
 from dataforge import blueprints, hands, paths, schema, transports, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.mamma import MammaConfig, layout, scene_view, select_sequences
-from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models
+from dataforge.datasets.mamma_body import PosedPerson, SmplxBody, fetch_models, landmark_vertices
 from dataforge.datasets.mamma_layers import (
     MASK_DOWNSCALE,
     MASK_WORKERS,
     PERSON_COLOURS,
     SOURCE_TAGS,
+    CameraVisibility,
     Clock,
     decode_gray,
     log_cameras,
     log_person_masks,
     palette_png,
     stored_size,
+    vertex_rows,
     write_body_mesh,
     write_body_pose,
     write_projections,
+    write_visibility,
 )
-from dataforge.datasets.mamma_source import PersonFit, SmplxModel
+from dataforge.datasets.mamma_source import VERTICES, PersonFit, SmplxModel
 from dataforge.datasets.mamma_syn_download import MAMMASYN_REPO, MAMMASYN_REVISION, fetch_proof, verify_syn
 from dataforge.datasets.mamma_syn_source import (
     BEDLAM_DATASET,
@@ -54,8 +57,10 @@ from dataforge.datasets.mamma_syn_source import (
     BedlamClip,
     BedlamLabels,
     BedlamView,
+    PersonContact,
     RenderLabels,
     RenderView,
+    ShardMember,
     ShardReader,
     SynFamily,
     SynMetadata,
@@ -94,7 +99,23 @@ MODEL_CANDIDATES: tuple[SmplxModel, ...] = ("locked_head_neutral", "v1_1_neutral
 shards do not say which, so each person takes the one whose forward gives back the shipped joints."""
 MESH_STRIDE: int = 1
 """Every frame keeps its mesh: at 6 fps a coarser stride would leave the body still for half a second."""
-SYN_LAYERS: tuple[str, ...] = (paths.BASE_LAYER, paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER, paths.MASKS_LAYER)
+SYN_LAYERS: tuple[str, ...] = (
+    paths.BASE_LAYER,
+    paths.BODY_POSE_LAYER,
+    paths.BODY_MESH_LAYER,
+    paths.PROJECTIONS_LAYER,
+    paths.MASKS_LAYER,
+    paths.CONTACTS_LAYER,
+    paths.VISIBILITY_LAYER,
+)
+PIXEL_LAYERS: frozenset[str] = frozenset({paths.BASE_LAYER, paths.MASKS_LAYER})
+"""The layers that need a sample's PNGs; the others need only its labels and the first PNG's size."""
+PNG_HEADER_BYTES: int = 24
+"""The bytes of a PNG that hold its width and height."""
+CONTACT_THRESHOLD_M: float = 0.01
+"""A vertex nearer the other person's surface than this, or inside it, is in contact with them."""
+CONTACT_COLOURS: dict[str, tuple[int, int, int]] = {"floor": (255, 140, 0), "person": (230, 50, 200)}
+CONTACT_RADIUS_M: float = 0.006
 SYN_RIGS: int = 8
 """Most cameras a MammaSyn render sequence has; the family layout's scene rules cover them all."""
 VIDEO_SOURCE: str = f"AV1 NVENC encode (CQ {AV1_CQ}, 4:2:0) of the shards' RGBA PNG renders, alpha dropped"
@@ -145,21 +166,35 @@ def stream_camera(  # noqa: UP047 — beartype requires legacy generics
     read: CameraRead[ViewT],
     parse: Callable[[SynSample, bytes, str], ViewT],
     members: dict[tuple[str, int], bytes] | None = None,
+    *,
+    pixels: bool = True,
 ) -> Iterator[bytes]:
     """Read one camera's samples in frame order (from ``members`` when already read): yield each render's PNG, keep its labels
-    and mask on ``read``."""
+    and mask on ``read``. Without ``pixels``, keep only the labels and the size from the first PNG's header (``label_members``)."""
     with ShardReader(directory, members) as shards:
         for sample in samples:
             origin: str = f"{directory}/{sample.camera}/{sample.frame:04d}"
-            image: bytes = shards.read(sample.image)
-            size: tuple[int, int] = png_size(image, origin)
-            if read.size not in (None, size):
-                raise ValueError(f"{origin}: {size[0]}x{size[1]}, the camera's earlier frames are {read.size}")
-            read.size = size
+            image: bytes = shards.read(sample.image) if pixels else b""
+            if pixels or read.size is None:
+                size: tuple[int, int] = png_size(image if pixels else shards.read(png_header(sample)), origin)
+                if read.size not in (None, size):
+                    raise ValueError(f"{origin}: {size[0]}x{size[1]}, the camera's earlier frames are {read.size}")
+                read.size = size
             read.frames.append(sample.frame)
-            read.masks.append(shards.read(sample.mask))
             read.views.append(parse(sample, shards.read(sample.labels), origin))
-            yield image
+            if pixels:
+                read.masks.append(shards.read(sample.mask))
+                yield image
+
+
+def png_header(sample: SynSample) -> ShardMember:
+    """The bytes of a sample's PNG that hold its size."""
+    return replace(sample.image, size=PNG_HEADER_BYTES)
+
+
+def label_members(samples: list[SynSample]) -> list[ShardMember]:
+    """What a pass without pixels reads of ``samples`` (one camera's, in frame order): every label pickle and the first PNG's header."""
+    return [png_header(samples[0]), *(sample.labels for sample in samples)]
 
 
 def read_cameras(  # noqa: UP047 — beartype requires legacy generics
@@ -169,13 +204,17 @@ def read_cameras(  # noqa: UP047 — beartype requires legacy generics
     parse: Callable[[SynSample, bytes, str], ViewT],
     members: dict[tuple[str, int], bytes] | None = None,
     turns: int = 0,
+    *,
+    pixels: bool = True,
 ) -> list[CameraRead[ViewT]]:
     """Every camera's pass, in parallel; with ``work``, each camera's renders are encoded to ``work/<camera>.mp4`` on the way,
-    turned ``turns`` quarters clockwise."""
+    turned ``turns`` quarters clockwise. Without ``pixels`` (and so without ``work``), the labels alone (``stream_camera``)."""
+    if work is not None and not pixels:
+        raise ValueError("encoding a camera needs its pixels")
 
     def run(camera: str) -> CameraRead[ViewT]:
         read: CameraRead[ViewT] = CameraRead(camera, turns=turns)
-        frames: Iterator[bytes] = stream_camera(directory, by_camera[camera], read, parse, members)
+        frames: Iterator[bytes] = stream_camera(directory, by_camera[camera], read, parse, members, pixels=pixels)
         if work is None:
             for _ in frames:
                 pass
@@ -341,6 +380,113 @@ def write_instance_masks(recording: rr.RecordingStream, reads: list[CameraRead[R
             log_person_masks(recording, rig, person, stored[rig - 1], size, blobs, [time_column(clock.times_ns), frame_index_column(clock.frames)])
 
 
+def log_contact(
+    recording: rr.RecordingStream,
+    path: str,
+    pose: PosedPerson,
+    kept: Bool[ndarray, "t"],
+    in_contact: Bool[ndarray, "t 10475"],
+    clock: Clock,
+    *,
+    colour: tuple[int, int, int],
+    shipped: dict[str, pa.Array],
+    statics: rr.AnyValues | None = None,
+) -> None:
+    """One contact entity: the shipped columns and ``in_contact`` at the ``kept`` rows (empty elsewhere), and the contacting
+    vertices of the posed body drawn as points.
+
+    Raises:
+        ValueError: A kept row has no posed body (the person is absent there).
+    """
+    posed_rows: Bool[ndarray, "t"] = np.zeros(len(clock.frames), dtype=bool)
+    posed_rows[pose.mesh_rows[pose.mesh_present]] = True
+    if (kept & ~posed_rows).any():
+        raise ValueError(f"{path}: contact at frame {clock.frames[np.flatnonzero(kept & ~posed_rows)[0]]}, where the person has no posed body")
+    rr.log(path, rr.AnyValues(n_vertices=VERTICES, topology="smplx"), static=True, recording=recording)
+    if statics is not None:
+        rr.log(path, statics, static=True, recording=recording)
+    columns = rr.DynamicArchetype.columns(archetype="dataforge.VertexContact", components={**shipped, "in_contact": vertex_rows(in_contact, kept)})
+    rr.send_columns(path, indexes=clock.indexes, columns=columns, recording=recording)
+    vertices: Float32[ndarray, "k 10475 3"] = pose.vertices[kept[posed_rows]]
+    rr.log(path, rr.Points3D.from_fields(colors=colour, radii=CONTACT_RADIUS_M), static=True, recording=recording)
+    rr.send_columns(
+        path,
+        indexes=clock.indexes,
+        columns=rr.Points3D.columns(positions=vertices[in_contact[kept]]).partition(np.where(kept, in_contact.sum(axis=1), 0)),
+        recording=recording,
+    )
+
+
+def write_contacts(recording: rr.RecordingStream, posed: list[PosedPerson], contacts: list[PersonContact], clock: Clock) -> None:
+    """Every person's floor contact and signed distance to the other person, one row per frame (an empty one where the person is
+    absent or the frame ships no distance), the contacting vertices drawn on the posed body."""
+    recording.send_property(
+        paths.CONTACTS_LAYER,
+        rr.AnyValues(
+            source="each sample's label pickle: floor_contact_mask, sdf_vertices (the same in every view of a frame)",
+            contact_threshold_m=CONTACT_THRESHOLD_M,
+            partner_contact="in_contact = signed_distance < contact_threshold_m: inside the other person counts as contact",
+        ),
+    )
+    for pose, contact in zip(posed, contacts, strict=True):
+        present: Bool[ndarray, "t"] = np.zeros(len(clock.frames), dtype=bool)
+        present[pose.mesh_rows[pose.mesh_present]] = True
+        log_contact(
+            recording, schema.person_floor_contact_path(pose.index), pose, present, contact.floor, clock, colour=CONTACT_COLOURS["floor"], shipped={}
+        )
+        if contact.partner is None or contact.partner_distance_m is None:
+            continue
+        shipped: Bool[ndarray, "t"] = present & np.isfinite(contact.partner_distance_m).all(axis=1)
+        log_contact(
+            recording,
+            schema.person_contact_path(pose.index, contact.partner),
+            pose,
+            shipped,
+            np.nan_to_num(contact.partner_distance_m, nan=np.inf) < CONTACT_THRESHOLD_M,
+            clock,
+            colour=CONTACT_COLOURS["person"],
+            shipped={"signed_distance": vertex_rows(contact.partner_distance_m.astype(np.float16), shipped)},
+            statics=rr.AnyValues(contact_threshold_m=CONTACT_THRESHOLD_M, unit="metres, negative inside the other person"),
+        )
+
+
+def camera_visibility(
+    rig: int,
+    pose: PosedPerson,
+    views: list[tuple[int, Bool[ndarray, "10475"], float]],
+    landmarks_uv: Float32[ndarray, "p l 2"],
+    rows: int,
+) -> CameraVisibility:
+    """One camera's visibility of one person over ``rows`` rows from its labelled ``views`` (row, visible vertices, rate), with the
+    landmarks' pixels at the person's posed rows."""
+    labelled: Bool[ndarray, "t"] = np.zeros(rows, dtype=bool)
+    visible: Bool[ndarray, "t 10475"] = np.zeros((rows, VERTICES), dtype=bool)
+    rate: Float32[ndarray, "t"] = np.full(rows, np.nan, dtype=np.float32)
+    for row, seen, score in views:
+        labelled[row], visible[row], rate[row] = True, seen, score
+    uv: Float32[ndarray, "t l 2"] = np.full((rows, landmarks_uv.shape[1], 2), np.nan, dtype=np.float32)
+    uv[pose.mesh_rows[pose.mesh_present]] = landmarks_uv
+    return CameraVisibility(rig, pose.index, labelled, visible, None, rate, uv)
+
+
+def render_visibility(reads: list[CameraRead[RenderView]], labels: RenderLabels, posed: list[PosedPerson], landmarks: Int64[ndarray, "l"]) -> list[CameraVisibility]:
+    """What each camera sees of each person, from the camera's own views; the landmarks through its pinhole, at the stored size."""
+    row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(labels.frames)}
+    by_camera: dict[str, CameraRead[RenderView]] = {read.camera: read for read in reads}
+    found: list[CameraVisibility] = []
+    for rig, camera in enumerate(labels.cameras, start=1):
+        scale: float = stored_size(camera.width, camera.height)[0] / camera.width
+        for pose in posed:
+            pixels: Float64[ndarray, "n 2"] = camera.project(pose.vertices[:, landmarks].reshape(-1, 3).astype(np.float64)) * scale
+            views: list[tuple[int, Bool[ndarray, "10475"], float]] = [
+                (row_of[view.frame], label.vertex_visibility, label.person_visitiblity_rate)
+                for view in by_camera[camera.name].views
+                if (label := view.people.get(pose.index)) is not None
+            ]
+            found.append(camera_visibility(rig, pose, views, pixels.reshape(-1, len(landmarks), 2).astype(np.float32), len(labels.frames)))
+    return found
+
+
 def syn_download(config: MammaConfig, family: SynFamily, selected: Callable[[], list[tuple[Path, list[str]]]]) -> None:
     """Fetch the SMPL-X models and verify the family's shards in place against the pinned Hub listing; with ``fetch_into``,
     fetch the shards holding the chosen sequences (``selected``: each one's directory and shard names) and compare them."""
@@ -372,6 +518,10 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
         return SmplxBody(self.config.model_root)
 
     @cached_property
+    def landmarks(self) -> Int64[ndarray, "512"]:
+        return landmark_vertices(self.config.model_root)
+
+    @cached_property
     def stage_root(self) -> Path:
         """This process's directory for the local shard copies, beside the rrd tree (``work/mamma-syn-stage/<pid>``): a preview
         and a full run never share one. The directories of processes that died are removed first."""
@@ -399,8 +549,9 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
         return select_sequences(self.config, [(SequenceIdentity(self.config.name, sequence.parts), sequence) for sequence in found], "sequence")
 
     def prefetch(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> None:
-        """Copy the shards of a sequence still to convert to local disk, and index the copy, while the one before it converts."""
-        if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
+        """Copy the shards of a sequence whose pixels are still to convert to local disk, and index the copy, while the one before
+        it converts. A sequence that needs its labels alone reads them in place (``convert``)."""
+        if PIXEL_LAYERS.intersection(self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]):
             staged: Path = self.stage_root / identity.recording_id
             try:
                 sequence_samples(stage_shards(source.shards, staged), self.config.index_root, identity.sequence_key)
@@ -409,15 +560,20 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                 raise
 
     def convert(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> Path:
-        """Read every camera once (encoding its renders when base is pending), assemble and check the labels, write the layers."""
+        """Read every camera once (encoding its renders when base is pending), assemble and check the labels, write the layers.
+
+        A sequence whose pending layers need no pixels reads its label pickles in place, never staging its shards.
+        """
         targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
+        pixels: bool = bool(PIXEL_LAYERS.intersection(pending))
         staged: Path = self.stage_root / identity.recording_id
         with work_dir("mamma-syn-") as work:
             try:
                 with self.timer.stage("read"):
-                    copies: list[Path] = stage_shards(source.shards, staged)  # the prefetch's copies, unless this is the run's first sequence
+                    # The prefetch's copies, unless this is the run's first sequence; the shards in place for labels alone.
+                    copies: list[Path] = stage_shards(source.shards, staged) if pixels else source.shards
                     samples: list[SynSample] = sequence_samples(copies, self.config.index_root, identity.sequence_key)
                     shipped: SynMetadata = read_json(source.metadata, SynMetadata)
                 if shipped.num_samples != len(samples):
@@ -429,7 +585,9 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                     if sample.frame in kept:
                         by_camera[sample.camera].append(sample)
                 with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
-                    reads: list[CameraRead[RenderView]] = read_cameras(staged, by_camera, work if paths.BASE_LAYER in pending else None, parse_render)
+                    reads: list[CameraRead[RenderView]] = read_cameras(
+                        staged if pixels else source.directory, by_camera, work if paths.BASE_LAYER in pending else None, parse_render, pixels=pixels
+                    )
             finally:
                 shutil.rmtree(staged, ignore_errors=True)
             labels: RenderLabels = assemble_render([view for read in reads for view in read.views], {read.camera: read.size for read in reads if read.size})
@@ -461,6 +619,14 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
                     recording, labels.cameras, posed, clock, camera_model="pinhole", calibration_source="each sample's label pickle (cam_int, cam_ext)"
                 ),
                 paths.MASKS_LAYER: lambda recording: write_instance_masks(recording, reads, [person.index for person in labels.people], RENDER_FPS),
+                paths.CONTACTS_LAYER: lambda recording: write_contacts(recording, posed, labels.contacts, clock),
+                paths.VISIBILITY_LAYER: lambda recording: write_visibility(
+                    recording,
+                    render_visibility(reads, labels, posed, self.landmarks),
+                    self.landmarks,
+                    clock,
+                    source="each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)",
+                ),
             },
         )
         self.timer.capture_s = len(labels.frames) / RENDER_FPS
@@ -568,8 +734,16 @@ def write_bedlam_base(
 
 
 def write_bedlam_pose(recording: rr.RecordingStream, labels: BedlamLabels, posed: list[PosedPerson], clock: Clock) -> None:
-    """The shipped parameters (each person's own world) with each person's world-to-camera transform, and the camera-frame keypoints."""
+    """The shipped parameters (each person's own world) with each person's world-to-camera transform and the motion they come
+    from, and the camera-frame keypoints."""
     write_body_pose(recording, labels.people, "bedlam_render", posed, clock)
+    for person, motion in zip(labels.people, labels.motions, strict=True):
+        rr.log(
+            schema.person_path(person.index),
+            rr.AnyValues(motion_action=motion[0], motion_source=motion[2], motion_info=motion),
+            static=True,
+            recording=recording,
+        )
     for person, transforms in zip(labels.people, labels.cam_T_body, strict=True):
         rr.send_columns(
             schema.person_body_path(person.index, "smplx"),
@@ -595,6 +769,20 @@ def write_bedlam_projections(recording: rr.RecordingStream, labels: BedlamLabels
         )
 
 
+def bedlam_visibility(read: CameraRead[BedlamView], labels: BedlamLabels, posed: list[PosedPerson], landmarks: Int64[ndarray, "l"]) -> list[CameraVisibility]:
+    """What the clip's camera sees of each person; the landmarks of the camera-frame body through each frame's K."""
+    row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(labels.frames)}
+    found: list[CameraVisibility] = []
+    for pose in posed:
+        rows: Int64[ndarray, "p"] = pose.mesh_rows[pose.mesh_present]
+        pixels: Float64[ndarray, "p l 3"] = np.einsum("pij,plj->pli", labels.K[rows], pose.vertices[:, landmarks].astype(np.float64))
+        views: list[tuple[int, Bool[ndarray, "10475"], float]] = [
+            (row_of[view.frame], label.vertex_visibility, label.person_visitiblity_rate) for view in read.views if (label := view.people.get(pose.index)) is not None
+        ]
+        found.append(camera_visibility(1, pose, views, (pixels[..., :2] / pixels[..., 2:]).astype(np.float32), len(labels.frames)))
+    return found
+
+
 class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
     """Convert one BEDLAM clip at a time from the shards in place, in its camera frame."""
 
@@ -608,6 +796,10 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
     @cached_property
     def body(self) -> SmplxBody:
         return SmplxBody(self.config.model_root)
+
+    @cached_property
+    def landmarks(self) -> Int64[ndarray, "512"]:
+        return landmark_vertices(self.config.model_root)
 
     def download(self) -> None:
         syn_download(
@@ -628,10 +820,15 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
 
     def prefetch(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> None:
         """Read the members of a clip still to convert into memory while the clip before it converts (a clip's samples lie in a
-        few runs of its batch's shards: a few reads, instead of three random NAS reads per sample on the convert's path)."""
-        if self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]:
+        few runs of its batch's shards: a few reads, instead of three random NAS reads per sample on the convert's path). A clip
+        whose pending layers need no pixels reads its label pickles and one PNG header (``label_members``)."""
+        pending: list[str] = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]
+        if pending:
             samples: list[SynSample] = self.clip_samples(source)
-            self.prefetched[identity.recording_id] = read_members(source.directory, [member for sample in samples for member in (sample.image, sample.mask, sample.labels)])
+            members: list[ShardMember] = (
+                [member for sample in samples for member in (sample.image, sample.mask, sample.labels)] if PIXEL_LAYERS.intersection(pending) else label_members(samples)
+            )
+            self.prefetched[identity.recording_id] = read_members(source.directory, members)
 
     def convert(self, identity: SequenceIdentity, source: BedlamClip, *, force: bool) -> Path:
         """Read the clip once (encoding it when base is pending), pose every person and move them into the camera frame, write."""
@@ -643,7 +840,13 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         with work_dir("mamma-bedlam-") as work:
             with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
                 (read,) = read_cameras(
-                    source.directory, {source.clip: samples}, work if paths.BASE_LAYER in pending else None, parse_bedlam, members, source.turns
+                    source.directory,
+                    {source.clip: samples},
+                    work if paths.BASE_LAYER in pending else None,
+                    parse_bedlam,
+                    members,
+                    source.turns,
+                    pixels=bool(PIXEL_LAYERS.intersection(pending)),
                 )
             labels: BedlamLabels = assemble_bedlam(read.views)
             # BEDLAM's principal point is the image centre; anywhere else, the PNGs are turned against K (a closeup the batch name missed).
@@ -671,6 +874,14 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
                 paths.BODY_MESH_LAYER: lambda recording: write_body_mesh(recording, posed, clock),
                 paths.PROJECTIONS_LAYER: lambda recording: write_bedlam_projections(recording, labels, posed, clock),
                 paths.MASKS_LAYER: lambda recording: write_instance_masks(recording, [read], [person.index for person in labels.people], BEDLAM_NUMBERING_FPS),
+                paths.CONTACTS_LAYER: lambda recording: write_contacts(recording, posed, labels.contacts, clock),
+                paths.VISIBILITY_LAYER: lambda recording: write_visibility(
+                    recording,
+                    bedlam_visibility(read, labels, posed, self.landmarks),
+                    self.landmarks,
+                    clock,
+                    source="each sample's label pickle: vertex_visibility, person_visitiblity_rate (the release's spelling)",
+                ),
             },
         )
         self.timer.capture_s = (int(labels.frames[-1]) - int(labels.frames[0]) + BEDLAM_STRIDE) / BEDLAM_NUMBERING_FPS

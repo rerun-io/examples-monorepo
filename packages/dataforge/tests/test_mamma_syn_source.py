@@ -21,6 +21,7 @@ from dataforge.datasets.mamma_syn_source import (
     BedlamLabels,
     BedlamView,
     RenderLabels,
+    RenderPersonLabel,
     RenderView,
     ShardMember,
     ShardReader,
@@ -139,8 +140,29 @@ def test_a_duplicate_member_names_its_shard(tmp_path: Path) -> None:
         index_shards([first, second])
 
 
-def render_person(*, pose: float = 0.0, trans: float = 0.0, cam_ext: np.ndarray | None = None) -> dict[str, object]:
-    """One person's ``data.pyd`` record with the release's keys and dtypes (the fields the converter does not keep included)."""
+VERTICES: int = 10475
+
+
+def vertex_mask(vertices: list[int], dtype: type = bool) -> np.ndarray:
+    """A per-vertex column, 1 at ``vertices``."""
+    mask: np.ndarray = np.zeros(VERTICES, dtype=dtype)
+    mask[vertices] = 1
+    return mask
+
+
+def render_person(
+    *,
+    pose: float = 0.0,
+    trans: float = 0.0,
+    cam_ext: np.ndarray | None = None,
+    floor: list[int] | None = None,
+    distance: np.ndarray | None = None,
+    seen: list[int] | None = None,
+    rate: float = 1.0,
+) -> dict[str, object]:
+    """One person's ``data.pyd`` record with the release's keys and dtypes (the fields the converter does not keep included).
+    ``floor``: the vertices on the floor; ``distance``: the per-vertex distance to the other person (an empty list without);
+    ``seen``: the vertices this view sees (all without)."""
     return {
         "imgname": "/tmp/bedlam_lab/x/png/seq/IOI_01/0000_00.png",
         "pose_world": np.full(165, pose),
@@ -154,7 +176,12 @@ def render_person(*, pose: float = 0.0, trans: float = 0.0, cam_ext: np.ndarray 
         "joints3d": np.full((127, 3), pose + trans),
         "vertices3d": np.zeros((10475, 3)),
         "joints2d": np.zeros((29, 5, 127, 2)),
-        "vertex_visibility": np.ones((10475, 1), dtype=np.int32),
+        "vertices2d": np.zeros((VERTICES, 2)),
+        "vertex_visibility": (np.ones(VERTICES, dtype=np.int32) if seen is None else vertex_mask(seen, np.int32))[:, None],
+        "person_visitiblity_rate": np.float64(rate),
+        "sdf_vertices": [] if distance is None else distance.astype(np.float32)[:, None],
+        "floor_contact_mask": vertex_mask(floor or []),
+        "camera_normals": np.zeros((VERTICES, 3)),
         "motion_info": np.str_("unknown"),
         "sub": 0,
         "person_idx": 0,
@@ -210,6 +237,54 @@ def test_views_that_disagree_on_a_person_raise() -> None:
         assemble_render(views, {"IOI_01": (2056, 1504), "IOI_02": (2056, 1504)})
 
 
+def test_render_views_carry_each_persons_contact_and_what_each_view_sees() -> None:
+    # Floor contact and the distance to the other person belong to the person at a frame (every view ships the same);
+    # visibility belongs to the view. Frame 1 ships no distance, and person 1 is absent there.
+    distance: np.ndarray = np.linspace(-0.01, 0.1, VERTICES)
+    views: list[RenderView] = [
+        RenderView("IOI_01", 0, read_render_view(pickled({0: render_person(floor=[3, 4], distance=distance, seen=[0, 1]), 1: render_person(pose=0.5, distance=-distance)}), "IOI_01/0000")),
+        RenderView("IOI_02", 0, read_render_view(pickled({0: render_person(floor=[3, 4], distance=distance, seen=[2], rate=0.4), 1: render_person(pose=0.5, distance=-distance)}), "IOI_02/0000")),
+        RenderView("IOI_01", 1, read_render_view(pickled({0: render_person(pose=0.1, floor=[9])}), "IOI_01/0001")),
+    ]
+    labels: RenderLabels = assemble_render(views, {"IOI_01": (2056, 1504), "IOI_02": (2056, 1504)})
+    first, second = labels.contacts
+    assert (first.partner, second.partner) == (1, 0)
+    assert [np.flatnonzero(row).tolist() for row in first.floor] == [[3, 4], [9]]
+    assert not second.floor.any()
+    assert first.partner_distance_m is not None and second.partner_distance_m is not None
+    np.testing.assert_array_equal(first.partner_distance_m[0], distance.astype(np.float32))
+    np.testing.assert_array_equal(second.partner_distance_m[0], -distance.astype(np.float32))
+    assert np.isnan(first.partner_distance_m[1]).all()
+    seen: RenderPersonLabel = views[1].people[0]
+    assert (np.flatnonzero(seen.vertex_visibility).tolist(), seen.person_visitiblity_rate) == ([2], 0.4)
+    assert np.flatnonzero(views[0].people[0].vertex_visibility).tolist() == [0, 1]
+
+
+def test_views_that_disagree_on_a_persons_floor_contact_raise() -> None:
+    views: list[RenderView] = [
+        RenderView("IOI_01", 0, read_render_view(pickled({0: render_person(floor=[3])}), "IOI_01/0000")),
+        RenderView("IOI_02", 0, read_render_view(pickled({0: render_person(floor=[4])}), "IOI_02/0000")),
+    ]
+    with pytest.raises(ValueError, match=r"person 0.*disagree at frame 0.*IOI_02"):
+        assemble_render(views, {"IOI_01": (2056, 1504), "IOI_02": (2056, 1504)})
+
+
+def test_a_distance_to_the_other_person_in_a_scene_of_three_raises() -> None:
+    # The release does not say whom a distance is to: only a two-person scene has one other person.
+    distance: np.ndarray = np.zeros(VERTICES)
+    people: dict[int, dict[str, object]] = {key: render_person(pose=0.1 * key, distance=distance) for key in (0, 1, 2)}
+    views: list[RenderView] = [RenderView("IOI_01", 0, read_render_view(pickled(people), "IOI_01/0000"))]
+    with pytest.raises(ValueError, match=r"3 people.*distance"):
+        assemble_render(views, {"IOI_01": (2056, 1504)})
+
+
+def test_a_vertex_visibility_other_than_0_or_1_names_its_sample() -> None:
+    person: dict[str, object] = render_person()
+    person["vertex_visibility"] = np.full((VERTICES, 1), 0.5)
+    with pytest.raises(ValueError, match=r"IOI_01/0004.*0 and 1"):
+        read_render_view(pickled({0: person}), "IOI_01/0004")
+
+
 def test_a_render_camera_that_moves_raises() -> None:
     moved: np.ndarray = np.eye(4)
     moved[0, 3] = 0.01
@@ -221,8 +296,9 @@ def test_a_render_camera_that_moves_raises() -> None:
         assemble_render(views, {"IOI_01": (2056, 1504)})
 
 
-def bedlam_person(*, offset: float, frame: int, focal: float = 1010.0) -> dict[str, object]:
-    """One person of a BEDLAM view: float32 pose and 11 betas, its own world (cam_ext), joints in the camera frame."""
+def bedlam_person(*, offset: float, frame: int, focal: float = 1010.0, floor: list[int] | None = None, seen: list[int] | None = None) -> dict[str, object]:
+    """One person of a BEDLAM view: float32 pose and 11 betas, its own world (cam_ext), joints in the camera frame; float64
+    visibility, and no distance to anyone (BEDLAM ships none)."""
     cam_ext: np.ndarray = np.eye(4)
     cam_ext[:3, 3] = [offset, 0.0, 4.0 + 0.1 * frame]  # each person's world sits elsewhere; the orbit moves the camera
     return {
@@ -240,6 +316,10 @@ def bedlam_person(*, offset: float, frame: int, focal: float = 1010.0) -> dict[s
         "sub": "rp_christine_posed_013",
         "person_idx": "00",
         "race": "asian",
+        "floor_contact_mask": vertex_mask(floor or []),
+        "camera_normals": np.zeros((VERTICES, 3)),
+        "vertex_visibility": (np.ones(VERTICES) if seen is None else vertex_mask(seen, np.float64))[:, None],
+        "person_visitiblity_rate": np.float64(1.0),
     }
 
 
@@ -260,6 +340,19 @@ def test_bedlam_views_keep_each_persons_camera_and_the_zoom() -> None:
     np.testing.assert_array_equal(labels.cam_T_body[1][1][:3, 3], [1.5, 0.0, 4.5])
     assert np.isnan(labels.cam_T_body[1][2]).all() and np.isnan(labels.joints3d[1][2]).all()
     assert (labels.joints3d[0][2] == 10.0).all()
+
+
+def test_bedlam_views_carry_each_persons_floor_contact_and_motion_source() -> None:
+    views: list[BedlamView] = [
+        BedlamView(0, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=0, floor=[7], seen=[5])}), "seq_000000/0000")),
+        BedlamView(5, read_bedlam_view(pickled({0: bedlam_person(offset=0.0, frame=5)}), "seq_000000/0005")),
+    ]
+    labels: BedlamLabels = assemble_bedlam(views)
+    (contact,) = labels.contacts
+    assert [np.flatnonzero(row).tolist() for row in contact.floor] == [[7], []]
+    assert (contact.partner, contact.partner_distance_m) == (None, None)
+    assert labels.motions == [["kick", "29", "amass.npz", "120.0", "0", "526"]]
+    assert np.flatnonzero(views[0].people[0].vertex_visibility).tolist() == [5]
 
 
 def test_people_in_one_bedlam_view_that_disagree_on_the_intrinsics_raise() -> None:
