@@ -78,6 +78,8 @@ and is not part of `world_T_cam`.
         /video                  VideoStream (encoded samples, video_time timeline)
         /coco133_uv             Points2DWithConfidence (projected 2D keypoints)
         /depth                  DepthImage (optional)
+        /masks/person_NN        a person's mask (§15)
+        /visibility/person_NN   what this camera sees of a person (§15)
   /rig_01                       moving ego rig: AnyValues{...} + Transform3D = world_T_rig(t) (temporal)
     /cam_00                     reference camera: Transform3D = identity rig_T_cam (static)
       /pinhole/video, /pinhole/coco133_uv
@@ -86,6 +88,7 @@ and is not part of `world_T_cam`.
     /imu_00                     peer sensor (IMU — see §8; emitted by dataforge)
     /mag_00                     peer sensor (magnetometer — see §9; emitted by dataforge)
   /gt                           ground-truth annotations (v1 paths retained, see §5; additions §10–11)
+    /people/person_NN           a person's body model and contact (§15)
 ```
 
 - Entity ids are **zero-padded to two digits** (`rig_00`, `cam_00`) so they sort
@@ -579,6 +582,67 @@ Frame provenance preserves source identity and missing-camera information.
   and index may differ.
 - Native-rate sensors retain their own `video_time` samples (§8–9); this rule
   does not resample them onto camera frames.
+
+## 15. People *(emitted — first writer: dataforge / MAMMA)*
+
+Whole-body labels of one or more people: a fitted body model, what it touches,
+and what each camera sees of it. Each person has one entity under
+`/world/gt/people`; each camera has one child per person under its `pinhole`,
+so a per-camera label lands on that image and on nothing else (§13).
+
+**Layout:**
+
+```
+/world/gt/people/person_NN                AnyValues (static): subject, gender, source, fit_method, model, + source metadata
+  /body/smplx                             AnyValues: static shape (betas, ...); temporal pose (165) + trans (3), NaN where absent
+  /body/mesh                              Mesh3D: static topology, temporal vertex_positions (world metres), empty where absent
+  /coco133_xyz                            Points3DWithConfidence (133, class 0, world metres)
+  /contact/floor                          dataforge.VertexContact{in_contact} + Points3D (the contacting vertices)
+  /contact/person_MM                      dataforge.VertexContact{signed_distance, in_contact} + Points3D
+/world/rig_NN/cam_MM/pinhole
+  /masks/person_NN                        EncodedImage: the person's mask, + static Transform3D scaling it over the video
+  /coco133_uv_projected/person_NN         Points2DWithConfidence: coco133_xyz through the camera's full lens model (derived)
+  /visibility/person_NN                   dataforge.VertexVisibility{visible, in_image, visibility_rate} + Points2D (landmarks)
+/world/gt/markers/<kind>                  Points3D + labels: motion-capture markers (vicon measured, mosh_baseline fitted), world metres
+```
+
+- `person_NN` is the source's person index, zero-padded. A writer does not
+  renumber people; a person absent from a frame keeps its index. The same `NN`
+  names the person in every per-camera child, and `MM` in `contact/person_MM`
+  is the partner's index.
+- **Per-vertex labels** are lists in the body model's vertex order, the order
+  of `body/mesh`'s `vertex_positions` (SMPL-X: 10,475). Each entity carries
+  static `AnyValues{n_vertices, topology}` so a reader can check the length
+  before it indexes. The list is the record; the `Points3D`/`Points2D` beside
+  it are a drawing of it.
+- **Rows.** Per-vertex entities have a row on every frame the recording has.
+  Where the person is absent, or the source does not label them in that view,
+  the lists and the drawing are empty, so the viewer's latest-at never holds a
+  stale label.
+- `contact/floor`: `in_contact` (list<bool>) is true where the source marks a
+  vertex as touching the floor. `Points3D` places the true vertices on the
+  posed body of that frame.
+- `contact/person_MM`: `signed_distance` (list<float16>, metres) is each
+  vertex's distance to person `MM`'s surface as the source shipped it, negative
+  inside (interpenetration). `in_contact` is derived: `signed_distance <
+  contact_threshold_m`, so interpenetration counts as contact. The threshold is
+  a static `AnyValues{contact_threshold_m}` on the entity. A source distance
+  that does not name its partner is written only for two-person scenes, where
+  the partner is the other person; a writer refuses it in a larger scene.
+- `visibility/person_NN`: each component is optional; a source writes the
+  ones it ships. `visible` (list<bool>) is true where the camera sees the
+  vertex. `in_image` (bool) says whether the body is in the camera's image at
+  all. `visibility_rate` (float32) is the source's per-view score, verbatim
+  under its own definition. `Points2D` draws a fixed vertex subset (static
+  `AnyValues{landmark_vertex_ids}`; MAMMA: MammaNet's 512 landmarks) in
+  stored-image pixels, coloured visible or hidden. It uses the source's own
+  2D projection when the source ships one, else the lens projection of
+  `body/mesh`. A source without `visible` draws no landmarks.
+- Contact a source did not ship (self-contact, contact computed from our
+  meshes) is an estimate: it goes under
+  `/world/pred/<name>/people/person_NN/contact/...` (§3, Layers versus paths).
+- Contact and visibility do not change the body: a reader that ignores them
+  reads the same person.
 
 These additive sections retain `exoego:v2`. An incompatible change to existing
 paths or meanings must increment the schema version and update this document.
