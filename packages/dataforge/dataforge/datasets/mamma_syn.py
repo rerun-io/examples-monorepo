@@ -112,6 +112,16 @@ class CameraRead(Generic[ViewT]):
     views: list[ViewT] = field(default_factory=list)
     masks: list[bytes] = field(default_factory=list)
     size: tuple[int, int] | None = None
+    """The shipped PNGs' width and height."""
+    turns: int = 0
+    """Clockwise quarter turns from the shipped PNGs and masks to the stored video and masks."""
+
+    @property
+    def turned_size(self) -> tuple[int, int]:
+        """The camera image's width and height: the PNGs' after the turns."""
+        assert self.size is not None  # a camera with samples has its PNG size
+        width, height = self.size
+        return (height, width) if self.turns % 2 else (width, height)
 
 
 def parse_render(sample: SynSample, payload: bytes, origin: str) -> RenderView:
@@ -158,18 +168,22 @@ def read_cameras(  # noqa: UP047 — beartype requires legacy generics
     work: Path | None,
     parse: Callable[[SynSample, bytes, str], ViewT],
     members: dict[tuple[str, int], bytes] | None = None,
+    turns: int = 0,
 ) -> list[CameraRead[ViewT]]:
-    """Every camera's pass, in parallel; with ``work``, each camera's renders are encoded to ``work/<camera>.mp4`` on the way."""
+    """Every camera's pass, in parallel; with ``work``, each camera's renders are encoded to ``work/<camera>.mp4`` on the way,
+    turned ``turns`` quarters clockwise."""
 
     def run(camera: str) -> CameraRead[ViewT]:
-        read: CameraRead[ViewT] = CameraRead(camera)
+        read: CameraRead[ViewT] = CameraRead(camera, turns=turns)
         frames: Iterator[bytes] = stream_camera(directory, by_camera[camera], read, parse, members)
         if work is None:
             for _ in frames:
                 pass
         else:
             # The nominal container rate; log_video_stream stamps every sample with its source frame's time.
-            encoded: int = encode_frames_to_mp4(frames, work / f"{camera}.mp4", source=FrameSource("png"), fps=RENDER_FPS, gop=AV1_GOP, cq=AV1_CQ)
+            encoded: int = encode_frames_to_mp4(
+                frames, work / f"{camera}.mp4", source=FrameSource("png"), fps=RENDER_FPS, gop=AV1_GOP, cq=AV1_CQ, rotate_cw_quarter_turns=turns
+            )
             if encoded != len(by_camera[camera]):
                 raise ValueError(f"{directory}/{camera}: {encoded} frames encoded of {len(by_camera[camera])}")
         return read
@@ -288,9 +302,10 @@ def write_render_base(
     )
 
 
-def instance_mask_pngs(source: bytes, size: tuple[int, int]) -> dict[int, bytes]:
-    """A palette PNG per person present in a sample's instance mask (pixel value = person index + 1), keyed by person index."""
-    ids = decode_gray(source)  # decoded once for every person; no jaxtyping on thread-pool locals (see palette_png)
+def instance_mask_pngs(source: bytes, size: tuple[int, int], turns: int) -> dict[int, bytes]:
+    """A palette PNG per person present in a sample's instance mask (pixel value = person index + 1), keyed by person index;
+    the mask turned ``turns`` quarters clockwise first, as its video."""
+    ids = np.rot90(decode_gray(source), k=-turns)  # decoded once for every person; no jaxtyping on thread-pool locals (see palette_png)
     return {
         int(value) - 1: palette_png(np.where(ids == value, np.uint8(255), np.uint8(0)), size, PERSON_COLOURS[(int(value) - 1) % len(PERSON_COLOURS)])
         for value in np.unique(ids)
@@ -309,15 +324,12 @@ def write_instance_masks(recording: rr.RecordingStream, reads: list[CameraRead[R
             person_ids="person_NN = the shards' instance mask value NN + 1",
         ),
     )
-    stored: list[tuple[int, int]] = []
-    for read in reads:
-        assert read.size is not None  # a camera with samples has its PNG size
-        stored.append(stored_size(*read.size))
+    stored: list[tuple[int, int]] = [stored_size(*read.turned_size) for read in reads]
     sizes: list[tuple[int, int]] = [(width // MASK_DOWNSCALE, height // MASK_DOWNSCALE) for width, height in stored]
     cv2.setNumThreads(1)  # see MASK_WORKERS
     with ThreadPoolExecutor(max_workers=MASK_WORKERS) as executor:
         futures: list[list[Future[dict[int, bytes]]]] = [
-            [executor.submit(instance_mask_pngs, mask, size) for mask in read.masks] for read, size in zip(reads, sizes, strict=True)
+            [executor.submit(instance_mask_pngs, mask, size, read.turns) for mask in read.masks] for read, size in zip(reads, sizes, strict=True)
         ]
         split: list[list[dict[int, bytes]]] = [[future.result() for future in camera] for camera in futures]
     everyone: list[int] = sorted(set(people).union(*(frame for camera in split for frame in camera)))
@@ -502,8 +514,7 @@ def write_bedlam_base(
     joint_error_m: float,
 ) -> None:
     """The camera at the origin of its own frame (the scene's world), its intrinsics at every frame (a zoom changes them), its video."""
-    assert read.size is not None
-    width, height = read.size
+    width, height = read.turned_size
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True, recording=recording)  # the camera frame: x right, y down, z ahead
     rr.log("/", annotation_context(), static=True, recording=recording)
     log_rig_node(recording, 1, reference=None, num_cameras=1, name="camera", kind="ego")
@@ -631,8 +642,16 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         samples: list[SynSample] = self.clip_samples(source)
         with work_dir("mamma-bedlam-") as work:
             with self.timer.stage("transcode" if paths.BASE_LAYER in pending else "read"):
-                (read,) = read_cameras(source.directory, {source.clip: samples}, work if paths.BASE_LAYER in pending else None, parse_bedlam, members)
+                (read,) = read_cameras(
+                    source.directory, {source.clip: samples}, work if paths.BASE_LAYER in pending else None, parse_bedlam, members, source.turns
+                )
             labels: BedlamLabels = assemble_bedlam(read.views)
+            # BEDLAM's principal point is the image centre; anywhere else, the PNGs are turned against K (a closeup the batch name missed).
+            width, height = read.turned_size
+            worst: int = int(np.abs(labels.K[:, :2, 2] - [width / 2, height / 2]).max(axis=1).argmax())
+            cx, cy = float(labels.K[worst, 0, 2]), float(labels.K[worst, 1, 2])
+            if max(abs(cx - width / 2), abs(cy - height / 2)) > 0.5:
+                raise ValueError(f"{source.directory}/{source.clip}: principal point ({cx}, {cy}) is not the centre of the {width}x{height} image")
             clock: Clock = Clock(labels.frames, frame_times(labels.frames, BEDLAM_NUMBERING_FPS))
             with self.timer.stage("smplx"):
                 people, posed, joint_error_m = pose_people(self.body, labels.people, labels.joints3d, clock, labels.cam_T_body)

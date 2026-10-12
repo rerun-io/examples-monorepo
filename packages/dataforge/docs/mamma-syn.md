@@ -16,6 +16,10 @@
   BEDLAM 1280x720), `<key>.mask.png` (8-bit instance mask: person index + 1, 0 = background) and `<key>.data.pyd` (a pickled dict
   of the people that view labels). The pickles refer to numpy arrays and scalars only; they are read with an unpickler that
   refuses anything else.
+- BEDLAM's 7 `closeup` batches (2,000 clips) are rendered in portrait and ship turned a quarter counter-clockwise to 1280x720,
+  their K still for the 720x1280 portrait image (principal point (360, 640)); BEDLAM's loaders turn them back by the batch name.
+  So does the converter: their video and masks are turned a quarter clockwise. In every batch the principal point is the
+  image centre (checked on 3 clips per batch); a clip whose K is not centred on its (turned) image fails.
 - A render key is `.../<sequence>/<camera>/<frame>`; within a camera the frames ascend, and a camera may straddle shards. A
   BEDLAM key is `.../png/<clip>/<clip>_<frame>`, the clips' samples unsorted in their batch's shards. Within a render shard each
   camera is one run, a sample's members in the order labels, render, mask.
@@ -89,7 +93,7 @@ another camera has.
 - **base**: the cameras and videos, capture and episode properties (`group`, `collection` = the dataset directory, `sequence`,
   `subjects`, `shard_samples`, `joints3d_max_error_mm`; BEDLAM: `batch`, `genders`). The renders' world is y down, as their
   labels are; a BEDLAM clip's world is its camera frame (x right, y down, z ahead), the only frame its bodies share: each BEDLAM
-  body comes in a world of its own, and on orbit clips those worlds do not agree.
+  body comes in a world of its own, and on orbit clips those worlds do not agree. A closeup clip's video is 720x1280 (see Source).
 - **body_pose**, per person `NN` = the release's person index (its mask value - 1): the shipped parameters, the `source` tag
   `synthetic_gt`, the `model` file, and COCO-133 keypoints from the posed model; NaN rows where no view labels the person (a view
   leaves out people it does not see).

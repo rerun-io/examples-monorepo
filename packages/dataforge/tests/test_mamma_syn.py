@@ -243,19 +243,22 @@ def bedlam_forward(frame: int, person: int) -> tuple[np.ndarray, np.ndarray, np.
     return pose, betas, trans, output.vertices[0].numpy().astype(np.float64), output.joints[0, :127].numpy().astype(np.float64)
 
 
-def bedlam_camera(frame: int, person: int) -> tuple[np.ndarray, np.ndarray]:
-    """The zoom: K changes every frame; each person's world sits at its own place in front of the camera."""
+def bedlam_camera(frame: int, person: int, size: tuple[int, int] = BEDLAM_SIZE) -> tuple[np.ndarray, np.ndarray]:
+    """The zoom: K changes every frame, its principal point at the centre of the camera's ``size`` image; each person's world
+    sits at its own place in front of the camera."""
     focal: float = 300.0 + 10.0 * frame
     cam_ext: np.ndarray = np.eye(4)
     cam_ext[:3, 3] = [0.8 * person - 0.4, 0.0, 5.0]
-    return np.array([[focal, 0.0, 160.0], [0.0, focal, 120.0], [0.0, 0.0, 1.0]]), cam_ext
+    return np.array([[focal, 0.0, size[0] / 2], [0.0, focal, size[1] / 2], [0.0, 0.0, 1.0]]), cam_ext
 
 
-def write_bedlam_batch(root: Path) -> Path:
-    directory: Path = root / "MammaSyn" / "MammaSyn-Singles" / "BEDLAM_MASKS_WD" / BATCH
+def write_bedlam_batch(root: Path, batch: str = BATCH, *, portrait: bool = False) -> Path:
+    """A batch as BEDLAM ships it. ``portrait``: the camera's image is BEDLAM_SIZE turned upright (K for 240x320), and the
+    shipped PNGs and masks are that image turned a quarter counter-clockwise, as in BEDLAM's closeup batches."""
+    directory: Path = root / "MammaSyn" / "MammaSyn-Singles" / "BEDLAM_MASKS_WD" / batch
     directory.mkdir(parents=True)
     members: list[tuple[str, bytes]] = []
-    width, height = BEDLAM_SIZE
+    width, height = BEDLAM_SIZE[::-1] if portrait else BEDLAM_SIZE
     for clip, frames in CLIPS.items():
         for frame in frames:
             people: dict[int, dict[str, object]] = {}
@@ -265,7 +268,7 @@ def write_bedlam_batch(root: Path) -> Path:
                 if (clip, frame, person) == ("seq_000000", 10, 1):
                     continue  # BEDLAM's labels leave out a person its mask still has
                 pose, betas, trans, _, joints = bedlam_forward(frame, person)
-                cam_int, cam_ext = bedlam_camera(frame, person)
+                cam_int, cam_ext = bedlam_camera(frame, person, (width, height))
                 people[person] = {
                     "pose_world": pose,
                     "shape": betas,
@@ -276,8 +279,10 @@ def write_bedlam_batch(root: Path) -> Path:
                     "joints3d": joints @ cam_ext[:3, :3].T + cam_ext[:3, 3],
                     "person_idx": f"{person:02d}",
                 }
-            key: str = f"/ps/project/bedlam/public/b0_all/{BATCH}/png/{clip}/{clip}_{frame:04d}"
+            key: str = f"/ps/project/bedlam/public/b0_all/{batch}/png/{clip}/{clip}_{frame:04d}"
             rgba: np.ndarray = np.full((height, width, 4), 255, dtype=np.uint8)
+            if portrait:
+                rgba, mask = np.rot90(rgba), np.rot90(mask)  # shipped turned a quarter counter-clockwise
             members += [(f"{key}.data.pyd", pickle.dumps(people, protocol=4)), (f"{key}.png", png(rgba)), (f"{key}.mask.png", png(mask))]
     with tarfile.open(directory / "000000.tar", "w") as tar:
         for name, payload in members:
@@ -333,3 +338,43 @@ def test_a_bedlam_clip_converts_in_its_camera_frame(tmp_path: Path, nvenc_ffmpeg
     for person in (0, 1):
         blobs = column_rows(masks, f"{schema.person_mask_path(1, 0, person)}:EncodedImage:blob").column(1).to_pylist()
         assert len(blobs) == 3 and np.asarray(Image.open(io.BytesIO(bytes(blobs[2][0])))).any()  # person 1's mask stays at frame 10
+
+
+CLOSEUP_BATCH: str = "20221011_1_250_batch01hand_closeup_suburb_a"
+
+
+def test_a_bedlam_closeup_clip_is_turned_upright_to_match_its_intrinsics(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
+) -> None:
+    """BEDLAM renders its closeup batches in portrait and ships the PNGs turned to landscape; K is for the portrait image."""
+    del nvenc_ffmpeg
+    write_bedlam_batch(tmp_path / "raw", CLOSEUP_BATCH, portrait=True)
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = MammaConfig(family="syn-bedlam", root=tmp_path / "raw", model_root=models, index_root=tmp_path / "index").setup()
+    identity, clip = dataset.discover()[0]
+    dataset.convert(identity, clip, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+
+    base = read_back(targets["base"])
+    resolutions = column_rows(base, f"{schema.pinhole_path(1, 0)}:Pinhole:resolution").column(1).to_pylist()
+    assert [list(row[0]) for row in resolutions] == [[240.0, 320.0]] * 3  # portrait, as K's principal point (120, 160) says
+
+    masks = read_back(targets["masks"])
+    blob = column_rows(masks, f"{schema.person_mask_path(1, 0, 0)}:EncodedImage:blob").column(1).to_pylist()[0][0]
+    quarter: np.ndarray = np.asarray(Image.open(io.BytesIO(bytes(blob))))
+    assert quarter.shape == (80, 60)  # a quarter of 240x320, upright
+    rows, cols = np.nonzero(quarter)
+    assert rows.max() < 40 and cols.max() < 30  # person 0 back in the top-left quarter of the upright image
+
+
+def test_a_bedlam_clip_whose_intrinsics_do_not_centre_on_its_image_fails(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
+) -> None:
+    """A portrait batch not named closeup would keep its landscape PNGs under portrait intrinsics: fail it, do not publish it."""
+    del nvenc_ffmpeg
+    write_bedlam_batch(tmp_path / "raw", portrait=True)
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = MammaConfig(family="syn-bedlam", root=tmp_path / "raw", model_root=models, index_root=tmp_path / "index").setup()
+    identity, clip = dataset.discover()[0]
+    with pytest.raises(ValueError, match=r"principal point \(120\.0, 160\.0\).*centre of the 320x240 image"):
+        dataset.convert(identity, clip, force=False)

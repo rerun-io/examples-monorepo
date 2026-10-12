@@ -563,6 +563,12 @@ class BedlamClip:
     def parts(self) -> tuple[str, str]:
         return (self.directory.name, self.clip)
 
+    @property
+    def turns(self) -> int:
+        """Clockwise quarter turns from the shipped PNGs to the camera's image: BEDLAM renders its closeup batches in portrait
+        and ships them turned a quarter counter-clockwise, K still for the portrait image (BEDLAM's loaders turn them back)."""
+        return 1 if "closeup" in self.directory.name else 0
+
 
 def discover_bedlam(root: Path, index_root: Path, batches: set[str] | None = None) -> tuple[list[BedlamClip], list[str]]:
     """Every clip of the BEDLAM batches (or of ``batches``) and the problems found; indexes uncached batches' shard headers.

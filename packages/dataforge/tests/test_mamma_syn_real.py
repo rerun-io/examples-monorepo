@@ -1,11 +1,13 @@
 """MammaSyn on the real shards: the SMPL-X forward against the shipped vertices, and a frame-limited convert per dataset group."""
 
+import io
 import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 from conftest import column_rows, raw_asset, read_back, recording_properties
+from PIL import Image
 
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig
@@ -113,3 +115,35 @@ def test_a_preview_of_each_group_converts(sample: str, tmp_path: Path, nvenc_ffm
     for subject in subjects:
         rows = column_rows(pose, f"{schema.person_coco133_xyz_path(int(subject.removeprefix('person_')))}:Points3D:positions")
         assert len(rows) == PREVIEW
+
+
+def test_a_bedlam_closeup_preview_is_upright_its_keypoints_on_its_masks(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closeup batches ship portrait renders turned to landscape under portrait intrinsics: turned back, each person's projected
+    body keypoints land on that person's mask (as shipped, almost none do)."""
+    del nvenc_ffmpeg
+    body()
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    key: str = "20221012_1_500_batch01hand_closeup_highSchoolGym/seq_000166"
+    dataset = MammaConfig(family="syn-bedlam", root=MAMMA_ROOT, model_root=MODEL_ROOT, sequences=(key,), frame_limit=PREVIEW, index_root=tmp_path / "index").setup()
+    ((identity, source),) = dataset.discover()
+    dataset.convert(identity, source, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+    base = read_back(targets["base"])
+    resolution = column_rows(base, f"{schema.pinhole_path(1, 0)}:Pinhole:resolution").column(1).to_pylist()[0][0]
+    assert list(resolution) == [720.0, 1280.0]
+    masks = read_back(targets["masks"])
+    projections = read_back(targets["projections"])
+    subjects: list[str] = base.reader(index=None, contents="/__properties/**").to_arrow_table().to_pylist()[0]["property:episode:subjects"]
+    for subject in subjects:
+        person: int = int(subject.removeprefix("person_"))
+        blobs = column_rows(masks, f"{schema.person_mask_path(1, 0, person)}:EncodedImage:blob").column(1).to_pylist()
+        points = column_rows(projections, f"{schema.person_projection_path(1, 0, person)}:Points2D:positions").column(1).to_pylist()
+        hits, inside = 0, 0
+        for blob, row in zip(blobs, points, strict=True):
+            quarter: np.ndarray = np.asarray(Image.open(io.BytesIO(bytes(blob[0]))))
+            for x, y in np.asarray(row, dtype=np.float64)[:17]:  # COCO-133's 17 body keypoints
+                u, v = int(x // 4), int(y // 4)
+                if 0 <= u < quarter.shape[1] and 0 <= v < quarter.shape[0]:
+                    inside += 1
+                    hits += int(quarter[v, u] != 0)
+        assert inside > 0 and hits / inside > 0.6, f"{subject}: {hits} of {inside} body keypoints on the mask"
