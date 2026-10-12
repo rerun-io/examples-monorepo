@@ -50,13 +50,15 @@ def pane_rigs(cameras: int) -> list[int]:
 
 
 def scene_view(rigs: int, *, card: bool = False) -> rrb.Spatial3DView:
-    """The scene (z up) of a rig of up to ``rigs`` cameras: projections and masks stay in the panes, and a card drops every video
-    while a layout hides them on rigs of more than ``VISIBLE_3D_VIDEOS`` cameras (a hidden video is not decoded)."""
+    """The scene (z up) of a rig of up to ``rigs`` cameras: projections, masks and visibility landmarks stay in the panes, and a
+    card drops every video while a layout hides them on rigs of more than ``VISIBLE_3D_VIDEOS`` cameras (a hidden video is not
+    decoded)."""
     numbers: range = range(1, rigs + 1)
     contents: list[str] = [
         "+ /world/**",
         *(f"- {schema.coco133_uv_projected_path(rig, 0)}/**" for rig in numbers),
         *(f"- {schema.pinhole_path(rig, 0)}/masks/**" for rig in numbers),
+        *(f"- {schema.pinhole_path(rig, 0)}/visibility/**" for rig in numbers),
         *(blueprints.video_exclusions((rig, 0) for rig in numbers) if card else []),
     ]
     return rrb.Spatial3DView(
