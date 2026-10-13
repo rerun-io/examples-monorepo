@@ -116,5 +116,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
 
 def main(config: Config) -> RunReport:
     series = rrb.Vertical(rrb.TimeSeriesView(origin="/signal", name="signal (video_time)"), rrb.TimeSeriesView(origin="/dagkit/health", name="runner health (wall_time)"))
-    config.rr_config.rec_stream.send_blueprint(rrb.Blueprint(rrb.Horizontal(rrb.Spatial3DView(origin="/world", name="helix"), series)))
+    trail = rrb.VisibleTimeRange("video_time", start=rrb.TimeRangeBoundary.cursor_relative(seconds=-4.0), end=rrb.TimeRangeBoundary.cursor_relative())
+    helix = rrb.Spatial3DView(origin="/world", name="helix (last 4 s)", time_ranges=trail, eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital))
+    config.rr_config.rec_stream.send_blueprint(rrb.Blueprint(rrb.Horizontal(helix, series)))
     return run_app(config, build)
