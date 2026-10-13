@@ -66939,7 +66939,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64-cuda13:
-      - conda: https://prefix.dev/ai-demos/linux-64/gsplat-1.5.3-py312_torch212_cuda130_h9a733f9_1.conda
+      - conda: https://prefix.dev/ai-demos/linux-64/gsplat-1.6.0-py312_torch212_cuda130_h9a733f9_1.conda
       - conda: https://prefix.dev/ai-demos/linux-64/splat-transform-1.9.2-hcc556be_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aiohttp-3.14.1-py312h5d8c7f2_0.conda
@@ -66989,7 +66989,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-nvvm-impl-13.0.88-h4bc722e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-nvvm-tools-13.0.88-h4bc722e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-profiler-api-13.0.85-h7938cbb_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/cudnn-9.25.0.15-h886f0b6_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/cudnn-9.26.0.51-hf99eb4f_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cusparselt-0.9.1.1-h7bcfba5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cxx-compiler-1.11.0-hfcd1e18_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cyrus-sasl-2.1.28-hac629b4_1.conda
@@ -67053,8 +67053,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libclang13-22.1.8-default_h746c552_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcublas-13.1.1.3-h676940d_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcublas-dev-13.1.1.3-h676940d_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-9.25.0.15-ha4b6413_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-dev-9.25.0.15-h7bcfba5_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-9.26.0.51-h8a19d09_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-dev-9.26.0.51-he21562f_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcudss-0.8.0.10-h7bcfba5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcudss-dev-0.8.0.10-h21fdb18_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcufft-12.0.0.61-hecca717_0.conda
@@ -67186,6 +67186,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nodejs-25.9.0-he4ff34a_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.5.0-py312h33ff503_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/nvtx-0.2.16-py312h4c3975b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ocl-icd-2.3.4-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/onednn-3.12-omp_h83de36e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/onemkl-license-2026.0.0-ha770c72_915.conda
@@ -67561,7 +67562,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64-cuda13:
-      - conda: https://prefix.dev/ai-demos/linux-64/gsplat-1.5.3-py312_torch212_cuda130_h9a733f9_1.conda
+      - conda: https://prefix.dev/ai-demos/linux-64/gsplat-1.6.0-py312_torch212_cuda130_h9a733f9_1.conda
       - conda: https://prefix.dev/ai-demos/linux-64/splat-transform-1.9.2-hcc556be_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aiohttp-3.14.1-py312h5d8c7f2_0.conda
@@ -67611,7 +67612,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-nvvm-impl-13.0.88-h4bc722e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-nvvm-tools-13.0.88-h4bc722e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cuda-profiler-api-13.0.85-h7938cbb_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/cudnn-9.25.0.15-h886f0b6_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/cudnn-9.26.0.51-hf99eb4f_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cusparselt-0.9.1.1-h7bcfba5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cxx-compiler-1.11.0-hfcd1e18_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/cyrus-sasl-2.1.28-hac629b4_1.conda
@@ -67675,8 +67676,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libclang13-22.1.8-default_h746c552_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcublas-13.1.1.3-h676940d_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcublas-dev-13.1.1.3-h676940d_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-9.25.0.15-ha4b6413_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-dev-9.25.0.15-h7bcfba5_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-9.26.0.51-h8a19d09_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libcudnn-dev-9.26.0.51-he21562f_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcudss-0.8.0.10-h7bcfba5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcudss-dev-0.8.0.10-h21fdb18_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libcufft-12.0.0.61-hecca717_0.conda
@@ -67808,6 +67809,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nodejs-25.9.0-he4ff34a_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.5.0-py312h33ff503_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/nvtx-0.2.16-py312h4c3975b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ocl-icd-2.3.4-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/onednn-3.12-omp_h83de36e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/onemkl-license-2026.0.0-ha770c72_915.conda
@@ -73828,37 +73830,6 @@ packages:
   run_exports: {}
   size: 78137443
   timestamp: 1772897253667
-- conda: https://prefix.dev/ai-demos/linux-64/gsplat-1.5.3-py312_torch212_cuda130_h9a733f9_1.conda
-  sha256: a94f2a561d5e4f155294eed8d3f7892270c0df3e486b3913db7886ffb0365c51
-  md5: d2490cb1d137c756ead1508e3b12f76a
-  depends:
-  - python ==3.12
-  - pytorch-gpu >=2.12,<2.13
-  - numpy
-  - jaxtyping
-  - rich >=12
-  - ninja
-  - packaging
-  - libgcc >=13
-  - cuda-version >=13.0,<14
-  - libstdcxx >=13
-  - python_abi 3.12.* *_cp312
-  - cuda-cudart >=13.0.96,<14.0a0
-  - libcufile >=1.15.1.6,<2.0a0
-  - libcufft >=12.0.0.61,<13.0a0
-  - libcublas >=13.1.1.3,<14.0a0
-  - libcusolver >=12.0.4.66,<13.0a0
-  - libcusparse >=12.6.3.3,<13.0a0
-  - cuda-nvrtc >=13.0.88,<14.0a0
-  - cuda-nvtx >=13.0.85,<14.0a0
-  - cudnn >=9.23.2.1,<10.0a0
-  - libcurand >=10.4.0.35,<11.0a0
-  license: Apache-2.0
-  purls:
-  - pkg:pypi/gsplat?source=project-defined-mapping
-  run_exports: {}
-  size: 11935688
-  timestamp: 1784685832280
 - conda: https://prefix.dev/ai-demos/linux-64/gsplat-1.6.0-py312_torch212_cuda130_h9a733f9_1.conda
   sha256: b8685a9fceb618f9d0b43b1ad0a8c00bdf56b9f4736df48753c7b7d77cde4366
   md5: 817cb6aa03bc8e800267137220853c28
