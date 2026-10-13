@@ -15,7 +15,7 @@ metrics = [
     { name = "fit_coverage", unit = "fraction", better = "higher", floor = 0.02 },
     { name = "realtime_fraction", unit = "x", better = "higher", floor = 0.05 },
 ]
-shots = [
+shots = [  # every case: GT mesh frames (10 Hz) inside the short window and the contact segment
     { view = "/world", t_s = 3.0 },
     { view = "/world/rig_01/cam_00/pinhole", t_s = 3.0 },
     { view = "/world", t_s = 6.0 },
@@ -32,6 +32,9 @@ dataset = "dataforge-mamma-eval"
 segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
 window_s = [0.0, 10.0]
 params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+# |pre - pre2|: the pre-port pipeline is deterministic (accuracy bit-identical: 21.376 mm, 29.770 mm, 0.9724, 0.99);
+# realtime 0.2679 / 0.2677. Bands = floors.
+noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00019 }
 
 [[graph.cases]]
 # rule: first sorted segment with two people (body_pose mosh_gt, masks); whole segment (7.5 s). Exercises the camera gate.
@@ -41,6 +44,8 @@ reference = "gt"
 dataset = "dataforge-mamma-eval"
 segment = "mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1"
 params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "2" }
+# |pre - pre2|: accuracy bit-identical (29.561 mm, 32.246 mm, 0.8471, 1.0); realtime 0.03225 / 0.03212. Bands = floors.
+noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00013 }
 
 [[graph.cases]]
 name = "full"
@@ -49,3 +54,5 @@ reference = "gt"
 dataset = "dataforge-mamma-eval"
 segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
 params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+# |pre - pre2|: accuracy bit-identical (22.172 mm, 31.370 mm, 0.9579, 0.9974); realtime 0.2335 / 0.2340. Bands = floors.
+noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00053 }
