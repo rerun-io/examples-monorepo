@@ -1695,6 +1695,22 @@ cmd = "python tools/gradio_app.py"
 cwd = "packages/vistadream"
 description = "Launch VistaDream Gradio web interface"
 
+# ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
+[feature.vistadream.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre --clip short && python -m dagkit.verify VERIFY.toml --phase pre2 --clip short && python -m dagkit.verify VERIFY.toml --phase pre --clip full"
+cwd = "packages/vistadream"
+description = "Record the pre-port goldens: pre and pre2 (noise run) of the short case, then pre of the full cases (FLUX.1-Fill-dev must be cached)"
+
+[feature.vistadream.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+cwd = "packages/vistadream"
+description = "Graph tier, short case (no outpainting): score post and band it against the pre-port golden"
+
+[feature.vistadream.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+cwd = "packages/vistadream"
+description = "Graph tier, full cases (outpaint, coarse)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # pyvrs-viewer
 # ═══════════════════════════════════════════════════════════════════════════

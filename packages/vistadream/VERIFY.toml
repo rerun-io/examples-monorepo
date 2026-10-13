@@ -1,0 +1,49 @@
+# vistadream verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "vistadream"
+
+[[graph]]
+name = "single_image"
+run = "vistadream.verify:run"
+score = "vistadream.verify:score"
+# No depth GT on the catalog: the reference is the pre-port golden of each case. The pre-port pipeline is broken at import
+# (`@dataclass` above a function instead of `SingleImageConfig`; `get_relative_predictor` no longer exists in monopriors) and
+# in the coarse stage (undefined `dpt_conf_mask_bool`): pre/pre2 ran it with the smallest fix, never committed, on gsplat 1.5.3.
+# input_psnr_db / input_depth_absrel: the final scene rendered at the input camera vs the processed input image / vs MoGe's
+# depth on MoGe-valid pixels. novel_rgb_mae: trajectory renders vs the case's pre golden at the same steps (pre scores 0).
+metrics = [
+    { name = "input_psnr_db", unit = "dB", better = "higher", floor = 0.3 },
+    { name = "input_depth_absrel", unit = "ratio", better = "lower", floor = 0.01 },
+    { name = "novel_rgb_mae", unit = "levels", better = "lower", floor = 1.0 },
+]
+shots = [  # t = 0: the input camera; 1.2 s / 3.7 s: the spiral trajectory's forward / backward extremes (steps 36 / 111)
+    { view = "/world", t_s = 0.0 },
+    { view = "/world/input/pinhole/render_rgb", t_s = 0.0 },
+    { view = "/world", t_s = 1.2 },
+    { view = "/world/render/pinhole/rgb", t_s = 1.2 },
+    { view = "/world", t_s = 3.7 },
+    { view = "/world/render/pinhole/rgb", t_s = 3.7 },
+]
+
+[[graph.cases]]
+# rule: the package's sample image; short = no outpainting (MoGe depth, 100-iteration splat init, 150 trajectory renders).
+name = "no-outpaint"
+clip = "short"
+reference = "pre-port"
+input = "data/office/IMG_4029.jpg"
+params = { stage = "no-outpaint", max_resolution = "512", seed = "0" }
+
+[[graph.cases]]
+# rule: the same image, outpainted by FLUX.1-Fill-dev (30 % border) before depth and init.
+name = "outpaint"
+clip = "full"
+reference = "pre-port"
+input = "data/office/IMG_4029.jpg"
+params = { stage = "outpaint", max_resolution = "512", expansion_percent = "0.3", seed = "0" }
+
+[[graph.cases]]
+# rule: the same image through the coarse expansion (view selection, FLUX inpainting, MoGe, 500 iterations per added view).
+name = "coarse"
+clip = "full"
+reference = "pre-port"
+input = "data/office/IMG_4029.jpg"
+params = { stage = "coarse", max_resolution = "512", expansion_percent = "0.3", n_frames = "10", seed = "0" }
