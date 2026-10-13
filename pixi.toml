@@ -3225,6 +3225,24 @@ cwd = "packages/robocap-live"
 depends-on = ["robocap-live-build"]
 description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
 
+[feature.robocap-live.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["robocap-live-build"]
+cwd = "packages/robocap-live"
+description = "Record the pre-port goldens (DAGKIT_GOLDENS): pre and pre2 (noise run) for every case"
+
+[feature.robocap-live.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["robocap-live-build"]
+cwd = "packages/robocap-live"
+description = "Graph tier, short case (5 s of Cap B session 14): band the hands layer against the pre-port golden"
+
+[feature.robocap-live.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["robocap-live-build"]
+cwd = "packages/robocap-live"
+description = "Graph tier, full case (the whole Cap B session 14 segment)"
+
 # Python tests import robocap_live._core, so every tier needs the build first; these shadow the dev feature's tasks.
 [feature.robocap-live.tasks.tests]
 cmd = "pytest -q -ra"
