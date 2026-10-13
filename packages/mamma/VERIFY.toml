@@ -1,0 +1,51 @@
+# mamma verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "mamma"
+
+[[graph]]
+name = "capture"
+run = "mamma.verify:run"
+score = "mamma.verify:score"
+# SMPL-X fits against the segment's mosh_gt meshes (MPJPE over the 22 body joints regressed from the mesh, PVE over all
+# vertices, world frame, no alignment) and person masks against the GT masks at their stored 1/4 size; persons matched
+# one-to-one by the smallest mean PVE. fit_coverage = scored / GT mesh frames; realtime_fraction = stream_s / wall_s.
+metrics = [
+    { name = "mpjpe_mm", unit = "mm", better = "lower", floor = 2.0 },
+    { name = "pve_mm", unit = "mm", better = "lower", floor = 2.0 },
+    { name = "mask_iou_mean", unit = "IoU", better = "higher", floor = 0.01 },
+    { name = "fit_coverage", unit = "fraction", better = "higher", floor = 0.02 },
+    { name = "realtime_fraction", unit = "x", better = "higher", floor = 0.05 },
+]
+shots = [
+    { view = "/world", t_s = 3.0 },
+    { view = "/world/rig_01/cam_00/pinhole", t_s = 3.0 },
+    { view = "/world", t_s = 6.0 },
+    { view = "/world/rig_05/cam_00/pinhole", t_s = 6.0 },
+]
+
+[[graph.cases]]
+# rule: first sorted segment with one person, body_pose tagged mosh_gt and a masks layer; first 10 s. Cameras (every
+# case): every second camera of the eight-camera ground ring, 90 deg apart, all 2056x1504.
+name = "short"
+clip = "short"
+reference = "gt"
+dataset = "dataforge-mamma-eval"
+segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
+window_s = [0.0, 10.0]
+params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+
+[[graph.cases]]
+# rule: first sorted segment with two people (body_pose mosh_gt, masks); whole segment (7.5 s). Exercises the camera gate.
+name = "contact"
+clip = "short"
+reference = "gt"
+dataset = "dataforge-mamma-eval"
+segment = "mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1"
+params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "2" }
+
+[[graph.cases]]
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-mamma-eval"
+segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
+params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }

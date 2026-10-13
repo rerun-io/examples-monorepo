@@ -2745,6 +2745,24 @@ cmd = "python tools/register_catalog.py"
 cwd = "packages/mamma"
 description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base+props layers, names/properties from gate.json, default blueprint); needs mamma-iphones-serve running"
 
+[feature.mamma.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
+cwd = "packages/mamma"
+description = "Record the pre-port goldens (DAGKIT_GOLDENS): pre and pre2 (noise run) for every case"
+
+[feature.mamma.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
+cwd = "packages/mamma"
+description = "Graph tier, short cases (10 s single person, 7.5 s two people): score post against mosh_gt and band it against pre"
+
+[feature.mamma.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
+cwd = "packages/mamma"
+description = "Graph tier, full case (whole single-person segment)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # mvs — multiview stereo depth + live meshing
 # ═══════════════════════════════════════════════════════════════════════════
