@@ -13,8 +13,8 @@ metrics = [
 ]
 shots = [
     { view = "/", t_s = 0.0 },
-    { view = "/", t_s = 139.0 },
-    { view = "/world/rig_00/cam_00/pinhole", t_s = 139.0 },
+    { view = "/", t_s = 139.917 },  # short case: Stage B frame 100 of 200, a kp2d overlay frame
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 139.917 },
 ]
 
 [[graph.cases]]
@@ -24,6 +24,8 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
 params = { frame_budget = "200" }
+# |pre - pre2| of the pre-port runs (refined: rot 2.098 / 2.239 deg, trans 5.372 / 6.407 cm, focal 3.877 / 3.870 %)
+noise = { rot_deg_mean = 0.141, trans_cm_mean = 1.035, focal_pct_mean_abs = 0.0075 }
 
 [[graph.cases]]
 name = "full"
@@ -32,7 +34,8 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
 params = { frame_budget = "1000" }
-noise_from = "short"  # run once pre-port; reuses the short case's measured noise
+# |pre - pre2| of the pre-port runs (refined: rot 1.164 / 1.156 deg, trans 1.596 / 1.533 cm, focal 3.853 / 3.850 %); bands = floors
+noise = { rot_deg_mean = 0.0087, trans_cm_mean = 0.063, focal_pct_mean_abs = 0.0032 }
 
 [[tests]]
 name = "ops"
