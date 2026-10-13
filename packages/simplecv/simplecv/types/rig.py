@@ -33,6 +33,13 @@ class RigCameras:
         rows: list[int] = [index[name] for name in names]
         return RigCameras(tuple(names), self.intrinsics[rows], self.cam_T_world[rows], self.resolution_wh[rows])
 
+    def scaled_to(self, height: int, width: int) -> "RigCameras":
+        """Every camera's intrinsics rescaled to a ``height x width`` image (K rows 0 and 1 times the size ratios)."""
+        ratio_xy: Float64[ndarray, "v 2"] = np.array([width, height], dtype=np.float64) / self.resolution_wh
+        intrinsics: Float64[ndarray, "v 3 3"] = self.intrinsics.copy()
+        intrinsics[:, :2] *= ratio_xy[:, :, None]
+        return RigCameras(self.names, intrinsics, self.cam_T_world, np.tile(np.array([width, height], dtype=np.int64), (len(self.names), 1)))
+
     def to_rerun(self, root: str) -> list[Log]:
         """Static: a rig never changes over a stream. ``view_index`` keeps the camera order through ``from_layer``."""
         logs: list[Log] = []

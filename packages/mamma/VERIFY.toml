@@ -1,0 +1,107 @@
+# mamma verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "mamma"
+
+[[graph]]
+name = "capture"
+run = "mamma.verify:run"
+score = "mamma.verify:score"
+# SMPL-X fits against the segment's mosh_gt meshes (MPJPE over the 22 body joints regressed from the mesh, PVE over all
+# vertices, world frame, no alignment) and person masks against the GT masks at their stored 1/4 size; persons matched
+# one-to-one by the smallest mean PVE. fit_coverage = scored / GT mesh frames; realtime_fraction = stream_s / wall_s.
+metrics = [
+    { name = "mpjpe_mm", unit = "mm", better = "lower", floor = 2.0 },
+    { name = "pve_mm", unit = "mm", better = "lower", floor = 2.0 },
+    { name = "mask_iou_mean", unit = "IoU", better = "higher", floor = 0.01 },
+    { name = "fit_coverage", unit = "fraction", better = "higher", floor = 0.02 },
+    { name = "realtime_fraction", unit = "x", better = "higher", floor = 0.05 },
+]
+shots = [  # every case: GT mesh frames (10 Hz) inside the short window and the contact segment
+    { view = "/world", t_s = 3.0 },
+    { view = "/world/rig_01/cam_00/pinhole", t_s = 3.0 },
+    { view = "/world", t_s = 6.0 },
+    { view = "/world/rig_05/cam_00/pinhole", t_s = 6.0 },
+]
+
+[[graph.cases]]
+# rule: first sorted segment with one person, body_pose tagged mosh_gt and a masks layer; first 10 s. Cameras (every
+# case): every second camera of the eight-camera ground ring, 90 deg apart, all 2056x1504.
+name = "short"
+clip = "short"
+reference = "gt"
+dataset = "dataforge-mamma-eval"
+segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
+window_s = [0.0, 10.0]
+params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+# |pre - pre2|: the pre-port pipeline is deterministic (accuracy bit-identical: 21.376 mm, 29.770 mm, 0.9724, 0.99);
+# realtime 0.2679 / 0.2677. Bands = floors.
+noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00019 }
+
+[[graph.cases]]
+# rule: first sorted segment with two people (body_pose mosh_gt, masks); whole segment (7.5 s). Exercises the camera gate.
+name = "contact"
+clip = "short"
+reference = "gt"
+dataset = "dataforge-mamma-eval"
+segment = "mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1"
+params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "2" }
+# |pre - pre2|: accuracy bit-identical (29.561 mm, 32.246 mm, 0.8471, 1.0); realtime 0.03225 / 0.03212. Bands = floors.
+noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00013 }
+
+[[graph.cases]]
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-mamma-eval"
+segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
+params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+# |pre - pre2|: accuracy bit-identical (22.172 mm, 31.370 mm, 0.9579, 0.9974); realtime 0.2335 / 0.2340. Bands = floors.
+noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00053 }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py"]
+properties = [
+    "tests/test_types.py::test_host_types_serde_roundtrip_keeps_dtype_and_shape",
+    "tests/test_types.py::test_tracks_map_to_engine_pixel_overlays_under_one_static_scale_per_view",
+    "tests/test_types.py::test_to_rerun_then_from_layer_gives_the_value_back",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_types_rerun.py"]
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_ops_triangulation.py", "tests/test_ops_identity.py", "tests/test_sources.py", "tests/test_skeleton.py"]
+properties = [
+    "tests/test_ops_triangulation.py::test_recovers_points_projected_into_two_or_more_views",
+    "tests/test_ops_triangulation.py::test_points_seen_by_fewer_than_two_views_come_back_as_finite_zeros",
+    "tests/test_ops_triangulation.py::test_gate_drops_a_view_that_sees_the_other_person_and_keeps_the_agreeing_ones",
+    "tests/test_ops_triangulation.py::test_gate_is_a_no_op_when_every_view_agrees",
+    "tests/test_ops_identity.py::test_identity_assignment_is_one_to_one_above_the_threshold",
+    "../simplecv/tests/test_types_sources.py::test_rig_scaled_to_a_size_and_back_is_the_identity",
+]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+properties = [
+    "tests/test_nodes.py::test_track_bootstraps_one_person_and_tracks_it_in_every_view",
+    "tests/test_nodes.py::test_fit_emits_every_frame_once_in_time_order_and_flush_drains_the_window",
+    "tests/test_nodes.py::test_fit_heads_of_a_person_who_starts_late_still_come_out_in_order",
+    "tests/test_graph.py::test_capture_graph_validates_and_the_runners_agree",
+]
+
+[[tests]]
+name = "models"
+tier = "model"
+lane = "integration"
+tests = ["tests/test_models.py", "tests/test_posekit_role.py"]

@@ -11,7 +11,11 @@ from serde import SerdeError, from_dict, to_dict
 
 pytest.importorskip("torchcodec", reason="the catalog video source decodes with torchcodec")
 
-from simplecv.sources.catalog_video import sample_indices  # noqa: E402
+import torch  # noqa: E402
+from dagkit.sources import SegmentRef  # noqa: E402
+
+from simplecv.sources.catalog_video import CatalogVideoSource, sample_indices  # noqa: E402
+from simplecv.types.frames import MultiViewFrames  # noqa: E402
 from simplecv.types.rig import RigCameras  # noqa: E402
 
 FINITE = st.floats(-10.0, 10.0)
@@ -100,3 +104,52 @@ def test_sample_indices_spread_a_budget_inside_the_window(n: int, budget: int, s
     inside = sample_indices(times, budget, window)
     assert np.all((times[inside] >= window[0]) & (times[inside] < window[1])) and inside.size == min(budget, min(n, start + length) - start)
     np.testing.assert_array_equal(sample_indices(times, (n - 1, 0, n - 1), None), np.unique([0, n - 1]))
+
+
+@settings(max_examples=50, deadline=None)
+@given(rig=rigs(), height=st.integers(16, 4096), width=st.integers(16, 4096))
+def test_rig_scaled_to_a_size_and_back_is_the_identity(rig: RigCameras, height: int, width: int) -> None:
+    scaled: RigCameras = rig.scaled_to(height, width)
+    assert np.all(scaled.resolution_wh == (width, height)) and scaled.names == rig.names
+    np.testing.assert_array_equal(scaled.cam_T_world, rig.cam_T_world)
+    np.testing.assert_allclose(scaled.intrinsics[:, 0], rig.intrinsics[:, 0] * width / rig.resolution_wh[:, :1], rtol=1e-12)
+    np.testing.assert_array_equal(scaled.intrinsics[:, 2], rig.intrinsics[:, 2])
+    back: RigCameras = scaled.select(rig.names[:1]).scaled_to(int(rig.resolution_wh[0, 1]), int(rig.resolution_wh[0, 0]))
+    np.testing.assert_allclose(back.intrinsics, rig.intrinsics[:1], rtol=1e-9, atol=1e-12)
+    np.testing.assert_array_equal(back.resolution_wh, rig.resolution_wh[:1])
+
+
+class FakeFrames:
+    """Stand-in for ``SegmentFrames``: views of different constant colours, 10 ms apart."""
+
+    def __init__(self, views: int, hw: tuple[int, int]) -> None:
+        self.views, self.hw = views, hw
+
+    def times_ns(self, view: int) -> np.ndarray:
+        return np.arange(5, dtype=np.int64) * 10_000_000
+
+    def frames_at(self, view: int, indices: list[int]) -> torch.Tensor:
+        return torch.full((len(indices), 3, *self.hw), 40 * view + indices[0], dtype=torch.uint8)
+
+    def close(self) -> None:
+        pass
+
+
+@settings(max_examples=20, deadline=None)
+@given(views=st.integers(1, 3), native_hw=st.sampled_from([(32, 48), (40, 40)]), resize_hw=st.sampled_from([(16, 24), (8, 8)]), keep=st.booleans())
+def test_source_resizes_and_puts_the_native_frames_first(views: int, native_hw: tuple[int, int], resize_hw: tuple[int, int], keep: bool) -> None:
+    cameras = tuple(f"rig_{v:02d}/cam_00" for v in range(views))
+    source = CatalogVideoSource(SegmentRef("d", "s"), cameras, decode="cpu_rgb", resize_hw=resize_hw, keep_native=keep)
+    source.statics, source.frames = {}, FakeFrames(views, native_hw)  # type: ignore[assignment]
+    events = list(source.events())
+    assert [e.port for e in events] == (["frames_native", "frames"] if keep else ["frames"]) * 5
+    assert ("frames_native" in source.outputs) == keep
+    for event in events:
+        frames: MultiViewFrames = event.value  # type: ignore[assignment]
+        assert frames.rgb.shape == (views, 3, *(native_hw if event.port == "frames_native" else resize_hw)) and frames.t_ns == frames.frame_index * 10_000_000
+        np.testing.assert_array_equal(frames.rgb[:, 0, 0, 0].numpy(), 40 * np.arange(views) + frames.frame_index)  # a constant image stays constant
+
+
+def test_source_refuses_native_frames_without_a_resize() -> None:
+    with pytest.raises(NotImplementedError, match="keep_native"):
+        CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="cpu_rgb", keep_native=True)

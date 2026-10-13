@@ -118,6 +118,7 @@ search-path = [
     "packages/trtkit/src",
     "packages/egoexo-forge/src",
     "packages/mamma/src",
+    "packages/mamma/tests",
     "packages/mvs/src",
     "packages/gauss-surf/src",
     "packages/live-rerun/src",

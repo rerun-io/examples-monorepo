@@ -9,8 +9,8 @@ from posekit.runtimes import TensorRtBackendConfig
 from torch import Tensor
 from trtkit import RuntimeSpec, TensorSpec
 
-from mamma.landmarks.mammanet import MammaNet
-from mamma.landmarks.posekit_role import MammaNetLandmarksConfig
+from mamma.models.landmarks.mammanet import MammaNet
+from mamma.models.landmarks.posekit_role import MammaNetLandmarksConfig
 
 
 def test_accelerated_role_requires_cuda_before_loading_weights() -> None:
@@ -64,9 +64,9 @@ def test_tensorrt_role_builds_from_weights_and_returns_dense_landmark_heads(monk
         del path, backend
         return FakeTensorRtRuntime()
 
-    monkeypatch.setattr("mamma.landmarks.posekit_role.load_mammanet", fake_load_mammanet)
-    monkeypatch.setattr("mamma.landmarks.posekit_role.ensure_mammanet_onnx", fake_ensure_mammanet_onnx)
-    monkeypatch.setattr("mamma.landmarks.posekit_role.create_runtime_from_onnx", fake_create_runtime)
+    monkeypatch.setattr("mamma.models.landmarks.posekit_role.load_mammanet", fake_load_mammanet)
+    monkeypatch.setattr("mamma.models.landmarks.posekit_role.ensure_mammanet_onnx", fake_ensure_mammanet_onnx)
+    monkeypatch.setattr("mamma.models.landmarks.posekit_role.create_runtime_from_onnx", fake_create_runtime)
     backend = TensorRtBackendConfig()
     role = MammaNetLandmarksConfig(weights_path=weights_path, device="cuda", backend=backend).setup()
     frames_rgb: Tensor = torch.zeros((1, 18, 12, 3), dtype=torch.uint8)

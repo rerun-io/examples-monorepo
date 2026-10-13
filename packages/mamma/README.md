@@ -1,11 +1,8 @@
 # mamma — streaming multiview SMPL-X body capture
 
-A causal streaming port of the MAMMA multiview body-capture pipeline: NVDEC
-decode → GPU resize → SAM2 person tracking → MammaNet dense landmarks → GPU
-triangulation → sliding-window SMPL-X fitting → Rerun, in one resident process
-with **no disk writes anywhere in the loop**. The original 5-subprocess offline
-DAG ran at ~12 s/frame (over an hour for this 4-camera clip); this runs the same
-clip in seconds at full per-frame mask quality.
+A causal streaming port of the MAMMA multiview body-capture pipeline as one dagkit graph
+(`src/mamma/graphs/capture.py`): NVDEC decode → GPU resize → SAM2 person tracking → MammaNet dense landmarks →
+GPU triangulation → sliding-window SMPL-X fitting → Rerun (and, on request, a `mamma_fit` catalog layer).
 
 ## Quickstart
 
@@ -16,14 +13,14 @@ dependencies.
 
 ```bash
 # from the repo root
-pixi run -e mamma --frozen mamma-demo-crossing-arms      # full pipeline -> Rerun viewer
-pixi run -e mamma --frozen mamma-validate-golden         # 3D accuracy gate vs frozen original output
-pixi run -e mamma --frozen mamma-benchmark               # wall-time gate (wall <= 2x clip duration = >=50% realtime)
-pixi run -e mamma --frozen mamma-goal-check              # all six acceptance clauses
+pixi run -e mamma --frozen mamma-capture                 # a catalog segment (dataforge-mamma-eval) -> Rerun viewer
+pixi run -e mamma --frozen mamma-demo-crossing-arms      # the crossing_arms files -> Rerun viewer
+pixi run -e mamma --frozen verify                        # graph tier: MPJPE / PVE / mask IoU vs mosh_gt, banded (VERIFY.toml)
 ```
 
-Optional TensorRT engine for MammaNet (used automatically by goal-check when
-present): `pixi run -e mamma --frozen python packages/mamma/tools/build_trt_engine.py`.
+`tools/apps/capture.py --help` lists the App options (`--preset quality|fast`, `--subjects`, `--output-dir` for the
+layer); presets are node parameters in `profiles/x86_64-cuda.toml`. Optional TensorRT engine for MammaNet (used
+when present): `pixi run -e mamma --frozen python packages/mamma/tools/build_trt_engine.py`.
 
 ## Downloading the MAMMA dataset
 
@@ -56,44 +53,17 @@ Implementation notes, learned the hard way:
   counts derive from the sequence naming convention (one 5-digit subject id
   per dancer).
 
-## Acceptance gates (`mamma-goal-check`, all PASS)
-
-| Clause | Criterion |
-|---|---|
-| golden | MPJPE/PVE vs the frozen original pipeline ≤ 30 mm on crossing_arms frames 60:90 |
-| dynamic | running_jumping per-frame PVE p95 AND max ≤ 30 mm vs the original DAG over all frames |
-| realtime | both clips (crossing_arms + running_jumping): wall ≤ 2× clip duration (≥50% realtime) incl. Rerun logging |
-| datasets | HOCap + Assembly101 ingest end-to-end → validated RRDs |
-| no-writes | streaming loop creates no files (runtime check + static write-call audit) |
-| hygiene | ruff + pyrefly + pytest clean in `mamma-dev` |
-
-Defaults trade the last 2.5 s for mask quality: `track_stride=1` keeps masks
-pixel-identical to the original tracker (stride 4 reaches 11.8 s but
-transiently collapses masks to the head during fast motion).
-
 ## Layout
 
 ```
 src/mamma/
-  calibration/   camera contracts + loaders (NPZ meta format)
-  datasets/      MultiViewSequence adapters: mamma NPZ, HOCap, Assembly101
-  tracking/      YOLO bootstrap + CLIP/epipolar identity + streaming SAM2 fork
-  landmarks/     MammaNet port (512 dense 2D landmarks) + TensorRT backend
-  fitting/       GPU triangulation + CUDA-graphed sliding-window SMPL-X fitter
-  engine/        per-tick streaming pipeline, in-process torchcodec decode, profiler
-  viz/           Rerun stream logger (NVENC H.264 -> VideoStream) + blueprint
-tools/           tyro CLIs: demos, validate_golden, benchmark, goal_check, profiler
+  types.py     edge Types (tracks, landmarks, SMPL-X fits, 3D landmarks) and their Rerun mapping
+  models/      YOLO12x, open_clip, SAM2 predictor, MammaNet (+ TensorRT, posekit role)
+  ops/         triangulation policy, identity scoring, SMPL-X body + window fit, skeleton regressor
+  nodes/       track, landmarks, fit
+  sources/     the MAMMA-format file source (catalog segments use simplecv's CatalogVideoSource)
+  graphs/      capture.py
+  apis/        capture App (Config, build), blueprint, downloads, TensorRT build, checkpoint conversion
+  verify.py    graph-tier check (VERIFY.toml)
+tools/         thin tyro shims over apis/
 ```
-
-## What's next
-
-- **True realtime at full quality:** ~2.4 s remain between stride-1 (14.5 s)
-  and the 12.1 s clip. Highest-leverage tranche: a TensorRT engine for the
-  EfficientTAM image encoder (same recipe as MammaNet — the encoder dominates
-  per-tick cost at stride 1) + columnar `rr.log` batching / worker
-  consolidation. Fallback: collapse-triggered re-track (stride 4 + densify when
-  mask area drops >40% vs running median).
-- **Multi-person hardening:** the batched steady-state tracker path assumes a
-  single subject (`obj_id=0`); Assembly101 scenes have several people.
-- **Live sources:** the pipeline is causal end-to-end; an RTSP/webcam adapter
-  producing `MultiViewSequence`-shaped input would make it a live capture demo.

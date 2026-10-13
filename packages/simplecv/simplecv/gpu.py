@@ -1,10 +1,10 @@
 """The one GPU-consumer step for a ``Fenced`` edge value (SPEC 2.8): wait on the producer's fence, keep its tensors alive."""
 
 import dataclasses
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import torch
-from dagkit.node import Fenced
+from dagkit.node import Fence, Fenced
 
 T = TypeVar("T")
 
@@ -23,3 +23,12 @@ def consume(fenced: Fenced[T], stream: torch.cuda.Stream | None = None) -> T:
     for tensor in tensors:
         tensor.record_stream(stream)
     return fenced.value
+
+
+def fence_after(tensor: torch.Tensor) -> Fence | None:
+    """A fence on the current stream after the work that produced ``tensor``; None for a host tensor."""
+    if not tensor.is_cuda:
+        return None
+    event = torch.cuda.Event()
+    event.record()
+    return cast(Fence, event)  # torch's Event.wait takes a Stream where dagkit's Fence protocol says object
