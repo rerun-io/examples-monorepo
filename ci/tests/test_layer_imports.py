@@ -101,10 +101,10 @@ def import_problems(path: Path, source: str, module: str | None = None) -> list[
 
 def test_relative_and_from_imports_resolve_to_modules(tmp_path: Path) -> None:
     probe: Path = tmp_path / "probe.py"
-    probe.write_text("from ..apis import refine\nfrom exo_calib import apis\nfrom . import cameras\n")
+    probe.write_text("from ..apis import calibrate\nfrom exo_calib import apis\nfrom . import cameras\n")
     found: list[str] = [module for module, _ in imports(probe, "exo_calib.ops.probe")]
-    assert found == ["exo_calib.apis.refine", "exo_calib.apis", "exo_calib.ops"]
-    assert import_problems(probe, "Op", "exo_calib.ops.probe") == [f"{probe} (Op) imports exo_calib.apis.refine", f"{probe} (Op) imports exo_calib.apis"]
+    assert found == ["exo_calib.apis.calibrate", "exo_calib.apis", "exo_calib.ops"]
+    assert import_problems(probe, "Op", "exo_calib.ops.probe") == [f"{probe} (Op) imports exo_calib.apis.calibrate", f"{probe} (Op) imports exo_calib.apis"]
 
 
 def root_init_problems(path: Path, package: str) -> list[str]:
@@ -118,9 +118,9 @@ def root_init_problems(path: Path, package: str) -> list[str]:
 
 def test_the_package_root_may_hold_only_the_beartype_hook(tmp_path: Path) -> None:
     init: Path = tmp_path / "__init__.py"
-    init.write_text("import os\nimport sys\nfrom beartype.claw import beartype_this_package\nfrom exo_calib.apis import refine\nimport torch\n")
+    init.write_text("import os\nimport sys\nfrom beartype.claw import beartype_this_package\nfrom exo_calib.apis import calibrate\nimport torch\n")
     found: list[str] = root_init_problems(init, "exo_calib")
-    assert found == [f"{init}: the package root imports {m} (only the beartype hook belongs there)" for m in ("exo_calib.apis.refine", "torch")]
+    assert found == [f"{init}: the package root imports {m} (only the beartype hook belongs there)" for m in ("exo_calib.apis.calibrate", "torch")]
 
 
 @pytest.mark.parametrize("package", CONFIG["enforced"])
