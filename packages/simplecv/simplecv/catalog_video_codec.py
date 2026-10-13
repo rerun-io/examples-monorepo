@@ -9,13 +9,19 @@ get it, which is why it lives here and not beside the GPU decoder that also
 calls it.
 """
 
-from collections.abc import Buffer, Sequence
+import sys
+from collections.abc import Sequence
 from fractions import Fraction
 from io import BytesIO
 from typing import Literal, TypeAlias
 
 import av
 import rerun as rr
+
+if sys.version_info >= (3, 12):
+    from collections.abc import Buffer
+else:  # simplecv supports 3.10+; mast3r-slam's env runs 3.11
+    from typing_extensions import Buffer
 
 CatalogCodecName: TypeAlias = Literal["av1", "h264", "hevc"]
 """Codec names shared by PyAV muxing and ``VideoFrameDecoder`` (which aliases ``hevc`` to its H.265 decoder)."""
