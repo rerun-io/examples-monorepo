@@ -107,7 +107,8 @@ def test_poses_read_the_slam_layers_rows_whole_sorted_and_finite(times: list[int
         for i, t in enumerate(times)
     ]
     keep: list[int] = sorted((i for i in range(len(times)) if i not in bad), key=lambda i: times[i])
-    read: list[tuple[int, CatalogPoses]] = list(CatalogPoses.from_layer(catalog_rows(logs), RIG_ROOT, "video_time"))
+    rows: pa.Table = catalog_rows(logs)  # sorted by time: shuffle, so that the reader has to sort
+    read: list[tuple[int, CatalogPoses]] = list(CatalogPoses.from_layer(rows.take(rng.permutation(rows.num_rows)), RIG_ROOT, "video_time"))
     if not keep:
         assert read == []
         return

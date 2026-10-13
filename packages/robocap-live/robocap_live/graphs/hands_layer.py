@@ -4,10 +4,12 @@
 ``hands`` -> ``layer`` / ``run`` -> every sink that takes that port (the ``LayerFileSink`` publishes the layer at flush).
 """
 
+import re
 from collections.abc import Mapping
 
 from dagkit.graph import AsOf, Block, Graph
 from dagkit.node import Node, Source
+from dagkit.sinks import segment_layers
 from dagkit.sources import Column, SegmentRef
 from simplecv.sources.catalog_video import CatalogVideoSource
 
@@ -19,7 +21,9 @@ GROUP_TOLERANCE_NS: int = 3_000_000  # a frameset holds each camera's next frame
 
 
 def segment_source(segment: SegmentRef, group_tolerance_ns: int = GROUP_TOLERANCE_NS) -> CatalogVideoSource:
-    """The segment's raw luma framesets, its base-layer rig and its whole ``slam_rs`` pose table."""
+    """The segment's raw luma framesets, base-layer rig and whole ``slam_rs`` pose table (an older ``slam`` layer writes that entity too)."""
+    if segment.timeline != "video_time" or not re.fullmatch(r"robocap__\w+__s\d+", segment.segment) or "slam_rs" not in segment_layers(segment):
+        raise ValueError(f"{segment.segment} on {segment.timeline}: needs a robocap__<device>__s<session> id on video_time with a slam_rs layer")
     statics: dict[str, Column] = {"cap_rig": Column(CapRig, RIG_ROOT, static=True), "poses": Column(CatalogPoses, RIG_ROOT)}
     return CatalogVideoSource(segment, CAMERAS, decode="cpu_luma", group_tolerance_ns=group_tolerance_ns, statics=statics)
 

@@ -96,35 +96,35 @@ def score(case: Case, golden: Path) -> dict[str, float]:
 
     Banded: ``kp2d_px_mean`` / ``kp2d_px_p95`` (KeyNet image keypoints of the frameset, camera and hand both goldens hold, in
     stored-video pixels), ``landmarks_mm_mean`` (world landmarks of the hands both report, mm), ``reported_delta_pct``
-    (frameset-hands reported by exactly one of the two, % of the reference's). Reported, not banded: the golden's counts.
+    (frameset-hands reported by exactly one of the two, % of the reference's) and ``kp2d_delta_pct`` (the same for KeyNet's
+    frameset-camera-hands, so a lost camera pane fails). Reported, not banded: the golden's counts.
     """
     reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden_path("robocap-live", "hands", case.name, "pre")
     if not reference.exists():
         raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
     ours, counts = _read(golden)
     theirs, _ = _read(reference)
-    kp2d: list[Float32[ndarray, " m"]] = []
-    for entity in KEYNET:
-        (t_ours, p_ours), (t_ref, p_ref) = _rows(ours, entity, "Points2D", 2), _rows(theirs, entity, "Points2D", 2)
-        _, i_ours, i_ref = np.intersect1d(t_ours, t_ref, assume_unique=True, return_indices=True)
-        kp2d.append(np.linalg.norm(p_ours[i_ours] - p_ref[i_ref], axis=-1).reshape(-1))
-    landmarks_mm: list[Float32[ndarray, " m"]] = []
-    reported_ours: set[tuple[str, int]] = set()
-    reported_ref: set[tuple[str, int]] = set()
-    for entity in LANDMARKS:
-        (t_ours, p_ours), (t_ref, p_ref) = _rows(ours, entity, "Points3D", 3), _rows(theirs, entity, "Points3D", 3)
-        _, i_ours, i_ref = np.intersect1d(t_ours, t_ref, assume_unique=True, return_indices=True)
-        landmarks_mm.append(1e3 * np.linalg.norm(p_ours[i_ours] - p_ref[i_ref], axis=-1).reshape(-1))
-        reported_ours |= {(entity, int(t)) for t in t_ours}
-        reported_ref |= {(entity, int(t)) for t in t_ref}
-    pixels: Float64[ndarray, " m"] = np.concatenate(kp2d).astype(np.float64)
-    millimetres: Float64[ndarray, " m"] = np.concatenate(landmarks_mm).astype(np.float64)
+    errors: dict[str, list[Float32[ndarray, " m"]]] = {"Points2D": [], "Points3D": []}
+    held: dict[str, tuple[int, float]] = {}  # archetype -> (rows ours holds, % of the reference's rows held by one golden only)
+    for entities, archetype, width, unit in ((KEYNET, "Points2D", 2, 1.0), (LANDMARKS, "Points3D", 3, 1e3)):
+        rows_ours: set[tuple[str, int]] = set()
+        rows_ref: set[tuple[str, int]] = set()
+        for entity in entities:
+            (t_ours, p_ours), (t_ref, p_ref) = _rows(ours, entity, archetype, width), _rows(theirs, entity, archetype, width)
+            _, i_ours, i_ref = np.intersect1d(t_ours, t_ref, assume_unique=True, return_indices=True)
+            errors[archetype].append(unit * np.linalg.norm(p_ours[i_ours] - p_ref[i_ref], axis=-1).reshape(-1))
+            rows_ours |= {(entity, int(t)) for t in t_ours}
+            rows_ref |= {(entity, int(t)) for t in t_ref}
+        held[archetype] = len(rows_ours), 100.0 * len(rows_ours ^ rows_ref) / len(rows_ref) if rows_ref else float("nan")
+    pixels: Float64[ndarray, " m"] = np.concatenate(errors["Points2D"]).astype(np.float64)
+    millimetres: Float64[ndarray, " m"] = np.concatenate(errors["Points3D"]).astype(np.float64)
     return {
         "kp2d_px_mean": float(pixels.mean()) if pixels.size else float("nan"),
         "kp2d_px_p95": float(np.percentile(pixels, 95)) if pixels.size else float("nan"),
         "landmarks_mm_mean": float(millimetres.mean()) if millimetres.size else float("nan"),
-        "reported_delta_pct": 100.0 * len(reported_ours ^ reported_ref) / len(reported_ref) if reported_ref else float("nan"),
+        "reported_delta_pct": held["Points3D"][1],
+        "kp2d_delta_pct": held["Points2D"][1],
         "kp2d_matched": float(pixels.size // 21),
-        "reported": float(len(reported_ours)),
+        "reported": float(held["Points3D"][0]),
         **{f"run_{name}": value for name, value in counts.items()},
     }

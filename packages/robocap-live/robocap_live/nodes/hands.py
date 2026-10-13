@@ -7,6 +7,7 @@ without the newest earlier one); ``step`` pushes a frameset; ``flush`` finishes 
 
 import importlib.util
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -68,7 +69,7 @@ class HandsNode:
 
     def __init__(self, segment: SegmentRef, params: HandsParams, output_dir: Path, core: CoreFactory = _core.HandsLayer) -> None:
         """``output_dir/<segment>/`` holds the partial layer file; ``core`` builds the core (tests pass one without networks)."""
-        self.segment, self.params, self.output_dir, self.make_core = segment, params, output_dir, core
+        self.segment, self.params, self.output_dir, self.make_core, self.lock = segment, params, output_dir, core, threading.Lock()
         self.core: _core.HandsLayer | None = None
         self.partial: Path | None = None
         self.t_ns: TimeNs = STATIC
@@ -98,16 +99,18 @@ class HandsNode:
 
     def step(self, tick: Tick, out: Emit) -> None:
         frames: LumaFrameset = cast(LumaFrameset, tick.value)
-        assert self.core is not None, "step before reset"
-        self.core.push(frames.t_ns, list(frames.luma), [frames.t_ns if t is None else t for t in frames.cam_t_ns])
+        with self.lock:
+            assert self.core is not None, "step before reset (or after abort)"
+            self.core.push(frames.t_ns, list(frames.luma), [frames.t_ns if t is None else t for t in frames.cam_t_ns])
         self.t_ns = frames.t_ns
 
     def flush(self, out: Emit) -> None:
-        if self.core is None or self.partial is None:
-            return
         started: float = time.perf_counter()
-        summary: _core.LayerSummary = self.core.finish()
-        layer, self.core, self.partial = LayerFile(self.partial), None, None
+        with self.lock:
+            if self.core is None or self.partial is None:
+                return
+            summary: _core.LayerSummary = self.core.finish()
+            layer, self.core, self.partial = LayerFile(self.partial), None, None
         stages: _core.HandStageTimes = summary.hand_stages
         run = LayerRun(
             summary.framesets, summary.with_pose, summary.held_pose, *summary.tracked, *summary.reported, summary.scale, summary.scale_final,
@@ -121,9 +124,10 @@ class HandsNode:
 
     def abort(self) -> None:
         """Stop a running core and delete its unfinished file (a finished one belongs to the publish sink)."""
-        if self.core is not None:
-            self.core.abort()
-            self.core = None
-        if self.partial is not None:
-            self.partial.unlink(missing_ok=True)
-            self.partial = None
+        with self.lock:  # a failing runner thread calls this at once, maybe during push (PyO3 refuses a call into a borrowed core)
+            if self.core is not None:
+                self.core.abort()
+                self.core = None
+            if self.partial is not None:
+                self.partial.unlink(missing_ok=True)
+                self.partial = None
