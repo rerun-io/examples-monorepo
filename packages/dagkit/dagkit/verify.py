@@ -1,8 +1,3 @@
-"""Verify cards: the VERIFY.toml schema, goldens as rrds, fail-closed metric bands and the CLI (SPEC §3).
-
-`python -m dagkit.verify VERIFY.toml --phase pre|pre2|post [--block B] [--clip short|full] [--register]`
-"""
-
 import importlib
 import importlib.metadata
 import math
@@ -11,7 +6,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 
 import rerun as rr
 import tyro
@@ -99,14 +94,12 @@ def load_card(path: Path) -> VerifyCard:
 
 
 def case_noise(block: GraphBlock, case: Case) -> dict[str, float]:
-    """The case's own measured noise, or the named case's (`noise_from`); empty means not measured."""
     if case.noise or case.noise_from is None:
         return case.noise
     return next((c.noise for c in block.cases if c.name == case.noise_from), {})
 
 
 def check_band(band: MetricBand, pre: float | None, post: float | None, noise: Mapping[str, float]) -> BandResult:
-    """tolerance = max(2 x noise, floor); lower: post <= pre + tol, higher: post >= pre - tol. Fails closed."""
     if pre is None or post is None:
         return BandResult(band.name, False, f"missing metric (pre={pre}, post={post})")
     if not (math.isfinite(pre) and math.isfinite(post)):
@@ -140,9 +133,10 @@ class VerifyArgs:
 
 
 def main(args: VerifyArgs) -> int:
-    """Run each case into a fresh golden, score it, and at `post` check every band against re-scored pre goldens."""
     card: VerifyCard = load_card(args.card)
-    sha7: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, check=True, cwd=args.card.parent).stdout.strip()
+    sha7: str = subprocess.run(
+        ["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, check=True, cwd=args.card.parent
+    ).stdout.strip()
     version: str = f"{importlib.metadata.version(card.package)}+{sha7}"
     failed: bool = False
     for block in (b for b in card.graph if args.block in (None, b.name)):
@@ -157,8 +151,7 @@ def main(args: VerifyArgs) -> int:
             run(case, args.phase, recording)
             recording.flush()
             metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
-            fields: dict[str, Any] = dict(metrics)
-            recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**fields), static=True)
+            recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
             recording.flush()
             recording.disconnect()
             partial.replace(golden)

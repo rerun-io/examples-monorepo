@@ -1,5 +1,3 @@
-"""Declared graphs: port kinds, port-type normalisation, placement and validation (SPEC §2.4)."""
-
 import graphlib
 import types
 from collections import defaultdict
@@ -14,22 +12,16 @@ from dagkit.time import GraphError
 
 @dataclass(frozen=True, slots=True)
 class Block:
-    """Lossless edge: the producer blocks while the queue is full."""
-
     capacity: int = 4  # ignored by the sequential runner
 
 
 @dataclass(frozen=True, slots=True)
 class DropOldest:
-    """Realtime edge: when full, drop and count the oldest waiting item. Lossless mode turns it into Block."""
-
     capacity: int = 1
 
 
 @dataclass(frozen=True, slots=True)
 class AsOf:
-    """Join edge: the consumer reads the newest value at or before its tick time; it never triggers a step."""
-
     wait_ns: int | None = None  # realtime only: how long to wait for the producer watermark (None or 0: never). Lossless always waits
     keep: int = 128  # realtime only: history bound
 
@@ -40,32 +32,24 @@ NodeKind: TypeAlias = Literal["source", "node", "segment", "sink"]
 
 @dataclass(frozen=True, slots=True)
 class Placement:
-    """Where the threaded runner runs a node."""
-
     where: Literal["main", "thread", "process"] = "thread"  # `main` = the caller thread (at most one node); `process` needs a `Spawn` recipe
     cpus: tuple[int, ...] | None = None  # thread affinity (Linux)
 
 
 @dataclass(frozen=True, slots=True)
 class Spawn:
-    """Picklable recipe for a process-placed node: the child builds `cls(config)`; ports are class attributes."""
-
     cls: type
     config: object
 
 
 @dataclass(frozen=True, slots=True)
 class PortRef:
-    """One port of one node."""
-
     node: str
     port: str
 
 
 @dataclass(frozen=True, slots=True)
 class NodeRef:
-    """Handle returned by `Graph.source/node/sink`; `ref["port"]` names a port."""
-
     name: str
 
     def __getitem__(self, port: str) -> PortRef:
@@ -74,8 +58,6 @@ class NodeRef:
 
 @dataclass(frozen=True, slots=True)
 class NodeSpec:
-    """A declared node: the object, its kind, placement and resource needs."""
-
     name: str
     obj: object
     kind: NodeKind
@@ -93,15 +75,12 @@ class NodeSpec:
 
 @dataclass(frozen=True, slots=True)
 class EdgeSpec:
-    """A typed edge between two ports."""
-
     src: PortRef
     dst: PortRef
     kind: PortKind
 
 
 def normalise(port_type: PortType) -> tuple[bool, tuple[type, ...]]:
-    """`Fenced[T]` -> (True, members of T); `A | B` -> (False, (A, B)); a class -> (False, (cls,))."""
     if port_type is Fenced:
         return True, (object,)
     fenced: bool = get_origin(port_type) is Fenced
@@ -112,8 +91,6 @@ def normalise(port_type: PortType) -> tuple[bool, tuple[type, ...]]:
 
 
 class Graph:
-    """Which nodes, typed edges, port kinds, resources and placement. No math, no models, no I/O."""
-
     def __init__(self, name: str) -> None:
         self.name: str = name
         self.resources: dict[str, Callable[[], object]] = {}
@@ -129,7 +106,6 @@ class Graph:
         return NodeRef(spec.name)
 
     def resource(self, name: str, factory: Callable[[], object]) -> str:
-        """Declare a graph-owned object, built once by the runner (declaration order) and closed after the run."""
         if name in self.resources or name in self.nodes:
             self._problems.append(f"duplicate name {name!r}")
         self.resources[name] = factory
@@ -143,19 +119,16 @@ class Graph:
         return self._add(NodeSpec(name, node, kind, placement, tuple(needs)))
 
     def sink(self, name: str, sink: Node) -> NodeRef:
-        """A Node with `outputs == {}`; it may take triggers from several producers."""
         return self._add(NodeSpec(name, sink, "sink", Placement(), ()))
 
     def edge(self, src: PortRef, dst: PortRef, kind: PortKind = Block()) -> None:
         self.edges.append(EdgeSpec(src, dst, kind))
 
     def checkpoint(self, src: PortRef, sink: LayerSink) -> None:
-        """Write any edge to a catalog layer: adds the sink and a Block edge into its port of the same name."""
         ref: NodeRef = self.sink(f"{src.node}_{src.port}_layer", sink)
         self.edge(src, ref[src.port if src.port in sink.inputs else next(iter(sink.inputs))])
 
     def order(self) -> list[str]:
-        """Topological order of node names; raises `GraphError` on a cycle."""
         sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter({name: set() for name in self.nodes})
         for edge in (e for e in self.edges if e.src.node in self.nodes and e.dst.node in self.nodes):
             sorter.add(edge.dst.node, edge.src.node)
@@ -165,7 +138,6 @@ class Graph:
             raise GraphError(f"cycle through {sorted(set(exc.args[1]))}") from exc
 
     def validate(self) -> None:
-        """Raise `GraphError` listing EVERY problem of the declared graph."""
         problems: list[str] = list(self._problems)
         incoming: dict[PortRef, list[EdgeSpec]] = defaultdict(list)
         for edge in self.edges:

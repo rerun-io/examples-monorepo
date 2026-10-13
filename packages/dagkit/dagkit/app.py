@@ -1,5 +1,3 @@
-"""App helpers: hardware-class profiles, one entry for CLI and UI, the generated gradio app (SPEC §2.9)."""
-
 import dataclasses
 import platform
 import signal
@@ -28,8 +26,6 @@ RUNNERS: dict[str, Callable[..., RunReport]] = {"sequential": run_sequential, "t
 
 @runtime_checkable
 class AppConfig(Protocol):
-    """What `run_app` reads from a package Config."""
-
     rr_config: Any
     runner: Literal["sequential", "threaded"]
     mode: Mode
@@ -43,8 +39,6 @@ G = TypeVar("G")
 @serde(deny_unknown_fields=True, type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class NodeProfile:
-    """Per-node placement and params of one hardware class (or one preset overlay)."""
-
     placement: Literal["main", "thread", "process"] = "thread"
     cpus: list[int] | None = None
     params: dict[str, Any] = field(default_factory=dict)  # overrides of the node's config dataclass fields
@@ -53,14 +47,11 @@ class NodeProfile:
 @serde(deny_unknown_fields=True, type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class Profile:
-    """`packages/<pkg>/profiles/<hardware>.toml`: node settings plus named operating points (presets)."""
-
     hardware: HardwareClass
     nodes: dict[str, NodeProfile] = field(default_factory=dict)
     presets: dict[str, dict[str, NodeProfile]] = field(default_factory=dict)  # preset -> node -> overlay
 
     def node(self, name: str, preset: str | None = None) -> NodeProfile:
-        """Base merged with the preset overlay: overlay params win; a non-default overlay placement/cpus wins."""
         if preset is not None and preset not in self.presets:
             raise KeyError(f"unknown preset {preset!r}; this profile has {sorted(self.presets)}")
         base: NodeProfile = self.nodes.get(name, NodeProfile())
@@ -71,12 +62,10 @@ class Profile:
         return NodeProfile(placement, overlay.cpus if overlay.cpus is not None else base.cpus, base.params | overlay.params)
 
     def configure(self, name: str, default: D, preset: str | None = None) -> D:
-        """The node's config (`@serde(type_check=coerce)`: params come from TOML) with profile/preset params over `default`."""
         return from_dict(type(default), to_dict(default) | self.node(name, preset).params)
 
 
 def detect_hardware() -> HardwareClass:
-    """platform.machine() + the NVIDIA driver; the RoboCap cap is aarch64 with a rockchip,rk3588 device tree."""
     machine: str = platform.machine()
     compatible: Path = Path("/proc/device-tree/compatible")
     if machine == "aarch64" and compatible.exists() and b"rockchip,rk3588" in compatible.read_bytes():
@@ -87,7 +76,6 @@ def detect_hardware() -> HardwareClass:
 
 
 def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "auto") -> Profile:
-    """Read `<directory>/<hardware>.toml` (hand-written: coerced; unknown keys refused)."""
     resolved: HardwareClass = detect_hardware() if hardware == "auto" else hardware
     path: Path = directory / f"{resolved}.toml"
     try:
@@ -100,7 +88,6 @@ def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "a
 
 
 def run_app(config: C, build: Callable[[C, rr.RecordingStream], Graph]) -> RunReport:
-    """The CLI entry: recording = `config.rr_config.rec_stream` (also gets the health view), SIGINT stops."""
     recording: rr.RecordingStream = config.rr_config.rec_stream
     control = Control()
     main: bool = threading.current_thread() is threading.main_thread()
@@ -115,12 +102,10 @@ def run_app(config: C, build: Callable[[C, rr.RecordingStream], Graph]) -> RunRe
 
 
 def _base(hint: object) -> object:
-    """`X | None` -> X."""
     return next(a for a in get_args(hint) if a is not type(None)) if get_origin(hint) in (Union, types.UnionType) else hint
 
 
 def _widgets(name: str, hint: object, default: object) -> list[Any]:
-    """Form widgets of one Config field (none for nested dataclasses such as rr_config, and for output paths)."""
     import gradio as gr
 
     hint = _base(hint)
@@ -138,7 +123,6 @@ def _widgets(name: str, hint: object, default: object) -> list[Any]:
 
 
 def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Graph], *, title: str, examples: Sequence[G] = ()) -> Any:
-    """Generated UI (a `gr.Blocks`): a form from Config fields, Run (threaded runner into a Rerun pane), Stop, output files."""
     import gradio as gr
     from gradio_rerun import Rerun
 
@@ -155,29 +139,31 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
             viewer = Rerun(streaming=True, height=720, scale=3)
         flat: list[Any] = [w for widgets in inputs.values() for w in widgets]
 
-        def config_from(values: Sequence[object]) -> G:
+        def run(*values: object) -> Iterator[tuple[object, ...]]:
             it: Iterator[object] = iter(values)
             kwargs: dict[str, object] = {}
             for f in fields:
                 got: list[object] = [next(it) for _ in inputs.get(f.name, [])]
                 if f.name in inputs:
                     base: object = _base(f.type)
-                    kwargs[f.name] = SegmentRef(str(got[0]), str(got[1])) if base is SegmentRef else Path(str(got[0])) if base is Path and got[0] else got[0]
+                    kwargs[f.name] = (
+                        SegmentRef(str(got[0]), str(got[1])) if base is SegmentRef else Path(str(got[0])) if base is Path and got[0] else got[0]
+                    )
                 elif f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING and dataclasses.is_dataclass(f.type):
                     headless: bool = "headless" in {g.name for g in dataclasses.fields(f.type)}  # type: ignore[arg-type]
                     kwargs[f.name] = f.type(**({"headless": True} if headless else {}))  # type: ignore[operator]
-            return config_type(**kwargs)
-
-        def run(*values: object) -> Iterator[tuple[object, ...]]:
-            config: G = config_from(values)
+            config: G = config_type(**kwargs)
             recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
             stream, control, errors = recording.binary_stream(), Control(), []
             graph: Graph = build(config, recording)
 
-            def body() -> RunReport:
-                return run_threaded(graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
+            def body() -> None:
+                try:
+                    run_threaded(graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
+                except BaseException as exc:  # delivered to the UI thread below
+                    errors.append(exc)
 
-            thread = threading.Thread(target=_guarded, args=(errors, body))
+            thread = threading.Thread(target=body)
             thread.start()
             while thread.is_alive():
                 time.sleep(0.2)
@@ -197,10 +183,3 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
 
 def _example_values(value: object) -> list[object]:
     return [value.dataset, value.segment] if isinstance(value, SegmentRef) else [str(value) if isinstance(value, Path) else value]
-
-
-def _guarded(errors: list[BaseException], body: Callable[[], object]) -> None:
-    try:
-        body()
-    except BaseException as exc:  # handed to the UI thread, which raises it as gr.Error (nothing swallowed)
-        errors.append(exc)

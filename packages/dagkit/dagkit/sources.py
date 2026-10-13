@@ -1,6 +1,5 @@
-"""Sources: the only pull points; each emits ONE time-ordered stream (SPEC §2.6)."""
-
 import heapq
+import itertools
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +18,6 @@ from dagkit.types import Type, read_column
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class SegmentRef:
-    """One segment of a catalog dataset, optionally a short window of it."""
-
     dataset: str  # catalog dataset name
     segment: str  # segment id
     catalog_url: str = "rerun+http://127.0.0.1:51235"  # catalog server
@@ -33,25 +30,18 @@ class SegmentRef:
 
 @dataclass(frozen=True, slots=True)
 class Column:
-    """One typed port read from a layer: the Type and the entity root that identifies it."""
-
     type: type[Type]  # value type; its `from_layer` reads the table
     root: str  # entity root (identifies a checkpoint, since catalog reads select entities, not layers)
     static: bool = False  # read without an index; values come back at STATIC
 
 
 def merge_events(*streams: Iterator[Event]) -> Iterator[Event]:
-    """Heap merge by (t_ns, stream index); raises `GraphError` on a non-monotonic stream."""
-    heap: list[tuple[TimeNs, int, Event]] = [(e.t_ns, i, e) for i, s in enumerate(streams) if (e := next(s, None)) is not None]
-    heapq.heapify(heap)
     last: list[TimeNs | None] = [None] * len(streams)
-    while heap:
-        t_ns, i, event = heapq.heappop(heap)
-        check_monotonic(last[i], t_ns, f"stream {i}")
-        last[i] = t_ns
+    indexed: list[Iterator[tuple[int, Event]]] = [zip(itertools.repeat(i), stream) for i, stream in enumerate(streams)]
+    for i, event in heapq.merge(*indexed, key=lambda pair: pair[1].t_ns):
+        check_monotonic(last[i], event.t_ns, f"stream {i}")
+        last[i] = event.t_ns
         yield event
-        if (following := next(streams[i], None)) is not None:
-            heapq.heappush(heap, (following.t_ns, i, following))
 
 
 def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Column], timeline: str, window_ns: tuple[int, int] | None) -> list[Event]:
@@ -67,12 +57,10 @@ def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Colu
             statics += events
         else:
             streams.append(iter(events))
-    return statics + list(merge_events(*streams))
+    return [*statics, *merge_events(*streams)]
 
 
 class IterSource:
-    """Files and live devices: any generator of Events (follow live sources with DropOldest edges)."""
-
     def __init__(self, outputs: Mapping[str, PortType], events: Callable[[], Iterator[Event]], *, clock: str = "video_time") -> None:
         self.outputs: dict[str, PortType] = dict(outputs)
         self.clock: str = clock
@@ -86,8 +74,6 @@ class IterSource:
 
 
 class CatalogSegmentSource(IterSource):
-    """Typed non-video columns of one catalog segment (poses, GT, prior layers, checkpoints)."""
-
     def __init__(self, segment: SegmentRef, ports: Mapping[str, Column]) -> None:
         def events() -> Iterator[Event]:
             dataset: DatasetEntry = segment.entry()  # the entry must outlive its queries
@@ -97,8 +83,6 @@ class CatalogSegmentSource(IterSource):
 
 
 class RecordingSource(IterSource):
-    """A local .rrd read through an in-process server: same reader, same columns as the catalog."""
-
     def __init__(self, path: Path, ports: Mapping[str, Column], timeline: str = "video_time") -> None:
         def events() -> Iterator[Event]:
             with rr.server.Server(host="127.0.0.1", datasets={"recording": [str(path)]}) as server:

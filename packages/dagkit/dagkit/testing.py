@@ -1,5 +1,3 @@
-"""Test helpers: the node contract on fakes, and the ticks each node of a graph receives."""
-
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -12,8 +10,6 @@ Output = tuple[str, TimeNs, object]
 
 
 class Recorder:
-    """An `Emit` that keeps every put in order."""
-
     def __init__(self) -> None:
         self.items: list[Output] = []
 
@@ -25,11 +21,6 @@ class Recorder:
 
 
 def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | None = None) -> list[Output]:
-    """Assert the push-only contract on `node`; return the outputs of one run.
-
-    Checks: outputs go to declared ports with non-decreasing time per port; a second flush emits nothing; a run
-    after a double `reset` repeats the first run exactly (reset is idempotent and rebuilds all state).
-    """
     ctx = ctx or RunContext("contract", "node", "lossless")
     runs: list[list[Output]] = []
     for resets in (1, 2):
@@ -53,8 +44,6 @@ def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | Non
 
 
 class _Spy:
-    """Forwards everything to the node and records each tick (or segment input) it receives."""
-
     def __init__(self, node: object, seen: list[object]) -> None:
         self.node, self.seen = node, seen
 
@@ -71,7 +60,6 @@ class _Spy:
 
 
 def collect_edges(graph: Graph, run: Callable[[Graph], object]) -> dict[str, list[object]]:
-    """Run `graph` with every node wrapped in a spy; return node -> received (port, t_ns, value, asof) in order."""
     seen: dict[str, list[object]] = defaultdict(list)
     spied = Graph(graph.name)
     spied.resources, spied.edges = dict(graph.resources), list(graph.edges)

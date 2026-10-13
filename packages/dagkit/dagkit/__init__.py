@@ -1,5 +1,3 @@
-"""Typed node/graph contract, runners, sources, sinks and verify cards. Imports no torch; import from the submodules."""
-
 import os
 
 if os.environ.get("PIXI_DEV_MODE") == "1":

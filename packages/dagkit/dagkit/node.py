@@ -1,5 +1,3 @@
-"""The push-only node contract (SPEC §2.3), the control plane and fenced GPU values (§2.8)."""
-
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -14,8 +12,6 @@ T = TypeVar("T")
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """One item of a Source's single time-ordered stream (`t_ns = STATIC` for whole-stream values)."""
-
     t_ns: TimeNs
     port: str
     value: object
@@ -23,8 +19,6 @@ class Event:
 
 @dataclass(frozen=True, slots=True)
 class Tick:
-    """What `Node.step` receives: one trigger event plus the AsOf snapshot at its time."""
-
     t_ns: TimeNs
     port: str
     value: object  # synced and unwrapped for host consumers of a `Fenced` port
@@ -32,26 +26,20 @@ class Tick:
 
 
 class Control:
-    """Thread-safe control plane, separate from data edges: stop, reset barrier, reconfigure."""
-
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._stopped: bool = False
+        self._stopped: threading.Event = threading.Event()
         self._requests: list[tuple[frozenset[str], dict[str, dict[str, object]], bool]] = []
         self.wake: Callable[[], None] = lambda: None  # set by the runner: wakes its waits on a request
 
     def stop(self) -> None:
-        """Sources stop after their current event; queues drain, nodes flush, the run returns `stopped`."""
-        with self._lock:
-            self._stopped = True
+        self._stopped.set()
         self.wake()
 
     def reset(self, nodes: Sequence[str] = ()) -> None:
-        """At the reset barrier: flush, `world += 1`, `reset(ctx)` on `nodes` (every non-sink node if empty)."""
         self._request(frozenset(nodes), {}, True)
 
     def reconfigure(self, params: Mapping[str, Mapping[str, object]]) -> None:
-        """Profile/preset switch: at the barrier the named nodes flush and reset with the new params."""
         self._request(frozenset(params), {name: dict(p) for name, p in params.items()}, False)
 
     def _request(self, targets: frozenset[str], params: dict[str, dict[str, object]], bump: bool) -> None:
@@ -61,11 +49,9 @@ class Control:
 
     @property
     def stopped(self) -> bool:
-        with self._lock:
-            return self._stopped
+        return self._stopped.is_set()
 
     def take_requests(self) -> list[tuple[frozenset[str], dict[str, dict[str, object]], bool]]:
-        """Runner side: pop the pending (targets, params, bump_world) barrier requests."""
         with self._lock:
             requests, self._requests = self._requests, []
             return requests
@@ -73,8 +59,6 @@ class Control:
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
-    """Everything a node may know about its run; rebuilt for every `reset`."""
-
     graph: str
     node: str
     mode: Mode
@@ -87,19 +71,12 @@ class RunContext:
 
 @runtime_checkable
 class Emit(Protocol):
-    """Output side of a node, given to `step`, `flush` and `run`."""
-
     def put(self, port: str, t_ns: TimeNs, value: object) -> None: ...  # time non-decreasing per port; may be < the tick
     def watermark(self, t_ns: TimeNs) -> None: ...  # `emits_late` nodes only: no more outputs with time <= t_ns
 
 
 @runtime_checkable
 class Node(Protocol):
-    """Push-only node: `reset` before the first tick, one `step` per trigger event, `flush` at end of stream.
-
-    Optional attributes, read with getattr: `emits_late: bool = False`, `abort(self) -> None` (failure cleanup).
-    """
-
     @property
     def inputs(self) -> Mapping[str, PortType]: ...
     @property
@@ -111,8 +88,6 @@ class Node(Protocol):
 
 @runtime_checkable
 class SegmentNode(Protocol):
-    """Whole-segment batch logic: `run` is called once, after every input closed."""
-
     @property
     def inputs(self) -> Mapping[str, PortType]: ...
     @property
@@ -123,8 +98,6 @@ class SegmentNode(Protocol):
 
 @runtime_checkable
 class Source(Protocol):
-    """The only pull point: STATIC events first, then non-decreasing `t_ns` on one stream."""
-
     @property
     def outputs(self) -> Mapping[str, PortType]: ...
     @property
@@ -135,15 +108,11 @@ class Source(Protocol):
 
 @runtime_checkable
 class Fence(Protocol):
-    """A recorded GPU event (`torch.cuda.Event` satisfies it); dagkit never imports torch."""
-
     def synchronize(self) -> None: ...
     def wait(self, stream: object = None) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
 class Fenced(Generic[T]):
-    """A GPU value plus the event recorded after the producer's last write; immutable once put (fan-out safe)."""
-
     value: T
     fence: Fence | None  # None for host-side or resumed values

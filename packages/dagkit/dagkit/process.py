@@ -1,5 +1,3 @@
-"""Process placement: a thread-side proxy for a `Spawn` recipe that runs in a child process (SPEC §2.5)."""
-
 import multiprocessing as mp
 import pickle
 import queue
@@ -14,8 +12,6 @@ from dagkit.time import GraphError, TimeNs
 
 
 class _Collect:
-    """The child's `Emit`: records puts and watermarks for the proxy to replay."""
-
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, TimeNs, object]] = []
 
@@ -49,8 +45,6 @@ def _child(spawn: Spawn, inbox: Queue, outbox: Queue) -> None:
 
 
 class ProcessNode:
-    """Proxy node run by a runner thread; the child (spawn context) builds `cls(config)` and runs its contract."""
-
     def __init__(self, spawn: Spawn) -> None:
         self.inputs: Mapping[str, PortType] = spawn.cls.inputs
         self.outputs: Mapping[str, PortType] = spawn.cls.outputs
@@ -88,7 +82,6 @@ class ProcessNode:
         self._call("flush", None, out)
 
     def close(self) -> None:
-        """Ask the child to exit, then join → terminate → kill."""
         if self._process.is_alive():
             self._inbox.put(("close", None))
             self._process.join(5.0)

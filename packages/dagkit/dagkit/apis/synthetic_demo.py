@@ -1,5 +1,3 @@
-"""Synthetic graph: paced helix source -> DropOldest(1) -> slow smoother (AsOf gain) -> RerunSink, plus the health view."""
-
 import math
 import time
 from collections.abc import Iterator
@@ -23,8 +21,6 @@ from dagkit.types import Log, row_times
 
 @dataclass(frozen=True, slots=True)
 class Sample:
-    """Demo Type: a 3D position and a scalar."""
-
     xyz: tuple[float, float, float]
     value: float
 
@@ -37,13 +33,12 @@ class Sample:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Sample"]]:
-        rows = zip(row_times(table, timeline), table[f"{root}/point:Points3D:positions"].to_pylist(), table[f"/signal{root}:Scalars:scalars"].to_pylist(), strict=True)
-        return ((t_ns, cls(tuple(xyz[0]), value[0])) for t_ns, xyz, value in rows)
+        points: list = table[f"{root}/point:Points3D:positions"].to_pylist()
+        scalars: list = table[f"/signal{root}:Scalars:scalars"].to_pylist()
+        return ((t_ns, cls(tuple(xyz[0]), value[0])) for t_ns, xyz, value in zip(row_times(table, timeline), points, scalars, strict=True))
 
 
 class Smooth:
-    """Slow exponential smoother (`delay_s` per step); its gain arrives on a 1 Hz control port, joined AsOf."""
-
     inputs, outputs = {"raw": Sample, "gain": float}, {"smooth": Sample}
 
     def __init__(self, delay_s: float) -> None:
@@ -67,8 +62,6 @@ class Smooth:
 
 @dataclass
 class DemoRerunConfig:
-    """`--rr-config.connect rerun+http://127.0.0.1:9876/proxy`, `--rr-config.save x.rrd`, else spawn a viewer."""
-
     connect: str | None = None
     save: Path | None = None
 
@@ -115,8 +108,9 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
 
 
 def main(config: Config) -> RunReport:
-    series = rrb.Vertical(rrb.TimeSeriesView(origin="/signal", name="signal (video_time)"), rrb.TimeSeriesView(origin="/dagkit/health", name="runner health (wall_time)"))
+    signal: rrb.TimeSeriesView = rrb.TimeSeriesView(origin="/signal", name="signal (video_time)")
+    health: rrb.TimeSeriesView = rrb.TimeSeriesView(origin="/dagkit/health", name="runner health (wall_time)")
     trail = rrb.VisibleTimeRange("video_time", start=rrb.TimeRangeBoundary.cursor_relative(seconds=-4.0), end=rrb.TimeRangeBoundary.cursor_relative())
     helix = rrb.Spatial3DView(origin="/world", name="helix (last 4 s)", time_ranges=trail, eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital))
-    config.rr_config.rec_stream.send_blueprint(rrb.Blueprint(rrb.Horizontal(helix, series)))
+    config.rr_config.rec_stream.send_blueprint(rrb.Blueprint(rrb.Horizontal(helix, rrb.Vertical(signal, health))))
     return run_app(config, build)

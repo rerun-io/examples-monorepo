@@ -1,9 +1,4 @@
-"""Runners: one engine behind `run_sequential` and `run_threaded` (SPEC §2.3, §2.3a, §2.5).
-
-Both share routing, AsOf snapshots, watermarks, pending lists, flush order and the reset barrier, so they deliver
-the same ticks on Block/AsOf graphs. Run state sits behind one lock: workers wait on `cond`, the coordinator waits
-for quiescence on `quiet` (so idle transitions never wake every worker).
-"""
+"""One engine for both runners. One lock, two conditions: workers wait on `cond`, the coordinator on `quiet`."""
 
 import bisect
 import heapq
@@ -14,7 +9,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 import numpy as np
 import rerun as rr
@@ -33,8 +28,6 @@ Status: TypeAlias = Literal["complete", "stopped", "failed"]
 @serde
 @dataclass(frozen=True, slots=True)
 class PortStats:
-    """Per trigger port: largest queue depth, DropOldest drops, largest pending list of the node."""
-
     depth_max: int
     drops: int
     pending_max: int
@@ -43,8 +36,6 @@ class PortStats:
 @serde
 @dataclass(frozen=True, slots=True)
 class NodeStats:
-    """Steps run (sources: events emitted) and step times."""
-
     ticks: int
     step_ms_mean: float
     step_ms_p95: float
@@ -54,8 +45,6 @@ class NodeStats:
 @serde
 @dataclass(frozen=True, slots=True)
 class RunReport:
-    """Replaces the per-package stage timers; realtime_fraction = stream_s / wall_s."""
-
     graph: str
     mode: str
     status: Status
@@ -75,15 +64,12 @@ class _Edge:
     wrap: bool  # host producer (a resumed checkpoint), fenced consumer: deliver Fenced(value, None)
     queue: deque = field(default_factory=deque)  # trigger edges: (seq, t_ns, value)
     history: list = field(default_factory=list)  # AsOf edges: (t_ns, value) in time order
-    closed: bool = False
     depth_max: int = 0
     drops: int = 0
 
 
 @dataclass(eq=False, slots=True)
 class _State:
-    """Per-node run state; also the `Emit` the node receives."""
-
     run: "_Run"
     spec: NodeSpec
     obj: object
@@ -182,7 +168,6 @@ class _Run:
             self.quiet.notify_all()
 
     def fail(self, exc: BaseException) -> None:
-        """Keep the first failure and wake every wait."""
         with self.cond:
             self.failure = self.failure or exc
         self.notify()
@@ -194,18 +179,15 @@ class _Run:
             raise _Abort
 
     def _ready(self, s: _State, t_ns: TimeNs) -> bool:
-        """Lossless AsOf: every producer's watermark has reached the tick."""
         return self.mode == "realtime" or s.spec.kind == "segment" or all(self.states[e.spec.src.node].wm >= t_ns for e in s.asofs)
 
     def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
-        """Next deliverable trigger in arrival order; blocked ticks move to the pending list (queues never wait on AsOf)."""
         while True:
             if s.pending and self._ready(s, s.pending[0][1]):
                 return s.pending.popleft()
-            heads: list[_Edge] = [e for e in s.triggers if e.queue]
-            if not heads:
+            edge: _Edge | None = min((e for e in s.triggers if e.queue), key=lambda e: cast(_Edge, e).queue[0][0], default=None)
+            if edge is None:
                 return None
-            edge: _Edge = min(heads, key=lambda e: e.queue[0][0])
             _, t_ns, value = edge.queue.popleft()
             self.cond.notify_all()
             if not s.pending and self._ready(s, t_ns):
@@ -214,23 +196,14 @@ class _Run:
             s.pending_max = max(s.pending_max, len(s.pending))
 
     def _can_finish(self, s: _State) -> bool:
-        if s.done or not s.started or self.paused or s.pending or any(e.queue or not e.closed for e in s.triggers):
+        if s.done or not s.started or self.paused or s.pending or any(e.queue or not self.states[e.spec.src.node].done for e in s.triggers):
             return False
         if s.spec.kind == "segment" and any(self.states[e.spec.src.node].wm < TIME_MAX for e in s.asofs):
             return False
         return s.spec.kind != "sink" or all(o.done for o in self.states.values() if o.spec.kind != "sink")
 
-    def _snapshot(self, s: _State, edge: _Edge, t_ns: TimeNs) -> object | None:
-        """Newest value with time <= t_ns; drops history no unprocessed tick can still need."""
-        found: int = bisect.bisect_right(edge.history, t_ns, key=lambda h: h[0])
-        value: object | None = edge.history[found - 1][1] if found else None
-        low: TimeNs = min([t_ns, *(p[1] for p in s.pending), *(e.queue[0][1] for e in s.triggers if e.queue)])
-        del edge.history[: max(bisect.bisect_right(edge.history, low, key=lambda h: h[0]) - 1, 0)]
-        return value
-
     @staticmethod
     def _convert(edge: _Edge, value: object) -> object:
-        """Host consumers get synced, unwrapped values; fenced consumers of host values get Fenced(value, None)."""
         if edge.unwrap and isinstance(value, Fenced):
             if value.fence is not None:
                 value.fence.synchronize()
@@ -238,7 +211,6 @@ class _Run:
         return Fenced(value, None) if edge.wrap and not isinstance(value, Fenced) else value
 
     def _deliver(self, s: _State, item: tuple[_Edge, TimeNs, object]) -> None:
-        """Step one tick (call outside the lock)."""
         edge, t_ns, raw = item
         port: str = edge.spec.dst.port
         value: object = self._convert(edge, raw)
@@ -249,11 +221,18 @@ class _Run:
             if not getattr(s.obj, "emits_late", False) and t_ns - 1 > s.wm:
                 s.wm = t_ns - 1
                 self.cond.notify_all()
-            waits: list[int] = [e.spec.kind.wait_ns for e in s.asofs if isinstance(e.spec.kind, AsOf) and e.spec.kind.wait_ns and self.mode == "realtime"]
+            waits: list[int] = [
+                e.spec.kind.wait_ns for e in s.asofs if isinstance(e.spec.kind, AsOf) and e.spec.kind.wait_ns and self.mode == "realtime"
+            ]
             deadline: float = time.monotonic() + max(waits, default=0) / 1e9
             while self.threaded and waits and any(self.states[e.spec.src.node].wm < t_ns for e in s.asofs) and time.monotonic() < deadline:
                 self.wait(deadline - time.monotonic())
-            raw_asof: list[tuple[_Edge, object | None]] = [(e, self._snapshot(s, e, t_ns)) for e in s.asofs]
+            raw_asof: list[tuple[_Edge, object | None]] = []
+            low: TimeNs = min([t_ns, *(p[1] for p in s.pending), *(e.queue[0][1] for e in s.triggers if e.queue)])
+            for e in s.asofs:
+                found: int = bisect.bisect_right(e.history, t_ns, key=lambda h: h[0])
+                raw_asof.append((e, e.history[found - 1][1] if found else None))
+                del e.history[: max(bisect.bisect_right(e.history, low, key=lambda h: h[0]) - 1, 0)]  # retain low's predecessor
         asof: dict[str, object | None] = {e.spec.dst.port: None if v is None else self._convert(e, v) for e, v in raw_asof}
         start: float = time.perf_counter()
         s.obj.step(Tick(t_ns, port, value, asof), s)  # type: ignore[attr-defined]
@@ -264,14 +243,13 @@ class _Run:
     def _close(self, s: _State) -> None:
         with self.cond:
             s.wm, s.done = TIME_MAX, True
-            for edge in itertools.chain.from_iterable(s.outs.values()):
-                edge.closed = True
         self.notify()
 
     def _finish(self, s: _State) -> None:
-        """End of stream (call outside the lock): SegmentNode.run on everything collected, else flush."""
         if s.spec.kind == "segment":
-            history: dict[str, list[Event]] = {e.spec.dst.port: [Event(t, e.spec.dst.port, self._convert(e, v)) for t, v in e.history] for e in s.asofs}
+            history: dict[str, list[Event]] = {
+                e.spec.dst.port: [Event(t, e.spec.dst.port, self._convert(e, v)) for t, v in e.history] for e in s.asofs
+            }
             s.obj.run({**s.collected, **history}, s)  # type: ignore[attr-defined]
         else:
             s.obj.flush(s)  # type: ignore[attr-defined]
@@ -284,7 +262,6 @@ class _Run:
         s.started = True
 
     def _start_source(self, s: _State) -> Iterator[Event]:
-        """Startup phase: route the source's leading STATIC events (AsOf stores, ctx.statics) before any reset."""
         events: Iterator[Event] = iter(s.obj.events())  # type: ignore[attr-defined]
         for event in events:
             if event.t_ns != STATIC:
@@ -302,7 +279,6 @@ class _Run:
         s.put(event.port, event.t_ns, event.value)
 
     def _barrier(self, settle: Callable[[], None]) -> None:
-        """Reset/reconfigure at one quiescent point: drain, flush targets (old world), reset them, resume."""
         with self.cond:
             if not (requests := self.control.take_requests()):
                 return
@@ -311,7 +287,7 @@ class _Run:
             for targets, params, bump in requests:
                 self.world += bump
                 for s in self.nodes:
-                    if s.done or s.spec.name not in (targets or {n.spec.name for n in self.nodes if n.spec.kind != "sink"}):
+                    if s.done or (s.spec.name not in targets if targets else s.spec.kind == "sink"):
                         continue
                     if s.spec.kind != "segment":
                         s.obj.flush(s)  # type: ignore[attr-defined]
@@ -323,37 +299,15 @@ class _Run:
             self.paused = False
             self.cond.notify_all()
 
-    def _quiescent(self) -> bool:
-        """Sources paused, every node waiting with nothing deliverable."""
-        if not all(s.done or s.paused for s in self.sources):
-            return False
-        return all(s.done or (s.idle and not any(e.queue for e in s.triggers) and not (s.pending and self._ready(s, s.pending[0][1]))) for s in self.nodes)
-
     def _drain(self) -> None:
-        """Sequential: step every ready node in topological order until none is ready."""
-        progress: bool = True
-        while progress:
-            progress = False
-            for s in self.nodes:
-                while not s.done:
-                    with self.cond:
-                        item = self._next(s)
-                    if item is None:
-                        break
-                    self._deliver(s, item)
-                    progress = True
-                with self.cond:
-                    finish: bool = self._can_finish(s)
-                if finish:
-                    self._finish(s)
-                    progress = True
+        while any([self._node_loop(s, wait=False) for s in self.nodes]):  # visit every node, without short-circuiting
+            pass
 
-    def sequential(self, streams: list[Iterator[Event]], health: rr.RecordingStream | None, every_s: float) -> None:
-        """Merge sources by (t_ns, source order); after each event drain the graph."""
+    def sequential(self, streams: list[Iterator[Event]]) -> None:
         heap: list[tuple[TimeNs, int, Event]] = [(e.t_ns, i, e) for i, it in enumerate(streams) if (e := next(it, None)) is not None]
         heapq.heapify(heap)
-        start: float = time.perf_counter()
-        logged: float = start
+        self.health_started_at: float = time.perf_counter()
+        self.health_logged: float = self.health_started_at
         while heap and not self.control.stopped:
             self._drain()
             _, i, event = heapq.heappop(heap)
@@ -364,14 +318,12 @@ class _Run:
                 self._close(self.sources[i])
             self._drain()
             self._barrier(self._drain)
-            if health is not None and time.perf_counter() - logged >= every_s:
-                logged = time.perf_counter()
-                self._health(health, logged - start)
+            self._health()
         for s in self.sources:
             self._close(s)
         self._drain()
 
-    def _guard(self, body: Callable[..., None], *args: object) -> None:
+    def _guard(self, body: Callable[..., object], *args: object) -> None:
         try:
             body(*args)
         except _Abort:
@@ -392,42 +344,48 @@ class _Run:
             self._emit(s, event)
         self._close(s)
 
-    def _node_loop(self, s: _State) -> None:
-        if s.spec.placement.cpus and hasattr(os, "sched_setaffinity"):
+    def _node_loop(self, s: _State, *, wait: bool = True) -> bool:
+        if wait and s.spec.placement.cpus and hasattr(os, "sched_setaffinity"):
             os.sched_setaffinity(0, s.spec.placement.cpus)
-        while True:
+        progress: bool = False
+        while not s.done:
             with self.cond:
                 while (item := self._next(s)) is None and not self._can_finish(s):
+                    if not wait:
+                        return progress
                     s.idle = True
                     self.quiet.notify_all()
                     self.wait()
                 s.idle = False
             if item is None:
-                return self._finish(s)
-            self._deliver(s, item)
+                self._finish(s)
+            else:
+                self._deliver(s, item)
+            progress = True
+        return progress
 
     def _settle(self) -> None:
-        while not self._quiescent():
+        # Sources paused, every node waiting with nothing deliverable; unsatisfied pending ticks may remain.
+        while not all(s.done or s.paused for s in self.sources) or not all(
+            s.done or (s.idle and not any(e.queue for e in s.triggers) and not (s.pending and self._ready(s, s.pending[0][1]))) for s in self.nodes
+        ):
             if self.failure is not None:
                 raise _Abort
             self.quiet.wait()
 
-    def _coordinate(self, health: rr.RecordingStream | None, every_s: float) -> None:
-        start: float = time.perf_counter()
-        logged: float = start
+    def _coordinate(self) -> None:
+        self.health_started_at: float = time.perf_counter()
+        self.health_logged: float = self.health_started_at
         with self.cond:
             while not all(s.done for s in self.states.values()) and self.failure is None:
                 self._barrier(self._settle)
-                self.cond.wait(every_s if health is not None else None)
-                if health is not None and time.perf_counter() - logged >= every_s:
-                    logged = time.perf_counter()
-                    self._health(health, logged - start)
+                self.cond.wait(self.health_every_s if self.health is not None else None)
+                self._health()
 
-    def threaded_body(self, streams: list[Iterator[Event]], health: rr.RecordingStream | None, every_s: float) -> None:
-        """A thread per source and per node (`main` = the caller), plus a coordinator for barriers and health."""
+    def threaded_body(self, streams: list[Iterator[Event]]) -> None:
         main: _State | None = next((s for s in self.nodes if s.spec.placement.where == "main"), None)
-        workers: list[tuple[Callable[..., None], tuple]] = [(self._source_loop, (s, it)) for s, it in zip(self.sources, streams, strict=True)]
-        workers += [(self._node_loop, (s,)) for s in self.nodes if s is not main] + [(self._coordinate, (health, every_s))]
+        workers: list[tuple[Callable[..., object], tuple]] = [(self._source_loop, (s, it)) for s, it in zip(self.sources, streams, strict=True)]
+        workers += [(self._node_loop, (s,)) for s in self.nodes if s is not main] + [(self._coordinate, ())]
         self.threads = [threading.Thread(target=self._guard, args=(body, *args), daemon=True) for body, args in workers]
         for thread in self.threads:
             thread.start()
@@ -439,27 +397,32 @@ class _Run:
         for thread in self.threads:
             thread.join()
 
-    def _health(self, recording: rr.RecordingStream, elapsed_s: float) -> None:
-        recording.set_time("wall_time", duration=elapsed_s)
+    def _health(self, *, force: bool = False) -> None:
+        now: float = time.perf_counter()
+        if self.health is None or (not force and now - self.health_logged < self.health_every_s):
+            return
+        self.health_logged = now
+        self.health.set_time("wall_time", duration=now - (self.started_at if force else self.health_started_at))
         for s in self.nodes:
             root: str = f"/dagkit/health/{s.spec.name}"
             if len(s.step_ms) > s.logged:
-                recording.log(f"{root}/step_ms", rr.Scalars(float(np.mean(s.step_ms[s.logged :]))))
+                self.health.log(f"{root}/step_ms", rr.Scalars(float(np.mean(s.step_ms[s.logged :]))))
                 s.logged = len(s.step_ms)
             for edge in s.triggers:
-                recording.log(f"{root}/queue_depth/{edge.spec.dst.port}", rr.Scalars(float(len(edge.queue))))
-                recording.log(f"{root}/drops/{edge.spec.dst.port}", rr.Scalars(float(edge.drops)))
+                self.health.log(f"{root}/queue_depth/{edge.spec.dst.port}", rr.Scalars(float(len(edge.queue))))
+                self.health.log(f"{root}/drops/{edge.spec.dst.port}", rr.Scalars(float(edge.drops)))
 
-    def execute(self, body: Callable[[list[Iterator[Event]], rr.RecordingStream | None, float], None], health: rr.RecordingStream | None, every_s: float) -> RunReport:
-        """Lifecycle (§2.3a): resources, startup statics, reset, run; on failure abort, join, close, re-raise."""
-        start: float = time.perf_counter()
+    def execute(self, health: rr.RecordingStream | None, every_s: float) -> RunReport:
+        self.started_at: float = time.perf_counter()
+        self.health: rr.RecordingStream | None = health
+        self.health_every_s: float = every_s
         try:
             self.resources = {name: factory() for name, factory in self.graph.resources.items()}
             streams: list[Iterator[Event]] = [self._start_source(s) for s in self.sources]
             for s in self.nodes:
                 self._reset(s)
             self.running = True
-            body(streams, health, every_s)
+            (self.threaded_body if self.threaded else self.sequential)(streams)
         except BaseException as exc:
             self.fail(exc)
             first: BaseException = self.failure or exc
@@ -476,44 +439,37 @@ class _Run:
             self._close_resources()
             raise first from None
         self._close_resources()
-        if health is not None:
-            self._health(health, time.perf_counter() - start)
-        return self._report("stopped" if self.control.stopped else "complete", time.perf_counter() - start)
-
-    def _close_resources(self) -> None:
-        """Sources and process children first, then resources in reverse declaration order."""
-        owned: list[object] = [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
-        for closeable in owned + list(reversed(self.resources.values())):
-            if (close := getattr(closeable, "close", None)) is not None:
-                close()
-
-    def _report(self, status: Status, wall_s: float) -> RunReport:
+        self._health(force=True)
+        wall_s: float = time.perf_counter() - self.started_at
         nodes: dict[str, NodeStats] = {}
         for name, s in self.states.items():
             ms: list[float] = sorted(s.step_ms) or [0.0]
             ports: dict[str, PortStats] = {e.spec.dst.port: PortStats(e.depth_max, e.drops, s.pending_max) for e in s.triggers}
             nodes[name] = NodeStats(s.ticks, float(np.mean(ms)), ms[int(0.95 * (len(ms) - 1))], ports)
         stream_s: float = (self.last_t - self.first_t) / 1e9 if self.first_t is not None else 0.0
-        return RunReport(self.graph.name, self.mode, status, wall_s, stream_s, nodes)
+        return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, stream_s, nodes)
+
+    def _close_resources(self) -> None:
+        owned: list[object] = [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
+        for closeable in owned + list(reversed(self.resources.values())):
+            if (close := getattr(closeable, "close", None)) is not None:
+                close()
 
 
 def run_sequential(graph: Graph, *, mode: Mode = "lossless", control: Control | None = None, health: rr.RecordingStream | None = None) -> RunReport:
-    """Debug runner: one thread, deterministic; lossless only."""
     if mode != "lossless":
         raise GraphError("run_sequential is lossless only")
-    run = _Run(graph, mode, control, threaded=False)
-    return run.execute(run.sequential, health, 1.0)
+    return _Run(graph, mode, control, threaded=False).execute(health, 1.0)
 
 
 def run_threaded(
     graph: Graph, *, mode: Mode = "realtime", control: Control | None = None, health: rr.RecordingStream | None = None, health_every_s: float = 1.0
 ) -> RunReport:
-    """A thread per source and per node, bounded queues per Block/DropOldest edge; lossless turns DropOldest into Block."""
-    run = _Run(graph, mode, control, threaded=True)
-    return run.execute(run.threaded_body, health, health_every_s)
+    return _Run(graph, mode, control, threaded=True).execute(health, health_every_s)
 
 
-def run_segments(build: Callable[[SegmentRef], Graph], segments: Sequence[SegmentRef], *, runner: Literal["sequential", "threaded"] = "threaded") -> list[RunReport]:
-    """Segment -> layer batch, lossless."""
+def run_segments(
+    build: Callable[[SegmentRef], Graph], segments: Sequence[SegmentRef], *, runner: Literal["sequential", "threaded"] = "threaded"
+) -> list[RunReport]:
     run: Callable[..., RunReport] = run_threaded if runner == "threaded" else run_sequential
     return [run(build(segment), mode="lossless") for segment in segments]
