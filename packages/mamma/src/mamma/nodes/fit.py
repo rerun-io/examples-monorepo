@@ -7,21 +7,21 @@ in fewer than two views on some ticks, is dropped and counted); ``flush`` drains
 """
 
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
 from dagkit.node import Emit, Fenced, PortType, RunContext, Tick
 from dagkit.time import TIME_MAX, TimeNs
-from jaxtyping import Bool, Float32, Int64
+from jaxtyping import Bool, Float32, Int32, Int64
 from numpy import ndarray
 from simplecv.gpu import consume
 from simplecv.types.rig import RigCameras
 from torch import Tensor
 
-from mamma.ops.smplx_body import SmplxBody
 from mamma.ops.triangulation import triangulate_gated, triangulate_landmarks
-from mamma.ops.window_fit import FitResult, FitterConfig, SlidingWindowFitter
+from mamma.ops.window_fit import FitResult, FitterConfig
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, SmplxFits
 
 CONTACT_MIN: float = 0.25
@@ -30,16 +30,28 @@ CONTACT_HEIGHT_M: float = 0.05
 """Height scale of the floor pull: only landmarks the geometry also places near z = 0 are pulled (a jump predicts contact)."""
 
 
+@runtime_checkable
+class WindowFitter(Protocol):
+    """What the node needs from ``ops.window_fit.SlidingWindowFitter`` (tests inject a fake)."""
+
+    def push(
+        self, frame_idx: int, pts2d_per_cam: list[Tensor], vis_per_cam: list[Tensor], anchors3d: Tensor, anchors_valid: Tensor, floor_contact: Tensor | None = None, optimize: bool = True
+    ) -> FitResult | None: ...
+    def drain_head(self) -> list[FitResult]: ...
+    def drain(self) -> list[FitResult]: ...
+
+
 class FitNode:
     inputs: Mapping[str, PortType] = {"landmarks": Fenced[MultiViewLandmarks], "rig": RigCameras}
     outputs: Mapping[str, PortType] = {"fit": SmplxFits, "kp3d": Landmarks3d, "topology": BodyTopology}
     emits_late: bool = True
 
-    def __init__(self, config: FitterConfig, body: SmplxBody) -> None:
-        self.config, self.body = config, body
+    def __init__(self, config: FitterConfig, faces: Int32[ndarray, "f 3"], new_fitter: Callable[[list[Tensor], list[Tensor]], WindowFitter]) -> None:
+        """``new_fitter(K per view, cam_T_world per view)`` starts one person's fitter (engine-size intrinsics, float32 on the device)."""
+        self.config, self.faces, self.new_fitter = config, faces, new_fitter
 
     def reset(self, ctx: RunContext) -> None:
-        self.fitters: dict[int, SlidingWindowFitter] = {}
+        self.fitters: dict[int, WindowFitter] = {}
         self.held: dict[TimeNs, dict[int, FitResult]] = {}
         self.times: dict[int, TimeNs] = {}
         """Frame index -> its tick time."""
@@ -78,7 +90,7 @@ class FitNode:
             for fit in [*self.fitters[person].drain_head(), *([result] if result is not None and result is not self.pushed.get(person) else [])]:
                 self.held.setdefault(self.times[fit.frame_idx], {})[person] = self.pushed[person] = fit
         if new:
-            out.put("topology", tick.t_ns, BodyTopology(tuple(new), np.asarray(self.body.model.faces, dtype=np.int32)))
+            out.put("topology", tick.t_ns, BodyTopology(tuple(new), self.faces))
         if points:
             out.put("kp3d", tick.t_ns, Landmarks3d(
                 landmarks.frame_index, tuple(p for p, _, _ in points), np.stack([c.cpu().numpy() for _, c, _ in points]), np.stack([v.cpu().numpy() for _, _, v in points]),
@@ -106,7 +118,7 @@ class FitNode:
         contact: Float32[Tensor, " n"] = landmarks.floor_contact[torch.as_tensor(rows, device=device)].mean(dim=0)  # fused over the views that see the person
         contact = torch.where(contact < CONTACT_MIN, 0.0, contact) * valid.float() * torch.exp(-((anchors[:, 2] / CONTACT_HEIGHT_M) ** 2))
         if person not in self.fitters:
-            self.fitters[person] = SlidingWindowFitter(self.body, *self.cameras, self.config)
+            self.fitters[person] = self.new_fitter(*self.cameras)
             new.append(person)
         observed: list[Float32[Tensor, "n 3"]] = list(torch.cat([xy, log_variance[..., None]], dim=-1).unbind(0))
         optimize: bool = self.config.fit_stride <= 1 or landmarks.frame_index % self.config.fit_stride == 0

@@ -165,10 +165,10 @@ class MultiViewLandmarks:
             )
             if not keyed:
                 continue
-            stacked: list[Tensor] = [torch.as_tensor(np.asarray([columns[p][k][row] for _, _, p in keyed], dtype=np.float32)) for k in range(4)]
+            xy, log_variance, visibility, floor_contact = (torch.as_tensor(np.asarray([columns[p][k][row] for _, _, p in keyed], dtype=np.float32)) for k in range(4))
             yield t_ns, cls(
                 int(columns[keyed[0][2]][4][row][0]), views, np.asarray([k[0] for k in keyed], dtype=np.int64),
-                np.asarray([k[1] for k in keyed], dtype=np.int64), *stacked, scale_xy,
+                np.asarray([k[1] for k in keyed], dtype=np.int64), xy, log_variance, visibility, floor_contact, scale_xy,
             )  # fmt: skip
 
 

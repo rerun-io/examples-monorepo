@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
@@ -91,3 +94,14 @@ def test_bbox_iou_xyxy() -> None:
     assert abs(bbox_iou_xyxy(box, half) - (50.0 / 150.0)) < 1e-6
     disjoint: Float32[ndarray, "4"] = np.array([20.0, 20.0, 30.0, 30.0], dtype=np.float32)
     assert bbox_iou_xyxy(box, disjoint) == 0.0
+
+
+@settings(max_examples=60, deadline=None)
+@given(score=arrays(np.float32, st.tuples(st.integers(0, 5), st.integers(0, 5)), elements=st.floats(0.0, 1.0, width=32)), min_score=st.floats(0.0, 1.0))
+def test_identity_assignment_is_one_to_one_above_the_threshold(score: np.ndarray, min_score: float) -> None:
+    """The per-tick identity map: each subject takes at most one detection and each detection at most one subject."""
+    matches: dict[int, int] = assign_hungarian(score, min_score=min_score)
+    assert len(set(matches.values())) == len(matches)
+    assert all(0 <= r < score.shape[0] and 0 <= c < score.shape[1] and score[r, c] >= min_score for r, c in matches.items())
+    if score.size and min_score == 0.0:
+        assert len(matches) == min(score.shape)

@@ -5,7 +5,7 @@ stay in engine pixels (the scale is the width ratio, as the original pipeline us
 """
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -20,6 +20,7 @@ from mamma.models.landmarks.estimator import DenseLandmarks
 from mamma.types import MultiViewLandmarks, MultiViewTracks
 
 
+@runtime_checkable
 class DenseLandmarker(Protocol):
     """What the node needs from ``models.landmarks.estimator.LandmarkEstimator`` (tests inject a fake)."""
 

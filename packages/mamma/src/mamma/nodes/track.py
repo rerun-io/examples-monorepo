@@ -5,9 +5,9 @@ in one batch over the views. Identity state (CLIP banks, lost / held counters, t
 models come in through the constructor (posekit ``PersonDetector`` / ``IdentityEncoder`` roles and ``Sam2Masks``).
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -63,6 +63,7 @@ class TrackParams:
     """Advance the masks every Nth tick; skipped ticks repeat the previous tracks."""
 
 
+@runtime_checkable
 class MaskTracker(Protocol):
     """What the node needs from ``models.sam2.Sam2Masks`` (tests inject a fake)."""
 
@@ -186,7 +187,7 @@ class TrackNode:
         return self._advance(frames, prompts)
 
     def _with_epipolar(
-        self, clip: Float32[ndarray, "k m"], f_matrix: Float64[ndarray, "3 3"] | None, reference: list[Float32[ndarray, "3"] | None], boxes: Float32[ndarray, "m 4"]
+        self, clip: Float32[ndarray, "k m"], f_matrix: Float64[ndarray, "3 3"] | None, reference: Sequence[Float32[ndarray, "3"] | None], boxes: Float32[ndarray, "m 4"]
     ) -> Float32[ndarray, "k m"]:
         """CLIP similarity blended with each detection's distance to every subject's epipolar line from the reference view."""
         if f_matrix is None:

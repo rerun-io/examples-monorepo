@@ -74,8 +74,7 @@ class FitterConfig:
     """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
     pure read-out — fit quality is unchanged. CAUTION: on skipped ticks push()
     returns the PREVIOUS FitResult, so ``FitResult.frame_idx`` lags the tick —
-    consumers indexing results by frame_idx (e.g. a ResultCollector) must set
-    1, as validate_golden does."""
+    the fit node keeps only a person's new results."""
     lbfgs_polish: bool = True
     """Eager LBFGS refinement (lr 0.3, strong-wolfe — the original's actual
     optimizer; its YAML 'Adam' field is dead config) on HARD ticks only:

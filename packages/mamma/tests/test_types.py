@@ -12,6 +12,7 @@ from dagkit.types import Log
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
+from mamma_fakes import assert_same
 from serde import SerdeError, from_dict, to_dict
 
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
@@ -75,17 +76,6 @@ def clouds(draw: st.DrawFn) -> Landmarks3d:
     valid: np.ndarray = draw(arrays(np.bool_, (len(persons), 6)))
     points: np.ndarray = np.where(valid[..., None], draw(arrays(np.float32, (len(persons), 6, 3), elements=FLOATS)), np.float32(0.0))
     return Landmarks3d(draw(st.integers(0, 10**5)), persons, points, valid)
-
-
-def assert_same(a: object, b: object) -> None:
-    for f in fields(a):  # type: ignore[arg-type]
-        x, y = getattr(a, f.name), getattr(b, f.name)
-        if isinstance(x, torch.Tensor | np.ndarray):
-            x, y = np.asarray(x), np.asarray(y)
-            assert x.dtype == y.dtype and x.shape == y.shape, f.name
-            np.testing.assert_allclose(x, y, rtol=1e-6, atol=1e-4, err_msg=f.name)
-        else:
-            assert x == y, f.name
 
 
 @settings(max_examples=30, deadline=None)

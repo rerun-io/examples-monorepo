@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import rerun as rr
 from dagkit.app import HardwareClass, load_profile, run_app
 from dagkit.graph import Graph
@@ -34,7 +35,7 @@ from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.smplx_body import SmplxBody
-from mamma.ops.window_fit import FitterConfig
+from mamma.ops.window_fit import FitterConfig, SlidingWindowFitter
 from mamma.sources.npz import NpzSequenceSource
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
 
@@ -106,13 +107,14 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     for view in range(len(cameras)):
         video.frames.times_ns(view)  # fetch the packets now, as the pre-port export did before its clock started
     data: Path = PACKAGE_DIR / "data"
+    body: SmplxBody = SmplxBody.load(data / "body_models", data / "body_models/downsampled_verts/verts_512.pkl")
     nodes = (
         TrackNode(
             track, Yolo12xDetector(PACKAGE_DIR / track.yolo_checkpoint), OpenClipIdentity(),
             Sam2Masks(track.sam2_config, PACKAGE_DIR / track.sam2_checkpoint, memory_window_size=track.memory_window_size),
         ),
         LandmarksNode(LandmarkEstimator(data / "weights/ma_2d/mamma_mask_full_cvpr.safetensors", engine_path=engine_plan())),
-        FitNode(fit, SmplxBody.load(data / "body_models", data / "body_models/downsampled_verts/verts_512.pkl")),
+        FitNode(fit, np.asarray(body.model.faces, dtype=np.int32), lambda K, cam_T_world: SlidingWindowFitter(body, K, cam_T_world, fit)),
     )  # fmt: skip
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS, timeline=video.clock)}
     if config.output_dir is not None and config.video is None:

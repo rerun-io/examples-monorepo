@@ -2,10 +2,10 @@
 
 import numpy as np
 import torch
-from conftest import K_ENGINE, camera_ring, project
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
+from mamma_fakes import K_ENGINE, camera_ring, project
 
 from mamma.ops.triangulation import triangulate_gated, triangulate_landmarks
 

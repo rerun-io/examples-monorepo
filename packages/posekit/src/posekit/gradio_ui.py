@@ -39,7 +39,7 @@ from posekit.runtimes import (
 )
 
 if TYPE_CHECKING:
-    from mamma.models.landmarks.skeleton import SkeletonRegressor
+    from mamma.ops.skeleton import SkeletonRegressor
 
 BackendName: TypeAlias = Literal["torch", "onnx", "tensorrt"]
 
@@ -160,7 +160,7 @@ def predict_ui(
         log_dense_predictions(boxes_xyxy, landmarks_xy, visibility, keypoint_threshold)
         if show_skeleton:
             try:
-                from mamma.models.landmarks.skeleton import joints_from_landmarks, load_skeleton_regressor, skeleton_strips
+                from mamma.ops.skeleton import joints_from_landmarks, load_skeleton_regressor, skeleton_strips
             except ImportError as error:
                 raise gr.Error("mamma is not installed in this environment") from error
             regressor: SkeletonRegressor = load_skeleton_regressor()
