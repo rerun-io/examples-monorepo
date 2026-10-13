@@ -1,0 +1,192 @@
+"""Verify cards: the VERIFY.toml schema, goldens as rrds, fail-closed metric bands and the CLI (SPEC §3).
+
+`python -m dagkit.verify VERIFY.toml --phase pre|pre2|post [--block B] [--clip short|full] [--register]`
+"""
+
+import importlib
+import importlib.metadata
+import math
+import os
+import subprocess
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, TypeAlias
+
+import rerun as rr
+import tyro
+from serde import SerdeError, coerce, serde
+from serde.toml import from_toml
+
+from dagkit.sources import SegmentRef
+from dagkit.types import Producer, log_producer
+
+Phase: TypeAlias = Literal["pre", "pre2", "post"]
+
+
+@serde(deny_unknown_fields=True, type_check=coerce)
+@dataclass(frozen=True, slots=True)
+class MetricBand:
+    name: str
+    unit: str
+    better: Literal["lower", "higher"]
+    floor: float
+    """Smallest ABSOLUTE tolerance (a relative floor is written as the number computed from the measured pre)."""
+
+
+@serde(deny_unknown_fields=True, type_check=coerce)
+@dataclass(frozen=True, slots=True)
+class Case:
+    name: str
+    clip: Literal["short", "full"]
+    reference: Literal["gt", "pre-port"]
+    dataset: str | None = None
+    """Catalog input (with `segment`) ..."""
+    segment: str | None = None
+    input: str | None = None
+    """... or a repo-relative local input."""
+    window_s: tuple[float, float] | None = None
+    params: dict[str, str] = field(default_factory=dict)
+    """Config overrides of this case."""
+    noise: dict[str, float] = field(default_factory=dict)
+    """metric -> measured |pre - pre2| for THIS case."""
+    noise_from: str | None = None
+    """Reuse the named case's noise (stated, never implied)."""
+
+
+@serde(deny_unknown_fields=True, type_check=coerce)
+@dataclass(frozen=True, slots=True)
+class Shot:
+    view: str
+    t_s: float
+
+
+@serde(deny_unknown_fields=True, type_check=coerce)
+@dataclass(frozen=True, slots=True)
+class GraphBlock:
+    name: str
+    run: str
+    """`pkg.verify:run`, (Case, phase, RecordingStream) -> None: writes the golden outputs."""
+    score: str
+    """`pkg.verify:score`, (Case, golden rrd) -> {metric: value}: reads a golden (+ GT), never the pipeline."""
+    cases: list[Case]
+    metrics: list[MetricBand]
+    shots: list[Shot] = field(default_factory=list)
+
+
+@serde(deny_unknown_fields=True, type_check=coerce)
+@dataclass(frozen=True, slots=True)
+class TestBlock:
+    name: str
+    tier: Literal["model", "op", "node", "types"]
+    lane: Literal["unit", "integration", "golden"]
+    tests: list[str]
+    properties: list[str] = field(default_factory=list)
+    """Test ids that own the property bounds."""
+
+
+@serde(deny_unknown_fields=True, type_check=coerce)
+@dataclass(frozen=True, slots=True)
+class VerifyCard:
+    package: str
+    graph: list[GraphBlock] = field(default_factory=list)
+    tests: list[TestBlock] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class BandResult:
+    metric: str
+    passed: bool
+    reason: str
+    """Why it passed or failed, with the numbers."""
+
+
+def load_card(path: Path) -> VerifyCard:
+    try:
+        return from_toml(VerifyCard, path.read_text())
+    except (SerdeError, ValueError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def case_noise(block: GraphBlock, case: Case) -> dict[str, float]:
+    """The case's own measured noise, or the named case's (`noise_from`); empty means not measured."""
+    if case.noise or case.noise_from is None:
+        return case.noise
+    return next((c.noise for c in block.cases if c.name == case.noise_from), {})
+
+
+def check_band(band: MetricBand, pre: float | None, post: float | None, noise: Mapping[str, float]) -> BandResult:
+    """tolerance = max(2 x noise, floor); lower: post <= pre + tol, higher: post >= pre - tol. Fails closed."""
+    if pre is None or post is None:
+        return BandResult(band.name, False, f"missing metric (pre={pre}, post={post})")
+    if not (math.isfinite(pre) and math.isfinite(post)):
+        return BandResult(band.name, False, f"non-finite metric (pre={pre}, post={post})")
+    if band.name not in noise:
+        return BandResult(band.name, False, "no measured noise for this case")
+    tol: float = max(2.0 * noise[band.name], band.floor)
+    passed: bool = post <= pre + tol if band.better == "lower" else post >= pre - tol
+    return BandResult(band.name, passed, f"pre {pre:.4g} post {post:.4g} {band.unit} tol {tol:.4g} ({band.better} is better)")
+
+
+def golden_path(package: str, block: str, case: str, phase: Phase) -> Path:
+    root: str | None = os.environ.get("DAGKIT_GOLDENS")
+    if not root:
+        raise RuntimeError("set DAGKIT_GOLDENS to the goldens directory (never committed)")
+    return Path(root) / package / block / f"{case}.{phase}.rrd"
+
+
+def _resolve(target: str) -> Callable[..., object]:
+    module, name = target.split(":")
+    return getattr(importlib.import_module(module), name)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifyArgs:
+    card: Path
+    """The package's VERIFY.toml."""
+    phase: Phase
+    block: str | None = None
+    clip: Literal["short", "full"] | None = None
+    register: bool = False
+    """Add catalog goldens as layer verify-<block>-<phase>-<sha7> (never a replacement)."""
+
+
+def main(args: VerifyArgs) -> int:
+    """Run each case into a fresh golden, score it, and at `post` check every band against re-scored pre goldens."""
+    card: VerifyCard = load_card(args.card)
+    sha7: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, check=True, cwd=args.card.parent).stdout.strip()
+    version: str = f"{importlib.metadata.version(card.package)}+{sha7}"
+    failed: bool = False
+    for block in (b for b in card.graph if args.block in (None, b.name)):
+        run, score = _resolve(block.run), _resolve(block.score)
+        for case in (c for c in block.cases if args.clip in (None, c.clip)):
+            golden: Path = golden_path(card.package, block.name, case.name, args.phase)
+            golden.parent.mkdir(parents=True, exist_ok=True)
+            partial: Path = golden.with_suffix(".partial")
+            recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
+            recording.save(partial)
+            log_producer(recording, f"verify-{block.name}", Producer(card.package, version, block.name, "verify", args.phase))
+            run(case, args.phase, recording)
+            recording.flush()
+            metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
+            fields: dict[str, Any] = dict(metrics)
+            recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**fields), static=True)
+            recording.flush()
+            recording.disconnect()
+            partial.replace(golden)
+            print(f"{block.name}/{case.name} {args.phase}: {metrics}")
+            if args.phase == "post":
+                paths: dict[str, Path] = {phase: golden_path(card.package, block.name, case.name, phase) for phase in ("pre", "pre2")}
+                scores: dict[str, dict] = {phase: dict(score(case, path)) for phase, path in paths.items() if path.exists()}  # type: ignore[call-overload]
+                for band in block.metrics:
+                    result: BandResult = check_band(band, scores.get("pre", {}).get(band.name), metrics.get(band.name), case_noise(block, case))
+                    failed |= not result.passed
+                    print(f"  {'PASS' if result.passed else 'FAIL'} {band.name}: {result.reason}; pre2 {scores.get('pre2', {}).get(band.name)}")
+            if args.register and case.dataset is not None and case.segment is not None:
+                dataset = SegmentRef(case.dataset, case.segment).entry()
+                dataset.register([golden.resolve().as_uri()], layer_name=f"verify-{block.name}-{args.phase}-{sha7}").wait()
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(tyro.cli(VerifyArgs)))

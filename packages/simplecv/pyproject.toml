@@ -28,7 +28,12 @@ dependencies = [
     "pandas>=2.3.3",
     "universal_pathlib>=0.3.7",
     "s3fs>=2025.3.0",
+    # Typed node/graph contract; a workspace sibling pinned in [tool.uv.sources] below.
+    "dagkit",
 ]
+
+[tool.uv.sources]
+dagkit = { path = "../dagkit", editable = true }
 
 [project.optional-dependencies]
 cpu = ["onnxruntime>=1.22.0,<2"]
