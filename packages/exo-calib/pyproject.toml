@@ -51,8 +51,9 @@ ignore = [
 
 [tool.vulture]
 paths = ["exo_calib", "tests"]
-# Tyro-facing verb entry points (the CLI shims call them) and the eval.json dataclass fields (serialized with asdict).
-ignore_names = ["main", "mean_abs", "max_abs", "se3", "sim3", "focal_error_pct", "camera_names", "refinement_diagnostics", "refined_rig_geometry"]
+# Tyro-facing verb entry points (the CLI shims call them), the eval.json dataclass fields (serialized with asdict),
+# and the verify hooks run/score (VERIFY.toml names them as strings for dagkit.verify).
+ignore_names = ["main", "run", "score", "mean_abs", "max_abs", "se3", "sim3", "focal_error_pct", "camera_names", "refinement_diagnostics", "refined_rig_geometry"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
