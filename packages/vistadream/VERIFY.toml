@@ -52,3 +52,42 @@ clip = "full"
 reference = "pre-port"
 input = "data/office/IMG_4029.jpg"
 params = { stage = "coarse", max_resolution = "512", expansion_percent = "0.3", n_frames = "10", seed = "0" }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py"]
+properties = [
+    "tests/test_types.py::test_camera_view_serde_and_layer_round_trip",
+    "tests/test_types.py::test_scene_views_round_trip_and_names",
+    "tests/test_types.py::test_image_canvas_depth_round_trip",
+    "tests/test_types.py::test_splats_map_to_native_gaussian_splats",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_types_rerun.py"]
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_ops.py"]
+properties = [
+    "tests/test_ops.py::test_spiral_poses_are_rigid_and_start_and_end_at_the_input_camera",
+    "tests/test_ops.py::test_backproject_reprojects_onto_its_pixels",
+    "tests/test_ops.py::test_process_image_keeps_aspect_and_caps_the_long_side",
+    "tests/test_ops.py::test_border_mask_covers_exactly_the_canvas_outside_the_image",
+    "tests/test_ops.py::test_align_depth_recovers_an_affine_prediction_where_known",
+    "tests/test_ops.py::test_gaussians_sit_on_the_backprojected_spawn_pixels",
+]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+properties = ["tests/test_graph.py::test_graph_validates_and_runners_agree"]

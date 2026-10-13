@@ -1680,21 +1680,21 @@ omegaconf = "*"
 
 [feature.vistadream.activation.env]
 PACKAGE_DIR = "packages/vistadream"
-PYREFLY_TARGET = "src/vistadream/api src/vistadream/gradio src/vistadream/resize_utils.py src/vistadream/__init__.py tools"
+PYREFLY_TARGET = "src/vistadream tools tests"
 CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
 CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
 PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.vistadream.tasks.vistadream-example]
-cmd = "python tools/run_single_img.py --image-path data/office/IMG_4029.jpg"
+cmd = "python tools/apps/single_image.py --image-path data/office/IMG_4029.jpg"
 cwd = "packages/vistadream"
-description = "Run VistaDream single image 3D reconstruction"
+description = "Run the VistaDream single-image graph on the sample photo (no outpainting; --stage outpaint / coarse need FLUX.1-Fill-dev)"
 
 [feature.vistadream.tasks.vistadream-gradio-app]
-cmd = "python tools/gradio_app.py"
+cmd = "python tools/apps/single_image_gradio.py"
 cwd = "packages/vistadream"
-description = "Launch VistaDream Gradio web interface"
+description = "Launch the gradio app generated from the single-image graph's Config"
 
 # ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
 [feature.vistadream.tasks.verify-pre]
