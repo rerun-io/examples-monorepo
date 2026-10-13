@@ -185,6 +185,10 @@ Bringing an upstream research model in (fork + pixify, then a vendor → predict
 Rerun pixel evidence) follows the repo skill `add-model` (`.agents/skills/add-model/SKILL.md`, also visible to
 Claude Code through `.claude/skills`). Both Codex and Claude Code load it when asked to "add/port <model>".
 
+Proving that a block still works (porting a package onto dagkit, changing a block's math, rewiring a graph, or the
+last step of add-model) follows the repo skill `verify-block` (`.agents/skills/verify-block/SKILL.md`): a `VERIFY.toml`
+card, rrd goldens, a metric band against catalog GT or a pre-port golden, hypothesis properties, and Rerun pixels.
+
 ## Adding a new package
 
 1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `ci/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
