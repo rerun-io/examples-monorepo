@@ -41,6 +41,7 @@ def test_chain_delivers_every_value_in_order(runner: str) -> None:
     assert sink.items == [("y", t, t + 1) for t in range(20)]
     assert report.status == "complete"
     assert report.nodes["add"].ticks == 20
+    assert report.nodes["add"].ports["x"].pending_max == 0  # ready ticks never count as waiting
     assert report.stream_s == pytest.approx(19e-9)
 
 
@@ -63,9 +64,12 @@ def diamond(events: list[tuple[int, str, int]], late: object) -> tuple[Graph, Co
 def test_flush_only_diamond_terminates(runner: str) -> None:
     events = [(t, "x", t) for t in range(1, 30)]
     graph, sink = diamond(events, Batch(size=10_000))
-    RUNNERS[runner](graph)
+    report: RunReport = RUNNERS[runner](graph)
     # every join tick waited for the late producer's flush, so each sees its own value * 10 at the same time
     assert sink.items == [("y", t, t + 10 * t) for t in range(1, 30)]
+    assert report.nodes["join"].ports["x"].pending_max > 0
+    if runner == "sequential":
+        assert report.nodes["join"].ports["x"].pending_max == 28  # the final source event closes late before join drains
 
 
 @pytest.mark.parametrize("runner", RUNNERS)

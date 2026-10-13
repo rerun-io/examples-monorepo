@@ -10,15 +10,12 @@ from dagkit.node import Emit, PortType, RunContext, Tick
 from dagkit.time import GraphError, TimeNs
 
 
-class _Collect:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, TimeNs, object]] = []
-
+class _Collect(list[tuple[str, str, TimeNs, object]]):
     def put(self, port: str, t_ns: TimeNs, value: object) -> None:
-        self.calls.append(("put", port, t_ns, value))
+        self.append(("put", port, t_ns, value))
 
     def watermark(self, t_ns: TimeNs) -> None:
-        self.calls.append(("watermark", "", t_ns, None))
+        self.append(("watermark", "", t_ns, None))
 
 
 def _child(spawn: Spawn, conn: Connection) -> None:
@@ -33,7 +30,7 @@ def _child(spawn: Spawn, conn: Connection) -> None:
                 node.step(arg, out)
             else:
                 node.flush(out)
-            conn.send(("ok", out.calls))  # pickles synchronously: an unpicklable output raises here, not in a feeder thread
+            conn.send(("ok", list(out)))  # pickles synchronously: an unpicklable output raises here, not in a feeder thread
     except BaseException as exc:
         text: str = traceback.format_exc()
         try:
@@ -85,9 +82,7 @@ class ProcessNode:
         self.abort()
 
     def abort(self) -> None:
-        if self._process.is_alive():
-            self._process.terminate()
-            self._process.join(2.0)
-        if self._process.is_alive():
-            self._process.kill()
-            self._process.join()
+        for stop, timeout in ((self._process.terminate, 2.0), (self._process.kill, None)):
+            if self._process.is_alive():
+                stop()
+                self._process.join(timeout)

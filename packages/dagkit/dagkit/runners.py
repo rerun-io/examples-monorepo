@@ -186,28 +186,26 @@ class _Run:
 
     def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
         if s.spec.kind == "node" and len(s.triggers) > 1 and any(e.queue for e in s.triggers):  # order by (t_ns, port declaration)
-            rank: list[str] = list(s.spec.inputs)
+            rank: dict[str, int] = {port: i for i, port in enumerate(s.spec.inputs)}
             s.pending.extend((e, t, v) for e in s.triggers for _, t, v in e.queue)
             for e in s.triggers:
                 e.queue.clear()
-            s.pending = deque(sorted(s.pending, key=lambda p: (p[1], rank.index(p[0].spec.dst.port))))
+            s.pending = deque(sorted(s.pending, key=lambda p: (p[1], rank[p[0].spec.dst.port])))
             s.pending_max = max(s.pending_max, len(s.pending))
             self.cond.notify_all()
         while True:
             if s.pending and self._ready(s, s.pending[0][1]):
                 return s.pending.popleft()
+            s.pending_max = max(s.pending_max, len(s.pending))
             edge: _Edge | None = min((e for e in s.triggers if e.queue), key=lambda e: cast(_Edge, e).queue[0][0], default=None)
             if edge is None:
                 return None
             _, t_ns, value = edge.queue.popleft()
             self.cond.notify_all()
-            if not s.pending and self._ready(s, t_ns):
-                return edge, t_ns, value
             s.pending.append((edge, t_ns, value))
-            s.pending_max = max(s.pending_max, len(s.pending))
 
     def _can_finish(self, s: _State) -> bool:
-        if s.done or not s.started or self.paused or s.pending or any(e.queue or not self.states[e.spec.src.node].done for e in s.triggers):
+        if self.paused or s.pending or any(e.queue or not self.states[e.spec.src.node].done for e in s.triggers):
             return False
         if s.spec.kind == "segment" and any(self.states[e.spec.src.node].wm < TIME_MAX for e in s.asofs):
             return False
@@ -232,11 +230,9 @@ class _Run:
             if not getattr(s.obj, "emits_late", False) and t_ns - 1 > s.wm:
                 s.wm = t_ns - 1
                 self.cond.notify_all()
-            waits: list[int] = [
-                e.spec.kind.wait_ns for e in s.asofs if isinstance(e.spec.kind, AsOf) and e.spec.kind.wait_ns and self.mode == "realtime"
-            ]
-            deadline: float = time.monotonic() + max(waits, default=0) / 1e9
-            while self.threaded and waits and any(self.states[e.spec.src.node].wm < t_ns for e in s.asofs) and time.monotonic() < deadline:
+            wait_ns: int = max((cast(AsOf, e.spec.kind).wait_ns or 0 for e in s.asofs), default=0) if self.mode == "realtime" else 0
+            deadline: float = time.monotonic() + wait_ns / 1e9
+            while self.threaded and wait_ns and any(self.states[e.spec.src.node].wm < t_ns for e in s.asofs) and time.monotonic() < deadline:
                 self.wait(deadline - time.monotonic())
             raw_asof: list[tuple[_Edge, object | None]] = []
             queued: list[TimeNs] = [p[1] for p in s.pending] + [e.queue[0][1] for e in s.triggers if e.queue]
@@ -256,16 +252,6 @@ class _Run:
         with self.cond:
             s.wm, s.done = TIME_MAX, True
         self.notify()
-
-    def _finish(self, s: _State) -> None:
-        if s.spec.kind == "segment":
-            history: dict[str, list[Event]] = {
-                e.spec.dst.port: [Event(t, e.spec.dst.port, self._convert(e, v)) for t, v in e.history] for e in s.asofs
-            }
-            s.obj.run({**s.collected, **history}, s)  # type: ignore[attr-defined]
-        else:
-            s.obj.flush(s)  # type: ignore[attr-defined]
-        self._close(s)
 
     def _reset(self, s: _State) -> None:
         resources: dict[str, object] = {need: self.resources[need] for need in s.spec.needs}
@@ -338,13 +324,14 @@ class _Run:
             self._close(s)
         self._drain()
 
-    def _guard(self, body: Callable[..., object], *args: object) -> None:
+    def _guard(self, body: Callable[..., object], *args: object, note: Callable[[str], object] | None = None) -> None:
         try:
             body(*args)
-        except _Abort:
-            pass
-        except BaseException as exc:  # handed to the caller thread, which re-raises it (nothing is swallowed)
-            self.fail(exc)
+        except BaseException as exc:
+            if note is not None:  # cleanup errors ride along on the original failure, which the caller re-raises
+                note(f"{getattr(body, '__qualname__', body)} failed during cleanup: {exc!r}")
+            elif not isinstance(exc, _Abort):  # worker failures reach the caller; _Abort only unwinds a failed run
+                self.fail(exc)
 
     def _source_loop(self, s: _State, events: Iterator[Event]) -> None:
         for event in events:
@@ -374,10 +361,17 @@ class _Run:
                 s.idle = False
                 if self.failure is not None:
                     raise _Abort  # never step or flush after a failure
-            if item is None:
-                self._finish(s)
-            else:
+            if item is not None:
                 self._deliver(s, item)
+            else:
+                if s.spec.kind == "segment":
+                    history: dict[str, list[Event]] = {
+                        e.spec.dst.port: [Event(t, e.spec.dst.port, self._convert(e, v)) for t, v in e.history] for e in s.asofs
+                    }
+                    s.obj.run({**s.collected, **history}, s)  # type: ignore[attr-defined]
+                else:
+                    s.obj.flush(s)  # type: ignore[attr-defined]
+                self._close(s)
             progress = True
         return progress
 
@@ -446,7 +440,7 @@ class _Run:
             first: BaseException = self.failure or exc
             note: Callable[[str], object] = getattr(first, "add_note", print)  # cleanup errors ride along; the first failure is raised
             for s in (s for s in self.nodes if (s.started or s.spec.kind == "sink") and hasattr(s.obj, "abort")):
-                self._quietly(s.obj.abort, note)  # type: ignore[attr-defined]
+                self._guard(s.obj.abort, note=note)  # type: ignore[attr-defined]
             deadline: float = time.monotonic() + 10.0
             for thread in self.threads:
                 thread.join(max(deadline - time.monotonic(), 0.0))
@@ -469,14 +463,7 @@ class _Run:
     def _close_resources(self, note: Callable[[str], object] | None = None) -> None:
         owned: list[object] = [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
         for close in (c for o in owned + list(reversed(self.resources.values())) if (c := getattr(o, "close", None)) is not None):
-            close() if note is None else self._quietly(close, note)
-
-    @staticmethod
-    def _quietly(call: Callable[[], object], note: Callable[[str], object]) -> None:
-        try:
-            call()
-        except BaseException as exc:  # failure path only: reported as a note on the first failure, which is re-raised
-            note(f"{getattr(call, '__qualname__', call)} failed during cleanup: {exc!r}")
+            close() if note is None else self._guard(close, note=note)
 
 
 def run_sequential(graph: Graph, *, mode: Mode = "lossless", control: Control | None = None, health: rr.RecordingStream | None = None) -> RunReport:
