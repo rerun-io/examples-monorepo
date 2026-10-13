@@ -51,8 +51,8 @@ def _view_logs(root: str, views: tuple[str, ...], scale_xy: Float32[ndarray, "v 
 
 
 def _views(table: pa.Table, root: str) -> tuple[tuple[str, ...], Float32[ndarray, "v 2"]]:
-    """The views ``_view_logs`` wrote, in their order, with their scales."""
-    paths: list[str] = _entities(table, root, "view_index")
+    """The views ``_view_logs`` wrote, in their order, with their scales (a rig in the same recording has its own ``view_index``)."""
+    paths: list[str] = [p for p in _entities(table, root, "view_index") if p.endswith("/pinhole/mamma")]
     first: list[list] = [next(c for c in _column(table, p, "view_index") if c is not None) for p in paths]
     paths = [p for _, p in sorted(zip([f[0] for f in first], paths, strict=True))]
     scales: list[list[float]] = [next(c for c in _column(table, p, "Transform3D:scale") if c is not None)[0][:2] for p in paths]
@@ -91,7 +91,8 @@ class MultiViewTracks:
                 logs.append(Log(path, rr.EncodedImage(contents=png.getvalue(), media_type="image/png", opacity=0.5, draw_order=11.0)))
             persons: str = f"{root}/{view}/pinhole/mamma/persons"
             logs.append(Log(persons, rr.Boxes2D(array=self.boxes_xyxy[rows], array_format=rr.Box2DFormat.XYXY, class_ids=self.person[rows] + 1)))
-            logs.append(Log(persons, rr.AnyValues(person=self.person[rows], score=self.scores[rows], frame_index=self.frame_index)))
+            values = rr.AnyValues(person=self.person[rows], score=self.scores[rows], frame_index=self.frame_index, mask_hw=list(self.masks.shape[1:]))
+            logs.append(Log(persons, values))
         return logs
 
     @classmethod
@@ -102,12 +103,12 @@ class MultiViewTracks:
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "MultiViewTracks"]]:
         """Masks come back as host tensors (a resumed value moves to the device in its consumer)."""
         views, scale_xy = _views(table, root)
-        names: tuple[str, ...] = ("person", "score", "frame_index", "Boxes2D:centers", "Boxes2D:half_sizes")
+        names: tuple[str, ...] = ("person", "score", "frame_index", "Boxes2D:centers", "Boxes2D:half_sizes", "mask_hw")
         columns: list[list[list]] = [[_column(table, f"{root}/{view}/pinhole/mamma/persons", name) for name in names] for view in views]
         for row, t_ns in enumerate(row_times(table, timeline)):
             if all(view[2][row] is None for view in columns):
                 continue
-            person, score, frame, center, half = ([np.asarray(view[k][row] or [], dtype=np.float32) for view in columns] for k in range(len(names)))
+            person, score, frame, center, half, mask_hw = ([np.asarray(view[k][row] or [], dtype=np.float32) for view in columns] for k in range(len(names)))
             mask_row: pa.Table = table.slice(row, 1)
             blobs: list[bytes] = [
                 bytes(_column(mask_row, f"{root}/{view}/pinhole/mamma/masks/person_{int(p):02d}", "EncodedImage:blob")[0][0])
@@ -116,9 +117,12 @@ class MultiViewTracks:
             ]
             centers, halves = (np.concatenate([b.reshape(-1, 2) for b in boxes]) for boxes in (center, half))
             xyxy: Float32[ndarray, "k 4"] = np.concatenate([centers - halves, centers + halves], axis=1)
+            masks: Bool[ndarray, "k h w"] = (
+                np.stack([np.asarray(Image.open(io.BytesIO(b))) > 0 for b in blobs]) if blobs else np.zeros((0, *next(m for m in mask_hw if m.size).astype(int)), dtype=bool)
+            )
             yield t_ns, cls(
                 int(next(f for f in frame if f.size)[0]), views, np.repeat(np.arange(len(views), dtype=np.int64), [p.size for p in person]),
-                np.concatenate(person).astype(np.int64), torch.as_tensor(np.stack([np.asarray(Image.open(io.BytesIO(b))) > 0 for b in blobs])),
+                np.concatenate(person).astype(np.int64), torch.as_tensor(masks),
                 xyxy, np.concatenate(score), scale_xy,
             )  # fmt: skip
 
@@ -142,11 +146,12 @@ class MultiViewLandmarks:
     def to_rerun(self, root: str) -> list[Log]:
         xy, log_variance, visibility, floor_contact = (t.cpu().numpy() for t in (self.xy, self.log_variance, self.visibility, self.floor_contact))
         logs: list[Log] = _view_logs(root, self.views, self.scale_xy)
+        logs += [Log(f"{root}/{view}/pinhole/mamma/landmarks", rr.AnyValues(frame_index=self.frame_index)) for view in self.views]
         for row in range(self.view.size):
             path: str = f"{root}/{self.views[self.view[row]]}/pinhole/mamma/landmarks/person_{self.person[row]:02d}"
             colors: Int64[ndarray, "n 3"] = np.where(visibility[row][:, None] > 0.5, np.asarray(PERSON_RGB), 90)
             logs.append(Log(path, rr.Points2D(xy[row], radii=1.5, colors=colors)))
-            values = rr.AnyValues(log_variance=log_variance[row], visibility=visibility[row], floor_contact=floor_contact[row], frame_index=self.frame_index)
+            values = rr.AnyValues(log_variance=log_variance[row], visibility=visibility[row], floor_contact=floor_contact[row])
             logs.append(Log(path, values))
         return logs
 
@@ -156,19 +161,26 @@ class MultiViewLandmarks:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "MultiViewLandmarks"]]:
+        """An empty frameset comes back with ``k = n = 0`` (as ``LandmarksNode`` emits it)."""
         views, scale_xy = _views(table, root)
         paths: list[str] = [p for p in _entities(table, root, "floor_contact") if "/pinhole/mamma/landmarks/person_" in p]
-        names: tuple[str, ...] = ("Points2D:positions", "log_variance", "visibility", "floor_contact", "frame_index")
+        names: tuple[str, ...] = ("Points2D:positions", "log_variance", "visibility", "floor_contact")
         columns: dict[str, list[list]] = {path: [_column(table, path, name) for name in names] for path in paths}
+        frames: list[list] = [_column(table, f"{root}/{view}/pinhole/mamma/landmarks", "frame_index") for view in views]
         for row, t_ns in enumerate(row_times(table, timeline)):
+            frame: list | None = next((f[row] for f in frames if f[row] is not None), None)
+            if frame is None:
+                continue
             keyed: list[tuple[int, int, str]] = sorted(
                 (views.index(p.removeprefix(f"{root}/").split("/pinhole/")[0]), _person(p), p) for p in paths if columns[p][3][row] is not None
             )
-            if not keyed:
-                continue
-            xy, log_variance, visibility, floor_contact = (torch.as_tensor(np.asarray([columns[p][k][row] for _, _, p in keyed], dtype=np.float32)) for k in range(4))
+            n: int = len(columns[keyed[0][2]][3][row]) if keyed else 0
+            xy, log_variance, visibility, floor_contact = (
+                torch.as_tensor(np.asarray([columns[p][k][row] for _, _, p in keyed], dtype=np.float32).reshape(len(keyed), n, *tail))
+                for k, tail in enumerate(((2,), (), (), ()))
+            )
             yield t_ns, cls(
-                int(columns[keyed[0][2]][4][row][0]), views, np.asarray([k[0] for k in keyed], dtype=np.int64),
+                int(frame[0]), views, np.asarray([k[0] for k in keyed], dtype=np.int64),
                 np.asarray([k[1] for k in keyed], dtype=np.int64), xy, log_variance, visibility, floor_contact, scale_xy,
             )  # fmt: skip
 
@@ -219,8 +231,10 @@ class BodyTopology:
     faces: Int32[ndarray, "f 3"]
 
     def to_rerun(self, root: str) -> list[Log]:
+        """Static per person: the source tag on the person node (as the GT people carry ``mosh_gt``) and the mesh topology."""
         mesh = rr.Mesh3D.from_fields(triangle_indices=self.faces, albedo_factor=MESH_ALBEDO)
-        return [Log(f"{root}/person_{person:02d}/body/mesh", mesh, static=True) for person in self.persons]
+        source = rr.AnyValues(source="mamma_pred")
+        return [Log(f"{root}/person_{p:02d}{path}", data, static=True) for p in self.persons for path, data in (("", source), ("/body/mesh", mesh))]
 
     @classmethod
     def contents(cls, root: str) -> list[str]:

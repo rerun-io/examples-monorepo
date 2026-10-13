@@ -61,8 +61,8 @@ class Config:
     resize_hw: tuple[int, int] = (752, 1024)
     """Engine size (tracking, masks, landmark outputs): aspect kept, 16-aligned (the default suits 2056 x 1504 cameras)."""
     preset: Literal["quality", "fast"] = "quality"
-    subjects: int | None = None
-    """People to track; None = as many as the bootstrap view detects. More than one turns the fitter's CUDA graphs off."""
+    subjects: int | None = 1
+    """People to track; None = as many as the bootstrap view detects. Only exactly one keeps the fitter's CUDA graphs."""
     output_dir: Path | None = None
     """Write the ``mamma_fit`` layer file here (one subdirectory per segment); None = viewer only."""
     register: Register = "new"
@@ -95,7 +95,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     profile = load_profile(PACKAGE_DIR / "profiles", config.hardware)
     track: TrackParams = replace(profile.configure("track", TrackParams(), config.preset), expected_subjects=config.subjects)
     fit: FitterConfig = profile.configure("fit", FitterConfig(), config.preset)
-    fit = replace(fit, use_cuda_graph=fit.use_cuda_graph and (config.subjects or 1) == 1)  # per-person graph captures deadlock
+    fit = replace(fit, use_cuda_graph=fit.use_cuda_graph and config.subjects == 1)  # per-person graph captures deadlock
     keep_native: bool = profile.configure("video", VideoParams(), config.preset).keep_native
     if config.video is None:
         cameras: tuple[str, ...] = config.cameras or RING

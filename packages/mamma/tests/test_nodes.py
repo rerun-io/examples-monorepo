@@ -101,10 +101,15 @@ def landmark_ticks(scene: FakeScene, count: int, persons: tuple[int, ...] = (0,)
     return ticks
 
 
+QUALITY: FitterConfig = FitterConfig(emit_stride=1)
+"""The quality preset: the fitter emits a fit for every tick (FakeFitter's schedule). With ``emit_stride`` 2 (fast) the
+fitter itself skips every other frame and the node puts only what the fitter returns."""
+
+
 def test_fit_emits_every_frame_once_in_time_order_and_flush_drains_the_window() -> None:
     scene = FakeScene()
     ticks = landmark_ticks(scene, 20)
-    node = FitNode(FitterConfig(), FACES, lambda K, T: FakeFitter())  # type: ignore[arg-type,return-value]
+    node = FitNode(QUALITY, FACES, lambda K, T: FakeFitter())  # type: ignore[arg-type,return-value]
     outputs = check_node_contract(node, ticks)
     fits = [(t, v) for p, t, v in outputs if p == "fit"]
     assert [v.frame_index for _, v in fits] == list(range(20)) and [t for t, _ in fits] == [tick.t_ns for tick in ticks]  # type: ignore[attr-defined]
@@ -120,7 +125,7 @@ def test_fit_emits_every_frame_once_in_time_order_and_flush_drains_the_window() 
 def test_fit_heads_of_a_person_who_starts_late_still_come_out_in_order() -> None:
     scene = FakeScene()
     ticks = landmark_ticks(scene, 6) + landmark_ticks(scene, 20, (0, 1))[6:]  # person 1 joins at frame 6
-    node = FitNode(FitterConfig(), FACES, lambda K, T: FakeFitter())  # type: ignore[arg-type,return-value]
+    node = FitNode(QUALITY, FACES, lambda K, T: FakeFitter())  # type: ignore[arg-type,return-value]
     outputs = check_node_contract(node, ticks)
     persons: dict[int, list[int]] = {0: [], 1: []}
     for port, _, value in outputs:

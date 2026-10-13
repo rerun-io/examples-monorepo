@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from mamma_fakes import assert_same
 from serde import SerdeError, from_dict, to_dict
+from simplecv.types.rig import RigCameras
 
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
 
@@ -40,7 +41,7 @@ def layer_table(values: list[tuple[int, object]], root: str) -> pa.Table:
 def tracks(draw: st.DrawFn) -> MultiViewTracks:
     v: int = draw(st.integers(1, 3))
     persons: list[int] = sorted(draw(st.sets(st.integers(0, 3), min_size=1, max_size=3)))
-    rows: list[tuple[int, int]] = [(view, p) for view in range(v) for p in persons if draw(st.booleans())] or [(0, persons[0])]
+    rows: list[tuple[int, int]] = [(view, p) for view in range(v) for p in persons if draw(st.booleans())]  # may be empty (nobody tracked yet)
     k: int = len(rows)
     return MultiViewTracks(
         frame_index=draw(st.integers(0, 10**5)),
@@ -58,8 +59,9 @@ def tracks(draw: st.DrawFn) -> MultiViewTracks:
 def landmarks(draw: st.DrawFn) -> MultiViewLandmarks:
     t: MultiViewTracks = draw(tracks())
     k: int = t.view.size
+    n: int = 5 if k else 0  # an empty frameset has no landmark axis (LandmarksNode emits k = n = 0)
     tensor = lambda *shape: torch.as_tensor(draw(arrays(np.float32, shape, elements=FLOATS)))  # noqa: E731
-    return MultiViewLandmarks(t.frame_index, t.views, t.view, t.person, tensor(k, 5, 2), tensor(k, 5), tensor(k, 5), tensor(k, 5), t.scale_xy)
+    return MultiViewLandmarks(t.frame_index, t.views, t.view, t.person, tensor(k, n, 2), tensor(k, n), tensor(k, n), tensor(k, n), t.scale_xy)
 
 
 @st.composite
@@ -124,7 +126,38 @@ def test_tracks_from_layer_keeps_each_frames_masks(first: MultiViewTracks) -> No
 
 def test_topology_is_static_per_person_and_reads_back() -> None:
     topology = BodyTopology((0, 2), np.arange(12, dtype=np.int32).reshape(4, 3))
-    assert [(log.path, log.static) for log in topology.to_rerun(PEOPLE)] == [(f"{PEOPLE}/person_00/body/mesh", True), (f"{PEOPLE}/person_02/body/mesh", True)]
+    logs: list[Log] = topology.to_rerun(PEOPLE)
+    assert [(log.path, log.static) for log in logs] == [(f"{PEOPLE}/person_{p:02d}{suffix}", True) for p in (0, 2) for suffix in ("", "/body/mesh")]
+    sources = [batch.as_arrow_array().to_pylist() for log in logs if log.path.endswith(("_00", "_02")) for batch in log.data.as_component_batches()]
+    assert sources == [["mamma_pred"], ["mamma_pred"]]  # the person node carries its source tag, as the GT people carry mosh_gt
     ((t_ns, back),) = BodyTopology.from_layer(layer_table([(STATIC, topology)], PEOPLE), PEOPLE, "video_time")
     assert t_ns == STATIC and back.persons == (0, 2)
     np.testing.assert_array_equal(back.faces, topology.faces)
+
+
+def test_empty_framesets_read_back_as_empty_values() -> None:
+    """Nobody tracked yet (before the bootstrap, or every track lost): the tick still round-trips, with its engine size."""
+    none: np.ndarray = np.zeros(0, dtype=np.int64)
+    views: tuple[str, ...] = ("rig_00/cam_00", "rig_01/cam_00")
+    scale: np.ndarray = np.full((2, 2), 2.0, dtype=np.float32)
+    empty = torch.zeros((0, 0))
+    values: list[object] = [
+        MultiViewTracks(7, views, none, none, torch.zeros((0, 48, 64), dtype=torch.bool), np.zeros((0, 4), np.float32), np.zeros(0, np.float32), scale),
+        MultiViewLandmarks(7, views, none, none, empty[..., None].expand(0, 0, 2), empty, empty, empty, scale),
+    ]
+    for value in values:
+        ((t_ns, back),) = type(value).from_layer(layer_table([(5, value)], ROOT), ROOT, "video_time")  # type: ignore[attr-defined]
+        assert t_ns == 5
+        assert_same(back, value)
+
+
+@settings(max_examples=20, deadline=None)
+@given(value=st.one_of(tracks(), landmarks()))
+def test_views_come_from_the_mamma_overlays_not_from_a_rig_in_the_same_recording(value: MultiViewTracks | MultiViewLandmarks) -> None:
+    """The file App logs the rig (``RigCameras.to_rerun``, which writes its own ``view_index``) beside the overlays."""
+    order: np.ndarray = np.lexsort((value.person, value.view))
+    value = type(value)(**{f.name: getattr(value, f.name)[order] if f.name not in ("frame_index", "views", "scale_xy") else getattr(value, f.name) for f in fields(value)})
+    v: int = len(value.views)
+    rig = RigCameras(value.views[::-1], np.tile(np.eye(3), (v, 1, 1)), np.tile(np.eye(4), (v, 1, 1)), np.tile(np.array([64, 48], dtype=np.int64), (v, 1)))
+    ((_, back),) = type(value).from_layer(layer_table([(STATIC, rig), (3, value)], ROOT), ROOT, "video_time")
+    assert_same(back, value)
