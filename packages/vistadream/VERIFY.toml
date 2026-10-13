@@ -31,9 +31,14 @@ clip = "short"
 reference = "pre-port"
 input = "data/office/IMG_4029.jpg"
 params = { stage = "no-outpaint", max_resolution = "512", seed = "0" }
+# |pre - pre2| (seeded; gsplat 1.5.3 backward atomics): 147,929 splats both runs, 0.23 % of trajectory pixels differ. Bands =
+# floors. novel_rgb_mae floor 1.0 level: a 1-pixel image shift scores 4.2 levels, adjacent trajectory steps 3.8-16.
+noise = { input_psnr_db = 0.0000121, input_depth_absrel = 0.000000015, novel_rgb_mae = 0.00264 }
 
 [[graph.cases]]
 # rule: the same image, outpainted by FLUX.1-Fill-dev (30 % border) before depth and init.
+# NOT RECORDED pre-port: the FLUX.1-Fill-dev weights (~34 GB) were not cached on the recording host and its disk had no room for
+# them. This case and `coarse` fail closed (no golden, no noise) until pre + pre2 are recorded.
 name = "outpaint"
 clip = "full"
 reference = "pre-port"
