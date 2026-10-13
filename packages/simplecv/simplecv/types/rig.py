@@ -34,12 +34,13 @@ class RigCameras:
         return RigCameras(tuple(names), self.intrinsics[rows], self.cam_T_world[rows], self.resolution_wh[rows])
 
     def to_rerun(self, root: str) -> list[Log]:
-        """Static: a rig never changes over a stream."""
+        """Static: a rig never changes over a stream. ``view_index`` keeps the camera order through ``from_layer``."""
         logs: list[Log] = []
-        for name, K, T, wh in zip(self.names, self.intrinsics, self.cam_T_world, self.resolution_wh, strict=True):
+        for i, (name, K, T, wh) in enumerate(zip(self.names, self.intrinsics, self.cam_T_world, self.resolution_wh, strict=True)):
             transform = rr.Transform3D(translation=T[:3, 3], mat3x3=T[:3, :3], relation=rr.TransformRelation.ChildFromParent)
             pinhole = rr.Pinhole(image_from_camera=K, resolution=wh, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=FRUSTUM_DEPTH_M)
-            logs += [Log(f"{root}/{name}", transform, static=True), Log(f"{root}/{name}/pinhole", pinhole, static=True)]
+            logs += [Log(f"{root}/{name}", transform, static=True), Log(f"{root}/{name}", rr.AnyValues(view_index=i), static=True)]
+            logs.append(Log(f"{root}/{name}/pinhole", pinhole, static=True))
         return logs
 
     @classmethod
@@ -48,8 +49,12 @@ class RigCameras:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "RigCameras"]]:
-        """Every camera under ``root`` with a static pose AND intrinsics (sorted names); nothing when there is none."""
-        wanted: list[str] = [c for c in table.column_names if c.startswith(f"{root}/") and (":Transform3D:" in c or ":Pinhole:" in c)]
+        """Every camera under ``root`` with a static pose AND intrinsics; nothing when there is none.
+
+        Cameras come back in the order ``to_rerun`` wrote them when every one carries a ``view_index``, else sorted by name
+        (a dataset's own GT rig).
+        """
+        wanted: list[str] = [c for c in table.column_names if c.startswith(f"{root}/") and (":Transform3D:" in c or ":Pinhole:" in c or c.endswith(":view_index"))]
         row: dict[str, object] = {c: table.column(c)[0].as_py() for c in wanted} if table.num_rows else {}
 
         def value(column: str) -> Float64[ndarray, " k"]:
@@ -60,6 +65,8 @@ class RigCameras:
         names: list[str] = sorted(n for n in posed if row.get(f"{root}/{n}/pinhole:Pinhole:image_from_camera") is not None)
         if not names:
             return
+        if all(row.get(f"{root}/{n}:view_index") is not None for n in names):
+            names.sort(key=lambda n: (int(value(f"{root}/{n}:view_index")[0]), n))
         cam_T_world: Float64[ndarray, "v 4 4"] = np.tile(np.eye(4), (len(names), 1, 1))
         for i, name in enumerate(names):  # Rerun stores 3x3 matrices column-major
             cam_T_world[i, :3, :3] = value(f"{root}/{name}:Transform3D:mat3x3").reshape(3, 3).T

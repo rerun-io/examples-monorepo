@@ -32,6 +32,8 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     from exo_calib.apis.calibrate import Config, calibrate
 
     assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
+    if case.window_s is not None:  # fail closed: Stage A calibrates from Config.frame_index, which a window may exclude
+        raise ValueError(f"case {case.name!r}: exo-calib does not run windowed cases (window_s); use frame_budget for a short clip")
     config = Config(RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment), frame_budget=int(case.params["frame_budget"]), register="off")
     calibrate(config, golden=recording)
     print(f"{case.name} {phase}: graph outputs written into the golden")

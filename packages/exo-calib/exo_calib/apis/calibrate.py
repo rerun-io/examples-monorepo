@@ -40,13 +40,13 @@ from exo_calib.types import OVERLAY_COLOR, RAW_COLOR, VARIANT_COLOR, VARIANTS, E
 PROFILES: Path = Path(__file__).resolve().parents[2] / "profiles"
 PORT_TYPES: dict[str, PortType] = {**InitNode.outputs, **Kp2dNode.outputs, **RefineNode.outputs, **ReportNode.outputs}
 ROOTS: dict[str, str] = {
-    "init": "/world/exocalib/init", "kp2d": KP2D_ROOT, "kp2d_gated": KP2D_ROOT, "refined": "/world/exocalib/refined",
+    "init": "/world/exocalib/init", "kp2d": KP2D_ROOT, "kp2d_overlay": KP2D_ROOT, "refined": "/world/exocalib/refined",
     "diag": "/world/exocalib/refined", "kp3d": "/world/exocalib/kp3d", "base_rig": "/world", "align": "/world",
 }  # fmt: skip
 LAYERS: dict[str, tuple[str, ...]] = {
-    "exocalib_kp2d": ("kp2d",), "exocalib_refined": ("refined", "base_rig", "diag", "kp3d", "kp2d_gated"), "exocalib_align": ("align",),
+    "exocalib_kp2d": ("kp2d",), "exocalib_refined": ("refined", "base_rig", "diag", "kp3d", "kp2d_overlay"), "exocalib_align": ("align",),
 }  # fmt: skip
-PASS1_LAYERS: dict[str, tuple[str, ...]] = {"exocalib_kp2d_pass1": ("kp2d",), "exocalib_refined_pass1": ("refined", "diag", "kp3d")}
+PASS1_LAYERS: dict[str, tuple[str, ...]] = {"exocalib_kp2d_pass1": ("kp2d",), "exocalib_refined_pass1": ("refined", "diag", "kp3d", "kp2d_overlay")}
 
 
 @dataclass
@@ -168,7 +168,7 @@ def calibrate(config: Config, golden: rr.RecordingStream | None = None) -> EvalR
         out: dict[str, Node] = {}
         if not suffix:
             name: str = "golden" if golden is not None else "viewer"
-            out[name] = RerunSink(output_recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports})
+            out[name] = RerunSink(output_recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, timeline=segment.timeline)
         if golden is not None:
             return out
         for layer, layer_ports in layers.items():

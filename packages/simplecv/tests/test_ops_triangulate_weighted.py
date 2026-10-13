@@ -72,3 +72,9 @@ def test_fewer_than_min_views_is_nan_and_invalid(points: np.ndarray, keep: int, 
         assert bool(valid.all()) and bool(torch.isfinite(xyz).all())
     else:
         assert not bool(valid.any()) and bool(torch.isnan(xyz).all())
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_an_empty_batch_returns_no_points(dtype: torch.dtype) -> None:
+    xyz, valid = triangulate_weighted(torch.empty((3, 0, 2), dtype=dtype), torch.empty((3, 0), dtype=dtype), ring_projections(3, dtype))
+    assert xyz.shape == (0, 3) and valid.shape == (0,) and xyz.dtype == dtype

@@ -47,3 +47,12 @@ def test_sequential_equals_threaded_lossless() -> None:
     assert len(records[0]) == 12
     np.testing.assert_equal(asdict(keeps[1].values["refined"]), asdict(keeps[0].values["refined"]))  # type: ignore[call-overload]
     assert keeps[1].values["eval"] == keeps[0].values["eval"]
+
+
+def test_refine_graph_runs_on_the_segment_clock() -> None:
+    scene = FakeScene()
+    layout = RigLayout(scene.rig.names, (), scene.rig.names)
+    factories = {name: object for name in ("detector", "pose", "moge", "frames")}
+    graph = refine_graph(replace(scene.segment, timeline="capture_time"), layout, (scene.rig, scene.rig), 12, factories, {}, report=True)
+    graph.validate()
+    assert {node.obj.clock for node in graph.nodes.values() if hasattr(node.obj, "clock")} == {"capture_time"}

@@ -12,7 +12,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dagkit.time import TimeNs
+from dagkit.time import STATIC, TimeNs
 from dagkit.types import Log, row_times
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
@@ -32,6 +32,24 @@ RAW_COLOR: tuple[int, int, int] = (110, 110, 110)
 def pinhole_leaf(root: str, view: str) -> str:
     """Overlay entity of a keypoint root under a camera: ``/world/<view>/pinhole/exocalib_<last root part>``."""
     return f"/world/{view}/pinhole/exocalib_{root.rsplit('/', 1)[1]}"
+
+
+class Drawing:
+    """Base of edge values that are drawn, never resumed (SPEC 2.6: only Types with ``from_layer`` resume).
+
+    Each one is derived from values that do resume (the kp2d record, the rigs), so a resume re-derives it; these two
+    methods complete dagkit's ``Type`` protocol for the sinks and refuse a read-back.
+    """
+
+    __slots__ = ()
+
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        raise NotImplementedError(f"{cls.__name__} is drawn, not resumed: re-derive it from the values it was drawn from")
+
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Drawing"]]:
+        raise NotImplementedError(f"{cls.__name__} is drawn, not resumed: re-derive it from the values it was drawn from")
 
 
 @serde(deny_unknown_fields=True)
@@ -67,22 +85,16 @@ class MultiViewKeypoints:
     video_wh: tuple[int, int]
 
     def to_rerun(self, root: str) -> list[Log]:
-        logs: list[Log] = []
-        for i, view in enumerate(self.views):
-            record = rr.AnyValues(
+        """The queryable record, one entity per camera at the frameset time (``cam_t_ns`` keeps each camera's own;
+        ``Kp2dOverlay`` draws the boxes and skeletons at those times)."""
+        return [
+            Log(f"{root}/{view}", rr.AnyValues(
                 view_index=i, frame_index=self.frame_index, cam_t_ns=int(self.cam_t_ns[i]), kp_xy=self.kp_xy[i].reshape(-1), conf=self.conf[i],
                 bbox_xyxy=self.bbox_xyxy[i], box_source=self.box_source[i], crop_origin_xy=self.crop_origin_xy[i], crop_size_wh=self.crop_size_wh[i],
                 crop_input_wh=np.asarray(self.crop_input_wh), video_wh=np.asarray(self.video_wh),
-            )  # fmt: skip
-            box: Float32[ndarray, "k 4"] = self.bbox_xyxy[i : i + 1] if np.isfinite(self.bbox_xyxy[i]).all() else np.zeros((0, 4), np.float32)
-            crop: Float32[ndarray, "k 4"] = np.concatenate((self.crop_origin_xy[i], self.crop_size_wh[i]))[None][: len(box)]
-            color: tuple[int, int, int] = (0, 200, 255) if self.box_source[i] == "tracked" else OVERLAY_COLOR
-            logs += [
-                Log(f"{root}/{view}", record),
-                Log(f"{pinhole_leaf(root, view)}_bbox", rr.Boxes2D(array=box, array_format=rr.Box2DFormat.XYXY, colors=color, labels=[self.box_source[i]] * len(box))),
-                Log(f"{pinhole_leaf(root, view)}_crop", rr.Boxes2D(array=crop, array_format=rr.Box2DFormat.XYWH, colors=RAW_COLOR)),
-            ]
-        return logs
+            ))
+            for i, view in enumerate(self.views)
+        ]  # fmt: skip
 
     @classmethod
     def contents(cls, root: str) -> list[str]:
@@ -108,36 +120,47 @@ class MultiViewKeypoints:
             )  # fmt: skip
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class Kp2dOverlay:
-    """The AssemblyHands-X-gated skeleton of one frameset (visualization): kept joints, and the raw ones the gate rejected."""
+class Kp2dOverlay(Drawing):
+    """One camera's Stage B drawing at that camera's own sample time: the person box and crop rectangle, plus (on the
+    frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it."""
 
-    views: tuple[str, ...]
-    gated_xy: Float64[ndarray, "v 133 2"]
-    gated_conf: Float64[ndarray, "v 133"]
+    view: str
+    bbox_xyxy: Float32[ndarray, "4"]
+    """NaN when the frame had no box."""
+    box_source: BoxSource
+    crop_xywh: Float32[ndarray, "4"]
+    raw_xy: Float32[ndarray, "133 2"]
+    raw_conf: Float32[ndarray, "133"]
+    gated_xy: Float64[ndarray, "133 2"] | None = None
+    gated_conf: Float64[ndarray, "133"] | None = None
     """0 where the gate rejected the joint."""
-    raw_xy: Float32[ndarray, "v 133 2"]
-    raw_conf: Float32[ndarray, "v 133"]
 
     def to_rerun(self, root: str) -> list[Log]:
-        logs: list[Log] = []
-        for i, view in enumerate(self.views):
-            if not np.isfinite(self.raw_xy[i]).any():
-                continue
-            keep = self.gated_conf[i] > 0.0
-            rejected = ~keep & np.isfinite(self.raw_xy[i]).all(axis=1)
-            gated = Points2DWithConfidence(
-                positions=np.where(keep[:, None], self.gated_xy[i], np.nan), confidences=self.gated_conf[i], class_ids=0, keypoint_ids=np.arange(133), radii=2.0
-            )  # NaN joints also drop their skeleton edges
-            raw = Points2DWithConfidence(
-                positions=self.raw_xy[i][rejected], confidences=self.raw_conf[i][rejected], class_ids=0, keypoint_ids=np.flatnonzero(rejected), radii=1.5
-            )
-            logs += [Log(pinhole_leaf(root, view), gated), Log(f"{pinhole_leaf(root, view)}_rejected", raw)]
-        return logs
+        leaf: str = pinhole_leaf(root, self.view)
+        box: Float32[ndarray, "k 4"] = self.bbox_xyxy[None] if np.isfinite(self.bbox_xyxy).all() else np.zeros((0, 4), np.float32)
+        color: tuple[int, int, int] = (0, 200, 255) if self.box_source == "tracked" else OVERLAY_COLOR
+        logs: list[Log] = [
+            Log(f"{leaf}_bbox", rr.Boxes2D(array=box, array_format=rr.Box2DFormat.XYXY, colors=color, labels=[self.box_source] * len(box))),
+            Log(f"{leaf}_crop", rr.Boxes2D(array=self.crop_xywh[None][: len(box)], array_format=rr.Box2DFormat.XYWH, colors=RAW_COLOR)),
+        ]
+        if self.gated_xy is None or self.gated_conf is None or not np.isfinite(self.raw_xy).any():
+            return logs
+        keep = self.gated_conf > 0.0
+        rejected = ~keep & np.isfinite(self.raw_xy).all(axis=1)
+        gated = Points2DWithConfidence(
+            positions=np.where(keep[:, None], self.gated_xy, np.nan), confidences=self.gated_conf, class_ids=0, keypoint_ids=np.arange(133), radii=2.0
+        )  # NaN joints also drop their skeleton edges
+        raw = Points2DWithConfidence(
+            positions=self.raw_xy[rejected], confidences=self.raw_conf[rejected], class_ids=0, keypoint_ids=np.flatnonzero(rejected), radii=1.5
+        )
+        return [*logs, Log(leaf, gated), Log(f"{leaf}_rejected", raw)]
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class Keypoints3dTracks:
+class Keypoints3dTracks(Drawing):
     """One frame of triangulated keypoints under both rigs (rows of ``xyz`` are ``VARIANTS``; NaN = not triangulated)."""
 
     keypoint_ids: Int64[ndarray, " n"]
@@ -179,6 +202,19 @@ class RefinementDiagnostics:
         )  # fmt: skip
         return [Log(root, values, static=True)]
 
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        return [root]
+
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "RefinementDiagnostics"]]:
+        def value(name: str) -> Float64[ndarray, " k"]:
+            return np.asarray(table.column(f"{root}:{name}")[0].as_py(), dtype=np.float64).reshape(-1)
+
+        if table.num_rows and f"{root}:focal_scale" in table.column_names and table.column(f"{root}:focal_scale")[0].as_py() is not None:
+            counts: list[int] = value("observation_count_per_view").astype(np.int64).tolist()
+            yield STATIC, cls(float(value("init_reprojection_px")[0]), value("ba_reprojection_px").tolist(), counts, float(value("metric_rescale_fix")[0]), value("focal_scale").tolist())
+
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
@@ -190,9 +226,23 @@ class BaseCalibration:
     def to_rerun(self, root: str) -> list[Log]:
         return [*self.rig.to_rerun(root), *(Log(f"{root}/{name}", rr.AnyValues(exocalib_written=True), static=True) for name in self.rig.names)]
 
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        return [f"{root}/**"]
 
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "BaseCalibration"]]:
+        """Only the cameras this Type wrote (the ``exocalib_written`` marker), not the dataset's GT cameras beside them."""
+        marker: str = ":exocalib_written"
+        written: set[str] = {c.removeprefix(f"{root}/").removesuffix(marker) for c in table.column_names if c.endswith(marker) and table.column(c)[0].as_py() is not None}
+        for t_ns, rig in RigCameras.from_layer(table, root, timeline):
+            if written:
+                yield t_ns, cls(rig.select([name for name in rig.names if name in written]))
+
+
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class RigAlignment:
+class RigAlignment(Drawing):
     """SE(3) alignment of each rig variant onto GT (pred world -> GT world) and the aligned camera centres."""
 
     names: tuple[str, ...]
@@ -251,6 +301,16 @@ class VariantMetrics:
 
 @serde
 @dataclass(frozen=True, slots=True)
+class RigGeometryReport:
+    """The refined rig in its own floor frame (z = 0 is the fitted floor), metres rounded to 6 digits."""
+
+    camera_centers_m: list[list[float]]
+    pairwise_distance_m: list[list[float]]
+    height_above_floor_m: list[float]
+
+
+@serde
+@dataclass(frozen=True, slots=True)
 class EvalReport:
     """``eval.json``: per-variant GT metrics (``None`` without GT, written as null) and the GT-free diagnostics."""
 
@@ -260,7 +320,5 @@ class EvalReport:
     init: VariantMetrics | None
     refined: VariantMetrics | None
     refinement_diagnostics: RefinementDiagnostics
-    camera_centers_m: list[list[float]]
-    """Refined rig in its own floor frame (z = 0 is the fitted floor)."""
-    pairwise_distance_m: list[list[float]]
+    refined_rig_geometry: RigGeometryReport
 

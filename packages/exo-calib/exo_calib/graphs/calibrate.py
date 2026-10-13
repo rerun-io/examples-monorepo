@@ -60,7 +60,8 @@ def refine_graph(
     for name in ("detector", "pose", "moge", "frames"):
         graph.resource(name, models[name])
     statics: dict[str, object] = {"init": seed[0], "tracking_rig": seed[1], "rig_layout": layout}
-    seed_ref = graph.source("seed", IterSource({"init": RigCameras, "tracking_rig": RigCameras, "rig_layout": RigLayout}, lambda: (Event(STATIC, p, v) for p, v in statics.items())))
+    seed_ports: dict[str, type] = {"init": RigCameras, "tracking_rig": RigCameras, "rig_layout": RigLayout}
+    seed_ref = graph.source("seed", IterSource(seed_ports, lambda: (Event(STATIC, p, v) for p, v in statics.items()), clock=segment.timeline))
     if resume_kp2d:
         catalog = graph.source("catalog", CatalogSegmentSource(segment, {"kp2d": Column(MultiViewKeypoints, KP2D_ROOT), "rig": Column(RigCameras, "/world", True)}))
         records, gt = catalog["kp2d"], catalog["rig"]

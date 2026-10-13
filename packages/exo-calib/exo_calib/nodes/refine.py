@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 from dagkit.node import Emit, Event, PortType, RunContext
 from dagkit.time import STATIC
-from jaxtyping import Float64
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 from simplecv.types.rig import RigCameras
 
@@ -54,13 +54,13 @@ FOCAL_ROBUST_SCALE_PX: float = 1.0
 LAMBDA_DECAY: float = 1.0
 """Kineo exponential decay for the logged 3D point confidence."""
 OVERLAY_LOG_STRIDE: int = 5
-"""Every N-th frame gets the gated / rejected keypoint overlay."""
+"""Every N-th frame gets the gated / rejected keypoint skeleton (every frame gets its boxes)."""
 
 
 class RefineNode:
     inputs: Mapping[str, PortType] = {"kp2d": MultiViewKeypoints, "init": RigCameras, "rig_layout": RigLayout}
     outputs: Mapping[str, PortType] = {
-        "refined": RigCameras, "base_rig": BaseCalibration, "diag": RefinementDiagnostics, "kp3d": Keypoints3dTracks, "kp2d_gated": Kp2dOverlay,
+        "refined": RigCameras, "base_rig": BaseCalibration, "diag": RefinementDiagnostics, "kp3d": Keypoints3dTracks, "kp2d_overlay": Kp2dOverlay,
     }  # fmt: skip
 
     def __init__(self, device: Literal["cuda", "cpu"] = "cuda") -> None:
@@ -132,5 +132,15 @@ class RefineNode:
         for frame in np.unique(obs.point_frame_idx).tolist():
             rows = np.flatnonzero(obs.point_frame_idx == frame)
             out.put("kp3d", times[frame], Keypoints3dTracks(obs.point_joint_idx[rows], np.stack((points_init[rows], points_xyz[rows])), point_conf[:, rows]))
-        for t in range(0, len(records), OVERLAY_LOG_STRIDE):
-            out.put("kp2d_gated", times[t], Kp2dOverlay(names, gated.xy[:, t], gated.conf[:, t], records[t].kp_xy, records[t].conf))
+        # Each camera's drawing at its own sample time, in time order over the whole segment (a camera may sample first).
+        draws: list[tuple[int, int, Kp2dOverlay]] = []
+        for t, r in enumerate(records):
+            for v, view in enumerate(names):
+                skeleton: bool = t % OVERLAY_LOG_STRIDE == 0
+                crop: Float32[ndarray, "4"] = np.concatenate((r.crop_origin_xy[v], r.crop_size_wh[v]))
+                overlay = Kp2dOverlay(
+                    view, r.bbox_xyxy[v], r.box_source[v], crop, r.kp_xy[v], r.conf[v], gated.xy[v, t] if skeleton else None, gated.conf[v, t] if skeleton else None
+                )
+                draws.append((int(r.cam_t_ns[v]), v, overlay))
+        for t_ns, _, overlay in sorted(draws, key=lambda draw: draw[:2]):
+            out.put("kp2d_overlay", t_ns, overlay)

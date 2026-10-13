@@ -1,7 +1,9 @@
 """simplecv shared Types and the catalog video source: serde, Rerun mapping structure, sampling (unit lane: no GPU, no catalog)."""
 
 import numpy as np
+import pyarrow as pa
 import pytest
+from dagkit.types import Log
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
@@ -46,9 +48,30 @@ def test_rig_refuses_unknown_fields() -> None:
 @given(rig=rigs(), root=st.sampled_from(["/world", "/world/exocalib/init"]))
 def test_rig_to_rerun_is_static_pose_plus_pinhole_per_camera(rig: RigCameras, root: str) -> None:
     logs = rig.to_rerun(root)
-    assert [log.path for log in logs] == [p for name in rig.names for p in (f"{root}/{name}", f"{root}/{name}/pinhole")]
+    assert [log.path for log in logs] == [p for name in rig.names for p in (f"{root}/{name}", f"{root}/{name}", f"{root}/{name}/pinhole")]
     assert all(log.static for log in logs)
     assert RigCameras.contents(root) == [f"{root}/**"]
+
+
+def static_row(logs: list[Log]) -> pa.Table:
+    """One catalog-style static row (``<entity>:<component>`` columns) from a Type's logs, without a server."""
+    return pa.table({f"{log.path}:{b.component_descriptor()}": [b.as_arrow_array().to_pylist()] for log in logs for b in log.data.as_component_batches()})
+
+
+@settings(max_examples=50, deadline=None)
+@given(rig=rigs(), seed=st.integers(0, 2**16))
+def test_rig_mapping_reads_back_the_camera_order_it_wrote(rig: RigCameras, seed: int) -> None:
+    shuffled: RigCameras = rig.select(list(np.random.default_rng(seed).permutation(rig.names)))
+    row: pa.Table = static_row(shuffled.to_rerun("/world"))
+    ((_, back),) = RigCameras.from_layer(row, "/world", "video_time")
+    assert back.names == shuffled.names
+    # the strategy draws any 4x4 matrix; a pose reads back with the bottom row [0, 0, 0, 1], and Rerun stores float32
+    np.testing.assert_allclose(back.cam_T_world[:, :3], shuffled.cam_T_world[:, :3], rtol=1e-6, atol=1e-5)
+    np.testing.assert_allclose(back.intrinsics, shuffled.intrinsics, rtol=1e-6, atol=1e-5)
+    np.testing.assert_array_equal(back.resolution_wh, shuffled.resolution_wh)
+    no_index: pa.Table = row.select([c for c in row.column_names if not c.endswith(":view_index")])  # e.g. a dataset's GT rig
+    ((_, gt),) = RigCameras.from_layer(no_index, "/world", "video_time")
+    assert gt.names == tuple(sorted(rig.names))
 
 
 @settings(max_examples=50, deadline=None)

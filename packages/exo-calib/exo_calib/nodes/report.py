@@ -15,7 +15,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.types.rig import RigCameras
 
 from exo_calib.ops.eval import RIG_MODES, align_rigs, camera_centers, rig_geometry, variant_metrics
-from exo_calib.types import VARIANTS, EvalReport, RefinementDiagnostics, RigAlignment, RigLayout, VariantMetrics
+from exo_calib.types import VARIANTS, EvalReport, RefinementDiagnostics, RigAlignment, RigGeometryReport, RigLayout, VariantMetrics
 
 
 class ReportNode:
@@ -47,10 +47,11 @@ class ReportNode:
                 print(f"{variant:8s} {mode:4s}: trans cm mean {e.translation_cm.mean:6.2f} max {e.translation_cm.max:6.2f} | rot deg mean {e.rotation_deg.mean:5.2f} max {e.rotation_deg.max:5.2f} | scale {e.scale:.4f}")
         geometry = rig_geometry(refined.cam_T_world)
         print(f"refined pairwise camera distances (m): {geometry.pairwise_distance_m.round(3).tolist()}")
-        report = EvalReport(
-            self.segment.segment, self.segment.dataset, list(names), metrics[0], metrics[1], diag,
-            geometry.camera_centers_m.round(6).tolist(), geometry.pairwise_distance_m.round(6).tolist(),
-        )  # fmt: skip
+        print(f"refined camera heights above fitted floor (m): {geometry.height_above_floor_m.round(3).tolist()}")
+        geometry_report = RigGeometryReport(
+            geometry.camera_centers_m.round(6).tolist(), geometry.pairwise_distance_m.round(6).tolist(), geometry.height_above_floor_m.round(6).tolist()
+        )
+        report = EvalReport(self.segment.segment, self.segment.dataset, list(names), metrics[0], metrics[1], diag, geometry_report)
         out.put("eval", STATIC, report)
         if gt is not None:  # each rig gets its own SE(3) pred-world -> GT-world transform, so everything overlays GT
             aligned: list[SimilarityTransform] = [align_rigs(rig.cam_T_world, gt.cam_T_world) for rig in rigs]

@@ -243,7 +243,7 @@ def triangulate_weighted(
     root_weight: Float[Tensor, "v n 1 1"] = torch.where(usable, weight, 0.0).sqrt()[..., None, None]
     pixels: Float[Tensor, "v n 2"] = torch.where(usable[..., None], xy, 0.0)
     rows: Float[Tensor, "v n 2 4"] = root_weight * (pixels[..., None] * P[:, None, 2:3] - P[:, None, :2])
-    design: Float[Tensor, "n r 4"] = rows.permute(1, 0, 2, 3).reshape(xy.shape[1], -1, 4)
+    design: Float[Tensor, "n r 4"] = rows.permute(1, 0, 2, 3).reshape(xy.shape[1], 2 * xy.shape[0], 4)
     homogeneous: Float[Tensor, "n 4"] = torch.linalg.eigh(design.mT @ design).eigenvectors[..., 0]
     xyz: Float[Tensor, "n 3"] = homogeneous[:, :3] / homogeneous[:, 3:]
     valid: Bool[Tensor, " n"] = (usable.sum(dim=0) >= min_views) & (homogeneous[:, 3].abs() > torch.finfo(xy.dtype).eps) & torch.isfinite(xyz).all(dim=1)
