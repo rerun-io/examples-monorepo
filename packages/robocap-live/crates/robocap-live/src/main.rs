@@ -192,7 +192,7 @@ struct Cli {
     /// Also save the Rerun stream to this .rrd.
     #[arg(long)]
     save: Option<PathBuf>,
-    /// Write one JSON line per frameset (SPEC "Runtime").
+    /// Write one JSON line per frameset (`RecordLine` in sched/record.rs).
     #[arg(long)]
     record: Option<PathBuf>,
     /// Pose source: slam-rs VIO, identity, or the dump's reference poses.
