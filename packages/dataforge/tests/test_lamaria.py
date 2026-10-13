@@ -1387,3 +1387,18 @@ def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
     assert gt["num_poses"] == 0
     assert "world_up_fraction_of_g" not in gt, "with no pose there is nothing to rotate gravity by"
     assert gt["world_up"] == "+z", "the world is still the published one; only the measurement is missing"
+
+
+@pytest.mark.integration
+def test_card_fields_name_properties_the_layers_write(converted_easy: ConvertedSequence) -> None:
+    """``table_fields()`` names columns by string, so a renamed property would strand a card field silently."""
+    written: set[str] = {
+        name
+        for layer in (converted_easy.base, converted_easy.gt)
+        for name in read_back(layer).reader(index=None, contents="/__properties/**").to_arrow_table().column_names
+        if name.startswith("property:")
+    }
+    fields = LamariaDataset(LamariaConfig()).table_fields()
+    declared: set[str] = {field.column for field in (*fields.cards, *fields.table)}
+    assert declared, "lamaria shows every property column unless it names the ones a card should carry"
+    assert declared <= written, f"table_fields() names columns no layer writes: {sorted(declared - written)}"
