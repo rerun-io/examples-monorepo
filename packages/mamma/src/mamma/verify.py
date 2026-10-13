@@ -53,8 +53,8 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     window: tuple[int, int] | None = _window_ns(case) if case.window_s is not None else None
     height, width = (int(x) for x in case.params["resize_hw"].split(","))
     config = Config(
-        RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment, window_ns=window), tuple(case.params["cameras"].split(",")),
-        (height, width), "quality" if case.params["preset"] == "quality" else "fast", int(case.params["subjects"]),
+        RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment, window_ns=window), cameras=tuple(case.params["cameras"].split(",")),
+        resize_hw=(height, width), preset="quality" if case.params["preset"] == "quality" else "fast", subjects=int(case.params["subjects"]),
     )  # fmt: skip
     report = run_threaded(build(config, recording), mode="lossless")
     recording.log("/verify/capture/run", rr.AnyValues(wall_s=report.wall_s, stream_s=report.stream_s, trt_engine=engine_plan() is not None), static=True)
