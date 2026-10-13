@@ -1,5 +1,6 @@
 """Pure fake nodes for the dagkit unit lane (importable by a spawned child process)."""
 
+import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -163,3 +164,10 @@ def verify_run(case: object, phase: str, recording: rr.RecordingStream) -> None:
 def verify_score(case: object, golden: object) -> dict[str, float]:
     """Fake `pkg.verify:score`: a constant metric."""
     return {"ate": 1.0}
+
+
+class Affinity(Square):
+    """Process-placement probe: y = the CPUs this process may run on, as a bit mask."""
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        out.put("y", tick.t_ns, sum(1 << cpu for cpu in os.sched_getaffinity(0)))

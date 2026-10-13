@@ -10,8 +10,7 @@ from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from dagkit.node import Emit, PortType, RunContext, Tick
 from dagkit.sources import SegmentRef
 from dagkit.time import GraphError
-from dagkit.types import LayerFile, Producer, Type, log_producer
-from dagkit.types import log_value as log_value
+from dagkit.types import LayerFile, Producer, Type, log_producer, log_value
 
 Register: TypeAlias = Literal["new", "replace", "off"]
 

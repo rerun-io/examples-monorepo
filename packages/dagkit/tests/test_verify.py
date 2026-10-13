@@ -4,12 +4,14 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import dagkit_fakes
 import pytest
+import tyro
 from hypothesis import given
 from hypothesis import strategies as st
 
 from dagkit import verify
-from dagkit.verify import Case, GraphBlock, MetricBand, case_noise, check_band, golden_path, load_card
+from dagkit.verify import GraphBlock, MetricBand, check_band, golden_path, load_card
 
 CARD = """
 package = "exo-calib"
@@ -51,7 +53,7 @@ def test_card_loads_and_full_case_reuses_short_noise(tmp_path: Path) -> None:
     card = load_card(tmp_path / "VERIFY.toml")
     block: GraphBlock = card.graph[0]
     assert block.shots[0].t_s == 0.0 and card.tests[0].tier == "op"
-    assert case_noise(block, block.cases[1]) == {"rot_deg_mean": 0.02}
+    assert block.cases[0].noise == {"rot_deg_mean": 0.02} and block.cases[1].noise_from == "short"
     (tmp_path / "BAD.toml").write_text(CARD.replace('package = "exo-calib"', 'package = "exo-calib"\nowner = "x"'))
     with pytest.raises(ValueError, match="BAD.toml"):
         load_card(tmp_path / "BAD.toml")
@@ -89,11 +91,6 @@ def test_golden_path_needs_the_goldens_root(monkeypatch: pytest.MonkeyPatch, tmp
         golden_path("pkg", "block", "case", "pre")
     monkeypatch.setenv("DAGKIT_GOLDENS", str(tmp_path))
     assert golden_path("pkg", "block", "short", "pre2") == tmp_path / "pkg/block/short.pre2.rrd"
-
-
-def test_case_without_noise_or_source_has_none() -> None:
-    case = Case("c", "short", "gt")
-    assert case_noise(GraphBlock("b", "m:r", "m:s", [case], [LOWER]), case) == {}
 
 
 SHORT_CARD = """
@@ -150,3 +147,55 @@ def test_register_publishes_an_immutable_copy(card: Path, monkeypatch: pytest.Mo
     golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
     assert len(set(uris)) == 2 and golden.as_uri() not in uris and {name for _, name in registered} == {"verify-fake-pre-abc1234"}
     assert all(Path(uri.removeprefix("file://")).exists() for uri in uris)
+
+
+# ── regressions from the 02-leaf review-loop thermo review ─────────────────────────────────────
+
+FULL_CASE = """
+[[graph.cases]]
+name = "full"
+clip = "full"
+reference = "pre-port"
+dataset = "ds"
+segment = "seg0"
+noise_from = "short"
+"""
+
+
+def test_cli_takes_the_card_as_a_positional_argument() -> None:
+    args: verify.VerifyArgs = tyro.cli(verify.VerifyArgs, args=["VERIFY.toml", "--phase", "post", "--clip", "short"])
+    assert args.card == Path("VERIFY.toml") and args.phase == "post" and args.clip == "short"
+
+
+def test_noise_from_needs_the_donor_cases_noise_run(card: Path) -> None:
+    card.write_text(SHORT_CARD + FULL_CASE.replace('noise_from = "short"', 'noise_from = "typo"'))
+    assert verify.main(verify.VerifyArgs(card, "pre", clip="full")) == 0
+    assert verify.main(verify.VerifyArgs(card, "pre2", clip="short")) == 0
+    assert verify.main(verify.VerifyArgs(card, "post", clip="full")) == 1  # an unknown noise_from case: no noise
+    card.write_text(SHORT_CARD + FULL_CASE)
+    verify.golden_path("dagkit", "fake", "short", "pre2").unlink()
+    assert verify.main(verify.VerifyArgs(card, "post", clip="full")) == 1  # the short case never ran pre2
+    assert verify.main(verify.VerifyArgs(card, "pre2", clip="short")) == 0
+    assert verify.main(verify.VerifyArgs(card, "post", clip="full")) == 0
+
+
+@pytest.mark.parametrize(("phase", "metrics"), [("pre", {"ate": math.nan}), ("pre2", {}), ("post", {"ate": math.inf})])
+def test_every_phase_fails_on_a_missing_or_non_finite_metric(card: Path, monkeypatch: pytest.MonkeyPatch, phase: verify.Phase, metrics: dict) -> None:
+    monkeypatch.setattr(dagkit_fakes, "verify_score", lambda case, golden: metrics)
+    assert verify.main(verify.VerifyArgs(card, phase)) == 1
+
+
+def test_register_skips_windowed_and_failed_cases(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registered: list[str] = []
+
+    class FakeDataset:
+        def register(self, uris: list[str], layer_name: str) -> SimpleNamespace:
+            registered.append(layer_name)
+            return SimpleNamespace(wait=lambda: None)
+
+    monkeypatch.setattr(verify.SegmentRef, "entry", lambda self: FakeDataset())
+    card.write_text(SHORT_CARD.replace("noise = { ate = 0.01 }", "noise = { ate = 0.01 }\nwindow_s = [1.0, 2.0]"))
+    assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
+    card.write_text(SHORT_CARD)
+    assert verify.main(verify.VerifyArgs(card, "post", register=True)) == 1  # no pre / pre2 goldens: the case failed
+    assert registered == []

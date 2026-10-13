@@ -64,6 +64,7 @@ class Smooth:
 class DemoRerunConfig:
     connect: str | None = None
     save: Path | None = None
+    headless: bool = False  # no native viewer (the generated UI renders into its own pane)
 
     def __post_init__(self) -> None:
         self.rec_stream = rr.RecordingStream("dagkit_synthetic_demo")
@@ -71,7 +72,7 @@ class DemoRerunConfig:
             self.rec_stream.connect_grpc(self.connect)
         elif self.save is not None:
             self.rec_stream.save(self.save)
-        else:
+        elif not self.headless:
             self.rec_stream.spawn()
 
 

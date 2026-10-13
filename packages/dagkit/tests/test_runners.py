@@ -1,17 +1,19 @@
 """Runner semantics (SPEC §2.3, §2.3a, §2.5): both runners, unit lane, fakes only."""
 
+import os
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
-from dagkit_fakes import Add, Batch, Collect, Square, Sum, source
+from dagkit_fakes import Add, Affinity, Batch, Collect, Square, Sum, source
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dagkit.graph import AsOf, Block, DropOldest, Graph, Placement, Spawn
-from dagkit.node import Control, Event, RunContext, Tick
+from dagkit.node import Control, Event, Fenced, RunContext, Tick
 from dagkit.runners import RunReport, run_segments, run_sequential, run_threaded
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import collect_edges
@@ -543,3 +545,156 @@ def test_process_node_with_an_unpicklable_resource_fails_instead_of_hanging() ->
     worker.start()
     worker.join(30.0)
     assert not worker.is_alive() and errors and "pickle" in repr(errors[0]).lower()
+
+
+# ── regressions from the 02-leaf review-loop thermo review ─────────────────────────────────────
+
+
+def late_join(control: Control, targets: list[str], size: int = 10_000) -> tuple[Graph, Recorded]:
+    """src -> late (Batch: flush-only by default) -> AsOf -> join, src -> join; the source asks for a reset after t=1."""
+
+    def events():  # noqa: ANN202
+        for t in (1, 2):
+            yield Event(t, "x", t)
+            if t == 1:
+                control.reset(targets)
+                time.sleep(0.3)  # threaded: the coordinator pauses this source before its next event
+
+    join = Recorded()
+    graph = Graph("reset-late")
+    src = graph.source("src", IterSource({"x": int}, events))
+    late, ref = graph.node("late", Batch(size=size)), graph.node("join", join)
+    graph.edge(src["x"], late["x"])
+    graph.edge(src["x"], ref["x"])
+    graph.edge(late["y"], ref["a"], AsOf())
+    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
+    return graph, join
+
+
+@pytest.mark.parametrize("size", [1, 10_000])  # 1: the flush emits nothing, only the barrier's watermark frees join
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_resetting_a_producer_keeps_its_old_world_asof_values(runner: str, size: int) -> None:
+    control = Control()
+    graph, join = late_join(control, ["late"], size)
+    RUNNERS[runner](graph, control=control)
+    assert join.seen == [(1, 0, 10), (2, 0, 20)]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_reset_that_cannot_finish_the_old_world_fails_closed(runner: str) -> None:
+    control = Control()
+    graph, join = late_join(control, ["join"])  # join's t=1 tick waits on `late`, which only emits at the end
+    with pytest.raises(GraphError, match="outside the reset"):
+        RUNNERS[runner](graph, control=control)
+    assert join.seen == []
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_reset_of_a_join_over_a_plain_producer_finishes_the_old_world(runner: str) -> None:
+    control = Control()
+
+    def events():  # noqa: ANN202
+        for t in range(1, 5):
+            yield Event(t, "x", t)
+            if t == 2:
+                control.reset(["join"])
+                time.sleep(0.3)
+
+    join = Recorded()
+    graph = Graph("reset-plain")
+    src = graph.source("src", IterSource({"x": int}, events))
+    plus, ref = graph.node("plus", Add(100)), graph.node("join", join)
+    graph.edge(src["x"], plus["x"])
+    graph.edge(src["x"], ref["x"])
+    graph.edge(plus["y"], ref["a"], AsOf())  # join's tick t waits until `plus` is final through t
+    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
+    RUNNERS[runner](graph, control=control)
+    assert join.seen == [(1, 0, 101), (2, 0, 102), (3, 1, 103), (4, 1, 104)]
+
+
+@dataclass(frozen=True)
+class GateFence:
+    """A fence whose synchronize blocks until the gate opens."""
+
+    gate: threading.Event
+
+    def synchronize(self) -> None:
+        self.gate.wait(10.0)
+
+    def wait(self, stream: object = None) -> None:
+        pass
+
+
+def test_a_node_blocked_in_a_fence_never_steps_after_abort() -> None:
+    gate, log = threading.Event(), []
+
+    class Device(Add):
+        outputs = {"y": Fenced[int]}
+
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            out.put("y", tick.t_ns, Fenced(int(tick.value), GateFence(gate)))  # type: ignore[call-overload]
+
+    class Host(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            log.append("step")
+
+        def abort(self) -> None:
+            log.append("abort")
+            gate.set()
+
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            time.sleep(0.3)  # the host is waiting in synchronize by now
+            raise KeyError("first failure")
+
+    graph = Graph("fenced-abort")
+    src = graph.source("src", source([(1, "x", 1)]))
+    device, host, boom = graph.node("device", Device(0)), graph.node("host", Host(0)), graph.node("boom", Boom(0))
+    graph.edge(src["x"], device["x"])
+    graph.edge(src["x"], boom["x"])
+    graph.edge(device["y"], host["x"])
+    for name, ref in (("host", host), ("boom", boom)):
+        graph.edge(ref["y"], graph.sink(f"{name}_sink", Collect(("y",)))["y"])
+    with pytest.raises(KeyError, match="first failure"):
+        run_threaded(graph, mode="lossless")
+    assert log == ["abort"]
+
+
+def test_a_failure_aborts_a_blocked_caller_thread_node() -> None:
+    released = threading.Event()
+
+    class Waiter(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            released.wait(10.0)  # only abort releases it (bounded so an unfixed runner fails instead of hanging)
+            super().step(tick, out)
+
+        def abort(self) -> None:
+            released.set()
+
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            time.sleep(0.3)
+            raise KeyError("boom")
+
+    graph = Graph("main-abort")
+    src = graph.source("src", source([(1, "x", 1)]))
+    waiter, boom = graph.node("waiter", Waiter(0), placement=Placement("main")), graph.node("boom", Boom(0))
+    for name, ref in (("waiter", waiter), ("boom", boom)):
+        graph.edge(src["x"], ref["x"])
+        graph.edge(ref["y"], graph.sink(f"{name}_sink", Collect(("y",)))["y"])
+    start: float = time.monotonic()
+    with pytest.raises(KeyError, match="boom"):
+        run_threaded(graph, mode="lossless")
+    assert time.monotonic() - start < 5.0
+
+
+@pytest.mark.skipif(not hasattr(os, "sched_getaffinity"), reason="Linux CPU affinity")
+def test_process_placement_pins_the_child_to_its_cpus() -> None:
+    cpu: int = max(os.sched_getaffinity(0))
+    graph = Graph("affinity")
+    node = graph.node("probe", Spawn(Affinity, 0), placement=Placement("process", (cpu,)))
+    sink = Collect(("y",))
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", sink)["y"])
+    run_threaded(graph, mode="lossless")
+    assert sink.items == [("y", 1, 1 << cpu)]

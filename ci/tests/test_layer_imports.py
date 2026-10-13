@@ -92,7 +92,7 @@ def import_problems(path: Path, source: str, module: str | None = None) -> list[
             ok: bool = "dagkit" in allowed or any(target_module.startswith(c) for c in allowed if c.startswith("dagkit."))
         elif target_file is not None and (target := layer_of(target_file)) is not None:
             ok = target in CONFIG["allowed"][source]
-        else:  # third-party, the package root, or a workspace module outside the layer homes (unless its package is enforced)
+        else:  # third-party, the package root (checked to hold only the beartype hook), or a module outside the layer homes
             ok = target_file is None or root_init or target_module.split(".")[0] not in CONFIG["enforced"]
         if not ok:
             problems.append(f"{path} ({source}) imports {target_module}")
@@ -107,12 +107,29 @@ def test_relative_and_from_imports_resolve_to_modules(tmp_path: Path) -> None:
     assert import_problems(probe, "Op", "exo_calib.ops.probe") == [f"{probe} (Op) imports exo_calib.apis.refine", f"{probe} (Op) imports exo_calib.apis"]
 
 
+def root_init_problems(path: Path, package: str) -> list[str]:
+    """The package root holds only the beartype hook (stdlib + beartype): a re-export there would let any layer import any other."""
+    return [
+        f"{path}: the package root imports {module} (only the beartype hook belongs there)"
+        for module, _ in imports(path, package)
+        if module.split(".")[0] not in sys.stdlib_module_names and module != "beartype.claw"
+    ]
+
+
+def test_the_package_root_may_hold_only_the_beartype_hook(tmp_path: Path) -> None:
+    init: Path = tmp_path / "__init__.py"
+    init.write_text("import os\nimport sys\nfrom beartype.claw import beartype_this_package\nfrom exo_calib.apis import refine\nimport torch\n")
+    found: list[str] = root_init_problems(init, "exo_calib")
+    assert found == [f"{init}: the package root imports {m} (only the beartype hook belongs there)" for m in ("exo_calib.apis.refine", "torch")]
+
+
 @pytest.mark.parametrize("package", CONFIG["enforced"])
 def test_enforced_package_imports_point_down(package: str) -> None:
     problems: list[str] = []
     for path in sorted((ROOTS[package] / package).rglob("*.py")) + sorted((ROOTS[package] / "tools").rglob("*.py")):
         if path.parent == ROOTS[package] / package and path.name == "__init__.py":
-            continue  # the package root holds only the beartype hook
+            problems += root_init_problems(path, package)
+            continue
         source: str | None = layer_of(path)
         if source is None:
             problems.append(f"{path.relative_to(REPO_ROOT)}: matches no layer rule")

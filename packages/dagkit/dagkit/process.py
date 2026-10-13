@@ -1,4 +1,5 @@
 import multiprocessing as mp
+import os
 import pickle
 import traceback
 from collections.abc import Mapping
@@ -18,8 +19,10 @@ class _Collect(list[tuple[str, str, TimeNs, object]]):
         self.append(("watermark", "", t_ns, None))
 
 
-def _child(spawn: Spawn, conn: Connection) -> None:
+def _child(spawn: Spawn, cpus: tuple[int, ...] | None, conn: Connection) -> None:
     try:
+        if cpus and hasattr(os, "sched_setaffinity"):
+            os.sched_setaffinity(0, cpus)  # the child does the work, so the placement's CPUs bind it
         node = spawn.cls(spawn.config)
         while (message := conn.recv())[0] != "close":
             op, arg = message
@@ -40,13 +43,13 @@ def _child(spawn: Spawn, conn: Connection) -> None:
 
 
 class ProcessNode:
-    def __init__(self, spawn: Spawn) -> None:
+    def __init__(self, spawn: Spawn, cpus: tuple[int, ...] | None = None) -> None:
         self.inputs: Mapping[str, PortType] = spawn.cls.inputs
         self.outputs: Mapping[str, PortType] = spawn.cls.outputs
         self.emits_late: bool = getattr(spawn.cls, "emits_late", False)
         context = mp.get_context("spawn")
         self._conn, child_conn = context.Pipe()
-        self._process = context.Process(target=_child, args=(spawn, child_conn), daemon=True)
+        self._process = context.Process(target=_child, args=(spawn, cpus, child_conn), daemon=True)
 
     def _call(self, op: str, arg: object, out: Emit) -> None:
         if self._process.exitcode is None and not self._process.is_alive():

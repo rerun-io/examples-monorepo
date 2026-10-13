@@ -95,12 +95,6 @@ def load_card(path: Path) -> VerifyCard:
         raise ValueError(f"{path}: {exc}") from exc
 
 
-def case_noise(block: GraphBlock, case: Case) -> dict[str, float]:
-    if case.noise or case.noise_from is None:
-        return case.noise
-    return next((c.noise for c in block.cases if c.name == case.noise_from), {})
-
-
 def check_band(band: MetricBand, pre: float | None, post: float | None, noise: Mapping[str, float]) -> BandResult:
     if pre is None or post is None:
         return BandResult(band.name, False, f"missing metric (pre={pre}, post={post})")
@@ -127,7 +121,7 @@ def _resolve(target: str) -> Callable[..., object]:
 
 @dataclass(frozen=True, slots=True)
 class VerifyArgs:
-    card: Path  # the package's VERIFY.toml
+    card: tyro.conf.Positional[Path]  # the package's VERIFY.toml
     phase: Phase
     block: str | None = None
     clip: Literal["short", "full"] | None = None
@@ -161,18 +155,21 @@ def main(args: VerifyArgs) -> int:
         recording.disconnect()
         partial.replace(golden)
         print(f"{block.name}/{case.name} {args.phase}: {metrics}")
-        if args.phase == "post":
-            paths: dict[str, Path] = {phase: golden_path(card.package, block.name, case.name, phase) for phase in ("pre", "pre2")}
-            scores: dict[str, dict] = {phase: dict(score(case, path)) for phase, path in paths.items() if path.exists()}  # type: ignore[call-overload]
+        results: list[BandResult] = [BandResult(b.name, False, "missing or non-finite") for b in block.metrics if not math.isfinite(metrics.get(b.name, math.nan))]
+        if args.phase == "post":  # noise: the case's own (noise, pre2 run), or those of its `noise_from` case (missing: fails)
+            donor: Case = next((c for c in block.cases if c.name == case.noise_from), case) if case.noise_from and not case.noise else case
+            paths: dict[str, tuple[Case, Path]] = {ph: (c, golden_path(card.package, block.name, c.name, ph)) for ph, c in (("pre", case), ("pre2", donor))}
+            scores: dict[str, dict] = {ph: dict(score(c, path)) for ph, (c, path) in paths.items() if path.exists()}  # type: ignore[call-overload]
             for band in block.metrics:
-                result: BandResult = check_band(band, scores.get("pre", {}).get(band.name), metrics.get(band.name), case_noise(block, case))
                 pre2: float | None = scores.get("pre2", {}).get(band.name)
-                if case.noise_from is None and (pre2 is None or not math.isfinite(pre2)):  # this case measured its own noise
-                    result = BandResult(band.name, False, f"pre2 golden or metric missing or non-finite ({pre2}): no noise evidence")
-                failed |= not result.passed
-                print(f"  {'PASS' if result.passed else 'FAIL'} {band.name}: {result.reason}; pre2 {pre2}")
-        if args.register and case.dataset is not None and case.segment is not None:  # an immutable copy: the golden path is reused
-            registered: Path = golden.with_name(f"{case.name}.{args.phase}.{sha7}.{uuid.uuid4().hex[:8]}.rrd")
+                result: BandResult = check_band(band, scores.get("pre", {}).get(band.name), metrics.get(band.name), donor.noise)
+                evidence: bool = pre2 is not None and math.isfinite(pre2)  # a finite pre2 metric: the noise was measured
+                results.append(BandResult(band.name, result.passed and evidence, f"{result.reason}; pre2 of {donor.name!r}: {pre2}"))
+        for result in results:
+            print(f"  {'PASS' if result.passed else 'FAIL'} {result.metric}: {result.reason}")
+        failed |= not all(r.passed for r in results)
+        if args.register and all(r.passed for r in results) and case.window_s is None and case.dataset and case.segment:  # never failed or windowed
+            registered: Path = golden.with_name(f"{case.name}.{args.phase}.{sha7}.{uuid.uuid4().hex[:8]}.rrd")  # immutable: the golden path is reused
             shutil.copy2(golden, registered)
             dataset = SegmentRef(case.dataset, case.segment).entry()
             dataset.register([registered.resolve().as_uri()], layer_name=f"verify-{block.name}-{args.phase}-{sha7}").wait()

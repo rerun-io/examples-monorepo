@@ -8,6 +8,7 @@ import pytest
 import rerun as rr
 from serde import coerce, serde
 
+from dagkit.apis import synthetic_demo
 from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, load_profile
 from dagkit.graph import Graph
 from dagkit.node import Mode
@@ -122,3 +123,13 @@ def test_generated_run_keeps_defaults_none_segments_and_a_headless_viewer_config
     list(run("ds", "seg", 10, "typed", "threaded", "lossless"))
     assert built[0].segment is None and built[0].label == "factory value" and built[0].rr_config.headless
     assert built[1].segment == SegmentRef("ds", "seg") and built[1].label == "typed"
+
+
+def test_generated_ui_never_spawns_a_viewer_for_the_synthetic_demo(monkeypatch: pytest.MonkeyPatch) -> None:
+    def spawn(self: rr.RecordingStream, *args: object, **kwargs: object) -> None:
+        raise AssertionError("the generated UI spawned a native viewer")
+
+    monkeypatch.setattr(rr.RecordingStream, "spawn", spawn)
+    demo = gradio_app(synthetic_demo.Config, synthetic_demo.build, title="Synthetic")
+    run = next(f.fn for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
+    list(run(0.2, 30.0, 0.0, "threaded", "lossless"))  # widget order: seconds, hz, smooth_ms, runner, mode

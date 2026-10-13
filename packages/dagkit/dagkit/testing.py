@@ -1,6 +1,8 @@
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import asdict, is_dataclass, replace
+
+import numpy as np
 
 from dagkit.graph import Graph, Spawn
 from dagkit.node import Emit, Event, Node, RunContext, Tick
@@ -39,7 +41,8 @@ def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | Non
             check_monotonic(last.get(port), t_ns, f"output {port}")
             last[port] = t_ns
         runs.append(out.items)
-    assert runs[0] == runs[1], "a run after reset differs from the first run (reset is not idempotent)"
+    plain: list[list[object]] = [[(p, t, asdict(v) if is_dataclass(v) and not isinstance(v, type) else v) for p, t, v in run] for run in runs]
+    np.testing.assert_equal(plain[1], plain[0], err_msg="a run after reset differs from the first run (reset is not idempotent)")  # arrays by value
     return runs[0]
 
 
