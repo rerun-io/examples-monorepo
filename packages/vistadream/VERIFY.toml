@@ -1,0 +1,101 @@
+# vistadream verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "vistadream"
+
+[[graph]]
+name = "single_image"
+run = "vistadream.verify:run"
+score = "vistadream.verify:score"
+# No depth GT on the catalog: the reference is the pre-port golden of each case. The pre-port pipeline is broken at import
+# (`@dataclass` above a function instead of `SingleImageConfig`; `get_relative_predictor` no longer exists in monopriors) and
+# in the coarse stage (undefined `dpt_conf_mask_bool`): pre/pre2 ran it with the smallest fix, never committed, on gsplat 1.5.3.
+# input_psnr_db / input_depth_absrel: the final scene rendered at the input camera vs the processed input image / vs MoGe's
+# depth on MoGe-valid pixels. novel_rgb_mae: trajectory renders vs the case's pre golden at the same steps (pre scores 0).
+metrics = [
+    { name = "input_psnr_db", unit = "dB", better = "higher", floor = 0.3 },
+    { name = "input_depth_absrel", unit = "ratio", better = "lower", floor = 0.01 },
+    { name = "novel_rgb_mae", unit = "levels", better = "lower", floor = 1.0 },
+]
+shots = [  # t = 0: the input camera; 1.2 s / 3.7 s: the spiral trajectory's forward / backward extremes (steps 36 / 111)
+    { view = "/world", t_s = 0.0 },
+    { view = "/world/input/pinhole/render_rgb", t_s = 0.0 },
+    { view = "/world", t_s = 1.2 },
+    { view = "/world/render/pinhole/rgb", t_s = 1.2 },
+    { view = "/world", t_s = 3.7 },
+    { view = "/world/render/pinhole/rgb", t_s = 3.7 },
+]
+
+[[graph.cases]]
+# rule: the package's sample image; short = no outpainting (MoGe depth, 100-iteration splat init, 150 trajectory renders).
+name = "no-outpaint"
+clip = "short"
+reference = "pre-port"
+input = "data/office/IMG_4029.jpg"
+params = { stage = "no-outpaint", max_resolution = "512", seed = "0" }
+# |pre - pre2| (seeded; gsplat 1.5.3 backward atomics): 147,929 splats both runs, 0.23 % of trajectory pixels differ. Bands =
+# floors. novel_rgb_mae floor 1.0 level: a 1-pixel image shift scores 4.2 levels, adjacent trajectory steps 3.8-16.
+noise = { input_psnr_db = 0.0000121, input_depth_absrel = 0.000000015, novel_rgb_mae = 0.00264 }
+
+[[graph.cases]]
+# rule: the same image, outpainted by FLUX.1-Fill-dev (30 % border) before depth and init.
+# NOT RECORDED pre-port: the FLUX.1-Fill-dev weights (~34 GB) were not cached on the recording host and its disk had no room for
+# them. This case and `coarse` fail closed (no golden, no noise) until pre + pre2 are recorded.
+name = "outpaint"
+clip = "full"
+reference = "pre-port"
+input = "data/office/IMG_4029.jpg"
+params = { stage = "outpaint", max_resolution = "512", expansion_percent = "0.3", seed = "0" }
+
+[[graph.cases]]
+# rule: the same image through the coarse expansion (view selection, FLUX inpainting, MoGe, 500 iterations per added view).
+name = "coarse"
+clip = "full"
+reference = "pre-port"
+input = "data/office/IMG_4029.jpg"
+params = { stage = "coarse", max_resolution = "512", expansion_percent = "0.3", n_frames = "10", seed = "0" }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py"]
+properties = [
+    "tests/test_types.py::test_camera_view_serde_and_layer_round_trip",
+    "tests/test_types.py::test_scene_views_round_trip_and_names",
+    "tests/test_types.py::test_scene_views_read_back_snapshots_whose_views_change",
+    "tests/test_types.py::test_image_canvas_depth_round_trip",
+    "tests/test_types.py::test_splats_map_to_native_gaussian_splats",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_types_rerun.py"]
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_ops.py"]
+properties = [
+    "tests/test_ops.py::test_spiral_poses_are_rigid_and_start_and_end_at_the_input_camera",
+    "tests/test_ops.py::test_backproject_reprojects_onto_its_pixels",
+    "tests/test_ops.py::test_process_image_keeps_aspect_and_caps_the_long_side",
+    "tests/test_ops.py::test_border_mask_covers_exactly_the_canvas_outside_the_image",
+    "tests/test_ops.py::test_align_depth_recovers_an_affine_prediction_where_known",
+    "tests/test_ops.py::test_gaussians_sit_on_the_backprojected_spawn_pixels",
+]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+properties = ["tests/test_graph.py::test_graph_validates_and_runners_agree"]
+
+[[tests]]
+name = "flux"
+tier = "model"
+lane = "unit"
+tests = ["tests/test_flux.py"]
+properties = ["tests/test_flux.py::test_flux_loads_only_cached_files_when_told"]

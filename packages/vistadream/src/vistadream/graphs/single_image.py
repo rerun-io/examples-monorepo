@@ -1,0 +1,48 @@
+"""The single-image graph (SPEC 5.4): one image in, a Gaussian scene and a camera path through it out.
+
+```
+image ─image─▶ outpaint ─canvas─▶ depth ─depth─▶ init ─scene, views─▶ [expand] ─scene─▶ render ─view─▶ sinks
+  └──────image (AsOf)───────────────────────────▶ ▲  ▲                     └─views (AsOf)─▶ ▲          (scene, views too)
+                          └─canvas (AsOf)─────────┘
+```
+Every edge but the AsOf ones is Block. ``expand`` (a SegmentNode) exists only for the coarse stage; without it ``init``'s
+outputs are final. Models are built by the App and handed to the nodes.
+"""
+
+from collections.abc import Mapping
+
+from dagkit.graph import AsOf, Graph, NodeRef, PortRef
+from dagkit.node import Node, Source
+
+from vistadream.nodes.prepare import DepthNode, OutpaintNode
+from vistadream.nodes.splats import ExpandNode, InitNode, RenderNode
+
+
+def single_image_graph(
+    image: Source, outpaint: OutpaintNode, depth: DepthNode, init: InitNode, expand: ExpandNode | None, render: RenderNode, sinks: Mapping[str, Node]
+) -> Graph:
+    """Every sink input names a final port: ``scene`` (Splats), ``views`` (SceneViews) or ``view`` (the render path)."""
+    graph = Graph("vistadream-single-image")
+    source: NodeRef = graph.source("image", image)
+    canvas: NodeRef = graph.node("outpaint", outpaint)
+    depth_ref: NodeRef = graph.node("depth", depth)
+    final: NodeRef = graph.node("init", init)
+    graph.edge(source["image"], canvas["image"])
+    graph.edge(canvas["canvas"], depth_ref["canvas"])
+    graph.edge(depth_ref["depth"], final["depth"])
+    graph.edge(canvas["canvas"], final["canvas"], AsOf())
+    graph.edge(source["image"], final["image"], AsOf())
+    if expand is not None:
+        grown: NodeRef = graph.node("expand", expand)
+        graph.edge(final["scene"], grown["scene"])
+        graph.edge(final["views"], grown["views"])
+        final = grown
+    path: NodeRef = graph.node("render", render)
+    graph.edge(final["scene"], path["scene"])
+    graph.edge(final["views"], path["views"], AsOf())
+    ports: dict[str, PortRef] = {"scene": final["scene"], "views": final["views"], "view": path["view"]}
+    for name, sink in sinks.items():
+        ref: NodeRef = graph.sink(name, sink)
+        for port in sink.inputs:
+            graph.edge(ports[port], ref[port])
+    return graph
