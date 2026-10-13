@@ -137507,8 +137507,8 @@ packages:
 - pypi: ./packages/vistadream
   name: vistadream
   requires_dist:
-  - einops>=0.8.1,<0.9
   - monopriors @ ./packages/monoprior
+  - simplecv @ ./packages/simplecv
   requires_python: '>=3.11'
 - pypi: ./packages/wilor-nano
   name: wilor-nano
