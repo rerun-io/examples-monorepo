@@ -1,31 +1,28 @@
 """Graph-tier check of mamma, driven by ``VERIFY.toml`` through ``python -m dagkit.verify``.
 
 ``run`` writes a golden rrd; ``score`` reads only that golden plus the segment's GT (``mosh_gt`` meshes, person masks)
-from the catalog. Golden contract (the ported graph writes the same paths on the segment's ``video_time``):
+from the catalog. Golden contract (on the segment's ``video_time``; the pre-port goldens wrote the same scored paths):
 
 - ``/world/mamma/people/person_NN/body/mesh``: ``Mesh3D`` vertex positions (SMPL-X, world metres) per fitted frame;
   ``triangle_indices`` static. ``body/smplx``: ``AnyValues`` pose (165 axis-angle), betas, trans per fitted frame.
 - ``/world/mamma/people/person_NN/landmarks3d``: triangulated landmarks (``Points3D``) per frame.
-- ``/world/<camera>/pinhole/mamma/masks/person_NN``: palette PNG (index 1 = the person) at engine size per frame, static
-  ``Transform3D`` scale to the stored video size; ``.../mamma/landmarks/person_NN`` (``Points2D`` in stored-video pixels
-  + visibility) and ``.../mamma/persons`` (``Boxes2D``, class id = person + 1).
+- ``/world/<camera>/pinhole/mamma/masks/person_NN``: palette PNG (index 1 = the person) at engine size per frame, under a
+  static ``Transform3D`` scale to the stored video size; ``.../mamma/landmarks/person_NN`` (``Points2D`` + visibility) and
+  ``.../mamma/persons`` (``Boxes2D``, class id = person + 1). Since the port the scale sits on ``.../pinhole/mamma``
+  (the pre-port goldens put it on each mask and wrote boxes and landmarks in stored pixels).
 - ``/verify/capture/run``: static ``AnyValues`` ``wall_s`` and ``stream_s`` (realtime_fraction = stream_s / wall_s).
 """
 
 import io
 import itertools
-import time
-from collections.abc import Sequence
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dagkit.sources import SegmentRef
-from dagkit.types import read_column
 from dagkit.verify import Case, Phase
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from PIL import Image
 from rerun.catalog import DatasetEntry
@@ -36,183 +33,32 @@ PRED_ROOT: str = "/world/mamma/people"
 GT_ROOT: str = "/world/gt/people"
 BODY_JOINTS: int = 22
 """MPJPE joints: the SMPL-X body joints regressed from the mesh (hands and face excluded)."""
-MASK_RGB: tuple[int, int, int] = (255, 140, 0)
 
 
 def _window_ns(case: Case) -> tuple[int, int]:
     return (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9)) if case.window_s is not None else (-(2**62), 2**62)
 
 
-def _png(mask: Bool[ndarray, "h w"]) -> bytes:
-    image: Image.Image = Image.fromarray(mask.astype(np.uint8), mode="P")
-    image.putpalette([0, 0, 0, *MASK_RGB])
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG", transparency=0)
-    return buffer.getvalue()
+def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
+    """The capture graph (``apis/capture.py``, threaded, lossless) on the case's segment window; every output goes into ``recording``.
 
+    Nothing is registered and no layer file is written, so the shared catalog is only read. ``phase`` does not change what runs.
+    """
+    from dagkit.runners import run_threaded
+    from simplecv.rerun_log_utils import RerunTyroConfig
 
-def _export(case: Case, cameras: Sequence[str], out: Path) -> tuple[Int64[ndarray, " n"], list[str]]:
-    """The segment's AV1 packets (keyframe before the window start → window end) wrapped as mp4 without re-encoding, plus its
-    calibration as the ``ma_cap`` npz contract the old pipeline reads. Returns each wrapped frame's ``video_time`` and the camera names."""
-    from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
-    from simplecv.rerun_dataloader import read_segment_packets
-    from simplecv.types.rig import RigCameras
-
-    from mamma.calibration.npz_contract import CameraCalibration, dump_camera_npz
+    from mamma.apis.capture import Config, build, engine_plan
 
     assert case.dataset is not None and case.segment is not None, "mamma cases are catalog segments"
-    dataset: DatasetEntry = SegmentRef(case.dataset, case.segment).entry()  # an entry must outlive its queries
-    rig_table: pa.Table = read_column(dataset, case.segment, RigCameras, "/world", "video_time", static=True)
-    rig: RigCameras = next(RigCameras.from_layer(rig_table, "/world", "video_time"))[1].select(cameras)
-    start_ns, stop_ns = _window_ns(case)
-    names: list[str] = [camera.replace("/", "_") for camera in cameras]
-    (out / "meta").mkdir(parents=True)
-    (out / "videos").mkdir()
-    clip_times: Int64[ndarray, " n"] | None = None
-    first: int = 0
-    for name, camera, K, cam_T_world, wh in zip(names, cameras, rig.intrinsics, rig.cam_T_world, rig.resolution_wh, strict=True):
-        packets: tuple = read_segment_packets(dataset, case.segment, f"world/{camera}/pinhole/video", "video_time")
-        times: Int64[ndarray, " m"] = np.asarray(packets[0]).astype("timedelta64[ns]").astype(np.int64)
-        keyframes: Bool[ndarray, " m"] = np.asarray(packets[2], dtype=bool)
-        inside: Int64[ndarray, " k"] = np.flatnonzero((times >= start_ns) & (times < stop_ns))
-        begin: int = int(np.flatnonzero(keyframes[: inside[0] + 1])[-1])
-        if clip_times is None:
-            clip_times, first = times[begin : inside[-1] + 1], int(inside[0] - begin)
-        elif not np.array_equal(times[begin : inside[-1] + 1], clip_times):
-            raise ValueError(f"{camera}: frame times differ from {cameras[0]}; the old pipeline needs index-aligned cameras")
-        mp4: bytes = wrap_mp4(packets[1][begin : inside[-1] + 1], keyframes[begin : inside[-1] + 1].tolist(), 30, catalog_codec_name(packets[3]))
-        (out / "videos" / f"{name}.mp4").write_bytes(mp4)
-        calibration = CameraCalibration(name=name, k_matrix=K, world_to_cam=cam_T_world, width=int(wh[0]), height=int(wh[1]))
-        dump_camera_npz(calibration, out / "meta" / f"{name}.npz")
-    assert clip_times is not None
-    fps: float = 1e9 / float(np.median(np.diff(clip_times)))
-    np.savez(out / "meta" / "global.npz", seq_name=case.segment, fps=fps, frame_start=first, frame_end=clip_times.size)
-    return clip_times, names
-
-
-def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """Pre-port: the streaming pipeline (``engine/pipeline.py``) on the segment's exported packets + calibration.
-
-    Its own Rerun logging (``StreamLogger``) goes to a scratch file as in a ``--rr-config.save`` run; the outputs are
-    collected per tick (validation mode, as ``tools/dump_artifacts.py``) and logged into ``recording`` on the segment's
-    ``video_time`` after the run. Wall time spans the stream loop plus the head/tail drains, not model construction.
-    """
-    import tensorrt as trt
-    import torch
-    from simplecv.video_io import TorchCodecVideoReader
-
-    from mamma.datasets.mamma_npz import load_mamma_sequence
-    from mamma.engine.pipeline import ResultCollector, build_streaming_pipeline
-    from mamma.engine.presets import PipelinePreset, get_preset
-    from mamma.fitting.stage import TickFitOutput
-    from mamma.fitting.window_fitter import FitResult
-
-    torch.set_float32_matmul_precision("high")  # as every old tool's entry point
-    cameras: list[str] = case.params["cameras"].split(",")
-    subjects: int = int(case.params["subjects"])
-    resize_hw: tuple[int, int] = (int(case.params["resize_hw"].split(",")[0]), int(case.params["resize_hw"].split(",")[1]))
-    preset: PipelinePreset = get_preset("quality" if case.params["preset"] == "quality" else "fast", expected_subjects=subjects)
-    if subjects > 1:
-        preset.fitter.use_cuda_graph = False  # per-person graph captures deadlock (tools/dump_artifacts.py)
-    sm: str = "sm{}{}".format(*torch.cuda.get_device_capability())
-    engine: Path = PACKAGE_DIR / ".trt_cache" / f"mammanet_b4_fp16_trt{trt.__version__.replace('.', '')}_{sm}.plan"
-
-    class Collector(ResultCollector):
-        def __init__(self) -> None:
-            super().__init__()
-            self.ticks: list[tuple[int, dict, dict, dict]] = []  # frame, {(cam, obj): mask bits + box}, {(cam, obj): lm}, {obj: tri}
-            self.fit_frames: dict[int, dict[int, FitResult]] = {}
-
-        def collect(self, frame_idx: int, tracks: list | None, landmarks: list | None, fit_output: TickFitOutput | None = None) -> None:
-            if frame_idx >= 0:
-                masks = {(c, o): (t.mask.cpu().numpy(), t.bbox_xyxy) for c, cam in enumerate(tracks or []) for o, t in cam.items()}
-                lms = {
-                    (c, o): (r.joints2d[:, :2].cpu().numpy(), r.visibility.cpu().numpy())
-                    for c, cam in enumerate(landmarks or [])
-                    for o, r in cam.items()
-                }
-                tri = {o: (p[v].cpu().numpy()) for o, (p, v) in (fit_output.triangulated.items() if fit_output else [])}
-                self.ticks.append((frame_idx, masks, lms, tri))
-            for obj, fit in fit_output.fits.items() if fit_output else []:
-                self.fit_frames.setdefault(obj, {})[fit.frame_idx] = fit
-
-    with TemporaryDirectory() as tmp:
-        times_ns, names = _export(case, cameras, Path(tmp) / "capture")
-        sequence = load_mamma_sequence(Path(tmp) / "capture", camera_names=names)
-        viz = rr.RecordingStream("mamma-verify-viz", send_properties=False)
-        viz.save(Path(tmp) / "viz.rrd")
-        previous: rr.RecordingStream | None = rr.set_global_data_recording(viz)
-        collector = Collector()
-        pipeline = build_streaming_pipeline(
-            sequence, resize_hw=resize_hw, device="cuda", tracker_config=preset.tracker, fitter_config=preset.fitter,
-            mammanet_weights=PACKAGE_DIR / "data/weights/ma_2d/mamma_mask_full_cvpr.safetensors",
-            trt_engine=engine if engine.exists() else None, collector=collector, hires_crops=preset.hires_crops,
-        )  # fmt: skip
-        # Decode fix (broken pre-port pipeline): the reader's NVDEC decoders are created on this thread but decode on pool
-        # threads; torchcodec CUDA decoders are thread-affine and fail from the third 32-frame chunk on. Smallest fix: the
-        # same readers, each decoding on its own thread (recorded in the golden as decode_fix).
-        pipeline.reader._video_readers = [
-            TorchCodecVideoReader(path, device="cuda", resize_hw=pipeline.reader.resize_hw, thread_owned=True) for path in sequence.video_paths
-        ]
-        start: float = time.perf_counter()
-        stats = pipeline.run()
-        assert pipeline.fitting is not None
-        for tail in pipeline.fitting.drain_head() + pipeline.fitting.drain():
-            collector.collect(-1, None, None, tail)
-        wall_s: float = time.perf_counter() - start
-        viz.flush()
-        viz.disconnect()
-        if previous is not None:
-            rr.set_global_data_recording(previous)
-        faces: Int64[ndarray, "f 3"] = np.asarray(pipeline.fitting.faces, dtype=np.int64)
-    ticks: list[int] = [tick[0] for tick in collector.ticks]
-    print(f"{case.name} {phase}: {stats.ticks} ticks in {wall_s:.1f}s; fits {[(o, len(f)) for o, f in sorted(collector.fit_frames.items())]}")
-
-    scale: tuple[float, float] = (sequence.cameras[0].width / resize_hw[1], sequence.cameras[0].height / resize_hw[0])
-    recording.log(
-        "/verify/capture/run",
-        rr.AnyValues(
-            wall_s=wall_s,
-            stream_s=(times_ns[ticks[-1]] - times_ns[ticks[0]]) / 1e9,
-            trt_engine=engine.exists(),
-            decode_fix="thread-owned NVDEC readers",
-        ),
-        static=True,
-    )
-    assert all((cam.width / resize_hw[1], cam.height / resize_hw[0]) == scale for cam in sequence.cameras), "one engine scale for every camera"
-    for obj in sorted(collector.fit_frames):
-        root: str = f"{PRED_ROOT}/person_{obj:02d}"
-        recording.log(f"{root}/body/mesh", rr.Mesh3D.from_fields(triangle_indices=faces, albedo_factor=[1.0, 0.55, 0.0, 0.8]), static=True)
-        for frame, fit in sorted(collector.fit_frames[obj].items()):
-            recording.set_time("video_time", duration=np.timedelta64(int(times_ns[frame]), "ns"))
-            recording.log(f"{root}/body/mesh", rr.Mesh3D.from_fields(vertex_positions=fit.vertices))
-            recording.log(f"{root}/body/smplx", rr.AnyValues(pose=fit.pose, betas=fit.betas, trans=fit.trans))
-    logged_scale: set[str] = set()
-    for frame, masks, lms, tri in collector.ticks:
-        recording.set_time("video_time", duration=np.timedelta64(int(times_ns[frame]), "ns"))
-        for obj, points in tri.items():
-            recording.log(f"{PRED_ROOT}/person_{obj:02d}/landmarks3d", rr.Points3D(points, radii=0.008, colors=MASK_RGB))
-        for (c, obj), (mask, _) in masks.items():
-            entity: str = f"/world/{cameras[c]}/pinhole/mamma/masks/person_{obj:02d}"
-            if entity not in logged_scale:
-                recording.log(entity, rr.Transform3D(scale=[scale[0], scale[1], 1.0]), static=True)
-                logged_scale.add(entity)
-            recording.log(entity, rr.EncodedImage(contents=_png(mask), media_type="image/png", opacity=0.5, draw_order=11.0))
-        for c in range(len(cameras)):
-            boxes = [(obj, box) for (cc, obj), (_, box) in masks.items() if cc == c and box is not None]
-            if boxes:
-                xyxy: Float64[ndarray, "b 4"] = np.stack([b for _, b in boxes]).astype(np.float64) * np.array([*scale, *scale])
-                recording.log(
-                    f"/world/{cameras[c]}/pinhole/mamma/persons",
-                    rr.Boxes2D(array=xyxy, array_format=rr.Box2DFormat.XYXY, class_ids=[o + 1 for o, _ in boxes]),
-                )
-        for (c, obj), (xy, visibility) in lms.items():
-            colors: list[tuple[int, int, int]] = [MASK_RGB if v > 0.5 else (90, 90, 90) for v in visibility]
-            recording.log(
-                f"/world/{cameras[c]}/pinhole/mamma/landmarks/person_{obj:02d}",
-                rr.Points2D(xy * np.array(scale, dtype=np.float32), radii=1.5, colors=colors),
-                rr.AnyValues(visibility=visibility),
-            )
+    window: tuple[int, int] | None = _window_ns(case) if case.window_s is not None else None
+    height, width = (int(x) for x in case.params["resize_hw"].split(","))
+    config = Config(
+        RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment, window_ns=window), tuple(case.params["cameras"].split(",")),
+        (height, width), "quality" if case.params["preset"] == "quality" else "fast", int(case.params["subjects"]),
+    )  # fmt: skip
+    report = run_threaded(build(config, recording), mode="lossless")
+    recording.log("/verify/capture/run", rr.AnyValues(wall_s=report.wall_s, stream_s=report.stream_s, trt_engine=engine_plan() is not None), static=True)
+    print(f"{case.name} {phase}: {report.nodes['track'].ticks} framesets in {report.wall_s:.1f} s; " + ", ".join(f"{n} {s.step_ms_mean:.0f} ms" for n, s in report.nodes.items() if s.ticks))
 
 
 def _series(table: pa.Table, column: str) -> dict[int, pa.Scalar]:

@@ -39,7 +39,7 @@ from posekit.runtimes import (
 )
 
 if TYPE_CHECKING:
-    from mamma.landmarks.skeleton import SkeletonRegressor
+    from mamma.models.landmarks.skeleton import SkeletonRegressor
 
 BackendName: TypeAlias = Literal["torch", "onnx", "tensorrt"]
 
@@ -82,7 +82,7 @@ def _build_estimator(network_name: str, backend_name: BackendName) -> TopDownPos
             return SapiensPoseConfig(model_size=model_size, backend=backend).setup()
         case "mamma-dense512":
             try:
-                from mamma.landmarks.posekit_role import MammaNetLandmarksConfig
+                from mamma.models.landmarks.posekit_role import MammaNetLandmarksConfig
             except ImportError as error:
                 raise gr.Error("mamma is not installed in this environment") from error
             mamma_backend: TorchBackendConfig | TensorRtBackendConfig = (
@@ -160,7 +160,7 @@ def predict_ui(
         log_dense_predictions(boxes_xyxy, landmarks_xy, visibility, keypoint_threshold)
         if show_skeleton:
             try:
-                from mamma.landmarks.skeleton import joints_from_landmarks, load_skeleton_regressor, skeleton_strips
+                from mamma.models.landmarks.skeleton import joints_from_landmarks, load_skeleton_regressor, skeleton_strips
             except ImportError as error:
                 raise gr.Error("mamma is not installed in this environment") from error
             regressor: SkeletonRegressor = load_skeleton_regressor()

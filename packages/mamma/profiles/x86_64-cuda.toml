@@ -1,0 +1,29 @@
+# mamma on the x86_64-cuda hardware class (dagkit profile, read by apis/capture.py). Two operating points:
+#   quality: every logged artifact inside the tight band (SAM2.1 hiera-small masks, crops from the full-size frames,
+#            emit every tick); about a quarter of realtime with four 2K cameras.
+#   fast:    EfficientTAM-ti masks, engine-size crops, a lighter fit (24 iterations, emit every other tick, no LBFGS polish).
+# Both re-anchor every 45 ticks and hold collapsed masks (they fix tracker failures at any operating point).
+hardware = "x86_64-cuda"
+
+[nodes.track.params]
+redetect_interval = 45
+reprompt_alive_on_routine = true
+transient_hold = true
+
+[presets.quality.video.params]
+keep_native = true
+
+[presets.quality.track.params]
+sam2_config = "configs/sam2.1/sam2.1_hiera_s.yaml"
+sam2_checkpoint = "data/weights/sam2/sam2.1_hiera_small.pt"
+
+[presets.quality.fit.params]
+emit_stride = 1
+
+[presets.fast.video.params]
+keep_native = false
+
+[presets.fast.fit.params]
+tick_iters = 24
+emit_stride = 2
+lbfgs_polish = false
