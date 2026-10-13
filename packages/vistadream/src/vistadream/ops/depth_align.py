@@ -24,11 +24,12 @@ def align_depth(rendered: Float32[ndarray, "h w"], predicted: Float32[ndarray, "
     diffused into the holes (100 rounds of a 15 x 15 box blur with the known offsets held). No holes: ``rendered``."""
     if not holes.any():
         return rendered
-    scale, shift = scale_shift(predicted[~holes], rendered[~holes])
+    known_mask: Bool[ndarray, "h w"] = ~holes
+    scale, shift = scale_shift(predicted[known_mask], rendered[known_mask])
     coarse: Float64[ndarray, "h w"] = predicted.astype(np.float64) * scale + shift
-    known: Float64[ndarray, "k"] = rendered[~holes] - coarse[~holes]
+    known: Float64[ndarray, "k"] = rendered[known_mask] - coarse[known_mask]
     offset: Float64[ndarray, "h w"] = np.zeros_like(coarse)
     for _ in range(100):
-        offset[~holes] = known
+        offset[known_mask] = known
         offset = cv2.blur(offset, (15, 15))
     return (coarse + offset).astype(np.float32)

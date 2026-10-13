@@ -63,10 +63,6 @@ def gaussians(view: CameraView, spawn: Bool[ndarray, "h w"], device: str) -> Tra
     )
 
 
-def merge(parts: Sequence[Splats]) -> Splats:
-    return Splats(*(torch.cat([getattr(p, f) for p in parts]) for f in ("centers", "scales", "quats_wxyz", "rgb", "opacity")))
-
-
 def render(splats: Splats, K: Float64[ndarray, "3 3"], cam_T_world: Float64[ndarray, "4 4"], width: int, height: int) -> Render:
     """gsplat's rasteriser (RGB + expected depth, black background, near plane 1 cm)."""
     import gsplat
@@ -101,14 +97,15 @@ def train(
     targets: list[Float32[Tensor, "h w 3"]] = [torch.from_numpy(v.rgb.astype(np.float32) / 255.0).to(device) for v in views]
 
     def scene() -> Splats:
-        return merge(([frozen] if frozen is not None else []) + [t.activated() for t in trainable])
+        parts: list[Splats] = ([frozen] if frozen is not None else []) + [t.activated() for t in trainable]
+        return Splats(*(torch.cat([getattr(p, f) for p in parts]) for f in ("centers", "scales", "quats_wxyz", "rgb", "opacity")))
 
     for _ in range(iters):
         index: int = rng.randint(0, len(views))
         view: CameraView = views[index]
         height, width = view.rgb.shape[:2]
         rgb: Float32[Tensor, "h w 3"] = torch.nan_to_num(rasterize(scene(), view.K, view.cam_T_world, width, height)[0])
-        target: Float32[Tensor, "h w 3"] = torch.nan_to_num(targets[index])
+        target: Float32[Tensor, "h w 3"] = targets[index]
         mask: Bool[ndarray, "h w"] = np.ones((height, width), dtype=bool) if view.supervise is None else view.supervise
         loss: Tensor = F.smooth_l1_loss(rgb[mask], target[mask]) + 0.2 * (1.0 - ssim(rgb[None].permute(0, 3, 1, 2), target[None].permute(0, 3, 1, 2)))
         loss.backward()

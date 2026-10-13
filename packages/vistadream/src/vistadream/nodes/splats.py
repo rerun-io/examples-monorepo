@@ -164,18 +164,18 @@ class PlySink:
     def step(self, tick: Tick, out: Emit) -> None:
         assert isinstance(tick.value, Splats)
         s: Splats = tick.value
-        columns: list[tuple[str, Tensor]] = [
+        columns: list[tuple[str, Float32[Tensor, " n"] | float]] = [
             *zip(("x", "y", "z"), s.centers.T, strict=True),
-            *zip(("nx", "ny", "nz"), torch.zeros_like(s.centers).T, strict=True),
+            *((name, 0.0) for name in ("nx", "ny", "nz")),
             *zip(("f_dc_0", "f_dc_1", "f_dc_2"), ((s.rgb - 0.5) / 0.28209479177387814).T, strict=True),
-            *((f"f_rest_{i}", torch.zeros_like(s.opacity)) for i in range(45)),
+            *((f"f_rest_{i}", 0.0) for i in range(45)),
             ("opacity", torch.logit(s.opacity)),
             *zip(("scale_0", "scale_1", "scale_2"), s.scales.log().T, strict=True),
             *zip(("rot_0", "rot_1", "rot_2", "rot_3"), s.quats_wxyz.T, strict=True),
         ]
         vertices: ndarray = np.empty(len(s.opacity), dtype=[(name, "f4") for name, _ in columns])
         for name, values in columns:
-            vertices[name] = values.detach().cpu().numpy()
+            vertices[name] = values.detach().cpu().numpy() if isinstance(values, Tensor) else values
         self.path.parent.mkdir(parents=True, exist_ok=True)
         PlyData([PlyElement.describe(vertices, "vertex")]).write(self.path)
 
