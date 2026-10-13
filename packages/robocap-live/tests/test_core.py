@@ -12,7 +12,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from robocap_live import _core
-from robocap_live.apis.hands_layer import default_ort_dylib
+from robocap_live.nodes.hands import default_ort_dylib
 
 HEIGHT: int = _core.FULL_HEIGHT
 WIDTH: int = _core.FULL_WIDTH

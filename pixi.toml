@@ -3146,7 +3146,7 @@ PYREFLY_TARGET = "handtrack"
 # ═══════════════════════════════════════════════════════════════════════════
 # The RoboCap hands catalog layer: robocap-live's Rust hand pipeline (DetNet and KeyNet on ONNX Runtime, the perspective
 # KeyNet crops, the ROBUST tracker on handfit, the UmeTrack mesh and the hands-layer writer) as the pyo3 module
-# robocap_live._core, fed one catalog segment at a time by robocap_live.catalog_segment. The cap binary needs none of this:
+# robocap_live._core, fed one catalog segment at a time by the robocap_live hands-layer graph. The cap binary needs none of this:
 # it builds in `robocap-cross` (packages/robocap-live/scripts/build-arm.sh). The env composes `cuda` for onnxruntime-gpu,
 # whose libonnxruntime.so the core loads at run time (CUDA execution provider, or the CPU one), and the cuDNN/cuBLAS libraries
 # that provider opens. Explicit platforms — see AGENTS.md.

@@ -32,7 +32,9 @@ reference = "pre-port"
 dataset = "robocap"
 segment = "robocap__fe6fede545c972fa__s00000014"
 window_s = [1655058.2373435, 1655063.2373435]
-params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", decode_threads = "2", group_tolerance_ns = "3000000", pose_tolerance_ns = "5000000" }
+# Since the port the graph fixes what decode_threads (2 libavcodec threads per camera) and pose_tolerance_ns set pre-port: each
+# frameset takes the core's own nearest pose within 2 ms (on this segment every slam_rs pose sits < 1 ms from its frameset).
+params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", group_tolerance_ns = "3000000" }
 # |pre - pre2|: the pre-port pipeline is deterministic on CPU ONNX Runtime (pre2 bit-identical: 150 framesets, 598 KeyNet
 # rows, 261 reported hand-framesets). Bands = floors.
 noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0 }
@@ -44,7 +46,50 @@ clip = "full"
 reference = "pre-port"
 dataset = "robocap"
 segment = "robocap__fe6fede545c972fa__s00000014"
-params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", decode_threads = "2", group_tolerance_ns = "3000000", pose_tolerance_ns = "5000000" }
+params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", group_tolerance_ns = "3000000" }
 # |pre - pre2|: own pre2 (3 min a run), bit-identical (32,074 framesets, 119,244 KeyNet rows, 47,261 reported
 # hand-framesets, scale 0.9922 calibrated). Bands = floors.
 noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0 }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py"]
+properties = [
+    "tests/test_types.py::test_cap_rig_serde_and_catalog_rows_round_trip_exactly",
+    "tests/test_types.py::test_poses_read_the_slam_layers_rows_whole_sorted_and_finite",
+    "tests/test_types.py::test_layer_run_is_static_numbers_that_read_back",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_catalog_layer.py"]
+properties = [
+    "tests/test_catalog_layer.py::test_cap_rig_and_run_counts_round_trip_through_a_catalog",
+    "tests/test_catalog_layer.py::test_poses_read_from_a_recording_the_way_slam_rs_writes_them",
+]
+
+[[tests]]
+name = "framesets"
+tier = "op"
+lane = "unit"
+tests = ["../simplecv/tests/test_ops_framesets.py", "../simplecv/tests/test_sources_luma.py"]
+properties = [
+    "../simplecv/tests/test_ops_framesets.py::test_every_frame_lands_in_exactly_one_frameset_in_order",
+    "../simplecv/tests/test_ops_framesets.py::test_members_sit_within_the_tolerance_of_the_opening_frame_and_openings_strictly_increase",
+    "../simplecv/tests/test_ops_framesets.py::test_tolerance_zero_with_equal_stamps_gives_full_framesets",
+]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_core.py"]
+properties = [
+    "tests/test_nodes.py::test_flush_finishes_the_layer_once_and_emits_its_file_and_counts_at_the_last_frameset",
+    "tests/test_nodes.py::test_reset_aborts_the_running_core_and_builds_a_fresh_one",
+    "tests/test_nodes.py::test_the_graph_validates_and_runs_the_same_ticks_sequential_and_threaded",
+]

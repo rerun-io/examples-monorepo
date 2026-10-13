@@ -48,10 +48,13 @@ pipeline is that of `--source replay <dump> --slam reference --hands on`: lossle
 `scene::Content::HandsLayer` mode. On the CPU ONNX Runtime the layer of a catalog segment equals that replay's of the segment's
 dump.
 
-The Python side (`robocap_live.catalog_segment`) reads the rig from the `base` layer's statics, the six H.264 streams in one bulk
-query, decoded to the raw Y plane (the cap's NV12 Y), groups framesets as the live adapter does (3 ms), and gives each frameset
-the nearest `slam_rs` pose of `/world/rig_00` within 5 ms. `robocap_live.apis.hands_layer` (`pixi run -e robocap-live
-robocap-hands-layer`) writes the layer and registers it as the segment's `hands` layer, replacing an earlier one.
+The Python side is a dagkit graph (`robocap_live/graphs/hands_layer.py`, lossless): simplecv's `CatalogVideoSource` in `cpu_luma`
+mode reads the six H.264 streams in one bulk query, decodes them to the raw Y plane (the cap's NV12 Y) and groups framesets as the
+live adapter does (`simplecv.ops.framesets`, 3 ms); its STATIC ports carry the rig of the `base` layer (`CapRig`) and the whole
+`slam_rs` pose table of `/world/rig_00` (`CatalogPoses`). The `hands` node wraps `_core.HandsLayer` (each frameset takes the
+pose within 2 ms of its time), and a `LayerFileSink` publishes the finished file. `robocap_live.apis.hands_layer` (`pixi run -e
+robocap-live robocap-hands-layer`) runs it and registers the file as the segment's `hands` layer: only when the segment has none,
+unless `--register replace` (a production refresh). The core logs its producer at the static `/producers/hands`.
 
 The layer holds only the hand entities (`/world/hands/{side}/{keypoints,mesh}`, the camera-pane overlays in full-resolution
 pixels, the skeleton's `AnnotationContext` on `/world`) and no recording properties; its recording id is the segment id and its

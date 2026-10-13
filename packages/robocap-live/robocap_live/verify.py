@@ -6,35 +6,33 @@ run-to-run noise). It reads only the two golden rrds, never the pipeline.
 
 Golden contract (the ported graph writes the same entities on the segment's ``video_time``): the hands layer exactly as the
 Rust layer writer logs it (``/world/hands/<side>/...`` in the world, ``/world/rig_00/cam_NN/pinhole/hands/<side>/...`` per
-camera), plus ``/verify/hands/run``: static ``AnyValues`` with the layer's counts (``LayerSummary``) and the run's wall time.
+camera), plus ``/verify/hands/run``: static ``AnyValues`` with the layer's counts (``LayerRun``) and the run's wall time.
 """
 
 import time
-from collections.abc import Iterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, cast
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import rerun as rr
+from dagkit.runners import run_threaded
+from dagkit.sinks import LayerFileSink, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.verify import Case, Phase, golden_path
-from datafusion import col, lit
-from jaxtyping import Float32, Float64, Int64, UInt8
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from rerun.catalog import DatasetEntry, DatasetView
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from rerun.catalog import DatasetEntry
+from serde import from_dict
 
-from robocap_live import _core
-from robocap_live.apis.hands_layer import DATASET, Config, LayerRun, default_ort_dylib, main
-from robocap_live.catalog_segment import CAMERA_ENTITIES, TIMELINE, group_framesets, nearest_poses, read_poses, read_rig, y_planes
+from robocap_live.graphs.hands_layer import hands_layer_graph, segment_source
+from robocap_live.nodes.hands import LAYER, HandsNode, HandsParams
+from robocap_live.types import LayerRun
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 """``packages/robocap-live``: case paths (``models_dir``) are relative to it."""
-KEYFRAME_LEAD_NS: int = 5_000_000_000
-"""How far before a window the packet read starts, so the decoder begins at a keyframe."""
+TIMELINE: str = "video_time"
 SIDES: tuple[str, ...] = ("left", "right")
 KEYNET: tuple[str, ...] = tuple(f"/world/rig_00/cam_{camera:02d}/pinhole/hands/{side}/keynet" for camera in range(6) for side in SIDES)
 """Per camera and hand: KeyNet's 21 image keypoints (stored-video pixels) on every frameset the hand was cropped."""
@@ -42,101 +40,26 @@ LANDMARKS: tuple[str, ...] = tuple(f"/world/hands/{side}/keypoints" for side in 
 """Per hand: the fitted 21 world landmarks (metres) on every frameset the hand was reported."""
 
 
-class _WindowedEntry:
-    """A dataset view whose readers keep only ``lo <= video_time < hi`` (a short clip's packets, not the whole segment)."""
-
-    def __init__(self, view: DatasetEntry | DatasetView, lo: int, hi: int) -> None:
-        self.view, self.lo, self.hi = view, lo, hi
-
-    def filter_segments(self, segment: str) -> "_WindowedEntry":
-        return _WindowedEntry(self.view.filter_segments(segment), self.lo, self.hi)
-
-    def filter_contents(self, contents: list[str]) -> "_WindowedEntry":
-        return _WindowedEntry(self.view.filter_contents(contents), self.lo, self.hi)
-
-    def reader(self, index: str) -> object:
-        t = col(index).cast(pa.int64())
-        return self.view.reader(index=index).filter((t >= lit(self.lo)) & (t < lit(self.hi)))
-
-
-def _pre_port_window(case: Case, partial: Path) -> dict[str, float]:
-    """The pre-port hands layer of a window: ``robocap_live.catalog_segment``'s readers, decoder and grouping and the
-    ``_core.HandsLayer`` loop of ``apis/hands_layer.main``, fed only the window's framesets (``main`` reads whole segments)."""
-    assert case.dataset is not None and case.segment is not None and case.window_s is not None
-    lo, hi = round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9)
-    started: float = time.perf_counter()
-    dataset: DatasetEntry = SegmentRef(case.dataset, case.segment).entry()  # an entry must outlive its queries
-    rig: _core.Rig = read_rig(dataset, case.segment, f"catalog {DATASET}")
-    windowed = _WindowedEntry(dataset, lo - KEYFRAME_LEAD_NS, hi)
-    videos = read_catalog_videos(windowed, case.segment, [f"{camera}/pinhole/video" for camera in CAMERA_ENTITIES], TIMELINE)  # type: ignore[arg-type]
-    trimmed: list[CatalogVideo] = []
-    skip: list[int] = []
-    inside: list[Int64[ndarray, " n"]] = []
-    for camera, video in enumerate(videos):
-        keep: Int64[ndarray, " k"] = np.flatnonzero(video.t_ns >= lo)
-        first_keyframe: int = max(i for i, keyframe in enumerate(video.keyframes[: int(keep[0]) + 1]) if keyframe)
-        trimmed.append(CatalogVideo(video.times[first_keyframe:], video.samples[first_keyframe:], video.keyframes[first_keyframe:], video.codec))
-        skip.append(int(keep[0]) - first_keyframe)
-        inside.append(video.t_ns[keep])
-        if not np.array_equal(keep, np.arange(keep[0], keep[-1] + 1)):
-            raise ValueError(f"camera {camera}: the window's frames are not contiguous")
-    index = group_framesets(inside, int(case.params["group_tolerance_ns"]))
-    poses = nearest_poses(index.t_ns, read_poses(dataset, case.segment), int(case.params["pose_tolerance_ns"]))
-    read_s: float = time.perf_counter() - started
-    core = _core.HandsLayer(
-        rig, partial, case.segment, poses.t_ns, poses.world_from_rig, models_dir=PACKAGE_DIR / case.params["models_dir"],
-        device=case.params["device"], ort_dylib=default_ort_dylib(), ort_threads=int(case.params["ort_threads"]), overlays=case.params["overlays"],
-    )  # fmt: skip
-    decoders: list[Iterator[UInt8[ndarray, "h w"]]] = [y_planes(video, 30, int(case.params["decode_threads"])) for video in trimmed]
-    for decoder, count in zip(decoders, skip, strict=True):
-        for _ in range(count):
-            next(decoder)
-    loop_started: float = time.perf_counter()
-    try:
-        for row in range(len(index.t_ns)):
-            t_ns: int = int(index.t_ns[row])
-            frames: list[UInt8[ndarray, "h w"] | None] = [next(decoders[c]) if index.frame[row, c] >= 0 else None for c in range(len(decoders))]
-            camera_t_ns: list[int] = [int(t) if f >= 0 else t_ns for t, f in zip(index.cam_t_ns[row], index.frame[row], strict=True)]
-            core.push(t_ns, frames, camera_t_ns)
-        summary = core.finish()
-    except BaseException:
-        core.abort()
-        raise
-    return _counts(summary) | {"read_s": read_s, "loop_s": time.perf_counter() - loop_started}
-
-
-def _pre_port_segment(case: Case, output_dir: Path) -> tuple[Path, dict[str, float]]:
-    """The pre-port hands layer of a whole segment: ``apis/hands_layer.main`` itself, with registration off."""
-    assert case.segment is not None
-    layer = main(Config(
-        segment=case.segment, output_dir=output_dir, catalog=SegmentRef(case.dataset or "robocap", case.segment).catalog_url,
-        models_dir=PACKAGE_DIR / case.params["models_dir"], device=case.params["device"],  # type: ignore[arg-type]
-        ort_threads=int(case.params["ort_threads"]), overlays=case.params["overlays"],  # type: ignore[arg-type]
-        decode_threads=int(case.params["decode_threads"]), register=False,
-    ))  # fmt: skip
-    return Path(layer.output), _counts(layer) | {"read_s": layer.catalog_read_s, "loop_s": layer.loop_s}
-
-
-def _counts(layer: _core.LayerSummary | LayerRun) -> dict[str, float]:
-    return {"framesets": layer.framesets, "with_pose": layer.with_pose, "held_pose": layer.held_pose, "tracked_left": layer.tracked[0],
-            "tracked_right": layer.tracked[1], "reported_left": layer.reported[0], "reported_right": layer.reported[1], "scale": layer.scale,
-            "scale_final": float(layer.scale_final)}  # fmt: skip
-
-
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """Pre-port: the current hands-layer pipeline (CPU ONNX Runtime) on the case's segment or window; its layer file's chunks
-    are copied into ``recording`` unchanged, and the counts go to ``/verify/hands/run``."""
+    """The hands-layer graph (threaded, lossless) on the case's segment or window: its published layer file (unregistered, in
+    a temporary directory) is copied into ``recording`` unchanged, its ``LayerRun`` and wall time go to ``/verify/hands/run``."""
+    assert case.dataset is not None and case.segment is not None, "robocap-live cases are catalog segments"
+    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
+    segment = SegmentRef(case.dataset, case.segment, window_ns=window)
+    params: HandsParams = from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
+                                                  "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
     started: float = time.perf_counter()
     with TemporaryDirectory() as tmp:
-        if case.window_s is not None:
-            layer: Path = Path(tmp) / f".{case.segment}.window.partial"
-            counts: dict[str, float] = _pre_port_window(case, layer)
-        else:
-            layer, counts = _pre_port_segment(case, Path(tmp))
-        recording.send_chunks(rr.chunk.RrdReader(layer).stream())
-    counts["wall_s"] = time.perf_counter() - started
-    recording.log("/verify/hands/run", rr.AnyValues(**cast(dict[str, Any], counts)), static=True)
-    print(f"{case.name} {phase}: {counts}")
+        publish = LayerFileSink(segment, LAYER, output_dir=Path(tmp), register="off")
+        counts = RerunSink(recording, {"run": LayerRun}, {"run": "/verify/hands/run"}, timeline=segment.timeline)
+        source = segment_source(segment, int(case.params["group_tolerance_ns"]))
+        report = run_threaded(
+            hands_layer_graph(source, HandsNode(segment, params, Path(tmp)), {"publish": publish, "counts": counts}), mode="lossless"
+        )
+        assert publish.published is not None, f"{case.name}: the run published no layer ({report.status})"
+        recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
+    recording.log("/verify/hands/run", rr.AnyValues(wall_s=time.perf_counter() - started), static=True)
+    print(f"{case.name} {phase}: {report.status}, {report.nodes['hands'].ticks} framesets in {report.wall_s:.1f} s")
 
 
 def _rows(table: pa.Table, entity: str, archetype: str, width: int) -> tuple[Int64[ndarray, " n"], Float32[ndarray, "n k w"]]:
