@@ -6,8 +6,6 @@ import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
-from exo_calib.ops.correspondences import ObservationSet
-
 
 def modulate_crop_edge_confidence(
     kp_xy: Float64[ndarray, "n 2"], conf: Float64[ndarray, "n"], crop_wh: tuple[int, int], margin_px: float
@@ -137,25 +135,3 @@ def drop_face_confidences(conf: Float64[ndarray, "v t 133"]) -> Float64[ndarray,
     selected: Float64[ndarray, "v t 133"] = conf.copy()
     selected[..., 23:91] = 0.0
     return selected
-
-
-def kineo_point_confidence_for_obs(
-    points_xyz: Float64[ndarray, "n 3"],
-    obs: ObservationSet,
-    intrinsics: Float64[ndarray, "v 3 3"],
-    cam_T_world: Float64[ndarray, "v 4 4"],
-    kp_xy: Float64[ndarray, "v t 133 2"],
-    conf: Float64[ndarray, "v t 133"],
-    lambda_decay: float,
-) -> Float64[ndarray, " n"]:
-    """Score every triangulated point with the Kineo pairwise consensus confidence.
-
-    Gathers the dense per-view keypoint / confidence arrays at each point's
-    (frame, joint) and delegates to :func:`kineo_point_confidence`.
-    """
-    num_views: int = intrinsics.shape[0]
-    kp_per_view: Float64[ndarray, "v n 2"] = np.stack(
-        [kp_xy[v, obs.point_frame_idx, obs.point_joint_idx] for v in range(num_views)]
-    )
-    conf_per_view: Float64[ndarray, "v n"] = np.stack([conf[v, obs.point_frame_idx, obs.point_joint_idx] for v in range(num_views)])
-    return kineo_point_confidence(points_xyz, kp_per_view, conf_per_view, intrinsics, cam_T_world, lambda_decay=lambda_decay)

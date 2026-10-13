@@ -17,7 +17,7 @@ from numpy import ndarray
 from simplecv.types.rig import RigCameras
 
 from exo_calib.ops.bundle_adjust import BaResult, PosePrior, mean_reprojection_error_px, refine_extrinsics, revert_large_pose_updates
-from exo_calib.ops.confidence import drop_face_confidences, kineo_point_confidence_for_obs
+from exo_calib.ops.confidence import drop_face_confidences, kineo_point_confidence
 from exo_calib.ops.correspondences import ObservationSet, build_observations, under_supported_view_indices
 from exo_calib.ops.eval import camera_centers, rig_geometry
 from exo_calib.ops.focal import FocalRefinementResult, refine_focals
@@ -122,7 +122,11 @@ class RefineNode:
         counts: list[int] = np.bincount(obs.obs_view_idx, minlength=len(names)).tolist()
         out.put("diag", STATIC, RefinementDiagnostics(init_reprojection_px, reprojection_px, counts, 1.0 if scale is None else scale, focal.focal_scale.tolist()))
         rigs: list[tuple[RigCameras, Float64[ndarray, "n 3"]]] = [(init, points_init), (refined, points_xyz)]
-        point_conf = np.stack([kineo_point_confidence_for_obs(p, obs, rig.intrinsics, rig.cam_T_world, kp_xy, conf, LAMBDA_DECAY) for rig, p in rigs])
+        kp_per_view: Float64[ndarray, "v n 2"] = np.stack([kp_xy[v, obs.point_frame_idx, obs.point_joint_idx] for v in range(len(names))])
+        conf_per_view: Float64[ndarray, "v n"] = np.stack([conf[v, obs.point_frame_idx, obs.point_joint_idx] for v in range(len(names))])
+        point_conf: Float64[ndarray, "2 n"] = np.stack([
+            kineo_point_confidence(p, kp_per_view, conf_per_view, rig.intrinsics, rig.cam_T_world, lambda_decay=LAMBDA_DECAY) for rig, p in rigs
+        ])
         for variant, p, c in zip(VARIANTS, (points_init, points_xyz), point_conf, strict=True):
             print(f"{variant}: {int(np.isfinite(p).all(axis=1).sum())} points, mean 3D confidence {c[np.isfinite(p).all(axis=1)].mean():.3f}")
         for frame in np.unique(obs.point_frame_idx).tolist():

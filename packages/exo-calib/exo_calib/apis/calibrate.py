@@ -118,9 +118,9 @@ def model_factories(segment: SegmentRef, cameras: tuple[str, ...], params: Kp2dP
 
 def log_style(recording: rr.RecordingStream, cameras: tuple[str, ...]) -> None:
     """Static presentation the Types do not carry per value: frustum colours and the COCO-133 annotation contexts."""
+    keypoints: list[rr.AnnotationInfo] = [rr.AnnotationInfo(id=i, label=n) for i, n in COCO_133_ID2NAME.items()]
 
     def context(class_id: int, label: str, color: tuple[int, int, int], links: bool) -> rr.ClassDescription:
-        keypoints = [rr.AnnotationInfo(id=i, label=n) for i, n in COCO_133_ID2NAME.items()]
         info = rr.AnnotationInfo(id=class_id, label=label, color=color)
         return rr.ClassDescription(info=info, keypoint_annotations=keypoints, keypoint_connections=COCO_133_LINKS if links else [])
 
@@ -158,15 +158,19 @@ def calibrate(config: Config, golden: rr.RecordingStream | None = None) -> EvalR
     sha: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, cwd=PROFILES.parent).stdout.strip()
     version: str = f"{importlib.metadata.version('exo-calib')}+{sha}"
     print(f"segment {segment.segment}: exo cameras {list(cameras)}; profile {hardware}")
+    output_recording: rr.RecordingStream = golden if golden is not None else config.rr_config.rec_stream
 
     def producer(graph: str) -> Producer:
         return Producer("exo-calib", version, graph, hardware, params_sha=hashlib.sha256(resolved.encode()).hexdigest()[:12])
 
     def sinks(graph: str, layers: Mapping[str, tuple[str, ...]], suffix: str = "", register: Register = config.register) -> dict[str, Node]:
         ports: list[str] = [port for layer_ports in layers.values() for port in layer_ports]
+        out: dict[str, Node] = {}
+        if not suffix:
+            name: str = "golden" if golden is not None else "viewer"
+            out[name] = RerunSink(output_recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports})
         if golden is not None:
-            return {} if suffix else {"golden": RerunSink(golden, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports})}
-        out: dict[str, Node] = {} if suffix else {"viewer": RerunSink(config.rr_config.rec_stream, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports})}
+            return out
         for layer, layer_ports in layers.items():
             recording, partial = open_layer(segment, layer, producer(graph), output_dir=config.output_dir)
             log_style(recording, cameras)
@@ -174,8 +178,7 @@ def calibrate(config: Config, golden: rr.RecordingStream | None = None) -> EvalR
             out[layer] = LayerSink(recording, partial, segment, layer, {p: PORT_TYPES[p] for p in layer_ports}, roots, register=register)
         return out
 
-    for recording in [golden] if golden is not None else [config.rr_config.rec_stream]:
-        log_style(recording, cameras)
+    log_style(output_recording, cameras)
     if config.resume_from is None:
         keep = Keep("init")
         run(init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})}), mode=config.mode)
