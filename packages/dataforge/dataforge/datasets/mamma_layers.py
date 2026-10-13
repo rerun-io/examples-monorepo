@@ -1,11 +1,11 @@
-"""MAMMA layer writers: base (cameras and AV1 video), body_pose, body_mesh, projections, masks and markers.
+"""MAMMA layer writers: base (cameras and AV1 video), body_pose, body_mesh, projections, masks, markers, contacts and visibility.
 
 Every stream logs on ``video_time`` = frame / fps from the sequence's own rate, beside the release ``frame_index``.
 """
 
 import io
 import tarfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -23,7 +23,18 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from dataforge import hands, meshes, paths, schema, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma_body import MODEL_FILES, PosedPerson
-from dataforge.datasets.mamma_source import MARKER_FILES, MammaCamera, MammaSequence, Method, PersonFit, SequenceLabels
+from dataforge.datasets.mamma_source import (
+    MARKER_FILES,
+    VERTICES,
+    CameraSight,
+    MammaCamera,
+    MammaSequence,
+    Method,
+    PersonFit,
+    SequenceLabels,
+    read_camera_sight,
+)
+from dataforge.datasets.mamma_syn_source import PersonContact
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     annotation_context,
@@ -66,6 +77,16 @@ MASK_OPACITY: float = 0.5
 """Opacity the viewer draws a mask with; its background palette entry is transparent. Set explicitly: at the default (1.0)
 Rerun 0.38 can draw a translucent PNG's transparent pixels black."""
 MARKER_COLOURS: dict[str, tuple[int, int, int]] = {"vicon": (40, 220, 40), "mosh_baseline": (255, 150, 0)}
+SEEN_COLOUR: tuple[int, int, int] = (255, 220, 0)
+"""A landmark the camera sees (yellow); neither landmark colour is a ``PERSON_COLOURS`` mask colour."""
+HIDDEN_COLOUR: tuple[int, int, int] = (25, 25, 25)
+"""A landmark the camera does not see (near black)."""
+CONTACT_THRESHOLD_M: float = 0.01
+"""A vertex nearer the other person's surface than this, or inside it, is in contact with them."""
+FLOOR_CONTACT_COLOUR: tuple[int, int, int] = (255, 140, 0)
+PARTNER_CONTACT_COLOUR: tuple[int, int, int] = (230, 50, 200)
+CONTACT_RADIUS_M: float = 0.006
+LANDMARKS_SOURCE: str = "MammaNet's 512 surface landmarks (farthest-point samples of SMPL-X, MAMMA paper Fig. 3)"
 
 
 def stored_size(width: int, height: int) -> tuple[int, int]:
@@ -226,6 +247,7 @@ def write_base(
             fit_method=labels.method,
             num_people=len(labels.people),
             subjects=pa.array([person.subject for person in labels.people]),
+            keywords=pa.array(labels.keywords, type=pa.string()),
         ),
     )
 
@@ -315,16 +337,13 @@ def write_projections(
     """Every person's COCO-133 keypoints through every camera's lens (Vicon radial, or pinhole), in stored pixels."""
     recording.send_property(paths.PROJECTIONS_LAYER, rr.AnyValues(derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source))
     for rig, camera in enumerate(cameras, start=1):
-        scale: float = stored_size(camera.width, camera.height)[0] / camera.width
         for pose in posed:
-            pixels: Float64[ndarray, "n 2"] = camera.project(pose.coco133.reshape(-1, 3).astype(np.float64)) * scale
-            positions: Float32[ndarray, "t 133 2"] = pixels.reshape(-1, 133, 2).astype(np.float32)
             hands.log_keypoints2d(
                 recording,
                 schema.person_projection_path(rig, 0, pose.index),
                 times_ns=clock.times_ns,
                 frame_indices=clock.frames,
-                positions=positions,
+                positions=stored_pixels(camera, pose.coco133),
                 confidence=None,  # 1 where the lens put the point, 0 where it is NaN
             )
 
@@ -425,5 +444,185 @@ def write_markers(recording: rr.RecordingStream, sequence: MammaSequence, clock:
             path,
             indexes=indexes,
             columns=rr.Points3D.columns(positions=positions[clock.frames].reshape(-1, 3)).partition([len(labels)] * len(clock.frames)),
+            recording=recording,
+        )
+
+
+def stored_pixels(camera: MammaCamera, points: Float32[ndarray, "t n 3"]) -> Float32[ndarray, "t n 2"]:
+    """World points through a camera's full lens model, in stored-image pixels; NaN where a point is NaN or behind the camera."""
+    scale: float = stored_size(camera.width, camera.height)[0] / camera.width
+    pixels: Float64[ndarray, "m 2"] = camera.project(points.reshape(-1, 3).astype(np.float64)) * scale
+    return pixels.reshape(*points.shape[:2], 2).astype(np.float32)
+
+
+def write_eval_visibility(
+    recording: rr.RecordingStream,
+    sequence: MammaSequence,
+    cameras: list[MammaCamera],
+    labels: SequenceLabels,
+    posed: list[PosedPerson],
+    landmark_ids: Int64[ndarray, "l"],
+    clock: Clock,
+) -> None:
+    """Every camera's ``is_body_in_img`` for every person, and on Dance its per-vertex ``visibility`` with the landmarks drawn; one
+    camera's NPZ in memory at a time."""
+
+    def found() -> Iterator[CameraVisibility]:
+        for rig, camera in enumerate(cameras, start=1):
+            sight: CameraSight = read_camera_sight(sequence.calibration(camera.name), labels.frames, len(labels.people))
+            for column, pose in enumerate(posed):
+                yield CameraVisibility(
+                    rig=rig,
+                    person=pose.index,
+                    labelled=np.ones(len(clock.frames), dtype=bool),
+                    visible=None if sight.visibility is None else sight.visibility[clock.rows, column],
+                    in_image=sight.is_body_in_img[clock.rows, column],
+                    rate=None,
+                    landmarks_uv=stored_pixels(camera, pose.landmarks),
+                )
+
+    write_visibility(recording, found(), landmark_ids, clock, source="each camera's gt/IOI_NN.npz: is_body_in_img; visibility (Dance)")
+
+
+def row_lists(values: ndarray, kept: Bool[ndarray, "t"]) -> pa.ListArray:
+    """One list per row of ``values`` (one value or one per vertex a row): the row where ``kept``, an empty list elsewhere."""
+    rows: ndarray = values.reshape(len(values), -1)
+    lengths: Int64[ndarray, "t"] = np.where(kept, rows.shape[1], 0)
+    offsets: Int64[ndarray, "t1"] = np.concatenate([[0], np.cumsum(lengths)])
+    return pa.ListArray.from_arrays(pa.array(offsets.astype(np.int32)), pa.array(rows[kept].reshape(-1)))
+
+
+def log_contact(
+    recording: rr.RecordingStream,
+    path: str,
+    pose: PosedPerson,
+    mesh_of: Int64[ndarray, "t"],
+    kept: Bool[ndarray, "t"],
+    in_contact: Bool[ndarray, "t 10475"],
+    clock: Clock,
+    *,
+    components: dict[str, pa.Array],
+    statics: rr.AnyValues,
+    colour: tuple[int, int, int],
+) -> None:
+    """One contact entity: its ``components`` (``in_contact`` and what the source shipped) and the contacting vertices of the
+    posed body at the ``kept`` rows, drawn as points. ``mesh_of`` gives each row's mesh in ``pose.vertices``; every kept row has
+    one."""
+    rr.log(path, statics, static=True, recording=recording)
+    rr.send_columns(path, indexes=clock.indexes, columns=rr.DynamicArchetype.columns(archetype="dataforge.VertexContact", components=components), recording=recording)
+    rows, vertices = np.nonzero(in_contact & kept[:, None])  # row-major, so the points come row by row
+    rr.log(path, rr.Points3D.from_fields(colors=colour, radii=CONTACT_RADIUS_M), static=True, recording=recording)
+    rr.send_columns(
+        path,
+        indexes=clock.indexes,
+        columns=rr.Points3D.columns(positions=pose.vertices[mesh_of[rows], vertices]).partition(np.where(kept, in_contact.sum(axis=1), 0)),
+        recording=recording,
+    )
+
+
+def write_contacts(recording: rr.RecordingStream, people: list[PersonFit], posed: list[PosedPerson], contacts: list[PersonContact], clock: Clock) -> None:
+    """Every person's floor contact and signed distance to the other person, one row per frame (an empty one where the person is
+    absent or the frame ships no distance), the contacting vertices drawn on the posed body.
+
+    Raises:
+        ValueError: A person is present at a frame without a posed mesh to draw the contact on.
+    """
+    recording.send_property(
+        paths.CONTACTS_LAYER,
+        rr.AnyValues(
+            source="each sample's label pickle: floor_contact_mask, sdf_vertices (the same in every view of a frame)",
+            contact_threshold_m=CONTACT_THRESHOLD_M,
+            partner_contact="in_contact = signed_distance < contact_threshold_m: inside the other person counts as contact",
+        ),
+    )
+    for person, pose, contact in zip(people, posed, contacts, strict=True):
+        present: Bool[ndarray, "t"] = person.present[clock.rows]
+        mesh_of: Int64[ndarray, "t"] = np.full(len(clock.frames), -1, dtype=np.int64)
+        mesh_of[pose.mesh_rows[pose.mesh_present]] = np.arange(len(pose.vertices))
+        bare: Int64[ndarray, "b"] = np.flatnonzero(present & (mesh_of < 0))
+        if len(bare):
+            raise ValueError(f"{person.subject}: frame {clock.frames[bare[0]]} is present but has no posed mesh to draw its contact on")
+        log_contact(
+            recording,
+            schema.person_floor_contact_path(pose.index),
+            pose,
+            mesh_of,
+            present,
+            contact.floor,
+            clock,
+            components={"in_contact": row_lists(contact.floor, present)},
+            statics=rr.AnyValues(n_vertices=VERTICES, topology="smplx"),
+            colour=FLOOR_CONTACT_COLOUR,
+        )
+        if contact.partner is None or contact.partner_distance_m is None:
+            continue
+        shipped: Bool[ndarray, "t"] = present & ~np.isnan(contact.partner_distance_m[:, 0])  # a row is all distances or all NaN
+        in_contact: Bool[ndarray, "t 10475"] = contact.partner_distance_m < CONTACT_THRESHOLD_M  # the shipped float32 distance
+        log_contact(
+            recording,
+            schema.person_contact_path(pose.index, contact.partner),
+            pose,
+            mesh_of,
+            shipped,
+            in_contact,
+            clock,
+            components={
+                "signed_distance": row_lists(contact.partner_distance_m.astype(np.float16), shipped),
+                "in_contact": row_lists(in_contact, shipped),
+            },
+            statics=rr.AnyValues(
+                n_vertices=VERTICES, topology="smplx", contact_threshold_m=CONTACT_THRESHOLD_M, unit="metres, negative inside the other person"
+            ),
+            colour=PARTNER_CONTACT_COLOUR,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CameraVisibility:
+    """What one camera sees of one person over a sequence's rows; a component the source does not ship is None."""
+
+    rig: int
+    person: int
+    labelled: Bool[ndarray, "t"]
+    """Rows at which the source labels the person in this camera."""
+    visible: Bool[ndarray, "t 10475"] | None
+    """True where the camera sees the vertex (rows outside ``labelled`` are ignored)."""
+    in_image: Bool[ndarray, "t"] | None
+    """Whether the body is in the camera's image at all."""
+    rate: Float32[ndarray, "t"] | None
+    """The source's per-view visibility score."""
+    landmarks_uv: Float32[ndarray, "t l 2"]
+    """The landmark vertices of the posed body through the camera, stored-image pixels; drawn where ``visible`` is known."""
+
+
+def write_visibility(recording: rr.RecordingStream, cameras: Iterable[CameraVisibility], landmark_ids: Int64[ndarray, "l"], clock: Clock, *, source: str) -> None:
+    """Every camera's visibility of every person, one row per frame (an empty one where the person is not labelled), and where the
+    source ships per-vertex visibility, the landmarks drawn yellow where seen, near black where not."""
+    recording.send_property(
+        paths.VISIBILITY_LAYER,
+        rr.AnyValues(source=source, landmarks=LANDMARKS_SOURCE, landmark_colours="yellow: the camera sees the vertex; near black: it does not"),
+    )
+    for camera in cameras:
+        path: str = schema.person_visibility_path(camera.rig, 0, camera.person)
+        components: dict[str, pa.Array] = {}
+        if camera.visible is not None:
+            components["visible"] = row_lists(camera.visible, camera.labelled)
+        if camera.in_image is not None:
+            components["in_image"] = row_lists(camera.in_image, camera.labelled)
+        if camera.rate is not None:
+            components["visibility_rate"] = row_lists(camera.rate, camera.labelled)
+        columns = rr.DynamicArchetype.columns(archetype="dataforge.VertexVisibility", components=components)
+        rr.send_columns(path, indexes=clock.indexes, columns=columns, recording=recording)
+        if camera.visible is None:
+            continue
+        rr.log(path, rr.AnyValues(n_vertices=VERTICES, topology="smplx", landmark_vertex_ids=landmark_ids), static=True, recording=recording)
+        drawn: Bool[ndarray, "t"] = camera.labelled
+        seen: Bool[ndarray, "k l"] = camera.visible[drawn][:, landmark_ids]
+        colours: UInt8[ndarray, "n 3"] = np.where(seen.reshape(-1, 1), SEEN_COLOUR, HIDDEN_COLOUR).astype(np.uint8)
+        rr.log(path, rr.Points2D.from_fields(radii=rr.Radius.ui_points(2.5), draw_order=30.0), static=True, recording=recording)
+        rr.send_columns(
+            path,
+            indexes=clock.indexes,
+            columns=rr.Points2D.columns(positions=camera.landmarks_uv[drawn].reshape(-1, 2), colors=colours).partition(np.where(drawn, len(landmark_ids), 0)),
             recording=recording,
         )

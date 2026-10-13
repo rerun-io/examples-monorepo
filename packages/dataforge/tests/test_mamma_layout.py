@@ -38,3 +38,12 @@ def test_the_eval_scene_hides_every_dance_video_and_keeps_masks_in_the_panes() -
     assert f"- {schema.coco133_uv_projected_path(32, 0)}/**" in contents
     hidden = view.visualizer_overrides or {}
     assert schema.video_path(32, 0) in {str(path) for path in hidden}
+
+
+def test_the_scene_of_every_family_keeps_the_visibility_landmarks_in_the_camera_panes() -> None:
+    # The landmarks are pixels of one camera's image: in 3D they would sit on that camera's frustum image.
+    for family, rigs in (("eval", 32), ("syn", 8), ("syn-bedlam", 1)):
+        dataset = MammaConfig(family=family).setup()
+        for blueprint in (dataset.default_blueprint(), dataset.table_blueprint()):
+            contents: list[str] = list(scene(blueprint).contents)  # type: ignore[arg-type]
+            assert f"- {schema.pinhole_path(rigs, 0)}/visibility/**" in contents

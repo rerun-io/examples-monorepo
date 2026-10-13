@@ -8,6 +8,7 @@ import tarfile
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import smplx
 import torch
@@ -17,8 +18,8 @@ from PIL import Image
 from dataforge import paths, schema
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig
-from dataforge.datasets.mamma_body import MODEL_FILES
-from dataforge.datasets.mamma_source import SmplxModel
+from dataforge.datasets.mamma_body import BODY_FILES, MODEL_FILES, landmark_vertices
+from dataforge.datasets.mamma_source import VERTICES, SmplxModel
 from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset
 
 pytestmark = pytest.mark.integration
@@ -31,6 +32,28 @@ FRAMES: tuple[int, ...] = (0, 1, 3)
 CAMERAS: dict[str, tuple[int, int]] = {"IOI_01": (320, 240), "IOI_02": (240, 320)}
 ABSENT: tuple[int, int] = (1, 1)
 """(person, frame): nobody's view labels person 1 at frame 1."""
+
+
+
+
+def floor_mask(person: int, frame: int) -> np.ndarray:
+    """The vertices of a person on the floor at a frame (every view ships the same)."""
+    return np.arange(VERTICES) % 97 == frame + 3 * person
+
+
+def partner_distance(person: int) -> np.ndarray:
+    """Each vertex's distance to the other person at frame 0, the only frame that ships one; some inside the other (negative)."""
+    distance: np.ndarray = np.linspace(-0.02, 0.3, VERTICES, dtype=np.float32)
+    return distance if person == 0 else distance[::-1].copy()
+
+
+def seen_mask(camera: str, person: int, frame: int) -> np.ndarray:
+    """The vertices a camera sees of a person at a frame."""
+    return (np.arange(VERTICES) + 7 * frame + 3 * person + list(CAMERAS).index(camera)) % 4 != 0
+
+
+def visibility_rate(camera: str, person: int, frame: int) -> float:
+    return 0.5 + 0.1 * person + 0.01 * frame + 0.001 * list(CAMERAS).index(camera)
 
 
 def body_params(person: int, frame: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -106,10 +129,15 @@ def write_sequence(root: Path, *, joint_error_m: float = 0.0) -> Path:
                     "cam_ext": cam_ext,
                     "gender": np.str_("neutral"),
                     "joints3d": joints[(person, frame)] + joint_error_m,
-                    "vertices2d": np.zeros((10475, 2)),
+                    "vertices2d": np.zeros((VERTICES, 2)),
                     "motion_info": np.str_("unknown"),
                     "sub": 0,
                     "person_idx": person,
+                    "vertex_visibility": seen_mask(name, person, frame).astype(np.int32)[:, None],
+                    "person_visitiblity_rate": np.float64(visibility_rate(name, person, frame)),
+                    "sdf_vertices": partner_distance(person)[:, None] if frame == 0 else [],
+                    "floor_contact_mask": floor_mask(person, frame),
+                    "camera_normals": np.zeros((VERTICES, 3)),
                 }
                 mask[:, person * width // 2 : (person + 1) * width // 2] = person + 1
             rgba: np.ndarray = np.full((height, width, 4), 255, dtype=np.uint8)
@@ -128,9 +156,15 @@ def write_sequence(root: Path, *, joint_error_m: float = 0.0) -> Path:
 
 @pytest.fixture
 def models() -> Path:
-    for model in MODEL_FILES.values():
+    for model in BODY_FILES:
         raw_asset("MAMMA SMPL-X model (dataforge-download mamma)", model.local(MODEL_ROOT))
     return MODEL_ROOT
+
+
+def test_mammanets_landmarks_are_512_distinct_body_vertices(models: Path) -> None:
+    landmarks: np.ndarray = landmark_vertices(models)
+    assert landmarks.shape == (512,) and len(set(landmarks.tolist())) == 512 and landmarks.max() < 10475
+    assert landmarks[:5].tolist() == [0, 9383, 5847, 5060, 3500]  # the release's matrix, row by row
 
 
 def syn_dataset(root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_root: Path) -> MammaSynDataset:
@@ -151,7 +185,7 @@ def test_a_render_sequence_converts_onto_its_source_frames(tmp_path: Path, nvenc
     dataset.convert(identity, sequence, force=False)
     assert not (dataset.stage_root / identity.recording_id).exists()  # the local copy goes once the cameras are read
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
-    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])
+    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks", "contacts", "visibility"])
     times: list[int] = frame_times(np.array(FRAMES, dtype=np.int64), 6).tolist()
 
     base = read_back(targets["base"])
@@ -202,6 +236,88 @@ def test_a_render_sequence_converts_onto_its_source_frames(tmp_path: Path, nvenc
                 np.testing.assert_array_equal(image, np.zeros_like(expected) if (person, frame) == ABSENT else expected)
 
 
+def test_a_render_sequence_carries_its_peoples_contact_and_what_each_camera_sees(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
+) -> None:
+    del nvenc_ffmpeg
+    write_sequence(tmp_path / "raw")
+    dataset: MammaSynDataset = syn_dataset(tmp_path / "raw", tmp_path, monkeypatch, models)
+    ((identity, sequence),) = dataset.discover()
+    dataset.convert(identity, sequence, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+    times: list[int] = frame_times(np.array(FRAMES, dtype=np.int64), 6).tolist()
+    mesh = read_back(targets["body_mesh"])
+
+    contacts = read_back(targets["contacts"])
+    for person in (0, 1):
+        path: str = schema.person_floor_contact_path(person)
+        rows = column_rows(contacts, f"{path}:dataforge.VertexContact:in_contact")
+        assert rows[schema.TIMELINE].cast("int64").to_pylist() == times  # every frame; an empty list where the person is absent
+        assert rows.column(1).to_pylist() == [[] if (person, frame) == ABSENT else floor_mask(person, frame).tolist() for frame in FRAMES]
+        points: list[list[list[float]]] = column_rows(contacts, f"{path}:Points3D:positions").column(1).to_pylist()
+        vertices: list[list[list[float]]] = column_rows(mesh, f"{schema.person_body_path(person, 'mesh')}:Mesh3D:vertex_positions").column(1).to_pylist()
+        for frame, drawn, posed in zip(FRAMES, points, vertices, strict=True):
+            expected: np.ndarray = np.zeros((0, 3)) if (person, frame) == ABSENT else np.array(posed)[floor_mask(person, frame)]
+            np.testing.assert_allclose(np.array(drawn).reshape(-1, 3), expected, atol=1e-6)  # on the posed body
+        assert static_values(contacts, path)["n_vertices"] == VERTICES
+
+    partner: str = schema.person_contact_path(0, 1)
+    distances = column_rows(contacts, f"{partner}:dataforge.VertexContact:signed_distance").column(1).to_pylist()
+    np.testing.assert_array_equal(np.array(distances[0], dtype=np.float16), partner_distance(0).astype(np.float16))
+    assert distances[1:] == [[], []]  # only frame 0 ships a distance
+    flags = column_rows(contacts, f"{partner}:dataforge.VertexContact:in_contact").column(1).to_pylist()
+    assert flags[0] == (partner_distance(0) < 0.01).tolist()  # inside the other person counts as contact
+    assert static_values(contacts, partner)["contact_threshold_m"] == 0.01
+    assert len(column_rows(contacts, f"{partner}:Points3D:positions").column(1).to_pylist()[0]) == int((partner_distance(0) < 0.01).sum())
+    assert len(column_rows(contacts, f"{schema.person_contact_path(1, 0)}:dataforge.VertexContact:signed_distance")) == len(FRAMES)
+    assert recording_properties(contacts, "contacts")["contact_threshold_m"] == 0.01
+
+    visibility = read_back(targets["visibility"])
+    landmarks: np.ndarray = landmark_vertices(models)
+    for rig, name in enumerate(CAMERAS, start=1):
+        cam_int, cam_ext = camera_matrices(name)
+        for person in (0, 1):
+            path = schema.person_visibility_path(rig, 0, person)
+            visible = column_rows(visibility, f"{path}:dataforge.VertexVisibility:visible").column(1).to_pylist()
+            assert visible == [[] if (person, frame) == ABSENT else seen_mask(name, person, frame).tolist() for frame in FRAMES]
+            rates = column_rows(visibility, f"{path}:dataforge.VertexVisibility:visibility_rate").column(1).to_pylist()
+            np.testing.assert_allclose([row[0] for row in rates if row], [visibility_rate(name, person, f) for f in FRAMES if (person, f) != ABSENT], rtol=1e-6)
+            drawn = column_rows(visibility, f"{path}:Points2D:positions").column(1).to_pylist()
+            colours = column_rows(visibility, f"{path}:Points2D:colors").column(1).to_pylist()
+            vertices = column_rows(mesh, f"{schema.person_body_path(person, 'mesh')}:Mesh3D:vertex_positions").column(1).to_pylist()
+            for frame, uv, colour, posed in zip(FRAMES, drawn, colours, vertices, strict=True):
+                if (person, frame) == ABSENT:
+                    assert uv == []
+                    continue
+                in_camera: np.ndarray = np.array(posed)[landmarks] @ cam_ext[:3, :3].T + cam_ext[:3, 3]
+                pixels: np.ndarray = in_camera @ cam_int.T
+                np.testing.assert_allclose(np.array(uv), pixels[:, :2] / pixels[:, 2:], atol=1e-3)  # the landmarks through the camera
+                assert len(set(colour)) == 2 and colour.count(colour[0]) in (seen_mask(name, person, frame)[landmarks].sum(), 512 - seen_mask(name, person, frame)[landmarks].sum())
+            statics = visibility.reader(index=None, contents=path).to_arrow_table()
+            assert statics[f"{path}:landmark_vertex_ids"].to_pylist()[0] == landmarks.tolist()
+
+
+def test_a_sequence_whose_other_layers_exist_writes_the_label_layers_from_its_shards_in_place(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
+) -> None:
+    # The labels-only pass the corpus gets: no staged copy, the label pickles and one PNG header per camera read in place.
+    del nvenc_ffmpeg
+    write_sequence(tmp_path / "raw")
+    dataset: MammaSynDataset = syn_dataset(tmp_path / "raw", tmp_path, monkeypatch, models)
+    ((identity, sequence),) = dataset.discover()
+    dataset.convert(identity, sequence, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+    full: dict[str, pa.Table] = {}
+    for layer in ("contacts", "visibility"):
+        full[layer] = read_back(targets[layer]).reader(index=schema.TIMELINE).to_arrow_table()
+        targets[layer].unlink()
+    dataset.prefetch(identity, sequence, force=False)
+    assert not (dataset.stage_root / identity.recording_id).exists()  # nothing staged for labels alone
+    dataset.convert(identity, sequence, force=False)
+    for layer, table in full.items():
+        assert read_back(targets[layer]).reader(index=schema.TIMELINE).to_arrow_table().equals(table)
+
+
 def test_parameters_that_do_not_reproduce_the_shipped_joints_fail_the_sequence(
     tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
 ) -> None:
@@ -217,6 +333,11 @@ BATCH: str = "20221010_3-10_500_batch01hand_zoom_suburb_d"
 CLIPS: dict[str, tuple[int, ...]] = {"seq_000000": (10, 0, 5), "seq_000001": (0, 5)}
 """Frames in shard order: BEDLAM ships a clip's samples unsorted, numbered at 30 fps, every 5th."""
 BEDLAM_SIZE: tuple[int, int] = (320, 240)
+BEDLAM_MOTIONS: tuple[list[str], list[str]] = (
+    ["kneel", "1", "/ps/project/datasets/AMASS/amass_march_2022/mosh_results/smplx_neutral/KIT/3/kneel_stageii.npz", "100.0", "0", "591"],
+    ["kick", "29", "/ps/project/datasets/AMASS/amass_march_2022/mosh_results/smplx_neutral/CMU/kick_stageii.npz", "120.0", "0", "526"],
+)
+"""Each person's motion_info as BEDLAM ships it."""
 
 
 def bedlam_forward(frame: int, person: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -278,6 +399,11 @@ def write_bedlam_batch(root: Path, batch: str = BATCH, *, portrait: bool = False
                     "gender": "female" if person == 0 else "male",
                     "joints3d": joints @ cam_ext[:3, :3].T + cam_ext[:3, 3],
                     "person_idx": f"{person:02d}",
+                    "motion_info": np.array(BEDLAM_MOTIONS[person]),
+                    "floor_contact_mask": floor_mask(person, frame),
+                    "vertex_visibility": seen_mask("IOI_01", person, frame).astype(np.float64)[:, None],
+                    "person_visitiblity_rate": np.float64(visibility_rate("IOI_01", person, frame)),
+                    "camera_normals": np.zeros((VERTICES, 3)),
                 }
             key: str = f"/ps/project/bedlam/public/b0_all/{batch}/png/{clip}/{clip}_{frame:04d}"
             rgba: np.ndarray = np.full((height, width, 4), 255, dtype=np.uint8)
@@ -307,7 +433,7 @@ def test_a_bedlam_clip_converts_in_its_camera_frame(tmp_path: Path, nvenc_ffmpeg
         shard.rename(shard.with_suffix(".moved"))  # the convert reads the clip from the prefetch alone
     dataset.convert(identity, clip, force=False)
     targets: dict[str, Path] = {layer: target for layer, target in dataset.targets(identity).items() if target.is_file()}
-    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks"])
+    assert sorted(targets) == sorted(["base", "body_pose", "body_mesh", "projections", "masks", "contacts", "visibility"])
     frames: list[int] = [0, 5, 10]
     times: list[int] = frame_times(np.array(frames, dtype=np.int64), 30).tolist()
 
@@ -338,6 +464,69 @@ def test_a_bedlam_clip_converts_in_its_camera_frame(tmp_path: Path, nvenc_ffmpeg
     for person in (0, 1):
         blobs = column_rows(masks, f"{schema.person_mask_path(1, 0, person)}:EncodedImage:blob").column(1).to_pylist()
         assert len(blobs) == 3 and np.asarray(Image.open(io.BytesIO(bytes(blobs[2][0])))).any()  # person 1's mask stays at frame 10
+
+
+def test_a_bedlam_clip_carries_its_peoples_floor_contact_what_the_camera_sees_and_their_motion(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
+) -> None:
+    del nvenc_ffmpeg
+    write_bedlam_batch(tmp_path / "raw")
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = MammaConfig(family="syn-bedlam", root=tmp_path / "raw", model_root=models, index_root=tmp_path / "index").setup()
+    identity, clip = dataset.discover()[0]
+    dataset.convert(identity, clip, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+    frames: list[int] = [0, 5, 10]
+    absent: tuple[int, int] = (1, 10)  # the labels leave person 1 out at frame 10
+
+    contacts = read_back(targets["contacts"])
+    for person in (0, 1):
+        flags = column_rows(contacts, f"{schema.person_floor_contact_path(person)}:dataforge.VertexContact:in_contact").column(1).to_pylist()
+        assert flags == [[] if (person, frame) == absent else floor_mask(person, frame).tolist() for frame in frames]
+    assert not any(":dataforge.VertexContact:signed_distance" in name for name in contacts.reader(index=schema.TIMELINE).to_arrow_table().column_names)
+
+    visibility = read_back(targets["visibility"])
+    mesh = read_back(targets["body_mesh"])
+    landmarks: np.ndarray = landmark_vertices(models)
+    for person in (0, 1):
+        path: str = schema.person_visibility_path(1, 0, person)
+        visible = column_rows(visibility, f"{path}:dataforge.VertexVisibility:visible").column(1).to_pylist()
+        assert visible == [[] if (person, frame) == absent else seen_mask("IOI_01", person, frame).tolist() for frame in frames]
+        drawn = column_rows(visibility, f"{path}:Points2D:positions").column(1).to_pylist()
+        vertices = column_rows(mesh, f"{schema.person_body_path(person, 'mesh')}:Mesh3D:vertex_positions").column(1).to_pylist()
+        cam_int, _ = bedlam_camera(5, person)
+        pixels: np.ndarray = np.array(vertices[1])[landmarks] @ cam_int.T  # the camera-frame body through frame 5's K
+        np.testing.assert_allclose(np.array(drawn[1]), pixels[:, :2] / pixels[:, 2:], atol=1e-3)
+
+    pose = read_back(targets["body_pose"])
+    for person in (0, 1):
+        statics = pose.reader(index=None, contents=schema.person_path(person)).to_arrow_table()
+        motion: list[str] = BEDLAM_MOTIONS[person]
+        assert statics[f"{schema.person_path(person)}:motion_info"].to_pylist()[0] == motion
+        assert (static_values(pose, schema.person_path(person))["motion_action"], static_values(pose, schema.person_path(person))["motion_source"]) == (motion[0], motion[2])
+
+
+def test_a_clip_whose_other_layers_exist_writes_the_label_layers_from_its_labels_alone(
+    tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, models: Path
+) -> None:
+    # The labels-only pass the corpus gets: base and masks exist, so the clip reads only its label pickles and one PNG header.
+    del nvenc_ffmpeg
+    write_bedlam_batch(tmp_path / "raw")
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset = MammaConfig(family="syn-bedlam", root=tmp_path / "raw", model_root=models, index_root=tmp_path / "index").setup()
+    identity, clip = dataset.discover()[0]
+    dataset.convert(identity, clip, force=False)
+    targets: dict[str, Path] = dataset.targets(identity)
+    full: dict[str, pa.Table] = {}
+    for layer in ("contacts", "visibility"):
+        full[layer] = read_back(targets[layer]).reader(index=schema.TIMELINE).to_arrow_table()
+        targets[layer].unlink()
+    dataset.prefetch(identity, clip, force=False)
+    for shard in clip.directory.glob("*.tar"):
+        shard.rename(shard.with_suffix(".moved"))  # the convert reads the clip from the prefetch alone
+    dataset.convert(identity, clip, force=False)
+    for layer, table in full.items():
+        assert read_back(targets[layer]).reader(index=schema.TIMELINE).to_arrow_table().equals(table)
 
 
 CLOSEUP_BATCH: str = "20221011_1_250_batch01hand_closeup_suburb_a"

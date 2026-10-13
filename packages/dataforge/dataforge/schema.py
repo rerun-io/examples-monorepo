@@ -246,6 +246,21 @@ def person_mask_path(rig: int, cam: int, person: int) -> str:
     return f"{pinhole_path(rig, cam)}/masks/person_{_index(person, 'person')}"
 
 
+def person_floor_contact_path(person: int) -> str:
+    """A person's per-vertex floor contact (§15): which body-model vertices touch the floor."""
+    return f"{person_path(person)}/contact/floor"
+
+
+def person_contact_path(person: int, other: int) -> str:
+    """A person's per-vertex contact with person ``other`` (§15): the signed distance to the other's surface."""
+    return f"{person_path(person)}/contact/person_{_index(other, 'person')}"
+
+
+def person_visibility_path(rig: int, cam: int, person: int) -> str:
+    """Which of a person's body-model vertices a camera sees (§15), beside that camera's mask of the person."""
+    return f"{pinhole_path(rig, cam)}/visibility/person_{_index(person, 'person')}"
+
+
 def markers_path(kind: str) -> str:
     """``/world/gt/markers/<kind>`` — motion-capture marker positions (``vicon`` measured, ``mosh_baseline`` fitted), world metres."""
     return f"/world/gt/markers/{kind}"

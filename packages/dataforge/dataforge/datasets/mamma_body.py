@@ -6,6 +6,9 @@ v1.1's at every vertex. Every fit with betas is neutral, and those use the locke
 those use SMPL-X v1.1 male and female from a public mirror. ``docs/mamma.md`` gives the measurements.
 """
 
+import io
+import pickle
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,7 +19,7 @@ from numpy import ndarray
 from simplecv.ops.smplx.smplx_coco133 import smplx_joints_to_coco133_xyzc
 
 from dataforge import meshes, transports
-from dataforge.datasets.mamma_source import PersonFit, SmplxModel
+from dataforge.datasets.mamma_source import PersonFit, SmplxModel, flags
 from dataforge.transports import HfRepoType
 
 
@@ -38,17 +41,14 @@ class ModelFile:
         return model_root / self.local_dir / self.path
 
 
+MAMMA_DATA_REPO: str = "pablovela5620/mamma-streaming-data"
+"""Private dataset repo holding MAMMA's own body-model files."""
+MAMMA_DATA_REVISION: str = "0a961eedf02e2fb3d32929b11cef625661dffc60"
 V1_1_MIRROR: str = "camenduru/SMPLer-X"
 """Public model repo with SMPL-X v1.1 for all three genders at its root."""
 V1_1_REVISION: str = "9e5548b70b48efe6992faa3b2a418df108542bf7"
 MODEL_FILES: dict[SmplxModel, ModelFile] = {
-    "locked_head_neutral": ModelFile(
-        "pablovela5620/mamma-streaming-data",
-        "dataset",
-        "0a961eedf02e2fb3d32929b11cef625661dffc60",
-        "body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz",
-        "",
-    ),
+    "locked_head_neutral": ModelFile(MAMMA_DATA_REPO, "dataset", MAMMA_DATA_REVISION, "body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz", ""),
     "v1_1_male": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_MALE.npz", "smplx_v1_1"),
     "v1_1_female": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_FEMALE.npz", "smplx_v1_1"),
     "v1_1_neutral": ModelFile(V1_1_MIRROR, "model", V1_1_REVISION, "SMPLX_NEUTRAL.npz", "smplx_v1_1"),
@@ -61,10 +61,46 @@ FORWARD_BATCH: int = 256
 """Frames per SMPL-X forward."""
 
 
+LANDMARK_FILE: ModelFile = ModelFile(MAMMA_DATA_REPO, "dataset", MAMMA_DATA_REVISION, "body_models/downsampled_verts/verts_512.pkl", "")
+"""MammaNet's 512 surface landmarks (farthest-point samples of SMPL-X, MAMMA paper Fig. 3): a pickled torch [512, 10475]
+sampling matrix, one 1 per row."""
+
+
+class TensorUnpickler(pickle.Unpickler):
+    """Unpickles a pickled torch tensor and nothing else: its storage bytes go through ``torch.load(weights_only=True)``."""
+
+    def find_class(self, module: str, name: str) -> object:
+        if (module, name) == ("torch._utils", "_rebuild_tensor_v2"):
+            return torch._utils._rebuild_tensor_v2
+        if (module, name) == ("torch.storage", "_load_from_bytes"):
+            return lambda payload: torch.load(io.BytesIO(payload), weights_only=True)
+        if (module, name) == ("collections", "OrderedDict"):
+            return OrderedDict
+        raise pickle.UnpicklingError(f"the landmark pickle refers to {module}.{name}, which is not part of a torch tensor")
+
+
+def landmark_vertices(model_root: Path) -> Int64[ndarray, "512"]:
+    """MammaNet's landmarks as SMPL-X vertex ids, in its landmark order.
+
+    Raises:
+        FileNotFoundError: The file is not under ``model_root`` (``dataforge-download mamma`` fetches it).
+        ValueError: A row of the matrix does not pick exactly one vertex.
+    """
+    with LANDMARK_FILE.local(model_root).open("rb") as handle:
+        picks: Bool[ndarray, "512 10475"] = flags(TensorUnpickler(handle).load().numpy())
+    if not (picks.sum(axis=1) == 1).all():
+        raise ValueError(f"{LANDMARK_FILE.local(model_root)}: a row of the landmark matrix does not pick exactly one vertex")
+    return picks.argmax(axis=1).astype(np.int64)
+
+
+BODY_FILES: tuple[ModelFile, ...] = (*MODEL_FILES.values(), LANDMARK_FILE)
+"""Every file posing a MAMMA body needs."""
+
+
 def fetch_models(model_root: Path) -> int:
-    """Fetch the three model files under ``model_root`` unless already there with their pinned sha256; return how many were fetched."""
+    """Fetch ``BODY_FILES`` under ``model_root`` unless already there with their pinned sha256; return how many were fetched."""
     fetched: int = 0
-    for model in MODEL_FILES.values():
+    for model in BODY_FILES:
         (file,) = transports.hf_lfs_files(model.repo, [model.path], revision=model.revision, repo_type=model.repo_type)
         fetched += transports.hf_fetch_verified(
             model.repo, file, local_dir=model_root / model.local_dir, revision=model.revision, repo_type=model.repo_type
@@ -91,16 +127,20 @@ class PosedPerson:
     """Posed vertices at the mesh rows where the person is present, world metres."""
     faces: UInt32[ndarray, "20908 3"]
     """The mesh triangles (one array every person shares)."""
+    landmarks: Float32[ndarray, "t 512 3"]
+    """The posed landmark vertices (``SmplxBody.landmark_ids``) at every row, world metres; NaN where the person is absent."""
 
 
 class SmplxBody:
-    """The ``MODEL_FILES`` under ``model_root``; one smplx layer per person, built from the fit's own settings."""
+    """The ``BODY_FILES`` under ``model_root``; one smplx layer per person, built from the fit's own settings."""
 
     def __init__(self, model_root: Path) -> None:
-        missing: list[str] = [str(model.local(model_root)) for model in MODEL_FILES.values() if not model.local(model_root).is_file()]
+        missing: list[str] = [str(model.local(model_root)) for model in BODY_FILES if not model.local(model_root).is_file()]
         if missing:
             raise FileNotFoundError(f"MAMMA needs the SMPL-X files {missing}; run dataforge-download mamma or set --model-root")
         self.model_root: Path = model_root
+        self.landmark_ids: Int64[ndarray, "512"] = landmark_vertices(model_root)
+        """MammaNet's landmarks as vertex ids; every pose keeps them at every row."""
         with np.load(MODEL_FILES["locked_head_neutral"].local(model_root), allow_pickle=False) as model:
             self.faces: UInt32[ndarray, "20908 3"] = model["f"].astype(np.uint32)  # every SMPL-X file shares this topology
         self.layers: dict[tuple[SmplxModel, bool, int], torch.nn.Module] = {}
@@ -129,7 +169,8 @@ class SmplxBody:
         return layer
 
     def pose(self, person: PersonFit, rows: Int64[ndarray, "t"], *, mesh_stride: int = meshes.BODY_MESH_STRIDE) -> PosedPerson:
-        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row."""
+        """Pose ``person`` at ``rows`` (indices into its arrays, from 0), keeping the meshes of every ``mesh_stride``-th row and the
+        landmarks at every row."""
         layer: torch.nn.Module = self.layer(person)
         present: Bool[ndarray, "t"] = person.present[rows]
         posed: Int64[ndarray, "p"] = np.flatnonzero(present)
@@ -137,6 +178,7 @@ class SmplxBody:
         coco133: Float32[ndarray, "t 133 3"] = np.full((len(rows), 133, 3), np.nan, dtype=np.float32)
         joints: Float32[ndarray, "t 144 3"] = np.full((len(rows), 144, 3), np.nan, dtype=np.float32)
         vertices: list[Float32[ndarray, "c 10475 3"]] = []
+        landmarks: Float32[ndarray, "t 512 3"] = np.full((len(rows), len(self.landmark_ids), 3), np.nan, dtype=np.float32)
         betas: torch.Tensor = torch.from_numpy(person.betas.astype(np.float32))[None]
         for start in range(0, len(posed), FORWARD_BATCH):
             batch: Int64[ndarray, "b"] = posed[start : start + FORWARD_BATCH]
@@ -156,7 +198,9 @@ class SmplxBody:
                 )
             joints[batch] = output.joints.numpy()
             coco133[batch] = smplx_joints_to_coco133_xyzc(output.joints.numpy())[..., :3]
-            vertices.append(output.vertices.numpy()[np.isin(batch, mesh_rows)])
+            posed_vertices: Float32[ndarray, "b 10475 3"] = output.vertices.numpy()
+            vertices.append(posed_vertices[np.isin(batch, mesh_rows)])
+            landmarks[batch] = posed_vertices[:, self.landmark_ids]
         return PosedPerson(
             index=person.index,
             coco133=coco133,
@@ -165,4 +209,5 @@ class SmplxBody:
             mesh_present=present[mesh_rows],
             vertices=np.concatenate(vertices) if vertices else np.zeros((0, 10475, 3), dtype=np.float32),
             faces=self.faces,
+            landmarks=landmarks,
         )

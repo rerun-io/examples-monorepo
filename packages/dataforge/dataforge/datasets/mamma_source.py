@@ -13,9 +13,11 @@ from typing import Literal, TypeAlias, TypeVar
 import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
-from serde import SerdeError, from_dict, serde
+from serde import SerdeError, field, from_dict, serde
 
 Gender: TypeAlias = Literal["neutral", "male", "female"]
+VERTICES: int = 10475
+"""SMPL-X vertices (every model a fit uses shares the topology): the length of every per-vertex label."""
 SmplxModel: TypeAlias = Literal["locked_head_neutral", "v1_1_male", "v1_1_female", "v1_1_neutral"]
 Method: TypeAlias = Literal["mosh_v_template", "mosh_betas", "mamma_pred", "mamma_render", "bedlam_render"]
 Family: TypeAlias = Literal["eval", "markerless-dance", "markerless-multiple-people", "markerless-iphones"]
@@ -164,6 +166,42 @@ class PersonFit:
     """Rows at which the person is there (MPI: every row; MammaSyn: rows a view labels them). Absent rows hold zeros."""
 
 
+def flags(value: object) -> Bool[ndarray, "..."]:
+    """A 0/1 array, as the release ships one (int32, float64), as booleans.
+
+    Raises:
+        ValueError: A value is neither 0 nor 1.
+    """
+    shipped: ndarray = np.asarray(value)
+    if not np.isin(shipped, (0, 1)).all():
+        raise ValueError(f"a 0/1 array holds values other than 0 and 1: {np.unique(shipped)[:6].tolist()}")
+    return shipped.astype(bool)
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class CameraSight:
+    """What an eval camera's NPZ says it sees of each person (``read_camera`` reads its calibration)."""
+
+    is_body_in_img: Bool[ndarray, "f p"]
+    """Whether each person's body is in the camera's image at each frame."""
+    visibility: Bool[ndarray, "f p 10475"] | None = field(default=None, deserializer=flags)
+    """True where the camera sees the vertex; Dance ships it, Singles and Extra do not."""
+
+
+def read_camera_sight(path: Path, frames: int, people: int) -> CameraSight:
+    """Decode what one eval camera sees.
+
+    Raises:
+        ValueError: The arrays do not cover ``frames`` frames of ``people`` people.
+    """
+    with np.load(path, allow_pickle=False) as npz:
+        sight: CameraSight = decode(CameraSight, path, {name: npz[name] for name in ("is_body_in_img", "visibility") if name in npz.files})
+    if sight.is_body_in_img.shape != (frames, people) or (sight.visibility is not None and sight.visibility.shape[:2] != (frames, people)):
+        raise ValueError(f"{path}: is_body_in_img {sight.is_body_in_img.shape} for {frames} frames of {people} people")
+    return sight
+
+
 @serde
 @dataclass(frozen=True, slots=True)
 class SequenceLabels:
@@ -179,6 +217,8 @@ class SequenceLabels:
     """How the labels were made: MoSh++ on a scanned template or on fitted betas (eval GT), or the MAMMA model's prediction."""
     people: list[PersonFit]
     """One fit per person, in the release's order."""
+    keywords: list[str] = field(default_factory=list)
+    """Eval: the words the release tags the sequence with (``keywords``); empty for markerless."""
 
     def __post_init__(self) -> None:
         for person in self.people:
@@ -221,6 +261,7 @@ def read_eval_labels(path: Path) -> SequenceLabels:
             "frames": int(npz["frames_len"]),
             "method": str(npz["method_used"]),
             "people": people,
+            "keywords": [str(keyword) for keyword in npz["keywords"]],
         }
     return decode(SequenceLabels, path, values)
 
