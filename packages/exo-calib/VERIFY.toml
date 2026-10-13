@@ -1,0 +1,41 @@
+# exo-calib verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "exo-calib"
+
+[[graph]]
+name = "calibrate"
+run = "exo_calib.verify:run"
+score = "exo_calib.verify:score"
+# Refined rig after SE(3) alignment of camera centres onto the GT rig (mean over the exo cameras).
+metrics = [
+    { name = "rot_deg_mean", unit = "deg", better = "lower", floor = 0.1 },
+    { name = "trans_cm_mean", unit = "cm", better = "lower", floor = 1.0 },
+    { name = "focal_pct_mean_abs", unit = "%", better = "lower", floor = 0.5 },
+]
+shots = [
+    { view = "/", t_s = 0.0 },
+    { view = "/", t_s = 139.0 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 139.0 },
+]
+
+[[graph.cases]]
+name = "short"  # rule: first sorted segment of the dataset with >= 4 cameras carrying static GT pose + intrinsics
+clip = "short"
+reference = "gt"
+dataset = "dataforge-assembly101"
+segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
+params = { frame_budget = "200" }
+
+[[graph.cases]]
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-assembly101"
+segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
+params = { frame_budget = "1000" }
+noise_from = "short"  # run once pre-port; reuses the short case's measured noise
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_triangulation.py", "tests/test_ba.py", "tests/test_eval.py", "tests/test_focal.py"]

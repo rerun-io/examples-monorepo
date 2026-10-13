@@ -1660,6 +1660,11 @@ cwd = "packages/exo-calib"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Stage E: SE3/Sim3 eval vs GT (eval.json) plus the exocalib_align layer"
 
+[feature.exo-calib.tasks]
+verify-pre = { cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2 --clip short", cwd = "packages/exo-calib", description = "Record the pre-port goldens (DAGKIT_GOLDENS): pre for every case, pre2 for the short case" }
+verify = { cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short", cwd = "packages/exo-calib", description = "Graph tier, short case: score post against GT and band it against pre (VERIFY.toml)" }
+verify-full = { cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full", cwd = "packages/exo-calib", description = "Graph tier, full case (frame budget 1000)" }
+
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream
 # ═══════════════════════════════════════════════════════════════════════════
