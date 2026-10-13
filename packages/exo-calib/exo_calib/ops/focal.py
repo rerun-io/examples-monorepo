@@ -9,8 +9,8 @@ from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from torch import Tensor
 
-from exo_calib.correspondences import ObservationSet
-from exo_calib.triangulation import valid_observation_mask
+from exo_calib.ops.correspondences import ObservationSet
+from exo_calib.ops.triangulation import valid_observation_mask
 
 TorchDevice: TypeAlias = Literal["cuda", "cpu"]
 

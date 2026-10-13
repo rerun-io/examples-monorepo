@@ -7,11 +7,17 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
+from simplecv.types.rig import RigCameras
 
-from exo_calib.cameras import camera_centers
+from exo_calib.types import AlignedErrors, ErrorStats, FocalErrors, VariantMetrics
 
 RigMode: TypeAlias = Literal["se3", "sim3"]
 RIG_MODES: tuple[RigMode, ...] = get_args(RigMode)
+
+
+def camera_centers(cam_T_world: Float64[ndarray, "v 4 4"]) -> Float64[ndarray, "v 3"]:
+    """World-frame camera centres ``-Rᵀt`` of world-to-camera transforms (the translation of their SE(3) inverse)."""
+    return -np.einsum("vji,vj->vi", cam_T_world[:, :3, :3], cam_T_world[:, :3, 3])
 
 
 @dataclass(slots=True)
@@ -117,3 +123,19 @@ def rig_geometry(cam_T_world: Float64[ndarray, "v 4 4"]) -> RigGeometry:
     centers: Float64[ndarray, "v 3"] = camera_centers(cam_T_world)
     pairwise_distance: Float64[ndarray, "v v"] = np.linalg.norm(centers[:, None, :] - centers[None, :, :], axis=2)
     return RigGeometry(camera_centers_m=centers, pairwise_distance_m=pairwise_distance, height_above_floor_m=centers[:, 2])
+
+
+def error_stats(values: Float64[ndarray, " v"], digits: int) -> ErrorStats:
+    """Summarize one per-camera error vector, rounded for ``eval.json``."""
+    return ErrorStats([round(float(x), digits) for x in values], round(float(np.mean(values)), digits), round(float(np.median(values)), digits), round(float(np.max(values)), digits))
+
+
+def variant_metrics(pred: RigCameras, gt: RigCameras) -> VariantMetrics:
+    """Score one rig against GT under SE(3) and Sim(3) alignment, plus its focal errors (percent)."""
+    aligned: dict[RigMode, AlignedErrors] = {}
+    for mode in RIG_MODES:
+        errors: CameraErrors = evaluate_rig(pred.cam_T_world, gt.cam_T_world, mode=mode)
+        aligned[mode] = AlignedErrors(error_stats(errors.rotation_error_deg, 4), error_stats(errors.translation_error_cm, 4), round(float(errors.alignment_scale), 6))
+    focal_pct: Float64[ndarray, " v"] = (pred.intrinsics[:, 0, 0] - gt.intrinsics[:, 0, 0]) / gt.intrinsics[:, 0, 0] * 100.0
+    focal = FocalErrors([round(float(x), 3) for x in focal_pct], round(float(np.abs(focal_pct).mean()), 3), round(float(np.abs(focal_pct).max()), 3))
+    return VariantMetrics(aligned["se3"], aligned["sim3"], focal)

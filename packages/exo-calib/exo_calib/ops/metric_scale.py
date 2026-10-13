@@ -1,15 +1,16 @@
-"""Global metric rescale of a refined rig from MoGe-2 metric depth at the surviving 2D observations."""
+"""Global metric rescale of a refined rig from metric depth at the surviving 2D observations (depth model injected)."""
+
+from collections.abc import Callable
+from typing import TypeAlias
 
 import numpy as np
-import torch
-from jaxtyping import Bool, Float64, Int64, UInt8
-from monopriors.models.metric_depth.moge_v2 import MoGeV2MetricPredictor
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
-from torch import Tensor
 
-from exo_calib.correspondences import ObservationSet
-from exo_calib.video_io import ExoVideoStreams, open_exo_streams
+from exo_calib.ops.correspondences import ObservationSet
+
+DepthAt: TypeAlias = Callable[[int, list[int]], list[Float64[ndarray, "h w"]]]
+"""(view, decoder sample indices) -> metric depth (metres) of each of those frames at video resolution."""
 
 METRIC_RESCALE_FRAMES: int = 6
 """Frames per view sampled for the MoGe-2 metric rescale after BA."""
@@ -47,40 +48,31 @@ def grouped_medians(group: Int64[ndarray, " n"], values: Float64[ndarray, " n"],
 
 
 def estimate_metric_rescale(
-    dataset: DatasetEntry,
-    segment_id: str,
     cam_T_world: Float64[ndarray, "v 4 4"],
-    intrinsics: Float64[ndarray, "v 3 3"],
     obs: ObservationSet,
     points_xyz: Float64[ndarray, "n 3"],
     sample_indices: Int64[ndarray, "t"],
-    names: tuple[str, ...],
+    depth_at: DepthAt,
 ) -> float | None:
-    """Estimate a global scale correction from MoGe-2 metric depth at the keypoints.
+    """Estimate a global scale correction from metric depth (MoGe-2 in the pipeline) at the keypoints.
 
-    For ``METRIC_RESCALE_FRAMES`` frames spread over the capture, each view's
-    MoGe-2 metric depth is sampled at the surviving 2D observations and divided
-    by the depth of the triangulated point in that camera; the median ratio over
-    all (view, frame) groups is the correction (1.0 = the rig is already metric).
-    Pooling thousands of depth ratios beats Stage A's few single-frame medians.
+    For ``METRIC_RESCALE_FRAMES`` frames spread over the capture, each view's metric depth is sampled at the surviving
+    2D observations and divided by the depth of the triangulated point in that camera; the median of the per-(view,
+    frame) medians is the correction (1.0 = the rig is already metric). Pooling thousands of depth ratios beats
+    Stage A's few single-frame medians.
 
     Args:
-        dataset: Catalog dataset entry (frames are decoded from it).
-        segment_id: Segment being refined.
         cam_T_world: Refined world-to-camera transforms.
-        intrinsics: Camera intrinsics at video resolution.
         obs: Surviving observations (pixel coordinates index the video frames).
         points_xyz: Triangulated points in the rig's (pre-rescale) frame.
         sample_indices: Stage B decoder sample index per correspondence frame.
-        names: Exo camera entity names in view order.
+        depth_at: Metric depth of the requested frames of one view.
 
     Returns:
-        Median metric/current depth ratio over all valid groups, or ``None`` when fewer than
-        ``MIN_RESCALE_GROUPS`` groups had enough valid samples.
+        The correction, or ``None`` when fewer than ``MIN_RESCALE_GROUPS`` groups had enough valid samples.
     """
-    # Evenly-spaced frames among those dense enough to form valid (view, frame)
-    # groups. On dense captures every frame qualifies; on long captures the points
-    # spread thin and a blind linspace would leave every group under the floor.
+    # Evenly-spaced frames among those dense enough to form valid (view, frame) groups. On dense captures every
+    # frame qualifies; on long captures the points spread thin and a blind linspace would leave every group under the floor.
     n_views: int = cam_T_world.shape[0]
     observation_frames: Int64[ndarray, " n_obs"] = obs.point_frame_idx[obs.obs_point_idx]
     frames_used: Int64[ndarray, " f"] = np.unique(obs.point_frame_idx)
@@ -103,25 +95,17 @@ def estimate_metric_rescale(
     camera_rows: Float64[ndarray, "r 4 4"] = cam_T_world[view]
     current_z: Float64[ndarray, " r"] = np.einsum("rj,rj->r", camera_rows[:, 2, :3], points) + camera_rows[:, 2, 3]
 
-    # MoGe runs once per (view, frame) group that has a finite point to compare against, one
-    # batched NVDEC read per view; all surviving joints feed the estimator, since body-only
-    # sampling has too few correspondences and MoGe's body depth runs a few percent short.
-    streams: ExoVideoStreams = open_exo_streams(dataset, segment_id, names)
-    moge: MoGeV2MetricPredictor = MoGeV2MetricPredictor(device="cuda")
+    # Depth runs once per (view, frame) group that has a finite point to compare against; all surviving joints feed
+    # the estimator, since body-only sampling has too few correspondences and MoGe's body depth runs a few percent short.
     metric_z: Float64[ndarray, " r"] = np.full(rows.size, np.nan)
-    for view_idx in np.unique(view[finite]):
+    for view_idx in np.unique(view[finite]).tolist():
         view_groups: Int64[ndarray, " k"] = np.unique(group[finite & (view == view_idx)])
-        decode_idx: list[int] = [int(sample_indices[chosen_frames[int(g) - int(view_idx) * chosen_frames.size]]) for g in view_groups]
-        frames: UInt8[Tensor, "k 3 h w"] = streams.decoders[int(view_idx)].get_frames_at(decode_idx).data
-        for group_id, frame in zip(view_groups, frames, strict=True):
-            frame_rgb: UInt8[ndarray, "h w 3"] = frame.permute(1, 2, 0).contiguous().cpu().numpy()
-            depth: Float64[ndarray, "h w"] = moge(frame_rgb, K_33=intrinsics[int(view_idx)].astype(np.float32)).depth_meters.astype(np.float64)
+        decode_idx: list[int] = [int(sample_indices[chosen_frames[int(g) - view_idx * chosen_frames.size]]) for g in view_groups]
+        for group_id, depth in zip(view_groups, depth_at(view_idx, decode_idx), strict=True):
             in_group: Bool[ndarray, " r"] = group == group_id
             px: Int64[ndarray, " m"] = np.clip(np.round(obs.obs_xy[rows[in_group], 0]).astype(np.int64), 0, depth.shape[1] - 1)
             py: Int64[ndarray, " m"] = np.clip(np.round(obs.obs_xy[rows[in_group], 1]).astype(np.int64), 0, depth.shape[0] - 1)
             metric_z[in_group] = depth[py, px]
-    del moge
-    torch.cuda.empty_cache()
 
     valid: Bool[ndarray, " r"] = finite & np.isfinite(metric_z) & (metric_z > MIN_DEPTH_M) & (current_z > MIN_DEPTH_M)
     group_medians, n_samples = grouped_medians(group[valid], metric_z[valid] / current_z[valid], MIN_RESCALE_SAMPLES_PER_GROUP)

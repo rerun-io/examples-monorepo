@@ -4,8 +4,8 @@ pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this t
 
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout  # noqa: E402
 
-from exo_calib.catalog_io import RigLayout, select_rig_layout  # noqa: E402
-from exo_calib.layer_io import PIPELINE_CALIBRATION_MARKER  # noqa: E402
+from exo_calib.sources.layout import select_rig_layout  # noqa: E402
+from exo_calib.types import RigLayout  # noqa: E402
 
 
 def _camera(
@@ -91,7 +91,7 @@ def test_calibrated_cameras_are_reported_beside_kind_tagged_rigs() -> None:
 
 def test_pipeline_written_base_calibration_is_not_ground_truth() -> None:
     layout: CatalogRigLayout = CatalogRigLayout(
-        cameras=(_camera("rig_00", kind="exo", calibrated=True, markers=(PIPELINE_CALIBRATION_MARKER,)),)
+        cameras=(_camera("rig_00", kind="exo", calibrated=True, markers=("exocalib_written",)),)
     )
 
     selected: RigLayout = select_rig_layout(layout)

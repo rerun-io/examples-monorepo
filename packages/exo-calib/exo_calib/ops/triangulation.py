@@ -1,21 +1,19 @@
-"""Confidence-weighted multi-view triangulation (fully vectorized).
+"""exo-calib's triangulation policy over the shared DLT kernel (``simplecv.ops.triangulate.triangulate_weighted``).
 
-``triangulate_points`` solves every point's weighted DLT at once: each valid
-observation contributes two confidence-scaled rows, the rows scatter into
-per-point 4x4 Gram matrices (``A^T A``) via bincount, and one batched ``eigh``
-extracts the null-space vector per point. ``triangulate_robust`` prunes
-observations whose reprojection residual exceeds a threshold, resolving
-ambiguous cases with leave-one-out consensus — all trials of a round are
-triangulated in a single batched call, grouped by view count.
+``triangulate_robust`` prunes observations whose reprojection residual exceeds a threshold, resolving ambiguous cases
+with leave-one-out consensus (all trials of a round in one batched call); ``triangulate_frame_keypoints`` is the
+online tracker's per-frame entry.
 """
 
 from typing import NamedTuple
 
 import numpy as np
+import torch
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
+from simplecv.ops.triangulate import triangulate_weighted
 
-from exo_calib.correspondences import ObservationSet
+from exo_calib.ops.correspondences import ObservationSet
 
 ROBUST_TRIANGULATION_ROUNDS: int = 2
 """Triangulate-then-prune passes; the second pass re-fits without the observations the first one rejected."""
@@ -85,63 +83,22 @@ def valid_observation_mask(obs: ObservationSet, n_views: int, n_points: int | No
 def triangulate_points(
     obs: ObservationSet, intrinsics: Float64[ndarray, "v 3 3"], cam_T_world: Float64[ndarray, "v 4 4"]
 ) -> Float64[ndarray, "n_points 3"]:
-    """Triangulate all points at once with confidence-weighted DLT.
+    """Triangulate all points at once with the shared weighted DLT kernel (rows scaled by confidence: weight = conf²).
 
-    Each observation contributes rows ``w * (u * P[2] - P[0])`` and
-    ``w * (v * P[2] - P[1])``; the per-point normal matrix ``A^T A`` is
-    accumulated with bincount scatters (zero rows contribute nothing), and the
-    null-space vector is the eigenvector of the smallest eigenvalue from one
-    batched ``eigh`` over all solvable points.
-
-    Args:
-        obs: Sparse pixel observations for the points.
-        intrinsics: Float64 camera intrinsics with shape ``(v, 3, 3)``.
-        cam_T_world: Float64 world-to-camera transforms with shape ``(v, 4, 4)``.
+    Every point holds at most one observation per view, so the sparse set scatters into dense ``(v, n)`` arrays.
 
     Returns:
-        Float64 world points with shape ``(n_points, 3)``. Invalid points are NaN.
+        Float64 world points with shape ``(n_points, 3)``. Points with fewer than two valid observations are NaN.
     """
-    n_points: int = obs.point_frame_idx.size
     n_views: int = intrinsics.shape[0]
-    points_xyz: Float64[ndarray, "n_points 3"] = np.full((n_points, 3), np.nan, dtype=np.float64)
-    valid_mask: Bool[ndarray, "n_obs"] = valid_observation_mask(obs, n_views)
-    if not valid_mask.any():
-        return points_xyz
-
-    observation_point_idx: Int64[ndarray, "q"] = obs.obs_point_idx[valid_mask]
-    observation_view_idx: Int64[ndarray, "q"] = obs.obs_view_idx[valid_mask]
-    xy: Float64[ndarray, "q 2"] = obs.obs_xy[valid_mask]
-    observation_conf: Float64[ndarray, "q"] = obs.obs_conf[valid_mask]
-
+    valid: Bool[ndarray, "n_obs"] = valid_observation_mask(obs, n_views)
+    xy: Float64[ndarray, "v n 2"] = np.full((n_views, obs.point_frame_idx.size, 2), np.nan)
+    weight: Float64[ndarray, "v n"] = np.zeros((n_views, obs.point_frame_idx.size))
+    xy[obs.obs_view_idx[valid], obs.obs_point_idx[valid]] = obs.obs_xy[valid]
+    weight[obs.obs_view_idx[valid], obs.obs_point_idx[valid]] = obs.obs_conf[valid] ** 2
     projection: Float64[ndarray, "v 3 4"] = np.einsum("vij,vjk->vik", intrinsics, cam_T_world[:, :3, :])
-    observation_projection: Float64[ndarray, "q 3 4"] = projection[observation_view_idx]
-    row_u: Float64[ndarray, "q 4"] = observation_conf[:, None] * (xy[:, 0:1] * observation_projection[:, 2] - observation_projection[:, 0])
-    row_v: Float64[ndarray, "q 4"] = observation_conf[:, None] * (xy[:, 1:2] * observation_projection[:, 2] - observation_projection[:, 1])
-    rows: Float64[ndarray, "r 4"] = np.concatenate((row_u, row_v))
-    row_point_idx: Int64[ndarray, "r"] = np.concatenate((observation_point_idx, observation_point_idx))
-
-    gram: Float64[ndarray, "n_points 4 4"] = np.zeros((n_points, 4, 4), dtype=np.float64)
-    for i in range(4):
-        for j in range(i, 4):
-            entry: Float64[ndarray, "n_points"] = np.bincount(
-                row_point_idx, weights=rows[:, i] * rows[:, j], minlength=n_points
-            )
-            gram[:, i, j] = entry
-            gram[:, j, i] = entry
-
-    obs_count: Int64[ndarray, "n_points"] = np.bincount(observation_point_idx, minlength=n_points).astype(np.int64)
-    solvable: Bool[ndarray, "n_points"] = (obs_count >= 2) & np.isfinite(gram).all(axis=(1, 2))
-    if not solvable.any():
-        return points_xyz
-
-    eig_result: tuple[Float64[ndarray, "s 4"], Float64[ndarray, "s 4 4"]] = np.linalg.eigh(gram[solvable])
-    homogeneous: Float64[ndarray, "s 4"] = eig_result[1][:, :, 0]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        dehomogenized: Float64[ndarray, "s 3"] = homogeneous[:, :3] / homogeneous[:, 3:4]
-    usable: Bool[ndarray, "s"] = (np.abs(homogeneous[:, 3]) > np.finfo(np.float64).eps) & np.isfinite(dehomogenized).all(axis=1)
-    solvable_idx: Int64[ndarray, "s"] = np.flatnonzero(solvable).astype(np.int64)
-    points_xyz[solvable_idx[usable]] = dehomogenized[usable]
-    return points_xyz
+    points_xyz, _ = triangulate_weighted(torch.from_numpy(xy), torch.from_numpy(weight), torch.from_numpy(projection))
+    return points_xyz.numpy()
 
 
 def _leave_one_out_drops(

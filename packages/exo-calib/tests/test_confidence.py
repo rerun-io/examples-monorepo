@@ -2,7 +2,7 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.confidence import (
+from exo_calib.ops.confidence import (
     drop_face_confidences,
     kineo_point_confidence,
     median_filter_keypoints,

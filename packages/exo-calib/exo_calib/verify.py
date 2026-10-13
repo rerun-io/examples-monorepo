@@ -1,64 +1,40 @@
 """Graph-tier check of exo-calib, driven by ``VERIFY.toml`` through ``python -m dagkit.verify``.
 
 ``run`` writes a golden rrd; ``score`` reads only that golden plus the GT rig of the segment from the catalog.
-Golden contract (the ported graph writes the same paths on ``video_time``): static rigs at
-``/world/exocalib/{init,refined}/<rig>/<cam>`` (``Transform3D`` child-from-parent = cam_T_world, ``Pinhole`` on the
-``pinhole`` child), kp2d under each camera's ``pinhole/exocalib_kp2d*``, kp3d tracks at
-``/world/exocalib/kp3d_{init,refined}``, GT alignment at ``/world/exocalib_error``.
+Golden contract (paths on ``video_time``, as the pre-port goldens): static rigs at ``/world/exocalib/{init,refined}/<rig>/<cam>``
+(``Transform3D`` child-from-parent = cam_T_world, ``Pinhole`` on the ``pinhole`` child), kp2d boxes and the gated
+skeleton under each camera's ``pinhole/exocalib_kp2d*``, kp3d tracks at ``/world/exocalib/kp3d_{init,refined}``, GT
+alignment at ``/world/exocalib_error``. Since the port the queryable kp2d record sits at ``/world/exocalib/kp2d/<cam>``.
 """
 
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from urllib.parse import urlparse
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dagkit.sources import SegmentRef
 from dagkit.verify import Case, Phase
-from datafusion import col
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
+from simplecv.rerun_log_utils import RerunTyroConfig
 
 CHILD_FROM_PARENT: int = 2
 """``Transform3D:relation`` value of a camera node logged as cam_T_world."""
 
 
-def _layer_paths(dataset: DatasetEntry, segment: str) -> dict[str, Path]:
-    """Local file of every layer registered on ``segment``, keyed by layer name."""
-    row: dict = (
-        dataset.segment_table()
-        .filter(col("rerun_segment_id") == segment)
-        .select(col("rerun_layer_names"), col("rerun_storage_urls"))
-        .to_arrow_table()
-        .to_pylist()[0]
-    )
-    return {name: Path(urlparse(url).path) for name, url in zip(row["rerun_layer_names"], row["rerun_storage_urls"], strict=True)}
-
-
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """Pre-port: the five-stage pipeline (``apis/pipeline.py``) against a private in-process catalog.
+    """The ported graph (``apis/calibrate.py``, lossless, threaded): every final output goes into ``recording``.
 
-    The private catalog holds only the segment's ``base`` layer (read from the shared catalog), so the old stages
-    register their layers there and never touch the shared corpus. The final ``exocalib_*`` layers (pass 2) are
-    copied chunk by chunk into ``recording``. ``phase`` does not change what runs.
+    Nothing is registered and no layer file is written, so the shared catalog is only read. ``phase`` does not change what runs.
     """
-    from exo_calib.apis import keypoints2d, pipeline
-    from exo_calib.catalog_io import StageConfig
+    from exo_calib.apis.calibrate import Config, calibrate
 
     assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
-    base: Path = _layer_paths(SegmentRef(case.dataset, case.segment).entry(), case.segment)["base"]
-    keypoints2d.STAGE_B_FRAME_BUDGET = int(case.params["frame_budget"])  # the old Stage B reads its budget from this constant
-    with TemporaryDirectory() as tmp, rr.server.Server(host="127.0.0.1", datasets={case.dataset: [str(base)]}) as server:
-        stage: StageConfig = StageConfig(catalog_url=server.url(), dataset_name=case.dataset, segment_id=case.segment, output_dir=Path(tmp))
-        pipeline.main(pipeline.PipelineConfig(stage=stage))
-        private: DatasetEntry = server.client().get_dataset(case.dataset)
-        layers: dict[str, Path] = _layer_paths(private, case.segment)
-        for name in ("exocalib_init", "exocalib_kp2d", "exocalib_refined", "exocalib_align"):
-            recording.send_chunks(rr.chunk.RrdReader(layers[name]).stream())
-    print(f"{case.name} {phase}: old pipeline outputs copied into the golden")
+    config = Config(RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment), frame_budget=int(case.params["frame_budget"]), register="off")
+    calibrate(config, golden=recording)
+    print(f"{case.name} {phase}: graph outputs written into the golden")
 
 
 def _rig(table: pa.Table, root: str, names: list[str]) -> tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]]:

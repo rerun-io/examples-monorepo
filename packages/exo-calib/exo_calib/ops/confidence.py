@@ -6,7 +6,7 @@ import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
-from exo_calib.correspondences import ObservationSet
+from exo_calib.ops.correspondences import ObservationSet
 
 
 def modulate_crop_edge_confidence(

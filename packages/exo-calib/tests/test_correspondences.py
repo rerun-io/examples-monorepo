@@ -2,7 +2,7 @@ import numpy as np
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
-from exo_calib.correspondences import ObservationSet, build_observations, under_supported_view_indices
+from exo_calib.ops.correspondences import ObservationSet, build_observations, under_supported_view_indices
 
 
 def test_build_observations_requires_a_strong_cross_view_pair() -> None:

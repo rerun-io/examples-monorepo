@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from exo_calib.apis.calibrate_init import select_ground_plane
+from exo_calib.ops.ground_plane import select_ground_plane
 
 UP = np.array([0.0, 0.0, 1.0])
 

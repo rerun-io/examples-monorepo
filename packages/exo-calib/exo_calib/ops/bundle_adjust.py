@@ -8,8 +8,8 @@ from jaxtyping import Bool, Float64, Int64
 from kornia_rs.k3d import bundle_adjust  # pyrefly: ignore[missing-import]  # Compiled extension exposes k3d only at runtime.
 from numpy import ndarray
 
-from exo_calib.correspondences import ObservationSet
-from exo_calib.triangulation import reprojection_errors_px, triangulate_points, valid_observation_mask
+from exo_calib.ops.correspondences import ObservationSet
+from exo_calib.ops.triangulation import reprojection_errors_px, triangulate_points, valid_observation_mask
 
 
 @dataclass(slots=True, frozen=True)
