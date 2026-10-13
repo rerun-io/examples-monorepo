@@ -151,6 +151,8 @@ class Graph:
             dst_types: tuple[type, ...] = normalise(dst.inputs[edge.dst.port])[1]
             if not all(any(issubclass(s, d) for d in dst_types) for s in src_types):
                 problems.append(f"edge {edge.src.node}.{edge.src.port} -> {edge.dst.node}.{edge.dst.port}: {src_types} is not {dst_types}")
+            if min(getattr(edge.kind, "capacity", 1), getattr(edge.kind, "keep", 1)) < 1:
+                problems.append(f"{edge.dst.node}.{edge.dst.port}: {edge.kind} needs capacity / keep >= 1")
             if isinstance(edge.kind, DropOldest) and (dst.kind == "segment" or isinstance(dst.obj, LayerSink)):
                 problems.append(f"{edge.dst.node}.{edge.dst.port}: DropOldest into a {'SegmentNode' if dst.kind == 'segment' else 'LayerSink'}")
         for name, spec in self.nodes.items():

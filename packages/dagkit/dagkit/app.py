@@ -39,8 +39,8 @@ G = TypeVar("G")
 @serde(deny_unknown_fields=True, type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class NodeProfile:
-    placement: Literal["main", "thread", "process"] = "thread"
-    cpus: list[int] | None = None
+    placement: Literal["main", "thread", "process"] | None = None  # None inherits (base default: thread)
+    cpus: list[int] | None = None  # None inherits; [] clears
     params: dict[str, Any] = field(default_factory=dict)  # overrides of the node's config dataclass fields
 
 
@@ -55,11 +55,9 @@ class Profile:
         if preset is not None and preset not in self.presets:
             raise KeyError(f"unknown preset {preset!r}; this profile has {sorted(self.presets)}")
         base: NodeProfile = self.nodes.get(name, NodeProfile())
-        overlay: NodeProfile | None = self.presets[preset].get(name) if preset is not None else None
-        if overlay is None:
-            return base
-        placement = overlay.placement if overlay.placement != "thread" else base.placement
-        return NodeProfile(placement, overlay.cpus if overlay.cpus is not None else base.cpus, base.params | overlay.params)
+        over: NodeProfile = self.presets[preset].get(name, NodeProfile()) if preset is not None else NodeProfile()
+        cpus: list[int] | None = over.cpus if over.cpus is not None else base.cpus
+        return NodeProfile(over.placement or base.placement or "thread", cpus, base.params | over.params)
 
     def configure(self, name: str, default: D, preset: str | None = None) -> D:
         return from_dict(type(default), to_dict(default) | self.node(name, preset).params)
@@ -133,7 +131,8 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
         control_state = gr.State(None)
         with gr.Row():
             with gr.Column(scale=1):
-                inputs: dict[str, list[Any]] = {f.name: w for f in fields if (w := _widgets(f.name, f.type, f.default))}
+                defaults: dict[str, object] = {f.name: _default(f) for f in fields}
+                inputs: dict[str, list[Any]] = {f.name: w for f in fields if (w := _widgets(f.name, f.type, defaults[f.name]))}
                 run_button, stop_button = gr.Button("Run", variant="primary"), gr.Button("Stop")
                 files = [gr.File(label=name) for name in output_names]
             viewer = Rerun(streaming=True, height=720, scale=3)
@@ -144,14 +143,17 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
             kwargs: dict[str, object] = {}
             for f in fields:
                 got: list[object] = [next(it) for _ in inputs.get(f.name, [])]
-                if f.name in inputs:
-                    base: object = _base(f.type)
-                    kwargs[f.name] = (
-                        SegmentRef(str(got[0]), str(got[1])) if base is SegmentRef else Path(str(got[0])) if base is Path and got[0] else got[0]
-                    )
-                elif f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING and dataclasses.is_dataclass(f.type):
-                    headless: bool = "headless" in {g.name for g in dataclasses.fields(f.type)}  # type: ignore[arg-type]
-                    kwargs[f.name] = f.type(**({"headless": True} if headless else {}))  # type: ignore[operator]
+                base: Any = _base(f.type)
+                default: object = defaults[f.name]
+                if base is SegmentRef and got:  # empty boxes = no catalog input; edits keep the default's url, timeline, window
+                    template: SegmentRef = default if isinstance(default, SegmentRef) else SegmentRef("", "")
+                    kwargs[f.name] = dataclasses.replace(template, dataset=str(got[0]), segment=str(got[1])) if any(got) else None
+                elif got and (got[0] is not None or default is dataclasses.MISSING):  # an empty widget keeps the Config default
+                    kwargs[f.name] = Path(str(got[0])) if base is Path and got[0] else got[0]
+                elif dataclasses.is_dataclass(base) and "headless" in {g.name for g in dataclasses.fields(base)}:
+                    kwargs[f.name] = base(headless=True)  # the UI renders into its own pane: never spawn a viewer
+                elif dataclasses.is_dataclass(base) and default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
+                    kwargs[f.name] = base()
             config: G = config_type(**kwargs)
             recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
             stream, control, errors = recording.binary_stream(), Control(), []
@@ -179,6 +181,13 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
         if examples:
             gr.Examples([[v for name, ws in inputs.items() for v in _example_values(getattr(e, name))[: len(ws)]] for e in examples], inputs=flat)
     return demo
+
+
+def _default(f: dataclasses.Field) -> object:
+    """A field's default value; factories of nested dataclasses are not called (they may spawn a viewer)."""
+    if f.default is not dataclasses.MISSING or f.default_factory is dataclasses.MISSING or dataclasses.is_dataclass(_base(f.type)):
+        return f.default
+    return f.default_factory()
 
 
 def _example_values(value: object) -> list[object]:

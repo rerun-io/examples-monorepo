@@ -2,7 +2,9 @@ import importlib
 import importlib.metadata
 import math
 import os
+import shutil
 import subprocess
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,8 +106,8 @@ def check_band(band: MetricBand, pre: float | None, post: float | None, noise: M
         return BandResult(band.name, False, f"missing metric (pre={pre}, post={post})")
     if not (math.isfinite(pre) and math.isfinite(post)):
         return BandResult(band.name, False, f"non-finite metric (pre={pre}, post={post})")
-    if band.name not in noise:
-        return BandResult(band.name, False, "no measured noise for this case")
+    if band.name not in noise or not all(math.isfinite(v) and v >= 0.0 for v in (2.0 * noise[band.name], band.floor)):
+        return BandResult(band.name, False, f"no finite, non-negative measured noise / floor (noise={noise.get(band.name)}, floor={band.floor})")
     tol: float = max(2.0 * noise[band.name], band.floor)
     passed: bool = post <= pre + tol if band.better == "lower" else post >= pre - tol
     return BandResult(band.name, passed, f"pre {pre:.4g} post {post:.4g} {band.unit} tol {tol:.4g} ({band.better} is better)")
@@ -138,34 +140,42 @@ def main(args: VerifyArgs) -> int:
         ["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, check=True, cwd=args.card.parent
     ).stdout.strip()
     version: str = f"{importlib.metadata.version(card.package)}+{sha7}"
+    selected: list[tuple[GraphBlock, Case]] = [(b, c) for b in card.graph if args.block in (None, b.name) for c in b.cases if args.clip in (None, c.clip)]
+    if not selected or any(not block.metrics for block, _ in selected):
+        print(f"FAIL: block={args.block} clip={args.clip} selects no case, or a selected block has no metrics")
+        return 1
     failed: bool = False
-    for block in (b for b in card.graph if args.block in (None, b.name)):
+    for block, case in selected:
         run, score = _resolve(block.run), _resolve(block.score)
-        for case in (c for c in block.cases if args.clip in (None, c.clip)):
-            golden: Path = golden_path(card.package, block.name, case.name, args.phase)
-            golden.parent.mkdir(parents=True, exist_ok=True)
-            partial: Path = golden.with_suffix(".partial")
-            recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
-            recording.save(partial)
-            log_producer(recording, f"verify-{block.name}", Producer(card.package, version, block.name, "verify", args.phase))
-            run(case, args.phase, recording)
-            recording.flush()
-            metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
-            recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
-            recording.flush()
-            recording.disconnect()
-            partial.replace(golden)
-            print(f"{block.name}/{case.name} {args.phase}: {metrics}")
-            if args.phase == "post":
-                paths: dict[str, Path] = {phase: golden_path(card.package, block.name, case.name, phase) for phase in ("pre", "pre2")}
-                scores: dict[str, dict] = {phase: dict(score(case, path)) for phase, path in paths.items() if path.exists()}  # type: ignore[call-overload]
-                for band in block.metrics:
-                    result: BandResult = check_band(band, scores.get("pre", {}).get(band.name), metrics.get(band.name), case_noise(block, case))
-                    failed |= not result.passed
-                    print(f"  {'PASS' if result.passed else 'FAIL'} {band.name}: {result.reason}; pre2 {scores.get('pre2', {}).get(band.name)}")
-            if args.register and case.dataset is not None and case.segment is not None:
-                dataset = SegmentRef(case.dataset, case.segment).entry()
-                dataset.register([golden.resolve().as_uri()], layer_name=f"verify-{block.name}-{args.phase}-{sha7}").wait()
+        golden: Path = golden_path(card.package, block.name, case.name, args.phase)
+        golden.parent.mkdir(parents=True, exist_ok=True)
+        partial: Path = golden.with_suffix(".partial")
+        recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
+        recording.save(partial)
+        log_producer(recording, f"verify-{block.name}", Producer(card.package, version, block.name, "verify", args.phase))
+        run(case, args.phase, recording)
+        recording.flush()
+        metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
+        recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
+        recording.flush()
+        recording.disconnect()
+        partial.replace(golden)
+        print(f"{block.name}/{case.name} {args.phase}: {metrics}")
+        if args.phase == "post":
+            paths: dict[str, Path] = {phase: golden_path(card.package, block.name, case.name, phase) for phase in ("pre", "pre2")}
+            scores: dict[str, dict] = {phase: dict(score(case, path)) for phase, path in paths.items() if path.exists()}  # type: ignore[call-overload]
+            for band in block.metrics:
+                result: BandResult = check_band(band, scores.get("pre", {}).get(band.name), metrics.get(band.name), case_noise(block, case))
+                pre2: float | None = scores.get("pre2", {}).get(band.name)
+                if case.noise_from is None and (pre2 is None or not math.isfinite(pre2)):  # this case measured its own noise
+                    result = BandResult(band.name, False, f"pre2 golden or metric missing or non-finite ({pre2}): no noise evidence")
+                failed |= not result.passed
+                print(f"  {'PASS' if result.passed else 'FAIL'} {band.name}: {result.reason}; pre2 {pre2}")
+        if args.register and case.dataset is not None and case.segment is not None:  # an immutable copy: the golden path is reused
+            registered: Path = golden.with_name(f"{case.name}.{args.phase}.{sha7}.{uuid.uuid4().hex[:8]}.rrd")
+            shutil.copy2(golden, registered)
+            dataset = SegmentRef(case.dataset, case.segment).entry()
+            dataset.register([registered.resolve().as_uri()], layer_name=f"verify-{block.name}-{args.phase}-{sha7}").wait()
     return 1 if failed else 0
 
 

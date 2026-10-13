@@ -1,10 +1,9 @@
 import multiprocessing as mp
 import pickle
-import queue
 import traceback
 from collections.abc import Mapping
 from dataclasses import replace
-from multiprocessing.queues import Queue
+from multiprocessing.connection import Connection
 
 from dagkit.graph import Spawn
 from dagkit.node import Emit, PortType, RunContext, Tick
@@ -22,10 +21,10 @@ class _Collect:
         self.calls.append(("watermark", "", t_ns, None))
 
 
-def _child(spawn: Spawn, inbox: Queue, outbox: Queue) -> None:
+def _child(spawn: Spawn, conn: Connection) -> None:
     try:
         node = spawn.cls(spawn.config)
-        while (message := inbox.get())[0] != "close":
+        while (message := conn.recv())[0] != "close":
             op, arg = message
             out = _Collect()
             if op == "reset":
@@ -34,14 +33,13 @@ def _child(spawn: Spawn, inbox: Queue, outbox: Queue) -> None:
                 node.step(arg, out)
             else:
                 node.flush(out)
-            outbox.put(("ok", out.calls))
+            conn.send(("ok", out.calls))  # pickles synchronously: an unpicklable output raises here, not in a feeder thread
     except BaseException as exc:
         text: str = traceback.format_exc()
         try:
-            pickle.dumps(exc)
+            conn.send(("error", (exc, text)))
         except (pickle.PicklingError, TypeError, AttributeError):  # an unpicklable exception still reaches the parent, as text
-            exc = GraphError(repr(exc))
-        outbox.put(("error", (exc, text)))
+            conn.send(("error", (GraphError(repr(exc)), text)))
 
 
 class ProcessNode:
@@ -50,21 +48,20 @@ class ProcessNode:
         self.outputs: Mapping[str, PortType] = spawn.cls.outputs
         self.emits_late: bool = getattr(spawn.cls, "emits_late", False)
         context = mp.get_context("spawn")
-        self._inbox: Queue = context.Queue()
-        self._outbox: Queue = context.Queue()
-        self._process = context.Process(target=_child, args=(spawn, self._inbox, self._outbox), daemon=True)
+        self._conn, child_conn = context.Pipe()
+        self._process = context.Process(target=_child, args=(spawn, child_conn), daemon=True)
 
     def _call(self, op: str, arg: object, out: Emit) -> None:
         if self._process.exitcode is None and not self._process.is_alive():
             self._process.start()
-        self._inbox.put((op, arg))
-        while True:
-            try:
-                status, payload = self._outbox.get(timeout=1.0)
-                break
-            except queue.Empty:
+        self._conn.send((op, arg))  # pickles synchronously: an unpicklable tick or resource raises in the runner thread
+        try:
+            while not self._conn.poll(1.0):
                 if not self._process.is_alive():
-                    raise GraphError(f"process node died (exit code {self._process.exitcode}) without a message") from None
+                    raise EOFError
+            status, payload = self._conn.recv()
+        except EOFError:
+            raise GraphError(f"process node died (exit code {self._process.exitcode}) without a message") from None
         if status == "error":
             exc, text = payload
             getattr(exc, "add_note", print)(f"raised in the child process during {op}:\n{text}")
@@ -83,7 +80,7 @@ class ProcessNode:
 
     def close(self) -> None:
         if self._process.is_alive():
-            self._inbox.put(("close", None))
+            self._conn.send(("close", None))
             self._process.join(5.0)
         self.abort()
 

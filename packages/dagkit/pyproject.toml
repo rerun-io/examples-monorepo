@@ -47,5 +47,5 @@ min_confidence = 60
 # Serialized schema/report fields read by consumers, Config fields read by tyro/gradio, pytest markers.
 ignore_names = [
     "step_ms_mean", "step_ms_p95", "params_sha", "reference", "input", "window_s", "lane", "properties", "metric",
-    "iterations", "lr", "polish", "headless", "image", "frames", "scale", "output_ply", "pytestmark",
+    "iterations", "lr", "polish", "headless", "image", "frames", "scale", "output_ply", "pytestmark", "verify_run", "verify_score",
 ]

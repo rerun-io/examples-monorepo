@@ -136,3 +136,13 @@ def test_checkpoint_adds_a_block_edge_into_the_layer_sink() -> None:
     graph.checkpoint(src["x"], layer)
     graph.validate()
     assert [(e.src.node, e.dst.node, e.dst.port, e.kind) for e in graph.edges] == [("src", "src_x_layer", "x", Block())]
+
+
+def test_capacities_and_retention_must_be_positive() -> None:
+    graph = Graph("capacity")
+    src = graph.source("src", source([], ports=("x", "a")))
+    node = graph.node("n", Add(0, with_asof=True))
+    graph.edge(src["x"], node["x"], Block(0))
+    graph.edge(src["a"], node["a"], AsOf(keep=0))
+    report: str = problems(graph)
+    assert "n.x: Block(capacity=0) needs capacity / keep >= 1" in report and "n.a: AsOf(wait_ns=None, keep=0)" in report

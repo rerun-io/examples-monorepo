@@ -31,16 +31,31 @@ def module_file(module: str) -> Path | None:
     return next((p for p in (base.with_suffix(".py"), base / "__init__.py") if p.exists()), None)
 
 
-def imports(path: Path) -> list[tuple[str, bool]]:
-    """(imported module, inside a function body) for every absolute import in a file."""
+def module_name(path: Path) -> str:
+    """Dotted module of a workspace file (`.../exo_calib/ops/x.py` -> `exo_calib.ops.x`)."""
+    for name, root in ROOTS.items():
+        if path.resolve().is_relative_to(root / name):
+            parts: tuple[str, ...] = path.resolve().relative_to(root).with_suffix("").parts
+            return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+    raise ValueError(f"{path} is in no [roots] package")
+
+
+def imports(path: Path, module: str | None = None) -> list[tuple[str, bool]]:
+    """(absolute imported module, inside a function body) for every import, relative ones resolved.
+
+    `from pkg import name` yields `pkg.name` when that is a module, else `pkg`.
+    """
+    module = module or module_name(path)
+    package: list[str] = module.split(".") if path.name == "__init__.py" else module.split(".")[:-1]
     tree: ast.Module = ast.parse(path.read_text())
     lazy: set[int] = {id(n) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef | ast.AsyncFunctionDef) for n in ast.walk(f)}
     found: list[tuple[str, bool]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found += [(alias.name, id(node) in lazy) for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            found.append((node.module, id(node) in lazy))
+        elif isinstance(node, ast.ImportFrom):
+            base: str = ".".join(package[: len(package) - node.level + 1] + [node.module or ""]).strip(".") if node.level else node.module or ""
+            found += [(f"{base}.{a.name}" if module_file(f"{base}.{a.name}") else base, id(node) in lazy) for a in node.names]
     return found
 
 
@@ -66,23 +81,41 @@ def test_dagkit_imports_only_its_allowlist() -> None:
     assert not problems, "dagkit must stay a torch-free leaf:\n" + "\n".join(problems)
 
 
+def import_problems(path: Path, source: str, module: str | None = None) -> list[str]:
+    """Imports of one file (layer `source`) that point up, or into an enforced module no rule classifies."""
+    problems: list[str] = []
+    for target_module, _ in imports(path, module):
+        target_file: Path | None = module_file(target_module)
+        root_init: bool = target_file is not None and target_file.parent.name == target_module.split(".")[0] and target_file.name == "__init__.py"
+        if target_module.split(".")[0] == "dagkit":
+            allowed: list[str] = CONFIG["allowed"][source]
+            ok: bool = "dagkit" in allowed or any(target_module.startswith(c) for c in allowed if c.startswith("dagkit."))
+        elif target_file is not None and (target := layer_of(target_file)) is not None:
+            ok = target in CONFIG["allowed"][source]
+        else:  # third-party, the package root, or a workspace module outside the layer homes (unless its package is enforced)
+            ok = target_file is None or root_init or target_module.split(".")[0] not in CONFIG["enforced"]
+        if not ok:
+            problems.append(f"{path} ({source}) imports {target_module}")
+    return problems
+
+
+def test_relative_and_from_imports_resolve_to_modules(tmp_path: Path) -> None:
+    probe: Path = tmp_path / "probe.py"
+    probe.write_text("from ..apis import refine\nfrom exo_calib import apis\nfrom . import cameras\n")
+    found: list[str] = [module for module, _ in imports(probe, "exo_calib.ops.probe")]
+    assert found == ["exo_calib.apis.refine", "exo_calib.apis", "exo_calib.ops"]
+    assert import_problems(probe, "Op", "exo_calib.ops.probe") == [f"{probe} (Op) imports exo_calib.apis.refine", f"{probe} (Op) imports exo_calib.apis"]
+
+
 @pytest.mark.parametrize("package", CONFIG["enforced"])
 def test_enforced_package_imports_point_down(package: str) -> None:
     problems: list[str] = []
     for path in sorted((ROOTS[package] / package).rglob("*.py")) + sorted((ROOTS[package] / "tools").rglob("*.py")):
-        if path.name == "__init__.py":
-            continue
+        if path.parent == ROOTS[package] / package and path.name == "__init__.py":
+            continue  # the package root holds only the beartype hook
         source: str | None = layer_of(path)
         if source is None:
             problems.append(f"{path.relative_to(REPO_ROOT)}: matches no layer rule")
-            continue
-        for module, _ in imports(path):
-            if module.split(".")[0] == "dagkit":
-                ok = "dagkit" in CONFIG["allowed"][source] or any(module.startswith(c) for c in CONFIG["allowed"][source] if c.startswith("dagkit."))
-            elif (target_file := module_file(module)) is not None and (target := layer_of(target_file)) is not None:
-                ok = target in CONFIG["allowed"][source]
-            else:
-                continue  # third-party, or a workspace module outside the layer homes
-            if not ok:
-                problems.append(f"{path.relative_to(REPO_ROOT)} ({source}) imports {module}")
+        else:
+            problems += import_problems(path, source, module_name(path) if path.is_relative_to(ROOTS[package] / package) else "tools.x")
     assert not problems, "imports that point up:\n" + "\n".join(problems)

@@ -1,6 +1,6 @@
 """Profiles (hand-written TOML, coerced, strict) and the generated gradio app."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -90,3 +90,35 @@ def test_gradio_app_builds_a_form_from_config_fields() -> None:
     for expected in ("segment.dataset", "segment.segment", "image", "frames", "scale", "name", "runner", "mode", "output_ply"):
         assert expected in labels, expected
     assert "rr_config" not in labels
+
+
+def test_a_preset_can_put_a_process_node_back_on_a_thread(tmp_path: Path) -> None:
+    (tmp_path / "x86_64-cuda.toml").write_text('hardware = "x86_64-cuda"\n[nodes.fit]\nplacement = "process"\n[presets.debug.fit]\nplacement = "thread"\ncpus = []\n')
+    profile: Profile = load_profile(tmp_path, "x86_64-cuda")
+    assert profile.node("fit").placement == "process" and profile.node("fit", "debug") == NodeProfile("thread", [], {})
+
+
+@dataclass
+class FormConfig:
+    rr_config: Inner = field(default_factory=Inner)
+    segment: SegmentRef | None = None
+    frames: int = 10
+    label: str = field(default_factory=lambda: "factory value")
+    runner: Literal["sequential", "threaded"] = "threaded"
+    mode: Mode = "lossless"
+
+
+def test_generated_run_keeps_defaults_none_segments_and_a_headless_viewer_config() -> None:
+    built: list[FormConfig] = []
+
+    def build(config: FormConfig, recording: rr.RecordingStream) -> Graph:
+        built.append(config)
+        return Graph("empty")
+
+    demo = gradio_app(FormConfig, build, title="Form")
+    run = next(f.fn for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
+    # widget order: segment.dataset, segment.segment, frames, label, runner, mode
+    list(run("", "", 10, None, "threaded", "lossless"))
+    list(run("ds", "seg", 10, "typed", "threaded", "lossless"))
+    assert built[0].segment is None and built[0].label == "factory value" and built[0].rr_config.headless
+    assert built[1].segment == SegmentRef("ds", "seg") and built[1].label == "typed"

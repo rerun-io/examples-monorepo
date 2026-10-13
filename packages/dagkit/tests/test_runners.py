@@ -11,9 +11,9 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dagkit.graph import AsOf, Block, DropOldest, Graph, Placement, Spawn
-from dagkit.node import Control, RunContext, Tick
+from dagkit.node import Control, Event, RunContext, Tick
 from dagkit.runners import RunReport, run_segments, run_sequential, run_threaded
-from dagkit.sources import SegmentRef
+from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import collect_edges
 from dagkit.time import GraphError
 
@@ -331,3 +331,211 @@ def test_run_segments_runs_one_lossless_graph_per_segment() -> None:
     reports: list[RunReport] = run_segments(build, [SegmentRef("ds", "a"), SegmentRef("ds", "bb")], runner="sequential")
     assert [r.graph for r in reports] == ["layer-a", "layer-bb"] and {r.mode for r in reports} == {"lossless"}
     assert sinks["bb"].items == [("x", t, 2) for t in range(3)]
+
+
+# ── regressions from the 02-leaf thermo review ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_no_sibling_flushes_after_a_failure(runner: str) -> None:
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            if tick.t_ns == 3:
+                raise KeyError("boom")
+            super().step(tick, out)
+
+    class Slow(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            time.sleep(0.2 if tick.t_ns == 3 else 0.0)
+            super().step(tick, out)
+
+    slow = Slow(0)
+    graph = Graph("fail-sibling")
+    src = graph.source("src", source([(t, "x", t) for t in range(6)]))
+    for name, node in (("boom", Boom(0)), ("slow", slow)):
+        ref = graph.node(name, node)
+        graph.edge(src["x"], ref["x"], Block(8))
+        graph.edge(ref["y"], graph.sink(f"{name}_sink", Collect(("y",)))["y"])
+    with pytest.raises(KeyError, match="boom"):
+        RUNNERS[runner](graph)
+    assert slow.flushes == 0
+
+
+class Recorded(Add):
+    """Join that records (t, world, asof) per tick."""
+
+    def __init__(self) -> None:
+        super().__init__(0, with_asof=True)
+        self.seen: list[tuple[int, int, object]] = []
+
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        self.seen.append((tick.t_ns, self.world, tick.asof["a"]))
+        super().step(tick, out)
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_reset_finishes_pending_ticks_in_the_old_world(runner: str) -> None:
+    control = Control()
+
+    def events():  # noqa: ANN202
+        for t in range(1, 6):
+            yield Event(t, "x", t)
+            if t == 1:
+                control.reset()
+                time.sleep(0.3)  # threaded: the coordinator pauses this source before its next event
+
+    join = Recorded()
+    graph = Graph("reset-diamond")
+    src = graph.source("src", IterSource({"x": int}, events))
+    late, ref = graph.node("late", Batch(size=10_000)), graph.node("join", join)
+    graph.edge(src["x"], late["x"], Block(1))
+    graph.edge(src["x"], ref["x"], Block(1))
+    graph.edge(late["y"], ref["a"], AsOf())
+    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"], Block(1))
+    RUNNERS[runner](graph, control=control)
+    assert join.seen[0] == (1, 0, 10)
+    assert all(asof == 10 * t for t, _, asof in join.seen) and join.seen[-1][1] == 1
+
+
+def test_sinks_and_segment_nodes_cannot_be_reset() -> None:
+    control = Control()
+    sink = Collect(("x",), on_step=lambda tick: control.reset(["sink"]) if tick.t_ns == 1 else None)
+    graph = Graph("reset-sink")
+    graph.edge(graph.source("src", source([(t, "x", t) for t in range(4)]))["x"], graph.sink("sink", sink)["x"])
+    with pytest.raises(GraphError, match="plain nodes"):
+        run_sequential(graph, control=control)
+
+
+class SlowAdd(Add):
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        time.sleep(0.3)
+        super().step(tick, out)
+
+
+def test_multi_producer_sink_keeps_asof_history_for_the_slow_producer() -> None:
+    def build() -> tuple[Graph, list[tuple[str, int, object]]]:
+        seen: list[tuple[str, int, object]] = []
+        graph = Graph("retention")
+        src = graph.source("src", source([(1, "a", 1), (10, "x", 10), (50, "a", 50), (100, "y", 100)], ports=("a", "x", "y")))
+        slow, fast = graph.node("slow", SlowAdd(0)), graph.node("fast", Add(0))
+        sink = graph.sink("sink", Collect(("p", "q", "a"), on_step=lambda tick: seen.append((tick.port, tick.t_ns, tick.asof["a"]))))
+        graph.edge(src["x"], slow["x"])
+        graph.edge(src["y"], fast["x"])
+        graph.edge(slow["y"], sink["p"])
+        graph.edge(fast["y"], sink["q"])
+        graph.edge(src["a"], sink["a"], AsOf())
+        return graph, seen
+
+    sequential, seen_sequential = build()
+    threaded, seen_threaded = build()
+    run_sequential(sequential)
+    run_threaded(threaded, mode="lossless")
+    assert sorted(seen_threaded) == sorted(seen_sequential) == [("p", 10, 1), ("q", 100, 50)]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_several_trigger_ports_deliver_in_time_then_declaration_order(runner: str) -> None:
+    class Swap(Add):
+        outputs = {"a": int, "b": int}
+
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            out.put("b", tick.t_ns, 2 * tick.t_ns)  # puts b before a at the same time
+            out.put("a", tick.t_ns, tick.t_ns)
+
+    order: list[tuple[str, int]] = []
+    graph = Graph("order")
+    swap = graph.node("swap", Swap(0))
+    consumer = graph.node("pair", Typed2(order))
+    graph.edge(graph.source("src", source([(t, "x", t) for t in range(1, 4)]))["x"], swap["x"])
+    graph.edge(swap["a"], consumer["a"], Block(1))
+    graph.edge(swap["b"], consumer["b"], Block(1))
+    RUNNERS[runner](graph)
+    assert order == [(port, t) for t in range(1, 4) for port in ("a", "b")]
+
+
+class Typed2:
+    """Two trigger ports a, b from one producer; records delivery order."""
+
+    inputs = {"a": int, "b": int}
+    outputs: dict[str, type] = {}
+
+    def __init__(self, order: list[tuple[str, int]]) -> None:
+        self.order = order
+
+    def reset(self, ctx: RunContext) -> None:
+        pass
+
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        self.order.append((tick.port, tick.t_ns))
+
+    def flush(self, out) -> None:  # noqa: ANN001
+        pass
+
+
+def test_stream_span_uses_min_and_max_source_time() -> None:
+    graph = Graph("span")
+    sink = graph.sink("sink", Collect(("x", "y")))
+    graph.edge(graph.source("late", source([(100, "x", 0)]))["x"], sink["x"])
+    graph.edge(graph.source("early", source([(10, "y", 0)], ports=("y",)))["y"], sink["y"])
+    for report in (run_sequential(graph), run_threaded(graph, mode="lossless")):
+        assert report.stream_s == pytest.approx(90e-9)
+
+
+class Closing:
+    def __init__(self, log: list[str], name: str, fail: bool = False) -> None:
+        self.log, self.name, self.fail = log, name, fail
+
+    def close(self) -> None:
+        self.log.append(self.name)
+        if self.fail:
+            raise RuntimeError(f"{self.name} close failed")
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_startup_failure_closes_resources_built_so_far(runner: str) -> None:
+    log: list[str] = []
+    graph = Graph("startup")
+    graph.resource("first", lambda: Closing(log, "first"))
+    graph.resource("second", lambda: (_ for _ in ()).throw(OSError("no device")))
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], graph.sink("sink", Collect(("x",)))["x"])
+    with pytest.raises(OSError, match="no device"):
+        RUNNERS[runner](graph)
+    assert log == ["first"]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_cleanup_errors_never_replace_the_original_failure(runner: str) -> None:
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            raise KeyError("original failure")
+
+    log: list[str] = []
+    graph = Graph("cleanup")
+    graph.resource("bad", lambda: Closing(log, "bad", fail=True))
+    graph.resource("good", lambda: Closing(log, "good"))
+    node = graph.node("boom", Boom(0))
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",)))["y"])
+    with pytest.raises(KeyError, match="original failure") as info:
+        RUNNERS[runner](graph)
+    assert log == ["good", "bad"] and any("bad close failed" in n for n in getattr(info.value, "__notes__", []))
+
+
+def test_process_node_with_an_unpicklable_resource_fails_instead_of_hanging() -> None:
+    graph = Graph("unpicklable")
+    graph.resource("lock", threading.Lock)
+    node = graph.node("sq", Spawn(Square, 0), placement=Placement("process"), needs=["lock"])
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",)))["y"])
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            run_threaded(graph, mode="lossless")
+        except Exception as exc:  # recorded for the assertion below; BeartypeException would surface as a different type
+            errors.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(30.0)
+    assert not worker.is_alive() and errors and "pickle" in repr(errors[0]).lower()

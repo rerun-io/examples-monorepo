@@ -93,6 +93,8 @@ class _State:
     def put(self, port: str, t_ns: TimeNs, value: object) -> None:
         run: _Run = self.run
         with run.cond:
+            if run.failure is not None:
+                raise _Abort  # another worker failed: no more outputs
             if port not in self.outs:
                 raise GraphError(f"{self.spec.name}: no output port {port!r}")
             if DEV_MODE:
@@ -142,8 +144,7 @@ class _Run:
         self.failure: BaseException | None = None
         self.running = self.paused = False
         self.seq = self.world = 0
-        self.first_t: TimeNs | None = None
-        self.last_t: TimeNs = 0
+        self.span: list[TimeNs] = []  # [first, last] non-STATIC source time
         self.params: dict[str, dict[str, object]] = {}
         self.resources: dict[str, object] = {}
         self.threads: list[threading.Thread] = []
@@ -179,9 +180,19 @@ class _Run:
             raise _Abort
 
     def _ready(self, s: _State, t_ns: TimeNs) -> bool:
+        if s.spec.kind == "node" and len(s.triggers) > 1 and self.states[s.triggers[0].spec.src.node].wm < t_ns:
+            return False  # several trigger ports (one producer): wait until nothing earlier can still arrive
         return self.mode == "realtime" or s.spec.kind == "segment" or all(self.states[e.spec.src.node].wm >= t_ns for e in s.asofs)
 
     def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
+        if s.spec.kind == "node" and len(s.triggers) > 1 and any(e.queue for e in s.triggers):  # order by (t_ns, port declaration)
+            rank: list[str] = list(s.spec.inputs)
+            s.pending.extend((e, t, v) for e in s.triggers for _, t, v in e.queue)
+            for e in s.triggers:
+                e.queue.clear()
+            s.pending = deque(sorted(s.pending, key=lambda p: (p[1], rank.index(p[0].spec.dst.port))))
+            s.pending_max = max(s.pending_max, len(s.pending))
+            self.cond.notify_all()
         while True:
             if s.pending and self._ready(s, s.pending[0][1]):
                 return s.pending.popleft()
@@ -228,7 +239,8 @@ class _Run:
             while self.threaded and waits and any(self.states[e.spec.src.node].wm < t_ns for e in s.asofs) and time.monotonic() < deadline:
                 self.wait(deadline - time.monotonic())
             raw_asof: list[tuple[_Edge, object | None]] = []
-            low: TimeNs = min([t_ns, *(p[1] for p in s.pending), *(e.queue[0][1] for e in s.triggers if e.queue)])
+            queued: list[TimeNs] = [p[1] for p in s.pending] + [e.queue[0][1] for e in s.triggers if e.queue]
+            low: TimeNs = min([t_ns, *queued, *(self.states[e.spec.src.node].wm + 1 for e in s.triggers)])  # earliest tick still to come
             for e in s.asofs:
                 found: int = bisect.bisect_right(e.history, t_ns, key=lambda h: h[0])
                 raw_asof.append((e, e.history[found - 1][1] if found else None))
@@ -258,8 +270,8 @@ class _Run:
     def _reset(self, s: _State) -> None:
         resources: dict[str, object] = {need: self.resources[need] for need in s.spec.needs}
         params: dict[str, object] = dict(self.params.get(s.spec.name, {}))
+        s.started = True  # a reset that fails half way still gets abort()
         s.obj.reset(RunContext(self.graph.name, s.spec.name, self.mode, resources, params, self.world, dict(s.statics), self.control))  # type: ignore[attr-defined]
-        s.started = True
 
     def _start_source(self, s: _State) -> Iterator[Event]:
         events: Iterator[Event] = iter(s.obj.events())  # type: ignore[attr-defined]
@@ -274,8 +286,7 @@ class _Run:
     def _emit(self, s: _State, event: Event) -> None:
         with self.cond:
             s.wm, s.ticks = max(s.wm, event.t_ns - 1), s.ticks + 1
-            self.first_t = event.t_ns if self.first_t is None else self.first_t
-            self.last_t = event.t_ns
+            self.span = [min(self.span[0], event.t_ns), max(self.span[1], event.t_ns)] if self.span else [event.t_ns, event.t_ns]
         s.put(event.port, event.t_ns, event.value)
 
     def _barrier(self, settle: Callable[[], None]) -> None:
@@ -285,13 +296,17 @@ class _Run:
             self.paused = True
             settle()
             for targets, params, bump in requests:
+                names: set[str] = set(targets) or {s.spec.name for s in self.nodes if s.spec.kind == "node"}
+                if bad := sorted(n for n in names if getattr(self.graph.nodes.get(n), "kind", None) != "node"):
+                    raise GraphError(f"reset/reconfigure targets must be plain nodes (not sources, sinks, SegmentNodes): {bad}")
                 self.world += bump
-                for s in self.nodes:
-                    if s.done or (s.spec.name not in targets if targets else s.spec.kind == "sink"):
-                        continue
-                    if s.spec.kind != "segment":
-                        s.obj.flush(s)  # type: ignore[attr-defined]
-                        settle()
+                targets_alive: list[_State] = [s for s in self.nodes if s.spec.name in names and not s.done]
+                for s in targets_alive:  # the old epoch ends: held ticks run in the OLD world, upstream first, then flush
+                    while s.pending:
+                        self._deliver(s, s.pending.popleft())
+                    s.obj.flush(s)  # type: ignore[attr-defined]
+                    settle()
+                for s in targets_alive:
                     self.params.setdefault(s.spec.name, {}).update(params.get(s.spec.name, {}))
                     for edge in (e for e in itertools.chain.from_iterable(s.outs.values()) if isinstance(e.spec.kind, AsOf)):
                         edge.history.clear()
@@ -357,6 +372,8 @@ class _Run:
                     self.quiet.notify_all()
                     self.wait()
                 s.idle = False
+                if self.failure is not None:
+                    raise _Abort  # never step or flush after a failure
             if item is None:
                 self._finish(s)
             else:
@@ -417,7 +434,8 @@ class _Run:
         self.health: rr.RecordingStream | None = health
         self.health_every_s: float = every_s
         try:
-            self.resources = {name: factory() for name, factory in self.graph.resources.items()}
+            for name, factory in self.graph.resources.items():
+                self.resources[name] = factory()
             streams: list[Iterator[Event]] = [self._start_source(s) for s in self.sources]
             for s in self.nodes:
                 self._reset(s)
@@ -426,17 +444,16 @@ class _Run:
         except BaseException as exc:
             self.fail(exc)
             first: BaseException = self.failure or exc
-            for s in (s for s in self.nodes if s.started and hasattr(s.obj, "abort")):
-                try:
-                    s.obj.abort()  # type: ignore[attr-defined]
-                except BaseException as abort_exc:  # keep the first failure; the cleanup error rides along as a note
-                    getattr(first, "add_note", print)(f"{s.spec.name}.abort() failed: {abort_exc!r}")
+            note: Callable[[str], object] = getattr(first, "add_note", print)  # cleanup errors ride along; the first failure is raised
+            for s in (s for s in self.nodes if (s.started or s.spec.kind == "sink") and hasattr(s.obj, "abort")):
+                self._quietly(s.obj.abort, note)  # type: ignore[attr-defined]
             deadline: float = time.monotonic() + 10.0
             for thread in self.threads:
                 thread.join(max(deadline - time.monotonic(), 0.0))
             if stuck := [t.name for t in self.threads if t.is_alive()]:
-                raise GraphError(f"threads {stuck} did not stop; resources leaked") from first
-            self._close_resources()
+                note(f"threads {stuck} did not stop; resources leaked")
+            else:
+                self._close_resources(note)
             raise first from None
         self._close_resources()
         self._health(force=True)
@@ -446,14 +463,20 @@ class _Run:
             ms: list[float] = sorted(s.step_ms) or [0.0]
             ports: dict[str, PortStats] = {e.spec.dst.port: PortStats(e.depth_max, e.drops, s.pending_max) for e in s.triggers}
             nodes[name] = NodeStats(s.ticks, float(np.mean(ms)), ms[int(0.95 * (len(ms) - 1))], ports)
-        stream_s: float = (self.last_t - self.first_t) / 1e9 if self.first_t is not None else 0.0
+        stream_s: float = (self.span[1] - self.span[0]) / 1e9 if self.span else 0.0
         return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, stream_s, nodes)
 
-    def _close_resources(self) -> None:
+    def _close_resources(self, note: Callable[[str], object] | None = None) -> None:
         owned: list[object] = [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
-        for closeable in owned + list(reversed(self.resources.values())):
-            if (close := getattr(closeable, "close", None)) is not None:
-                close()
+        for close in (c for o in owned + list(reversed(self.resources.values())) if (c := getattr(o, "close", None)) is not None):
+            close() if note is None else self._quietly(close, note)
+
+    @staticmethod
+    def _quietly(call: Callable[[], object], note: Callable[[str], object]) -> None:
+        try:
+            call()
+        except BaseException as exc:  # failure path only: reported as a note on the first failure, which is re-raised
+            note(f"{getattr(call, '__qualname__', call)} failed during cleanup: {exc!r}")
 
 
 def run_sequential(graph: Graph, *, mode: Mode = "lossless", control: Control | None = None, health: rr.RecordingStream | None = None) -> RunReport:

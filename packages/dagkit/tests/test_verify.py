@@ -2,11 +2,13 @@
 
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from dagkit import verify
 from dagkit.verify import Case, GraphBlock, MetricBand, case_noise, check_band, golden_path, load_card
 
 CARD = """
@@ -67,7 +69,9 @@ def test_band_tolerance_is_twice_noise_or_floor() -> None:
     (1.0, None, {"ate": 0.1}, "missing metric"),
     (math.nan, 1.0, {"ate": 0.1}, "non-finite"),
     (1.0, math.inf, {"ate": 0.1}, "non-finite"),
-    (1.0, 1.0, {}, "no measured noise"),
+    (1.0, 1.0, {}, "no finite, non-negative measured noise"),
+    (1.0, 1e99, {"ate": math.inf}, "no finite, non-negative measured noise"),
+    (1.0, 1.0, {"ate": -0.1}, "no finite, non-negative measured noise"),
 ])  # fmt: skip
 def test_band_fails_closed(pre: float | None, post: float | None, noise: dict[str, float], reason: str) -> None:
     result = check_band(LOWER, pre, post, noise)
@@ -90,3 +94,59 @@ def test_golden_path_needs_the_goldens_root(monkeypatch: pytest.MonkeyPatch, tmp
 def test_case_without_noise_or_source_has_none() -> None:
     case = Case("c", "short", "gt")
     assert case_noise(GraphBlock("b", "m:r", "m:s", [case], [LOWER]), case) == {}
+
+
+SHORT_CARD = """
+package = "dagkit"
+
+[[graph]]
+name = "fake"
+run = "dagkit_fakes:verify_run"
+score = "dagkit_fakes:verify_score"
+metrics = [{ name = "ate", unit = "m", better = "lower", floor = 0.1 }]
+
+[[graph.cases]]
+name = "short"
+clip = "short"
+reference = "pre-port"
+dataset = "ds"
+segment = "seg0"
+noise = { ate = 0.01 }
+"""
+
+
+@pytest.fixture
+def card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("DAGKIT_GOLDENS", str(tmp_path / "goldens"))
+    monkeypatch.setattr(verify.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="abc1234\n"))
+    (tmp_path / "VERIFY.toml").write_text(SHORT_CARD)
+    return tmp_path / "VERIFY.toml"
+
+
+def test_post_fails_closed_without_pre2_and_passes_with_it(card: Path) -> None:
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 0
+    assert verify.main(verify.VerifyArgs(card, "post")) == 1  # no pre2 golden: no noise evidence
+    assert verify.main(verify.VerifyArgs(card, "pre2")) == 0
+    assert verify.main(verify.VerifyArgs(card, "post")) == 0
+
+
+def test_an_empty_selection_fails(card: Path) -> None:
+    assert verify.main(verify.VerifyArgs(card, "pre", block="typo")) == 1
+    assert verify.main(verify.VerifyArgs(card, "pre", clip="full")) == 1
+
+
+def test_register_publishes_an_immutable_copy(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registered: list[tuple[list[str], str]] = []
+
+    class FakeDataset:
+        def register(self, uris: list[str], layer_name: str) -> SimpleNamespace:
+            registered.append((uris, layer_name))
+            return SimpleNamespace(wait=lambda: None)
+
+    monkeypatch.setattr(verify.SegmentRef, "entry", lambda self: FakeDataset())
+    assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
+    assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
+    uris: list[str] = [uris[0] for uris, _ in registered]
+    golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
+    assert len(set(uris)) == 2 and golden.as_uri() not in uris and {name for _, name in registered} == {"verify-fake-pre-abc1234"}
+    assert all(Path(uri.removeprefix("file://")).exists() for uri in uris)

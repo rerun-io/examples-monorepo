@@ -153,3 +153,13 @@ class Point:
         labels: list = table[f"{root}/point:Points3D:labels"].to_pylist()
         for t_ns, xyz, label in zip(row_times(table, timeline), positions, labels, strict=True):
             yield t_ns, cls((float(xyz[0][0]), float(xyz[0][1]), float(xyz[0][2])), label[0])
+
+
+def verify_run(case: object, phase: str, recording: rr.RecordingStream) -> None:
+    """Fake `pkg.verify:run` for dagkit.verify tests: logs one point."""
+    recording.log("/out", rr.Points3D([[0.0, 0.0, 0.0]]), static=True)
+
+
+def verify_score(case: object, golden: object) -> dict[str, float]:
+    """Fake `pkg.verify:score`: a constant metric."""
+    return {"ate": 1.0}

@@ -2,7 +2,7 @@
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a94a6"/></marker></defs>
 <rect width="1100" height="752" fill="#ffffff"/>
 <text x="20" y="34" font-size="20" font-weight="700" fill="#1d2433">dagkit module map</text>
-<text x="245" y="34" font-size="13" fill="#5b6475">arrows = imports (down or sideways, never up; all import time.py); numbers = lines; 1954 non-test lines, budget 1,800</text>
+<text x="245" y="34" font-size="13" fill="#5b6475">arrows = imports (down or sideways, never up; all import time.py); numbers = lines; 1791 non-test lines (with the 6-line tools shim), budget 1,800</text>
 <text x="20" y="106" font-size="13" font-weight="600" fill="#5b6475">App / entry</text>
 <text x="20" y="218" font-size="13" font-weight="600" fill="#5b6475">Runners</text>
 <text x="20" y="330" font-size="13" font-weight="600" fill="#5b6475">Graph</text>
@@ -39,50 +39,50 @@
 <path d="M291,132 C291,269 442,269 442,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
 <rect x="196" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="208" y="94" font-size="15" font-weight="700" fill="#1d2433">synthetic_demo.py</text>
-<text x="376" y="94" font-size="12" text-anchor="end" fill="#5b6475">122</text>
+<text x="376" y="94" font-size="12" text-anchor="end" fill="#5b6475">116</text>
 <text x="208" y="116" font-size="11.5" fill="#3b4252">apis demo: helix graph</text>
 <rect x="422" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="434" y="94" font-size="15" font-weight="700" fill="#1d2433">app.py</text>
-<text x="602" y="94" font-size="12" text-anchor="end" fill="#5b6475">206</text>
+<text x="602" y="94" font-size="12" text-anchor="end" fill="#5b6475">194</text>
 <text x="434" y="116" font-size="11.5" fill="#3b4252">profiles, run_app, gradio_app</text>
 <rect x="648" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="660" y="94" font-size="15" font-weight="700" fill="#1d2433">verify.py</text>
-<text x="828" y="94" font-size="12" text-anchor="end" fill="#5b6475">180</text>
+<text x="828" y="94" font-size="12" text-anchor="end" fill="#5b6475">183</text>
 <text x="660" y="116" font-size="11.5" fill="#3b4252">VERIFY.toml, bands, CLI</text>
 <rect x="874" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="886" y="94" font-size="15" font-weight="700" fill="#1d2433">testing.py</text>
-<text x="1054" y="94" font-size="12" text-anchor="end" fill="#5b6475">82</text>
+<text x="1054" y="94" font-size="12" text-anchor="end" fill="#5b6475">70</text>
 <text x="886" y="116" font-size="11.5" fill="#3b4252">node contract, spy runs</text>
 <rect x="347" y="182" width="190" height="62" rx="9" fill="#d9e8fb" stroke="#7b8494" stroke-width="1.2"/>
 <text x="359" y="206" font-size="15" font-weight="700" fill="#1d2433">runners.py</text>
-<text x="527" y="206" font-size="12" text-anchor="end" fill="#5b6475">519</text>
+<text x="527" y="206" font-size="12" text-anchor="end" fill="#5b6475">498</text>
 <text x="359" y="228" font-size="11.5" fill="#3b4252">sequential + threaded engine</text>
 <rect x="723" y="182" width="190" height="62" rx="9" fill="#d9e8fb" stroke="#7b8494" stroke-width="1.2"/>
 <text x="735" y="206" font-size="15" font-weight="700" fill="#1d2433">process.py</text>
-<text x="903" y="206" font-size="12" text-anchor="end" fill="#5b6475">103</text>
+<text x="903" y="206" font-size="12" text-anchor="end" fill="#5b6475">93</text>
 <text x="735" y="228" font-size="11.5" fill="#3b4252">Spawn proxy (child process)</text>
 <rect x="535" y="294" width="190" height="62" rx="9" fill="#dff3e3" stroke="#7b8494" stroke-width="1.2"/>
 <text x="547" y="318" font-size="15" font-weight="700" fill="#1d2433">graph.py</text>
-<text x="715" y="318" font-size="12" text-anchor="end" fill="#5b6475">208</text>
+<text x="715" y="318" font-size="12" text-anchor="end" fill="#5b6475">182</text>
 <text x="547" y="340" font-size="11.5" fill="#3b4252">ports, Placement, validate</text>
 <rect x="347" y="406" width="190" height="62" rx="9" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="359" y="430" font-size="15" font-weight="700" fill="#1d2433">sources.py</text>
-<text x="527" y="430" font-size="12" text-anchor="end" fill="#5b6475">108</text>
+<text x="527" y="430" font-size="12" text-anchor="end" fill="#5b6475">92</text>
 <text x="359" y="452" font-size="11.5" fill="#3b4252">SegmentRef, Column, IterSource</text>
 <rect x="723" y="406" width="190" height="62" rx="9" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="735" y="430" font-size="15" font-weight="700" fill="#1d2433">sinks.py</text>
-<text x="903" y="430" font-size="12" text-anchor="end" fill="#5b6475">154</text>
+<text x="903" y="430" font-size="12" text-anchor="end" fill="#5b6475">134</text>
 <text x="735" y="452" font-size="11.5" fill="#3b4252">RerunSink, LayerSink, publish</text>
 <rect x="347" y="518" width="190" height="62" rx="9" fill="#f3f3f3" stroke="#7b8494" stroke-width="1.2"/>
 <text x="359" y="542" font-size="15" font-weight="700" fill="#1d2433">node.py</text>
-<text x="527" y="542" font-size="12" text-anchor="end" fill="#5b6475">149</text>
+<text x="527" y="542" font-size="12" text-anchor="end" fill="#5b6475">118</text>
 <text x="359" y="564" font-size="11.5" fill="#3b4252">Node, Tick, Emit, Control, Fenced</text>
 <rect x="723" y="518" width="190" height="62" rx="9" fill="#f3f3f3" stroke="#7b8494" stroke-width="1.2"/>
 <text x="735" y="542" font-size="15" font-weight="700" fill="#1d2433">types.py</text>
-<text x="903" y="542" font-size="12" text-anchor="end" fill="#5b6475">95</text>
+<text x="903" y="542" font-size="12" text-anchor="end" fill="#5b6475">83</text>
 <text x="735" y="564" font-size="11.5" fill="#3b4252">Type, Log, Producer, roundtrip</text>
 <rect x="535" y="630" width="190" height="62" rx="9" fill="#f3f3f3" stroke="#7b8494" stroke-width="1.2"/>
 <text x="547" y="654" font-size="15" font-weight="700" fill="#1d2433">time.py</text>
-<text x="715" y="654" font-size="12" text-anchor="end" fill="#5b6475">20</text>
+<text x="715" y="654" font-size="12" text-anchor="end" fill="#5b6475">16</text>
 <text x="547" y="676" font-size="11.5" fill="#3b4252">TimeNs, STATIC, GraphError</text>
 </svg>
