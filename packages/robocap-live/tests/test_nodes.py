@@ -14,6 +14,8 @@ from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, collect_edges
 from dagkit.time import STATIC
 from dagkit.types import LayerFile
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from simplecv.types.frames import LumaFrameset
@@ -83,6 +85,27 @@ def test_flush_finishes_the_layer_once_and_emits_its_file_and_counts_at_the_last
     assert (layer_port, run_port) == ("layer", "run") and t_layer == t_run == T0 + 3 * STEP
     assert isinstance(layer, LayerFile) and layer.path.is_file() and layer.path.parent == tmp_path / SEGMENT.segment
     assert isinstance(run, LayerRun) and (run.framesets, run.with_pose, run.held_pose) == (4, 3, 1)
+
+
+@settings(max_examples=8, deadline=None)
+@given(offsets_us=st.lists(st.one_of(st.none(), st.integers(-1_900, 1_900), st.integers(2_100, 4_000)), min_size=1, max_size=5))
+def test_each_frameset_takes_the_pose_within_2_ms_else_the_newest_earlier_one(
+    tmp_path_factory: pytest.TempPathFactory, offsets_us: list[int | None]
+) -> None:
+    """``offsets_us[i]``: frameset i's pose sits that far from it (None: no pose). Within 2 ms it is the frameset's own, else held."""
+    tmp_path: Path = tmp_path_factory.mktemp("hands")
+    t_ns = np.asarray([T0 + i * STEP + 1_000 * o for i, o in enumerate(offsets_us) if o is not None], dtype=np.int64)
+    table = CatalogPoses(t_ns, np.tile(np.eye(4), (len(t_ns), 1, 1)))
+    hands, out = node(tmp_path), Recorder()
+    hands.reset(RunContext("hands-layer", "hands", "lossless", statics={"cap_rig": cap_rig(), "poses": table}))
+    for frames in framesets(len(offsets_us)):
+        hands.step(Tick(frames.t_ns, "frames", frames, {}), out)
+    hands.flush(out)
+    own: list[bool] = [o is not None and abs(o) <= 2_000 for o in offsets_us]
+    run = out.items[1][2]
+    assert isinstance(run, LayerRun) and run.framesets == len(offsets_us) and run.with_pose == sum(own)
+    assert run.held_pose == sum(not mine and any(own[:i]) for i, mine in enumerate(own))
+    assert [t for _, t, _ in out.items] == [T0 + (len(offsets_us) - 1) * STEP] * 2
 
 
 def test_reset_aborts_the_running_core_and_builds_a_fresh_one(tmp_path: Path) -> None:

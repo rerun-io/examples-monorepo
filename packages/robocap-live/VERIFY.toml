@@ -90,6 +90,7 @@ lane = "unit"
 tests = ["tests/test_nodes.py", "tests/test_core.py"]
 properties = [
     "tests/test_nodes.py::test_flush_finishes_the_layer_once_and_emits_its_file_and_counts_at_the_last_frameset",
+    "tests/test_nodes.py::test_each_frameset_takes_the_pose_within_2_ms_else_the_newest_earlier_one",
     "tests/test_nodes.py::test_reset_aborts_the_running_core_and_builds_a_fresh_one",
     "tests/test_nodes.py::test_the_graph_validates_and_runs_the_same_ticks_sequential_and_threaded",
 ]
