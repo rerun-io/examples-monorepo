@@ -112,7 +112,8 @@ class TrackNode:
             self.sigma_px, self.max_dist_px = resolve_epipolar_px(width, height)
             self.states = self.masks.new_states(views, (height, width))
             self.lost, self.held, self.areas = [{} for _ in range(views)], [{} for _ in range(views)], [{} for _ in range(views)]
-        self.ticks_seen += self.last is not None
+        if self.last is not None:
+            self.ticks_seen += 1  # forward ticks since the bootstrap (track_stride counts them)
         if self.last is None:
             tracks: list[dict[int, Track]] = self._bootstrap(frames)
         elif self.ticks_seen % self.params.track_stride != 0:
