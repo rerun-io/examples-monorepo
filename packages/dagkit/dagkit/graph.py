@@ -1,5 +1,6 @@
 """Declared graphs: port kinds, port-type normalisation, placement and validation (SPEC §2.4)."""
 
+import graphlib
 import types
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -15,8 +16,7 @@ from dagkit.time import GraphError
 class Block:
     """Lossless edge: the producer blocks while the queue is full."""
 
-    capacity: int = 4
-    """Queue bound (ignored by the sequential runner)."""
+    capacity: int = 4  # ignored by the sequential runner
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,17 +24,14 @@ class DropOldest:
     """Realtime edge: when full, drop and count the oldest waiting item. Lossless mode turns it into Block."""
 
     capacity: int = 1
-    """Queue bound."""
 
 
 @dataclass(frozen=True, slots=True)
 class AsOf:
     """Join edge: the consumer reads the newest value at or before its tick time; it never triggers a step."""
 
-    wait_ns: int | None = None
-    """Realtime only: how long to wait for the producer watermark (None or 0: never). Lossless always waits."""
-    keep: int = 128
-    """Realtime only: history bound."""
+    wait_ns: int | None = None  # realtime only: how long to wait for the producer watermark (None or 0: never). Lossless always waits
+    keep: int = 128  # realtime only: history bound
 
 
 PortKind: TypeAlias = Block | DropOldest | AsOf
@@ -45,10 +42,8 @@ NodeKind: TypeAlias = Literal["source", "node", "segment", "sink"]
 class Placement:
     """Where the threaded runner runs a node."""
 
-    where: Literal["main", "thread", "process"] = "thread"
-    """`main` = the caller thread (at most one node), `process` needs a `Spawn` recipe."""
-    cpus: tuple[int, ...] | None = None
-    """CPU affinity of the node's thread (Linux)."""
+    where: Literal["main", "thread", "process"] = "thread"  # `main` = the caller thread (at most one node); `process` needs a `Spawn` recipe
+    cpus: tuple[int, ...] | None = None  # thread affinity (Linux)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +51,7 @@ class Spawn:
     """Picklable recipe for a process-placed node: the child builds `cls(config)`; ports are class attributes."""
 
     cls: type
-    """Node class (importable by module path)."""
     config: object
-    """Picklable constructor argument."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +59,7 @@ class PortRef:
     """One port of one node."""
 
     node: str
-    """Node name."""
     port: str
-    """Port name."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +67,6 @@ class NodeRef:
     """Handle returned by `Graph.source/node/sink`; `ref["port"]` names a port."""
 
     name: str
-    """Node name."""
 
     def __getitem__(self, port: str) -> PortRef:
         return PortRef(self.name, port)
@@ -94,13 +84,11 @@ class NodeSpec:
 
     @property
     def inputs(self) -> Mapping[str, PortType]:
-        owner: object = self.obj.cls if isinstance(self.obj, Spawn) else self.obj
-        return getattr(owner, "inputs", {})
+        return getattr(self.obj.cls if isinstance(self.obj, Spawn) else self.obj, "inputs", {})
 
     @property
     def outputs(self) -> Mapping[str, PortType]:
-        owner: object = self.obj.cls if isinstance(self.obj, Spawn) else self.obj
-        return getattr(owner, "outputs", {})
+        return getattr(self.obj.cls if isinstance(self.obj, Spawn) else self.obj, "outputs", {})
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,24 +156,13 @@ class Graph:
 
     def order(self) -> list[str]:
         """Topological order of node names; raises `GraphError` on a cycle."""
-        indegree: dict[str, int] = dict.fromkeys(self.nodes, 0)
-        successors: dict[str, list[str]] = {name: [] for name in self.nodes}
-        for edge in self.edges:
-            if edge.src.node in self.nodes and edge.dst.node in self.nodes:
-                indegree[edge.dst.node] += 1
-                successors[edge.src.node].append(edge.dst.node)
-        ready: list[str] = [name for name in self.nodes if indegree[name] == 0]
-        ordered: list[str] = []
-        while ready:
-            name: str = ready.pop(0)
-            ordered.append(name)
-            for successor in successors[name]:
-                indegree[successor] -= 1
-                if indegree[successor] == 0:
-                    ready.append(successor)
-        if len(ordered) != len(self.nodes):
-            raise GraphError(f"cycle through {sorted(set(self.nodes) - set(ordered))}")
-        return ordered
+        sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter({name: set() for name in self.nodes})
+        for edge in (e for e in self.edges if e.src.node in self.nodes and e.dst.node in self.nodes):
+            sorter.add(edge.dst.node, edge.src.node)
+        try:
+            return list(sorter.static_order())
+        except graphlib.CycleError as exc:
+            raise GraphError(f"cycle through {sorted(set(exc.args[1]))}") from exc
 
     def validate(self) -> None:
         """Raise `GraphError` listing EVERY problem of the declared graph."""

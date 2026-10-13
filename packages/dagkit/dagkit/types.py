@@ -19,12 +19,9 @@ from dagkit.time import STATIC, TimeNs
 class Log:
     """One entry of a Type's Rerun mapping."""
 
-    path: str
-    """Absolute entity path (root + suffix)."""
+    path: str  # absolute entity path (root + suffix)
     data: rr.AsComponents
-    """The archetype to log."""
     static: bool = False
-    """Log as static (whole-recording) data."""
 
 
 @runtime_checkable
@@ -32,16 +29,10 @@ class Type(Protocol):
     """Every edge value. Host Types are also `@serde` frozen dataclasses (jaxtyping arrays with explicit dtype)."""
 
     def to_rerun(self, root: str) -> Iterable[Log]: ...
-
     @classmethod
-    def contents(cls, root: str) -> list[str]:
-        """Entity filter for `from_layer` reads."""
-        ...
-
+    def contents(cls, root: str) -> list[str]: ...  # entity filter for `from_layer` reads
     @classmethod
-    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Type"]]:
-        """Read back exactly what `to_rerun` wrote (STATIC comes back as STATIC; see `row_times`)."""
-        ...
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Type"]]: ...  # exactly what to_rerun wrote
 
 
 T = TypeVar("T", bound=Type)
@@ -53,17 +44,11 @@ class Producer:
     """Who wrote a layer; logged as a STATIC entity, never as recording properties."""
 
     package: str
-    """Workspace package that ran the graph."""
-    version: str
-    """Package version + git sha7."""
+    version: str  # package version + git sha7
     graph: str
-    """Graph name."""
-    profile: str
-    """Hardware class / preset the run used."""
-    phase: str = "run"
-    """`run`, or a verify phase (`pre`, `pre2`, `post`)."""
-    params_sha: str = ""
-    """sha256[:12] of the resolved node params + SegmentRef window; resume compares it."""
+    profile: str  # hardware class / preset the run used
+    phase: str = "run"  # `run`, or a verify phase (`pre`, `pre2`, `post`)
+    params_sha: str = ""  # sha256[:12] of the resolved node params + SegmentRef window; resume compares it
 
 
 @serde(deny_unknown_fields=True)
@@ -72,7 +57,6 @@ class LayerFile:
     """A finished layer rrd written outside dagkit (e.g. by a Rust core)."""
 
     path: Path
-    """The finished file."""
 
 
 def log_producer(recording: rr.RecordingStream, layer: str, producer: Producer) -> None:

@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
 from dagkit.graph import Graph, Spawn
-from dagkit.node import Emit, Event, Node, PortType, RunContext, Tick
+from dagkit.node import Emit, Event, Node, RunContext, Tick
 from dagkit.time import TimeNs, check_monotonic
 
 Output = tuple[str, TimeNs, object]
@@ -53,24 +53,17 @@ def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | Non
 
 
 class _Spy:
-    """Forwards the node contract and records every tick (or segment input) the node receives."""
+    """Forwards everything to the node and records each tick (or segment input) it receives."""
 
     def __init__(self, node: object, seen: list[object]) -> None:
-        self.node: object = node
-        self.seen: list[object] = seen
-        self.inputs: Mapping[str, PortType] = getattr(node, "inputs", {})
-        self.outputs: Mapping[str, PortType] = getattr(node, "outputs", {})
-        self.emits_late: bool = getattr(node, "emits_late", False)
+        self.node, self.seen = node, seen
 
-    def reset(self, ctx: RunContext) -> None:
-        self.node.reset(ctx)  # type: ignore[attr-defined]
+    def __getattr__(self, name: str) -> object:  # inputs, outputs, emits_late, reset, flush, abort
+        return getattr(self.node, name)
 
     def step(self, tick: Tick, out: Emit) -> None:
         self.seen.append((tick.port, tick.t_ns, tick.value, dict(tick.asof)))
         self.node.step(tick, out)  # type: ignore[attr-defined]
-
-    def flush(self, out: Emit) -> None:
-        self.node.flush(out)  # type: ignore[attr-defined]
 
     def run(self, inputs: Mapping[str, Sequence[Event]], out: Emit) -> None:
         self.seen.append({port: list(events) for port, events in inputs.items()})

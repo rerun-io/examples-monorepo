@@ -60,7 +60,7 @@ class ProcessNode:
         self._outbox: Queue = context.Queue()
         self._process = context.Process(target=_child, args=(spawn, self._inbox, self._outbox), daemon=True)
 
-    def _call(self, op: str, arg: object, out: Emit | None = None) -> None:
+    def _call(self, op: str, arg: object, out: Emit) -> None:
         if self._process.exitcode is None and not self._process.is_alive():
             self._process.start()
         self._inbox.put((op, arg))
@@ -76,13 +76,10 @@ class ProcessNode:
             getattr(exc, "add_note", print)(f"raised in the child process during {op}:\n{text}")
             raise exc
         for kind, port, t_ns, value in payload:
-            if out is not None and kind == "put":
-                out.put(port, t_ns, value)
-            elif out is not None:
-                out.watermark(t_ns)
+            out.put(port, t_ns, value) if kind == "put" else out.watermark(t_ns)
 
     def reset(self, ctx: RunContext) -> None:
-        self._call("reset", replace(ctx, control=None))
+        self._call("reset", replace(ctx, control=None), _Collect())
 
     def step(self, tick: Tick, out: Emit) -> None:
         self._call("step", tick, out)

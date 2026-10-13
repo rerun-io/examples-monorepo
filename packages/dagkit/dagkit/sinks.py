@@ -90,28 +90,32 @@ class RerunSink:
         self.recording.flush()
 
 
-class LayerSink(RerunSink):
+class _Publisher:
+    """Shared by the layer sinks: publish once at flush, as `.stopped` when the run was stopped."""
+
+    def __init__(self, segment: SegmentRef, layer: str, output_dir: Path, register: Register) -> None:
+        _check_new(segment, layer, register)
+        self.segment, self.layer, self.output_dir, self.register = segment, layer, output_dir, register
+        self.published: Path | None = None
+        self._ctx: RunContext | None = None
+
+    def reset(self, ctx: RunContext) -> None:
+        self._ctx = ctx
+
+    def _publish(self, path: Path) -> None:
+        stopped: bool = self._ctx is not None and self._ctx.control is not None and self._ctx.control.stopped
+        self.published = publish_layer_file(path, self.segment, self.layer, output_dir=self.output_dir, register=self.register, stopped=stopped)
+
+
+class LayerSink(_Publisher, RerunSink):
     """One catalog layer of one segment; lossless only. Owns flush, close and publish of the stream from `open_layer`."""
 
     def __init__(
-        self,
-        recording: rr.RecordingStream,
-        partial: Path,
-        segment: SegmentRef,
-        layer: str,
-        inputs: Mapping[str, PortType],
-        roots: Mapping[str, str],
-        *,
-        register: Register = "new",
+        self, recording: rr.RecordingStream, partial: Path, segment: SegmentRef, layer: str, inputs: Mapping[str, PortType], roots: Mapping[str, str], *, register: Register = "new"
     ) -> None:
-        super().__init__(recording, inputs, roots, timeline=segment.timeline)
-        _check_new(segment, layer, register)
+        RerunSink.__init__(self, recording, inputs, roots, timeline=segment.timeline)
+        _Publisher.__init__(self, segment, layer, partial.parent.parent, register)
         self.partial: Path = partial
-        self.segment: SegmentRef = segment
-        self.layer: str = layer
-        self.register: Register = register
-        self.published: Path | None = None
-        self._ctx: RunContext | None = None
 
     def reset(self, ctx: RunContext) -> None:
         if ctx.mode != "lossless":
@@ -119,13 +123,10 @@ class LayerSink(RerunSink):
         self._ctx = ctx
 
     def flush(self, out: Emit) -> None:
-        if self.published is not None:
-            return
-        self.recording.flush()
-        self.recording.disconnect()
-        stopped: bool = self._ctx is not None and self._ctx.control is not None and self._ctx.control.stopped
-        output_dir: Path = self.partial.parent.parent
-        self.published = publish_layer_file(self.partial, self.segment, self.layer, output_dir=output_dir, register=self.register, stopped=stopped)
+        if self.published is None:
+            self.recording.flush()
+            self.recording.disconnect()
+            self._publish(self.partial)
 
     def abort(self) -> None:
         """Failed run: drop the partial file."""
@@ -133,32 +134,21 @@ class LayerSink(RerunSink):
         self.partial.unlink(missing_ok=True)
 
 
-class LayerFileSink:
+class LayerFileSink(_Publisher):
     """Publishes a finished layer file another writer produced (e.g. robocap-live's Rust core) at flush."""
 
     inputs: Mapping[str, PortType] = {"layer": LayerFile}
     outputs: Mapping[str, PortType] = {}
 
     def __init__(self, segment: SegmentRef, layer: str, *, output_dir: Path, register: Register = "new") -> None:
-        _check_new(segment, layer, register)
-        self.segment: SegmentRef = segment
-        self.layer: str = layer
-        self.output_dir: Path = output_dir
-        self.register: Register = register
-        self.published: Path | None = None
+        super().__init__(segment, layer, output_dir, register)
         self._file: LayerFile | None = None
-        self._ctx: RunContext | None = None
-
-    def reset(self, ctx: RunContext) -> None:
-        self._ctx = ctx
 
     def step(self, tick: Tick, out: Emit) -> None:
         assert isinstance(tick.value, LayerFile)
         self._file = tick.value
 
     def flush(self, out: Emit) -> None:
-        if self._file is None:
-            return
-        stopped: bool = self._ctx is not None and self._ctx.control is not None and self._ctx.control.stopped
-        self.published = publish_layer_file(self._file.path, self.segment, self.layer, output_dir=self.output_dir, register=self.register, stopped=stopped)
-        self._file = None
+        if self._file is not None:
+            self._publish(self._file.path)
+            self._file = None

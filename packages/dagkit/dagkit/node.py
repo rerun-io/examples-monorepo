@@ -7,22 +7,18 @@ from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, runtime_
 
 from dagkit.time import TimeNs
 
-Mode: TypeAlias = Literal["lossless", "realtime"]
-PortType: TypeAlias = Any
-"""A class, `Fenced[T]` or a union `A | B`; `dagkit.graph.normalise` reads it."""
+Mode: TypeAlias = Literal["lossless", "realtime"]  # lossless: eval and layers; realtime: live devices
+PortType: TypeAlias = Any  # a class, `Fenced[T]` or a union `A | B`; `dagkit.graph.normalise` reads it
 T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """One item of a Source's single time-ordered stream."""
+    """One item of a Source's single time-ordered stream (`t_ns = STATIC` for whole-stream values)."""
 
     t_ns: TimeNs
-    """Time on the graph clock; `STATIC` for whole-stream values."""
     port: str
-    """Output port the value leaves on."""
     value: object
-    """The typed value."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,13 +26,9 @@ class Tick:
     """What `Node.step` receives: one trigger event plus the AsOf snapshot at its time."""
 
     t_ns: TimeNs
-    """Time of the trigger event."""
     port: str
-    """Input port the trigger arrived on."""
-    value: object
-    """The trigger value (unwrapped for host consumers of a `Fenced` port)."""
-    asof: Mapping[str, object | None]
-    """AsOf port -> newest value with time <= t_ns, or None."""
+    value: object  # synced and unwrapped for host consumers of a `Fenced` port
+    asof: Mapping[str, object | None]  # AsOf port -> newest value with time <= t_ns, or None
 
 
 class Control:
@@ -46,8 +38,7 @@ class Control:
         self._lock = threading.Lock()
         self._stopped: bool = False
         self._requests: list[tuple[frozenset[str], dict[str, dict[str, object]], bool]] = []
-        self.wake: Callable[[], None] = lambda: None
-        """Set by the runner: wakes its waits when a request arrives."""
+        self.wake: Callable[[], None] = lambda: None  # set by the runner: wakes its waits on a request
 
     def stop(self) -> None:
         """Sources stop after their current event; queues drain, nodes flush, the run returns `stopped`."""
@@ -56,25 +47,25 @@ class Control:
         self.wake()
 
     def reset(self, nodes: Sequence[str] = ()) -> None:
-        """At the reset barrier: flush, `world += 1`, `reset(ctx)` on `nodes` (every node if empty)."""
-        with self._lock:
-            self._requests.append((frozenset(nodes), {}, True))
-        self.wake()
+        """At the reset barrier: flush, `world += 1`, `reset(ctx)` on `nodes` (every non-sink node if empty)."""
+        self._request(frozenset(nodes), {}, True)
 
     def reconfigure(self, params: Mapping[str, Mapping[str, object]]) -> None:
         """Profile/preset switch: at the barrier the named nodes flush and reset with the new params."""
+        self._request(frozenset(params), {name: dict(p) for name, p in params.items()}, False)
+
+    def _request(self, targets: frozenset[str], params: dict[str, dict[str, object]], bump: bool) -> None:
         with self._lock:
-            self._requests.append((frozenset(params), {name: dict(p) for name, p in params.items()}, False))
+            self._requests.append((targets, params, bump))
         self.wake()
 
     @property
     def stopped(self) -> bool:
-        """True once `stop` was called."""
         with self._lock:
             return self._stopped
 
     def take_requests(self) -> list[tuple[frozenset[str], dict[str, dict[str, object]], bool]]:
-        """Runner side: pop pending (targets, params, bump_world) barrier requests."""
+        """Runner side: pop the pending (targets, params, bump_world) barrier requests."""
         with self._lock:
             requests, self._requests = self._requests, []
             return requests
@@ -85,34 +76,21 @@ class RunContext:
     """Everything a node may know about its run; rebuilt for every `reset`."""
 
     graph: str
-    """Graph name."""
     node: str
-    """This node's name."""
     mode: Mode
-    """lossless (eval, layers) or realtime (live)."""
-    resources: Mapping[str, object] = field(default_factory=dict)
-    """Graph-owned objects this node declared in `needs`."""
-    params: Mapping[str, object] = field(default_factory=dict)
-    """Profile/preset params for this node, as applied by `Control.reconfigure`."""
-    world: int = 0
-    """Bumped by `Control.reset`; resettable estimators copy it onto their outputs."""
-    statics: Mapping[str, object] = field(default_factory=dict)
-    """AsOf port -> the Source's leading STATIC value on that edge (startup phase)."""
-    control: Control | None = None
-    """The run's control plane (None inside a process child); sinks read `control.stopped` at flush."""
+    resources: Mapping[str, object] = field(default_factory=dict)  # graph-owned objects this node declared in `needs`
+    params: Mapping[str, object] = field(default_factory=dict)  # profile/preset params, as applied by `Control.reconfigure`
+    world: int = 0  # bumped by `Control.reset`; resettable estimators copy it onto their outputs
+    statics: Mapping[str, object] = field(default_factory=dict)  # AsOf port -> the Source's leading STATIC value (startup)
+    control: Control | None = None  # None inside a process child; sinks read `control.stopped` at flush
 
 
 @runtime_checkable
 class Emit(Protocol):
     """Output side of a node, given to `step`, `flush` and `run`."""
 
-    def put(self, port: str, t_ns: TimeNs, value: object) -> None:
-        """Emit `value` on `port`; time is non-decreasing per port and may be older than the tick."""
-        ...
-
-    def watermark(self, t_ns: TimeNs) -> None:
-        """Only for `emits_late` nodes: no more outputs with time <= t_ns."""
-        ...
+    def put(self, port: str, t_ns: TimeNs, value: object) -> None: ...  # time non-decreasing per port; may be < the tick
+    def watermark(self, t_ns: TimeNs) -> None: ...  # `emits_late` nodes only: no more outputs with time <= t_ns
 
 
 @runtime_checkable
@@ -165,9 +143,7 @@ class Fence(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Fenced(Generic[T]):
-    """A GPU value plus the event that marks it ready; immutable once put (fan-out safe)."""
+    """A GPU value plus the event recorded after the producer's last write; immutable once put (fan-out safe)."""
 
     value: T
-    """The device value (tensors stay on the device)."""
-    fence: Fence | None
-    """Recorded after the producer's last write; None for host-side or resumed values."""
+    fence: Fence | None  # None for host-side or resumed values

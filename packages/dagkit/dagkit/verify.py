@@ -30,8 +30,7 @@ class MetricBand:
     name: str
     unit: str
     better: Literal["lower", "higher"]
-    floor: float
-    """Smallest ABSOLUTE tolerance (a relative floor is written as the number computed from the measured pre)."""
+    floor: float  # smallest ABSOLUTE tolerance (a relative floor is written as the number computed from the measured pre)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -40,18 +39,13 @@ class Case:
     name: str
     clip: Literal["short", "full"]
     reference: Literal["gt", "pre-port"]
-    dataset: str | None = None
-    """Catalog input (with `segment`) ..."""
+    dataset: str | None = None  # catalog input (with `segment`) ...
     segment: str | None = None
-    input: str | None = None
-    """... or a repo-relative local input."""
+    input: str | None = None  # ... or a repo-relative local input
     window_s: tuple[float, float] | None = None
-    params: dict[str, str] = field(default_factory=dict)
-    """Config overrides of this case."""
-    noise: dict[str, float] = field(default_factory=dict)
-    """metric -> measured |pre - pre2| for THIS case."""
-    noise_from: str | None = None
-    """Reuse the named case's noise (stated, never implied)."""
+    params: dict[str, str] = field(default_factory=dict)  # config overrides of this case
+    noise: dict[str, float] = field(default_factory=dict)  # metric -> measured |pre - pre2| for THIS case
+    noise_from: str | None = None  # reuse the named case's noise (stated, never implied)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -65,10 +59,8 @@ class Shot:
 @dataclass(frozen=True, slots=True)
 class GraphBlock:
     name: str
-    run: str
-    """`pkg.verify:run`, (Case, phase, RecordingStream) -> None: writes the golden outputs."""
-    score: str
-    """`pkg.verify:score`, (Case, golden rrd) -> {metric: value}: reads a golden (+ GT), never the pipeline."""
+    run: str  # `pkg.verify:run`, (Case, phase, RecordingStream) -> None: writes the golden outputs
+    score: str  # `pkg.verify:score`, (Case, golden rrd) -> {metric: value}: reads a golden (+ GT), never the pipeline
     cases: list[Case]
     metrics: list[MetricBand]
     shots: list[Shot] = field(default_factory=list)
@@ -81,8 +73,7 @@ class TestBlock:
     tier: Literal["model", "op", "node", "types"]
     lane: Literal["unit", "integration", "golden"]
     tests: list[str]
-    properties: list[str] = field(default_factory=list)
-    """Test ids that own the property bounds."""
+    properties: list[str] = field(default_factory=list)  # test ids that own the property bounds
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -97,8 +88,7 @@ class VerifyCard:
 class BandResult:
     metric: str
     passed: bool
-    reason: str
-    """Why it passed or failed, with the numbers."""
+    reason: str  # why it passed or failed, with the numbers
 
 
 def load_card(path: Path) -> VerifyCard:
@@ -142,13 +132,11 @@ def _resolve(target: str) -> Callable[..., object]:
 
 @dataclass(frozen=True, slots=True)
 class VerifyArgs:
-    card: Path
-    """The package's VERIFY.toml."""
+    card: Path  # the package's VERIFY.toml
     phase: Phase
     block: str | None = None
     clip: Literal["short", "full"] | None = None
-    register: bool = False
-    """Add catalog goldens as layer verify-<block>-<phase>-<sha7> (never a replacement)."""
+    register: bool = False  # add catalog goldens as layer verify-<block>-<phase>-<sha7> (never a replacement)
 
 
 def main(args: VerifyArgs) -> int:

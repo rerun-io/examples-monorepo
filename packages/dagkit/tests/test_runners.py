@@ -12,7 +12,8 @@ from hypothesis import strategies as st
 
 from dagkit.graph import AsOf, Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Control, RunContext, Tick
-from dagkit.runners import RunReport, run_sequential, run_threaded
+from dagkit.runners import RunReport, run_segments, run_sequential, run_threaded
+from dagkit.sources import SegmentRef
 from dagkit.testing import collect_edges
 from dagkit.time import GraphError
 
@@ -316,3 +317,17 @@ def test_resources_are_built_once_shared_and_closed(runner: str) -> None:
     graph.edge(b["y"], graph.sink("sink", Collect(("y",)))["y"])
     RUNNERS[runner](graph)
     assert len(built) == 1 and seen == [built[0], built[0]] and built[0].closed
+
+
+def test_run_segments_runs_one_lossless_graph_per_segment() -> None:
+    sinks: dict[str, Collect] = {}
+
+    def build(segment: SegmentRef) -> Graph:
+        graph = Graph(f"layer-{segment.segment}")
+        sinks[segment.segment] = Collect(("x",))
+        graph.edge(graph.source("src", source([(t, "x", len(segment.segment)) for t in range(3)]))["x"], graph.sink("sink", sinks[segment.segment])["x"])
+        return graph
+
+    reports: list[RunReport] = run_segments(build, [SegmentRef("ds", "a"), SegmentRef("ds", "bb")], runner="sequential")
+    assert [r.graph for r in reports] == ["layer-a", "layer-bb"] and {r.mode for r in reports} == {"lossless"}
+    assert sinks["bb"].items == [("x", t, 2) for t in range(3)]
