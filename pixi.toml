@@ -1957,6 +1957,25 @@ depends-on = [
 cwd = "packages/mast3r-slam"
 description = "Launch MASt3R-SLAM Gradio web UI"
 
+# ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
+[feature.mast3r-slam.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Record the pre-port goldens: pre and pre2 (noise run) of every case (msd-odyssey cam_00 vs mocap GT)"
+
+[feature.mast3r-slam.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Graph tier, short case (first 30 s): Sim3 ATE of the final keyframes + tracked fraction, banded against pre"
+
+[feature.mast3r-slam.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Graph tier, full case (whole segment)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # gsplat-rust-renderer
 # ═══════════════════════════════════════════════════════════════════════════

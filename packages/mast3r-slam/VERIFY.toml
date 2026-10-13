@@ -1,0 +1,36 @@
+# mast3r-slam verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "mast3r-slam"
+
+[[graph]]
+name = "slam"
+run = "mast3r_slam.verify:run"
+score = "mast3r_slam.verify:score"
+# GT: msd-odyssey mocap rig poses (layer gt, /world/rig_00 on video_time) composed with the static cam_00 extrinsic.
+# ate_rmse_m = Sim3 (Umeyama) ATE RMSE of the FINAL keyframe camera centres against GT cam_00 (nearest GT pose, <= 5 ms);
+# floor = 5 % of the measured short pre (set after the pre runs). tracked_fraction = input frames the frontend left in
+# TRACKING / input frames (the catalog gives the denominator). Every phase runs lossless (the frontend waits for the
+# backend after each keyframe / relocalisation: the old single_thread), uncalibrated, 512 px, every 2nd frame of cam_00.
+metrics = [
+    { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.0 },
+    { name = "tracked_fraction", unit = "1", better = "higher", floor = 0.02 },
+]
+
+[[graph.cases]]
+# rule: the first sorted msd-odyssey segment whose mocap GT spans the capture (GT duration >= 99.9 % of the capture,
+# 0 sanitized poses); short = its first 30 s on video_time.
+name = "short"
+clip = "short"
+reference = "gt"
+dataset = "msd-odyssey"
+segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
+window_s = [0.0, 30.0]
+params = { calib = "false", subsample = "2", img_size = "512" }
+
+[[graph.cases]]
+# rule: the same segment, whole (156.7 s, 4,706 cam_00 frames -> 2,353 input frames).
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "msd-odyssey"
+segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
+params = { calib = "false", subsample = "2", img_size = "512" }
