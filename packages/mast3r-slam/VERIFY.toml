@@ -7,11 +7,20 @@ run = "mast3r_slam.verify:run"
 score = "mast3r_slam.verify:score"
 # GT: msd-odyssey mocap rig poses (layer gt, /world/rig_00 on video_time) composed with the static cam_00 extrinsic.
 # ate_rmse_m = Sim3 (Umeyama) ATE RMSE of the FINAL keyframe camera centres against GT cam_00 (nearest GT pose, <= 5 ms);
-# floor = 5 % of the measured short pre (set after the pre runs). tracked_fraction = input frames the frontend left in
+# floor = 5 % of the short pre (0.36904 m -> 0.01845 m). tracked_fraction = input frames the frontend left in
 # TRACKING / input frames (the catalog gives the denominator). Every phase runs lossless (the frontend waits for the
-# backend after each keyframe / relocalisation: the old single_thread), uncalibrated, 512 px, every 2nd frame of cam_00.
+# backend after each keyframe / relocalisation: the old single_thread), uncalibrated, every 2nd frame of cam_00.
+# Shots (own viewer, verify-block 5): 3D view "/" = Sim3-aligned estimate (final keyframes + tracked frustum) over the GT
+# cam_00 trail and frustum; cam_00 = the input video. 150.0 s applies to the full case only (after the short window).
+shots = [
+    { view = "/", t_s = 15.0 },
+    { view = "/", t_s = 29.5 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 15.0 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 29.5 },
+    { view = "/", t_s = 150.0 },
+]
 metrics = [
-    { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.0 },
+    { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.01845 },
     { name = "tracked_fraction", unit = "1", better = "higher", floor = 0.02 },
 ]
 
@@ -25,12 +34,16 @@ dataset = "msd-odyssey"
 segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
 window_s = [0.0, 30.0]
 params = { calib = "false", subsample = "2", img_size = "512" }
+# pre and pre2 bit-identical (lossless is deterministic here): ATE 0.369037 m, tracked 354/450 = 0.786667, 58 keyframes.
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
 
 [[graph.cases]]
-# rule: the same segment, whole (156.7 s, 4,706 cam_00 frames -> 2,353 input frames).
+# rule: the same segment, whole (156.7 s, 4,706 cam_00 frames -> 2,353 input frames), at 224 px (the old fast operating
+# point): at 512 px the old backend runs out of GPU memory in the global GN solve (all keyframes, 32 GB GPU, ~18 min in)
+# and the frontend then waits forever for it (the single_thread wait never checks the backend).
 name = "full"
 clip = "full"
 reference = "gt"
 dataset = "msd-odyssey"
 segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
-params = { calib = "false", subsample = "2", img_size = "512" }
+params = { calib = "false", subsample = "2", img_size = "224" }
