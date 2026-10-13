@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 
 use nalgebra::Isometry3;
 use rerun::RecordingStream;
+use rerun::components::Text;
 
 use crate::frame::Luma;
 use crate::frame::{NUM_CAMERAS, Rig, SMALL_SIZE};
@@ -279,6 +280,15 @@ struct Prelude {
 impl Prelude {
     fn send(&self, rec: &RecordingStream) -> Result<(), LogError> {
         scene::log_static_hands(rec, &self.rig)?;
+        if self.content == scene::Content::HandsLayer {
+            // Who wrote the layer (dagkit's `Producer` fields): a static entity, never recording properties.
+            let producer = rerun::AnyValues::default()
+                .with_component::<Text>("package", ["robocap-live"])
+                .with_component::<Text>("version", [env!("CARGO_PKG_VERSION")])
+                .with_component::<Text>("graph", ["robocap-hands-layer"])
+                .with_component::<Text>("phase", ["run"]);
+            rec.log_static("/producers/hands", &producer)?;
+        }
         if self.content == scene::Content::Full {
             scene::log_static_scene(rec, &self.rig, self.h264)?;
         }

@@ -6,8 +6,9 @@ and writes a catalog segment's `hands` layer.
 
 This file holds what only it says: the dump format, the hands catalog layer, the `--record` JSONL, and the code conventions. The types live in the code:
 
-- `crates/robocap-types`: camera indices and names, `FrameMeta`, `CameraFrame`, `Frameset`, `ImuSample`, `SourceEvent`, and
-  `SlamPose` / `SlamStatus` / `SlamStages` (no runtime, device or estimator; `frame.rs` and `slam.rs` re-export them).
+- `crates/robocap-types`: camera indices and names, and `SlamPose` / `SlamStatus` / `SlamStages` (no runtime, device or
+  estimator; `frame.rs` and `slam.rs` re-export them). The sensor payloads `FrameMeta`, `CameraFrame`, `Frameset`,
+  `ImuSample` and `SourceEvent` live in `kornia-staging-sensors` (packages/kornia-staging).
 - `crates/robocap-live/src/frame.rs`: `Rig`, `DumpMeta`, `FrameHeader`.
 - `crates/robocap-live/src/nets/mod.rs`: the `HandNets` trait and the raw net outputs; `models/MODELS.md` for the model files.
 - `crates/robocap-live/src/hands/mod.rs`: the tracker's inputs, config and per-frameset results.
@@ -59,6 +60,30 @@ unless `--register replace` (a production refresh). The core logs its producer a
 The layer holds only the hand entities (`/world/hands/{side}/{keypoints,mesh}`, the camera-pane overlays in full-resolution
 pixels, the skeleton's `AnnotationContext` on `/world`) and no recording properties; its recording id is the segment id and its
 times are the catalog's `video_time`.
+
+## The runtime as a dagkit graph
+
+`sched/` is the realtime runner the Python side's dagkit graphs describe; there is no Rust dagkit crate yet (one grows from
+`sched/` when a second Rust graph needs it). The shared vocabulary:
+
+| dagkit (Python) | robocap-live `sched/` |
+|---|---|
+| `run_threaded(graph, mode, control)` | `sched::run(source, PipelineConfig, sinks, stop)` |
+| `Mode` lossless / realtime | `PipelineConfig.lossless` |
+| Block / DropOldest edge | `StageQueue<T>::new(capacity, QueuePolicy::{Block, DropOldest})` |
+| AsOf edge + watermark | `PoseStore::pose_for(index, wait)` + `consumed` / `progress` (lookups stay inside the reader's world; live prefers the newest `ok` pose: node logic, not generic AsOf) |
+| `emits_late` + `Emit.watermark` | SLAM `port.frontend_lag` (the pose comes one frameset late) |
+| `world` / `Control.reset` | `PoseStore::reset(index)` on backwards time, a > 3 s gap or an estimator error |
+| a Source's one time-ordered stream | `FrameSource::next_event() -> SourceEvent::{Frameset, Imu}` |
+| port kinds per edge | frames DropOldest live; IMU `StageQueue::new(LIVE_IMU_CAPACITY = 8192, DropOldest)` live, unbounded in lossless replay |
+| Sink `step` / `flush` | `FramesetSink::{frameset, finish}` |
+| `Placement(cpus)` | `spawn_stage(name, cpus, uclamp_min)` (uclamp is Rust-only) |
+| failure path | `Shared::fail` + `close_all` + `SHUTDOWN_GRACE` |
+| health view / `RunReport` | `Stats`, `RunSummary`, `--record` `timings_ms` |
+| Model role over a private Runtime | `HandNets` (RKNN / ORT / golden), `NetsFactory` rebuild |
+| App: deploy + the `robocap-cap` profile | `robocap-panel`, `scripts/` |
+
+Time stays i64 nanoseconds on both sides. Python and Rust meet only at catalog layers and the PyO3 `_core`.
 
 ## SLAM lane, lag and pose time
 

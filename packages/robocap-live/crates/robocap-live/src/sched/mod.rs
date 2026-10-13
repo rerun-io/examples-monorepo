@@ -16,6 +16,9 @@
 //!   framesets by their timestamps only, and hands wait for publication of their frameset's estimate, including the final flush.
 //!
 //! Every stage records its wall time per frameset; a one-line summary is printed every second and a final summary at the end.
+//!
+//! This is the Rust form of a dagkit graph (queues = Block / DropOldest edges, `PoseStore` = an AsOf edge, sinks, a shared
+//! failure path); SPEC.md "The runtime as a dagkit graph" maps each piece onto the Python runners' vocabulary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
