@@ -130,6 +130,12 @@ pablo-dl-server (Ryzen 9 9950X3D, RTX 5090, prod env), 2026-10-11; the release r
 - **BEDLAM** (10,450 clips, 317,602 samples, 14.8 h of capture): 0.94 TB became 152.7 GB (6.2x). The first discovery walks the
   headers of 1,603 tars (82 min, sharing the NAS with a copy; cached after). Converting took 58 min in 4 processes on disjoint
   batches, one NVENC session each: 1.18 s per clip, 0.6 s transcode, 0.3 s waiting for the prefetched members, 0.2 s SMPL-X.
+- **Labels** (2026-10-12, `contacts`, `visibility` and BEDLAM's `body_pose` again for the motion source): a pass with only these
+  layers pending reads the label pickles and one PNG header per camera in place, 2.05 TB for the renders and 0.47 TB for BEDLAM.
+  The NAS sets the pace: 150 to 190 MB/s in all, at 140 to 400 ms per 1 MB read. Renders: 2,112 sequences in about 10 h on 3
+  processes, sharing the NAS with the other two passes for most of it (median 23 s per sequence, all of it the read). BEDLAM:
+  10,450 clips in 3.3 h on 4 processes (median 4.8 s per clip, 4.7 s of it fetching the members, eight runs at once). Output:
+  renders 2.2 GB contacts, 13.0 GB visibility; BEDLAM 0.9 GB contacts, 6.4 GB visibility, 3.8 GB body pose (was 3.7).
 - Size by layer: renders 39.3 GB meshes, 14.3 GB video, 3.0 GB projections, 1.3 GB masks, 0.9 GB body pose; BEDLAM 142.7 GB
   meshes (up to 10 people at every frame), 4.2 GB video, 3.7 GB body pose, 1.5 GB projections, 0.6 GB masks. Meshes are kept at
   every 6 Hz frame (below the 10 Hz display cap of `meshes.BODY_MESH_STRIDE`).
@@ -139,3 +145,11 @@ pablo-dl-server (Ryzen 9 9950X3D, RTX 5090, prod env), 2026-10-11; the release r
 - Not ingested: the upstream crop boxes (`center`, `scale`), `camera_normals`, BEDLAM's texture and skin names. Self-contact is not
   shipped; computing it from our meshes would be an estimate under `/world/pred/...` (a follow-up).
 - A rendered person that no view labels at a frame has no body there, even when a mask shows them.
+- BEDLAM's `vertex_visibility` ignores scene geometry: a person behind a tree trunk or a counter keeps the hidden vertices as
+  seen, while the mask is cut by the occluder. The share of seen landmarks that fall on the person's own mask has a median of
+  0.94 over the 10,450 clips; 290 are below 0.85, 279 of them in three batches (`batch01hand_orbit_archVizUI3_time15`,
+  `highbmihand_static_suburb_d`, `batch01hand_zoom_suburb_d`). The layer keeps the release's flags.
+- The floor-contact flags hold the release's ground, not a flat one: a plane fitted to a sequence's floor-contact vertices leaves a
+  p95 residual of 0.9 to 4.0 cm (median per render dataset) and up to 9.7 cm, where the release places a body below the ground
+  (InterHand `seq_000078`: one of two people up to 21 cm under the snow the other stands on, while that person's contact
+  vertices sit a median 1.8 cm above their own lowest vertex).

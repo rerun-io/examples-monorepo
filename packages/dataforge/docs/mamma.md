@@ -141,6 +141,9 @@ files became 77 GB of rrds (2.9×). Each sequence's total is its in-process time
   body_mesh 10.0, projections 8.0, body_pose 0.6; multiple people base 5.8, body_mesh 2.9, projections 2.3, body_pose 0.2;
   iPhones body_mesh 1.1, base 0.9, projections 0.1, body_pose 0.1. The meshes and projections (one 133-point row per person,
   camera and frame) are a third to a half of each family's output.
+- Labels (2026-10-12): eval's base again for `keywords` and the new `visibility` layer, all 52 sequences in 4.4 h while the
+  MammaSyn label pass shared the NAS (transcode 1.5 h, visibility 1.9 h, most of it reading the Dance per-vertex NPZs).
+  `visibility` is 2.2 GB, nearly all of it the 18 Dance sequences' per-vertex lists and landmarks.
 
 ## Known gaps
 
