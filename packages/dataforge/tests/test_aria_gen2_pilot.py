@@ -130,8 +130,9 @@ def test_verify_only_discovery_and_default_root(tmp_path: Path, monkeypatch) -> 
         (source / 'video.vrs').write_bytes(b'vrs')
         (source / 'mps/slam/closed_loop_trajectory.csv').touch()
         (source / 'mps/hand_tracking/hand_tracking_results.csv').touch()
-        manifest['sequences'][sequence] = {'main_vrs': {'file_size_bytes': 3, 'sha1sum': hashlib.sha1(b'vrs').hexdigest()}}
-    (root / 'AriaGen2PilotDataset_download_urls.json').write_text(json.dumps(manifest))
+        listed = {'file_size_bytes': 3, 'sha1sum': hashlib.sha1(b'vrs').hexdigest()}
+        manifest['sequences'][sequence] = {'main_vrs': listed, 'mps_slam_trajectories': listed, 'mps_hand_tracking': listed}
+    (root / 'AriaGen2PilotDataset_manifest.json').write_text(json.dumps(manifest))
     dataset = AriaGen2PilotConfig().setup()
     before = {path: path.stat().st_mtime_ns for path in tmp_path.rglob('*')}
     dataset.download()

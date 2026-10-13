@@ -72,6 +72,9 @@ ignore_names = [
     "nvenc",
     # Partial profile envelope consumed by pyserde.
     "hand_model",
+    # aria_gen2_pilot manifest entries, read by name from FETCHED.
+    "mps_slam_trajectories",
+    "mps_hand_tracking",
     # EpisodeProperties fields serialized through dataclasses.fields.
     "hand_pose_version",
     "object_pose_version",
