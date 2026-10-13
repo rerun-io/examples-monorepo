@@ -35,7 +35,9 @@ ROOTS: dict[str, str] = {"scene": "/world/splats", "views": "/world", "view": "/
 class Config:
     rr_config: RerunTyroConfig
     image_path: Path = PACKAGE_DIR / "data/office/IMG_4029.jpg"
+    """The photo (default: the package's sample)."""
     stage: Stage = "no-outpaint"
+    """``outpaint`` and ``coarse`` load FLUX.1-Fill-dev (about 34 GB on first use)."""
     max_resolution: Literal[512, 1024, 1920] = 512
     """Long side of the working image (both sides become multiples of 32)."""
     expansion_percent: float = 0.3
@@ -48,6 +50,7 @@ class Config:
     """Seed of the order in which optimisation steps visit the training views."""
     flux: FluxConfig = field(default_factory=FluxConfig)
     runner: Literal["sequential", "threaded"] = "threaded"
+    """dagkit runner; both give the same outputs (lossless)."""
     mode: Mode = "lossless"
 
 

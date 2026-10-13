@@ -1700,7 +1700,7 @@ description = "Launch the gradio app generated from the single-image graph's Con
 [feature.vistadream.tasks.verify-pre]
 cmd = "python -m dagkit.verify VERIFY.toml --phase pre --clip short && python -m dagkit.verify VERIFY.toml --phase pre2 --clip short && python -m dagkit.verify VERIFY.toml --phase pre --clip full"
 cwd = "packages/vistadream"
-description = "Record the pre-port goldens: pre and pre2 (noise run) of the short case, then pre of the full cases (FLUX.1-Fill-dev must be cached)"
+description = "Pre-port goldens (pre, pre2, full pre): only from the card commit 7aef310bb with the VERIFY.toml import fix; on the ported tree run() refuses these phases"
 
 [feature.vistadream.tasks.verify]
 cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
