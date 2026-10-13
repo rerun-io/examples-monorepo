@@ -1,9 +1,11 @@
 from collections.abc import Sequence
 
 import numpy as np
+import torch
 from einops import rearrange
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from numpy import ndarray
+from torch import Tensor
 
 from simplecv.camera_parameters import KannalaBrandtDistortion, apply_radial_tangential_distortion
 
@@ -226,3 +228,23 @@ def batch_triangulate(
     result[valid_joints, 3] = conf3d
 
     return result
+
+
+def triangulate_weighted(
+    xy: Float[Tensor, "v n 2"], weight: Float[Tensor, "v n"], P: Float[Tensor, "v 3 4"], min_views: int = 2
+) -> tuple[Float[Tensor, "n 3"], Bool[Tensor, " n"]]:
+    """Weighted DLT of every point at once: one batched 4x4 ``eigh`` of ``AᵀA``; float32 or float64 in = out.
+
+    ``weight`` is the least-squares weight: each view's rows ``u·P₂ − P₀`` and ``v·P₂ − P₁`` are scaled by its square
+    root. A zero, negative or non-finite weight, or a non-finite pixel, drops that observation. Points with fewer than
+    ``min_views`` observations come back NaN with ``valid`` False (callers adapt the policy).
+    """
+    usable: Bool[Tensor, "v n"] = (weight > 0) & torch.isfinite(weight) & torch.isfinite(xy).all(dim=-1)
+    root_weight: Float[Tensor, "v n 1 1"] = torch.where(usable, weight, 0.0).sqrt()[..., None, None]
+    pixels: Float[Tensor, "v n 2"] = torch.where(usable[..., None], xy, 0.0)
+    rows: Float[Tensor, "v n 2 4"] = root_weight * (pixels[..., None] * P[:, None, 2:3] - P[:, None, :2])
+    design: Float[Tensor, "n r 4"] = rows.permute(1, 0, 2, 3).reshape(xy.shape[1], -1, 4)
+    homogeneous: Float[Tensor, "n 4"] = torch.linalg.eigh(design.mT @ design).eigenvectors[..., 0]
+    xyz: Float[Tensor, "n 3"] = homogeneous[:, :3] / homogeneous[:, 3:]
+    valid: Bool[Tensor, " n"] = (usable.sum(dim=0) >= min_views) & (homogeneous[:, 3].abs() > torch.finfo(xy.dtype).eps) & torch.isfinite(xyz).all(dim=1)
+    return torch.where(valid[:, None], xyz, torch.nan), valid

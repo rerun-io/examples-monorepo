@@ -1,0 +1,33 @@
+"""Decoded multi-camera frames: what ``CatalogVideoSource`` puts on its ``frames`` port (memory only, no serde)."""
+
+from dataclasses import dataclass
+
+from dagkit.time import TimeNs
+from jaxtyping import Int64, UInt8
+from numpy import ndarray
+from torch import Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class MultiViewFrames:
+    """One synchronized sample of every camera; a single camera is ``v == 1``."""
+
+    t_ns: TimeNs
+    frame_index: int
+    """Sample index into the segment's video streams."""
+    views: tuple[str, ...]
+    """Camera names in the source's ``cameras`` order."""
+    rgb: UInt8[Tensor, "v 3 h w"]
+    """On the decode device (CUDA for ``nvdec_rgb``)."""
+    cam_t_ns: Int64[Tensor, " v"]
+    """Each camera's own sample time."""
+
+
+@dataclass(frozen=True, slots=True)
+class LumaFrameset:
+    """Raw Y planes of one frameset (``cpu_luma``); ``None`` marks a camera missing from it."""
+
+    t_ns: TimeNs
+    views: tuple[str, ...]
+    luma: tuple[UInt8[ndarray, "h w"] | None, ...]
+    cam_t_ns: tuple[int | None, ...]
