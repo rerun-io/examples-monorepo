@@ -58,8 +58,9 @@ lane = "unit"
 tests = ["tests/test_types.py", "tests/test_layout.py"]
 properties = [
     "tests/test_types.py::test_keypoints_serde_roundtrip_keeps_dtype_and_shape",
-    "tests/test_types.py::test_keypoints_to_rerun_writes_the_record_under_the_root_and_boxes_under_each_pinhole",
+    "tests/test_types.py::test_keypoints_to_rerun_writes_one_record_per_camera_under_the_root",
     "tests/test_types.py::test_kp3d_logs_each_rig_variant_that_has_a_finite_point",
+    "tests/test_types.py::test_every_port_the_app_writes_to_a_sink_is_a_dagkit_type",
 ]
 
 [[tests]]
@@ -72,9 +73,12 @@ tests = ["tests/test_types_rerun.py"]
 name = "nodes"
 tier = "node"
 lane = "unit"
-tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+tests = ["tests/test_nodes.py", "tests/test_graph.py", "tests/test_verify.py"]
 properties = [
     "tests/test_nodes.py::test_kp2d_contract_detects_then_tracks_and_keeps_the_projections",
     "tests/test_nodes.py::test_refine_is_deterministic_and_keeps_an_exact_rig_and_report_scores_it",
+    "tests/test_nodes.py::test_refine_draws_each_camera_at_its_own_sample_time",
+    "tests/test_nodes.py::test_a_rerun_sink_takes_every_refine_and_report_output",
     "tests/test_graph.py::test_sequential_equals_threaded_lossless",
+    "tests/test_graph.py::test_refine_graph_runs_on_the_segment_clock",
 ]
