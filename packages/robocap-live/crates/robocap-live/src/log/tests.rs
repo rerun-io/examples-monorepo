@@ -299,13 +299,15 @@ fn a_hands_layer_saves_only_the_hands_and_no_recording_properties_and_drops_noth
         .filter(|entity| {
             !(entity.starts_with("/world/hands/")
                 || entity.contains("/pinhole/hands/")
-                || *entity == "/world")
+                || *entity == "/world"
+                || *entity == "/producers/hands")
         })
         .collect();
     assert!(
         foreign.is_empty(),
         "a layer holds only the hands: {foreign:?}"
     );
+    assert!(components["/producers/hands"].contains("package"));
     assert_eq!(
         components
             .get("/world")
