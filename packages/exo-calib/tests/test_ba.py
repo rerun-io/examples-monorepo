@@ -3,9 +3,9 @@ from conftest import observe_points, ring_rig
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.ba import BaResult, mean_reprojection_error_px, refine_extrinsics, revert_large_pose_updates
-from exo_calib.correspondences import ObservationSet
-from exo_calib.triangulation import triangulate_points
+from exo_calib.ops.bundle_adjust import BaResult, mean_reprojection_error_px, refine_extrinsics, revert_large_pose_updates
+from exo_calib.ops.correspondences import ObservationSet
+from exo_calib.ops.triangulation import triangulate_points
 
 
 def test_mean_reprojection_error_px_uses_confidence_weights_and_ignores_invalid() -> None:

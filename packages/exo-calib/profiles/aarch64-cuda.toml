@@ -1,0 +1,5 @@
+# exo-calib on the aarch64-cuda hardware class (dagkit profile, read by apis/calibrate.py).
+hardware = "aarch64-cuda"
+
+[nodes.kp2d.params]
+batch_size = 32  # TensorRT engine batch: at least the number of exo views

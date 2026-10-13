@@ -4,7 +4,7 @@ from hypothesis import strategies as st
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
-from exo_calib.metric_scale import grouped_medians
+from exo_calib.ops.metric_scale import grouped_medians
 
 
 def _reference(group: Int64[ndarray, " n"], values: Float64[ndarray, " n"], min_count: int) -> tuple[Float64[ndarray, " g"], int]:

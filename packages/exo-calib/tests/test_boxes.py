@@ -2,8 +2,8 @@ import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
-from exo_calib.boxes import boxes_from_projected_keypoints, boxes_needing_detection, extrapolate_keypoints
-from exo_calib.triangulation import triangulate_frame_keypoints
+from exo_calib.ops.boxes import boxes_from_projected_keypoints, boxes_needing_detection, extrapolate_keypoints
+from exo_calib.ops.triangulation import triangulate_frame_keypoints
 
 
 def test_boxes_from_projected_keypoints_filters_confidence_and_pads_about_center() -> None:

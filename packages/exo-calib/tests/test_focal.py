@@ -3,8 +3,8 @@ from conftest import observe_points
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.correspondences import ObservationSet
-from exo_calib.focal import FocalRefinementResult, refine_focals
+from exo_calib.ops.correspondences import ObservationSet
+from exo_calib.ops.focal import FocalRefinementResult, refine_focals
 
 
 def test_refine_focals_recovers_per_camera_scale_with_fixed_poses_and_points() -> None:

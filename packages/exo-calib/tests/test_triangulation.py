@@ -3,8 +3,8 @@ from conftest import observe_points, ring_rig
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.correspondences import ObservationSet
-from exo_calib.triangulation import RobustTriangulationResult, triangulate_points, triangulate_robust
+from exo_calib.ops.correspondences import ObservationSet
+from exo_calib.ops.triangulation import RobustTriangulationResult, triangulate_points, triangulate_robust
 
 
 def test_triangulate_points_recovers_exact_synthetic_scene() -> None:

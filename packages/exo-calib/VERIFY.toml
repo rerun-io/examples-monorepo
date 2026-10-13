@@ -1,0 +1,84 @@
+# exo-calib verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "exo-calib"
+
+[[graph]]
+name = "calibrate"
+run = "exo_calib.verify:run"
+score = "exo_calib.verify:score"
+# Refined rig after SE(3) alignment of camera centres onto the GT rig (mean over the exo cameras).
+metrics = [
+    { name = "rot_deg_mean", unit = "deg", better = "lower", floor = 0.1 },
+    { name = "trans_cm_mean", unit = "cm", better = "lower", floor = 1.0 },
+    { name = "focal_pct_mean_abs", unit = "%", better = "lower", floor = 0.5 },
+]
+shots = [
+    { view = "/", t_s = 0.0 },
+    { view = "/", t_s = 139.917 },  # short case: Stage B frame 100 of 200, a kp2d overlay frame
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 139.917 },
+]
+
+[[graph.cases]]
+name = "short"  # rule: first sorted segment of the dataset with >= 4 cameras carrying static GT pose + intrinsics
+clip = "short"
+reference = "gt"
+dataset = "dataforge-assembly101"
+segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
+params = { frame_budget = "200" }
+# |pre - pre2| of the pre-port runs (refined: rot 2.098 / 2.239 deg, trans 5.372 / 6.407 cm, focal 3.877 / 3.870 %)
+noise = { rot_deg_mean = 0.141, trans_cm_mean = 1.035, focal_pct_mean_abs = 0.0075 }
+
+[[graph.cases]]
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-assembly101"
+segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
+params = { frame_budget = "1000" }
+# |pre - pre2| of the pre-port runs (refined: rot 1.164 / 1.156 deg, trans 1.596 / 1.533 cm, focal 3.853 / 3.850 %); bands = floors
+noise = { rot_deg_mean = 0.0087, trans_cm_mean = 0.063, focal_pct_mean_abs = 0.0032 }
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_ops_properties.py", "tests/test_triangulation.py", "tests/test_ba.py", "tests/test_eval.py", "tests/test_focal.py", "tests/test_boxes.py", "tests/test_confidence.py", "tests/test_correspondences.py", "tests/test_ground_plane.py", "tests/test_keypoints.py", "tests/test_metric_scale.py"]
+properties = [
+    "tests/test_ops_properties.py::test_camera_centers_are_the_translation_of_the_se3_inverse",
+    "tests/test_ops_properties.py::test_ba_on_exact_observations_keeps_poses_and_never_moves_a_fixed_pose",
+    "tests/test_ops_properties.py::test_robust_triangulation_drops_an_injected_outlier",
+    "tests/test_ops_properties.py::test_rotation_guard_ignores_a_rotation_the_whole_rig_shares",
+    "tests/test_ops_properties.py::test_rotation_guard_still_reverts_a_camera_that_diverges_from_the_rig",
+    "tests/test_metric_scale.py::test_grouped_medians_matches_per_group_numpy_median",
+]
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py", "tests/test_layout.py"]
+properties = [
+    "tests/test_types.py::test_keypoints_serde_roundtrip_keeps_dtype_and_shape",
+    "tests/test_types.py::test_keypoints_to_rerun_writes_one_record_per_camera_under_the_root",
+    "tests/test_types.py::test_kp3d_logs_each_rig_variant_that_has_a_finite_point",
+    "tests/test_types.py::test_every_port_the_app_writes_to_a_sink_is_a_dagkit_type",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_types_rerun.py"]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_graph.py", "tests/test_verify.py"]
+properties = [
+    "tests/test_nodes.py::test_kp2d_contract_detects_then_tracks_and_keeps_the_projections",
+    "tests/test_nodes.py::test_refine_is_deterministic_and_keeps_an_exact_rig_and_report_scores_it",
+    "tests/test_nodes.py::test_refine_draws_each_camera_at_its_own_sample_time",
+    "tests/test_nodes.py::test_a_rerun_sink_takes_every_refine_and_report_output",
+    "tests/test_graph.py::test_sequential_equals_threaded_lossless",
+    "tests/test_graph.py::test_refine_graph_runs_on_the_segment_clock",
+]
