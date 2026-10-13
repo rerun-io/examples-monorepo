@@ -84,16 +84,13 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
         raise RuntimeError(f"phase {phase!r} is a pre-port reference: record it from the card commit 7aef310bb with the import fix in VERIFY.toml")
     stage = case.params["stage"]
     assert stage in ("no-outpaint", "outpaint", "coarse"), stage
-    if stage != "no-outpaint":  # FLUX.1-Fill-dev is ~34 GB: refuse to start a download from a verify run
-        from huggingface_hub import snapshot_download
-
-        snapshot_download("black-forest-labs/FLUX.1-Fill-dev", local_files_only=True)
     seed: int = int(case.params["seed"])
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     started: float = time.perf_counter()
-    built = nodes(stage, float(case.params.get("expansion_percent", "0.3")), int(case.params.get("n_frames", "10")), seed, FluxConfig())
+    flux = FluxConfig(local_files_only=True)  # FLUX.1-Fill-dev is ~34 GB: a verify run never downloads it
+    built = nodes(stage, float(case.params.get("expansion_percent", "0.3")), int(case.params.get("n_frames", "10")), seed, flux)
     recording.log("/world", rr.ViewCoordinates.RDF, static=True)
     input_render = InputRender(recording)
     sinks = {"viewer": RerunSink(recording, PORTS, ROOTS), "input_render": input_render}
@@ -121,7 +118,7 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     [render_depth] = images(table, f"{INPUT}/render_depth", "DepthImage", TIMELINE, np.float32).values()
     [valid_u8] = images(table, f"{INPUT}/valid", "Image", TIMELINE, np.uint8).values()
     mse: float = float(np.mean((rendered.astype(np.float64) - rgb.astype(np.float64)) ** 2))
-    valid: Bool[ndarray, "h w"] = (valid_u8 > 0) & np.isfinite(depth) & (depth > 0) & np.isfinite(render_depth)
+    valid: Bool[ndarray, "h w"] = (valid_u8 > 0) & np.isfinite(depth) & (depth > 0)  # a non-finite render depth there: NaN, fails
     absrel: float = float(np.mean(np.abs(render_depth[valid] - depth[valid]) / depth[valid])) if valid.any() else float("nan")
 
     reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden_path("vistadream", "single_image", case.name, "pre")

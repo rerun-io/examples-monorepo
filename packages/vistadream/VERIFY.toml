@@ -61,6 +61,7 @@ tests = ["tests/test_types.py"]
 properties = [
     "tests/test_types.py::test_camera_view_serde_and_layer_round_trip",
     "tests/test_types.py::test_scene_views_round_trip_and_names",
+    "tests/test_types.py::test_scene_views_read_back_snapshots_whose_views_change",
     "tests/test_types.py::test_image_canvas_depth_round_trip",
     "tests/test_types.py::test_splats_map_to_native_gaussian_splats",
 ]
@@ -91,3 +92,10 @@ tier = "node"
 lane = "unit"
 tests = ["tests/test_nodes.py", "tests/test_graph.py"]
 properties = ["tests/test_graph.py::test_graph_validates_and_runners_agree"]
+
+[[tests]]
+name = "flux"
+tier = "model"
+lane = "unit"
+tests = ["tests/test_flux.py"]
+properties = ["tests/test_flux.py::test_flux_loads_only_cached_files_when_told"]

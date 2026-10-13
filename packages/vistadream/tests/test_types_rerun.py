@@ -19,6 +19,7 @@ def test_host_types_round_trip_through_a_catalog() -> None:
     depth = RNG.uniform(0.5, 3.0, (24, 32)).astype(np.float32)
     mask = RNG.random((24, 32)) > 0.5
     pose = np.eye(4)
+    pose[:3, :3] = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]  # a turn about z: a lost or transposed rotation shows
     pose[:3, 3] = [0.125, -0.25, 0.5]  # float32-exact: Rerun stores transforms as float32
     view = CameraView(rgb, K, pose, depth, mask, ~mask)
     values: list[tuple[Type, str]] = [

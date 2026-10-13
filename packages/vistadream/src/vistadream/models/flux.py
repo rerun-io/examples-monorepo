@@ -28,6 +28,8 @@ class FluxConfig:
     """Guidance scale."""
     seed: int = 42
     """Seed of the diffusion noise (every call starts from it)."""
+    local_files_only: bool = False
+    """Load only from the Hugging Face cache: a missing file is an error, never a download."""
 
 
 class FluxInpainting:
@@ -38,7 +40,7 @@ class FluxInpainting:
 
         self.config: FluxConfig = config
         # Any: diffusers' lazy-import dummies make every FluxFillPipeline method unknown to the type checker
-        self.pipe: Any = cast(Any, FluxFillPipeline.from_pretrained("black-forest-labs/FLUX.1-Fill-dev", torch_dtype=torch.bfloat16))
+        self.pipe: Any = cast(Any, FluxFillPipeline.from_pretrained("black-forest-labs/FLUX.1-Fill-dev", torch_dtype=torch.bfloat16, local_files_only=config.local_files_only))
         if config.offload:
             self.pipe.enable_model_cpu_offload()
         else:

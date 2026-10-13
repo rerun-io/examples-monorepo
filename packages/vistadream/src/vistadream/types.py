@@ -210,14 +210,14 @@ class SceneViews:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "SceneViews"]]:
+        """One value per time the input view has; each snapshot holds the views logged at that time (``expand`` adds some)."""
         suffix: str = "/pinhole/rgb:Image:buffer"
-        names: list[str] = sorted(c.removeprefix(f"{root}/").removesuffix(suffix) for c in table.column_names if c.startswith(f"{root}/") and c.endswith(suffix))
-        if "input" not in names:
-            return
-        order: list[str] = [n for n in names if n == "outpaint"] + ["input"] + [n for n in names if n.startswith("view_")]
-        per_view: list[dict[TimeNs, CameraView]] = [dict(CameraView.from_layer(table, f"{root}/{n}", timeline)) for n in order]
-        for t in per_view[0]:
-            yield t, cls(tuple(v[t] for v in per_view), order.index("input"))
+        names: list[str] = [c.removeprefix(f"{root}/").removesuffix(suffix) for c in table.column_names if c.startswith(f"{root}/") and c.endswith(suffix)]
+        order: list[str] = sorted(names, key=lambda n: (n != "outpaint", n))  # outpaint, input, view_02, view_03, ...
+        per_view: dict[str, dict[TimeNs, CameraView]] = {n: dict(CameraView.from_layer(table, f"{root}/{n}", timeline)) for n in order}
+        for t in per_view.get("input", {}):
+            present: list[str] = [n for n in order if t in per_view[n]]
+            yield t, cls(tuple(per_view[n][t] for n in present), present.index("input"))
 
 
 @dataclass(frozen=True, slots=True)

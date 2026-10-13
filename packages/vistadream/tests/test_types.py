@@ -1,12 +1,15 @@
 """vistadream Types: serde round-trips, the Rerun mapping, and to_rerun -> from_layer on catalog-shaped rows (unit lane)."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 import rerun as rr
 import torch
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
+from scipy.spatial.transform import Rotation
 from serde import SerdeError, from_dict, to_dict
 from vistadream_fakes import layer_table
 
@@ -21,7 +24,10 @@ def views(draw: st.DrawFn, depth: bool | None = None) -> CameraView:
     h, w = draw(SHAPES)
     with_depth: bool = draw(st.booleans()) if depth is None else depth
     K = np.array([[draw(st.floats(10.0, 1e3)), 0.0, w / 2], [0.0, draw(st.floats(10.0, 1e3)), h / 2], [0.0, 0.0, 1.0]])
+    quat = draw(arrays(np.float64, 4, elements=st.floats(-1.0, 1.0)))
+    assume(np.linalg.norm(quat) > 0.1)
     cam_T_world = np.eye(4)
+    cam_T_world[:3, :3] = Rotation.from_quat(quat).as_matrix()  # any rotation: a lost or transposed one must show
     cam_T_world[:3, 3] = draw(arrays(np.float64, 3, elements=st.floats(-10.0, 10.0, width=32, allow_subnormal=False)))
     return CameraView(
         draw(arrays(np.uint8, (h, w, 3))),
@@ -84,6 +90,13 @@ def test_scene_views_round_trip_and_names(training: list[CameraView], data: st.D
             assert_views_equal(x, y)
 
 
+def test_scene_views_read_back_snapshots_whose_views_change() -> None:
+    view = CameraView(np.zeros((2, 3, 3), np.uint8), np.eye(3), np.eye(4), np.ones((2, 3), np.float32))
+    snapshots: list[tuple[int, object]] = [(0, SceneViews((view,), 0)), (1, SceneViews((view, view), 1)), (2, SceneViews((view, view, view), 1))]
+    read = list(SceneViews.from_layer(layer_table(snapshots, "/world"), "/world", "video_time"))
+    assert [(t, s.input_index, s.names()) for t, s in read] == [(0, 0, ["input"]), (1, 1, ["outpaint", "input"]), (2, 1, ["outpaint", "input", "view_02"])]
+
+
 @settings(max_examples=30, deadline=None)
 @given(SHAPES, st.data())
 def test_image_canvas_depth_round_trip(shape: tuple[int, int], data: st.DataObject) -> None:
@@ -93,10 +106,12 @@ def test_image_canvas_depth_round_trip(shape: tuple[int, int], data: st.DataObje
     depth = RelativeDepth(data.draw(arrays(np.float32, (h, w), elements=st.floats(0.0, 50.0, width=32, allow_subnormal=False))), canvas.mask, np.eye(3))
     for value in (image, canvas, depth):
         kind = type(value)
-        assert to_dict(from_dict(kind, to_dict(value))).keys() == to_dict(value).keys()
-        [(_, back)] = list(kind.from_layer(layer_table([(0, value)], "/x"), "/x", "video_time"))
-        for name, field in to_dict(value).items():
-            np.testing.assert_array_equal(np.asarray(to_dict(back)[name]), np.asarray(field), err_msg=f"{kind.__name__}.{name}")
+        [(_, read)] = list(kind.from_layer(layer_table([(0, value)], "/x"), "/x", "video_time"))
+        for back in (from_dict(kind, to_dict(value)), read):  # serde, then the Rerun mapping: values, shapes and dtypes kept
+            for field in dataclasses.fields(kind):
+                x, y = getattr(back, field.name), getattr(value, field.name)
+                np.testing.assert_array_equal(x, y, err_msg=f"{kind.__name__}.{field.name}")
+                assert x.dtype == y.dtype, f"{kind.__name__}.{field.name}"
 
 
 def test_unknown_fields_are_refused() -> None:

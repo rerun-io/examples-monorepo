@@ -53,9 +53,7 @@ def test_backproject_reprojects_onto_its_pixels(scene: tuple[np.ndarray, np.ndar
 @given(st.integers(16, 2500), st.integers(16, 2500), st.sampled_from([512, 1024, 1920]))
 def test_process_image_keeps_aspect_and_caps_the_long_side(width: int, height: int, max_dimension: int) -> None:
     out_w, out_h = process_image(Image.new("RGB", (width, height)), max_dimension=max_dimension).size
-    assert out_w % 32 == 0 and out_h % 32 == 0
-    if max(width, height) > max_dimension:
-        assert max(out_w, out_h) <= max_dimension + 16  # rounding to 32 moves a side by at most 16
+    assert out_w % 32 == 0 and out_h % 32 == 0 and max(out_w, out_h) <= max_dimension  # small images grow at most to the cap
     assume(min(out_w, out_h) >= 64)  # rounding a short side to 32 dominates its aspect
     assert abs(out_w / out_h - width / height) / (width / height) < 0.35
 
@@ -66,7 +64,7 @@ def test_border_mask_covers_exactly_the_canvas_outside_the_image(width: int, hei
     rgb = np.full((height, width, 3), 200, np.uint8)
     canvas, mask, (x, y, w, h) = add_border_and_mask(rgb, border)
     assert canvas.shape[0] % 32 == 0 and canvas.shape[1] % 32 == 0 and (w, h) == (width, height)
-    assume(x + w <= canvas.shape[1] and y + h <= canvas.shape[0])  # rounding down can crop the image (tiny borders)
+    assert x + w <= canvas.shape[1] and y + h <= canvas.shape[0]  # rounding to 32 never cuts the image (borders under 16 px)
     assert mask.sum() == mask.size - width * height
     assert not mask[y : y + h, x : x + w].any() and (canvas[mask] == 0).all() and (canvas[~mask] == 200).all()
 
