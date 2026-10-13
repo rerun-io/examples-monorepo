@@ -108,8 +108,9 @@ class MultiViewTracks:
             if all(view[2][row] is None for view in columns):
                 continue
             person, score, frame, center, half = ([np.asarray(view[k][row] or [], dtype=np.float32) for view in columns] for k in range(len(names)))
+            mask_row: pa.Table = table.slice(row, 1)
             blobs: list[bytes] = [
-                bytes(_column(table, f"{root}/{view}/pinhole/mamma/masks/person_{int(p):02d}", "EncodedImage:blob")[row][0])
+                bytes(_column(mask_row, f"{root}/{view}/pinhole/mamma/masks/person_{int(p):02d}", "EncodedImage:blob")[0][0])
                 for view, people in zip(views, person, strict=True)
                 for p in people.tolist()
             ]

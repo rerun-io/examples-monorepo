@@ -69,8 +69,9 @@ class FitNode:
         if self.cameras is None:
             rig = tick.asof["rig"]
             assert isinstance(rig, RigCameras), "fit needs the rig (a STATIC AsOf value)"
-            engine_wh: Int64[ndarray, "v 2"] = np.rint(rig.select(landmarks.views).resolution_wh / landmarks.scale_xy).astype(np.int64)
-            engine: RigCameras = rig.select(landmarks.views).scaled_to(int(engine_wh[0, 1]), int(engine_wh[0, 0]))
+            selected: RigCameras = rig.select(landmarks.views)
+            engine_wh: Int64[ndarray, "v 2"] = np.rint(selected.resolution_wh / landmarks.scale_xy).astype(np.int64)
+            engine: RigCameras = selected.scaled_to(int(engine_wh[0, 1]), int(engine_wh[0, 0]))
             device: torch.device = landmarks.xy.device
             self.cameras = (
                 [torch.as_tensor(K, dtype=torch.float32, device=device) for K in engine.intrinsics],
@@ -87,7 +88,10 @@ class FitNode:
                 continue
             result, cloud = self._fit_person(landmarks, person, rows, new)
             points.append((person, *cloud))
-            for fit in [*self.fitters[person].drain_head(), *([result] if result is not None and result is not self.pushed.get(person) else [])]:
+            fits: list[FitResult] = [*self.fitters[person].drain_head()]
+            if result is not None and result is not self.pushed.get(person):
+                fits.append(result)
+            for fit in fits:
                 self.held.setdefault(self.times[fit.frame_idx], {})[person] = self.pushed[person] = fit
         if new:
             out.put("topology", tick.t_ns, BodyTopology(tuple(new), self.faces))
@@ -108,14 +112,15 @@ class FitNode:
         views: int = len(landmarks.views)
         device: torch.device = landmarks.xy.device
         index: Tensor = torch.as_tensor(landmarks.view[rows], device=device)
+        row_index: Int64[Tensor, " r"] = torch.as_tensor(rows, device=device)
 
         def per_view(values: Tensor) -> Tensor:  # views without this person stay zero (excluded by visibility)
-            return torch.zeros((views, *values.shape[1:]), device=device).index_copy_(0, index, values[torch.as_tensor(rows, device=device)])
+            return torch.zeros((views, *values.shape[1:]), device=device).index_copy_(0, index, values[row_index])
 
         xy, log_variance, visibility = per_view(landmarks.xy), per_view(landmarks.log_variance), per_view(landmarks.visibility)
         gated, anchors, valid = triangulate_gated(xy, log_variance, visibility, self.P, reproj_thresh_px=self.config.reproj_gate_px)
         cloud: tuple[Float32[Tensor, "n 3"], Bool[Tensor, " n"]] = triangulate_landmarks(xy, log_variance, visibility, self.P, vis_thresh=-1.0)
-        contact: Float32[Tensor, " n"] = landmarks.floor_contact[torch.as_tensor(rows, device=device)].mean(dim=0)  # fused over the views that see the person
+        contact: Float32[Tensor, " n"] = landmarks.floor_contact[row_index].mean(dim=0)  # fused over the views that see the person
         contact = torch.where(contact < CONTACT_MIN, 0.0, contact) * valid.float() * torch.exp(-((anchors[:, 2] / CONTACT_HEIGHT_M) ** 2))
         if person not in self.fitters:
             self.fitters[person] = self.new_fitter(*self.cameras)

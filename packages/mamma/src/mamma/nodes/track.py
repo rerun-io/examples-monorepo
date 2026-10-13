@@ -151,7 +151,7 @@ class TrackNode:
         per_view: list[BoxDetections] = []
         for v in range(frames_hwc.shape[0]):
             rows: Tensor = (found.frame_indices == v).nonzero().reshape(-1)
-            per_view.append(BoxDetections(found.xyxy[rows], found.scores[rows], torch.zeros_like(found.frame_indices[rows]) + v))
+            per_view.append(BoxDetections(found.xyxy[rows], found.scores[rows], found.frame_indices[rows]))
         features: list[Float32[Tensor, "m 512"]] = [self.encoder(frames_hwc, dets) for dets in per_view]
         return per_view, features
 

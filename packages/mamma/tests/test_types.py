@@ -1,7 +1,7 @@
 """mamma Types: serde round-trips, the Rerun mapping structure, and to_rerun -> from_layer on catalog-shaped rows (unit lane)."""
 
 from collections import defaultdict
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import numpy as np
 import pyarrow as pa
@@ -109,6 +109,17 @@ def test_to_rerun_then_from_layer_gives_the_value_back(value: object, t_ns: int)
     ((t_back, back),) = type(value).from_layer(layer_table([(t_ns, value)], root), root, "video_time")  # type: ignore[attr-defined]
     assert t_back == t_ns
     assert_same(back, value)
+
+
+@settings(max_examples=30, deadline=None)
+@given(first=tracks())
+def test_tracks_from_layer_keeps_each_frames_masks(first: MultiViewTracks) -> None:
+    second: MultiViewTracks = replace(first, frame_index=first.frame_index + 1, masks=~first.masks)
+    values: list[tuple[int, object]] = [(10, first), (20, second)]
+    restored: list[tuple[int, MultiViewTracks]] = list(MultiViewTracks.from_layer(layer_table(values, ROOT), ROOT, "video_time"))
+    for (t_ns, value), (t_back, back) in zip(values, restored, strict=True):
+        assert t_back == t_ns
+        assert_same(back, value)
 
 
 def test_topology_is_static_per_person_and_reads_back() -> None:
