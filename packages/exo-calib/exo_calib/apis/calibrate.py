@@ -186,7 +186,7 @@ def calibrate(config: Config, golden: rr.RecordingStream | None = None) -> EvalR
         _, init = next(RigCameras.from_layer(table, ROOTS["init"], segment.timeline))
     assert isinstance(init, RigCameras)
     tracking: RigCameras = init
-    if config.resume_from is None:  # pass 1 only tracks: its outputs go to unregistered *_pass1 files
+    if config.resume_from != "kp2d":  # pass 1 only tracks: its outputs go to unregistered *_pass1 files
         keep = Keep("refined")
         pass1: Graph = refine_graph(segment, layout, (init, init), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", PASS1_LAYERS, "_pass1", "off")}, report=False)
         run(pass1, mode=config.mode)
