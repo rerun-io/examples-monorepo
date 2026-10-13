@@ -2,7 +2,7 @@
 
 import threading
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import torch
@@ -17,6 +17,7 @@ from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
 from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
+from simplecv.gpu import fence_after
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
@@ -84,7 +85,9 @@ class CatalogVideoSource:
     """Framesets of ``cameras`` at the sampled indices (index-aligned; ``t_ns`` = the first camera's time), after the STATIC ports.
 
     Ports: ``frames`` (``Fenced[MultiViewFrames]`` for ``nvdec_rgb``, ``MultiViewFrames`` for ``cpu_rgb``), ``rig`` (STATIC
-    ``RigCameras`` of the base layer, only when every camera has a calibration) and one STATIC port per ``statics`` key.
+    ``RigCameras`` of the base layer at the stored size, only when every camera has a calibration) and one STATIC port per
+    ``statics`` key. With ``resize_hw`` the frames are area-resized after decode; ``keep_native`` adds ``frames_native``
+    (same type, decoded size), emitted just before ``frames`` at the same time.
     """
 
     def __init__(
@@ -99,19 +102,20 @@ class CatalogVideoSource:
         keep_native: bool = False,
         statics: Mapping[str, Column] | None = None,
     ) -> None:
-        if decode == "cpu_luma" or group_tolerance_ns is not None or resize_hw is not None or keep_native:
-            raise NotImplementedError("cpu_luma decode, frameset grouping and resizing land with their first user (mamma, robocap-live)")
+        if decode == "cpu_luma" or group_tolerance_ns is not None or (keep_native and resize_hw is None):
+            raise NotImplementedError("cpu_luma decode and frameset grouping land with robocap-live; keep_native needs resize_hw")
         self.segment, self.cameras, self.sample, self.fenced = segment, cameras, sample, decode == "nvdec_rgb"
+        self.resize_hw, self.keep_native = resize_hw, keep_native
         self.statics: dict[str, Column] = {"rig": Column(RigCameras, "/world", static=True), **(statics or {})}
         self.clock: str = segment.timeline
-        self.outputs: dict[str, PortType] = {"frames": Fenced[MultiViewFrames] if self.fenced else MultiViewFrames}
+        frame_type: PortType = Fenced[MultiViewFrames] if self.fenced else MultiViewFrames
+        self.outputs: dict[str, PortType] = {"frames": frame_type} | ({"frames_native": frame_type} if keep_native else {})
         self.outputs |= {port: column.type for port, column in self.statics.items()}
         self.frames = SegmentFrames(segment, cameras, "cuda" if self.fenced else "cpu")
 
     def events(self) -> Iterator[Event]:
-        dataset: DatasetEntry = self.segment.entry()
-        for port, column in self.statics.items():
-            table = read_column(dataset, self.segment.segment, column.type, column.root, self.clock, static=True)
+        for port, column in self.statics.items():  # the entry lives through the call (an entry must outlive its queries)
+            table = read_column(self.segment.entry(), self.segment.segment, column.type, column.root, self.clock, static=True)
             for _, value in column.type.from_layer(table, column.root, self.clock):
                 if port != "rig":
                     yield Event(STATIC, port, value)
@@ -120,14 +124,16 @@ class CatalogVideoSource:
         times: list[Int64[ndarray, " n"]] = [self.frames.times_ns(view) for view in range(len(self.cameras))]
         shortest: int = min(t.size for t in times)  # index-aligned: every sampled index exists in every camera
         for index in sample_indices(times[0][:shortest], self.sample, self.segment.window_ns).tolist():
-            rgb: UInt8[Tensor, "v 3 h w"] = torch.stack([self.frames.frames_at(view, [index])[0] for view in range(len(self.cameras))])
-            frames = MultiViewFrames(int(times[0][index]), index, self.cameras, rgb, torch.as_tensor([int(t[index]) for t in times]))
-            if self.fenced:
-                fence = torch.cuda.Event()
-                fence.record()  # torch's Event.wait takes a Stream where dagkit's Fence protocol says object: cast
-                yield Event(frames.t_ns, "frames", Fenced(frames, cast(Fence, fence)))
-            else:
-                yield Event(frames.t_ns, "frames", frames)
+            native: UInt8[Tensor, "v 3 hh ww"] = torch.stack([self.frames.frames_at(view, [index])[0] for view in range(len(self.cameras))])
+            rgb: UInt8[Tensor, "v 3 h w"] = native
+            if self.resize_hw is not None:
+                rgb = torch.nn.functional.interpolate(native.float(), size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
+            cam_t_ns: Int64[Tensor, " v"] = torch.as_tensor([int(t[index]) for t in times])
+            ports: dict[str, UInt8[Tensor, "v 3 _ _"]] = ({"frames_native": native} if self.keep_native else {}) | {"frames": rgb}
+            fence: Fence | None = fence_after(rgb)
+            for port, pixels in ports.items():
+                frames = MultiViewFrames(int(times[0][index]), index, self.cameras, pixels, cam_t_ns)
+                yield Event(frames.t_ns, port, Fenced(frames, fence) if self.fenced else frames)
 
     def close(self) -> None:
         self.frames.close()
