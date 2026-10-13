@@ -101,14 +101,12 @@ def sample_indices(times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int 
 
 
 class CatalogVideoSource:
-    """Framesets of ``cameras`` at the sampled indices (index-aligned; ``t_ns`` = the first camera's time), after the STATIC ports.
+    """Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``.
 
-    Ports: ``frames`` (``Fenced[MultiViewFrames]`` for ``nvdec_rgb``, ``MultiViewFrames`` for ``cpu_rgb``, ``LumaFrameset``
-    for ``cpu_luma``), ``rig`` (STATIC ``RigCameras`` of the base layer at the stored size, only when every camera has a
-    calibration) and one STATIC port per ``statics`` key (a temporal column is read whole into one STATIC value). With
-    ``resize_hw`` the frames are area-resized after decode; ``keep_native`` adds ``frames_native`` (same type, decoded
-    size), emitted just before ``frames`` at the same time. ``cpu_luma`` decodes every frame (in the window) in order and
-    groups the cameras' frames into framesets (``ops.framesets``, ``group_tolerance_ns``; ``t_ns`` = the opening frame's).
+    Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera:
+    ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize;
+    ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time.
+    ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening.
     """
 
     def __init__(
@@ -178,11 +176,10 @@ class CatalogVideoSource:
             inside.append(video.t_ns[first:])
         index: FramesetIndex = group_framesets(inside, tolerance_ns)
         for row, t_ns in enumerate(index.t_ns.tolist()):
-            present: list[bool] = (index.frame[row] >= 0).tolist()
-            luma = tuple(next(decoder, None) if here else None for decoder, here in zip(decoders, present, strict=True))
-            if any(here and plane is None for here, plane in zip(present, luma, strict=True)):
+            cam_t_ns = tuple(int(t) if f >= 0 else None for t, f in zip(index.cam_t_ns[row], index.frame[row], strict=True))  # None: absent
+            luma = tuple(next(decoder, None) if t is not None else None for decoder, t in zip(decoders, cam_t_ns, strict=True))
+            if any(t is not None and plane is None for t, plane in zip(cam_t_ns, luma, strict=True)):
                 raise ValueError(f"{self.segment.segment}: a camera's decoder ended before its last packet")
-            cam_t_ns = tuple(int(t) if here else None for t, here in zip(index.cam_t_ns[row], present, strict=True))
             yield Event(t_ns, "frames", LumaFrameset(t_ns, self.cameras, luma, cam_t_ns))
         if any(next(decoder, None) is not None for decoder in decoders):
             raise ValueError(f"{self.segment.segment}: a camera decoded more frames than it has packets")
