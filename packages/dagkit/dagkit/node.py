@@ -76,7 +76,7 @@ class Emit(Protocol):
 
 
 @runtime_checkable
-class Node(Protocol):
+class Node(Protocol):  # optional: `emits_late`; `abort()` on failure, which may meet a step begun before the failure
     @property
     def inputs(self) -> Mapping[str, PortType]: ...
     @property

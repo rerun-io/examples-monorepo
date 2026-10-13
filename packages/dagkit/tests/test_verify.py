@@ -176,6 +176,8 @@ def test_noise_from_needs_the_donor_cases_noise_run(card: Path) -> None:
     verify.golden_path("dagkit", "fake", "short", "pre2").unlink()
     assert verify.main(verify.VerifyArgs(card, "post", clip="full")) == 1  # the short case never ran pre2
     assert verify.main(verify.VerifyArgs(card, "pre2", clip="short")) == 0
+    assert verify.main(verify.VerifyArgs(card, "post", clip="full")) == 1  # nor pre: one run is no noise measurement
+    assert verify.main(verify.VerifyArgs(card, "pre", clip="short")) == 0
     assert verify.main(verify.VerifyArgs(card, "post", clip="full")) == 0
 
 

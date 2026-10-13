@@ -1,4 +1,4 @@
-"""One engine for both runners. One lock, two conditions: workers wait on `cond`, the coordinator on `quiet`."""
+"""One engine for both runners: one lock and one condition; a reset is a per-node cut, applied in the node's own thread."""
 
 import bisect
 import heapq
@@ -63,8 +63,7 @@ class _Edge:
     unwrap: bool  # Fenced producer, host consumer: sync and unwrap at delivery
     wrap: bool  # host producer (a resumed checkpoint), fenced consumer: deliver Fenced(value, None)
     queue: deque = field(default_factory=deque)  # trigger edges: (seq, t_ns, value)
-    history: list = field(default_factory=list)  # AsOf edges: (t_ns, value) in time order
-    floors: list = field(default_factory=list)  # AsOf edges: the producer's reset times; a later tick never sees an entry before one
+    history: list = field(default_factory=list)  # AsOf edges: (t_ns, value, producer epoch) in time order
     depth_max: int = 0
     drops: int = 0
 
@@ -84,8 +83,8 @@ class _State:
     wm: TimeNs = STATIC - 1
     started: bool = False
     done: bool = False
-    idle: bool = False
-    paused: bool = False
+    cuts: list = field(default_factory=list)  # Control.reset/reconfigure: (time, params, world); applied before the first later tick
+    epoch: int = 0  # cuts applied so far; AsOf entries carry it
     ticks: int = 0
     step_ms: list[float] = field(default_factory=list)
     logged: int = 0
@@ -110,7 +109,7 @@ class _State:
             for edge in self.outs[port]:
                 kind = edge.spec.kind
                 if isinstance(kind, AsOf):
-                    edge.history.append((t_ns, value))
+                    edge.history.append((t_ns, value, self.epoch))
                     if run.mode == "realtime" and len(edge.history) > kind.keep:
                         del edge.history[0]
                     continue
@@ -141,9 +140,8 @@ class _Run:
         self.control.wake = self.notify
         lock = threading.RLock()
         self.cond: threading.Condition = threading.Condition(lock)
-        self.quiet: threading.Condition = threading.Condition(lock)
         self.failure: BaseException | None = None
-        self.running = self.paused = False
+        self.running = False
         self.seq = self.world = 0
         self.first, self.last = TIME_MAX, STATIC - 1  # first and last non-STATIC source time
         self.params: dict[str, dict[str, object]] = {}
@@ -167,7 +165,6 @@ class _Run:
     def notify(self) -> None:
         with self.cond:
             self.cond.notify_all()
-            self.quiet.notify_all()
 
     def fail(self, exc: BaseException) -> None:
         with self.cond:
@@ -209,7 +206,7 @@ class _Run:
             s.pending.append((edge, t_ns, value))
 
     def _can_finish(self, s: _State) -> bool:
-        if self.paused or s.pending or any(e.queue or not self.states[e.spec.src.node].done for e in s.triggers):
+        if s.pending or any(e.queue or not self.states[e.spec.src.node].done for e in s.triggers):
             return False
         if s.spec.kind == "segment" and any(self.states[e.spec.src.node].wm < TIME_MAX for e in s.asofs):
             return False
@@ -219,13 +216,12 @@ class _Run:
         if edge.unwrap and isinstance(value, Fenced):
             if value.fence is not None:
                 value.fence.synchronize()
-            if self.failure is not None:  # the sync may have waited out a failure: never run user code after abort()
-                raise _Abort
             return value.value
         return Fenced(value, None) if edge.wrap and not isinstance(value, Fenced) else value
 
     def _deliver(self, s: _State, item: tuple[_Edge, TimeNs, object]) -> None:
         edge, t_ns, raw = item
+        self._cut(s, t_ns)
         port: str = edge.spec.dst.port
         value: object = self._convert(edge, raw)
         with self.cond:
@@ -244,10 +240,12 @@ class _Run:
             low: TimeNs = min([t_ns, *queued, *(self.states[e.spec.src.node].wm + 1 for e in s.triggers)])  # earliest tick still to come
             for e in s.asofs:
                 found: int = bisect.bisect_right(e.history, t_ns, key=lambda h: h[0])
-                floor: TimeNs = max((f for f in e.floors if f < t_ns), default=STATIC - 1)
-                raw_asof.append((e, e.history[found - 1][1] if found and e.history[found - 1][0] > floor else None))
+                need: int = sum(cut[0] < t_ns for cut in self.states[e.spec.src.node].cuts)  # the producer world that owns t_ns
+                raw_asof.append((e, e.history[found - 1][1] if found and e.history[found - 1][2] == need else None))
                 del e.history[: max(bisect.bisect_right(e.history, low, key=lambda h: h[0]) - 1, 0)]  # retain low's predecessor
         asof: dict[str, object | None] = {e.spec.dst.port: None if v is None else self._convert(e, v) for e, v in raw_asof}
+        if self.failure is not None:  # the commit point: no step begins after a failure (abort() may only meet a running one)
+            raise _Abort
         start: float = time.perf_counter()
         s.obj.step(Tick(t_ns, port, value, asof), s)  # type: ignore[attr-defined]
         with self.cond:
@@ -259,11 +257,11 @@ class _Run:
             s.wm, s.done = TIME_MAX, True
         self.notify()
 
-    def _reset(self, s: _State) -> None:
+    def _reset(self, s: _State, world: int = 0) -> None:
         resources: dict[str, object] = {need: self.resources[need] for need in s.spec.needs}
         params: dict[str, object] = dict(self.params.get(s.spec.name, {}))
         s.started = True  # a reset that fails half way still gets abort()
-        s.obj.reset(RunContext(self.graph.name, s.spec.name, self.mode, resources, params, self.world, dict(s.statics), self.control))  # type: ignore[attr-defined]
+        s.obj.reset(RunContext(self.graph.name, s.spec.name, self.mode, resources, params, world, dict(s.statics), self.control))  # type: ignore[attr-defined]
 
     def _start_source(self, s: _State) -> Iterator[Event]:
         events: Iterator[Event] = iter(s.obj.events())  # type: ignore[attr-defined]
@@ -277,49 +275,33 @@ class _Run:
 
     def _emit(self, s: _State, event: Event) -> None:
         with self.cond:
-            s.ticks, self.first, self.last = s.ticks + 1, min(self.first, event.t_ns), max(self.last, event.t_ns)
+            s.wm, s.ticks = max(s.wm, event.t_ns - 1), s.ticks + 1
+            self.first, self.last = min(self.first, event.t_ns), max(self.last, event.t_ns)
         s.put(event.port, event.t_ns, event.value)
 
-    def _final(self, s: _State) -> bool:  # settled: s gets no more ticks at or before `last`
-        return not s.pending and all(self.states[e.spec.src.node].wm >= self.last for e in s.triggers)
-
-    def _finalize(self, settle: Callable[[], None]) -> None:
-        """Settle, then raise every final non-late node's watermark to `last`, until nothing changes."""
-        raised: bool = True
-        while raised:
-            self.cond.notify_all()  # a watermark moved (a raise, or a flushed target): waiting workers re-check their pending ticks
-            settle()
-            raised = False
-            for s in self.nodes:  # topological: a raised watermark reaches the nodes downstream in the same pass
-                if s.spec.kind != "segment" and not getattr(s.obj, "emits_late", False) and s.wm < self.last and self._final(s):
-                    s.wm, raised = self.last, True
-
-    def _barrier(self, settle: Callable[[], None]) -> None:
+    def _schedule(self) -> None:
+        """Control.reset / reconfigure: each target switches world after the newest emitted time (a cut never splits a timestamp)."""
         with self.cond:
-            if not (requests := self.control.take_requests()):
-                return
-            self.paused = True  # sources pause at a time boundary: every source holds an event later than `last`
-            for targets, params, bump in requests:
+            for targets, params, bump in self.control.take_requests():
                 names: set[str] = set(targets) or {s.spec.name for s in self.nodes if s.spec.kind == "node"}
                 if bad := sorted(n for n in names if getattr(self.graph.nodes.get(n), "kind", None) != "node"):
                     raise GraphError(f"reset/reconfigure targets must be plain nodes (not sources, sinks, SegmentNodes): {bad}")
                 self.world += bump
-                alive: list[_State] = [s for s in self.nodes if s.spec.name in names and not s.done]
-                self._finalize(settle)
-                for s in alive:  # the old epoch ends upstream first: s flushes, then every tick that waited on s runs
-                    if not self._final(s):
-                        raise GraphError(f"reset of {s.spec.name}: its old-world ticks wait on a producer outside the reset; reset that one too")
-                    s.obj.flush(s)  # type: ignore[attr-defined]
-                    s.wm = TIME_MAX  # until the barrier ends: s is final for the old world
-                    self._finalize(settle)
-                for s in alive:
-                    s.wm = self.last  # the new world only sees ticks after `last`
-                    self.params.setdefault(s.spec.name, {}).update(params.get(s.spec.name, {}))
-                    for edge in (e for e in itertools.chain.from_iterable(s.outs.values()) if isinstance(e.spec.kind, AsOf)):
-                        edge.floors.append(self.last)  # old-world values stay for old ticks that are still on their way
-                    self._reset(s)
-            self.paused = False
-            self.cond.notify_all()
+                for s in (s for s in self.nodes if s.spec.name in names and not s.done):
+                    s.cuts.append((self.last, params.get(s.spec.name, {}), self.world))
+
+    def _cut(self, s: _State, t_ns: TimeNs) -> None:
+        """In s's own thread, before its tick at t_ns: every cut before t_ns ends the old world (flush), then reset."""
+        while s.epoch < len(s.cuts) and s.cuts[s.epoch][0] < t_ns:
+            cut, params, world = s.cuts[s.epoch]
+            if self.failure is not None:  # never flush after a failure
+                raise _Abort
+            s.obj.flush(s)  # type: ignore[attr-defined]
+            with self.cond:
+                s.epoch, s.wm = s.epoch + 1, max(s.wm, cut)  # every tick at or before the cut has run and flushed
+                self.params.setdefault(s.spec.name, {}).update(params)
+                self.cond.notify_all()
+            self._reset(s, world)
 
     def _drain(self) -> None:
         while any([self._node_loop(s, wait=False) for s in self.nodes]):  # visit every node, without short-circuiting
@@ -328,20 +310,16 @@ class _Run:
     def sequential(self, streams: list[Iterator[Event]]) -> None:
         heap: list[tuple[TimeNs, int, Event]] = [(e.t_ns, i, e) for i, it in enumerate(streams) if (e := next(it, None)) is not None]
         heapq.heapify(heap)
-        for t_ns, i, _ in heap:  # a source's next event is known: nothing before it can follow (also below)
-            self.sources[i].wm = t_ns - 1
         while heap and not self.control.stopped:
             self._drain()
             _, i, event = heapq.heappop(heap)
             self._emit(self.sources[i], event)
             if (following := next(streams[i], None)) is not None:
-                self.sources[i].wm = following.t_ns - 1
                 heapq.heappush(heap, (following.t_ns, i, following))
             else:
                 self._close(self.sources[i])
             self._drain()
-            if not heap or heap[0][0] > event.t_ns:  # the barrier sees whole timestamps
-                self._barrier(self._drain)
+            self._schedule()
             self._health()
         for s in self.sources:
             self._close(s)
@@ -358,14 +336,6 @@ class _Run:
 
     def _source_loop(self, s: _State, events: Iterator[Event]) -> None:
         for event in events:
-            with self.cond:
-                s.wm = max(s.wm, event.t_ns - 1)  # the next event is known: nothing before it can follow
-                self.cond.notify_all()
-                while self.paused and event.t_ns > self.last:  # pause at a time boundary only
-                    s.paused = True
-                    self.quiet.notify_all()
-                    self.wait()
-                s.paused = False
             if self.control.stopped:
                 break
             self._emit(s, event)
@@ -380,19 +350,19 @@ class _Run:
                 while (item := self._next(s)) is None and not self._can_finish(s):
                     if not wait:
                         return progress
-                    s.idle = True
-                    self.quiet.notify_all()
                     self.wait()
-                s.idle = False
                 if self.failure is not None:
                     raise _Abort  # never step or flush after a failure
             if item is not None:
                 self._deliver(s, item)
             else:
+                self._cut(s, TIME_MAX)  # a reset still due runs before the final flush
+                history: dict[str, list[Event]] = {
+                    e.spec.dst.port: [Event(t, e.spec.dst.port, self._convert(e, v)) for t, v, _ in e.history] for e in s.asofs if s.spec.kind == "segment"
+                }
+                if self.failure is not None:  # a fence sync above may have outlived a failure
+                    raise _Abort
                 if s.spec.kind == "segment":
-                    history: dict[str, list[Event]] = {
-                        e.spec.dst.port: [Event(t, e.spec.dst.port, self._convert(e, v)) for t, v in e.history] for e in s.asofs
-                    }
                     s.obj.run({**s.collected, **history}, s)  # type: ignore[attr-defined]
                 else:
                     s.obj.flush(s)  # type: ignore[attr-defined]
@@ -400,19 +370,10 @@ class _Run:
             progress = True
         return progress
 
-    def _settle(self) -> None:
-        # Sources paused, every node waiting with nothing deliverable; unsatisfied pending ticks may remain.
-        while not all(s.done or s.paused for s in self.sources) or not all(
-            s.done or (s.idle and not any(e.queue for e in s.triggers) and not (s.pending and self._ready(s, s.pending[0][1]))) for s in self.nodes
-        ):
-            if self.failure is not None:
-                raise _Abort
-            self.quiet.wait()
-
     def _coordinate(self) -> None:
         with self.cond:
             while not all(s.done for s in self.states.values()) and self.failure is None:
-                self._barrier(self._settle)
+                self._schedule()
                 self.cond.wait(self.health_every_s if self.health is not None else None)
                 self._health()
 

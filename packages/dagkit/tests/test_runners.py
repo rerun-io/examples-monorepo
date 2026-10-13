@@ -581,12 +581,90 @@ def test_resetting_a_producer_keeps_its_old_world_asof_values(runner: str, size:
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
-def test_a_reset_that_cannot_finish_the_old_world_fails_closed(runner: str) -> None:
+def test_a_consumer_reset_waits_for_its_old_ticks(runner: str) -> None:
     control = Control()
     graph, join = late_join(control, ["join"])  # join's t=1 tick waits on `late`, which only emits at the end
-    with pytest.raises(GraphError, match="outside the reset"):
-        RUNNERS[runner](graph, control=control)
-    assert join.seen == []
+    RUNNERS[runner](graph, control=control)
+    assert join.seen == [(1, 0, 10), (2, 1, 20)]  # the cut runs in join's own stream, after its old tick
+
+
+class EndOnly(Add):
+    """Plain node that emits only at flush, at the time of its last tick."""
+
+    def reset(self, ctx: RunContext) -> None:
+        super().reset(ctx)
+        self.saved: Tick | None = None
+
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        self.saved = tick
+
+    def flush(self, out) -> None:  # noqa: ANN001
+        if self.saved is not None:
+            out.put("y", self.saved.t_ns, int(self.saved.value))  # type: ignore[call-overload]
+            self.saved = None
+
+
+class Future(Add):
+    """Emits one value dated in the future (t=100) on its first tick, then nothing."""
+
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        if tick.value == 1:
+            out.put("y", 100, 10)
+
+
+def reset_after_first(control: Control, targets: list[str], events: list[tuple[int, int]]) -> IterSource:
+    def gen():  # noqa: ANN202
+        for i, (t, value) in enumerate(events):
+            yield Event(t, "x", value)
+            if i == 0:
+                control.reset(targets)
+                time.sleep(0.2)
+
+    return IterSource({"x": int}, gen)
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_reset_lets_a_plain_node_flush_at_its_last_tick(runner: str) -> None:
+    control, sink = Control(), Collect(("y",))
+    graph = Graph("end-only")
+    end = graph.node("end", EndOnly(0))
+    graph.edge(graph.source("src", reset_after_first(control, ["end"], [(1, 1), (2, 2)]))["x"], end["x"])
+    graph.edge(end["y"], graph.sink("sink", sink)["y"])
+    RUNNERS[runner](graph, control=control)
+    assert sink.items == [("y", 1, 1), ("y", 2, 2)]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_reset_hides_old_values_dated_after_the_cut(runner: str) -> None:
+    control, join = Control(), Recorded()
+    graph = Graph("future")
+    src = graph.source("src", reset_after_first(control, ["predict"], [(1, 1), (101, 2)]))
+    predict, ref = graph.node("predict", Future(0)), graph.node("join", join)
+    graph.edge(src["x"], predict["x"])
+    graph.edge(src["x"], ref["x"])
+    graph.edge(predict["y"], ref["a"], AsOf())
+    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
+    graph.edge(predict["y"], graph.sink("predict_sink", Collect(("y",)))["y"])
+    RUNNERS[runner](graph, control=control)
+    assert [(t, asof) for t, _, asof in join.seen] == [(1, None), (101, None)]
+
+
+def test_a_reset_inside_a_timestamp_is_kept_and_never_splits_it() -> None:
+    class Worlds(Add):
+        def __init__(self) -> None:
+            super().__init__(0)
+            self.seen: list[tuple[object, int]] = []
+
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            self.seen.append((tick.value, self.world))
+
+    control, node = Control(), Worlds()
+    graph = Graph("tie")
+    ref = graph.node("node", node)
+    graph.edge(graph.source("src", reset_after_first(control, ["node"], [(1, 10), (1, 20)]))["x"], ref["x"])
+    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
+    run_sequential(graph, control=control)
+    assert node.seen == [(10, 0), (20, 0)] and node.resets == 2 and node.flushes == 2  # the cut applies after time 1
 
 
 @pytest.mark.parametrize("runner", RUNNERS)

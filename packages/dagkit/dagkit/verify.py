@@ -156,15 +156,15 @@ def main(args: VerifyArgs) -> int:
         partial.replace(golden)
         print(f"{block.name}/{case.name} {args.phase}: {metrics}")
         results: list[BandResult] = [BandResult(b.name, False, "missing or non-finite") for b in block.metrics if not math.isfinite(metrics.get(b.name, math.nan))]
-        if args.phase == "post":  # noise: the case's own (noise, pre2 run), or those of its `noise_from` case (missing: fails)
+        if args.phase == "post":  # noise: the case's own (noise, pre + pre2 runs), or those of its `noise_from` case (missing: fails)
             donor: Case = next((c for c in block.cases if c.name == case.noise_from), case) if case.noise_from and not case.noise else case
-            paths: dict[str, tuple[Case, Path]] = {ph: (c, golden_path(card.package, block.name, c.name, ph)) for ph, c in (("pre", case), ("pre2", donor))}
-            scores: dict[str, dict] = {ph: dict(score(c, path)) for ph, (c, path) in paths.items() if path.exists()}  # type: ignore[call-overload]
+            runs: list[tuple[Case, Phase]] = [(case, "pre"), (donor, "pre"), (donor, "pre2")]
+            scores: dict = {(c.name, ph): dict(score(c, p)) for c, ph in runs if (p := golden_path(card.package, block.name, c.name, ph)).exists()}  # type: ignore[call-overload]
             for band in block.metrics:
-                pre2: float | None = scores.get("pre2", {}).get(band.name)
-                result: BandResult = check_band(band, scores.get("pre", {}).get(band.name), metrics.get(band.name), donor.noise)
-                evidence: bool = pre2 is not None and math.isfinite(pre2)  # a finite pre2 metric: the noise was measured
-                results.append(BandResult(band.name, result.passed and evidence, f"{result.reason}; pre2 of {donor.name!r}: {pre2}"))
+                noise_runs: list[float | None] = [scores.get((donor.name, ph), {}).get(band.name) for ph in ("pre", "pre2")]
+                result: BandResult = check_band(band, scores.get((case.name, "pre"), {}).get(band.name), metrics.get(band.name), donor.noise)
+                measured: bool = all(v is not None and math.isfinite(v) for v in noise_runs)  # both runs behind the noise exist and score
+                results.append(BandResult(band.name, result.passed and measured, f"{result.reason}; noise runs (pre, pre2) of {donor.name!r}: {noise_runs}"))
         for result in results:
             print(f"  {'PASS' if result.passed else 'FAIL'} {result.metric}: {result.reason}")
         failed |= not all(r.passed for r in results)
