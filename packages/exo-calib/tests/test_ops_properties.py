@@ -6,12 +6,21 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 
-from exo_calib.ops.bundle_adjust import refine_extrinsics
+from exo_calib.ops.bundle_adjust import refine_extrinsics, revert_large_pose_updates
 from exo_calib.ops.eval import camera_centers
 from exo_calib.ops.triangulation import triangulate_robust
 
 K = np.array([[800.0, 0.0, 320.0], [0.0, 820.0, 240.0], [0.0, 0.0, 1.0]])
 POINTS = arrays(np.float64, st.tuples(st.integers(8, 30), st.just(3)), elements=st.floats(-0.5, 0.5))
+ROTVEC = arrays(np.float64, 3, elements=st.floats(-1.0, 1.0)).filter(lambda v: np.linalg.norm(v) > 0.1)
+
+
+def rotated_rig(cam_T_world: np.ndarray, common: np.ndarray, per_camera: np.ndarray) -> np.ndarray:
+    """Rotate the whole world by ``common`` (a gauge move), then each camera by its own ``per_camera`` rotation."""
+    out = cam_T_world.copy()
+    out[:, :3, :3] = per_camera @ cam_T_world[:, :3, :3] @ common.T
+    out[:, :3, 3] = np.einsum("vij,vj->vi", per_camera, cam_T_world[:, :3, 3])
+    return out
 
 
 @settings(max_examples=60, deadline=None)
@@ -49,3 +58,35 @@ def test_robust_triangulation_drops_an_injected_outlier(points: np.ndarray, view
     kept = robust.obs.obs_view_idx[robust.obs.obs_point_idx == target]
     assert view not in kept.tolist() and kept.size == 4 and robust.obs.obs_point_idx.size == obs.obs_point_idx.size - 1
     np.testing.assert_allclose(robust.points_xyz, points, atol=1e-6)
+
+
+@settings(max_examples=60, deadline=None)
+@given(n_views=st.integers(3, 8), axis=ROTVEC, angle_deg=st.floats(0.0, 40.0), small=arrays(np.float64, (8, 3), elements=st.floats(-1.0, 1.0)))
+def test_rotation_guard_ignores_a_rotation_the_whole_rig_shares(n_views: int, axis: np.ndarray, angle_deg: float, small: np.ndarray) -> None:
+    from scipy.spatial.transform import Rotation
+
+    initial = ring_rig(n_views, 4.0)
+    common = Rotation.from_rotvec(axis / np.linalg.norm(axis) * np.deg2rad(angle_deg)).as_matrix()
+    own = Rotation.from_rotvec(small[:n_views] * np.deg2rad(3.0) / np.sqrt(3.0)).as_matrix()  # <= 3 deg per camera
+    refined = rotated_rig(initial, common, own)
+    guarded, reverted = revert_large_pose_updates(refined, initial, maximum_rotation_deg=10.0)
+    assert reverted == ()
+    np.testing.assert_array_equal(guarded, refined)
+
+
+@settings(max_examples=60, deadline=None)
+@given(n_views=st.integers(3, 8), axis=ROTVEC, angle_deg=st.floats(0.0, 5.0), small=arrays(np.float64, (8, 3), elements=st.floats(-1.0, 1.0)),
+       bad=st.integers(0, 7), bad_axis=ROTVEC, bad_deg=st.floats(30.0, 120.0))  # fmt: skip
+def test_rotation_guard_still_reverts_a_camera_that_diverges_from_the_rig(
+    n_views: int, axis: np.ndarray, angle_deg: float, small: np.ndarray, bad: int, bad_axis: np.ndarray, bad_deg: float
+) -> None:
+    from scipy.spatial.transform import Rotation
+
+    initial = ring_rig(n_views, 4.0)
+    common = Rotation.from_rotvec(axis / np.linalg.norm(axis) * np.deg2rad(angle_deg)).as_matrix()
+    own = Rotation.from_rotvec(small[:n_views] * np.deg2rad(3.0) / np.sqrt(3.0)).as_matrix()
+    own[bad % n_views] = Rotation.from_rotvec(bad_axis / np.linalg.norm(bad_axis) * np.deg2rad(bad_deg)).as_matrix() @ own[bad % n_views]
+    refined = rotated_rig(initial, common, own)
+    guarded, reverted = revert_large_pose_updates(refined, initial, maximum_rotation_deg=10.0)
+    assert reverted == (bad % n_views,)
+    np.testing.assert_array_equal(guarded[bad % n_views], initial[bad % n_views])

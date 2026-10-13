@@ -46,7 +46,8 @@ pins the similarity gauge without freezing rigs of any size."""
 MINIMUM_VIEW_SUPPORT_RATIO: float = 0.10
 """Fix views whose robust-observation count is below this fraction of the median count."""
 MAXIMUM_ROTATION_UPDATE_DEG: float = 10.0
-"""Revert a camera pose when BA rotates it farther from Stage A than this data-independent safety bound."""
+"""Revert a camera pose when BA rotates it farther from Stage A than this data-independent safety bound, also after
+removing the rotation the whole rig shares (BA's softly pinned gauge)."""
 FOCAL_ITERATIONS: int = 300
 FOCAL_LEARNING_RATE: float = 0.03
 FOCAL_ROBUST_SCALE_PX: float = 1.0

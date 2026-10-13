@@ -46,6 +46,8 @@ properties = [
     "tests/test_ops_properties.py::test_camera_centers_are_the_translation_of_the_se3_inverse",
     "tests/test_ops_properties.py::test_ba_on_exact_observations_keeps_poses_and_never_moves_a_fixed_pose",
     "tests/test_ops_properties.py::test_robust_triangulation_drops_an_injected_outlier",
+    "tests/test_ops_properties.py::test_rotation_guard_ignores_a_rotation_the_whole_rig_shares",
+    "tests/test_ops_properties.py::test_rotation_guard_still_reverts_a_camera_that_diverges_from_the_rig",
     "tests/test_metric_scale.py::test_grouped_medians_matches_per_group_numpy_median",
 ]
 

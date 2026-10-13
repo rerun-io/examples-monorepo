@@ -203,6 +203,11 @@ def revert_large_pose_updates(
 ) -> tuple[Float64[ndarray, "v 4 4"], tuple[int, ...]]:
     """Restore initial poses whose BA rotation update exceeds a data-independent bound.
 
+    BA's gauge is only softly pinned, so the whole rig may turn a few degrees together; that shared turn is no camera's
+    divergence. With three or more cameras a camera is restored only when its update exceeds the bound both as measured
+    and after removing the rotation the whole rig shares (the chordal mean of the per-camera updates), so the guard never
+    restores more cameras than the measured bound alone would.
+
     Args:
         refined_cam_T_world: Float64 refined world-to-camera transforms, shape ``(v, 4, 4)``.
         initial_cam_T_world: Float64 initial world-to-camera transforms, shape ``(v, 4, 4)``.
@@ -213,16 +218,19 @@ def revert_large_pose_updates(
     """
     if maximum_rotation_deg < 0.0:
         raise ValueError("maximum_rotation_deg must be nonnegative")
-    relative_rotation: Float64[ndarray, "v 3 3"] = np.einsum(
-        "vij,vkj->vik", refined_cam_T_world[:, :3, :3], initial_cam_T_world[:, :3, :3]
-    )
-    cosine: Float64[ndarray, "v"] = np.clip(
-        (np.trace(relative_rotation, axis1=1, axis2=2) - 1.0) / 2.0,
-        -1.0,
-        1.0,
-    )
-    update_deg: Float64[ndarray, "v"] = np.rad2deg(np.arccos(cosine))
-    reverted: tuple[int, ...] = tuple(int(view_idx) for view_idx in np.flatnonzero(update_deg > maximum_rotation_deg))
+    refined: Float64[ndarray, "v 3 3"] = refined_cam_T_world[:, :3, :3]
+    initial: Float64[ndarray, "v 3 3"] = initial_cam_T_world[:, :3, :3]
+
+    def update_deg(expected: Float64[ndarray, "v 3 3"]) -> Float64[ndarray, "v"]:
+        relative: Float64[ndarray, "v 3 3"] = np.einsum("vij,vkj->vik", refined, expected)
+        return np.rad2deg(np.arccos(np.clip((np.trace(relative, axis1=1, axis2=2) - 1.0) / 2.0, -1.0, 1.0)))
+
+    large: Bool[ndarray, "v"] = update_deg(initial) > maximum_rotation_deg
+    if large.any() and refined.shape[0] >= 3:
+        u, _, vt = np.linalg.svd(np.einsum("vji,vjk->ik", initial, refined))  # sum of the per-camera world updates initialᵀ·refined
+        shared: Float64[ndarray, "3 3"] = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+        large &= update_deg(initial @ shared) > maximum_rotation_deg
+    reverted: tuple[int, ...] = tuple(int(view_idx) for view_idx in np.flatnonzero(large))
     guarded_cam_T_world: Float64[ndarray, "v 4 4"] = refined_cam_T_world.copy()
     if reverted:
         guarded_cam_T_world[np.asarray(reverted, dtype=np.int64)] = initial_cam_T_world[np.asarray(reverted, dtype=np.int64)]
