@@ -1,7 +1,7 @@
 """The SLAM graph (SPEC 5.5).
 
 ```
-video ─frames─▶ frontend (main thread) ─task─▶ backend (own process) ─map, keyframes─▶ sinks
+video ─frames─▶ frontend (main thread) ─task─▶ backend (own process) ─map, keyframes, cloud─▶ sinks
   └─rig (AsOf, calibrated only)─▶ ▲  └─tracked──────────────────────────────────────────▶ sinks
 ```
 ``frames`` is Block(2) (DropOldest(1) for a live camera), ``task`` Block(16). Resources: ``mast3r`` (the model, shared
@@ -36,7 +36,7 @@ def shared_model() -> AsymmetricMASt3R:
 def slam_graph(
     video: Source, cfg: SlamConfig, frame_hw: tuple[int, int], sinks: Mapping[str, Node], *, live: bool = False, nerfstudio: NerfstudioSink | None = None
 ) -> Graph:
-    """Sinks name the ports they take: ``tracked`` and ``keyframes`` (TrackedFrame), ``map`` (MapUpdate).
+    """Sinks name the ports they take: ``tracked`` and ``keyframes`` (TrackedFrame), ``map`` (MapUpdate), ``cloud`` (KeyframeCloud).
 
     ``frame_hw`` is the MASt3R frame size of the input (it sizes the shared buffers before the first frame arrives).
     """
@@ -51,7 +51,7 @@ def slam_graph(
     if "rig" in frontend_node.inputs:
         graph.edge(source["rig"], frontend["rig"], AsOf())
     graph.edge(frontend["task"], backend["task"], Block(16))
-    ports: dict[str, PortRef] = {"tracked": frontend["tracked"], "map": backend["map"], "keyframes": backend["keyframes"]}
+    ports: dict[str, PortRef] = {"tracked": frontend["tracked"], "map": backend["map"], "keyframes": backend["keyframes"], "cloud": backend["cloud"]}
     for name, sink in sinks.items():
         ref: NodeRef = graph.sink(name, sink)
         for port in sink.inputs:

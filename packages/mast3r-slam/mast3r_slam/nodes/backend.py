@@ -6,27 +6,31 @@ import lietorch
 import numpy as np
 import torch
 from dagkit.node import Emit, PortType, RunContext, Tick
-from jaxtyping import Float32, Int64
+from jaxtyping import Bool, Float32, Int64, UInt8
 from mast3r.model import AsymmetricMASt3R
 from numpy import ndarray
 
 from mast3r_slam.models.retrieval import CHECKPOINT, RetrievalDatabase
 from mast3r_slam.nodes.factor_graph import FactorGraph
 from mast3r_slam.nodes.shared import SharedKeyframes, SharedSlam, SharedStates
-from mast3r_slam.types import BackendTask, Frame, KeyframeAdded, MapUpdate, Mode, SlamConfig, TrackedFrame
+from mast3r_slam.types import BackendTask, Frame, KeyframeAdded, KeyframeCloud, MapUpdate, Mode, SlamConfig, TrackedFrame
+
+CLOUD_CONFIDENCE: float = 7.0
+"""Accumulated confidence a point needs to enter a keyframe's cloud (viewer only)."""
 
 
 class Backend:
     """One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyframe and to retrieval candidates, then
     runs global Gauss-Newton; ``RelocRequest`` tries to relocalise the shared current frame against the retrieval database.
-    Each task's result leaves as a ``MapUpdate``; once TERMINATED (realtime stop) queued tasks are dropped and counted.
+    Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeCloud``); once TERMINATED (realtime stop)
+    queued tasks are dropped and counted.
 
     At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``).
     The shared buffers carry the map both ways; the backend acknowledges each task by dequeuing it there.
     """
 
     inputs: Mapping[str, PortType] = {"task": BackendTask}
-    outputs: Mapping[str, PortType] = {"map": MapUpdate, "keyframes": TrackedFrame}
+    outputs: Mapping[str, PortType] = {"map": MapUpdate, "keyframes": TrackedFrame, "cloud": KeyframeCloud}
     emits_late: bool = True
 
     def __init__(self, cfg: SlamConfig) -> None:
@@ -88,6 +92,12 @@ class Backend:
         elif isinstance(task, KeyframeAdded):
             self._connect(task.index)
             self.times[task.index] = tick.t_ns
+            keyframe: Frame = self.keyframes[task.index]
+            assert keyframe.X_canon is not None and keyframe.C is not None
+            keep: Bool[ndarray, " hw"] = (keyframe.C > CLOUD_CONFIDENCE).reshape(-1).cpu().numpy()
+            if keep.any():
+                colors: UInt8[ndarray, "n 3"] = (keyframe.rgb.reshape(-1, 3).numpy()[keep] * 255).astype(np.uint8)
+                out.put("cloud", tick.t_ns, KeyframeCloud(task.index, keyframe.X_canon.cpu().numpy()[keep], colors))
         elif self.states.get_mode() == Mode.RELOC and self._relocalise(self.states.get_frame()):
             self.times[len(self.keyframes) - 1] = tick.t_ns
             self.states.set_mode(Mode.TRACKING)

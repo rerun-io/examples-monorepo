@@ -18,7 +18,7 @@ from mast3r_slam.nodes.backend import Backend
 from mast3r_slam.nodes.frontend import Frontend
 from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
-from mast3r_slam.types import Frame, KeyframeAdded, MapUpdate, Mode, RelocRequest, SlamConfig, TrackedFrame
+from mast3r_slam.types import Frame, KeyframeAdded, KeyframeCloud, MapUpdate, Mode, RelocRequest, SlamConfig, TrackedFrame
 
 SIZE: int = 224
 PATCHES: int = SIZE * SIZE // 256
@@ -37,7 +37,7 @@ def shared() -> Iterator[SharedSlam]:
 def observe(frame: Frame) -> None:
     """What MASt3R would leave on a frame: features and a point map (a fronto-parallel plane)."""
     frame.feat, frame.pos = torch.zeros(1, PATCHES, 1024), torch.zeros(1, PATCHES, 2, dtype=torch.long)
-    frame.update_pointmap(torch.ones(SIZE * SIZE, 3), torch.ones(SIZE * SIZE, 1), CFG.tracking)
+    frame.update_pointmap(torch.ones(SIZE * SIZE, 3), torch.full((SIZE * SIZE, 1), 10.0), CFG.tracking)  # confident
 
 
 def fake_mono(model: object, frame: Frame) -> tuple[torch.Tensor, torch.Tensor]:
@@ -157,8 +157,10 @@ def test_backend_contract(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -
     assert np.stack([maps[-1].ii, maps[-1].jj], axis=1).tolist() == [[0, 1], [0, 2], [1, 2], [3, 0]]
     finals = [(t, v.frame_index) for port, t, v in out.items if port == "keyframes" and isinstance(v, TrackedFrame)]
     assert finals == [(0, 0), (1000, 10), (2000, 20), (3000, 20)]  # the relocalised frame is keyframe 3, at its own time
+    clouds = [v for port, _, v in out.items if port == "cloud" and isinstance(v, KeyframeCloud)]
+    assert [c.index for c in clouds] == [0, 1, 2] and all(len(c.points) == SIZE * SIZE for c in clouds)  # new keyframes only
     backend.flush(out)
-    assert len(out.items) == len(maps) + len(finals)  # a second flush emits nothing
+    assert len(out.items) == len(maps) + len(finals) + len(clouds)  # a second flush emits nothing
 
     backend.reset(ctx)
     for tick in ticks():

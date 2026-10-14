@@ -28,7 +28,7 @@ from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
 from mast3r_slam.ops.image import resize_img
 from mast3r_slam.sources.webcam import Webcam
-from mast3r_slam.types import MapUpdate, SlamConfig, TrackedFrame
+from mast3r_slam.types import KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
 """``packages/mast3r-slam`` (checkpoints and profiles are relative to it)."""
@@ -70,10 +70,11 @@ class Config:
 
 
 def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
-    """Ports and entity roots of the graph's outputs: final keyframe camera poses, per-frame tracked poses, the map."""
+    """Ports and entity roots of the graph's outputs: final keyframe camera poses, per-frame tracked poses, the map and
+    the keyframe clouds (under the map's per-keyframe poses)."""
     name: str = camera.split("/")[-1]
-    ports: dict[str, PortType] = {"keyframes": TrackedFrame, "tracked": TrackedFrame, "map": MapUpdate}
-    return ports, {"keyframes": f"{ROOT}/{name}", "tracked": f"{ROOT}/tracked/{name}", "map": f"{ROOT}/map"}
+    ports: dict[str, PortType] = {"keyframes": TrackedFrame, "tracked": TrackedFrame, "map": MapUpdate, "cloud": KeyframeCloud}
+    return ports, {"keyframes": f"{ROOT}/{name}", "tracked": f"{ROOT}/tracked/{name}", "map": f"{ROOT}/map", "cloud": f"{ROOT}/map/keyframes"}
 
 
 def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
@@ -117,7 +118,8 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     if config.segment is not None and config.layer_dir is not None:
         producer = Producer("mast3r-slam", "0.0.1", "mast3r-slam", config.preset or "base")
         layer, partial = open_layer(config.segment, LAYER, producer, output_dir=config.layer_dir)
-        sinks["layer"] = LayerSink(layer, partial, config.segment, LAYER, ports, roots, register=config.register)
+        layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
+        sinks["layer"] = LayerSink(layer, partial, config.segment, LAYER, layer_ports, roots, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
     return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=config.webcam is not None, nerfstudio=nerfstudio)
 

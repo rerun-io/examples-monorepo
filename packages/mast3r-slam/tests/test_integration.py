@@ -8,7 +8,7 @@ import torch
 from dagkit.types import rerun_roundtrip
 
 from mast3r_slam.ops.optim import gauss_newton_rays
-from mast3r_slam.types import LocalOptConfig, MapUpdate, TrackedFrame
+from mast3r_slam.types import KeyframeCloud, LocalOptConfig, MapUpdate, TrackedFrame
 
 pytestmark = pytest.mark.integration
 
@@ -54,3 +54,11 @@ def test_map_update_rerun_round_trip(n_edges: int) -> None:
     assert t_ns == 7 and back.world == 2
     np.testing.assert_array_equal(back.world_sim3_cam, poses)
     np.testing.assert_array_equal(np.stack([back.ii, back.jj]), np.stack([value.ii, value.jj]))
+
+
+def test_keyframe_cloud_rerun_round_trip() -> None:
+    value = KeyframeCloud(12, np.array([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]], dtype=np.float32), np.array([[255, 0, 10], [1, 2, 3]], dtype=np.uint8))
+    [(t_ns, back)] = rerun_roundtrip(value, "/mast3r_slam/map/keyframes", "video_time", 9)
+    assert t_ns == 9 and back.index == 12
+    np.testing.assert_array_equal(back.points, value.points)
+    np.testing.assert_array_equal(back.colors, value.colors)

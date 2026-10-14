@@ -10,7 +10,7 @@ from hypothesis.extra.numpy import arrays
 from serde import SerdeError, from_dict, to_dict
 from serde.toml import from_toml, to_toml
 
-from mast3r_slam.types import Frame, MapUpdate, SlamConfig, TrackedFrame, TrackingConfig
+from mast3r_slam.types import Frame, KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame, TrackingConfig
 
 FINITE = st.floats(-100.0, 100.0, allow_nan=False, width=32)
 
@@ -46,7 +46,8 @@ def test_map_update_serde_round_trip_and_rerun_structure(k: int, data: st.DataOb
     np.testing.assert_array_equal(np.stack([back.ii, back.jj]), edges)
     assert back.ii.dtype == back.jj.dtype == np.int64
     logs = value.to_rerun("/mast3r_slam/map")
-    assert {log.path for log in logs} == set(MapUpdate.contents("/mast3r_slam/map")[: 2 if len(edges[0]) else 1])
+    frames = {f"/mast3r_slam/map/keyframes/{i:04d}" for i in range(k)}  # each keyframe's frame, for its KeyframeCloud
+    assert {log.path for log in logs} == set(MapUpdate.contents("/mast3r_slam/map")[: 2 if len(edges[0]) else 1]) | frames
     assert not any(log.static for log in logs)
     points = next(log.data for log in logs if isinstance(log.data, rr.Points3D))
     assert points.positions is not None and len(points.positions) == k
@@ -117,3 +118,16 @@ def test_recent_replaces_and_first_keeps_only_the_second_observation() -> None:
         first.update_pointmap(points, conf, TrackingConfig(filtering_mode="first"))
     assert recent.X_canon is not None and first.X_canon is not None
     assert float(recent.X_canon[0, 0]) == 3.0 and float(first.X_canon[0, 0]) == 2.0
+
+
+@given(index=st.integers(0, 600), points=arrays(np.float32, st.tuples(st.integers(1, 20), st.just(3)), elements=FINITE), data=st.data())
+@settings(max_examples=30, deadline=None)
+def test_keyframe_cloud_serde_round_trip_and_rerun_path(index: int, points: np.ndarray, data: st.DataObject) -> None:
+    colors: np.ndarray = data.draw(arrays(np.uint8, points.shape))
+    value = KeyframeCloud(index, points, colors)
+    back = from_dict(KeyframeCloud, to_dict(value))
+    np.testing.assert_array_equal(back.points, points)
+    np.testing.assert_array_equal(back.colors, colors)
+    assert back.points.dtype == np.float32 and back.colors.dtype == np.uint8
+    [log] = value.to_rerun("/mast3r_slam/map/keyframes")
+    assert log.path == f"/mast3r_slam/map/keyframes/{index:04d}/points" and not log.static

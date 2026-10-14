@@ -6,6 +6,7 @@ Edge Types (host, picklable: the backend runs in its own process):
   ``keyframes``: the final keyframe poses, emitted at flush at each keyframe's own frame time).
 - ``KeyframeAdded`` / ``RelocRequest``: the frontend's tasks for the backend (``BackendTask``).
 - ``MapUpdate``: every keyframe pose and factor-graph edge after the backend applied a task.
+- ``KeyframeCloud``: a new keyframe's confident points in its own camera frame (viewer only).
 
 Poses are lietorch Sim3 rows ``[t_xyz, q_xyzw, s]`` (world_from_cam); Rerun gets the rigid part (Transform3D) and keeps
 the scale and indices as ``AnyValues`` beside it, so ``from_layer`` restores the value exactly.
@@ -24,7 +25,7 @@ import rerun as rr
 import torch
 from dagkit.time import TimeNs
 from dagkit.types import Log, row_times
-from jaxtyping import Bool, Float, Float32, Int, Int64
+from jaxtyping import Bool, Float, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from serde import coerce, serde
 from torch import Tensor
@@ -330,6 +331,8 @@ class MapUpdate:
         keyframes = rr.AnyValues(world_sim3_cam=self.world_sim3_cam.reshape(-1), world=self.world)
         lines = rr.LineStrips3D(np.stack([centres[self.ii], centres[self.jj]], axis=1), colors=(0, 200, 0), radii=rr.Radius.ui_points(1.0))
         logs: list[Log] = [Log(f"{root}/keyframes", rr.Points3D(centres, colors=(255, 140, 0), radii=rr.Radius.ui_points(4.0))), Log(f"{root}/keyframes", keyframes)]
+        for i, pose in enumerate(self.world_sim3_cam):  # each keyframe's frame, so its KeyframeCloud follows the corrected pose
+            logs.append(Log(f"{root}/keyframes/{i:04d}", rr.Transform3D(translation=pose[:3], quaternion=rr.Quaternion(xyzw=pose[3:7]), scale=float(pose[7]))))
         if len(self.ii):  # Rerun refuses an AnyValues of empty batches; edges never disappear once logged
             logs += [Log(f"{root}/edges", lines), Log(f"{root}/edges", rr.AnyValues(edge_ii=self.ii, edge_jj=self.jj))]
         return logs
@@ -345,3 +348,35 @@ class MapUpdate:
             if poses is not None:
                 first, second = (np.asarray(e if e is not None else [], dtype=np.int64).reshape(-1) for e in (ii, jj))
                 yield t_ns, cls(np.asarray(poses, dtype=np.float32).reshape(-1, 8), first, second, int(_value(world)))
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class KeyframeCloud:
+    """The confident points of a new keyframe in its own camera frame, coloured (logged under the keyframe's pose)."""
+
+    index: int
+    """Keyframe index (``MapUpdate`` row)."""
+    points: Float32[ndarray, "n 3"]
+    """Canonical points in the keyframe's camera frame (at its Sim3 scale)."""
+    colors: UInt8[ndarray, "n 3"]
+    """RGB of each point."""
+
+    def to_rerun(self, root: str) -> list[Log]:
+        return [Log(f"{root}/{self.index:04d}/points", rr.Points3D(self.points, colors=self.colors, radii=rr.Radius.ui_points(1.5)))]
+
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        return [f"{root}/**"]
+
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "KeyframeCloud"]]:
+        names: list[str] = [c.removesuffix(":Points3D:positions") for c in table.column_names if c.startswith(f"{root}/") and c.endswith("/points:Points3D:positions")]
+        for row, t_ns in enumerate(row_times(table, timeline)):
+            for name in names:
+                points = table[f"{name}:Points3D:positions"][row].as_py()
+                if points is not None:
+                    colors = np.asarray(table[f"{name}:Points3D:colors"][row].as_py(), dtype=np.uint32)  # packed RGBA
+                    rgb: UInt8[ndarray, "n 3"] = np.stack([(colors >> s) & 0xFF for s in (24, 16, 8)], axis=1).astype(np.uint8)
+                    index: int = int(name.removeprefix(f"{root}/").removesuffix("/points"))
+                    yield t_ns, cls(index, np.asarray(points, dtype=np.float32).reshape(-1, 3), rgb)
