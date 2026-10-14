@@ -308,8 +308,9 @@ def rig_blueprint(
                 rrb.Grid(*camera_panes, grid_columns=CAMERA_GRID_COLUMNS, name="Synchronized cameras"),
                 column_shares=list(RIG_COLUMN_SHARES),
             ),
-            rrb.Horizontal(*plots),
-            row_shares=list(PLOT_ROW_SHARES),
+            # A rig with no sensor plots (a camera-only benchmark) gets no empty plot row.
+            *([rrb.Horizontal(*plots)] if plots else []),
+            row_shares=list(PLOT_ROW_SHARES) if plots else None,
         ),
         rrb.TimePanel(timeline=schema.TIMELINE),
         collapse_panels=True,
@@ -369,6 +370,7 @@ def table_blueprint(
     run_source: str,
     eye_controls: rrb.EyeControls3D,
     front_pane: rrb.Spatial2DView,
+    depth_cameras: Sequence[int] = (),
 ) -> rrb.Blueprint:
     """The segment-table preview card: the follow-framed rig beside one video pane.
 
@@ -383,6 +385,8 @@ def table_blueprint(
         run_source: Processing source whose trail is excluded.
         eye_controls: Eye of the 3D view.
         front_pane: The single 2D pane the card decodes.
+        depth_cameras: Cameras carrying a depth stream; excluded too, since a 3D view
+            back-projects every depth image into a point cloud.
 
     Returns:
         The blueprint registered with ``segment_table=True``.
@@ -392,7 +396,12 @@ def table_blueprint(
             rrb.Spatial3DView(
                 name="Follow",
                 origin=schema.rig_path(rig),
-                contents=["/**", *video_exclusions((rig, index) for index in range(num_cameras)), f"- {schema.trail_path(run_source)}/**"],
+                contents=[
+                    "/**",
+                    *video_exclusions((rig, index) for index in range(num_cameras)),
+                    *(f"- {schema.depth_path(rig, index)}/**" for index in depth_cameras),
+                    f"- {schema.trail_path(run_source)}/**",
+                ],
                 line_grid=False,  # rig-rooted, same reason as rig_blueprint's Follow view
                 eye_controls=eye_controls,
             ),

@@ -71,6 +71,11 @@ def video_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/video"
 
 
+def depth_path(rig: int, cam: int) -> str:
+    """``.../pinhole/depth`` — a DepthImage registered to that camera, on ``video_time``."""
+    return f"{pinhole_path(rig, cam)}/depth"
+
+
 def imu_path(rig: int, imu: int) -> str:
     """``/world/rig_NN/imu_MM`` — carries the static ``rig_T_imu`` transform."""
     return f"{rig_path(rig)}/imu_{_index(imu, 'imu')}"
