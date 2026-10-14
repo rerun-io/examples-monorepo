@@ -141,8 +141,7 @@ class _Run:
         self.graph, self.mode, self.threaded = graph, mode, threaded
         self.control: Control = control or Control()
         self.control.wake = self.notify
-        lock = threading.RLock()
-        self.cond: threading.Condition = threading.Condition(lock)
+        self.cond: threading.Condition = threading.Condition(threading.RLock())
         self.failure: BaseException | None = None
         self.running = False
         self.seq = self.world = 0
@@ -307,7 +306,7 @@ class _Run:
             self._reset(s, world)
 
     def _drain(self) -> None:
-        while any([self._node_loop(s, wait=False) for s in self.nodes]):  # visit every node, without short-circuiting
+        while any([self._node_loop(s) for s in self.nodes]):  # visit every node, without short-circuiting
             pass
 
     def sequential(self, streams: list[Iterator[Event]]) -> None:
@@ -344,14 +343,14 @@ class _Run:
             self._emit(s, event)
         self._close(s)
 
-    def _node_loop(self, s: _State, *, wait: bool = True) -> bool:
-        if wait and s.spec.placement.cpus and hasattr(os, "sched_setaffinity"):
+    def _node_loop(self, s: _State) -> bool:
+        if self.threaded and s.spec.placement.cpus and hasattr(os, "sched_setaffinity"):
             os.sched_setaffinity(0, s.spec.placement.cpus)
         progress: bool = False
         while not s.done:
             with self.cond:
                 while (item := self._next(s)) is None and not self._can_finish(s):
-                    if not wait:
+                    if not self.threaded:
                         return progress
                     self.wait()
                 if self.failure is not None:
@@ -465,9 +464,7 @@ class _Run:
         return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, max(self.last - self.first, 0) / 1e9, nodes)
 
     def _release(self) -> None:
-        """Break the run's reference cycles (states and control.wake point back at the run), so its resources and the
-        nodes' references to them free when the run returns instead of at the next cyclic collection, and a Control a
-        UI keeps after the run (gradio's gr.State) does not keep the run alive."""
+        """Break state/control cycles so resources free on return without cyclic GC, even while a UI keeps Control."""
         self.control.wake = lambda: None
         self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
 

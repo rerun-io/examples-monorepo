@@ -96,14 +96,10 @@ def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "a
     return profile
 
 
-def graphs(built: Graph | Iterator[Graph]) -> Iterator[Graph]:
-    """Iterate a build; generators can read a completed graph's sinks before yielding the next graph."""
-    return iter((built,)) if isinstance(built, Graph) else built
-
-
 def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
     """The CLI's and the form's one loop: Stop is checked before the next graph is built, and a stopped build is closed."""
-    built: Iterator[Graph] = graphs(build(config, recording))
+    result: Graph | Iterator[Graph] = build(config, recording)
+    built: Iterator[Graph] = iter((result,)) if isinstance(result, Graph) else result
     names: set[str] = set()
     report: RunReport | None = None
     try:
