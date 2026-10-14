@@ -93,10 +93,11 @@ class VioNode:
 
     def step(self, tick: Tick, out: Emit) -> None:
         assert self.lockstep is not None, "step before reset"
+        self.t_ns = tick.t_ns  # the layer leaves at the last tick's time, also when a stop falls between an imu batch and its frames
         if tick.port == "imu":
             self.lockstep.push_imu(cast(ImuStream, tick.value))
         else:
-            self.framesets, self.t_ns = self.framesets + 1, tick.t_ns
+            self.framesets += 1
             self.lockstep.hold(cast(Frameset, tick.value))
         self._emit(self.lockstep.track_pending(), out)
         held: list[int] = [f.t_ns - self.offset_ns for f in [*self.lockstep.pending, *self.lockstep.lagged]]

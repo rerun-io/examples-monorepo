@@ -18,7 +18,8 @@ def decode_gray_cuda(payload: bytes, resize_hw: tuple[int, int], downscale: int 
     The native dimensions after integer downscaling must match calibration;
     resizing must not make an incompatible source look valid.
     """
-    reader: TorchCodecVideoReader = TorchCodecVideoReader(payload, device="cuda", seek_mode="exact", resize_hw=resize_hw)
+    # thread_owned: a threaded dagkit runner opens the source on the caller's thread and resumes it on its own (NVDEC is thread-affine)
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(payload, device="cuda", seek_mode="exact", resize_hw=resize_hw, thread_owned=True)
     try:
         source_resize_hw: tuple[int, int] = (max(1, reader.source_height // downscale), max(1, reader.source_width // downscale))
         if source_resize_hw != resize_hw:

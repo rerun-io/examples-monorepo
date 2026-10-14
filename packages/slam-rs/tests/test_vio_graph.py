@@ -81,13 +81,39 @@ def ticks(rig: VioRig, sets: list[Frameset]) -> list[Tick]:
     return [Tick(e.t_ns, e.port, e.value, {"rig": rig}) for e in stream(rig, sets) if e.t_ns != STATIC]
 
 
-def node_outputs(node: VioNode, rig: VioRig, sets: list[Frameset]) -> Recorder:
-    out = Recorder()
+class Strict(Recorder):
+    """A recorder that holds the node to its watermarks: no output at or before a time the node declared final."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wm: int = STATIC
+
+    def put(self, port: str, t_ns: int, value: object) -> None:
+        assert t_ns > self.wm, f"{port} at {t_ns} after watermark {self.wm}"
+        super().put(port, t_ns, value)
+
+    def watermark(self, t_ns: int) -> None:
+        assert t_ns >= self.wm, f"watermark {t_ns} after {self.wm}"
+        self.wm = t_ns
+
+
+def node_outputs(node: VioNode, rig: VioRig, sets: list[Frameset], drop_last_frames: bool = False) -> Recorder:
+    """Run the node over the stream; ``drop_last_frames`` stops it between the last frameset's IMU batch and its images."""
+    out = Strict()
     node.reset(RunContext("test", "vio", "lossless", statics={"rig": rig}))
-    for tick in ticks(rig, sets):
+    for tick in ticks(rig, sets)[: -1 if drop_last_frames else None]:
         node.step(tick, out)
     node.flush(out)
     return out
+
+
+def test_a_stop_between_an_imu_batch_and_its_frames_still_publishes_within_the_watermark(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
+) -> None:
+    out: Recorder = node_outputs(
+        VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), rig(camera, imu), framesets(texture), drop_last_frames=True
+    )
+    assert [port for port, _, _ in out.items][-1] == "layer" and out.items[-1][1] == (STEPS - 1) * FRAME_PERIOD_NS
 
 
 def lockstep_poses(rig: VioRig, sets: list[Frameset]) -> list[Float64[ndarray, " 7"]]:

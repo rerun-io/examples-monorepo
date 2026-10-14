@@ -3247,7 +3247,8 @@ PYREFLY_TARGET = "robocap_live tools/apps tests"
 # (the slam-rs-build pattern). robocap-live path-depends on slam-rs, whose shared CubeCL patches kornia-staging-patch-deps
 # prepares.
 [feature.robocap-live.tasks.robocap-live-build]
-depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+# The robocap App imports slam_rs (its VIO graph), whose core slam-rs-build compiles and installs in place.
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }, { task = "slam-rs-build", environment = "slam-rs" }]
 cmd = "PYO3_BUILD_EXTENSION_MODULE=1 cargo build --release -p robocap-live-py && cp target/release/lib_core.so robocap_live/_core.so.new && mv robocap_live/_core.so.new robocap_live/_core.so"
 cwd = "packages/robocap-live"
 inputs = [
