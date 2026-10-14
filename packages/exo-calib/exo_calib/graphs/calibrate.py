@@ -55,9 +55,11 @@ def refine_graph(
     """``seed`` = (Stage A rig, tracking rig); both passes refine against Stage A, only the tracking rig changes.
 
     ``resume_kp2d`` reads the Stage B records (and the GT rig) back from the catalog instead of decoding and detecting.
+    The pass without the report (pass 1) is its own graph, ``exocalib-refine-pass1``: its sinks differ, and the viewer
+    keeps each graph's picture and run health apart by name.
     """
     graph = Graph(
-        "exocalib-refine",
+        "exocalib-refine" if report else "exocalib-refine-pass1",
         about="Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then bundle adjustment of the Stage A rig on them; the second pass tracks through the first pass's rig and scores both rigs against GT.",
     )
     for name in ("detector", "pose", "moge", "frames"):

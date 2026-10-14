@@ -29,9 +29,10 @@ CARD: Path = Path(__file__).resolve().parents[1] / "VERIFY.toml"
 
 
 def case_config(case: Case) -> Config:
-    """The App config of a catalog case; it registers nothing."""
+    """The App config of a catalog case; it registers nothing, and its files go to the package's ``data/outputs`` from any cwd."""
     assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
-    return Config(RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment), frame_budget=int(case.params["frame_budget"]), register="off")
+    segment = SegmentRef(case.dataset, case.segment)
+    return Config(RerunTyroConfig(headless=True), segment, frame_budget=int(case.params["frame_budget"]), output_dir=CARD.parent / "data" / "outputs", register="off")
 
 
 def examples() -> list[Config]:

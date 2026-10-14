@@ -5,9 +5,10 @@ passes refine against the ORIGINAL Stage A rig. Outputs become the catalog layer
 (pass 1: unregistered ``*_pass1`` files) plus ``eval.json``, and stream to the ``rr_config`` viewer.
 ``--resume-from init|kp2d`` reads those layers back (after a Producer check) instead of recomputing them.
 ``build`` yields the graphs in order; the CLI (``main`` = ``run_app``) and the gradio app (``tools/apps/calibrate_gradio.py``)
-both run it, with run health, so the viewer's "pipeline (debug)" tab shows both graphs live.
+both run it, with run health, so the viewer's "pipeline (debug)" tab shows every graph live.
 """
 
+import gc
 import hashlib
 import importlib.metadata
 import json
@@ -19,6 +20,7 @@ from typing import Literal
 
 import rerun as rr
 import rerun.blueprint as rrb
+import torch
 from dagkit.app import HardwareClass, detect_hardware, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
 from dagkit.node import Control, Emit, Mode, Node, PortType, RunContext, Tick
@@ -155,16 +157,25 @@ def check_producer(segment: SegmentRef, layer: str, producer: Producer) -> None:
         raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {expected}")
 
 
+def free_gpu_memory() -> None:
+    """Collect finished graphs (a runner keeps its graph's models in reference cycles) and hand PyTorch's cached GPU memory
+    back to the driver, where TensorRT engines and the next run allocate: the GPU is shared, and the gradio app runs again."""
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
-    """The exoego layout of ``tools/apps/blueprint.py`` (without the ego panes, which a live run never fills), then the
-    "pipeline (debug)" tab: the ``graphs`` and their guides beside three output views the guide's links outline."""
+    """The exoego layout of ``tools/apps/blueprint.py`` (without the ego panes, which a live run never fills; its 3D scene
+    leaves out the 2D overlays, which have no base pinhole to project through live), then the "pipeline (debug)" tab: the
+    ``graphs`` and their guides beside three output views the guide's links outline."""
     camera: str = layout.exo_camera_names[0]
+    scene: list[str] = ["/**", *(f"- /world/{name}/pinhole/**" for name in layout.exo_camera_names)]
     outputs: list[rrb.View] = [
         rrb.Spatial2DView(origin=f"/world/{camera}/pinhole", name=f"3 kp2d · keypoints {camera}"),
         rrb.Spatial3DView(origin="/world", contents="/world/exocalib/**", name="4 refine · rigs + 3D keypoints"),
         rrb.Spatial3DView(origin="/world", contents=["/world/exocalib_error/**", "/world/exocalib/refined/**"], name="6 report · error to GT"),
     ]
-    return with_pipeline(rrb.Blueprint(exoego_view(replace(layout, ego_camera_names=()))), outputs, graphs=graphs)
+    return with_pipeline(rrb.Blueprint(exoego_view(replace(layout, ego_camera_names=()), scene)), outputs, graphs=graphs)
 
 
 def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False) -> Iterator[Graph]:
@@ -174,6 +185,7 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
     run ends the App. Outputs stream to ``recording``; ``golden`` (verify) sends them there only: no layer files, no
     ``eval.json``, no blueprint.
     """
+    free_gpu_memory()  # what the previous run of a long-lived app (gradio) left
     segment: SegmentRef = config.segment
     layout: RigLayout = discover_rig_layout(segment, exo_rigs=config.exo_rigs)
     cameras: tuple[str, ...] = layout.exo_camera_names
@@ -204,13 +216,15 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
         return out
 
     if not golden:
-        recording.send_blueprint(blueprint(layout, ["exocalib-refine"] if config.resume_from else ["exocalib-init", "exocalib-refine"]))
+        skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1
+        recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
     log_style(recording, cameras)
     if config.resume_from is None:
         keep = Keep("init")
         yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
         if "init" not in keep.values:
             return
+        free_gpu_memory()  # Stage A's models, for the refine passes' TensorRT engines
         init = keep.values["init"]
     else:
         check_producer(segment, "exocalib_init", producer("exocalib-init"))

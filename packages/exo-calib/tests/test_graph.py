@@ -43,13 +43,13 @@ def test_the_app_graphs_validate_draw_what_they_declare_and_document_themselves(
     pass1.nodes["keep"].obj.values["refined"] = scene.rig  # type: ignore[attr-defined]  # ... and the pass-1 rig, handed on
     pass2: Graph = next(steps)
     graphs: list[Graph] = [init, pass1, pass2]
-    assert [g.name for g in graphs] == ["exocalib-init", "exocalib-refine", "exocalib-refine"]
+    assert [g.name for g in graphs] == ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"]
     assert {"viewer", "report", "exocalib_kp2d", "exocalib_refined", "exocalib_align"} <= set(pass2.nodes) and "viewer" not in pass1.nodes
     for k, graph in enumerate(graphs):
         graph.validate()
         (tmp_path / str(k)).mkdir()
         check_picture(graph, tmp_path / str(k))  # the graph view as the runner logs it, read back from an rrd == the declaration
-    check_graph_docs(init, pass2, snapshot=PACKAGE_DIR / "GRAPH.md")  # the two graphs the debug tab shows
+    check_graph_docs(*graphs, snapshot=PACKAGE_DIR / "GRAPH.md")  # the three graphs the debug tab shows
 
 
 def test_a_stopped_graph_hands_nothing_on_and_ends_the_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ Catalog partitions use the dataset id as their application id, and the id change
 whenever the dataset is recreated, so rerun this tool after a dataset recreate.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,7 +42,7 @@ class BlueprintConfig:
     """Loop the whole timeline instead of parking on the last frame; for short standalone exports of a segment."""
 
 
-def exoego_view(layout: RigLayout) -> rrb.Vertical:
+def exoego_view(layout: RigLayout, scene_contents: Sequence[str] = ("/**",)) -> rrb.Vertical:
     """The exoego layout: a 3D scene, the ego cameras tabbed beside it (when there are any), the exo cameras as a strip below.
 
     Mirrors ``simplecv.apis.view_exoego.create_container`` (the base rrd's own
@@ -53,7 +54,7 @@ def exoego_view(layout: RigLayout) -> rrb.Vertical:
     scene = rrb.Spatial3DView(
         origin="/",
         name="3D View",
-        contents="/**",
+        contents=list(scene_contents),
         spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
         # An ego camera without dataset calibration has no pose in any layer, so keep it out of the 3D scene.
         overrides={f"/world/{name}/pinhole": rrb.EntityBehavior(visible=False) for name in layout.ego_camera_names if name not in layout.calibrated_camera_names},

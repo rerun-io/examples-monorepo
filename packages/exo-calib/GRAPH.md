@@ -57,6 +57,101 @@ Saves **init** from 2 init into the catalog layer `exocalib_init`.
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
 
+# exocalib-refine-pass1
+Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then bundle adjustment of the Stage A rig on them; the second pass tracks through the first pass's rig and scores both rigs against GT.
+
+**Read the picture top to bottom.** A box is one step: its number and name, what it does, how it runs (blue = source, orange = once per item, purple = once on the whole segment, green = output; while a run is live: grey = no input yet, green = ok, yellow = its queue is half full, red = it dropped items). A label on a line is the data that flows, `port: Type`, and how it arrives:
+- **waits**: every item, in order; the sender waits while the queue is full (nothing is lost)
+- **latest**: the newest value at or before the step's time; it never starts the step
+- **drops old**: only the newest items; older ones are dropped while the step is busy
+
+`(GPU)` after a type: the value stays on the GPU. A tag left of a box lists its inputs from further up (`port: Type ← 1 video · latest`). Box numbers match the sections below.
+
+## 1 · seed: Hand in values from the App
+*source* · `IterSource` · `packages/dagkit/dagkit/sources.py`
+
+| gives | type | to |
+|---|---|---|
+| **init** | `RigCameras` | 4 refine |
+| **tracking_rig** | `RigCameras` | 3 kp2d |
+| **rig_layout** | `RigLayout` | 4 refine |
+
+## 2 · video: Decode the cameras' videos
+*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+
+Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening.
+
+| gives | type | to |
+|---|---|---|
+| **frames** | `MultiViewFrames` (GPU) | 3 kp2d |
+| **rig** | `RigCameras` | nobody (unused) |
+
+## 3 · kp2d: Find 2D body keypoints in every view
+*runs once per item* · `Kp2dNode` · `packages/exo-calib/exo_calib/nodes/kp2d.py`
+
+Stage B: lockstep multi-view COCO-133 keypoints with person boxes tracked through a camera rig.
+
+| takes | type | from | arrives |
+|---|---|---|---|
+| **frames** | `MultiViewFrames` (GPU) | 2 video | waits (2) |
+| **tracking_rig** | `RigCameras` | 1 seed | latest |
+
+| gives | type | to |
+|---|---|---|
+| **kp2d** | `MultiViewKeypoints` | 4 refine, 5 exocalib_kp2d_pass1 |
+
+Uses the graph resources `detector`, `pose` (built once, shared).
+
+## 4 · refine: Refine the rig by bundle adjustment
+*runs once on the whole segment* · `RefineNode` · `packages/exo-calib/exo_calib/nodes/refine.py`
+
+Stage C+D (whole segment): Kineo-style correspondences, robust triangulation, staged BA, focal, metric rescale.
+
+| takes | type | from | arrives |
+|---|---|---|---|
+| **kp2d** | `MultiViewKeypoints` | 3 kp2d | waits (4) |
+| **init** | `RigCameras` | 1 seed | latest |
+| **rig_layout** | `RigLayout` | 1 seed | latest |
+
+| gives | type | to |
+|---|---|---|
+| **refined** | `RigCameras` | 6 keep, 7 exocalib_refined_pass1 |
+| **base_rig** | `BaseCalibration` | nobody (unused) |
+| **diag** | `RefinementDiagnostics` | 7 exocalib_refined_pass1 |
+| **kp3d** | `Keypoints3dTracks` | 7 exocalib_refined_pass1 |
+| **kp2d_overlay** | `Kp2dOverlay` | 7 exocalib_refined_pass1 |
+
+Uses the graph resources `frames`, `moge` (built once, shared).
+
+## 5 · exocalib_kp2d_pass1: Save its inputs as a catalog layer
+*output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
+
+Saves **kp2d** from 3 kp2d into the catalog layer `exocalib_kp2d_pass1`.
+
+## 6 · keep: Hand values on to the App's next graph
+*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+
+Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+
+Takes **refined** from 4 refine.
+
+## 7 · exocalib_refined_pass1: Save its inputs as a catalog layer
+*output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
+
+Saves **refined, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer `exocalib_refined_pass1`.
+
+## Data types
+| type | what it is | code |
+|---|---|---|
+| `BaseCalibration` | Refined cameras written onto base camera nodes that carry no dataset GT; the marker keeps them out of GT discovery | `packages/exo-calib/exo_calib/types.py` |
+| `Keypoints3dTracks` | One frame of triangulated keypoints under both rigs (rows of ``xyz`` are ``VARIANTS``; NaN = not triangulated) | `packages/exo-calib/exo_calib/types.py` |
+| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box and crop rectangle, plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
+| `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
+| `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
+| `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
+| `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
+| `RigLayout` | One segment's cameras: the exo ones to calibrate, the worn ego ones, and those with dataset GT calibration | `packages/exo-calib/exo_calib/types.py` |
+
 # exocalib-refine
 Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then bundle adjustment of the Stage A rig on them; the second pass tracks through the first pass's rig and scores both rigs against GT.
 

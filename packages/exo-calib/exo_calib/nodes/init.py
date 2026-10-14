@@ -107,4 +107,4 @@ class InitNode:
         out.put("init", tick.t_ns, estimate_init_cameras(frames_rgb, frames.views, self.g3t, self.moge))
 
     def flush(self, out: Emit) -> None:
-        pass
+        self.g3t = self.moge = None  # Stage A runs once: the App hands their GPU memory on to the refine passes
