@@ -1946,19 +1946,19 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 
 # ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
 [feature.mast3r-slam.tasks.verify-pre]
-cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre --block slam && python -m dagkit.verify VERIFY.toml --phase pre2 --block slam"
 depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
 cwd = "packages/mast3r-slam"
 description = "Record the pre-port goldens: pre and pre2 (noise run) of every case (msd-odyssey cam_00 vs mocap GT); runs only at the card commit (the port refuses pre phases)"
 
 [feature.mast3r-slam.tasks.verify]
-cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --block slam --clip short"
 depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
 cwd = "packages/mast3r-slam"
 description = "Graph tier, short case (first 30 s): Sim3 ATE of the final keyframes + tracked fraction, banded against pre"
 
 [feature.mast3r-slam.tasks.verify-full]
-cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --block slam --clip full"
 depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
 cwd = "packages/mast3r-slam"
 description = "Graph tier, full case (first 120 s at 512 px)"

@@ -55,7 +55,9 @@ RUN: str = "/verify/slam/run"
 MAX_ASSOCIATION_NS: int = 5_000_000
 """An estimated pose is scored against the nearest GT pose only within this time gap (block ``slam``)."""
 EVO_MAX_DIFF_NS: int = 10_000_000
-"""evo's default ``t_max_diff`` (0.01 s), the association of the paper's ``evo_ape tum gt est -as`` (block ``paper``)."""
+"""evo's default ``t_max_diff`` (0.01 s), the association of the paper's ``evo_ape tum gt est -as`` (block ``paper``). The
+paper's EuRoC script hands evo nanosecond stamps, so there 0.01 matched only stamps equal as float64 (about half of the
+keyframes); this block keeps 10 ms on both benchmarks."""
 CHILD_FROM_PARENT: int = 2
 """``Transform3D:relation`` of a node logged as child_from_parent (the catalog's camera extrinsics)."""
 

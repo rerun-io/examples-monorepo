@@ -62,7 +62,10 @@ noise = { ate_rmse_m = 0.0000248, tracked_fraction = 0.000555 }
 # averages 0.030 / 0.060 m TUM and 0.041 / 0.164 m EuRoC, calibrated / uncalibrated), from the catalog (dataforge vslam-lab).
 # Protocol = the paper's code (scripts/eval_{tum,euroc}.sh, config/eval_calib.yaml): every 2nd frame, 512 px, single thread
 # (= lossless), the FINAL keyframe poses, `evo_ape tum gt est -as` = Sim3 (Umeyama) ATE RMSE of the camera centres with
-# evo's 10 ms association. Undistortion as its dataloader: TUM when calibrated, EuRoC always (cam0 only, mono, gray),
+# evo's 10 ms association (its EuRoC script passes nanosecond stamps, so there evo's 0.01 matched only float64-equal stamps:
+# 44 of 83 keyframes on MH_01, ATE 0.0287 m vs 0.0290 m at 10 ms; this block keeps 10 ms on both benchmarks; the paper also
+# keeps the last frame of an odd-length sequence, this source drops it). Undistortion as its dataloader: TUM when
+# calibrated, EuRoC always (cam0 only, mono, gray),
 # cv2.getOptimalNewCameraMatrix alpha 0 with a centred principal point; the source does it (case param `undistort`).
 # GT camera = GT rig pose (layer gt, /world/rig_00) x the static cam_00 extrinsic (layer base). TUM: identity (the mocap
 # pose is the camera's). EuRoC: gt is state_groundtruth_estimate0 (the body = IMU frame); the paper's
