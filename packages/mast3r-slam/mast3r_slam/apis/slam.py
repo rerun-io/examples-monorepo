@@ -3,6 +3,8 @@
 The graph is ``graphs/slam.py``; the CLI (``tools/apps/slam.py``) and the gradio app (``tools/apps/slam_gradio.py``) both
 run ``build``. SLAM parameters come from ``profiles/<hardware>.toml`` (a preset picks an operating point); ``img_size``
 and ``subsample`` override it. Lossless (default) waits for the backend after every keyframe; use realtime for a camera.
+The generated form sends 0 for an empty number field, so 0 means "not set" for ``max_frames`` and ``subsample``, and a
+file input takes precedence over ``webcam``.
 """
 
 from dataclasses import dataclass, replace
@@ -44,21 +46,21 @@ class Config:
     """Catalog input (takes precedence): the camera ``camera`` of this segment (``window_ns`` clips it)."""
     camera: str = "rig_00/cam_00"
     """Catalog camera entity under ``/world``."""
-    video: Path | None = PACKAGE_DIR / "data/normal-apt-tour.mp4"
-    """Video file input (used when there is no segment, webcam or image directory)."""
+    video: Path | None = None
+    """Video file input (used when there is no segment); ``pixi run mast3r-slam-example-*`` downloads examples to ``data/``."""
     images: Path | None = None
-    """Image directory input (natural sort order, 30 fps)."""
+    """Image directory input (natural sort order, 30 fps; used when there is no segment or video)."""
     webcam: int | None = None
-    """Live OpenCV camera index (run with ``--mode realtime``)."""
+    """Live OpenCV camera index, used when no segment, video or image directory is given (run with ``--mode realtime``)."""
     max_frames: int | None = None
-    """File inputs: stop after this many input frames."""
+    """File inputs: stop after this many frames, counted after ``subsample`` (0: all)."""
     hardware: HardwareClass | Literal["auto"] = "auto"
     preset: str | None = None
     """Profile operating point: ``fast`` (224 px, every 5th frame), ``eval`` (every 2nd frame), ``calib`` (calibrated)."""
     img_size: Literal[224, 512] | None = None
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
-    """Use every n-th input frame (overrides the preset)."""
+    """Use every n-th input frame (overrides the preset; 0 keeps it)."""
     output_nerfstudio: Path | None = None
     """Export the final keyframes in Nerfstudio format into this directory."""
     layer_dir: Path | None = None
@@ -91,20 +93,21 @@ def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
 
 
 def video_source(config: Config, cfg: SlamConfig) -> Source:
+    max_frames: int | None = config.max_frames or None
     if config.segment is not None:
         return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample)
-    if config.webcam is not None:
-        return Webcam(config.webcam, config.max_frames)
+    if config.video is not None:
+        return VideoFileSource(config.video, stride=cfg.subsample, max_frames=max_frames)
     if config.images is not None:
-        return ImageDirSource(config.images, stride=cfg.subsample, max_frames=config.max_frames)
-    if config.video is None:
-        raise ValueError("no input: give a segment, a webcam, an image directory or a video")
-    return VideoFileSource(config.video, stride=cfg.subsample, max_frames=config.max_frames)
+        return ImageDirSource(config.images, stride=cfg.subsample, max_frames=max_frames)
+    if config.webcam is None:
+        raise ValueError("no input: give a segment, a video, an image directory or a webcam")
+    return Webcam(config.webcam, max_frames)
 
 
 def slam_config(config: Config) -> SlamConfig:
     cfg: SlamConfig = load_profile(PACKAGE_DIR / "profiles", config.hardware).configure("slam", SlamConfig(), config.preset)
-    overrides: dict[str, int] = {k: v for k, v in (("img_size", config.img_size), ("subsample", config.subsample)) if v is not None}
+    overrides: dict[str, int] = {k: v for k, v in (("img_size", config.img_size), ("subsample", config.subsample)) if v}
     return replace(cfg, **overrides)  # type: ignore[arg-type]
 
 
@@ -121,7 +124,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
         sinks["layer"] = LayerSink(layer, partial, config.segment, LAYER, layer_ports, roots, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
-    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=config.webcam is not None, nerfstudio=nerfstudio)
+    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, Webcam), nerfstudio=nerfstudio)
 
 
 def main(config: Config) -> RunReport:

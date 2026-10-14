@@ -44,6 +44,8 @@ an image directory or a webcam; `--preset` picks an operating point from `profil
 cd packages/mast3r-slam
 pixi run -e mast3r-slam --frozen python tools/apps/slam.py --video data/normal-apt-tour.mp4 --preset base --mode realtime
 ```
+The generated gradio app (`pixi run -e mast3r-slam mast3r-slam-app`) has the same fields; choose the hardware class
+there (its form does not offer `auto`). An uploaded video takes precedence over the webcam field.
 
 ### Verification
 `VERIFY.toml` bands the Sim3 ATE of the final keyframes against msd-odyssey mocap GT (`verify`, `verify-full` tasks).

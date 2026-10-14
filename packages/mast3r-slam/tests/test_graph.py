@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 import rerun as rr
-from dagkit.app import load_profile
+from dagkit.app import gradio_app, load_profile
 from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Emit, Event, PortType, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
@@ -15,12 +15,15 @@ from dagkit.sources import IterSource
 from dagkit.testing import Recorder
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.sources.files import VideoFileSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
-from mast3r_slam.apis.slam import outputs
+from mast3r_slam.apis.slam import Config, build, outputs, slam_config, video_source
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
+from mast3r_slam.sources.webcam import Webcam
 from mast3r_slam.types import SlamConfig
 
 PROFILES: Path = Path(__file__).resolve().parents[1] / "profiles"
@@ -106,3 +109,18 @@ def test_profile_presets_resolve(preset: str | None) -> None:
     cfg: SlamConfig = load_profile(PROFILES, "x86_64-cuda").configure("slam", SlamConfig(), preset)
     assert cfg.subsample == {None: 1, "base": 1, "eval": 2, "fast": 5, "calib": 2}[preset]
     assert cfg.img_size == (224 if preset == "fast" else 512) and cfg.use_calib == (preset == "calib")
+
+
+def test_a_file_input_beats_webcam_zero_and_zero_means_unset(tmp_path: Path) -> None:
+    """The generated gradio form sends 0 for an empty number field (webcam, max_frames, subsample)."""
+    config = Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4", webcam=0, max_frames=0, subsample=0, hardware="x86_64-cuda", preset="fast")
+    cfg: SlamConfig = slam_config(config)
+    assert cfg.subsample == 5  # the preset's
+    source = video_source(config, cfg)
+    assert isinstance(source, VideoFileSource) and source.stride == 5 and source.max_frames is None
+    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=None, webcam=0), cfg), Webcam)
+
+
+def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
+    assert Config.__dataclass_fields__["video"].default is None  # a default file that is not downloaded crashes the form
+    gradio_app(Config, build, title="MASt3R-SLAM")
