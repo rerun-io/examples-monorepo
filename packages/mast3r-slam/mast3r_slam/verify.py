@@ -15,27 +15,29 @@ Input frames are the clip's cam_00 frames at indices ``0, s, 2s, ...`` (``n // s
 uncalibrated, lossless (the frontend waits for the backend after every keyframe and relocalisation request).
 """
 
-import contextlib
-import os
 import time
+from collections import Counter
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Literal, cast
-from unittest import mock
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.node import Emit, Tick
+from dagkit.runners import RunReport, run_threaded
+from dagkit.sinks import RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.verify import Case, Phase
-from jaxtyping import Float32, Float64, Int64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
-from simplecv.sources.catalog_video import MP4_NOMINAL_FPS
+from simplecv.sources.catalog_video import CatalogVideoSource
+
+from mast3r_slam.apis.slam import frame_hw, outputs
+from mast3r_slam.graphs.slam import slam_graph
+from mast3r_slam.types import SlamConfig
 
 TIMELINE: str = "video_time"
 CAMERA: str = "/world/rig_00/cam_00"
@@ -70,87 +72,39 @@ def _input_times(case: Case, video: CatalogVideo) -> Int64[ndarray, " n"]:
     return video.t_ns[: len(video.t_ns) // stride * stride : stride]
 
 
-def _log_poses(recording: rr.RecordingStream, path: str, t_ns: Int64[ndarray, " n"], sim3: Float32[ndarray, "n 8"]) -> None:
-    """lietorch Sim3 rows ``[t, q_xyzw, s]`` (world_from_cam) as one ``Transform3D`` per time."""
-    for t, row in zip(t_ns.tolist(), sim3.astype(np.float64), strict=True):
-        recording.set_time(TIMELINE, duration=np.timedelta64(t, "ns"))
-        recording.log(path, rr.Transform3D(translation=row[:3], quaternion=rr.Quaternion(xyzw=row[3:7])))
+class _GoldenSink(RerunSink):
+    """The graph's final keyframes and tracked poses into the golden, counted per port."""
+
+    def __init__(self, recording: rr.RecordingStream, camera: str) -> None:
+        ports, roots = outputs(camera)
+        super().__init__(recording, {p: ports[p] for p in ("keyframes", "tracked")}, roots)
+        self.counts: Counter[str] = Counter()
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        self.counts[tick.port] += 1
+        super().step(tick, out)
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """Pre-port: ``run_slam_pipeline`` on the catalog clip wrapped as an mp4 (no re-encode), lossless, uncalibrated.
+    """The ported graph on the case's clip (cam_00, every ``subsample``-th frame, uncalibrated), lossless, threaded.
 
-    Per-frame poses are read after each frame; the final keyframe poses at the last frame, when (lossless) the backend
-    has applied every task.
+    Only ``post``: the ``pre``/``pre2`` goldens come from the card commit, which drove the old pipeline (git history).
     """
-    import torch
-    import torch.multiprocessing as mp
-
-    from mast3r_slam.api import inference
-    from mast3r_slam.api.inference import SlamPipelineHandle, run_slam_pipeline
-    from mast3r_slam.frame import Mode, SharedKeyframes, SharedStates
-    from mast3r_slam.mast3r_utils import load_mast3r
-
-    if case.params["calib"] != "false":
-        raise NotImplementedError("the pre-port feed (mp4) has no calibration path: calibrated cases need the port")
-    video: CatalogVideo = _clip(case)
-    times: Int64[ndarray, " n"] = _input_times(case, video)
-    with contextlib.suppress(RuntimeError):
-        mp.set_start_method("spawn")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_grad_enabled(False)
-    model = load_mast3r(device="cuda:0")
-    model.share_memory()
-    # The old pipeline logs to the global stream (blueprint, logger thread): an enabled one that saves to /dev/null. It
-    # stays global after the run (rerun cannot unset it); a previous global is restored.
-    discard = rr.RecordingStream("mast3r-slam-preport", send_properties=False)
-    discard.save(os.devnull)
-    handle: SlamPipelineHandle = SlamPipelineHandle()
-    tracked: list[tuple[int, Float32[ndarray, " 8"]]] = []
-    keyframes: tuple[Int64[ndarray, " k"], Float32[ndarray, "k 8"]] | None = None
-    previous: rr.RecordingStream | None = rr.set_global_data_recording(discard)
+    if phase != "post":
+        raise ValueError(f"phase {phase}: pre-port goldens come from the card commit (the old pipeline); this tree runs the port")
+    assert case.dataset is not None and case.segment is not None, "mast3r-slam cases are catalog segments"
+    cfg = SlamConfig(use_calib=case.params["calib"] == "true", img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
+    video = CatalogVideoSource(SegmentRef(case.dataset, case.segment, window_ns=_window_ns(case)), (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample)
+    golden = _GoldenSink(recording, CAMERA)
     start: float = time.perf_counter()
-    # Rerun's Mp4Reader rejects AV1 packets muxed without an av1C box, and the old pipeline logs the source video
-    # through it: that logging (and the logging timestamps it returns) is skipped; the SLAM inputs are untouched.
-    no_video_log = mock.patch.object(inference, "log_video_for_dataset", return_value=None)
-    try:
-        with TemporaryDirectory() as tmp, no_video_log:
-            clip: Path = Path(tmp) / "clip.mp4"
-            clip.write_bytes(wrap_mp4(video.samples, video.keyframes, MP4_NOMINAL_FPS, codec=video.codec))
-            pipeline = run_slam_pipeline(
-                model=model,
-                dataset_path=str(clip),
-                config_path="config/eval_no_calib.yaml",  # base + uncalibrated + single_thread (lossless)
-                device="cuda:0",
-                img_size=cast(Literal[224, 512], int(case.params["img_size"])),
-                subsample=int(case.params["subsample"]),
-                handle=handle,
-                recording=discard,
-            )
-            for i, _ in enumerate(pipeline):
-                states: SharedStates | None = handle.states
-                shared: SharedKeyframes | None = handle.keyframes
-                assert states is not None and shared is not None
-                if states.get_mode() == Mode.TRACKING:
-                    tracked.append((i, states.get_frame().world_sim3_cam.data[0].cpu().numpy()))
-                if i == len(times) - 1:  # the last frame: the map is final (the generator then terminates the backend)
-                    with shared.lock:
-                        n_kf: int = len(shared)
-                        frame_index: Int64[ndarray, " k"] = shared.dataset_idx[:n_kf].cpu().numpy().astype(np.int64)
-                        keyframes = (times[frame_index], shared.world_sim3_cam[:n_kf, 0].cpu().numpy())
-    finally:
-        if previous is not None:
-            rr.set_global_data_recording(previous)
+    report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode="lossless")
     wall_s: float = time.perf_counter() - start
-    if keyframes is None or handle.stopped_early:
-        raise RuntimeError(f"{case.name}: the old pipeline stopped before its last frame ({len(times)} input frames)")
-    _log_poses(recording, KEYFRAMES, *keyframes)
-    if tracked:
-        index: list[int] = [i for i, _ in tracked]
-        _log_poses(recording, TRACKED, times[index], np.stack([pose for _, pose in tracked]))
-    counts = rr.AnyValues(input_frames=float(len(times)), tracked_frames=float(len(tracked)), keyframes=float(len(keyframes[0])), wall_s=wall_s)
+    if report.status != "complete":
+        raise RuntimeError(f"{case.name}: the graph ended {report.status}")
+    inputs: int = report.nodes["frontend"].ticks
+    counts = rr.AnyValues(input_frames=float(inputs), tracked_frames=float(golden.counts["tracked"]), keyframes=float(golden.counts["keyframes"]), wall_s=wall_s)
     recording.log(RUN, counts, static=True)
-    print(f"{case.name} {phase}: {len(times)} input frames, {len(tracked)} tracked, {len(keyframes[0])} keyframes, {wall_s:.1f} s")
+    print(f"{case.name} {phase}: {inputs} input frames, {golden.counts['tracked']} tracked, {golden.counts['keyframes']} keyframes, {wall_s:.1f} s")
 
 
 def _poses(table: pa.Table, path: str) -> tuple[Int64[ndarray, " n"], Float64[ndarray, "n 3"], Float64[ndarray, "n 4"]]:

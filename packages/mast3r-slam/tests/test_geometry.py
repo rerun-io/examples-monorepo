@@ -4,7 +4,7 @@ import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
-from mast3r_slam.geometry import backproject, get_pixel_coords, point_to_dist, point_to_ray_dist, project_calib, skew_sym
+from mast3r_slam.ops.geometry import backproject, get_pixel_coords, point_to_dist, point_to_ray_dist, project_calib, skew_sym
 
 
 def test_skew_sym_antisymmetric() -> None:

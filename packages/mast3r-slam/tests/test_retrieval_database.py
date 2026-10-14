@@ -10,7 +10,7 @@ from asmk.asmk_method import ASMKMethod, IvfBuilder  # noqa: E402
 from asmk.codebook import Codebook  # noqa: E402
 from asmk.kernel import ASMKKernel  # noqa: E402
 
-from mast3r_slam.retrieval_database import RetrievalDatabase  # noqa: E402
+from mast3r_slam.models.retrieval import RetrievalDatabase  # noqa: E402
 
 
 @pytest.fixture

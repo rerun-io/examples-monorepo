@@ -1,0 +1,335 @@
+"""The graph's ``shared`` resource: keyframe buffer and current-frame state in shared memory, seen by both processes.
+
+The frontend (main process) and the backend (its own process) exchange the map through these buffers: CUDA tensors cross
+by CUDA IPC, the small fields live in an ``mp.Manager``. This is the feedback path of the SLAM loop (poses, mode,
+relocalisation), so the graph itself stays acyclic.
+"""
+
+import multiprocessing
+from multiprocessing.managers import SyncManager
+
+import lietorch
+import torch
+import torch.multiprocessing  # noqa: F401  (registers the CUDA IPC reductions: shared tensors cross processes uncopied)
+from jaxtyping import Float, Int
+from torch import Tensor
+
+from mast3r_slam.types import Frame, Mode
+
+
+class SharedStates:
+    """Shared mutable state between the tracker and backend processes.
+
+    Holds the current frame data, mode, and synchronisation primitives in
+    shared memory so they can be accessed across ``torch.multiprocessing``
+    process boundaries.
+    """
+
+    def __init__(
+        self,
+        manager,
+        h: int,
+        w: int,
+        dtype: torch.dtype = torch.float32,
+        device: str = "cuda",
+    ) -> None:
+        self.h: int = h
+        self.w: int = w
+        self.dtype: torch.dtype = dtype
+        self.device: str = device
+
+        self.lock = manager.RLock()
+        self.mode = manager.Value("i", Mode.INIT)
+        self.reloc_sem = manager.Value("i", 0)
+        self.global_optimizer_tasks = manager.list()
+
+        self.feat_dim: int = 1024
+        self.num_patches: int = h * w // (16 * 16)
+
+        # fmt:off
+        # shared state for the current frame (used for reloc/visualization)
+        self.dataset_idx: Int[Tensor, "1"] = torch.zeros(1, device=device, dtype=torch.int).share_memory_()
+        self.rgb_tensor: Float[Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
+        self.rgb: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.img_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
+        self.img_true_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
+        self.world_sim3_cam: Float[Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
+        self.X: Float[Tensor, "hw 3"] = torch.zeros(h * w, 3, device=device, dtype=dtype).share_memory_()
+        self.C: Float[Tensor, "hw 1"] = torch.zeros(h * w, 1, device=device, dtype=dtype).share_memory_()
+        self.feat: Float[Tensor, "1 n_patches feat_dim"] = torch.zeros(1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
+        self.pos: Int[Tensor, "1 n_patches 2"] = torch.zeros(1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
+        # fmt: on
+
+    def set_frame(self, frame: Frame) -> None:
+        """Copy the frame's data into shared memory tensors.
+
+        Args:
+            frame: The Frame whose data should be written.
+        """
+        assert frame.X_canon is not None
+        assert frame.C is not None
+        assert frame.feat is not None
+        assert frame.pos is not None
+        with self.lock:
+            self.dataset_idx[:] = frame.frame_id
+            self.rgb_tensor[:] = frame.rgb_tensor
+            self.rgb[:] = frame.rgb
+            self.img_shape[:] = frame.img_shape
+            self.img_true_shape[:] = frame.img_true_shape
+            self.world_sim3_cam[:] = frame.world_sim3_cam.data
+            self.X[:] = frame.X_canon
+            self.C[:] = frame.C
+            self.feat[:] = frame.feat
+            self.pos[:] = frame.pos
+
+    def get_frame(self) -> Frame:
+        """Read the current frame from shared memory.
+
+        Returns:
+            A Frame constructed from the shared state tensors.
+        """
+        with self.lock:
+            frame: Frame = Frame(
+                int(self.dataset_idx[0]),
+                self.rgb_tensor,
+                self.img_shape,
+                self.img_true_shape,
+                self.rgb,
+                lietorch.Sim3(self.world_sim3_cam),
+            )
+            frame.X_canon = self.X
+            frame.C = self.C
+            frame.feat = self.feat
+            frame.pos = self.pos
+            return frame
+
+    def queue_global_optimization(self, idx: int) -> None:
+        """Enqueue a keyframe index for global optimization.
+
+        Args:
+            idx: Keyframe index to optimize.
+        """
+        with self.lock:
+            self.global_optimizer_tasks.append(idx)
+
+    def queue_reloc(self) -> None:
+        """Increment the relocalization semaphore by one."""
+        with self.lock:
+            self.reloc_sem.value += 1
+
+    def dequeue_reloc(self) -> None:
+        """Decrement the relocalization semaphore if positive."""
+        with self.lock:
+            if self.reloc_sem.value == 0:
+                return
+            self.reloc_sem.value -= 1
+
+    def get_mode(self) -> Mode:
+        """Return the current operating mode.
+
+        Returns:
+            The current Mode enum value.
+        """
+        with self.lock:
+            return self.mode.value
+
+    def set_mode(self, mode: Mode) -> None:
+        """Set the operating mode.
+
+        Args:
+            mode: The new Mode to set.
+        """
+        with self.lock:
+            self.mode.value = mode
+
+
+class SharedKeyframes:
+    """Thread-safe shared-memory buffer of keyframes.
+
+    Pre-allocates fixed-size tensors in shared memory for up to ``buffer``
+    keyframes.  All reads and writes are protected by a reentrant lock so
+    the tracker and backend processes can safely interleave access.
+    """
+
+    def __init__(
+        self,
+        manager,
+        h: int,
+        w: int,
+        buffer: int = 512,
+        dtype: torch.dtype = torch.float32,
+        device: str = "cuda",
+        use_calib: bool = False,
+    ) -> None:
+        self.use_calib: bool = use_calib
+        self.lock = manager.RLock()
+        self.n_size = manager.Value("i", 0)
+
+        self.h: int = h
+        self.w: int = w
+        self.buffer: int = buffer
+        self.dtype: torch.dtype = dtype
+        self.device: str = device
+
+        self.feat_dim: int = 1024
+        self.num_patches: int = h * w // (16 * 16)
+
+        # fmt:off
+        self.dataset_idx: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
+        self.rgb_tensor: Float[Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
+        self.rgb: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.img_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
+        self.img_true_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
+        self.world_sim3_cam: Float[Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
+        self.X: Float[Tensor, "buf hw 3"] = torch.zeros(buffer, h * w, 3, device=device, dtype=dtype).share_memory_()
+        self.C: Float[Tensor, "buf hw 1"] = torch.zeros(buffer, h * w, 1, device=device, dtype=dtype).share_memory_()
+        self.N: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
+        self.N_updates: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
+        self.feat: Float[Tensor, "buf 1 n_patches feat_dim"] = torch.zeros(buffer, 1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
+        self.pos: Int[Tensor, "buf 1 n_patches 2"] = torch.zeros(buffer, 1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
+        self.K: Float[Tensor, "3 3"] = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
+        # fmt: on
+
+    def __getitem__(self, idx) -> Frame:
+        """Retrieve a keyframe by buffer index.
+
+        Args:
+            idx: Buffer index of the keyframe.
+
+        Returns:
+            A Frame constructed from the shared tensors at the given index.
+        """
+        with self.lock:
+            # put all of the data into a frame
+            kf: Frame = Frame(
+                int(self.dataset_idx[idx]),
+                self.rgb_tensor[idx],
+                self.img_shape[idx],
+                self.img_true_shape[idx],
+                self.rgb[idx],
+                lietorch.Sim3(self.world_sim3_cam[idx]),
+            )
+            kf.X_canon = self.X[idx]
+            kf.C = self.C[idx]
+            kf.feat = self.feat[idx]
+            kf.pos = self.pos[idx]
+            kf.N = int(self.N[idx])
+            kf.N_updates = int(self.N_updates[idx])
+            if self.use_calib:
+                kf.K = self.K
+            return kf
+
+    def __setitem__(self, idx: int, value: Frame) -> int:
+        """Write a Frame into the shared buffer at the given index.
+
+        Args:
+            idx: Buffer index to write to.
+            value: The Frame to store.
+
+        Returns:
+            The index that was written.
+        """
+        assert value.X_canon is not None
+        assert value.C is not None
+        assert value.feat is not None
+        assert value.pos is not None
+        if idx >= self.buffer:
+            raise RuntimeError(f"the keyframe buffer is full ({self.buffer} slots): raise SlamConfig.keyframe_buffer or shorten the input")
+        with self.lock:
+            self.n_size.value = max(idx + 1, self.n_size.value)
+
+            # set the attributes
+            self.dataset_idx[idx] = value.frame_id
+            self.rgb_tensor[idx] = value.rgb_tensor
+            self.rgb[idx] = value.rgb
+            self.img_shape[idx] = value.img_shape
+            self.img_true_shape[idx] = value.img_true_shape
+            self.world_sim3_cam[idx] = value.world_sim3_cam.data
+            self.X[idx] = value.X_canon
+            self.C[idx] = value.C
+            self.feat[idx] = value.feat
+            self.pos[idx] = value.pos
+            self.N[idx] = value.N
+            self.N_updates[idx] = value.N_updates
+            return idx
+
+    def __len__(self) -> int:
+        """Return the number of keyframes currently stored."""
+        with self.lock:
+            return self.n_size.value
+
+    def append(self, value: Frame) -> None:
+        """Append a keyframe to the end of the buffer.
+
+        Args:
+            value: The Frame to append.
+        """
+        with self.lock:
+            self[self.n_size.value] = value
+
+    def pop_last(self) -> None:
+        """Remove the last keyframe by decrementing the size counter."""
+        with self.lock:
+            self.n_size.value -= 1
+
+    def last_keyframe(self) -> Frame | None:
+        """Return the most recently appended keyframe, or None if empty.
+
+        Returns:
+            The last Frame in the buffer, or None when the buffer is empty.
+        """
+        with self.lock:
+            if self.n_size.value == 0:
+                return None
+            return self[self.n_size.value - 1]
+
+    def update_world_sim3_cams(self, world_sim3_cams: lietorch.Sim3, idx: Int[Tensor, "n"]) -> None:
+        """Overwrite the poses for a set of keyframes.
+
+        Args:
+            world_sim3_cams: New Sim3 poses to write.
+            idx: Tensor of buffer indices corresponding to each pose.
+        """
+        with self.lock:
+            self.world_sim3_cam[idx] = world_sim3_cams.data
+
+    def set_intrinsics(self, K: Float[Tensor, "3 3"]) -> None:
+        """Set the shared camera intrinsic matrix (requires ``use_calib`` config).
+
+        Args:
+            K: 3x3 intrinsic matrix.
+        """
+        assert self.use_calib
+        with self.lock:
+            self.K[:] = K
+
+
+class SharedSlam:
+    """The ``shared`` graph resource: keyframe buffer + current-frame state over one manager (``close`` shuts it down)."""
+
+    def __init__(self, h: int, w: int, buffer: int, use_calib: bool, device: str = "cuda") -> None:
+        self.manager: SyncManager | None = multiprocessing.get_context("spawn").Manager()
+        self.keyframes: SharedKeyframes = SharedKeyframes(self.manager, h, w, buffer, device=device, use_calib=use_calib)
+        self.states: SharedStates = SharedStates(self.manager, h, w, device=device)
+
+    def __getstate__(self) -> dict[str, object]:
+        """The buffers and manager proxies cross to the backend process; the manager itself stays with its owner."""
+        return {"keyframes": self.keyframes, "states": self.states, "manager": None}
+
+    def reset(self) -> None:
+        """A new run: no keyframes, mode INIT, no pending backend work."""
+        with self.keyframes.lock, self.states.lock:
+            self.keyframes.n_size.value = 0
+            self.states.mode.value = Mode.INIT
+            self.states.reloc_sem.value = 0
+            del self.states.global_optimizer_tasks[:]
+
+    def backend_idle(self) -> bool:
+        """The backend applied every task queued so far (the lossless acknowledgement)."""
+        with self.states.lock:
+            return len(self.states.global_optimizer_tasks) == 0 and self.states.reloc_sem.value == 0
+
+    def close(self) -> None:
+        if self.manager is not None:
+            self.manager.shutdown()
+            self.manager = None
