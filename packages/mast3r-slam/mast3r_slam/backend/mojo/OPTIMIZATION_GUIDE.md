@@ -9,17 +9,18 @@ Replace CUDA/C++ matching kernels (`iter_proj`, `refine_matches`) with Mojo equi
 ## Architecture
 
 ```
-Python caller (mast3r_slam/matching.py)
+Python caller (mast3r_slam/ops/matching.py, mast3r_slam/ops/optim.py)
   → try: import mast3r_slam_mojo_backends  (preferred, no C++ build)
-    except: from mast3r_slam import _backends  (CUDA fallback)
-  → iter_proj_py() / refine_matches_py()   (Mojo, receives PythonObject)
-    → Extract shapes, pointers from PyTorch tensors
-    → get_cached_context_ptr() → enqueue_function[kernel]()
+    except: from mast3r_slam import _backends  (CUDA fallback, matching only)
+  → iter_proj_py() / refine_matches_py() / gauss_newton_rays_step_py() / pose_retr_py()
+    → Extract shapes, pointers from PyTorch tensors (torch_ptr[dtype])
+    → cached_context()[].enqueue_function[kernel]()
     → torch.cuda.synchronize()  (required: cross-stream correctness)
   → Return PyTorch tensors
 
-Note: global_opt.py still imports mast3r_slam._backends directly for the
-Gauss-Newton solvers which have not been ported to Mojo.
+The ray-cost Gauss-Newton loop is Python (ops/optim.gauss_newton_rays: Mojo step
+kernel → dense CPU solve → Mojo retraction). The points and calib costs use the
+CUDA extension (nodes/factor_graph.py).
 ```
 
 **Build command (current repo workflow):**
@@ -28,25 +29,25 @@ cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev _mast3r-slam-build-mojo-kernels
 ```
 
-**Equivalent direct Mojo invocation:**
+**Equivalent direct Mojo invocation (stable Mojo 1.x from the max channel, plus max-core for `max.gpu` and `layout`):**
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
-  -o mast3r_slam/_mojo_backends.so \
-  mast3r_slam/backend/mojo/matching_kernels.mojo
+  -o mast3r_slam_mojo_backends.so \
+  mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo
 ```
 
-**Test command (24 collected pytest cases from 15 test functions):**
+**Test command (Mojo vs CUDA parity, integration lane):**
 ```bash
 pixi run -e mast3r-slam-dev python -m pytest tests/test_mojo_vs_cuda.py -v -s
 ```
 
 **Benchmark command (500 runs, median, side-by-side):**
 ```bash
-PYTHONPATH=. pixi run -e mast3r-slam-dev python tools/bench_matching_kernels.py
+pixi run -e mast3r-slam-dev python tools/bench_kernels.py
 ```
 
-**Task wiring note:** the `mast3r-slam` Pixi baseline/example/app tasks now depend on both `_build-cuda-kernels` and `_build-mojo-kernels`, so the Mojo shared library is built automatically before those entrypoints run. The CUDA build is still required because `global_opt.py` still uses `mast3r_slam._backends`.
+**Task wiring note:** the `mast3r-slam` example/app/verify tasks depend on `_mast3r-slam-build-mojo-kernels`, so the Mojo shared library is built automatically before those entrypoints run. The CUDA extension (`_mast3r-slam-build-cuda-kernels`) is needed for the calibrated cost and the parity tests.
 
 ## Current Performance (RTX 5090, median of 500 runs, verified 2026-04-05)
 
@@ -137,41 +138,36 @@ For a 13 µs kernel (iter_proj 64x64), 8 µs overhead = 1.6x. For a 225 µs kern
 
 ## Key Technical Details
 
-### Cached DeviceContext pattern
+### Cached DeviceContext pattern (python_interop.mojo)
 ```mojo
-# In PyInit_: allocate and store as Python module attribute
-var ctx_storage = alloc[DeviceContext](1)
-var cached_ctx = DeviceContext()
-ctx_storage.init_pointee_move(cached_ctx^)
-Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx_storage)))
+# In PyInit_: a process-lifetime allocation, its address stored on the module
+var ctx = alloc(Layout[DeviceContext](count=1)).unsafe_leak()
+ctx.unsafe_write(DeviceContext())
+Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx)))
 
-# In each wrapper: retrieve via module lookup
-def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
-    var module = Python.import_module("mast3r_slam._mojo_backends")
-    var ctx_addr = Int(py=module._ctx_addr)
-    return UnsafePointer[DeviceContext, MutAnyOrigin](unsafe_from_address=ctx_addr)
+# In each wrapper
+def cached_context() raises -> MutPointer[DeviceContext, MutAnyOrigin]:
+    var module = Python.import_module("mast3r_slam_mojo_backends")
+    return MutPointer[DeviceContext, MutAnyOrigin](unsafe_from_address=Int(py=module._ctx_addr))
 ```
 
-### UnsafePointer from PyTorch tensor
+### Typed pointer and TileTensor from a PyTorch tensor
 ```mojo
-var ptr_int: Int = Int(py=tensor.data_ptr())
-var ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=ptr_int)
+var ptr = MutPointer[Scalar[dtype], MutAnyOrigin](unsafe_from_address=Int(py=tensor.data_ptr()))
+var t = TileTensor(ptr, row_major((batch, num_pts, Idx[3])))   # plain Int = runtime dim, Idx[N] = static
 ```
-- **Must use `MutAnyOrigin`** — `UnsafePointer[Float32]` alone fails to infer the `origin` parameter
-- The `unsafe_from_address` keyword is required (not `address`)
+- The tensor must be contiguous and hold `dtype` (the wrappers call `.contiguous()`, `.float()`, `.half()`).
+- Kernels take `TileTensor[dtype, Layout, ImmutAnyOrigin]` for inputs and `MutAnyOrigin` for outputs.
 
-### SIMD loads on GPU (NO alignment hints!)
+### SIMD loads on GPU: pass the scalar alignment
 ```mojo
-# Float32: load 4 elements (128 bits) — NO alignment=16!
-var v = ptr.load[width=4](offset)          # SIMD[DType.float32, 4]
-var sum = (v * other_v).reduce_add()       # scalar Float32
-
-# Float16: load 8 elements (128 bits), accumulate in f32
-var v16 = ptr_f16.load[width=8](offset)    # SIMD[DType.float16, 8]
-var v32 = v16.cast[DType.float32]()        # SIMD[DType.float32, 8]
-score += (v32 * other_v32).reduce_add()
+comptime F16_ALIGN = align_of[Float16]()
+var v16 = D11.load[width=8, alignment=F16_ALIGN]((b, v, u, k))   # SIMD[DType.float16, 8]
+score += (v16.cast[.float32]() * q.cast[.float32]()).reduce_add()
 ```
-**WARNING**: Never use `alignment=16` with PyTorch tensor pointers. Offsets within the tensor are not guaranteed aligned. This caused `CUDA_ERROR_MISALIGNED_ADDRESS` crashes discovered by Hypothesis fuzz testing.
+**WARNING**: `TileTensor.load[width=8]` defaults to the vector alignment (16 B for f16x8). A PyTorch view can start at any
+element, so descriptor loads pass the scalar alignment explicitly. A 16-B assumption caused `CUDA_ERROR_MISALIGNED_ADDRESS`
+crashes discovered by Hypothesis fuzz testing.
 
 ### Cross-stream synchronization (REQUIRED)
 ```mojo
@@ -247,30 +243,34 @@ The Hypothesis property-based fuzz tests (50 random examples per test, randomizi
 
 | File | Purpose |
 |------|---------|
-| `mast3r_slam/backend/mojo/matching_kernels.mojo` | All Mojo code — kernels + Python extension |
+| `mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo` | Extension module entry point (`PyInit_`) |
+| `mast3r_slam/backend/mojo/matching.mojo` | `iter_proj` and `refine_matches` kernels + Python wrappers |
+| `mast3r_slam/backend/mojo/gn_kernels.mojo` / `gn.mojo` | Gauss-Newton ray-cost step and Sim(3) retraction kernels / wrappers |
+| `mast3r_slam/backend/mojo/python_interop.mojo` | Cached DeviceContext and torch tensor pointers |
 | `mast3r_slam/backend/mojo/OPTIMIZATION_GUIDE.md` | This document |
-| `tests/test_mojo_vs_cuda.py` | 15 test functions expanded to 24 collected pytest cases |
-| `tools/bench_matching_kernels.py` | Side-by-side CUDA vs Mojo benchmark (500 runs, median) |
-| `mast3r_slam/matching.py` | Production code — tries Mojo first, falls back to CUDA |
+| `tests/test_mojo_vs_cuda.py` | Mojo vs CUDA parity (integration lane) |
+| `tools/bench_kernels.py` | Side-by-side CUDA vs Mojo benchmark (500 runs, median) |
+| `mast3r_slam/ops/matching.py`, `mast3r_slam/ops/optim.py` | Production callers — matching tries Mojo first, falls back to CUDA |
 | `mast3r_slam/backend/src/matching_kernels.cu` | CUDA oracle (DO NOT MODIFY) |
-| `mast3r_slam/backend/src/gn_kernels.cu` | GN CUDA kernels (not yet ported to Mojo) |
-| `pixi.toml` (root) | `mojo` dep + Modular channel + cached `_build-mojo-kernels` task and task dependencies |
+| `mast3r_slam/backend/src/gn_kernels.cu` | GN CUDA kernels (oracle for the rays cost; points and calib costs) |
+| `pixi.toml` (root) | `mojo` + `max-core` from the stable max channel + cached `_mast3r-slam-build-mojo-kernels` task |
 
-## Mojo API Gotchas
+## Mojo API Gotchas (stable Mojo 1.1)
 
-1. **No module-level `var`** — Workaround: `alloc[T](1)` + store address as Python module attribute
-2. **`UnsafePointer` needs full type**: `UnsafePointer[Float32, MutAnyOrigin]`, not `UnsafePointer[Float32]`
-3. **`unsafe_from_address=`** — Not `address=`; the keyword changed between Mojo versions
-4. **No `alignment=` on SIMD loads from PyTorch pointers** — Causes `CUDA_ERROR_MISALIGNED_ADDRESS`
+1. **No module-level `var`** — Workaround: `alloc(Layout[T](count=1)).unsafe_leak()` + store the address as a Python module attribute
+2. **`gpu` and `layout` are not in the stdlib** — `from max.gpu import ...`, `from max.gpu.host import DeviceContext`, `from layout import ...`; they ship with `max-core`, which the pixi feature pins next to `mojo`
+3. **Kernel scalars must be fixed-width** — `Int` and `UInt` are not `DevicePassable`; pass `Int32` and convert inside the kernel
+4. **Pass the scalar alignment on SIMD loads from PyTorch views** — the default vector alignment causes `CUDA_ERROR_MISALIGNED_ADDRESS`
 5. **`Float32` type casts**: Use `Float32(int_value)` explicitly; no implicit int→float
 6. **Kernel functions can't raise** — No `raises` keyword on GPU kernels
 7. **`comptime` not `alias`** — For compile-time constants
-8. **`def` not `fn`** — `fn` is deprecated
-9. **`min`/`max` are free functions** — `from std.math import min, max`
+8. **`def` not `fn`** — `fn` is removed
+9. **`min(max(x, lo), hi)` on purpose in iter_proj** — `clamp(NaN, lo, hi)` returns `hi`; CUDA's `fmin(fmax(..))` returns `lo`
 10. **`SIMD.reduce_add()`** — Not `.sum()` or `.reduce[add]()`
 11. **`floor()` returns Float** — Need `Int(floor(x))` for integer index
-12. **`InlineArray` for GPU kernel return values** — Use `InlineArray[T, N](fill=default)` with `return arr^` (transfer ownership)
+12. **`Array[T, N](fill=default)`** for fixed-size per-thread arrays (`InlineArray` was renamed)
 13. **Cross-stream sync is mandatory** — Mojo and PyTorch use different CUDA streams; `torch.cuda.synchronize()` required before returning
+14. **Pointers**: `Pointer`/`MutPointer`/`ImmPointer` (`UnsafePointer` is deprecated), `p[unsafe_offset=i]`, `p.unsafe_load[width=w]`, `p.unsafe_write(v)`
 
 ## How the CUDA Kernel Works (for reference)
 
