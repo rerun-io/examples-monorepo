@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`, `vslam-lab`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -309,6 +309,61 @@ no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
 Each recording records the Hub commit it was built from as
 `property:capture:hf_revision`; the config defaults to a pinned commit and `--revision` accepts only a full SHA.
 
+### SLAM benchmarks through VSLAM-LAB (vslam-lab)
+
+[VSLAM-LAB](https://github.com/VSLAM-LAB/VSLAM-LAB) fetches some thirty SLAM
+benchmarks and rewrites each sequence into one layout (`calibration.yaml`,
+`rgb.csv`, `groundtruth.csv`, `rgb_<i>/`, `depth_<i>/`, `imu_0.csv`), so one
+converter, `datasets/vslam_lab.py` over the readers in `vslam_lab_source.py`,
+covers them all. `--benchmark` picks the VSLAM-LAB directory and the catalog
+dataset, one per benchmark because each has its own sensor layout:
+
+| `--benchmark` | VSLAM-LAB dir | dataset | streams | ground truth |
+| --- | --- | --- | --- | --- |
+| `rgbdtum` | `RGBDTUM` | `vslam-lab-rgbdtum` | RGB 640×480 @ 30 Hz + registered depth (`depth_factor` 5000) | motion capture, the camera's optical centre |
+| `euroc` | `EUROC` | `vslam-lab-euroc` | stereo gray 752×480 @ 20 Hz + 200 Hz IMU | `state_groundtruth_estimate0`, world_T_imu0 at 200 Hz |
+
+A further benchmark is one `BENCHMARKS` entry: its camera, depth and IMU
+counts, and the two claims its files do not make, the world up axis and
+where the rig looks (each entry's comment says what it was measured on).
+
+`download` only verifies the local tree; VSLAM-LAB fetches it
+(`pixi run -e vslamlab download-sequence <dataset> <sequence>` in a VSLAM-LAB
+clone, whose `set-benchmark-path <dir>` writes to `<dir>/VSLAM-LAB-Benchmark`,
+the default `--root` when `DATAFORGE_RAW_ROOT=<dir>`).
+
+```bash
+export DATAFORGE_RAW_ROOT=<dir>                                # holds VSLAM-LAB-Benchmark/
+export DATAFORGE_OUTPUT_ROOT=<rrd tree>
+pixi run -e dataforge --frozen dataforge-download vslam-lab --benchmark euroc
+pixi run -e dataforge --frozen dataforge-convert --sequence MH_01_easy vslam-lab --benchmark euroc
+pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-vslam-lab-euroc vslam-lab --benchmark euroc
+```
+
+One sequence is up to three layers under `vslam-lab-<benchmark>__<sequence>`:
+`base` (one AV1 video per camera at its pinhole, `rig_T_cam` = the yaml's
+`T_BS`; depth as `rr.DepthImage` with `meter` = `depth_factor` on the RGB
+camera's pinhole, to which it is registered; the IMU), `gt` (world_T_body on
+`rig_00`, its path and trail, the root `ViewCoordinates`) and, where
+`calibration.yaml` carries an IMU noise model, `sensor_metadata` (simplecv's
+`ImuCalibration` on the IMU node). The rig frame is VSLAM-LAB's body frame,
+so `rig_00`'s `reference` names the sensor whose `T_BS` is the identity:
+`cam_00` on TUM, `imu_00` on EuRoC. `gt` and `sensor_metadata` rebuild from the
+`groundtruth.csv` and `calibration.yaml` sidecars alone.
+
+`video_time` carries the benchmark's own nanosecond stamps, **unshifted**
+(Unix epoch on both), so a trajectory read back from the catalog lines up
+1:1 with the upstream file and with any estimate stamped on the same clock;
+`frame_index` is the row of `rgb.csv`. Two facts of VSLAM-LAB's conversion a
+consumer should know: on TUM, `rgb.csv` pairs each RGB frame with the nearest
+depth frame (within 20 ms) and gives both the RGB stamp; on EuRoC, VSLAM-LAB
+writes `groundtruth.csv` from TUM's `supp_v2` files, cam0 positions at 20 Hz
+with a constant placeholder quaternion. `convert` logs such a file but flags
+it (`property:gt:has_rotation = false`, and a warning); the catalog's EuRoC
+corpus replaces it, before conversion, with the upstream
+`mav0/state_groundtruth_estimate0/data.csv` in the same columns: the full
+6-DoF body pose at 200 Hz.
+
 ### Environment variables
 
 | variable | default | purpose |
@@ -358,6 +413,7 @@ is a nominal-rate fiction for such a file.
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
 | `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, turned 90° clockwise so the scene is upright) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
+| `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as `DepthImage` where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and
