@@ -41,7 +41,7 @@ class Config:
     image_path: Path = PACKAGE_DIR / "data/office/IMG_4029.jpg"
     """The photo (default: the package's sample)."""
     stage: Stage = "no-outpaint"
-    """``outpaint`` and ``coarse`` load FLUX.1-Fill-dev (about 34 GB on first use)."""
+    """The outpaint and coarse stages load FLUX.1-Fill-dev (about 34 GB on first use)."""
     max_resolution: Literal[512, 1024, 1920] = 512
     """Long side of the working image (both sides become multiples of 32)."""
     expansion_percent: float = 0.3
@@ -56,7 +56,7 @@ class Config:
     runner: Literal["sequential", "threaded"] = "threaded"
     """dagkit runner; both give the same outputs (lossless)."""
     mode: Mode = "lossless"
-    """``lossless``: every step sees every item; ``realtime``: busy steps drop old items."""
+    """lossless: every step sees every item; realtime: busy steps drop old items."""
 
 
 def nodes(stage: Stage, expansion_percent: float, n_frames: int, seed: int, flux: FluxConfig) -> tuple[OutpaintNode, DepthNode, InitNode, ExpandNode | None, RenderNode]:
