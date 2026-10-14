@@ -24,8 +24,10 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
 params = { frame_budget = "200" }
-# |pre - pre2| of the pre-port runs (refined: rot 2.098 / 2.239 deg, trans 5.372 / 6.407 cm, focal 3.877 / 3.870 %)
-noise = { rot_deg_mean = 0.141, trans_cm_mean = 1.035, focal_pct_mean_abs = 0.0075 }
+# Reference since the keypoint median counts video frames (the old record-median goldens scored rot 2.098 / 2.239 deg,
+# trans 5.372 / 6.407 cm). Noise = spread of three runs of the same code (pre, pre2 and one more): rot 1.223 / 1.204 /
+# 1.199 deg, trans 2.589 / 2.861 / 4.396 cm, focal 3.860 / 3.865 / 3.872 %. trans moves with the MoGe metric rescale.
+noise = { rot_deg_mean = 0.024, trans_cm_mean = 1.807, focal_pct_mean_abs = 0.012 }
 
 [[graph.cases]]
 name = "full"
@@ -34,8 +36,10 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
 params = { frame_budget = "1000" }
-# |pre - pre2| of the pre-port runs (refined: rot 1.164 / 1.156 deg, trans 1.596 / 1.533 cm, focal 3.853 / 3.850 %); bands = floors
-noise = { rot_deg_mean = 0.0087, trans_cm_mean = 0.063, focal_pct_mean_abs = 0.0032 }
+# Reference since the keypoint median counts video frames (old: rot 1.164 / 1.156 deg, trans 1.596 / 1.533 cm). Spread of
+# three runs of the same code: rot 1.048 / 1.062 / 1.050 deg, trans 4.792 / 1.487 / 1.553 cm (metric rescale 1.02-1.08),
+# focal 3.857 / 3.855 / 3.855 %.
+noise = { rot_deg_mean = 0.014, trans_cm_mean = 3.304, focal_pct_mean_abs = 0.0021 }
 
 [[tests]]
 name = "ops"
