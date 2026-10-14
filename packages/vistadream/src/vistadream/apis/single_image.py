@@ -2,7 +2,9 @@
 
 Stages: ``no-outpaint`` (MoGe depth of the image, 100 optimisation steps), ``outpaint`` (FLUX.1 Fill grows the canvas first)
 and ``coarse`` (then adds inpainted views along a spiral, 500 steps each). The scene, the training views and the rendered
-path stream to the ``rr_config`` viewer; ``output_ply`` also saves the scene. The gradio app is generated from ``Config``.
+path stream to the ``rr_config`` viewer; ``output_ply`` also saves the scene. The gradio app is generated from ``Config``;
+its example is the ``VERIFY.toml`` short case (``short_case``). The viewer opens on the normal view; the "pipeline (debug)"
+tab shows the graph, its guide and four of its outputs.
 """
 
 from dataclasses import dataclass, field
@@ -11,16 +13,18 @@ from typing import Literal
 
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit.app import run_app
+from dagkit.app import run_app, with_pipeline
+from dagkit.doc import describe
 from dagkit.graph import Graph
 from dagkit.node import Mode, Node, PortType
 from dagkit.runners import RunReport
 from dagkit.sinks import RerunSink
+from dagkit.verify import load_card
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from vistadream.graphs.single_image import single_image_graph
 from vistadream.models.flux import FluxConfig
-from vistadream.nodes.prepare import DepthNode, OutpaintNode, image_source
+from vistadream.nodes.prepare import DepthNode, ImageSource, OutpaintNode
 from vistadream.nodes.splats import ExpandNode, InitNode, PlySink, RenderNode
 from vistadream.types import CameraView, SceneViews, Splats, Stage
 
@@ -52,6 +56,7 @@ class Config:
     runner: Literal["sequential", "threaded"] = "threaded"
     """dagkit runner; both give the same outputs (lossless)."""
     mode: Mode = "lossless"
+    """``lossless``: every step sees every item; ``realtime``: busy steps drop old items."""
 
 
 def nodes(stage: Stage, expansion_percent: float, n_frames: int, seed: int, flux: FluxConfig) -> tuple[OutpaintNode, DepthNode, InitNode, ExpandNode | None, RenderNode]:
@@ -66,10 +71,28 @@ def nodes(stage: Stage, expansion_percent: float, n_frames: int, seed: int, flux
     return OutpaintNode(inpaint, expansion_percent), DepthNode(moge), InitNode(seed=seed), expand, RenderNode()
 
 
-def blueprint(n_frames: int) -> rrb.Blueprint:
-    """3D: splats and camera frusta (explicit image exclusions: filters have no mid-path wildcards) | 2D: input, depth, canvas, path."""
-    cameras: list[str] = ["input", "outpaint", "render", *(f"view_{i:02d}" for i in range(2, n_frames))]
+def short_case(rr_config: RerunTyroConfig) -> Config:
+    """The ``VERIFY.toml`` short case as a Config: the gradio example, one click runs a known-good input."""
+    [case] = [c for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for c in block.cases if c.clip == "short"]
+    stage, max_resolution = case.params["stage"], int(case.params["max_resolution"])
+    assert case.input is not None and stage in ("no-outpaint", "outpaint", "coarse") and max_resolution in (512, 1024, 1920), case
+    return Config(rr_config, PACKAGE_DIR / case.input, stage, max_resolution, seed=int(case.params["seed"]))
+
+
+def blueprint(config: Config, graph: Graph) -> rrb.Blueprint:
+    """The normal view, 3D: splats and camera frusta (explicit image exclusions: filters have no mid-path wildcards) | 2D:
+    input, depth, canvas, path; then the "pipeline (debug)" tab, whose output views carry the graph's step numbers."""
+    cameras: list[str] = ["input", "outpaint", "render", *(f"view_{i:02d}" for i in range(2, config.n_frames))]
     images: list[str] = [f"- /world/{camera}/pinhole/{image}" for camera in cameras for image in ("rgb", "depth", "valid", "supervise")]
+    number: dict[str, int] = {n.name: n.number for n in describe(graph).nodes}
+    final: str = "expand" if "expand" in graph.nodes else "init"
+    node, what, origin = ("image", "input", "/world/input/pinhole/rgb") if config.stage == "no-outpaint" else ("outpaint", "canvas", "/world/outpaint/pinhole/rgb")
+    outputs: list[rrb.View] = [
+        rrb.Spatial2DView(origin=origin, name=f"{number[node]} {node} · {what}"),
+        rrb.Spatial2DView(origin="/world/input/pinhole/depth", name=f"{number['depth']} depth · MoGe depth"),
+        rrb.Spatial3DView(origin="/world", name=f"{number[final]} {final} · scene", contents=["+ /world/**", *images]),
+        rrb.Spatial2DView(origin="/world/render/pinhole/rgb", name=f"{number['render']} render · path"),
+    ]
     view3d = rrb.Spatial3DView(origin="/world", name="Gaussian splats", contents=["+ /world/**", *images])
     grid = rrb.Grid(
         rrb.Spatial2DView(origin="/world/input/pinhole/rgb", name="input"),
@@ -78,18 +101,19 @@ def blueprint(n_frames: int) -> rrb.Blueprint:
         rrb.Spatial2DView(origin="/world/render/pinhole/rgb", name="render path"),
         grid_columns=2,
     )
-    return rrb.Blueprint(rrb.Horizontal(view3d, grid), collapse_panels=True)
+    return with_pipeline(rrb.Blueprint(rrb.Horizontal(view3d, grid), collapse_panels=True), outputs)
 
 
 def build(config: Config, recording: rr.RecordingStream) -> Graph:
-    """Models load here, before the run."""
+    """Models load here, before the run; the blueprint names the graph's steps, so it follows the graph."""
     recording.log("/world", rr.ViewCoordinates.RDF, static=True)
-    recording.send_blueprint(blueprint(config.n_frames))
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS)}
     if config.output_ply is not None:
         sinks["ply"] = PlySink(config.output_ply)
     built = nodes(config.stage, config.expansion_percent, config.n_frames, config.seed, config.flux)
-    return single_image_graph(image_source(config.image_path, config.max_resolution), *built, sinks)
+    graph: Graph = single_image_graph(ImageSource(config.image_path, config.max_resolution), *built, sinks)
+    recording.send_blueprint(blueprint(config, graph))
+    return graph
 
 
 def main(config: Config) -> RunReport:

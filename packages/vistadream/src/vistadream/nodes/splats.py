@@ -25,8 +25,10 @@ EDGE_THRESHOLD: float = 0.01
 
 
 class InitNode:
-    """The first scene: the input view (and the outpainted canvas before it) as Gaussians on every pixel off a depth edge
-    (canvas: only the outpainted, valid ones), optimised ``iters`` steps against both views."""
+    """Fit the first Gaussian scene
+
+    The input view (and the outpainted canvas before it) as Gaussians on every pixel off a depth edge (canvas: only the
+    outpainted, valid ones), optimised ``iters`` steps against both views."""
 
     inputs = {"depth": RelativeDepth, "canvas": OutpaintCanvas, "image": RgbImage}
     outputs = {"scene": Fenced[Splats], "views": SceneViews}
@@ -60,8 +62,11 @@ class InitNode:
 
 
 class ExpandNode:
-    """Coarse stage: up to ``n_frames - 2`` views picked on a dense spiral (largest holes under 25 % of the image, never next
-    to a picked one), inpainted, given aligned depth, and each optimised ``iters`` steps into the scene (old Gaussians fixed)."""
+    """Grow the scene with inpainted views
+
+    Coarse stage only: up to ``n_frames - 2`` views picked on a dense spiral (largest holes under 25 % of the image, never
+    next to a picked one), inpainted, given aligned depth, and each optimised ``iters`` steps into the scene (old Gaussians
+    fixed)."""
 
     inputs = {"scene": Fenced[Splats], "views": SceneViews}
     outputs = {"scene": Fenced[Splats], "views": SceneViews}
@@ -119,7 +124,9 @@ class ExpandNode:
 
 
 class RenderNode:
-    """The final scene at the input camera along the spiral: 150 views (25 per training view when there are more than 2),
+    """Render the scene along a camera path
+
+    The final scene at the input camera along the spiral: 150 views (25 per training view when there are more than 2),
     one every ``1 / fps`` s after the scene's time."""
 
     inputs = {"scene": Fenced[Splats], "views": SceneViews}
@@ -150,7 +157,9 @@ class RenderNode:
 
 
 class PlySink:
-    """Writes the final scene as a 3DGS PLY (degree-0 SH: DC + 45 zero coefficients, logit opacity, log scales)."""
+    """Save the scene as a 3DGS PLY file
+
+    Degree-0 SH (DC + 45 zero coefficients), logit opacity, log scales."""
 
     inputs = {"scene": Splats}
     outputs: dict = {}

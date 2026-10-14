@@ -17,7 +17,7 @@ from vistadream_fakes import Keep
 
 from vistadream.apis.single_image import PORTS
 from vistadream.graphs.single_image import single_image_graph
-from vistadream.nodes.prepare import DepthNode, OutpaintNode, image_source
+from vistadream.nodes.prepare import DepthNode, ImageSource, OutpaintNode
 from vistadream.nodes.splats import ExpandNode, InitNode, RenderNode
 
 pytestmark = pytest.mark.integration
@@ -37,7 +37,7 @@ def test_coarse_graph_grows_the_scene_on_the_gpu() -> None:
     moge = MoGeV1Predictor(device="cuda")
     keep = Keep(PORTS)
     nodes = (OutpaintNode(opencv_inpaint), DepthNode(moge), InitNode(), ExpandNode(opencv_inpaint, moge, n_frames=4, iters=50), RenderNode())
-    report = run_threaded(single_image_graph(image_source(IMAGE, 512), *nodes, {"keep": keep}), mode="lossless")
+    report = run_threaded(single_image_graph(ImageSource(IMAGE, 512), *nodes, {"keep": keep}), mode="lossless")
     assert report.status == "complete"
     [views] = [v for port, _, v in keep.items if port == "views"]
     [scene] = [v for port, _, v in keep.items if port == "scene"]

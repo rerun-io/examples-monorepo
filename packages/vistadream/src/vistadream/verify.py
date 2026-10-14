@@ -38,7 +38,7 @@ from rerun.catalog import DatasetEntry
 from vistadream.apis.single_image import PACKAGE_DIR, PORTS, ROOTS, nodes
 from vistadream.graphs.single_image import single_image_graph
 from vistadream.models.flux import FluxConfig
-from vistadream.nodes.prepare import image_source
+from vistadream.nodes.prepare import ImageSource
 from vistadream.ops.splats import render
 from vistadream.types import SceneViews, Splats, images
 
@@ -94,7 +94,7 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     recording.log("/world", rr.ViewCoordinates.RDF, static=True)
     input_render = InputRender(recording)
     sinks = {"viewer": RerunSink(recording, PORTS, ROOTS), "input_render": input_render}
-    report = run_sequential(single_image_graph(image_source(PACKAGE_DIR / case.input, int(case.params["max_resolution"])), *built, sinks))
+    report = run_sequential(single_image_graph(ImageSource(PACKAGE_DIR / case.input, int(case.params["max_resolution"])), *built, sinks))
     wall_s: float = time.perf_counter() - started
     recording.log("/verify/single_image/run", rr.AnyValues(wall_s=wall_s, n_splats=float(input_render.n_splats), stage=stage, code="graph"), static=True)
     print(f"{case.name} {phase}: {report.status}, {input_render.n_splats} splats in {wall_s:.1f} s")
