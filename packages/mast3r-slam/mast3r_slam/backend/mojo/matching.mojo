@@ -9,13 +9,12 @@ Tensors are row-major (PyTorch). `rays_img` is [B, H, W, 9]: ray (0..2), d ray/d
 """
 
 from std.math import ceildiv, floor, max, min, sqrt
-from std.memory import stack_allocation
 from std.python import Python, PythonObject
 from std.sys import align_of
 from std.utils.numerics import min_finite
 from max.gpu import block_idx, global_idx, thread_idx
 from max.gpu.memory import AddressSpace
-from layout import Idx, TileTensor, row_major
+from layout import Idx, TileTensor, row_major, stack_allocation
 
 from gn_kernels import Vec3
 from python_interop import cached_context, torch_ptr
@@ -234,11 +233,13 @@ def refine_matches_kernel_f16_cached[FDIM: Int, BLOCK_SIZE: Int](
     var h = Int(D11.dim[1]())
     var w = Int(D11.dim[2]())
 
-    # Each thread writes and reads only its own slots, so no barrier (threads past num_pts have already returned).
-    var q_shared = stack_allocation[BLOCK_SIZE * CHUNKS, SIMD[.float16, 8], address_space=AddressSpace.SHARED]()
-    var q_base = thread_idx.x * CHUNKS
+    # Each thread writes and reads only its own row, so no barrier (threads past num_pts have already returned).
+    var q_shared = stack_allocation[.float16, address_space=AddressSpace.SHARED, alignment=align_of[SIMD[.float16, 8]]()](
+        row_major[BLOCK_SIZE, FDIM]()
+    )
+    var tid = thread_idx.x
     comptime for chunk in range(CHUNKS):
-        q_shared[unsafe_offset=q_base + chunk] = D21.load[width=8, alignment=F16_ALIGN]((b, n, chunk * 8))
+        q_shared.store((tid, chunk * 8), D21.load[width=8, alignment=F16_ALIGN]((b, n, chunk * 8)))
 
     var u0 = Int(p1[b, n, 0])
     var v0 = Int(p1[b, n, 1])
@@ -255,7 +256,7 @@ def refine_matches_kernel_f16_cached[FDIM: Int, BLOCK_SIZE: Int](
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
                     var score: Float32 = 0.0
                     comptime for chunk in range(CHUNKS):
-                        var q = q_shared[unsafe_offset=q_base + chunk]
+                        var q = q_shared.load[width=8]((tid, chunk * 8))
                         var v11 = D11.load[width=8, alignment=F16_ALIGN]((b, v_cand, u_cand, chunk * 8))
                         score += (q.cast[.float32]() * v11.cast[.float32]()).reduce_add()
                     if score > max_score:
