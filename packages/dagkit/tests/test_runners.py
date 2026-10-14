@@ -1,8 +1,10 @@
 """Runner semantics (SPEC §2.3, §2.3a, §2.5): both runners, unit lane, fakes only."""
 
+import gc
 import os
 import threading
 import time
+import weakref
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -323,6 +325,34 @@ def test_resources_are_built_once_shared_and_closed(runner: str) -> None:
     graph.edge(b["y"], graph.sink("sink", Collect(("y",)))["y"])
     RUNNERS[runner](graph)
     assert len(built) == 1 and seen == [built[0], built[0]] and built[0].closed
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_finished_run_frees_its_resources_without_the_cyclic_gc(runner: str) -> None:
+    """A run's models and buffers free when it returns, not at the next cyclic collection (a verify card runs many
+    cases in one process; a caller may keep its Control)."""
+    built: list[weakref.ref] = []
+
+    class Holds(Add):
+        def reset(self, ctx: RunContext) -> None:
+            self.model = ctx.resources["model"]  # as a model node keeps its model
+
+    def build() -> Graph:
+        graph = Graph("frees")
+        graph.resource("model", lambda: (model := Model(), built.append(weakref.ref(model)))[0])
+        a = graph.node("a", Holds(0), needs=["model"])
+        graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], a["x"])
+        graph.edge(a["y"], graph.sink("sink", Collect(("y",)))["y"])
+        return graph
+
+    control = Control()
+    gc.collect()
+    gc.disable()
+    try:
+        RUNNERS[runner](build(), control=control)
+        assert built and built[0]() is None
+    finally:
+        gc.enable()
 
 
 def test_run_segments_runs_one_lossless_graph_per_segment() -> None:

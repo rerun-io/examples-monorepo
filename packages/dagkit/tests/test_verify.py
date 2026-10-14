@@ -30,6 +30,7 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "seg"
 noise = { rot_deg_mean = 0.02 }
+published = { rot_deg_mean = 0.5 }
 
 [[graph.cases]]
 name = "full"
@@ -54,6 +55,7 @@ def test_card_loads_and_full_case_reuses_short_noise(tmp_path: Path) -> None:
     block: GraphBlock = card.graph[0]
     assert block.shots[0].t_s == 0.0 and card.tests[0].tier == "op"
     assert block.cases[0].noise == {"rot_deg_mean": 0.02} and block.cases[1].noise_from == "short"
+    assert block.cases[0].published == {"rot_deg_mean": 0.5} and block.cases[1].published == {}
     (tmp_path / "BAD.toml").write_text(CARD.replace('package = "exo-calib"', 'package = "exo-calib"\nowner = "x"'))
     with pytest.raises(ValueError, match="BAD.toml"):
         load_card(tmp_path / "BAD.toml")
@@ -64,6 +66,15 @@ def test_band_tolerance_is_twice_noise_or_floor() -> None:
     assert not check_band(LOWER, 1.0, 1.11, {"ate": 0.01}).passed
     assert check_band(LOWER, 1.0, 1.4, {"ate": 0.2}).passed  # 2 x noise wins
     assert check_band(HIGHER, 20.0, 19.7, {"psnr": 0.0}).passed and not check_band(HIGHER, 20.0, 19.6, {"psnr": 0.0}).passed
+
+
+def test_a_published_value_is_the_base_only_when_it_is_worse_than_pre() -> None:
+    assert check_band(LOWER, 1.0, 1.5, {"ate": 0.0}, published=1.45).passed  # base 1.45 (the paper), tol = floor 0.1
+    assert not check_band(LOWER, 1.0, 1.56, {"ate": 0.0}, published=1.45).passed
+    assert check_band(LOWER, 1.0, 1.1, {"ate": 0.0}, published=0.5).passed and not check_band(LOWER, 1.0, 1.11, {"ate": 0.0}, published=0.5).passed
+    assert check_band(HIGHER, 20.0, 18.8, {"psnr": 0.0}, published=19.0).passed and not check_band(HIGHER, 20.0, 18.6, {"psnr": 0.0}, published=19.0).passed
+    result = check_band(LOWER, 1.0, 1.0, {"ate": 0.0}, published=math.nan)
+    assert not result.passed and "non-finite" in result.reason
 
 
 @pytest.mark.parametrize(("pre", "post", "noise", "reason"), [

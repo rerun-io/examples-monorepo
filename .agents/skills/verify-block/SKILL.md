@@ -103,7 +103,7 @@ Owned TOML, read by `dagkit.verify` with pyserde (`deny_unknown_fields`, `type_c
 |---|---|
 | top level `VerifyCard` | `package`, `[[graph]]`, `[[tests]]` |
 | `[[graph]]` `GraphBlock` | `name`, `run` (`"pkg.verify:run"`), `score` (`"pkg.verify:score"`), `cases`, `metrics`, `shots` |
-| `[[graph.cases]]` `Case` | `name`, `clip` (`short`/`full`), `reference` (`gt`/`pre-port`), `dataset` + `segment` OR `input` (repo-relative file), `window_s` (`[start, stop]`, absolute seconds on the case clock), `params` (Config overrides, string values), `noise` (metric → measured \|pre − pre2\|), `noise_from` (short case whose noise a full case reuses) |
+| `[[graph.cases]]` `Case` | `name`, `clip` (`short`/`full`), `reference` (`gt`/`pre-port`), `dataset` + `segment` OR `input` (repo-relative file), `window_s` (`[start, stop]`, absolute seconds on the case clock), `params` (Config overrides, string values), `noise` (metric → measured \|pre − pre2\|), `noise_from` (short case whose noise a full case reuses), `published` (metric → the method's published result on this case, e.g. its paper's table) |
 | `[[graph.metrics]]` `MetricBand` | `name`, `unit`, `better` (`lower`/`higher`), `floor` (ABSOLUTE smallest tolerance; write "5 % of pre" as the number) |
 | `[[graph.shots]]` `Shot` | `view` (a view's `origin` from `rerun_get_viewer_state`, e.g. `/`, or `full`), `t_s` (absolute seconds on the case clock) |
 | `[[tests]]` `TestBlock` | `name`, `tier` (`model`/`op`/`node`/`types`), `lane` (`unit`/`integration`/`golden`), `tests` (test ids), `properties` (ids of the property tests that own the bounds) |
@@ -146,7 +146,9 @@ properties = ["tests/test_ops_triangulate.py::test_recovers_projected_points"]
 ```
 
 Band: `tolerance = max(2 × noise[metric], floor)`. `lower` passes when `post ≤ pre + tolerance`, `higher` when
-`post ≥ pre − tolerance`; noise 0 (deterministic) gives the floor. Keep GPU nondeterminism as in production
+`post ≥ pre − tolerance`; noise 0 (deterministic) gives the floor. With `published`, the base is the worse of `pre` and
+the published value (`max` for `lower`): a paper never tightens a band, and a case far worse than its paper is a finding
+for the PR, not a reason to move the band. Keep GPU nondeterminism as in production
 (no extra seeding). Typical floors: ATE 5 % of pre (as a number), MPJPE / PVE 2 mm, rotation 0.1°, translation
 1 cm, focal 0.5 %, 2D keypoints 0.5 px, PSNR 0.3 dB, mask IoU 0.01. A failed band: find the cause (Type
 mapping, dtype, frame offset, realtime drops; verify runs lossless). Never "fix" it with byte identity.

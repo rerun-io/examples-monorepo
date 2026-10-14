@@ -43,6 +43,7 @@ class Case:
     params: dict[str, str] = field(default_factory=dict)  # config overrides of this case
     noise: dict[str, float] = field(default_factory=dict)  # metric -> measured |pre - pre2| for THIS case
     noise_from: str | None = None  # reuse the named case's noise (stated, never implied)
+    published: dict[str, float] = field(default_factory=dict)  # metric -> a published result on this case (a paper's table)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -95,16 +96,19 @@ def load_card(path: Path) -> VerifyCard:
         raise ValueError(f"{path}: {exc}") from exc
 
 
-def check_band(band: MetricBand, pre: float | None, post: float | None, noise: Mapping[str, float]) -> BandResult:
+def check_band(band: MetricBand, pre: float | None, post: float | None, noise: Mapping[str, float], published: float | None = None) -> BandResult:
+    """``post`` within ``tol`` of the base: ``pre``, or a ``published`` result when that is worse (it never tightens a band)."""
     if pre is None or post is None:
         return BandResult(band.name, False, f"missing metric (pre={pre}, post={post})")
-    if not (math.isfinite(pre) and math.isfinite(post)):
-        return BandResult(band.name, False, f"non-finite metric (pre={pre}, post={post})")
+    if not all(math.isfinite(v) for v in (pre, post, pre if published is None else published)):
+        return BandResult(band.name, False, f"non-finite metric (pre={pre}, post={post}, published={published})")
     if band.name not in noise or not all(math.isfinite(v) and v >= 0.0 for v in (2.0 * noise[band.name], band.floor)):
         return BandResult(band.name, False, f"no finite, non-negative measured noise / floor (noise={noise.get(band.name)}, floor={band.floor})")
     tol: float = max(2.0 * noise[band.name], band.floor)
-    passed: bool = post <= pre + tol if band.better == "lower" else post >= pre - tol
-    return BandResult(band.name, passed, f"pre {pre:.4g} post {post:.4g} {band.unit} tol {tol:.4g} ({band.better} is better)")
+    base: float = pre if published is None else max(pre, published) if band.better == "lower" else min(pre, published)
+    passed: bool = post <= base + tol if band.better == "lower" else post >= base - tol
+    cited: str = "" if published is None else f" published {published:.4g}"
+    return BandResult(band.name, passed, f"pre {pre:.4g}{cited} post {post:.4g} {band.unit} tol {tol:.4g} ({band.better} is better)")
 
 
 def golden_path(package: str, block: str, case: str, phase: Phase) -> Path:
@@ -162,7 +166,8 @@ def main(args: VerifyArgs) -> int:
             scores: dict = {(c.name, ph): dict(score(c, p)) for c, ph in runs if (p := golden_path(card.package, block.name, c.name, ph)).exists()}  # type: ignore[call-overload]
             for band in block.metrics:
                 noise_runs: list[float | None] = [scores.get((donor.name, ph), {}).get(band.name) for ph in ("pre", "pre2")]
-                result: BandResult = check_band(band, scores.get((case.name, "pre"), {}).get(band.name), metrics.get(band.name), donor.noise)
+                pre: float | None = scores.get((case.name, "pre"), {}).get(band.name)
+                result: BandResult = check_band(band, pre, metrics.get(band.name), donor.noise, case.published.get(band.name))
                 measured: bool = all(v is not None and math.isfinite(v) for v in noise_runs)  # both runs behind the noise exist and score
                 results.append(BandResult(band.name, result.passed and measured, f"{result.reason}; noise runs (pre, pre2) of {donor.name!r}: {noise_runs}"))
         for result in results:

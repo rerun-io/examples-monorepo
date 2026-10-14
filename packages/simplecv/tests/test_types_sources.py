@@ -11,10 +11,12 @@ from serde import SerdeError, from_dict, to_dict
 
 pytest.importorskip("torchcodec", reason="the catalog video source decodes with torchcodec")
 
+import cv2  # noqa: E402
 import torch  # noqa: E402
 from dagkit.sources import SegmentRef  # noqa: E402
 
-from simplecv.sources.catalog_video import CatalogVideoSource, sample_indices  # noqa: E402
+from simplecv.sources import catalog_video  # noqa: E402
+from simplecv.sources.catalog_video import CatalogVideoSource, sample_indices, undistortion_maps  # noqa: E402
 from simplecv.types.frames import MultiViewFrames  # noqa: E402
 from simplecv.types.rig import RigCameras  # noqa: E402
 
@@ -153,3 +155,75 @@ def test_source_resizes_and_puts_the_native_frames_first(views: int, native_hw: 
 def test_source_refuses_native_frames_without_a_resize() -> None:
     with pytest.raises(NotImplementedError, match="keep_native"):
         CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="cpu_rgb", keep_native=True)
+
+
+@settings(max_examples=50, deadline=None)
+@given(
+    f=st.floats(250.0, 600.0), offset=st.tuples(st.floats(-15.0, 15.0), st.floats(-15.0, 15.0)), k1=st.floats(-0.3, 0.3), k2=st.floats(-0.1, 0.1),
+    p=st.tuples(st.floats(-2e-3, 2e-3), st.floats(-2e-3, 2e-3)), uv=arrays(np.float64, (20, 2), elements=st.floats(0.1, 0.9)),
+)  # fmt: skip
+def test_undistortion_maps_send_each_undistorted_pixel_to_its_distorted_source(
+    f: float, offset: tuple[float, float], k1: float, k2: float, p: tuple[float, float], uv: np.ndarray
+) -> None:
+    width, height = 160, 120  # a small image keeps the maps cheap; the intrinsics scale with it
+    K = np.array([[f / 4, 0.0, (width - 1) / 2 + offset[0] / 4], [0.0, f / 4, (height - 1) / 2 + offset[1] / 4], [0.0, 0.0, 1.0]])
+    coefficients = np.array([k1, k2, p[0], p[1], 0.0] + [0.0] * 9)  # the catalog's zero-padded 14-vector
+    K_new, map_x, map_y = undistortion_maps(K, coefficients, width, height)
+    np.testing.assert_allclose(K_new[:2, 2], [(width - 1) / 2, (height - 1) / 2])  # centred principal point
+    pixels = uv * [width - 1, height - 1]  # inside the undistorted image
+    rays = np.c_[(pixels - K_new[:2, 2]) / K_new[[0, 1], [0, 1]], np.ones(len(pixels))]
+    distorted, _ = cv2.projectPoints(rays, np.zeros(3), np.zeros(3), K, coefficients)
+    sampled = np.stack([cv2.remap(m, pixels[:, :1].astype(np.float32), pixels[:, 1:].astype(np.float32), cv2.INTER_LINEAR)[:, 0] for m in (map_x, map_y)], axis=1)
+    np.testing.assert_allclose(sampled, distorted[:, 0], atol=0.02)
+
+
+def rig_with_distortion(K: np.ndarray, width: int, height: int, coefficients: list[float] | None, model: str = "brown_conrady") -> pa.Table:
+    rig = RigCameras(("rig_00/cam_00",), K[None], np.eye(4)[None], np.array([[width, height]]))
+    row: pa.Table = static_row(rig.to_rerun("/world"))
+    if coefficients is not None:
+        row = row.append_column("/world/rig_00/cam_00/pinhole:simplecv.components.DistortionCoefficients", pa.array([[coefficients]], pa.list_(pa.list_(pa.float32()))))
+        row = row.append_column("/world/rig_00/cam_00/pinhole:simplecv.components.DistortionModel", pa.array([[model]]))
+    return row
+
+
+class TextureFrames(FakeFrames):
+    """The same fixed random texture in every frame."""
+
+    def frames_at(self, view: int, indices: list[int]) -> torch.Tensor:
+        texture = np.random.default_rng(0).integers(0, 256, (3, *self.hw), dtype=np.uint8)
+        return torch.from_numpy(texture)[None].repeat(len(indices), 1, 1, 1)
+
+
+def test_source_undistorts_its_frames_and_emits_the_undistorted_pinhole(monkeypatch: pytest.MonkeyPatch) -> None:
+    width, height = 64, 48
+    K = np.array([[60.0, 0.0, 33.0], [0.0, 60.0, 22.0], [0.0, 0.0, 1.0]])
+    coefficients = [-0.25, 0.05, 1e-3, -1e-3, 0.0]
+    monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: rig_with_distortion(K, width, height, coefficients))
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
+    source = CatalogVideoSource(SegmentRef("d", "s"), ("rig_00/cam_00",), decode="cpu_rgb", undistort=True)
+    source.frames = TextureFrames(1, (height, width))  # type: ignore[assignment]
+    list(source.events())  # a graph reads the source again after a first look (e.g. at the frame size)
+    events = list(source.events())
+    rig: RigCameras = events[0].value  # type: ignore[assignment]
+    K_new, map_x, map_y = undistortion_maps(K, np.asarray(coefficients, dtype=np.float32).astype(np.float64), width, height)
+    np.testing.assert_allclose(rig.intrinsics[0], K_new)
+    np.testing.assert_array_equal(rig.resolution_wh, [[width, height]])
+    native = source.frames.frames_at(0, [0])[0].permute(1, 2, 0).numpy().copy()
+    for event in events[1:]:
+        frames: MultiViewFrames = event.value  # type: ignore[assignment]
+        np.testing.assert_array_equal(frames.rgb[0].permute(1, 2, 0).numpy(), cv2.remap(native, map_x, map_y, cv2.INTER_LINEAR))
+
+
+def test_source_refuses_to_undistort_without_coefficients_or_off_the_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: rig_with_distortion(np.eye(3), 8, 8, None))
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
+    source = CatalogVideoSource(SegmentRef("d", "s"), ("rig_00/cam_00",), decode="cpu_rgb", undistort=True)
+    source.frames = FakeFrames(1, (8, 8))  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="DistortionCoefficients"):
+        list(source.events())
+    fisheye = rig_with_distortion(np.eye(3), 8, 8, [0.1, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "kannala_brandt")  # 8 terms OpenCV would misread
+    monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: fisheye)
+    with pytest.raises(ValueError, match="brown_conrady"):
+        list(source.events())
+    with pytest.raises(NotImplementedError, match="undistort"):
+        CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="nvdec_rgb", undistort=True)

@@ -7,13 +7,15 @@ from io import BytesIO
 from typing import Any, Literal
 
 import av
+import cv2
 import numpy as np
+import pyarrow as pa
 import torch
 from dagkit.node import Event, Fence, Fenced, PortType
 from dagkit.sources import Column, SegmentRef
 from dagkit.time import STATIC
 from dagkit.types import read_column
-from jaxtyping import Int64, UInt8
+from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from torch import Tensor
@@ -30,6 +32,10 @@ MP4_NOMINAL_FPS: int = 30
 times come from the catalog, so it only labels the container."""
 KEYFRAME_LEAD_NS: int = 5_000_000_000  # a windowed cpu_luma read starts this early, so each camera's decoder begins at a keyframe
 LUMA_DECODE_THREADS: int = 2  # libavcodec threads per camera for cpu_luma (every camera decodes in lockstep)
+DISTORTION: str = "pinhole:simplecv.components.DistortionCoefficients"
+"""A camera's distortion coefficients beside its pinhole (Brown-Conrady: OpenCV order, zero-padded to 14; dataforge's layout)."""
+DISTORTION_MODEL: str = "pinhole:simplecv.components.DistortionModel"
+"""Names the model of those coefficients; ``undistort`` takes ``brown_conrady`` only (a Kannala-Brandt vector would be misread)."""
 
 
 class SegmentFrames:
@@ -105,6 +111,16 @@ def sample_indices(
     return candidates[np.linspace(0, candidates.size - 1, min(sample, candidates.size)).round().astype(np.int64)]
 
 
+def undistortion_maps(
+    K: Float64[ndarray, "3 3"], coefficients: Float64[ndarray, " k"], width: int, height: int
+) -> tuple[Float64[ndarray, "3 3"], Float32[ndarray, "h w"], Float32[ndarray, "h w"]]:
+    """Intrinsics and ``cv2.remap`` tables that undistort a ``width x height`` OpenCV camera onto a pinhole of the same size:
+    alpha 0 (every output pixel sees the scene) and the principal point at the centre (as MASt3R-SLAM's dataloader)."""
+    K_new, _ = cv2.getOptimalNewCameraMatrix(K, coefficients, (width, height), 0.0, (width, height), centerPrincipalPoint=True)
+    map_x, map_y = cv2.initUndistortRectifyMap(K, coefficients, None, K_new, (width, height), cv2.CV_32FC1)
+    return K_new, map_x, map_y
+
+
 class CatalogVideoSource:
     """Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``.
 
@@ -112,6 +128,8 @@ class CatalogVideoSource:
     ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize;
     ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time.
     ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening.
+    ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and
+    the rig carries the undistorted pinhole.
     """
 
     def __init__(
@@ -126,8 +144,13 @@ class CatalogVideoSource:
         keep_native: bool = False,
         statics: Mapping[str, Column] | None = None,
         stride: int = 1,
+        undistort: bool = False,
     ) -> None:
         luma: bool = decode == "cpu_luma"
+        if undistort and decode != "cpu_rgb":
+            raise NotImplementedError("undistort remaps cpu_rgb frames only")
+        self.undistort: bool = undistort
+        self.maps: list[tuple[Float32[ndarray, "h w"], Float32[ndarray, "h w"]]] = []
         if luma != (group_tolerance_ns is not None) or (luma and (resize_hw is not None or isinstance(sample, int | tuple))) or (keep_native and resize_hw is None):
             raise NotImplementedError("cpu_luma groups every frame (group_tolerance_ns); rgb is index-aligned; keep_native needs resize_hw")
         self.segment, self.cameras, self.sample, self.stride, self.fenced = segment, cameras, sample, stride, decode == "nvdec_rgb"
@@ -147,7 +170,7 @@ class CatalogVideoSource:
                 if port != "rig":
                     yield Event(STATIC, port, value)
                 elif isinstance(value, RigCameras) and set(self.cameras) <= set(value.names):
-                    yield Event(STATIC, port, value.select(self.cameras))
+                    yield Event(STATIC, port, self._undistorted(value.select(self.cameras), table) if self.undistort else value.select(self.cameras))
         if self.group_tolerance_ns is not None:
             yield from self._luma_framesets(self.group_tolerance_ns)
             return
@@ -155,6 +178,10 @@ class CatalogVideoSource:
         shortest: int = min(t.size for t in times)  # index-aligned: every sampled index exists in every camera
         for index in sample_indices(times[0][:shortest], self.sample, self.segment.window_ns, self.stride).tolist():
             native: UInt8[Tensor, "v 3 hh ww"] = torch.stack([self.frames.frames_at(view, [index])[0] for view in range(len(self.cameras))])
+            if self.undistort:
+                if len(self.maps) != len(self.cameras) or native.shape[-2:] != self.maps[0][0].shape:
+                    raise ValueError(f"{self.segment.segment}: undistort needs a calibrated rig of the decoded frame size")
+                native = torch.stack([torch.from_numpy(cv2.remap(view.permute(1, 2, 0).numpy().copy(), *maps, cv2.INTER_LINEAR)).permute(2, 0, 1) for view, maps in zip(native, self.maps, strict=True)])
             rgb: UInt8[Tensor, "v 3 h w"] = native
             if self.resize_hw is not None:
                 rgb = torch.nn.functional.interpolate(native.float(), size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
@@ -164,6 +191,22 @@ class CatalogVideoSource:
             for port, pixels in ports.items():
                 frames = MultiViewFrames(int(times[0][index]), index, self.cameras, pixels, cam_t_ns)
                 yield Event(frames.t_ns, port, Fenced(frames, fence) if self.fenced else frames)
+
+    def _undistorted(self, rig: RigCameras, table: pa.Table) -> RigCameras:
+        """The rig with every camera's undistorted pinhole; keeps the remap tables for the frames (one set per read)."""
+        intrinsics: Float64[ndarray, "v 3 3"] = rig.intrinsics.copy()
+        self.maps = []
+        for i, camera in enumerate(self.cameras):
+            column, model = f"/world/{camera}/{DISTORTION}", f"/world/{camera}/{DISTORTION_MODEL}"
+            if column not in table.column_names or table.column(column)[0].as_py() is None:
+                raise ValueError(f"{self.segment.segment} {camera}: undistort needs the camera's {DISTORTION}")
+            if model not in table.column_names or table.column(model)[0].as_py() != ["brown_conrady"]:
+                raise ValueError(f"{self.segment.segment} {camera}: undistort takes brown_conrady coefficients, not {table.column(model)[0].as_py() if model in table.column_names else None}")
+            coefficients: Float64[ndarray, " k"] = np.asarray(table.column(column)[0].as_py(), dtype=np.float64).reshape(-1)
+            width, height = (int(v) for v in rig.resolution_wh[i])
+            intrinsics[i], *maps = undistortion_maps(rig.intrinsics[i], coefficients, width, height)
+            self.maps.append((maps[0], maps[1]))
+        return RigCameras(rig.names, intrinsics, rig.cam_T_world, rig.resolution_wh)
 
     def _luma_framesets(self, tolerance_ns: int) -> Iterator[Event]:
         lo, hi = self.segment.window_ns or (None, None)

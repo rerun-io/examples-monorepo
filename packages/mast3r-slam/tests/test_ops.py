@@ -84,3 +84,11 @@ def test_ate_is_invariant_to_a_sim3_of_the_estimate(scale: float, rotvec: np.nda
     base, moved_ate = _ate(est_t, est_xyz, gt_t, gt_xyz), _ate(est_t, moved, gt_t, gt_xyz)
     assert base[2] == moved_ate[2] == est_t.size
     np.testing.assert_allclose(moved_ate[0], base[0], rtol=1e-6)
+
+
+def test_ate_associates_only_within_the_gap_it_is_given() -> None:
+    gt_t = np.arange(0, 64_000_000, 16_000_000, dtype=np.int64)  # GT 16 ms apart: every estimate below is 8 ms from both neighbours
+    gt_xyz = np.random.default_rng(1).normal(size=(gt_t.size, 3))
+    est_t = gt_t[:-1] + 8_000_000
+    assert _ate(est_t, gt_xyz[:-1], gt_t, gt_xyz, 5_000_000)[2] == 0
+    assert _ate(est_t, gt_xyz[:-1], gt_t, gt_xyz, 10_000_000)[2] == est_t.size
