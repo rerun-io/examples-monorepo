@@ -15,7 +15,7 @@ Each sequence becomes, under one recording id (README#the-layer-rule):
 * **sensor_metadata**: the IMU noise model as simplecv's ``ImuCalibration``, where calibration.yaml has one.
 
 The derived layers read only their sidecars (groundtruth.csv and calibration.yaml, copied verbatim), so they
-rebuild without the frames (and without the raw tree once the sidecars exist). Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
+rebuild without the frames. Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
 ``video_time``: a gt row lands on the frame it was measured at, and a trajectory read back from the catalog
 compares 1:1 with the upstream file.
 """
@@ -23,7 +23,7 @@ compares 1:1 with the upstream file.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
@@ -181,12 +181,6 @@ def rig_reference(calibration: Calibration) -> str | None:
     return None
 
 
-def png_bytes(directory: Path, frames: FrameIndex) -> Iterator[bytes]:
-    """The frame files of one stream, in order, as the encoder's PNG input."""
-    for path in frames.paths:
-        yield (directory / path).read_bytes()
-
-
 def log_depth(recording: rr.RecordingStream, directory: Path, frames: FrameIndex, camera: int, *, meter: float) -> None:
     """Log one depth stream as ``rr.DepthImage`` on its camera's pinhole, frame by frame.
 
@@ -276,7 +270,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
                 frames: FrameIndex = streams[camera.cam_name]
                 clip: Path = work / f"cam_{index:02d}.mp4"
                 with self.timer.stage("encode"):
-                    encode_frames_to_mp4(png_bytes(source, frames), clip, source=FrameSource("png"), fps=nominal_fps(frames.times_ns))
+                    encode_frames_to_mp4(((source / path).read_bytes() for path in frames.paths), clip, source=FrameSource("png"), fps=nominal_fps(frames.times_ns))
                 log_camera_node(
                     recording,
                     RIG,
