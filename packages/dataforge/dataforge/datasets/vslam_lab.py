@@ -315,6 +315,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             num_frames=max(frames.times_ns.size for frames in streams.values()),
             start_time_ns=first_ns,
             duration_s=self.timer.capture_s,
+            clock_source="the benchmark's own rgb.csv / imu_0.csv / groundtruth.csv nanosecond stamps, unshifted; frame_index: row of rgb.csv",
             benchmark=self.benchmark.directory,
             sequence=source.name,
             has_depth=bool(self.benchmark.depth_cameras),
