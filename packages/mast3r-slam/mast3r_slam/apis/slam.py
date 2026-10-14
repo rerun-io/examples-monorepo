@@ -43,23 +43,23 @@ LAYER: str = "mast3r_slam"
 class Config:
     rr_config: RerunTyroConfig
     segment: SegmentRef | None = field(default_factory=lambda: SegmentRef("msd-odyssey", "msd-odyssey__MOO_others__MOO01_hand_puncher_1", window_ns=(0, 30_000_000_000)))
-    """Catalog input when no video, images or webcam is given: the camera ``camera`` of this segment (``window_ns`` clips it)."""
+    """Catalog input when no video, images or webcam is given: the camera named by camera in this segment (window_ns clips it)."""
     camera: str = "rig_00/cam_00"
-    """Catalog camera entity under ``/world``."""
+    """Catalog camera entity under /world."""
     undistort: bool = False
     """Catalog input: undistort the camera with its stored Brown-Conrady coefficients first (the MASt3R-SLAM paper does
     on EuRoC always and on TUM when calibrated)."""
     video: Path | None = None
-    """Video file input (beats every other input); ``pixi run mast3r-slam-example-*`` downloads examples to ``data/``."""
+    """Video file input (beats every other input); pixi run mast3r-slam-example-* downloads examples to data/."""
     images: Path | None = None
     """Image directory input (natural sort order, 30 fps; used when there is no video)."""
     webcam: int | None = None
-    """Live OpenCV camera index, used when no video or image directory is given (run with ``--mode realtime``)."""
+    """Live OpenCV camera index, used when no video or image directory is given (run with --mode realtime)."""
     max_frames: int | None = None
-    """File inputs: stop after this many frames, counted after ``subsample`` (0: all)."""
+    """File inputs: stop after this many frames, counted after subsample (0: all)."""
     hardware: HardwareClass | Literal["auto"] = "auto"
     preset: Literal["base", "eval", "fast", "calib"] | None = None
-    """Profile operating point: ``fast`` (224 px, every 5th frame), ``eval`` (every 2nd frame), ``calib`` (calibrated)."""
+    """Profile operating point: fast (224 px, every 5th frame), eval (every 2nd frame), calib (calibrated)."""
     img_size: Literal[224, 512] | None = None
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
@@ -67,11 +67,11 @@ class Config:
     output_nerfstudio: Path | None = None
     """Export the final keyframes in Nerfstudio format into this directory."""
     layer_dir: Path | None = None
-    """Catalog input: also write the segment's ``mast3r_slam`` layer here (windowed runs publish it unregistered)."""
+    """Catalog input: also write the segment's mast3r_slam layer here (windowed runs publish it unregistered)."""
     register: Register = "new"
-    """How the layer reaches the segment's catalog (``new`` refuses to overwrite)."""
+    """How the layer reaches the segment's catalog (new refuses to overwrite)."""
     runner: Literal["sequential", "threaded"] = "threaded"
-    """``threaded`` only: the lossless frontend waits for the backend inside its own calls, where ``sequential`` cannot step it."""
+    """Threaded only: the lossless frontend waits for the backend inside its own calls, where sequential cannot step it."""
     mode: Mode = "lossless"
 
 
