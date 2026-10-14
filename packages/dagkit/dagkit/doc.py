@@ -38,7 +38,7 @@ ROLE: dict[str, tuple[str, Rgb]] = {
     "source": ("source", (90, 170, 255)), "node": ("once per item", (255, 180, 70)), "segment": ("once per segment", (200, 130, 255)),
     "sink": ("output", (110, 220, 130)),
 }  # fmt: skip
-KIND_RGB: dict[str, Rgb] = {"waits": (235, 235, 235), "latest": (90, 210, 235), "drops old": (255, 150, 80), "": (170, 170, 170)}
+KIND_RGB: dict[str, Rgb] = {"waits": (125, 135, 150), "latest": (40, 170, 200), "drops old": (240, 120, 40), "": (135, 135, 135)}  # dark and light themes
 
 
 @serde(deny_unknown_fields=True)

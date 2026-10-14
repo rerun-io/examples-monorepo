@@ -194,7 +194,8 @@ def _leaves(cls: type, template: object, prefix: tuple[str, ...] = ()) -> list[L
 
 def _widgets(leaf: Leaf) -> list[Any]:
     """Path -> File (a directory, by name or docstring, -> Textbox), output* -> save checkbox (optional) or Textbox, bool ->
-    Checkbox, int/float -> Number, Literals -> Dropdown, str -> Textbox, SegmentRef -> dataset + segment; others: none."""
+    Checkbox, int/float -> Number (optional: Textbox), Literals -> Dropdown, str -> Textbox, SegmentRef -> dataset +
+    segment; others: none."""
     import gradio as gr
 
     path, hint, default, doc = leaf
@@ -210,6 +211,8 @@ def _widgets(leaf: Leaf) -> list[Any]:
     if base is Path:
         directory: bool = path[-1].endswith("dir") or "directory" in doc
         return [gr.Textbox(str(value or ""), label=label, info=doc) if directory else gr.File(value=str(value) if value else None, label=label, type="filepath")]
+    if base in (int, float) and optional:  # gr.Number shows and sends 0 for None: a text box keeps "empty" empty
+        return [gr.Textbox("" if value is None else str(value), label=label, info=doc, placeholder="empty: the default")]
     makers: dict[object, Callable[..., Any]] = {bool: gr.Checkbox, int: lambda **kw: gr.Number(precision=0, **kw), float: gr.Number, str: gr.Textbox}
     return [makers[base](value=value, label=label, info=doc)] if base in makers else []
 
@@ -223,9 +226,9 @@ def _value(leaf: Leaf, got: list[Any], scratch: Path) -> object:
         return dataclasses.replace(template, dataset=str(got[0]), segment=str(got[1])) if any(got) else None
     if path[-1].startswith("output") and type(None) in get_args(hint):
         return scratch / path[-1].replace("output_", "output.", 1) if got[0] else dataclasses.MISSING
-    if got[0] is None or (got[0] == "" and (type(None) in get_args(hint) or base is Path)):
+    if got[0] is None or (got[0] == "" and (type(None) in get_args(hint) or base in (Path, int, float))):
         return dataclasses.MISSING
-    return Path(str(got[0])) if base is Path else got[0]
+    return base(got[0]) if base in (Path, int, float) else got[0]  # the browser sends 20 for 20.0 and text from a text box
 
 
 def _assemble(cls: type, given: dict[tuple[str, ...], object], template: object, prefix: tuple[str, ...] = ()) -> Any:
