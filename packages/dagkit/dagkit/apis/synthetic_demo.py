@@ -21,6 +21,8 @@ from dagkit.types import Log, row_times
 
 @dataclass(frozen=True, slots=True)
 class Sample:
+    """One point of the helix and its signal value."""
+
     xyz: tuple[float, float, float]
     value: float
 
@@ -39,6 +41,11 @@ class Sample:
 
 
 class Smooth:
+    """Smooth the signal with a gain.
+
+    Moves its state a ``gain`` fraction towards each raw sample; ``delay_s`` simulates a slow step.
+    """
+
     inputs, outputs = {"raw": Sample, "gain": float}, {"smooth": Sample}
 
     def __init__(self, delay_s: float) -> None:
@@ -97,7 +104,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
             wobble: float = 0.15 * math.sin(37.0 * t_s)
             yield Event(int(t_s * 1e9), "raw", Sample((math.cos(t_s) + wobble, math.sin(t_s), 0.1 * t_s), math.sin(2.0 * t_s) + wobble))
 
-    graph = Graph("synthetic")
+    graph = Graph("synthetic", about="dagkit's synthetic demo: a paced helix, a smoother that keeps only the newest sample (it drops when slow), drawn live.")
     src = graph.source("helix", IterSource({"raw": Sample, "gain": float}, events))
     smooth = graph.node("smooth", Smooth(config.smooth_ms / 1e3))
     sink = graph.sink("rerun", RerunSink(recording, {"raw": Sample, "smooth": Sample}, {"raw": "/world/raw", "smooth": "/world/smooth"}))

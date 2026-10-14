@@ -91,8 +91,9 @@ def normalise(port_type: PortType) -> tuple[bool, tuple[type, ...]]:
 
 
 class Graph:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, about: str = "") -> None:
         self.name: str = name
+        self.about: str = about  # one or two sentences: what the graph turns into what (the guide's opening, `dagkit.doc`)
         self.resources: dict[str, Callable[[], object]] = {}
         self.nodes: dict[str, NodeSpec] = {}
         self.edges: list[EdgeSpec] = []

@@ -15,9 +15,11 @@ import numpy as np
 import rerun as rr
 from serde import serde
 
-from dagkit.graph import AsOf, DropOldest, EdgeSpec, Graph, NodeSpec, Spawn, normalise
+from dagkit.doc import GRAPH_ROOT, Rgb, log_graph
+from dagkit.graph import AsOf, Block, DropOldest, EdgeSpec, Graph, NodeSpec, Spawn, normalise
 from dagkit.node import Control, Event, Fenced, Mode, RunContext, Tick
 from dagkit.process import ProcessNode
+from dagkit.sinks import RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.time import STATIC, TIME_MAX, GraphError, TimeNs, check_monotonic
 
@@ -89,6 +91,7 @@ class _State:
     step_ms: list[float] = field(default_factory=list)
     logged: int = 0
     pending_max: int = 0
+    drops_seen: int = 0  # drops at the last health log
 
     def put(self, port: str, t_ns: TimeNs, value: object) -> None:
         run: _Run = self.run
@@ -406,11 +409,26 @@ class _Run:
             for edge in s.triggers:
                 self.health.log(f"{root}/queue_depth/{edge.spec.dst.port}", rr.Scalars(float(len(edge.queue))))
                 self.health.log(f"{root}/drops/{edge.spec.dst.port}", rr.Scalars(float(edge.drops)))
+        if self.picture is not None:  # recolour the graph view's step boxes
+            ids, colors = self.picture
+            colors = [self._light(self.states[i]) if i in self.states and self.states[i].spec.kind != "source" else c for i, c in zip(ids, colors, strict=True)]
+            self.health.log(GRAPH_ROOT + self.graph.name, rr.GraphNodes.from_fields(colors=colors))
+
+    def _light(self, s: _State) -> Rgb:
+        """grey: no input yet; red: drops since the last health log; yellow: a Block queue at least half full; else green."""
+        drops: int = sum(e.drops for e in s.triggers)
+        dropped, s.drops_seen = drops > s.drops_seen, drops
+        if not (s.ticks or any(s.collected.values())):
+            return (130, 130, 130)
+        if dropped:
+            return (255, 80, 80)
+        return (240, 210, 60) if any(isinstance(e.spec.kind, Block) and 2 * len(e.queue) >= e.spec.kind.capacity for e in s.triggers) else (110, 220, 130)
 
     def execute(self, health: rr.RecordingStream | None, every_s: float) -> RunReport:
         self.started_at: float = time.perf_counter()
         self.health: rr.RecordingStream | None = health
         self.health_every_s: float = every_s
+        self.picture: tuple[list[str], list[Rgb]] | None = log_graph(health, self.graph, health=True) if health is not None else None
         try:
             for name, factory in self.graph.resources.items():
                 self.resources[name] = factory()
@@ -435,6 +453,8 @@ class _Run:
                 self._release()
             raise first from None
         self._close_resources()
+        if health is not None:  # the guide's "See it" links: what each viewer sink drew
+            log_graph(health, self.graph, drawn={s.spec.name: s.obj.drawn for s in self.nodes if isinstance(s.obj, RerunSink) and s.obj.recording is health}, health=True)
         self._health(force=True)
         wall_s: float = time.perf_counter() - self.started_at
         nodes: dict[str, NodeStats] = {}
