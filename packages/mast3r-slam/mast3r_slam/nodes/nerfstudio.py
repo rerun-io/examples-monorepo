@@ -125,7 +125,9 @@ def save_kf_to_nerfstudio(ns_save_path: Path, keyframes: SharedKeyframes) -> Non
 
 
 class NerfstudioSink:
-    """Exports the final map at flush (after the backend's final ``keyframes``); reads the images and point maps from the
+    """Export the keyframes for Nerfstudio.
+
+    Exports the final map at flush (after the backend's final ``keyframes``); reads the images and point maps from the
     ``shared`` resource, so the graph adds it with ``needs=("shared",)``."""
 
     inputs: Mapping[str, PortType] = {"keyframes": TrackedFrame}

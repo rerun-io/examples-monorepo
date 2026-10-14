@@ -13,7 +13,9 @@ from simplecv.types.frames import MultiViewFrames
 
 
 class Webcam:
-    """OpenCV camera ``device`` as one-view ``MultiViewFrames`` on a monotonic clock that starts at the first frame."""
+    """Read frames from a live camera.
+
+    OpenCV camera ``device`` as one-view ``MultiViewFrames`` on a monotonic clock that starts at the first frame."""
 
     clock: str = "video_time"
     outputs: Mapping[str, PortType] = {"frames": MultiViewFrames}

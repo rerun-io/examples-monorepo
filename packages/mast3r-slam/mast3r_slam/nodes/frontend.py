@@ -34,7 +34,9 @@ def create_frame(frame_id: int, rgb: RgbNormalized, world_sim3_cam: lietorch.Sim
 
 
 class Frontend:
-    """Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyframe 0), TRACKING (pose solve
+    """Track each frame against the keyframes.
+
+    Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyframe 0), TRACKING (pose solve
     against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it).
 
     Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend
@@ -46,9 +48,9 @@ class Frontend:
     outputs: Mapping[str, PortType] = {"tracked": TrackedFrame, "task": BackendTask}
     emits_late: bool = True
 
-    def __init__(self, cfg: SlamConfig, device: str = "cuda:0") -> None:
-        self.cfg, self.device = cfg, device
-        self.inputs: dict[str, PortType] = {"frames": MultiViewFrames} | ({"rig": RigCameras} if cfg.use_calib else {})
+    def __init__(self, params: SlamConfig, device: str = "cuda:0") -> None:
+        self.params, self.device = params, device
+        self.inputs: dict[str, PortType] = {"frames": MultiViewFrames} | ({"rig": RigCameras} if params.use_calib else {})
         self.held: tuple[int, int] | None = None
         """(time, frame index) of the frame whose tracked verdict waits for the backend."""
         self.aborted: bool = False
@@ -60,14 +62,14 @@ class Frontend:
         self.shared: SharedSlam = ctx.resources["shared"]  # type: ignore[assignment]
         self.shared.reset()
         self.lossless, self.world, self.held, self.aborted = ctx.mode == "lossless", ctx.world, None, False
-        self.tracker: FrameTracker = FrameTracker(self.model, self.shared.keyframes, self.cfg.tracking, self.cfg.matching, self.cfg.use_calib)
+        self.tracker: FrameTracker = FrameTracker(self.model, self.shared.keyframes, self.params.tracking, self.params.matching, self.params.use_calib)
         torch.backends.cuda.matmul.allow_tf32 = True  # as the old CLI set it for tracking (main process); the backend keeps the default
-        if self.cfg.use_calib:
+        if self.params.use_calib:
             rig: RigCameras | None = ctx.statics.get("rig")  # type: ignore[assignment]
             if rig is None:
                 raise ValueError("use_calib needs the source's rig intrinsics (a catalog segment with a calibrated camera)")
             width, height = (int(v) for v in rig.resolution_wh[0])
-            K: Float32[ndarray, "3 3"] = frame_intrinsics(rig.intrinsics[0], height, width, self.cfg.img_size)
+            K: Float32[ndarray, "3 3"] = frame_intrinsics(rig.intrinsics[0], height, width, self.params.img_size)
             self.shared.keyframes.set_intrinsics(torch.from_numpy(K).to(self.device))
 
     def _settle(self, out: Emit) -> None:
@@ -102,7 +104,7 @@ class Frontend:
             return
         rgb: RgbNormalized = frames.rgb[0].permute(1, 2, 0).cpu().numpy().astype(np.float32) / 255.0
         pose: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=self.device) if mode == Mode.INIT else states.get_frame().world_sim3_cam
-        frame: Frame = create_frame(frames.frame_index, rgb, pose, self.cfg.img_size, self.device)
+        frame: Frame = create_frame(frames.frame_index, rgb, pose, self.params.img_size, self.device)
         if mode == Mode.TRACKING:
             new_kf, try_reloc = self.tracker.track(frame)
             if try_reloc:
@@ -112,7 +114,7 @@ class Frontend:
                 self._queue_keyframe(frame, tick.t_ns, out)
         elif mode in (Mode.INIT, Mode.RELOC):  # a mono point map; INIT bootstraps the map, RELOC asks the backend
             X, C = mast3r_inference_mono(self.model, frame)
-            frame.update_pointmap(X, C, self.cfg.tracking)
+            frame.update_pointmap(X, C, self.params.tracking)
             if mode == Mode.INIT:
                 self._queue_keyframe(frame, tick.t_ns, out)
                 states.set_mode(Mode.TRACKING)
