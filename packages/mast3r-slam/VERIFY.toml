@@ -11,13 +11,13 @@ score = "mast3r_slam.verify:score"
 # TRACKING / input frames (the catalog gives the denominator). Every phase runs lossless (the frontend waits for the
 # backend after each keyframe / relocalisation: the old single_thread), uncalibrated, every 2nd frame of cam_00.
 # Shots (own viewer, verify-block 5): 3D view "/" = Sim3-aligned estimate (final keyframes + tracked frustum) over the GT
-# cam_00 trail and frustum; cam_00 = the input video. 150.0 s applies to the full case only (after the short window).
+# cam_00 trail and frustum; cam_00 = the input video. 119.5 s applies to the full case only (after the short window).
 shots = [
     { view = "/", t_s = 15.0 },
     { view = "/", t_s = 29.5 },
     { view = "/world/rig_00/cam_00/pinhole", t_s = 15.0 },
     { view = "/world/rig_00/cam_00/pinhole", t_s = 29.5 },
-    { view = "/", t_s = 150.0 },
+    { view = "/", t_s = 119.5 },
 ]
 metrics = [
     { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.01845 },
@@ -38,12 +38,17 @@ params = { calib = "false", subsample = "2", img_size = "512" }
 noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
 
 [[graph.cases]]
-# rule: the same segment, whole (156.7 s, 4,706 cam_00 frames -> 2,353 input frames), at 224 px (the old fast operating
-# point): at 512 px the old backend runs out of GPU memory in the global GN solve (all keyframes, 32 GB GPU, ~18 min in)
-# and the frontend then waits forever for it (the single_thread wait never checks the backend).
+# rule: the same segment, its first 120 s at 512 px (1,800 input frames). The whole segment does not run pre-port: at
+# 512 px the backend runs out of GPU memory in the global GN solve at ~140 s (~440 keyframes, ~1,460 edges; the frontend
+# then waits forever for it), at 224 px the 512-keyframe buffer overflows. 120 s is the longest round window that runs
+# with margin. Pre-port runs need one fix outside the SLAM math: the Mojo gauss_newton_rays loop never frees its CPU
+# dense normal equations (host memory grows ~ keyframes^3, 30 GB at 187 keyframes), so pre and pre2 ran with an
+# op-for-op Python copy of that loop (same torch calls and Mojo kernels; short-case poses bit-identical with and without
+# it; Producer version suffix "+gn-leak-fix"). The port must keep host memory bounded.
 name = "full"
 clip = "full"
 reference = "gt"
 dataset = "msd-odyssey"
 segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
-params = { calib = "false", subsample = "2", img_size = "224" }
+window_s = [0.0, 120.0]
+params = { calib = "false", subsample = "2", img_size = "512" }
