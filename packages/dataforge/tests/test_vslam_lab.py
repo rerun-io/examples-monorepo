@@ -178,6 +178,7 @@ def test_a_tum_sequence_converts_video_depth_and_gt_on_upstream_stamps(tmp_path:
     assert depth.column(1).to_pylist()[0] == [5000.0]
     capture: dict[str, object] = recording_properties(store, "capture")
     assert (capture["num_cameras"], capture["num_frames"], capture["start_time_ns"], capture["benchmark"]) == (1, 3, TUM_STAMPS[0], "RGBDTUM")
+    assert "unshifted" in str(capture["clock_source"])
     assert (paths.sidecar_path(tmp_path / "out", identity, "groundtruth.csv")).read_bytes() == (source / "groundtruth.csv").read_bytes()
     assert paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity).is_file()
 
