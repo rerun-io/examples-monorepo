@@ -129,6 +129,9 @@ def write_sequence(directory: Path, *, glasses: bool = True, pose_dir: str = "po
         images.mkdir(parents=True)
         for frame in FRAMES:
             (images / f"{frame:05d}.jpg").write_bytes(gradient_jpeg(*EXO_SIZE, 40 * frame))
+        if name == "cam01":  # leftovers some release image directories hold (train/12_mma/003_mma)
+            (images / "modified_image.jpg").write_bytes(gradient_jpeg(*EXO_SIZE, 0))
+            (images / "draw_bbox.py").write_text("print('authoring script')\n")
     workplace: Path = directory / "colmap" / "workplace"
     workplace.mkdir(parents=True)
     width, height = EXO_SIZE

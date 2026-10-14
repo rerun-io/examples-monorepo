@@ -513,8 +513,14 @@ def read_glasses(
 
 
 def read_frames(files: SequenceFiles, exo: list[ExoCamera]) -> Int64[ndarray, "t"]:
-    """The release frames: the first exo camera's JPEG numbers, which every other exo camera must match."""
-    numbered: list[list[int]] = [[frame_number(name) for name in files.files(f"exo/{camera.name}/images") if name.endswith(".jpg")] for camera in exo]
+    """The release frames: the first exo camera's numbered JPEGs, which every other exo camera must match.
+
+    Only ``NNNNN.jpg`` are frames: some image directories also hold the authors' leftovers (``modified_image.jpg``,
+    ``draw_bbox.py``, masks, preview ``rgb.mp4``; train/12_mma/003_mma).
+    """
+    numbered: list[list[int]] = [
+        [frame_number(name) for name in files.files(f"exo/{camera.name}/images") if name.endswith(".jpg") and name[: -len(".jpg")].isdigit()] for camera in exo
+    ]
     if not numbered or not numbered[0]:
         raise ValueError("no exo camera with JPEG frames")
     for camera, numbers in zip(exo, numbered, strict=True):
