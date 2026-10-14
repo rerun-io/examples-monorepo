@@ -9,7 +9,7 @@ import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 
-from dagkit.app import run_app
+from dagkit.app import run_app, with_pipeline
 from dagkit.graph import AsOf, Block, DropOldest, Graph
 from dagkit.node import Emit, Event, Mode, RunContext, Tick
 from dagkit.runners import RunReport
@@ -120,5 +120,6 @@ def main(config: Config) -> RunReport:
     health: rrb.TimeSeriesView = rrb.TimeSeriesView(origin="/dagkit/health", name="runner health (wall_time)")
     trail = rrb.VisibleTimeRange("video_time", start=rrb.TimeRangeBoundary.cursor_relative(seconds=-4.0), end=rrb.TimeRangeBoundary.cursor_relative())
     helix = rrb.Spatial3DView(origin="/world", name="helix (last 4 s)", time_ranges=trail, eye_controls=rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital))
-    config.rr_config.rec_stream.send_blueprint(rrb.Blueprint(rrb.Horizontal(helix, rrb.Vertical(signal, health))))
+    outputs = [rrb.Spatial3DView(origin="/world", name="2 smooth · helix", time_ranges=trail), rrb.TimeSeriesView(origin="/dagkit/health", name="run health")]
+    config.rr_config.rec_stream.send_blueprint(with_pipeline(rrb.Blueprint(rrb.Horizontal(helix, rrb.Vertical(signal, health))), outputs))
     return run_app(config, build)
