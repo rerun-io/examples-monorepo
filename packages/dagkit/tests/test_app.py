@@ -256,3 +256,6 @@ def test_with_pipeline_keeps_the_normal_view_first_and_active() -> None:
     assert both.time_panel is normal.time_panel and both.collapse_panels
     views: list[str] = [type(v).__name__ for v in tabs.contents[1].contents[0].contents] + [type(tabs.contents[1].contents[1]).__name__]
     assert views == ["GraphView", "Horizontal", "TextDocumentView"]
+    two: Any = with_pipeline(normal, graphs=["exocalib-init", "exocalib-refine"]).root_container.contents[1]  # a multi-graph app
+    assert [(type(v).__name__, str(v.origin)) for v in two.contents[0].contents] == [("GraphView", "/dagkit/graph/exocalib-init"), ("GraphView", "/dagkit/graph/exocalib-refine")]
+    assert [v.name for v in two.contents[1].contents] == ["guide exocalib-init: what each step does", "guide exocalib-refine: what each step does"]

@@ -133,13 +133,18 @@ def run_app(config: C, build: Callable[[C, rr.RecordingStream], Graph | Iterator
     return reports[-1]
 
 
-def with_pipeline(blueprint: rrb.Blueprint, outputs: Sequence[rrb.View] = ()) -> rrb.Blueprint:
+def with_pipeline(blueprint: rrb.Blueprint, outputs: Sequence[rrb.View] = (), graphs: Sequence[str] = ()) -> rrb.Blueprint:
     """``blueprint`` (the app's normal view, first and active) plus a "pipeline (debug)" tab: the graph picture over
     ``outputs`` (2-4 NEW views of the app's outputs: a view object sits in one place only) beside the guide, whose links
-    select and outline what those views show. Panels and flags of ``blueprint`` are kept."""
-    picture = rrb.GraphView(origin=GRAPH_ROOT, name="pipeline graph")
+    select and outline what those views show. An app that runs several graphs names them in ``graphs``: one picture and
+    one guide each (a GraphView would draw them over each other; a TextDocumentView shows one document). Panels and flags
+    of ``blueprint`` are kept."""
+    names: list[str] = [f"/{g}" for g in graphs] or [""]
+    pictures: list[rrb.View] = [rrb.GraphView(origin=GRAPH_ROOT.rstrip("/") + n, name=f"graph{n.replace('/', ' ')}") for n in names]
+    guides: list[rrb.View] = [rrb.TextDocumentView(origin=GUIDE_ROOT.rstrip("/") + n, name=f"guide{n.replace('/', ' ')}: what each step does") for n in names]
+    picture: rrb.Container | rrb.View = rrb.Tabs(*pictures) if len(pictures) > 1 else pictures[0]
     left: rrb.Container | rrb.View = rrb.Vertical(picture, rrb.Horizontal(*outputs), row_shares=[3, 2]) if outputs else picture
-    tab = rrb.Horizontal(left, rrb.TextDocumentView(origin=GUIDE_ROOT, name="guide: what each step does"), column_shares=[3, 2], name="pipeline (debug)")
+    tab = rrb.Horizontal(left, rrb.Tabs(*guides) if len(guides) > 1 else guides[0], column_shares=[3, 2], name="pipeline (debug)")
     normal: rrb.Container = blueprint.root_container
     normal.name = normal.name or "main"
     panels: list[Any] = [getattr(blueprint, p) for p in ("top_panel", "blueprint_panel", "selection_panel", "time_panel") if hasattr(blueprint, p)]
