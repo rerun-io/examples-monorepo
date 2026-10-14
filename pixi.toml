@@ -280,6 +280,21 @@ cmd = "python tools/demos/synthetic_graph.py"
 cwd = "packages/dagkit"
 description = "Run a synthetic graph on the threaded runner into Rerun, with the health view"
 
+# The generated gradio app (dagkit.app.gradio_app) for package envs that do not compose `common`
+# (exo-calib and robocap-live run on the catalog lane). Explicit platforms: see AGENTS.md "Platforms & lockfile".
+[feature.dagkit-app]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.dagkit-app.dependencies]
+# conda-forge anyio 4.15 imports typing_extensions.sentinel (>= 4.16) but accepts the < 4.16 that catalog-common pins;
+# gradio's server (starlette, httpx) imports it at startup.
+anyio = "<4.15"
+
+[feature.dagkit-app.pypi-dependencies]
+# pin-bump: hold — restates `common`'s exact pins; gradio-rerun's exact rerun-sdk pin must match.
+gradio = "==6.13.0"                                        # pin-bump: hold
+gradio-rerun = "==0.38.1"                                  # pin-bump: hold
+
 # ═══════════════════════════════════════════════════════════════════════════
 # simplecv
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3427,12 +3442,14 @@ exo-calib = { features = [
     "rerun-prerelease",
     "cuda",
     "exo-calib",
+    "dagkit-app",
 ], solve-group = "exo-calib", no-default-feature = true }
 exo-calib-dev = { features = [
     "catalog-common",
     "rerun-prerelease",
     "cuda",
     "exo-calib",
+    "dagkit-app",
     "dev",
 ], solve-group = "exo-calib", no-default-feature = true }
 monoprior = { features = [
@@ -3777,12 +3794,14 @@ robocap-live = { features = [
     "rerun-prerelease",
     "cuda",
     "robocap-live",
+    "dagkit-app",
 ], solve-group = "robocap-live", no-default-feature = true }
 robocap-live-dev = { features = [
     "catalog-common",
     "rerun-prerelease",
     "cuda",
     "robocap-live",
+    "dagkit-app",
     "dev",
 ], solve-group = "robocap-live", no-default-feature = true }
 handfit = { features = ["handfit"], solve-group = "handfit", no-default-feature = true }

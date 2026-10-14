@@ -336,7 +336,8 @@ not build on `osx-arm64`): `[feature.mv-api-catalog-register-mac]` and
 `[feature.slam-rs-osx]`. Both are tagged `# pin-bump: hold`; a bump has to touch
 all four sites or the Mac silently runs a release behind, and no linux gate and
 no `pixi lock --check` can see it. The torch-free lanes `[feature.agent-traces]` and
-`[feature.dagkit]` (which also restates the `gradio` / `gradio-rerun` pins) carry the same tag.
+`[feature.dagkit]` (which also restates the `gradio` / `gradio-rerun` pins) carry the same tag, and so does
+`[feature.dagkit-app]`, which restates the `gradio` / `gradio-rerun` pins for the catalog-lane apps (exo-calib, robocap-live).
 
 To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
