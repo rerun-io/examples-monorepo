@@ -309,7 +309,12 @@ class LoopbackArchive(NamedTuple):
 
 @contextmanager
 def serve(
-    bodies: dict[str, bytes], *, body_limit: int | None = None, honor_ranges: bool = True, stall_once: str | None = None
+    bodies: dict[str, bytes],
+    *,
+    body_limit: int | None = None,
+    honor_ranges: bool = True,
+    stall_once: str | None = None,
+    content_types: dict[str, str] | None = None,
 ) -> Iterator[LoopbackArchive]:
     """Serve ``bodies`` on a loopback port for the duration of the block.
 
@@ -323,6 +328,8 @@ def serve(
         stall_once: Truncate the **first** GET of a path with this suffix to half
             its length, the way the real archive hangs up mid-transfer. The next
             GET (a ``Range`` resume) is answered in full.
+        content_types: URL path → the ``Content-Type`` its GET carries (Google Drive
+            tells its quota page from a file only by this header); none by default.
 
     Yields:
         The server's base URL and its request log.
@@ -366,6 +373,8 @@ def serve(
             if body_limit is not None:
                 body = body[:body_limit]
             self.send_response(206 if start else 200)
+            if content_types is not None and self.path in content_types:
+                self.send_header("Content-Type", content_types[self.path])
             if start:
                 self.send_header("Content-Range", f"bytes {start}-{len(whole) - 1}/{len(whole)}")
             self.send_header("Content-Length", str(len(body)))
