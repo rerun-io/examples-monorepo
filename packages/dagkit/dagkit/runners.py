@@ -432,6 +432,7 @@ class _Run:
                 note(f"threads {stuck} did not stop; resources leaked")
             else:
                 self._close_resources(note)
+                self._release()
             raise first from None
         self._close_resources()
         self._health(force=True)
@@ -441,7 +442,14 @@ class _Run:
             ms: list[float] = sorted(s.step_ms) or [0.0]
             ports: dict[str, PortStats] = {e.spec.dst.port: PortStats(e.depth_max, e.drops, s.pending_max) for e in s.triggers}
             nodes[name] = NodeStats(s.ticks, float(np.mean(ms)), ms[int(0.95 * (len(ms) - 1))], ports)
+        self._release()
         return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, max(self.last - self.first, 0) / 1e9, nodes)
+
+    def _release(self) -> None:
+        """Break the run's reference cycles (states and control.wake point back at the run), so its resources and the
+        nodes' references to them free when the run returns instead of at the next cyclic collection."""
+        self.control.wake = lambda: None
+        self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
 
     def _close_resources(self, note: Callable[[str], object] | None = None) -> None:
         owned: list[object] = [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
