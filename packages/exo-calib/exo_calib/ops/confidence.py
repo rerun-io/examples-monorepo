@@ -3,7 +3,7 @@
 import warnings
 
 import numpy as np
-from jaxtyping import Bool, Float64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
 
@@ -47,26 +47,28 @@ def threshold_rescale_confidence(conf: Float64[ndarray, "n"], *, tau: float) -> 
     return rescaled_conf
 
 
-def median_filter_keypoints(kp_xy: Float64[ndarray, "t n 2"], *, window: int) -> Float64[ndarray, "t n 2"]:
-    """Apply a centered temporal median to keypoint coordinates.
+def median_filter_keypoints(
+    kp_xy: Float64[ndarray, "t n 2"], frame_index: Int64[ndarray, " t"], *, window: int
+) -> Float64[ndarray, "t n 2"]:
+    """Apply a centered temporal median over a window of VIDEO frames (AssemblyHands-X), not of records.
+
+    Record ``t`` takes the median of the records whose frame index lies within ``window // 2`` video frames of its own,
+    so a frame budget that samples sparser than that leaves every record as the model saw it, and the median never
+    mixes poses seconds apart.
 
     Args:
         kp_xy: Float64 keypoint coordinates with shape ``(t, n, 2)``.
-        window: Odd temporal window size.
+        frame_index: Video frame index of each record with shape ``(t,)``.
+        window: Odd temporal window size in video frames.
 
     Returns:
         Float64 filtered keypoint coordinates with shape ``(t, n, 2)``.
     """
-    half_window: int = window // 2
     filtered_xy: Float64[ndarray, "t n 2"] = np.empty_like(kp_xy)
-    frame_idx: int
-    for frame_idx in range(kp_xy.shape[0]):
-        start_idx: int = max(0, frame_idx - half_window)
-        stop_idx: int = min(kp_xy.shape[0], frame_idx + half_window + 1)
-        window_xy: Float64[ndarray, "window_t n 2"] = kp_xy[start_idx:stop_idx]
+    for t in range(kp_xy.shape[0]):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            filtered_xy[frame_idx] = np.nanmedian(window_xy, axis=0)
+            filtered_xy[t] = np.nanmedian(kp_xy[np.abs(frame_index - frame_index[t]) <= window // 2], axis=0)
     return filtered_xy
 
 

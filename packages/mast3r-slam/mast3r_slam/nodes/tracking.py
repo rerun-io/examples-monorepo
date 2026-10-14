@@ -265,8 +265,7 @@ class FrameTracker:
             Xk = constrain_points_to_ray(img_size, Xk[None], K).squeeze(0)
 
             # Setup pixel coordinates
-            uv_k: Float[Tensor, "hw 2"] = get_pixel_coords(1, img_size, device=Xf.device, dtype=Xf.dtype)
-            uv_k = uv_k.view(-1, 2)
+            uv_k: Float[Tensor, "hw 2"] = get_pixel_coords(1, img_size, device=Xf.device, dtype=Xf.dtype).view(-1, 2)
             meas_k = torch.cat((uv_k, torch.log(Xk[..., 2:3])), dim=-1)
             # Avoid any bad calcs in log
             valid_meas_k = Xk[..., 2:3] > self.cfg.depth_eps

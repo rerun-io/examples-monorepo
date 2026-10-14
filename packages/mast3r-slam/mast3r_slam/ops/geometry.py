@@ -49,11 +49,11 @@ def point_to_ray_dist(
 
 def constrain_points_to_ray(
     img_size: tuple[int, int],
-    Xs: Float[Tensor, "b h w 3"],
+    Xs: Float[Tensor, "b hw 3"],
     K: Float[Tensor, "3 3"],
-) -> Float[Tensor, "b h w 3"]:
-    """Re-project points onto calibrated rays, preserving depth."""
-    uv: Float[Tensor, "b h w 2"] = get_pixel_coords(Xs.shape[0], img_size, device=Xs.device, dtype=Xs.dtype).view(*Xs.shape[:-1], 2)
+) -> Float[Tensor, "b hw 3"]:
+    """Re-project points (flattened row-major per image) onto calibrated rays, preserving depth."""
+    uv: Float[Tensor, "b hw 2"] = get_pixel_coords(Xs.shape[0], img_size, device=Xs.device, dtype=Xs.dtype).view(*Xs.shape[:-1], 2)
     Xs = backproject(uv, Xs[..., 2:3], K)
     return Xs
 
@@ -94,7 +94,7 @@ def project_calib(
     K: Float[Tensor, "3 3"],
     img_size: tuple[int, int],
     jacobian: bool = False,
-    border: float = 0,
+    border: int = 0,
     z_eps: float = 0.0,
 ) -> (
     tuple[Float[Tensor, "... 3"], Bool[Tensor, "... 1"]]
