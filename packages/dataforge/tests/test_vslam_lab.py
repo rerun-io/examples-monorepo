@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
 from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
-from jaxtyping import UInt8, UInt16
+from jaxtyping import Float64, UInt8, UInt16
 from numpy import ndarray
 from test_vslam_lab_source import EUROC_CALIBRATION, TUM_CALIBRATION  # pyrefly: ignore[missing-import]
 
@@ -27,6 +27,13 @@ from dataforge.identity import SequenceIdentity
 
 TUM_STAMPS: tuple[int, ...] = (1305031102175303936, 1305031102211214080, 1305031102243211008)
 EUROC_STAMPS: tuple[int, ...] = (1403636579763555584, 1403636579813555456, 1403636579863555584)
+EUROC_CAM1_T_BS: tuple[float, ...] = (
+    0.0125552670891, -0.9997550997230, 0.0182237714554, -0.0198435579556,
+    0.9995987811510, 0.0130119051815, 0.0251588363115, 0.0453689425024,
+    -0.0253898008918, 0.0179005838253, 0.9995173470780, 0.0078621244704,
+    0.0, 0.0, 0.0, 1.0,
+)  # fmt: skip
+"""cam1's body_T_sensor, as EUROC_CALIBRATION writes it."""
 
 
 def tum_sequence(root: Path, name: str = "rgbd_dataset_freiburg1_xyz") -> Path:
@@ -75,20 +82,24 @@ def euroc_sequence(root: Path) -> Path:
     return sequence
 
 
-def dataset(root: Path, benchmark: str, **overrides: int) -> VslamLabDataset:
-    config: VslamLabConfig = replace(VslamLabConfig(), benchmark=benchmark, root=root, **overrides)  # pyrefly: ignore[bad-argument-type]
+def dataset(root: Path, benchmark: str) -> VslamLabDataset:
+    config: VslamLabConfig = replace(VslamLabConfig(), benchmark=benchmark, root=root)  # pyrefly: ignore[bad-argument-type]
     built = config.setup()
     assert isinstance(built, VslamLabDataset)
     return built
 
 
 def rebuild_derived_layers(built: VslamLabDataset, identity: SequenceIdentity, source: Path) -> None:
-    """Convert with a base layer already published, the layer rule's rebuild path: gt and sensor_metadata come
-    from their sidecars alone, so no frame is read and no GPU is needed."""
+    """The layer rule's rebuild path: base and the sidecars are published and the raw tree is gone, so gt and
+    sensor_metadata come from the sidecars alone; no frame is read and no GPU is needed."""
     base: Path = built.targets(identity)[paths.BASE_LAYER]
     base.parent.mkdir(parents=True)
     base.touch()
-    built.convert(identity, source, force=False)
+    for name in ("groundtruth.csv", "calibration.yaml"):
+        sidecar: Path = paths.sidecar_path(paths.output_root(), identity, name)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_bytes((source / name).read_bytes())
+    built.convert(identity, source.parent / "deleted", force=False)
 
 
 def test_every_benchmark_is_one_catalog_dataset_named_after_it() -> None:
@@ -106,10 +117,17 @@ def test_discover_finds_complete_sequences_of_the_chosen_benchmark_only(tmp_path
     assert found[0][1] == tmp_path / "RGBDTUM" / "rgbd_dataset_freiburg1_xyz"
 
 
-def test_download_names_what_a_sequence_lacks(tmp_path: Path) -> None:
+def test_download_refuses_a_benchmark_with_no_sequence(tmp_path: Path) -> None:
     (tmp_path / "EUROC" / "MH_02_easy").mkdir(parents=True)
-    with pytest.raises(FileNotFoundError, match="EUROC"):
+    with pytest.raises(FileNotFoundError, match="EUROC holds no sequence"):
         dataset(tmp_path, "euroc").download()
+
+
+def test_download_counts_sequences_beside_vslam_labs_support_directories(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    euroc_sequence(tmp_path)
+    (tmp_path / "EUROC" / "supp_v2" / "gtFiles").mkdir(parents=True)
+    dataset(tmp_path, "euroc").download()
+    assert "vslam-lab-euroc: 1 sequence(s)" in capsys.readouterr().out
 
 
 def test_gt_is_world_t_rig_on_the_upstream_stamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,13 +140,15 @@ def test_gt_is_world_t_rig_on_the_upstream_stamps(tmp_path: Path, monkeypatch: p
     poses: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:translation")
     assert poses.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == [1305031102170000000, 1305031102240000000]
     np.testing.assert_allclose(poses.column(1).to_pylist()[1], [[1.3543, 0.6306, 1.6360]], rtol=1e-6)
+    quaternions: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:quaternion")
+    np.testing.assert_allclose(quaternions.column(1).to_pylist()[1], [[0.6129, 0.5966, -0.3316, -0.3980]], rtol=1e-6)
     gt: dict[str, object] = recording_properties(store, "gt")
-    assert (gt["num_poses"], gt["world_up"], gt["has_rotation"]) == (2, "+z", True)
+    assert (gt["num_poses"], gt["world_up"], gt["num_sanitized"]) == (2, "+z", 0)
     # TUM ships no IMU noise model, so there is no sensor_metadata layer to write.
     assert not paths.rrd_path(tmp_path / "out", layer=paths.SENSOR_METADATA_LAYER, identity=identity).exists()
 
 
-def test_position_only_gt_is_flagged_and_announced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_position_only_gt_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
     source: Path = euroc_sequence(tmp_path / "raw")
     # VSLAM-LAB's own EuRoC groundtruth.csv: cam0 positions with a constant (1, 0, 0, 0) in the quaternion columns.
@@ -137,10 +157,9 @@ def test_position_only_gt_is_flagged_and_announced(tmp_path: Path, monkeypatch: 
     )
     built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
     identity, _ = built.discover()[0]
-    rebuild_derived_layers(built, identity, source)
-    store: rrc.ChunkStore = read_back(paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity))
-    assert recording_properties(store, "gt")["has_rotation"] is False
-    assert "position-only" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="groundtruth.csv: 2 poses with a constant rotation are position-only"):
+        rebuild_derived_layers(built, identity, source)
+    assert not paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity).exists()
 
 
 def test_the_imu_noise_model_lands_on_the_imu_node_as_sensor_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,15 +214,22 @@ def test_an_euroc_sequence_converts_stereo_and_the_imu(tmp_path: Path, monkeypat
     assert column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars").num_rows == 21
     rig: dict[str, object] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().to_pylist()[0]
     assert rig[f"{schema.rig_path(0)}:reference"] == ["imu_00"]
+    # simplecv stores a camera as cam_T_rig with relation ChildFromParent (2), so cam_01's stored translation is
+    # T_BS inverted; the IMU is the body, so its transform is the identity.
+    static: dict[str, list[list[float]]] = store.reader(index=None, contents="/world/**").to_arrow_table().to_pylist()[0]
+    cam1_T_body: Float64[ndarray, "4 4"] = np.linalg.inv(np.array(EUROC_CAM1_T_BS, dtype=np.float64).reshape(4, 4))
+    assert static[f"{schema.cam_path(0, 1)}:Transform3D:relation"] == [2]
+    np.testing.assert_allclose(static[f"{schema.cam_path(0, 1)}:Transform3D:translation"], [cam1_T_body[:3, 3]], rtol=1e-6)
+    np.testing.assert_allclose(static[f"{schema.imu_path(0, 0)}:Transform3D:translation"], [[0.0, 0.0, 0.0]])
 
 
 @pytest.mark.integration
-def test_a_real_sequence_previews_through_every_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+def test_the_real_freiburg1_xyz_converts_every_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
-    config: VslamLabConfig = VslamLabConfig(benchmark="rgbdtum", frame_limit=10)
-    raw_asset("VSLAM-LAB RGBDTUM freiburg1_xyz", config.root / "RGBDTUM/rgbd_dataset_freiburg1_xyz/rgb.csv")
-    built: VslamLabDataset = dataset(config.root, "rgbdtum", frame_limit=10)
+    root: Path = VslamLabConfig().root
+    raw_asset("VSLAM-LAB RGBDTUM freiburg1_xyz frames", root / "RGBDTUM/rgbd_dataset_freiburg1_xyz/rgb_0/1305031102.175304.png")
+    built: VslamLabDataset = dataset(root, "rgbdtum")
     identity, source = next(pair for pair in built.discover() if pair[0].parts == ("rgbd_dataset_freiburg1_xyz",))
     store: rrc.ChunkStore = read_back(built.convert(identity, source, force=False))
-    assert column_rows(store, f"{schema.video_path(0, 0)}:VideoStream:sample").num_rows == 10
-    assert column_rows(store, f"{schema.depth_path(0, 0)}:DepthImage:meter").num_rows == 10
+    assert column_rows(store, f"{schema.video_path(0, 0)}:VideoStream:sample").num_rows == 798
+    assert column_rows(store, f"{schema.depth_path(0, 0)}:DepthImage:meter").num_rows == 798

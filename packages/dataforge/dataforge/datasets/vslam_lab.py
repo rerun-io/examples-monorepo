@@ -15,7 +15,7 @@ Each sequence becomes, under one recording id (README#the-layer-rule):
 * **sensor_metadata**: the IMU noise model as simplecv's ``ImuCalibration``, where calibration.yaml has one.
 
 The derived layers read only their sidecars (groundtruth.csv and calibration.yaml, copied verbatim), so they
-rebuild without the frames. Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
+rebuild without the frames (and without the raw tree once the sidecars exist). Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
 ``video_time``: a gt row lands on the frame it was measured at, and a trajectory read back from the catalog
 compares 1:1 with the upstream file.
 """
@@ -32,30 +32,30 @@ import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float64, Int64, UInt16
+from jaxtyping import Bool, Float64, Int64, UInt16
 from numpy import ndarray
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.imu_calibration import ImuCalibration
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.basalt import FollowFrame
-from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
+from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.vslam_lab_source import (
     Calibration,
     CameraEntry,
     FrameIndex,
     ImuStream,
     PoseTable,
+    StreamName,
     read_calibration,
     read_frame_index,
     read_imu,
     read_poses,
 )
-from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory, nominal_fps
+from dataforge.euroc import IDENTITY_QUATERNION_XYZW, dropout_rows, nominal_fps
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     TRAJECTORY_COLOR,
-    ImuChannel,
     log_camera_node,
     log_imu,
     log_pose_track,
@@ -63,7 +63,7 @@ from dataforge.logging_toolkit import (
     log_trail_segments,
     log_video_stream,
 )
-from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg
+from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, WorldUpAxis
 
 BenchmarkChoice: TypeAlias = Literal["rgbdtum", "euroc"]
@@ -71,7 +71,7 @@ BenchmarkChoice: TypeAlias = Literal["rgbdtum", "euroc"]
 RIG: int = 0
 """A VSLAM-LAB sequence is one rig."""
 REQUIRED_FILES: tuple[str, ...] = ("calibration.yaml", "rgb.csv", "groundtruth.csv")
-"""What makes a sequence directory convertible."""
+"""What makes a sequence directory discoverable; the frames are read only while base is pending."""
 SIDECARS: tuple[str, ...] = ("groundtruth.csv", "calibration.yaml")
 """Kept verbatim beside the rrds: the gt and sensor_metadata layers rebuild from them alone."""
 IMAGE_PLANE_DISTANCE: float = 0.1
@@ -133,7 +133,7 @@ BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
 
 
 @dataclass
-class VslamLabConfig(FrameLimitedConfig):
+class VslamLabConfig(DataforgeDatasetConfig):
     """VSLAM-LAB benchmark sequences: video, depth, IMU and ground truth in VSLAM-LAB's layout."""
 
     command: ClassVar[str] = "vslam-lab"
@@ -229,33 +229,39 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         ]
 
     def download(self) -> None:
-        """Verify the local VSLAM-LAB tree; VSLAM-LAB's ``download-sequence`` fetches it."""
-        incomplete: list[str] = [
-            f"{sequence.name} lacks {', '.join(missing)}"
-            for sequence in sorted(path for path in self.benchmark_dir.glob("*") if path.is_dir())
-            if (missing := transports.local_verify(sequence, required=REQUIRED_FILES))
-        ]
+        """Verify the local VSLAM-LAB tree; VSLAM-LAB's ``download-sequence`` fetches it.
+
+        Directories without the three sequence files are not sequences (VSLAM-LAB keeps EuRoC's ``supp_v2/``
+        and room archives beside them), so only an empty benchmark directory is an error.
+        """
         found: int = len(self.discover())
-        if incomplete or not found:
-            raise FileNotFoundError(f"{self.benchmark_dir}: {'; '.join(incomplete) or 'no sequence'}; fetch it with VSLAM-LAB's download-sequence")
+        if not found:
+            raise FileNotFoundError(f"{self.benchmark_dir} holds no sequence with {', '.join(REQUIRED_FILES)}; fetch one with VSLAM-LAB's download-sequence")
         print(f"{self.config.name}: {found} sequence(s) in {self.benchmark_dir}")
 
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
-        """Write whichever layers are missing; base from the frames, the derived ones from their sidecars."""
+        """Write whichever layers are missing; base from the frames, the derived ones from their sidecars.
+
+        A conversion that writes base reads the raw groundtruth.csv and calibration.yaml and publishes them as
+        sidecars only after every layer is written, so a failed run never leaves new sidecars beside old layers.
+        A rebuild (base published, a derived layer missing) reads the sidecars alone.
+        """
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
         sidecars: dict[str, Path] = {name: paths.sidecar_path(paths.output_root(), identity, name) for name in SIDECARS}
-        for name, sidecar in sidecars.items():
-            if paths.BASE_LAYER in pending or not sidecar.is_file():
-                with writing.atomic_write(sidecar) as staged:
-                    shutil.copyfile(source / name, staged)
-        calibration: Calibration = read_calibration(sidecars["calibration.yaml"])
+        fresh: bool = paths.BASE_LAYER in pending
+        inputs: dict[str, Path] = {name: source / name if fresh or not sidecar.is_file() else sidecar for name, sidecar in sidecars.items()}
+        calibration: Calibration = read_calibration(inputs["calibration.yaml"])
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, calibration),
-            paths.GT_LAYER: lambda recording: self.write_gt(recording, read_poses(sidecars["groundtruth.csv"])),
+            paths.GT_LAYER: lambda recording: self.write_gt(recording, inputs["groundtruth.csv"]),
         }
         if any(imu.sigma_g_c is not None for imu in calibration.imus):
             writers[paths.SENSOR_METADATA_LAYER] = lambda recording: write_sensor_metadata(recording, calibration)
         self.write_layers(identity, targets, [layer for layer in pending if layer in writers], writers)
+        for name, sidecar in sidecars.items():
+            if inputs[name] != sidecar:
+                with writing.atomic_write(sidecar) as staged:
+                    shutil.copyfile(inputs[name], staged)
         return targets[paths.BASE_LAYER]
 
     def write_base(self, recording: rr.RecordingStream, identity: SequenceIdentity, source: Path, calibration: Calibration) -> None:
@@ -263,17 +269,12 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         if len(calibration.cameras) != self.benchmark.num_cameras:
             raise ValueError(f"{source}: {len(calibration.cameras)} cameras, but {self.benchmark.directory} declares {self.benchmark.num_cameras}")
         require_av1_nvenc(resolve_ffmpeg())
-        limit: int | None = self.config.frame_limit
-        streams: dict[str, FrameIndex] = {
-            name: FrameIndex(times_ns=frames.times_ns[:limit], paths=frames.paths[:limit]) for name, frames in read_frame_index(source / "rgb.csv").items()
-        }
+        streams: dict[StreamName, FrameIndex] = read_frame_index(source / "rgb.csv")
         log_rig_node(recording, RIG, reference=rig_reference(calibration), num_cameras=len(calibration.cameras), name=self.benchmark.label, kind="ego")
-        work_dir: Path = paths.work_root() / identity.recording_id
-        work_dir.mkdir(parents=True, exist_ok=True)
-        try:
+        with work_dir(f"{identity.recording_id}-") as work:
             for index, camera in enumerate(calibration.cameras):
                 frames: FrameIndex = streams[camera.cam_name]
-                clip: Path = work_dir / f"cam_{index:02d}.mp4"
+                clip: Path = work / f"cam_{index:02d}.mp4"
                 with self.timer.stage("encode"):
                     encode_frames_to_mp4(png_bytes(source, frames), clip, source=FrameSource("png"), fps=nominal_fps(frames.times_ns))
                 log_camera_node(
@@ -290,20 +291,17 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
                 log_video_stream(recording, clip, schema.video_path(RIG, index), times_ns=frames.times_ns, frame_indices=frame_indices)
                 if camera.depth_name is not None and camera.depth_factor is not None:
                     log_depth(recording, source, streams[camera.depth_name], index, meter=camera.depth_factor)
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
         first_ns: int = int(streams["rgb_0"].times_ns[0])
         last_ns: int = max(int(frames.times_ns[-1]) for frames in streams.values())
         if calibration.imus:
             imu: ImuStream = read_imu(source / "imu_0.csv")
-            kept: Int64[ndarray, "n_kept"] = np.flatnonzero(imu.gyro.times_ns <= last_ns) if limit is not None else np.arange(imu.gyro.times_ns.size)
             body_T_imu: Float64[ndarray, "4 4"] = calibration.imus[0].body_T_sensor
             log_imu(
                 recording,
                 RIG,
                 0,
-                gyro=ImuChannel(times_ns=imu.gyro.times_ns[kept], values_xyz=imu.gyro.values_xyz[kept]),
-                accel=ImuChannel(times_ns=imu.accel.times_ns[kept], values_xyz=imu.accel.values_xyz[kept]),
+                gyro=imu.gyro,
+                accel=imu.accel,
                 name=calibration.imus[0].imu_name,
                 rig_T_imu=rr.Transform3D(translation=body_T_imu[:3, 3], mat3x3=body_T_imu[:3, :3]),
             )
@@ -322,44 +320,46 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             has_imu=bool(calibration.imus),
         )
 
-    def write_gt(self, recording: rr.RecordingStream, poses: PoseTable) -> None:
+    def write_gt(self, recording: rr.RecordingStream, groundtruth: Path) -> None:
         """The ground-truth layer: world_T_rig on the rig node, the whole path and its trail, the world axes.
 
         A dropout row (a non-unit quaternion) becomes identity rotation with its translation kept, the rule
-        ``dataforge.euroc.gt_trajectory`` holds for every EuRoC-style file. A file whose rotation never changes
-        is position-only ground truth (VSLAM-LAB's own EuRoC csv is cam0 positions with a constant placeholder
-        quaternion): it is still logged, but ``has_rotation`` is false and convert says so.
+        ``dataforge.euroc.gt_trajectory`` holds for every EuRoC-style file.
+
+        Raises:
+            ValueError: The file holds no pose, or a rotation that never changes. The second is VSLAM-LAB's own
+                EuRoC csv: cam0 *positions* with a constant placeholder quaternion, which logged as world_T_body
+                would put every sensor at the wrong place and turned 180 degrees (README says how to replace it).
         """
-        trajectory: GtTrajectory = gt_trajectory(
-            TimestampedSamples(times_ns=poses.times_ns, values=np.column_stack([poses.translations_xyz, poses.quaternions_xyzw[:, [3, 0, 1, 2]]]))
-        )
-        has_rotation: bool = bool(np.ptp(trajectory.quaternions_xyzw, axis=0).max() > 0.0)
-        if not has_rotation:
-            print(f"  warning: {self.benchmark.directory} groundtruth.csv never changes its rotation; logging it as position-only ground truth")
+        poses: PoseTable = read_poses(groundtruth)
+        quaternions_xyzw: Float64[ndarray, "n_poses 4"] = poses.quaternions_xyzw.copy()
+        dropped: Bool[ndarray, "n_poses"] = dropout_rows(quaternions_xyzw)
+        quaternions_xyzw[dropped] = IDENTITY_QUATERNION_XYZW
+        if poses.times_ns.size < 2 or np.ptp(quaternions_xyzw, axis=0).max() == 0.0:
+            raise ValueError(f"{groundtruth}: {poses.times_ns.size} poses with a constant rotation are position-only, not world_T_body")
         rr.log("/", WORLD_UP_VIEW_COORDINATES[self.benchmark.world_up], static=True, recording=recording)
         log_pose_track(
             recording,
             schema.rig_path(RIG),
-            times_ns=trajectory.times_ns,
-            translations_xyz=trajectory.translations_xyz,
-            quaternions_xyzw=trajectory.quaternions_xyzw,
+            times_ns=poses.times_ns,
+            translations_xyz=poses.translations_xyz,
+            quaternions_xyzw=quaternions_xyzw,
         )
         rr.log(
             schema.trajectory_path(schema.GT_RUN_SOURCE),
-            rr.LineStrips3D([trajectory.translations_xyz], colors=TRAJECTORY_COLOR, radii=rr.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS)),
+            rr.LineStrips3D([poses.translations_xyz], colors=TRAJECTORY_COLOR, radii=rr.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS)),
             static=True,
             recording=recording,
         )
-        log_trail_segments(recording, schema.trail_path(schema.GT_RUN_SOURCE), times_ns=trajectory.times_ns, translations_xyz=trajectory.translations_xyz)
-        steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(trajectory.translations_xyz, axis=0), axis=1)
+        log_trail_segments(recording, schema.trail_path(schema.GT_RUN_SOURCE), times_ns=poses.times_ns, translations_xyz=poses.translations_xyz)
+        steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(poses.translations_xyz, axis=0), axis=1)
         recording.send_property(
             "gt",
             rr.AnyValues(
-                num_poses=int(trajectory.times_ns.size),
-                duration_s=(int(trajectory.times_ns[-1]) - int(trajectory.times_ns[0])) / 1e9,
+                num_poses=int(poses.times_ns.size),
+                duration_s=(int(poses.times_ns[-1]) - int(poses.times_ns[0])) / 1e9,
                 trajectory_len_m=float(steps_m.sum()),
-                num_sanitized=trajectory.num_sanitized,
-                has_rotation=has_rotation,
+                num_sanitized=int(dropped.sum()),
                 world_up=self.benchmark.world_up,
                 source=self.benchmark.gt_source,
             ),

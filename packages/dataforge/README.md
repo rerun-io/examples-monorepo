@@ -358,11 +358,17 @@ so `rig_00`'s `reference` names the sensor whose `T_BS` is the identity:
 consumer should know: on TUM, `rgb.csv` pairs each RGB frame with the nearest
 depth frame (within 20 ms) and gives both the RGB stamp; on EuRoC, VSLAM-LAB
 writes `groundtruth.csv` from TUM's `supp_v2` files, cam0 positions at 20 Hz
-with a constant placeholder quaternion. `convert` logs such a file but flags
-it (`property:gt:has_rotation = false`, and a warning); the catalog's EuRoC
-corpus replaces it, before conversion, with the upstream
-`mav0/state_groundtruth_estimate0/data.csv` in the same columns: the full
-6-DoF body pose at 200 Hz.
+with a constant placeholder quaternion. `convert` refuses a ground truth whose
+rotation never changes, because logged as world_T_body it would place every
+sensor wrong. Replace it with the upstream body pose (world_T_imu0, 200 Hz),
+which VSLAM-LAB's kept sequence zip still holds:
+
+```bash
+cd <benchmark root>/EUROC
+unzip -p machine_hall/MH_01_easy/MH_01_easy.zip mav0/state_groundtruth_estimate0/data.csv \
+  | awk -F, 'BEGIN { print "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw" } !/^#/ { print $1","$2","$3","$4","$6","$7","$8","$5 }' \
+  > MH_01_easy/groundtruth.csv
+```
 
 ### Environment variables
 
