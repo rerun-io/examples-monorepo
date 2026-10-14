@@ -63,7 +63,8 @@ glasses were synchronised by the authors.
   divided out of every pose); each Aria's per-frame extrinsic through `inv(colmap_from_aria[ariaNN]) @ colmap_from_aria[aria01]`,
   as upstream's loaders do. A take that ships `scale.npy` lives in that world instead (COLMAP made metric and gravity-aligned),
   as upstream's loader decides: its labels are there, glasses or not. `train/12_mma` wears glasses and ships `scale.npy`; its
-  labels sit metres from the Aria world, and its glasses reach the `scale.npy` world through the Aria transforms.
+  labels sit metres from the Aria world, and its glasses reach the `scale.npy` world through the Aria transforms (upstream's
+  loader leaves glasses out of `scale.npy` takes; see Known gaps).
   `property:capture:world_frame` names the world of each take.
 - **Rigs.** GoPro `camNN` = `rig_NN` (one camera). Glasses `ariaNN` = `rig_(90+NN)`: `cam_00` rgb, `cam_01` slam-left, `cam_02`
   slam-right; the rig frame is the rgb camera's device-orientation frame and moves per frame. The Aria images are upright: each
@@ -122,5 +123,15 @@ profiled on an idle host), 4.0 s projections; 183 MB of rrds from 1.7 GB of JPEG
   not ship. None of the Aria world, the raw COLMAP frame or a sibling take's `scale.npy` fits (205-586 px). Left as converted
   (a label fault, not corrected). Corpus check (projected COCO keypoints inside the shipped GoPro boxes, enlarged 25 %):
   1.000 on the other 205 takes, 0.10-0.18 on these three.
+- **Release fault, Aria placement:** 73 of the 236 logged glasses (118 takes) sit more than 25 cm from every head (median over
+  the take; a well-placed pair sits 6-10 cm from its wearer's). In the Aria world, 42 of 178: aria02 in all 35
+  `train/02_grappling` takes (0.4-1.6 m) and in `train/11_karate3/001`, and both pairs of the three `12_mma` takes above. Where
+  the release ships Aria `poses2d` (`11_karate3/001`, `02_grappling/002`), our projection lands within 0.5 px of it: the
+  release's own `colmap_from_aria_transforms.pkl` puts these glasses there. Left as converted. In `scale.npy` takes, 31 of 58:
+  upstream places no glasses there, and dataforge places them through the same transforms, so the same fault shows
+  (`11_karate3`: aria01 6-8 cm from its wearer, aria02 0.96-1.46 m). Whether to leave the glasses out of `scale.npy` takes, or
+  to keep only pairs near a head, is an open decision.
+- **Release fault, person keys:** in `train/02_grappling/{034,035,038,040}_grappling` aria01 sits 8-10 cm from the other
+  person's head and 0.5-0.7 m from its wearer's: the labels' `aria01`/`aria02` keys look swapped there. Left as converted.
 - Aria joints just past projectaria-tools' Gen1 cone or valid radius are NaN, where the release's own 2D still places them (12
   of 453 sampled on `002_hugging`, at 57-64° off-axis for rgb and 80-88° for slam).
