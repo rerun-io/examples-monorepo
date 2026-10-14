@@ -46,9 +46,9 @@ class Backend:
 
     def reset(self, ctx: RunContext) -> None:
         model: AsymmetricMASt3R = ctx.resources["mast3r"]  # type: ignore[assignment]
-        shared: SharedSlam = ctx.resources["shared"]  # type: ignore[assignment]
-        self.keyframes: SharedKeyframes = shared.keyframes
-        self.states: SharedStates = shared.states
+        self.shared: SharedSlam = ctx.resources["shared"]  # type: ignore[assignment]
+        self.keyframes: SharedKeyframes = self.shared.keyframes
+        self.states: SharedStates = self.shared.states
         K = self.keyframes.K if self.cfg.use_calib else None
         self.graph: FactorGraph = FactorGraph(model, self.keyframes, self.cfg.local_opt, self.cfg.matching, K, device=self.keyframes.device)
         self.retrieval: RetrievalDatabase = RetrievalDatabase(CHECKPOINT, backbone=model, device=self.keyframes.device)
@@ -103,9 +103,14 @@ class Backend:
             if keep.any():
                 colors: UInt8[ndarray, "n 3"] = (keyframe.rgb.reshape(-1, 3).numpy()[keep] * 255).astype(np.uint8)
                 out.put("cloud", tick.t_ns, KeyframeCloud(task.index, keyframe.X_canon.cpu().numpy()[keep], colors))
-        elif self.states.get_mode() == Mode.RELOC and self._relocalise(self.states.get_frame()):
-            self.times[len(self.keyframes) - 1] = tick.t_ns
-            self.states.set_mode(Mode.TRACKING)
+        elif self.states.get_mode() == Mode.RELOC:
+            frame: Frame = self.states.get_frame()
+            if frame.frame_id != task.frame_index:
+                raise RuntimeError(f"the shared current frame is frame {frame.frame_id}, the request is for frame {task.frame_index}")
+            if self._relocalise(frame):
+                self.times[len(self.keyframes) - 1] = tick.t_ns
+                self.states.set_mode(Mode.TRACKING)
+        self.shared.publish()
         with self.states.lock:  # the acknowledgement the lossless frontend waits for
             if isinstance(task, KeyframeAdded):
                 self.states.global_optimizer_tasks.pop(0)

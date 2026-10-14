@@ -142,7 +142,7 @@ def test_backend_contract(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -
         shared.states.set_frame(frame)
         shared.states.set_mode(Mode.RELOC)
         shared.states.queue_reloc()
-        return [Tick(1000 * i, "task", KeyframeAdded(i), {}) for i in range(3)] + [Tick(3000, "task", RelocRequest(30), {})]
+        return [Tick(1000 * i, "task", KeyframeAdded(i), {}) for i in range(3)] + [Tick(3000, "task", RelocRequest(20), {})]
 
     backend = Backend(CFG)
     ctx = RunContext("slam", "backend", "lossless", resources={"mast3r": MODEL, "shared": shared})
@@ -167,3 +167,20 @@ def test_backend_contract(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -
         backend.step(tick, Recorder())
         shared.states.set_mode(Mode.TERMINATED)  # realtime stop: what is still queued is dropped and counted
     assert backend.dropped == 3 and shared.backend_idle()
+
+
+def test_backend_refuses_to_relocalise_a_frame_it_was_not_asked_for(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The current frame crosses processes through shared memory; a stale one (the writes of the request's frame not yet
+    visible) must fail loudly instead of relocalising the previous frame at the request's time."""
+    monkeypatch.setattr(backend_module, "FactorGraph", FakeGraph)
+    monkeypatch.setattr(backend_module, "RetrievalDatabase", FakeRetrieval)
+    shared.reset()
+    frame = Frame(20, torch.zeros(1, 3, SIZE, SIZE), torch.tensor([[SIZE, SIZE]]), torch.tensor([[SIZE, SIZE]]), torch.zeros(SIZE, SIZE, 3))
+    observe(frame)
+    shared.states.set_frame(frame)
+    shared.states.set_mode(Mode.RELOC)
+    shared.states.queue_reloc()
+    backend = Backend(CFG)
+    backend.reset(RunContext("slam", "backend", "lossless", resources={"mast3r": MODEL, "shared": shared}))
+    with pytest.raises(RuntimeError, match="frame 20, .* frame 22"):
+        backend.step(Tick(3000, "task", RelocRequest(22), {}), Recorder())

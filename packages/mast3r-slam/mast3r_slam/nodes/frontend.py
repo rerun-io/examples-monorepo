@@ -85,6 +85,7 @@ class Frontend:
         keyframes = self.shared.keyframes
         keyframes.append(frame)
         self.shared.states.queue_global_optimization(len(keyframes) - 1)
+        self.shared.publish()
         out.put("task", t_ns, KeyframeAdded(len(keyframes) - 1))
 
     @torch.no_grad()
@@ -112,6 +113,7 @@ class Frontend:
             states.set_frame(frame)
             if mode == Mode.RELOC:
                 states.queue_reloc()
+                self.shared.publish()
                 out.put("task", tick.t_ns, RelocRequest(frames.frame_index))
         else:
             raise RuntimeError(f"frontend stepped in mode {mode}")

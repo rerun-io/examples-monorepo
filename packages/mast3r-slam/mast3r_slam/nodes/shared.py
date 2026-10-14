@@ -324,6 +324,12 @@ class SharedSlam:
             self.states.reloc_sem.value = 0
             del self.states.global_optimizer_tasks[:]
 
+    def publish(self) -> None:
+        """Make this process's queued GPU writes to the buffers visible to the other process before telling it so: CUDA IPC
+        does not order work across processes (without it the backend relocalised the previous current frame)."""
+        if self.keyframes.device.startswith("cuda"):
+            torch.cuda.synchronize(self.keyframes.device)
+
     def backend_idle(self) -> bool:
         """The backend applied every task queued so far (the lossless acknowledgement)."""
         with self.states.lock:
