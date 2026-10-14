@@ -56,19 +56,20 @@ class Config:
     segment: SegmentRef = field(default_factory=lambda: SegmentRef("dataforge-mamma-eval", "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"))
     """The whole segment by default (the VERIFY ``full`` case); ``--segment.window-ns 0 10000000000`` is the ``short`` case."""
     video: Path | None = None
-    """A MAMMA-format capture directory (``meta/*.npz`` + videos) to run instead of ``segment``."""
+    """A MAMMA-format capture directory (meta/*.npz + videos) to run instead of the segment."""
     cameras: tuple[str, ...] | None = None
     """Camera entities under ``/world``; None = every second camera of the mamma-eval ground ring (90 deg apart), or
     every camera of a ``video`` directory."""
     resize_hw: tuple[int, int] = (752, 1024)
     """Engine size (tracking, masks, landmark outputs): aspect kept, 16-aligned (the default suits 2056 x 1504 cameras)."""
     preset: Literal["quality", "fast"] = "quality"
+    """Operating point: quality or fast (node parameters in profiles/<hardware>.toml)."""
     subjects: int | None = 1
     """People to track; None = as many as the bootstrap view detects. Only exactly one keeps the fitter's CUDA graphs."""
     output_dir: Path | None = None
-    """Write the ``mamma_fit`` layer file here (one subdirectory per segment); None = viewer only."""
+    """Write the mamma_fit layer file here (one subdirectory per segment); None = viewer only."""
     register: Register = "new"
-    """``new`` registers the layer when the segment has none; ``replace`` is the explicit production refresh."""
+    """new registers the layer when the segment has none; replace is the explicit production refresh; off never registers."""
     hardware: HardwareClass | Literal["auto"] = "auto"
     runner: Literal["sequential", "threaded"] = "threaded"
     mode: Mode = "lossless"
