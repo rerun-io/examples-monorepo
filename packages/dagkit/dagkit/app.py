@@ -43,7 +43,7 @@ class AppConfig(Protocol):
 
 C = TypeVar("C", bound=AppConfig)
 D = TypeVar("D")
-G = TypeVar("G")
+G = TypeVar("G")  # a form's Config type: not bound to AppConfig, as beartype cannot issubclass-check a data Protocol
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -95,7 +95,7 @@ def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "a
     return profile
 
 
-def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
+def _run_graphs(config: AppConfig, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
     """The CLI's and the form's one loop: Stop is checked before the next graph is built, and a stopped build is closed."""
     result: Graph | Iterator[Graph] = build(config, recording)
     built: Iterator[Graph] = iter((result,)) if isinstance(result, Graph) else result
@@ -106,7 +106,7 @@ def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], r
             if graph.name in names:  # its picture, guide and health colours would land on the earlier graph's
                 raise GraphError(f"graph name {graph.name!r} repeats in one app")
             names.add(graph.name)
-            report = RUNNERS[getattr(config, "runner", "threaded")](graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
+            report = RUNNERS[config.runner](graph, mode=config.mode, control=control, health=recording)
             print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
             del graph  # its nodes free their models before the next graph is built
     finally:
@@ -287,7 +287,7 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
                 scratch = Path(tmp)  # copies each download into its cache while the run waits at the yield that offers it
                 try:
                     given: dict[tuple[str, ...], object] = {leaf[0]: v for leaf, ws in form if (v := _value(leaf, [next(it) for _ in ws], scratch)) is not dataclasses.MISSING}
-                    config: G = _assemble(config_type, given, None)
+                    config: AppConfig = _assemble(config_type, given, None)  # an instance check is fine
                 except (TypeError, ValueError) as exc:  # a required field left empty, a malformed number or window
                     raise gr.Error(f"the form does not make a {config_type.__name__}: {exc}") from None
                 if getattr(config, "register", "off") != "off" and any(isinstance(v, Path) and v.is_relative_to(scratch) for v in given.values()):

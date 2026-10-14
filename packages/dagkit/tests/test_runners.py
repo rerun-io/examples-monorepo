@@ -363,6 +363,17 @@ def test_a_run_closes_its_source_generators_although_the_error_is_kept(runner: s
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
+def test_a_sink_gets_the_resources_it_needs(runner: str) -> None:
+    """An export that reads a graph-owned buffer at flush (mast3r-slam's Nerfstudio export) is a sink, not a step."""
+    graph = Graph("export")
+    graph.resource("shared", Model)
+    sink = Collect(("x",))
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], graph.sink("export", sink, needs=("shared",))["x"])
+    RUNNERS[runner](graph)
+    assert sink.ctx is not None and isinstance(sink.ctx.resources["shared"], Model) and sink.items == [("x", 1, 1)]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
 def test_a_finished_run_frees_its_resources_without_the_cyclic_gc(runner: str) -> None:
     """A run's models and buffers free when it returns, not at the next cyclic collection (a verify card runs many
     cases in one process; a caller may keep its Control)."""

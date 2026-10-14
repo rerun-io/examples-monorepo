@@ -119,8 +119,8 @@ class Graph:
         kind: NodeKind = "segment" if hasattr(node, "run") and not hasattr(node, "step") else "node"
         return self._add(NodeSpec(name, node, kind, placement, tuple(needs)))
 
-    def sink(self, name: str, sink: Node) -> NodeRef:
-        return self._add(NodeSpec(name, sink, "sink", Placement(), ()))
+    def sink(self, name: str, sink: Node, *, needs: Sequence[str] = ()) -> NodeRef:
+        return self._add(NodeSpec(name, sink, "sink", Placement(), tuple(needs)))
 
     def edge(self, src: PortRef, dst: PortRef, kind: PortKind = Block()) -> None:
         self.edges.append(EdgeSpec(src, dst, kind))
