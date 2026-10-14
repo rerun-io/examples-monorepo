@@ -265,3 +265,9 @@ def test_run_health_recolours_the_boxes(tmp_path: Path) -> None:
     assert run._light(busy) == (110, 220, 130)  # one item in a Block(4) queue is fine ...
     busy.triggers[0].queue.append((1, 1, 1))
     assert run._light(busy) == (240, 210, 60)  # ... half full is backpressure
+
+
+def test_the_demo_app_documents_its_graph(tmp_path: Path) -> None:
+    """What every package does for its app graphs, built with fakes: picture == declaration, docs complete, GRAPH.md current."""
+    check_picture(demo_graph(), tmp_path)
+    check_graph_docs(demo_graph(), snapshot=Path(__file__).resolve().parents[1] / "GRAPH.md")
