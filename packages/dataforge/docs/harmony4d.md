@@ -61,8 +61,10 @@ glasses were synchronised by the authors.
 - **World.** aria01's Aria SLAM world: gravity-aligned, z up, metres; its origin is aria01's first head pose (~1.5 m above the
   floor), so the default 3D grid is off. Exo poses come from COLMAP through `colmap_from_aria[aria01]` (a similarity, scale ~1.8:
   divided out of every pose); each Aria's per-frame extrinsic through `inv(colmap_from_aria[ariaNN]) @ colmap_from_aria[aria01]`,
-  as upstream's loaders do. Takes without glasses reach the world through `scale.npy` (some, such as `05_sword2`, ship the
-  Aria transforms as well; only glasses make those the world).
+  as upstream's loaders do. A take that ships `scale.npy` lives in that world instead (COLMAP made metric and gravity-aligned),
+  as upstream's loader decides: its labels are there, glasses or not. `train/12_mma` wears glasses and ships `scale.npy`; its
+  labels sit metres from the Aria world, and its glasses reach the `scale.npy` world through the Aria transforms.
+  `property:capture:world_frame` names the world of each take.
 - **Rigs.** GoPro `camNN` = `rig_NN` (one camera). Glasses `ariaNN` = `rig_(90+NN)`: `cam_00` rgb, `cam_01` slam-left, `cam_02`
   slam-right; the rig frame is the rgb camera's device-orientation frame and moves per frame. The Aria images are upright: each
   Aria camera node logs the lens turned a quarter turn clockwise (`image_rotation_cw_deg` 90).

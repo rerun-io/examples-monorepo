@@ -410,22 +410,24 @@ def read_colmap_images(text: str) -> list[tuple[str, int, Float64[ndarray, "4 4"
 
 
 def read_world(files: SequenceFiles) -> tuple[dict[str, Float64[ndarray, "4 4"]], Float64[ndarray, "4 4"], WorldSource]:
-    """(each Aria's world -> COLMAP, anchor world -> COLMAP, source file): the two ways a take reaches its world.
+    """(each Aria's world -> COLMAP, world -> COLMAP, source file): the two ways a take reaches its world.
 
-    With glasses, ``colmap_from_aria_transforms.pkl`` maps every Aria's world into COLMAP and the anchor's is the world.
-    Exo-only takes ship ``scale.npy`` (COLMAP -> metric world), so the world is ``inv(scale)`` of COLMAP; some ship the
-    transforms as well (05_sword2), and only glasses make those the world.
+    A take that ships ``scale.npy`` (COLMAP -> metric world) lives in that world, ``inv(scale)`` of COLMAP: upstream's loader
+    (jyuntins/harmony4d ``ego_exo_scene.py``) treats it as an exo sequence and the release's labels are in it, glasses or not
+    (train/12_mma wears glasses; its labels miss the Aria world by metres). Otherwise ``colmap_from_aria_transforms.pkl``
+    maps every Aria's world into COLMAP and the anchor's is the world. Glasses reach either world through those transforms.
     """
     workplace: str = "colmap/workplace"
-    has_glasses: bool = any(name.startswith("aria") for name in files.directories("ego"))
-    if not has_glasses and files.exists(f"{workplace}/scale.npy"):
-        scale: Float64[ndarray, "4 4"] = np.asarray(load_pickle(files.read(f"{workplace}/scale.npy"), "scale.npy"), dtype=np.float64)
-        return {}, np.linalg.inv(scale), "scale.npy"
     name: WorldSource = "colmap_from_aria_transforms.pkl"
-    raw: object = load_pickle(files.read(f"{workplace}/{name}"), name)
-    transforms: dict[str, Float64[ndarray, "4 4"]] = {key: np.asarray(value, dtype=np.float64) for key, value in person_dict(raw, name).items()}
+    transforms: dict[str, Float64[ndarray, "4 4"]] = {}
+    if files.exists(f"{workplace}/{name}"):
+        raw: object = load_pickle(files.read(f"{workplace}/{name}"), name)
+        transforms = {key: np.asarray(value, dtype=np.float64) for key, value in person_dict(raw, name).items()}
+    if files.exists(f"{workplace}/scale.npy"):
+        scale: Float64[ndarray, "4 4"] = np.asarray(load_pickle(files.read(f"{workplace}/scale.npy"), "scale.npy"), dtype=np.float64)
+        return transforms, np.linalg.inv(scale), "scale.npy"
     if ANCHOR not in transforms:
-        raise ValueError(f"{name} has no {ANCHOR}: {sorted(transforms)}")
+        raise ValueError(f"{workplace} has neither scale.npy nor an {ANCHOR} in {name}: {sorted(transforms)}")
     return transforms, transforms[ANCHOR], name
 
 
@@ -621,7 +623,8 @@ def read_sequence(files: SequenceFiles, *, pose_dirs: tuple[str, ...] = ("poses3
     aria_to_colmap, colmap_from_world, world_source = read_world(files)
     exo: list[ExoCamera] = read_exo_cameras(files, colmap_from_world, capture)
     frames: Int64[ndarray, "t"] = read_frames(files, exo)
-    glasses: list[AriaGlasses] = read_glasses(files, frames, aria_to_colmap, colmap_from_world, capture.INVALID_ARIAS)
+    # Glasses without transforms (a scale.npy take that ships none) cannot be placed: left out, as upstream does.
+    glasses: list[AriaGlasses] = read_glasses(files, frames, aria_to_colmap, colmap_from_world, capture.INVALID_ARIAS) if aria_to_colmap else []
     pose_dir: str | None = label_dir(files, pose_dirs)
     if pose_dir is None:
         raise ValueError(f"processed_data lacks {' / '.join(pose_dirs)}")

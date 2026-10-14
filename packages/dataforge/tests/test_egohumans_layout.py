@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from egohumans_synthetic import ARIA_FOCAL, ARIA_RGB_UPRIGHT, ARIA_SLAM_OFFSETS, EXO_LENS, EXO_POSES, FRAMES, write_sequence
+from egohumans_synthetic import ARIA_FOCAL, ARIA_RGB_UPRIGHT, ARIA_SLAM_OFFSETS, COLMAP_FROM_WORLD, EXO_LENS, EXO_POSES, FRAMES, write_sequence
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge.egohumans_layout import (
@@ -107,11 +107,13 @@ def test_exo_only_take_reaches_the_world_through_scale(tmp_path: Path) -> None:
         np.testing.assert_allclose(camera.world_T_cam, EXO_POSES[camera.name], atol=1e-9)
 
 
-def test_glasses_take_the_aria_world_when_scale_ships_too(sequence_dir: Path) -> None:
-    np.save(sequence_dir / "colmap/workplace/scale.npy", np.eye(4))  # as 05_sword2 ships both files
-    sequence = read_sequence(DirectorySequenceFiles(sequence_dir))
-    assert sequence.world_source == "colmap_from_aria_transforms.pkl" and [glasses.name for glasses in sequence.glasses] == ["aria01"]
-    np.testing.assert_allclose(sequence.exo[0].world_T_cam, EXO_POSES["cam01"], atol=1e-9)
+def test_scale_decides_the_world_and_glasses_still_reach_it(sequence: Sequence, sequence_dir: Path) -> None:
+    # As train/12_mma ships: glasses, their transforms and scale.npy. Here both worlds coincide, so every pose must too.
+    np.save(sequence_dir / "colmap/workplace/scale.npy", np.linalg.inv(COLMAP_FROM_WORLD))
+    scaled = read_sequence(DirectorySequenceFiles(sequence_dir))
+    assert scaled.world_source == "scale.npy" and [glasses.name for glasses in scaled.glasses] == ["aria01"]
+    np.testing.assert_allclose(scaled.exo[0].world_T_cam, EXO_POSES["cam01"], atol=1e-9)
+    np.testing.assert_allclose(scaled.glasses[0].world_T_rig, sequence.glasses[0].world_T_rig, atol=1e-9)
 
 
 def test_zip_and_directory_read_the_same_sequence(sequence_dir: Path, tmp_path: Path) -> None:
