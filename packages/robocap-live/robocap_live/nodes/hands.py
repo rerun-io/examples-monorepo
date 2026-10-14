@@ -64,6 +64,12 @@ def default_ort_dylib() -> Path:
 
 
 class HandsNode:
+    """Track the hands in each frameset.
+
+    The Rust core (DetNet and KeyNet on ONNX Runtime, the ROBUST tracker on handfit) takes the rig and the whole ``slam_rs``
+    pose table at reset, each frameset in ``step``, and writes the hands layer file itself; ``flush`` emits that file and the
+    run's counts."""
+
     inputs: Mapping[str, PortType] = {"frames": LumaFrameset, "cap_rig": CapRig, "poses": CatalogPoses}
     outputs: Mapping[str, PortType] = {"layer": LayerFile, "run": LayerRun}
 

@@ -40,14 +40,23 @@ LANDMARKS: tuple[str, ...] = tuple(f"/world/hands/{side}/keypoints" for side in 
 """Per hand: the fitted 21 world landmarks (metres) on every frameset the hand was reported."""
 
 
+def case_segment(case: Case) -> SegmentRef:
+    """The case's catalog segment, windowed when the case has a window."""
+    assert case.dataset is not None and case.segment is not None, "robocap-live cases are catalog segments"
+    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
+    return SegmentRef(case.dataset, case.segment, window_ns=window)
+
+
+def case_hands(case: Case) -> HandsParams:
+    """The case's hand settings (``models_dir`` relative to the package)."""
+    return from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
+                                   "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
+
+
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """The hands-layer graph (threaded, lossless) on the case's segment or window: its published layer file (unregistered, in
     a temporary directory) is copied into ``recording`` unchanged, its ``LayerRun`` and wall time go to ``/verify/hands/run``."""
-    assert case.dataset is not None and case.segment is not None, "robocap-live cases are catalog segments"
-    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
-    segment = SegmentRef(case.dataset, case.segment, window_ns=window)
-    params: HandsParams = from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
-                                                  "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
+    segment, params = case_segment(case), case_hands(case)
     started: float = time.perf_counter()
     with TemporaryDirectory() as tmp:
         publish = LayerFileSink(segment, LAYER, output_dir=Path(tmp), register="off")
