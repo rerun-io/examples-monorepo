@@ -806,3 +806,34 @@ def test_process_placement_pins_the_child_to_its_cpus() -> None:
     graph.edge(node["y"], graph.sink("sink", sink)["y"])
     run_threaded(graph, mode="lossless")
     assert sink.items == [("y", 1, 1 << cpu)]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_finished_run_lets_go_of_its_resources_while_its_control_lives(runner: str, fail: bool) -> None:
+    """A UI keeps the Control after a run (gradio's gr.State): the run's models must not stay reachable through it."""
+    import gc
+    import weakref
+
+    refs: list[weakref.ref[Model]] = []
+
+    def model() -> Model:
+        refs.append(weakref.ref(made := Model()))
+        return made
+
+    def explode(tick: Tick) -> None:
+        if fail:
+            raise RuntimeError("boom")
+
+    control = Control()
+    graph = Graph("release")
+    graph.resource("model", model)
+    node = graph.node("a", Add(0), needs=["model"])
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",), on_step=explode))["y"])
+    try:
+        RUNNERS[runner](graph, control=control)
+    except RuntimeError:
+        assert fail
+    gc.collect()
+    assert refs and refs[0]() is None, "the finished run is still reachable through control.wake"

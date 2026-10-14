@@ -42,13 +42,19 @@ class WindowFitter(Protocol):
 
 
 class FitNode:
+    """Fit an SMPL-X body to each person.
+
+    Triangulates every person's landmarks across the views, then fits SMPL-X over a sliding window per person; a fit
+    comes out ``emit_lag`` ticks late, in time order.
+    """
+
     inputs: Mapping[str, PortType] = {"landmarks": Fenced[MultiViewLandmarks], "rig": RigCameras}
     outputs: Mapping[str, PortType] = {"fit": SmplxFits, "kp3d": Landmarks3d, "topology": BodyTopology}
     emits_late: bool = True
 
-    def __init__(self, config: FitterConfig, faces: Int32[ndarray, "f 3"], new_fitter: Callable[[list[Tensor], list[Tensor]], WindowFitter]) -> None:
+    def __init__(self, params: FitterConfig, faces: Int32[ndarray, "f 3"], new_fitter: Callable[[list[Tensor], list[Tensor]], WindowFitter]) -> None:
         """``new_fitter(K per view, cam_T_world per view)`` starts one person's fitter (engine-size intrinsics, float32 on the device)."""
-        self.config, self.faces, self.new_fitter = config, faces, new_fitter
+        self.params, self.faces, self.new_fitter = params, faces, new_fitter
 
     def reset(self, ctx: RunContext) -> None:
         self.fitters: dict[int, WindowFitter] = {}
@@ -57,7 +63,7 @@ class FitNode:
         """Frame index -> its tick time."""
         self.pushed: dict[int, FitResult] = {}
         """Each person's newest result: with ``emit_stride`` > 1 a fitter repeats it on skipped ticks."""
-        self.recent: deque[TimeNs] = deque(maxlen=self.config.window_size)
+        self.recent: deque[TimeNs] = deque(maxlen=self.params.window_size)
         self.closed: TimeNs | None = None
         """Every fit at or before this time has been put (or dropped as late)."""
         self.late: int = 0
@@ -118,7 +124,7 @@ class FitNode:
             return torch.zeros((views, *values.shape[1:]), device=device).index_copy_(0, index, values[row_index])
 
         xy, log_variance, visibility = per_view(landmarks.xy), per_view(landmarks.log_variance), per_view(landmarks.visibility)
-        gated, anchors, valid = triangulate_gated(xy, log_variance, visibility, self.P, reproj_thresh_px=self.config.reproj_gate_px)
+        gated, anchors, valid = triangulate_gated(xy, log_variance, visibility, self.P, reproj_thresh_px=self.params.reproj_gate_px)
         cloud: tuple[Float32[Tensor, "n 3"], Bool[Tensor, " n"]] = triangulate_landmarks(xy, log_variance, visibility, self.P, vis_thresh=-1.0)
         contact: Float32[Tensor, " n"] = landmarks.floor_contact[row_index].mean(dim=0)  # fused over the views that see the person
         contact = torch.where(contact < CONTACT_MIN, 0.0, contact) * valid.float() * torch.exp(-((anchors[:, 2] / CONTACT_HEIGHT_M) ** 2))
@@ -126,7 +132,7 @@ class FitNode:
             self.fitters[person] = self.new_fitter(*self.cameras)
             new.append(person)
         observed: list[Float32[Tensor, "n 3"]] = list(torch.cat([xy, log_variance[..., None]], dim=-1).unbind(0))
-        optimize: bool = self.config.fit_stride <= 1 or landmarks.frame_index % self.config.fit_stride == 0
+        optimize: bool = self.params.fit_stride <= 1 or landmarks.frame_index % self.params.fit_stride == 0
         return self.fitters[person].push(landmarks.frame_index, observed, list(gated.unbind(0)), anchors, valid, floor_contact=contact, optimize=optimize), cloud
 
     def _release(self, out: Emit, until: TimeNs) -> None:

@@ -181,5 +181,6 @@ def main(args: VerifyArgs) -> int:
     return 1 if failed else 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main(tyro.cli(VerifyArgs)))
+if __name__ == "__main__":  # parse with the imported module's classes: a second `Case` here fails beartype in package callbacks
+    module = importlib.import_module("dagkit.verify")
+    raise SystemExit(module.main(tyro.cli(module.VerifyArgs)))

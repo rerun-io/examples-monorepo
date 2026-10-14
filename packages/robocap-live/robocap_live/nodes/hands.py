@@ -37,11 +37,11 @@ class HandsParams:
     """The core's networks and overlays."""
 
     models_dir: Path
-    """``detnet_full.onnx`` and ``keynet.onnx`` (packages/robocap-live/models/MODELS.md)."""
+    """detnet_full.onnx and keynet.onnx (packages/robocap-live/models/MODELS.md)."""
     device: Literal["auto", "cpu", "cuda"] = "auto"
     """ONNX Runtime device: CUDA on GPU 0 when its execution provider registers (auto), or forced."""
     ort_dylib: Path | None = None
-    """``libonnxruntime.so``; default ``ORT_DYLIB_PATH``, else the library of this env's ``onnxruntime`` package."""
+    """libonnxruntime.so; default ORT_DYLIB_PATH, else the library of this env's onnxruntime package."""
     ort_threads: int = 0
     """ONNX Runtime intra-op threads per session (0 = its default)."""
     overlays: Literal["fit", "debug", "verbose"] = "debug"
@@ -64,6 +64,12 @@ def default_ort_dylib() -> Path:
 
 
 class HandsNode:
+    """Track the hands in each frameset.
+
+    The Rust core (DetNet and KeyNet on ONNX Runtime, the ROBUST tracker on handfit) takes the rig and the whole ``slam_rs``
+    pose table at reset, each frameset in ``step``, and writes the hands layer file itself; ``flush`` emits that file and the
+    run's counts."""
+
     inputs: Mapping[str, PortType] = {"frames": LumaFrameset, "cap_rig": CapRig, "poses": CatalogPoses}
     outputs: Mapping[str, PortType] = {"layer": LayerFile, "run": LayerRun}
 

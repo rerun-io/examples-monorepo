@@ -15,20 +15,23 @@ from the catalog. Golden contract (on the segment's ``video_time``; the pre-port
 
 import io
 import itertools
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.runners import run_threaded
 from dagkit.sources import SegmentRef
-from dagkit.verify import Case, Phase
+from dagkit.verify import Case, Phase, load_card
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from PIL import Image
 from rerun.catalog import DatasetEntry
+from simplecv.rerun_log_utils import RerunTyroConfig
 
-PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
-"""``packages/mamma``: weights, body models and the TensorRT cache live under it."""
+from mamma.apis.capture import PACKAGE_DIR, Config, build, engine_plan
+
 PRED_ROOT: str = "/world/mamma/people"
 GT_ROOT: str = "/world/gt/people"
 BODY_JOINTS: int = 22
@@ -39,24 +42,30 @@ def _window_ns(case: Case) -> tuple[int, int]:
     return (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9)) if case.window_s is not None else (-(2**62), 2**62)
 
 
+def case_config(case: Case) -> Config:
+    """The App Config of a case: ``run`` and the gradio app's examples (``example_cases``) run the same inputs."""
+    assert case.dataset is not None and case.segment is not None, "mamma cases are catalog segments"
+    window: tuple[int, int] | None = _window_ns(case) if case.window_s is not None else None
+    height, width = (int(x) for x in case.params["resize_hw"].split(","))
+    return Config(
+        RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment, window_ns=window), cameras=tuple(case.params["cameras"].split(",")),
+        resize_hw=(height, width), preset="quality" if case.params["preset"] == "quality" else "fast", subjects=int(case.params["subjects"]),
+    )  # fmt: skip
+
+
+def example_cases() -> list[Config]:
+    """The gradio app's examples, the ``VERIFY.toml`` cases: ``short`` (the first 10 s), ``full`` (one person) and ``contact``
+    (two people). They never register."""
+    cases: list[Case] = [case for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for case in block.cases]
+    return [replace(case_config(case), register="off") for case in sorted(cases, key=lambda case: case.params["subjects"])]
+
+
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """The capture graph (``apis/capture.py``, threaded, lossless) on the case's segment window; every output goes into ``recording``.
 
     Nothing is registered and no layer file is written, so the shared catalog is only read. ``phase`` does not change what runs.
     """
-    from dagkit.runners import run_threaded
-    from simplecv.rerun_log_utils import RerunTyroConfig
-
-    from mamma.apis.capture import Config, build, engine_plan
-
-    assert case.dataset is not None and case.segment is not None, "mamma cases are catalog segments"
-    window: tuple[int, int] | None = _window_ns(case) if case.window_s is not None else None
-    height, width = (int(x) for x in case.params["resize_hw"].split(","))
-    config = Config(
-        RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment, window_ns=window), cameras=tuple(case.params["cameras"].split(",")),
-        resize_hw=(height, width), preset="quality" if case.params["preset"] == "quality" else "fast", subjects=int(case.params["subjects"]),
-    )  # fmt: skip
-    report = run_threaded(build(config, recording), mode="lossless")
+    report = run_threaded(build(case_config(case), recording), mode="lossless")
     recording.log("/verify/capture/run", rr.AnyValues(wall_s=report.wall_s, stream_s=report.stream_s, trt_engine=engine_plan() is not None), static=True)
     print(f"{case.name} {phase}: {report.nodes['track'].ticks} framesets in {report.wall_s:.1f} s; " + ", ".join(f"{n} {s.step_ms_mean:.0f} ms" for n, s in report.nodes.items() if s.ticks))
 

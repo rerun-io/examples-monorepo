@@ -173,9 +173,13 @@ Pipelines are moving onto one typed node/graph interface in `packages/dagkit` (p
   Pass `health=recording` for the `/dagkit/health` view.
 - **Sinks** take an explicit `RecordingStream`. `LayerSink` writes `<layer>.<run_id>.rrd` and registers it only if
   the segment has no layer of that name (`register="new"`); never re-register over the shared `:51235` corpus.
-- **Apps**: `<module>/apis/<graph>.py` holds `Config` and `build(config, recording) -> Graph`; `main` is
-  `run_app(config, build)`; `dagkit.app.gradio_app` generates the UI. Profiles are `profiles/<hardware>.toml` for
-  `x86_64-cuda`, `aarch64-cuda` and `robocap-cap` only.
+- **Apps**: `<module>/apis/<graph>.py` holds `Config` and `build(config, recording) -> Graph` (a generator of Graphs
+  for a multi-pass app); `main` is `run_app(config, build)`; `dagkit.app.gradio_app` generates the UI from the same
+  `build`. Profiles are `profiles/<hardware>.toml` for `x86_64-cuda`, `aarch64-cuda` and `robocap-cap` only.
+- **Graph view**: both entry points log the graph's picture, guide and `GraphDoc` (`dagkit.doc`) with run-health
+  colours; the App wraps its normal blueprint in `dagkit.app.with_pipeline` for a secondary "pipeline (debug)" tab.
+  A package's `GRAPH.md` is the guide without links, kept by `dagkit.testing.check_graph_docs`; read it to learn a
+  pipeline without running it. `check_picture` proves picture == declaration in the unit lane.
 - **Tests**: `dagkit.testing.check_node_contract` per node, `collect_edges` for sequential == threaded, hypothesis
   for Types and Ops; graph-tier bands live in `VERIFY.toml` and run with `python -m dagkit.verify`.
 
@@ -336,7 +340,8 @@ not build on `osx-arm64`): `[feature.mv-api-catalog-register-mac]` and
 `[feature.slam-rs-osx]`. Both are tagged `# pin-bump: hold`; a bump has to touch
 all four sites or the Mac silently runs a release behind, and no linux gate and
 no `pixi lock --check` can see it. The torch-free lanes `[feature.agent-traces]` and
-`[feature.dagkit]` (which also restates the `gradio` / `gradio-rerun` pins) carry the same tag.
+`[feature.dagkit]` (which also restates the `gradio` / `gradio-rerun` pins) carry the same tag, and so does
+`[feature.dagkit-app]`, which restates the `gradio` / `gradio-rerun` pins for the catalog-lane apps (exo-calib, robocap-live).
 
 To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one

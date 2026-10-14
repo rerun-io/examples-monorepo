@@ -122,8 +122,9 @@ def undistortion_maps(
 
 
 class CatalogVideoSource:
-    """Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``.
+    """Decode the cameras' videos.
 
+    Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``.
     Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera:
     ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize;
     ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time.

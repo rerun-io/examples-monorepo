@@ -16,17 +16,23 @@ from vistadream.ops.image import add_border_and_mask, process_image
 from vistadream.types import OutpaintCanvas, RelativeDepth, RgbImage
 
 
-def image_source(path: Path, max_resolution: int) -> IterSource:
-    """One ``image`` event at t = 0: the file as RGB, resized by ``process_image``."""
+class ImageSource(IterSource):
+    """Read the photo and resize it
 
-    def events() -> Iterator[Event]:
-        yield Event(0, "image", RgbImage(np.array(process_image(Image.open(path).convert("RGB"), max_dimension=max_resolution))))
+    One ``image`` event at t = 0: the file as RGB, resized by ``process_image`` (long side ``max_resolution``)."""
 
-    return IterSource({"image": RgbImage}, events)
+    def __init__(self, path: Path, max_resolution: int) -> None:
+        def events() -> Iterator[Event]:
+            yield Event(0, "image", RgbImage(np.array(process_image(Image.open(path).convert("RGB"), max_dimension=max_resolution))))
+
+        super().__init__({"image": RgbImage}, events)
 
 
 class OutpaintNode:
-    """Pads the image by ``expansion / 2`` per side and fills the border with ``inpaint``; without one, the canvas is the image."""
+    """Outpaint a border around the image
+
+    Pads the image by ``expansion / 2`` per side and fills the border with ``inpaint`` (FLUX.1 Fill); without one, the
+    canvas is the image."""
 
     inputs = {"image": RgbImage}
     outputs = {"canvas": OutpaintCanvas}
@@ -54,7 +60,9 @@ class OutpaintNode:
 
 
 class DepthNode:
-    """Relative depth of the canvas from a predictor with a validity mask (MoGe v1); non-finite depth becomes 0."""
+    """Predict the depth of the canvas
+
+    Relative depth of the canvas from a predictor with a validity mask (MoGe v1); non-finite depth becomes 0."""
 
     inputs = {"canvas": OutpaintCanvas}
     outputs = {"depth": RelativeDepth}

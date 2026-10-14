@@ -46,6 +46,8 @@ class Producer:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class LayerFile:
+    """A finished layer file (an rrd) that a sink publishes."""
+
     path: Path
 
 
@@ -53,11 +55,13 @@ def log_producer(recording: rr.RecordingStream, layer: str, producer: Producer) 
     recording.log(f"/producers/{layer}", rr.AnyValues(**to_dict(producer)), static=True)
 
 
-def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value: Type, root: str) -> None:
+def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value: Type, root: str) -> list[str]:
     if t_ns != STATIC:
         recording.set_time(timeline, duration=np.timedelta64(t_ns, "ns"))
-    for log in value.to_rerun(root):
+    logs: list[Log] = list(value.to_rerun(root))
+    for log in logs:
         recording.log(log.path, log.data, static=log.static or t_ns == STATIC)
+    return [log.path for log in logs]
 
 
 def row_times(table: pa.Table, timeline: str) -> list[TimeNs]:

@@ -58,6 +58,8 @@ OVERLAY_LOG_STRIDE: int = 5
 
 
 class RefineNode:
+    """Refine the rig by bundle adjustment."""
+
     inputs: Mapping[str, PortType] = {"kp2d": MultiViewKeypoints, "init": RigCameras, "rig_layout": RigLayout}
     outputs: Mapping[str, PortType] = {
         "refined": RigCameras, "base_rig": BaseCalibration, "diag": RefinementDiagnostics, "kp3d": Keypoints3dTracks, "kp2d_overlay": Kp2dOverlay,

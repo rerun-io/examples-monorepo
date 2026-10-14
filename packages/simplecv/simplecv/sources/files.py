@@ -22,7 +22,10 @@ def _frames(t_ns: int, index: int, view: str, rgb: UInt8[Tensor, "3 h w"]) -> Ev
 
 
 class VideoFileSource:
-    """Every ``stride``-th frame of a video file (torchcodec, CPU), whole strides only, on the stream's presentation time."""
+    """Decode a video file.
+
+    Every ``stride``-th frame (torchcodec, CPU), whole strides only, on the stream's presentation time.
+    """
 
     clock: str = "video_time"
     outputs: Mapping[str, PortType] = {"frames": MultiViewFrames}
@@ -44,7 +47,10 @@ class VideoFileSource:
 
 
 class ImageDirSource:
-    """The images of a directory in natural sort order, every ``stride``-th, timed at ``fps``."""
+    """Read the images of a directory.
+
+    Natural sort order, every ``stride``-th, timed at ``fps``.
+    """
 
     clock: str = "video_time"
     outputs: Mapping[str, PortType] = {"frames": MultiViewFrames}

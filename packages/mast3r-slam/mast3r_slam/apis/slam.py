@@ -3,18 +3,18 @@
 The graph is ``graphs/slam.py``; the CLI (``tools/apps/slam.py``) and the gradio app (``tools/apps/slam_gradio.py``) both
 run ``build``. SLAM parameters come from ``profiles/<hardware>.toml`` (a preset picks an operating point); ``img_size``
 and ``subsample`` override it. Lossless (default) waits for the backend after every keyframe; use realtime for a camera.
-The generated form sends 0 for an empty number field, so 0 means "not set" for ``max_frames`` and ``subsample``, and a
-file input takes precedence over ``webcam``.
+Inputs, first given wins: ``video``, ``images``, ``webcam``, then ``segment`` (default: the VERIFY.toml short case, so a
+run without arguments and the form's defaults run a known-good clip). 0 means "not set" for ``max_frames`` and ``subsample``.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit.app import HardwareClass, load_profile, run_app
+from dagkit.app import HardwareClass, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
 from dagkit.node import Event, Mode, Node, PortType, Source
 from dagkit.runners import RunReport
@@ -42,24 +42,24 @@ LAYER: str = "mast3r_slam"
 @dataclass
 class Config:
     rr_config: RerunTyroConfig
-    segment: SegmentRef | None = None
-    """Catalog input (takes precedence): the camera ``camera`` of this segment (``window_ns`` clips it)."""
+    segment: SegmentRef | None = field(default_factory=lambda: SegmentRef("msd-odyssey", "msd-odyssey__MOO_others__MOO01_hand_puncher_1", window_ns=(0, 30_000_000_000)))
+    """Catalog input when no video, images or webcam is given: the camera named by camera in this segment (window_ns clips it)."""
     camera: str = "rig_00/cam_00"
-    """Catalog camera entity under ``/world``."""
+    """Catalog camera entity under /world."""
     undistort: bool = False
     """Catalog input: undistort the camera with its stored Brown-Conrady coefficients first (the MASt3R-SLAM paper does
     on EuRoC always and on TUM when calibrated)."""
     video: Path | None = None
-    """Video file input (used when there is no segment); ``pixi run mast3r-slam-example-*`` downloads examples to ``data/``."""
+    """Video file input (beats every other input); pixi run mast3r-slam-example-* downloads examples to data/."""
     images: Path | None = None
-    """Image directory input (natural sort order, 30 fps; used when there is no segment or video)."""
+    """Image directory input (natural sort order, 30 fps; used when there is no video)."""
     webcam: int | None = None
-    """Live OpenCV camera index, used when no segment, video or image directory is given (run with ``--mode realtime``)."""
+    """Live OpenCV camera index, used when no video or image directory is given (run with --mode realtime)."""
     max_frames: int | None = None
-    """File inputs: stop after this many frames, counted after ``subsample`` (0: all)."""
+    """File inputs: stop after this many frames, counted after subsample (0: all)."""
     hardware: HardwareClass | Literal["auto"] = "auto"
-    preset: str | None = None
-    """Profile operating point: ``fast`` (224 px, every 5th frame), ``eval`` (every 2nd frame), ``calib`` (calibrated)."""
+    preset: Literal["base", "eval", "fast", "calib"] | None = None
+    """Profile operating point: fast (224 px, every 5th frame), eval (every 2nd frame), calib (calibrated)."""
     img_size: Literal[224, 512] | None = None
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
@@ -67,12 +67,18 @@ class Config:
     output_nerfstudio: Path | None = None
     """Export the final keyframes in Nerfstudio format into this directory."""
     layer_dir: Path | None = None
-    """Catalog input: also write the segment's ``mast3r_slam`` layer here (windowed runs publish it unregistered)."""
+    """Catalog input: also write the segment's mast3r_slam layer here (windowed runs publish it unregistered)."""
     register: Register = "new"
-    """How the layer reaches the segment's catalog (``new`` refuses to overwrite)."""
+    """How the layer reaches the segment's catalog (new refuses to overwrite)."""
     runner: Literal["sequential", "threaded"] = "threaded"
-    """``threaded`` only: the lossless frontend waits for the backend inside its own calls, where ``sequential`` cannot step it."""
+    """Threaded only: the lossless frontend waits for the backend inside its own calls, where sequential cannot step it."""
     mode: Mode = "lossless"
+
+
+def examples() -> list[Config]:
+    """The gradio app's one-click example: the VERIFY.toml short case (the default segment's first 30 s, every 2nd frame
+    at 512 px, uncalibrated, lossless), so one click reproduces the banded run."""
+    return [Config(RerunTyroConfig(headless=True), subsample=2, img_size=512)]
 
 
 def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
@@ -98,15 +104,15 @@ def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
 
 def video_source(config: Config, cfg: SlamConfig) -> Source:
     max_frames: int | None = config.max_frames or None
-    if config.segment is not None:
-        return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
     if config.video is not None:
         return VideoFileSource(config.video, stride=cfg.subsample, max_frames=max_frames)
     if config.images is not None:
         return ImageDirSource(config.images, stride=cfg.subsample, max_frames=max_frames)
-    if config.webcam is None:
-        raise ValueError("no input: give a segment, a video, an image directory or a webcam")
-    return Webcam(config.webcam, max_frames)
+    if config.webcam is not None:
+        return Webcam(config.webcam, max_frames)
+    if config.segment is None:
+        raise ValueError("no input: give a video, an image directory, a webcam or a segment")
+    return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
 
 
 def slam_config(config: Config) -> SlamConfig:
@@ -122,13 +128,22 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     video: Source = video_source(config, cfg)
     ports, roots = outputs(config.camera)
     recording.log(ROOT, rr.ViewCoordinates.RDF, static=True)
-    recording.send_blueprint(rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), collapse_panels=True))
+    debug: list[rrb.View] = [  # the "pipeline (debug)" tab's output views, beside the graph view's guide
+        rrb.Spatial3DView(
+            origin=ROOT, contents=[f"+ {roots['tracked']}", f"+ {roots['map']}/keyframes", f"+ {roots['map']}/edges"],
+            overrides={roots["tracked"]: rr.TransformAxes3D(0.1)}, name="2 frontend · tracked camera",
+        ),
+        rrb.DataframeView(origin=roots["tracked"], name="2 frontend · tracked poses"),
+        rrb.Spatial3DView(origin=ROOT, contents=f"+ {roots['map']}/**", name="3 backend · map"),
+    ]  # fmt: skip
+    normal = rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), rrb.TimePanel(state="collapsed", timeline=video.clock), collapse_panels=True)
+    recording.send_blueprint(with_pipeline(normal, debug))  # the outputs' clock, not the run health's wall_time
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, ports, roots)}
-    if config.segment is not None and config.layer_dir is not None:
+    if isinstance(video, CatalogVideoSource) and config.layer_dir is not None:
         producer = Producer("mast3r-slam", "0.0.1", "mast3r-slam", config.preset or "base")
-        layer, partial = open_layer(config.segment, LAYER, producer, output_dir=config.layer_dir)
+        layer, partial = open_layer(video.segment, LAYER, producer, output_dir=config.layer_dir)
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
-        sinks["layer"] = LayerSink(layer, partial, config.segment, LAYER, layer_ports, roots, register=config.register)
+        sinks["layer"] = LayerSink(layer, partial, video.segment, LAYER, layer_ports, roots, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
     return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, Webcam), nerfstudio=nerfstudio)
 

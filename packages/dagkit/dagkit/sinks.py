@@ -53,6 +53,8 @@ def publish_layer_file(partial: Path, segment: SegmentRef, layer: str, *, output
 
 
 class RerunSink:
+    """Draw its inputs in the viewer."""
+
     outputs: Mapping[str, PortType] = {}
 
     def __init__(
@@ -62,18 +64,23 @@ class RerunSink:
         self.inputs: dict[str, PortType] = dict(inputs)
         self.roots: dict[str, str] = dict(roots)
         self.timeline: str = timeline
+        self.drawn: dict[str, set[str]] = {}  # input port -> entity paths it logged (the first 64): the guide's links
 
     def reset(self, ctx: RunContext) -> None:
         pass
 
     def step(self, tick: Tick, out: Emit) -> None:
-        log_value(self.recording, self.timeline, tick.t_ns, cast(Type, tick.value), self.roots[tick.port])
+        paths: list[str] = log_value(self.recording, self.timeline, tick.t_ns, cast(Type, tick.value), self.roots[tick.port])
+        if len(drawn := self.drawn.setdefault(tick.port, set())) < 64:
+            drawn.update(paths)
 
     def flush(self, out: Emit) -> None:
         self.recording.flush()
 
 
 class LayerFileSink:
+    """Publish a finished layer file."""
+
     inputs: dict[str, PortType] = {"layer": LayerFile}
     outputs: Mapping[str, PortType] = {}
 
@@ -101,6 +108,8 @@ class LayerFileSink:
 
 
 class LayerSink(RerunSink, LayerFileSink):
+    """Save its inputs as a catalog layer."""
+
     def __init__(
         self,
         recording: rr.RecordingStream,

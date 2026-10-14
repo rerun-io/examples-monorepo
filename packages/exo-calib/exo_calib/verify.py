@@ -12,30 +12,44 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.app import RUNNERS
 from dagkit.sources import SegmentRef
-from dagkit.verify import Case, Phase
+from dagkit.verify import Case, Phase, load_card
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 from simplecv.rerun_log_utils import RerunTyroConfig
 
+from exo_calib.apis.calibrate import Config, build
+
 CHILD_FROM_PARENT: int = 2
 """``Transform3D:relation`` value of a camera node logged as cam_T_world."""
+CARD: Path = Path(__file__).resolve().parents[1] / "VERIFY.toml"
+
+
+def case_config(case: Case) -> Config:
+    """The App config of a catalog case; it registers nothing, and its files go to the package's ``data/outputs`` from any cwd."""
+    assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
+    segment = SegmentRef(case.dataset, case.segment)
+    return Config(RerunTyroConfig(headless=True), segment, frame_budget=int(case.params["frame_budget"]), output_dir=CARD.parent / "data" / "outputs", register="off")
+
+
+def examples() -> list[Config]:
+    """The card's short cases as App configs: the gradio app's examples, one click from a known-good run."""
+    return [case_config(case) for block in load_card(CARD).graph for case in block.cases if case.clip == "short"]
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The ported graph (``apis/calibrate.py``, lossless, threaded): every final output goes into ``recording``.
+    """The App's graphs (``apis/calibrate.py``, lossless, threaded): every final output goes into ``recording``.
 
     Nothing is registered and no layer file is written, so the shared catalog is only read. ``phase`` does not change what runs.
     """
-    from exo_calib.apis.calibrate import Config, calibrate
-
-    assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
     if case.window_s is not None:  # fail closed: Stage A calibrates from Config.frame_index, which a window may exclude
         raise ValueError(f"case {case.name!r}: exo-calib does not run windowed cases (window_s); use frame_budget for a short clip")
-    config = Config(RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment), frame_budget=int(case.params["frame_budget"]), register="off")
-    calibrate(config, golden=recording)
+    config: Config = case_config(case)
+    for graph in build(config, recording, golden=True):
+        RUNNERS[config.runner](graph, mode=config.mode)
     print(f"{case.name} {phase}: graph outputs written into the golden")
 
 

@@ -212,3 +212,21 @@ def test_register_skips_windowed_and_failed_cases(card: Path, monkeypatch: pytes
     card.write_text(SHORT_CARD)
     assert verify.main(verify.VerifyArgs(card, "post", register=True)) == 1  # no pre / pre2 goldens: the case failed
     assert registered == []
+
+
+def test_running_the_module_parses_the_imported_classes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`python -m dagkit.verify` must build `dagkit.verify.VerifyArgs` (one Case class), or beartype rejects package callbacks."""
+    import runpy
+    import warnings
+
+    seen: list[type] = []
+
+    def cli(cls: type) -> None:
+        seen.append(cls)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(tyro, "cli", cli)
+    with warnings.catch_warnings(), pytest.raises(SystemExit):
+        warnings.simplefilter("ignore", RuntimeWarning)  # runpy: the module is already imported
+        runpy.run_module("dagkit.verify", run_name="__main__")
+    assert seen == [verify.VerifyArgs]

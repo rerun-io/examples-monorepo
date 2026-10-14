@@ -30,6 +30,12 @@ class DenseLandmarker(Protocol):
 
 
 class LandmarksNode:
+    """Find each tracked person's 2D landmarks.
+
+    MammaNet's dense landmarks (with log-variance, visibility and floor contact) per (view, person) track, cropped around
+    the track's mask from the frames of the same tick.
+    """
+
     inputs: Mapping[str, PortType] = {"tracks": Fenced[MultiViewTracks], "frames": Fenced[MultiViewFrames]}
     outputs: Mapping[str, PortType] = {"landmarks": Fenced[MultiViewLandmarks]}
 

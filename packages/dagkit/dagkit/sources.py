@@ -61,6 +61,8 @@ def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Colu
 
 
 class IterSource:
+    """Hand in values from the App."""
+
     def __init__(self, outputs: Mapping[str, PortType], events: Callable[[], Iterator[Event]], *, clock: str = "video_time") -> None:
         self.outputs: dict[str, PortType] = dict(outputs)
         self.clock: str = clock
@@ -74,6 +76,8 @@ class IterSource:
 
 
 class CatalogSegmentSource(IterSource):
+    """Read stored layers from the catalog."""
+
     def __init__(self, segment: SegmentRef, ports: Mapping[str, Column]) -> None:
         def events() -> Iterator[Event]:
             dataset: DatasetEntry = segment.entry()  # the entry must outlive its queries
@@ -83,6 +87,8 @@ class CatalogSegmentSource(IterSource):
 
 
 class RecordingSource(IterSource):
+    """Read stored values from an rrd file."""
+
     def __init__(self, path: Path, ports: Mapping[str, Column], timeline: str = "video_time") -> None:
         def events() -> Iterator[Event]:
             with rr.server.Server(host="127.0.0.1", datasets={"recording": [str(path)]}) as server:

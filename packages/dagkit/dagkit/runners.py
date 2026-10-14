@@ -15,9 +15,11 @@ import numpy as np
 import rerun as rr
 from serde import serde
 
-from dagkit.graph import AsOf, DropOldest, EdgeSpec, Graph, NodeSpec, Spawn, normalise
+from dagkit.doc import GRAPH_ROOT, Rgb, log_graph
+from dagkit.graph import AsOf, Block, DropOldest, EdgeSpec, Graph, NodeSpec, Spawn, normalise
 from dagkit.node import Control, Event, Fenced, Mode, RunContext, Tick
 from dagkit.process import ProcessNode
+from dagkit.sinks import RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.time import STATIC, TIME_MAX, GraphError, TimeNs, check_monotonic
 
@@ -89,6 +91,7 @@ class _State:
     step_ms: list[float] = field(default_factory=list)
     logged: int = 0
     pending_max: int = 0
+    drops_seen: int = 0  # drops at the last health log
 
     def put(self, port: str, t_ns: TimeNs, value: object) -> None:
         run: _Run = self.run
@@ -138,8 +141,7 @@ class _Run:
         self.graph, self.mode, self.threaded = graph, mode, threaded
         self.control: Control = control or Control()
         self.control.wake = self.notify
-        lock = threading.RLock()
-        self.cond: threading.Condition = threading.Condition(lock)
+        self.cond: threading.Condition = threading.Condition(threading.RLock())
         self.failure: BaseException | None = None
         self.running = False
         self.seq = self.world = 0
@@ -304,7 +306,7 @@ class _Run:
             self._reset(s, world)
 
     def _drain(self) -> None:
-        while any([self._node_loop(s, wait=False) for s in self.nodes]):  # visit every node, without short-circuiting
+        while any([self._node_loop(s) for s in self.nodes]):  # visit every node, without short-circuiting
             pass
 
     def sequential(self, streams: list[Iterator[Event]]) -> None:
@@ -341,14 +343,14 @@ class _Run:
             self._emit(s, event)
         self._close(s)
 
-    def _node_loop(self, s: _State, *, wait: bool = True) -> bool:
-        if wait and s.spec.placement.cpus and hasattr(os, "sched_setaffinity"):
+    def _node_loop(self, s: _State) -> bool:
+        if self.threaded and s.spec.placement.cpus and hasattr(os, "sched_setaffinity"):
             os.sched_setaffinity(0, s.spec.placement.cpus)
         progress: bool = False
         while not s.done:
             with self.cond:
                 while (item := self._next(s)) is None and not self._can_finish(s):
-                    if not wait:
+                    if not self.threaded:
                         return progress
                     self.wait()
                 if self.failure is not None:
@@ -406,12 +408,26 @@ class _Run:
             for edge in s.triggers:
                 self.health.log(f"{root}/queue_depth/{edge.spec.dst.port}", rr.Scalars(float(len(edge.queue))))
                 self.health.log(f"{root}/drops/{edge.spec.dst.port}", rr.Scalars(float(edge.drops)))
+        ids, colors = self.picture
+        colors = [self._light(self.states[i]) if i in self.states and self.states[i].spec.kind != "source" else c for i, c in zip(ids, colors, strict=True)]
+        self.health.log(GRAPH_ROOT + self.graph.name, rr.GraphNodes.from_fields(colors=colors))
+
+    def _light(self, s: _State) -> Rgb:
+        """grey: no input yet; red: drops since the last health log; yellow: a Block queue at least half full; else green."""
+        drops: int = sum(e.drops for e in s.triggers)
+        dropped, s.drops_seen = drops > s.drops_seen, drops
+        if not (s.ticks or any(s.collected.values())):
+            return (130, 130, 130)
+        if dropped:
+            return (255, 80, 80)
+        return (240, 210, 60) if any(isinstance(e.spec.kind, Block) and 2 * len(e.queue) >= e.spec.kind.capacity for e in s.triggers) else (110, 220, 130)
 
     def execute(self, health: rr.RecordingStream | None, every_s: float) -> RunReport:
         self.started_at: float = time.perf_counter()
         self.health: rr.RecordingStream | None = health
         self.health_every_s: float = every_s
         try:
+            self.picture: tuple[list[str], list[Rgb]] = log_graph(health, self.graph, health=True) if health is not None else ([], [])
             for name, factory in self.graph.resources.items():
                 self.resources[name] = factory()
             streams: list[Iterator[Event]] = [self._start_source(s) for s in self.sources]
@@ -435,6 +451,8 @@ class _Run:
                 self._release()
             raise first from None
         self._close_resources()
+        if health is not None:  # the guide's "See it" links: what each viewer sink drew
+            log_graph(health, self.graph, drawn={s.spec.name: s.obj.drawn for s in self.nodes if isinstance(s.obj, RerunSink) and s.obj.recording is health}, health=True)
         self._health(force=True)
         wall_s: float = time.perf_counter() - self.started_at
         nodes: dict[str, NodeStats] = {}
@@ -446,8 +464,7 @@ class _Run:
         return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, max(self.last - self.first, 0) / 1e9, nodes)
 
     def _release(self) -> None:
-        """Break the run's reference cycles (states and control.wake point back at the run), so its resources and the
-        nodes' references to them free when the run returns instead of at the next cyclic collection."""
+        """Break state/control cycles so resources free on return without cyclic GC, even while a UI keeps Control."""
         self.control.wake = lambda: None
         self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
 
