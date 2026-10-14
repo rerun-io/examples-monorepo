@@ -44,6 +44,13 @@ def nanoseconds(value: str) -> int:
     return int(Decimal(value))
 
 
+def row_major_4x4(values: list[float]) -> Float64[ndarray, "4 4"]:
+    """A ``T_BS`` list as the 4x4 it writes row-major; anything but 16 numbers is refused."""
+    if len(values) != 16:
+        raise ValueError(f"T_BS holds {len(values)} numbers, not a 4x4")
+    return np.array(values, dtype=np.float64).reshape(4, 4)
+
+
 @serde(type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class CameraEntry:
@@ -61,8 +68,8 @@ class CameraEntry:
     """Width, height in pixels."""
     fps: float
     """Nominal frame rate."""
-    T_BS: tuple[float, ...]  # noqa: N815 — VSLAM-LAB's own key
-    """body_T_sensor, a row-major 4x4."""
+    body_T_sensor: Float64[ndarray, "4 4"] = field(rename="T_BS", deserializer=row_major_4x4)
+    """Pose in the body (rig) frame, VSLAM-LAB's ``T_BS``."""
     distortion_type: Literal["radtan4", "radtan5"] | None = None
     """Brown-Conrady with k1 k2 p1 p2 (radtan4) or k1 k2 p1 p2 k3 (radtan5); absent for an undistorted camera."""
     distortion_coefficients: tuple[float, ...] = ()
@@ -73,18 +80,11 @@ class CameraEntry:
     """Native depth units per metre: metres = pixel / depth_factor."""
 
     def __post_init__(self) -> None:
-        if len(self.T_BS) != 16:
-            raise ValueError(f"{self.cam_name}: T_BS holds {len(self.T_BS)} numbers, not a 4x4")
         expected: int = {None: 0, "radtan4": 4, "radtan5": 5}[self.distortion_type]
         if len(self.distortion_coefficients) != expected:
             raise ValueError(f"{self.cam_name}: {self.distortion_type} takes {expected} coefficients, got {len(self.distortion_coefficients)}")
         if (self.depth_name is None) != (self.depth_factor is None):
             raise ValueError(f"{self.cam_name}: depth_name and depth_factor come together")
-
-    @property
-    def body_T_sensor(self) -> Float64[ndarray, "4 4"]:
-        """``T_BS`` as a matrix."""
-        return np.array(self.T_BS, dtype=np.float64).reshape(4, 4)
 
 
 @serde(type_check=coerce)
@@ -96,8 +96,8 @@ class ImuEntry:
     """Stream it describes, ``imu_<i>``."""
     fps: float
     """Nominal sample rate."""
-    T_BS: tuple[float, ...]  # noqa: N815 — VSLAM-LAB's own key
-    """body_T_sensor, a row-major 4x4."""
+    body_T_sensor: Float64[ndarray, "4 4"] = field(rename="T_BS", deserializer=row_major_4x4)
+    """Pose in the body (rig) frame, VSLAM-LAB's ``T_BS``."""
     sigma_g_c: float | None = None
     """Gyro white-noise density, rad/s/sqrt(Hz)."""
     sigma_a_c: float | None = None
@@ -106,15 +106,6 @@ class ImuEntry:
     """Gyro bias random walk, rad/s^2/sqrt(Hz)."""
     sigma_aw_c: float | None = None
     """Accelerometer bias random walk, m/s^3/sqrt(Hz)."""
-
-    def __post_init__(self) -> None:
-        if len(self.T_BS) != 16:
-            raise ValueError(f"{self.imu_name}: T_BS holds {len(self.T_BS)} numbers, not a 4x4")
-
-    @property
-    def body_T_sensor(self) -> Float64[ndarray, "4 4"]:
-        """``T_BS`` as a matrix."""
-        return np.array(self.T_BS, dtype=np.float64).reshape(4, 4)
 
 
 @serde(type_check=coerce)
