@@ -93,7 +93,12 @@ properties = [
 name = "gauss-newton-parity"
 tier = "op"
 lane = "integration"
-tests = ["tests/test_integration.py::test_gauss_newton_rays_equals_the_mojo_loop"]
+tests = [
+    "tests/test_integration.py::test_gauss_newton_rays_step_matches_a_float64_reference",
+    "tests/test_integration.py::test_pose_retr_matches_lietorch_and_keeps_the_pinned_pose",
+    "tests/test_integration.py::test_gauss_newton_rays_moves_only_the_free_poses",
+    "tests/test_mojo_vs_cuda.py::test_gauss_newton_rays_matches_cuda_on_representative_base_shape",
+]
 
 [[tests]]
 name = "nodes"
