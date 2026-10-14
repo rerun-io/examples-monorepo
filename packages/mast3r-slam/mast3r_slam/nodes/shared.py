@@ -33,11 +33,6 @@ class SharedStates:
         dtype: torch.dtype = torch.float32,
         device: str = "cuda",
     ) -> None:
-        self.h: int = h
-        self.w: int = w
-        self.dtype: torch.dtype = dtype
-        self.device: str = device
-
         self.lock = manager.RLock()
         self.mode = manager.Value("i", Mode.INIT)
         self.reloc_sem = manager.Value("i", 0)
@@ -61,11 +56,7 @@ class SharedStates:
         # fmt: on
 
     def set_frame(self, frame: Frame) -> None:
-        """Copy the frame's data into shared memory tensors.
-
-        Args:
-            frame: The Frame whose data should be written.
-        """
+        """Copy the frame's data into the shared tensors under the lock."""
         assert frame.X_canon is not None
         assert frame.C is not None
         assert frame.feat is not None
@@ -83,11 +74,7 @@ class SharedStates:
             self.pos[:] = frame.pos
 
     def get_frame(self) -> Frame:
-        """Read the current frame from shared memory.
-
-        Returns:
-            A Frame constructed from the shared state tensors.
-        """
+        """Read the current frame, retaining views of the shared tensors."""
         with self.lock:
             frame: Frame = Frame(
                 int(self.dataset_idx[0]),
@@ -104,11 +91,7 @@ class SharedStates:
             return frame
 
     def queue_global_optimization(self, idx: int) -> None:
-        """Enqueue a keyframe index for global optimization.
-
-        Args:
-            idx: Keyframe index to optimize.
-        """
+        """Enqueue a keyframe index for global optimization."""
         with self.lock:
             self.global_optimizer_tasks.append(idx)
 
@@ -125,20 +108,12 @@ class SharedStates:
             self.reloc_sem.value -= 1
 
     def get_mode(self) -> Mode:
-        """Return the current operating mode.
-
-        Returns:
-            The current Mode enum value.
-        """
+        """Return the current operating mode under the lock."""
         with self.lock:
             return self.mode.value
 
     def set_mode(self, mode: Mode) -> None:
-        """Set the operating mode.
-
-        Args:
-            mode: The new Mode to set.
-        """
+        """Set the operating mode under the lock."""
         with self.lock:
             self.mode.value = mode
 
@@ -165,10 +140,7 @@ class SharedKeyframes:
         self.lock = manager.RLock()
         self.n_size = manager.Value("i", 0)
 
-        self.h: int = h
-        self.w: int = w
         self.buffer: int = buffer
-        self.dtype: torch.dtype = dtype
         self.device: str = device
 
         self.feat_dim: int = 1024
@@ -191,16 +163,8 @@ class SharedKeyframes:
         # fmt: on
 
     def __getitem__(self, idx) -> Frame:
-        """Retrieve a keyframe by buffer index.
-
-        Args:
-            idx: Buffer index of the keyframe.
-
-        Returns:
-            A Frame constructed from the shared tensors at the given index.
-        """
+        """Read a keyframe by buffer index, retaining views of the shared tensors."""
         with self.lock:
-            # put all of the data into a frame
             kf: Frame = Frame(
                 int(self.dataset_idx[idx]),
                 self.rgb_tensor[idx],
@@ -220,15 +184,7 @@ class SharedKeyframes:
             return kf
 
     def __setitem__(self, idx: int, value: Frame) -> int:
-        """Write a Frame into the shared buffer at the given index.
-
-        Args:
-            idx: Buffer index to write to.
-            value: The Frame to store.
-
-        Returns:
-            The index that was written.
-        """
+        """Write a frame into the shared buffer and return its index; refuse a full buffer."""
         assert value.X_canon is not None
         assert value.C is not None
         assert value.feat is not None
@@ -238,7 +194,6 @@ class SharedKeyframes:
         with self.lock:
             self.n_size.value = max(idx + 1, self.n_size.value)
 
-            # set the attributes
             self.dataset_idx[idx] = value.frame_id
             self.rgb_tensor[idx] = value.rgb_tensor
             self.rgb[idx] = value.rgb
@@ -259,11 +214,7 @@ class SharedKeyframes:
             return self.n_size.value
 
     def append(self, value: Frame) -> None:
-        """Append a keyframe to the end of the buffer.
-
-        Args:
-            value: The Frame to append.
-        """
+        """Append a keyframe to the end of the buffer."""
         with self.lock:
             self[self.n_size.value] = value
 
@@ -273,11 +224,7 @@ class SharedKeyframes:
             self.n_size.value -= 1
 
     def last_keyframe(self) -> Frame | None:
-        """Return the most recently appended keyframe, or None if empty.
-
-        Returns:
-            The last Frame in the buffer, or None when the buffer is empty.
-        """
+        """Return the most recently appended keyframe, or None if empty."""
         with self.lock:
             if self.n_size.value == 0:
                 return None
