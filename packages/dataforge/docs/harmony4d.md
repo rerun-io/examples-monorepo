@@ -116,5 +116,11 @@ profiled on an idle host), 4.0 s projections; 183 MB of rrds from 1.7 GB of JPEG
   fix, say) means fetching that zip again: no other layer keeps each frame's Aria calibration or the shipped boxes.
 - `coco133_uv_projected` confidence is 1 wherever the lens places a joint, as in MAMMA and Ego-Exo4D; the shipped 3D confidence
   stays on `coco133_xyz` only.
+- **Release fault, three takes:** `train/12_mma/{001,002,009}_mma` ship glasses and the Aria transforms but no `scale.npy`.
+  Their labels are not in the Aria world: our projection, by upstream's own loader rule, lands 200-380 px (median) from the
+  release's `poses2d`. That `poses2d` sits inside the release's boxes, so the release placed these labels in a world it does
+  not ship. None of the Aria world, the raw COLMAP frame or a sibling take's `scale.npy` fits (205-586 px). Left as converted
+  (a label fault, not corrected). Corpus check (projected COCO keypoints inside the shipped GoPro boxes, enlarged 25 %):
+  1.000 on the other 205 takes, 0.10-0.18 on these three.
 - Aria joints just past projectaria-tools' Gen1 cone or valid radius are NaN, where the release's own 2D still places them (12
   of 453 sampled on `002_hugging`, at 57-64° off-axis for rgb and 80-88° for slam).
