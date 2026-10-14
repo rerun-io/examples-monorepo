@@ -87,6 +87,9 @@ TUM_RGB_CSV: str = """ts_rgb_0 (ns),path_rgb_0,ts_depth_0 (ns),path_depth_0
 1305031102211214080,rgb_0/1305031102.211214.png,1305031102211214080,depth_0/1305031102.226738.png
 """
 
+IMU_HEADER: str = "ts (ns),wx (rad s^-1),wy (rad s^-1),wz (rad s^-1),ax (m s^-2),ay (m s^-2),az (m s^-2)"
+"""imu_0.csv's header, as VSLAM-LAB writes it."""
+
 EUROC_RGB_CSV: str = """ts_rgb_0 (ns),path_rgb_0,ts_rgb_1 (ns),path_rgb_1
 1403636579763555584,rgb_0/1403636579763555584.png,1403636579763555584,rgb_1/1403636579763555584.png
 1403636579813555457,rgb_0/1403636579813555456.png,1403636579813555457,rgb_1/1403636579813555456.png
@@ -168,10 +171,23 @@ def test_an_imu_csv_splits_into_gyro_and_accel(tmp_path: Path) -> None:
         write(
             tmp_path,
             "imu_0.csv",
-            "ts (ns),wx (rad s^-1),wy (rad s^-1),wz (rad s^-1),ax (m s^-2),ay (m s^-2),az (m s^-2)\n"
-            "1403636579758555392,-0.0991,0.1473,0.0272,8.1476,-0.3759,-2.4026\n",
+            f"{IMU_HEADER}\n1403636579758555392,-0.0991,0.1473,0.0272,8.1476,-0.3759,-2.4026\n",
         )
     )
     assert imu.gyro.times_ns.tolist() == imu.accel.times_ns.tolist() == [1403636579758555392]
     np.testing.assert_array_equal(imu.gyro.values_xyz, [[-0.0991, 0.1473, 0.0272]])
     np.testing.assert_array_equal(imu.accel.values_xyz, [[8.1476, -0.3759, -2.4026]])
+
+
+def test_imu_and_gt_stamps_written_as_float_literals_are_read_exactly(tmp_path: Path) -> None:
+    imu: ImuStream = read_imu(write(tmp_path, "imu_0.csv", f"{IMU_HEADER}\n1403636579758555393.0,0,0,0,0,0,9.8\n"))
+    poses: GtTrajectory = read_poses(write(tmp_path, "groundtruth.csv", "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n1403636580838555649.0,1,2,3,0,0,0,1\n"))
+    assert imu.gyro.times_ns.tolist() == [1403636579758555393]
+    assert poses.times_ns.tolist() == [1403636580838555649]
+    np.testing.assert_array_equal(poses.translations_xyz, [[1.0, 2.0, 3.0]])
+
+
+@pytest.mark.parametrize("body", ["ts (ns),wx (rad s^-1)\n1,0.1\n", f"{IMU_HEADER}\n1,0.1,,0.3,9.8,0,0\n"])
+def test_an_imu_csv_with_a_missing_column_or_cell_names_the_file(tmp_path: Path, body: str) -> None:
+    with pytest.raises(ValueError, match="imu_0.csv"):
+        read_imu(write(tmp_path, "imu_0.csv", body))
