@@ -58,6 +58,13 @@ def harmony_hub(monkeypatch: pytest.MonkeyPatch) -> HubStore:
     return store
 
 
+def test_gopro_panes_are_cameras_every_take_ships() -> None:
+    """206 of the 208 takes ship cam01-cam20 (only two 01_hugging takes add cam21/cam22): every pane must exist in all of them."""
+    assert len(harmony4d.EXO_PANES) == 8
+    assert harmony4d.EXO_PANES[0] == 1 and harmony4d.EXO_PANES[-1] == 20
+    assert all(1 <= rig <= 20 for rig in harmony4d.EXO_PANES)
+
+
 def test_remote_sequences_are_the_release_zips(monkeypatch: pytest.MonkeyPatch) -> None:
     harmony_hub(monkeypatch)
     listed = Harmony4dConfig(root=Path("/nonexistent")).setup().remote_sequences()

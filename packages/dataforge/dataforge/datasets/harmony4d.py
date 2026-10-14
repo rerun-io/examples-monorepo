@@ -29,8 +29,8 @@ SOURCE_REVISION: str = "3fedb23fd9d1a92541d98ccbce025c695bd752e4"
 """The release as of 2024-11-09: 22 zips, 351.6 GB."""
 EGO_PANES: tuple[int, ...] = (EGO_RIG_OFFSET + 1, EGO_RIG_OFFSET + 2)
 """Rigs of aria01 and aria02 (``egohumans_writers.ego_rig``); takes without glasses leave the panes empty."""
-EXO_PANES: tuple[int, ...] = (1, 4, 7, 10, 13, 16, 19, 22)
-"""Eight of the ~20 GoPros, evenly spaced (MAMMA's eight-pane rule)."""
+EXO_PANES: tuple[int, ...] = (1, 4, 6, 9, 12, 15, 17, 20)
+"""Eight GoPros evenly spaced over cam01-cam20, which every take ships (only two 01_hugging takes add cam21/cam22); MAMMA's eight-pane rule."""
 EXO_SLOTS: int = 30
 """Most GoPros a take can have; the 3D view's rules cover them all (rules on absent entities do nothing)."""
 

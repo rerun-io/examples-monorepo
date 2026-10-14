@@ -81,8 +81,9 @@ glasses were synchronised by the authors.
 - **Fisheye rule.** Both lens models are fisheye (a pinhole is off by up to ~500 px at a GoPro's corners), so camera panes show
   the video, projected keypoints and boxes, and the meshes stay in 3D.
 - **Blueprint.** The scene (videos hidden in 3D, grid off, orbital eye fitted per take) with aria01/aria02 rgb on the right and
-  eight GoPros (cam01, 04, …, 22) along the bottom; the card shows the scene beside cam01; table fields split, scene, people,
-  frames.
+  eight GoPros (cam01, 04, 06, 09, 12, 15, 17, 20: every take ships cam01-cam20) along the bottom; the card shows the scene
+  beside cam01; table fields split, scene, people, frames. The release ships no glasses in 90 of the 208 takes (no `ego/`
+  directory, e.g. every `05_sword2` take); their aria01/aria02 panes stay empty, as one dataset blueprint serves every take.
 
 ## Differences from simplecv
 
