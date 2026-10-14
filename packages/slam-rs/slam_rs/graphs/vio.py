@@ -1,8 +1,8 @@
 """The VIO graph (lossless); its picture and guide: ``GRAPH.md`` (tests/test_vio_graph.py) and every run's "pipeline (debug)" tab."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from dataclasses import replace
-from typing import Literal
+from typing import Literal, cast
 
 from dagkit.graph import AsOf, Block, Graph
 from dagkit.node import Event, Node, Source
@@ -22,7 +22,7 @@ class VioSource(IterSource):
     starts at the segment's first frameset; a window only ends it (frameset times up to its stop)."""
 
     def __init__(self, segment: SegmentRef, decoder: Literal["cpu", "cuda"]) -> None:
-        def events() -> Iterator[Event]:
+        def events() -> Generator[Event, None, None]:
             source = CatalogSegment(segment.catalog_url, segment.dataset, segment.segment)
             feed: SegmentFeed
             rig = ROBOCAP_RIG if segment.dataset == "robocap" else MSD_RIG
@@ -38,6 +38,16 @@ class VioSource(IterSource):
                     yield Event(f.t_ns - offset_ns, "frames", replace(f, imu=f.imu.between(f.t_ns, f.t_ns)))
 
         super().__init__({"rig": VioRig, "imu": ImuStream, "frames": Frameset}, events, clock=segment.timeline)
+        self.stream: Generator[Event, None, None] | None = None
+
+    def events(self) -> Iterator[Event]:
+        self.stream = cast(Generator[Event, None, None], super().events())
+        return self.stream
+
+    def close(self) -> None:
+        """Release the open segment (decoders, cached video) when the run ends, also a failed one whose error the caller keeps."""
+        if self.stream is not None:
+            self.stream.close()
 
 
 def vio_graph(source: Source, vio: VioNode, sinks: Mapping[str, Node]) -> Graph:

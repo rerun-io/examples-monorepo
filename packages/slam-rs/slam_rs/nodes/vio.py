@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import numpy as np
-from dagkit.node import Emit, PortType, RunContext, Tick
+from dagkit.node import Control, Emit, PortType, RunContext, Tick
 from dagkit.sources import SegmentRef
 from dagkit.time import STATIC, TimeNs
 from dagkit.types import LayerFile
@@ -61,6 +61,7 @@ class VioNode:
         self.segment, self.params, self.output_dir, self.decoder = segment, params, output_dir, decoder
         self.lockstep: Lockstep | None = None
         self.run: SegmentRun | None = None  # the finished run's counts
+        self.partial: Path | None = None  # the layer file flush wrote; abort() deletes it unless the publish sink moved it
         self.offset_ns, self.export_ns = 0, 0  # video_time -> estimator clock; estimator clock -> device clock
 
     def reset(self, ctx: RunContext) -> None:
@@ -79,7 +80,8 @@ class VioNode:
                 raise
             print(f"GPU unavailable: {error}; using CPU", flush=True)
             vio = _core.Vio(calibration, flow, gpu=False)
-        self.lockstep, self.run, self.framesets, self.t_ns, self.wm = Lockstep(vio), None, 0, STATIC, STATIC
+        self.lockstep, self.run, self.partial, self.framesets, self.t_ns, self.wm = Lockstep(vio), None, None, 0, STATIC, STATIC
+        self.control: Control | None = ctx.control
         self.offset_ns, self.export_ns = rig.imu.cam_time_offset_ns, rig.export_offset_ns
         self.poses: list[tuple[int, Float64[ndarray, " 3"], Float64[ndarray, " 4"]]] = []  # device clock, position, wxyz
         self.started: float = time.monotonic()
@@ -116,10 +118,18 @@ class VioNode:
         self.run = SegmentRun(estimate, self.framesets, self.framesets - len(self.poses), time.monotonic() - self.started, empty_trajectory(),
                               float(np.median(elapsed)) if elapsed else float("nan"), config_text_sha256(self.config_text))  # fmt: skip
         backend: str = str(_core.gpu_backend) if self.lockstep.vio.gpu else "cpu"
-        partial: Path = self.output_dir / self.segment.segment / f".{POSE_SOURCE}.{uuid.uuid4().hex[:12]}.partial"
-        partial.parent.mkdir(parents=True, exist_ok=True)
-        write_layer(partial, self.segment.segment, self.run, clock_offset_ns=self.export_ns + self.offset_ns,
-                    profile=self.params.profile, backend=backend, decoder=self.decoder)  # fmt: skip
         print(f"{self.segment.segment}: {self.run.framesets} framesets, {len(estimate)} poses, {self.run.lost} lost, {self.run.wall_s:.1f} s")
         self.lockstep = None
-        out.put("layer", self.t_ns, LayerFile(partial))
+        if self.control is not None and self.control.stopped and (len(estimate) < 2 or self.run.lost):
+            return  # a stop before a publishable prefix: no layer (a complete run with too few poses still fails in write_layer)
+        self.partial = self.output_dir / self.segment.segment / f".{POSE_SOURCE}.{uuid.uuid4().hex[:12]}.partial"
+        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        write_layer(self.partial, self.segment.segment, self.run, clock_offset_ns=self.export_ns + self.offset_ns,
+                    profile=self.params.profile, backend=backend, decoder=self.decoder)  # fmt: skip
+        out.put("layer", self.t_ns, LayerFile(self.partial))
+
+    def abort(self) -> None:
+        """Failure cleanup: release the estimator and delete a layer file the publish sink has not moved yet."""
+        self.lockstep = None
+        if self.partial is not None:
+            self.partial.unlink(missing_ok=True)
