@@ -48,6 +48,7 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     config: Config = case_config(case)
     for graph in build(config, recording, golden=True):
         RUNNERS[config.runner](graph, mode=config.mode)
+        del graph  # its models free before the next graph is built (as the App's loop does)
     print(f"{case.name} {phase}: graph outputs written into the golden")
 
 

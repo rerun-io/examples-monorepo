@@ -8,7 +8,6 @@ passes refine against the ORIGINAL Stage A rig. Outputs become the catalog layer
 both run it, with run health, so the viewer's "pipeline (debug)" tab shows every graph live.
 """
 
-import gc
 import hashlib
 import importlib.metadata
 import json
@@ -157,13 +156,6 @@ def check_producer(segment: SegmentRef, layer: str, producer: Producer) -> None:
         raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {expected}")
 
 
-def free_gpu_memory() -> None:
-    """Collect finished graphs (a runner keeps its graph's models in reference cycles) and hand PyTorch's cached GPU memory
-    back to the driver, where TensorRT engines and the next run allocate: the GPU is shared, and the gradio app runs again."""
-    gc.collect()
-    torch.cuda.empty_cache()
-
-
 def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
     """The exoego layout of ``tools/apps/blueprint.py`` (without the ego panes, which a live run never fills; its 3D scene
     leaves out the 2D overlays, which have no base pinhole to project through live), then the "pipeline (debug)" tab: the
@@ -185,7 +177,7 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
     run ends the App. Outputs stream to ``recording``; ``golden`` (verify) sends them there only: no layer files, no
     ``eval.json``, no blueprint.
     """
-    free_gpu_memory()  # what the previous run of a long-lived app (gradio) left
+    torch.cuda.empty_cache()  # PyTorch's cache of a previous run (gradio) back to the driver, where TensorRT engines allocate
     segment: SegmentRef = config.segment
     layout: RigLayout = discover_rig_layout(segment, exo_rigs=config.exo_rigs)
     cameras: tuple[str, ...] = layout.exo_camera_names
@@ -224,7 +216,7 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
         yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
         if "init" not in keep.values:
             return
-        free_gpu_memory()  # Stage A's models, for the refine passes' TensorRT engines
+        torch.cuda.empty_cache()  # Stage A's models (freed with its graph) back to the driver, for the refine passes' engines
         init = keep.values["init"]
     else:
         check_producer(segment, "exocalib_init", producer("exocalib-init"))

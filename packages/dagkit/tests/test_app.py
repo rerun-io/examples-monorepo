@@ -1,6 +1,8 @@
 """Profiles (hand-written TOML, coerced, strict) and the generated gradio app."""
 
 import dataclasses
+import gc
+import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -287,6 +289,44 @@ def test_health_views_plot_exactly_what_the_runner_logs(tmp_path: Path) -> None:
     origins: list[str] = [str(view.origin) for view in health_views([graph, graph])]
     assert origins == ["/dagkit/health/add/drops/x", "/dagkit/health/add/queue_depth/x", "/dagkit/health/keep/drops/y", "/dagkit/health/keep/queue_depth/y", "/dagkit/health/add/step_ms"]
     assert set(origins) <= logged
+
+
+class Weights:
+    """A model's GPU memory: a graph frees it when its nodes go."""
+
+
+class HoldsWeights(Collect):
+    def __init__(self, weights: Weights) -> None:
+        super().__init__(("x",))
+        self.weights: Weights | None = weights
+
+
+def test_each_graph_and_each_form_run_frees_its_models_before_the_next_build() -> None:
+    """A multi-pass App (exo-calib: Stage A models, then TensorRT engines) builds its next graph after the finished one
+    let go of its models, by reference counting alone (no cyclic GC, no hand-written release in the App or a node)."""
+    alive: list[weakref.ref] = []
+    seen: list[list[bool]] = []
+
+    def holding(name: str) -> Graph:
+        weights = Weights()
+        alive.append(weakref.ref(weights))
+        graph = Graph(name, about="Hold weights.")
+        graph.edge(graph.source("src", source([(0, "x", 1)]))["x"], graph.sink("keep", HoldsWeights(weights))["x"])
+        return graph
+
+    def passes(config: PassesConfig, recording: rr.RecordingStream) -> Iterator[Graph]:
+        for name in ("stage-a", "refine"):
+            seen.append([ref() is not None for ref in alive])  # earlier models, as this graph is built
+            yield holding(name)
+
+    gc.collect()
+    gc.disable()
+    try:
+        run_app(PassesConfig(), passes)
+        list(run_fn(gradio_app(PassesConfig, passes, title="Passes"))(3, "sequential", "lossless"))
+    finally:
+        gc.enable()
+    assert seen == [[], [False], [False, False], [False, False, False]]
 
 
 def test_with_pipeline_keeps_the_normal_view_first_and_active() -> None:

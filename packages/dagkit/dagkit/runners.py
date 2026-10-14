@@ -81,6 +81,7 @@ class _State:
     statics: dict[str, object] = field(default_factory=dict)
     last_put: dict[str, TimeNs] = field(default_factory=dict)
     collected: dict[str, list[Event]] = field(default_factory=dict)
+    events: Iterator[Event] | None = None  # a source's own iterator: closed with the run (a generator's with / finally)
     wm: TimeNs = STATIC - 1
     started: bool = False
     done: bool = False
@@ -265,7 +266,7 @@ class _Run:
         s.obj.reset(RunContext(self.graph.name, s.spec.name, self.mode, resources, params, world, dict(s.statics), self.control))  # type: ignore[attr-defined]
 
     def _start_source(self, s: _State) -> Iterator[Event]:
-        events: Iterator[Event] = iter(s.obj.events())  # type: ignore[attr-defined]
+        s.events = events = iter(s.obj.events())  # type: ignore[attr-defined]
         for event in events:
             if event.t_ns != STATIC:
                 return itertools.chain([event], events)
@@ -468,7 +469,7 @@ class _Run:
         self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
 
     def _close_resources(self, note: Callable[[str], object] | None = None) -> None:
-        owned: list[object] = [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
+        owned: list[object] = [s.events for s in self.sources] + [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
         for close in (c for o in owned + list(reversed(self.resources.values())) if (c := getattr(o, "close", None)) is not None):
             close() if note is None else self._guard(close, note=note)
 

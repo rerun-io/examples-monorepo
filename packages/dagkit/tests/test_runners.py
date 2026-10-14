@@ -328,6 +328,41 @@ def test_resources_are_built_once_shared_and_closed(runner: str) -> None:
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
+@pytest.mark.parametrize("ending", ["fails", "stops"])
+def test_a_run_closes_its_source_generators_although_the_error_is_kept(runner: str, ending: str) -> None:
+    """A generator Source that holds a resource in ``with`` / ``finally`` (an open segment, a camera) releases it with the
+    run, not when the caller drops the exception (whose traceback keeps the suspended generator alive)."""
+    closed: list[bool] = []
+    control = Control()
+
+    def events():  # noqa: ANN202
+        try:
+            for t in range(50):
+                if ending == "stops" and t == 3:
+                    control.stop()
+                yield Event(t, "x", t)
+        finally:
+            closed.append(True)
+
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            if ending == "fails" and tick.t_ns == 3:
+                raise KeyError("boom")
+            super().step(tick, out)
+
+    graph = Graph("closes")
+    node = graph.node("boom", Boom(0))
+    graph.edge(graph.source("src", IterSource({"x": int}, events))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",)))["y"])
+    if ending == "fails":
+        with pytest.raises(KeyError, match="boom") as kept:
+            RUNNERS[runner](graph)
+        assert kept.value is not None and closed == [True]
+    else:
+        assert RUNNERS[runner](graph, control=control).status == "stopped" and closed == [True]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
 def test_a_finished_run_frees_its_resources_without_the_cyclic_gc(runner: str) -> None:
     """A run's models and buffers free when it returns, not at the next cyclic collection (a verify card runs many
     cases in one process; a caller may keep its Control)."""

@@ -3,7 +3,6 @@
 import contextlib
 import dataclasses
 import functools
-import gc
 import itertools
 import platform
 import shutil
@@ -109,6 +108,7 @@ def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], r
             names.add(graph.name)
             report = RUNNERS[getattr(config, "runner", "threaded")](graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
             print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
+            del graph  # its nodes free their models before the next graph is built
     finally:
         getattr(built, "close", lambda: None)()  # a stopped multi-pass build never runs past its yield
     return report
@@ -282,7 +282,6 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
         flat: list[Any] = [w for _, widgets in form for w in widgets]
 
         def run(*values: object) -> Iterator[tuple[object, ...]]:
-            gc.collect()  # the previous run (reference cycles in the runner) frees its models before this one loads its own
             it: Iterator[object] = iter(values)
             scratch = Path(tempfile.mkdtemp(prefix="dagkit-app-"))
             try:
