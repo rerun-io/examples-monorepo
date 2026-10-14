@@ -261,6 +261,189 @@ segment = "vslam-lab-euroc__V2_03_difficult"
 params = { calib = "true", undistort = "true", subsample = "2", img_size = "512" }
 published = { ate_rmse_m = 0.043 }
 
+# Uncalibrated ("Ours*" in the paper): TUM without undistortion, EuRoC undistorted (the paper: its distortion is too
+# strong for MASt3R) but without intrinsics for the rest of the pipeline. Full tier, whole sequences.
+
+[[graph.cases]]
+name = "tum-360-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_360"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.07 }
+
+[[graph.cases]]
+name = "tum-desk-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.035 }
+
+[[graph.cases]]
+name = "tum-desk2-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk2"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.055 }
+
+[[graph.cases]]
+name = "tum-floor-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_floor"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.056 }
+
+[[graph.cases]]
+name = "tum-plant-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_plant"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.035 }
+
+[[graph.cases]]
+name = "tum-room-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_room"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.118 }
+
+[[graph.cases]]
+name = "tum-rpy-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_rpy"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.041 }
+
+[[graph.cases]]
+name = "tum-teddy-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_teddy"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.114 }
+
+[[graph.cases]]
+name = "tum-xyz-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_xyz"
+params = { calib = "false", undistort = "false", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.02 }
+
+[[graph.cases]]
+name = "euroc-mh01-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_01_easy"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.18 }
+
+[[graph.cases]]
+name = "euroc-mh02-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_02_easy"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.124 }
+
+[[graph.cases]]
+name = "euroc-mh03-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_03_medium"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.156 }
+
+[[graph.cases]]
+name = "euroc-mh04-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_04_difficult"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.282 }
+
+[[graph.cases]]
+name = "euroc-mh05-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_05_difficult"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.327 }
+
+[[graph.cases]]
+name = "euroc-v101-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_01_easy"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.101 }
+
+[[graph.cases]]
+name = "euroc-v102-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_02_medium"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.134 }
+
+[[graph.cases]]
+name = "euroc-v103-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_03_difficult"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.096 }
+
+[[graph.cases]]
+name = "euroc-v201-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_01_easy"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.133 }
+
+[[graph.cases]]
+name = "euroc-v202-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_02_medium"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.1 }
+
+[[graph.cases]]
+name = "euroc-v203-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_03_difficult"
+params = { calib = "false", undistort = "true", subsample = "2", img_size = "512" }
+published = { ate_rmse_m = 0.17 }
+
 [[tests]]
 name = "types"
 tier = "types"
