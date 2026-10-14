@@ -5,15 +5,6 @@ from torch import Tensor
 
 from mast3r_slam.types import MatchingConfig
 
-# Matching kernel backend selection: prefer Mojo, fall back to CUDA C++ if the
-# Mojo shared library is not built. This comment only describes the matching
-# kernels selected in this module; calibrated and points GN flows may still
-# call into the CUDA backend via global_opt.py.
-try:
-    import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
-except ImportError:
-    from mast3r_slam import _backends as _matching_backends  # pyrefly: ignore
-
 
 def img_gradient(
     img: Float[Tensor, "b c h w"],
@@ -176,9 +167,13 @@ def match(
     rays_with_grad_img, pts3d_norm, p_init = prep_for_iter_proj(
         X11, X21, idx_1_to_2_init
     )
+    try:  # the matching kernels, imported on first use (the Mojo module opens a GPU context): Mojo, else the CUDA C++ build
+        import mast3r_slam_mojo_backends as kernels  # pyrefly: ignore
+    except ImportError:
+        from mast3r_slam import _backends as kernels  # pyrefly: ignore
     p1: Float[Tensor, "b hw 2"]
     valid_proj2: Bool[Tensor, "b hw"]
-    p1, valid_proj2 = _matching_backends.iter_proj(
+    p1, valid_proj2 = kernels.iter_proj(
         rays_with_grad_img,
         pts3d_norm,
         p_init,
@@ -197,7 +192,7 @@ def match(
     valid_proj2 = valid_proj2 & valid_dists2
 
     if cfg.radius > 0:
-        (p1,) = _matching_backends.refine_matches(
+        (p1,) = kernels.refine_matches(
             D11.half(),
             D21.view(b, h * w, -1).half(),
             p1,

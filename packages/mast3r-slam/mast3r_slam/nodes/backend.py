@@ -109,7 +109,9 @@ class Backend:
                 raise RuntimeError(f"the shared current frame is frame {frame.frame_id}, the request is for frame {task.frame_index}")
             if self._relocalise(frame):
                 self.times[len(self.keyframes) - 1] = tick.t_ns
-                self.states.set_mode(Mode.TRACKING)
+                with self.states.lock:  # a realtime stop (TERMINATED) that came during the relocalisation stays
+                    if self.states.get_mode() == Mode.RELOC:
+                        self.states.set_mode(Mode.TRACKING)
         self.shared.publish()
         with self.states.lock:  # the acknowledgement the lossless frontend waits for
             if isinstance(task, KeyframeAdded):

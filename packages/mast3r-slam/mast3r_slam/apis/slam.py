@@ -68,6 +68,7 @@ class Config:
     register: Register = "new"
     """How the layer reaches the segment's catalog (``new`` refuses to overwrite)."""
     runner: Literal["sequential", "threaded"] = "threaded"
+    """``threaded`` only: the lossless frontend waits for the backend inside its own calls, where ``sequential`` cannot step it."""
     mode: Mode = "lossless"
 
 
@@ -112,6 +113,8 @@ def slam_config(config: Config) -> SlamConfig:
 
 
 def build(config: Config, recording: rr.RecordingStream) -> Graph:
+    if config.runner != "threaded":
+        raise ValueError("mast3r-slam runs on the threaded runner only (the sequential runner never steps the backend during the frontend's wait)")
     cfg: SlamConfig = slam_config(config)
     video: Source = video_source(config, cfg)
     ports, roots = outputs(config.camera)

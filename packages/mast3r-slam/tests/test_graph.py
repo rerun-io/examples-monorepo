@@ -1,6 +1,8 @@
 """Graph tier, unit lane: the SLAM graph validates in every input shape; process placement equals thread placement;
 the profile's presets resolve (no GPU: nothing here runs a resource factory or a model)."""
 
+import subprocess
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -9,7 +11,7 @@ import rerun as rr
 from dagkit.app import gradio_app, load_profile
 from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Emit, Event, PortType, RunContext, Tick
-from dagkit.runners import run_sequential, run_threaded
+from dagkit.runners import run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import IterSource
 from dagkit.testing import Recorder
@@ -97,9 +99,9 @@ def affine_graph(values: list[float], process: bool) -> tuple[Graph, Collect]:
 @settings(max_examples=3, deadline=None)
 def test_a_pure_node_in_a_process_gives_the_same_outputs_as_in_a_thread(values: list[float]) -> None:
     results: list[list[tuple[str, int, object]]] = []
-    for process, run in ((False, run_sequential), (True, run_threaded)):
+    for process in (False, True):  # the threaded runner gives the thread placement its own worker thread
         graph, sink = affine_graph(values, process)
-        run(graph, mode="lossless")
+        run_threaded(graph, mode="lossless")
         results.append(sink.items)
     assert results[0] == results[1] == [("y", i, 2.0 * v - 1.0) for i, v in enumerate(values)]
 
@@ -124,3 +126,16 @@ def test_a_file_input_beats_webcam_zero_and_zero_means_unset(tmp_path: Path) -> 
 def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
     assert Config.__dataclass_fields__["video"].default is None  # a default file that is not downloaded crashes the form
     gradio_app(Config, build, title="MASt3R-SLAM")
+
+
+def test_the_app_runs_the_threaded_runner_only() -> None:
+    """The lossless frontend waits for the backend at its next step and at flush; the sequential runner steps the backend
+    only between frontend calls, so the wait in flush would never end."""
+    with pytest.raises(ValueError, match="threaded runner only"):
+        build(Config(RerunTyroConfig(headless=True), runner="sequential"), rr.RecordingStream("test", send_properties=False))
+
+
+def test_the_graph_and_cpu_ops_import_without_the_kernel_extensions() -> None:
+    """Unit lane (no GPU): the Mojo / CUDA kernels load on first use, never at import (the Mojo module opens a GPU context)."""
+    loaded = "import sys, mast3r_slam.apis.slam; print([m for m in ('mast3r_slam_mojo_backends', 'mast3r_slam._backends') if m in sys.modules])"
+    assert subprocess.run([sys.executable, "-c", loaded], capture_output=True, text=True, check=True).stdout.splitlines()[-1] == "[]"

@@ -38,7 +38,8 @@ class Frontend:
     against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it).
 
     Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend
-    applied every queued task, so every frame sees one fixed map. A frame's ``tracked`` pose leaves after that wait, when
+    applied every queued task, so every frame sees one fixed map. Realtime: lost frames that arrive while a relocalisation
+    request is queued are skipped, so the one shared current frame stays the requested one. A frame's ``tracked`` pose leaves after that wait, when
     the backend's relocalisation verdict is known (hence ``emits_late``). ``abort`` ends a wait when the run fails.
     """
 
@@ -53,6 +54,8 @@ class Frontend:
         self.aborted: bool = False
 
     def reset(self, ctx: RunContext) -> None:
+        if ctx.world != 0:  # the backend's final poses and the Nerfstudio export read the one shared map at their flush
+            raise NotImplementedError("mast3r-slam has no mid-run reset (Control.reset): stop the run and start a new one")
         self.model: AsymmetricMASt3R = ctx.resources["mast3r"]  # type: ignore[assignment]
         self.shared: SharedSlam = ctx.resources["shared"]  # type: ignore[assignment]
         self.shared.reset()
@@ -94,6 +97,9 @@ class Frontend:
         frames: MultiViewFrames = tick.value  # type: ignore[assignment]
         states = self.shared.states
         mode: Mode = states.get_mode()
+        if mode == Mode.RELOC and states.reloc_sem.value > 0:  # realtime: the backend still owns the requested shared frame
+            out.watermark(tick.t_ns)
+            return
         rgb: RgbNormalized = frames.rgb[0].permute(1, 2, 0).cpu().numpy().astype(np.float32) / 255.0
         pose: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=self.device) if mode == Mode.INIT else states.get_frame().world_sim3_cam
         frame: Frame = create_frame(frames.frame_index, rgb, pose, self.cfg.img_size, self.device)

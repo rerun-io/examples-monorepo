@@ -104,6 +104,9 @@ properties = [
     "tests/test_nodes.py::test_frontend_contract_and_mode_flow",
     "tests/test_nodes.py::test_frontend_reset_returns_to_init",
     "tests/test_nodes.py::test_lossless_frontend_waits_for_the_backend_and_abort_ends_the_wait",
+    "tests/test_nodes.py::test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers",
+    "tests/test_nodes.py::test_frontend_refuses_a_mid_run_reset",
     "tests/test_nodes.py::test_backend_contract",
+    "tests/test_nodes.py::test_a_realtime_stop_during_relocalisation_stays_terminated",
     "tests/test_graph.py::test_a_pure_node_in_a_process_gives_the_same_outputs_as_in_a_thread",
 ]

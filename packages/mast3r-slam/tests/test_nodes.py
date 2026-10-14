@@ -65,9 +65,38 @@ def test_frontend_contract_and_mode_flow(shared: SharedSlam, monkeypatch: pytest
     tasks = [(t, v) for port, t, v in outputs if port == "task"]
     tracked = [v.frame_index for port, _, v in outputs if port == "tracked" and isinstance(v, TrackedFrame)]
     assert tasks[:3] == [(0, KeyframeAdded(0)), (2000, KeyframeAdded(1)), (5000, KeyframeAdded(2))]
-    assert tasks[3:] == [(t, RelocRequest(t // 1000)) for t in (8000, 9000)]  # frame 7 is lost; nobody relocalises it
+    # Frame 7 is lost; frame 8 asks for relocalisation; nobody answers, so frame 9 leaves the request's shared frame alone.
+    assert tasks[3:] == [(8000, RelocRequest(8))]
     assert tracked == [0, 1, 2, 3, 4, 5, 6]
     assert shared.states.get_mode() == Mode.TERMINATED
+
+
+def test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Realtime: lost frames that arrive while a relocalisation request is queued neither overwrite the one shared current
+    frame nor queue another request, so the backend relocalises exactly the frame it was asked for."""
+    monkeypatch.setattr(frontend_module, "mast3r_inference_mono", fake_mono)
+    monkeypatch.setattr(FrameTracker, "track", fake_track)
+    monkeypatch.setattr(backend_module, "FactorGraph", FakeGraph)
+    monkeypatch.setattr(backend_module, "RetrievalDatabase", FakeRetrieval)
+    resources = {"mast3r": MODEL, "shared": shared}
+    frontend, backend, out = Frontend(CFG, device="cpu"), Backend(CFG), Recorder()
+    frontend.reset(RunContext("slam", "frontend", "realtime", resources=resources))
+    backend.reset(RunContext("slam", "backend", "realtime", resources=resources))
+    for tick in frame_ticks(11):  # frame 7 is lost, frame 8 asks; frames 9 and 10 arrive before the backend answers
+        frontend.step(tick, out)
+    assert shared.states.get_frame().frame_id == 8
+    tasks = [v for port, _, v in out.items if port == "task"]
+    assert [v for v in tasks if isinstance(v, RelocRequest)] == [RelocRequest(8)]
+    for t, task in [(t, v) for port, t, v in out.items if port == "task"]:
+        backend.step(Tick(t, "task", task, {}), Recorder())
+    assert shared.backend_idle() and shared.states.get_mode() == Mode.TRACKING
+
+
+def test_frontend_refuses_a_mid_run_reset(shared: SharedSlam) -> None:
+    """The backend's final poses and the Nerfstudio export read the one shared map at flush: a ``Control.reset`` (a new
+    world) would clear it under them, so it fails the run instead."""
+    with pytest.raises(NotImplementedError, match="reset"):
+        Frontend(CFG, device="cpu").reset(RunContext("slam", "frontend", "lossless", resources={"mast3r": MODEL, "shared": shared}, world=1))
 
 
 def test_frontend_reset_returns_to_init(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,3 +213,25 @@ def test_backend_refuses_to_relocalise_a_frame_it_was_not_asked_for(shared: Shar
     backend.reset(RunContext("slam", "backend", "lossless", resources={"mast3r": MODEL, "shared": shared}))
     with pytest.raises(RuntimeError, match="frame 20, .* frame 22"):
         backend.step(Tick(3000, "task", RelocRequest(22), {}), Recorder())
+
+
+def test_a_realtime_stop_during_relocalisation_stays_terminated(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frontend's flush sets TERMINATED while the backend relocalises; the backend's success must not undo the stop."""
+    monkeypatch.setattr(backend_module, "FactorGraph", FakeGraph)
+    monkeypatch.setattr(backend_module, "RetrievalDatabase", FakeRetrieval)
+    shared.reset()
+    frame = Frame(20, torch.zeros(1, 3, SIZE, SIZE), torch.tensor([[SIZE, SIZE]]), torch.tensor([[SIZE, SIZE]]), torch.zeros(SIZE, SIZE, 3))
+    observe(frame)
+    shared.states.set_frame(frame)
+    shared.states.set_mode(Mode.RELOC)
+    shared.states.queue_reloc()
+    backend = Backend(CFG)
+    backend.reset(RunContext("slam", "backend", "realtime", resources={"mast3r": MODEL, "shared": shared}))
+
+    def stopped_while_relocalising(frame: Frame) -> bool:
+        shared.states.set_mode(Mode.TERMINATED)
+        return True
+
+    monkeypatch.setattr(backend, "_relocalise", stopped_while_relocalising)
+    backend.step(Tick(3000, "task", RelocRequest(20), {}), Recorder())
+    assert shared.states.get_mode() == Mode.TERMINATED and shared.backend_idle()
