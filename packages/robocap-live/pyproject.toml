@@ -6,11 +6,12 @@ authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
 # Static metadata only: `pixi lock` must never build this package; the Rust core is compiled by the `robocap-live-build`
 # pixi task, not by the wheel build. catalog-common supplies numpy, jaxtyping, av, pyarrow and rerun-sdk.
-dependencies = ["simplecv", "tyro"]
+dependencies = ["simplecv", "slam-rs", "tyro"]
 
 # Workspace siblings named above resolve to their in-repo path (never to a PyPI namesake).
 [tool.uv.sources]
 simplecv = { path = "../simplecv", editable = true }
+slam-rs = { path = "../slam-rs", editable = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -54,6 +54,44 @@ params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = 
 # hand-framesets, scale 0.9922 calibrated). Bands = floors.
 noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0, kp2d_delta_pct = 0.0 }
 
+[[graph]]
+name = "robocap"
+run = "robocap_live.verify:run_robocap"
+score = "robocap_live.verify:score"
+# The whole robocap chain (segment -> vio -> hands, poses on AsOf), banded on its hands layer with the `hands` block's metrics
+# against its OWN pre-port golden. Pre-port the chain is two tools joined by a layer: slam-rs's catalog VIO tool writes the
+# slam_rs layer (its pre golden: slam-rs VERIFY.toml, block `vio`, case `full`) and the hands-layer graph reads it. Today's
+# VIO poses differ from the catalog's older slam_rs layer that the `hands` block reads: the same hands code fed with them
+# sits 205 mm (landmarks) and 2.45 px (KeyNet mean) from the `hands` golden, so three of these bands catch a pose change.
+metrics = [
+    { name = "kp2d_px_mean", unit = "px", better = "lower", floor = 0.5 },
+    { name = "kp2d_px_p95", unit = "px", better = "lower", floor = 1.0 },
+    { name = "landmarks_mm_mean", unit = "mm", better = "lower", floor = 1.0 },
+    { name = "reported_delta_pct", unit = "%", better = "lower", floor = 1.0 },
+    { name = "kp2d_delta_pct", unit = "%", better = "lower", floor = 1.0 },
+]
+shots = [  # the `hands` block's shots
+    { view = "/world", t_s = 1655059.7373435 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 1655059.7373435 },
+    { view = "/world/rig_00/cam_01/pinhole", t_s = 1655059.7373435 },
+    { view = "/world", t_s = 1655061.7373435 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 1655061.7373435 },
+    { view = "/world/rig_00/cam_01/pinhole", t_s = 1655061.7373435 },
+]
+
+[[graph.cases]]
+# rule: the `hands` block's short window (Cap B session 14, 445-450 s); VIO starts at the segment's first frameset (it
+# initialises from rest) and runs to the window's end. Hands params as `hands`, VIO params as slam-rs's cases.
+name = "short"
+clip = "short"
+reference = "pre-port"
+dataset = "robocap"
+segment = "robocap__fe6fede545c972fa__s00000014"
+window_s = [1655058.2373435, 1655063.2373435]
+params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", group_tolerance_ns = "3000000", profile = "fast", backend = "cpu", decode_device = "cpu" }
+# |pre - pre2|: bit-identical (150 framesets, all with a pose; 261 reported hand-framesets). Bands = floors.
+noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0, kp2d_delta_pct = 0.0 }
+
 [[tests]]
 name = "types"
 tier = "types"

@@ -4,9 +4,10 @@ tab; a windowed run's hands reach the viewer."""
 
 import dataclasses
 import functools
+import itertools
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, get_args, get_type_hints
+from typing import Any, Literal, get_args, get_type_hints
 
 import pytest
 import rerun as rr
@@ -20,6 +21,7 @@ from dagkit.time import STATIC
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.frames import LumaFrameset
+from slam_rs.nodes.vio import VioParams
 
 # pyrefly resolves `test_nodes` to another package's tests on the monorepo search path; pytest imports this one.
 from test_nodes import SEGMENT, T0, cap_rig, framesets, no_nets, poses  # pyrefly: ignore[missing-module-attribute]
@@ -33,18 +35,24 @@ from robocap_live.types import CapRig, CatalogPoses
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 
 
-def app_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Graph:
-    """The graph the App runs, as ``build`` yields it; the catalog's layer list is faked (the source reads nothing until it runs)."""
+def app_graphs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slam: Literal["vio", "catalog"] = "catalog") -> list[Graph]:
+    """The graphs the App runs, as ``build`` yields them (none runs here); the catalog's layer list is faked (the sources read
+    nothing until they run)."""
     monkeypatch.setattr(hands_layer, "segment_layers", lambda segment: ["base", "slam_rs"])
-    config = Config(RerunTyroConfig(headless=True), SEGMENT, tmp_path, HandsParams(tmp_path), register="off")
-    return next(iter(build(config, rr.RecordingStream("robocap-live-test"))))
+    config = Config(RerunTyroConfig(headless=True), SEGMENT, tmp_path, HandsParams(tmp_path), slam, VioParams(decode_device="cpu"), register="off")
+    return list(itertools.islice(build(config, rr.RecordingStream("robocap-live-test")), 2))
 
 
-def test_the_app_graph_validates_draws_its_declaration_and_documents_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    graph: Graph = app_graph(tmp_path, monkeypatch)
-    graph.validate()
-    check_picture(graph, tmp_path)
-    check_graph_docs(graph, snapshot=PACKAGE_DIR / "GRAPH.md")
+def test_the_app_graphs_validate_draw_their_declaration_and_document_themselves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """VIO first, then the hands on the layer it published (a second source, ``slam``, reads it as the STATIC pose table)."""
+    graphs: list[Graph] = app_graphs(tmp_path, monkeypatch, "vio")
+    assert [g.name for g in graphs] == ["slam-rs-vio", "robocap-hands-layer"] and "slam" in graphs[1].nodes
+    for graph in graphs:
+        graph.validate()
+        check_picture(graph, tmp_path)
+    check_graph_docs(*graphs, snapshot=PACKAGE_DIR / "GRAPH.md")
+    (catalog,) = app_graphs(tmp_path, monkeypatch, "catalog")
+    assert "slam" not in catalog.nodes and catalog.edges[2].src.node == "segment"  # poses from the segment's slam_rs layer
 
 
 def fake_inputs(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
@@ -55,7 +63,9 @@ def fake_inputs(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
         yield Event(STATIC, "poses", poses(count))
         yield from (Event(f.t_ns, "frames", f) for f in framesets(count))
 
-    monkeypatch.setattr(app, "segment_source", lambda segment: IterSource({"frames": LumaFrameset, "cap_rig": CapRig, "poses": CatalogPoses}, events))
+    monkeypatch.setattr(
+        app, "segment_source", lambda segment, **_: IterSource({"frames": LumaFrameset, "cap_rig": CapRig, "poses": CatalogPoses}, events)
+    )
     monkeypatch.setattr(app, "HandsNode", functools.partial(HandsNode, core=no_nets))
 
 
@@ -71,7 +81,7 @@ def test_a_windowed_run_copies_its_hands_into_the_viewer_and_a_whole_one_only_pu
     fake_inputs(monkeypatch, 5)
     segment: SegmentRef = dataclasses.replace(SEGMENT, window_ns=(T0, T0 + 10**9) if window else None)
     rrd: Path = tmp_path / "app.rrd"
-    config = Config(RerunTyroConfig(headless=True, save=rrd), segment, tmp_path, HandsParams(tmp_path), register="off")
+    config = Config(RerunTyroConfig(headless=True, save=rrd), segment, tmp_path, HandsParams(tmp_path), "catalog", register="off")
     report = main(config)
     config.rr_config.rec_stream.flush()
     assert report.status == "complete" and report.nodes["hands"].ticks == 5
@@ -87,13 +97,13 @@ def test_the_viewer_opens_on_the_run_health_as_before_and_the_pipeline_tab_comes
     view), except a sink's single end-of-run step time; the "pipeline (debug)" tab follows and never opens first."""
     fake_inputs(monkeypatch, 3)
     rrd: Path = tmp_path / "app.rrd"
-    config = Config(RerunTyroConfig(headless=True, save=rrd), SEGMENT, tmp_path, HandsParams(tmp_path), register="off")
+    config = Config(RerunTyroConfig(headless=True, save=rrd), SEGMENT, tmp_path, HandsParams(tmp_path), "catalog", register="off")
     main(config)
     config.rr_config.rec_stream.flush()
     logged: set[str] = {
         e for e in entities(rrd) if e.startswith("/dagkit/health/") and e not in ("/dagkit/health/publish/step_ms", "/dagkit/health/viewer/step_ms")
     }
-    root = blueprint(app_graph(tmp_path, monkeypatch)).root_container
+    root = blueprint(app_graphs(tmp_path, monkeypatch)).root_container
     assert isinstance(root, rrb.Tabs) and root.active_tab == 0
     tabs: list[rrb.Container | rrb.View] = list(root.contents)
     assert [tab.name for tab in tabs] == ["main", "pipeline (debug)"] and isinstance(tabs[0], rrb.Grid)
@@ -104,6 +114,7 @@ def test_the_viewer_opens_on_the_run_health_as_before_and_the_pipeline_tab_comes
 FORM: dict[str, str] = {  # Config leaf -> the widget the generated form gives it
     "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "output_dir": "Textbox", "hands.models_dir": "Textbox",
     "hands.device": "Dropdown", "hands.ort_dylib": "File", "hands.ort_threads": "Number", "hands.overlays": "Dropdown",
+    "slam": "Dropdown", "vio.profile": "Dropdown", "vio.backend": "Dropdown", "vio.decode_device": "Dropdown",
     "register": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
 HIDDEN: dict[str, str] = {
@@ -136,13 +147,18 @@ def test_every_config_field_is_a_form_widget_or_deliberately_hidden() -> None:
             assert [value for _, value in widget.choices] == list(get_args(fields[label])), label
     assert any(isinstance(c, gr.Accordion) and c.label == "hands" for c in demo.blocks.values()), "HandsParams is not grouped"
     # the fields the Config leaves open start from the example: Run on the untouched form is the short case, unregistered (windowed)
-    assert (widgets["segment.segment"].value, widgets["segment.window_ns"].value) == ("robocap__fe6fede545c972fa__s00000014", "1655058237343500 1655063237343500")
+    assert (widgets["segment.segment"].value, widgets["segment.window_ns"].value) == (
+        "robocap__fe6fede545c972fa__s00000014",
+        "1655058237343500 1655063237343500",
+    )
 
 
-def test_the_example_is_the_verify_short_case_never_registered() -> None:
-    """One click runs a known-good input: 5 s of the README sample (Cap B session 14) on CPU ONNX Runtime, as VERIFY.toml says."""
-    (example,) = examples()
+def test_the_examples_are_the_verify_short_cases_never_registered() -> None:
+    """One click runs a known-good input: 5 s of the README sample (Cap B session 14) on CPU ONNX Runtime, as VERIFY.toml says;
+    the first runs VIO on the CPU lane before the hands (``robocap``), the second reads the registered poses (``hands``)."""
     window: tuple[int, int] = (1_655_058_237_343_500, 1_655_063_237_343_500)
-    assert example.segment == SegmentRef("robocap", "robocap__fe6fede545c972fa__s00000014", window_ns=window)
-    assert (example.register, example.hands.device, example.hands.ort_threads, example.hands.overlays) == ("off", "cpu", 4, "debug")
-    assert (example.hands.models_dir / "detnet_full.onnx").parent == PACKAGE_DIR / "models"
+    for example, slam in zip(examples(), ("vio", "catalog"), strict=True):
+        assert example.segment == SegmentRef("robocap", "robocap__fe6fede545c972fa__s00000014", window_ns=window) and example.slam == slam
+        assert (example.register, example.hands.device, example.hands.ort_threads, example.hands.overlays) == ("off", "cpu", 4, "debug")
+        assert (example.hands.models_dir / "detnet_full.onnx").parent == PACKAGE_DIR / "models"
+    assert examples()[0].vio == VioParams("fast", "cpu", "cpu")

@@ -54,8 +54,11 @@ mode reads the six H.264 streams in one bulk query, decodes them to the raw Y pl
 live adapter does (`simplecv.ops.framesets`, 3 ms); its STATIC ports carry the rig of the `base` layer (`CapRig`) and the whole
 `slam_rs` pose table of `/world/rig_00` (`CatalogPoses`). The `hands` node wraps `_core.HandsLayer` (each frameset takes the
 pose within 2 ms of its time), and a `LayerFileSink` publishes the finished file. `robocap_live.apis.hands_layer` (`pixi run -e
-robocap-live robocap-hands-layer`) runs it and registers the file as the segment's `hands` layer: only when the segment has none,
-unless `--register replace` (a production refresh). The core logs its producer at the static `/producers/hands`.
+robocap-live robocap-hands-layer`) first runs slam-rs's VIO graph (`slam_rs/graphs/vio.py`: the segment's cameras and IMU on one
+stream through `VioNode`) and publishes its `slam_rs` layer, then runs this graph with that file as its pose table (the core takes
+the whole table when it is built, so the two graphs meet at the layer, a checkpoint); `--slam catalog` skips VIO and reads the
+segment's registered `slam_rs` layer. Each file is registered as the segment's layer only when the segment has none, unless
+`--register replace` (a production refresh). The core logs its producer at the static `/producers/hands`.
 
 The layer holds only the hand entities (`/world/hands/{side}/{keypoints,mesh}`, the camera-pane overlays in full-resolution
 pixels, the skeleton's `AnnotationContext` on `/world`) and no recording properties; its recording id is the segment id and its

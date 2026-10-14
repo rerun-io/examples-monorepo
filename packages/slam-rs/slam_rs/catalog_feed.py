@@ -1,43 +1,24 @@
 """One ``dataforge:v1`` segment as calibration, IMU, ground truth and grayscale framesets.
 
-The feed is the Python half of the estimator's data contract: it reads a segment
-either from a catalog URL or from a local ``.rrd`` served in process, and hands
-the Rust core CPU grayscale images with integer-nanosecond timestamps.
+This Python half of the estimator contract reads a catalog URL or local ``.rrd`` served in process and gives the Rust core
+CPU grayscale images with integer-nanosecond timestamps. Five decisions affect the numbers:
 
-Five decisions matter here because each one can change the numbers:
-
-* **Pixels.** The default CPU path muxes samples without re-encoding and decodes AV1 by
-  single-threaded dav1d to ``gray8``. The MSD streams are limited-range
-  ``yuv420p`` with flat chroma, so the ``gray8`` reformat (limited to full
-  expansion) is what recovers the original grayscale; the raw Y plane is off by
-  up to 17 LSB. dav1d also pads rows, so the decoded plane's ``line_size``
-  exceeds the frame width and the copy honours it. The optional CUDA path uses
-  SimpleCV's NVDEC reader and GPU RGB-to-gray conversion; its pixel rounding differs.
-* **Round trips.** The default reads each camera, IMU and ground truth per time
-  window, and long segments are cut into windows on ``video_time`` whose
-  edges land on frames that are keyframes in *every* camera, so a window decodes
-  standalone. Decimated AV1 decode is a known upstream hazard: every frame is
-  decoded and ``frame_stride`` only decides which framesets are yielded. Offline
-  ``cache_video`` instead fetches all selected compressed streams once, reuses
-  those packets for the frame index, and keeps decoders alive for the segment.
-* **Rig shape.** A rig is not always four hardware-synced cameras fed at their
-  stored resolution on one IMU clock. :class:`RigProfile` carries the four things
-  that differ and default to what MSD is: which cameras of the rig are fed and in
-  what order, the integer downscale applied to frames *and* intrinsics, whether
-  the accelerometer has to be interpolated onto the gyroscope's clock, and how
-  far apart two cameras' frames may be and still be one frameset.
-* **Clocks.** DataForge stores frames, IMU and ground truth on the same
-  ``video_time`` clock. All three reach the estimator's inertial clock by adding
-  ``cam_time_offset_ns``, derived from the catalog's signed
-  ``applied_time_shift_ns``. Query bounds make the inverse conversion. Factory
-  per-camera offsets are not applied again.
-  MSD's offset is zero, so every MSD number is unchanged by this.
-* **Geometry.** ``Pinhole:image_from_camera`` is column-major, ``Pinhole:resolution``
-  is ``(width, height)`` while the decoded array is ``(height, width)``, and the
-  camera ``Transform3D`` is ``ChildFromParent`` — that is ``cam_T_imu``, and it is
-  inverted here. msd-g2 stores its images rotated into portrait with the
-  calibration rotated to match, so nothing may assume a landscape frame or a
-  shared orientation across cameras.
+1. **Pixels.** CPU muxes without re-encoding and decodes AV1 with single-threaded dav1d to ``gray8``. MSD's limited-range
+   ``yuv420p`` has flat chroma: limited-to-full expansion restores original grayscale; raw Y differs by up to 17 LSB. Copies honor
+   dav1d's padded ``line_size`` (> width). Optional CUDA uses SimpleCV NVDEC and GPU RGB-to-gray with different rounding.
+2. **Round trips.** Each camera, IMU and truth is read per window. Long segments split on ``video_time`` at keyframes shared
+   by every camera, so windows decode alone. Upstream decimated AV1 decode is unsafe: decode all frames; ``frame_stride``
+   selects yielded framesets. Offline ``cache_video`` fetches selected compressed streams once, reuses packets for the frame
+   index and keeps decoders alive for the segment.
+3. **Rig shape.** Rigs need not have four hardware-synced cameras at stored resolution on one IMU clock. :class:`RigProfile`
+   defaults to MSD and sets camera selection/order, integer downscale for frames and intrinsics, accel interpolation onto
+   the gyro clock, and the allowed time gap between cameras in a frameset.
+4. **Clocks.** DataForge frames, IMU and truth share ``video_time``. Add ``cam_time_offset_ns`` (from the catalog's signed
+   ``applied_time_shift_ns``) to reach the estimator's inertial clock; invert for query bounds. Never reapply factory
+   per-camera offsets. MSD's zero offset leaves all its numbers unchanged.
+5. **Geometry.** ``Pinhole:image_from_camera`` is column-major; ``Pinhole:resolution`` is ``(width, height)``, decoded arrays
+   are ``(height, width)``. Camera ``Transform3D`` is ``ChildFromParent`` (``cam_T_imu``), inverted here. msd-g2 images and
+   calibration are rotated to portrait: assume neither landscape frames nor a shared camera orientation.
 """
 
 import hashlib
@@ -114,32 +95,20 @@ class Frameset:
     images: list[UInt8[ndarray, "h w"]]
     """One C-contiguous grayscale image per camera, in rig camera order."""
     imu: ImuStream
-    """Inertial samples since the previous frameset, running one sample past :attr:`t_ns`.
-
-    The lead sample matters: a backend that integrates up to the frame time and
-    blocks until it can deadlocks on the very first frameset if it is only ever
-    given samples at or before that time.
+    """Inertial samples since the previous frameset, including one past :attr:`t_ns`.
+    Without that lead, a backend blocking until it can integrate to frame time deadlocks on the first frameset.
     """
     ground_truth: Float64[ndarray, " 7"] | None
     """Nearest ground-truth pose as ``[tx, ty, tz, qw, qx, qy, qz]``, or None without a ``gt`` layer."""
 
     def image_digests(self) -> tuple[str, ...]:
-        """Digest each camera's contiguous gray8 buffer in image order.
-
-        Hash on demand for pixel comparisons and clip dumps, avoiding hashing cost
-        in the feed loop and avoiding a temporary bytes copy.
-
-        Returns:
-            One hex digest per camera.
+        """Return a hex digest per contiguous gray8 camera buffer, in image order, for pixel comparisons and clip dumps.
+        Hash on demand to avoid feed-loop cost and a temporary bytes copy.
         """
         return tuple(hashlib.sha256(image).hexdigest() for image in self.images)
 
     def digest(self) -> str:
-        """Digest of the timestamp and the per-camera digests: one value per frameset.
-
-        Returns:
-            One hex digest for the whole frameset.
-        """
+        """Return one frameset hex digest combining its timestamp and per-camera digests."""
         rolled = hashlib.sha256(np.int64(self.t_ns).tobytes())
         for camera_digest in self.image_digests():
             rolled.update(bytes.fromhex(camera_digest))
@@ -178,10 +147,8 @@ class CatalogSegment:
 
 
 def resolve_catalog_segments(sources: Sequence[CatalogSegment], require_ground_truth: bool = False) -> tuple[CatalogSegment, ...]:
-    """Resolve segment availability with one manifest query per catalog dataset.
-
-    Resolved handles can be passed to ``open_segment`` without another lookup.
-    Ground-truth requirements are selected by the caller's scoring policy.
+    """Resolve availability with one manifest query per catalog dataset; ``open_segment`` reuses handles without lookup.
+    The caller's scoring policy sets ground-truth requirements.
     """
     datasets: dict[tuple[str, str], DatasetEntry] = {}
     layers: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
@@ -211,12 +178,9 @@ SegmentSource: TypeAlias = LocalSegment | CatalogSegment
 
 @dataclass(slots=True, frozen=True)
 class RigProfile:
-    """How one rig's recording has to be read, where reading it whole is wrong.
-
-    The default is MSD: every camera the rig declares, at its stored resolution,
-    on one hardware-synced clock, with both inertial channels already paired.
-    RoboCap is none of those, and each departure is a number a caller must state
-    rather than a branch the feed guesses.
+    """Rig read rules where reading the whole recording is wrong; callers state deviations rather than the feed guessing.
+    Defaults are MSD: all declared cameras, stored resolution, one hardware-synced clock, paired inertial channels.
+    RoboCap differs on all four.
     """
 
     camera_names: tuple[str, ...] | None = None
@@ -228,19 +192,12 @@ class RigProfile:
     frameset_tolerance_ns: int = 0
     """How far a camera's frame may sit from the anchor camera's and still join that frameset; 0 demands identical timestamps."""
     video_time_is_absolute: bool = False
-    """Whether ``video_time`` already **is** the device clock, so an export adds nothing to it.
-
-    False is MSD, whose ``video_time`` is relative to
-    ``property:capture:start_time_ns``; RoboCap records the device clock itself,
-    and that is what trajectory CSV exports use.
+    """True if ``video_time`` is already the device clock used by trajectory CSV exports, so exports add nothing (RoboCap).
+    False for MSD: ``video_time`` is relative to ``property:capture:start_time_ns``.
     """
 
     def __post_init__(self) -> None:
-        """Refuse a profile the feed cannot honour, before anything reads a recording with it.
-
-        Raises:
-            ValueError: If ``downscale`` is below one or ``frameset_tolerance_ns`` is negative.
-        """
+        """Before reading, raise ValueError for unsupported ``downscale < 1`` or ``frameset_tolerance_ns < 0``."""
         if self.downscale < 1:
             raise ValueError(f"downscale must be at least 1; got {self.downscale}")
         if self.frameset_tolerance_ns < 0:
@@ -254,12 +211,8 @@ ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
 
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
-    """Every non-null value of a temporal component column, flat and float64.
-
-    Rerun nests a component's values one list deep and the component's own arity
-    another (``list<fixed_size_list<3>>`` for a ``Transform3D:translation``,
-    ``list<double>`` for ``Scalars:scalars``), so the unwrapping is a loop rather
-    than a fixed number of ``flatten`` calls.
+    """Flatten non-null temporal component values to float64. Rerun nests values one list deep, plus the component's arity:
+    ``Transform3D:translation`` is ``list<fixed_size_list<3>>``, ``Scalars:scalars`` is ``list<double>``; unwrap in a loop.
     """
     values: pa.Array = column.drop_null()
     while pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
@@ -268,22 +221,10 @@ def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
 
 
 def _static_cell(statics: pa.Table, column: str) -> pa.Scalar:
-    """Row zero of one static component column.
-
-    A static is logged once, so row zero is the value — but a rig node that
-    carries no statics at all reached ``statics[column][0]`` as an ``IndexError``
-    out of pyarrow with nothing in it that says which component was being read.
-    The three readers below differ only in what they make of the cell.
-
-    Args:
-        statics: Single-row table from ``filter_contents(...).reader(index=None)``.
-        column: Component column name, e.g. ``/world/rig_00:reference``.
-
-    Returns:
-        The cell, valid.
-
-    Raises:
-        ValueError: If the column is absent, the table has no rows, or the cell is null.
+    """Return the valid row-zero cell for ``column`` (e.g. ``/world/rig_00:reference``), since statics are logged once.
+    ``statics`` is a single-row ``filter_contents(...).reader(index=None)`` table. Raise ValueError for a missing column,
+    no rows or a null cell: empty rig statics formerly caused a pyarrow IndexError that did not name the component.
+    The three readers below differ only in how they interpret the cell.
     """
     if column not in statics.column_names:
         raise ValueError(f"static column {column} is missing")
@@ -314,11 +255,8 @@ def _static_string(statics: pa.Table, column: str) -> str:
 
 
 def _static_int(statics: pa.Table, column: str) -> int:
-    """One static integer component, read without passing through float64.
-
-    A device clock is around 1e13 ns today, which float64 holds exactly, but the
-    margin to 2^53 is only three decades and the whole point of this value is that
-    it is added to timestamps that must stay exact.
+    """Read a static integer without float64 to keep timestamp sums exact: today's device clock (~1e13 ns) fits float64,
+    but has only three decades of margin to 2^53.
     """
     value: object = _static_scalar(_static_cell(statics, column))
     if not isinstance(value, int):
@@ -327,14 +265,8 @@ def _static_int(statics: pa.Table, column: str) -> int:
 
 
 def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
-    """Pull one camera node's static components out of a statics table.
-
-    Args:
-        statics: Single-row table from ``filter_contents(...).reader(index=None)``.
-        entity: Camera node entity path, e.g. ``/world/rig_00/cam_00``.
-
-    Returns:
-        The raw statics, unconverted.
+    """Return raw, unconverted camera statics for ``entity`` (e.g. ``/world/rig_00/cam_00``).
+    ``statics`` is a single-row table from ``filter_contents(...).reader(index=None)``.
     """
     optional_radius: str = f"{entity}:distortion_valid_radius"
     return CameraStatics(
@@ -350,34 +282,14 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
 
 
 def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
-    """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread.
-
-    ``reformat(format="gray8")`` performs the limited-to-full range expansion the
-    MSD streams need; reading the raw Y plane instead is a systematic photometric
-    shift of up to 17 LSB. dav1d pads each row, so the plane's ``line_size``
-    exceeds the frame width and the visible columns are sliced out.
-
-    The plane is read through the buffer protocol and the visible columns are
-    copied once (T06): ``bytes(plane)`` used to copy the padded plane first, at
-    0.751 ms a frame against 0.677 ms. The copy is explicit rather than
-    :func:`numpy.ascontiguousarray`, which would return the slice untouched on a
-    frame the decoder did not pad — a view into memory the decoder reuses for the
-    next frame.
-
-    A ``downscale`` above one asks the same ``swscale`` call for the smaller frame
-    with ``SWS_AREA``: one conversion, colour and size together, which is the
-    combined area-resampling operation. Converting first and resampling
-    afterwards is a second, different filter and a different trajectory.
-
-    Args:
-        mp4_bytes: MP4 produced by :func:`wrap_mp4`.
-        downscale: Integer factor to shrink each frame by.
-
-    Yields:
-        One grayscale image per frame, in decode order.
-
-    Raises:
-        ValueError: If ``downscale`` is below one.
+    """Yield C-contiguous ``gray8`` frames in decode order from in-memory ``mp4_bytes`` produced by :func:`wrap_mp4`.
+    Use one decoder thread. ``reformat(format="gray8")`` expands MSD's limited range to full; raw Y shifts pixels by up to
+    17 LSB. Slice visible columns from dav1d's padded rows (``line_size`` > width). Read via the buffer protocol and copy
+    once (T06: 0.677 ms/frame vs 0.751 ms with the old padded-plane ``bytes(plane)`` copy). Copy explicitly:
+    :func:`numpy.ascontiguousarray` would leave unpadded frames as views into memory the decoder reuses for the next frame.
+    Integer ``downscale > 1`` shrinks frames in the same ``swscale`` call with ``SWS_AREA``, combining color conversion
+    and area resampling; converting then resizing uses a second, different filter and changes the trajectory.
+    Raise ValueError if ``downscale < 1``.
     """
     if downscale < 1:
         raise ValueError(f"downscale must be at least 1; got {downscale}")
@@ -404,12 +316,8 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
 
 @dataclass(slots=True, frozen=True)
 class _VideoIndex:
-    """Frameset timing, read without touching a single encoded sample.
-
-    A frameset is one row: its ``video_time``, and the frame each fed camera
-    contributes to it. On a hardware-synced rig fed whole that is the identity —
-    frameset ``i`` is frame ``i`` of every camera — and on RoboCap it is the
-    nearest-match table built by this feed.
+    """Frameset timing without reading encoded samples: each row holds ``video_time`` and each fed camera's frame.
+    For a whole hardware-synced rig, frameset ``i`` uses every camera's frame ``i``; RoboCap uses this feed's nearest matches.
     """
 
     t_ns: Int64[ndarray, " n_framesets"]
@@ -439,29 +347,20 @@ class SegmentFeed:
     capture_start_time_ns: int
     """``property:capture:start_time_ns``: add it to a ``video_time`` to reach the absolute device clock."""
     export_offset_ns: int
-    """What an exported trajectory adds to its ``video_time`` stamps to land on the absolute device clock.
-
-    :attr:`capture_start_time_ns` on a rig whose ``video_time`` is relative to it,
-    and zero on one that records the device clock directly
-    (:attr:`RigProfile.video_time_is_absolute`). The rule is the recording's, not
-    the tool's: two tools reading it from the feed cannot disagree about it.
+    """Add to exported ``video_time`` stamps for the absolute device clock: :attr:`capture_start_time_ns` for relative rigs,
+    zero if :attr:`RigProfile.video_time_is_absolute`. This recording-owned rule keeps tools reading the feed consistent.
     """
     frame_t_ns: Int64[ndarray, " n_frames"]
-    """Timestamp of every frameset on the inertial clock, before ``frame_stride`` is applied.
-
-    That is ``video_time`` plus :attr:`ImuCalib.cam_time_offset_ns`, which is the
-    clock the estimator, the exported trajectory and ground-truth CSV exports are on.
+    """All frameset times before ``frame_stride``: ``video_time`` + :attr:`ImuCalib.cam_time_offset_ns`, on the inertial clock
+    used by the estimator, exported trajectory and ground-truth CSV exports.
     """
     camera_positions: tuple[int, ...]
     """Rig index of each fed camera, in the order a frameset's images arrive."""
     rig_cameras: int
     """Cameras the rig declares, of which :attr:`camera_positions` are the fed ones."""
     profile: RigProfile
-    """How this rig had to be read, exactly as the caller stated it.
-
-    Held rather than copied field by field: a rig knob is one declaration, and a
-    feed that carried its own copy of two of them made the profile three
-    declarations, of which only one is the caller's.
+    """The caller's exact rig read rules, held whole so each setting has one declaration.
+    Copying two fields into the feed previously made three profile declarations, only one of them the caller's.
     """
     frame_stride: int
     """Yield every n-th frameset. Every frame is still decoded: decimated AV1 decode is unreliable."""
@@ -484,20 +383,9 @@ class SegmentFeed:
         return self.gt_dataset is not None
 
     def stop_ns_after(self, max_framesets: int | None) -> int | None:
-        """When a count of framesets runs out, as a time :meth:`framesets` can stop at.
-
-        A caller counts framesets and the feed reads by time, so the count has to
-        become the timestamp of the last frameset that will be yielded. Without
-        it the feed is told to run to the end of the segment and fetches a whole
-        window nothing below will decode — on the RoboCap rig, thirty seconds of
-        four 1080p H.264 streams.
-
-        Args:
-            max_framesets: Framesets the caller will consume; None to run on.
-
-        Returns:
-            The last yielded frameset's timestamp, or None where the caller set
-            no count.
+        """Return the last yielded timestamp for ``max_framesets`` consumed framesets; None means no count limit.
+        :meth:`framesets` reads by time: this bound avoids fetching an unused window en route to segment end
+        (30 s of four 1080p H.264 streams on RoboCap).
         """
         if max_framesets is None:
             return None
@@ -513,19 +401,10 @@ class SegmentFeed:
         return replace(samples, t_ns=samples.t_ns + offset_ns)
 
     def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory:
-        """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock.
-
-        The layer stores them on ``video_time``, like the frames, so the window is
-        asked for in that clock and the answer comes back in the inertial one.
-        Empty where there is nothing to give: no ``gt`` layer at all, or a window
-        the layer does not cover. Whether the segment *has* a layer is
-        :attr:`has_ground_truth`, which is the distinction a caller acts on;
-        callers of this test :func:`len`.
-
-        Raises:
-            ValueError: If the layer's translation and rotation are not valid on
-                the same rows, so no pose can be read off it
-                (:func:`_rig_trajectory`).
+        """Return rig truth over inertial ``[first_ns, last_ns]``; query its stored ``video_time`` clock (also used by frames)
+        and shift back. Empty for no ``gt`` layer or no window coverage: test :func:`len` for poses, :attr:`has_ground_truth`
+        for layer presence. Raise ValueError if translation/rotation validity differs by row, preventing pose reads
+        (:func:`_rig_trajectory`).
         """
         if self.gt_dataset is None:
             return empty_trajectory()
@@ -533,44 +412,18 @@ class SegmentFeed:
         return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
     def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
-        """Decode the segment and yield one frameset at a time.
-
-        By default, video, inertial samples and ground truth are fetched one
-        window at a time, bounding memory and startup cost. Window edges land on
-        frames that are keyframes in every camera so each window decodes alone.
-        With cached video, the whole segment is one window, including its IMU
-        and ground truth. CPU decoding holds one image per camera; CUDA holds
-        a batch per camera.
-
-        Each frameset carries the inertial samples since the previous one, running
-        one sample past its own timestamp, and the nearest ground-truth pose.
-
-        A caller that stops early states where, because the fetch is a window
-        ahead of what it yields: a consumer breaking out of the loop has already
-        paid for a whole window of encoded samples — 30 s x 30 fps x 4 cameras of
-        1080p on a RoboCap run — that nothing will read.
-
-        Args:
-            stop_ns: Last frameset time worth reading, on the inertial clock; a
-                window opening past it is not fetched at all. None reads to the
-                end of the segment. Framesets up to the end of the window that
-                covers it are still yielded, because a window is the unit that is
-                read.
-
-        Yields:
-            Framesets in time order, every :attr:`frame_stride`-th one.
-
-        Raises:
-            ValueError: If a camera's decoder runs dry before the window ends, a
-                decoded frame disagrees with the calibrated resolution, or a
-                window's inertial read leaves a gap at the boundary.
+        """Decode the segment; yield every :attr:`frame_stride`-th frameset, one at a time in time order.
+        Each carries IMU samples since the previous frameset through one past its timestamp, plus the nearest truth pose.
+        Default video/IMU/truth reads use windows to bound memory/startup cost; edges are keyframes in every camera so each
+        window decodes alone. Cached video uses one whole-segment window, including IMU/truth. CPU holds one image per camera;
+        CUDA holds a batch. Fetching runs a window ahead: state early stops to avoid an unread encoded window
+        (RoboCap: 30 s x 30 fps x 4 cameras at 1080p).
+        ``stop_ns`` is the last useful inertial-clock time; skip windows opening later. None reads to segment end.
+        The covering window still yields through its end because reads are per window.
+        Raise ValueError for a decoder ending before the window, a frame/calibration resolution mismatch or an IMU boundary gap.
         """
-        # Each read reaches past both ends of its window. Forward, because a
-        # frameset needs one sample beyond its own timestamp. Backward by a whole
-        # frame period, because the first frameset of a window owns the samples
-        # since the *previous* window's last frameset, which is one frame earlier —
-        # a margin of a few IMU periods silently drops 16 ms of every boundary at
-        # 54 Hz, which is what the gap check below is here to catch.
+        # Read beyond both ends: one sample after frame time, a whole frame period before for samples since the prior window's
+        # last frameset. A few IMU periods would drop 16 ms at every 54 Hz boundary; the gap check below catches this.
         frame_period_ns: int = int(1e9 / max(self.index.fps, 1))
         imu_period_ns: int = int(1e9 / max(self.imu.frequency_hz, 1.0))
         margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
@@ -595,9 +448,7 @@ class SegmentFeed:
                 window: tuple[bytes, int] = self._window_payload(position, start, stop)
                 decoders.append(self._open_decoder(window[0], camera))
                 cursor.append(window[1] - 1)
-            # One selected frame and one decode cursor per camera: a
-            # camera that contributes no frame to this frameset still has its own
-            # frames decoded in order, because dropping one breaks the next.
+            # Keep one selected frame and decode cursor per camera; decode even unused frames in order or the next breaks.
             decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
@@ -648,11 +499,8 @@ class SegmentFeed:
         return wrap_mp4(packets[0], packets[1], fps=self.index.fps, codec=self.index.codec), int(self.index.frame_index[start, position])
 
     def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]]:
-        """Encoded samples and keyframe flags of one fed camera, over the framesets ``[start, stop)``.
-
-        The range is contiguous in that camera's own frames, from the frame the
-        first frameset takes to the frame the last one does, so the decoder gets
-        every frame the ones it must produce depend on.
+        """Return one fed camera's encoded samples/keyframe flags for framesets ``[start, stop)``.
+        Include every camera frame from the first frameset's choice to the last's, so decoding has all dependencies.
         """
         camera_index: int = self.camera_positions[position]
         camera_t_ns: Int64[ndarray, " n_frames"] = self.index.camera_t_ns[position]
@@ -695,22 +543,10 @@ def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
 
 
 def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
-    """The codec every sample of one camera's stream is in.
-
-    ``VideoStream:codec`` is logged once, as a static, so the value is row zero
-    of the non-null codecs — and a recording that carries neither the samples nor
-    the codec has to say which camera it was asked about rather than raise an
-    index error out of pyarrow.
-
-    Args:
-        table: The three columns ``_read_video_index`` selects: the timeline, ``is_keyframe``, ``codec``.
-        entity: The camera's video entity path, for the error.
-
-    Returns:
-        The codec name the sample wrapper needs.
-
-    Raises:
-        ValueError: If the stream has no samples or carries no codec.
+    """Return the sample wrapper's codec name for every sample in one camera stream.
+    ``table`` has ``_read_video_index``'s timeline, ``is_keyframe``, ``codec`` columns; ``entity`` names the video path in errors.
+    Static ``VideoStream:codec`` is logged once: take row zero of non-null codecs. Raise ValueError if samples or codec are
+    absent, identifying the camera rather than exposing a pyarrow index error.
     """
     if table.num_rows == 0:
         raise ValueError(f"{entity}: the recording carries no video samples")
@@ -718,22 +554,10 @@ def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
 
 
 def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id: str) -> CatalogCodecName:
-    """The one codec every fed camera's stream is in.
-
-    :attr:`_VideoIndex.codec` names the codec :meth:`SegmentFeed._fetch_samples`
-    muxes *every* camera's samples under, so a rig whose cameras disagree cannot
-    be decoded from one index and has to name the two that differ rather than
-    silently decode three of four streams as the fourth.
-
-    Args:
-        per_camera: ``(camera_index, codec)`` in feed order, at least one entry.
-        segment_id: Segment the cameras belong to, for the error.
-
-    Returns:
-        The codec the sample wrapper needs.
-
-    Raises:
-        ValueError: If two fed cameras carry different codecs.
+    """Return the sample wrapper's shared codec from at least one ``per_camera`` (camera_index, codec) pair in feed order.
+    ``segment_id`` identifies the cameras' segment in errors. :attr:`_VideoIndex.codec` is what
+    :meth:`SegmentFeed._fetch_samples` muxes every camera under: differing codecs cannot decode from one index.
+    Raise ValueError naming the two mismatched cameras, rather than silently decoding three of four streams as the fourth.
     """
     first_camera, codec = per_camera[0]
     for camera_index, other in per_camera[1:]:
@@ -775,8 +599,7 @@ def _read_video_index(
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
     codec: CatalogCodecName = _shared_codec(per_camera_codec, segment_id)
     if tolerance_ns == 0:
-        # MSD is hardware-synced: a frameset is "all cameras at the same
-        # video_time", and the identity table is what a matcher would return.
+    # MSD hardware sync gives all cameras the same video_time per frameset; matching would return the identity table.
         for position, times in enumerate(per_camera_times[1:], start=1):
             if not np.array_equal(times, per_camera_times[0]):
                 raise ValueError(
@@ -806,12 +629,8 @@ def _read_video_index(
 
 
 def _nearest_pose(trajectory: Trajectory, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
-    """The pose closest in time to ``t_ns`` as ``[tx, ty, tz, qw, qx, qy, qz]``, or None if none is close enough.
-
-    The tolerance is the gate's own association tolerance. Without it a frameset
-    outside the ground truth's span would silently receive a stale pose: on the
-    Index smoke segment the ground truth starts 17.5 ms after ``video_time`` zero,
-    so the very first frameset has no truth and must say so rather than borrow one.
+    """Return the nearest pose to ``t_ns`` as ``[tx, ty, tz, qw, qx, qy, qz]``, or None outside the gate's association tolerance.
+    This prevents stale truth outside its span: Index smoke truth starts 17.5 ms after ``video_time`` zero, so its first frameset has none.
     """
     if len(trajectory) == 0:
         return None
@@ -848,11 +667,8 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
 
 
 def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
-    """Ground-truth rig poses over one window on ``video_time``, converted from Rerun's XYZW to w-first.
-
-    Empty when the layer carries no rig transform at all and when this window
-    holds no pose: the two are the same answer to "what is the truth here", and
-    the layer's own absence is :attr:`SegmentFeed.has_ground_truth`.
+    """Return one window's rig truth on ``video_time``, converting Rerun XYZW to w-first. Empty for no rig transform or no
+    poses in this window; both mean no truth here. :attr:`SegmentFeed.has_ground_truth` distinguishes layer absence.
     """
     table: pa.Table = (
         dataset.filter_segments([segment_id])
@@ -864,35 +680,19 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
     return _rig_trajectory(table, segment_id)
 
 
-def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
-    """One window of the ``gt`` layer's rig transforms as a trajectory, Rerun's XYZW converted to w-first.
-
-    Empty when the layer carries neither component and when the window holds no
-    pose at all.
-
-    Args:
-        table: The window's rows, one Rerun ``Transform3D`` per row.
-        segment_id: Which segment the rows came from, for the refusal below.
-
-    Returns:
-        The poses the window carries, on ``video_time``.
-
-    Raises:
-        ValueError: If the two components are not valid on the same rows. A pose
-            is one row's translation and that same row's rotation, and the two
-            components are read by dropping each column's own nulls — so two
-            masks with equal counts on different rows flatten to equal lengths
-            and every pose silently takes another row's rotation. Rerun stores
-            components independently and lets either one be logged or cleared
-            alone, so the layout is one a valid recording can hold; a refusal
-            naming the row is the only reading of it that cannot be wrong
-            (S25 review).
+def _rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
+    """Return a ``gt`` window's rig trajectory on ``video_time``, converting Rerun XYZW to w-first.
+    ``table`` holds one ``entity`` Transform3D per row, indexed by ``timeline``; ``segment_id`` identifies errors.
+    Empty if neither component exists or the window has no pose. Raise ValueError naming the row if translation and rotation
+    validity differs: a pose needs both from the same row. Dropping column nulls separately can give equal lengths but pair
+    different rows. Rerun stores components independently and permits logging/clearing either alone, so valid recordings can
+    have this layout; refusal is the only safe reading (S25 review).
     """
-    translation_column: str = f"{RIG_ENTITY}:Transform3D:translation"
-    quaternion_column: str = f"{RIG_ENTITY}:Transform3D:quaternion"
+    translation_column: str = f"{entity}:Transform3D:translation"
+    quaternion_column: str = f"{entity}:Transform3D:quaternion"
     if translation_column not in table.column_names or quaternion_column not in table.column_names:
         return empty_trajectory()
-    row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
+    row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[timeline].combine_chunks().cast(pa.int64()))
     translations: pa.Array = table[translation_column].combine_chunks()
     quaternions: pa.Array = table[quaternion_column].combine_chunks()
     valid: Bool[ndarray, " n_rows"] = translations.is_valid().to_numpy(zero_copy_only=False)
@@ -904,9 +704,7 @@ def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
             f"a quaternion without a translation, the first at {int(row_t_ns[disagreeing[0]])} ns; a pose needs both, "
             f"and reading each component off its own rows would give it another row's rotation"
         )
-    # One mask for the timestamps and both components: each column's own null
-    # removal drops exactly `valid`'s false rows, because the two masks are
-    # equal by here.
+    # Equal masks: each component's null removal drops exactly `valid`'s false rows, matching the timestamps' mask.
     position_m: Float64[ndarray, "n_poses 3"] = _flat_float(translations).reshape(-1, 3)
     if position_m.shape[0] == 0:
         return empty_trajectory()
@@ -919,22 +717,9 @@ def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
 
 
 def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str, ...] | None) -> tuple[int, ...]:
-    """Resolve camera names to rig indices in caller order.
-
-    Normalize hyphens to underscores on both sides so left-front and left_front
-    select the same recorded camera.
-
-    Args:
-        statics: Single-row table holding every camera node's statics.
-        camera_count: Cameras the rig declares.
-        camera_names: Names to feed in order, or None for every camera in rig order.
-
-    Returns:
-        One rig index per fed camera.
-
-    Raises:
-        ValueError: If a name is asked for that the recording does not carry, or
-            two cameras answer to the same name.
+    """Return one rig index per ``camera_names`` entry in caller order; None selects all ``camera_count`` declared cameras
+    in rig order. ``statics`` is a single-row table of every camera's statics. Normalize hyphens to underscores in requested
+    and recorded names (left-front == left_front). Raise ValueError for a missing name or two cameras sharing a name.
     """
     if camera_names is None:
         return tuple(range(camera_count))
@@ -1043,27 +828,13 @@ def open_segment(
     decode_device: Literal["cpu", "cuda"] = "cpu",
     include_ground_truth: bool = True,
 ) -> Iterator[SegmentFeed]:
-    """Open one segment for reading, from local ``.rrd`` files or from a catalog server.
-
-    A local source is served by an in-process ``rr.server.Server`` on an ephemeral
-    port that shuts down when the context exits, so no catalog server is needed.
-    The base and ground-truth layers become two datasets there, because one
-    in-process dataset takes a single layer per segment.
-
-    Args:
-        source: Where the segment lives.
-        profile: How this rig has to be read; the default is what MSD is.
-        frame_stride: Yield every n-th frameset; every frame is still decoded.
-        window_s: Longest time window fetched in one round trip.
-        cache_video: Fetch compressed streams together once; RAM use scales with encoded segment size.
-        decode_device: CPU PyAV or CUDA TorchCodec; CUDA requires the slam-rs-cuda environment.
-        include_ground_truth: Read isolated GT for scoring; False reads only the estimator's inputs.
-
-    Yields:
-        The open feed.
-
-    Raises:
-        ValueError: If a local base ``.rrd`` does not hold exactly one segment.
+    """Yield an open feed for ``source`` (local ``.rrd`` files or a catalog server), with ``profile`` rig read rules (MSD default).
+    Local files need no catalog server: an in-process ``rr.server.Server`` uses an ephemeral port and stops on context exit.
+    Base and truth use separate datasets because each in-process dataset accepts one layer per segment.
+    ``frame_stride`` yields every n-th frameset while decoding all frames; ``window_s`` bounds each fetch's time window.
+    ``cache_video`` fetches compressed streams together once; RAM scales with encoded segment size. ``decode_device`` selects
+    CPU PyAV or CUDA TorchCodec (requires slam-rs-cuda). ``include_ground_truth`` reads isolated GT for scoring; False reads
+    only estimator inputs. Raise ValueError if the local base ``.rrd`` does not contain exactly one segment.
     """
     if isinstance(source, LocalSegment):
         datasets: dict[str, str | PathLike[str] | Sequence[str | PathLike[str]]] = {"base": [str(source.base_rrd)]}

@@ -1,13 +1,8 @@
 """Tyro-facing entry points; the scripts under ``tools/`` are thin shims over these.
 
-Every one of these tools reaches a user error the same way — a benchmark id that
-is not in the reference set, a recording that is not on this machine, a
-configuration the port does not run, ``--gpu`` on a host with no driver — and
-what the operator should see for all of them is one sentence and a non-zero
-exit, not a traceback through the feed. :func:`run` is where that conversion
-lives, in the shim rather than in ``main``: every test drives ``main(Config(…))``
-and asserts the typed ``ValueError`` or ``FileNotFoundError``, which is the
-contract the tools are written against and stays exactly as it is.
+Unknown reference benchmark IDs, recordings absent from this host, unsupported configs and ``--gpu`` without a driver
+must produce one sentence and a non-zero exit, not a feed traceback. The shim's :func:`run` converts these errors;
+``main`` keeps the tools' typed ValueError/FileNotFoundError contract, asserted by every test via ``main(Config(...))``.
 """
 
 from collections.abc import Callable
@@ -16,15 +11,8 @@ import tyro
 
 
 def run[Config](config_type: type[Config], main: Callable[[Config], None]) -> None:
-    """Parse the command line and run one tool, turning a user error into one sentence.
-
-    Args:
-        config_type: The tool's Tyro config dataclass.
-        main: The tool's entry point.
-
-    Raises:
-        SystemExit: With the error's own text, for the two typed errors every
-            tool raises on bad input.
+    """Parse CLI args with Tyro dataclass ``config_type`` and call entry point ``main``.
+    Convert tools' bad-input ValueError/FileNotFoundError to SystemExit with the error's own text as one sentence.
     """
     try:
         main(tyro.cli(config_type))

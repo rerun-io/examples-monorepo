@@ -2362,7 +2362,7 @@ description = "Download every MSD recording (about 15.5 GB)"
 depends-on = ["slam-rs-wgpu-build"]
 cmd = "python tools/apps/catalog_layer.py"
 cwd = "packages/slam-rs"
-description = "Run catalog VIO on the GPU (wgpu frontend, NVDEC decode) and replace its slam_rs pose layer (fast profile)"
+description = "Run the VIO graph on the GPU (wgpu frontend, NVDEC decode) and publish a segment's slam_rs pose layer (--register replace refreshes one)"
 
 [feature.slam-rs.tasks.slam-rs-import-imu-calibration]
 cmd = "python tools/import_imu_calibration.py"
@@ -2455,6 +2455,25 @@ description = "Run native catalog tests and explicitly select fixture parity whe
 [feature.slam-rs.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test", "slam-rs-clippy", "slam-rs-wgpu-clippy"]
 description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
+
+# ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
+[feature.slam-rs.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Record the pre-port goldens (DAGKIT_GOLDENS): pre and pre2 (noise run) for every case"
+
+[feature.slam-rs.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Graph tier, short cases (60 s of Cap B session 14 vs pre-port; msd-index MIO10 vs GT)"
+
+[feature.slam-rs.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Graph tier, full cases (the whole Cap B session 14 vs pre-port; msd-index MIO07 vs GT)"
 
 [feature.slam-rs.tasks.slam-rs-fmt]
 cmd = "cargo fmt --all"
@@ -2664,7 +2683,7 @@ slam-rs = { path = "packages/slam-rs" }
 slam-rs-catalog = { path = "packages/slam-rs" }
 
 [feature.slam-rs-pkg.tasks.slam-rs-pkg-check]
-cmd = "python -c \"import importlib.util, slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config; assert 'site-packages' in slam_rs.__file__, slam_rs.__file__; assert importlib.util.find_spec('slam_rs.catalog_feed'); print('slam-rs', slam_rs._core.__version__, slam_rs.__file__)\""
+cmd = "python -c \"import importlib.util, slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config; assert 'site-packages' in slam_rs.__file__, slam_rs.__file__; assert importlib.util.find_spec('slam_rs.catalog_feed') and importlib.util.find_spec('slam_rs.nodes.vio'); print('slam-rs', slam_rs._core.__version__, slam_rs.__file__)\""
 description = "Import the installed slam-rs core output and check the catalog output is present"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3216,6 +3235,9 @@ libvulkan-loader = "==1.4.357.0"
 
 [feature.robocap-live.pypi-dependencies]
 robocap-live = { path = "packages/robocap-live", editable = true }
+# The robocap app runs slam-rs's VIO graph before the hands (its CPU core is built in place by slam-rs-build).
+slam-rs = { path = "packages/slam-rs", editable = true }
+dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.robocap-live.activation.env]
 PACKAGE_DIR = "packages/robocap-live"
@@ -3225,7 +3247,8 @@ PYREFLY_TARGET = "robocap_live tools/apps tests"
 # (the slam-rs-build pattern). robocap-live path-depends on slam-rs, whose shared CubeCL patches kornia-staging-patch-deps
 # prepares.
 [feature.robocap-live.tasks.robocap-live-build]
-depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+# The robocap App imports slam_rs (its VIO graph), whose core slam-rs-build compiles and installs in place.
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }, { task = "slam-rs-build", environment = "slam-rs" }]
 cmd = "PYO3_BUILD_EXTENSION_MODULE=1 cargo build --release -p robocap-live-py && cp target/release/lib_core.so robocap_live/_core.so.new && mv robocap_live/_core.so.new robocap_live/_core.so"
 cwd = "packages/robocap-live"
 inputs = [
@@ -3273,7 +3296,7 @@ description = "Run Python and native author checks for robocap-live"
 cmd = "python tools/apps/hands_layer.py"
 cwd = "packages/robocap-live"
 depends-on = ["robocap-live-build"]
-description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
+description = "Run slam-rs VIO over one robocap catalog segment, then its hands on those poses; register its `slam_rs` and `hands` layers (--slam catalog: hands on the registered poses)"
 
 [feature.robocap-live.tasks.verify-pre]
 cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
