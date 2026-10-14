@@ -48,7 +48,10 @@ The generated gradio app (`pixi run -e mast3r-slam mast3r-slam-app`) has the sam
 there (its form does not offer `auto`). An uploaded video takes precedence over the webcam field.
 
 ### Verification
-`VERIFY.toml` bands the Sim3 ATE of the final keyframes against msd-odyssey mocap GT (`verify`, `verify-full` tasks).
+`VERIFY.toml` bands the Sim3 ATE of the final keyframes against msd-odyssey mocap GT (`verify`, `verify-full` tasks), and
+against the MASt3R-SLAM paper on TUM RGB-D fr1 and EuRoC from the catalog (`verify-paper-pre`, `verify-paper`: 40 whole
+sequences, calibrated and uncalibrated, the paper's protocol; a band allows the worse of our `pre` run and the paper's ATE).
+To run a benchmark segment the paper's way, add `--undistort` (EuRoC always; TUM with `--preset calib`).
 
 ## First Run
 
