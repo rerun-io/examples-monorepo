@@ -14,4 +14,4 @@ def test_tool_shim_imports(shim: Path) -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # ``__name__`` is not ``__main__``, so nothing runs
-    assert callable(module.main)
+    assert callable(getattr(module, "main", None) or module.build)  # a CLI shim's entry point, or what the gradio shim runs

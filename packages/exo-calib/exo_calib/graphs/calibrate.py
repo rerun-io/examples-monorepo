@@ -31,7 +31,7 @@ def connect_sinks(graph: Graph, ports: Mapping[str, PortRef], sinks: Mapping[str
 
 
 def init_graph(segment: SegmentRef, cameras: tuple[str, ...], frame_index: int, models: Factories, sinks: Mapping[str, Node]) -> Graph:
-    graph = Graph("exocalib-init")
+    graph = Graph("exocalib-init", about="Stage A, run once: metric, gravity-aligned exo cameras from one synchronized frameset of the exo videos. The refine graph starts from this rig.")
     for name in ("g3t", "moge"):
         graph.resource(name, models[name])
     video = graph.source("video", CatalogVideoSource(segment, cameras, decode="nvdec_rgb", sample=(frame_index,)))
@@ -56,7 +56,10 @@ def refine_graph(
 
     ``resume_kp2d`` reads the Stage B records (and the GT rig) back from the catalog instead of decoding and detecting.
     """
-    graph = Graph("exocalib-refine")
+    graph = Graph(
+        "exocalib-refine",
+        about="Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then bundle adjustment of the Stage A rig on them; the second pass tracks through the first pass's rig and scores both rigs against GT.",
+    )
     for name in ("detector", "pose", "moge", "frames"):
         graph.resource(name, models[name])
     statics: dict[str, object] = {"init": seed[0], "tracking_rig": seed[1], "rig_layout": layout}

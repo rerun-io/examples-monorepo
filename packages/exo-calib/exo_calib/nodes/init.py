@@ -91,6 +91,8 @@ def estimate_init_cameras(frames_rgb: list[UInt8[ndarray, "h w 3"]], names: tupl
 
 
 class InitNode:
+    """Calibrate the rig from one frameset."""
+
     inputs: Mapping[str, PortType] = {"frames": MultiViewFrames}
     outputs: Mapping[str, PortType] = {"init": RigCameras}
 

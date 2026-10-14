@@ -41,38 +41,33 @@ class BlueprintConfig:
     """Loop the whole timeline instead of parking on the last frame; for short standalone exports of a segment."""
 
 
-def main(config: BlueprintConfig) -> None:
-    """Recreate the exoego viewer layout, bound to the dataset's current id.
+def exoego_view(layout: RigLayout) -> rrb.Vertical:
+    """The exoego layout: a 3D scene, the ego cameras tabbed beside it (when there are any), the exo cameras as a strip below.
 
     Mirrors ``simplecv.apis.view_exoego.create_container`` (the base rrd's own
     blueprint, which the catalog does not serve). Not imported from simplecv
     because that module pulls in dataset configs with deps outside this env.
     """
-    layout: RigLayout = discover_rig_layout(config.segment, exo_rigs=config.exo_rigs)
     exo_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in layout.exo_camera_names]
     ego_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in layout.ego_camera_names]
-    main_view: rrb.Horizontal = rrb.Horizontal(
-        contents=[
-            rrb.Spatial3DView(
-                origin="/",
-                name="3D View",
-                contents="/**",
-                spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
-                # An ego camera without dataset calibration has no pose in any layer, so keep it out of the 3D scene.
-                overrides={
-                    f"/world/{name}/pinhole": rrb.EntityBehavior(visible=False)
-                    for name in layout.ego_camera_names
-                    if name not in layout.calibrated_camera_names
-                },
-            ),
-            rrb.Vertical(contents=ego_tabs) if ego_tabs else rrb.Tabs(),
-        ],
-        column_shares=[4, 1],
+    scene = rrb.Spatial3DView(
+        origin="/",
+        name="3D View",
+        contents="/**",
+        spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
+        # An ego camera without dataset calibration has no pose in any layer, so keep it out of the 3D scene.
+        overrides={f"/world/{name}/pinhole": rrb.EntityBehavior(visible=False) for name in layout.ego_camera_names if name not in layout.calibrated_camera_names},
     )
-    container: rrb.Vertical = rrb.Vertical(main_view, rrb.Horizontal(contents=exo_tabs), row_shares=[4, 1])
+    top: rrb.Horizontal | rrb.Spatial3DView = rrb.Horizontal(scene, rrb.Vertical(contents=ego_tabs), column_shares=[4, 1]) if ego_tabs else scene
+    return rrb.Vertical(top, rrb.Horizontal(contents=exo_tabs), row_shares=[4, 1])
+
+
+def main(config: BlueprintConfig) -> None:
+    """Recreate the exoego viewer layout, bound to the dataset's current id."""
+    layout: RigLayout = discover_rig_layout(config.segment, exo_rigs=config.exo_rigs)
     # An explicit time panel opts out of ``collapse_panels``, so restate the collapsed state.
     panels: list[rrb.TimePanel] = [rrb.TimePanel(loop_mode="All", state=rrb.PanelState.Collapsed)] if config.loop_playback else []
-    blueprint: rrb.Blueprint = rrb.Blueprint(container, *panels, collapse_panels=True)
+    blueprint: rrb.Blueprint = rrb.Blueprint(exoego_view(layout), *panels, collapse_panels=True)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     rbl_path: Path = config.output_dir / BLUEPRINT_FILENAME
     counter: int = 1

@@ -62,6 +62,8 @@ def best_box_per_frame(detections: BoxDetections, num_frames: int) -> Float32[nd
 
 
 class Kp2dNode:
+    """Find 2D body keypoints in every view."""
+
     inputs: Mapping[str, PortType] = {"frames": Fenced[MultiViewFrames], "tracking_rig": RigCameras}
     outputs: Mapping[str, PortType] = {"kp2d": MultiViewKeypoints}
 

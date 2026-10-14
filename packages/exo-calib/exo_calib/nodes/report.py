@@ -19,6 +19,8 @@ from exo_calib.types import VARIANTS, EvalReport, RefinementDiagnostics, RigAlig
 
 
 class ReportNode:
+    """Score the rigs against GT calibration."""
+
     inputs: Mapping[str, PortType] = {"refined": RigCameras, "diag": RefinementDiagnostics, "init": RigCameras, "gt": RigCameras, "rig_layout": RigLayout}
     outputs: Mapping[str, PortType] = {"align": RigAlignment, "eval": EvalReport}
 
