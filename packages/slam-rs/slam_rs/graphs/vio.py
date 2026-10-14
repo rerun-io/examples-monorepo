@@ -58,8 +58,5 @@ def vio_graph(source: Source, vio: VioNode, sinks: Mapping[str, Node]) -> Graph:
     for port in ("imu", "frames"):
         graph.edge(segment[port], node[port], Block(4))
     graph.edge(segment["rig"], node["rig"], AsOf())
-    for name, sink in sinks.items():
-        ref = graph.sink(name, sink)
-        for port in sink.inputs:
-            graph.edge(node[port], ref[port])
+    graph.sinks({port: node[port] for port in vio.outputs}, sinks)
     return graph

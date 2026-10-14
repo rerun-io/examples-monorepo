@@ -29,7 +29,7 @@ def write_layer(tmp_path: Path, segment: SegmentRef, register: str = "off") -> P
     sink = LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register=register)  # type: ignore[arg-type]
     events = [Event(t, "point", Point((float(t), 0.0, 0.0), f"p{t}")) for t in (10, 20)]
     graph = Graph("points")
-    graph.checkpoint(graph.source("src", IterSource({"point": Point}, lambda: iter(events)))["point"], sink)
+    graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter(events)))["point"]}, {"layer": sink})
     run_sequential(graph)
     assert sink.published is not None
     return sink.published

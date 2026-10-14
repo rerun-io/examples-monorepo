@@ -42,8 +42,5 @@ def single_image_graph(
     graph.edge(final["scene"], path["scene"])
     graph.edge(final["views"], path["views"], AsOf())
     ports: dict[str, PortRef] = {"scene": final["scene"], "views": final["views"], "view": path["view"]}
-    for name, sink in sinks.items():
-        ref: NodeRef = graph.sink(name, sink)
-        for port in sink.inputs:
-            graph.edge(ports[port], ref[port])
+    graph.sinks(ports, sinks)
     return graph

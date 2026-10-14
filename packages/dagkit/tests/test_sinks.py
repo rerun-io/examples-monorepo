@@ -27,7 +27,7 @@ def point_graph(sink: LayerSink, n: int, control: Control | None = None) -> Grap
 
     graph = Graph("points")
     src = graph.source("src", IterSource({"point": Point}, events))
-    graph.checkpoint(src["point"], sink)
+    graph.sinks({"point": src["point"]}, {"layer": sink})
     return graph
 
 
@@ -66,7 +66,7 @@ def test_failed_run_deletes_the_partial(tmp_path: Path) -> None:
         raise OSError("device gone")
 
     graph = Graph("fails")
-    graph.checkpoint(graph.source("src", IterSource({"point": Point}, events))["point"], sink)
+    graph.sinks({"point": graph.source("src", IterSource({"point": Point}, events))["point"]}, {"layer": sink})
     with pytest.raises(OSError, match="device gone"):
         run_sequential(graph)
     assert sink.published is None and list((tmp_path / "seg0").iterdir()) == []

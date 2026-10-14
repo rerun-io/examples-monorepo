@@ -125,9 +125,12 @@ class Graph:
     def edge(self, src: PortRef, dst: PortRef, kind: PortKind = Block()) -> None:
         self.edges.append(EdgeSpec(src, dst, kind))
 
-    def checkpoint(self, src: PortRef, sink: LayerSink) -> None:
-        ref: NodeRef = self.sink(f"{src.node}_{src.port}_layer", sink)
-        self.edge(src, ref[src.port if src.port in sink.inputs else next(iter(sink.inputs))])
+    def sinks(self, ports: Mapping[str, PortRef], sinks: Mapping[str, Node]) -> None:
+        """Add every sink and feed each of its inputs from the producer port named like it."""
+        for name, sink in sinks.items():
+            ref: NodeRef = self.sink(name, sink)
+            for port in sink.inputs:
+                self.edge(ports[port], ref[port])
 
     def order(self) -> list[str]:
         sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter({name: set() for name in self.nodes})

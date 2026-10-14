@@ -22,14 +22,6 @@ Factories = Mapping[str, Callable[[], object]]
 KP2D_ROOT: str = "/world/exocalib/kp2d"
 
 
-def connect_sinks(graph: Graph, ports: Mapping[str, PortRef], sinks: Mapping[str, Node]) -> None:
-    """Feed every sink the producer port named like each of its inputs."""
-    for name, sink in sinks.items():
-        ref = graph.sink(name, sink)
-        for port in sink.inputs:
-            graph.edge(ports[port], ref[port])
-
-
 def init_graph(segment: SegmentRef, cameras: tuple[str, ...], frame_index: int, models: Factories, sinks: Mapping[str, Node]) -> Graph:
     graph = Graph("exocalib-init", about="Stage A, run once: metric, gravity-aligned exo cameras from one synchronized frameset of the exo videos. The refine graph starts from this rig.")
     for name in ("g3t", "moge"):
@@ -37,7 +29,7 @@ def init_graph(segment: SegmentRef, cameras: tuple[str, ...], frame_index: int, 
     video = graph.source("video", CatalogVideoSource(segment, cameras, decode="nvdec_rgb", sample=(frame_index,)))
     init = graph.node("init", InitNode(), needs=("g3t", "moge"))
     graph.edge(video["frames"], init["frames"])
-    connect_sinks(graph, {"init": init["init"]}, sinks)
+    graph.sinks({"init": init["init"]}, sinks)
     return graph
 
 
@@ -88,5 +80,5 @@ def refine_graph(
         for src, port in ((seed_ref["init"], "init"), (gt, "gt"), (seed_ref["rig_layout"], "rig_layout")):
             graph.edge(src, rep[port], AsOf())
         ports |= {"align": rep["align"], "eval": rep["eval"]}
-    connect_sinks(graph, ports, sinks)
+    graph.sinks(ports, sinks)
     return graph

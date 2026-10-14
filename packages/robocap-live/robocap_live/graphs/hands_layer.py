@@ -58,8 +58,5 @@ def hands_layer_graph(source: Source, hands: HandsNode, sinks: Mapping[str, Node
     graph.edge(segment["frames"], node["frames"], Block(4))
     graph.edge(segment["cap_rig"], node["cap_rig"], AsOf())
     graph.edge((segment if poses is None else graph.source("slam", poses))["poses"], node["poses"], AsOf())
-    for name, sink in sinks.items():
-        ref = graph.sink(name, sink)
-        for port in sink.inputs:
-            graph.edge(node[port], ref[port])
+    graph.sinks({port: node[port] for port in hands.outputs}, sinks)
     return graph
