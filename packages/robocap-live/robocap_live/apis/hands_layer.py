@@ -107,10 +107,9 @@ def examples() -> list[Config]:
     """The gradio examples, known-good inputs: VERIFY.toml's short cases (5 s of the README sample on CPU ONNX Runtime, VIO from the
     segment's start for ``robocap``, the registered poses for ``hands``), unregistered."""
     blocks = {block.name: block for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph}
-    short = {name: next(c for c in blocks[name].cases if c.name == "short") for name in ("robocap", "hands")}
     return [
-        case_config(short["robocap"], PACKAGE_DIR / "data" / "hands-layer", "vio"),
-        case_config(short["hands"], PACKAGE_DIR / "data" / "hands-layer", "catalog"),
+        case_config(next(c for c in blocks[name].cases if c.name == "short"), PACKAGE_DIR / "data" / "hands-layer", slam)
+        for name, slam in (("robocap", "vio"), ("hands", "catalog"))
     ]
 
 

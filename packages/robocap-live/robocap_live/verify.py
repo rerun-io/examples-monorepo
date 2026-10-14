@@ -10,6 +10,7 @@ camera), plus ``/verify/hands/run``: static ``AnyValues`` with the layer's count
 """
 
 import time
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
@@ -38,17 +39,7 @@ LANDMARKS: tuple[str, ...] = tuple(f"/world/hands/{side}/keypoints" for side in 
 """Per hand: the fitted 21 world landmarks (metres) on every frameset the hand was reported."""
 
 
-def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The App on the case's segment or window, hands on the catalog's ``slam_rs`` poses (:func:`_run`)."""
-    _run(case, phase, recording, "catalog")
-
-
-def run_robocap(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The App's whole chain: VIO from the segment's start to the window's end, then the hands on its poses (:func:`_run`)."""
-    _run(case, phase, recording, "vio")
-
-
-def _run(case: Case, phase: Phase, recording: rr.RecordingStream, slam: Literal["vio", "catalog"]) -> None:
+def run(case: Case, phase: Phase, recording: rr.RecordingStream, slam: Literal["vio", "catalog"] = "catalog") -> None:
     """Run the App's graphs (threaded, lossless): the published hands layer (unregistered, in a temporary directory) is copied into
     ``recording`` unchanged, its ``LayerRun`` and the wall time go to ``/verify/hands/run``."""
     started: float = time.perf_counter()
@@ -60,6 +51,9 @@ def _run(case: Case, phase: Phase, recording: rr.RecordingStream, slam: Literal[
         assert publish.published is not None and hands.run is not None, f"{case.name}: the run published no layer ({report.status})"
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
     recording.log("/verify/hands/run", rr.AnyValues(**to_dict(hands.run), wall_s=time.perf_counter() - started), static=True)
+
+
+run_robocap: partial[None] = partial(run, slam="vio")
 
 
 def _rows(table: pa.Table, entity: str, archetype: str, width: int) -> tuple[Int64[ndarray, " n"], Float32[ndarray, "n k w"]]:
@@ -103,7 +97,7 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     if not reference.exists():
         raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
     ours, counts = _read(golden)
-    theirs, _ = _read(reference)
+    theirs, _ = (ours, counts) if reference == golden else _read(reference)
     errors: dict[str, list[Float32[ndarray, " m"]]] = {"Points2D": [], "Points3D": []}
     held: dict[str, tuple[int, float]] = {}  # archetype -> (rows ours holds, % of the reference's rows held by one golden only)
     for entities, archetype, width, unit in ((KEYNET, "Points2D", 2, 1.0), (LANDMARKS, "Points3D", 3, 1e3)):

@@ -65,7 +65,8 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
     if not reference.exists():
         raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
-    (ours, _), (theirs, _) = _read(golden), _read(reference)
+    ours: Trajectory = _read(golden)[0]
+    theirs: Trajectory = ours if reference == golden else _read(reference)[0]
     common, i_ours, i_ref = np.intersect1d(ours.t_ns, theirs.t_ns, assume_unique=True, return_indices=True)
     return {
         "ate_vs_pre_cm": 100.0 * ate(ours, theirs).rmse_m,

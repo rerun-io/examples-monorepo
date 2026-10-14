@@ -17,6 +17,7 @@ from dagkit.sinks import LayerFileSink
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges
 from dagkit.time import STATIC
+from dagkit.verify import Case
 from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, TextureFactory, gravity_batch
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -24,13 +25,14 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import from_dict, to_dict
 
-from slam_rs import _core
+from slam_rs import _core, verify
 from slam_rs.apis.catalog_layer import vio_publish
 from slam_rs.catalog_feed import Frameset, ImuCalib, ImuStream
 from slam_rs.config import SlamConfig
 from slam_rs.graphs.vio import vio_graph
 from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.tracking import Lockstep
+from slam_rs.trajectory import Trajectory
 from slam_rs.types import RigPose, VioRig
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
@@ -209,3 +211,20 @@ def test_the_decoder_follows_the_device_choice() -> None:
     assert VioParams(decode_device="cpu").decoder() == "cpu"
     torch = pytest.importorskip("torch")
     assert VioParams(decode_device="auto").decoder() == ("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.parametrize("suffix", ["partial", "rrd"])
+def test_pre_scores_itself_with_one_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str) -> None:
+    pre: Path = tmp_path / f"short.pre.{suffix}"
+    pre.touch()
+    poses: Trajectory = Trajectory(np.array([1, 2, 3], dtype=np.int64), np.eye(3), np.tile([1.0, 0.0, 0.0, 0.0], (3, 1)))
+    reads: list[Path] = []
+
+    def read(path: Path) -> tuple[Trajectory, float]:
+        reads.append(path)
+        return poses, 0.0
+
+    monkeypatch.setattr(verify, "_read", read)
+    scores: dict[str, float] = verify.score(Case("short", "short", "pre-port"), pre)
+    assert reads == [pre]
+    assert scores == pytest.approx({"ate_vs_pre_cm": 0.0, "max_pos_vs_pre_cm": 0.0, "poses_delta_pct": 0.0, "pose_count": 3.0})

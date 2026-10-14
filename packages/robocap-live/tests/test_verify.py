@@ -33,3 +33,19 @@ def test_keynet_rows_lost_on_a_camera_pane_fail_a_band_although_the_matched_rows
     band = next(m for m in block.metrics if m.name == "kp2d_delta_pct")
     assert band.better == "lower" and scores["kp2d_delta_pct"] > band.floor
     assert all("kp2d_delta_pct" in case.noise for case in block.cases)
+
+
+@pytest.mark.parametrize("suffix", ["partial", "rrd"])
+def test_pre_scores_itself_with_one_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str) -> None:
+    pre: Path = tmp_path / f"short.pre.{suffix}"
+    pre.touch()
+    reads: list[Path] = []
+
+    def read(path: Path) -> tuple[pa.Table, dict[str, float]]:
+        reads.append(path)
+        return golden([True, True, True]), {}
+
+    monkeypatch.setattr(verify, "_read", read)
+    scores: dict[str, float] = verify.score(Case("short", "short", "pre-port"), pre)
+    assert reads == [pre]
+    assert scores["kp2d_px_mean"] == scores["landmarks_mm_mean"] == scores["reported_delta_pct"] == scores["kp2d_delta_pct"] == 0.0
