@@ -38,9 +38,9 @@ The Rust core (DetNet and KeyNet on ONNX Runtime, the ROBUST tracker on handfit)
 | **run** | `LayerRun` | 4 viewer |
 
 Settings:
-- `models_dir`: ``detnet_full.onnx`` and ``keynet.onnx`` (packages/robocap-live/models/MODELS.md)
+- `models_dir`: detnet_full.onnx and keynet.onnx (packages/robocap-live/models/MODELS.md)
 - `device`: ONNX Runtime device: CUDA on GPU 0 when its execution provider registers (auto), or forced
-- `ort_dylib`: ``libonnxruntime.so``; default ``ORT_DYLIB_PATH``, else the library of this env's ``onnxruntime`` package
+- `ort_dylib`: libonnxruntime.so; default ORT_DYLIB_PATH, else the library of this env's onnxruntime package
 - `ort_threads`: ONNX Runtime intra-op threads per session (0 = its default)
 - `overlays`: How much of the hand pipeline the camera panes show
 
