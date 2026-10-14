@@ -1,5 +1,6 @@
 """Backend node (SPEC 5.5, placed in its own process): connects each new keyframe, relocalises lost frames, optimises the map."""
 
+import os
 from collections.abc import Mapping
 
 import lietorch
@@ -34,6 +35,10 @@ class Backend:
     emits_late: bool = True
 
     def __init__(self, cfg: SlamConfig) -> None:
+        # Built in the backend process before its first CUDA use: the global solve allocates edge-sized buffers that fragment
+        # the default allocator (2.5 GB reserved but unallocated at a 120 s OOM). The process only writes into tensors the
+        # main process shares by CUDA IPC and exports none, so its own allocator may use expandable segments.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         self.cfg: SlamConfig = cfg
         self.times: dict[int, int] = {}
         """Keyframe slot -> time of its frame."""

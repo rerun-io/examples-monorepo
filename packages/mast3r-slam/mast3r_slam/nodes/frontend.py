@@ -58,7 +58,7 @@ class Frontend:
         self.shared.reset()
         self.lossless, self.world, self.held, self.aborted = ctx.mode == "lossless", ctx.world, None, False
         self.tracker: FrameTracker = FrameTracker(self.model, self.shared.keyframes, self.cfg.tracking, self.cfg.matching, self.cfg.use_calib)
-        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True  # as the old CLI set it for tracking (main process); the backend keeps the default
         if self.cfg.use_calib:
             rig: RigCameras | None = ctx.statics.get("rig")  # type: ignore[assignment]
             if rig is None:
