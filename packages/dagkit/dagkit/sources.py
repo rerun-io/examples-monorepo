@@ -6,13 +6,12 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import rerun as rr
 from rerun.catalog import CatalogClient, DatasetEntry
 from serde import serde
 
 from dagkit.node import Event, PortType
 from dagkit.time import TimeNs, check_monotonic
-from dagkit.types import Type, read_column
+from dagkit.types import Type, read_column, served
 
 
 @serde(deny_unknown_fields=True)
@@ -91,8 +90,7 @@ class RecordingSource(IterSource):
 
     def __init__(self, path: Path, ports: Mapping[str, Column], timeline: str = "video_time") -> None:
         def events() -> Iterator[Event]:
-            with rr.server.Server(host="127.0.0.1", datasets={"recording": [str(path)]}) as server:
-                dataset: DatasetEntry = server.client().get_dataset("recording")
+            with served(path) as dataset:
                 return iter(_column_events(dataset, dataset.segment_ids()[0], ports, timeline, None))
 
         super().__init__({port: column.type for port, column in ports.items()}, events, clock=timeline)

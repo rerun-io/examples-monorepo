@@ -12,7 +12,8 @@ from dagkit.runners import run_sequential
 from dagkit.sinks import LayerSink, open_layer, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, read_producer, rerun_roundtrip
+from dagkit.types import Producer, read_producer, rerun_roundtrip, served
+from dagkit.verify import run_counts
 
 pytestmark = pytest.mark.integration
 PRODUCER = Producer("dagkit", "0.1.0+test", "points", "x86_64-cuda")
@@ -71,3 +72,13 @@ def test_read_producer_gives_back_what_the_layer_logged(tmp_path: Path) -> None:
         dataset = server.client().get_dataset("ds")  # an entry must outlive its queries
         assert read_producer(dataset, "seg0", "points") == PRODUCER
         assert read_producer(dataset, "seg0", "hands") is None
+
+
+def test_run_counts_are_the_numbers_a_verify_run_logged(tmp_path: Path) -> None:
+    recording = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    recording.save(tmp_path / "golden.rrd")
+    recording.log("/verify/fake/run", rr.AnyValues(frames=12, wall_s=1.5, trt=True, code="graph"), static=True)
+    recording.flush()
+    recording.disconnect()
+    with served(tmp_path / "golden.rrd") as golden:
+        assert run_counts(golden, "fake") == {"frames": 12.0, "wall_s": 1.5, "trt": 1.0}

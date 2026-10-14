@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 
 from dagkit import verify
 from dagkit.sources import SegmentRef
-from dagkit.verify import Case, GraphBlock, MetricBand, check_band, golden_path, load_card
+from dagkit.verify import Case, GraphBlock, MetricBand, check_band, golden_path, load_card, pre_golden
 
 CARD = """
 package = "exo-calib"
@@ -112,6 +112,16 @@ def test_golden_path_needs_the_goldens_root(monkeypatch: pytest.MonkeyPatch, tmp
         golden_path("pkg", "block", "case", "pre")
     monkeypatch.setenv("DAGKIT_GOLDENS", str(tmp_path))
     assert golden_path("pkg", "block", "short", "pre2") == tmp_path / "pkg/block/short.pre2.rrd"
+
+
+def test_pre_golden_is_the_pre_run_beside_a_golden_or_its_partial(tmp_path: Path) -> None:
+    case = Case("short", "short", "pre-port", dataset="ds", segment="seg")
+    with pytest.raises(FileNotFoundError, match="run --phase pre first"):
+        pre_golden(case, tmp_path / "short.post.rrd")
+    (tmp_path / "short.pre.rrd").write_bytes(b"")
+    assert pre_golden(case, tmp_path / "short.post.partial") == pre_golden(case, tmp_path / "short.pre2.rrd") == tmp_path / "short.pre.rrd"
+    (tmp_path / "short.pre.partial").write_bytes(b"")
+    assert pre_golden(case, tmp_path / "short.pre.partial") == tmp_path / "short.pre.partial"  # the pre run scores itself
 
 
 SHORT_CARD = """

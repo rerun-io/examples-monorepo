@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeAlias, cast
 
 import rerun as rr
 import tyro
+from rerun.catalog import DatasetEntry
 from serde import SerdeError, coerce, serde
 from serde.toml import from_toml
 
@@ -122,6 +123,21 @@ def golden_path(package: str, block: str, case: str, phase: Phase) -> Path:
     if not root:
         raise RuntimeError("set DAGKIT_GOLDENS to the goldens directory (never committed)")
     return Path(root) / package / block / f"{case}.{phase}.rrd"
+
+
+def pre_golden(case: Case, golden: Path) -> Path:
+    """The case's pre-port reference golden beside ``golden`` (the pre run's own golden or partial scores itself)."""
+    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
+    if not reference.exists():
+        raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
+    return reference
+
+
+def run_counts(golden: DatasetEntry, block: str) -> dict[str, float]:
+    """The numbers a verify ``run`` logged as static ``AnyValues`` at ``/verify/<block>/run`` (text left out)."""
+    prefix: str = f"/verify/{block}/run:"
+    row: dict[str, Any] = golden.filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table().to_pylist()[0]
+    return {k.removeprefix(prefix): float(v[0]) for k, v in row.items() if k.startswith(prefix) and v and isinstance(v[0], int | float)}
 
 
 def _resolve(target: str) -> Callable[..., object]:

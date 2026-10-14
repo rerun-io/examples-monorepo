@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import importlib.metadata
 import subprocess
@@ -104,6 +105,13 @@ def read_column(dataset: DatasetEntry, segment: str, value_type: type[Type], roo
     return view.reader(index=None if static else timeline).to_arrow_table()
 
 
+@contextlib.contextmanager
+def served(path: Path) -> Iterator[DatasetEntry]:
+    """One rrd on an in-process catalog server: query the entry inside the ``with`` (an entry must outlive its queries)."""
+    with rr.server.Server(host="127.0.0.1", datasets={"rrd": [str(path)]}) as server:
+        yield server.client().get_dataset("rrd")
+
+
 def rerun_roundtrip(value: T, root: str, timeline: str, t_ns: TimeNs) -> list[tuple[TimeNs, T]]:
     static: bool = t_ns == STATIC
     with tempfile.TemporaryDirectory() as tmp:
@@ -113,6 +121,6 @@ def rerun_roundtrip(value: T, root: str, timeline: str, t_ns: TimeNs) -> list[tu
         log_value(recording, timeline, t_ns, value, root)
         recording.flush()
         recording.disconnect()
-        with rr.server.Server(host="127.0.0.1", datasets={"roundtrip": [str(path)]}) as server:
-            table: pa.Table = read_column(server.client().get_dataset("roundtrip"), "roundtrip", type(value), root, timeline, static)
+        with served(path) as dataset:
+            table: pa.Table = read_column(dataset, "roundtrip", type(value), root, timeline, static)
     return list(type(value).from_layer(table, root, timeline))  # type: ignore[return-value]
