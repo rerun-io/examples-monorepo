@@ -195,6 +195,8 @@ def test_a_tum_sequence_converts_video_depth_and_gt_on_upstream_stamps(tmp_path:
     depth: pa.Table = column_rows(store, f"{schema.depth_path(0, 0)}:DepthImage:meter")
     assert depth.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == list(TUM_STAMPS)
     assert depth.column(1).to_pylist()[0] == [5000.0]
+    # Only the capture clocks: no wall-clock log_time of whenever the conversion ran.
+    assert sorted(column.name for column in store.schema().index_columns()) == sorted([schema.FRAME_INDEX, schema.TIMELINE])
     capture: dict[str, object] = recording_properties(store, "capture")
     assert (capture["num_cameras"], capture["num_frames"], capture["start_time_ns"], capture["benchmark"]) == (1, 3, TUM_STAMPS[0], "RGBDTUM")
     assert "unshifted" in str(capture["clock_source"])

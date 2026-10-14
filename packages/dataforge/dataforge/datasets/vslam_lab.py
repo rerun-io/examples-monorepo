@@ -190,6 +190,7 @@ def log_depth(recording: rr.RecordingStream, directory: Path, frames: FrameIndex
     registered to it (``cam_type: rgb+depth``), so a pixel of one is the same ray as the pixel of the other.
     """
     entity: str = schema.depth_path(RIG, camera)
+    recording.set_log_time_enabled(False)  # the frames' own stamps are the clock, not when this conversion ran
     for index, (stamp, path) in enumerate(zip(frames.times_ns, frames.paths, strict=True)):
         depth: UInt16[ndarray, "h w"] | None = cv2.imread(str(directory / path), cv2.IMREAD_UNCHANGED)
         if depth is None:
