@@ -235,3 +235,19 @@ def test_a_realtime_stop_during_relocalisation_stays_terminated(shared: SharedSl
     monkeypatch.setattr(backend, "_relocalise", stopped_while_relocalising)
     backend.step(Tick(3000, "task", RelocRequest(20), {}), Recorder())
     assert shared.states.get_mode() == Mode.TERMINATED and shared.backend_idle()
+
+
+def test_calibrated_tracking_measures_every_keyframe_pixel_at_its_depth(shared: SharedSlam) -> None:
+    # The calibrated path under beartype (dev env): both point maps go onto their pixel rays, and each keyframe pixel is
+    # measured as (u, v, log z) in row-major order.
+    tracker = FrameTracker(MODEL, shared.keyframes, CFG.tracking, CFG.matching, use_calib=True)
+    frame, keyframe = (Frame(i, torch.zeros(1, 3, SIZE, SIZE), torch.tensor([[SIZE, SIZE]]), torch.tensor([[SIZE, SIZE]]), torch.zeros(SIZE, SIZE, 3)) for i in (1, 0))
+    observe(frame)
+    observe(keyframe)  # every point at depth 1
+    K = torch.tensor([[200.0, 0.0, 112.0], [0.0, 200.0, 112.0], [0.0, 0.0, 1.0]])
+
+    *_, meas_k, valid_meas_k = tracker.get_points_poses(frame, keyframe, torch.arange(SIZE * SIZE), (SIZE, SIZE), True, K)
+
+    pixel = torch.arange(SIZE * SIZE)
+    assert meas_k is not None and valid_meas_k is not None and bool(valid_meas_k.all())
+    torch.testing.assert_close(meas_k, torch.stack(((pixel % SIZE).float(), (pixel // SIZE).float(), torch.zeros(SIZE * SIZE)), dim=-1))
