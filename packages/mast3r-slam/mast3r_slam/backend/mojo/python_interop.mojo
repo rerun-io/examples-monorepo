@@ -3,8 +3,9 @@
 The module owns one process-lifetime `DeviceContext`. A Mojo shared library cannot hold a module-level global, so its
 address lives on the Python module as `_ctx_addr`.
 
-`torch_ptr` turns `tensor.data_ptr()` into a typed pointer. Callers pass contiguous tensors of the matching dtype and keep
-them alive until the kernel has finished (they synchronise before returning).
+`torch_ptr` turns `tensor.data_ptr()` into a typed pointer. Callers must keep contiguous tensors of the matching dtype
+alive until the kernel has finished. Matching and ray-step wrappers synchronise before returning; the Python
+Gauss-Newton loop owns the final synchronisation after retraction.
 """
 
 from max.gpu.host import DeviceContext

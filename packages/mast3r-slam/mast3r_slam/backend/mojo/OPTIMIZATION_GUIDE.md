@@ -15,7 +15,7 @@ Python caller (mast3r_slam/ops/matching.py, mast3r_slam/ops/optim.py)
   → iter_proj_py() / refine_matches_py() / gauss_newton_rays_step_py() / pose_retr_py()
     → Extract shapes, pointers from PyTorch tensors (torch_ptr[dtype])
     → cached_context()[].enqueue_function[kernel]()
-    → torch.cuda.synchronize()  (required: cross-stream correctness)
+    → torch.cuda.synchronize()  (pose_retr leaves this to the Python GN loop)
   → Return PyTorch tensors
 
 The ray-cost Gauss-Newton loop is Python (ops/optim.gauss_newton_rays: Mojo step
@@ -39,7 +39,7 @@ pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
 
 **Test command (Mojo vs CUDA parity, integration lane):**
 ```bash
-pixi run -e mast3r-slam-dev python -m pytest tests/test_mojo_vs_cuda.py -v -s
+pixi run -e mast3r-slam-dev --frozen python -m pytest tests/test_mojo_vs_cuda.py -m integration -v -s
 ```
 
 **Benchmark command (500 runs, median, side-by-side):**
@@ -92,7 +92,7 @@ The `torch.cuda.synchronize()` is the critical difference. Mojo's `DeviceContext
 
 | Component | Cost (µs) | Status |
 |-----------|-----------|--------|
-| `get_cached_context_ptr()` | ~1 | **Active** — Python module attr lookup |
+| `cached_context()` | ~1 | **Active** — Python module attr lookup |
 | `torch.cuda.synchronize()` | ~2 | **Active** — required for cross-stream correctness |
 | `torch.empty()` × 2 output allocs | ~2 | **Active** |
 | `Int(py=tensor.shape[i])` × 4-5 | ~0.5 | Negligible |
@@ -184,7 +184,7 @@ def choose_iter_proj_block(num_pts: Int) -> Int:
     if num_pts <= 16384: return 64     # medium: balance
     return 128                          # large: maximize occupancy
 
-def choose_refine_block(num_pts: Int, fdim: Int) -> Int:
+def choose_refine_block(num_pts: Int) -> Int:
     if num_pts <= 1024: return 8       # very small
     return 16                           # branch-heavy: keep blocks small
 ```
@@ -269,7 +269,7 @@ The Hypothesis property-based fuzz tests (50 random examples per test, randomizi
 10. **`SIMD.reduce_add()`** — Not `.sum()` or `.reduce[add]()`
 11. **`floor()` returns Float** — Need `Int(floor(x))` for integer index
 12. **`Array[T, N](fill=default)`** for fixed-size per-thread arrays (`InlineArray` was renamed)
-13. **Cross-stream sync is mandatory** — Mojo and PyTorch use different CUDA streams; `torch.cuda.synchronize()` required before returning
+13. **Cross-stream sync is mandatory** — matching and ray-step wrappers synchronise before returning; the Python GN loop owns the final sync after `pose_retr`
 14. **Pointers**: `Pointer`/`MutPointer`/`ImmPointer` (`UnsafePointer` is deprecated), `p[unsafe_offset=i]`, `p.unsafe_load[width=w]`, `p.unsafe_write(v)`
 
 ## How the CUDA Kernel Works (for reference)

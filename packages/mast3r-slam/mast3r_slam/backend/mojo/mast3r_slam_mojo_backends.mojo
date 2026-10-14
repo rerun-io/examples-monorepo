@@ -1,7 +1,7 @@
 """CPython extension module `mast3r_slam_mojo_backends`: the Mojo GPU kernels of MASt3R-SLAM.
 
 `import mast3r_slam_mojo_backends` calls `PyInit_mast3r_slam_mojo_backends`, which registers the functions below and
-creates the GPU DeviceContext they share. Names and signatures match the CUDA extension `mast3r_slam._backends`.
+creates the GPU DeviceContext they share. Matching entry points share names and signatures with `mast3r_slam._backends`.
 
 Frontend (matching): iter_proj, refine_matches.
 Backend (Gauss-Newton): gauss_newton_rays_step (one linearisation), pose_retr (retraction). The iteration loop and the
