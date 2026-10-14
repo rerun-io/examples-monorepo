@@ -1,13 +1,4 @@
-"""A Graph in words and as a picture: ``describe`` -> ``GraphDoc`` -> ``guide`` (markdown) and ``picture`` (GraphView).
-
-``describe(graph)`` collects the facts (pyserde): per node its title (first line of the class docstring), what it does,
-ports with their Types, how each edge delivers, params with their attribute docs, code locations. ``guide(doc)`` renders
-them as markdown with ``recording://`` links (``links=False``: the checked-in ``GRAPH.md``); ``picture(doc)`` as GraphView
-items read top to bottom: one row per rank (longest path), a data label on each line between adjacent rows, every other
-input of a box in one tag on its left, the first sink fed by that box alone on its right. ``log_graph`` writes picture,
-guide and the GraphDoc JSON. The runners call it whenever they get ``health=`` (``run_app`` and ``gradio_app`` always
-pass it), so every app shows its graph without wiring; ``dagkit.app.with_pipeline`` adds the blueprint tab.
-"""
+"""Describe a Graph as typed facts, a GraphView picture and a linked markdown guide; log all three with ``log_graph``."""
 
 import ast
 import dataclasses
@@ -26,7 +17,7 @@ import rerun as rr
 from serde import serde
 from serde.json import to_json
 
-from dagkit.graph import AsOf, DropOldest, Graph, NodeKind, PortKind, Spawn, normalise
+from dagkit.graph import AsOf, DropOldest, Graph, NodeKind, Spawn, normalise
 from dagkit.node import PortType
 from dagkit.sinks import LayerFileSink
 
@@ -34,9 +25,9 @@ How: TypeAlias = Literal["waits", "latest", "drops old"]
 Rgb: TypeAlias = tuple[int, int, int]
 GRAPH_ROOT, GUIDE_ROOT = "/dagkit/graph/", "/dagkit/guide/"
 REPO_URL: str = "https://github.com/rerun-io/examples-monorepo"
-ROLE: dict[str, tuple[str, Rgb]] = {
-    "source": ("source", (90, 170, 255)), "node": ("once per item", (255, 180, 70)), "segment": ("once per segment", (200, 130, 255)),
-    "sink": ("output", (110, 220, 130)),
+ROLE: dict[str, tuple[str, Rgb, str]] = {
+    "source": ("source", (90, 170, 255), "source"), "node": ("once per item", (255, 180, 70), "runs once per item"),
+    "segment": ("once per segment", (200, 130, 255), "runs once on the whole segment"), "sink": ("output", (110, 220, 130), "output"),
 }  # fmt: skip
 KIND_RGB: dict[str, Rgb] = {"waits": (125, 135, 150), "latest": (40, 170, 200), "drops old": (240, 120, 40), "": (135, 135, 135)}  # dark and light themes
 
@@ -145,10 +136,6 @@ def _port(name: str, port_type: PortType) -> PortDoc:
     return PortDoc(name, " | ".join(c.__name__ for c in classes), _sentence(own_doc(own)) if own else "", fenced, _code(own) if own else "")
 
 
-def _how(kind: PortKind) -> tuple[How, int]:
-    return ("latest", 0) if isinstance(kind, AsOf) else ("drops old" if isinstance(kind, DropOldest) else "waits", kind.capacity)
-
-
 def _ranks(names: Sequence[str], pairs: Sequence[tuple[str, str]]) -> dict[str, int]:
     """Longest path from a source (``names`` in topological order)."""
     rank: dict[str, int] = {}
@@ -160,10 +147,9 @@ def _ranks(names: Sequence[str], pairs: Sequence[tuple[str, str]]) -> dict[str, 
 def describe(graph: Graph, drawn: Mapping[str, Mapping[str, Collection[str]]] | None = None) -> GraphDoc:
     """The facts of a valid graph; ``drawn`` = per sink, per input port, the entity paths it logged (``RerunSink.drawn``)."""
     graph.validate()
-    first: dict[str, int] = {name: i for i, name in enumerate(graph.nodes)}
     rank: dict[str, int] = _ranks(graph.order(), [(e.src.node, e.dst.node) for e in graph.edges])
     nodes: list[NodeDoc] = []
-    for number, name in enumerate(sorted(graph.nodes, key=lambda n: (rank[n], graph.nodes[n].kind == "sink", first[n])), 1):
+    for number, name in enumerate(sorted(graph.nodes, key=lambda n: (rank[n], graph.nodes[n].kind == "sink")), 1):
         spec = graph.nodes[name]
         cls: type = spec.obj.cls if isinstance(spec.obj, Spawn) else type(spec.obj)
         title, _, about = own_doc(cls).partition("\n")
@@ -177,7 +163,9 @@ def describe(graph: Graph, drawn: Mapping[str, Mapping[str, Collection[str]]] | 
             list(spec.needs), [_port(p, t) for p, t in spec.inputs.items()], [_port(p, t) for p, t in spec.outputs.items()], values,
             spec.obj.layer if isinstance(spec.obj, LayerFileSink) else "", {p: sorted(paths) for p, paths in (drawn or {}).get(name, {}).items()},
         ))  # fmt: skip
-    edges: list[EdgeDoc] = [EdgeDoc(e.src.node, e.src.port, e.dst.node, e.dst.port, *_how(e.kind)) for e in graph.edges]
+    edges: list[EdgeDoc] = [EdgeDoc(e.src.node, e.src.port, e.dst.node, e.dst.port,
+        "latest" if isinstance(e.kind, AsOf) else "drops old" if isinstance(e.kind, DropOldest) else "waits",
+        0 if isinstance(e.kind, AsOf) else e.kind.capacity) for e in graph.edges]  # fmt: skip
     return GraphDoc(graph.name, graph.about, _git("rev-parse", "HEAD"), nodes, edges, sorted(graph.resources))
 
 
@@ -221,12 +209,6 @@ def crosses(a: Item, b: Item, items: Sequence[Item], margin: float = 3.0) -> boo
     return False
 
 
-def _box_label(n: NodeDoc) -> str:
-    how: str = f"output · layer {n.layer}" if n.layer else ROLE[n.kind][0]
-    how += "" if n.placement == "thread" or n.kind in ("source", "sink") else f" · {n.placement}"
-    return f"{n.number}  {n.name}\n{n.title or n.cls}\n{how}" + (f" · uses {', '.join(n.needs)}" if n.needs else "")
-
-
 def picture(doc: GraphDoc) -> tuple[list[Item], list[tuple[str, str]]]:
     """GraphView items (boxes first, in reading order) and lines. A line that would pass under a third item becomes part of a tag."""
     nodes: dict[str, NodeDoc] = {n.name: n for n in doc.nodes}
@@ -255,7 +237,12 @@ def picture(doc: GraphDoc) -> tuple[list[Item], list[tuple[str, str]]]:
     def lines(keys: Sequence[tuple[str, str, str]]) -> str:
         return "\n".join(f"{e.src}.{e.src_port}->{e.dst}.{e.dst_port} {e.how}" for k in keys for e in groups[k])
 
-    boxes: dict[str, Item] = {n.name: Item(n.name, _box_label(n), ROLE[n.kind][1], f"{n.title} ({n.cls}, {n.code})") for n in doc.nodes}
+    boxes: dict[str, Item] = {}
+    for n in doc.nodes:
+        how: str = f"output · layer {n.layer}" if n.layer else ROLE[n.kind][0]
+        how += "" if n.placement == "thread" or n.kind in ("source", "sink") else f" · {n.placement}"
+        label: str = f"{n.number}  {n.name}\n{n.title or n.cls}\n{how}" + (f" · uses {', '.join(n.needs)}" if n.needs else "")
+        boxes[n.name] = Item(n.name, label, ROLE[n.kind][1], f"{n.title} ({n.cls}, {n.code})")
     sides: dict[str, str] = {p: s for s, p in side.items()}
     tagged: set[tuple[str, str, str]] = {k for k, es in groups.items() if k[1] not in side and (es[0].how == "latest" or rank[k[1]] - rank[k[0]] != 1)}
     while True:
@@ -337,7 +324,7 @@ def guide(doc: GraphDoc, *, links: bool = True, health: bool = False) -> str:
         "(`port: Type ← 1 video · latest`). Box numbers match the sections below." + (" Click a link to select the data in the views of this tab." if links else ""), "",
     ]  # fmt: skip
     for n in doc.nodes:
-        how: str = {"source": "source", "node": "runs once per item", "segment": "runs once on the whole segment", "sink": "output"}[n.kind]
+        how: str = ROLE[n.kind][2]
         how += "" if n.placement == "thread" or n.kind in ("source", "sink") else f", placed on {n.placement}"
         refs: str = " · ".join(r for r in (code(n.code, f"code of {n.number} {n.name}"), link(f"{root}[#{n.number - 1}]", f"box {n.number} {n.name}")) if r)
         md += [f"## {n.number} · {n.name}: {n.title or n.cls}", f"*{how}* · `{n.cls}` · {refs}", ""] + ([n.about, ""] if n.about else [])
@@ -351,7 +338,7 @@ def guide(doc: GraphDoc, *, links: bool = True, health: bool = False) -> str:
             md += ["| gives | type | to |", "|---|---|---|"]
             see: list[str] = []
             for p in n.outputs:
-                to: list[str] = sorted({f"{by[e.dst].number} {e.dst}" for e in out_of[(n.name, p.name)]}, key=lambda s: int(s.split()[0]))
+                to: list[str] = [f"{by[name].number} {name}" for name in sorted({e.dst for e in out_of[(n.name, p.name)]}, key=lambda name: by[name].number)]
                 md.append(f"| **{p.name}** | `{p.type}`{' (GPU)' if p.gpu else ''} | {', '.join(to) or 'nobody (unused)'} |")
                 paths: list[str] = seen.get((n.name, p.name), [])
                 if links and paths:  # one link per line: a wrapped link misses its click

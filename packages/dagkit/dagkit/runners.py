@@ -409,10 +409,9 @@ class _Run:
             for edge in s.triggers:
                 self.health.log(f"{root}/queue_depth/{edge.spec.dst.port}", rr.Scalars(float(len(edge.queue))))
                 self.health.log(f"{root}/drops/{edge.spec.dst.port}", rr.Scalars(float(edge.drops)))
-        if self.picture is not None:  # recolour the graph view's step boxes
-            ids, colors = self.picture
-            colors = [self._light(self.states[i]) if i in self.states and self.states[i].spec.kind != "source" else c for i, c in zip(ids, colors, strict=True)]
-            self.health.log(GRAPH_ROOT + self.graph.name, rr.GraphNodes.from_fields(colors=colors))
+        ids, colors = self.picture
+        colors = [self._light(self.states[i]) if i in self.states and self.states[i].spec.kind != "source" else c for i, c in zip(ids, colors, strict=True)]
+        self.health.log(GRAPH_ROOT + self.graph.name, rr.GraphNodes.from_fields(colors=colors))
 
     def _light(self, s: _State) -> Rgb:
         """grey: no input yet; red: drops since the last health log; yellow: a Block queue at least half full; else green."""
@@ -428,7 +427,7 @@ class _Run:
         self.started_at: float = time.perf_counter()
         self.health: rr.RecordingStream | None = health
         self.health_every_s: float = every_s
-        self.picture: tuple[list[str], list[Rgb]] | None = log_graph(health, self.graph, health=True) if health is not None else None
+        self.picture: tuple[list[str], list[Rgb]] = log_graph(health, self.graph, health=True) if health is not None else ([], [])
         try:
             for name, factory in self.graph.resources.items():
                 self.resources[name] = factory()

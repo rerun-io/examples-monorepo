@@ -1,11 +1,4 @@
-"""App layer: hardware profiles, the CLI (``run_app``) and the generated gradio app (``gradio_app``); one ``build`` for both.
-
-``build(config, recording)`` returns a Graph, or a generator of Graphs for a multi-pass app (``graphs``). Both entry points
-run every graph with ``health=recording``, and the runner then logs the graph view itself (``dagkit.doc.log_graph``): the
-picture at ``/dagkit/graph/<graph>``, the guide at ``/dagkit/guide/<graph>``, the ``GraphDoc`` JSON and run-health colours
-on ``wall_time``. No package wires any of it; a package only wraps its normal blueprint with ``with_pipeline(bp, outputs)``
-to get the secondary "pipeline (debug)" tab, while its normal view stays the first, active tab (in the gradio pane too).
-"""
+"""Hardware profiles and CLI/gradio entry points sharing ``build(config, recording)`` and the runner's graph view."""
 
 import contextlib
 import dataclasses
@@ -103,42 +96,34 @@ def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "a
 
 
 def graphs(built: Graph | Iterator[Graph]) -> Iterator[Graph]:
-    """``build`` returns one Graph, or an iterator of Graphs (a generator) that runs them in order: a driver that needs one
-    graph's results to build the next (exo-calib: init, then refine passes) reads them from a sink between its yields."""
+    """Iterate a build; generators can read a completed graph's sinks before yielding the next graph."""
     return iter((built,)) if isinstance(built, Graph) else built
 
 
 def run_app(config: C, build: Callable[[C, rr.RecordingStream], Graph | Iterator[Graph]]) -> RunReport:
-    """The CLI: every graph ``build`` gives, on ``config.runner`` / ``config.mode``, Ctrl-C = stop; returns the last report.
-
-    The runner logs each graph's picture, guide and GraphDoc into ``config.rr_config.rec_stream`` (``dagkit.doc``), and
-    recolours it with the run health; ``with_pipeline`` adds the tab that shows them.
-    """
+    """Run every built graph with health logging and Ctrl-C to stop; return the last report (an empty build raises)."""
     recording: rr.RecordingStream = config.rr_config.rec_stream
     control = Control()
     main: bool = threading.current_thread() is threading.main_thread()
     previous = signal.signal(signal.SIGINT, lambda *_: control.stop()) if main else None
-    reports: list[RunReport] = []
+    report: RunReport | None = None
     try:
         for graph in graphs(build(config, recording)):
             if control.stopped:
                 break
-            reports.append(report := RUNNERS[config.runner](graph, mode=config.mode, control=control, health=recording))
+            report = RUNNERS[config.runner](graph, mode=config.mode, control=control, health=recording)
             print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
     finally:
         if main:
             signal.signal(signal.SIGINT, previous)
-    if not reports:
+    if report is None:
         raise GraphError("build gave no graph to run")
-    return reports[-1]
+    return report
 
 
 def with_pipeline(blueprint: rrb.Blueprint, outputs: Sequence[rrb.View] = (), graphs: Sequence[str] = ()) -> rrb.Blueprint:
-    """``blueprint`` (the app's normal view, first and active) plus a "pipeline (debug)" tab: the graph picture over
-    ``outputs`` (2-4 NEW views of the app's outputs: a view object sits in one place only) beside the guide, whose links
-    select and outline what those views show. An app that runs several graphs names them in ``graphs``: one picture and
-    one guide each (a GraphView would draw them over each other; a TextDocumentView shows one document). Panels and flags
-    of ``blueprint`` are kept."""
+    """Append a debug tab, keeping the active normal view, panels and flags. ``outputs`` must be NEW view objects;
+    ``graphs`` gives each graph its own picture and guide tabs (overlapping pictures cannot share a GraphView)."""
     names: list[str] = [f"/{g}" for g in graphs] or [""]
     pictures: list[rrb.View] = [rrb.GraphView(origin=GRAPH_ROOT.rstrip("/") + n, name=f"graph{n.replace('/', ' ')}") for n in names]
     guides: list[rrb.View] = [rrb.TextDocumentView(origin=GUIDE_ROOT.rstrip("/") + n, name=f"guide{n.replace('/', ' ')}: what each step does") for n in names]
@@ -155,12 +140,6 @@ def with_pipeline(blueprint: rrb.Blueprint, outputs: Sequence[rrb.View] = (), gr
 
 def _base(hint: object) -> Any:
     return next(a for a in get_args(hint) if a is not type(None)) if get_origin(hint) in (Union, types.UnionType) else hint
-
-
-def _choices(hint: object) -> list[Any] | None:
-    """Every value of a Literal or a union of Literals (``HardwareClass | Literal["auto"]``); None for anything else."""
-    members: list[object] = [a for a in (get_args(hint) if get_origin(hint) in (Union, types.UnionType) else (hint,)) if a is not type(None)]
-    return [v for m in members for v in get_args(m)] if all(get_origin(m) is Literal for m in members) else None
 
 
 def _nested(hint: object) -> bool:
@@ -198,9 +177,7 @@ def _leaves(cls: type, template: object, prefix: tuple[str, ...] = ()) -> list[L
 
 
 def _widgets(leaf: Leaf) -> list[Any]:
-    """Path -> File (a directory, by name or docstring, -> Textbox), output* -> save checkbox (optional) or Textbox, bool ->
-    Checkbox, int/float -> Number (optional: Textbox), Literals -> Dropdown, str -> Textbox, SegmentRef -> dataset +
-    segment; others: none."""
+    """Widgets for a leaf; unsupported types (including viewer configs) remain hidden."""
     import gradio as gr
 
     path, hint, default, doc = leaf
@@ -211,8 +188,9 @@ def _widgets(leaf: Leaf) -> list[Any]:
         return [gr.Textbox(getattr(value, part, ""), label=f"{label}.{part}") for part in ("dataset", "segment")]
     if path[-1].startswith("output"):
         return [gr.Checkbox(False, label=f"{label}: save it, then download it", info=doc)] if optional else [gr.Textbox(str(value or ""), label=label, info=doc)]
-    if (choices := _choices(hint)) is not None:
-        return [gr.Dropdown(choices, value=value, label=label, info=doc)]
+    members: list[object] = [a for a in (get_args(hint) if get_origin(hint) in (Union, types.UnionType) else (hint,)) if a is not type(None)]
+    if all(get_origin(m) is Literal for m in members):
+        return [gr.Dropdown([v for m in members for v in get_args(m)], value=value, label=label, info=doc)]
     if base is Path:
         directory: bool = path[-1].endswith("dir") or "directory" in doc
         return [gr.Textbox(str(value or ""), label=label, info=doc) if directory else gr.File(value=str(value) if value else None, label=label, type="filepath")]
