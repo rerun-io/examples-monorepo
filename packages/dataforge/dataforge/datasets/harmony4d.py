@@ -1,7 +1,7 @@
 """Harmony4D (Khirodkar, Song et al., NeurIPS 2024): close two-person interactions, ~20 static GoPros, optional Aria glasses.
 
 The release is 22 zips on the Hugging Face Hub (``Jyun-Ting/Harmony4D``, MIT), one per scene and split, each holding several
-sequences in the EgoHumans capture layout (``egohumans_source``). Conversion reads the members straight from the zip; nothing is
+sequences in the EgoHumans capture layout (``egohumans_layout``). Conversion reads the members straight from the zip; nothing is
 extracted. Layers: base (cameras, AV1 video, glasses poses), body_pose (SMPL parameters, SMPL-45 joints, COCO-133 keypoints),
 body_mesh (shipped SMPL vertices at 10 Hz) and projections (keypoints through every lens, shipped boxes). See ``docs/harmony4d.md``.
 """
@@ -18,17 +18,17 @@ import rerun.blueprint as rrb
 
 from dataforge import paths, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig, RemoteSequence
-from dataforge.datasets.egohumans_layers import EGO_RIG_OFFSET, LAYERS, Clock, capture_blueprint, capture_card, layer_writers
-from dataforge.datasets.egohumans_source import FPS, ZipSequenceFiles, read_sequence, sequences_in
-from dataforge.datasets.epfl_download import fetch_smpl_neutral
+from dataforge.egohumans_layout import FPS, ZipSequenceFiles, read_sequence, sequences_in
+from dataforge.egohumans_writers import EGO_RIG_OFFSET, LAYERS, Clock, capture_blueprint, capture_card, layer_writers
 from dataforge.identity import SequenceIdentity
+from dataforge.smpl import fetch_smpl_neutral
 from dataforge.transports import FetchReport, HfFileInfo, hf_fetch_verified, hf_list_files
 
 SOURCE_REPO: str = "Jyun-Ting/Harmony4D"
 SOURCE_REVISION: str = "3fedb23fd9d1a92541d98ccbce025c695bd752e4"
 """The release as of 2024-11-09: 22 zips, 351.6 GB."""
 EGO_PANES: tuple[int, ...] = (EGO_RIG_OFFSET + 1, EGO_RIG_OFFSET + 2)
-"""Rigs of aria01 and aria02 (``egohumans_layers.ego_rig``); takes without glasses leave the panes empty."""
+"""Rigs of aria01 and aria02 (``egohumans_writers.ego_rig``); takes without glasses leave the panes empty."""
 EXO_PANES: tuple[int, ...] = (1, 4, 7, 10, 13, 16, 19, 22)
 """Eight of the ~20 GoPros, evenly spaced (MAMMA's eight-pane rule)."""
 EXO_SLOTS: int = 30

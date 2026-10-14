@@ -16,9 +16,6 @@ from dataforge import blueprints, meshes, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig, RemoteSequence
 from dataforge.datasets.epfl_actions import read_actions
 from dataforge.datasets.epfl_download import (
-    SMPL_FILE,
-    SMPL_REPO,
-    SMPL_REVISION,
     SOURCE_REPO,
     VIDEO_DIR,
     FetchError,
@@ -41,6 +38,7 @@ from dataforge.datasets.epfl_source import (
     read_timestamps,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.smpl import SMPL_FILE, SMPL_REPO, SMPL_REVISION
 from dataforge.transports import FetchReport, hf_list_files
 
 KITCHEN_UP: tuple[float, float, float] = (-0.03, -0.81, -0.58)

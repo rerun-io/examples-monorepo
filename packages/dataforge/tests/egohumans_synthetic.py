@@ -15,7 +15,7 @@ import numpy as np
 import turbojpeg
 from jaxtyping import Float64
 
-from dataforge.datasets.egohumans_source import AriaMode
+from dataforge.egohumans_layout import AriaMode
 
 FRAMES: tuple[int, ...] = (1, 2, 3)
 EXO_SIZE: tuple[int, int] = (3840, 2160)

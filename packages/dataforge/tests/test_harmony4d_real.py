@@ -21,8 +21,8 @@ from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge import paths
-from dataforge.datasets.egohumans_layers import exo_camera, exo_scale
-from dataforge.datasets.egohumans_source import ARIA_MODES, Sequence, ZipSequenceFiles, load_pickle, read_sequence, sequences_in
+from dataforge.egohumans_layout import ARIA_MODES, Sequence, ZipSequenceFiles, load_pickle, read_sequence, sequences_in
+from dataforge.egohumans_writers import exo_camera, exo_scale
 
 pytestmark = pytest.mark.golden
 

@@ -27,7 +27,7 @@ from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge import blueprints, hands, meshes, paths, schema, writing
 from dataforge.clocks import frame_times
-from dataforge.datasets.egohumans_source import (
+from dataforge.egohumans_layout import (
     ARIA_MODES,
     ARIA_STREAM_IDS,
     COCO17,

@@ -13,8 +13,8 @@ from hub_fake import HubStore
 
 from dataforge import paths, schema, transports
 from dataforge.datasets import harmony4d
-from dataforge.datasets.epfl_download import SMPL_FILE, SMPL_REPO, SMPL_REVISION
 from dataforge.datasets.harmony4d import SOURCE_REPO, SOURCE_REVISION, Harmony4dConfig, Harmony4dDataset
+from dataforge.smpl import SMPL_FILE, SMPL_REPO, SMPL_REVISION
 
 SMPL_ROOT: Path = paths.raw_root() / "harmony4d" / "body_models"
 

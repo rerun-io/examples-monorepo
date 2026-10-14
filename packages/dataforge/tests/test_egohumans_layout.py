@@ -14,8 +14,7 @@ import pytest
 from egohumans_synthetic import ARIA_FOCAL, ARIA_RGB_UPRIGHT, ARIA_SLAM_OFFSETS, EXO_LENS, EXO_POSES, FRAMES, write_sequence
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
-from dataforge.datasets.egohumans_layers import aria_camera, ego_rig, encode_job, exo_camera, exo_scale, halvings, person_index
-from dataforge.datasets.egohumans_source import (
+from dataforge.egohumans_layout import (
     DirectorySequenceFiles,
     Sequence,
     box_records,
@@ -24,6 +23,7 @@ from dataforge.datasets.egohumans_source import (
     read_sequence,
     sequences_in,
 )
+from dataforge.egohumans_writers import aria_camera, ego_rig, encode_job, exo_camera, exo_scale, halvings, person_index
 
 
 @pytest.fixture
