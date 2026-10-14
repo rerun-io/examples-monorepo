@@ -1,0 +1,185 @@
+"""The VIO node and graph on a synthetic two-camera rig through the real CPU core (unit lane: no GPU, no catalog).
+
+The node must make exactly the estimator calls ``Lockstep.push`` makes (an IMU batch, then ``track``), whatever runner delivers
+the one stream, and however the samples are split across framesets (D17); its outputs follow the dagkit node contract.
+"""
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import numpy as np
+import pytest
+import rerun as rr
+from dagkit.graph import Graph
+from dagkit.node import Event, RunContext, Tick
+from dagkit.runners import run_sequential, run_threaded
+from dagkit.sinks import LayerFileSink
+from dagkit.sources import IterSource, SegmentRef
+from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges
+from dagkit.time import STATIC
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, TextureFactory, gravity_batch
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from jaxtyping import Float64, Int64
+from numpy import ndarray
+from serde import from_dict, to_dict
+
+from slam_rs import _core
+from slam_rs.apis.catalog_layer import vio_publish
+from slam_rs.catalog_feed import Frameset, ImuCalib, ImuStream
+from slam_rs.config import SlamConfig
+from slam_rs.graphs.vio import vio_graph
+from slam_rs.nodes.vio import VioNode, VioParams
+from slam_rs.tracking import Lockstep
+from slam_rs.types import RigPose, VioRig
+
+PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
+SEGMENT = SegmentRef("msd-index", "msd-index__test__synthetic")
+STEPS: int = 5
+
+
+@pytest.fixture(autouse=True)
+def default_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The node reads the dataset's profiled config from slam.toml; the synthetic rig takes the core's defaults."""
+    text: str = _core.VioConfig().to_json()
+    monkeypatch.setattr(SlamConfig, "vio_config_text", lambda self, dataset, profile="reference": text)
+
+
+def framesets(texture: TextureFactory, splits: list[int] | None = None) -> list[Frameset]:
+    """``STEPS`` framesets of a still rig, each with its 1 kHz samples; ``splits[i]`` samples of frameset ``i`` move to ``i + 1``
+    (a short batch leaves the frameset uncovered, so it is held until the next batch)."""
+    batches: list[Int64[ndarray, " n"]] = [
+        np.arange(s * FRAME_PERIOD_NS, (s + 1) * FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64) for s in range(STEPS)
+    ]
+    for i, moved in enumerate(splits or []):
+        if moved and i + 1 < STEPS:
+            batches[i], batches[i + 1] = (
+                batches[i][: len(batches[i]) - moved],
+                np.concatenate([batches[i][len(batches[i]) - moved :], batches[i + 1]]),
+            )
+    out: list[Frameset] = []
+    for step, t_ns in enumerate(batches):
+        gyro, accel = gravity_batch(t_ns)
+        out.append(Frameset(step * FRAME_PERIOD_NS, [texture(step, 0), texture(step - 2, 0)], ImuStream(t_ns, gyro, accel), None))
+    return out
+
+
+def rig(camera: CameraFactory, imu: ImuCalib) -> VioRig:
+    return VioRig((camera(0, 0.0), camera(1, 0.1)), imu, 0)
+
+
+def stream(rig: VioRig, sets: list[Frameset]) -> Iterator[Event]:
+    """What ``vio_source`` emits: STATIC rig, then per frameset its IMU batch and its images at the frameset's time."""
+    yield Event(STATIC, "rig", rig)
+    for f in sets:
+        if len(f.imu):
+            yield Event(f.t_ns, "imu", f.imu)
+        yield Event(f.t_ns, "frames", f)
+
+
+def ticks(rig: VioRig, sets: list[Frameset]) -> list[Tick]:
+    return [Tick(e.t_ns, e.port, e.value, {"rig": rig}) for e in stream(rig, sets) if e.t_ns != STATIC]
+
+
+def node_outputs(node: VioNode, rig: VioRig, sets: list[Frameset]) -> Recorder:
+    out = Recorder()
+    node.reset(RunContext("test", "vio", "lossless", statics={"rig": rig}))
+    for tick in ticks(rig, sets):
+        node.step(tick, out)
+    node.flush(out)
+    return out
+
+
+def lockstep_poses(rig: VioRig, sets: list[Frameset]) -> list[Float64[ndarray, " 7"]]:
+    lockstep = Lockstep(_core.Vio(_core.Calibration.from_catalog(list(rig.cameras), rig.imu), _core.VioConfig()))
+    results = [r for f in sets for _, r in lockstep.push(f)] + [r for _, r in lockstep.flush()]
+    return [np.asarray(r.world_from_rig) for r in results]
+
+
+@settings(max_examples=6, deadline=None)
+@given(splits=st.lists(st.integers(min_value=0, max_value=3), min_size=STEPS, max_size=STEPS))
+def test_the_node_makes_lockstep_calls_whatever_the_imu_split(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path_factory: pytest.TempPathFactory, splits: list[int]
+) -> None:
+    """D17 through the node: moving a frameset's last samples to the next batch (it is held, then retried) changes no pose, and the
+    node's poses are the ones ``Lockstep.push`` gets from the same framesets."""
+    vrig: VioRig = rig(camera, imu)
+    reference: list[Float64[ndarray, " 7"]] = lockstep_poses(vrig, framesets(texture))
+    out: Recorder = node_outputs(VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path_factory.mktemp("vio"), "cpu"), vrig, framesets(texture, splits))
+    poses: list[RigPose] = [v for p, _, v in out.items if p == "pose"]  # type: ignore[misc]
+    assert len(poses) == len(reference) >= 2
+    for pose, expected in zip(poses, reference, strict=True):
+        np.testing.assert_array_equal(pose.position_m, expected[:3])
+        np.testing.assert_array_equal(np.roll(pose.quaternion_wxyz, -1), expected[3:])
+
+
+def test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
+) -> None:
+    node = VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu")
+    vrig: VioRig = rig(camera, imu)
+    runs: list[Recorder] = []
+    for _ in range(2):
+        node.reset(RunContext("test", "vio", "lossless", statics={"rig": vrig}))  # a reset over a used node starts afresh
+        runs.append(node_outputs(node, vrig, framesets(texture)))
+        drained: int = len(runs[-1].items)
+        node.flush(runs[-1])
+        assert len(runs[-1].items) == drained, "a second flush emitted outputs"
+    for out in runs:
+        times: dict[str, list[int]] = {}
+        for port, t_ns, _ in out.items:
+            times.setdefault(port, []).append(t_ns)
+        assert all(a <= b for t in times.values() for a, b in zip(t, t[1:], strict=False))
+        assert [p for p, _, _ in out.items].count("layer") == 1 and out.items[-1][0] == "layer"
+    first, second = ([(p, t, to_dict(v)) for p, t, v in out.items if p == "pose"] for out in runs)
+    np.testing.assert_equal(first, second)
+    assert node.run is not None and node.run.framesets == STEPS and node.run.lost == 0
+
+
+def graph_of(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path) -> Graph:
+    vrig: VioRig = rig(camera, imu)
+    source = IterSource({"rig": VioRig, "imu": ImuStream, "frames": Frameset}, lambda: stream(vrig, framesets(texture)))
+    publish = LayerFileSink(SEGMENT, "slam_rs", output_dir=tmp_path, register="off")
+    return vio_graph(source, VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), {"publish": publish})
+
+
+def test_the_app_graph_validates_draws_its_declaration_and_documents_itself(tmp_path: Path) -> None:
+    """The graph the App runs (its source reads nothing until the run starts)."""
+    graph: Graph = vio_publish(SEGMENT, VioParams(decode_device="cpu"), tmp_path, "off", rr.RecordingStream("slam-rs-test"))[0]
+    graph.validate()
+    check_picture(graph, tmp_path)
+    check_graph_docs(graph, snapshot=PACKAGE_DIR / "GRAPH.md")
+
+
+def test_sequential_and_threaded_deliver_the_same_ticks_and_publish_the_same_poses(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
+) -> None:
+    runs: list[dict[str, list[object]]] = []
+    for name, runner in (("sequential", run_sequential), ("threaded", run_threaded)):
+        graph: Graph = graph_of(camera, imu, texture, tmp_path / name)
+        runs.append(collect_edges(graph, lambda g, runner=runner: runner(g, mode="lossless")))
+        (published,) = (tmp_path / name / SEGMENT.segment).glob("slam_rs.*.rrd")
+        assert published.stat().st_size > 0
+    plain = [[(p, t, to_dict(v) if isinstance(v, RigPose) else type(v).__name__) for p, t, v, _ in seen["vio"]] for seen in runs]  # type: ignore[misc]
+    assert plain[0] == plain[1] and len(plain[0]) == 2 * STEPS
+
+
+@settings(max_examples=25, deadline=None)
+@given(
+    position=st.lists(st.floats(-100.0, 100.0), min_size=3, max_size=3),
+    quaternion=st.lists(st.floats(-1.0, 1.0), min_size=4, max_size=4).filter(lambda q: sum(x * x for x in q) > 1e-3),
+)
+def test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root(position: list[float], quaternion: list[float]) -> None:
+    pose = RigPose(np.asarray(position), np.asarray(quaternion) / np.linalg.norm(quaternion))
+    back: RigPose = from_dict(RigPose, to_dict(pose))
+    np.testing.assert_array_equal(back.position_m, pose.position_m)
+    np.testing.assert_array_equal(back.quaternion_wxyz, pose.quaternion_wxyz)
+    (log,) = pose.to_rerun("/world/rig_00")
+    assert log.path == "/world/rig_00" and not log.static and isinstance(log.data, rr.Transform3D)
+    assert RigPose.contents("/world/rig_00") == ["/world/rig_00"]
+
+
+def test_the_decoder_follows_the_device_choice() -> None:
+    assert VioParams(decode_device="cpu").decoder() == "cpu"
+    torch = pytest.importorskip("torch")
+    assert VioParams(decode_device="auto").decoder() == ("cuda" if torch.cuda.is_available() else "cpu")

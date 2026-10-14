@@ -17,6 +17,7 @@ from scipy.spatial.transform import Rotation
 from slam_rs import _core
 from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
+from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -82,12 +83,17 @@ class Lockstep:
             # The feed already hands over the samples since the previous frameset,
             # running one past this frame time: a backend that integrates up to the
             # frame and blocks until it can deadlocks on the first frameset otherwise.
-            self.vio.push_imu_batch(
-                frameset.imu.t_ns,
-                np.ascontiguousarray(frameset.imu.gyro_rad_s),
-                np.ascontiguousarray(frameset.imu.accel_m_s2),
-            )
-            self.imu_samples += len(frameset.imu)
+            self.push_imu(frameset.imu)
+        self.hold(frameset)
+        yield from self.track_pending()
+
+    def push_imu(self, imu: ImuStream) -> None:
+        """Hand the estimator a batch of inertial samples (tracking the held framesets is :meth:`track_pending`)."""
+        self.vio.push_imu_batch(imu.t_ns, np.ascontiguousarray(imu.gyro_rad_s), np.ascontiguousarray(imu.accel_m_s2))
+        self.imu_samples += len(imu)
+
+    def hold(self, frameset: Frameset) -> None:
+        """Queue a frameset behind the held ones; :meth:`track_pending` tracks it once the samples cover it."""
         self.pending.append(frameset)
         if len(self.pending) > MAX_HELD_FRAMESETS:
             # Every batch runs one sample past its own frame time and therefore
@@ -98,6 +104,9 @@ class Lockstep:
                 f"frameset {frameset.t_ns} takes the hold to {len(self.pending)} framesets, past the {MAX_HELD_FRAMESETS} "
                 f"the feed's one-sample lead allows; held {[held.t_ns for held in self.pending]}"
             )
+
+    def track_pending(self) -> Iterator[tuple[Frameset, _core.VioResult]]:
+        """Track the held framesets in order until the estimator refuses one for want of IMU."""
         while self.pending:
             held: Frameset = self.pending[0]
             started: float = time.monotonic()
@@ -123,6 +132,11 @@ class Lockstep:
                 continue
             self.elapsed_ms.append(elapsed_ms)
             yield completed, result
+
+    @property
+    def lagged(self) -> list[Frameset]:
+        """The accepted frameset whose pose lag mode returns with the next one (empty otherwise)."""
+        return [] if self._buffered is None else [self._buffered]
 
     def flow_frame(self) -> _core.FlowFrame:
         """Keypoints for the most recently yielded estimate, including lag mode."""

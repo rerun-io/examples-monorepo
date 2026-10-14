@@ -1,87 +1,65 @@
-"""Run one catalog segment and replace its single slam_rs results layer."""
+"""Run slam-rs VIO over one catalog segment and publish its ``slam_rs`` pose layer (the VIO graph, ``slam_rs/graphs/vio.py``).
 
+The finished file is published under ``output_dir/<segment>/`` and registered as the segment's ``slam_rs`` layer (``register``:
+``new`` only when it has none, ``replace`` for a production refresh, ``off``). A windowed run is a smoke run, never registered.
+The viewer follows the rig pose live and gets the layer (trajectory and trail) at the end; the "pipeline (debug)" tab shows the graph.
+"""
+
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter
 from typing import Literal
 
-import torch
-from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
+import rerun as rr
+import rerun.blueprint as rrb
+from dagkit.app import run_app, with_pipeline
+from dagkit.graph import Graph
+from dagkit.node import Mode
+from dagkit.runners import RunReport
+from dagkit.sinks import LayerFileSink, Register, RerunSink
+from dagkit.sources import SegmentRef
+from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs import _core
-from slam_rs.catalog_feed import ROBOCAP_RIG, CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
-from slam_rs.catalog_layer import POSE_SOURCE, write_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
-from slam_rs.tracking import Lockstep, SegmentRun, drive
+from slam_rs.catalog_layer import POSE_SOURCE
+from slam_rs.graphs.vio import VioSource, vio_graph
+from slam_rs.nodes.vio import VioNode, VioParams
+from slam_rs.rig import RIG_ENTITY
+from slam_rs.types import RigPose
 
 
-@dataclass(slots=True)
+@dataclass
 class Config:
-    """Read catalog cameras and IMU, run VIO, then replace one pose layer."""
-
-    segment: str
-    """Full segment ID, including the known dataset prefix (robocap, msd-index, msd-odyssey or msd-g2)."""
+    rr_config: RerunTyroConfig
+    segment: SegmentRef
+    """A catalog segment of robocap, msd-index, msd-odyssey or msd-g2."""
     output_dir: Path
-    """This dataset's results directory, visible at the same path to this host and the catalog server."""
-    catalog: str | None = None
-    """Catalog URL; defaults to slam.toml."""
-    profile: Literal["fast", "reference"] = "fast"
-    """Estimator configuration profile."""
-    backend: Literal["auto", "gpu", "cpu"] = "auto"
-    """Auto uses the GPU build when a driver is available; GPU requires it; CPU disables it."""
-    decode_device: Literal["auto", "cuda", "cpu"] = "auto"
-    """CUDA/NVDEC when available; CPU retains the reference PyAV grayscale conversion."""
+    """The dataset's slam_rs-layer directory, visible at the same path to this host and to the catalog server."""
+    vio: VioParams = VioParams()
+    register: Register = "new"
+    runner: Literal["sequential", "threaded"] = "threaded"
+    mode: Mode = "lossless"
 
 
-def main(config: Config) -> None:
-    """Track the complete segment before publishing any replacement."""
-    if Path(config.segment).name != config.segment:
-        raise ValueError("segment ID must not contain path separators")
-    settings: SlamConfig = load_slam_config()
-    dataset_name: str = config.segment.split("__", 1)[0]
-    is_robocap: bool = dataset_name == "robocap"
-    rig_profile: RigProfile = ROBOCAP_RIG if is_robocap else RigProfile()
-    catalog_url: str = config.catalog or settings.catalog_url
-    # One manifest query resolves the dataset handle that open_segment and the final register share.
-    segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]
-    dataset: DatasetEntry | None = segment.dataset
-    if dataset is None:
-        raise ValueError(f"{config.segment}: catalog resolution returned no dataset handle")
-    output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
-    cuda_available: bool = torch.cuda.is_available()
-    if config.decode_device == "cuda" and not cuda_available:
-        raise ValueError("CUDA decoding requires an available NVIDIA GPU and the slam-rs-cuda environment")
-    decode_device: Literal["cpu", "cuda"] = "cuda" if config.decode_device == "cuda" or (config.decode_device == "auto" and cuda_available) else "cpu"
-    if decode_device == "cpu" and config.decode_device == "auto":
-        print("WARNING: decoding on the CPU: no CUDA device in this environment (the slam-rs-cuda environment decodes with NVDEC)", flush=True)
-    print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
-    started: float = perf_counter()
-    feed: SegmentFeed
-    with open_segment(segment, profile=rig_profile, cache_video=True, decode_device=decode_device, include_ground_truth=False) as feed:
-        load_s: float = perf_counter() - started
-        config_text: str = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, config.profile)
-        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
-        flow: _core.VioConfig = _core.VioConfig.from_json(config_text)
-        use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
-        if config.backend == "auto" and _core.gpu_backend is None:
-            print("WARNING: tracking on the CPU: this slam_rs._core has no GPU frontend (run slam-rs-wgpu-build; the "
-                  "slam-rs-catalog-layer task does it first)", flush=True)
-        vio: _core.Vio
-        try:
-            vio = _core.Vio(calibration, flow, gpu=use_gpu)
-        except ValueError as error:
-            # Only an absent adapter permits auto fallback. Invalid calibration,
-            # config, client panics and failures during tracking must still fail.
-            if config.backend != "auto" or "wgpu found no" not in str(error):
-                raise
-            print(f"GPU unavailable: {error}; using CPU", flush=True)
-            vio = _core.Vio(calibration, flow, gpu=False)
-        backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
-        print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
-              f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
-        run: SegmentRun = drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text))
-        write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,
-                    profile=config.profile, backend=backend, decoder=decode_device)
-    dataset.register([output.as_uri()], layer_name=POSE_SOURCE, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
-    print(f"Registered {len(run.estimate)} poses; {run.wall_s:.1f} s, {run.framesets / run.wall_s:.1f} framesets/s; {output}")
-    print(dataset.segment_url(config.segment))
+def vio_publish(
+    segment: SegmentRef, params: VioParams, output_dir: Path, register: Register, recording: rr.RecordingStream
+) -> tuple[Graph, LayerFileSink]:
+    """The VIO graph with its sinks: the ``slam_rs`` layer publisher (returned too: its ``published`` file) and the live pose."""
+    decoder: Literal["cpu", "cuda"] = params.decoder()
+    publish = LayerFileSink(segment, POSE_SOURCE, output_dir=output_dir, register=register)
+    viewer = RerunSink(recording, {"pose": RigPose}, {"pose": RIG_ENTITY}, timeline=segment.timeline)
+    return vio_graph(VioSource(segment, decoder), VioNode(segment, params, output_dir, decoder), {"publish": publish, "viewer": viewer}), publish
+
+
+def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
+    """The VIO graph; once it ran, its layer (a few MB) goes to ``recording`` too."""
+    graph, publish = vio_publish(config.segment, config.vio, config.output_dir, config.register, recording)
+    normal = rrb.Blueprint(rrb.Spatial3DView(origin="/world", name="trajectory"), rrb.TimePanel(timeline=config.segment.timeline))
+    recording.send_blueprint(with_pipeline(normal, [rrb.Spatial3DView(origin="/world", name="2 vio · rig pose"),
+                                                    rrb.TimeSeriesView(origin="/dagkit/health/vio", name="2 vio · step ms and queue")]))  # fmt: skip
+    yield graph
+    if publish.published is not None:
+        recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
+
+
+def main(config: Config) -> RunReport:
+    return run_app(config, build)

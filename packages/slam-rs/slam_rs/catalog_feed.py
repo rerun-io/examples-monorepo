@@ -864,7 +864,7 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
     return _rig_trajectory(table, segment_id)
 
 
-def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
+def _rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
     """One window of the ``gt`` layer's rig transforms as a trajectory, Rerun's XYZW converted to w-first.
 
     Empty when the layer carries neither component and when the window holds no
@@ -873,6 +873,8 @@ def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
     Args:
         table: The window's rows, one Rerun ``Transform3D`` per row.
         segment_id: Which segment the rows came from, for the refusal below.
+        entity: The entity whose ``Transform3D`` rows are the poses.
+        timeline: The rows' index column.
 
     Returns:
         The poses the window carries, on ``video_time``.
@@ -888,11 +890,11 @@ def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
             naming the row is the only reading of it that cannot be wrong
             (S25 review).
     """
-    translation_column: str = f"{RIG_ENTITY}:Transform3D:translation"
-    quaternion_column: str = f"{RIG_ENTITY}:Transform3D:quaternion"
+    translation_column: str = f"{entity}:Transform3D:translation"
+    quaternion_column: str = f"{entity}:Transform3D:quaternion"
     if translation_column not in table.column_names or quaternion_column not in table.column_names:
         return empty_trajectory()
-    row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
+    row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[timeline].combine_chunks().cast(pa.int64()))
     translations: pa.Array = table[translation_column].combine_chunks()
     quaternions: pa.Array = table[quaternion_column].combine_chunks()
     valid: Bool[ndarray, " n_rows"] = translations.is_valid().to_numpy(zero_copy_only=False)

@@ -6,7 +6,7 @@ not hardware-synced, how an accelerometer on its own clock reaches the
 gyroscope's, and which cameras of a six-camera rig are fed and in what order.
 RoboCap is why the code exists, so its numbers are the fixtures; what is under
 test is the feed. The rig's own calibration arithmetic and the two real-recording
-tests are in ``test_robocap_probe``.
+tests are in ``test_robocap_probe`` (the calibration checks of a RoboCap replay).
 """
 
 import os

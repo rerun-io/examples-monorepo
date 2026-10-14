@@ -36,8 +36,8 @@ outputs:
         - if: osx
           then: cp target/release/lib_core.dylib "$SP_DIR/slam_rs/_core.so"
           else: cp target/release/lib_core.so "$SP_DIR/slam_rs/_core.so"
-        - rm -f "$SP_DIR"/slam_rs/catalog_*.py "$SP_DIR"/slam_rs/{tracking,vio_log,cuda_decode,trajectory,reference}.py
-        - rm -rf "$SP_DIR/slam_rs/apis" "$SP_DIR/slam_rs/__pycache__"
+        - rm -f "$SP_DIR"/slam_rs/catalog_*.py "$SP_DIR"/slam_rs/{tracking,vio_log,cuda_decode,trajectory,reference,types,verify}.py
+        - rm -rf "$SP_DIR"/slam_rs/{apis,nodes,graphs,__pycache__}
     requirements:
       build:
         - ${{ compiler('c') }}
@@ -90,3 +90,4 @@ outputs:
       - script:
           - test -f "$SP_DIR/slam_rs/catalog_feed.py"
           - test -d "$SP_DIR/slam_rs/apis"
+          - test -f "$SP_DIR/slam_rs/nodes/vio.py"

@@ -4,36 +4,28 @@ Both blocks share ``run``. ``vio`` (robocap, no ground truth): ``score`` compare
 golden (``pre`` itself scores 0, ``pre2`` gives the run-to-run noise). ``vio-gt`` (msd-index): ``score_gt`` is the slam-rs
 gate's ATE against the catalog's ``gt`` layer. Both read only golden rrds (plus GT), never the pipeline.
 
-Golden contract (the ported graph writes the same entities on the segment's ``video_time``): the ``slam_rs`` layer exactly as
-:func:`~slam_rs.catalog_layer.write_layer` writes it, plus ``/verify/vio/run``: static ``AnyValues`` with the run's counts.
+Golden contract (on the segment's ``video_time``): the ``slam_rs`` layer exactly as :func:`~slam_rs.catalog_layer.write_layer`
+writes it, plus ``/verify/vio/run``: static ``AnyValues`` with the run's counts.
 """
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import cast
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.runners import RunReport, run_sequential
+from dagkit.sources import SegmentRef
 from dagkit.verify import Case, Phase
 from rerun.catalog import DatasetEntry
+from serde import from_dict
 
-from slam_rs import _core
-from slam_rs.catalog_feed import (
-    RIG_ENTITY,
-    ROBOCAP_RIG,
-    TIMELINE,
-    CatalogSegment,
-    RigProfile,
-    SegmentFeed,
-    _read_ground_truth,
-    _rig_trajectory,
-    open_segment,
-    resolve_catalog_segments,
-)
-from slam_rs.catalog_layer import write_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
-from slam_rs.tracking import Lockstep, SegmentRun, drive
+from slam_rs.apis.catalog_layer import vio_publish
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, _read_ground_truth, _rig_trajectory, resolve_catalog_segments
+from slam_rs.config import load_slam_config
+from slam_rs.nodes.vio import VioNode, VioParams
+from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, ate
 
 RUN: str = "/verify/vio/run"
@@ -41,39 +33,22 @@ RUN: str = "/verify/vio/run"
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """Today's catalog-layer tool (``apis/catalog_layer.py``) without its register step; its layer file goes into ``recording``.
-
-    VIO initialises from rest, so it starts at the segment's first frameset; a window ends the run at ``window_s[1]``.
-    """
+    """The VIO graph (sequential, lossless) on the case's segment, its layer (unregistered, in a temporary directory) copied into
+    ``recording``. VIO initialises from rest, so it starts at the segment's first frameset; a window ends it at ``window_s[1]``."""
     assert case.dataset is not None and case.segment is not None, "slam-rs cases are catalog segments"
-    settings: SlamConfig = load_slam_config()
-    robocap: bool = case.dataset == "robocap"
-    segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(settings.catalog_url, case.dataset, case.segment),))[0]
-    assert case.params["profile"] in ("fast", "reference") and case.params["decode_device"] in ("cpu", "cuda"), f"{case.name}: {case.params}"
-    profile: Literal["fast", "reference"] = "fast" if case.params["profile"] == "fast" else "reference"
-    decoder: Literal["cpu", "cuda"] = "cpu" if case.params["decode_device"] == "cpu" else "cuda"
-    feed: SegmentFeed
-    with (
-        open_segment(
-            segment, profile=ROBOCAP_RIG if robocap else RigProfile(), cache_video=True, decode_device=decoder, include_ground_truth=False
-        ) as feed,
-        TemporaryDirectory() as tmp,
-    ):
-        config_text: str = settings.robocap_config_text(profile) if robocap else settings.vio_config_text(case.dataset, profile)
-        vio = _core.Vio(
-            _core.Calibration.from_catalog(feed.cameras, feed.imu), _core.VioConfig.from_json(config_text), gpu=case.params["backend"] == "gpu"
-        )
-        stop_ns: int | None = None if case.window_s is None else round(case.window_s[1] * 1e9) + feed.imu.cam_time_offset_ns  # feed clock
-        result: SegmentRun = drive(feed, Lockstep(vio), stop_ns, config_sha256=config_text_sha256(config_text))
-        backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
-        layer: Path = Path(tmp) / f"{case.segment}.rrd"
-        write_layer(layer, case.segment, result, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,
-                    profile=profile, backend=backend, decoder=decoder)  # fmt: skip
-        recording.send_chunks(rr.chunk.RrdReader(layer).stream())
+    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
+    segment = SegmentRef(case.dataset, case.segment, load_slam_config().catalog_url, window_ns=window)
+    params: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")})
+    with TemporaryDirectory() as tmp:
+        graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio"))
+        report: RunReport = run_sequential(graph)
+        assert publish.published is not None, f"{case.name}: the run published no layer ({report.status})"
+        recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
+    result: SegmentRun | None = cast(VioNode, graph.nodes["vio"].obj).run
+    assert result is not None
     recording.log(RUN, rr.AnyValues(framesets=result.framesets, poses=len(result.estimate), lost=result.lost, wall_s=result.wall_s,
-                                    median_tracker_ms=result.median_tracker_ms, backend=backend, decoder=decoder,
-                                    config_sha256=result.config_sha256), static=True)  # fmt: skip
-    print(f"{case.name} {phase}: {result.framesets} framesets, {len(result.estimate)} poses, {result.lost} lost, {result.wall_s:.1f} s ({backend})")
+                                    median_tracker_ms=result.median_tracker_ms, config_sha256=result.config_sha256), static=True)  # fmt: skip
+    print(f"{case.name} {phase}: {result.framesets} framesets, {len(result.estimate)} poses, {result.lost} lost, {result.wall_s:.1f} s")
 
 
 def _read(golden: Path) -> tuple[Trajectory, float]:
