@@ -191,8 +191,9 @@ class CatalogVideoSource:
                 yield Event(frames.t_ns, port, Fenced(frames, fence) if self.fenced else frames)
 
     def _undistorted(self, rig: RigCameras, table: pa.Table) -> RigCameras:
-        """The rig with every camera's undistorted pinhole; keeps the remap tables for the frames."""
+        """The rig with every camera's undistorted pinhole; keeps the remap tables for the frames (one set per read)."""
         intrinsics: Float64[ndarray, "v 3 3"] = rig.intrinsics.copy()
+        self.maps = []
         for i, camera in enumerate(self.cameras):
             column: str = f"/world/{camera}/{DISTORTION}"
             if column not in table.column_names or table.column(column)[0].as_py() is None:

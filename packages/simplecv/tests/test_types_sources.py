@@ -202,6 +202,7 @@ def test_source_undistorts_its_frames_and_emits_the_undistorted_pinhole(monkeypa
     monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
     source = CatalogVideoSource(SegmentRef("d", "s"), ("rig_00/cam_00",), decode="cpu_rgb", undistort=True)
     source.frames = TextureFrames(1, (height, width))  # type: ignore[assignment]
+    list(source.events())  # a graph reads the source again after a first look (e.g. at the frame size)
     events = list(source.events())
     rig: RigCameras = events[0].value  # type: ignore[assignment]
     K_new, map_x, map_y = undistortion_maps(K, np.asarray(coefficients, dtype=np.float32).astype(np.float64), width, height)
