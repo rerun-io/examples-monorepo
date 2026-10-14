@@ -7,7 +7,8 @@ run = "mast3r_slam.verify:run"
 score = "mast3r_slam.verify:score"
 # GT: msd-odyssey mocap rig poses (layer gt, /world/rig_00 on video_time) composed with the static cam_00 extrinsic.
 # ate_rmse_m = Sim3 (Umeyama) ATE RMSE of the FINAL keyframe camera centres against GT cam_00 (nearest GT pose, <= 5 ms);
-# floor = 5 % of the short pre (0.36904 m -> 0.01845 m). tracked_fraction = input frames the frontend left in
+# floor = 5 % of the short pre (0.36904 m -> 0.01845 m; floors are per block, so the full case gets the same 0.01845 m,
+# 3 % of its 0.62155 m). tracked_fraction = input frames the frontend left in
 # TRACKING / input frames (the catalog gives the denominator). Every phase runs lossless (the frontend waits for the
 # backend after each keyframe / relocalisation: the old single_thread), uncalibrated, every 2nd frame of cam_00.
 # Shots (own viewer, verify-block 5): 3D view "/" = Sim3-aligned estimate (final keyframes + tracked frustum) over the GT
@@ -52,3 +53,6 @@ dataset = "msd-odyssey"
 segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
 window_s = [0.0, 120.0]
 params = { calib = "false", subsample = "2", img_size = "512" }
+# pre / pre2 (not bit-identical over 120 s): ATE 0.621547 / 0.621571 m, tracked 1571 / 1572 of 1802, 349 keyframes each;
+# tolerance = max(2 x noise, floor) = the floors.
+noise = { ate_rmse_m = 0.0000248, tracked_fraction = 0.000555 }
