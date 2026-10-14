@@ -92,7 +92,7 @@ properties = [
 name = "nodes"
 tier = "node"
 lane = "unit"
-tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+tests = ["tests/test_nodes.py", "tests/test_graph.py", "tests/test_app.py"]
 properties = [
     "tests/test_nodes.py::test_track_bootstraps_one_person_and_tracks_it_in_every_view",
     "tests/test_nodes.py::test_fit_emits_every_frame_once_in_time_order_and_flush_drains_the_window",

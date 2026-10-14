@@ -59,6 +59,11 @@ class FileFrames:
 
 
 class NpzSequenceSource(CatalogVideoSource):
+    """Decode a MAMMA-format capture directory.
+
+    The rig from ``meta/<camera>.npz``, frames from the videos, timed by the capture's frame range and fps.
+    """
+
     def __init__(self, root: Path, cameras: tuple[str, ...], *, resize_hw: tuple[int, int], keep_native: bool) -> None:
         capture = np.load(root / "meta" / "global.npz")
         fps: float = float(capture["fps"])

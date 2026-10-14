@@ -2,7 +2,8 @@
 
 Input: a catalog segment, or a MAMMA-format capture directory (``video``, the public demo files; its rig and videos are
 logged too). The outputs stream to the ``rr_config`` viewer; with ``output_dir`` they also become the segment's ``mamma_fit``
-catalog layer. Presets (``quality``, ``fast``) are node parameters in ``profiles/<hardware>.toml``.
+catalog layer. Presets (``quality``, ``fast``) are node parameters in ``profiles/<hardware>.toml``. The CLI
+(``tools/apps/capture.py``) and the generated gradio app (``tools/apps/capture_gradio.py``) run the same ``build``.
 """
 
 import importlib.metadata
@@ -53,6 +54,7 @@ RING: tuple[str, ...] = ("rig_01/cam_00", "rig_03/cam_00", "rig_05/cam_00", "rig
 class Config:
     rr_config: RerunTyroConfig
     segment: SegmentRef = field(default_factory=lambda: SegmentRef("dataforge-mamma-eval", "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"))
+    """The whole segment by default (the VERIFY ``full`` case); ``--segment.window-ns 0 10000000000`` is the ``short`` case."""
     video: Path | None = None
     """A MAMMA-format capture directory (``meta/*.npz`` + videos) to run instead of ``segment``."""
     cameras: tuple[str, ...] | None = None
@@ -116,13 +118,21 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         LandmarksNode(LandmarkEstimator(data / "weights/ma_2d/mamma_mask_full_cvpr.safetensors", engine_path=engine_plan())),
         FitNode(fit, np.asarray(body.model.faces, dtype=np.int32), lambda K, cam_T_world: SlidingWindowFitter(body, K, cam_T_world, fit)),
     )  # fmt: skip
+    return app_graph(config, recording, video, nodes, f"{profile.hardware}/{config.preset}")
+
+
+def app_graph(config: Config, recording: rr.RecordingStream, video: CatalogVideoSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
+    """The capture graph with the App's sinks (the viewer; with ``output_dir`` the ``mamma_fit`` layer) and its blueprint.
+
+    ``build`` passes the loaded models; the unit tests pass fakes. ``profile`` is ``<hardware>/<preset>`` for the producer.
+    """
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS, timeline=video.clock)}
     if config.output_dir is not None and config.video is None:
         sha: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, cwd=PACKAGE_DIR).stdout.strip()
-        producer = Producer("mamma", f"{importlib.metadata.version('mamma')}+{sha}", "mamma-capture", f"{profile.hardware}/{config.preset}")
+        producer = Producer("mamma", f"{importlib.metadata.version('mamma')}+{sha}", "mamma-capture", profile)
         layer, partial = open_layer(config.segment, LAYER, producer, output_dir=config.output_dir)
         sinks[LAYER] = LayerSink(layer, partial, config.segment, LAYER, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, register=config.register)
-    recording.send_blueprint(default_blueprint(cameras))
+    recording.send_blueprint(default_blueprint(video.cameras))
     return capture_graph(video, *nodes, sinks)
 
 

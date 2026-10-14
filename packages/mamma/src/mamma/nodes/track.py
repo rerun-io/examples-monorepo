@@ -84,6 +84,12 @@ class Track:
 
 
 class TrackNode:
+    """Track every person in every view.
+
+    Masks and boxes per (view, person) at engine size; a person keeps one id across views and time (CLIP + epipolar
+    identity at bootstrap and re-detects, SAM2 masks every tick).
+    """
+
     inputs: Mapping[str, PortType] = {"frames": Fenced[MultiViewFrames], "rig": RigCameras}
     outputs: Mapping[str, PortType] = {"tracks": Fenced[MultiViewTracks]}
 
