@@ -89,7 +89,7 @@ TUM_RGB_CSV: str = """ts_rgb_0 (ns),path_rgb_0,ts_depth_0 (ns),path_depth_0
 
 EUROC_RGB_CSV: str = """ts_rgb_0 (ns),path_rgb_0,ts_rgb_1 (ns),path_rgb_1
 1403636579763555584,rgb_0/1403636579763555584.png,1403636579763555584,rgb_1/1403636579763555584.png
-1403636579813555456,rgb_0/1403636579813555456.png,1403636579813555456,rgb_1/1403636579813555456.png
+1403636579813555457,rgb_0/1403636579813555456.png,1403636579813555457,rgb_1/1403636579813555456.png
 """
 
 
@@ -140,12 +140,12 @@ def test_euroc_stereo_lists_both_cameras_on_their_own_clocks(tmp_path: Path) -> 
     assert sorted(streams) == ["rgb_0", "rgb_1"]
     assert streams["rgb_1"].paths[1] == "rgb_1/1403636579813555456.png"
     # Every stamp survives exactly: 1.4e18 is beyond float64's integer range.
-    assert int(streams["rgb_0"].times_ns[1]) == 1403636579813555456
+    assert int(streams["rgb_0"].times_ns[1]) == 1403636579813555457
 
 
 def test_a_stamp_written_as_a_float_literal_is_read_exactly(tmp_path: Path) -> None:
-    streams: dict[StreamName, FrameIndex] = read_frame_index(write(tmp_path, "rgb.csv", "ts_rgb_0 (ns),path_rgb_0\n10000000000.0,rgb_0/a.png\n"))
-    assert streams["rgb_0"].times_ns.tolist() == [10_000_000_000]
+    streams: dict[StreamName, FrameIndex] = read_frame_index(write(tmp_path, "rgb.csv", "ts_rgb_0 (ns),path_rgb_0\n1403636579813555457.0,rgb_0/a.png\n"))
+    assert streams["rgb_0"].times_ns.tolist() == [1403636579813555457]
 
 
 def test_ground_truth_comes_back_world_t_body_scalar_last(tmp_path: Path) -> None:

@@ -49,7 +49,7 @@ def nanoseconds(value: str) -> int:
 class CameraEntry:
     """One ``cameras:`` entry of calibration.yaml."""
 
-    cam_name: str
+    cam_name: StreamName
     """Stream it calibrates, ``rgb_<i>``."""
     cam_type: Literal["gray", "rgb", "rgb+depth"]
     """Pixel content; ``rgb+depth`` means ``depth_name`` is registered to this camera."""
@@ -67,7 +67,7 @@ class CameraEntry:
     """Brown-Conrady with k1 k2 p1 p2 (radtan4) or k1 k2 p1 p2 k3 (radtan5); absent for an undistorted camera."""
     distortion_coefficients: tuple[float, ...] = ()
     """The coefficients ``distortion_type`` names, in that order."""
-    depth_name: str | None = None
+    depth_name: StreamName | None = None
     """Depth stream registered to this camera (``depth_<i>``), on an ``rgb+depth`` camera."""
     depth_factor: float | None = None
     """Native depth units per metre: metres = pixel / depth_factor."""

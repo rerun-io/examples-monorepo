@@ -98,8 +98,7 @@ def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
         raise ValueError("gt/data.csv has no data rows, so the sequence has neither poses nor a clock origin")
     translations_xyz: Float64[ndarray, "n_poses 3"] = np.ascontiguousarray(samples.values[:, 0:3])
     quaternions_xyzw: Float64[ndarray, "n_poses 4"] = np.ascontiguousarray(samples.values[:, [4, 5, 6, 3]])
-    norms: Float64[ndarray, "n_poses"] = np.linalg.norm(quaternions_xyzw, axis=1)
-    dropped: Bool[ndarray, "n_poses"] = np.abs(norms - 1.0) > QUATERNION_NORM_TOLERANCE
+    dropped: Bool[ndarray, "n_poses"] = dropout_rows(quaternions_xyzw)
     quaternions_xyzw[dropped] = IDENTITY_QUATERNION_XYZW
     return GtTrajectory(
         times_ns=samples.times_ns,
@@ -107,6 +106,11 @@ def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
         quaternions_xyzw=quaternions_xyzw,
         num_sanitized=int(dropped.sum()),
     )
+
+
+def dropout_rows(quaternions_xyzw: Float64[ndarray, "n_poses 4"]) -> Bool[ndarray, "n_poses"]:
+    """Rows whose quaternion is not unit-norm: tracking dropouts, which ``gt_trajectory`` turns into identity."""
+    return np.abs(np.linalg.norm(quaternions_xyzw, axis=1) - 1.0) > QUATERNION_NORM_TOLERANCE
 
 
 def read_camera_index(data: bytes) -> list[CameraRow]:
