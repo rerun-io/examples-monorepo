@@ -54,9 +54,9 @@ def case_config(case: Case) -> Config:
 
 
 def example_cases() -> list[Config]:
-    """The gradio app's examples: the ``VERIFY.toml`` cases its form can state exactly, i.e. whole segments (the form edits a
-    segment's dataset and id, not its window): ``full`` (one person) and ``contact`` (two people). They never register."""
-    cases: list[Case] = [case for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for case in block.cases if case.window_s is None]
+    """The gradio app's examples, the ``VERIFY.toml`` cases: ``short`` (the first 10 s), ``full`` (one person) and ``contact``
+    (two people). They never register."""
+    cases: list[Case] = [case for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for case in block.cases]
     return [replace(case_config(case), register="off") for case in sorted(cases, key=lambda case: case.params["subjects"])]
 
 

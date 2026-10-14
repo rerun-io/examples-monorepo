@@ -93,7 +93,10 @@ class GraphDoc:
 
 @functools.cache
 def _git(*args: str) -> str:
-    done = subprocess.run(["git", *args], capture_output=True, text=True, cwd=Path(__file__).parent)
+    try:
+        done = subprocess.run(["git", *args], capture_output=True, text=True, cwd=Path(__file__).parent)
+    except OSError:  # no git on this host (a deployed device): no code links
+        return ""
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
@@ -229,7 +232,7 @@ def picture(doc: GraphDoc) -> tuple[list[Item], list[tuple[str, str]]]:
         es: list[EdgeDoc] = groups[key]
         frm: str = f" ← {nodes[src].number} {src}" if tag else ""
         if not port:
-            return textwrap.fill(", ".join(e.src_port for e in es), 30) + frm
+            return textwrap.fill(", ".join(e.src_port for e in es), 30, break_long_words=False) + frm
         typ: PortDoc = out_type[(src, es[0].src_port)]
         name: str = port if es[0].src_port == port else f"{es[0].src_port} as {port}"
         return f"{name}: {typ.type}{' (GPU)' if typ.gpu else ''}{frm} · {es[0].how}"
@@ -340,7 +343,8 @@ def guide(doc: GraphDoc, *, links: bool = True, health: bool = False) -> str:
             for p in n.outputs:
                 to: list[str] = [f"{by[name].number} {name}" for name in sorted({e.dst for e in out_of[(n.name, p.name)]}, key=lambda name: by[name].number)]
                 md.append(f"| **{p.name}** | `{p.type}`{' (GPU)' if p.gpu else ''} | {', '.join(to) or 'nobody (unused)'} |")
-                paths: list[str] = seen.get((n.name, p.name), [])
+                drawn: list[str] = seen.get((n.name, p.name), [])
+                paths: list[str] = [path for path in drawn if not any(other.startswith(path + "/") for other in drawn)]  # leaves: a parent may outline nothing
                 if links and paths:  # one link per line: a wrapped link misses its click
                     see += [f"- {link(path, f'{n.name}.{p.name} → {path}')}" for path in paths[:2]] + ([f"- {n.name}.{p.name}: +{len(paths) - 2} more"] if len(paths) > 2 else [])
             md += ["", "See it:", *see, ""] if see else [""]

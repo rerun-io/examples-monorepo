@@ -17,7 +17,6 @@ from dagkit.node import Event
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import check_graph_docs, check_picture
 from dagkit.time import STATIC
-from dagkit.types import LayerFile
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.frames import LumaFrameset
@@ -42,8 +41,6 @@ def app_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Graph:
 
 
 def test_the_app_graph_validates_draws_its_declaration_and_documents_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # dagkit's LayerFile has no docstring yet (stage-09 confirm); this is the one-liner proposed for it. Delete once dagkit has it.
-    monkeypatch.setattr(LayerFile, "__doc__", "A finished layer file (an rrd) that a sink publishes.")
     graph: Graph = app_graph(tmp_path, monkeypatch)
     graph.validate()
     check_picture(graph, tmp_path)
@@ -105,7 +102,7 @@ def test_the_viewer_opens_on_the_run_health_as_before_and_the_pipeline_tab_comes
 
 
 FORM: dict[str, str] = {  # Config leaf -> the widget the generated form gives it
-    "segment.dataset": "Textbox", "segment.segment": "Textbox", "output_dir": "Textbox", "hands.models_dir": "Textbox",
+    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "output_dir": "Textbox", "hands.models_dir": "Textbox",
     "hands.device": "Dropdown", "hands.ort_dylib": "File", "hands.ort_threads": "Number", "hands.overlays": "Dropdown",
     "register": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
@@ -113,7 +110,6 @@ HIDDEN: dict[str, str] = {
     "rr_config": "the form streams into its own Rerun pane",
     "segment.catalog_url": "kept from the default SegmentRef",
     "segment.timeline": "kept from the default SegmentRef",
-    "segment.window_ns": "kept from the default SegmentRef: the dagkit form has no window yet (stage-09 confirm)",
 }
 
 
@@ -139,6 +135,8 @@ def test_every_config_field_is_a_form_widget_or_deliberately_hidden() -> None:
         if kind == "Dropdown":  # every Literal value, "auto" included
             assert [value for _, value in widget.choices] == list(get_args(fields[label])), label
     assert any(isinstance(c, gr.Accordion) and c.label == "hands" for c in demo.blocks.values()), "HandsParams is not grouped"
+    # the fields the Config leaves open start from the example: Run on the untouched form is the short case, unregistered (windowed)
+    assert (widgets["segment.segment"].value, widgets["segment.window_ns"].value) == ("robocap__fe6fede545c972fa__s00000014", "1655058237343500 1655063237343500")
 
 
 def test_the_example_is_the_verify_short_case_never_registered() -> None:

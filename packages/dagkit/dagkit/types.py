@@ -46,6 +46,8 @@ class Producer:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class LayerFile:
+    """A finished layer file (an rrd) that a sink publishes."""
+
     path: Path
 
 

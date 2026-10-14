@@ -10,7 +10,7 @@ import rerun as rr
 from rerun.chunk import RrdReader
 
 from dagkit.doc import GRAPH_ROOT, GraphDoc, describe, guide, log_graph
-from dagkit.graph import AsOf, DropOldest, Graph, Spawn
+from dagkit.graph import AsOf, DropOldest, Graph, Spawn, normalise
 from dagkit.node import Emit, Event, Node, RunContext, Tick
 from dagkit.time import TimeNs, check_monotonic
 
@@ -80,9 +80,11 @@ def collect_edges(graph: Graph, run: Callable[[Graph], object]) -> dict[str, lis
 
 
 def drawn_problems(graph: Graph, ids: Sequence[str], labels: Sequence[str], lines: Sequence[tuple[str, str]], edges: Sequence[str]) -> list[str]:
-    """Check boxes, edge coverage, label text and connections independently against the declaration."""
+    """Check boxes (one per node), edge coverage, what each label shows (port; into a step also its Type, GPU mark and how it
+    arrives) and every line (it joins two items and carries a declared edge) independently against the declaration."""
     box: dict[str, str] = {i: label for i, label in zip(ids, labels, strict=True) if i in graph.nodes}
     problems: list[str] = [f"node {n} has no box" for n in graph.nodes if n not in box]
+    problems += [f"node {i}: {c} boxes" for i, c in Counter(ids).items() if c > 1]
     problems += [f"box {n} reads {label.split(chr(10))[0]!r}" for n, label in box.items() if label.split("\n")[0].split("  ", 1)[-1] != n]
     how: dict[type, str] = {AsOf: "latest", DropOldest: "drops old"}
     declared: Counter[str] = Counter(f"{e.src.node}.{e.src.port}->{e.dst.node}.{e.dst.port} {how.get(type(e.kind), 'waits')}" for e in graph.edges)
@@ -90,15 +92,22 @@ def drawn_problems(graph: Graph, ids: Sequence[str], labels: Sequence[str], line
     problems += [f"declared, drawn {drawn[e]} times: {e}" for e in declared if drawn[e] != 1] + [f"drawn, not declared: {e}" for e in drawn if e not in declared]
     pairs: set[tuple[str, str]] = set(lines)
     problems += [f"line {a} -> {b} joins an unknown item" for a, b in lines if a not in ids or b not in ids]
+    meant: set[tuple[str, str]] = set()  # the lines the drawn edges account for
     for item, label, text in zip(ids, labels, edges, strict=True):
         for line in text.splitlines():
             connection, kind = line.split(" ", 1)
             (src_node, src_port), (dst_node, dst_port) = [port.rsplit(".", 1) for port in connection.split("->")]
             into_step: bool = dst_node in graph.nodes and graph.nodes[dst_node].kind != "sink"
+            meant |= {(item, dst_node)} | (set() if item.endswith(" <-") else {(src_node, item)})
             problems += [f"{item} does not point at {dst_node}"] if (item, dst_node) not in pairs else []
             problems += [f"{item} is not fed by {src_node}"] if not item.endswith(" <-") and (src_node, item) not in pairs else []
-            problems += [f"{item}: {label!r} lacks {dst_port if into_step else src_port!r} or {kind!r}"] if (dst_port if into_step else src_port) not in label or (into_step and kind not in label) else []
-    return problems
+            want: str = re.escape(src_port)
+            if into_step and src_port in graph.nodes.get(src_node, graph.nodes[dst_node]).outputs:
+                fenced, classes = normalise(graph.nodes[src_node].outputs[src_port])
+                shown: str = " | ".join(c.__name__ for c in classes) + (" (GPU)" if fenced else "")
+                want = rf"^{re.escape(dst_port if src_port == dst_port else f'{src_port} as {dst_port}')}: {re.escape(shown)} (← .+ )?· {kind}$"
+            problems += [f"{item}: {label!r} lacks {want!r}"] if not any(re.search(want, row) for row in label.splitlines()) else []
+    return problems + [f"line {a} -> {b} is not a declared edge" for a, b in lines if (a, b) not in meant]
 
 
 def picture_problems(graph: Graph, rrd: Path) -> list[str]:

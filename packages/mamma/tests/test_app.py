@@ -82,26 +82,30 @@ def form() -> gr.Blocks:
 
 
 def test_every_config_field_has_a_form_widget_or_is_hidden_on_purpose() -> None:
-    """Table test over the Config: one widget per field (the segment two: dataset and id), none for the HIDDEN ones."""
+    """Table test over the Config: one widget per field (the segment three: dataset, id and window), none for the HIDDEN ones."""
     labels: list[str] = [str(b.label) for b in form().blocks.values() if isinstance(b, gr.components.FormComponent) and b.label]
     widgets: dict[str, list[str]] = {f.name: [label for label in labels if label.split(":")[0].split(".")[0] == f.name] for f in dataclasses.fields(Config)}
     assert {name for name, found in widgets.items() if not found} == set(HIDDEN)
-    assert widgets.pop("segment") == ["segment.dataset", "segment.segment"]
+    assert widgets.pop("segment") == ["segment.dataset", "segment.segment", "segment.window_ns"]
     assert {name: len(found) for name, found in widgets.items() if name not in HIDDEN} == {name: 1 for name in widgets if name not in HIDDEN}, widgets
 
 
-def test_one_click_on_an_example_fills_the_form_with_a_whole_segment_verify_case() -> None:
-    """The form edits a segment's dataset and id (not its window) and has no widget for the HIDDEN fields, so an example
-    states a VERIFY case exactly when it is a whole segment with the default cameras and engine size."""
+def test_one_click_on_an_example_fills_the_form_with_a_verify_case() -> None:
+    """The form edits a segment's dataset, id and window and has no widget for the HIDDEN fields, so an example states a
+    VERIFY case exactly (the default cameras and engine size)."""
     examples: list[Config] = example_cases()
     (table,) = [b for b in form().blocks.values() if isinstance(b, gr.Dataset)]
     labels: list[str] = [str(c.label) for c in table._components]
     default = Config(RerunTyroConfig(headless=True))
-    assert [(e.segment.segment, e.subjects) for e in examples] == [(default.segment.segment, 1), ("mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1", 2)]
+    contact: str = "mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1"
+    assert [(e.segment.segment, e.segment.window_ns, e.subjects) for e in examples] == [
+        (default.segment.segment, (0, 10_000_000_000), 1), (default.segment.segment, None, 1), (contact, None, 2)
+    ]  # short, full, contact
     for row, example in zip(table.raw_samples, examples, strict=True):
         assert dict(zip(labels, row, strict=True)) == {
             "segment.dataset": example.segment.dataset, "segment.segment": example.segment.segment, "preset": "quality",
+            "segment.window_ns": " ".join(map(str, example.segment.window_ns or ())),
             "subjects": example.subjects, "output_dir: save it, then download it": False, "register": "off",
             "hardware": default.hardware, "runner": default.runner, "mode": default.mode,
         }  # fmt: skip
-        assert (example.segment.window_ns, example.video, example.cameras, example.resize_hw) == (None, None, RING, default.resize_hw)
+        assert (example.video, example.cameras, example.resize_hw) == (None, RING, default.resize_hw)

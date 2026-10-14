@@ -22,7 +22,7 @@ from exo_calib.apis.calibrate import Config
 from exo_calib.verify import CARD, examples
 
 WIDGETS: dict[str, str] = {
-    "segment.dataset": "Textbox", "segment.segment": "Textbox", "frame_index": "Number", "frame_budget": "Number", "output_dir": "Textbox",
+    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "frame_index": "Number", "frame_budget": "Number", "output_dir": "Textbox",
     "register": "Dropdown", "resume_from": "Dropdown", "hardware": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
 """Form label -> widget class, in form order."""
@@ -86,7 +86,7 @@ def test_whatever_the_form_sends_comes_back_as_the_typed_config(
     built: list[Config] = []
     _, run, _ = form(built)
     sent: tuple[float, ...] = tuple(float(n) for n in numbers) if as_float else numbers  # a browser may send 200.0 for 200
-    list(run(*segment, *sent, output_dir, *choices))
+    list(run(*segment, "", *sent, output_dir, *choices))  # "": no window, the whole segment
     (config,) = built
     default = Config(config.rr_config)
     expected = dataclasses.replace(

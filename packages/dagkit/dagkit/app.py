@@ -3,6 +3,7 @@
 import contextlib
 import dataclasses
 import functools
+import gc
 import itertools
 import platform
 import shutil
@@ -100,19 +101,30 @@ def graphs(built: Graph | Iterator[Graph]) -> Iterator[Graph]:
     return iter((built,)) if isinstance(built, Graph) else built
 
 
+def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
+    """The CLI's and the form's one loop: Stop is checked before the next graph is built, and a stopped build is closed."""
+    built: Iterator[Graph] = graphs(build(config, recording))
+    names: set[str] = set()
+    report: RunReport | None = None
+    try:
+        while not control.stopped and (graph := next(built, None)) is not None:
+            if graph.name in names:  # its picture, guide and health colours would land on the earlier graph's
+                raise GraphError(f"graph name {graph.name!r} repeats in one app")
+            names.add(graph.name)
+            report = RUNNERS[getattr(config, "runner", "threaded")](graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
+            print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
+    finally:
+        getattr(built, "close", lambda: None)()  # a stopped multi-pass build never runs past its yield
+    return report
+
+
 def run_app(config: C, build: Callable[[C, rr.RecordingStream], Graph | Iterator[Graph]]) -> RunReport:
     """Run every built graph with health logging and Ctrl-C to stop; return the last report (an empty build raises)."""
-    recording: rr.RecordingStream = config.rr_config.rec_stream
     control = Control()
     main: bool = threading.current_thread() is threading.main_thread()
     previous = signal.signal(signal.SIGINT, lambda *_: control.stop()) if main else None
-    report: RunReport | None = None
     try:
-        for graph in graphs(build(config, recording)):
-            if control.stopped:
-                break
-            report = RUNNERS[config.runner](graph, mode=config.mode, control=control, health=recording)
-            print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
+        report: RunReport | None = _run_graphs(config, build, config.rr_config.rec_stream, control)
     finally:
         if main:
             signal.signal(signal.SIGINT, previous)
@@ -185,7 +197,9 @@ def _widgets(leaf: Leaf) -> list[Any]:
     value: Any = None if default is dataclasses.MISSING else default
     optional: bool = type(None) in get_args(hint)
     if base is SegmentRef:
-        return [gr.Textbox(getattr(value, part, ""), label=f"{label}.{part}") for part in ("dataset", "segment")]
+        window: str = " ".join(map(str, getattr(value, "window_ns", None) or ()))
+        placeholder: str = "start stop (ns on the segment's timeline); empty: the whole segment"
+        return [gr.Textbox(getattr(value, part, ""), label=f"{label}.{part}") for part in ("dataset", "segment")] + [gr.Textbox(window, label=f"{label}.window_ns", placeholder=placeholder)]
     if path[-1].startswith("output"):
         return [gr.Checkbox(False, label=f"{label}: save it, then download it", info=doc)] if optional else [gr.Textbox(str(value or ""), label=label, info=doc)]
     members: list[object] = [a for a in (get_args(hint) if get_origin(hint) in (Union, types.UnionType) else (hint,)) if a is not type(None)]
@@ -201,16 +215,21 @@ def _widgets(leaf: Leaf) -> list[Any]:
 
 
 def _value(leaf: Leaf, got: list[Any], scratch: Path) -> object:
-    """The Config value of one leaf's widgets; MISSING keeps the default (an empty widget, an unchecked save box)."""
+    """The Config value of one leaf's widgets: an emptied optional field is None, an empty required one (or an unchecked save
+    box) MISSING, which keeps the default."""
     path, hint, default, _ = leaf
     base: object = _base(hint)
-    if base is SegmentRef:  # empty boxes = no catalog input; edits keep the default's url, timeline, window
+    optional: bool = type(None) in get_args(hint)
+    if base is SegmentRef:  # empty dataset and segment = no catalog input; edits keep the default's url and timeline
         template: SegmentRef = default if isinstance(default, SegmentRef) else SegmentRef("", "")
-        return dataclasses.replace(template, dataset=str(got[0]), segment=str(got[1])) if any(got) else None
-    if path[-1].startswith("output") and type(None) in get_args(hint):
+        window: tuple[int, ...] = tuple(int(x) for x in str(got[2] or "").replace(",", " ").split())
+        if len(window) not in (0, 2):
+            raise ValueError(f"{'.'.join(path)}.window_ns: two integers (start stop) or nothing, got {got[2]!r}")
+        return dataclasses.replace(template, dataset=str(got[0]), segment=str(got[1]), window_ns=(window[0], window[1]) if window else None) if any(got[:2]) else None
+    if path[-1].startswith("output") and optional:
         return scratch / path[-1].replace("output_", "output.", 1) if got[0] else dataclasses.MISSING
-    if got[0] is None or (got[0] == "" and (type(None) in get_args(hint) or base in (Path, int, float))):
-        return dataclasses.MISSING
+    if got[0] is None or (got[0] == "" and (optional or base in (Path, int, float))):
+        return None if optional else dataclasses.MISSING
     return base(got[0]) if base in (Path, int, float) else got[0]  # the browser sends 20 for 20.0 and text from a text box
 
 
@@ -230,11 +249,11 @@ def _assemble(cls: type, given: dict[tuple[str, ...], object], template: object,
     return cls(**kwargs) if template is None else dataclasses.replace(cast(Any, template), **kwargs)
 
 
-def _download(value: object, scratch: Path) -> str | None:
-    """A file output as it is; a directory the form chose is zipped (gr.File cannot return a directory)."""
+def _download(value: object) -> str | None:
+    """A saved file as it is, a saved directory zipped (gr.File cannot return a directory)."""
     if not isinstance(value, Path) or not value.exists():
         return None
-    return str(value) if value.is_file() else shutil.make_archive(str(value), "zip", value) if value.is_relative_to(scratch) else None
+    return str(value) if value.is_file() else shutil.make_archive(str(value), "zip", value)
 
 
 def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Graph | Iterator[Graph]], *, title: str, examples: Sequence[G] = ()) -> Any:
@@ -242,8 +261,9 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
     import gradio as gr
     from gradio_rerun import Rerun
 
-    leaves: list[Leaf] = _leaves(config_type, None)
-    outputs: list[Leaf] = [leaf for leaf in leaves if leaf[0][-1].startswith("output")]
+    first: object = examples[0] if examples else None  # a required field the Config leaves open starts from the first example
+    leaves: list[Leaf] = [(p, h, functools.reduce(getattr, p, first) if d is dataclasses.MISSING and first is not None else d, doc) for p, h, d, doc in _leaves(config_type, None)]
+    outputs: list[Leaf] = [leaf for leaf in leaves if leaf[0][-1].startswith("output") and type(None) in get_args(leaf[1])]  # "save it" boxes
     with gr.Blocks(title=title) as demo:
         gr.Markdown(f"# {title}")
         control_state = gr.State(None)
@@ -259,21 +279,22 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
         flat: list[Any] = [w for _, widgets in form for w in widgets]
 
         def run(*values: object) -> Iterator[tuple[object, ...]]:
+            gc.collect()  # the previous run (reference cycles in the runner) frees its models before this one loads its own
             it: Iterator[object] = iter(values)
             scratch = Path(tempfile.mkdtemp(prefix="dagkit-app-"))
-            given: dict[tuple[str, ...], object] = {}
-            for leaf, widgets in form:
-                if (value := _value(leaf, [next(it) for _ in widgets], scratch)) is not dataclasses.MISSING:
-                    given[leaf[0]] = value
-            config: G = _assemble(config_type, given, None)
+            try:
+                given: dict[tuple[str, ...], object] = {leaf[0]: v for leaf, ws in form if (v := _value(leaf, [next(it) for _ in ws], scratch)) is not dataclasses.MISSING}
+                config: G = _assemble(config_type, given, None)
+            except (TypeError, ValueError) as exc:  # a required field left empty, a malformed number or window
+                raise gr.Error(f"the form does not make a {config_type.__name__}: {exc}") from None
+            if getattr(config, "register", "off") != "off" and any(isinstance(v, Path) and v.is_relative_to(scratch) for v in given.values()):
+                config = dataclasses.replace(cast(Any, config), register="off")  # a temporary output is never registered on the catalog
             recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
             stream, control, errors = recording.binary_stream(), Control(), []
 
             def body() -> None:
                 try:
-                    for graph in graphs(build(config, recording)):
-                        if not control.stopped:
-                            RUNNERS[getattr(config, "runner", "threaded")](graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
+                    _run_graphs(config, build, recording, control)
                 except BaseException as exc:  # delivered to the UI thread below
                     errors.append(exc)
 
@@ -284,13 +305,19 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
                 yield (control, stream.read(), *(None for _ in files))
             recording.flush()
             if errors:
-                raise gr.Error(repr(errors[0]))
-            yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config), scratch) for leaf in outputs))
+                raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
+            yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config)) for leaf in outputs))
 
         run_button.click(run, inputs=flat, outputs=[control_state, viewer, *files])
         stop_button.click(lambda control: control and control.stop(), inputs=[control_state], outputs=[])
         if examples:
-            gr.Examples([[v for leaf, ws in form for v in _example(leaf, e)[: len(ws)]] for e in examples], inputs=flat)
+            table = gr.Examples([[v for leaf, ws in form for v in _example(leaf, e)[: len(ws)]] for e in examples], inputs=flat)
+            if cleared := [w for w, kept in zip(flat, table.input_has_examples, strict=True) if not kept]:
+
+                def clear(_: object) -> dict[Any, None]:  # gr.Examples skips columns that are None in every example: clear them
+                    return dict.fromkeys(cleared)
+
+                table.dataset.click(clear, inputs=[table.dataset], outputs=cleared)
     return demo
 
 
@@ -298,7 +325,7 @@ def _example(leaf: Leaf, example: object) -> list[object]:
     """Widget values of one leaf for an example Config."""
     value: object = functools.reduce(lambda obj, name: getattr(obj, name, None), leaf[0], example)
     if isinstance(value, SegmentRef) or _base(leaf[1]) is SegmentRef:
-        return [getattr(value, "dataset", ""), getattr(value, "segment", "")]
+        return [getattr(value, "dataset", ""), getattr(value, "segment", ""), " ".join(map(str, getattr(value, "window_ns", None) or ()))]
     if leaf[0][-1].startswith("output") and type(None) in get_args(leaf[1]):
         return [value is not None]
     return [str(value) if isinstance(value, Path) else value]

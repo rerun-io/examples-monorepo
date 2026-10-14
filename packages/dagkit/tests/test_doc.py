@@ -271,3 +271,86 @@ def test_the_demo_app_documents_its_graph(tmp_path: Path) -> None:
     """What every package does for its app graphs, built with fakes: picture == declaration, docs complete, GRAPH.md current."""
     check_picture(demo_graph(), tmp_path)
     check_graph_docs(demo_graph(), snapshot=Path(__file__).resolve().parents[1] / "GRAPH.md")
+
+
+def test_a_graph_view_failure_aborts_the_sinks_like_any_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The picture is logged inside the runner's cleanup boundary: if it fails, the sinks are aborted (layer files dropped)."""
+    import dagkit.runners
+
+    class Aborting(Collect):
+        aborted: bool = False
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("no picture")
+
+    monkeypatch.setattr(dagkit.runners, "log_graph", broken)
+    graph = Graph("view", about="One source, one sink.")
+    sink = Aborting(("x",))
+    graph.edge(graph.source("src", numbers([1]))["x"], graph.sink("sink", sink)["x"])
+    with pytest.raises(RuntimeError, match="no picture"):
+        run_sequential(graph, health=rr.RecordingStream("dagkit-test"))
+    assert sink.aborted
+
+
+def test_without_git_the_docs_have_no_code_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host without a git executable (a deployed device) still describes and pictures its graph."""
+    import dagkit.doc
+
+    def missing(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(dagkit.doc.subprocess, "run", missing)
+    dagkit.doc._git.cache_clear()
+    try:
+        doc: GraphDoc = describe(demo_graph())
+        assert doc.commit == "" and "github.com" not in guide(doc) and picture(doc)[0]
+    finally:
+        dagkit.doc._git.cache_clear()
+
+
+def test_the_layer_file_type_documents_itself(tmp_path: Path) -> None:
+    from dagkit.sinks import LayerFileSink
+    from dagkit.sources import SegmentRef
+    from dagkit.types import LayerFile
+
+    graph = Graph("publish", about="Publish a finished layer file.")
+    src = graph.source("src", IterSource({"layer": LayerFile}, lambda: iter(())))
+    sink = graph.sink("publish", LayerFileSink(SegmentRef("ds", "seg"), "layer", output_dir=tmp_path, register="off"))
+    graph.edge(src["layer"], sink["layer"])
+    problems: list[str] = []
+    try:
+        check_graph_docs(graph)
+    except AssertionError as exc:
+        problems = str(exc).splitlines()
+    assert not [p for p in problems if p.startswith("LayerFile")], problems
+
+
+def test_the_structure_check_sees_what_the_picture_shows() -> None:
+    """Negative controls on the visible picture: a wrong type, an undeclared line, a second box for a node."""
+    graph: Graph = demo_graph()
+    items, lines = picture(describe(graph))
+    ids, labels, edges = [i.id for i in items], [i.label for i in items], [i.edges for i in items]
+    raw: int = next(i for i, label in enumerate(labels) if label.startswith("raw: Sample"))
+    assert any("Sample" in p for p in drawn_problems(graph, ids, [*labels[:raw], labels[raw].replace("Sample", "str"), *labels[raw + 1 :]], lines, edges))
+    assert any("smooth -> helix" in p for p in drawn_problems(graph, ids, labels, [*lines, ("smooth", "helix")], edges))
+    assert any("smooth" in p and "2 boxes" in p for p in drawn_problems(graph, [*ids, "smooth"], [*labels, labels[ids.index("smooth")]], lines, [*edges, ""]))
+
+
+def test_long_port_names_wrap_without_failing_the_read_back(tmp_path: Path) -> None:
+    graph = Graph("long", about="A sink fed through ports with long names.")
+    ports: tuple[str, str] = ("a_rather_long_port_name_for_poses", "another_long_port_name_for_frames")
+    src = graph.source("src", IterSource(dict.fromkeys(ports, int), lambda: iter(())))
+    sink = graph.sink("sink", Collect(ports))
+    for port in ports:
+        graph.edge(src[port], sink[port])
+    check_picture(graph, tmp_path)
+
+
+def test_see_it_links_point_at_leaf_entities() -> None:
+    drawn: dict[str, dict[str, list[str]]] = {"rerun": {"smooth": ["/world/smooth", "/world/smooth/line", "/world/smooth/point"]}}
+    text: str = guide(describe(demo_graph(), drawn), health=True)
+    assert "(recording://world/smooth/line)" in text and "(recording://world/smooth/point)" in text
+    assert "(recording://world/smooth)" not in text

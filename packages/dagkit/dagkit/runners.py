@@ -427,8 +427,8 @@ class _Run:
         self.started_at: float = time.perf_counter()
         self.health: rr.RecordingStream | None = health
         self.health_every_s: float = every_s
-        self.picture: tuple[list[str], list[Rgb]] = log_graph(health, self.graph, health=True) if health is not None else ([], [])
         try:
+            self.picture: tuple[list[str], list[Rgb]] = log_graph(health, self.graph, health=True) if health is not None else ([], [])
             for name, factory in self.graph.resources.items():
                 self.resources[name] = factory()
             streams: list[Iterator[Event]] = [self._start_source(s) for s in self.sources]
@@ -466,7 +466,8 @@ class _Run:
 
     def _release(self) -> None:
         """Break the run's reference cycles (states and control.wake point back at the run), so its resources and the
-        nodes' references to them free when the run returns instead of at the next cyclic collection."""
+        nodes' references to them free when the run returns instead of at the next cyclic collection, and a Control a
+        UI keeps after the run (gradio's gr.State) does not keep the run alive."""
         self.control.wake = lambda: None
         self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
 

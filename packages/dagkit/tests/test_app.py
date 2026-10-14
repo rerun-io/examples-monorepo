@@ -1,5 +1,6 @@
 """Profiles (hand-written TOML, coerced, strict) and the generated gradio app."""
 
+import dataclasses
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,7 +17,7 @@ from dagkit.apis import synthetic_demo
 from dagkit.apis.synthetic_demo import DemoRerunConfig
 from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
-from dagkit.node import Mode
+from dagkit.node import Emit, Mode, Tick
 from dagkit.sources import SegmentRef
 
 PROFILE = """
@@ -123,9 +124,9 @@ def test_generated_run_keeps_defaults_none_segments_and_a_headless_viewer_config
 
     demo = gradio_app(FormConfig, build, title="Form")
     run = next(f.fn for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
-    # widget order: segment.dataset, segment.segment, frames, label, runner, mode
-    list(run("", "", 10, None, "threaded", "lossless"))
-    list(run("ds", "seg", 10, "typed", "threaded", "lossless"))
+    # widget order: segment.dataset, segment.segment, segment.window_ns, frames, label, runner, mode
+    list(run("", "", "", 10, None, "threaded", "lossless"))
+    list(run("ds", "seg", "", 10, "typed", "threaded", "lossless"))
     assert built[0].segment is None and built[0].label == "factory value" and built[0].rr_config.headless
     assert built[1].segment == SegmentRef("ds", "seg") and built[1].label == "typed"
 
@@ -260,3 +261,123 @@ def test_with_pipeline_keeps_the_normal_view_first_and_active() -> None:
     two: Any = multi.contents[1]
     assert [(type(v).__name__, str(v.origin)) for v in two.contents[0].contents] == [("GraphView", "/dagkit/graph/exocalib-init"), ("GraphView", "/dagkit/graph/exocalib-refine")]
     assert [v.name for v in two.contents[1].contents] == ["guide exocalib-init: what each step does", "guide exocalib-refine: what each step does"]
+
+
+@dataclass(frozen=True, slots=True)
+class Models:
+    models_dir: Path
+    """Where the networks live (a directory)."""
+    threads: int | None = 1
+
+
+@dataclass
+class RequiredConfig:
+    """robocap-live's shape: required fields with no default, a server-side output directory, a registering publisher."""
+
+    rr_config: Inner
+    segment: SegmentRef
+    output_dir: Path
+    models: Models
+    output_scene: Path | None = None
+    register: Literal["new", "replace", "off"] = "new"
+    runner: Literal["sequential", "threaded"] = "sequential"
+    mode: Mode = "lossless"
+
+
+def initial(demo: Any) -> list[object]:
+    """The values the form's widgets start with, in the order Run receives them."""
+    run = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
+    return [demo.blocks[b._id].value if hasattr(b, "_id") else demo.blocks[b].value for b in run.inputs]
+
+
+def test_required_fields_start_from_the_first_example_and_the_window_round_trips() -> None:
+    built: list[RequiredConfig] = []
+
+    def build(config: RequiredConfig, recording: rr.RecordingStream) -> Graph:
+        built.append(config)
+        return Graph("empty")
+
+    example = RequiredConfig(Inner(), SegmentRef("ds", "seg", window_ns=(5, 9)), Path("/srv/out"), Models(Path("/srv/models")), register="off")
+    demo = gradio_app(RequiredConfig, build, title="Required", examples=[example])
+    labels: list[str] = [getattr(b, "label", None) or "" for b in demo.blocks.values()]
+    assert "segment.window_ns" in labels and "output_dir (download)" not in labels  # a server path: nothing to download
+    values: list[object] = initial(demo)
+    list(run_fn(demo)(*values))  # Run without touching the form: the first example's inputs, the Config's own register
+    assert built[0] == dataclasses.replace(example, rr_config=built[0].rr_config, register="new") and built[0].segment.window_ns == (5, 9)
+    window: int = 2  # widget order: segment.dataset, segment.segment, segment.window_ns, output_dir, ...
+    list(run_fn(demo)(*values[:window], "", *values[window + 1 :]))
+    assert built[1].segment.window_ns is None  # an empty window box: the whole segment
+
+
+def test_a_form_without_values_for_required_fields_says_which() -> None:
+    import gradio as gr
+
+    demo = gradio_app(RequiredConfig, lambda config, recording: Graph("empty"), title="Required")
+    with pytest.raises(gr.Error, match="models_dir"):
+        list(run_fn(demo)(*initial(demo)))
+
+
+def test_save_it_never_registers_and_an_empty_optional_number_is_none() -> None:
+    built: list[RequiredConfig] = []
+
+    def build(config: RequiredConfig, recording: rr.RecordingStream) -> Graph:
+        built.append(config)
+        return Graph("empty")
+
+    example = RequiredConfig(Inner(), SegmentRef("ds", "seg"), Path("/srv/out"), Models(Path("/srv/models")))
+    demo = gradio_app(RequiredConfig, build, title="Required", examples=[example])
+    values: list[object] = initial(demo)
+    # widget order: segment.dataset, segment.segment, segment.window_ns, output_dir, models.models_dir, models.threads, output_scene, register, ...
+    assert values[5] == "1" and values[6] is False and values[7] == "new"
+    list(run_fn(demo)(*values[:5], "", True, *values[7:]))
+    assert built[0].models.threads is None  # cleared, not the default 1
+    assert built[0].output_scene is not None and built[0].register == "off"  # a temporary output is never registered on the catalog
+    list(run_fn(demo)(*values))
+    assert (built[1].output_scene, built[1].register) == (None, "new")
+
+
+def test_an_example_click_clears_what_every_example_leaves_empty() -> None:
+    """gr.Examples drops the columns that are None in every example; the form clears them on a click instead of keeping edits."""
+    demo = gradio_app(NestedConfig, lambda config, recording: Graph("empty"), title="Nested", examples=[NestedConfig(Inner(), Nets(Path("/m")))])
+    clear = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "clear")
+    cleared: list[str] = [demo.blocks[b._id if hasattr(b, "_id") else b].label for b in clear.outputs]
+    assert {"max_frames", "preset"} <= set(cleared) and "nets.models_dir" not in cleared
+    assert all(v is None for v in clear.fn(None).values())
+
+
+class Stopper(Collect):
+    """Presses Stop while its graph runs."""
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        super().step(tick, out)
+        assert self.ctx is not None and self.ctx.control is not None
+        self.ctx.control.stop()
+
+
+def test_stop_never_builds_another_graph_and_a_repeated_name_is_refused() -> None:
+    import gradio as gr
+
+    from dagkit.time import GraphError
+
+    steps: list[str] = []
+
+    def passes(config: PassesConfig, recording: rr.RecordingStream) -> Iterator[Graph]:
+        for name in ("first", "second"):
+            graph = Graph(name)
+            graph.edge(graph.source("src", source([(0, "x", 0)]))["x"], graph.sink("keep", Stopper(("x",)))["x"])
+            steps.append(f"built {name}")
+            yield graph
+
+    assert run_app(PassesConfig(), passes).status == "stopped" and steps == ["built first"]
+    steps.clear()
+    list(run_fn(gradio_app(PassesConfig, passes, title="Passes"))(3, "sequential", "lossless"))
+    assert steps == ["built first"]
+
+    def twice(config: PassesConfig, recording: rr.RecordingStream) -> Iterator[Graph]:
+        yield from two_passes(config, recording)
+        yield next(two_passes(config, recording))
+
+    with pytest.raises(GraphError, match="pass1"):
+        run_app(PassesConfig(), twice)
+    with pytest.raises(gr.Error, match="pass1"):
+        list(run_fn(gradio_app(PassesConfig, twice, title="Passes"))(3, "sequential", "lossless"))
