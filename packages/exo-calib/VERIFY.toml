@@ -49,6 +49,7 @@ properties = [
     "tests/test_ops_properties.py::test_rotation_guard_ignores_a_rotation_the_whole_rig_shares",
     "tests/test_ops_properties.py::test_rotation_guard_still_reverts_a_camera_that_diverges_from_the_rig",
     "tests/test_metric_scale.py::test_grouped_medians_matches_per_group_numpy_median",
+    "tests/test_keypoints.py::test_median_is_the_identity_when_records_are_farther_apart_than_half_its_window",
 ]
 
 [[tests]]
