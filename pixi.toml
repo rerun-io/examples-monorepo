@@ -3295,7 +3295,7 @@ description = "Run Python and native author checks for robocap-live"
 cmd = "python tools/apps/hands_layer.py"
 cwd = "packages/robocap-live"
 depends-on = ["robocap-live-build"]
-description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
+description = "Run slam-rs VIO over one robocap catalog segment, then its hands on those poses; register its `slam_rs` and `hands` layers (--slam catalog: hands on the registered poses)"
 
 [feature.robocap-live.tasks.verify-pre]
 cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
