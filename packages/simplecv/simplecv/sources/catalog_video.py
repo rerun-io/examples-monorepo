@@ -33,7 +33,9 @@ times come from the catalog, so it only labels the container."""
 KEYFRAME_LEAD_NS: int = 5_000_000_000  # a windowed cpu_luma read starts this early, so each camera's decoder begins at a keyframe
 LUMA_DECODE_THREADS: int = 2  # libavcodec threads per camera for cpu_luma (every camera decodes in lockstep)
 DISTORTION: str = "pinhole:simplecv.components.DistortionCoefficients"
-"""A camera's OpenCV (Brown-Conrady) coefficients beside its pinhole, zero-padded to 14 (dataforge's layout)."""
+"""A camera's distortion coefficients beside its pinhole (Brown-Conrady: OpenCV order, zero-padded to 14; dataforge's layout)."""
+DISTORTION_MODEL: str = "pinhole:simplecv.components.DistortionModel"
+"""Names the model of those coefficients; ``undistort`` takes ``brown_conrady`` only (a Kannala-Brandt vector would be misread)."""
 
 
 class SegmentFrames:
@@ -195,9 +197,11 @@ class CatalogVideoSource:
         intrinsics: Float64[ndarray, "v 3 3"] = rig.intrinsics.copy()
         self.maps = []
         for i, camera in enumerate(self.cameras):
-            column: str = f"/world/{camera}/{DISTORTION}"
+            column, model = f"/world/{camera}/{DISTORTION}", f"/world/{camera}/{DISTORTION_MODEL}"
             if column not in table.column_names or table.column(column)[0].as_py() is None:
                 raise ValueError(f"{self.segment.segment} {camera}: undistort needs the camera's {DISTORTION}")
+            if model not in table.column_names or table.column(model)[0].as_py() != ["brown_conrady"]:
+                raise ValueError(f"{self.segment.segment} {camera}: undistort takes brown_conrady coefficients, not {table.column(model)[0].as_py() if model in table.column_names else None}")
             coefficients: Float64[ndarray, " k"] = np.asarray(table.column(column)[0].as_py(), dtype=np.float64).reshape(-1)
             width, height = (int(v) for v in rig.resolution_wh[i])
             intrinsics[i], *maps = undistortion_maps(rig.intrinsics[i], coefficients, width, height)

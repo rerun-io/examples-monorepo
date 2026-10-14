@@ -177,12 +177,12 @@ def test_undistortion_maps_send_each_undistorted_pixel_to_its_distorted_source(
     np.testing.assert_allclose(sampled, distorted[:, 0], atol=0.02)
 
 
-def rig_with_distortion(K: np.ndarray, width: int, height: int, coefficients: list[float] | None) -> pa.Table:
+def rig_with_distortion(K: np.ndarray, width: int, height: int, coefficients: list[float] | None, model: str = "brown_conrady") -> pa.Table:
     rig = RigCameras(("rig_00/cam_00",), K[None], np.eye(4)[None], np.array([[width, height]]))
     row: pa.Table = static_row(rig.to_rerun("/world"))
     if coefficients is not None:
         row = row.append_column("/world/rig_00/cam_00/pinhole:simplecv.components.DistortionCoefficients", pa.array([[coefficients]], pa.list_(pa.list_(pa.float32()))))
-        row = row.append_column("/world/rig_00/cam_00/pinhole:simplecv.components.DistortionModel", pa.array([["brown_conrady"]]))
+        row = row.append_column("/world/rig_00/cam_00/pinhole:simplecv.components.DistortionModel", pa.array([[model]]))
     return row
 
 
@@ -220,6 +220,10 @@ def test_source_refuses_to_undistort_without_coefficients_or_off_the_cpu(monkeyp
     source = CatalogVideoSource(SegmentRef("d", "s"), ("rig_00/cam_00",), decode="cpu_rgb", undistort=True)
     source.frames = FakeFrames(1, (8, 8))  # type: ignore[assignment]
     with pytest.raises(ValueError, match="DistortionCoefficients"):
+        list(source.events())
+    fisheye = rig_with_distortion(np.eye(3), 8, 8, [0.1, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "kannala_brandt")  # 8 terms OpenCV would misread
+    monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: fisheye)
+    with pytest.raises(ValueError, match="brown_conrady"):
         list(source.events())
     with pytest.raises(NotImplementedError, match="undistort"):
         CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="nvdec_rgb", undistort=True)
