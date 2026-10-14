@@ -12,15 +12,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 from egohumans_synthetic import ARIA_FOCAL, ARIA_RGB_UPRIGHT, ARIA_SLAM_OFFSETS, EXO_LENS, EXO_POSES, FRAMES, write_sequence
+from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
-from dataforge.datasets.egohumans_layers import ego_rig, exo_rig, halvings, person_index
+from dataforge.datasets.egohumans_layers import aria_camera, ego_rig, encode_job, exo_camera, exo_scale, halvings, person_index
 from dataforge.datasets.egohumans_source import (
     DirectorySequenceFiles,
     Sequence,
-    ZipSequenceFiles,
     load_pickle,
     read_aria_calibration,
     read_sequence,
+    sequences_in,
 )
 
 
@@ -39,17 +40,18 @@ def test_exo_poses_are_rigid_and_metric_despite_colmap_scale(sequence: Sequence)
     for camera in sequence.exo:
         np.testing.assert_allclose(camera.world_T_cam, EXO_POSES[camera.name], atol=1e-9)
         np.testing.assert_allclose(camera.lens, EXO_LENS)
-    # cam01 is registered at frames 1 and 301; the earliest wins.
-    assert sequence.exo[0].registration == "cam01/00001.jpg"
     assert sequence.world_source == "colmap_from_aria_transforms.pkl"
 
 
-def test_exo_projection_puts_the_optical_axis_at_the_principal_point(sequence: Sequence) -> None:
+def test_exo_lens_at_the_stored_size_puts_the_optical_axis_at_the_principal_point(sequence: Sequence) -> None:
     camera = sequence.exo[0]
+    stored = exo_camera(camera)
+    assert (stored.intrinsics.width, stored.intrinsics.height) == (1920, 1080)
+    cam_T_world = stored.extrinsics.cam_T_world
     ahead = camera.world_T_cam[:3, 3] + 2.0 * camera.world_T_cam[:3, 2]
     behind = camera.world_T_cam[:3, 3] - 2.0 * camera.world_T_cam[:3, 2]
-    pixels = camera.project(np.stack([ahead, behind]))
-    np.testing.assert_allclose(pixels[0], EXO_LENS[2:4], atol=1e-6)
+    pixels = project_fisheye62(np.stack([ahead, behind]) @ cam_T_world[:3, :3].T + cam_T_world[:3, 3], stored)
+    np.testing.assert_allclose(pixels[0], np.array(EXO_LENS[2:4]) * exo_scale(camera), atol=1e-6)
     assert np.isnan(pixels[1]).all()
 
 
@@ -104,6 +106,13 @@ def test_exo_only_take_reaches_the_world_through_scale(tmp_path: Path) -> None:
         np.testing.assert_allclose(camera.world_T_cam, EXO_POSES[camera.name], atol=1e-9)
 
 
+def test_glasses_take_the_aria_world_when_scale_ships_too(sequence_dir: Path) -> None:
+    np.save(sequence_dir / "colmap/workplace/scale.npy", np.eye(4))  # as 05_sword2 ships both files
+    sequence = read_sequence(DirectorySequenceFiles(sequence_dir))
+    assert sequence.world_source == "colmap_from_aria_transforms.pkl" and [glasses.name for glasses in sequence.glasses] == ["aria01"]
+    np.testing.assert_allclose(sequence.exo[0].world_T_cam, EXO_POSES["cam01"], atol=1e-9)
+
+
 def test_zip_and_directory_read_the_same_sequence(sequence_dir: Path, tmp_path: Path) -> None:
     archive_path = tmp_path / "01_hugging.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -111,12 +120,13 @@ def test_zip_and_directory_read_the_same_sequence(sequence_dir: Path, tmp_path: 
             if path.is_file():
                 archive.write(path, str(path.relative_to(sequence_dir.parents[1])))
     with zipfile.ZipFile(archive_path) as archive:
-        zipped = ZipSequenceFiles(archive, "01_hugging/002_hugging")
+        (zipped,) = sequences_in(archive).values()
         on_disk = DirectorySequenceFiles(sequence_dir)
         for directory in ("exo/cam01/images", "processed_data/smpl", "colmap/workplace", "missing"):
             assert zipped.files(directory) == on_disk.files(directory)
         assert zipped.directories("exo") == on_disk.directories("exo") == ["cam01", "cam02"]
-        assert zipped.tree("ego/aria01/images") == on_disk.tree("ego/aria01/images")
+        assert zipped.directories("ego/aria01/images") == on_disk.directories("ego/aria01/images") == ["left", "rgb", "right"]
+        assert zipped.directories("processed_data") == on_disk.directories("processed_data") and zipped.directories("missing") == []
         from_zip = read_sequence(zipped)
         from_disk = read_sequence(on_disk)
     np.testing.assert_array_equal(from_zip.frames, from_disk.frames)
@@ -146,6 +156,13 @@ def test_calibration_with_two_people_is_refused() -> None:
 
 
 def test_rig_slots_and_stored_sizes(sequence: Sequence) -> None:
-    assert [exo_rig(camera) for camera in sequence.exo] == [1, 2]
+    assert [camera.number for camera in sequence.exo] == [1, 2]
     assert [ego_rig(glasses) for glasses in sequence.glasses] == [91]
     assert halvings(3840, 2160) == 1 and halvings(1408, 1408) == 0 and halvings(480, 640) == 0
+
+
+def test_encode_refuses_frames_that_do_not_match_the_logged_lens(sequence: Sequence, sequence_dir: Path, tmp_path: Path) -> None:
+    pytest.importorskip("turbojpeg", reason="PyTurboJPEG is a dataforge-env dependency")
+    job = encode_job(DirectorySequenceFiles(sequence_dir), "exo/cam01/images", sequence.frames, tmp_path / "cam01.mp4", (1, 2), aria_camera(sequence.glasses[0], 0))
+    with pytest.raises(ValueError, match="the logged lens is"):
+        job()

@@ -83,7 +83,6 @@ def colmap_image_line(image_id: int, name: str, camera_id: int, world_T_cam: Flo
 
 def aria_calibration(frame: int) -> str:
     """aria01's calib file: rgb at ARIA_RGB_POSE, the slam cameras beside it; extrinsics written column by column."""
-    width, height = ARIA_RGB_UPRIGHT
     lines: list[str] = ["Serial, intrinsics (radtanthinprsim), extrinsic (3x4)", "aria"]
     for mode, (upright_width, upright_height) in (("rgb", ARIA_RGB_UPRIGHT), ("left", ARIA_SLAM_UPRIGHT), ("right", ARIA_SLAM_UPRIGHT)):
         # Device orientation is the upright image turned back: device width = upright height.
@@ -96,7 +95,6 @@ def aria_calibration(frame: int) -> str:
         cam_T_world: Float64[np.ndarray, "4 4"] = np.linalg.inv(pose)
         lines.append(" ".join(f"{value:.12f}" for value in intrinsics))
         lines.append(" ".join(f"{value:.12f}" for value in cam_T_world[:3].T.reshape(-1)))
-    del width, height
     return "\n".join(lines) + "\n"
 
 

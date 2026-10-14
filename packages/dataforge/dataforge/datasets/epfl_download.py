@@ -8,7 +8,7 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 
 from dataforge.datasets.epfl_source import CAMERA_NAMES
-from dataforge.transports import HfFileInfo, IntegrityError, publish_verified
+from dataforge.transports import HfFileInfo, IntegrityError, hf_fetch_verified, hf_lfs_files, publish_verified
 
 SOURCE_REPO: str = "pablovela5620/epfl-smart-kitchen-av1"
 """AV1 mirror of the public release: videos, meta data, poses and annotations (pinned at SOURCE_REVISION)."""
@@ -18,6 +18,24 @@ SMPL_REVISION: str = "e05c6b723e24e2c0fc79201e06e8c8fbaa6cedfd"
 SMPL_FILE: str = "body_models/smpl/SMPL_NEUTRAL.pkl"
 POSE_DIR: str = "Public_release_pose"
 VIDEO_DIR: str = "Public_release_videos"
+
+
+def fetch_smpl_neutral(local_dir: Path, smpl_root: Path, *, explicit: bool) -> None:
+    """Put the official neutral SMPL at ``smpl_root/smpl/SMPL_NEUTRAL.pkl`` unless it is there (Harmony4D, EgoHumans).
+
+    The model repo is private: its ``SMPL_FILE`` lands under ``local_dir`` (whose ``body_models`` is the default ``smpl_root``);
+    anyone without access places the official file at the destination instead, and an ``explicit`` root is never fetched into.
+    """
+    dest: Path = smpl_root / "smpl/SMPL_NEUTRAL.pkl"
+    if dest.is_file():
+        return
+    if explicit:
+        raise FileNotFoundError(f"no official neutral SMPL at {dest}")
+    try:
+        (smpl,) = hf_lfs_files(SMPL_REPO, [SMPL_FILE], revision=SMPL_REVISION)
+    except HfHubHTTPError as error:
+        raise FileNotFoundError(f"{SMPL_REPO}: HTTP {error.response.status_code}; log in with access or place the official SMPL_NEUTRAL.pkl at {dest}") from error
+    hf_fetch_verified(SMPL_REPO, smpl, local_dir=local_dir, revision=SMPL_REVISION)
 
 
 def session_files(key: str) -> tuple[str, ...]:

@@ -16,18 +16,18 @@ from typing import ClassVar
 
 import rerun.blueprint as rrb
 
-from dataforge import blueprints, paths, writing
+from dataforge import paths, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig, RemoteSequence
-from dataforge.datasets.egohumans_layers import Clock, scene_view, smpl_faces, write_base, write_body_mesh, write_body_pose, write_projections
-from dataforge.datasets.egohumans_source import FPS, ZipSequenceFiles, read_sequence
-from dataforge.datasets.epfl_download import SMPL_FILE, SMPL_REPO, SMPL_REVISION
+from dataforge.datasets.egohumans_layers import EGO_RIG_OFFSET, LAYERS, Clock, capture_blueprint, capture_card, layer_writers
+from dataforge.datasets.egohumans_source import FPS, ZipSequenceFiles, read_sequence, sequences_in
+from dataforge.datasets.epfl_download import fetch_smpl_neutral
 from dataforge.identity import SequenceIdentity
-from dataforge.transports import FetchReport, HfFileInfo, hf_fetch_verified, hf_lfs_files, hf_list_files
+from dataforge.transports import FetchReport, HfFileInfo, hf_fetch_verified, hf_list_files
 
 SOURCE_REPO: str = "Jyun-Ting/Harmony4D"
 SOURCE_REVISION: str = "3fedb23fd9d1a92541d98ccbce025c695bd752e4"
 """The release as of 2024-11-09: 22 zips, 351.6 GB."""
-EGO_PANES: tuple[int, ...] = (91, 92)
+EGO_PANES: tuple[int, ...] = (EGO_RIG_OFFSET + 1, EGO_RIG_OFFSET + 2)
 """Rigs of aria01 and aria02 (``egohumans_layers.ego_rig``); takes without glasses leave the panes empty."""
 EXO_PANES: tuple[int, ...] = (1, 4, 7, 10, 13, 16, 19, 22)
 """Eight of the ~20 GoPros, evenly spaced (MAMMA's eight-pane rule)."""
@@ -43,7 +43,6 @@ class Harmony4dSequence:
     """Local release zip, ``<root>/<split>/<scene>.zip``."""
     prefix: str
     """``<scene>/<sequence>`` inside the zip."""
-
 
 
 @dataclass
@@ -78,7 +77,10 @@ def archive_key(path: str) -> str:
 class Harmony4dDataset(DataforgeDataset[Harmony4dConfig, Harmony4dSequence]):
     """Download the release zips, then convert each sequence from its zip in place."""
 
-    layers = (paths.BASE_LAYER, paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER)
+    layers = LAYERS
+    _open: tuple[Path, dict[str, ZipSequenceFiles]] | None = None
+    """The zip the last sequence came from, kept open with every sequence of it listed: discover sorts a zip's sequences
+    together, and parsing a 40 GB zip's central directory takes seconds."""
 
     def archives(self) -> list[HfFileInfo]:
         """The release zips at the pinned revision (one listing call)."""
@@ -100,13 +102,7 @@ class Harmony4dDataset(DataforgeDataset[Harmony4dConfig, Harmony4dSequence]):
         for file in archives:
             if self.config.selects(archive_key(file.path)):
                 report.count(hf_fetch_verified(SOURCE_REPO, file, local_dir=self.config.root, revision=SOURCE_REVISION), file.size_bytes)
-        smpl_dest: Path = self.config.smpl_root / "smpl/SMPL_NEUTRAL.pkl"
-        if not smpl_dest.is_file():
-            if self.config.smpl_model_root is not None:
-                raise FileNotFoundError(f"no official neutral SMPL at {smpl_dest}")
-            # The model repo is private: a stranger places the official neutral model at smpl_dest instead.
-            (smpl,) = hf_lfs_files(SMPL_REPO, [SMPL_FILE], revision=SMPL_REVISION)
-            hf_fetch_verified(SMPL_REPO, smpl, local_dir=self.config.root, revision=SMPL_REVISION)
+        fetch_smpl_neutral(self.config.root, self.config.smpl_root, explicit=self.config.smpl_model_root is not None)
         print(f"harmony4d download: {report.summary()}")
 
     def discover(self) -> list[tuple[SequenceIdentity, Harmony4dSequence]]:
@@ -117,8 +113,8 @@ class Harmony4dDataset(DataforgeDataset[Harmony4dConfig, Harmony4dSequence]):
             if not self.config.selects(f"{split}/{archive.stem}"):
                 continue
             with zipfile.ZipFile(archive) as opened:
-                prefixes: set[str] = {"/".join(name.split("/")[:2]) for name in opened.namelist() if name.count("/") >= 3 and name.split("/")[2] == "exo"}
-            for prefix in sorted(prefixes):
+                prefixes: list[str] = list(sequences_in(opened))
+            for prefix in prefixes:
                 identity: SequenceIdentity = SequenceIdentity(self.config.name, (split, *prefix.split("/")))
                 if self.config.selects(identity.sequence_key):
                     found.append((identity, Harmony4dSequence(archive, prefix)))
@@ -129,6 +125,13 @@ class Harmony4dDataset(DataforgeDataset[Harmony4dConfig, Harmony4dSequence]):
                 raise ValueError(f"harmony4d: {missing} not under {self.config.root}; download the archive first")
         return found
 
+    def sequence_files(self, source: Harmony4dSequence) -> ZipSequenceFiles:
+        """``source``'s files, from the zip already open when the last sequence came from the same one."""
+        if self._open is None or self._open[0] != source.archive:
+            if self._open is not None:
+                next(iter(self._open[1].values())).archive.close()
+            self._open = (source.archive, sequences_in(zipfile.ZipFile(source.archive)))
+        return self._open[1][source.prefix]
 
     def convert(self, identity: SequenceIdentity, source: Harmony4dSequence, *, force: bool) -> Path:
         """Base, body_pose, body_mesh and projections of one sequence, read from its zip in place."""
@@ -136,39 +139,24 @@ class Harmony4dDataset(DataforgeDataset[Harmony4dConfig, Harmony4dSequence]):
         if not pending:
             return targets[paths.BASE_LAYER]
         split, scene, sequence_name = identity.parts
-        with zipfile.ZipFile(source.archive) as archive:
-            files: ZipSequenceFiles = ZipSequenceFiles(archive, source.prefix)
-            with self.timer.stage("read"):
-                sequence = read_sequence(files)
-            clock: Clock = Clock.of(sequence, self.config.frame_limit)
-            episode: dict[str, str] = dict(split=split, scene=scene, sequence=sequence_name, activity=re.sub(r"_part\d+$", "", scene.split("_", 1)[-1]))
-            self.write_layers(
-                identity,
-                targets,
-                pending,
-                {
-                    paths.BASE_LAYER: lambda recording: write_base(
-                        recording, identity, files, sequence, clock, self.timer, source_revision=f"{SOURCE_REPO}@{SOURCE_REVISION}", episode=episode
-                    ),
-                    paths.BODY_POSE_LAYER: lambda recording: write_body_pose(recording, sequence, clock),
-                    paths.BODY_MESH_LAYER: lambda recording: write_body_mesh(recording, sequence, clock, smpl_faces(self.config.smpl_root)),
-                    paths.PROJECTIONS_LAYER: lambda recording: write_projections(recording, sequence, clock),
-                },
-            )
+        with self.timer.stage("read"):
+            files: ZipSequenceFiles = self.sequence_files(source)
+            sequence = read_sequence(files)
+        clock: Clock = Clock.of(sequence, self.config.frame_limit)
+        episode: dict[str, str] = dict(split=split, scene=scene, sequence=sequence_name, activity=re.sub(r"_part\d+$", "", scene.split("_", 1)[-1]))
+        writers = layer_writers(
+            identity, files, sequence, clock, self.timer, self.config.smpl_root, source_revision=f"{SOURCE_REPO}@{SOURCE_REVISION}", episode=episode
+        )
+        self.write_layers(identity, targets, pending, writers)
         self.timer.capture_s = len(clock.frames) / FPS
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Scene on top with both glasses' rgb cameras beside it; eight GoPros along the bottom (lens-projected keypoints, boxes)."""
-        return blueprints.exoego_blueprint(
-            scene_view(EXO_SLOTS, EGO_PANES),
-            ego_panes=[blueprints.camera_view(f"aria0{rig - 90} rgb", rig, 0) for rig in EGO_PANES],
-            exo_panes=[blueprints.camera_view(f"cam{rig:02d}", rig, 0) for rig in EXO_PANES],
-        )
+        return capture_blueprint(EXO_SLOTS, EGO_PANES, EXO_PANES)
 
     def table_blueprint(self) -> rrb.Blueprint:
-        """Card: the scene without video beside cam01."""
-        return blueprints.exoego_table_blueprint(scene_view(EXO_SLOTS, EGO_PANES, card=True), blueprints.camera_view("cam01", 1, 0))
+        return capture_card(EXO_SLOTS, EGO_PANES)
 
     def table_fields(self) -> writing.TableFields:
         fields = tuple(writing.TableField(f"property:episode:{name}", name) for name in ("split", "scene", "num_people")) + (

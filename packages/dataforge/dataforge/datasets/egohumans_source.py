@@ -27,15 +27,18 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, TypeAlias
 
-import cv2
 import numpy as np
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
+from PIL import Image
 from scipy.spatial.transform import Rotation
 from serde import serde
 from simplecv.camera_parameters import Fisheye624Parameters
 from simplecv.se3 import SE3
 from simplecv.sensors.camera import fisheye624
+
+from dataforge import aria
+from dataforge.records import NumpyOnlyUnpickler
 
 FPS: int = 20
 """Release frame rate: both papers cut their takes at 20 fps; the files carry frame numbers, no timestamps."""
@@ -44,28 +47,12 @@ ANCHOR: str = "aria01"
 AriaMode: TypeAlias = Literal["rgb", "left", "right"]
 ARIA_MODES: tuple[AriaMode, ...] = ("rgb", "left", "right")
 """Order of an Aria's cameras in its calib file and under its rig (``cam_00`` rgb, ``cam_01`` left, ``cam_02`` right)."""
-ARIA_STREAM_IDS: dict[AriaMode, str] = {"rgb": "214-1", "left": "1201-1", "right": "1201-2"}
+ARIA_STREAM_IDS: dict[AriaMode, aria.AriaStreamId] = {"rgb": aria.RGB_STREAM_ID, "left": aria.SLAM_LEFT_STREAM_ID, "right": aria.SLAM_RIGHT_STREAM_ID}
 """VRS stream id of each Aria camera (the release ships extracted JPEGs, the ids name the sensor)."""
-ARIA_MAX_SOLID_ANGLE: dict[AriaMode, float] = {"rgb": np.deg2rad(55.0), "left": np.deg2rad(75.0), "right": np.deg2rad(75.0)}
-"""Half-angle a point must lie within to project, as projectaria-tools' Gen1 camera defaults (``dataforge.aria``)."""
-PICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
-    {(module, name) for module in ("numpy.core.multiarray", "numpy._core.multiarray") for name in ("_reconstruct", "scalar")}
-    | {(module, "_frombuffer") for module in ("numpy.core.numeric", "numpy._core.numeric")}
-    | {("numpy", "dtype"), ("numpy", "ndarray")}
-)
-"""Everything a release pickle may build besides plain containers: numpy arrays and scalars (numpy 1 wrote ``numpy.core``)."""
+WorldSource: TypeAlias = Literal["colmap_from_aria_transforms.pkl", "scale.npy"]
 COCO17: int = 17
 SMPL_JOINTS: int = 45
 SMPL_VERTICES: int = 6890
-
-
-class NumpyOnlyUnpickler(pickle.Unpickler):
-    """Unpickles plain containers and numpy arrays only: a release pickle naming any other global is refused, not run."""
-
-    def find_class(self, module: str, name: str) -> object:
-        if (module, name) not in PICKLE_GLOBALS:
-            raise pickle.UnpicklingError(f"the pickle refers to {module}.{name}, which is not a numpy type")
-        return super().find_class(module, name)
 
 
 def load_pickle(payload: bytes, origin: str) -> object:
@@ -138,27 +125,22 @@ class SequenceFiles(ABC):
     def exists(self, relative: str) -> bool:
         """Whether file ``relative`` exists (asked once per frame and label directory: must not list a directory)."""
 
+    @abstractmethod
     def directories(self, relative: str) -> list[str]:
         """Sorted names of the subdirectories of ``relative`` that hold files somewhere below."""
-        return sorted({name.split("/", 1)[0] for name in self.tree(relative) if "/" in name})
-
-    @abstractmethod
-    def tree(self, relative: str) -> list[str]:
-        """Every file below ``relative``, as paths relative to it."""
 
 
 class ZipSequenceFiles(SequenceFiles):
     """A sequence inside a release zip (Harmony4D ships one zip per scene, several sequences each), read in place."""
 
-    def __init__(self, archive: zipfile.ZipFile, prefix: str) -> None:
+    def __init__(self, archive: zipfile.ZipFile, prefix: str, names: list[str]) -> None:
+        """``names``: the sequence's members, relative to ``prefix`` (``sequences_in`` lists a zip's sequences in one pass)."""
         self.archive: zipfile.ZipFile = archive
         self.prefix: str = prefix.rstrip("/")
         self.listing: dict[str, list[str]] = {}
         """Directory (relative to the sequence) -> file names, built once from the zip's central directory."""
-        for name in archive.namelist():
-            if name.endswith("/") or not name.startswith(self.prefix + "/"):
-                continue
-            path: PurePosixPath = PurePosixPath(name[len(self.prefix) + 1 :])
+        for name in names:
+            path: PurePosixPath = PurePosixPath(name)
             self.listing.setdefault(str(path.parent), []).append(path.name)
         for names in self.listing.values():
             names.sort()
@@ -173,14 +155,19 @@ class ZipSequenceFiles(SequenceFiles):
     def files(self, relative: str) -> list[str]:
         return self.listing.get(relative.rstrip("/") or ".", [])
 
-    def tree(self, relative: str) -> list[str]:
-        base: str = relative.rstrip("/")
-        return sorted(
-            str(PurePosixPath(directory, name).relative_to(base))
-            for directory, names in self.listing.items()
-            if directory == base or directory.startswith(base + "/")
-            for name in names
-        )
+    def directories(self, relative: str) -> list[str]:
+        base: str = relative.rstrip("/") + "/"
+        return sorted({directory[len(base) :].split("/", 1)[0] for directory in self.listing if directory.startswith(base)})
+
+
+def sequences_in(archive: zipfile.ZipFile) -> dict[str, ZipSequenceFiles]:
+    """Every ``<scene>/<sequence>`` directory of a release zip that holds an ``exo/`` tree, listed in one pass over the zip."""
+    grouped: dict[str, list[str]] = {}
+    for name in archive.namelist():
+        parts: list[str] = name.split("/", 2)
+        if len(parts) == 3 and parts[2] and not name.endswith("/"):
+            grouped.setdefault(f"{parts[0]}/{parts[1]}", []).append(parts[2])
+    return {prefix: ZipSequenceFiles(archive, prefix, names) for prefix, names in sorted(grouped.items()) if any(name.startswith("exo/") for name in names)}
 
 
 class DirectorySequenceFiles(SequenceFiles):
@@ -199,9 +186,10 @@ class DirectorySequenceFiles(SequenceFiles):
         directory: Path = self.root / relative
         return sorted(path.name for path in directory.iterdir() if path.is_file()) if directory.is_dir() else []
 
-    def tree(self, relative: str) -> list[str]:
-        base: Path = self.root / relative
-        return sorted(str(path.relative_to(base)) for path in base.rglob("*") if path.is_file()) if base.is_dir() else []
+    def directories(self, relative: str) -> list[str]:
+        # The extraction creates a directory only for a file in it, so every directory holds files below.
+        directory: Path = self.root / relative
+        return sorted(path.name for path in directory.iterdir() if path.is_dir()) if directory.is_dir() else []
 
 
 # ── cameras ────────────────────────────────────────────────────────────────
@@ -240,28 +228,12 @@ class ExoCamera:
     lens: Float64[ndarray, "8"]
     """``fx, fy, cx, cy, k1, k2, k3, k4``: COLMAP OPENCV_FISHEYE (Kannala-Brandt, four radial terms) at the source size."""
     world_T_cam: Float64[ndarray, "4 4"]
-    """Camera pose in the anchor world, metres."""
-    registration: str
-    """The COLMAP image the pose comes from (each camera is registered at a few frames; they agree within ~2 mm)."""
+    """Camera pose in the anchor world, metres (each camera is registered at a few frames; they agree within ~2 mm)."""
 
     @property
     def number(self) -> int:
         """``cam07`` -> 7."""
         return int(self.name.removeprefix("cam"))
-
-    def project(self, points_world: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 2"]:
-        """World points through the full lens, source pixels; NaN behind the camera or outside the image."""
-        cam_T_world: Float64[ndarray, "4 4"] = np.linalg.inv(self.world_T_cam)
-        points_cam: Float64[ndarray, "n 3"] = points_world @ cam_T_world[:3, :3].T + cam_T_world[:3, 3]
-        pixels: Float64[ndarray, "n 2"] = np.full((len(points_world), 2), np.nan)
-        front: Bool[ndarray, "n"] = np.isfinite(points_cam).all(axis=1) & (points_cam[:, 2] > 0.0)
-        if front.any():
-            K: Float64[ndarray, "3 3"] = np.array([[self.lens[0], 0.0, self.lens[2]], [0.0, self.lens[1], self.lens[3]], [0.0, 0.0, 1.0]])
-            projected: Float64[ndarray, "m 1 2"] = cv2.fisheye.projectPoints(points_cam[front].reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, self.lens[4:])[0]
-            pixels[front] = projected.reshape(-1, 2)
-        inside: Bool[ndarray, "n"] = (pixels[:, 0] >= 0) & (pixels[:, 0] < self.width) & (pixels[:, 1] >= 0) & (pixels[:, 1] < self.height)
-        pixels[~inside] = np.nan
-        return pixels
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,14 +252,20 @@ class AriaCamera:
     """Per-frame camera pose in the anchor world, metres."""
 
     def calibration(self, frame: int) -> Fisheye624Parameters:
-        """Frame ``frame``'s lens in the stored (upright) orientation, ``rig_T_cam`` left as identity."""
+        """Frame ``frame``'s lens in the stored (upright) orientation, ``rig_T_cam`` left as identity.
+
+        The cone and the valid radius are projectaria-tools' Gen1 defaults (``aria.CAMERA_CONFIGS``), the radius scaled from the
+        factory size to the release's (rgb 2880 -> 1408).
+        """
+        config: aria.CameraConfig = aria.CAMERA_CONFIGS["gen1"][aria.STREAM_LABELS[ARIA_STREAM_IDS[self.mode]]]
         device: Fisheye624Parameters = Fisheye624Parameters(
             name=self.mode,
             width=self.width,
             height=self.height,
             params=self.intrinsics[frame],
             rig_T_cam=SE3(np.array([1.0, 0.0, 0.0, 0.0]), np.zeros(3)),
-            max_solid_angle=float(ARIA_MAX_SOLID_ANGLE[self.mode]),
+            max_solid_angle=config.max_solid_angle,
+            valid_radius=None if config.valid_radius is None else config.valid_radius * self.width / config.width,
         )
         return fisheye624.rotate_cw90(device)
 
@@ -389,15 +367,10 @@ class Sequence:
     """People, by name."""
     boxes: list[CameraBoxes]
     """Shipped boxes of every camera that has a box directory."""
-    world_source: str
-    """How the world was reached: ``colmap_from_aria_transforms.pkl`` or ``scale.npy``."""
+    world_source: WorldSource
+    """How the world was reached."""
     keypoints_source: str
     """The ``processed_data`` directory the COCO-17 keypoints came from."""
-
-    @property
-    def video_times_ns(self) -> Int64[ndarray, "t"]:
-        """``video_time``: (frame - first frame) / ``FPS``."""
-        return (self.frames - self.frames[0]) * (1_000_000_000 // FPS)
 
 
 def read_colmap_cameras(text: str) -> dict[int, tuple[str, int, int, Float64[ndarray, "p"]]]:
@@ -425,17 +398,19 @@ def read_colmap_images(text: str) -> list[tuple[str, int, Float64[ndarray, "4 4"
     return images
 
 
-def read_world(files: SequenceFiles) -> tuple[dict[str, Float64[ndarray, "4 4"]], Float64[ndarray, "4 4"], str]:
+def read_world(files: SequenceFiles) -> tuple[dict[str, Float64[ndarray, "4 4"]], Float64[ndarray, "4 4"], WorldSource]:
     """(each Aria's world -> COLMAP, anchor world -> COLMAP, source file): the two ways a take reaches its world.
 
     With glasses, ``colmap_from_aria_transforms.pkl`` maps every Aria's world into COLMAP and the anchor's is the world.
-    Exo-only takes ship ``scale.npy`` (COLMAP -> metric world) instead, so the world is ``inv(scale)`` of COLMAP.
+    Exo-only takes ship ``scale.npy`` (COLMAP -> metric world), so the world is ``inv(scale)`` of COLMAP; some ship the
+    transforms as well (05_sword2), and only glasses make those the world.
     """
     workplace: str = "colmap/workplace"
-    if files.exists(f"{workplace}/scale.npy"):
+    has_glasses: bool = any(name.startswith("aria") for name in files.directories("ego"))
+    if not has_glasses and files.exists(f"{workplace}/scale.npy"):
         scale: Float64[ndarray, "4 4"] = np.asarray(load_pickle(files.read(f"{workplace}/scale.npy"), "scale.npy"), dtype=np.float64)
         return {}, np.linalg.inv(scale), "scale.npy"
-    name: str = "colmap_from_aria_transforms.pkl"
+    name: WorldSource = "colmap_from_aria_transforms.pkl"
     raw: object = load_pickle(files.read(f"{workplace}/{name}"), name)
     transforms: dict[str, Float64[ndarray, "4 4"]] = {key: np.asarray(value, dtype=np.float64) for key, value in person_dict(raw, name).items()}
     if ANCHOR not in transforms:
@@ -461,18 +436,17 @@ def read_exo_cameras(files: SequenceFiles, colmap_from_world: Float64[ndarray, "
         )
         if not registered:
             raise ValueError(f"exo/{name}: no COLMAP registration in images.txt")
-        image_name, camera_id, cam_T_colmap = registered[0]
+        _, camera_id, cam_T_colmap = registered[0]
         if name in config.CALIBRATION.MANUAL_EXO_CAMERAS:
             manual: str = f"colmap/workplace/{name}.npy"
             extrinsic: Float64[ndarray, "r 4"] = np.asarray(load_pickle(files.read(manual), manual), dtype=np.float64)
             cam_T_colmap = np.eye(4)
             cam_T_colmap[:3] = extrinsic[:3]
-            image_name = manual
         model, width, height, params = lenses[camera_id]
         if model != "OPENCV_FISHEYE" or len(params) != 8:
             raise ValueError(f"exo/{name}: COLMAP camera {camera_id} is {model} with {len(params)} parameters, expected OPENCV_FISHEYE with 8")
         world_T_cam: Float64[ndarray, "4 4"] = rigid(cam_T_colmap @ colmap_from_world)
-        cameras.append(ExoCamera(name, width, height, params, world_T_cam, image_name))
+        cameras.append(ExoCamera(name, width, height, params, world_T_cam))
     return cameras
 
 
@@ -497,18 +471,6 @@ def read_aria_calibration(text: str, origin: str) -> list[tuple[Float64[ndarray,
     return result
 
 
-def jpeg_size(payload: bytes) -> tuple[int, int]:
-    """(width, height) from a JPEG's start-of-frame header."""
-    index: int = 2
-    while index < len(payload) - 9:
-        marker: int = payload[index + 1]
-        length: int = int.from_bytes(payload[index + 2 : index + 4], "big")
-        if marker in (0xC0, 0xC1, 0xC2):
-            return int.from_bytes(payload[index + 7 : index + 9], "big"), int.from_bytes(payload[index + 5 : index + 7], "big")
-        index += 2 + length
-    raise ValueError("JPEG without a frame header")
-
-
 def read_glasses(
     files: SequenceFiles,
     frames: Int64[ndarray, "t"],
@@ -530,7 +492,7 @@ def read_glasses(
         ]
         cameras: list[AriaCamera] = []
         for index, mode in enumerate(ARIA_MODES):
-            upright: tuple[int, int] = jpeg_size(files.read(f"ego/{name}/images/{mode}/{frames[0]:05d}.jpg"))
+            upright: tuple[int, int] = Image.open(io.BytesIO(files.read(f"ego/{name}/images/{mode}/{frames[0]:05d}.jpg"))).size  # reads the header only
             intrinsics: Float64[ndarray, "t 15"] = np.stack([calibration[index][0] for calibration in calibrations])
             world_T_cam: Float64[ndarray, "t 4 4"] = np.stack([rigid(calibration[index][1] @ aria_world_T_world) for calibration in calibrations])
             # The stored image is upright: its height is the device-orientation width.
@@ -552,10 +514,8 @@ def read_frames(files: SequenceFiles, exo: list[ExoCamera]) -> Int64[ndarray, "t
 
 def label_dir(files: SequenceFiles, names: tuple[str, ...]) -> str | None:
     """The first of ``names`` (under ``processed_data``) that the release ships, or None."""
-    for name in names:
-        if files.tree(f"processed_data/{name}"):
-            return f"processed_data/{name}"
-    return None
+    shipped: list[str] = files.directories("processed_data")
+    return next((f"processed_data/{name}" for name in names if name in shipped), None)
 
 
 def read_people(files: SequenceFiles, frames: Int64[ndarray, "t"], pose_dir: str) -> list[PersonTrack]:
@@ -644,7 +604,7 @@ def read_sequence(files: SequenceFiles, *, pose_dirs: tuple[str, ...] = ("poses3
     aria_to_colmap, colmap_from_world, world_source = read_world(files)
     exo: list[ExoCamera] = read_exo_cameras(files, colmap_from_world, capture)
     frames: Int64[ndarray, "t"] = read_frames(files, exo)
-    glasses: list[AriaGlasses] = read_glasses(files, frames, aria_to_colmap, colmap_from_world, capture.INVALID_ARIAS) if aria_to_colmap else []
+    glasses: list[AriaGlasses] = read_glasses(files, frames, aria_to_colmap, colmap_from_world, capture.INVALID_ARIAS)
     pose_dir: str | None = label_dir(files, pose_dirs)
     if pose_dir is None:
         raise ValueError(f"processed_data lacks {' / '.join(pose_dirs)}")

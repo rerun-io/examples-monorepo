@@ -18,9 +18,11 @@ import numpy as np
 import pytest
 from conftest import raw_asset
 from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
+from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge import paths
-from dataforge.datasets.egohumans_source import ARIA_MODES, Sequence, ZipSequenceFiles, load_pickle, read_sequence
+from dataforge.datasets.egohumans_layers import exo_camera, exo_scale
+from dataforge.datasets.egohumans_source import ARIA_MODES, Sequence, ZipSequenceFiles, load_pickle, read_sequence, sequences_in
 
 pytestmark = pytest.mark.golden
 
@@ -32,7 +34,7 @@ FRAMES_CHECKED: tuple[int, ...] = (0, 150, 300)
 @pytest.fixture(scope="module")
 def release() -> tuple[ZipSequenceFiles, Sequence]:
     archive = zipfile.ZipFile(raw_asset("Harmony4D test/01_hugging.zip (dataforge-download harmony4d --sequences test/01_hugging)", ROOT / "test/01_hugging.zip"))
-    files = ZipSequenceFiles(archive, "01_hugging/002_hugging")
+    files = sequences_in(archive)["01_hugging/002_hugging"]
     return files, read_sequence(files)
 
 
@@ -49,8 +51,11 @@ def test_exo_lenses_reproduce_the_shipped_2d(release: tuple[ZipSequenceFiles, Se
         for camera in sequence.exo:
             shipped = load_pickle(files.read(f"processed_data/poses2d/{camera.name}/rgb/{frame:05d}.npy"), camera.name)
             assert isinstance(shipped, dict)
+            stored = exo_camera(camera)  # the lens base logs; the shipped 2D is at the source size
+            cam_T_world = stored.extrinsics.cam_T_world
             for person in sequence.people:
-                offsets.append(max_offset(camera.project(person.joints[row].astype(np.float64)), np.asarray(shipped[person.name])))
+                joints = person.joints[row].astype(np.float64) @ cam_T_world[:3, :3].T + cam_T_world[:3, 3]
+                offsets.append(max_offset(project_fisheye62(joints, stored) / exo_scale(camera), np.asarray(shipped[person.name])))
     assert len(sequence.exo) == 22
     assert np.median(offsets) < 0.5 and max(offsets) < 2.5
 

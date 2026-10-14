@@ -61,7 +61,8 @@ glasses were synchronised by the authors.
 - **World.** aria01's Aria SLAM world: gravity-aligned, z up, metres; its origin is aria01's first head pose (~1.5 m above the
   floor), so the default 3D grid is off. Exo poses come from COLMAP through `colmap_from_aria[aria01]` (a similarity, scale ~1.8:
   divided out of every pose); each Aria's per-frame extrinsic through `inv(colmap_from_aria[ariaNN]) @ colmap_from_aria[aria01]`,
-  as upstream's loaders do. Exo-only takes reach the world through `scale.npy`.
+  as upstream's loaders do. Takes without glasses reach the world through `scale.npy` (some, such as `05_sword2`, ship the
+  Aria transforms as well; only glasses make those the world).
 - **Rigs.** GoPro `camNN` = `rig_NN` (one camera). Glasses `ariaNN` = `rig_(90+NN)`: `cam_00` rgb, `cam_01` slam-left, `cam_02`
   slam-right; the rig frame is the rgb camera's device-orientation frame and moves per frame. The Aria images are upright: each
   Aria camera node logs the lens turned a quarter turn clockwise (`image_rotation_cw_deg` 90).
@@ -70,8 +71,10 @@ glasses were synchronised by the authors.
   COCO-17 keypoints with the shipped confidence in COCO-133 slots 0–16 (the rest NaN, confidence 0). `body_mesh` holds the
   shipped posed vertices at 10 Hz (the dataforge mesh display rate) with SMPL's triangles.
 - **2D.** No measured COCO 2D is shipped. `projections` holds `coco133_xyz` projected through each full lens model per person,
-  `<pinhole>/coco133_uv_projected/person_NN` (OPENCV_FISHEYE for the GoPros, each frame's FISHEYE624 for the Aria cameras, in the
-  upright image), with `property:projections:{derived_from,camera_model,calibration_source}`; plus the shipped person boxes.
+  `<pinhole>/coco133_uv_projected/person_NN`, with `property:projections:{derived_from,camera_model,calibration_source}`; plus
+  the shipped person boxes. The GoPros project through the very Kannala-Brandt lens `base` logs (simplecv `project_fisheye62`:
+  rays behind the camera, past the lens fold or outside the image are NaN); the Aria cameras through each frame's FISHEYE624
+  in the upright image, inside projectaria-tools' Gen1 cone (1.0 rad rgb, 1.4 rad slam) and valid radius (scaled to 1408 px).
 - **Fisheye rule.** Both lens models are fisheye (a pinhole is off by up to ~500 px at a GoPro's corners), so camera panes show
   the video, projected keypoints and boxes, and the meshes stay in 3D.
 - **Blueprint.** The scene (videos hidden in 3D, grid off, orbital eye fitted per take) with aria01/aria02 rgb on the right and
@@ -99,8 +102,8 @@ shipped vertices within 0.01 mm (measured 0.0007 mm). Pixel evidence: https://pa
 ## Timing
 
 `test/01_hugging/002_hugging` (301 frames, 15.05 s, 22 GoPros + 2 glasses), prod env: 44.7 s total, of which 38.8 s transcode
-(CPU JPEG decode of 28 streams), 4.0 s projections; 183 MB of rrds from 1.7 GB of JPEG frames (~9×). Full-run figures: see the
-PR body.
+of 28 streams, four at a time (JPEG decode, ffmpeg's range conversion and NVENC per camera; which one limits is not yet
+profiled on an idle host), 4.0 s projections; 183 MB of rrds from 1.7 GB of JPEG frames (~9×). Full-run figures: see the PR body.
 
 ## Known gaps
 

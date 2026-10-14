@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import cache
 from itertools import chain
 from pathlib import Path
 from typing import Any
@@ -22,9 +23,22 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt32
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Fisheye624Parameters, Intrinsics, KannalaBrandtDistortion
 from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
+from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
-from dataforge import blueprints, hands, meshes, schema, writing
-from dataforge.datasets.egohumans_source import ARIA_MODES, ARIA_STREAM_IDS, COCO17, FPS, AriaGlasses, ExoCamera, PersonTrack, Sequence, SequenceFiles
+from dataforge import blueprints, hands, meshes, paths, schema, writing
+from dataforge.clocks import frame_times
+from dataforge.datasets.egohumans_source import (
+    ARIA_MODES,
+    ARIA_STREAM_IDS,
+    COCO17,
+    FPS,
+    AriaGlasses,
+    ExoCamera,
+    PersonTrack,
+    Sequence,
+    SequenceFiles,
+    WorldSource,
+)
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     annotation_context,
@@ -54,17 +68,13 @@ ENCODE_WORKERS: int = 4
 PERSON_COLOURS: list[tuple[int, int, int]] = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240)]
 """Box colour of each person, cycled (MAMMA's mask palette)."""
 BODY_SOURCE: str = "release SMPL fit (neutral, 10 betas); vertices and joints as shipped"
-WORLD_FRAMES: dict[str, str] = {
+LAYERS: tuple[str, ...] = (paths.BASE_LAYER, paths.BODY_POSE_LAYER, paths.BODY_MESH_LAYER, paths.PROJECTIONS_LAYER)
+WORLD_FRAMES: dict[WorldSource, str] = {
     "colmap_from_aria_transforms.pkl": "aria01's SLAM world (gravity-aligned, z up, metres; origin at aria01's first head pose), "
     "reached through colmap_from_aria_transforms.pkl",
     "scale.npy": "the COLMAP world made metric and gravity-aligned by scale.npy (z up, metres; origin where COLMAP put it)",
 }
 """``property:capture:world_frame`` for each way a take reaches its world (``Sequence.world_source``)."""
-
-
-def exo_rig(camera: ExoCamera) -> int:
-    """``cam07`` -> rig 7."""
-    return camera.number
 
 
 def ego_rig(glasses: AriaGlasses) -> int:
@@ -90,9 +100,9 @@ def exo_scale(camera: ExoCamera) -> float:
     return 1.0 / (1 << halvings(camera.width, camera.height))
 
 
-
+@cache
 def smpl_faces(model_root: Path) -> UInt32[ndarray, "f 3"]:
-    """SMPL's triangle list (shape-independent), from the official neutral model under ``model_root/smpl``."""
+    """SMPL's triangle list (shape-independent), from the official neutral model under ``model_root/smpl``; loaded once per process."""
     model: SmplxLayerTorch = SmplxLayerTorch(betas=np.zeros(10, dtype=np.float32), model_type="smpl", gender="neutral", model_root_dir=model_root)
     return np.asarray(model.faces, dtype=np.uint32)
 
@@ -118,6 +128,21 @@ def scene_view(exo_slots: int, ego_rigs: tuple[int, ...], *, card: bool = False)
         line_grid=rrb.LineGrid3D(visible=False),
     )
 
+
+def capture_blueprint(exo_slots: int, ego_rigs: tuple[int, ...], exo_rigs: tuple[int, ...]) -> rrb.Blueprint:
+    """Scene on top with each pair of glasses' rgb camera beside it; the ``exo_rigs`` GoPros along the bottom."""
+    return blueprints.exoego_blueprint(
+        scene_view(exo_slots, ego_rigs),
+        ego_panes=[blueprints.camera_view(f"aria{rig - EGO_RIG_OFFSET:02d} rgb", rig, 0) for rig in ego_rigs],
+        exo_panes=[blueprints.camera_view(f"cam{rig:02d}", rig, 0) for rig in exo_rigs],
+    )
+
+
+def capture_card(exo_slots: int, ego_rigs: tuple[int, ...]) -> rrb.Blueprint:
+    """Card: the scene without video beside cam01."""
+    return blueprints.exoego_table_blueprint(scene_view(exo_slots, ego_rigs, card=True), blueprints.camera_view("cam01", 1, 0))
+
+
 @dataclass(frozen=True, slots=True)
 class Clock:
     """The frames a conversion writes and their times."""
@@ -129,8 +154,8 @@ class Clock:
 
     @classmethod
     def of(cls, sequence: Sequence, frame_limit: int | None) -> Clock:
-        count: int = min(len(sequence.frames), frame_limit or len(sequence.frames))
-        return cls(sequence.frames[:count], sequence.video_times_ns[:count])
+        frames: Int64[ndarray, "t"] = sequence.frames[: min(len(sequence.frames), frame_limit or len(sequence.frames))]
+        return cls(frames, frame_times(frames - frames[0], FPS))
 
     @property
     def indexes(self) -> list[rr.TimeColumn]:
@@ -165,8 +190,10 @@ def aria_camera(glasses: AriaGlasses, index: int) -> Fisheye62Parameters:
     return upright.to_fisheye62(rig_T_upright)
 
 
-def encode_job(files: SequenceFiles, directory: str, frames: Int64[ndarray, "t"], clip: Path, scaling: tuple[int, int]) -> Callable[[], None]:
-    """Encode ``directory/NNNNN.jpg`` of ``frames`` into ``clip`` (AV1, 20 fps), decoding at ``scaling``."""
+def encode_job(
+    files: SequenceFiles, directory: str, frames: Int64[ndarray, "t"], clip: Path, scaling: tuple[int, int], logged: Fisheye62Parameters
+) -> Callable[[], None]:
+    """Encode ``directory/NNNNN.jpg`` of ``frames`` into ``clip`` (AV1, 20 fps), decoding at ``scaling`` to the ``logged`` lens's size."""
 
     def encode() -> None:
         # Imported here: PyTurboJPEG is a dataforge-env dependency, and the registry imports this module everywhere.
@@ -175,7 +202,9 @@ def encode_job(files: SequenceFiles, directory: str, frames: Int64[ndarray, "t"]
         images: Iterator[bytes] = (files.read(f"{directory}/{frame:05d}.jpg") for frame in frames)
         first: bytes = next(images)
         source: FrameSource = jpeg_frame_source(first, scaling_factor=scaling)
-        count: int = encode_frames_to_mp4(
+        if (source.width, source.height) != (logged.intrinsics.width, logged.intrinsics.height):
+            raise ValueError(f"{directory}: frames decode to {source.width}x{source.height}, the logged lens is {logged.intrinsics.width}x{logged.intrinsics.height}")
+        encode_frames_to_mp4(
             decode_jpeg_frames(chain([first], images), source=source, scaling_factor=scaling),
             clip,
             source=source,
@@ -184,8 +213,6 @@ def encode_job(files: SequenceFiles, directory: str, frames: Int64[ndarray, "t"]
             cq=AV1_CQ,
             filter_threads=1,
         )
-        if count != len(frames):
-            raise ValueError(f"{directory}: encoded {count} frames, expected {len(frames)}")
 
     return encode
 
@@ -210,7 +237,7 @@ def write_base(
     slots: list[tuple[int, int]] = []
     with work_dir("egohumans-") as work:
         for camera in sequence.exo:
-            rig: int = exo_rig(camera)
+            rig: int = camera.number
             stored: Fisheye62Parameters = exo_camera(camera)
             log_rig_node(recording, rig, reference=None, num_cameras=1, name=camera.name, kind="exo")
             log_camera_node(recording, rig, 0, stored, name=camera.name, kind="rgb", image_plane_distance=frustum_m, camera_model="OPENCV_FISHEYE")
@@ -230,7 +257,7 @@ def write_base(
                 )
             )
             clip: Path = work / f"{camera.name}.mp4"
-            jobs.append((clip, encode_job(files, f"exo/{camera.name}/images", clock.frames, clip, (1, 1 << halvings(camera.width, camera.height)))))
+            jobs.append((clip, encode_job(files, f"exo/{camera.name}/images", clock.frames, clip, (1, 1 << halvings(camera.width, camera.height)), stored)))
             slots.append((rig, 0))
         for glasses in sequence.glasses:
             rig = ego_rig(glasses)
@@ -263,7 +290,7 @@ def write_base(
                     )
                 )
                 clip = work / f"{glasses.name}-{mode}.mp4"
-                jobs.append((clip, encode_job(files, f"ego/{glasses.name}/images/{mode}", clock.frames, clip, (1, 1))))
+                jobs.append((clip, encode_job(files, f"ego/{glasses.name}/images/{mode}", clock.frames, clip, (1, 1), stored_aria)))
                 slots.append((rig, index))
             log_dense_pose_track(
                 recording, schema.rig_path(rig), times_ns=clock.times_ns, frame_indices=clock.frames, transforms=glasses.world_T_rig[: len(clock.frames)]
@@ -307,6 +334,9 @@ def coco133(person: PersonTrack, rows: int) -> tuple[Float32[ndarray, "t 133 3"]
 def write_body_pose(recording: rr.RecordingStream, sequence: Sequence, clock: Clock) -> None:
     """Every person's SMPL parameters, SMPL-45 joints and fit loss at full rate, and their COCO-133 keypoints."""
     rows: int = len(clock.frames)
+
+    def column(values: Float32[ndarray, "t k"]) -> pa.FixedSizeListArray:
+        return pa.FixedSizeListArray.from_arrays(pa.array(values.reshape(-1)), values.shape[1])
     for person in sequence.people:
         index: int = person_index(person)
         rr.log(
@@ -326,10 +356,6 @@ def write_body_pose(recording: rr.RecordingStream, sequence: Sequence, clock: Cl
             static=True,
             recording=recording,
         )
-
-        def column(values: Float32[ndarray, "t k"]) -> pa.FixedSizeListArray:
-            return pa.FixedSizeListArray.from_arrays(pa.array(values.reshape(-1)), values.shape[1])
-
         rr.send_columns(
             path,
             indexes=clock.indexes,
@@ -375,26 +401,34 @@ def write_body_mesh(recording: rr.RecordingStream, sequence: Sequence, clock: Cl
 
 
 def projected(sequence: Sequence, person: PersonTrack, clock: Clock) -> Iterator[tuple[tuple[int, int], Float32[ndarray, "t 133 2"]]]:
-    """``person``'s COCO-133 keypoints through every camera's full lens, in stored pixels, one camera at a time."""
+    """``person``'s COCO-133 keypoints through every camera's full lens, in stored pixels, one camera at a time.
+
+    The GoPros project through the very lens base logs (``project_fisheye62``: its fold bound, rear rays and the image edge give
+    NaN); only the 17 shipped COCO slots are projected, the rest stay NaN.
+    """
     rows: int = len(clock.frames)
-    positions: Float64[ndarray, "t 133 3"] = coco133(person, rows)[0].astype(np.float64)
+    body: Float64[ndarray, "t 17 3"] = person.coco17[:rows].astype(np.float64)
+    pixels: Float32[ndarray, "t 133 2"] = np.full((rows, 133, 2), np.nan, dtype=np.float32)
     for camera in sequence.exo:
-        pixels: Float64[ndarray, "m 2"] = camera.project(positions.reshape(-1, 3)) * exo_scale(camera)
-        yield (exo_rig(camera), 0), pixels.reshape(rows, 133, 2).astype(np.float32)
+        stored: Fisheye62Parameters = exo_camera(camera)
+        cam_T_world: Float64[ndarray, "4 4"] = stored.extrinsics.cam_T_world
+        flat: Float64[ndarray, "n 3"] = body.reshape(-1, 3)
+        pixels[:, :COCO17] = project_fisheye62(flat @ cam_T_world[:3, :3].T + cam_T_world[:3, 3], stored).reshape(rows, COCO17, 2)
+        yield (camera.number, 0), pixels.copy()
     for glasses in sequence.glasses:
         for index, aria in enumerate(glasses.cameras):
-            # Loop locals stay unannotated: beartype would rebuild a jaxtyping checker per frame in the dev env.
-            frames = np.stack([aria.project(row, positions[row]) for row in range(rows)])
-            yield (ego_rig(glasses), index), frames.astype(np.float32)
+            for row in range(rows):  # each frame has its own lens and pose
+                pixels[row, :COCO17] = aria.project(row, body[row])
+            yield (ego_rig(glasses), index), pixels.copy()
 
 
 def write_projections(recording: rr.RecordingStream, sequence: Sequence, clock: Clock) -> None:
     """Each person's COCO-133 keypoints through every lens, and the release's person boxes as shipped."""
     recording.send_property(
-        "projections",
+        paths.PROJECTIONS_LAYER,
         rr.AnyValues(
             derived_from="coco133_xyz",
-            camera_model="OPENCV_FISHEYE (exo), FISHEYE624 per frame (Aria, turned upright)",
+            camera_model="OPENCV_FISHEYE as Kannala-Brandt (exo, at the stored size), FISHEYE624 per frame (Aria, turned upright)",
             calibration_source="COLMAP cameras/images.txt and the per-frame Aria calib files",
         ),
     )
@@ -408,7 +442,7 @@ def write_projections(recording: rr.RecordingStream, sequence: Sequence, clock: 
                 positions=pixels,
                 confidence=None,  # 1 where the lens put the point, 0 where it is NaN
             )
-    slots: dict[str, tuple[int, int, float]] = {camera.name: (exo_rig(camera), 0, exo_scale(camera)) for camera in sequence.exo}
+    slots: dict[str, tuple[int, int, float]] = {camera.name: (camera.number, 0, exo_scale(camera)) for camera in sequence.exo}
     slots |= {f"{glasses.name}/{mode}": (ego_rig(glasses), index, 1.0) for glasses in sequence.glasses for index, mode in enumerate(ARIA_MODES)}
     rows: int = len(clock.frames)
     for camera_boxes in sequence.boxes:
@@ -430,3 +464,23 @@ def write_projections(recording: rr.RecordingStream, sequence: Sequence, clock: 
                 columns=rr.Boxes2D.columns(centers=centres, half_sizes=half_sizes).partition(lengths),
                 recording=recording,
             )
+
+
+def layer_writers(
+    identity: SequenceIdentity,
+    files: SequenceFiles,
+    sequence: Sequence,
+    clock: Clock,
+    timer: SequenceTimer,
+    smpl_root: Path,
+    *,
+    source_revision: str,
+    episode: dict[str, str],
+) -> dict[str, Callable[[rr.RecordingStream], None]]:
+    """The four ``LAYERS`` of one sequence, for ``DataforgeDataset.write_layers`` (Harmony4D and EgoHumans write the same)."""
+    return {
+        paths.BASE_LAYER: lambda recording: write_base(recording, identity, files, sequence, clock, timer, source_revision=source_revision, episode=episode),
+        paths.BODY_POSE_LAYER: lambda recording: write_body_pose(recording, sequence, clock),
+        paths.BODY_MESH_LAYER: lambda recording: write_body_mesh(recording, sequence, clock, smpl_faces(smpl_root)),
+        paths.PROJECTIONS_LAYER: lambda recording: write_projections(recording, sequence, clock),
+    }
