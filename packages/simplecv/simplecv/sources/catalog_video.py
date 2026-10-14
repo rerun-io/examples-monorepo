@@ -84,11 +84,16 @@ def luma_planes(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w"]]:
             yield np.frombuffer(plane, dtype=np.uint8).reshape(frame.height, plane.line_size)[:, : frame.width]
 
 
-def sample_indices(times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int | tuple[int, ...], window_ns: tuple[int, int] | None) -> Int64[ndarray, " t"]:
-    """Sample indices of a stream: all, a budget spread evenly (rounded linspace), or explicit indices; inside ``window_ns`` when set."""
+def sample_indices(
+    times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int | tuple[int, ...], window_ns: tuple[int, int] | None, stride: int = 1
+) -> Int64[ndarray, " t"]:
+    """Sample indices of a stream: all, a budget spread evenly (rounded linspace), or explicit indices; inside ``window_ns``
+    when set, and from every ``stride``-th frame of it (whole strides only: ``m // stride`` frames, as a decoder reading
+    ``i * stride``)."""
     candidates: Int64[ndarray, " m"] = np.arange(times_ns.size, dtype=np.int64)
     if window_ns is not None:
         candidates = candidates[(times_ns >= window_ns[0]) & (times_ns < window_ns[1])]
+    candidates = candidates[: candidates.size // stride * stride : stride]
     if candidates.size == 0:
         raise ValueError("the stream has no frames (in the window)")
     if isinstance(sample, tuple):
@@ -120,11 +125,12 @@ class CatalogVideoSource:
         resize_hw: tuple[int, int] | None = None,
         keep_native: bool = False,
         statics: Mapping[str, Column] | None = None,
+        stride: int = 1,
     ) -> None:
         luma: bool = decode == "cpu_luma"
         if luma != (group_tolerance_ns is not None) or (luma and (resize_hw is not None or isinstance(sample, int | tuple))) or (keep_native and resize_hw is None):
             raise NotImplementedError("cpu_luma groups every frame (group_tolerance_ns); rgb is index-aligned; keep_native needs resize_hw")
-        self.segment, self.cameras, self.sample, self.fenced = segment, cameras, sample, decode == "nvdec_rgb"
+        self.segment, self.cameras, self.sample, self.stride, self.fenced = segment, cameras, sample, stride, decode == "nvdec_rgb"
         self.group_tolerance_ns: int | None = group_tolerance_ns
         self.resize_hw, self.keep_native = resize_hw, keep_native
         self.statics: dict[str, Column] = {"rig": Column(RigCameras, "/world", static=True), **(statics or {})}
@@ -147,7 +153,7 @@ class CatalogVideoSource:
             return
         times: list[Int64[ndarray, " n"]] = [self.frames.times_ns(view) for view in range(len(self.cameras))]
         shortest: int = min(t.size for t in times)  # index-aligned: every sampled index exists in every camera
-        for index in sample_indices(times[0][:shortest], self.sample, self.segment.window_ns).tolist():
+        for index in sample_indices(times[0][:shortest], self.sample, self.segment.window_ns, self.stride).tolist():
             native: UInt8[Tensor, "v 3 hh ww"] = torch.stack([self.frames.frames_at(view, [index])[0] for view in range(len(self.cameras))])
             rgb: UInt8[Tensor, "v 3 h w"] = native
             if self.resize_hw is not None:
