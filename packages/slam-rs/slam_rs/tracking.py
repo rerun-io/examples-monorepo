@@ -1,7 +1,5 @@
-"""Track catalog framesets in order, holding frames until their IMU samples arrive.
-
-Replay and fleet measurements share this driver so they use the same frame,
-inertial, and timestamp handling. Returned trajectories use the device clock.
+"""Track catalog framesets in order, holding frames for IMU samples; return trajectories on the device clock.
+Replay and fleet measurements share this driver for consistent frame, inertial and timestamp handling.
 """
 
 import time
@@ -28,12 +26,8 @@ MAX_HELD_FRAMESETS: int = 2
 
 @dataclass(slots=True)
 class Lockstep:
-    """One estimator, driven frameset by frameset, holding a refused frameset.
-
-    Everything a driver needs to report afterwards is on this value: what was
-    pushed, what tracked and how long it took, how many retries it cost, and
-    what is still held. The tracked count is ``len(elapsed_ms)``: one entry per
-    yielded pose, including the final drain in lag mode.
+    """Drive one estimator by frameset, holding refusals; retain all driver report data: inputs, tracks, times, retries, holds.
+    ``len(elapsed_ms)`` counts tracked poses, one entry per yielded pose including lag mode's final drain.
     """
 
     vio: _core.Vio
@@ -57,32 +51,14 @@ class Lockstep:
     """First buffered call's cost, included with the final drain's timing."""
 
     def push(self, frameset: Frameset) -> Iterator[tuple[Frameset, _core.VioResult]]:
-        """Push the frameset's inertial samples, then yield everything they now cover.
-
-        A frameset the estimator refuses is **held, not dropped** (D17): the next
-        frameset's batch runs one sample past its own frame time and therefore
-        past this one's, so the held frameset tracks then — and before the
-        frameset whose samples unblocked it, because time order is the
-        trajectory. Nothing moved on the refusal, so the retry produces the pose
-        a run that had the samples all along would have produced.
-
-        Args:
-            frameset: The frameset to track, with the samples since the previous one.
-
-        Yields:
-            Each frameset that tracked and what ``track`` returned for it, in
-            trajectory order. A refused frameset yields nothing until its samples
-            arrive.
-
-        Raises:
-            ValueError: If the hold ever carries more than
-                :data:`MAX_HELD_FRAMESETS` framesets, which the feed's one-sample
-                lead makes impossible.
+        """Push ``frameset``'s IMU samples since the previous one; yield covered framesets and their ``track`` results in order.
+        Hold refusals without yielding until samples arrive (D17). The next batch leads its own frame by one sample, so it
+        covers the held frame too; track that first to preserve trajectory time order. Refusal changes no state, so retry
+        produces the same pose as a run with all samples available. Raise ValueError if the hold exceeds
+        :data:`MAX_HELD_FRAMESETS`, which the feed's one-sample lead prevents.
         """
         if len(frameset.imu):
-            # The feed already hands over the samples since the previous frameset,
-            # running one past this frame time: a backend that integrates up to the
-            # frame and blocks until it can deadlocks on the first frameset otherwise.
+            # Samples since the prior frameset lead this frame by one; without it, blocking integration deadlocks on frame one.
             self.push_imu(frameset.imu)
         self.hold(frameset)
         yield from self.track_pending()
@@ -96,10 +72,8 @@ class Lockstep:
         """Queue a frameset behind the held ones; :meth:`track_pending` tracks it once the samples cover it."""
         self.pending.append(frameset)
         if len(self.pending) > MAX_HELD_FRAMESETS:
-            # Every batch runs one sample past its own frame time and therefore
-            # past the previous frameset's, so a second refusal in a row cannot
-            # happen; a deeper hold would silently retain whole decoded framesets
-            # (~1.8 MB each) until the end of the segment.
+            # Each batch leads its own frame by one sample, hence covers the prior frame: two refusals in a row are impossible.
+            # A deeper hold would silently retain decoded framesets (~1.8 MB each) until segment end.
             raise ValueError(
                 f"frameset {frameset.t_ns} takes the hold to {len(self.pending)} framesets, past the {MAX_HELD_FRAMESETS} "
                 f"the feed's one-sample lead allows; held {[held.t_ns for held in self.pending]}"
@@ -180,10 +154,8 @@ class SegmentRun:
     median_tracker_ms: float
     """Median accepted tracker call duration."""
     config_sha256: str
-    """SHA-256 of the exact config text the estimator was built from (:func:`~slam_rs.reference.config_text_sha256`).
-
-    Taken where the text is parsed, so a tool that exports it cannot name a
-    config the estimator did not read.
+    """SHA-256 of the estimator's exact config text (:func:`~slam_rs.reference.config_text_sha256`), taken at parse time
+    so export tools cannot name a config the estimator did not read.
     """
 
 
@@ -202,9 +174,7 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         positions.append(pose[0:3].copy())
         quaternions.append(np.roll(pose[3:7], 1))
 
-    # A count is asked of the feed as a time, or it fetches a window nothing here
-    # reads. The in-loop breaks still make the cut, because the feed yields to
-    # the end of the window that covers `stop_ns`.
+    # Convert count to feed time to avoid an unread fetch; loop breaks enforce the cut since the feed ends at the covering window.
     counted_ns: int | None = feed.stop_ns_after(max_framesets)
     if counted_ns is not None:
         stop_ns = counted_ns if stop_ns is None else min(stop_ns, counted_ns)
@@ -261,27 +231,16 @@ def run_segment(
 def robocap_estimator_files(
     settings: SlamConfig, profile: Literal["reference", "fast"] = "reference"
 ) -> tuple[_core.Calibration, _core.VioConfig, str]:
-    """Read the RoboCap calibration and profiled configuration named by the settings.
-
-    Returns:
-        Calibration, parsed VIO configuration, and the exact configuration text
-        used to identify the run.
-    """
+    """Read settings' RoboCap calibration/profiled config; return calibration, parsed VIO config and exact text identifying the run."""
     calibration: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
     config_text: str = settings.robocap_config_text(profile)
     return calibration, _core.VioConfig.from_json(config_text), config_text
 
 
 def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuCalib, downscale: int) -> None:
-    """Require the file calibration and catalog statics to describe the same rig.
-
-    Intrinsics, distortion, extrinsics, and IMU parameters are compared at the
-    selected image scale. The file must carry no additional camera time offset:
-    catalog samples are already aligned, and the feed only shifts their common
-    time origin.
-
-    Raises:
-        ValueError: If any rig parameter differs beyond its storage precision.
+    """Require file calibration and catalog statics to match: intrinsics, distortion, extrinsics and IMU at selected image scale.
+    Raise ValueError for any rig difference beyond storage precision. The file must have no extra camera time offset:
+    catalog samples are aligned already; the feed shifts only their common origin.
     """
     if basalt.camera_count != len(cameras):
         raise ValueError(f"basalt's calibration has {basalt.camera_count} cameras, the feed selected {len(cameras)}")

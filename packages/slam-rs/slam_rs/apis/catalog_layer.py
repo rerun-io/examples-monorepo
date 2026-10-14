@@ -1,9 +1,6 @@
-"""Run slam-rs VIO over one catalog segment and publish its ``slam_rs`` pose layer (the VIO graph, ``slam_rs/graphs/vio.py``).
-
-The finished file is published under ``output_dir/<segment>/`` and registered as the segment's ``slam_rs`` layer (``register``:
-``new`` only when it has none, ``replace`` for a production refresh, ``off``). A windowed run is a smoke run, never registered.
-The viewer follows the rig pose live and gets the layer (trajectory and trail) at the end; the "pipeline (debug)" tab shows the graph.
-"""
+"""Run slam-rs VIO over one catalog segment and publish its ``slam_rs`` pose layer under ``output_dir/<segment>/`` (``register``:
+``new`` only when the segment has none, ``replace`` for a production refresh, ``off``; a windowed run never registers). The
+viewer follows the rig pose live and gets the layer's trajectory at the end; the "pipeline (debug)" tab shows the graph."""
 
 from collections.abc import Iterator
 from dataclasses import dataclass

@@ -1,11 +1,9 @@
-"""Run slam-rs VIO over one robocap catalog segment, then track its hands with robocap-live's Rust pipeline on those poses (SPEC 5.3).
+"""Run slam-rs VIO over one robocap catalog segment, then track its hands on those poses with robocap-live's Rust pipeline.
 
-Two graphs, joined by the ``slam_rs`` layer they checkpoint through: the VIO graph publishes the poses (``slam``: ``vio``), the
-hands-layer graph reads that file as its pose table (``catalog`` skips VIO and reads the segment's registered layer). Each layer is
-published under ``output_dir/<segment>/`` and registered (``register``: ``new`` only when the segment has none, ``replace`` for a
-production refresh, ``off``). A windowed run (``--segment.window-ns``: VIO runs from the segment's start to its end, the hands only
-inside it) is a smoke run, never registered; its hands are copied into the viewer. The viewer opens on the run health; the
-"pipeline (debug)" tab shows each graph, its guide and the outputs.
+Two graphs joined by the ``slam_rs`` layer they checkpoint through (``slam`` ``catalog`` skips VIO and reads the registered layer).
+Each layer is published under ``output_dir/<segment>/`` (``register``: ``new`` only when the segment has none, ``replace`` for a
+production refresh, ``off``). A windowed run (VIO from the segment's start to the window's end, hands inside it) never registers
+and copies its hands into the viewer, which opens on the run health; the "pipeline (debug)" tab shows each graph and its guide.
 """
 
 from collections.abc import Iterator, Sequence
@@ -52,8 +50,7 @@ class Config:
 
 
 def blueprint(graphs: Sequence[Graph]) -> rrb.Blueprint:
-    """The run health, one plot per series (on ``wall_time``), then the "pipeline (debug)" tab: the hands a windowed run copies in
-    (``video_time``) and the hands step's own health."""
+    """The run health, one plot per series (``wall_time``), then the "pipeline (debug)" tab with the hands and their step's health."""
     series: list[str] = [
         f"{e.dst.node}/{what}/{e.dst.port}" for g in graphs for e in g.edges if not isinstance(e.kind, AsOf) for what in ("drops", "queue_depth")
     ]

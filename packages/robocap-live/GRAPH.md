@@ -23,7 +23,7 @@ STATIC ``rig``, then per frameset its IMU batch (``imu``: the samples since the 
 ## 2 · vio: Track the rig pose with VIO
 *runs once per item* · `VioNode` · `packages/slam-rs/slam_rs/nodes/vio.py`
 
-``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a frameset and tracks what the samples cover; ``flush`` drains it and writes the ``slam_rs`` layer file (``run`` keeps the run's counts).
+``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a frameset and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file.
 
 | takes | type | from | arrives |
 |---|---|---|---|

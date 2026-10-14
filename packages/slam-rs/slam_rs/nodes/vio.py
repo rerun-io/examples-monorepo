@@ -1,9 +1,5 @@
-"""The ``vio`` node: slam-rs's estimator (``_core.Vio`` behind :class:`~slam_rs.tracking.Lockstep`) on the one time-ordered stream.
-
-Each frameset's IMU batch arrives on ``imu`` at the frameset's time, before its gray8 images on ``frames`` (port order), so the
-estimator sees exactly the calls ``Lockstep.push`` makes: the batch, then ``track``. Poses leave late (a refused frameset is
-held, lag mode returns the previous frameset's pose); ``flush`` drains the estimator and writes the segment's ``slam_rs`` layer.
-"""
+"""The ``vio`` node: ``_core.Vio`` behind :class:`~slam_rs.tracking.Lockstep`. A frameset's IMU batch arrives on ``imu`` at its
+time and before its ``frames`` (port order), so the estimator gets exactly the calls ``Lockstep.push`` makes."""
 
 import time
 import uuid
@@ -54,19 +50,17 @@ class VioParams:
 class VioNode:
     """Track the rig pose with VIO.
 
-    ``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds
-    a frameset and tracks what the samples cover; ``flush`` drains it and writes the ``slam_rs`` layer file (``run`` keeps the
-    run's counts)."""
+    ``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a
+    frameset and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file."""
 
     inputs: Mapping[str, PortType] = {"imu": ImuStream, "frames": Frameset, "rig": VioRig}
     outputs: Mapping[str, PortType] = {"pose": RigPose, "layer": LayerFile}
     emits_late: bool = True
 
     def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path, decoder: Literal["cpu", "cuda"]) -> None:
-        """``output_dir/<segment>/`` holds the layer file; ``decoder`` is the one the source decodes with (layer metadata)."""
         self.segment, self.params, self.output_dir, self.decoder = segment, params, output_dir, decoder
         self.lockstep: Lockstep | None = None
-        self.run: SegmentRun | None = None
+        self.run: SegmentRun | None = None  # the finished run's counts
         self.offset_ns, self.export_ns = 0, 0  # video_time -> estimator clock; estimator clock -> device clock
 
     def reset(self, ctx: RunContext) -> None:
@@ -74,10 +68,8 @@ class VioNode:
         if not isinstance(rig, VioRig):
             raise ValueError(f"{self.segment.segment}: no rig calibration in the base layer")
         settings: SlamConfig = load_slam_config()
-        dataset: str = self.segment.dataset
-        self.config_text: str = (
-            settings.robocap_config_text(self.params.profile) if dataset == "robocap" else settings.vio_config_text(dataset, self.params.profile)
-        )
+        profile, dataset = self.params.profile, self.segment.dataset
+        self.config_text: str = settings.robocap_config_text(profile) if dataset == "robocap" else settings.vio_config_text(dataset, profile)
         calibration: _core.Calibration = _core.Calibration.from_catalog(rig.cameras, rig.imu)
         flow: _core.VioConfig = _core.VioConfig.from_json(self.config_text)
         try:
@@ -127,8 +119,6 @@ class VioNode:
         partial.parent.mkdir(parents=True, exist_ok=True)
         write_layer(partial, self.segment.segment, self.run, clock_offset_ns=self.export_ns + self.offset_ns,
                     profile=self.params.profile, backend=backend, decoder=self.decoder)  # fmt: skip
-        print(
-            f"{self.segment.segment}: {self.run.framesets} framesets, {len(estimate)} poses, {self.run.lost} lost, {self.run.wall_s:.1f} s ({backend})"
-        )
+        print(f"{self.segment.segment}: {self.run.framesets} framesets, {len(estimate)} poses, {self.run.lost} lost, {self.run.wall_s:.1f} s")
         self.lockstep = None
         out.put("layer", self.t_ns, LayerFile(partial))
