@@ -136,7 +136,8 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         rrb.DataframeView(origin=roots["tracked"], name="2 frontend · tracked poses"),
         rrb.Spatial3DView(origin=ROOT, contents=f"+ {roots['map']}/**", name="3 backend · map"),
     ]  # fmt: skip
-    recording.send_blueprint(with_pipeline(rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), collapse_panels=True), debug))
+    normal = rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), rrb.TimePanel(state="collapsed", timeline=video.clock), collapse_panels=True)
+    recording.send_blueprint(with_pipeline(normal, debug))  # the outputs' clock, not the run health's wall_time
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, ports, roots)}
     if isinstance(video, CatalogVideoSource) and config.layer_dir is not None:
         producer = Producer("mast3r-slam", "0.0.1", "mast3r-slam", config.preset or "base")
