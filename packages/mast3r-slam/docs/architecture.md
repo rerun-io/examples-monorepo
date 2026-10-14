@@ -17,7 +17,9 @@ video ─frames─▶ frontend (main thread) ─task─▶ backend (own process)
 
 Resources: `mast3r` (the model, shared with the backend by CUDA IPC) and `shared` (`nodes/shared.py`: keyframe buffer and
 current-frame state in shared memory over an `mp.Manager`). The shared state is the feedback path of the SLAM loop
-(poses, mode, relocalisation), so the graph has no cycle.
+(poses, mode, relocalisation), so the graph has no cycle. CUDA IPC does not order GPU work across processes: each side
+calls `SharedSlam.publish` (a device sync) before it hands over (the frontend before each task, the backend before each
+acknowledgement), and the backend refuses a relocalisation request whose frame is not the shared current frame.
 
 Modes: **lossless** (default, every eval run) — before each frame and at flush the frontend waits until the backend has
 applied every queued task (`SharedSlam.backend_idle`), so every frame sees one fixed map; **realtime** — no wait; at the
