@@ -46,6 +46,9 @@ class Config:
     """Catalog input (takes precedence): the camera ``camera`` of this segment (``window_ns`` clips it)."""
     camera: str = "rig_00/cam_00"
     """Catalog camera entity under ``/world``."""
+    undistort: bool = False
+    """Catalog input: undistort the camera with its stored Brown-Conrady coefficients first (the MASt3R-SLAM paper does
+    on EuRoC always and on TUM when calibrated)."""
     video: Path | None = None
     """Video file input (used when there is no segment); ``pixi run mast3r-slam-example-*`` downloads examples to ``data/``."""
     images: Path | None = None
@@ -96,7 +99,7 @@ def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
 def video_source(config: Config, cfg: SlamConfig) -> Source:
     max_frames: int | None = config.max_frames or None
     if config.segment is not None:
-        return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample)
+        return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
     if config.video is not None:
         return VideoFileSource(config.video, stride=cfg.subsample, max_frames=max_frames)
     if config.images is not None:

@@ -12,11 +12,17 @@ Golden contract (the ported graph writes the same paths on the segment's ``video
 - ``/verify/slam/run``: static ``AnyValues`` run counts (``input_frames``, ``tracked_frames``, ``keyframes``, ``wall_s``).
 
 Input frames are the clip's cam_00 frames at indices ``0, s, 2s, ...`` (``n // s`` of them, ``s`` = ``subsample``),
-uncalibrated, lossless (the frontend waits for the backend after every keyframe and relocalisation request).
+lossless (the frontend waits for the backend after every keyframe and relocalisation request); case params choose
+calibrated tracking (``calib``) and undistortion by the catalog source (``undistort``).
+
+Block ``slam`` (msd-odyssey): its pre/pre2 goldens came from the old pipeline, so this tree only runs ``post``. Block
+``paper`` (TUM RGB-D fr1, EuRoC; ``run_paper``/``score_paper``) records every phase with this graph and associates poses
+within evo's default 10 ms, as the MASt3R-SLAM paper's ``evo_ape -as``.
 """
 
 import time
 from collections import Counter
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +53,9 @@ KEYFRAMES: str = "/mast3r_slam/cam_00"
 TRACKED: str = "/mast3r_slam/tracked/cam_00"
 RUN: str = "/verify/slam/run"
 MAX_ASSOCIATION_NS: int = 5_000_000
-"""An estimated pose is scored against the nearest GT pose only within this time gap."""
+"""An estimated pose is scored against the nearest GT pose only within this time gap (block ``slam``)."""
+EVO_MAX_DIFF_NS: int = 10_000_000
+"""evo's default ``t_max_diff`` (0.01 s), the association of the paper's ``evo_ape tum gt est -as`` (block ``paper``)."""
 CHILD_FROM_PARENT: int = 2
 """``Transform3D:relation`` of a node logged as child_from_parent (the catalog's camera extrinsics)."""
 
@@ -85,16 +93,18 @@ class _GoldenSink(RerunSink):
         super().step(tick, out)
 
 
-def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The ported graph on the case's clip (cam_00, every ``subsample``-th frame, uncalibrated), lossless, threaded.
+def run(case: Case, phase: Phase, recording: rr.RecordingStream, *, phases: tuple[Phase, ...] = ("post",)) -> None:
+    """The graph on the case's clip (cam_00, every ``subsample``-th frame), lossless, threaded.
 
-    Only ``post``: the ``pre``/``pre2`` goldens come from the card commit, which drove the old pipeline (git history).
+    ``phases`` this tree may record: block ``slam`` only ``post`` (its ``pre``/``pre2`` goldens come from the card commit,
+    which drove the old pipeline: git history); block ``paper`` every phase (``run_paper``).
     """
-    if phase != "post":
+    if phase not in phases:
         raise ValueError(f"phase {phase}: pre-port goldens come from the card commit (the old pipeline); this tree runs the port")
     assert case.dataset is not None and case.segment is not None, "mast3r-slam cases are catalog segments"
     cfg = SlamConfig(use_calib=case.params["calib"] == "true", img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
-    video = CatalogVideoSource(SegmentRef(case.dataset, case.segment, window_ns=_window_ns(case)), (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample)
+    segment = SegmentRef(case.dataset, case.segment, window_ns=_window_ns(case))
+    video = CatalogVideoSource(segment, (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample, undistort=case.params.get("undistort") == "true")
     golden = _GoldenSink(recording, CAMERA)
     start: float = time.perf_counter()
     report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode="lossless")
@@ -136,15 +146,19 @@ def _gt_camera_centers(case: Case) -> tuple[Int64[ndarray, " g"], Float64[ndarra
 
 
 def _ate(
-    t_ns: Int64[ndarray, " n"], xyz: Float64[ndarray, "n 3"], gt_t_ns: Int64[ndarray, " g"], gt_xyz: Float64[ndarray, "g 3"]
+    t_ns: Int64[ndarray, " n"],
+    xyz: Float64[ndarray, "n 3"],
+    gt_t_ns: Int64[ndarray, " g"],
+    gt_xyz: Float64[ndarray, "g 3"],
+    max_association_ns: int = MAX_ASSOCIATION_NS,
 ) -> tuple[float, float, int]:
-    """Sim3-aligned (Umeyama) RMSE of the estimated camera centres against the nearest GT centres (<= 5 ms apart).
+    """Sim3-aligned (Umeyama) RMSE of the estimated camera centres against the nearest GT centres (within the gap).
 
     Returns (rmse in m, Sim3 scale, number of associated poses); NaN when fewer than three poses associate.
     """
     right: Int64[ndarray, " n"] = np.clip(np.searchsorted(gt_t_ns, t_ns), 1, len(gt_t_ns) - 1)
     nearest: Int64[ndarray, " n"] = np.where(np.abs(gt_t_ns[right - 1] - t_ns) <= np.abs(gt_t_ns[right] - t_ns), right - 1, right)
-    keep: np.ndarray = np.abs(gt_t_ns[nearest] - t_ns) <= MAX_ASSOCIATION_NS
+    keep: np.ndarray = np.abs(gt_t_ns[nearest] - t_ns) <= max_association_ns
     if keep.sum() < 3:
         return float("nan"), float("nan"), int(keep.sum())
     gt_T_est: SimilarityTransform = umeyama_alignment(xyz[keep], gt_xyz[nearest[keep]], allow_scaling=True)
@@ -152,7 +166,7 @@ def _ate(
     return float(np.sqrt(np.mean(error**2))), gt_T_est.scale, int(keep.sum())
 
 
-def score(case: Case, golden: Path) -> dict[str, float]:
+def score(case: Case, golden: Path, max_association_ns: int = MAX_ASSOCIATION_NS) -> dict[str, float]:
     """Banded: ``ate_rmse_m`` (final keyframes vs GT cam_00, Sim3) and ``tracked_fraction``; the rest is reported."""
     with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
         dataset: DatasetEntry = server.client().get_dataset("golden")  # an entry must outlive its queries
@@ -160,8 +174,8 @@ def score(case: Case, golden: Path) -> dict[str, float]:
         tr_t, tr_xyz, _ = _poses(dataset.filter_contents([TRACKED]).reader(index=TIMELINE).to_arrow_table(), TRACKED)
         run_row: dict = dataset.filter_contents([RUN]).reader(index=None).to_arrow_table().to_pylist()[0]
     gt_t, gt_xyz = _gt_camera_centers(case)
-    ate, scale, associated = _ate(kf_t, kf_xyz, gt_t, gt_xyz)
-    tracked_ate, _, _ = _ate(tr_t, tr_xyz, gt_t, gt_xyz)
+    ate, scale, associated = _ate(kf_t, kf_xyz, gt_t, gt_xyz, max_association_ns)
+    tracked_ate, _, _ = _ate(tr_t, tr_xyz, gt_t, gt_xyz, max_association_ns)
     reported: dict[str, float] = {f"run_{k.split(':')[-1]}": float(v[0]) for k, v in run_row.items() if k.startswith(f"{RUN}:") and v is not None}
     return {
         "ate_rmse_m": ate,
@@ -171,3 +185,7 @@ def score(case: Case, golden: Path) -> dict[str, float]:
         "sim3_scale": scale,
         "tracked_ate_rmse_m": tracked_ate,
     } | reported
+
+
+run_paper = partial(run, phases=("pre", "pre2", "post"))
+score_paper = partial(score, max_association_ns=EVO_MAX_DIFF_NS)
