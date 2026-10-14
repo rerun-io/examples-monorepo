@@ -23,8 +23,8 @@ import rerun.blueprint as rrb
 from serde import SerdeError, coerce, from_dict, serde, to_dict
 from serde.toml import from_toml
 
-from dagkit.doc import GRAPH_ROOT, GUIDE_ROOT, field_docs
-from dagkit.graph import Graph
+from dagkit.doc import GRAPH_ROOT, GUIDE_ROOT, HEALTH_ROOT, field_docs
+from dagkit.graph import AsOf, Graph
 from dagkit.node import Control, Mode
 from dagkit.runners import RunReport, run_sequential, run_threaded
 from dagkit.sources import SegmentRef
@@ -144,6 +144,13 @@ def with_pipeline(blueprint: rrb.Blueprint, outputs: Sequence[rrb.View] = (), gr
     return rrb.Blueprint(
         rrb.Tabs(normal, tab, active_tab=0), *panels, auto_layout=blueprint.auto_layout, auto_views=blueprint.auto_views, collapse_panels=blueprint.collapse_panels
     )
+
+
+def health_views(graphs: Sequence[Graph]) -> list[rrb.View]:
+    """One plot per run-health series the runner logs for ``graphs``: drops and queue depth per trigger edge, step ms per node."""
+    series: list[str] = [f"{e.dst.node}/{what}/{e.dst.port}" for g in graphs for e in g.edges if not isinstance(e.kind, AsOf) for what in ("drops", "queue_depth")]
+    series += [f"{name}/step_ms" for g in graphs for name, spec in g.nodes.items() if spec.kind == "node"]
+    return [rrb.TimeSeriesView(origin=HEALTH_ROOT + s, name=s) for s in dict.fromkeys(series)]
 
 
 def _base(hint: object) -> Any:

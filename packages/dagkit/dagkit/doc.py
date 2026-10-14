@@ -22,7 +22,7 @@ from dagkit.types import git
 
 How: TypeAlias = Literal["waits", "latest", "drops old"]
 Rgb: TypeAlias = tuple[int, int, int]
-GRAPH_ROOT, GUIDE_ROOT = "/dagkit/graph/", "/dagkit/guide/"
+GRAPH_ROOT, GUIDE_ROOT, HEALTH_ROOT = "/dagkit/graph/", "/dagkit/guide/", "/dagkit/health/"
 REPO_URL: str = "https://github.com/rerun-io/examples-monorepo"
 ROLE: dict[str, tuple[str, Rgb, str]] = {
     "source": ("source", (90, 170, 255), "source"), "node": ("once per item", (255, 180, 70), "runs once per item"),
@@ -349,8 +349,8 @@ def guide(doc: GraphDoc, *, links: bool = True, health: bool = False) -> str:
             md += ["Settings:", *(f"- `{p.name}`" + (f" = {p.value[:40]}" if links else "") + (f": {p.doc}" if p.doc else "") for p in n.params[:5])]
             md += [f"- +{len(n.params) - 5} more", ""] if len(n.params) > 5 else [""]
         if links and health and n.kind != "source":
-            live: list[str] = [link(f"/dagkit/health/{n.name}/step_ms", f"{n.name} step ms")]
-            live += [link(f"/dagkit/health/{n.name}/queue_depth/{e.dst_port}", f"{n.name} queue {e.dst_port}") for e in into[n.name] if e.how != "latest"]
+            live: list[str] = [link(f"{HEALTH_ROOT}{n.name}/step_ms", f"{n.name} step ms")]
+            live += [link(f"{HEALTH_ROOT}{n.name}/queue_depth/{e.dst_port}", f"{n.name} queue {e.dst_port}") for e in into[n.name] if e.how != "latest"]
             md += ["Live: " + " · ".join(live), ""]
     types: dict[str, PortDoc] = {p.type: p for n in doc.nodes for p in [*n.inputs, *n.outputs]}
     md += ["## Data types", "| type | what it is | code |", "|---|---|---|"]

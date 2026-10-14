@@ -9,15 +9,16 @@ from typing import Any, Literal
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit_fakes import Collect, source
+from dagkit_fakes import Add, Collect, source
 from rerun.chunk import RrdReader
 from serde import coerce, serde
 
 from dagkit.apis import synthetic_demo
 from dagkit.apis.synthetic_demo import DemoRerunConfig
-from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, load_profile, run_app, with_pipeline
+from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, health_views, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
 from dagkit.node import Emit, Mode, Tick
+from dagkit.runners import run_sequential
 from dagkit.sources import SegmentRef
 from dagkit.testing import check_form
 
@@ -269,6 +270,23 @@ def test_a_two_pass_app_runs_every_graph_from_the_cli_and_the_form(tmp_path: Pat
     assert {"/dagkit/graph/pass1", "/dagkit/graph/pass2", "/dagkit/guide/pass1", "/dagkit/guide/pass2", "/passes/done"} <= paths
     streamed: list[tuple[object, ...]] = list(run_fn(gradio_app(PassesConfig, two_passes, title="Passes"))(3, "sequential", "lossless"))
     assert any(out[1] for out in streamed)  # the pane got the stream; the generator's final assert ran (no gr.Error)
+
+
+def test_health_views_plot_exactly_what_the_runner_logs(tmp_path: Path) -> None:
+    graph = Graph("chain", about="Add one.")
+    src = graph.source("src", source([(t, "x", t) for t in range(3)]))
+    add = graph.node("add", Add(1))
+    graph.edge(src["x"], add["x"])
+    graph.edge(add["y"], graph.sink("keep", Collect(("y",)))["y"])
+    recording = rr.RecordingStream("dagkit-test", recording_id="health", send_properties=False)
+    recording.save(tmp_path / "health.rrd")
+    run_sequential(graph, health=recording)
+    recording.flush()
+    reader = RrdReader(tmp_path / "health.rrd")
+    logged: set[str] = {str(c.entity_path) for c in reader.stream(store=reader.recordings()[0]).to_chunks()}
+    origins: list[str] = [str(view.origin) for view in health_views([graph, graph])]
+    assert origins == ["/dagkit/health/add/drops/x", "/dagkit/health/add/queue_depth/x", "/dagkit/health/keep/drops/y", "/dagkit/health/keep/queue_depth/y", "/dagkit/health/add/step_ms"]
+    assert set(origins) <= logged
 
 
 def test_with_pipeline_keeps_the_normal_view_first_and_active() -> None:

@@ -26,9 +26,15 @@ def _check_new(segment: SegmentRef, layer: str, register: Register) -> None:
         raise GraphError(f"{segment.dataset}/{segment.segment} already has layer {layer!r}; a refresh needs an explicit --register replace")
 
 
-def open_layer(segment: SegmentRef, layer: str, producer: Producer, *, output_dir: Path) -> tuple[rr.RecordingStream, Path]:
+def partial_path(output_dir: Path, segment: SegmentRef, layer: str) -> Path:
+    """``<output_dir>/<segment>/.<layer>.<run id>.partial`` (its directory made): the name ``publish_layer_file`` reads the run id from."""
     partial: Path = output_dir / segment.segment / f".{layer}.{uuid.uuid4().hex[:12]}.partial"
     partial.parent.mkdir(parents=True, exist_ok=True)
+    return partial
+
+
+def open_layer(segment: SegmentRef, layer: str, producer: Producer, *, output_dir: Path) -> tuple[rr.RecordingStream, Path]:
+    partial: Path = partial_path(output_dir, segment, layer)
     recording = rr.RecordingStream(producer.package, recording_id=segment.segment, send_properties=False)
     recording.save(partial)
     log_producer(recording, layer, producer)

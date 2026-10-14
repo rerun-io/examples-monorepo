@@ -9,7 +9,6 @@ import importlib.util
 import os
 import threading
 import time
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Literal, TypeAlias, cast
 
 import numpy as np
 from dagkit.node import Emit, PortType, RunContext, Tick
+from dagkit.sinks import partial_path
 from dagkit.sources import SegmentRef
 from dagkit.time import STATIC, TimeNs
 from dagkit.types import LayerFile
@@ -93,8 +93,7 @@ class HandsNode:
             focal=np.ascontiguousarray(intrinsics[:, [0, 1], [0, 1]]), principal=np.ascontiguousarray(intrinsics[:, :2, 2]), fisheye62=np.ascontiguousarray(cap.fisheye62),
             source=f"catalog {self.segment.dataset} {self.segment.segment}", device=self.segment.segment,  # provenance only
         )  # fmt: skip
-        self.partial = self.output_dir / self.segment.segment / f".{LAYER}.{uuid.uuid4().hex[:12]}.partial"
-        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        self.partial = partial_path(self.output_dir, self.segment, LAYER)
         started: float = time.perf_counter()
         p: HandsParams = self.params
         self.core = self.make_core(

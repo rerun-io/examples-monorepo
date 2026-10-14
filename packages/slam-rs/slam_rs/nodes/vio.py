@@ -2,7 +2,6 @@
 time and before its ``frames`` (port order), so the estimator gets exactly the calls ``Lockstep.push`` makes."""
 
 import time
-import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Literal, cast
 
 import numpy as np
 from dagkit.node import Control, Emit, PortType, RunContext, Tick
+from dagkit.sinks import partial_path
 from dagkit.sources import SegmentRef
 from dagkit.time import STATIC, TimeNs
 from dagkit.types import LayerFile
@@ -122,8 +122,7 @@ class VioNode:
         self.lockstep = None
         if self.control is not None and self.control.stopped and (len(estimate) < 2 or self.run.lost):
             return  # a stop before a publishable prefix: no layer (a complete run with too few poses still fails in write_layer)
-        self.partial = self.output_dir / self.segment.segment / f".{POSE_SOURCE}.{uuid.uuid4().hex[:12]}.partial"
-        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        self.partial = partial_path(self.output_dir, self.segment, POSE_SOURCE)
         write_layer(self.partial, self.segment.segment, self.run, clock_offset_ns=self.export_ns + self.offset_ns,
                     profile=self.params.profile, backend=backend, decoder=self.decoder)  # fmt: skip
         out.put("layer", self.t_ns, LayerFile(self.partial))

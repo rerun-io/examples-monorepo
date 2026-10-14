@@ -15,7 +15,7 @@ import numpy as np
 import rerun as rr
 from serde import serde
 
-from dagkit.doc import GRAPH_ROOT, Rgb, log_graph
+from dagkit.doc import GRAPH_ROOT, HEALTH_ROOT, Rgb, log_graph
 from dagkit.graph import AsOf, Block, DropOldest, EdgeSpec, Graph, NodeSpec, Spawn, normalise
 from dagkit.node import Control, Event, Fenced, Mode, RunContext, Tick
 from dagkit.process import ProcessNode
@@ -401,7 +401,7 @@ class _Run:
         self.health_logged = now
         self.health.set_time("wall_time", duration=now - (self.started_at if force else self.health_started_at))
         for s in self.nodes:
-            root: str = f"/dagkit/health/{s.spec.name}"
+            root: str = HEALTH_ROOT + s.spec.name
             if len(s.step_ms) > s.logged:
                 self.health.log(f"{root}/step_ms", rr.Scalars(float(np.mean(s.step_ms[s.logged :]))))
                 s.logged = len(s.step_ms)

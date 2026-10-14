@@ -1,5 +1,6 @@
 """LayerSink / LayerFileSink publish policy without a catalog (register='off'), through a real run."""
 
+import re
 import stat
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from dagkit_fakes import Point
 from dagkit.graph import Block, Graph
 from dagkit.node import Control, Event, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
-from dagkit.sinks import LayerFileSink, LayerSink, open_layer
+from dagkit.sinks import LayerFileSink, LayerSink, open_layer, partial_path, publish_layer_file
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder
 from dagkit.time import GraphError
@@ -90,3 +91,12 @@ def test_layer_file_sink_publishes_what_another_writer_produced(tmp_path: Path) 
     sink.step(Tick(0, "layer", LayerFile(written), {}), Recorder())
     with pytest.raises(FileNotFoundError):
         sink.flush(Recorder())
+
+
+def test_partial_path_is_the_name_publish_reads_the_run_id_from(tmp_path: Path) -> None:
+    segment = SegmentRef("ds", "seg0")
+    partial: Path = partial_path(tmp_path, segment, "hands")  # another writer (a Rust layer writer) fills it
+    assert partial.parent.is_dir() and re.fullmatch(r"\.hands\.[0-9a-f]{12}\.partial", partial.name)
+    partial.write_bytes(b"rrd")
+    final: Path = publish_layer_file(partial, segment, "hands", output_dir=tmp_path, register="off")
+    assert final.name == f"hands.{partial.name.split('.')[2]}.rrd"
