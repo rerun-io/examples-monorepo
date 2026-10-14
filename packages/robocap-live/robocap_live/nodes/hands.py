@@ -80,6 +80,7 @@ class HandsNode:
         self.partial: Path | None = None
         self.t_ns: TimeNs = STATIC
         self.loaded_s: float = 0.0
+        self.run: LayerRun | None = None
 
     def reset(self, ctx: RunContext) -> None:
         self.abort()
@@ -125,6 +126,7 @@ class HandsNode:
         )  # fmt: skip
         print(f"{self.segment.segment}: {run.framesets} framesets ({run.with_pose} with a pose, {run.held_pose} held), reported "
               f"left {run.reported_left} / right {run.reported_right}, scale {run.scale:.4f}{'' if run.scale_final else ' (not calibrated)'}")  # fmt: skip
+        self.run = run
         out.put("layer", self.t_ns, layer)
         out.put("run", self.t_ns, run)
 

@@ -21,18 +21,15 @@ def golden(keynet_rows: list[bool]) -> pa.Table:
     })  # fmt: skip
 
 
-def test_keynet_rows_lost_on_a_camera_pane_fail_a_band_although_the_matched_rows_score_zero(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_keynet_rows_lost_on_a_camera_pane_fail_a_band_although_the_matched_rows_score_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     pre: Path = tmp_path / "short.pre.rrd"
     pre.touch()
     reference, post = golden([True, True, True]), golden([True, False, False])
-    monkeypatch.setattr(verify, "golden_path", lambda *args: pre)
     monkeypatch.setattr(verify, "_read", lambda path: (reference if path == pre else post, {}))
     scores: dict[str, float] = verify.score(Case("short", "short", "pre-port"), tmp_path / "short.post.rrd")
     assert scores["kp2d_px_mean"] == scores["landmarks_mm_mean"] == scores["reported_delta_pct"] == 0.0
     assert scores["kp2d_delta_pct"] == pytest.approx(200.0 / 3)  # 2 of the reference's 3 pane rows are gone
-    (block,) = load_card(Path(verify.PACKAGE_DIR) / "VERIFY.toml").graph
+    block = next(b for b in load_card(Path(verify.PACKAGE_DIR) / "VERIFY.toml").graph if b.name == "hands")
     band = next(m for m in block.metrics if m.name == "kp2d_delta_pct")
     assert band.better == "lower" and scores["kp2d_delta_pct"] > band.floor
     assert all("kp2d_delta_pct" in case.noise for case in block.cases)

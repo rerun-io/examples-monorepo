@@ -10,29 +10,26 @@ camera), plus ``/verify/hands/run``: static ``AnyValues`` with the layer's count
 """
 
 import time
-from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal, cast
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import rerun as rr
-from dagkit.runners import run_threaded
-from dagkit.sinks import LayerFileSink, RerunSink
-from dagkit.sources import SegmentRef
-from dagkit.verify import Case, Phase, golden_path
+from dagkit.runners import RunReport, run_threaded
+from dagkit.sinks import LayerFileSink
+from dagkit.verify import Case, Phase
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from serde import from_dict
+from serde import to_dict
 
-from robocap_live.graphs.hands_layer import hands_layer_graph, segment_source
-from robocap_live.nodes.hands import LAYER, HandsNode, HandsParams
-from robocap_live.types import LayerRun
+from robocap_live.apis.hands_layer import PACKAGE_DIR as PACKAGE_DIR
+from robocap_live.apis.hands_layer import build, case_config
+from robocap_live.nodes.hands import HandsNode
 
-PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
-"""``packages/robocap-live``: case paths (``models_dir``) are relative to it."""
 TIMELINE: str = "video_time"
 SIDES: tuple[str, ...] = ("left", "right")
 KEYNET: tuple[str, ...] = tuple(f"/world/rig_00/cam_{camera:02d}/pinhole/hands/{side}/keynet" for camera in range(6) for side in SIDES)
@@ -41,54 +38,28 @@ LANDMARKS: tuple[str, ...] = tuple(f"/world/hands/{side}/keypoints" for side in 
 """Per hand: the fitted 21 world landmarks (metres) on every frameset the hand was reported."""
 
 
-def case_segment(case: Case) -> SegmentRef:
-    """The case's catalog segment, windowed when the case has a window."""
-    assert case.dataset is not None and case.segment is not None, "robocap-live cases are catalog segments"
-    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
-    return SegmentRef(case.dataset, case.segment, window_ns=window)
-
-
-def case_hands(case: Case) -> HandsParams:
-    """The case's hand settings (``models_dir`` relative to the package)."""
-    return from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
-                                   "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
-
-
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The hands-layer graph (threaded, lossless) on the case's segment or window, logged by :func:`_hands`."""
-    _hands(case, phase, case_segment(case), recording)
+    """The App on the case's segment or window, hands on the catalog's ``slam_rs`` poses (:func:`_run`)."""
+    _run(case, phase, recording, "catalog")
 
 
 def run_robocap(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """Pre-port robocap chain: the hands-layer graph fed with slam-rs's catalog VIO poses (the whole-segment ``slam_rs`` layer
-    of slam-rs's ``vio`` ``full`` pre golden) instead of the catalog's own; base layer and poses are served in process."""
-    segment: SegmentRef = case_segment(case)
-    shared: DatasetEntry = segment.entry()  # an entry must outlive its queries
-    rows: list[dict] = shared.segment_table().to_arrow_table().select(["rerun_segment_id", "rerun_layer_names", "rerun_storage_urls"]).to_pylist()
-    row: dict = next(row for row in rows if row["rerun_segment_id"] == segment.segment)
-    base: str = dict(zip(row["rerun_layer_names"], row["rerun_storage_urls"], strict=True))["base"]
-    with rr.server.Server(host="127.0.0.1") as server:
-        dataset: DatasetEntry = server.client().create_dataset(segment.dataset)
-        dataset.register([base, golden_path("slam-rs", "vio", "full", "pre").as_uri()], layer_name=["base", "slam_rs"]).wait()
-        _hands(case, phase, replace(segment, catalog_url=server.url()), recording)
+    """The App's whole chain: VIO from the segment's start to the window's end, then the hands on its poses (:func:`_run`)."""
+    _run(case, phase, recording, "vio")
 
 
-def _hands(case: Case, phase: Phase, segment: SegmentRef, recording: rr.RecordingStream) -> None:
-    """Run the hands-layer graph (threaded, lossless) on ``segment``: its published layer file (unregistered, in a temporary
-    directory) is copied into ``recording`` unchanged, its ``LayerRun`` and wall time go to ``/verify/hands/run``."""
-    params: HandsParams = case_hands(case)
+def _run(case: Case, phase: Phase, recording: rr.RecordingStream, slam: Literal["vio", "catalog"]) -> None:
+    """Run the App's graphs (threaded, lossless): the published hands layer (unregistered, in a temporary directory) is copied into
+    ``recording`` unchanged, its ``LayerRun`` and the wall time go to ``/verify/hands/run``."""
     started: float = time.perf_counter()
     with TemporaryDirectory() as tmp:
-        publish = LayerFileSink(segment, LAYER, output_dir=Path(tmp), register="off")
-        counts = RerunSink(recording, {"run": LayerRun}, {"run": "/verify/hands/run"}, timeline=segment.timeline)
-        source = segment_source(segment, int(case.params["group_tolerance_ns"]))
-        report = run_threaded(
-            hands_layer_graph(source, HandsNode(segment, params, Path(tmp)), {"publish": publish, "counts": counts}), mode="lossless"
-        )
-        assert publish.published is not None, f"{case.name}: the run published no layer ({report.status})"
+        for graph in build(case_config(case, Path(tmp), slam), rr.RecordingStream("robocap-live-verify")):
+            report: RunReport = run_threaded(graph, mode="lossless")
+            print(f"{case.name} {phase}: {graph.name} {report.status} in {report.wall_s:.1f} s")
+        hands, publish = cast(HandsNode, graph.nodes["hands"].obj), cast(LayerFileSink, graph.nodes["publish"].obj)
+        assert publish.published is not None and hands.run is not None, f"{case.name}: the run published no layer ({report.status})"
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
-    recording.log("/verify/hands/run", rr.AnyValues(wall_s=time.perf_counter() - started), static=True)
-    print(f"{case.name} {phase}: {report.status}, {report.nodes['hands'].ticks} framesets in {report.wall_s:.1f} s")
+    recording.log("/verify/hands/run", rr.AnyValues(**to_dict(hands.run), wall_s=time.perf_counter() - started), static=True)
 
 
 def _rows(table: pa.Table, entity: str, archetype: str, width: int) -> tuple[Int64[ndarray, " n"], Float32[ndarray, "n k w"]]:
