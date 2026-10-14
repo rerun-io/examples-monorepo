@@ -81,8 +81,10 @@ Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, w
 | **rig** | `RigCameras` | nobody (unused) |
 | **cap_rig** | `CapRig` | 3 hands |
 
-## 2 · slam: Hand in values from the App
-*source* · `IterSource` · `packages/dagkit/dagkit/sources.py`
+## 2 · slam: Read the poses the VIO graph published
+*source* · `PosesCheckpoint` · `packages/robocap-live/robocap_live/graphs/hands_layer.py`
+
+Its ``slam_rs`` layer file (``publish.published``, read when this graph starts) as the STATIC pose table, f32 as stored.
 
 | gives | type | to |
 |---|---|---|

@@ -18,16 +18,16 @@ from dagkit.graph import AsOf, Graph
 from dagkit.node import Mode, Node, Source
 from dagkit.runners import RunReport
 from dagkit.sinks import LayerFileSink, Register, RerunSink
-from dagkit.sources import Column, IterSource, RecordingSource, SegmentRef
+from dagkit.sources import SegmentRef
 from dagkit.verify import Case, load_card
 from serde import from_dict
 from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs.apis.catalog_layer import vio_publish
 from slam_rs.nodes.vio import VioParams
 
-from robocap_live.graphs.hands_layer import GROUP_TOLERANCE_NS, hands_layer_graph, segment_source
+from robocap_live.graphs.hands_layer import GROUP_TOLERANCE_NS, PosesCheckpoint, hands_layer_graph, segment_source
 from robocap_live.nodes.hands import LAYER, HandsNode, HandsParams
-from robocap_live.types import RIG_ROOT, CatalogPoses, LayerRun
+from robocap_live.types import LayerRun
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
 """``packages/robocap-live``: case paths (``models_dir``) are relative to it."""
@@ -55,7 +55,8 @@ def blueprint(graphs: Sequence[Graph]) -> rrb.Blueprint:
         f"{e.dst.node}/{what}/{e.dst.port}" for g in graphs for e in g.edges if not isinstance(e.kind, AsOf) for what in ("drops", "queue_depth")
     ]
     series += [f"{name}/step_ms" for g in graphs for name, spec in g.nodes.items() if spec.kind == "node"]
-    normal = rrb.Blueprint(rrb.Grid(*(rrb.TimeSeriesView(origin=f"/dagkit/health/{s}", name=s) for s in series)), rrb.TimePanel(timeline="wall_time"))
+    unique: list[str] = list(dict.fromkeys(series))  # both graphs name their sinks publish and viewer
+    normal = rrb.Blueprint(rrb.Grid(*(rrb.TimeSeriesView(origin=f"/dagkit/health/{s}", name=s) for s in unique)), rrb.TimePanel(timeline="wall_time"))
     outputs: list[rrb.View] = [
         rrb.Spatial3DView(origin="/world", contents="+ /world/hands/**", name="2 hands · hands in 3D"),
         rrb.Spatial2DView(origin="/world/rig_00/cam_00/pinhole", name="2 hands · cam_00 overlays"),
@@ -77,8 +78,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     if config.slam == "vio":
         vio, slam = vio_publish(config.segment, config.vio, config.output_dir, config.register, recording)
         graphs.append(vio)
-        columns: dict[str, Column] = {"poses": Column(CatalogPoses, RIG_ROOT)}
-        poses = IterSource({"poses": CatalogPoses}, lambda: RecordingSource(slam.published, columns, config.segment.timeline).events())  # type: ignore[arg-type]
+        poses = PosesCheckpoint(slam, config.segment.timeline)
     source = segment_source(config.segment, catalog_poses=poses is None)
     graphs.append(hands_layer_graph(source, HandsNode(config.segment, config.hands, config.output_dir), sinks, poses))
     recording.send_blueprint(blueprint(graphs))
