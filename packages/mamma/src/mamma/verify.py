@@ -38,17 +38,11 @@ BODY_JOINTS: int = 22
 """MPJPE joints: the SMPL-X body joints regressed from the mesh (hands and face excluded)."""
 
 
-def _window_ns(case: Case) -> tuple[int, int]:
-    return (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9)) if case.window_s is not None else (-(2**62), 2**62)
-
-
 def case_config(case: Case) -> Config:
     """The App Config of a case: ``run`` and the gradio app's examples (``example_cases``) run the same inputs."""
-    assert case.dataset is not None and case.segment is not None, "mamma cases are catalog segments"
-    window: tuple[int, int] | None = _window_ns(case) if case.window_s is not None else None
     height, width = (int(x) for x in case.params["resize_hw"].split(","))
     return Config(
-        RerunTyroConfig(headless=True), SegmentRef(case.dataset, case.segment, window_ns=window), cameras=tuple(case.params["cameras"].split(",")),
+        RerunTyroConfig(headless=True), case.segment_ref(), cameras=tuple(case.params["cameras"].split(",")),
         resize_hw=(height, width), preset="quality" if case.params["preset"] == "quality" else "fast", subjects=int(case.params["subjects"]),
     )  # fmt: skip
 
@@ -95,9 +89,9 @@ def _people(table: pa.Table, root: str) -> list[str]:
 def score(case: Case, golden: Path) -> dict[str, float]:
     """MPJPE / PVE of the fitted meshes against the ``mosh_gt`` meshes, person-mask IoU at the GT mask size, fit coverage and
     realtime fraction. Persons are matched to GT persons by the smallest mean PVE (one-to-one)."""
-    assert case.dataset is not None and case.segment is not None, "mamma cases are catalog segments"
+    segment_ref: SegmentRef = case.segment_ref()
     cameras: list[str] = case.params["cameras"].split(",")
-    start_ns, stop_ns = _window_ns(case)
+    start_ns, stop_ns = segment_ref.window_ns or (-(2**62), 2**62)
     mesh_paths: list[str] = ["/world/mamma/people/**"]
     mask_paths: list[str] = [f"/world/{camera}/pinhole/mamma/masks/**" for camera in cameras]
     with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
@@ -105,8 +99,8 @@ def score(case: Case, golden: Path) -> dict[str, float]:
         pred_meshes: pa.Table = golden_dataset.filter_contents(mesh_paths).reader(index="video_time").to_arrow_table()
         pred_masks: pa.Table = golden_dataset.filter_contents(mask_paths).reader(index="video_time").to_arrow_table()
         report: dict = golden_dataset.filter_contents(["/verify/capture/run"]).reader(index=None).to_arrow_table().to_pylist()[0]
-    source: DatasetEntry = SegmentRef(case.dataset, case.segment).entry()
-    segment = source.filter_segments(case.segment)
+    source: DatasetEntry = segment_ref.entry()
+    segment = source.filter_segments(segment_ref.segment)
     gt_mesh_paths: list[str] = sorted(
         {
             c.entity_path

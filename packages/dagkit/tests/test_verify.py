@@ -11,7 +11,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from dagkit import verify
-from dagkit.verify import GraphBlock, MetricBand, check_band, golden_path, load_card
+from dagkit.sources import SegmentRef
+from dagkit.verify import Case, GraphBlock, MetricBand, check_band, golden_path, load_card
 
 CARD = """
 package = "exo-calib"
@@ -59,6 +60,15 @@ def test_card_loads_and_full_case_reuses_short_noise(tmp_path: Path) -> None:
     (tmp_path / "BAD.toml").write_text(CARD.replace('package = "exo-calib"', 'package = "exo-calib"\nowner = "x"'))
     with pytest.raises(ValueError, match="BAD.toml"):
         load_card(tmp_path / "BAD.toml")
+
+
+def test_a_case_segment_ref_carries_its_window_in_ns_and_a_local_case_has_none() -> None:
+    case = Case("short", "short", "gt", dataset="ds", segment="seg", window_s=(1.5, 2.25))
+    assert case.segment_ref() == SegmentRef("ds", "seg", window_ns=(1_500_000_000, 2_250_000_000))
+    assert case.segment_ref("rerun+http://host:1").catalog_url == "rerun+http://host:1"
+    assert Case("full", "full", "gt", dataset="ds", segment="seg").segment_ref().window_ns is None
+    with pytest.raises(ValueError, match="'local' has no catalog segment"):
+        Case("local", "short", "pre-port", input="data/image.png").segment_ref()
 
 
 def test_band_tolerance_is_twice_noise_or_floor() -> None:

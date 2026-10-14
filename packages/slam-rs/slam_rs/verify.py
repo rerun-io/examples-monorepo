@@ -35,9 +35,7 @@ RUN: str = "/verify/vio/run"
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """The VIO graph (sequential, lossless) on the case's segment, its layer (unregistered, in a temporary directory) copied into
     ``recording``. VIO initialises from rest, so it starts at the segment's first frameset; a window ends it at ``window_s[1]``."""
-    assert case.dataset is not None and case.segment is not None, "slam-rs cases are catalog segments"
-    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
-    segment = SegmentRef(case.dataset, case.segment, load_slam_config().catalog_url, window_ns=window)
+    segment: SegmentRef = case.segment_ref(load_slam_config().catalog_url)
     params: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")})
     with TemporaryDirectory() as tmp:
         graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio"))
@@ -80,14 +78,14 @@ def score(case: Case, golden: Path) -> dict[str, float]:
 
 def score_gt(case: Case, golden: Path) -> dict[str, float]:
     """The slam-rs gate's ATE of a golden against the segment's ``gt`` layer, and the framesets that produced no pose."""
-    assert case.dataset is not None and case.segment is not None, "slam-rs cases are catalog segments"
+    segment: SegmentRef = case.segment_ref(load_slam_config().catalog_url)
     ours, lost = _read(golden)
     source: CatalogSegment = resolve_catalog_segments(
-        (CatalogSegment(load_slam_config().catalog_url, case.dataset, case.segment),), require_ground_truth=True
+        (CatalogSegment(segment.catalog_url, segment.dataset, segment.segment),), require_ground_truth=True
     )[0]
     assert source.ground_truth_uri is not None
     with rr.server.Server(host="127.0.0.1") as server:
         truth: DatasetEntry = server.client().create_dataset("gt")
         truth.register([source.ground_truth_uri]).wait()
-        gt: Trajectory = _read_ground_truth(truth, case.segment, int(ours.t_ns[0]), int(ours.t_ns[-1]))
+        gt: Trajectory = _read_ground_truth(truth, segment.segment, int(ours.t_ns[0]), int(ours.t_ns[-1]))
     return {"gt_ate_cm": 100.0 * ate(ours, gt).rmse_m, "lost_framesets": lost, "pose_count": float(len(ours))}

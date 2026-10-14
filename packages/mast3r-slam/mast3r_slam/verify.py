@@ -62,17 +62,13 @@ CHILD_FROM_PARENT: int = 2
 """``Transform3D:relation`` of a node logged as child_from_parent (the catalog's camera extrinsics)."""
 
 
-def _window_ns(case: Case) -> tuple[int, int] | None:
-    return None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
-
-
 def _clip(case: Case) -> CatalogVideo:
     """The case's cam_00 packets (``window_s`` [start, stop) or the whole segment); the first must be a keyframe."""
-    assert case.dataset is not None and case.segment is not None, "mast3r-slam cases are catalog segments"
-    dataset: DatasetEntry = SegmentRef(case.dataset, case.segment).entry()  # the entry must outlive its queries
-    video: CatalogVideo = read_catalog_videos(dataset, case.segment, [VIDEO], TIMELINE, _window_ns(case))[0]
+    segment: SegmentRef = case.segment_ref()
+    dataset: DatasetEntry = segment.entry()  # the entry must outlive its queries
+    video: CatalogVideo = read_catalog_videos(dataset, segment.segment, [VIDEO], TIMELINE, segment.window_ns)[0]
     if not video.keyframes[0]:
-        raise ValueError(f"{case.segment}: the window {case.window_s} does not start on a keyframe")
+        raise ValueError(f"{segment.segment}: the window {case.window_s} does not start on a keyframe")
     return video
 
 
@@ -103,10 +99,8 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream, *, phases: tupl
     """
     if phase not in phases:
         raise ValueError(f"phase {phase}: pre-port goldens come from the card commit (the old pipeline); this tree runs the port")
-    assert case.dataset is not None and case.segment is not None, "mast3r-slam cases are catalog segments"
     cfg = SlamConfig(use_calib=case.params["calib"] == "true", img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
-    segment = SegmentRef(case.dataset, case.segment, window_ns=_window_ns(case))
-    video = CatalogVideoSource(segment, (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample, undistort=case.params.get("undistort") == "true")
+    video = CatalogVideoSource(case.segment_ref(), (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample, undistort=case.params.get("undistort") == "true")
     golden = _GoldenSink(recording, CAMERA)
     start: float = time.perf_counter()
     report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode="lossless")
@@ -134,16 +128,16 @@ def _poses(table: pa.Table, path: str) -> tuple[Int64[ndarray, " n"], Float64[nd
 
 def _gt_camera_centers(case: Case) -> tuple[Int64[ndarray, " g"], Float64[ndarray, "g 3"]]:
     """GT cam_00 centres = GT rig pose (world_T_rig) applied to the cam_00 centre in the rig frame (static extrinsic)."""
-    assert case.dataset is not None and case.segment is not None
-    dataset: DatasetEntry = SegmentRef(case.dataset, case.segment).entry()
-    static: dict = dataset.filter_segments(case.segment).filter_contents([CAMERA]).reader(index=None).to_arrow_table().to_pylist()[0]
+    segment: SegmentRef = case.segment_ref()
+    dataset: DatasetEntry = segment.entry()
+    static: dict = dataset.filter_segments(segment.segment).filter_contents([CAMERA]).reader(index=None).to_arrow_table().to_pylist()[0]
     cam_T_rig: Float64[ndarray, "4 4"] = np.eye(4)
     cam_T_rig[:3, :3] = np.asarray(static[f"{CAMERA}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T  # column-major
     cam_T_rig[:3, 3] = static[f"{CAMERA}:Transform3D:translation"][0]
     if static[f"{CAMERA}:Transform3D:relation"][0] != CHILD_FROM_PARENT:
         cam_T_rig = np.linalg.inv(cam_T_rig)
     rig_center: Float64[ndarray, " 3"] = np.linalg.inv(cam_T_rig)[:3, 3]
-    t_ns, xyz, xyzw = _poses(dataset.filter_segments(case.segment).filter_contents([GT_RIG]).reader(index=TIMELINE).to_arrow_table(), GT_RIG)
+    t_ns, xyz, xyzw = _poses(dataset.filter_segments(segment.segment).filter_contents([GT_RIG]).reader(index=TIMELINE).to_arrow_table(), GT_RIG)
     return t_ns, Rotation.from_quat(xyzw).apply(rig_center) + xyz
 
 

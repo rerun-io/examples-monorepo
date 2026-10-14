@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
@@ -44,6 +44,14 @@ class Case:
     noise: dict[str, float] = field(default_factory=dict)  # metric -> measured |pre - pre2| for THIS case
     noise_from: str | None = None  # reuse the named case's noise (stated, never implied)
     published: dict[str, float] = field(default_factory=dict)  # metric -> a published result on this case (a paper's table)
+
+    def segment_ref(self, catalog_url: str | None = None) -> SegmentRef:
+        """The case's catalog segment, ``window_s`` as ``window_ns``; a local-input case has none (ValueError)."""
+        if self.dataset is None or self.segment is None:
+            raise ValueError(f"case {self.name!r} has no catalog segment (dataset and segment)")
+        window: tuple[int, int] | None = None if self.window_s is None else (round(self.window_s[0] * 1e9), round(self.window_s[1] * 1e9))
+        segment = SegmentRef(self.dataset, self.segment, window_ns=window)
+        return segment if catalog_url is None else replace(segment, catalog_url=catalog_url)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -176,7 +184,7 @@ def main(args: VerifyArgs) -> int:
         if args.register and all(r.passed for r in results) and case.window_s is None and case.dataset and case.segment:  # never failed or windowed
             registered: Path = golden.with_name(f"{case.name}.{args.phase}.{sha7}.{uuid.uuid4().hex[:8]}.rrd")  # immutable: the golden path is reused
             shutil.copy2(golden, registered)
-            dataset = SegmentRef(case.dataset, case.segment).entry()
+            dataset = case.segment_ref().entry()
             dataset.register([registered.resolve().as_uri()], layer_name=f"verify-{block.name}-{args.phase}-{sha7}").wait()
     return 1 if failed else 0
 

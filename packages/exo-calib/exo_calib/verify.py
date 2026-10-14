@@ -30,9 +30,7 @@ CARD: Path = Path(__file__).resolve().parents[1] / "VERIFY.toml"
 
 def case_config(case: Case) -> Config:
     """The App config of a catalog case; it registers nothing, and its files go to the package's ``data/outputs`` from any cwd."""
-    assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
-    segment = SegmentRef(case.dataset, case.segment)
-    return Config(RerunTyroConfig(headless=True), segment, frame_budget=int(case.params["frame_budget"]), output_dir=CARD.parent / "data" / "outputs", register="off")
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), frame_budget=int(case.params["frame_budget"]), output_dir=CARD.parent / "data" / "outputs", register="off")
 
 
 def examples() -> list[Config]:
@@ -88,7 +86,7 @@ def _rig_errors(
 
 def score(case: Case, golden: Path) -> dict[str, float]:
     """Score the golden's refined (banded) and init (reported) rigs against the segment's GT base calibration."""
-    assert case.dataset is not None and case.segment is not None, "exo-calib cases are catalog segments"
+    segment: SegmentRef = case.segment_ref()
     with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
         golden_dataset: DatasetEntry = server.client().get_dataset("golden")  # an entry must outlive its queries
         table: pa.Table = golden_dataset.filter_contents(["/world/exocalib/**"]).reader(index=None).to_arrow_table()
@@ -98,9 +96,9 @@ def score(case: Case, golden: Path) -> dict[str, float]:
         for c in table.column_names
         if c.startswith("/world/exocalib/refined/") and c.endswith(suffix)
     )
-    source: DatasetEntry = SegmentRef(case.dataset, case.segment).entry()
+    source: DatasetEntry = segment.entry()
     gt_table: pa.Table = (
-        source.filter_segments(case.segment).filter_contents([f"/world/{name}/**" for name in names]).reader(index=None).to_arrow_table()
+        source.filter_segments(segment.segment).filter_contents([f"/world/{name}/**" for name in names]).reader(index=None).to_arrow_table()
     )
     gt: tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]] = _rig(gt_table, "/world", names)
     return _rig_errors("", _rig(table, "/world/exocalib/refined", names), gt) | _rig_errors("init_", _rig(table, "/world/exocalib/init", names), gt)

@@ -87,20 +87,13 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
 
 
-def case_segment(case: Case) -> SegmentRef:
-    """The case's catalog segment, windowed when the case has a window."""
-    assert case.dataset is not None and case.segment is not None, "robocap-live cases are catalog segments"
-    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
-    return SegmentRef(case.dataset, case.segment, window_ns=window)
-
-
 def case_config(case: Case, output_dir: Path, slam: Literal["vio", "catalog"]) -> Config:
     """The App's Config for a case (``models_dir`` relative to the package; VIO params of a ``robocap`` case), unregistered."""
     assert int(case.params["group_tolerance_ns"]) == GROUP_TOLERANCE_NS, f"{case.name}: the graph groups framesets within {GROUP_TOLERANCE_NS} ns"
     hands: HandsParams = from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
                                                  "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
     vio: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")}) if slam == "vio" else VioParams()
-    return Config(RerunTyroConfig(headless=True), case_segment(case), output_dir, hands, slam, vio, register="off")
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), output_dir, hands, slam, vio, register="off")
 
 
 def examples() -> list[Config]:
