@@ -9,13 +9,12 @@ Coverage
 Covers all kernel families that have a Mojo implementation:
   - iter_proj (frontend: iterative projection)
   - refine_matches (frontend: descriptor refinement)
-  - gauss_newton_rays (backend: GN linearisation + solve + retraction)
+  - gauss_newton_rays (backend: GN linearisation + solve + retraction). The Mojo
+    side is the production loop, `mast3r_slam.ops.optim.gauss_newton_rays`
+    (Mojo step and retraction kernels, dense solve on the CPU).
 
-NOT benchmarked (no Mojo implementation — always routed to CUDA):
-  - gauss_newton_points: linearisation step delegates to CUDA extension
-  - gauss_newton_calib: linearisation step delegates to CUDA extension
-  The Mojo wrappers for these call into the CUDA extension for the step kernel
-  (see gn.mojo `gauss_newton_impl`).
+NOT benchmarked (no Mojo implementation): gauss_newton_points and
+gauss_newton_calib run only in the CUDA extension.
 
 Input shapes are taken from real pipeline runs (instrumented with BENCH_LOG_SHAPES):
   - fast config: 224px, fdim=24, radius=3, dilation=5, batch=1..8
@@ -37,6 +36,9 @@ from typing import Any
 import lietorch
 import torch
 from torch import Tensor
+
+from mast3r_slam.ops.optim import gauss_newton_rays
+from mast3r_slam.types import LocalOptConfig
 
 # ── Backend imports ───────────────────────────────────────────────────────────
 
@@ -180,13 +182,13 @@ def make_gn_runner(
     delta_thresh: float,
 ) -> Callable[[], object]:
     """Capture one GN rays benchmark configuration into a zero-argument runner."""
+    cfg = LocalOptConfig(sigma_ray=sigma_ray, sigma_dist=sigma_dist, C_conf=c_thresh, Q_conf=q_thresh, max_iters=max_iter, delta_norm=delta_thresh)
 
     def run() -> object:
         t_copy: Tensor = twc.clone()
-        args = (t_copy, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh)
         if backend is mojo_be:
-            return backend.gauss_newton_rays(args)
-        return backend.gauss_newton_rays(*args)
+            return gauss_newton_rays(t_copy, xs, cs, ii, jj, idx, valid, q, cfg)
+        return backend.gauss_newton_rays(t_copy, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh)
 
     return run
 

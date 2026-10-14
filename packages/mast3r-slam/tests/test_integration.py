@@ -1,41 +1,13 @@
-"""Integration lane: the Gauss-Newton Op against the Mojo loop it replaces (GPU, bit-identical) and the Rerun round trips
-of the edge Types through an in-process server (a catalog)."""
+"""Integration lane: the Rerun round trips of the edge Types through an in-process server (a catalog). The Gauss-Newton
+Op's GPU parity with the CUDA extension is in test_mojo_vs_cuda.py."""
 
-import lietorch
 import numpy as np
 import pytest
-import torch
 from dagkit.types import rerun_roundtrip
 
-from mast3r_slam.ops.optim import gauss_newton_rays
-from mast3r_slam.types import KeyframeCloud, LocalOptConfig, MapUpdate, TrackedFrame
+from mast3r_slam.types import KeyframeCloud, MapUpdate, TrackedFrame
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.mark.parametrize(("n_kf", "hw", "valid_frac"), [(12, 50176, 0.3), (60, 4096, 0.05)])
-def test_gauss_newton_rays_equals_the_mojo_loop(n_kf: int, hw: int, valid_frac: float) -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("needs a CUDA GPU")
-    mojo = pytest.importorskip("mast3r_slam_mojo_backends", reason="Mojo kernels: pixi task _mast3r-slam-build-mojo-kernels")
-    torch.manual_seed(n_kf)
-    device = "cuda:0"
-    poses = lietorch.Sim3.exp(0.05 * torch.randn(n_kf, 7, device=device)).data.contiguous().float()
-    xs = torch.randn(n_kf, hw, 3, device=device)
-    xs[..., 2].abs_().add_(1.0)
-    cs = (0.5 + torch.rand(n_kf, hw, 1, device=device)).contiguous()
-    forward = [(i, i + 1) for i in range(n_kf - 1)] + [(i, i + 2) for i in range(n_kf - 2)]
-    ii_f, jj_f = (torch.tensor([e[k] for e in forward], device=device) for k in (0, 1))
-    ii, jj = torch.cat([ii_f, jj_f]).contiguous(), torch.cat([jj_f, ii_f]).contiguous()
-    idx = torch.randint(0, hw, (len(ii), hw), device=device)
-    valid = (torch.rand(len(ii), hw, 1, device=device) < valid_frac).contiguous()
-    q = (1.55 + 0.35 * torch.rand(len(ii), hw, 1, device=device)).contiguous()
-    cfg = LocalOptConfig()
-    reference, ported = poses.clone(), poses.clone()
-    mojo.gauss_newton_rays((reference, xs, cs, ii, jj, idx, valid, q, cfg.sigma_ray, cfg.sigma_dist, cfg.C_conf, cfg.Q_conf, cfg.max_iters, cfg.delta_norm))
-    gauss_newton_rays(ported, xs, cs, ii, jj, idx, valid, q, cfg)
-    assert not torch.equal(ported, poses)  # the solve moved the free poses
-    assert torch.equal(ported[0], poses[0]) and torch.equal(ported, reference)
 
 
 def test_tracked_frame_rerun_round_trip() -> None:
