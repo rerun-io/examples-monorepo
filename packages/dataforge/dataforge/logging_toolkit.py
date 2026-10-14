@@ -618,6 +618,45 @@ def log_trail_segments(
     )
 
 
+def log_gt_path(
+    recording: rr.RecordingStream,
+    rig: int,
+    *,
+    times_ns: Int64[ndarray, "n_poses"],
+    translations_xyz: Float64[ndarray, "n_poses 3"],
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"],
+    radius: float,
+    radius_unit: Literal["m", "ui_points"],
+) -> None:
+    """Send a gt layer's trajectory: ``world_T_rig`` on the rig node, the whole path, and its trail.
+
+    Two views of one trajectory: the static strip is the whole path, shown whole in
+    the overview and dimmed to context in the follow view, and the per-pose segments
+    are what the blueprint's cursor-relative time range turns into a recent-motion
+    trail on top of it. The pose track leaves ``from_parent`` unset: the stored value
+    is world_T_rig, the child-to-parent step every child frustum rides. The root
+    ``ViewCoordinates`` stays with the caller, which knows its world's up axis.
+
+    Args:
+        recording: Destination recording stream.
+        rig: Rig whose node the poses animate.
+        times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
+        translations_xyz: ``world_t_rig``, metres.
+        quaternions_xyzw: ``world_R_rig``, scalar last.
+        radius: Stroke of the whole path, in ``radius_unit``.
+        radius_unit: ``"m"`` for a metric radius, ``"ui_points"`` for a width on screen
+            that stays visible over a long walk.
+    """
+    log_pose_track(recording, schema.rig_path(rig), times_ns=times_ns, translations_xyz=translations_xyz, quaternions_xyzw=quaternions_xyzw)
+    rr.log(
+        schema.trajectory_path(schema.GT_RUN_SOURCE),
+        rr.LineStrips3D([translations_xyz], colors=TRAJECTORY_COLOR, radii=rr.Radius.ui_points(radius) if radius_unit == "ui_points" else radius),
+        static=True,
+        recording=recording,
+    )
+    log_trail_segments(recording, schema.trail_path(schema.GT_RUN_SOURCE), times_ns=times_ns, translations_xyz=translations_xyz)
+
+
 def log_imu(
     recording: rr.RecordingStream,
     rig: int,

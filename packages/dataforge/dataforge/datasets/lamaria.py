@@ -68,16 +68,14 @@ from dataforge.datasets import lamaria_source
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
-    TRAJECTORY_COLOR,
     FrameKind,
     FrameSource,
     ImuChannel,
     encode_frames_to_mp4,
     log_camera_node,
+    log_gt_path,
     log_imu,
-    log_pose_track,
     log_rig_node,
-    log_trail_segments,
     log_video_stream,
     require_av1_nvenc,
     resolve_ffmpeg,
@@ -1051,33 +1049,14 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             # The right-handed axes WORLD_UP names; every LaMAria world is Z-up.
             rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)
             if trajectory.times_ns.size:
-                # from_parent stays unset: the stored value is world_T_rig, the
-                # child-to-parent step, which is what every child frustum rides.
-                log_pose_track(
+                log_gt_path(
                     recording,
-                    schema.rig_path(RIG),
+                    RIG,
                     times_ns=trajectory.times_ns,
                     translations_xyz=trajectory.translations_xyz,
                     quaternions_xyzw=trajectory.quaternions_xyzw,
-                )
-                # Two views of one trajectory: the static strip is the whole path for the
-                # overview, and the per-pose segments are what the blueprint's cursor-relative
-                # time range turns into a recent-motion trail in the Follow view.
-                rr.log(
-                    schema.trajectory_path(schema.GT_RUN_SOURCE),
-                    rr.LineStrips3D(
-                        [trajectory.translations_xyz],
-                        colors=TRAJECTORY_COLOR,
-                        radii=rr.components.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS),
-                    ),
-                    static=True,
-                    recording=recording,
-                )
-                log_trail_segments(
-                    recording,
-                    schema.trail_path(schema.GT_RUN_SOURCE),
-                    times_ns=trajectory.times_ns,
-                    translations_xyz=trajectory.translations_xyz,
+                    radius=GT_TRAJECTORY_WIDTH_UI_POINTS,
+                    radius_unit="ui_points",
                 )
             if points:
                 log_control_points(recording, points)
