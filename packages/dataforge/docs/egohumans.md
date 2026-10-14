@@ -25,8 +25,13 @@ pixi run -e dataforge dataforge-convert egohumans --sequences 02_lego/006_legoas
   is size-checked and renamed; a broken transfer resumes with a `Range` request.
 - **Drive quota.** Drive refuses popular files for up to a day ("Quota exceeded: too many users have viewed or downloaded this
   file recently") and answers with an HTML page; `download` recognises it, keeps the part, reports the file and fails at the
-  end so a rerun picks it up. It never slices a file into small ranges to get around the quota. On 2026-10-13 every file of the
-  folder was refused; a user unit retried hourly for 48 h (Pablo's choice).
+  end so a rerun picks it up. It never slices a file into small ranges to get around the quota. Every file of the folder was
+  refused on 2026-10-13 and still on 2026-10-14 (15 hourly retries); a user unit retried hourly for 48 h (Pablo's choice).
+- **A way past the quota (tried once, 2026-10-14; not automated).** A signed-in Google account can "Make a copy" of a
+  refused file: `06_badminton/045_badminton.tar.gz` worked. The copy lands in that account's My Drive with its own quota and
+  counts against its storage (597.6 GB for the whole release). Downloading the copy was not finished: it needs a signed-in
+  browser download, or a short "Anyone with the link" share so that `fetch_drive_file` can fetch it by the copy's id. A Codex
+  computer-use agent on a Mac signed in to Google made the copy, then lost its connection to Chrome.
 - Each sequence's upstream config is fetched from GitHub (`egohumans/configs/<activity>/<sequence>.yaml` at `d7875dd4`) into
   `<root>/configs/`. It lists the glasses (`INVALID_ARIAS`) and GoPros (`INVALID_EXOS`) the authors left out and the GoPros
   posed by hand (`CALIBRATION.MANUAL_EXO_CAMERAS`, pose in `colmap/workplace/camNN.npy`): 91 of the 133 configs pose some GoPros by hand, 29 drop glasses, 31 drop GoPros (all 133 parse).
