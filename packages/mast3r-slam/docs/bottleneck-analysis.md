@@ -106,7 +106,7 @@ These changes were enough to prove that logging overhead was real and to quantif
 
 ## Logging Optimization — Completed
 
-Logging has been moved off the tracking critical path via `AsyncRerunLogger` (a dedicated background thread). See `async_logger.py` and `log_events.py`.
+Logging has been moved off the tracking critical path: the graph's `RerunSink` logs the Types' `to_rerun` mappings in its own thread (see `docs/architecture.md`). The notes below describe the earlier async logger thread.
 
 Measured result on `example-base` (full video, 512px, live viewer):
 

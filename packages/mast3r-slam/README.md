@@ -38,11 +38,17 @@ pixi run -e mast3r-slam --frozen mast3r-slam-app
 ```
 
 ### Direct Python (from package directory)
+The App (`mast3r_slam/apis/slam.py`, a dagkit graph in `mast3r_slam/graphs/slam.py`) takes a catalog segment, a video,
+an image directory or a webcam; `--preset` picks an operating point from `profiles/x86_64-cuda.toml`:
 ```bash
 cd packages/mast3r-slam
-pixi run -e mast3r-slam --frozen python tools/mast3r_slam_inference.py \
-    --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml
+pixi run -e mast3r-slam --frozen python tools/apps/slam.py --video data/normal-apt-tour.mp4 --preset base --mode realtime
 ```
+The generated gradio app (`pixi run -e mast3r-slam mast3r-slam-app`) has the same fields; choose the hardware class
+there (its form does not offer `auto`). An uploaded video takes precedence over the webcam field.
+
+### Verification
+`VERIFY.toml` bands the Sim3 ATE of the final keyframes against msd-odyssey mocap GT (`verify`, `verify-full` tasks).
 
 ## First Run
 
@@ -62,7 +68,6 @@ Subsequent runs skip all install steps (idempotent checks).
 - curope (CUDA RoPE2D) is skipped; falls back to a slower PyTorch implementation.
   **TODO:** Add curope as a pixi-build workspace package (`packages/curope/`) to enable
   the faster CUDA kernel from `naver/croco/models/curope/`.
-- `pyrealsense2` is optional (only needed for live RealSense camera input)
 
 ## Acknowledgements
 

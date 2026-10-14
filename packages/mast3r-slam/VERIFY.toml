@@ -1,0 +1,112 @@
+# mast3r-slam verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "mast3r-slam"
+
+[[graph]]
+name = "slam"
+run = "mast3r_slam.verify:run"
+score = "mast3r_slam.verify:score"
+# GT: msd-odyssey mocap rig poses (layer gt, /world/rig_00 on video_time) composed with the static cam_00 extrinsic.
+# ate_rmse_m = Sim3 (Umeyama) ATE RMSE of the FINAL keyframe camera centres against GT cam_00 (nearest GT pose, <= 5 ms);
+# floor = 5 % of the short pre (0.36904 m -> 0.01845 m; floors are per block, so the full case gets the same 0.01845 m,
+# 3 % of its 0.62155 m). tracked_fraction = input frames the frontend left in
+# TRACKING / input frames (the catalog gives the denominator). Every phase runs lossless (the frontend waits for the
+# backend after each keyframe / relocalisation: the old single_thread), uncalibrated, every 2nd frame of cam_00.
+# Shots (own viewer, verify-block 5): 3D view "/" = Sim3-aligned estimate (final keyframes + tracked frustum) over the GT
+# cam_00 trail and frustum; cam_00 = the input video. 119.5 s applies to the full case only (after the short window).
+shots = [
+    { view = "/", t_s = 15.0 },
+    { view = "/", t_s = 29.5 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 15.0 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 29.5 },
+    { view = "/", t_s = 119.5 },
+]
+metrics = [
+    { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.01845 },
+    { name = "tracked_fraction", unit = "1", better = "higher", floor = 0.02 },
+]
+
+[[graph.cases]]
+# rule: the first sorted msd-odyssey segment whose mocap GT spans the capture (GT duration >= 99.9 % of the capture,
+# 0 sanitized poses); short = its first 30 s on video_time.
+name = "short"
+clip = "short"
+reference = "gt"
+dataset = "msd-odyssey"
+segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
+window_s = [0.0, 30.0]
+params = { calib = "false", subsample = "2", img_size = "512" }
+# pre and pre2 bit-identical (lossless is deterministic here): ATE 0.369037 m, tracked 354/450 = 0.786667, 58 keyframes.
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+# rule: the same segment, its first 120 s at 512 px (1,800 input frames). The whole segment does not run pre-port: at
+# 512 px the backend runs out of GPU memory in the global GN solve at ~140 s (~440 keyframes, ~1,460 edges; the frontend
+# then waits forever for it), at 224 px the 512-keyframe buffer overflows. 120 s is the longest round window that runs
+# with margin. Pre-port runs need one fix outside the SLAM math: the Mojo gauss_newton_rays loop never frees its CPU
+# dense normal equations (host memory grows ~ keyframes^3, 30 GB at 187 keyframes), so pre and pre2 ran with an
+# op-for-op Python copy of that loop (same torch calls and Mojo kernels; short-case poses bit-identical with and without
+# it; Producer version suffix "+gn-leak-fix"). The port must keep host memory bounded.
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "msd-odyssey"
+segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
+window_s = [0.0, 120.0]
+params = { calib = "false", subsample = "2", img_size = "512" }
+# pre / pre2 (not bit-identical over 120 s): ATE 0.621547 / 0.621571 m, tracked 1571 / 1572 of 1802, 349 keyframes each;
+# tolerance = max(2 x noise, floor) = the floors.
+noise = { ate_rmse_m = 0.0000248, tracked_fraction = 0.000555 }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py"]
+properties = [
+    "tests/test_types.py::test_tracked_frame_serde_round_trip_keeps_dtype",
+    "tests/test_types.py::test_map_update_serde_round_trip_and_rerun_structure",
+    "tests/test_types.py::test_keyframe_cloud_serde_round_trip_and_rerun_path",
+    "tests/test_types.py::test_slam_config_toml_round_trip",
+    "tests/test_types.py::test_slam_config_refuses_unknown_keys_and_coerces_hand_written_numbers",
+    "tests/test_types.py::test_weighted_pointmap_is_a_confidence_weighted_mean",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_integration.py::test_tracked_frame_rerun_round_trip", "tests/test_integration.py::test_map_update_rerun_round_trip", "tests/test_integration.py::test_keyframe_cloud_rerun_round_trip"]
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_ops.py"]
+properties = [
+    "tests/test_ops.py::test_sim3_compose_with_inverse_is_identity",
+    "tests/test_ops.py::test_solve_pose_blocks_solves_the_assembled_system",
+    "tests/test_ops.py::test_frame_intrinsics_map_projections_through_resize_and_crop",
+    "tests/test_ops.py::test_ate_is_invariant_to_a_sim3_of_the_estimate",
+]
+
+[[tests]]
+name = "gauss-newton-parity"
+tier = "op"
+lane = "integration"
+tests = ["tests/test_integration.py::test_gauss_newton_rays_equals_the_mojo_loop"]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+properties = [
+    "tests/test_nodes.py::test_frontend_contract_and_mode_flow",
+    "tests/test_nodes.py::test_frontend_reset_returns_to_init",
+    "tests/test_nodes.py::test_lossless_frontend_waits_for_the_backend_and_abort_ends_the_wait",
+    "tests/test_nodes.py::test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers",
+    "tests/test_nodes.py::test_frontend_refuses_a_mid_run_reset",
+    "tests/test_nodes.py::test_backend_contract",
+    "tests/test_nodes.py::test_a_realtime_stop_during_relocalisation_stays_terminated",
+    "tests/test_graph.py::test_a_pure_node_in_a_process_gives_the_same_outputs_as_in_a_thread",
+]

@@ -3,8 +3,7 @@ import pytest
 from beartype import beartype
 from beartype.roar import BeartypeCallHintParamViolation
 
-from mast3r_slam.image_types import RgbNormalized
-from mast3r_slam.image_utils import resize_img
+from mast3r_slam.ops.image import RgbNormalized, resize_img
 
 
 @beartype

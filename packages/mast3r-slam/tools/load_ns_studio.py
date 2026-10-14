@@ -10,7 +10,7 @@ from serde.json import from_json
 from simplecv.ops import conventions
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from mast3r_slam.nerfstudio_utils import NerfstudioData
+from mast3r_slam.nodes.nerfstudio import NerfstudioData
 
 
 @dataclass

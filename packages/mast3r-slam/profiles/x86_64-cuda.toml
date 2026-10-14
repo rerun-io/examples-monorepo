@@ -1,0 +1,21 @@
+# mast3r-slam on the x86_64-cuda hardware class (dagkit profile, read by apis/slam.py).
+# `slam` holds SlamConfig fields (mast3r_slam/types.py); the defaults are the base operating point. Presets:
+#   base:  512 px, every frame.
+#   eval:  512 px, every 2nd frame (the verify cases; run lossless).
+#   fast:  224 px, every 5th frame.
+#   calib: calibrated tracking and optimisation, every 2nd frame (needs a catalog camera with intrinsics and the CUDA
+#          backend built by the pixi task _mast3r-slam-build-cuda-kernels).
+hardware = "x86_64-cuda"
+
+[presets.base]
+
+[presets.eval.slam.params]
+subsample = 2
+
+[presets.fast.slam.params]
+img_size = 224
+subsample = 5
+
+[presets.calib.slam.params]
+use_calib = true
+subsample = 2

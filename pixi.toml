@@ -1900,25 +1900,9 @@ outputs = [
 ]
 description = "Download example video data"
 
-# ── Test baseline task ──────────────────────────────────────────────────
-[feature.mast3r-slam.tasks._mast3r-slam-generate-test-baseline]
-cmd = """python tools/mast3r_slam_inference.py \
-  --dataset data/normal-apt-tour.mp4 --img-size 224 \
-  --config config/test.yaml --max-frames 30 --no-viz \
-  --rr-config.save tests/fixtures/baseline_30frames.rrd"""
-depends-on = [
-    "_mast3r-slam-build-cuda-kernels",
-    "_mast3r-slam-build-mojo-kernels",
-    "_mast3r-slam-download-checkpoints",
-    "_mast3r-slam-download-example-data",
-]
-cwd = "packages/mast3r-slam"
-description = "Generate baseline .rrd for regression tests (30 frames, deterministic)"
-outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
-
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.mast3r-slam-example-quick]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
+cmd = "python tools/apps/slam.py --video data/normal-apt-tour.mp4 --preset fast --max-frames 100 --mode realtime"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -1928,7 +1912,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-fast]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
+cmd = "python tools/apps/slam.py --video data/normal-apt-tour.mp4 --preset fast --mode realtime"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -1938,7 +1922,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-base]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
+cmd = "python tools/apps/slam.py --video data/normal-apt-tour.mp4 --preset base --mode realtime"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -1948,7 +1932,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (base config, 512px)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-app]
-cmd = "python tools/gradio-app.py"
+cmd = "python tools/apps/slam_gradio.py"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -1956,6 +1940,25 @@ depends-on = [
 ]
 cwd = "packages/mast3r-slam"
 description = "Launch MASt3R-SLAM Gradio web UI"
+
+# ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
+[feature.mast3r-slam.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Record the pre-port goldens: pre and pre2 (noise run) of every case (msd-odyssey cam_00 vs mocap GT); runs only at the card commit (the port refuses pre phases)"
+
+[feature.mast3r-slam.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Graph tier, short case (first 30 s): Sim3 ATE of the final keyframes + tracked fraction, banded against pre"
+
+[feature.mast3r-slam.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Graph tier, full case (first 120 s at 512 px)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # gsplat-rust-renderer
