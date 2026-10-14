@@ -90,3 +90,21 @@ def test_a_windowed_read_brings_only_the_window(tmp_path: Path) -> None:
     with served(path) as dataset:
         table = read_column(dataset, "seg0", Point, "/points", "video_time", False, window_ns=(15, 25))
         assert [t for t, _ in Point.from_layer(table, "/points", "video_time")] == [20]
+
+
+def test_a_layer_registered_after_the_sink_was_built_still_fails_at_publish(tmp_path: Path) -> None:
+    base = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    base.save(tmp_path / "base.rrd")
+    base.log("/base", rr.Points3D([[0, 0, 0]]), static=True)
+    base.flush()
+    base.disconnect()
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(tmp_path / "base.rrd")]}) as server:
+        segment = SegmentRef("ds", "seg0", catalog_url=server.url())
+        recording, partial = open_layer(segment, "points", PRODUCER, output_dir=tmp_path / "late")
+        late = LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register="new")  # no layer yet
+        write_layer(tmp_path / "first", segment, register="new")  # another run registers the layer first
+        graph = Graph("late")
+        graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter([Event(5, "point", Point((0.0, 0.0, 0.0), "p"))])))["point"]}, {"layer": late})
+        with pytest.raises(Exception, match="Layer 'points' already exists"):  # the catalog refuses the duplicate (AlreadyExistsError)
+            run_sequential(graph)
+        assert segment_layers(segment) == ["base", "points"]

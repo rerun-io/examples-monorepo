@@ -17,13 +17,8 @@ Register: TypeAlias = Literal["new", "replace", "off"]
 
 def segment_layers(segment: SegmentRef) -> list[str]:
     dataset: DatasetEntry = segment.entry()  # the entry must outlive the query it runs
-    rows: list[dict] = dataset.segment_table().to_arrow_table().select(["rerun_segment_id", "rerun_layer_names"]).to_pylist()
-    return next((row["rerun_layer_names"] for row in rows if row["rerun_segment_id"] == segment.segment), [])
-
-
-def _check_new(segment: SegmentRef, layer: str, register: Register) -> None:
-    if register == "new" and segment.window_ns is None and layer in segment_layers(segment):
-        raise GraphError(f"{segment.dataset}/{segment.segment} already has layer {layer!r}; a refresh needs an explicit --register replace")
+    rows: list[dict] = dataset.filter_segments([segment.segment]).segment_table().select("rerun_layer_names").to_arrow_table().to_pylist()
+    return rows[0]["rerun_layer_names"] if rows else []
 
 
 def partial_path(output_dir: Path, segment: SegmentRef, layer: str) -> Path:
@@ -50,8 +45,7 @@ def publish_layer_file(partial: Path, segment: SegmentRef, layer: str, *, output
     final.parent.mkdir(parents=True, exist_ok=True)
     partial.chmod(0o644)
     shutil.move(partial, final)
-    if register != "off" and not infix:
-        _check_new(segment, layer, register)
+    if register != "off" and not infix:  # "new" registers with ERROR: the catalog refuses a layer registered since (AlreadyExistsError)
         on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.REPLACE if register == "replace" else OnDuplicateSegmentLayer.ERROR
         dataset: DatasetEntry = segment.entry()
         dataset.register([final.resolve().as_uri()], layer_name=layer, on_duplicate=on_duplicate).wait()
@@ -91,7 +85,8 @@ class LayerFileSink:
     outputs: Mapping[str, PortType] = {}
 
     def __init__(self, segment: SegmentRef, layer: str, *, output_dir: Path, register: Register = "new") -> None:
-        _check_new(segment, layer, register)
+        if register == "new" and segment.window_ns is None and layer in segment_layers(segment):
+            raise GraphError(f"{segment.dataset}/{segment.segment} already has layer {layer!r}; a refresh needs an explicit --register replace")
         self.segment, self.layer, self.output_dir, self.register = segment, layer, output_dir, register
         self.published: Path | None = None
         self._ctx: RunContext | None = None
