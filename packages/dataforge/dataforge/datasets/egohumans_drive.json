@@ -1,0 +1,716 @@
+{
+ "folder_id": "1JD963urzuzV_R_6FOVOtlx8UupwUuknR",
+ "listed": "2026-10-13",
+ "files": [
+  {
+   "path": "01_tagging/001_tagging.tar.gz",
+   "file_id": "1MFvQcZR9hxwwROGWHVwtagaT5e4ktpeb",
+   "size_bytes": 7371898232
+  },
+  {
+   "path": "01_tagging/002_tagging.tar.gz",
+   "file_id": "1yaNOxvAnaSkA2LZntI4Mbmwyvpfaqzy5",
+   "size_bytes": 10044211943
+  },
+  {
+   "path": "01_tagging/003_tagging.tar.gz",
+   "file_id": "1wTD0ANoWKOqRuREpV-Aw6DKIX9DU1FU9",
+   "size_bytes": 3831343203
+  },
+  {
+   "path": "01_tagging/004_tagging.tar.gz",
+   "file_id": "1rdz-eZSQsWtHBn7Pc9wuZl3zMHDuXk_F",
+   "size_bytes": 1664674708
+  },
+  {
+   "path": "01_tagging/005_tagging.tar.gz",
+   "file_id": "1k9W9OanJromsKKbAKtu9fImyvfCYgVZz",
+   "size_bytes": 5337147937
+  },
+  {
+   "path": "01_tagging/006_tagging.tar.gz",
+   "file_id": "1z6tPwRhMOJXeH1SYEEl2JUPEj49iCsVd",
+   "size_bytes": 4551084260
+  },
+  {
+   "path": "01_tagging/007_tagging.tar.gz",
+   "file_id": "1-AOrBpd26axQ5PefAaKCuKYFAANF38zg",
+   "size_bytes": 8503149124
+  },
+  {
+   "path": "01_tagging/008_tagging.tar.gz",
+   "file_id": "1ZfD0yhUMqG3sUEhPJKUBTnDZT_EeJWtS",
+   "size_bytes": 2547920219
+  },
+  {
+   "path": "01_tagging/009_tagging.tar.gz",
+   "file_id": "1rzzovoh_KBq9ZMPCBLygcUIHxKX251Gk",
+   "size_bytes": 6721639539
+  },
+  {
+   "path": "01_tagging/010_tagging.tar.gz",
+   "file_id": "1FyAiqXtWuDKD2YOgGhPgETwlBIhwO8ch",
+   "size_bytes": 5001175137
+  },
+  {
+   "path": "01_tagging/011_tagging.tar.gz",
+   "file_id": "1PqCY7BId0DoxifEhxpJ0ylrQsaLTuKfi",
+   "size_bytes": 8812486425
+  },
+  {
+   "path": "01_tagging/012_tagging.tar.gz",
+   "file_id": "1inb-lR-wpsNVtRRhzlD0GhZHQplkYrmW",
+   "size_bytes": 2430348273
+  },
+  {
+   "path": "01_tagging/013_tagging.tar.gz",
+   "file_id": "14qAK3eMNuJmnkKiXvQ5Ljb5fe31cABYI",
+   "size_bytes": 2213209801
+  },
+  {
+   "path": "01_tagging/014_tagging.tar.gz",
+   "file_id": "11Op5AK-wIIpkhQX1UszORYMJso6djtu3",
+   "size_bytes": 2560889937
+  },
+  {
+   "path": "02_lego/001_legoassemble.tar.gz",
+   "file_id": "1UWIRnDSenVtjCtotHHsC2WqvG3UyyBcx",
+   "size_bytes": 3735108026
+  },
+  {
+   "path": "02_lego/002_legoassemble.tar.gz",
+   "file_id": "1RkcmTnGVQHFKZNacA5B68f-jW7h-Lxx4",
+   "size_bytes": 2786871248
+  },
+  {
+   "path": "02_lego/003_legoassemble.tar.gz",
+   "file_id": "1td-PfWHa8cDnHen_H5otm1UkVc5qjuFW",
+   "size_bytes": 3700027690
+  },
+  {
+   "path": "02_lego/004_legoassemble.tar.gz",
+   "file_id": "1x0Q7CJhwxOqD7s4u9tsIJ9OBr_2QN5MZ",
+   "size_bytes": 3686065874
+  },
+  {
+   "path": "02_lego/005_legoassemble.tar.gz",
+   "file_id": "1-spRQqFuIqvAySTCxkz4jWMJ1N8srpDG",
+   "size_bytes": 2310509890
+  },
+  {
+   "path": "02_lego/006_legoassemble.tar.gz",
+   "file_id": "1239iAX4oIZMt8JGEZ8IbOaUIIxLrP5DQ",
+   "size_bytes": 1545427686
+  },
+  {
+   "path": "03_fencing/001_fencing.tar.gz",
+   "file_id": "1sOa-YsPDJFIPC17z4DDyQA-gAPJa8uzo",
+   "size_bytes": 3477974903
+  },
+  {
+   "path": "03_fencing/002_fencing.tar.gz",
+   "file_id": "195ABHXOlkHVhQwGWv0rqAcoRqsKKOgO0",
+   "size_bytes": 3473463942
+  },
+  {
+   "path": "03_fencing/003_fencing.tar.gz",
+   "file_id": "1o1Lmn08RgusbBUQ0K0pOyqeEqGfcHnXq",
+   "size_bytes": 3475820457
+  },
+  {
+   "path": "03_fencing/004_fencing.tar.gz",
+   "file_id": "1hsUBUjcgghX5PLnuFTPouNNVpeVIMM6Y",
+   "size_bytes": 1849311486
+  },
+  {
+   "path": "03_fencing/005_fencing.tar.gz",
+   "file_id": "1gIvSVP7nfzLhMUiAnl6eYLSukld_e2pK",
+   "size_bytes": 3398828268
+  },
+  {
+   "path": "03_fencing/006_fencing.tar.gz",
+   "file_id": "1JlJ5p2tD0netEk45oYL3iVOIq5f3VXaf",
+   "size_bytes": 3402204790
+  },
+  {
+   "path": "03_fencing/007_fencing.tar.gz",
+   "file_id": "1pig_6ErpxRGXdo4BOFVPIpGKowux7JNF",
+   "size_bytes": 3452263211
+  },
+  {
+   "path": "03_fencing/008_fencing.tar.gz",
+   "file_id": "1UtykV6bzVO5o2f7SLF-j8BH231W2tzbt",
+   "size_bytes": 3469169276
+  },
+  {
+   "path": "03_fencing/009_fencing.tar.gz",
+   "file_id": "1gQHoLw2bwkJACRSyaMhpydAfQp70rbAj",
+   "size_bytes": 2511083039
+  },
+  {
+   "path": "03_fencing/010_fencing.tar.gz",
+   "file_id": "1jmAL1WaO4Dzi9aaJvxUYO6uLHme9yNZd",
+   "size_bytes": 3178110175
+  },
+  {
+   "path": "03_fencing/011_fencing.tar.gz",
+   "file_id": "1QtS_VSZJsMeExhRgTx0XiUblOFI98v-v",
+   "size_bytes": 3230800303
+  },
+  {
+   "path": "03_fencing/012_fencing.tar.gz",
+   "file_id": "1uZOB5WhP8Zwi5-pom_s3QEx7fo-qYWBM",
+   "size_bytes": 2545984406
+  },
+  {
+   "path": "03_fencing/013_fencing.tar.gz",
+   "file_id": "1AX1omSP8Lj3PcXWBsmJoBkpNKQ6aB6FQ",
+   "size_bytes": 1705171886
+  },
+  {
+   "path": "03_fencing/014_fencing.tar.gz",
+   "file_id": "1a5cYkz8uzDVS-dp3u779Glbv2GMGdMoV",
+   "size_bytes": 1757495607
+  },
+  {
+   "path": "04_basketball/001_basketball.tar.gz",
+   "file_id": "1tM_kv3TRGquO_bKhBcGl3IBa8Sj_5fX7",
+   "size_bytes": 11539704694
+  },
+  {
+   "path": "04_basketball/002_basketball.tar.gz",
+   "file_id": "1OgdnmlLR0828EhZdc5IFhQ6sajUpBsXt",
+   "size_bytes": 5582293515
+  },
+  {
+   "path": "04_basketball/003_basketball.tar.gz",
+   "file_id": "1ujC71wK-r168Bkr4HCyJIalgKm34F3kX",
+   "size_bytes": 5383382478
+  },
+  {
+   "path": "04_basketball/004_basketball.tar.gz",
+   "file_id": "1jgaGRHKp15iPy0CsRKp33Y9yDo5iFxJX",
+   "size_bytes": 1253952613
+  },
+  {
+   "path": "04_basketball/005_basketball.tar.gz",
+   "file_id": "1sfiSAW6wDV4a9Q1dtN_OM8YpJiLu9j6s",
+   "size_bytes": 4585527909
+  },
+  {
+   "path": "04_basketball/006_basketball.tar.gz",
+   "file_id": "1nIdafrEgHXOJZBMMXXyDUuK6aROE1gv4",
+   "size_bytes": 1822377179
+  },
+  {
+   "path": "04_basketball/007_basketball.tar.gz",
+   "file_id": "1GwpxkXV--ptWq0jLxATpn0G47CIJK70Y",
+   "size_bytes": 5461548164
+  },
+  {
+   "path": "04_basketball/008_basketball.tar.gz",
+   "file_id": "1Em-D6bTnfLVFRdM8gs_cCcM16To2rOFW",
+   "size_bytes": 3689396177
+  },
+  {
+   "path": "04_basketball/009_basketball.tar.gz",
+   "file_id": "11WcbfH8619ahQLHtEVtmYNK1tdONBVDm",
+   "size_bytes": 1837210808
+  },
+  {
+   "path": "04_basketball/010_basketball.tar.gz",
+   "file_id": "1fEfe5YKwoFfyMiC-HsjqclTsST3xuFe6",
+   "size_bytes": 2690474400
+  },
+  {
+   "path": "04_basketball/011_basketball.tar.gz",
+   "file_id": "1a0rUA6kTr3fGuGVKZVk4X6_RmS7RU6cT",
+   "size_bytes": 5389310465
+  },
+  {
+   "path": "04_basketball/012_basketball.tar.gz",
+   "file_id": "1IsrX7KweKUceaZRTnUF4Rbc3a22DSP9g",
+   "size_bytes": 4570150117
+  },
+  {
+   "path": "04_basketball/013_basketball.tar.gz",
+   "file_id": "1MWfLQ36PbK_m2JfTdKvsRYaBedkYeA9e",
+   "size_bytes": 1687072879
+  },
+  {
+   "path": "04_basketball/014_basketball.tar.gz",
+   "file_id": "1nvt6M-Iw2c-Qey4JmUduHILjPr8vzt45",
+   "size_bytes": 2149011263
+  },
+  {
+   "path": "05_volleyball/001_volleyball.tar.gz",
+   "file_id": "1foa7knnedIfU1I954ENuc3G83-kIz9YS",
+   "size_bytes": 14891144176
+  },
+  {
+   "path": "05_volleyball/002_volleyball.tar.gz",
+   "file_id": "1eoG8H71Y7hrLp-tlRdFyXPJYFA0qdcX-",
+   "size_bytes": 5003083643
+  },
+  {
+   "path": "05_volleyball/003_volleyball.tar.gz",
+   "file_id": "1Jis3FzpaiCXnqxFU7_7367w4v2IG88Jd",
+   "size_bytes": 4252390875
+  },
+  {
+   "path": "05_volleyball/004_volleyball.tar.gz",
+   "file_id": "1eeFyKYqdEsTqZoM6RQJU38h5hwOx3_0F",
+   "size_bytes": 5007000787
+  },
+  {
+   "path": "05_volleyball/005_volleyball.tar.gz",
+   "file_id": "1tOrv4vIRULSFxylvD7H0avbTCruxTgr7",
+   "size_bytes": 2197460082
+  },
+  {
+   "path": "05_volleyball/006_volleyball.tar.gz",
+   "file_id": "1oKcqRL-duBJM1cZx4KTVDKXMqIIud6U1",
+   "size_bytes": 5001816993
+  },
+  {
+   "path": "05_volleyball/007_volleyball.tar.gz",
+   "file_id": "12nUv76cavNacqXA7PsoboicAupNKiZZx",
+   "size_bytes": 4979221369
+  },
+  {
+   "path": "05_volleyball/008_volleyball.tar.gz",
+   "file_id": "1V2eK6YNtTZJrbTYDQEnnjsRenB-BhRSh",
+   "size_bytes": 4988927694
+  },
+  {
+   "path": "05_volleyball/009_volleyball.tar.gz",
+   "file_id": "1Vfis3dJs81NoeFu1glfZ4YQ1QQAgkF0Y",
+   "size_bytes": 4985953835
+  },
+  {
+   "path": "05_volleyball/010_volleyball.tar.gz",
+   "file_id": "1KkTd0h0Nuf2jWAoYp2YnvnkLFT5r6KF3",
+   "size_bytes": 4994983121
+  },
+  {
+   "path": "05_volleyball/011_volleyball.tar.gz",
+   "file_id": "1zJMsMbFd3Kspbw3gXBJ6A8LjCCURSTTq",
+   "size_bytes": 4976632075
+  },
+  {
+   "path": "06_badminton/001_badminton.tar.gz",
+   "file_id": "1yfXEQantLxN_xeMO94B56adO0zROS2B1",
+   "size_bytes": 21607984721
+  },
+  {
+   "path": "06_badminton/002_badminton.tar.gz",
+   "file_id": "1g32M2GjseBVh8IrkzfoVeIrJQ8N_YNzx",
+   "size_bytes": 5281844328
+  },
+  {
+   "path": "06_badminton/003_badminton.tar.gz",
+   "file_id": "18BvFUdApabzZxDBESHTBBcKa220d0x15",
+   "size_bytes": 3559347230
+  },
+  {
+   "path": "06_badminton/004_badminton.tar.gz",
+   "file_id": "1GNc5ZKGMaLyi5DZHWe-exXXRcmR2-iSe",
+   "size_bytes": 4834656863
+  },
+  {
+   "path": "06_badminton/005_badminton.tar.gz",
+   "file_id": "1yNqZt8G8nuNYQU2KoEHcfcaoipLRnfHU",
+   "size_bytes": 5719966939
+  },
+  {
+   "path": "06_badminton/006_badminton.tar.gz",
+   "file_id": "1PbGroM1T67vcb8L3GJpI2qmco5bQom11",
+   "size_bytes": 5276095830
+  },
+  {
+   "path": "06_badminton/007_badminton.tar.gz",
+   "file_id": "1xjL7GUE_E_sHaxrM7i3oh9HaQPve5B4V",
+   "size_bytes": 5277221818
+  },
+  {
+   "path": "06_badminton/008_badminton.tar.gz",
+   "file_id": "1-YB4BQq4X-B6wh09xNIxWw35MXqf8RYo",
+   "size_bytes": 3548958694
+  },
+  {
+   "path": "06_badminton/009_badminton.tar.gz",
+   "file_id": "1JY9N49YZ77NuY2X_tqi4Pbw8idVLURDy",
+   "size_bytes": 5709360852
+  },
+  {
+   "path": "06_badminton/010_badminton.tar.gz",
+   "file_id": "1x0ieH169DFfuj-2ZzxtI30vTPDhMGR1g",
+   "size_bytes": 5258583148
+  },
+  {
+   "path": "06_badminton/011_badminton.tar.gz",
+   "file_id": "1zkhBCm46-y2qEl11sMyB-0jcxNUQfOmZ",
+   "size_bytes": 1814746123
+  },
+  {
+   "path": "06_badminton/012_badminton.tar.gz",
+   "file_id": "1Z8wzEfHFBG9F-6pJ2l_3r74dPnDSzs3y",
+   "size_bytes": 7850693936
+  },
+  {
+   "path": "06_badminton/013_badminton.tar.gz",
+   "file_id": "1cdo8YUcMSNoDdKU91gmnyuS7rIa06n36",
+   "size_bytes": 3537915822
+  },
+  {
+   "path": "06_badminton/014_badminton.tar.gz",
+   "file_id": "1PKpEcWOiASSRpvNn4lI-RouKGaqq88vQ",
+   "size_bytes": 5245028311
+  },
+  {
+   "path": "06_badminton/015_badminton.tar.gz",
+   "file_id": "1J_XHxkCT5ehhlZtmlqyNxu0nvBB8KKwc",
+   "size_bytes": 3533989451
+  },
+  {
+   "path": "06_badminton/016_badminton.tar.gz",
+   "file_id": "1NiduBj-sQS7K8FBemfuL4rtTRQfQBEmS",
+   "size_bytes": 6124240245
+  },
+  {
+   "path": "06_badminton/017_badminton.tar.gz",
+   "file_id": "1cbTPNcXWK140Mu_zAtDBaFORahtZk2VH",
+   "size_bytes": 4375373351
+  },
+  {
+   "path": "06_badminton/018_badminton.tar.gz",
+   "file_id": "1WPag1I3N1vb0j2onAzHMVkfgVIcpCjMU",
+   "size_bytes": 5156889783
+  },
+  {
+   "path": "06_badminton/019_badminton.tar.gz",
+   "file_id": "1iw8dwZUqcbfGJE-s1b35Jv3sUV68Ta6a",
+   "size_bytes": 2685539490
+  },
+  {
+   "path": "06_badminton/020_badminton.tar.gz",
+   "file_id": "1ZuiE29tZ-iWTttxosGTZP3hggbniFrsM",
+   "size_bytes": 1818206888
+  },
+  {
+   "path": "06_badminton/021_badminton.tar.gz",
+   "file_id": "1ONQh_lqOCgxZYiGSDpProgL_68DlSWNP",
+   "size_bytes": 4364003696
+  },
+  {
+   "path": "06_badminton/022_badminton.tar.gz",
+   "file_id": "11v0imgFvRbDdmDjqyp8Vg_H8rojT8RxJ",
+   "size_bytes": 6119990712
+  },
+  {
+   "path": "06_badminton/023_badminton.tar.gz",
+   "file_id": "1avyWGMxPhAlTzjtF3RFA8PfUAIDZxnTf",
+   "size_bytes": 5241250421
+  },
+  {
+   "path": "06_badminton/024_badminton.tar.gz",
+   "file_id": "1Y0xXYa3GrofYmeAiqTqfIR9OwptiPmFi",
+   "size_bytes": 4367726525
+  },
+  {
+   "path": "06_badminton/025_badminton.tar.gz",
+   "file_id": "1SgWUedxUL9hIEYDcGV2pJ7SX0UcHaxsx",
+   "size_bytes": 5214950178
+  },
+  {
+   "path": "06_badminton/026_badminton.tar.gz",
+   "file_id": "1NH-4uDcC_DHdSFa_oPEIXAJUfLetZ29s",
+   "size_bytes": 4368682589
+  },
+  {
+   "path": "06_badminton/027_badminton.tar.gz",
+   "file_id": "1cY0BFCpJzccg7SRAk33xYDpipu4L0uq1",
+   "size_bytes": 5232470577
+  },
+  {
+   "path": "06_badminton/028_badminton.tar.gz",
+   "file_id": "1EjQUMRv-kSTAmhuVcjz9mh41fjFnp0Sx",
+   "size_bytes": 5494816510
+  },
+  {
+   "path": "06_badminton/029_badminton.tar.gz",
+   "file_id": "14oBf5_yrOT_feGd6lalURACOONGxtuhm",
+   "size_bytes": 1810267798
+  },
+  {
+   "path": "06_badminton/030_badminton.tar.gz",
+   "file_id": "1zRHYJEgOY44XmLuhTPWOUoQ8qUgZGk3D",
+   "size_bytes": 5221736097
+  },
+  {
+   "path": "06_badminton/031_badminton.tar.gz",
+   "file_id": "1sSbrLqYly84mk3iXyMvrOzF3F_slRrSx",
+   "size_bytes": 6922412889
+  },
+  {
+   "path": "06_badminton/032_badminton.tar.gz",
+   "file_id": "12QEQb8MUsozSPgSDxv-1iqmsDKE0HN_l",
+   "size_bytes": 5215247883
+  },
+  {
+   "path": "06_badminton/033_badminton.tar.gz",
+   "file_id": "1uBNlsK-gRiSBOMmMlO8uQPufruXpa2Ao",
+   "size_bytes": 2667113715
+  },
+  {
+   "path": "06_badminton/034_badminton.tar.gz",
+   "file_id": "1Af78-Ye56wZDZncaM0ONcDAIYkxcLxL_",
+   "size_bytes": 2660982837
+  },
+  {
+   "path": "06_badminton/035_badminton.tar.gz",
+   "file_id": "1Xul5VMX9bx6T-LuDpaKeRswsokLZ9AAN",
+   "size_bytes": 2403422564
+  },
+  {
+   "path": "06_badminton/036_badminton.tar.gz",
+   "file_id": "19rBHEbAJBmRFx5SvO5HXO9OrSU1AFEQT",
+   "size_bytes": 5196634811
+  },
+  {
+   "path": "06_badminton/037_badminton.tar.gz",
+   "file_id": "163VJfVKBtDgCoZnM-S4QqlmRUossUN4r",
+   "size_bytes": 954604156
+  },
+  {
+   "path": "06_badminton/038_badminton.tar.gz",
+   "file_id": "1oC-zGQhosUWcViNgD6PFp6JSxBuqkJsJ",
+   "size_bytes": 3858791025
+  },
+  {
+   "path": "06_badminton/039_badminton.tar.gz",
+   "file_id": "1ly5eijLMqsMXAdNHmBJGFKutsRu854O0",
+   "size_bytes": 4710660436
+  },
+  {
+   "path": "06_badminton/040_badminton.tar.gz",
+   "file_id": "1O4qRbJwyEmqObDpDa4Iw5KTMpyCF66Gm",
+   "size_bytes": 2237652376
+  },
+  {
+   "path": "06_badminton/041_badminton.tar.gz",
+   "file_id": "1eTZ_8F_yVdy-IDuxwul0F6vK0SSCvafQ",
+   "size_bytes": 1758451546
+  },
+  {
+   "path": "06_badminton/042_badminton.tar.gz",
+   "file_id": "11rNlz629es0psi0qyZoyWagS6e5RC2wB",
+   "size_bytes": 2419231237
+  },
+  {
+   "path": "06_badminton/043_badminton.tar.gz",
+   "file_id": "1gxMiawmFFoJh4464n-cZ40jF3W4X7dOy",
+   "size_bytes": 1759465075
+  },
+  {
+   "path": "06_badminton/044_badminton.tar.gz",
+   "file_id": "1lJw5qJGQBZpVl4Xu0b2ZVnx1Rd2Eqw-c",
+   "size_bytes": 1505605979
+  },
+  {
+   "path": "06_badminton/045_badminton.tar.gz",
+   "file_id": "1HRtghFpKj_h9KTejxFM8wMtVkZb4igej",
+   "size_bytes": 929375115
+  },
+  {
+   "path": "06_badminton/046_badminton.tar.gz",
+   "file_id": "1PwGwX0kdzVmOrgRN6ls89FQdzmkqj0St",
+   "size_bytes": 2325738699
+  },
+  {
+   "path": "06_badminton/047_badminton.tar.gz",
+   "file_id": "1sP4a7L-MZKI-CPKxbZXFkl-ZENy8KYEz",
+   "size_bytes": 4926018099
+  },
+  {
+   "path": "06_badminton/048_badminton.tar.gz",
+   "file_id": "1dQ-bLf7LqEY_0llij5iSFnpAwqDjxA6X",
+   "size_bytes": 5488209189
+  },
+  {
+   "path": "06_badminton/049_badminton.tar.gz",
+   "file_id": "1Atm0GefWFYLEOj8E957ECxDX9KT97c0e",
+   "size_bytes": 6410488310
+  },
+  {
+   "path": "06_badminton/050_badminton.tar.gz",
+   "file_id": "1jeTVQg3rGaetEn2ZEfTZCyhDF9-Oo-X_",
+   "size_bytes": 4828373576
+  },
+  {
+   "path": "06_badminton/051_badminton.tar.gz",
+   "file_id": "1Fop5WYFjdIXDmOSmieitlrN6_gj9X-F6",
+   "size_bytes": 4311155777
+  },
+  {
+   "path": "06_badminton/052_badminton.tar.gz",
+   "file_id": "1LngkEAsBiuf946KBxke_kkAzTQKRLQqf",
+   "size_bytes": 3836425304
+  },
+  {
+   "path": "06_badminton/053_badminton.tar.gz",
+   "file_id": "1al3oIcntYj7qxA7YFFZSPxtcHNOdbZE7",
+   "size_bytes": 4830144446
+  },
+  {
+   "path": "06_badminton/054_badminton.tar.gz",
+   "file_id": "1fbOJ2X_AeiyHWYm9iYS5Tedq9H2Fih65",
+   "size_bytes": 4766891935
+  },
+  {
+   "path": "06_badminton/055_badminton.tar.gz",
+   "file_id": "1px2BDaKhZUlRwruT6iCJIOmyL7tawy-E",
+   "size_bytes": 4756809222
+  },
+  {
+   "path": "06_badminton/056_badminton.tar.gz",
+   "file_id": "1GsCn-hJPFJSW55a5y32ZW1qV8b0j88rt",
+   "size_bytes": 4963348315
+  },
+  {
+   "path": "06_badminton/057_badminton.tar.gz",
+   "file_id": "1q_iZHS3Z9sLIV5F8hQRmbFnhOYI92n5O",
+   "size_bytes": 2098377462
+  },
+  {
+   "path": "06_badminton/058_badminton.tar.gz",
+   "file_id": "1sDOz3CJqdWipKe7RMAfAcc33lrPobH_I",
+   "size_bytes": 3490007578
+  },
+  {
+   "path": "06_badminton/059_badminton.tar.gz",
+   "file_id": "1q9Ng3GttRQXCQVXuYFkXBYxmUUBT1AAh",
+   "size_bytes": 3278012527
+  },
+  {
+   "path": "06_badminton/060_badminton.tar.gz",
+   "file_id": "1TUBFErdoFQaJVJLc8954D6Ky8eC55PDZ",
+   "size_bytes": 3885297677
+  },
+  {
+   "path": "06_badminton/061_badminton.tar.gz",
+   "file_id": "1XI_0cDrQH3FGeLxY1MihoGnRZLDzbLiV",
+   "size_bytes": 4250485405
+  },
+  {
+   "path": "07_tennis/001_tennis.tar.gz",
+   "file_id": "15szZeRspDlkMB8dKtDArQVNNaZb3EdtC",
+   "size_bytes": 2870930138
+  },
+  {
+   "path": "07_tennis/002_tennis.tar.gz",
+   "file_id": "1STlQsJBfRsSlo-or2UQhZRMHLLCxD7zu",
+   "size_bytes": 5690758030
+  },
+  {
+   "path": "07_tennis/003_tennis.tar.gz",
+   "file_id": "1q9WMzvo2mD_uyZOqXwcuHarNcFFH9r2Q",
+   "size_bytes": 5684762670
+  },
+  {
+   "path": "07_tennis/004_tennis.tar.gz",
+   "file_id": "16StEEhW7sOF0FNxRgL_ZVE7RPt7ORKut",
+   "size_bytes": 5737971445
+  },
+  {
+   "path": "07_tennis/005_tennis.tar.gz",
+   "file_id": "11HYt39RrCmxwBxOTFk0PS0Trj1aA2Mk8",
+   "size_bytes": 6042371321
+  },
+  {
+   "path": "07_tennis/006_tennis.tar.gz",
+   "file_id": "1T6i8j1Enq_ym7OJ0rdrPbb9_xGvzORD-",
+   "size_bytes": 6432943231
+  },
+  {
+   "path": "07_tennis/007_tennis.tar.gz",
+   "file_id": "1e0DBnqG6AAlPxuWVhYvnMFRItCpMlQmC",
+   "size_bytes": 7721922311
+  },
+  {
+   "path": "07_tennis/008_tennis.tar.gz",
+   "file_id": "116FGtWachsdF7sFNkzJN9moqlAM9-TI1",
+   "size_bytes": 5921881136
+  },
+  {
+   "path": "07_tennis/009_tennis.tar.gz",
+   "file_id": "1zN5XAl28sVb6Vt2K6f8GFJlfDNKQfPbS",
+   "size_bytes": 6314110944
+  },
+  {
+   "path": "07_tennis/010_tennis.tar.gz",
+   "file_id": "1-jLlsa-Ecee5iM-8z2ssPAe11sMmb-ld",
+   "size_bytes": 8149627700
+  },
+  {
+   "path": "07_tennis/011_tennis.tar.gz",
+   "file_id": "1PQ42jePgeO8-D9WyxLDHNaxDg8lkb8N1",
+   "size_bytes": 6342602540
+  },
+  {
+   "path": "07_tennis/012_tennis.tar.gz",
+   "file_id": "1aBr4pQzkCEhTAzMaHa6JG8g4Hh2REk9u",
+   "size_bytes": 7215900092
+  },
+  {
+   "path": "07_tennis/013_tennis.tar.gz",
+   "file_id": "1jbejRoRJiamVWRTf7inJNhK1g8MEiJLl",
+   "size_bytes": 4992211143
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco/person_keypoints_ego_rgb.json",
+   "file_id": "1Eigfw_bZWzuwA2qboTTWY5Ah6ACS-gZ8",
+   "size_bytes": 331828578
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco/person_keypoints_ego_slam.json",
+   "file_id": "18INsjyqJ-TRTVrgypjG0vwwIOTmCeZVF",
+   "size_bytes": 279388205
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco/person_keypoints_exo.json",
+   "file_id": "1diiUCsNVy590QIcptmizM2XIhicki1Q8",
+   "size_bytes": 877251529
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco_track/detections_ego_rgb.pkl",
+   "file_id": "1mSq8HfbbTFjiyh1OKo2mRFeCweDVS6vB",
+   "size_bytes": 54590960
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco_track/detections_ego_slam.pkl",
+   "file_id": "1AxYPce1HI-qkqpt_hzoOO0CnRybcf7_P",
+   "size_bytes": 90594747
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco_track/detections_exo.pkl",
+   "file_id": "1698zy1rVg-IOkW5TQOl8PfSDtxZozaki",
+   "size_bytes": 276054924
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco_track/tracking_ego_rgb.json",
+   "file_id": "1uTU4ndg1oiTo1YQ_pL3JCRi61jFvhdQ0",
+   "size_bytes": 93487536
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco_track/tracking_ego_slam.json",
+   "file_id": "1vxTA6Dk9FZhqbwnDDyk0OLKv4F2eVIqb",
+   "size_bytes": 110265608
+  },
+  {
+   "path": "benchmark/01_tagging:02_legoassemble:03_fencing/all/coco_track/tracking_exo.json",
+   "file_id": "1cpIYLpxTniLYCOftEDxPKFCXjwN7P6xt",
+   "size_bytes": 334760135
+  }
+ ]
+}
