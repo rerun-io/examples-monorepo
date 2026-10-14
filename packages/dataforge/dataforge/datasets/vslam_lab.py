@@ -53,15 +53,7 @@ from dataforge.datasets.vslam_lab_source import (
 )
 from dataforge.euroc import GtTrajectory, nominal_fps
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import (
-    TRAJECTORY_COLOR,
-    log_camera_node,
-    log_imu,
-    log_pose_track,
-    log_rig_node,
-    log_trail_segments,
-    log_video_stream,
-)
+from dataforge.logging_toolkit import log_camera_node, log_gt_path, log_imu, log_rig_node, log_video_stream
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, WorldUpAxis
 
@@ -329,20 +321,15 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         if poses.times_ns.size < 2 or np.ptp(poses.quaternions_xyzw, axis=0).max() == 0.0:
             raise ValueError(f"{groundtruth}: {poses.times_ns.size} poses with a constant rotation are position-only, not world_T_body")
         rr.log("/", WORLD_UP_VIEW_COORDINATES[self.benchmark.world_up], static=True, recording=recording)
-        log_pose_track(
+        log_gt_path(
             recording,
-            schema.rig_path(RIG),
+            RIG,
             times_ns=poses.times_ns,
             translations_xyz=poses.translations_xyz,
             quaternions_xyzw=poses.quaternions_xyzw,
+            radius=GT_TRAJECTORY_WIDTH_UI_POINTS,
+            radius_unit="ui_points",
         )
-        rr.log(
-            schema.trajectory_path(schema.GT_RUN_SOURCE),
-            rr.LineStrips3D([poses.translations_xyz], colors=TRAJECTORY_COLOR, radii=rr.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS)),
-            static=True,
-            recording=recording,
-        )
-        log_trail_segments(recording, schema.trail_path(schema.GT_RUN_SOURCE), times_ns=poses.times_ns, translations_xyz=poses.translations_xyz)
         steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(poses.translations_xyz, axis=0), axis=1)
         recording.send_property(
             "gt",
