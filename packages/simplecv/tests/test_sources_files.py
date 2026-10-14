@@ -10,8 +10,9 @@ from hypothesis import strategies as st
 
 pytest.importorskip("torchcodec", reason="the video file source decodes with torchcodec")
 
+from simplecv.sources import files  # noqa: E402
 from simplecv.sources.catalog_video import sample_indices  # noqa: E402
-from simplecv.sources.files import ImageDirSource, VideoFileSource  # noqa: E402
+from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource  # noqa: E402
 from simplecv.types.frames import MultiViewFrames  # noqa: E402
 
 
@@ -59,3 +60,25 @@ def test_video_file_source_reads_whole_strides_on_the_stream_clock(tmp_path: Pat
     np.testing.assert_allclose([f.t_ns for f in frames], [0, 200_000_000, 400_000_000], atol=1_000_000)
     assert frames[0].rgb.shape == (1, 3, 16, 32) and abs(int(frames[2].rgb.float().mean()) - 120) <= 3
     assert len(frames_of(VideoFileSource(path, stride=1, max_frames=2))) == 2
+
+
+def test_webcam_source_converts_bgr_counts_frames_and_releases_the_camera(monkeypatch: pytest.MonkeyPatch) -> None:
+    released: list[int] = []
+
+    class Camera:
+        def __init__(self, device: int) -> None:
+            self.device, self.frames = device, 0
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            self.frames += 1
+            return True, np.full((4, 6, 3), (10 * self.frames, 0, 255), dtype=np.uint8)  # BGR: blue
+
+        def release(self) -> None:
+            released.append(self.device)
+
+    monkeypatch.setattr(files.cv2, "VideoCapture", Camera)
+    events = list(WebcamSource(2, max_frames=3).events())
+    frames: list[MultiViewFrames] = [e.value for e in events]  # type: ignore[misc]
+    assert [f.frame_index for f in frames] == [0, 1, 2] and frames[0].views == ("webcam",) and released == [2]
+    assert [e.t_ns for e in events] == sorted(e.t_ns for e in events) and frames[0].rgb.shape == (1, 3, 4, 6)
+    assert frames[1].rgb[0, :, 0, 0].tolist() == [255, 0, 20]  # RGB

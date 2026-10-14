@@ -23,7 +23,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
-from simplecv.sources.files import VideoFileSource
+from simplecv.sources.files import VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
@@ -31,7 +31,6 @@ from mast3r_slam.apis import slam as app
 from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, examples, outputs, slam_config, video_source
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
-from mast3r_slam.sources.webcam import Webcam
 from mast3r_slam.types import SlamConfig
 
 PROFILES: Path = Path(__file__).resolve().parents[1] / "profiles"
@@ -126,7 +125,7 @@ def test_a_file_input_beats_webcam_zero_and_zero_means_unset(tmp_path: Path) -> 
     assert cfg.subsample == 5  # the preset's
     source = video_source(config, cfg)
     assert isinstance(source, VideoFileSource) and source.stride == 5 and source.max_frames is None
-    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=None, webcam=0), cfg), Webcam)
+    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=None, webcam=0), cfg), WebcamSource)
 
 
 def test_the_default_input_and_the_gradio_example_are_the_verify_short_case(tmp_path: Path) -> None:

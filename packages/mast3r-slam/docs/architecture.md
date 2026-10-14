@@ -10,7 +10,7 @@ video ─frames─▶ frontend (main thread) ─task─▶ backend (own process)
 
 | node | layer module | does |
 |---|---|---|
-| `video` | `simplecv.sources` (`CatalogVideoSource`, `VideoFileSource`, `ImageDirSource`), `mast3r_slam.sources.webcam` | one-view `MultiViewFrames`, every `subsample`-th frame |
+| `video` | `simplecv.sources` (`CatalogVideoSource`, `VideoFileSource`, `ImageDirSource`, `WebcamSource`) | one-view `MultiViewFrames`, every `subsample`-th frame |
 | `frontend` | `nodes/frontend.py` (+ `nodes/tracking.py`) | INIT / TRACKING / RELOC per frame; emits `tracked` poses and `KeyframeAdded` / `RelocRequest` tasks |
 | `backend` | `nodes/backend.py` (+ `nodes/factor_graph.py`, `models/retrieval.py`) | matching factors, retrieval, global Gauss-Newton; emits `MapUpdate` per task, a new keyframe's `KeyframeCloud`, and the final keyframe poses at flush |
 | sinks | `dagkit.sinks.RerunSink` / `LayerSink`, `nodes/nerfstudio.py` | viewer, catalog layer `mast3r_slam`, Nerfstudio export |

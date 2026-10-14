@@ -23,13 +23,12 @@ from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
-from simplecv.sources.files import ImageDirSource, VideoFileSource
+from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
 from mast3r_slam.ops.image import resize_img
-from mast3r_slam.sources.webcam import Webcam
 from mast3r_slam.types import KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
@@ -109,7 +108,7 @@ def video_source(config: Config, cfg: SlamConfig) -> Source:
     if config.images is not None:
         return ImageDirSource(config.images, stride=cfg.subsample, max_frames=max_frames)
     if config.webcam is not None:
-        return Webcam(config.webcam, max_frames)
+        return WebcamSource(config.webcam, max_frames)
     if config.segment is None:
         raise ValueError("no input: give a video, an image directory, a webcam or a segment")
     return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
@@ -145,7 +144,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
         sinks["layer"] = LayerSink(layer, partial, video.segment, LAYER, layer_ports, roots, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
-    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, Webcam), nerfstudio=nerfstudio)
+    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 
 
 def main(config: Config) -> RunReport:
