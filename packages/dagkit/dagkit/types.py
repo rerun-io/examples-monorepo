@@ -96,6 +96,27 @@ def row_times(table: pa.Table, timeline: str) -> list[TimeNs]:
     return table[timeline].cast(pa.int64()).to_pylist() if timeline in table.column_names else [STATIC] * table.num_rows
 
 
+def column(table: pa.Table, name: str) -> list:
+    """One column's cells as Python values, one per row (``None`` in every row when the table lacks it)."""
+    return table[name].to_pylist() if name in table.column_names else [None] * table.num_rows
+
+
+def cells(table: pa.Table, name: str, timeline: str) -> dict[TimeNs, pa.Scalar]:
+    """The non-null cells of one column keyed by their time (STATIC for a table read without an index)."""
+    if name not in table.column_names:
+        return {}
+    return {t: cell for t, cell in zip(row_times(table, timeline), table[name], strict=True) if cell.is_valid}
+
+
+def flat(values: pa.Scalar | pa.Array, dtype: type) -> np.ndarray:
+    """A cell's (or a column's non-null) component values as ``dtype``, unwrapping Rerun's nesting: one list per row plus
+    the component's arity (``Transform3D:translation`` is ``list<fixed_size_list<3>>``)."""
+    array = values.values if isinstance(values, pa.Scalar) else values.drop_null()
+    while pa.types.is_list(array.type) or pa.types.is_large_list(array.type) or pa.types.is_fixed_size_list(array.type):
+        array = array.flatten()
+    return array.to_numpy(zero_copy_only=False).astype(dtype)
+
+
 def read_column(dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool) -> pa.Table:
     view = dataset.filter_segments([segment]).filter_contents(value_type.contents(root))
     return view.reader(index=None if static else timeline).to_arrow_table()

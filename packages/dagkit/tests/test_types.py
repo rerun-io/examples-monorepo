@@ -5,6 +5,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dagkit_fakes import Point
@@ -17,7 +18,7 @@ from dagkit.node import Fenced, Tick
 from dagkit.sources import SegmentRef
 from dagkit.testing import layer_table
 from dagkit.time import STATIC
-from dagkit.types import LayerFile, Log, Producer, Type, row_times
+from dagkit.types import LayerFile, Log, Producer, Type, cells, column, flat, row_times
 
 text = st.text(st.characters(codec="utf-8", exclude_categories=("Cs",)), max_size=12)
 
@@ -61,6 +62,17 @@ def test_row_times_reads_the_index_or_gives_static() -> None:
     timed = pa.table({"video_time": pa.array([5, 7], pa.duration("ns")), "v": [1, 2]})
     assert row_times(timed, "video_time") == [5, 7]
     assert row_times(pa.table({"v": [1]}), "video_time") == [STATIC]
+
+
+def test_table_readers_give_cells_by_time_and_flat_values() -> None:
+    xyz = pa.array([[[1.0, 2.0, 3.0]], None, [[4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]], pa.list_(pa.list_(pa.float32(), 3)))
+    table = pa.table({"video_time": pa.array([5, 7, 9], pa.duration("ns")), "/p:Points3D:positions": xyz})
+    assert column(table, "/p:Points3D:positions")[1] is None and column(table, "/q:Points3D:positions") == [None, None, None]
+    found: dict[int, pa.Scalar] = cells(table, "/p:Points3D:positions", "video_time")
+    assert list(found) == [5, 9] and cells(table, "/q:Points3D:positions", "video_time") == {}
+    assert list(cells(table.drop_columns("video_time"), "/p:Points3D:positions", "video_time")) == [STATIC]  # a read without an index
+    np.testing.assert_array_equal(flat(found[9], np.float64), [4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
+    np.testing.assert_array_equal(flat(table["/p:Points3D:positions"].combine_chunks(), np.float32), np.arange(1, 10, dtype=np.float32))  # nulls dropped
 
 
 def test_fenced_and_tick_are_frozen_values() -> None:
