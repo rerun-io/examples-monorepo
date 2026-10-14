@@ -2456,6 +2456,25 @@ description = "Run native catalog tests and explicitly select fixture parity whe
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "slam-rs-rust-test", "slam-rs-recorder-test", "slam-rs-clippy", "slam-rs-wgpu-clippy"]
 description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
 
+# ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
+[feature.slam-rs.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Record the pre-port goldens (DAGKIT_GOLDENS): pre and pre2 (noise run) for every case"
+
+[feature.slam-rs.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Graph tier, short cases (60 s of Cap B session 14 vs pre-port; msd-index MIO10 vs GT)"
+
+[feature.slam-rs.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Graph tier, full cases (the whole Cap B session 14 vs pre-port; msd-index MIO07 vs GT)"
+
 [feature.slam-rs.tasks.slam-rs-fmt]
 cmd = "cargo fmt --all"
 cwd = "packages/slam-rs"

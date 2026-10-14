@@ -10,6 +10,7 @@ camera), plus ``/verify/hands/run``: static ``AnyValues`` with the layer's count
 """
 
 import time
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -54,9 +55,28 @@ def case_hands(case: Case) -> HandsParams:
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The hands-layer graph (threaded, lossless) on the case's segment or window: its published layer file (unregistered, in
-    a temporary directory) is copied into ``recording`` unchanged, its ``LayerRun`` and wall time go to ``/verify/hands/run``."""
-    segment, params = case_segment(case), case_hands(case)
+    """The hands-layer graph (threaded, lossless) on the case's segment or window, logged by :func:`_hands`."""
+    _hands(case, phase, case_segment(case), recording)
+
+
+def run_robocap(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
+    """Pre-port robocap chain: the hands-layer graph fed with slam-rs's catalog VIO poses (the whole-segment ``slam_rs`` layer
+    of slam-rs's ``vio`` ``full`` pre golden) instead of the catalog's own; base layer and poses are served in process."""
+    segment: SegmentRef = case_segment(case)
+    shared: DatasetEntry = segment.entry()  # an entry must outlive its queries
+    rows: list[dict] = shared.segment_table().to_arrow_table().select(["rerun_segment_id", "rerun_layer_names", "rerun_storage_urls"]).to_pylist()
+    row: dict = next(row for row in rows if row["rerun_segment_id"] == segment.segment)
+    base: str = dict(zip(row["rerun_layer_names"], row["rerun_storage_urls"], strict=True))["base"]
+    with rr.server.Server(host="127.0.0.1") as server:
+        dataset: DatasetEntry = server.client().create_dataset(segment.dataset)
+        dataset.register([base, golden_path("slam-rs", "vio", "full", "pre").as_uri()], layer_name=["base", "slam_rs"]).wait()
+        _hands(case, phase, replace(segment, catalog_url=server.url()), recording)
+
+
+def _hands(case: Case, phase: Phase, segment: SegmentRef, recording: rr.RecordingStream) -> None:
+    """Run the hands-layer graph (threaded, lossless) on ``segment``: its published layer file (unregistered, in a temporary
+    directory) is copied into ``recording`` unchanged, its ``LayerRun`` and wall time go to ``/verify/hands/run``."""
+    params: HandsParams = case_hands(case)
     started: float = time.perf_counter()
     with TemporaryDirectory() as tmp:
         publish = LayerFileSink(segment, LAYER, output_dir=Path(tmp), register="off")
@@ -108,7 +128,7 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     (frameset-hands reported by exactly one of the two, % of the reference's) and ``kp2d_delta_pct`` (the same for KeyNet's
     frameset-camera-hands, so a lost camera pane fails). Reported, not banded: the golden's counts.
     """
-    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden_path("robocap-live", "hands", case.name, "pre")
+    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
     if not reference.exists():
         raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
     ours, counts = _read(golden)
