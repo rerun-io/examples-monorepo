@@ -80,8 +80,6 @@ class InputRender:
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """The single-image graph (sequential, lossless) on the case's image with seeded RNGs; every output goes to ``recording``."""
     assert case.input is not None, "vistadream cases are local images"
-    if phase != "post":  # this tree has only the graph: a pre / pre2 run here would overwrite the reference with the port
-        raise RuntimeError(f"phase {phase!r} is a pre-port reference: record it from the card commit 7aef310bb with the import fix in VERIFY.toml")
     stage = case.params["stage"]
     assert stage in ("no-outpaint", "outpaint", "coarse"), stage
     seed: int = int(case.params["seed"])

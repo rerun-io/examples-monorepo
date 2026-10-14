@@ -15,9 +15,9 @@ Input frames are the clip's cam_00 frames at indices ``0, s, 2s, ...`` (``n // s
 lossless (the frontend waits for the backend after every keyframe and relocalisation request); case params choose
 calibrated tracking (``calib``) and undistortion by the catalog source (``undistort``).
 
-Block ``slam`` (msd-odyssey): its pre/pre2 goldens came from the old pipeline, so this tree only runs ``post``. Block
-``paper`` (TUM RGB-D fr1, EuRoC; ``run_paper``/``score_paper``) records every phase with this graph and associates poses
-within evo's default 10 ms, as the MASt3R-SLAM paper's ``evo_ape -as``.
+Block ``slam`` (msd-odyssey): its pre/pre2 goldens came from the old pipeline (dagkit.verify never overwrites them). Block
+``paper`` (TUM RGB-D fr1, EuRoC; ``score_paper``) recorded every phase with this graph and associates poses within evo's
+default 10 ms, as the MASt3R-SLAM paper's ``evo_ape -as``.
 """
 
 import time
@@ -91,14 +91,8 @@ class _GoldenSink(RerunSink):
         super().step(tick, out)
 
 
-def run(case: Case, phase: Phase, recording: rr.RecordingStream, *, phases: tuple[Phase, ...] = ("post",)) -> None:
-    """The graph on the case's clip (cam_00, every ``subsample``-th frame), lossless, threaded.
-
-    ``phases`` this tree may record: block ``slam`` only ``post`` (its ``pre``/``pre2`` goldens come from the card commit,
-    which drove the old pipeline: git history); block ``paper`` every phase (``run_paper``).
-    """
-    if phase not in phases:
-        raise ValueError(f"phase {phase}: pre-port goldens come from the card commit (the old pipeline); this tree runs the port")
+def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
+    """The graph on the case's clip (cam_00, every ``subsample``-th frame), lossless, threaded."""
     cfg = SlamConfig(use_calib=case.params["calib"] == "true", img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
     video = CatalogVideoSource(case.segment_ref(), (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample, undistort=case.params.get("undistort") == "true")
     golden = _GoldenSink(recording, CAMERA)
@@ -183,5 +177,4 @@ def score(case: Case, golden: Path, max_association_ns: int = MAX_ASSOCIATION_NS
     } | reported
 
 
-run_paper = partial(run, phases=("pre", "pre2", "post"))
 score_paper = partial(score, max_association_ns=EVO_MAX_DIFF_NS)

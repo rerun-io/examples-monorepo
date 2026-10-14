@@ -158,6 +158,30 @@ def test_post_fails_closed_without_pre2_and_passes_with_it(card: Path) -> None:
     assert verify.main(verify.VerifyArgs(card, "post")) == 0
 
 
+def test_reference_goldens_are_write_once(card: Path) -> None:
+    """A pre / pre2 run on a ported tree would replace the pre-port reference with the port's own output."""
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 0
+    golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
+    kept: int = golden.stat().st_ino
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 1 and golden.stat().st_ino == kept
+    assert verify.main(verify.VerifyArgs(card, "pre", overwrite=True)) == 0 and golden.stat().st_ino != kept
+    assert verify.main(verify.VerifyArgs(card, "pre2")) == 0 and verify.main(verify.VerifyArgs(card, "pre2")) == 1
+    assert verify.main(verify.VerifyArgs(card, "post")) == 0 and verify.main(verify.VerifyArgs(card, "post")) == 0  # post is rewritten
+
+
+def test_post_scores_each_golden_once(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 0 and verify.main(verify.VerifyArgs(card, "pre2")) == 0
+    scored: list[str] = []
+
+    def score(case: object, golden: Path) -> dict[str, float]:
+        scored.append(golden.name)
+        return {"ate": 1.0}
+
+    monkeypatch.setattr(dagkit_fakes, "verify_score", score)
+    assert verify.main(verify.VerifyArgs(card, "post")) == 0
+    assert sorted(scored) == ["short.post.partial", "short.pre.rrd", "short.pre2.rrd"]
+
+
 def test_an_empty_selection_fails(card: Path) -> None:
     assert verify.main(verify.VerifyArgs(card, "pre", block="typo")) == 1
     assert verify.main(verify.VerifyArgs(card, "pre", clip="full")) == 1
@@ -173,7 +197,7 @@ def test_register_publishes_an_immutable_copy(card: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(verify.SegmentRef, "entry", lambda self: FakeDataset())
     assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
-    assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
+    assert verify.main(verify.VerifyArgs(card, "pre", register=True, overwrite=True)) == 0
     uris: list[str] = [uris[0] for uris, _ in registered]
     golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
     assert len(set(uris)) == 2 and golden.as_uri() not in uris and {name for _, name in registered} == {"verify-fake-pre-abc1234"}

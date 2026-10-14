@@ -152,6 +152,7 @@ class VerifyArgs:
     block: str | None = None
     clip: Literal["short", "full"] | None = None
     register: bool = False  # add catalog goldens as layer verify-<block>-<phase>-<sha7> (never a replacement)
+    overwrite: bool = False  # re-record existing pre / pre2 goldens (the pre-port references are write-once)
 
 
 def main(args: VerifyArgs) -> int:
@@ -160,6 +161,10 @@ def main(args: VerifyArgs) -> int:
     selected: list[tuple[GraphBlock, Case]] = [(b, c) for b in card.graph if args.block in (None, b.name) for c in b.cases if args.clip in (None, c.clip)]
     if not selected or any(not block.metrics for block, _ in selected):
         print(f"FAIL: block={args.block} clip={args.clip} selects no case, or a selected block has no metrics")
+        return 1
+    kept: list[Path] = [p for b, c in selected if (p := golden_path(card.package, b.name, c.name, args.phase)).exists()]
+    if args.phase != "post" and kept and not args.overwrite:
+        print(f"FAIL: reference goldens are write-once; {[str(p) for p in kept]} exist (--overwrite re-records them)")
         return 1
     failed: bool = False
     for block, case in selected:
@@ -182,8 +187,8 @@ def main(args: VerifyArgs) -> int:
         results: list[BandResult] = [BandResult(b.name, False, "missing or non-finite") for b in block.metrics if not math.isfinite(metrics.get(b.name, math.nan))]
         if args.phase == "post":  # noise: the case's own (noise, pre + pre2 runs), or those of its `noise_from` case (missing: fails)
             donor: Case = next((c for c in block.cases if c.name == case.noise_from), case) if case.noise_from and not case.noise else case
-            runs: list[tuple[Case, Phase]] = [(case, "pre"), (donor, "pre"), (donor, "pre2")]
-            scores: dict = {(c.name, ph): dict(score(c, p)) for c, ph in runs if (p := golden_path(card.package, block.name, c.name, ph)).exists()}  # type: ignore[call-overload]
+            runs: dict[tuple[str, Phase], Case] = {(c.name, ph): c for c, ph in ((case, "pre"), (donor, "pre"), (donor, "pre2"))}  # donor is often case
+            scores: dict = {(n, ph): dict(score(c, p)) for (n, ph), c in runs.items() if (p := golden_path(card.package, block.name, n, ph)).exists()}  # type: ignore[call-overload]
             for band in block.metrics:
                 noise_runs: list[float | None] = [scores.get((donor.name, ph), {}).get(band.name) for ph in ("pre", "pre2")]
                 pre: float | None = scores.get((case.name, "pre"), {}).get(band.name)

@@ -75,7 +75,7 @@ noise = { ate_rmse_m = 0.0000248, tracked_fraction = 0.000555 }
 # Shots (scratch viewer, verify-block 5; per benchmark): 3D = the Sim3-aligned keyframe trajectory over the GT cam_00
 # trail, and the cam_00 input view, of tum-desk and euroc-mh01 at the middle of the sequence.
 name = "paper"
-run = "mast3r_slam.verify:run_paper"
+run = "mast3r_slam.verify:run"
 score = "mast3r_slam.verify:score_paper"
 # pre and pre2 bit-identical on all 40 cases (lossless is deterministic): noise 0, so tolerance = floor. ate floor =
 # 5 % of the median pre ATE over the 40 cases (0.05127 m -> 0.00256 m); tracked_fraction floor as block slam.
