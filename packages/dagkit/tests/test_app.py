@@ -2,6 +2,7 @@
 
 import dataclasses
 import gc
+import tempfile
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -211,12 +212,26 @@ def test_nested_literal_optional_and_output_fields_round_trip_through_the_form()
     assert first.nets == Nets(Path("/models")) and first.fill == Fill(steps=10) and first.max_frames is None and first.preset is None
     assert isinstance(first.fill.guidance, float)  # a beartyped float field never receives an int
     assert first.output_dir == Path("data/outputs") and first.output_ply is None and first.rr_config.headless
-    *_, last = run_fn(demo)("/models", "cuda", 4, 5, 1.5, "aarch64-cuda", "3", "fast", "elsewhere", False, True, "threaded", "lossless")
+    offered: bool = False
+    for last in run_fn(demo)("/models", "cuda", 4, 5, 1.5, "aarch64-cuda", "3", "fast", "elsewhere", False, True, "threaded", "lossless"):
+        offered = isinstance(last[-1], str) and Path(last[-1]).is_file()  # gradio copies the download while the run waits at its yield
     second: NestedConfig = built[1]
     assert second.nets == Nets(Path("/models"), "cuda", 4) and second.fill == Fill(5, 1.5) and (second.hardware, second.max_frames, second.preset) == ("aarch64-cuda", 3, "fast")
     assert second.output_scene is not None and second.output_scene.name == "output.scene" and second.output_dir == Path("elsewhere")
     zipped: str | None = last[-1]  # type: ignore[assignment]  # output_scene is a directory: offered as a zip
-    assert zipped is not None and zipped.endswith("output.scene.zip") and Path(zipped).is_file() and last[-2] is None
+    assert offered and zipped is not None and zipped.endswith("output.scene.zip") and last[-2] is None
+    assert not Path(zipped).parent.exists()  # the run's scratch directory goes with the run
+
+
+def test_a_form_run_leaves_no_scratch_directory_even_when_the_form_is_wrong(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import gradio as gr
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    demo = gradio_app(NestedConfig, lambda config, recording: Graph("empty"), title="Nested")
+    list(run_fn(demo)("/models", "auto", 0, 10, 30, "auto", "", "", "data/outputs", True, False, "threaded", "lossless"))
+    with pytest.raises(gr.Error, match="does not make a NestedConfig"):
+        list(run_fn(demo)("/models", "auto", 0, 10, 30, "auto", "three", "", "data/outputs", False, False, "threaded", "lossless"))
+    assert list(tmp_path.iterdir()) == []
 
 
 NESTED_FORM: dict[str, str] = {

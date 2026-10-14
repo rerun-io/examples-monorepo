@@ -267,7 +267,7 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
     first: object = examples[0] if examples else None  # a required field the Config leaves open starts from the first example
     leaves: list[Leaf] = [(p, h, functools.reduce(getattr, p, first) if d is dataclasses.MISSING and first is not None else d, doc) for p, h, d, doc in _leaves(config_type, None)]
     outputs: list[Leaf] = [leaf for leaf in leaves if leaf[0][-1].startswith("output") and type(None) in get_args(leaf[1])]  # "save it" boxes
-    with gr.Blocks(title=title) as demo:
+    with gr.Blocks(title=title, delete_cache=(3600, 3600)) as demo:  # hourly: drop downloads older than an hour from gradio's cache
         gr.Markdown(f"# {title}")
         control_state = gr.State(None)
         with gr.Row():
@@ -283,32 +283,33 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
 
         def run(*values: object) -> Iterator[tuple[object, ...]]:
             it: Iterator[object] = iter(values)
-            scratch = Path(tempfile.mkdtemp(prefix="dagkit-app-"))
-            try:
-                given: dict[tuple[str, ...], object] = {leaf[0]: v for leaf, ws in form if (v := _value(leaf, [next(it) for _ in ws], scratch)) is not dataclasses.MISSING}
-                config: G = _assemble(config_type, given, None)
-            except (TypeError, ValueError) as exc:  # a required field left empty, a malformed number or window
-                raise gr.Error(f"the form does not make a {config_type.__name__}: {exc}") from None
-            if getattr(config, "register", "off") != "off" and any(isinstance(v, Path) and v.is_relative_to(scratch) for v in given.values()):
-                config = dataclasses.replace(cast(Any, config), register="off")  # a temporary output is never registered on the catalog
-            recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
-            stream, control, errors = recording.binary_stream(), Control(), []
-
-            def body() -> None:
+            with tempfile.TemporaryDirectory(prefix="dagkit-app-", ignore_cleanup_errors=True) as tmp:  # gone with the run: gradio
+                scratch = Path(tmp)  # copies each download into its cache while the run waits at the yield that offers it
                 try:
-                    _run_graphs(config, build, recording, control)
-                except BaseException as exc:  # delivered to the UI thread below
-                    errors.append(exc)
+                    given: dict[tuple[str, ...], object] = {leaf[0]: v for leaf, ws in form if (v := _value(leaf, [next(it) for _ in ws], scratch)) is not dataclasses.MISSING}
+                    config: G = _assemble(config_type, given, None)
+                except (TypeError, ValueError) as exc:  # a required field left empty, a malformed number or window
+                    raise gr.Error(f"the form does not make a {config_type.__name__}: {exc}") from None
+                if getattr(config, "register", "off") != "off" and any(isinstance(v, Path) and v.is_relative_to(scratch) for v in given.values()):
+                    config = dataclasses.replace(cast(Any, config), register="off")  # a temporary output is never registered on the catalog
+                recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
+                stream, control, errors = recording.binary_stream(), Control(), []
 
-            thread = threading.Thread(target=body)
-            thread.start()
-            while thread.is_alive():
-                time.sleep(0.2)
-                yield (control, stream.read(), *(None for _ in files))
-            recording.flush()
-            if errors:
-                raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
-            yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config)) for leaf in outputs))
+                def body() -> None:
+                    try:
+                        _run_graphs(config, build, recording, control)
+                    except BaseException as exc:  # delivered to the UI thread below
+                        errors.append(exc)
+
+                thread = threading.Thread(target=body)
+                thread.start()
+                while thread.is_alive():
+                    time.sleep(0.2)
+                    yield (control, stream.read(), *(None for _ in files))
+                recording.flush()
+                if errors:
+                    raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
+                yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config)) for leaf in outputs))
 
         run_button.click(run, inputs=flat, outputs=[control_state, viewer, *files])
         stop_button.click(lambda control: control and control.stop(), inputs=[control_state], outputs=[])

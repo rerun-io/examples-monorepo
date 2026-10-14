@@ -2,12 +2,10 @@
 and whatever the form sends comes back as the typed Config the CLI would build (no GPU, no catalog: ``build`` is a fake)."""
 
 import dataclasses
-import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, get_args
 
-import pytest
 import rerun as rr
 from dagkit.app import HardwareClass, gradio_app
 from dagkit.graph import Graph
@@ -15,7 +13,7 @@ from dagkit.node import Mode
 from dagkit.sinks import Register
 from dagkit.sources import SegmentRef
 from dagkit.verify import load_card
-from hypothesis import HealthCheck, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from exo_calib.apis.calibrate import Config
@@ -55,8 +53,7 @@ def test_every_config_field_has_a_widget_or_is_hidden_on_purpose() -> None:
     assert choices["resume_from"] == ["init", "kp2d"] and choices["mode"] == list(get_args(Mode))
 
 
-def test_the_example_is_the_verify_short_case_and_runs_from_one_click(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))  # the app's per-run scratch directories
+def test_the_example_is_the_verify_short_case_and_runs_from_one_click() -> None:
     short = next(case for block in load_card(CARD).graph for case in block.cases if case.clip == "short")
     (example,) = examples()
     assert (example.segment.dataset, example.segment.segment, example.frame_budget, example.register) == (short.dataset, short.segment, 200, "off")
@@ -68,7 +65,7 @@ def test_the_example_is_the_verify_short_case_and_runs_from_one_click(tmp_path: 
     assert dataclasses.replace(built[0], rr_config=example.rr_config) == example and built[0].rr_config.headless
 
 
-@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(max_examples=25, deadline=None)
 @given(
     segment=st.tuples(NAME, NAME),
     numbers=st.tuples(st.integers(0, 10_000), st.integers(1, 100_000)),
@@ -80,9 +77,8 @@ def test_the_example_is_the_verify_short_case_and_runs_from_one_click(tmp_path: 
     ),  # fmt: skip
 )
 def test_whatever_the_form_sends_comes_back_as_the_typed_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, segment: tuple[str, str], numbers: tuple[int, int], as_float: bool, output_dir: str, choices: tuple
+    segment: tuple[str, str], numbers: tuple[int, int], as_float: bool, output_dir: str, choices: tuple
 ) -> None:
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     built: list[Config] = []
     _, run, _ = form(built)
     sent: tuple[float, ...] = tuple(float(n) for n in numbers) if as_float else numbers  # a browser may send 200.0 for 200

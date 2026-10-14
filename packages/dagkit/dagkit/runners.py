@@ -11,7 +11,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, cast
 
-import numpy as np
 import rerun as rr
 from serde import serde
 
@@ -23,6 +22,7 @@ from dagkit.sinks import RerunSink
 from dagkit.time import STATIC, TIME_MAX, GraphError, TimeNs, check_monotonic
 
 DEV_MODE: bool = os.environ.get("PIXI_DEV_MODE") == "1"
+STEP_WINDOW: int = 4096  # step times a node keeps for the report's p95
 Status: TypeAlias = Literal["complete", "stopped", "failed"]
 
 
@@ -39,7 +39,7 @@ class PortStats:
 class NodeStats:
     ticks: int
     step_ms_mean: float
-    step_ms_p95: float
+    step_ms_p95: float  # of the last STEP_WINDOW steps
     ports: dict[str, PortStats]
 
 
@@ -88,8 +88,9 @@ class _State:
     cuts: list = field(default_factory=list)  # Control.reset/reconfigure: (time, params, world); applied before the first later tick
     epoch: int = 0  # cuts applied so far; AsOf entries carry it
     ticks: int = 0
-    step_ms: list[float] = field(default_factory=list)
-    logged: int = 0
+    step_ms: deque = field(default_factory=lambda: deque(maxlen=STEP_WINDOW))  # the latest step times: a live run never grows
+    step_ms_sum: float = 0.0
+    logged: tuple[int, float] = (0, 0.0)  # ticks and step_ms_sum at the last health log
     pending_max: int = 0
     drops_seen: int = 0  # drops at the last health log
 
@@ -252,7 +253,8 @@ class _Run:
         s.obj.step(Tick(t_ns, port, value, asof), s)  # type: ignore[attr-defined]
         with self.cond:
             s.ticks += 1
-            s.step_ms.append((time.perf_counter() - start) * 1e3)
+            s.step_ms.append(ms := (time.perf_counter() - start) * 1e3)
+            s.step_ms_sum += ms
 
     def _close(self, s: _State) -> None:
         with self.cond:
@@ -402,9 +404,9 @@ class _Run:
         self.health.set_time("wall_time", duration=now - (self.started_at if force else self.health_started_at))
         for s in self.nodes:
             root: str = HEALTH_ROOT + s.spec.name
-            if len(s.step_ms) > s.logged:
-                self.health.log(f"{root}/step_ms", rr.Scalars(float(np.mean(s.step_ms[s.logged :]))))
-                s.logged = len(s.step_ms)
+            if s.ticks > s.logged[0]:  # the mean step since the last log
+                self.health.log(f"{root}/step_ms", rr.Scalars((s.step_ms_sum - s.logged[1]) / (s.ticks - s.logged[0])))
+                s.logged = (s.ticks, s.step_ms_sum)
             for edge in s.triggers:
                 self.health.log(f"{root}/queue_depth/{edge.spec.dst.port}", rr.Scalars(float(len(edge.queue))))
                 self.health.log(f"{root}/drops/{edge.spec.dst.port}", rr.Scalars(float(edge.drops)))
@@ -459,7 +461,7 @@ class _Run:
         for name, s in self.states.items():
             ms: list[float] = sorted(s.step_ms) or [0.0]
             ports: dict[str, PortStats] = {e.spec.dst.port: PortStats(e.depth_max, e.drops, s.pending_max) for e in s.triggers}
-            nodes[name] = NodeStats(s.ticks, float(np.mean(ms)), ms[int(0.95 * (len(ms) - 1))], ports)
+            nodes[name] = NodeStats(s.ticks, s.step_ms_sum / s.ticks if s.step_ms else 0.0, ms[int(0.95 * (len(ms) - 1))], ports)
         self._release()
         return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, max(self.last - self.first, 0) / 1e9, nodes)
 
