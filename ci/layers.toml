@@ -3,7 +3,7 @@
 # A port moves its import root from `pending` to `enforced`; in an enforced package every module must match a rule.
 
 enforced = ["exo_calib", "mamma", "robocap_live", "vistadream", "mast3r_slam"]
-pending = []
+pending = ["slam_rs"]  # ported onto dagkit (graphs, nodes, types, verify); its top-level modules have no layer home yet
 
 # Import name -> source root (the directory that holds the import package), relative to the repo.
 [roots]
@@ -14,6 +14,7 @@ mamma = "packages/mamma/src"
 robocap_live = "packages/robocap-live"
 vistadream = "packages/vistadream/src"
 mast3r_slam = "packages/mast3r-slam"
+slam_rs = "packages/slam-rs"
 posekit = "packages/posekit/src"
 monopriors = "packages/monoprior"
 trtkit = "packages/trtkit/src"
