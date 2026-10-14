@@ -12,7 +12,7 @@ from dagkit.runners import run_sequential
 from dagkit.sinks import LayerSink, open_layer, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, rerun_roundtrip
+from dagkit.types import Producer, read_producer, rerun_roundtrip
 
 pytestmark = pytest.mark.integration
 PRODUCER = Producer("dagkit", "0.1.0+test", "points", "x86_64-cuda")
@@ -63,3 +63,11 @@ def test_register_new_adds_the_layer_once_and_refuses_a_second(tmp_path: Path) -
             write_layer(tmp_path / "layers", segment, register="new")
         source = CatalogSegmentSource(segment, {"point": Column(Point, "/points")})
         assert [e.t_ns for e in source.events()] == [10, 20]
+
+
+def test_read_producer_gives_back_what_the_layer_logged(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(path)]}) as server:
+        dataset = server.client().get_dataset("ds")  # an entry must outlive its queries
+        assert read_producer(dataset, "seg0", "points") == PRODUCER
+        assert read_producer(dataset, "seg0", "hands") is None

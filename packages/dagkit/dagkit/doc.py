@@ -2,10 +2,8 @@
 
 import ast
 import dataclasses
-import functools
 import inspect
 import itertools
-import subprocess
 import textwrap
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
@@ -20,6 +18,7 @@ from serde.json import to_json
 from dagkit.graph import AsOf, DropOldest, Graph, NodeKind, Spawn, normalise
 from dagkit.node import PortType
 from dagkit.sinks import LayerFileSink
+from dagkit.types import git
 
 How: TypeAlias = Literal["waits", "latest", "drops old"]
 Rgb: TypeAlias = tuple[int, int, int]
@@ -91,22 +90,13 @@ class GraphDoc:
     resources: list[str]
 
 
-@functools.cache
-def _git(*args: str) -> str:
-    try:
-        done = subprocess.run(["git", *args], capture_output=True, text=True, cwd=Path(__file__).parent)
-    except OSError:  # no git on this host (a deployed device): no code links
-        return ""
-    return done.stdout.strip() if done.returncode == 0 else ""
-
-
 def _code(cls: type) -> str:
     """``path/in/repo.py#L<line>`` of a class (its module name outside the checkout)."""
     try:
         path, line = Path(inspect.getsourcefile(cls) or "").resolve(), inspect.getsourcelines(cls)[1]
     except (OSError, TypeError):
         return cls.__module__
-    root: str = _git("rev-parse", "--show-toplevel")
+    root: str = git("rev-parse", "--show-toplevel")
     return f"{path.relative_to(root)}#L{line}" if root and path.is_relative_to(root) else cls.__module__
 
 
@@ -169,7 +159,7 @@ def describe(graph: Graph, drawn: Mapping[str, Mapping[str, Collection[str]]] | 
     edges: list[EdgeDoc] = [EdgeDoc(e.src.node, e.src.port, e.dst.node, e.dst.port,
         "latest" if isinstance(e.kind, AsOf) else "drops old" if isinstance(e.kind, DropOldest) else "waits",
         0 if isinstance(e.kind, AsOf) else e.kind.capacity) for e in graph.edges]  # fmt: skip
-    return GraphDoc(graph.name, graph.about, _git("rev-parse", "HEAD"), nodes, edges, sorted(graph.resources))
+    return GraphDoc(graph.name, graph.about, git("rev-parse", "HEAD"), nodes, edges, sorted(graph.resources))
 
 
 @dataclass(slots=True)

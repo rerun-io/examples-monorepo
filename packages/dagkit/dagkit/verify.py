@@ -1,9 +1,7 @@
 import importlib
-import importlib.metadata
 import math
 import os
 import shutil
-import subprocess
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -16,7 +14,7 @@ from serde import SerdeError, coerce, serde
 from serde.toml import from_toml
 
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, log_producer
+from dagkit.types import Producer, git, log_producer
 
 Phase: TypeAlias = Literal["pre", "pre2", "post"]
 
@@ -142,10 +140,7 @@ class VerifyArgs:
 
 def main(args: VerifyArgs) -> int:
     card: VerifyCard = load_card(args.card)
-    sha7: str = subprocess.run(
-        ["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, check=True, cwd=args.card.parent
-    ).stdout.strip()
-    version: str = f"{importlib.metadata.version(card.package)}+{sha7}"
+    sha7: str = git("rev-parse", "--short=7", "HEAD")
     selected: list[tuple[GraphBlock, Case]] = [(b, c) for b in card.graph if args.block in (None, b.name) for c in b.cases if args.clip in (None, c.clip)]
     if not selected or any(not block.metrics for block, _ in selected):
         print(f"FAIL: block={args.block} clip={args.clip} selects no case, or a selected block has no metrics")
@@ -158,7 +153,8 @@ def main(args: VerifyArgs) -> int:
         partial: Path = golden.with_suffix(".partial")
         recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
         recording.save(partial)
-        log_producer(recording, f"verify-{block.name}", Producer(card.package, version, block.name, "verify", args.phase))
+        producer: Producer = Producer.of(card.package, block.name, "verify", phase=args.phase)
+        log_producer(recording, f"verify-{block.name}", producer)
         run(case, args.phase, recording)
         recording.flush()
         metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]

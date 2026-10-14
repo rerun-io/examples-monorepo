@@ -1,5 +1,7 @@
 """Types tier, unit lane: serde round-trips and the `to_rerun` structure (no catalog)."""
 
+import importlib.metadata
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -23,6 +25,13 @@ text = st.text(st.characters(codec="utf-8", exclude_categories=("Cs",)), max_siz
 @given(st.builds(Producer, text, text, text, text, text, text))
 def test_producer_json_roundtrip(producer: Producer) -> None:
     assert from_json(Producer, to_json(producer)) == producer
+
+
+def test_producer_of_stamps_the_package_version_and_the_checkout_sha() -> None:
+    producer: Producer = Producer.of("dagkit", "points", "x86_64-cuda/fast", params_sha="abc")
+    version, sha = producer.version.split("+")
+    assert version == importlib.metadata.version("dagkit") and re.fullmatch("[0-9a-f]{7,}", sha)
+    assert producer == Producer("dagkit", producer.version, "points", "x86_64-cuda/fast", "run", "abc")
 
 
 @given(st.builds(SegmentRef, text, text, text, text, st.none() | st.tuples(st.integers(-(2**62), 0), st.integers(1, 2**62))))

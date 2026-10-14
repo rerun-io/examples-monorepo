@@ -136,7 +136,7 @@ noise = { ate = 0.01 }
 @pytest.fixture
 def card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("DAGKIT_GOLDENS", str(tmp_path / "goldens"))
-    monkeypatch.setattr(verify.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="abc1234\n"))
+    monkeypatch.setattr(verify, "git", lambda *args: "abc1234")
     (tmp_path / "VERIFY.toml").write_text(SHORT_CARD)
     return tmp_path / "VERIFY.toml"
 
