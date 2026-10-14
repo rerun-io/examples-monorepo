@@ -82,3 +82,30 @@ segment = "msd-index__MIO_others__MIO07_mapping_easy"
 params = { profile = "fast", backend = "cpu", decode_device = "cpu" }
 # pre 2.2046 cm (4094 associated; benchmarks.toml cpu baseline 2.2044 cm), pre2 bit-identical. The floor is 3.6 % of this pre.
 noise = { gt_ate_cm = 0.0, lost_framesets = 0.0 }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root"]
+properties = ["tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root"]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_types_rerun.py"]
+properties = ["tests/test_types_rerun.py::test_a_rig_pose_reads_back_at_its_time_with_its_quaternion_order_in_float32"]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_vio_graph.py"]
+properties = [
+    "tests/test_vio_graph.py::test_the_node_makes_lockstep_calls_whatever_the_imu_split",
+    "tests/test_vio_graph.py::test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order",
+    "tests/test_vio_graph.py::test_a_stop_between_an_imu_batch_and_its_frames_still_publishes_within_the_watermark",
+    "tests/test_vio_graph.py::test_the_app_graph_validates_draws_its_declaration_and_documents_itself",
+    "tests/test_vio_graph.py::test_sequential_and_threaded_deliver_the_same_ticks_and_publish_the_same_poses",
+]
