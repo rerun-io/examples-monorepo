@@ -2,17 +2,21 @@ import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 from rerun.chunk import RrdReader
 
+from dagkit.app import _leaves, gradio_app
 from dagkit.doc import GRAPH_ROOT, GraphDoc, describe, guide, log_graph
 from dagkit.graph import AsOf, DropOldest, Graph, Spawn, normalise
-from dagkit.node import Emit, Event, Node, RunContext, Tick
-from dagkit.time import TimeNs, check_monotonic
+from dagkit.node import Emit, Event, Fenced, Node, RunContext, Tick
+from dagkit.time import STATIC, TimeNs, check_monotonic
+from dagkit.types import Type
 
 Output = tuple[str, TimeNs, object]
 
@@ -26,6 +30,19 @@ class Recorder:
 
     def watermark(self, t_ns: TimeNs) -> None:
         pass
+
+
+def host(value: object) -> object:
+    """``value`` as numpy compares it: Fenced unwrapped, dataclasses as dicts, sequences as lists, tensors (anything with
+    ``detach``; dagkit never imports torch) as host arrays."""
+    value = value.value if isinstance(value, Fenced) else value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: host(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, dict):
+        return {k: host(v) for k, v in value.items()}
+    if isinstance(value, tuple | list):
+        return [host(v) for v in value]
+    return value.detach().cpu().numpy() if hasattr(value, "detach") else value
 
 
 def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | None = None) -> list[Output]:
@@ -47,7 +64,7 @@ def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | Non
             check_monotonic(last.get(port), t_ns, f"output {port}")
             last[port] = t_ns
         runs.append(out.items)
-    plain: list[list[object]] = [[(p, t, asdict(v) if is_dataclass(v) and not isinstance(v, type) else v) for p, t, v in run] for run in runs]
+    plain: list[list[object]] = [[(p, t, host(v)) for p, t, v in run] for run in runs]
     np.testing.assert_equal(plain[1], plain[0], err_msg="a run after reset differs from the first run (reset is not idempotent)")  # arrays by value
     return runs[0]
 
@@ -66,6 +83,37 @@ class _Spy:
     def run(self, inputs: Mapping[str, Sequence[Event]], out: Emit) -> None:
         self.seen.append({port: list(events) for port, events in inputs.items()})
         self.node.run(inputs, out)  # type: ignore[attr-defined]
+
+
+def layer_table(values: Sequence[tuple[TimeNs, Type]], root: str, timeline: str = "video_time") -> pa.Table:
+    """What a catalog reader returns for these values (no server): one row per time, ``<entity>:<component>`` columns,
+    statics repeated in every row (one row when every value is static)."""
+    cells: dict[str, dict[TimeNs, list]] = defaultdict(dict)
+    statics: dict[str, list] = {}
+    for t_ns, value in values:
+        for log in value.to_rerun(root):
+            for batch in log.data.as_component_batches():
+                name: str = f"{log.path}:{batch.component_descriptor()}"
+                if log.static or t_ns == STATIC:
+                    statics[name] = batch.as_arrow_array().to_pylist()
+                else:
+                    cells[name][t_ns] = batch.as_arrow_array().to_pylist()
+    times: list[TimeNs] = sorted({t for t, _ in values if t != STATIC}) or [0]
+    columns: dict[str, Any] = {timeline: pa.array(times, type=pa.int64())} | {n: [c.get(t) for t in times] for n, c in cells.items()}
+    return pa.table(columns | {n: [v] * len(times) for n, v in statics.items()})
+
+
+def check_form(config_type: type, build: Callable[..., object], widgets: Mapping[str, str], hidden: Mapping[str, str], *, examples: Sequence = ()) -> Any:
+    """The generated form shows ``widgets`` (form label without its ": save it" note -> gradio class name, in form order) and
+    leaves out the ``hidden`` Config fields (each with its reason): every field is in exactly one of them. Returns the app."""
+    demo = gradio_app(config_type, build, title=config_type.__name__, examples=examples)  # type: ignore[arg-type]
+    run = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
+    shown: list[tuple[str, str]] = [(str(w.label).split(":")[0], type(w).__name__) for w in run.inputs]
+    assert shown == list(widgets.items()), f"the form shows {shown}"
+    for path in (".".join(leaf[0]) for leaf in _leaves(config_type, None)):
+        has_widget: bool = any(label == path or label.startswith(f"{path}.") for label, _ in shown)
+        assert has_widget != (path in hidden), f"{path}: {'shown and hidden' if has_widget else 'neither shown nor hidden on purpose'}"
+    return demo
 
 
 def collect_edges(graph: Graph, run: Callable[[Graph], object]) -> dict[str, list[object]]:

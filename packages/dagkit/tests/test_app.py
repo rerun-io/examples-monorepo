@@ -19,6 +19,7 @@ from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, load_p
 from dagkit.graph import Graph
 from dagkit.node import Emit, Mode, Tick
 from dagkit.sources import SegmentRef
+from dagkit.testing import check_form
 
 PROFILE = """
 hardware = "x86_64-cuda"
@@ -213,6 +214,27 @@ def test_nested_literal_optional_and_output_fields_round_trip_through_the_form()
     assert second.output_scene is not None and second.output_scene.name == "output.scene" and second.output_dir == Path("elsewhere")
     zipped: str | None = last[-1]  # type: ignore[assignment]  # output_scene is a directory: offered as a zip
     assert zipped is not None and zipped.endswith("output.scene.zip") and Path(zipped).is_file() and last[-2] is None
+
+
+NESTED_FORM: dict[str, str] = {
+    "nets.models_dir": "Textbox", "nets.device": "Dropdown", "nets.threads": "Number", "fill.steps": "Number", "fill.guidance": "Number",
+    "hardware": "Dropdown", "max_frames": "Textbox", "preset": "Textbox", "output_dir": "Textbox", "output_ply": "Checkbox", "output_scene": "Checkbox",
+    "runner": "Dropdown", "mode": "Dropdown",
+}  # fmt: skip
+
+
+def test_check_form_wants_every_config_field_shown_in_order_or_hidden_on_purpose() -> None:
+    def build(config: NestedConfig, recording: rr.RecordingStream) -> Graph:
+        return Graph("empty")
+
+    demo = check_form(NestedConfig, build, NESTED_FORM, {"rr_config": "the form renders into its own pane"})
+    assert type(demo).__name__ == "Blocks"
+    with pytest.raises(AssertionError, match="rr_config"):
+        check_form(NestedConfig, build, NESTED_FORM, {})
+    with pytest.raises(AssertionError, match="max_frames"):
+        check_form(NestedConfig, build, {k: v for k, v in NESTED_FORM.items() if k != "max_frames"}, {"rr_config": "", "max_frames": ""})
+    with pytest.raises(AssertionError):  # the form's order is part of the table
+        check_form(NestedConfig, build, dict(reversed(NESTED_FORM.items())), {"rr_config": ""})
 
 
 @dataclass

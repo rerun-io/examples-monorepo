@@ -53,8 +53,10 @@ pixi run -e dagkit --frozen dagkit-demo --rr-config.connect rerun+http://127.0.0
 python -m dagkit.verify packages/<pkg>/VERIFY.toml --phase post   # graph-tier bands (needs DAGKIT_GOLDENS)
 ```
 
-Tests for a package graph: `dagkit.testing.check_node_contract(node, ticks)` for every node with fakes, and
-`dagkit.testing.collect_edges(graph, run)` to compare `run_sequential` with `run_threaded(mode="lossless")`. For the
+Tests for a package graph: `dagkit.testing.check_node_contract(node, ticks)` for every node with fakes (it compares runs
+through `host`, so Fenced values and tensors need no wrapper), `dagkit.testing.collect_edges(graph, run)` to compare
+`run_sequential` with `run_threaded(mode="lossless")`, `layer_table(values, root)` for a Type's `from_layer(to_rerun)`
+round trip without a server, and `check_form(Config, build, widgets, hidden)` for the generated form. For the
 graph view, on the graphs the App builds (with fakes): `check_picture(graph, tmp_path)` logs the picture to an rrd and
 reads it back (picture == declaration), and `check_graph_docs(*graphs, snapshot=PACKAGE_DIR / "GRAPH.md")` checks the
 docs and keeps the package's `GRAPH.md` (the guide without links; `DAGKIT_UPDATE_SNAPSHOTS=1` rewrites it).

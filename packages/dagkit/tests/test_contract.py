@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from dagkit_fakes import Add, Batch
 
-from dagkit.node import Emit, RunContext, Tick
-from dagkit.testing import check_node_contract
+from dagkit.node import Emit, Fenced, RunContext, Tick
+from dagkit.testing import check_node_contract, host
 
 
 def ticks(n: int) -> list[Tick]:
@@ -58,3 +58,36 @@ def test_array_valued_outputs_compare_by_value() -> None:
     assert [(port, t) for port, t, _ in outputs] == [("y", 0), ("y", 1)]
     with pytest.raises(AssertionError, match="reset is not idempotent"):
         check_node_contract(LeakyLift(0), ticks(2))
+
+
+class Tensorish:
+    """Duck-typed like a torch tensor (dagkit never imports torch): equal values, a new object every run."""
+
+    def __init__(self, values: list[float]) -> None:
+        self.values = values
+
+    def detach(self) -> "Tensorish":
+        return self
+
+    def cpu(self) -> "Tensorish":
+        return self
+
+    def numpy(self) -> np.ndarray:
+        return np.asarray(self.values)
+
+
+@dataclass(frozen=True)
+class GpuCloud:
+    xyz: Tensorish
+    views: tuple[Tensorish, ...]
+
+
+def test_fenced_and_tensor_like_outputs_compare_by_value() -> None:
+    class OnGpu(Add):
+        def step(self, tick: Tick, out: Emit) -> None:
+            cloud = GpuCloud(Tensorish([float(tick.value)] * 3), (Tensorish([1.0]),))  # type: ignore[arg-type]
+            out.put("y", tick.t_ns, Fenced(cloud, None))
+
+    outputs = check_node_contract(OnGpu(0), ticks(2))
+    assert [type(value) for _, _, value in outputs] == [Fenced, Fenced]  # the caller still gets the values the node put
+    np.testing.assert_equal(host(outputs[1][2]), {"xyz": np.ones(3), "views": [np.ones(1)]})
