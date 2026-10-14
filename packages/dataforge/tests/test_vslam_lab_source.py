@@ -15,13 +15,13 @@ from dataforge.datasets.vslam_lab_source import (
     Calibration,
     FrameIndex,
     ImuStream,
-    PoseTable,
     StreamName,
     read_calibration,
     read_frame_index,
     read_imu,
     read_poses,
 )
+from dataforge.euroc import GtTrajectory
 
 TUM_CALIBRATION: str = """%YAML 1.2
 ---
@@ -149,7 +149,7 @@ def test_a_stamp_written_as_a_float_literal_is_read_exactly(tmp_path: Path) -> N
 
 
 def test_ground_truth_comes_back_world_t_body_scalar_last(tmp_path: Path) -> None:
-    poses: PoseTable = read_poses(
+    poses: GtTrajectory = read_poses(
         write(
             tmp_path,
             "groundtruth.csv",

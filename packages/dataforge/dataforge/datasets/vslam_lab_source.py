@@ -30,6 +30,7 @@ from serde import SerdeError, coerce, field, from_dict, serde
 from serde.yaml import from_yaml
 from yaml import YAMLError
 
+from dataforge.euroc import GtTrajectory, sanitized
 from dataforge.logging_toolkit import ImuChannel
 
 StreamName: TypeAlias = Literal["rgb_0", "rgb_1", "depth_0", "depth_1"]
@@ -174,18 +175,6 @@ class FrameIndex:
 
 
 @dataclass(frozen=True, slots=True)
-class PoseTable:
-    """groundtruth.csv as arrays: world_T_body per row."""
-
-    times_ns: Int64[ndarray, "n_poses"]
-    """Pose stamps, nanoseconds."""
-    translations_xyz: Float64[ndarray, "n_poses 3"]
-    """world_t_body, metres."""
-    quaternions_xyzw: Float64[ndarray, "n_poses 4"]
-    """world_R_body, scalar last, as written."""
-
-
-@dataclass(frozen=True, slots=True)
 class ImuStream:
     """imu_0.csv split into its two channels on one clock."""
 
@@ -234,13 +223,13 @@ def read_frame_index(path: Path) -> dict[StreamName, FrameIndex]:
     return streams
 
 
-def read_poses(path: Path) -> PoseTable:
-    """Read groundtruth.csv."""
+def read_poses(path: Path) -> GtTrajectory:
+    """Read groundtruth.csv as world_T_body, a dropout row repaired as in every EuRoC-style file (``euroc.sanitized``)."""
     rows: list[PoseRow] = read_rows(path, PoseRow)
-    return PoseTable(
-        times_ns=np.array([row.ts for row in rows], dtype=np.int64),
-        translations_xyz=np.array([[row.tx, row.ty, row.tz] for row in rows], dtype=np.float64).reshape(-1, 3),
-        quaternions_xyzw=np.array([[row.qx, row.qy, row.qz, row.qw] for row in rows], dtype=np.float64).reshape(-1, 4),
+    return sanitized(
+        np.array([row.ts for row in rows], dtype=np.int64),
+        np.array([[row.tx, row.ty, row.tz] for row in rows], dtype=np.float64).reshape(-1, 3),
+        np.array([[row.qx, row.qy, row.qz, row.qw] for row in rows], dtype=np.float64).reshape(-1, 4),
     )
 
 
