@@ -12,7 +12,7 @@ Dense monocular SLAM: the frontend tracks every frame against the last keyframe 
 ## 1 · video: Decode the cameras' videos
 *source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening.
+Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
 
 | gives | type | to |
 |---|---|---|

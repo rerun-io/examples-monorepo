@@ -178,7 +178,7 @@ def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path
 
 FORM: dict[str, str] = {
     "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "video": "File", "images": "Textbox",
-    "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown", "img_size": "Dropdown",
+    "undistort": "Checkbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown", "img_size": "Dropdown",
     "subsample": "Textbox", "output_nerfstudio: save it, then download it": "Checkbox", "layer_dir": "Textbox",
     "register": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
