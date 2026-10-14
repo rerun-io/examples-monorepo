@@ -98,6 +98,7 @@ class Backend:
                 self.states.dequeue_reloc()
         ii: Int64[ndarray, " e"] = self.graph.ii.cpu().numpy().astype(np.int64)
         out.put("map", tick.t_ns, MapUpdate(self._poses(), ii, self.graph.jj.cpu().numpy().astype(np.int64), self.world))
+        torch.cuda.empty_cache()  # each global solve allocates edge-sized buffers: cached blocks would fragment the GPU
 
     def flush(self, out: Emit) -> None:
         poses: Float32[ndarray, "k 8"] = self._poses()
