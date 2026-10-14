@@ -50,7 +50,7 @@ class CameraRow:
 
 @dataclass(frozen=True, slots=True)
 class TimestampedSamples:
-    """One purely numeric MSD csv, split into its clock and its value columns."""
+    """One purely numeric EuRoC-style csv (MSD's, VSLAM-LAB's streams), split into its clock and its value columns."""
 
     times_ns: Int64[ndarray, "n_samples"]
     """Sample times on the device clock, nanoseconds."""

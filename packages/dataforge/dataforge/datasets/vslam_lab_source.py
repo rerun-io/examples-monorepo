@@ -10,8 +10,9 @@
         imu_0.csv          ts (ns), wx..wz (rad s^-1), ax..az (m s^-2)
         rgb_0/ rgb_1/ depth_0/ depth_1/   the frames rgb.csv names
 
-``T_BS`` is body_T_sensor as a row-major 4x4. Every file here is a third-party format read whole, so each row
-or entry is a pyserde record: unknown YAML keys are allowed (their schema is not ours to police), and a file that
+``T_BS`` is body_T_sensor as a row-major 4x4. calibration.yaml and rgb.csv are records read whole, so each
+entry or row is a pyserde record: unknown YAML keys are allowed (their schema is not ours to police).
+groundtruth.csv and imu_0.csv are streams (EuRoC's run at 200 Hz), read as Arrow columns. Either way a file that
 does not parse is a ``ValueError`` naming it.
 """
 
@@ -21,20 +22,28 @@ import csv
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, TypeAlias, TypeVar
+from typing import Literal, TypeAlias
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.csv as pacsv
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import SerdeError, coerce, field, from_dict, serde
 from serde.yaml import from_yaml
 from yaml import YAMLError
 
-from dataforge.euroc import GtTrajectory, sanitized
+from dataforge.euroc import GtTrajectory, TimestampedSamples, sanitized
 from dataforge.logging_toolkit import ImuChannel
 
 StreamName: TypeAlias = Literal["rgb_0", "rgb_1", "depth_0", "depth_1"]
 """Image streams rgb.csv can list; ``depth_<i>`` is registered to ``rgb_<i>``."""
+TIMESTAMP_COLUMN: str = "ts (ns)"
+"""First column of groundtruth.csv and imu_0.csv."""
+POSE_COLUMNS: tuple[str, ...] = ("tx (m)", "ty (m)", "tz (m)", "qx", "qy", "qz", "qw")
+"""groundtruth.csv after the stamp: world_t_body, then world_R_body scalar last."""
+IMU_COLUMNS: tuple[str, ...] = ("wx (rad s^-1)", "wy (rad s^-1)", "wz (rad s^-1)", "ax (m s^-2)", "ay (m s^-2)", "az (m s^-2)")
+"""imu_0.csv after the stamp: angular velocity, then linear acceleration."""
 
 
 def nanoseconds(value: str) -> int:
@@ -135,35 +144,6 @@ class FrameRow:
     path_depth_1: str | None = field(default=None, rename="path_depth_1")
 
 
-@serde(type_check=coerce)
-@dataclass(frozen=True, slots=True)
-class PoseRow:
-    """One groundtruth.csv row: world_T_body."""
-
-    ts: int = field(rename="ts (ns)", deserializer=nanoseconds)
-    tx: float = field(rename="tx (m)")
-    ty: float = field(rename="ty (m)")
-    tz: float = field(rename="tz (m)")
-    qx: float
-    qy: float
-    qz: float
-    qw: float
-
-
-@serde(type_check=coerce)
-@dataclass(frozen=True, slots=True)
-class ImuRow:
-    """One imu_0.csv row: angular velocity, then linear acceleration."""
-
-    ts: int = field(rename="ts (ns)", deserializer=nanoseconds)
-    wx: float = field(rename="wx (rad s^-1)")
-    wy: float = field(rename="wy (rad s^-1)")
-    wz: float = field(rename="wz (rad s^-1)")
-    ax: float = field(rename="ax (m s^-2)")
-    ay: float = field(rename="ay (m s^-2)")
-    az: float = field(rename="az (m s^-2)")
-
-
 @dataclass(frozen=True, slots=True)
 class FrameIndex:
     """One image stream of rgb.csv: when each frame was captured, and where it lies."""
@@ -184,19 +164,6 @@ class ImuStream:
     """Linear acceleration, m/s^2."""
 
 
-RowT = TypeVar("RowT")
-
-
-def read_rows(path: Path, row_type: type[RowT]) -> list[RowT]:  # noqa: UP047 — pyserde/beartype use the runtime TypeVar.
-    """Every data row of a VSLAM-LAB csv as ``row_type``; a malformed file is a ``ValueError`` naming it."""
-    with path.open(newline="") as stream:
-        reader: csv.DictReader[str] = csv.DictReader(stream)
-        try:
-            return [from_dict(row_type, {name.strip(): value for name, value in row.items()}) for row in reader]
-        except (SerdeError, ValueError, ArithmeticError) as error:
-            raise ValueError(f"{path}: {error}") from error
-
-
 def read_calibration(path: Path) -> Calibration:
     """Read a calibration.yaml; a malformed one is a ``ValueError`` naming it."""
     try:
@@ -207,7 +174,11 @@ def read_calibration(path: Path) -> Calibration:
 
 def read_frame_index(path: Path) -> dict[StreamName, FrameIndex]:
     """Read rgb.csv into one ``FrameIndex`` per stream it lists."""
-    rows: list[FrameRow] = read_rows(path, FrameRow)
+    with path.open(newline="") as stream:
+        try:
+            rows: list[FrameRow] = [from_dict(FrameRow, {name.strip(): value for name, value in row.items()}) for row in csv.DictReader(stream)]
+        except (SerdeError, ValueError, ArithmeticError) as error:
+            raise ValueError(f"{path}: {error}") from error
     columns: dict[StreamName, tuple[list[int | None], list[str | None]]] = {
         "rgb_0": ([row.ts_rgb_0 for row in rows], [row.path_rgb_0 for row in rows]),
         "rgb_1": ([row.ts_rgb_1 for row in rows], [row.path_rgb_1 for row in rows]),
@@ -223,21 +194,33 @@ def read_frame_index(path: Path) -> dict[StreamName, FrameIndex]:
     return streams
 
 
+def read_samples(path: Path, columns: tuple[str, ...]) -> TimestampedSamples:
+    """A stream csv as its ``ts (ns)`` clock and a float64 table of ``columns``, in that order.
+
+    The stamp is read as text and converted by ``nanoseconds``, so it stays exact; a missing column or an empty or
+    non-numeric cell is a ``ValueError`` naming the file.
+    """
+    options: pacsv.ConvertOptions = pacsv.ConvertOptions(
+        column_types={TIMESTAMP_COLUMN: pa.string(), **dict.fromkeys(columns, pa.float64())}, include_columns=[TIMESTAMP_COLUMN, *columns], null_values=[]
+    )
+    try:
+        table: pa.Table = pacsv.read_csv(path, convert_options=options)
+        times_ns: Int64[ndarray, "n_samples"] = np.array([nanoseconds(stamp) for stamp in table[TIMESTAMP_COLUMN].to_pylist()], dtype=np.int64)
+    except (KeyError, ValueError, ArithmeticError) as error:
+        raise ValueError(f"{path}: {error}") from error
+    return TimestampedSamples(times_ns=times_ns, values=np.column_stack([table[name].to_numpy() for name in columns]))
+
+
 def read_poses(path: Path) -> GtTrajectory:
     """Read groundtruth.csv as world_T_body, a dropout row repaired as in every EuRoC-style file (``euroc.sanitized``)."""
-    rows: list[PoseRow] = read_rows(path, PoseRow)
-    return sanitized(
-        np.array([row.ts for row in rows], dtype=np.int64),
-        np.array([[row.tx, row.ty, row.tz] for row in rows], dtype=np.float64).reshape(-1, 3),
-        np.array([[row.qx, row.qy, row.qz, row.qw] for row in rows], dtype=np.float64).reshape(-1, 4),
-    )
+    samples: TimestampedSamples = read_samples(path, POSE_COLUMNS)
+    return sanitized(samples.times_ns, samples.values[:, :3], samples.values[:, 3:])
 
 
 def read_imu(path: Path) -> ImuStream:
     """Read imu_0.csv."""
-    rows: list[ImuRow] = read_rows(path, ImuRow)
-    times_ns: Int64[ndarray, "n_samples"] = np.array([row.ts for row in rows], dtype=np.int64)
+    samples: TimestampedSamples = read_samples(path, IMU_COLUMNS)
     return ImuStream(
-        gyro=ImuChannel(times_ns=times_ns, values_xyz=np.array([[row.wx, row.wy, row.wz] for row in rows], dtype=np.float64).reshape(-1, 3)),
-        accel=ImuChannel(times_ns=times_ns, values_xyz=np.array([[row.ax, row.ay, row.az] for row in rows], dtype=np.float64).reshape(-1, 3)),
+        gyro=ImuChannel(times_ns=samples.times_ns, values_xyz=np.ascontiguousarray(samples.values[:, :3])),
+        accel=ImuChannel(times_ns=samples.times_ns, values_xyz=np.ascontiguousarray(samples.values[:, 3:])),
     )
