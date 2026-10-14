@@ -78,6 +78,17 @@ def person_dict(value: object, origin: str) -> dict[str, object]:
     return value
 
 
+def box_records(value: object, origin: str) -> dict[str, object]:
+    """A box file as person name -> box: Harmony4D ships a dict keyed by person, EgoHumans' pipeline a list of
+    ``{bbox: [x1, y1, x2, y2, confidence], human_name, human_id, color}`` records (upstream ``ego_exo_scene.get_bboxes``)."""
+    records: object = value.tolist() if isinstance(value, np.ndarray) and value.dtype == object and value.ndim == 1 else value
+    if not isinstance(records, list):
+        return person_dict(records, origin)
+    if not all(isinstance(record, dict) and isinstance(record.get("human_name"), str) and "bbox" in record for record in records):
+        raise ValueError(f"{origin}: expected box records with human_name and bbox")
+    return {record["human_name"]: record["bbox"] for record in records}
+
+
 # ── the per-sequence capture config ────────────────────────────────────────
 
 
@@ -585,7 +596,7 @@ def read_boxes(files: SequenceFiles, frames: Int64[ndarray, "t"], cameras: list[
             name: str = f"{directory}/{frame:05d}.npy"
             if not files.exists(name):
                 continue
-            for person, box in person_dict(load_pickle(files.read(name), name), name).items():
+            for person, box in box_records(load_pickle(files.read(name), name), name).items():
                 if person in boxes and box is not None:
                     boxes[person][row] = np.asarray(box, dtype=np.float32).reshape(-1)[:4]
         result.append(CameraBoxes(camera, boxes))

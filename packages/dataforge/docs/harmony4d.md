@@ -110,3 +110,9 @@ profiled on an idle host), 4.0 s projections; 183 MB of rrds from 1.7 GB of JPEG
 - `poses2d` (SMPL-45 2D) is not stored (decision); the release's `colmap` points and database are not stored.
 - The world grid is off: the floor height varies per take (the world origin is a head pose); a ground-plane fit is a follow-up.
 - Each GoPro's pose is the earliest COLMAP registration (≤ 2 px from the release's per-frame choice).
+- Every layer is built from the zip. Once a converted zip is deleted, rebuilding one derived layer (projections after a lens
+  fix, say) means fetching that zip again: no other layer keeps each frame's Aria calibration or the shipped boxes.
+- `coco133_uv_projected` confidence is 1 wherever the lens places a joint, as in MAMMA and Ego-Exo4D; the shipped 3D confidence
+  stays on `coco133_xyz` only.
+- Aria joints just past projectaria-tools' Gen1 cone or valid radius are NaN, where the release's own 2D still places them (12
+  of 453 sampled on `002_hugging`, at 57-64° off-axis for rgb and 80-88° for slam).

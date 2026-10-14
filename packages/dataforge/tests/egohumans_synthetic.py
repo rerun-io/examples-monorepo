@@ -120,8 +120,9 @@ def person_pose(name: str, frame: int) -> tuple[Float64[np.ndarray, "17 4"], dic
 def write_sequence(directory: Path, *, glasses: bool = True, pose_dir: str = "poses3d", box_dir: str = "bbox", flat_boxes: bool = False) -> Path:
     """Write the sequence under ``directory`` (``<scene>/<sequence>`` is up to the caller) and return it.
 
-    Harmony4D ships ``poses3d`` and ``bbox``; EgoHumans ``fit_poses3d`` (among earlier stages) and ``bboxes``. Most Harmony4D
-    sequences put a GoPro's boxes straight under ``bbox/camNN`` (``flat_boxes``), a few under ``bbox/camNN/rgb``.
+    Harmony4D ships ``poses3d`` and ``bbox`` (a dict per frame keyed by person); EgoHumans ``fit_poses3d`` (among earlier
+    stages) and ``bboxes`` (a list of upstream box records per frame). Most Harmony4D sequences put a GoPro's boxes straight
+    under ``bbox/camNN`` (``flat_boxes``), a few under ``bbox/camNN/rgb``.
     """
     for name in EXO_POSES:
         images: Path = directory / "exo" / name / "images"
@@ -163,5 +164,9 @@ def write_sequence(directory: Path, *, glasses: bool = True, pose_dir: str = "po
         npy_pickle(directory / "processed_data" / pose_dir / f"{frame:05d}.npy", {name: pose[0] for name, pose in poses.items()})
         npy_pickle(directory / "processed_data" / "smpl" / f"{frame:05d}.npy", {name: pose[1] for name, pose in poses.items()})
         boxes = directory / "processed_data" / box_dir / "cam01" / ("" if flat_boxes else "rgb")
-        npy_pickle(boxes / f"{frame:05d}.npy", {name: np.array([10, 20, 110, 220]) for name in names})
+        if box_dir == "bboxes":
+            records = [{"bbox": np.array([10, 20, 110, 220, 1.0]), "human_name": name, "human_id": index, "color": [255, 0, 0]} for index, name in enumerate(names)]
+            npy_pickle(boxes / f"{frame:05d}.npy", records)
+        else:
+            npy_pickle(boxes / f"{frame:05d}.npy", {name: np.array([10, 20, 110, 220]) for name in names})
     return directory

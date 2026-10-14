@@ -18,6 +18,7 @@ from dataforge.datasets.egohumans_layers import aria_camera, ego_rig, encode_job
 from dataforge.datasets.egohumans_source import (
     DirectorySequenceFiles,
     Sequence,
+    box_records,
     load_pickle,
     read_aria_calibration,
     read_sequence,
@@ -90,9 +91,9 @@ def test_people_cover_every_frame_with_nan_where_unlabelled(sequence: Sequence) 
     assert [person_index(person) for person in sequence.people] == [0, 1]
 
 
-@pytest.mark.parametrize("flat", [False, True])
-def test_boxes_are_read_per_camera_and_person_in_either_layout(tmp_path: Path, flat: bool) -> None:
-    sequence = read_sequence(DirectorySequenceFiles(write_sequence(tmp_path / "s" / "q", flat_boxes=flat)))
+@pytest.mark.parametrize(("box_dir", "flat"), [("bbox", False), ("bbox", True), ("bboxes", False)])
+def test_boxes_are_read_per_camera_and_person_in_every_layout(tmp_path: Path, box_dir: str, flat: bool) -> None:
+    sequence = read_sequence(DirectorySequenceFiles(write_sequence(tmp_path / "s" / "q", box_dir=box_dir, flat_boxes=flat)))
     (boxes,) = sequence.boxes
     assert boxes.camera == "cam01"
     np.testing.assert_array_equal(boxes.boxes["aria01"][0], [10, 20, 110, 220])
@@ -140,6 +141,11 @@ def test_pickles_naming_other_globals_are_refused() -> None:
 
     with pytest.raises(ValueError, match="not a numpy type"):
         load_pickle(pickle.dumps({"aria01": Payload()}), "evil.npy")
+    empty = io.BytesIO()
+    np.save(empty, np.array([], dtype=object), allow_pickle=True)  # an EgoHumans box file of a frame without boxes
+    assert box_records(load_pickle(empty.getvalue(), "00001.npy"), "00001.npy") == {}
+    with pytest.raises(ValueError, match="box records"):
+        box_records([{"bbox": [1, 2, 3, 4]}], "no-name.npy")
     buffer = io.BytesIO()
     np.save(buffer, np.array({"aria01": np.arange(3)}, dtype=object), allow_pickle=True)
     loaded = load_pickle(buffer.getvalue(), "labels.npy")
