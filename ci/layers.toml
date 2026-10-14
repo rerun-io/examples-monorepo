@@ -19,8 +19,9 @@ monopriors = "packages/monoprior"
 trtkit = "packages/trtkit/src"
 
 # dagkit is machinery, not a layer: stdlib plus these, and gradio only inside function bodies of dagkit/app.py.
+# datafusion is the catalog reader's expression language (rerun-sdk's catalog extra), for windowed reads.
 [dagkit]
-allowed = ["numpy", "pyarrow", "rerun", "serde", "tomli_w", "orjson", "tyro", "beartype"]
+allowed = ["numpy", "pyarrow", "rerun", "serde", "tomli_w", "orjson", "tyro", "beartype", "datafusion"]
 lazy = ["gradio", "gradio_rerun"]
 
 # Path rules, first match wins; patterns are fnmatch globs on the path relative to packages/ (`*` crosses `/`).

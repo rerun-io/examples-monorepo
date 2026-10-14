@@ -13,7 +13,7 @@ from dagkit.sinks import LayerSink, open_layer, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
 from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, read_producer, served
+from dagkit.types import Producer, read_column, read_producer, served
 from dagkit.verify import run_counts
 
 pytestmark = pytest.mark.integration
@@ -83,3 +83,10 @@ def test_run_counts_are_the_numbers_a_verify_run_logged(tmp_path: Path) -> None:
     recording.disconnect()
     with served(tmp_path / "golden.rrd") as golden:
         assert run_counts(golden, "fake") == {"frames": 12.0, "wall_s": 1.5, "trt": 1.0}
+
+
+def test_a_windowed_read_brings_only_the_window(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))  # points at 10 and 20
+    with served(path) as dataset:
+        table = read_column(dataset, "seg0", Point, "/points", "video_time", False, window_ns=(15, 25))
+        assert [t for t, _ in Point.from_layer(table, "/points", "video_time")] == [20]

@@ -117,9 +117,18 @@ def flat(values: pa.Scalar | pa.Array, dtype: type) -> np.ndarray:
     return array.to_numpy(zero_copy_only=False).astype(dtype)
 
 
-def read_column(dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool) -> pa.Table:
+def read_column(
+    dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool, window_ns: tuple[int, int] | None = None
+) -> pa.Table:
+    """The rows ``value_type.from_layer`` reads, only ``window_ns`` [start, stop) of a temporal column."""
     view = dataset.filter_segments([segment]).filter_contents(value_type.contents(root))
-    return view.reader(index=None if static else timeline).to_arrow_table()
+    reader = view.reader(index=None if static else timeline)
+    if window_ns is not None and not static:
+        from datafusion import col, lit  # the catalog reader's expression language (rerun-sdk's catalog extra)
+
+        time = col(timeline).cast(pa.int64())
+        reader = reader.filter((time >= lit(window_ns[0])) & (time < lit(window_ns[1])))
+    return reader.to_arrow_table()
 
 
 @contextlib.contextmanager

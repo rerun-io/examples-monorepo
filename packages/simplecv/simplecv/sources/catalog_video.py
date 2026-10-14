@@ -17,11 +17,10 @@ from dagkit.time import STATIC
 from dagkit.types import read_column
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
 from torch import Tensor
 
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
+from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.gpu import fence_after
 from simplecv.ops.framesets import FramesetIndex, group_framesets
 from simplecv.types.frames import LumaFrameset, MultiViewFrames
@@ -48,19 +47,17 @@ class SegmentFrames:
 
     def __init__(self, segment: SegmentRef, cameras: tuple[str, ...], device: Literal["cuda", "cpu"] = "cuda") -> None:
         self.segment, self.cameras, self.device = segment, cameras, device
-        self._dataset: DatasetEntry | None = None
-        self._packets: dict[int, tuple[Int64[ndarray, " n"], bytes]] = {}
+        self._packets: list[tuple[Int64[ndarray, " n"], bytes]] = []
         self._decoders: dict[tuple[int, int], Any] = {}  # torchcodec VideoDecoder per (thread, view), imported lazily
 
     def times_ns(self, view: int) -> Int64[ndarray, " n"]:
-        """Sample times of one camera on the segment's timeline (its packets are fetched on the first call)."""
-        if view not in self._packets:
-            from simplecv.rerun_dataloader import read_segment_packets  # needs the rerun dataloader extra
-
-            self._dataset = self._dataset or self.segment.entry()  # the entry must outlive its queries
-            times, samples, keyframes, codec = read_segment_packets(self._dataset, self.segment.segment, f"world/{self.cameras[view]}/pinhole/video", self.segment.timeline)
-            mp4: bytes = wrap_mp4(samples, keyframes, MP4_NOMINAL_FPS, codec=catalog_codec_name(codec))
-            self._packets[view] = (np.asarray(times).astype("timedelta64[ns]").astype(np.int64), mp4)
+        """Sample times of one camera on the segment's timeline (the first call fetches every camera's packets in one read)."""
+        if not self._packets:
+            dataset = self.segment.entry()  # the entry must outlive its queries
+            entities: list[str] = [f"/world/{camera}/pinhole/video" for camera in self.cameras]
+            for video in read_catalog_videos(dataset, self.segment.segment, entities, self.segment.timeline):
+                mp4: bytes = wrap_mp4(video.samples, video.keyframes, MP4_NOMINAL_FPS, codec=video.codec)
+                self._packets.append((np.asarray(video.times).astype("timedelta64[ns]").astype(np.int64), mp4))
         return self._packets[view][0]
 
     def frames_at(self, view: int, indices: Sequence[int]) -> UInt8[Tensor, "k 3 h w"]:
@@ -165,8 +162,9 @@ class CatalogVideoSource:
         self.frames = SegmentFrames(segment, cameras, "cuda" if self.fenced else "cpu")
 
     def events(self) -> Iterator[Event]:
-        for port, column in self.statics.items():  # the entry lives through the call (an entry must outlive its queries)
-            table = read_column(self.segment.entry(), self.segment.segment, column.type, column.root, self.clock, static=column.static)
+        dataset = self.segment.entry()  # one for every static port (an entry must outlive its queries)
+        for port, column in self.statics.items():
+            table = read_column(dataset, self.segment.segment, column.type, column.root, self.clock, static=column.static)  # temporal statics: whole
             for _, value in column.type.from_layer(table, column.root, self.clock):
                 if port != "rig":
                     yield Event(STATIC, port, value)

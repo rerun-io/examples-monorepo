@@ -4,7 +4,6 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
 from rerun.catalog import CatalogClient, DatasetEntry
 from serde import serde
@@ -47,10 +46,7 @@ def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Colu
     statics: list[Event] = []
     streams: list[Iterator[Event]] = []
     for port, column in ports.items():
-        table: pa.Table = read_column(dataset, segment, column.type, column.root, timeline, column.static)
-        if window_ns is not None and not column.static:
-            times: np.ndarray = table[timeline].cast(pa.int64()).to_numpy()  # int64 ns
-            table = table.filter(pa.array((times >= window_ns[0]) & (times < window_ns[1])))
+        table: pa.Table = read_column(dataset, segment, column.type, column.root, timeline, column.static, window_ns)
         events: list[Event] = [Event(t_ns, port, value) for t_ns, value in column.type.from_layer(table, column.root, timeline)]
         if column.static:
             statics += events
