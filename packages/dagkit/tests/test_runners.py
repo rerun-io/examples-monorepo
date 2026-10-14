@@ -16,8 +16,8 @@ from hypothesis import strategies as st
 
 from dagkit.graph import AsOf, Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Control, Event, Fenced, RunContext, Tick
-from dagkit.runners import RunReport, run_segments, run_sequential, run_threaded
-from dagkit.sources import IterSource, SegmentRef
+from dagkit.runners import RunReport, run_sequential, run_threaded
+from dagkit.sources import IterSource
 from dagkit.testing import collect_edges
 from dagkit.time import GraphError
 
@@ -353,20 +353,6 @@ def test_a_finished_run_frees_its_resources_without_the_cyclic_gc(runner: str) -
         assert built and built[0]() is None
     finally:
         gc.enable()
-
-
-def test_run_segments_runs_one_lossless_graph_per_segment() -> None:
-    sinks: dict[str, Collect] = {}
-
-    def build(segment: SegmentRef) -> Graph:
-        graph = Graph(f"layer-{segment.segment}")
-        sinks[segment.segment] = Collect(("x",))
-        graph.edge(graph.source("src", source([(t, "x", len(segment.segment)) for t in range(3)]))["x"], graph.sink("sink", sinks[segment.segment])["x"])
-        return graph
-
-    reports: list[RunReport] = run_segments(build, [SegmentRef("ds", "a"), SegmentRef("ds", "bb")], runner="sequential")
-    assert [r.graph for r in reports] == ["layer-a", "layer-bb"] and {r.mode for r in reports} == {"lossless"}
-    assert sinks["bb"].items == [("x", t, 2) for t in range(3)]
 
 
 # ── regressions from the 02-leaf thermo review ─────────────────────────────────────────────────

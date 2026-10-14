@@ -12,8 +12,8 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from dagkit.sources import Column, RecordingSource, SegmentRef
+from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC
-from dagkit.types import rerun_roundtrip
 from datafusion import col
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.rig import RigCameras

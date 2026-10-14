@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from dagkit.types import rerun_roundtrip
+from dagkit.testing import rerun_roundtrip
 
 from slam_rs.types import RigPose
 

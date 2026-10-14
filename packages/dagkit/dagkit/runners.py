@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, cast
 
@@ -20,7 +20,6 @@ from dagkit.graph import AsOf, Block, DropOldest, EdgeSpec, Graph, NodeSpec, Spa
 from dagkit.node import Control, Event, Fenced, Mode, RunContext, Tick
 from dagkit.process import ProcessNode
 from dagkit.sinks import RerunSink
-from dagkit.sources import SegmentRef
 from dagkit.time import STATIC, TIME_MAX, GraphError, TimeNs, check_monotonic
 
 DEV_MODE: bool = os.environ.get("PIXI_DEV_MODE") == "1"
@@ -484,10 +483,3 @@ def run_threaded(
     graph: Graph, *, mode: Mode = "realtime", control: Control | None = None, health: rr.RecordingStream | None = None, health_every_s: float = 1.0
 ) -> RunReport:
     return _Run(graph, mode, control, threaded=True).execute(health, health_every_s)
-
-
-def run_segments(
-    build: Callable[[SegmentRef], Graph], segments: Sequence[SegmentRef], *, runner: Literal["sequential", "threaded"] = "threaded"
-) -> list[RunReport]:
-    run: Callable[..., RunReport] = run_threaded if runner == "threaded" else run_sequential
-    return [run(build(segment), mode="lossless") for segment in segments]

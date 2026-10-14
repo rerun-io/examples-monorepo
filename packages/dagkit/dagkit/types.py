@@ -2,11 +2,10 @@ import contextlib
 import functools
 import importlib.metadata
 import subprocess
-import tempfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import pyarrow as pa
@@ -31,9 +30,6 @@ class Type(Protocol):
     def contents(cls, root: str) -> list[str]: ...  # entity filter for `from_layer` reads
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Type"]]: ...  # exactly what to_rerun wrote
-
-
-T = TypeVar("T", bound=Type)
 
 
 @functools.cache
@@ -110,17 +106,3 @@ def served(path: Path) -> Iterator[DatasetEntry]:
     """One rrd on an in-process catalog server: query the entry inside the ``with`` (an entry must outlive its queries)."""
     with rr.server.Server(host="127.0.0.1", datasets={"rrd": [str(path)]}) as server:
         yield server.client().get_dataset("rrd")
-
-
-def rerun_roundtrip(value: T, root: str, timeline: str, t_ns: TimeNs) -> list[tuple[TimeNs, T]]:
-    static: bool = t_ns == STATIC
-    with tempfile.TemporaryDirectory() as tmp:
-        path: Path = Path(tmp) / "roundtrip.rrd"
-        recording = rr.RecordingStream("dagkit-roundtrip", recording_id="roundtrip", send_properties=False)
-        recording.save(path)
-        log_value(recording, timeline, t_ns, value, root)
-        recording.flush()
-        recording.disconnect()
-        with served(path) as dataset:
-            table: pa.Table = read_column(dataset, "roundtrip", type(value), root, timeline, static)
-    return list(type(value).from_layer(table, root, timeline))  # type: ignore[return-value]

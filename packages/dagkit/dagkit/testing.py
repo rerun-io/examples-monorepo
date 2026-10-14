@@ -1,10 +1,11 @@
 import os
 import re
+import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import pyarrow as pa
@@ -15,10 +16,12 @@ from dagkit.app import _leaves, gradio_app
 from dagkit.doc import GRAPH_ROOT, GraphDoc, describe, guide, log_graph
 from dagkit.graph import AsOf, DropOldest, Graph, Spawn, normalise
 from dagkit.node import Emit, Event, Fenced, Node, RunContext, Tick
+from dagkit.sources import Column, RecordingSource
 from dagkit.time import STATIC, TimeNs, check_monotonic
-from dagkit.types import Type
+from dagkit.types import Type, log_value
 
 Output = tuple[str, TimeNs, object]
+T = TypeVar("T", bound=Type)
 
 
 class Recorder:
@@ -114,6 +117,19 @@ def check_form(config_type: type, build: Callable[..., object], widgets: Mapping
         has_widget: bool = any(label == path or label.startswith(f"{path}.") for label, _ in shown)
         assert has_widget != (path in hidden), f"{path}: {'shown and hidden' if has_widget else 'neither shown nor hidden on purpose'}"
     return demo
+
+
+def rerun_roundtrip(value: T, root: str, timeline: str, t_ns: TimeNs) -> list[tuple[TimeNs, T]]:
+    """``value`` logged at ``t_ns`` into an rrd and read back as a graph reads a layer (an in-process server: integration lane)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path: Path = Path(tmp) / "roundtrip.rrd"
+        recording = rr.RecordingStream("dagkit-roundtrip", recording_id="roundtrip", send_properties=False)
+        recording.save(path)
+        log_value(recording, timeline, t_ns, value, root)
+        recording.flush()
+        recording.disconnect()
+        events = RecordingSource(path, {"v": Column(type(value), root, t_ns == STATIC)}, timeline).events()
+        return [(event.t_ns, cast(T, event.value)) for event in events]
 
 
 def collect_edges(graph: Graph, run: Callable[[Graph], object]) -> dict[str, list[object]]:

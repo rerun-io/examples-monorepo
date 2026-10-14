@@ -11,8 +11,9 @@ from dagkit.node import Event
 from dagkit.runners import run_sequential
 from dagkit.sinks import LayerSink, open_layer, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
+from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, read_producer, rerun_roundtrip, served
+from dagkit.types import Producer, read_producer, served
 from dagkit.verify import run_counts
 
 pytestmark = pytest.mark.integration

@@ -6,7 +6,7 @@ import lietorch
 import numpy as np
 import pytest
 import torch
-from dagkit.types import rerun_roundtrip
+from dagkit.testing import rerun_roundtrip
 from torch import Tensor
 
 from mast3r_slam.ops.optim import gauss_newton_rays
