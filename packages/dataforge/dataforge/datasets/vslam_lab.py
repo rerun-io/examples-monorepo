@@ -32,7 +32,7 @@ import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Bool, Float64, Int64, UInt16
+from jaxtyping import Float64, Int64, UInt16
 from numpy import ndarray
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.imu_calibration import ImuCalibration
@@ -45,14 +45,13 @@ from dataforge.datasets.vslam_lab_source import (
     CameraEntry,
     FrameIndex,
     ImuStream,
-    PoseTable,
     StreamName,
     read_calibration,
     read_frame_index,
     read_imu,
     read_poses,
 )
-from dataforge.euroc import IDENTITY_QUATERNION_XYZW, dropout_rows, nominal_fps
+from dataforge.euroc import GtTrajectory, nominal_fps
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     TRAJECTORY_COLOR,
@@ -318,19 +317,16 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
     def write_gt(self, recording: rr.RecordingStream, groundtruth: Path) -> None:
         """The ground-truth layer: world_T_rig on the rig node, the whole path and its trail, the world axes.
 
-        A dropout row (a non-unit quaternion) becomes identity rotation with its translation kept, the rule
-        ``dataforge.euroc.gt_trajectory`` holds for every EuRoC-style file.
+        ``read_poses`` has already turned a dropout row (a non-unit quaternion) into identity rotation with its
+        translation kept, the rule ``dataforge.euroc.sanitized`` holds for every EuRoC-style file.
 
         Raises:
             ValueError: The file holds no pose, or a rotation that never changes. The second is VSLAM-LAB's own
                 EuRoC csv: cam0 *positions* with a constant placeholder quaternion, which logged as world_T_body
                 would put every sensor at the wrong place and turned 180 degrees (README says how to replace it).
         """
-        poses: PoseTable = read_poses(groundtruth)
-        quaternions_xyzw: Float64[ndarray, "n_poses 4"] = poses.quaternions_xyzw.copy()
-        dropped: Bool[ndarray, "n_poses"] = dropout_rows(quaternions_xyzw)
-        quaternions_xyzw[dropped] = IDENTITY_QUATERNION_XYZW
-        if poses.times_ns.size < 2 or np.ptp(quaternions_xyzw, axis=0).max() == 0.0:
+        poses: GtTrajectory = read_poses(groundtruth)
+        if poses.times_ns.size < 2 or np.ptp(poses.quaternions_xyzw, axis=0).max() == 0.0:
             raise ValueError(f"{groundtruth}: {poses.times_ns.size} poses with a constant rotation are position-only, not world_T_body")
         rr.log("/", WORLD_UP_VIEW_COORDINATES[self.benchmark.world_up], static=True, recording=recording)
         log_pose_track(
@@ -338,7 +334,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             schema.rig_path(RIG),
             times_ns=poses.times_ns,
             translations_xyz=poses.translations_xyz,
-            quaternions_xyzw=quaternions_xyzw,
+            quaternions_xyzw=poses.quaternions_xyzw,
         )
         rr.log(
             schema.trajectory_path(schema.GT_RUN_SOURCE),
@@ -354,7 +350,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
                 num_poses=int(poses.times_ns.size),
                 duration_s=(int(poses.times_ns[-1]) - int(poses.times_ns[0])) / 1e9,
                 trajectory_len_m=float(steps_m.sum()),
-                num_sanitized=int(dropped.sum()),
+                num_sanitized=poses.num_sanitized,
                 world_up=self.benchmark.world_up,
                 source=self.benchmark.gt_source,
             ),

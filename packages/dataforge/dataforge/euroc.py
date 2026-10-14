@@ -60,10 +60,11 @@ class TimestampedSamples:
 
 @dataclass(frozen=True, slots=True)
 class GtTrajectory:
-    """One ``gt/data.csv`` as Rerun wants it: ``world_T_rig`` per sample, quaternion xyzw."""
+    """One EuRoC-style ground truth (MSD's ``gt/data.csv``, VSLAM-LAB's ``groundtruth.csv``) as Rerun wants it:
+    ``world_T_rig`` per sample, quaternion xyzw."""
 
     times_ns: Int64[ndarray, "n_poses"]
-    """Pose times on the device clock, nanoseconds — already the IMU's clock."""
+    """Pose times, nanoseconds, on the sequence's own sensor clock (MSD: already the IMU's)."""
     translations_xyz: Float64[ndarray, "n_poses 3"]
     """``world_t_rig``, metres."""
     quaternions_xyzw: Float64[ndarray, "n_poses 4"]
@@ -81,8 +82,8 @@ def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
     A non-unit quaternion breaks the rotation chain from that row on, so every
     child frustum of the rig stops tracking — slam-evals hit exactly this on
     ROVER-T265's ``0 0 0 0`` rows (``slam_evals/ingest/columns.py``) and settled
-    on the same per-row repair: identity rotation, translation untouched, and
-    the count reported rather than hidden.
+    on the same per-row repair (``sanitized``): identity rotation, translation
+    untouched, and the count reported rather than hidden.
 
     Args:
         samples: ``read_numeric_csv(..., num_values=GT_VALUE_COLUMNS)`` output.
@@ -96,21 +97,20 @@ def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
     """
     if samples.times_ns.size == 0:
         raise ValueError("gt/data.csv has no data rows, so the sequence has neither poses nor a clock origin")
-    translations_xyz: Float64[ndarray, "n_poses 3"] = np.ascontiguousarray(samples.values[:, 0:3])
-    quaternions_xyzw: Float64[ndarray, "n_poses 4"] = np.ascontiguousarray(samples.values[:, [4, 5, 6, 3]])
-    dropped: Bool[ndarray, "n_poses"] = dropout_rows(quaternions_xyzw)
-    quaternions_xyzw[dropped] = IDENTITY_QUATERNION_XYZW
+    return sanitized(samples.times_ns, samples.values[:, 0:3], samples.values[:, [4, 5, 6, 3]])
+
+
+def sanitized(
+    times_ns: Int64[ndarray, "n_poses"], translations_xyz: Float64[ndarray, "n_poses 3"], quaternions_xyzw: Float64[ndarray, "n_poses 4"]
+) -> GtTrajectory:
+    """Pose columns with every dropout row (a non-unit quaternion) repaired: identity rotation, translation kept, counted."""
+    dropped: Bool[ndarray, "n_poses"] = np.abs(np.linalg.norm(quaternions_xyzw, axis=1) - 1.0) > QUATERNION_NORM_TOLERANCE
     return GtTrajectory(
-        times_ns=samples.times_ns,
-        translations_xyz=translations_xyz,
-        quaternions_xyzw=quaternions_xyzw,
+        times_ns=times_ns,
+        translations_xyz=np.ascontiguousarray(translations_xyz),
+        quaternions_xyzw=np.where(dropped[:, None], IDENTITY_QUATERNION_XYZW, quaternions_xyzw),
         num_sanitized=int(dropped.sum()),
     )
-
-
-def dropout_rows(quaternions_xyzw: Float64[ndarray, "n_poses 4"]) -> Bool[ndarray, "n_poses"]:
-    """Rows whose quaternion is not unit-norm: tracking dropouts, which ``gt_trajectory`` turns into identity."""
-    return np.abs(np.linalg.norm(quaternions_xyzw, axis=1) - 1.0) > QUATERNION_NORM_TOLERANCE
 
 
 def read_camera_index(data: bytes) -> list[CameraRow]:
