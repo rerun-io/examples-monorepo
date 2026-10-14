@@ -26,7 +26,7 @@ from serde.json import to_json
 
 from dataforge import writing
 from dataforge.datasets.mamma_source import VERTICES, Gender, MammaCamera, PersonFit, decode, flags
-from dataforge.records import read_json
+from dataforge.records import NumpyOnlyUnpickler, read_json
 
 SynFamily: TypeAlias = Literal["syn", "syn-bedlam"]
 SYN_DIR: str = "MammaSyn"
@@ -43,12 +43,6 @@ READ_STREAMS: int = 4
 180 MB/s with 1 stream, 340 with 4, 300 with 8; random reads (a tar header walk, member by member) about 250 per second."""
 READ_SPAN: int = 256 << 20
 """Bytes of a shard one stream copies in order."""
-PICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
-    {(module, name) for module in ("numpy.core.multiarray", "numpy._core.multiarray") for name in ("_reconstruct", "scalar")}
-    | {("numpy", "dtype"), ("numpy", "ndarray")}
-)
-"""Everything a label pickle may build besides plain containers: numpy arrays and scalars (all a release pickle refers to;
-numpy 1 wrote ``numpy.core``, numpy 2 writes ``numpy._core``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,15 +303,6 @@ def sequence_samples(shards: list[Path], index_root: Path, key: str) -> list[Syn
     with writing.atomic_write(cache) as temp:
         temp.write_text(to_json(ShardIndex(stamps, samples)))
     return samples
-
-
-class NumpyOnlyUnpickler(pickle.Unpickler):
-    """Unpickles plain containers and numpy arrays only: a label pickle naming any other global is refused, not run."""
-
-    def find_class(self, module: str, name: str) -> object:
-        if (module, name) not in PICKLE_GLOBALS:
-            raise pickle.UnpicklingError(f"the label pickle refers to {module}.{name}, which is not a numpy array type")
-        return super().find_class(module, name)
 
 
 def load_people(payload: bytes, origin: str) -> dict[int, dict[str, object]]:

@@ -12,10 +12,6 @@ from dataforge.transports import HfFileInfo, IntegrityError, publish_verified
 
 SOURCE_REPO: str = "pablovela5620/epfl-smart-kitchen-av1"
 """AV1 mirror of the public release: videos, meta data, poses and annotations (pinned at SOURCE_REVISION)."""
-SMPL_REPO: str = "pablovela5620/mamma-streaming-data"
-"""Private dataset holding the official neutral SMPL model; contacted only when the model is not already in place."""
-SMPL_REVISION: str = "e05c6b723e24e2c0fc79201e06e8c8fbaa6cedfd"
-SMPL_FILE: str = "body_models/smpl/SMPL_NEUTRAL.pkl"
 POSE_DIR: str = "Public_release_pose"
 VIDEO_DIR: str = "Public_release_videos"
 

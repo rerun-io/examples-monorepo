@@ -7,11 +7,12 @@ import pytest
 from hub_fake import HubStore
 from huggingface_hub.errors import HfHubHTTPError
 
-from dataforge import transports
+from dataforge import smpl, transports
 from dataforge.datasets import epfl_download
 from dataforge.datasets.epfl import EpflConfig
-from dataforge.datasets.epfl_download import SMPL_FILE, session_files
+from dataforge.datasets.epfl_download import session_files
 from dataforge.datasets.epfl_source import SOURCE_REVISION
+from dataforge.smpl import SMPL_FILE
 from dataforge.transports import matches_file
 
 KEYS = ("test/YH2003/2023_05_17_09_08_58", "train/YH2007/2023_10_30_10_05_27")
@@ -23,11 +24,11 @@ def content(path: str) -> bytes:
 
 def epfl_hub(monkeypatch: pytest.MonkeyPatch, *, incomplete: str = "train/YH2099/2023_01_01_00_00_00") -> HubStore:
     """The pose/video repo with KEYS complete, plus the SMPL model repo; content(path) is every file's bytes."""
-    store = HubStore({epfl_download.SOURCE_REPO: SOURCE_REVISION, epfl_download.SMPL_REPO: epfl_download.SMPL_REVISION})
+    store = HubStore({epfl_download.SOURCE_REPO: SOURCE_REVISION, smpl.SMPL_REPO: smpl.SMPL_REVISION})
     # The incomplete session ships its poses but no videos.
     for path in [path for key in KEYS for path in session_files(key)] + list(session_files(incomplete)[:4]) + ["manifests/sequences.csv"]:
         store.add(epfl_download.SOURCE_REPO, path, content(path), lfs=path.endswith((".mp4", ".csv")))
-    store.add(epfl_download.SMPL_REPO, SMPL_FILE, content(SMPL_FILE), lfs=True)
+    store.add(smpl.SMPL_REPO, SMPL_FILE, content(SMPL_FILE), lfs=True)
     store.install(monkeypatch, epfl_download, transports)
     return store
 
@@ -46,7 +47,7 @@ def test_remote_sequences_lists_complete_sessions(monkeypatch: pytest.MonkeyPatc
         assert sequence.files == session_files(sequence.key)
         assert sequence.size_bytes == sum(sizes[path] for path in sequence.files)
     assert "YH2099" in capsys.readouterr().err
-    assert hub.fetched == [] and epfl_download.SMPL_REPO not in hub.listed
+    assert hub.fetched == [] and smpl.SMPL_REPO not in hub.listed
 
 
 def test_download_subset_then_resume_skips_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -54,7 +55,7 @@ def test_download_subset_then_resume_skips_complete(tmp_path: Path, monkeypatch:
     config = EpflConfig(root=tmp_path / "raw", sequences=(KEYS[1],))
     dataset = config.setup()
     dataset.download()
-    assert hub.listed.count(epfl_download.SMPL_REPO) == 1
+    assert hub.listed.count(smpl.SMPL_REPO) == 1
     assert sorted(hub.fetched) == sorted([SMPL_FILE, *session_files(KEYS[1])])
     assert (tmp_path / "raw/body_models/smpl/SMPL_NEUTRAL.pkl").read_bytes() == content(SMPL_FILE)
     assert [identity.parts for identity, _ in dataset.discover()] == [tuple(KEYS[1].split("/"))]
@@ -62,7 +63,7 @@ def test_download_subset_then_resume_skips_complete(tmp_path: Path, monkeypatch:
 
     hub.calls.clear()
     dataset.download()
-    assert hub.fetched == [] and epfl_download.SMPL_REPO not in hub.listed
+    assert hub.fetched == [] and smpl.SMPL_REPO not in hub.listed
     assert "fetched 0 file(s)" in capsys.readouterr().out
 
     # A truncated file is fetched again (forced past the Hub's staging metadata); others and the in-place SMPL stay skipped.
@@ -70,7 +71,7 @@ def test_download_subset_then_resume_skips_complete(tmp_path: Path, monkeypatch:
     truncated.write_bytes(b"x")
     dataset.download()
     assert hub.fetched == hub.forced == [session_files(KEYS[1])[0]]
-    assert epfl_download.SMPL_REPO not in hub.listed
+    assert smpl.SMPL_REPO not in hub.listed
     assert truncated.read_bytes() == content(session_files(KEYS[1])[0])
 
 
@@ -78,7 +79,7 @@ def test_download_all_splits_videos_and_smpl_overrides(tmp_path: Path, monkeypat
     hub = epfl_hub(monkeypatch)
     config = EpflConfig(root=tmp_path / "raw", video_root=tmp_path / "videos", smpl_model_root=tmp_path / "models")
     config.setup().download()
-    assert hub.listed.count(epfl_download.SMPL_REPO) == 1
+    assert hub.listed.count(smpl.SMPL_REPO) == 1
     assert len(hub.fetched) == 1 + len(KEYS) * len(session_files(KEYS[0]))
     assert (tmp_path / "models/smpl/SMPL_NEUTRAL.pkl").is_file()
     assert (tmp_path / "videos" / session_files(KEYS[0])[-1]).is_file()
@@ -135,7 +136,7 @@ def test_smpl_in_place_skips_private_repo_and_denied_repo_names_the_path(tmp_pat
     hub = epfl_hub(monkeypatch)
     # A synthetic signed query stands in for the redirect the real client would carry.
     signed = "https://cdn.invalid/smpl?X-Signature=synthetic"
-    hub.refused[epfl_download.SMPL_REPO] = HfHubHTTPError(f"403 for {signed}", response=httpx.Response(403, request=httpx.Request("GET", signed)))
+    hub.refused[smpl.SMPL_REPO] = HfHubHTTPError(f"403 for {signed}", response=httpx.Response(403, request=httpx.Request("GET", signed)))
     with pytest.raises(ValueError, match="place the official SMPL_NEUTRAL.pkl at") as error:
         EpflConfig(root=tmp_path, sequences=(KEYS[0],)).setup().download()
     assert "X-Signature" not in str(error.value)
@@ -146,7 +147,7 @@ def test_smpl_in_place_skips_private_repo_and_denied_repo_names_the_path(tmp_pat
     model.write_bytes(b"user-placed model")
     hub.calls.clear()
     EpflConfig(root=tmp_path, sequences=(KEYS[0],)).setup().download()
-    assert hub.fetched == [] and epfl_download.SMPL_REPO not in hub.listed
+    assert hub.fetched == [] and smpl.SMPL_REPO not in hub.listed
 
 
 def test_discover_skips_pruned_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
