@@ -1,5 +1,5 @@
-data/
-checkpoints/
+/data
+/checkpoints
 logs/
 *.so
 *.egg-info/
