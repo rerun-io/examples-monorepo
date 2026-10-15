@@ -7,7 +7,7 @@ import time
 import weakref
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 from dagkit_fakes import Add, Affinity, Batch, Collect, Square, Sum, source
@@ -71,9 +71,19 @@ def test_flush_only_diamond_terminates(runner: str) -> None:
     report: RunReport = RUNNERS[runner](graph)
     # every join tick waited for the late producer's flush, so each sees its own value * 10 at the same time
     assert sink.items == [("y", t, t + 10 * t) for t in range(1, 30)]
-    assert report.nodes["join"].ports["x"].pending_max > 0
-    if runner == "sequential":
-        assert report.nodes["join"].ports["x"].pending_max == 28  # the final source event closes late before join drains
+    assert report.nodes["join"].ports["x"].depth_max == 1  # the Block bound holds: ticks spill only from a full queue
+    assert report.nodes["join"].ports["x"].pending_max > 0  # ... which a flush-only producer needs, or the source never closes
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_tick_waiting_on_a_late_asof_producer_stays_in_its_block_queue(runner: str) -> None:
+    """A single-trigger node keeps Block backpressure: a waiting tick holds the queue (so the producer waits on it) and
+    spills only when the queue is full, as for several trigger ports."""
+    graph, sink = diamond([(t, "x", t) for t in range(1, 30)], Batch(size=3))  # late lags by at most 3 ticks
+    graph.edges[1] = replace(graph.edges[1], kind=Block(8))  # src -> join: room for the lag
+    report: RunReport = RUNNERS[runner](graph)
+    assert sink.items == [("y", t, t + 10 * t) for t in range(1, 30)]
+    assert report.nodes["join"].ports["x"].pending_max == 0 and 1 < report.nodes["join"].ports["x"].depth_max <= 8
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
