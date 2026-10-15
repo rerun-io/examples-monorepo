@@ -13,7 +13,7 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from dagkit.time import TimeNs
-from dagkit.types import Log, row_times
+from dagkit.types import Log, cells, flat
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from serde import serde
@@ -21,21 +21,6 @@ from torch import Tensor
 
 Stage: TypeAlias = Literal["no-outpaint", "outpaint", "coarse"]
 """``no-outpaint``: the image as is; ``outpaint``: FLUX fills a border first; ``coarse``: then adds inpainted views."""
-
-
-def cells(table: pa.Table, column: str, timeline: str) -> dict[TimeNs, pa.Scalar]:
-    """The non-null cells of one column keyed by their time (STATIC for a table read without an index)."""
-    if column not in table.column_names:
-        return {}
-    return {t: cell for t, cell in zip(row_times(table, timeline), table[column], strict=True) if cell.is_valid}
-
-
-def flat(cell: pa.Scalar, dtype: type) -> ndarray:
-    """One component cell's values, nested lists flattened, converted to ``dtype``."""
-    values: pa.Array = cell.values
-    while pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
-        values = values.flatten()
-    return values.to_numpy(zero_copy_only=False).astype(dtype)
 
 
 def images(table: pa.Table, entity: str, archetype: str, timeline: str, dtype: type) -> dict[TimeNs, ndarray]:

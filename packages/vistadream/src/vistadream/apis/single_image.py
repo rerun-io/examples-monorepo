@@ -19,7 +19,7 @@ from dagkit.graph import Graph
 from dagkit.node import Mode, Node, PortType
 from dagkit.runners import RunReport
 from dagkit.sinks import RerunSink
-from dagkit.verify import load_card
+from dagkit.verify import Case, load_card
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from vistadream.graphs.single_image import single_image_graph
@@ -59,24 +59,19 @@ class Config:
     """lossless: every step sees every item; realtime: busy steps drop old items."""
 
 
-def nodes(stage: Stage, expansion_percent: float, n_frames: int, seed: int, flux: FluxConfig) -> tuple[OutpaintNode, DepthNode, InitNode, ExpandNode | None, RenderNode]:
-    """The graph's nodes with their models (MoGe v1; FLUX.1 Fill unless ``no-outpaint``), shared by ``build`` and ``verify``."""
-    from monopriors.models.relative_depth.moge_v1 import MoGeV1Predictor
-
-    from vistadream.models.flux import FluxInpainting
-
-    moge = MoGeV1Predictor(device="cuda")
-    inpaint: FluxInpainting | None = None if stage == "no-outpaint" else FluxInpainting(flux)
-    expand: ExpandNode | None = ExpandNode(inpaint, moge, n_frames, seed=seed) if stage == "coarse" and inpaint is not None else None
-    return OutpaintNode(inpaint, expansion_percent), DepthNode(moge), InitNode(seed=seed), expand, RenderNode()
+def case_config(case: Case, rr_config: RerunTyroConfig) -> Config:
+    """A ``VERIFY.toml`` case as a Config (params the case leaves out keep their default)."""
+    params: dict[str, str] = case.params
+    stage, max_resolution = params["stage"], int(params["max_resolution"])
+    assert case.input is not None and stage in ("no-outpaint", "outpaint", "coarse") and max_resolution in (512, 1024, 1920), case
+    expansion_percent, n_frames = float(params.get("expansion_percent", Config.expansion_percent)), int(params.get("n_frames", Config.n_frames))
+    return Config(rr_config, PACKAGE_DIR / case.input, stage, max_resolution, expansion_percent, n_frames, seed=int(params["seed"]))
 
 
 def short_case(rr_config: RerunTyroConfig) -> Config:
     """The ``VERIFY.toml`` short case as a Config: the gradio example, one click runs a known-good input."""
     [case] = [c for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for c in block.cases if c.clip == "short"]
-    stage, max_resolution = case.params["stage"], int(case.params["max_resolution"])
-    assert case.input is not None and stage in ("no-outpaint", "outpaint", "coarse") and max_resolution in (512, 1024, 1920), case
-    return Config(rr_config, PACKAGE_DIR / case.input, stage, max_resolution, seed=int(case.params["seed"]))
+    return case_config(case, rr_config)
 
 
 def blueprint(config: Config, graph: Graph) -> rrb.Blueprint:
@@ -105,13 +100,21 @@ def blueprint(config: Config, graph: Graph) -> rrb.Blueprint:
 
 
 def build(config: Config, recording: rr.RecordingStream) -> Graph:
-    """Models load here, before the run; the blueprint names the graph's steps, so it follows the graph."""
+    """Models load here, before the run (MoGe v1; FLUX.1 Fill unless ``no-outpaint``); the blueprint names the graph's steps,
+    so it follows the graph."""
+    from monopriors.models.relative_depth.moge_v1 import MoGeV1Predictor
+
+    from vistadream.models.flux import FluxInpainting
+
     recording.log("/world", rr.ViewCoordinates.RDF, static=True)
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS)}
     if config.output_ply is not None:
         sinks["ply"] = PlySink(config.output_ply)
-    built = nodes(config.stage, config.expansion_percent, config.n_frames, config.seed, config.flux)
-    graph: Graph = single_image_graph(ImageSource(config.image_path, config.max_resolution), *built, sinks)
+    moge = MoGeV1Predictor(device="cuda")
+    inpaint: FluxInpainting | None = None if config.stage == "no-outpaint" else FluxInpainting(config.flux)
+    expand: ExpandNode | None = ExpandNode(inpaint, moge, config.n_frames, seed=config.seed) if config.stage == "coarse" and inpaint is not None else None
+    source = ImageSource(config.image_path, config.max_resolution)
+    graph: Graph = single_image_graph(source, OutpaintNode(inpaint, config.expansion_percent), DepthNode(moge), InitNode(seed=config.seed), expand, RenderNode(), sinks)
     recording.send_blueprint(blueprint(config, graph))
     return graph
 
