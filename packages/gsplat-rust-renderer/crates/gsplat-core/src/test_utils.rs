@@ -43,7 +43,7 @@ pub fn read<T: bytemuck::Pod>(
     });
     let mut encoder = device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes);
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     encoder.map_buffer_on_submit(&staging, wgpu::MapMode::Read, .., move |result| {
         tx.send(result).unwrap()
     });

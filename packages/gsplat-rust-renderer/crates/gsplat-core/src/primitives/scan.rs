@@ -1,7 +1,7 @@
 //! Hierarchical inclusive scan with GPU-resident counts.
 use super::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::gpu::{bind, storage, uniform};
-use crate::kernels::Kernels;
+use crate::kernels::{BLOCK_SIZE, Kernels, WG};
 
 const fn scan_level(level: usize) -> u32 {
     level as u32 * 2
@@ -26,19 +26,19 @@ impl Scan {
         let mut divisor = 1;
         let mut plans = Vec::new();
         loop {
-            let blocks = n.div_ceil(1024);
+            let blocks = n.div_ceil(BLOCK_SIZE);
             levels.push((
                 storage(device, "scan output", u64::from(n) * 4),
                 storage(device, "scan block sums", u64::from(blocks) * 4),
                 uniform(device, &[count.index(), divisor, capacity, 0]),
             ));
-            plans.push(DispatchPlan::new(count, capacity, divisor * 1024, 1));
-            plans.push(DispatchPlan::new(count, capacity, divisor * 256, 1));
+            plans.push(DispatchPlan::new(count, capacity, divisor * BLOCK_SIZE, 1));
+            plans.push(DispatchPlan::new(count, capacity, divisor * WG, 1));
             if blocks == 1 {
                 break;
             }
             n = blocks;
-            divisor *= 1024;
+            divisor *= BLOCK_SIZE;
         }
         let groups = levels
             .iter()

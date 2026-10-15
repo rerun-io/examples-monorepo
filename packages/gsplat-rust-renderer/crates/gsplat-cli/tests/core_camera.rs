@@ -27,7 +27,7 @@ fn world_to_camera_matches_brush_for_oblique_poses() {
             BrushModel::Pinhole,
         );
         assert_eq!(
-            camera.world_to_local(),
+            camera.view_from_world(),
             glam::Mat4::from(brush.world_to_local())
         );
     }

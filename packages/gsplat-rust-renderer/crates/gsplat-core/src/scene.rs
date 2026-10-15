@@ -16,8 +16,7 @@ impl Scene {
         splats: &Splats,
         limit: u64,
     ) -> Result<Self, Error> {
-        let n =
-            u32::try_from(splats.transforms.len()).map_err(|_| Error::Input("too many splats"))?;
+        let n = u32::try_from(splats.transforms.len())?;
         if n >= 0x8000_0000 {
             return Err(Error::Input(
                 "visible count reserves its high bit for arithmetic overflow",
@@ -35,9 +34,8 @@ impl Scene {
                 "inconsistent transform, opacity, SH, or scale-floor lengths",
             ));
         }
-        let oversized = n == 0 || Splats::gpu_bytes(n as usize, splats.sh_degree) > limit;
         let upload = |label, bytes: &[u8]| -> Result<wgpu::Buffer, Error> {
-            if oversized && bytes.len() as u64 > limit {
+            if bytes.len() as u64 > limit {
                 return Err(Error::Capacity {
                     required: bytes.len() as u64,
                     limit,

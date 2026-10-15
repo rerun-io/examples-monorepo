@@ -22,9 +22,7 @@ pub fn stage_ms(ticks: &[u64], period_ns: f32) -> Result<[f64; 8], crate::Error>
         || ticks[9] <= ticks[0]
         || ticks.windows(2).any(|pair| pair[1] < pair[0])
     {
-        return Err(crate::Error::Readback(format!(
-            "invalid GPU stage timestamps: {ticks:?}"
-        )));
+        return Err(crate::Error::InvalidTimestamps(ticks.to_vec()));
     }
     Ok(std::array::from_fn(|i| {
         let (start, end) = stage_queries(i);
