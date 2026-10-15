@@ -1,0 +1,55 @@
+# dagkit
+
+One typed node/graph interface for every pipeline in this repo: Types, push-only Nodes, a declared Graph, two
+runners, Sources and Sinks, hardware-class profiles and verify cards. Pure Python; it never imports torch.
+
+![contract](docs/contract.svg)
+
+![module map](docs/module-map.svg)
+
+## A graph in 20 lines
+
+```python
+from dagkit.graph import AsOf, DropOldest, Graph
+from dagkit.runners import run_threaded
+from dagkit.sinks import RerunSink
+from dagkit.sources import IterSource
+
+graph = Graph("demo")
+src = graph.source("camera", IterSource({"frame": Frame, "rig": Rig}, read_events))   # one time-ordered stream
+det = graph.node("detect", Detector(model))                                          # reset / step / flush
+sink = graph.sink("viewer", RerunSink(recording, {"boxes": Boxes}, {"boxes": "/world/boxes"}))
+graph.edge(src["frame"], det["frame"], DropOldest(1))   # live: keep the latest frame
+graph.edge(src["rig"], det["rig"], AsOf())              # newest rig at or before the frame time
+graph.edge(det["boxes"], sink["boxes"])                 # Block(4) by default
+report = run_threaded(graph, mode="realtime", health=recording)   # health view at /dagkit/health
+```
+
+`run_sequential(graph)` runs the same graph on one thread, deterministically. On Block and AsOf edges both runners
+deliver the same ticks to every node (property-tested on random graphs).
+
+## Rules
+
+| Piece | Rule |
+|---|---|
+| Time | `TimeNs` = i64 nanoseconds on ONE clock per graph; `STATIC` marks whole-stream values |
+| Type | `to_rerun(root)`, `contents(root)`, `from_layer(table, root, timeline)`; host Types are `@serde` frozen dataclasses |
+| Node | `reset(ctx)` (idempotent), one `step(tick, out)` per trigger event, `flush(out)` at end of stream; models come in through the constructor or `ctx.resources` |
+| Ports | `Block` (lossless), `DropOldest` (realtime, counted), `AsOf` (never triggers; lossless waits for the producer watermark) |
+| Late output | a node with `emits_late = True` calls `out.watermark(t)`; other nodes' watermark is `t - 1` before a tick at `t` |
+| GPU | `Fenced(value, cuda_event)`; host consumers get it synced and unwrapped; never write into a put value |
+| Sinks | take an explicit `RecordingStream`; `LayerSink` publishes `<layer>.<run_id>.rrd` and registers only if the segment has no such layer (`register="new"`) |
+| Apps | `<module>/apis/<graph>.py` defines `Config` + `build(config, recording) -> Graph`; `main` is `run_app(config, build)`; `gradio_app(Config, build, title=...)` generates the UI |
+| Profiles | `profiles/<hardware>.toml` for `x86_64-cuda`, `aarch64-cuda`, `robocap-cap`; never hostnames or GPU models |
+
+## Run
+
+```bash
+pixi run -e dagkit-dev --frozen gate                      # lint, typecheck, deadcode, unit + integration tests
+pixi run -e dagkit --frozen dagkit-demo                   # synthetic graph into a spawned viewer
+pixi run -e dagkit --frozen dagkit-demo --rr-config.connect rerun+http://127.0.0.1:9876/proxy
+python -m dagkit.verify packages/<pkg>/VERIFY.toml --phase post   # graph-tier bands (needs DAGKIT_GOLDENS)
+```
+
+Tests for a package graph: `dagkit.testing.check_node_contract(node, ticks)` for every node with fakes, and
+`dagkit.testing.collect_edges(graph, run)` to compare `run_sequential` with `run_threaded(mode="lossless")`.

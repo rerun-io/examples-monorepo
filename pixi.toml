@@ -67,6 +67,7 @@ rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 gradio = "==6.13.0"                                        # pin-bump: hold
 gradio-rerun = "==0.38.1"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -94,6 +95,7 @@ xorg-xorgproto = "*"
 
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 
 # Catalog lane with the dataloader extra; for unreleased builds see AGENTS.md
 # "Testing Rerun builds".
@@ -247,6 +249,36 @@ ci-lock-check = { cmd = "pixi lock --check", cwd = ".", env = { CONDA_OVERRIDE_C
 ci = { depends-on = ["ci-lint", "ci-structure", "ci-lock-check"] }
 # Reads the PR body from $PR_BODY; the workflow's pr-gate-line job is its only caller besides humans.
 ci-gate-line = { cmd = "bash ci/check_gate_line.sh", cwd = "." }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# dagkit — typed node/graph contract and runners (pure Python, no torch)
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.dagkit]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.dagkit.dependencies]
+python = "3.12.*"
+numpy = "*"
+pyarrow = "*"
+pyserde = ">=0.31.2,<0.32"
+tomli-w = ">=1.2,<2"
+orjson = ">=3.11,<4"
+tyro = ">=0.9.1,<0.10"
+
+[feature.dagkit.pypi-dependencies]
+dagkit = { path = "packages/dagkit", editable = true, extras = ["gradio"] }
+# pin-bump: hold — this torch-free lane restates `common`'s exact pins; see AGENTS.md.
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+gradio = "==6.13.0"                                        # pin-bump: hold
+gradio-rerun = "==0.38.1"                                  # pin-bump: hold
+
+[feature.dagkit.activation.env]
+PACKAGE_DIR = "packages/dagkit"
+
+[feature.dagkit.tasks.dagkit-demo]
+cmd = "python tools/demos/synthetic_graph.py"
+cwd = "packages/dagkit"
+description = "Run a synthetic graph on the threaded runner into Rerun, with the health view"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # simplecv
@@ -1015,6 +1047,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
 rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 
@@ -1981,6 +2014,7 @@ gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 
 [feature.gsplat-rust-renderer.activation]
 scripts = ["packages/gsplat-rust-renderer/activate.sh"]
@@ -2579,6 +2613,7 @@ hf-transfer = "*"
 
 [feature.slam-rs-osx.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
 rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
@@ -3374,6 +3409,8 @@ dev = { features = [
     "dev",
     "common",
 ], solve-group = "dev", no-default-feature = true }
+dagkit = { features = ["dagkit"], solve-group = "dagkit", no-default-feature = true }
+dagkit-dev = { features = ["dagkit", "dev"], solve-group = "dagkit", no-default-feature = true }
 simplecv = { features = [
     "common",
     "cuda",
