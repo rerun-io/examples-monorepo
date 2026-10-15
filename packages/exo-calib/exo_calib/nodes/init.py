@@ -20,6 +20,7 @@ from simplecv.types.rig import RigCameras
 
 from exo_calib.ops.eval import camera_centers
 from exo_calib.ops.ground_plane import select_ground_plane
+from exo_calib.types import MetricScale
 
 KEEP_TOP_PERCENT: float = 30.0
 """Percentage of high-confidence pixels the multi-view geometry pass retains."""
@@ -33,8 +34,8 @@ UP: Float64[ndarray, "3"] = np.array([0.0, 0.0, 1.0])
 """G3T normalizes its predicted gravity to +Z; the floor fit refines that direction."""
 
 
-def estimate_init_cameras(frames_rgb: list[UInt8[ndarray, "h w 3"]], names: tuple[str, ...], g3t: Any, moge: Any) -> RigCameras:
-    """Metric, +Z-up exo cameras (ground at z = 0) with intrinsics at the native video resolution."""
+def estimate_init_cameras(frames_rgb: list[UInt8[ndarray, "h w 3"]], names: tuple[str, ...], g3t: Any, moge: Any) -> tuple[RigCameras, MetricScale]:
+    """Metric, +Z-up exo cameras (ground at z = 0) with intrinsics at the native video resolution, and the metric scale."""
     mv = g3t(frames_rgb, preprocessing_mode="pad", center_method="none")
     depth_confidences: list[UInt8[ndarray, "H W"]] = [robust_filter_confidences(p.confidence_mask, keep_top_percent=KEEP_TOP_PERCENT) for p in mv]
     intrinsics_per_view: list[Float64[ndarray, "3 3"]] = [np.asarray(p.pinhole_param.intrinsics.k_matrix, dtype=np.float64) for p in mv]
@@ -87,14 +88,14 @@ def estimate_init_cameras(frames_rgb: list[UInt8[ndarray, "h w 3"]], names: tupl
     intrinsics: Float64[ndarray, "v 3 3"] = np.stack(
         [np.diag([video_w / p.pinhole_param.intrinsics.width, video_h / p.pinhole_param.intrinsics.height, 1.0]) @ K for p, K in zip(mv, intrinsics_per_view, strict=True)]
     )
-    return RigCameras(names, intrinsics, cam_T_world, np.tile(np.array([video_w, video_h], dtype=np.int64), (len(mv), 1)))
+    return RigCameras(names, intrinsics, cam_T_world, np.tile(np.array([video_w, video_h], dtype=np.int64), (len(mv), 1))), MetricScale(scale)
 
 
 class InitNode:
     """Calibrate the rig from one frameset."""
 
     inputs: Mapping[str, PortType] = {"frames": MultiViewFrames}
-    outputs: Mapping[str, PortType] = {"init": RigCameras}
+    outputs: Mapping[str, PortType] = {"init": RigCameras, "metric_scale": MetricScale}
 
     def reset(self, ctx: RunContext) -> None:
         self.g3t, self.moge = ctx.resources["g3t"], ctx.resources["moge"]
@@ -104,7 +105,9 @@ class InitNode:
         assert isinstance(frames, MultiViewFrames)
         frames_rgb: list[UInt8[ndarray, "h w 3"]] = list(frames.rgb.permute(0, 2, 3, 1).contiguous().cpu().numpy())
         print(f"Stage A: calibrating from frame {frames.frame_index} of {len(frames_rgb)} exo views")
-        out.put("init", tick.t_ns, estimate_init_cameras(frames_rgb, frames.views, self.g3t, self.moge))
+        estimate: tuple[RigCameras, MetricScale] = estimate_init_cameras(frames_rgb, frames.views, self.g3t, self.moge)
+        out.put("init", tick.t_ns, estimate[0])
+        out.put("metric_scale", tick.t_ns, estimate[1])
 
     def flush(self, out: Emit) -> None:
         pass

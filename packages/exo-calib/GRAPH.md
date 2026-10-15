@@ -31,6 +31,7 @@ Stage A: metric, gravity-aligned exo cameras from one synchronized frameset (G3T
 | gives | type | to |
 |---|---|---|
 | **init** | `RigCameras` | 3 keep, 4 viewer, 5 exocalib_init |
+| **metric_scale** | `MetricScale` | 4 viewer, 5 exocalib_init |
 
 Uses the graph resources `g3t`, `moge` (built once, shared).
 
@@ -41,19 +42,22 @@ Keeps the newest value of each input in ``values`` (a multi-graph App builds its
 
 Takes **init** from 2 init.
 
-## 4 · viewer: Draw its inputs in the viewer
-*output* · `RerunSink` · `packages/dagkit/dagkit/sinks.py`
+## 4 · viewer: Draw the segment and its inputs
+*output* · `SegmentViewer` · `packages/exo-calib/exo_calib/apis/calibrate.py`
 
-Takes **init** from 2 init.
+The App's first viewer (the init graph's; on a resume, the last refine graph's) draws the segment as its catalog view shows it when its run starts: every camera's video under its pinhole and the dataset's cameras (``log_segment_cameras``). Then, as ``RerunSink``, its inputs over them.
+
+Takes **init, metric_scale** from 2 init.
 
 ## 5 · exocalib_init: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
 
-Saves **init** from 2 init into the catalog layer `exocalib_init`.
+Saves **init, metric_scale** from 2 init into the catalog layer `exocalib_init`.
 
 ## Data types
 | type | what it is | code |
 |---|---|---|
+| `MetricScale` | Stage A's global metric scale: static ``AnyValues`` on the init rig entity | `packages/exo-calib/exo_calib/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
 
@@ -143,7 +147,7 @@ Saves **refined, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer
 |---|---|---|
 | `BaseCalibration` | Refined cameras written onto base camera nodes that carry no dataset GT; the marker keeps them out of GT discovery | `packages/exo-calib/exo_calib/types.py` |
 | `Keypoints3dTracks` | One frame of triangulated keypoints under both rigs (rows of ``xyz`` are ``VARIANTS``; NaN = not triangulated) | `packages/exo-calib/exo_calib/types.py` |
-| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box and crop rectangle, plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
+| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box, the crop rectangle and the raw joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
@@ -234,6 +238,7 @@ Stage E (whole segment): score the Stage A and refined rigs against the segment'
 |---|---|---|
 | **align** | `RigAlignment` | 9 viewer, 10 exocalib_align |
 | **eval** | `EvalReport` | 8 keep |
+| **status** | `ReportStatus` | 9 viewer, 10 exocalib_align |
 
 ## 7 · exocalib_refined: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
@@ -247,15 +252,17 @@ Keeps the newest value of each input in ``values`` (a multi-graph App builds its
 
 Takes **eval** from 6 report.
 
-## 9 · viewer: Draw its inputs in the viewer
-*output* · `RerunSink` · `packages/dagkit/dagkit/sinks.py`
+## 9 · viewer: Draw the segment and its inputs
+*output* · `SegmentViewer` · `packages/exo-calib/exo_calib/apis/calibrate.py`
 
-Takes **kp2d** from 3 kp2d; **refined, base_rig, diag, kp3d, kp2d_overlay** from 4 refine; **align** from 6 report.
+The App's first viewer (the init graph's; on a resume, the last refine graph's) draws the segment as its catalog view shows it when its run starts: every camera's video under its pinhole and the dataset's cameras (``log_segment_cameras``). Then, as ``RerunSink``, its inputs over them.
+
+Takes **kp2d** from 3 kp2d; **refined, base_rig, diag, kp3d, kp2d_overlay** from 4 refine; **align, status** from 6 report.
 
 ## 10 · exocalib_align: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
 
-Saves **align** from 6 report into the catalog layer `exocalib_align`.
+Saves **align, status** from 6 report into the catalog layer `exocalib_align`.
 
 ## Data types
 | type | what it is | code |
@@ -263,9 +270,10 @@ Saves **align** from 6 report into the catalog layer `exocalib_align`.
 | `BaseCalibration` | Refined cameras written onto base camera nodes that carry no dataset GT; the marker keeps them out of GT discovery | `packages/exo-calib/exo_calib/types.py` |
 | `EvalReport` | ``eval.json``: per-variant GT metrics (``None`` without GT, written as null) and the GT-free diagnostics | `packages/exo-calib/exo_calib/types.py` |
 | `Keypoints3dTracks` | One frame of triangulated keypoints under both rigs (rows of ``xyz`` are ``VARIANTS``; NaN = not triangulated) | `packages/exo-calib/exo_calib/types.py` |
-| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box and crop rectangle, plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
+| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box, the crop rectangle and the raw joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
+| `ReportStatus` | Whether Stage E had GT for every exo camera (without it, nothing is scored or aligned): static ``AnyValues`` | `packages/exo-calib/exo_calib/types.py` |
 | `RigAlignment` | SE(3) alignment of each rig variant onto GT (pred world -> GT world) and the aligned camera centres | `packages/exo-calib/exo_calib/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
