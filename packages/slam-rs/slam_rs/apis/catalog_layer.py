@@ -10,6 +10,7 @@ from typing import Literal
 import rerun as rr
 import rerun.blueprint as rrb
 from dagkit.app import run_app, with_pipeline
+from dagkit.doc import HEALTH_ROOT
 from dagkit.graph import Graph
 from dagkit.node import Mode
 from dagkit.runners import RunReport
@@ -54,7 +55,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     graph, publish = vio_publish(config.segment, config.vio, config.output_dir, config.register, recording)
     normal = rrb.Blueprint(rrb.Spatial3DView(origin="/world", name="trajectory"), rrb.TimePanel(timeline=config.segment.timeline))
     recording.send_blueprint(with_pipeline(normal, [rrb.Spatial3DView(origin="/world", name="2 vio · rig pose"),
-                                                    rrb.TimeSeriesView(origin="/dagkit/health/vio", name="2 vio · step ms and queue")]))  # fmt: skip
+                                                    rrb.TimeSeriesView(origin=HEALTH_ROOT + "vio", name="2 vio · step ms and queue")]))  # fmt: skip
     yield graph
     if publish.published is not None:
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())

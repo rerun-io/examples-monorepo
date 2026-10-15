@@ -21,10 +21,10 @@ import pyarrow.compute as pc
 import rerun as rr
 from dagkit.runners import RunReport, run_threaded
 from dagkit.sinks import LayerFileSink
-from dagkit.verify import Case, Phase
+from dagkit.types import served
+from dagkit.verify import Case, Phase, pre_golden, run_counts
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
 from serde import to_dict
 
 from robocap_live.apis.hands_layer import PACKAGE_DIR as PACKAGE_DIR
@@ -75,16 +75,8 @@ def _rows(table: pa.Table, entity: str, archetype: str, width: int) -> tuple[Int
 
 def _read(golden: Path) -> tuple[pa.Table, dict[str, float]]:
     """The KeyNet and landmark rows of a golden, and its static run counts."""
-    with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
-        dataset: DatasetEntry = server.client().get_dataset("golden")  # an entry must outlive its queries
-        table: pa.Table = dataset.filter_contents([*KEYNET, *LANDMARKS]).reader(index=TIMELINE).to_arrow_table()
-        statics: pa.Table = dataset.filter_contents(["/verify/hands/run"]).reader(index=None).to_arrow_table()
-    counts: dict[str, float] = {
-        c.removeprefix("/verify/hands/run:"): float(np.asarray(statics[c].to_pylist()[0]).reshape(-1)[0])
-        for c in statics.column_names
-        if c.startswith("/verify/hands/run:")
-    }
-    return table, counts
+    with served(golden) as dataset:
+        return dataset.filter_contents([*KEYNET, *LANDMARKS]).reader(index=TIMELINE).to_arrow_table(), run_counts(dataset, "hands")
 
 
 def score(case: Case, golden: Path) -> dict[str, float]:
@@ -95,9 +87,7 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     (frameset-hands reported by exactly one of the two, % of the reference's) and ``kp2d_delta_pct`` (the same for KeyNet's
     frameset-camera-hands, so a lost camera pane fails). Reported, not banded: the golden's counts.
     """
-    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
-    if not reference.exists():
-        raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
+    reference: Path = pre_golden(case, golden)
     ours, counts = _read(golden)
     theirs, _ = (ours, counts) if reference == golden else _read(reference)
     errors: dict[str, list[Float32[ndarray, " m"]]] = {"Points2D": [], "Points3D": []}

@@ -7,16 +7,15 @@ import functools
 import itertools
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Literal, get_args, get_type_hints
+from typing import Any, Literal
 
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit.app import gradio_app
 from dagkit.graph import Graph
 from dagkit.node import Event
 from dagkit.sources import IterSource, SegmentRef
-from dagkit.testing import check_graph_docs, check_picture
+from dagkit.testing import check_form, check_graph_docs, check_picture
 from dagkit.time import STATIC
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -112,42 +111,21 @@ def test_the_viewer_opens_on_the_run_health_as_before_and_the_pipeline_tab_comes
     assert len(plots) == len(list(tabs[0].contents)) == 7 and {str(v.origin) for v in plots} == logged
 
 
-FORM: dict[str, str] = {  # Config leaf -> the widget the generated form gives it
+FORM: dict[str, str] = {  # form label -> the widget the generated form gives it, in form order
     "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "output_dir": "Textbox", "hands.models_dir": "Textbox",
     "hands.device": "Dropdown", "hands.ort_dylib": "File", "hands.ort_threads": "Number", "hands.overlays": "Dropdown",
     "slam": "Dropdown", "vio.profile": "Dropdown", "vio.backend": "Dropdown", "vio.decode_device": "Dropdown",
     "register": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
-HIDDEN: dict[str, str] = {
-    "rr_config": "the form streams into its own Rerun pane",
-    "segment.catalog_url": "kept from the default SegmentRef",
-    "segment.timeline": "kept from the default SegmentRef",
-}
-
-
-def leaves(cls: type, prefix: str = "") -> dict[str, object]:
-    """Every field of a Config, nested dataclasses opened up (unless hidden whole), with its type hint."""
-    out: dict[str, object] = {}
-    for name, hint in get_type_hints(cls).items():
-        path: str = prefix + name
-        nested: bool = dataclasses.is_dataclass(hint) and path not in HIDDEN
-        out |= leaves(hint, f"{path}.") if nested and isinstance(hint, type) else {path: hint}
-    return out
+HIDDEN: dict[str, str] = {"rr_config": "the form streams into its own Rerun pane"}
 
 
 def test_every_config_field_is_a_form_widget_or_deliberately_hidden() -> None:
     gr = pytest.importorskip("gradio", reason="the generated form needs gradio (robocap-live envs)")
-    fields: dict[str, object] = leaves(Config)
-    assert sorted(fields) == sorted([*FORM, *HIDDEN]), "a Config field is neither in the form nor deliberately hidden"
-    demo = gradio_app(Config, build, title="RoboCap hands layer", examples=examples())
-    widgets: dict[str, Any] = {c.label: c for c in demo.blocks.values() if getattr(c, "label", None) in FORM}
-    for label, kind in FORM.items():
-        widget = widgets[label]
-        assert type(widget).__name__ == kind, f"{label}: {type(widget).__name__}, expected {kind}"
-        if kind == "Dropdown":  # every Literal value, "auto" included
-            assert [value for _, value in widget.choices] == list(get_args(fields[label])), label
+    demo = check_form(Config, build, FORM, HIDDEN, examples=examples())
     assert any(isinstance(c, gr.Accordion) and c.label == "hands" for c in demo.blocks.values()), "HandsParams is not grouped"
     # the fields the Config leaves open start from the example: Run on the untouched form is the short case, unregistered (windowed)
+    widgets: dict[str, Any] = {c.label: c for c in demo.blocks.values() if getattr(c, "label", None) in FORM}
     assert (widgets["segment.segment"].value, widgets["segment.window_ns"].value) == (
         "robocap__fe6fede545c972fa__s00000014",
         "1655058237343500 1655063237343500",
