@@ -14,6 +14,7 @@ struct ImageInfo {
     tiles_x: u32,
     tiles_y: u32,
 }
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SceneInfo {
@@ -22,6 +23,7 @@ struct SceneInfo {
     coefficients: u32,
     padding: u32,
 }
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct LensInfo {
@@ -57,6 +59,7 @@ struct RenderFlags {
     has_min_scale: u32,
     padding: u32,
 }
+
 impl Uniforms {
     fn new(camera: &Camera, options: &RenderOptions, scene: &Scene, tiles: glam::UVec2) -> Self {
         let focal = camera.focal();
@@ -106,6 +109,7 @@ impl Uniforms {
         }
     }
 }
+
 impl ViewState {
     pub(crate) fn prepare(
         &mut self,
@@ -124,6 +128,7 @@ impl ViewState {
         self.resize(queue, kernels, tile_count)?;
         Ok(tiles)
     }
+
     pub(crate) fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,

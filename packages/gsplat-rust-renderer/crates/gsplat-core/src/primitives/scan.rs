@@ -6,12 +6,15 @@ use crate::kernels::{BLOCK_SIZE, Kernels, WG};
 const fn scan_level(level: usize) -> u32 {
     level as u32 * 2
 }
+
 const ADD_OFFSETS: u32 = 1;
+
 pub(crate) struct Scan {
     output: wgpu::Buffer,
     groups: Vec<(wgpu::BindGroup, Option<wgpu::BindGroup>)>,
     dispatch_base: u32,
 }
+
 impl Scan {
     pub fn new(
         device: &wgpu::Device,
@@ -75,6 +78,7 @@ impl Scan {
             dispatch_base,
         }
     }
+
     pub fn plans(count: CountSlot, capacity: u32) -> Vec<DispatchPlan> {
         let mut plans = Vec::new();
         let mut n = capacity.max(1);
@@ -91,6 +95,7 @@ impl Scan {
         }
         plans
     }
+
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -121,6 +126,7 @@ impl Scan {
             }
         }
     }
+
     pub fn output(&self) -> &wgpu::Buffer {
         &self.output
     }

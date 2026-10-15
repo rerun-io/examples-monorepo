@@ -17,6 +17,7 @@ fn required_limits() -> wgpu::Limits {
         ..wgpu::Limits::downlevel_webgl2_defaults()
     }
 }
+
 /// Validate the enabled compute capabilities before creating pipelines.
 pub fn check_adapter(features: wgpu::Features, limits: &wgpu::Limits) -> Result<(), Error> {
     if !features.contains(wgpu::Features::SUBGROUP) || !required_limits().check_limits(limits) {
@@ -24,6 +25,7 @@ pub fn check_adapter(features: wgpu::Features, limits: &wgpu::Limits) -> Result<
     }
     Ok(())
 }
+
 /// Subgroups are mandatory; timing is enabled only when supported.
 pub fn required_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     wgpu::Features::SUBGROUP | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY)
@@ -59,6 +61,7 @@ mod capability_tests {
         );
         assert_eq!(failures, 8);
     }
+
     #[test]
     fn depth_raster_requires_two_storage_textures() {
         let limits = wgpu::Limits {
@@ -67,6 +70,7 @@ mod capability_tests {
         };
         assert!(super::check_adapter(wgpu::Features::SUBGROUP, &limits).is_err());
     }
+
     #[test]
     fn compute_limits_preserve_renderer_limits_and_fit_large_bindings() {
         let available = wgpu::Limits {

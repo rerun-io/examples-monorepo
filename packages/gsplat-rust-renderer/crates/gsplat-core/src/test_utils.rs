@@ -16,6 +16,7 @@ pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
     }))
     .expect("request GPU test device")
 }
+
 pub fn upload<T: bytemuck::Pod>(device: &wgpu::Device, values: &[T]) -> wgpu::Buffer {
     let bytes = bytemuck::cast_slice(values);
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -26,6 +27,7 @@ pub fn upload<T: bytemuck::Pod>(device: &wgpu::Device, values: &[T]) -> wgpu::Bu
             | wgpu::BufferUsages::COPY_DST,
     })
 }
+
 pub fn read<T: bytemuck::Pod>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

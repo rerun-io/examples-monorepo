@@ -2,11 +2,17 @@
 use crate::gpu::{Kernel, module, pipeline};
 
 pub(crate) const TILE_WIDTH: u32 = 16;
+
 pub(crate) const WG: u32 = 256;
+
 pub(crate) const ELEMENTS_PER_THREAD: u32 = 4;
+
 pub(crate) const BLOCK_SIZE: u32 = WG * ELEMENTS_PER_THREAD;
+
 pub(crate) const BITS_PER_PASS: u32 = 4;
+
 pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
+
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
 pub(crate) fn sources() -> [String; 7] {
@@ -27,21 +33,25 @@ const U: wgpu::BindingType = wgpu::BindingType::Buffer {
     has_dynamic_offset: false,
     min_binding_size: None,
 };
+
 const R: wgpu::BindingType = wgpu::BindingType::Buffer {
     ty: wgpu::BufferBindingType::Storage { read_only: true },
     has_dynamic_offset: false,
     min_binding_size: None,
 };
+
 pub(crate) const W: wgpu::BindingType = wgpu::BindingType::Buffer {
     ty: wgpu::BufferBindingType::Storage { read_only: false },
     has_dynamic_offset: false,
     min_binding_size: None,
 };
+
 const COLOR: wgpu::BindingType = wgpu::BindingType::StorageTexture {
     access: wgpu::StorageTextureAccess::WriteOnly,
     format: wgpu::TextureFormat::Rgba8Unorm,
     view_dimension: wgpu::TextureViewDimension::D2,
 };
+
 const DEPTH: wgpu::BindingType = wgpu::BindingType::StorageTexture {
     access: wgpu::StorageTextureAccess::WriteOnly,
     format: wgpu::TextureFormat::R32Float,
@@ -115,6 +125,7 @@ pub(crate) struct Kernels {
     pub scatter: Kernel,
     pub prepare: Kernel,
 }
+
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
         let [projection, mapping, raster, scan, sort, prepare, outputs] =

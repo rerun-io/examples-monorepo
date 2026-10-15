@@ -18,6 +18,7 @@ impl Camera {
             size,
         }
     }
+
     /// Transform world positions to the camera's OpenCV coordinate frame.
     pub fn view_from_world(&self) -> glam::Mat4 {
         glam::Mat4::from(
@@ -46,6 +47,7 @@ mod tests {
         assert!((camera.focal().x - camera.focal().y).abs() < 1e-3);
         assert_eq!(camera.center_uv, Vec2::splat(0.5));
     }
+
     #[test]
     fn camera_validation_rejects_non_unit_rotation() {
         let mut camera = crate::test_utils::pinhole_camera(64);

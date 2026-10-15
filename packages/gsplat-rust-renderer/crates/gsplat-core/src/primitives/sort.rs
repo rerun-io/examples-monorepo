@@ -4,7 +4,9 @@ use crate::gpu::{bind, storage, uniform};
 use crate::kernels::{BIN_COUNT, BITS_PER_PASS, BLOCK_SIZE, Kernels};
 
 const BLOCKS: u32 = 0;
+
 const REDUCED: u32 = 1;
+
 struct SortGroups {
     count_keys: wgpu::BindGroup,
     reduce_counts: wgpu::BindGroup,
@@ -12,12 +14,14 @@ struct SortGroups {
     scan_add: wgpu::BindGroup,
     scatter: wgpu::BindGroup,
 }
+
 pub(crate) struct RadixSort {
     keys: [wgpu::Buffer; 2],
     values: [wgpu::Buffer; 2],
     groups: [SortGroups; 8],
     dispatch_base: u32,
 }
+
 impl RadixSort {
     pub fn new(
         device: &wgpu::Device,
@@ -107,12 +111,14 @@ impl RadixSort {
             dispatch_base,
         }
     }
+
     pub fn plans(count: CountSlot, capacity: u32) -> [DispatchPlan; 2] {
         [
             DispatchPlan::new(count, capacity, BLOCK_SIZE, 1),
             DispatchPlan::new(count, capacity, BLOCK_SIZE * BLOCK_SIZE, BIN_COUNT),
         ]
     }
+
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -156,10 +162,12 @@ impl RadixSort {
             );
         }
     }
+
     pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {
         let index = bits.div_ceil(BITS_PER_PASS) as usize % 2;
         (&self.keys[index], &self.values[index])
     }
+
     /// Retained buffer bytes; the shared dispatch buffers belong to the view, and histogram/parameter buffers held only by bind groups are excluded.
     pub(crate) fn gpu_byte_size(&self) -> u64 {
         self.keys

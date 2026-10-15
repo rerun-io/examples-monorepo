@@ -6,10 +6,13 @@ use glam::UVec2;
 pub enum Target {
     /// Four f32 lanes per pixel, unclipped RGB, for parity and HDR composition.
     Float(wgpu::Buffer),
+
     /// One packed RGBA8 u32 per pixel, Brush's truncating quantization.
     Packed(wgpu::Buffer),
+
     /// rgba8unorm storage texture, for viewer composition.
     Texture(wgpu::TextureView),
+
     /// Viewer-only color plus alpha-weighted expected camera depth (positive Z), r32float.
     TextureDepth {
         color: wgpu::TextureView,
@@ -24,6 +27,7 @@ pub(crate) enum RasterKind {
     Texture,
     TextureDepth,
 }
+
 impl RasterKind {
     pub fn binding(self) -> u32 {
         match self {
@@ -33,6 +37,7 @@ impl RasterKind {
         }
     }
 }
+
 impl Target {
     pub(crate) fn layout(&self, size: UVec2) -> Result<RasterKind, crate::Error> {
         let texture = |view: &wgpu::TextureView, format| {

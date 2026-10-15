@@ -13,6 +13,7 @@ struct Intersections {
     capacity: u32,
     sort: RadixSort,
 }
+
 impl Intersections {
     fn new(device: &wgpu::Device, kernels: &Kernels, counts: &wgpu::Buffer, capacity: u32) -> Self {
         let keys = storage(device, "intersection tile keys", u64::from(capacity) * 4);
@@ -34,10 +35,12 @@ struct ProjectionGroups {
     forward: wgpu::BindGroup,
     visible: wgpu::BindGroup,
 }
+
 struct MappingGroups {
     tiles: wgpu::BindGroup,
     offsets: wgpu::BindGroup,
 }
+
 struct FrameSlot {
     uniform: wgpu::Buffer,
     readback: wgpu::Buffer,
@@ -103,6 +106,7 @@ impl Scratch {
         }
     }
 }
+
 /// Scratch for one scene/view pair. Several views may encode before one submit.
 /// Poll feedback before reuse; at most three unconsumed frames may be in flight.
 pub struct ViewState {
@@ -118,11 +122,17 @@ pub struct ViewState {
     timing: Option<wgpu::QuerySet>,
     overflow_events: u32,
 }
+
 const VISIBLE: u32 = 0;
+
 const INTERSECTIONS: u32 = 1;
+
 const DEPTH_SORT: u32 = 2;
+
 const TILE_SORT: u32 = 4;
+
 const SCAN: u32 = 6;
+
 fn plans(n: u32, capacity: u32) -> Vec<DispatchPlan> {
     let mut plans = vec![
         DispatchPlan::new(CountSlot::Visible, n, WG, 1),
@@ -133,6 +143,7 @@ fn plans(n: u32, capacity: u32) -> Vec<DispatchPlan> {
     plans.extend(Scan::plans(CountSlot::Visible, n));
     plans
 }
+
 impl ViewState {
     /// Retained scratch bytes, excluding scene buffers and buffers held only by bind groups.
     pub fn gpu_byte_size(&self) -> u64 {
@@ -264,6 +275,7 @@ impl ViewState {
             overflow_events: 0,
         })
     }
+
     fn resize(
         &mut self,
         queue: &wgpu::Queue,
@@ -319,10 +331,12 @@ impl ViewState {
         }
         Ok(())
     }
+
     /// Whether this view still has submitted feedback to consume.
     pub fn has_pending_frames(&self) -> bool {
         !self.pending.is_empty()
     }
+
     /// Nonblocking completed-frame counts. An overflow preserves the target and requests a rerender.
     pub fn poll_feedback(&mut self) -> Result<Option<FrameStats>, Error> {
         self.device.poll(wgpu::PollType::Poll)?;
@@ -360,6 +374,7 @@ impl ViewState {
         }
         Ok(latest)
     }
+
     /// Diagnostic timestamps need ten slots; wait for completion before resolving on Metal.
     pub fn set_timestamp_queries(&mut self, queries: Option<wgpu::QuerySet>) -> Result<(), Error> {
         if let Some(q) = &queries
@@ -455,6 +470,7 @@ mod tests {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().visible, 0);
     }
+
     #[test]
     #[ignore = "integration: GPU"]
     fn raster_dispatch_rejects_tile_axes_above_the_portable_limit() {

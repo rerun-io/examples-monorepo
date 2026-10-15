@@ -12,6 +12,7 @@ pub(crate) struct GaussianRenderer {
     composite_pipeline: re_renderer::GpuRenderPipelineHandle,
     pub(crate) core: Option<gsplat_core::Renderer>,
 }
+
 struct TargetImage {
     size: glam::UVec2,
     color: GpuTexture,
@@ -38,18 +39,21 @@ enum Image {
 }
 // Bound the first allocation; feedback grows scratch for denser views.
 const MAX_INITIAL_INTERSECTIONS: u32 = 1_048_576;
+
 #[derive(Clone, Copy)]
 pub(crate) enum Prepared {
     Pending,
     Current,
     Encode,
 }
+
 pub(crate) struct RenderView {
     core: gsplat_core::ViewState,
     target: TargetImage,
     image: Image,
     last_good: Option<GpuBindGroup>,
 }
+
 impl RenderView {
     pub(crate) fn gpu_byte_size(&self) -> u64 {
         self.core.gpu_byte_size()
@@ -67,15 +71,18 @@ impl RenderView {
         self.core = view;
         Ok(())
     }
+
     fn completed(&self) -> Option<GpuBindGroup> {
         match &self.image {
             Image::Dirty | Image::Pending { .. } | Image::Capacity { .. } => self.last_good.clone(),
             Image::Complete { .. } => Some(self.target.composite.clone()),
         }
     }
+
     fn is_current(&self, camera: &Camera, options: &RenderOptions) -> bool {
         matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && old_options == options)
     }
+
     pub(crate) fn prepare(
         &mut self,
         renderer: &GaussianRenderer,
@@ -127,6 +134,7 @@ impl RenderView {
         }
         Ok(Prepared::Encode)
     }
+
     fn encode(
         &mut self,
         renderer: &GaussianRenderer,
@@ -164,8 +172,10 @@ pub(crate) struct GaussianDrawData {
     pub(crate) center: glam::Vec3A,
     pub(crate) prepared: Prepared,
 }
+
 impl DrawData for GaussianDrawData {
     type Renderer = GaussianRenderer;
+
     fn collect_drawables(
         &self,
         view_info: &re_renderer::renderer::DrawableCollectionViewInfo,
@@ -191,12 +201,14 @@ impl DrawData for GaussianDrawData {
         );
     }
 }
+
 fn core_view(
     core: &gsplat_core::Renderer,
     scene: &Arc<gsplat_core::Scene>,
 ) -> Result<gsplat_core::ViewState, Error> {
     core.create_view(scene, scene.len().clamp(1, MAX_INITIAL_INTERSECTIONS))
 }
+
 impl GaussianRenderer {
     pub(crate) fn core(&self) -> Result<&gsplat_core::Renderer, Error> {
         self.core.as_ref().ok_or(Error::Capabilities)
@@ -216,6 +228,7 @@ impl GaussianRenderer {
             last_good: None,
         })
     }
+
     fn target(&self, ctx: &re_renderer::RenderContext, size: glam::UVec2) -> TargetImage {
         // TextureDesc is not exported in 0.38.1; reuse the public 2D descriptor.
         let template = ctx.texture_manager_2d.white_texture_unorm();
@@ -256,6 +269,7 @@ impl GaussianRenderer {
         }
     }
 }
+
 impl Renderer for GaussianRenderer {
     type RendererDrawData = GaussianDrawData;
 

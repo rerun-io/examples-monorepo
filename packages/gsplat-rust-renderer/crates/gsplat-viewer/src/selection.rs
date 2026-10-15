@@ -3,6 +3,7 @@ use re_sdk_types::blueprint::archetypes::ActiveVisualizers;
 use re_viewer::external::{re_sdk_types, re_viewer_context};
 
 pub(crate) const COMPUTE: &str = "ComputeGaussianSplats3D";
+
 pub(crate) const NATIVE: &str = "GaussianSplats3D";
 use re_viewer_context::{
     BlueprintContext as _, IdentifiedViewSystem, MissingChunkReporter, ViewContext,
@@ -29,6 +30,7 @@ pub(crate) fn has_explicit_visualizers(
 
 #[derive(Default)]
 pub(crate) struct AutomaticSplatSelection;
+
 impl IdentifiedViewSystem for AutomaticSplatSelection {
     fn identifier() -> ViewSystemIdentifier {
         "AutomaticSplatSelection".into()
@@ -55,6 +57,7 @@ fn select_default(
     selected.push(compute);
     Some(selected)
 }
+
 impl ViewContextSystem for AutomaticSplatSelection {
     fn execute(
         &mut self,
@@ -84,6 +87,7 @@ impl ViewContextSystem for AutomaticSplatSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn instruction(name: &'static str) -> re_viewer_context::VisualizerInstruction {
         re_viewer_context::VisualizerInstruction::new(
             re_sdk_types::blueprint::components::VisualizerInstructionId::new_random(),
@@ -100,6 +104,7 @@ mod tests {
             .collect(),
         )
     }
+
     #[test]
     fn defaults_replace_only_native_and_deduplicate_compute() {
         let native = instruction(NATIVE);
@@ -114,6 +119,7 @@ mod tests {
         assert_eq!(selected[1].component_mappings, native.component_mappings);
         assert_eq!(selected[1].visualizer_type.as_str(), COMPUTE);
     }
+
     #[test]
     fn explicit_native_compute_or_empty_selection_is_preserved() {
         for instructions in [

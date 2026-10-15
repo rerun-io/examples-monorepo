@@ -27,6 +27,7 @@ pub(crate) enum CountSlot {
     Visible,
     Intersections,
 }
+
 impl CountSlot {
     pub fn index(self) -> u32 {
         match self {
@@ -35,6 +36,7 @@ impl CountSlot {
         }
     }
 }
+
 /// A count source and the workgroup arithmetic consumed by dispatch.wgsl.
 pub(crate) struct DispatchPlan {
     count: CountSlot,
@@ -42,6 +44,7 @@ pub(crate) struct DispatchPlan {
     per_group: u32,
     multiplier: u32,
 }
+
 impl DispatchPlan {
     pub fn new(count: CountSlot, max: u32, per_group: u32, multiplier: u32) -> Self {
         Self {
@@ -51,6 +54,7 @@ impl DispatchPlan {
             multiplier,
         }
     }
+
     fn words(&self) -> [u32; 4] {
         [
             self.count.index(),
@@ -60,12 +64,14 @@ impl DispatchPlan {
         ]
     }
 }
+
 pub(crate) struct Dispatches {
     plans: wgpu::Buffer,
     args: wgpu::Buffer,
     group: wgpu::BindGroup,
     len: u32,
 }
+
 impl Dispatches {
     pub fn new(
         device: &wgpu::Device,
@@ -96,6 +102,7 @@ impl Dispatches {
             len: plans.len() as u32,
         }
     }
+
     pub fn update(&self, queue: &wgpu::Queue, plans: &[DispatchPlan]) {
         assert_eq!(plans.len(), self.len as usize);
         queue.write_buffer(
@@ -104,6 +111,7 @@ impl Dispatches {
             bytemuck::cast_slice(&plans.iter().map(DispatchPlan::words).collect::<Vec<_>>()),
         );
     }
+
     pub fn prepare(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -118,6 +126,7 @@ impl Dispatches {
             timestamp_writes,
         );
     }
+
     pub fn dispatch_indirect(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -132,6 +141,7 @@ impl Dispatches {
         });
         self.dispatch_in_pass(&mut pass, index, pipeline, group);
     }
+
     pub fn dispatch_in_pass(
         &self,
         pass: &mut wgpu::ComputePass<'_>,
@@ -143,6 +153,7 @@ impl Dispatches {
         pass.set_bind_group(0, group, &[]);
         pass.dispatch_workgroups_indirect(&self.args, u64::from(index) * 16);
     }
+
     /// Retained buffer bytes; histogram/parameter buffers held only by bind groups are excluded.
     pub(crate) fn gpu_byte_size(&self) -> u64 {
         self.plans.size() + self.args.size()
@@ -154,6 +165,7 @@ mod tests {
     use super::*;
     use crate::gpu::{module, pipeline};
     use crate::test_utils::{gpu, read, upload};
+
     #[test]
     #[ignore = "integration: GPU"]
     fn wrapped_intersection_count_cannot_enable_raster() {

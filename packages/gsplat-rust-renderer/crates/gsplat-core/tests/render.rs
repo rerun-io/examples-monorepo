@@ -10,6 +10,7 @@ fn centered_gaussian_has_analytic_color_alpha_and_background() {
     let (device, queue) = common::gpu();
     analytic_render(&device, &queue, glam::Affine3A::IDENTITY, 0.182_996_84);
 }
+
 #[test]
 #[ignore = "integration: GPU"]
 fn instance_affine_preserves_projection_and_covariance() {
@@ -25,6 +26,7 @@ fn instance_affine_preserves_projection_and_covariance() {
         0.106_753_71,
     );
 }
+
 fn analytic_render(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -265,6 +267,7 @@ fn texture(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::Texture 
         view_formats: &[],
     })
 }
+
 fn copy_texture(
     encoder: &mut wgpu::CommandEncoder,
     texture: &wgpu::Texture,

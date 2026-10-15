@@ -233,9 +233,11 @@ struct Cli {
     rrd_path: Option<PathBuf>,
     #[arg(long = "memory-limit")]
     memory_limit: Option<String>,
+
     /// Accepted for compatibility with the Rerun SDK spawn path; this viewer does not host a store server.
     #[arg(long = "server-memory-limit", hide = true)]
     _server_memory_limit: Option<String>,
+
     /// Accepted for compatibility with the Rerun SDK spawn path.
     #[arg(long = "expect-data-soon", hide = true)]
     _expect_data_soon: bool,
@@ -306,6 +308,7 @@ fn register_splat_system(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
     #[test]
     fn startup_arguments_and_sdk_flags() {
         let cli = Cli::try_parse_from([
@@ -323,6 +326,7 @@ mod cli_tests {
         assert_eq!(cli.port, 4321);
         assert!(cli.headless);
     }
+
     #[test]
     fn invalid_arguments_fail_clearly() {
         for args in [
