@@ -1,8 +1,8 @@
 //! Compute requirements shared by standalone and viewer devices.
 use crate::Error;
 
-// Optional depth raster: 256 * (9 splat floats + 1 depth float), plus five shared scalars.
-pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_260;
+// Optional depth raster: 256 * (9 splat floats + 1 depth float), plus four shared scalars.
+pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_256;
 
 fn required_limits() -> wgpu::Limits {
     wgpu::Limits {

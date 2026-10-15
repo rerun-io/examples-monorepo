@@ -10,7 +10,6 @@ var<workgroup> skip: u32;
 var<workgroup> range_lo: u32;
 var<workgroup> range_hi: u32;
 var<workgroup> num_done: atomic<u32>;
-var<workgroup> done_snapshot: u32;
 fn compact_bits(v: u32) -> u32 {
     var x = v & 0x55u;
     x = (x | (x >> 1u)) & 0x33u;
@@ -46,11 +45,7 @@ fn raster(tile: u32, lid: u32) -> Raster {
         atomicAdd(&num_done, 1u);
     }
     for (var start = lo; start < hi; start += WG) {
-        workgroupBarrier();
-        if lid == 0u {
-            done_snapshot = atomicLoad(&num_done);
-        }
-        if workgroupUniformLoad(&done_snapshot) >= WG {
+        if workgroupUniformLoad(&num_done) >= WG {
             break;
         }
         let remaining = min(WG, hi - start);
