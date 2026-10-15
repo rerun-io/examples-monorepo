@@ -14,12 +14,10 @@ fn cube_scan(value: u32, lid: u32, lane: u32, width: u32) -> vec2u {
     workgroupBarrier();
     if planes <= width {
         var v = 0u;
-        if lane < planes {
+        if plane == 0u && lane < planes {
             v = partials[lane];
         }
         let scanned = subgroupExclusiveAdd(v);
-        // Every plane reads before plane zero overwrites the shared totals.
-        workgroupBarrier();
         if plane == 0u {
             if lane < planes {
                 partials[lane] = scanned;
