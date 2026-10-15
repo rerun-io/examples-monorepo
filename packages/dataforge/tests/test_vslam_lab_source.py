@@ -17,6 +17,7 @@ from dataforge.datasets.vslam_lab_source import (
     ImuStream,
     StreamName,
     read_calibration,
+    read_euroc_gt,
     read_frame_index,
     read_imu,
     read_poses,
@@ -164,6 +165,25 @@ def test_ground_truth_comes_back_world_t_body_scalar_last(tmp_path: Path) -> Non
     assert poses.times_ns.tolist() == [1403636580838555648, 1403636580843555328]
     np.testing.assert_array_equal(poses.translations_xyz[0], [4.688319, -1.786938, 0.783338])
     np.testing.assert_array_equal(poses.quaternions_xyzw[1], [-0.152990, -0.826976, -0.082863, 0.534640])
+
+
+def test_euroc_s_own_ground_truth_comes_back_world_t_imu0_scalar_last(tmp_path: Path) -> None:
+    poses: GtTrajectory = read_euroc_gt(
+        write(
+            tmp_path,
+            "state_groundtruth_estimate0.csv",
+            "#timestamp, p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z [], v_RS_R_x [m s^-1]\n"
+            "1403636580838555648,4.688319,-1.786938,0.783338,0.534108,-0.153029,-0.827383,-0.082152,-0.027876\n",
+        )
+    )
+    assert poses.times_ns.tolist() == [1403636580838555648]
+    np.testing.assert_array_equal(poses.translations_xyz, [[4.688319, -1.786938, 0.783338]])
+    np.testing.assert_array_equal(poses.quaternions_xyzw, [[-0.153029, -0.827383, -0.082152, 0.534108]])
+
+
+def test_an_empty_euroc_ground_truth_names_the_file(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="state_groundtruth_estimate0.csv"):
+        read_euroc_gt(write(tmp_path, "state_groundtruth_estimate0.csv", "#timestamp, p_RS_R_x [m]\n"))
 
 
 def test_an_imu_csv_splits_into_gyro_and_accel(tmp_path: Path) -> None:
