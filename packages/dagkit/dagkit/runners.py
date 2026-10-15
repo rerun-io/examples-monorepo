@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias, cast
 
+import numpy as np
 import rerun as rr
 from serde import serde
 
@@ -265,6 +266,10 @@ class _Run:
         s.events = events = iter(s.obj.events())  # type: ignore[attr-defined]
         for event in events:
             if event.t_ns != STATIC:
+                if self.health is not None:  # the picture's colours on the data timeline, from its first time (not 0: Unix-time data)
+                    self.health.set_time(s.obj.clock, duration=np.timedelta64(event.t_ns, "ns"))  # type: ignore[attr-defined]
+                    self.health.log(GRAPH_ROOT + self.graph.name, rr.GraphNodes.from_fields(colors=self.picture[1]))
+                    self.health.reset_time()
                 return itertools.chain([event], events)
             s.put(event.port, STATIC, event.value)
             for edge in (e for e in s.outs[event.port] if isinstance(e.spec.kind, AsOf)):

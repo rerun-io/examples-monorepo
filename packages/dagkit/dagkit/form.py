@@ -194,7 +194,7 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
                 finally:  # also when gradio closes this iterator at a yield: the run stops before its scratch directory goes
                     control.stop()
                     thread.join()
-                recording.flush()
+                    recording.flush()  # also on a close: dropping an unflushed recording with a binary stream can hang
                 if errors:
                     raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
                 yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config)) for leaf in outputs))

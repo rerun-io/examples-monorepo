@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 import rerun as rr
 from dagkit_fakes import Collect, Point
@@ -355,3 +356,20 @@ def test_see_it_links_point_at_leaf_entities() -> None:
     text: str = guide(describe(demo_graph(), drawn), health=True)
     assert "(recording://world/smooth/line)" in text and "(recording://world/smooth/point)" in text
     assert "(recording://world/smooth)" not in text
+
+
+def test_the_picture_colours_on_the_data_clock_start_with_the_data(tmp_path: Path) -> None:
+    """The picture keeps its colours on the graph clock (the debug tab on the data timeline) from the first source time,
+    never at 0: a segment on Unix time (TUM) would otherwise stretch the normal view's time panel over 41 years."""
+    unix: int = 1_305_031_452_791_720_000
+    graph = Graph("clock", about="Colours on the data clock.")
+    src: NodeRef = graph.source("src", IterSource({"x": int}, lambda: iter([Event(unix + t, "x", t) for t in range(3)])))
+    graph.edge(src["x"], graph.node("busy", Step(False))["x"])
+    recording = rr.RecordingStream("dagkit-test", recording_id="clock", send_properties=False)
+    recording.save(tmp_path / "clock.rrd")
+    run_sequential(graph, health=recording)
+    recording.disconnect()
+    reader = RrdReader(tmp_path / "clock.rrd")
+    times: list[int] = [t for c in reader.stream(store=reader.recordings()[0]).to_chunks() if "video_time" in (batch := c.to_record_batch()).schema.names
+                        for t in batch.column("video_time").cast(pa.int64()).to_pylist() if t is not None]  # fmt: skip
+    assert times and min(times) == unix
