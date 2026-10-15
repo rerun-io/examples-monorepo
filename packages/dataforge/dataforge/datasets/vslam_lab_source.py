@@ -36,8 +36,8 @@ from serde import SerdeError, coerce, field, serde
 from serde.yaml import from_yaml
 from yaml import YAMLError
 
-from dataforge.euroc import GT_VALUE_COLUMNS, GtTrajectory, TimestampedSamples, gt_trajectory, read_numeric_csv, sanitized
-from dataforge.logging_toolkit import ImuChannel
+from dataforge.euroc import GT_VALUE_COLUMNS, TimestampedSamples, gt_trajectory, read_numeric_csv, sanitized
+from dataforge.logging_toolkit import GtTrajectory, ImuChannel
 
 StreamName: TypeAlias = Literal["rgb_0", "rgb_1", "depth_0", "depth_1"]
 """Image streams rgb.csv can list; ``depth_<i>`` is registered to ``rgb_<i>``."""

@@ -35,7 +35,6 @@ from dataforge.euroc import (
     IMU_VALUE_COLUMNS,
     MAG_VALUE_COLUMNS,
     CameraRow,
-    GtTrajectory,
     TimestampedSamples,
     first_timestamp_ns,
     gt_trajectory,
@@ -45,6 +44,7 @@ from dataforge.euroc import (
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
+    GtTrajectory,
     ImuChannel,
     log_camera_node,
     log_gt_path,
@@ -482,15 +482,7 @@ def write_gt_layer(
         # must agree, and a disagreement is a warning, not a silent
         # per-sequence reorientation.
         rr.log("/", WORLD_UP_VIEW_COORDINATES[profile.world_up], static=True, recording=recording)
-        log_gt_path(
-            recording,
-            RIG,
-            times_ns=gt.times_ns,
-            translations_xyz=gt.translations_xyz,
-            quaternions_xyzw=gt.quaternions_xyzw,
-            radius=GT_TRAJECTORY_RADIUS_M,
-            radius_unit="m",
-        )
+        log_gt_path(recording, RIG, gt, radius_m=GT_TRAJECTORY_RADIUS_M)
         recording.send_property(
             "gt",
             rr.AnyValues(

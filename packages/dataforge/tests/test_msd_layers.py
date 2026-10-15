@@ -35,8 +35,8 @@ from scipy.spatial.transform import Rotation
 from dataforge import paths, schema
 from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rotate_camera_cw, upright_quarter_turns
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
-from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
-from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
+from dataforge.euroc import TimestampedSamples, gt_trajectory
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, GtTrajectory, ImuChannel
 from dataforge.world_up import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
 
 VIEWER_AXIS_VECTORS: dict[int, tuple[float, float, float]] = {

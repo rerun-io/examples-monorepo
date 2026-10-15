@@ -22,7 +22,7 @@ from dataforge.datasets.vslam_lab_source import (
     read_imu,
     read_poses,
 )
-from dataforge.euroc import GtTrajectory
+from dataforge.logging_toolkit import GtTrajectory
 
 TUM_CALIBRATION: str = """%YAML 1.2
 ---

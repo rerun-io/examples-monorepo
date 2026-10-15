@@ -557,6 +557,13 @@ def log_pose_track(
 
 TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
 """Fixed tint of a whole ground-truth path; one trajectory is one quantity, not a per-row class."""
+TRAJECTORY_RADIUS_UI_POINTS: float = 1.5
+"""Default stroke of a whole ground-truth path, in **screen** points rather than metres.
+
+A walk can be hundreds of metres long, so the overview view frames all of it at once
+and any honest metric width is a small fraction of a pixel there (0.01 m over a 400 m
+shot is 0.06 px, i.e. invisible). Rerun reads a negative radius as UI points, which
+keeps the path one visible hairline at every zoom."""
 TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
 """Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
 TRAIL_RADIUS_UI_POINTS: float = 3.0
@@ -618,16 +625,31 @@ def log_trail_segments(
     )
 
 
-def log_gt_path(
-    recording: rr.RecordingStream,
-    rig: int,
-    *,
-    times_ns: Int64[ndarray, "n_poses"],
-    translations_xyz: Float64[ndarray, "n_poses 3"],
-    quaternions_xyzw: Float64[ndarray, "n_poses 4"],
-    radius: float,
-    radius_unit: Literal["m", "ui_points"],
-) -> None:
+@dataclass(frozen=True, slots=True)
+class GtTrajectory:
+    """A ground truth as the rig moves through it, in the columns ``rr.Transform3D`` takes, whatever file it came from."""
+
+    times_ns: Int64[ndarray, "n_poses"]
+    """Pose times on the sequence's ``video_time`` clock, nanoseconds."""
+    translations_xyz: Float64[ndarray, "n_poses 3"]
+    """``world_t_rig``, metres."""
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"]
+    """``world_R_rig``, scalar **last**; a repaired dropout row holds identity."""
+    num_sanitized: int = 0
+    """Rows whose quaternion was not unit-norm and was replaced with identity (``euroc.sanitized``)."""
+
+    @property
+    def length_m(self) -> float:
+        """Path length, summed over consecutive poses; 0.0 for fewer than two."""
+        return float(np.linalg.norm(np.diff(self.translations_xyz, axis=0), axis=1).sum())
+
+    @property
+    def duration_s(self) -> float:
+        """Span from the first pose to the last; 0.0 for none."""
+        return float((self.times_ns[-1] - self.times_ns[0]) / 1e9) if self.times_ns.size else 0.0
+
+
+def log_gt_path(recording: rr.RecordingStream, rig: int, trajectory: GtTrajectory, *, radius_m: float | None = None) -> None:
     """Send a gt layer's trajectory: ``world_T_rig`` on the rig node, the whole path, and its trail.
 
     Two views of one trajectory: the static strip is the whole path, shown whole in
@@ -640,17 +662,17 @@ def log_gt_path(
     Args:
         recording: Destination recording stream.
         rig: Rig whose node the poses animate.
-        times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
-        translations_xyz: ``world_t_rig``, metres.
-        quaternions_xyzw: ``world_R_rig``, scalar last.
-        radius: Stroke of the whole path, in ``radius_unit``.
-        radius_unit: ``"m"`` for a metric radius, ``"ui_points"`` for a width on screen
-            that stays visible over a long walk.
+        trajectory: The poses, on the ``video_time`` clock.
+        radius_m: A metric stroke for the whole path; ``None`` draws ``TRAJECTORY_RADIUS_UI_POINTS`` on screen.
     """
-    log_pose_track(recording, schema.rig_path(rig), times_ns=times_ns, translations_xyz=translations_xyz, quaternions_xyzw=quaternions_xyzw)
+    times_ns: Int64[ndarray, "n_poses"] = trajectory.times_ns
+    translations_xyz: Float64[ndarray, "n_poses 3"] = trajectory.translations_xyz
+    log_pose_track(recording, schema.rig_path(rig), times_ns=times_ns, translations_xyz=translations_xyz, quaternions_xyzw=trajectory.quaternions_xyzw)
     rr.log(
         schema.trajectory_path(schema.GT_RUN_SOURCE),
-        rr.LineStrips3D([translations_xyz], colors=TRAJECTORY_COLOR, radii=rr.Radius.ui_points(radius) if radius_unit == "ui_points" else radius),
+        rr.LineStrips3D(
+            [translations_xyz], colors=TRAJECTORY_COLOR, radii=rr.Radius.ui_points(TRAJECTORY_RADIUS_UI_POINTS) if radius_m is None else radius_m
+        ),
         static=True,
         recording=recording,
     )
