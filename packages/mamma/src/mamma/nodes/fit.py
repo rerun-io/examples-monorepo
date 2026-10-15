@@ -22,7 +22,7 @@ from torch import Tensor
 
 from mamma.ops.triangulation import triangulate_gated, triangulate_landmarks
 from mamma.ops.window_fit import FitResult, FitterConfig
-from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, SmplxFits
+from mamma.types import BodyTopology, FitHealth, FitParams, FitView, Landmarks3d, MultiViewLandmarks, SmplxFits
 
 CONTACT_MIN: float = 0.25
 """Fused floor-contact probability below which a landmark is not pulled to the floor."""
@@ -49,7 +49,7 @@ class FitNode:
     """
 
     inputs: Mapping[str, PortType] = {"landmarks": Fenced[MultiViewLandmarks], "rig": RigCameras}
-    outputs: Mapping[str, PortType] = {"fit": SmplxFits, "kp3d": Landmarks3d, "topology": BodyTopology}
+    outputs: Mapping[str, PortType] = {"fit": SmplxFits, "kp3d": Landmarks3d, "topology": BodyTopology, "view": FitView, "params": FitParams, "health": FitHealth}
     emits_late: bool = True
 
     def __init__(self, params: FitterConfig, faces: Int32[ndarray, "f 3"], new_fitter: Callable[[list[Tensor], list[Tensor]], WindowFitter]) -> None:
@@ -88,12 +88,14 @@ class FitNode:
         self.recent.append(tick.t_ns)
         new: list[int] = []
         points: list[tuple[int, Float32[Tensor, "n 3"], Bool[Tensor, " n"]]] = []
+        counts: list[Int64[Tensor, "2"]] = []
         for person in sorted(set(landmarks.person.tolist())):
             rows: Int64[ndarray, " r"] = np.flatnonzero(landmarks.person == person)
             if rows.size < 2:
                 continue
-            result, cloud = self._fit_person(landmarks, person, rows, new)
+            result, cloud, count = self._fit_person(landmarks, person, rows, new)
             points.append((person, *cloud))
+            counts.append(count)
             fits: list[FitResult] = [*self.fitters[person].drain_head()]
             if result is not None and result is not self.pushed.get(person):
                 fits.append(result)
@@ -102,18 +104,22 @@ class FitNode:
         if new:
             out.put("topology", tick.t_ns, BodyTopology(tuple(new), self.faces))
         if points:
+            persons: tuple[int, ...] = tuple(p for p, _, _ in points)
             out.put("kp3d", tick.t_ns, Landmarks3d(
-                landmarks.frame_index, tuple(p for p, _, _ in points), np.stack([c.cpu().numpy() for _, c, _ in points]), np.stack([v.cpu().numpy() for _, _, v in points]),
+                landmarks.frame_index, persons, np.stack([c.cpu().numpy() for _, c, _ in points]), np.stack([v.cpu().numpy() for _, _, v in points]),
             ))  # fmt: skip
+            health: Int64[ndarray, "p 2"] = torch.stack(counts).cpu().numpy()
+            out.put("health", tick.t_ns, FitHealth(persons, health[:, 0], health[:, 1]))
         if len(self.recent) == self.recent.maxlen:
             self._release(out, self.recent[0])
             out.watermark(self.recent[0])
 
     def _fit_person(
         self, landmarks: MultiViewLandmarks, person: int, rows: Int64[ndarray, " r"], new: list[int]
-    ) -> tuple[FitResult | None, tuple[Float32[Tensor, "n 3"], Bool[Tensor, " n"]]]:
+    ) -> tuple[FitResult | None, tuple[Float32[Tensor, "n 3"], Bool[Tensor, " n"]], Int64[Tensor, "2"]]:
         """One person's tick: gated triangulation, the dense cloud for display, then a push into the person's fitter (the
-        first full window also leaves its head frames in ``drain_head``)."""
+        first full window also leaves its head frames in ``drain_head``). Also its fit health: valid anchors and pulled
+        floor contacts."""
         assert self.cameras is not None
         views: int = len(landmarks.views)
         device: torch.device = landmarks.xy.device
@@ -133,7 +139,8 @@ class FitNode:
             new.append(person)
         observed: list[Float32[Tensor, "n 3"]] = list(torch.cat([xy, log_variance[..., None]], dim=-1).unbind(0))
         optimize: bool = self.params.fit_stride <= 1 or landmarks.frame_index % self.params.fit_stride == 0
-        return self.fitters[person].push(landmarks.frame_index, observed, list(gated.unbind(0)), anchors, valid, floor_contact=contact, optimize=optimize), cloud
+        fitted: FitResult | None = self.fitters[person].push(landmarks.frame_index, observed, list(gated.unbind(0)), anchors, valid, floor_contact=contact, optimize=optimize)
+        return fitted, cloud, torch.stack([valid.sum(), (contact > CONTACT_MIN).sum()])
 
     def _release(self, out: Emit, until: TimeNs) -> None:
         """Put every held frame with time <= ``until``, in time order, and close everything up to ``until``."""
@@ -143,9 +150,12 @@ class FitNode:
                 self.late += len(fits)
                 continue
             persons: list[int] = sorted(fits)
-            out.put("fit", t_ns, SmplxFits(
+            fit = SmplxFits(
                 fits[persons[0]].frame_idx, tuple(persons), *(np.stack([getattr(fits[p], name) for p in persons]) for name in ("vertices", "pose", "betas", "trans")),
-            ))  # fmt: skip
+            )  # fmt: skip
+            out.put("fit", t_ns, fit)
+            out.put("view", t_ns, FitView(fit, self.faces, np.stack([fits[p].joints for p in persons])))
+            out.put("params", t_ns, FitParams(fit))
         self.closed = until
 
     def flush(self, out: Emit) -> None:

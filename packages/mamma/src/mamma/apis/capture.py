@@ -1,11 +1,14 @@
 """mamma capture App: streaming multi-view body capture (SPEC 5.2, graph ``graphs/capture.py``).
 
-Input: a catalog segment, or a MAMMA-format capture directory (``video``, the public demo files; its rig and videos are
-logged too). The outputs stream to the ``rr_config`` viewer; with ``output_dir`` they also become the segment's ``mamma_fit``
-catalog layer. Presets (``quality``, ``fast``) are node parameters in ``profiles/<hardware>.toml``. The CLI
-(``tools/apps/capture.py``) and the generated gradio app (``tools/apps/capture_gradio.py``) run the same ``build``.
+Input: a catalog segment, or a MAMMA-format capture directory (``video``, the public demo files). The viewer shows the rig
+with each camera's video under its overlays, the shaded meshes, joints and plots; with ``output_dir`` the outputs also become
+the segment's ``mamma_fit`` catalog layer. Presets (``quality``, ``fast``) are node parameters in
+``profiles/<hardware>.toml``. The CLI (``tools/apps/capture.py``) and the generated gradio app (``tools/apps/capture_gradio.py``)
+run the same ``build``.
 """
 
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -14,14 +17,18 @@ import numpy as np
 import rerun as rr
 from dagkit.app import HardwareClass, load_profile, run_app
 from dagkit.graph import Graph
-from dagkit.node import Mode, Node, PortType
+from dagkit.node import Emit, Mode, Node, PortType, RunContext, Tick
 from dagkit.runners import RunReport
 from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer
+from jaxtyping import Float64
+from numpy import ndarray
 from serde import serde
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import VideoSource
+from simplecv.sources.catalog_video import VideoSource, log_segment_videos
+from simplecv.types.rig import RigCameras
+from simplecv.video_encoder import ffmpeg_transcode, pick_ffmpeg_encoder
 
 from mamma.apis.blueprint import default_blueprint
 from mamma.graphs.capture import capture_graph
@@ -35,16 +42,25 @@ from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.smplx_body import SmplxBody
 from mamma.ops.window_fit import FitterConfig, SlidingWindowFitter
-from mamma.sources.npz import load_rig, npz_sequence_source, video_paths
-from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
+from mamma.sources.npz import npz_sequence_source, video_paths
+from mamma.types import BodyTopology, FitHealth, FitParams, FitView, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits, person_classes
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[3]
 """``packages/mamma``: weights, body models and the TensorRT cache live under ``data/`` and ``.trt_cache/``."""
-PORTS: dict[str, PortType] = {"tracks": MultiViewTracks, "landmarks": MultiViewLandmarks, "fit": SmplxFits, "kp3d": Landmarks3d, "topology": BodyTopology}
-ROOTS: dict[str, str] = {"tracks": "/world", "landmarks": "/world", "fit": "/world/mamma/people", "kp3d": "/world/mamma/people", "topology": "/world/mamma/people"}
+PORTS: dict[str, PortType] = {
+    "rig": RigCameras, "tracks": MultiViewTracks, "landmarks": MultiViewLandmarks, "fit": SmplxFits, "kp3d": Landmarks3d, "topology": BodyTopology,
+    "view": FitView, "params": FitParams, "health": FitHealth,
+}  # fmt: skip
+PEOPLE: str = "/world/mamma/people"
+ROOTS: dict[str, str] = {
+    "rig": "/world", "tracks": "/world", "landmarks": "/world", "fit": PEOPLE, "kp3d": PEOPLE, "topology": PEOPLE, "view": PEOPLE,
+    "params": "/metrics/params", "health": "/metrics/fit",
+}  # fmt: skip
 LAYER: str = "mamma_fit"
 LAYER_PORTS: tuple[str, ...] = ("tracks", "fit", "kp3d", "topology")
 """The layer keeps masks, boxes, fits and 3D landmarks (the dense 2D landmarks only stream to the viewer)."""
+VIEWER_PORTS: tuple[str, ...] = ("rig", "tracks", "landmarks", "kp3d", "topology", "view", "params", "health")
+"""The viewer draws each fit's mesh once, through ``view`` (the layer's ``fit`` with normals and joints)."""
 RING: tuple[str, ...] = ("rig_01/cam_00", "rig_03/cam_00", "rig_05/cam_00", "rig_07/cam_00")
 
 
@@ -104,7 +120,6 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     else:
         cameras = config.cameras or tuple(sorted(p.stem for p in (config.video / "meta").glob("*.npz") if p.stem != "global"))
         video = npz_sequence_source(config.video, cameras, resize_hw=config.resize_hw, keep_native=keep_native)
-        log_files(recording, config.video, cameras, video.clock)
     video.prefetch()
     data: Path = PACKAGE_DIR / "data"
     body: SmplxBody = SmplxBody.load(data / "body_models", data / "body_models/downsampled_verts/verts_512.pkl")
@@ -124,7 +139,7 @@ def app_graph(config: Config, recording: rr.RecordingStream, video: VideoSource,
 
     ``build`` passes the loaded models; the unit tests pass fakes. ``profile`` is ``<hardware>/<preset>`` for the producer.
     """
-    sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS, timeline=video.clock)}
+    sinks: dict[str, Node] = {"viewer": CaptureViewer(recording, video, config.video or config.segment)}
     if config.output_dir is not None and config.video is None:
         producer: Producer = Producer.of("mamma", "mamma-capture", profile)
         sinks[LAYER] = LayerSink.open(config.segment, LAYER, producer, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, output_dir=config.output_dir, register=config.register)
@@ -132,17 +147,52 @@ def app_graph(config: Config, recording: rr.RecordingStream, video: VideoSource,
     return capture_graph(video, *nodes, sinks)
 
 
-def log_files(recording: rr.RecordingStream, root: Path, cameras: tuple[str, ...], timeline: str) -> None:
-    """A file capture has no base layer: log its rig, z-up world and videos (frame references on the source's clock)."""
-    recording.log("/world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    for log in load_rig(root / "meta", cameras).to_rerun("/world"):
-        recording.log(log.path, log.data, static=True)
-    for camera, path in zip(cameras, video_paths(root, cameras), strict=True):
-        asset = rr.AssetVideo(path=path)
-        recording.log(f"/world/{camera}/pinhole/video", asset, static=True)
-        times_ns = asset.read_frame_timestamps_nanos()
-        frames = rr.VideoFrameReference.columns_nanos(times_ns)
-        recording.send_columns(f"/world/{camera}/pinhole/video", indexes=[rr.TimeColumn(timeline, duration=times_ns * 1e-9)], columns=frames)
+class CaptureViewer(RerunSink):
+    """Draw the rig, its videos and the bodies.
+
+    Every input through its Type's Rerun mapping, plus the static scene: a z-up world, the person classes and a ground quad
+    under the rig. When the run starts it logs the cameras' videos (a segment's are copied from the catalog, a capture
+    directory's files are referenced), so the camera views play under the overlays.
+    """
+
+    def __init__(self, recording: rr.RecordingStream, video: VideoSource, videos: SegmentRef | Path) -> None:
+        super().__init__(recording, {port: PORTS[port] for port in VIEWER_PORTS}, ROOTS, timeline=video.clock)
+        self.cameras, self.videos = video.cameras, videos
+
+    def reset(self, ctx: RunContext) -> None:
+        self.recording.log("/world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, person_classes(), static=True)
+        if isinstance(self.videos, SegmentRef):
+            log_segment_videos(self.recording, self.videos, {camera: f"/world/{camera}/pinhole/video" for camera in self.cameras})
+        else:
+            log_file_videos(self.recording, self.videos, self.cameras, self.timeline)
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        super().step(tick, out)
+        if isinstance(tick.value, RigCameras):  # the ground (z = 0) under the rig's centre, 2 m past every camera
+            rig: RigCameras = tick.value
+            centres: Float64[ndarray, "v 3"] = np.einsum("vji,vj->vi", -rig.cam_T_world[:, :3, :3], rig.cam_T_world[:, :3, 3])
+            middle: Float64[ndarray, "2"] = centres[:, :2].mean(axis=0)
+            half: float = float(np.abs(centres[:, :2] - middle).max()) + 2.0
+            corners: Float64[ndarray, "4 3"] = np.c_[middle + half * np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]), np.zeros(4)]
+            ground = rr.Mesh3D(vertex_positions=corners, triangle_indices=[[0, 1, 2], [0, 2, 3]], vertex_colors=[[70, 80, 90, 110]] * 4)
+            self.recording.log("/world/ground", ground, static=True)
+
+
+def log_file_videos(recording: rr.RecordingStream, root: Path, cameras: tuple[str, ...], timeline: str) -> None:
+    """A capture directory's videos, re-encoded to 4:2:0 with a keyframe every 30 frames and no B-frames (the demo files are
+    4:4:4 HEVC with B-frames and a keyframe every 250 frames, which the viewer stops decoding past the second); frame i at
+    i / fps, the source's clock."""
+    fps: int = int(np.load(root / "meta" / "global.npz")["fps"])
+    encoder: str = pick_ffmpeg_encoder()
+    with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(len(cameras)) as encodes:
+        outputs: list[Path] = [Path(tmp) / f"{i}.mp4" for i in range(len(cameras))]
+        list(encodes.map(lambda src, dst: ffmpeg_transcode(src, dst, input_format="mov", fps=fps, encoder=encoder), video_paths(root, cameras), outputs))
+        for camera, path in zip(cameras, outputs, strict=True):
+            asset = rr.AssetVideo(path=path)
+            recording.log(f"/world/{camera}/pinhole/video", asset, static=True)
+            times_ns = asset.read_frame_timestamps_nanos()
+            frames = rr.VideoFrameReference.columns_nanos(times_ns)
+            recording.send_columns(f"/world/{camera}/pinhole/video", indexes=[rr.TimeColumn(timeline, duration=times_ns * 1e-9)], columns=frames)
 
 
 def main(config: Config) -> RunReport:
