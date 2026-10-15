@@ -38,6 +38,8 @@ class Lockstep:
     """Inertial samples pushed so far."""
     retries: int = 0
     """How many framesets were refused for want of IMU, and so had to be tracked a second time."""
+    uninitialised: int = 0
+    """Framesets the estimator consumed before its first pose (``NoVisualFeatures``: too few stereo landmarks to initialise)."""
     elapsed_ms: list[float] = field(default_factory=list)
     """Wall time per yielded pose. Lag mode adds startup frontend time to the
     final drain; calls waiting for stereo do not yield a pose."""
@@ -91,6 +93,7 @@ class Lockstep:
                 self._buffered_flow = self.vio.flow_frame()
             assert completed.t_ns == result.t_ns
             if result.status == _core.VioStatus.NoVisualFeatures:
+                self.uninitialised += not self.elapsed_ms  # one after the first pose is a hole, not a start
                 continue
             self.elapsed_ms.append(elapsed_ms)
             yield completed, result
@@ -120,6 +123,7 @@ class Lockstep:
         self._buffered_flow = None
         self._startup_ms = 0.0
         if result.status == _core.VioStatus.NoVisualFeatures:
+            self.uninitialised += not self.elapsed_ms
             return
         self.elapsed_ms.append(elapsed_ms)
         yield held, result
@@ -134,7 +138,7 @@ class SegmentRun:
     framesets: int
     """Framesets replayed."""
     lost: int
-    """Framesets that produced no pose: waiting for stereo structure or IMU coverage."""
+    """Framesets that produced no pose: :attr:`unprocessable` ones and missing ones (holes in the trajectory)."""
     wall_s: float
     """Wall time the feed loop took: decode plus ``track``, nothing logged."""
     ground_truth: Trajectory
@@ -145,6 +149,9 @@ class SegmentRun:
     """SHA-256 of the estimator's exact config text (:func:`~slam_rs.reference.config_text_sha256`), taken at parse time
     so export tools cannot name a config the estimator did not read.
     """
+    unprocessable: int = 0
+    """Of :attr:`lost`, the framesets VIO cannot process: those it consumed before it initialised
+    (:attr:`Lockstep.uninitialised`) and the trailing ones no later IMU sample covers (still pending at the end)."""
 
 
 def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
@@ -188,6 +195,7 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         estimate=shift_clock(estimate, feed.export_offset_ns),
         framesets=replayed,
         lost=replayed - len(t_ns),
+        unprocessable=lockstep.uninitialised + len(lockstep.pending),
         wall_s=wall_s,
         config_sha256=config_sha256,
         ground_truth=shift_clock(feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])), feed.export_offset_ns),

@@ -6,6 +6,7 @@ delivers the one stream, and however the samples are split across framesets (D17
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -22,8 +23,9 @@ from dagkit.sinks import LayerFileSink, RerunSink
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges, layer_table
 from dagkit.time import STATIC
+from dagkit.types import LayerFile
 from dagkit.verify import Case
-from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, TextureFactory, gravity_batch
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, RowsReader, TextureFactory, gravity_batch
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from jaxtyping import Float64, Int64
@@ -166,10 +168,62 @@ def test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order(
     assert node.run is not None and node.run.framesets == STEPS and node.run.lost == 0
 
 
-def graph_of(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path) -> Graph:
-    """The App's graph over the synthetic stream: the layer publisher and the live pose sink."""
+def test_a_last_frameset_no_later_imu_sample_covers_is_not_processable_and_the_layer_holds_every_other_pose(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """The stream's IMU ends at the last frame: VIO cannot track that frameset (it needs a sample past it), so it is counted as
+    not processable, not as missing, and the layer holds the other framesets' poses, unmoved."""
     vrig: VioRig = rig(camera, imu)
-    source = IterSource({"rig": VioRig, "frames": Frameset}, lambda: stream(vrig, framesets(texture)))
+    covered: list[Float64[ndarray, " 7"]] = lockstep_poses(vrig, framesets(texture))
+    sets: list[Frameset] = framesets(texture)
+    sets[-1] = replace(sets[-1], imu=sets[-1].imu.between(-1, sets[-1].t_ns))  # no sample past the last frame
+    node = VioNode(SEGMENT, PARAMS, tmp_path)
+    out: Strict = node_outputs(node, vrig, sets)
+    assert node.run is not None and (node.run.framesets, len(node.run.estimate), node.run.unprocessable) == (STEPS, STEPS - 1, 1)
+    poses: list[RigPose] = [v for p, _, v in out.items if p == "pose"]  # type: ignore[misc]
+    for pose, expected in zip(poses, covered[: STEPS - 1], strict=True):
+        np.testing.assert_array_equal(pose.position_m, expected[:3])
+    (layer,) = [v for p, _, v in out.items if p == "layer"]
+    assert [row.t_ns for row in read_rows(cast(LayerFile, layer).path)[RIG_ENTITY]] == [s * FRAME_PERIOD_NS for s in range(STEPS - 1)]
+
+
+def test_a_first_frameset_consumed_before_vio_initialised_is_not_processable_and_the_layer_holds_every_other_pose(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """RoboCap session 15: the first frameset shows the estimator too few stereo landmarks to initialise (here: blank images), so
+    it is consumed without a pose (``NoVisualFeatures``). VIO starts at the next one: the first is not processable, not missing."""
+    sets: list[Frameset] = framesets(texture)
+    sets[0] = replace(sets[0], images=[np.zeros_like(image) for image in sets[0].images])
+    node = VioNode(SEGMENT, PARAMS, tmp_path)
+    out: Strict = node_outputs(node, rig(camera, imu), sets)
+    assert node.run is not None and (node.run.framesets, len(node.run.estimate), node.run.unprocessable) == (STEPS, STEPS - 1, 1)
+    (layer,) = [v for p, _, v in out.items if p == "layer"]
+    assert [row.t_ns for row in read_rows(cast(LayerFile, layer).path)[RIG_ENTITY]] == [s * FRAME_PERIOD_NS for s in range(1, STEPS)]
+
+
+def test_a_frameset_lost_mid_stream_still_refuses_the_layer(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path) -> None:
+    """After the first pose every frameset VIO can process needs its pose: one the estimator consumed without a pose mid-stream
+    (a hole in the trajectory) is missing, and no layer file is written."""
+    vrig: VioRig = rig(camera, imu)
+    node = VioNode(SEGMENT, PARAMS, tmp_path)
+    node.reset(RunContext("test", "vio", "lossless", statics={"rig": vrig}))
+    assert node.lockstep is not None
+    real: _core.Vio = node.lockstep.vio
+    hole = Mock(spec=_core.VioResult, status=_core.VioStatus.NoVisualFeatures, t_ns=2 * FRAME_PERIOD_NS, world_from_rig=None)
+    node.lockstep.vio = Mock(spec=real, wraps=real, gpu=False)
+    node.lockstep.vio.track.side_effect = lambda t_ns, images: hole if t_ns == hole.t_ns else real.track(t_ns, images)
+    out = Strict()
+    for tick in ticks(vrig, framesets(texture)):
+        node.step(tick, out)
+    with pytest.raises(ValueError, match="incomplete pose layer: 4 poses / 5 framesets, 0 not processable, 1 missing"):
+        node.flush(out)
+    assert not list(tmp_path.rglob("*.rrd")) and not list(tmp_path.rglob("*.partial"))
+
+
+def graph_of(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path, sets: list[Frameset] | None = None) -> Graph:
+    """The App's graph over the synthetic stream (or ``sets``): the layer publisher and the live pose sink."""
+    vrig: VioRig = rig(camera, imu)
+    source = IterSource({"rig": VioRig, "frames": Frameset}, lambda: stream(vrig, sets or framesets(texture)))
     publish = LayerFileSink(SEGMENT, "slam_rs", output_dir=tmp_path, register="off")
     viewer = RerunSink(rr.RecordingStream("slam-rs-test"), {"pose": RigPose}, {"pose": "/world/rig"})
     return vio_graph(source, VioNode(SEGMENT, PARAMS, tmp_path), {"publish": publish, "viewer": viewer})
@@ -226,6 +280,31 @@ def test_a_stop_before_two_poses_ends_stopped_without_a_layer(
     assert runner(graph, mode="lossless", control=control).status == "stopped"
     assert not list(tmp_path.rglob("*.rrd")) and not list(tmp_path.rglob("*.partial"))
     assert cast(VioNode, graph.nodes["vio"].obj).lockstep is None
+
+
+def test_a_stop_publishes_the_prefix_although_its_first_frameset_came_before_vio_initialised(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
+) -> None:
+    """A stop after a publishable prefix publishes it; a first frameset VIO could not process does not make the prefix
+    unpublishable (RoboCap session 15 starts that way)."""
+    control = Control()
+    sets: list[Frameset] = framesets(texture)
+    sets[0] = replace(sets[0], images=[np.zeros_like(image) for image in sets[0].images])
+    graph: Graph = graph_of(camera, imu, texture, tmp_path, sets)
+    source = cast(IterSource, graph.nodes["segment"].obj)
+    events = source.events
+
+    def stopping() -> Iterator[Event]:
+        for event in events():
+            if event.port == "frames" and event.t_ns == 3 * FRAME_PERIOD_NS:
+                control.stop()
+            yield event
+
+    source.events = stopping
+    assert run_sequential(graph, control=control).status == "stopped"
+    run = cast(VioNode, graph.nodes["vio"].obj).run
+    assert run is not None and (run.framesets, len(run.estimate), run.unprocessable) == (3, 2, 1)
+    assert len(list((tmp_path / SEGMENT.segment).glob("slam_rs.*.rrd"))) == 1
 
 
 def test_a_failed_run_releases_the_estimator_and_leaves_no_partial_layer(

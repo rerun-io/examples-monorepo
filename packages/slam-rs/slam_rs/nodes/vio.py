@@ -141,11 +141,13 @@ class VioNode:
         estimate = Trajectory(np.array(t_ns, dtype=np.int64), np.array(positions).reshape(-1, 3), np.array(quaternions).reshape(-1, 4))
         elapsed: list[float] = self.lockstep.elapsed_ms
         self.run = SegmentRun(estimate, self.framesets, self.framesets - len(self.poses), time.monotonic() - self.started, empty_trajectory(),
-                              float(np.median(elapsed)) if elapsed else float("nan"), config_text_sha256(self.config_text))  # fmt: skip
+                              float(np.median(elapsed)) if elapsed else float("nan"), config_text_sha256(self.config_text),
+                              unprocessable=self.lockstep.uninitialised + len(self.lockstep.pending))  # fmt: skip
         backend: str = str(_core.gpu_backend) if self.lockstep.vio.gpu else "cpu"
-        print(f"{self.segment.segment}: {self.run.framesets} framesets, {len(estimate)} poses, {self.run.lost} lost, {self.run.wall_s:.1f} s")
+        print(f"{self.segment.segment}: {self.run.framesets} framesets, {len(estimate)} poses, {self.run.lost} lost ({self.run.unprocessable} not processable), "
+              f"{self.run.wall_s:.1f} s")
         self.lockstep = None
-        if self.output_dir is None or (self.control is not None and self.control.stopped and (len(estimate) < 2 or self.run.lost)):
+        if self.output_dir is None or (self.control is not None and self.control.stopped and (len(estimate) < 2 or self.run.lost != self.run.unprocessable)):
             return  # no layer asked for, or a stop before a publishable prefix (a complete run with too few poses still fails in write_layer)
         self.partial = partial_path(self.output_dir, self.segment, POSE_SOURCE)
         write_layer(self.partial, self.segment.segment, self.run, clock_offset_ns=self.export_ns + self.offset_ns,
