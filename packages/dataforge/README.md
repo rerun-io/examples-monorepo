@@ -354,12 +354,12 @@ so `rig_00`'s `reference` names the sensor whose `T_BS` is the identity:
 `cam_00` on TUM, `imu_00` on EuRoC.
 
 vslam-lab is the one exception to [the layer rule](#the-layer-rule): it keeps no
-sidecars. The converter never deletes the VSLAM-LAB tree, and `discover` already
-requires each sequence's small files, so `gt` and `sensor_metadata` read
-`groundtruth.csv` and `calibration.yaml` in place, the only copy there is: no layer
-can be rebuilt from a stale one. Delete the frames once base is published; keep
-those files. `convert` reads and checks them before it writes any layer, so a
-refused sequence leaves the published layers as they were, even under `--force`.
+sidecars. The converter never deletes the VSLAM-LAB tree, so `gt` and
+`sensor_metadata` read the sequence's ground-truth csv and `calibration.yaml` in
+place, the only copy there is: no layer can be rebuilt from a stale one. Delete
+the frames (and EuRoC's zips, after `download`) once base is published; keep
+those small files. `convert` reads and checks them before it writes any layer, so
+a refused sequence leaves the published layers as they were, even under `--force`.
 
 `video_time` carries the benchmark's own nanosecond stamps, **unshifted**
 (Unix epoch on both), so a trajectory read back from the catalog lines up
