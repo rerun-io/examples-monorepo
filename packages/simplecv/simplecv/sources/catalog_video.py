@@ -13,6 +13,7 @@ import av
 import cv2
 import numpy as np
 import pyarrow as pa
+import rerun as rr
 import torch
 from dagkit.catalog import read_column
 from dagkit.node import Event, Fenced, PortType, Source
@@ -75,6 +76,21 @@ class SegmentFrames:
     def close(self) -> None:
         self._decoders.clear()
         self._packets.clear()
+
+
+def log_segment_videos(recording: rr.RecordingStream, segment: SegmentRef, entities: Mapping[str, str]) -> None:
+    """Copy cameras' encoded videos from the catalog into ``recording`` (camera -> entity) on the segment's timeline as a
+    duration, without re-encoding: what a viewer of the segment plays. A window starts at the keyframe before it (up to
+    ``KEYFRAME_LEAD_NS`` earlier), so its first frames decode."""
+    window: tuple[int, int] | None = None if segment.window_ns is None else (segment.window_ns[0] - KEYFRAME_LEAD_NS, segment.window_ns[1])
+    videos = read_catalog_videos(segment.entry(), segment.segment, [f"/world/{camera}/pinhole/video" for camera in entities], segment.timeline, window)
+    for entity, video in zip(entities.values(), videos, strict=True):
+        t_ns: Int64[ndarray, " n"] = video.t_ns
+        start: int = 0 if segment.window_ns is None else max((i for i, key in enumerate(video.keyframes) if key and t_ns[i] <= segment.window_ns[0]), default=0)
+        codec = {"av1": rr.VideoCodec.AV1, "h264": rr.VideoCodec.H264, "hevc": rr.VideoCodec.H265}[video.codec]
+        recording.log(entity, rr.VideoStream(codec=codec), static=True)
+        samples = rr.VideoStream.columns(sample=video.samples[start:], is_keyframe=video.keyframes[start:])
+        recording.send_columns(entity, indexes=[rr.TimeColumn(segment.timeline, duration=t_ns[start:].astype("timedelta64[ns]"))], columns=samples)
 
 
 def luma_planes(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w"]]:
