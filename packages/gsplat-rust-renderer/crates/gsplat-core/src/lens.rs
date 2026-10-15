@@ -82,17 +82,17 @@ impl CameraModel {
         let t9 = t7 * t2;
         theta + p[0] * t3 + p[1] * t5 + p[2] * t7 + p[3] * t9
     }
-    fn radial(self, r: f64) -> f64 {
-        let p = self.coefficients().map(f64::from);
+    fn radial(p: &[f64; 8], r: f64) -> f64 {
         let r2 = r * r;
         let r4 = r2 * r2;
         let r6 = r4 * r2;
         (1.0 + p[0] * r2 + p[1] * r4 + p[2] * r6) / (1.0 + p[3] * r2 + p[4] * r4 + p[5] * r6)
     }
     fn undistort_radius(self, distorted: f64) -> f64 {
+        let p = self.coefficients().map(f64::from);
         let mut r = distorted;
         for _ in 0..30 {
-            let factor = self.radial(r);
+            let factor = Self::radial(&p, r);
             if factor.abs() < 1e-12 {
                 break;
             }
@@ -106,11 +106,12 @@ impl CameraModel {
         r
     }
     fn corner_radius(self, distorted: f64) -> Option<f64> {
+        let p = self.coefficients().map(f64::from);
         let mut lo = 0.0;
         let mut hi = None;
         for i in 1..=4096 {
             let r = f64::from(i) * 16.0 / 4096.0;
-            if r * self.radial(r) >= distorted {
+            if r * Self::radial(&p, r) >= distorted {
                 hi = Some(r);
                 break;
             }
@@ -119,7 +120,7 @@ impl CameraModel {
         let mut hi = hi?;
         for _ in 0..64 {
             let mid = 0.5 * (lo + hi);
-            if mid * self.radial(mid) < distorted {
+            if mid * Self::radial(&p, mid) < distorted {
                 lo = mid;
             } else {
                 hi = mid;
@@ -178,7 +179,7 @@ impl CameraModel {
             Self::Pinhole => theta.tan(),
             Self::RadialTangential8 { .. } => {
                 let r = theta.tan();
-                r * self.radial(r)
+                r * Self::radial(&self.coefficients().map(f64::from), r)
             }
             _ => self.kb4(theta),
         };

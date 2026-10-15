@@ -1,7 +1,7 @@
 //! Stable four-bit radix sort with GPU-resident counts.
 use super::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::gpu::{bind, storage, uniform};
-use crate::kernels::Kernels;
+use crate::kernels::{BIN_COUNT, BITS_PER_PASS, BLOCK_SIZE, Kernels};
 
 const BLOCKS: u32 = 0;
 const REDUCED: u32 = 1;
@@ -36,15 +36,22 @@ impl RadixSort {
             values.clone(),
             storage(device, "sort values", u64::from(capacity) * 4),
         ];
-        let blocks = capacity.div_ceil(1024).max(1);
-        let histogram = storage(device, "sort histogram", u64::from(blocks) * 64);
+        let blocks = capacity.div_ceil(BLOCK_SIZE).max(1);
+        let histogram = storage(
+            device,
+            "sort histogram",
+            u64::from(blocks) * u64::from(BIN_COUNT) * 4,
+        );
         let reduced = storage(
             device,
             "sort reduced histogram",
-            u64::from(blocks.div_ceil(1024)) * 64,
+            u64::from(blocks.div_ceil(BLOCK_SIZE)) * u64::from(BIN_COUNT) * 4,
         );
         let groups = std::array::from_fn(|digit| {
-            let params = uniform(device, &[count.index(), digit as u32 * 4, capacity, 0]);
+            let params = uniform(
+                device,
+                &[count.index(), digit as u32 * BITS_PER_PASS, capacity, 0],
+            );
             let source = digit % 2;
             let dest = 1 - source;
             let group = |kernel: &crate::gpu::Kernel, bindings: &[(u32, &wgpu::Buffer)]| {
@@ -102,8 +109,8 @@ impl RadixSort {
                 &kernels.prepare,
                 counts,
                 &[
-                    DispatchPlan::new(count, capacity, 1024, 1),
-                    DispatchPlan::new(count, capacity, 1024 * 1024, 16),
+                    DispatchPlan::new(count, capacity, BLOCK_SIZE, 1),
+                    DispatchPlan::new(count, capacity, BLOCK_SIZE * BLOCK_SIZE, BIN_COUNT),
                 ],
             ),
         }
@@ -121,7 +128,7 @@ impl RadixSort {
             label: Some("gsplat radix sort"),
             timestamp_writes,
         });
-        for groups in &self.groups[..bits.div_ceil(4) as usize] {
+        for groups in &self.groups[..bits.div_ceil(BITS_PER_PASS) as usize] {
             self.dispatches.dispatch_in_pass(
                 &mut pass,
                 BLOCKS,
@@ -148,7 +155,7 @@ impl RadixSort {
         }
     }
     pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {
-        let index = bits.div_ceil(4) as usize % 2;
+        let index = bits.div_ceil(BITS_PER_PASS) as usize % 2;
         (&self.keys[index], &self.values[index])
     }
 }

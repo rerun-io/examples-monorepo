@@ -10,7 +10,10 @@ from gsplat_rust_renderer.nerfbaselines import scene_data_dir, scene_ply_path
 
 
 def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None:
-    """Missing external assets are pytest skips; Rust failures remain failures."""
+    """Missing external assets are pytest skips; Rust failures remain failures.
+
+    `--all-features` matches gsplat-rust-check and enables the `testing` feature that gates gsplat-core's integration tests.
+    """
     root: Path = Path(__file__).resolve().parents[1]
     environment: dict[str, str] = dict(os.environ)
     defaults: dict[str, Path] = {
@@ -31,7 +34,7 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
     if suite.startswith("bin:"):
         selection = ["--bin", suite.removeprefix("bin:")]
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        ["cargo", "test", "--locked", "--package", package, *selection, "--", "--ignored", "--nocapture", "--test-threads=1"],
+        ["cargo", "test", "--locked", "--all-features", "--package", package, *selection, "--", "--ignored", "--nocapture", "--test-threads=1"],
         cwd=root, env=environment, text=True, capture_output=True, check=False,
     )
     print(result.stdout, result.stderr, sep="\n")

@@ -1,6 +1,14 @@
 //! Device-lifetime modules and pipelines; allocation paths never compile shaders.
 use crate::gpu::{Kernel, module, pipeline};
 
+pub(crate) const TILE_WIDTH: u32 = 16;
+pub(crate) const WG: u32 = 256;
+pub(crate) const ELEMENTS_PER_THREAD: u32 = 4;
+pub(crate) const BLOCK_SIZE: u32 = WG * ELEMENTS_PER_THREAD;
+pub(crate) const BITS_PER_PASS: u32 = 4;
+pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
+pub(crate) const CHECKS_PER_ITER: u32 = 8;
+
 pub(crate) fn sources() -> [String; 7] {
     [
         "project.wgsl",
@@ -194,7 +202,7 @@ mod tests {
                 .map(|(_, variable)| layout[variable.ty].size)
                 .sum();
             assert!(
-                workgroup_bytes <= crate::REQUIRED_WORKGROUP_STORAGE_BYTES,
+                workgroup_bytes <= crate::device_caps::REQUIRED_WORKGROUP_STORAGE_BYTES,
                 "shader needs {workgroup_bytes} workgroup bytes, exceeding the device guard"
             );
         }

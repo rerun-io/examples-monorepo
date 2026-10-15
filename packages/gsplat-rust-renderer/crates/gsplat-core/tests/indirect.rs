@@ -1,7 +1,8 @@
 //! Overflow preserves the old image, then feedback grows and rerenders it exactly.
-mod common;
+#![cfg(feature = "testing")]
 use glam::UVec2;
-use gsplat_core::{Camera, CameraModel, RenderOptions, Renderer, Splats, Target};
+use gsplat_core::test_utils as common;
+use gsplat_core::{RenderOptions, Renderer, Target};
 
 #[test]
 #[ignore = "integration: GPU"]

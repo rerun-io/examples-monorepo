@@ -70,12 +70,22 @@ impl Camera {
             || self.size.y == 0
             || !self.position.is_finite()
             || !self.rotation.is_finite()
+            || !self.rotation.is_normalized()
             || !self.center_uv.is_finite()
             || !(self.fov_x > 0.0 && self.fov_x < std::f64::consts::TAU)
             || !(self.fov_y > 0.0 && self.fov_y < std::f64::consts::TAU)
             || !self.model.coefficients().iter().all(|x| x.is_finite())
         {
             return Err(crate::Error::Input("invalid camera"));
+        }
+        if matches!(self.model, crate::CameraModel::Pinhole | crate::CameraModel::RadialTangential8 { .. })
+            && (self.fov_x >= std::f64::consts::PI || self.fov_y >= std::f64::consts::PI)
+        {
+            return Err(crate::Error::Input("forward lens field of view must be below pi"));
+        }
+        let focal = self.focal();
+        if !focal.is_finite() || focal.x <= 0.0 || focal.y <= 0.0 {
+            return Err(crate::Error::Input("camera focal lengths must be finite and positive"));
         }
         Ok(())
     }

@@ -1,7 +1,8 @@
 //! Analytic output formats and target validation through the public renderer API.
-mod common;
+#![cfg(feature = "testing")]
 use glam::{Quat, Vec3};
-use gsplat_core::{Camera, CameraModel, RenderMode, RenderOptions, Renderer, Splats, Target};
+use gsplat_core::test_utils as common;
+use gsplat_core::{RenderMode, RenderOptions, Renderer, Splats, Target};
 
 #[test]
 #[ignore = "integration: GPU"]

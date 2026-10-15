@@ -1,8 +1,8 @@
 //! Frame uniforms and the ordered forward compute passes.
-use super::{INTERSECTIONS, VISIBLE, ViewState};
+use super::{INTERSECTIONS, PendingFrame, VISIBLE, ViewState};
 use crate::gpu::{self, bind};
-use crate::kernels::Kernels;
-use crate::primitives::dispatch::dispatch;
+use crate::kernels::{Kernels, TILE_WIDTH, WG};
+use crate::primitives::dispatch::dispatch_direct;
 use crate::{Camera, Error, RenderMode, RenderOptions, Scene, Target};
 use bytemuck::{Pod, Zeroable};
 
@@ -26,33 +26,33 @@ struct SceneInfo {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct LensInfo {
     kind: u32,
-    padding: [u32; 3],
-    half_fov: f32,
+    padding: u32,
+    padding2: [u32; 2],
+    half_max_render_fov: f32,
     radial_limit: f32,
-    padding2: [f32; 2],
+    padding3: [f32; 2],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(super) struct Uniforms {
-    view: [[f32; 4]; 4],
-    camera: [f32; 4],
-    pinhole: [f32; 4],
-    clamp_limits: [f32; 4],
+    view_from_obj: [[f32; 4]; 4],
+    camera_position_in_obj: [f32; 4],
+    pinhole_params: [f32; 4],
+    jacobian_clamp_limits: [f32; 4],
     image: ImageInfo,
     scene: SceneInfo,
     background: [f32; 4],
-    options: Flags,
-    coeff0: [f32; 4],
-    coeff1: [f32; 4],
+    options: RenderFlags,
+    coefficients: [f32; 8],
     lens: LensInfo,
     padding: [u32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Flags {
-    log_splat_scale: f32,
+struct RenderFlags {
+    log_scale_offset: f32,
     mip: u32,
     has_min_scale: u32,
     padding: u32,
@@ -64,16 +64,16 @@ impl Uniforms {
         let (clamps, radial_limit) = camera.clamp_limits();
         let coefficients = camera.model.coefficients();
         Self {
-            view: (camera.world_to_local() * glam::Mat4::from(options.world_from_local))
+            view_from_obj: (camera.view_from_world() * glam::Mat4::from(options.world_from_local))
                 .to_cols_array_2d(),
-            camera: options
+            camera_position_in_obj: options
                 .world_from_local
                 .inverse()
                 .transform_point3(camera.position)
                 .extend(0.0)
                 .to_array(),
-            pinhole: [focal.x, focal.y, center.x, center.y],
-            clamp_limits: clamps.to_array(),
+            pinhole_params: [focal.x, focal.y, center.x, center.y],
+            jacobian_clamp_limits: clamps.to_array(),
             image: ImageInfo {
                 width: camera.size.x,
                 height: camera.size.y,
@@ -87,20 +87,20 @@ impl Uniforms {
                 padding: 0,
             },
             background: options.background.extend(0.0).to_array(),
-            options: Flags {
-                log_splat_scale: options.splat_scale.ln(),
+            options: RenderFlags {
+                log_scale_offset: options.splat_scale.ln(),
                 mip: u32::from(options.render_mode == RenderMode::Mip),
                 has_min_scale: u32::from(scene.has_min_scale),
                 padding: 0,
             },
-            coeff0: coefficients[..4].try_into().unwrap(),
-            coeff1: coefficients[4..].try_into().unwrap(),
+            coefficients,
             lens: LensInfo {
                 kind: camera.model.kind(),
-                padding: [0; 3],
-                half_fov: camera.half_max_render_fov(),
+                padding: 0,
+                padding2: [0; 2],
+                half_max_render_fov: camera.half_max_render_fov(),
                 radial_limit,
-                padding2: [0.0; 2],
+                padding3: [0.0; 2],
             },
             padding: [0; 4],
         }
@@ -113,7 +113,7 @@ impl ViewState {
         kernels: &Kernels,
         size: glam::UVec2,
     ) -> Result<glam::UVec2, Error> {
-        let tiles = glam::UVec2::new(size.x.div_ceil(16), size.y.div_ceil(16));
+        let tiles = glam::UVec2::new(size.x.div_ceil(TILE_WIDTH), size.y.div_ceil(TILE_WIDTH));
         let tile_count = tiles
             .x
             .checked_mul(tiles.y)
@@ -136,7 +136,10 @@ impl ViewState {
         let index = self
             .frames
             .iter()
-            .position(|frame| frame.receiver.is_none())
+            .enumerate()
+            .find_map(|(slot, _)| {
+                (!self.pending.iter().any(|pending| pending.slot == slot)).then_some(slot)
+            })
             .ok_or(Error::Busy(
                 "three frames are pending; poll view feedback before rendering again",
             ))?;
@@ -145,11 +148,8 @@ impl ViewState {
         let uniforms = Uniforms::new(camera, options, scene, tiles);
         queue.write_buffer(&frame.uniform, 0, bytemuck::bytes_of(&uniforms));
         let raster = kernels.raster(raster_kind);
-        if frame
-            .raster
-            .as_ref()
-            .is_none_or(|(cached, _)| cached != &target)
-        {
+        frame.raster.take_if(|(cached, _)| cached != &target);
+        let (_, raster_group) = frame.raster.get_or_insert_with(|| {
             let (_, ids) = scratch.intersections.sort.output(scratch.bits);
             let mut bindings = vec![
                 (0, frame.uniform.as_entire_binding()),
@@ -163,8 +163,8 @@ impl ViewState {
                 bindings.push((8, wgpu::BindingResource::TextureView(depth)));
             }
             let group = bind(&self.device, &raster.layout, &bindings);
-            frame.raster = Some((target, group));
-        }
+            (target, group)
+        });
         let timestamps = |start, end| {
             self.timing
                 .as_ref()
@@ -175,11 +175,11 @@ impl ViewState {
                 })
         };
         encoder.clear_buffer(&scratch.counts, 0, None);
-        dispatch(
+        dispatch_direct(
             encoder,
             &kernels.project_forward,
             &frame.projection.forward,
-            scene.n.div_ceil(256),
+            scene.n.div_ceil(WG),
             timestamps(Some(0), 1),
         );
         self.dispatches
@@ -188,16 +188,16 @@ impl ViewState {
             .depth_sort
             .encode(encoder, kernels, 32, timestamps(None, 3));
         self.dispatches
-            .dispatch(encoder, VISIBLE, &kernels.gather, &scratch.gather, None);
+            .dispatch_indirect(encoder, VISIBLE, &kernels.gather, &scratch.gather, None);
         scratch.scan.encode(encoder, kernels, timestamps(None, 4));
-        self.dispatches.dispatch(
+        self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,
             &kernels.project_visible,
             &frame.projection.visible,
             timestamps(None, 5),
         );
-        self.dispatches.dispatch(
+        self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,
             &kernels.map_tiles,
@@ -209,24 +209,26 @@ impl ViewState {
             .sort
             .encode(encoder, kernels, scratch.bits, timestamps(None, 7));
         encoder.clear_buffer(&scratch.offsets, 0, None);
-        self.dispatches.dispatch(
+        self.dispatches.dispatch_indirect(
             encoder,
             INTERSECTIONS,
             &kernels.tile_offsets,
             &frame.mapping.offsets,
             timestamps(None, 8),
         );
-        dispatch(
+        dispatch_direct(
             encoder,
             raster,
-            &frame.raster.as_ref().unwrap().1,
+            raster_group,
             self.tile_count,
             timestamps(None, 9),
         );
         encoder.copy_buffer_to_buffer(&scratch.counts, 0, &frame.readback, 0, 8);
-        frame.receiver = Some(gpu::feedback(encoder, &frame.readback));
-        frame.capacity = scratch.intersections.capacity;
-        self.pending.push_back(index);
+        self.pending.push_back(PendingFrame {
+            slot: index,
+            receiver: gpu::feedback(encoder, &frame.readback),
+            capacity: scratch.intersections.capacity,
+        });
         Ok(())
     }
 }

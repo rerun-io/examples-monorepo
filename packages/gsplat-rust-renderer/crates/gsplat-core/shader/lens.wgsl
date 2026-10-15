@@ -7,19 +7,19 @@ struct CameraProjection {
 }
 
 fn project_camera(point: vec3f) -> CameraProjection {
-    let fx = u.pinhole.x;
-    let fy = u.pinhole.y;
+    let fx = frame.pinhole_params.x;
+    let fy = frame.pinhole_params.y;
     let x = point.x;
     let y = point.y;
     let z = point.z;
     let iz = 1.0 / z;
-    let kind = u.lens.kind;
-    let k = u.coeff0;
-    let e = u.coeff1;
+    let kind = frame.lens.kind;
+    let k = frame.coefficients[0];
+    let e = frame.coefficients[1];
     if kind == 0u {
-        let d = u.pinhole.xy * iz;
-        let clamped = clamp(point.xy * iz, u.clamp_limits.xy, u.clamp_limits.zw);
-        return CameraProjection(u.pinhole.xy * point.xy * iz + u.pinhole.zw,
+        let d = frame.pinhole_params.xy * iz;
+        let clamped = clamp(point.xy * iz, frame.jacobian_clamp_limits.xy, frame.jacobian_clamp_limits.zw);
+        return CameraProjection(frame.pinhole_params.xy * point.xy * iz + frame.pinhole_params.zw,
         vec3f(d.x, 0.0, -d.x * clamped.x), vec3f(0.0, d.y, -d.y * clamped.y));
     }
     if kind == 2u {
@@ -30,12 +30,12 @@ fn project_camera(point: vec3f) -> CameraProjection {
         let r4 = r2 * r2;
         let r6 = r4 * r2;
         let radial = (1.0 + k.x * r2 + k.y * r4 + k.z * r6) / (1.0 + k.w * r2 + e.x * r4 + e.y * r6);
-        let xy = u.pinhole.xy * (v * radial + vec2f(
+        let xy = frame.pinhole_params.xy * (v * radial + vec2f(
             2.0 * p1 * v.x * v.y + p2 * (r2 + 2.0 * v.x * v.x),
-            2.0 * p2 * v.x * v.y + p1 * (r2 + 2.0 * v.y * v.y))) + u.pinhole.zw;
-        let bounded = clamp(point.xy * iz, u.clamp_limits.xy, u.clamp_limits.zw);
+            2.0 * p2 * v.x * v.y + p1 * (r2 + 2.0 * v.y * v.y))) + frame.pinhole_params.zw;
+        let bounded = clamp(point.xy * iz, frame.jacobian_clamp_limits.xy, frame.jacobian_clamp_limits.zw);
         let rb = length(bounded);
-        let normalized = bounded * select(1.0, u.lens.radial_limit / rb, rb > u.lens.radial_limit);
+        let normalized = bounded * select(1.0, frame.lens.radial_limit / rb, rb > frame.lens.radial_limit);
         let xn = normalized.x;
         let yn = normalized.y;
         let xc = xn * z;
@@ -57,12 +57,13 @@ fn project_camera(point: vec3f) -> CameraProjection {
             vec3f(fx * d00 * iz, fx * d01 * iz, -fx * (d00 * xc + d01 * yc) * (iz * iz)),
             vec3f(fy * d01 * iz, fy * d11 * iz, -fy * (d01 * xc + d11 * yc) * (iz * iz)));
     }
+    // Kinds 1 and 3: Kannala-Brandt base; thin prism adds its terms below.
     let x2 = x * x;
     let y2 = y * y;
     let xy = x * y;
     let r2 = x2 + y2;
     let r = sqrt(r2);
-    var result = CameraProjection(u.pinhole.xy * point.xy * iz + u.pinhole.zw,
+    var result = CameraProjection(frame.pinhole_params.xy * point.xy * iz + frame.pinhole_params.zw,
         vec3f(fx * iz, 0.0, -fx * iz * x * iz), vec3f(0.0, fy * iz, -fy * iz * y * iz));
     if r >= 1e-6 {
         let theta = atan2(r, z);
@@ -79,7 +80,7 @@ fn project_camera(point: vec3f) -> CameraProjection {
         let dd = deriv * vec3f(x * z * irhor, y * z * irhor, -r * irho);
         let xr = x * ir;
         let yr = y * ir;
-        result.xy = u.pinhole.xy * (d * point.xy * ir) + u.pinhole.zw;
+        result.xy = frame.pinhole_params.xy * (d * point.xy * ir) + frame.pinhole_params.zw;
         result.jx = fx * vec3f(dd.x * xr + d * y2 * ir3, dd.y * xr - d * xy * ir3, dd.z * xr);
         result.jy = fy * vec3f(dd.x * yr - d * xy * ir3, dd.y * yr + d * x2 * ir3, dd.z * yr);
     }
@@ -96,7 +97,7 @@ fn project_camera(point: vec3f) -> CameraProjection {
         let nvy = 2.0 * (p2 * x + (3.0 * p1 + sy) * y);
         let iz2 = iz * iz;
         let iz3 = iz2 * iz;
-        result.xy += u.pinhole.xy * vec2f(nu, nv) * iz2;
+        result.xy += frame.pinhole_params.xy * vec2f(nu, nv) * iz2;
         result.jx += vec3f(fx * nux * iz2, fx * nuy * iz2, -2.0 * fx * nu * iz3);
         result.jy += vec3f(fy * nvx * iz2, fy * nvy * iz2, -2.0 * fy * nv * iz3);
     }

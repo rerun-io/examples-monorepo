@@ -5,9 +5,11 @@ edition = "2024"
 description = "WebGPU Gaussian splat forward rendering without a tensor runtime"
 
 [features]
+testing = ["dep:pollster"]
 serde = ["dep:serde"]
 
 [dependencies]
+pollster = { workspace = true, optional = true }
 half = { workspace = true, features = ["bytemuck"] }
 bytemuck.workspace = true
 glam.workspace = true

@@ -52,35 +52,30 @@ impl Target {
             }
             Ok(())
         };
-        match self {
-            Self::Float(buffer) | Self::Packed(buffer) => {
-                let float = matches!(self, Self::Float(_));
-                let bytes = u64::from(size.x) * u64::from(size.y);
-                let bytes = bytes
-                    .checked_mul(if float { 16 } else { 4 })
-                    .ok_or(crate::Error::Input("target size overflow"))?;
-                if buffer.size() < bytes || !buffer.usage().contains(wgpu::BufferUsages::STORAGE) {
-                    return Err(crate::Error::Input(
-                        "target buffer is too small or lacks STORAGE usage",
-                    ));
-                }
-                Ok(if float {
-                    RasterKind::Float
-                } else {
-                    RasterKind::Packed
-                })
-            }
+        let (buffer, kind, bytes_per_pixel) = match self {
+            Self::Float(buffer) => (buffer, RasterKind::Float, 16),
+            Self::Packed(buffer) => (buffer, RasterKind::Packed, 4),
             Self::Texture(color) => {
                 texture(color, wgpu::TextureFormat::Rgba8Unorm)?;
-                Ok(RasterKind::Texture)
+                return Ok(RasterKind::Texture);
             }
             Self::TextureDepth { color, depth } => {
                 texture(color, wgpu::TextureFormat::Rgba8Unorm)?;
                 texture(depth, wgpu::TextureFormat::R32Float)?;
-                Ok(RasterKind::TextureDepth)
+                return Ok(RasterKind::TextureDepth);
             }
+        };
+        let bytes = (u64::from(size.x) * u64::from(size.y))
+            .checked_mul(bytes_per_pixel)
+            .ok_or(crate::Error::Input("target size overflow"))?;
+        if buffer.size() < bytes || !buffer.usage().contains(wgpu::BufferUsages::STORAGE) {
+            return Err(crate::Error::Input(
+                "target buffer is too small or lacks STORAGE usage",
+            ));
         }
+        Ok(kind)
     }
+
     pub(crate) fn resource(&self) -> wgpu::BindingResource<'_> {
         match self {
             Self::Float(buffer) | Self::Packed(buffer) => buffer.as_entire_binding(),

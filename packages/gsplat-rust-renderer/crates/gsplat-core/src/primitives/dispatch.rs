@@ -1,7 +1,7 @@
 //! GPU count sources and cached two-dimensional indirect dispatch plans.
 use crate::gpu::{bind, storage, upload};
 
-pub(crate) fn dispatch(
+pub(crate) fn dispatch_direct(
     encoder: &mut wgpu::CommandEncoder,
     pipeline: &crate::gpu::Kernel,
     group: &wgpu::BindGroup,
@@ -110,7 +110,7 @@ impl Dispatches {
         kernel: &crate::gpu::Kernel,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        dispatch(
+        dispatch_direct(
             encoder,
             kernel,
             &self.group,
@@ -118,7 +118,7 @@ impl Dispatches {
             timestamp_writes,
         );
     }
-    pub fn dispatch(
+    pub fn dispatch_indirect(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         index: u32,
@@ -186,8 +186,8 @@ mod tests {
             ],
         );
         let mut encoder = device.create_command_encoder(&Default::default());
-        dispatch(&mut encoder, &kernel, &group, 1, None);
-        dispatch(&mut encoder, raster, &raster_group, 1, None);
+        dispatch_direct(&mut encoder, &kernel, &group, 1, None);
+        dispatch_direct(&mut encoder, raster, &raster_group, 1, None);
         queue.submit([encoder.finish()]);
         assert_eq!(read::<u32>(device, queue, &counts, 2), [0x8000_0000, 3]);
         assert_eq!(read::<[f32; 4]>(device, queue, &target, 1), [[0.25; 4]]);

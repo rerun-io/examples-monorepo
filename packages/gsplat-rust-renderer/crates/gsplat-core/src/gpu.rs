@@ -106,9 +106,9 @@ pub(crate) fn feedback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     })
 }
 pub(crate) fn feedback(encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer) -> Feedback {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     encoder.map_buffer_on_submit(buffer, wgpu::MapMode::Read, .., move |result| {
-        let _ = tx.send(result);
+        tx.send(result).ok();
     });
     rx
 }
@@ -118,14 +118,14 @@ pub(crate) fn read_feedback(
 ) -> Option<Result<[u32; 2], crate::Error>> {
     let status = match receiver.try_recv() {
         Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-        Err(error) => Err(crate::Error::Readback(error.to_string())),
-        Ok(status) => status.map_err(|error| crate::Error::Readback(error.to_string())),
+        Err(error) => Err(error.into()),
+        Ok(status) => status.map_err(crate::Error::from),
     };
     let result = status.and_then(|()| {
         buffer
             .get_mapped_range(..)
             .map(|data| *bytemuck::from_bytes::<[u32; 2]>(&data))
-            .map_err(|error| crate::Error::Readback(error.to_string()))
+            .map_err(crate::Error::from)
     });
     buffer.unmap();
     Some(result)
