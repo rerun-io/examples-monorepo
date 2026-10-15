@@ -38,8 +38,5 @@ def capture_graph(video: Source, track: TrackNode, landmarks: LandmarksNode, fit
     graph.edge(landmarked["landmarks"], fitted["landmarks"], Block(4))
     graph.edge(source["rig"], fitted["rig"], AsOf())
     ports: dict[str, PortRef] = {"tracks": tracked["tracks"], "landmarks": landmarked["landmarks"]} | {port: fitted[port] for port in FitNode.outputs}
-    for name, sink in sinks.items():
-        ref = graph.sink(name, sink)
-        for port in sink.inputs:
-            graph.edge(ports[port], ref[port])
+    graph.sinks(ports, sinks)
     return graph

@@ -4,7 +4,7 @@ The graph is ``graphs/slam.py``; the CLI (``tools/apps/slam.py``) and the gradio
 run ``build``. SLAM parameters come from ``profiles/<hardware>.toml`` (a preset picks an operating point); ``img_size``
 and ``subsample`` override it. Lossless (default) waits for the backend after every keyframe; use realtime for a camera.
 Inputs, first given wins: ``video``, ``images``, ``webcam``, then ``segment`` (default: the VERIFY.toml short case, so a
-run without arguments and the form's defaults run a known-good clip). 0 means "not set" for ``max_frames`` and ``subsample``.
+run without arguments and the form's defaults run a known-good clip).
 """
 
 from dataclasses import dataclass, field, replace
@@ -23,13 +23,13 @@ from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
-from simplecv.sources.files import ImageDirSource, VideoFileSource
+from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
+from simplecv.types.rig import RigCameras
 
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
 from mast3r_slam.ops.image import resize_img
-from mast3r_slam.sources.webcam import Webcam
 from mast3r_slam.types import KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
@@ -56,14 +56,14 @@ class Config:
     webcam: int | None = None
     """Live OpenCV camera index, used when no video or image directory is given (run with --mode realtime)."""
     max_frames: int | None = None
-    """File inputs: stop after this many frames, counted after subsample (0: all)."""
+    """File inputs: stop after this many frames, counted after subsample."""
     hardware: HardwareClass | Literal["auto"] = "auto"
     preset: Literal["base", "eval", "fast", "calib"] | None = None
     """Profile operating point: fast (224 px, every 5th frame), eval (every 2nd frame), calib (calibrated)."""
     img_size: Literal[224, 512] | None = None
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
-    """Use every n-th input frame (overrides the preset; 0 keeps it)."""
+    """Use every n-th input frame (overrides the preset)."""
     output_nerfstudio: Path | None = None
     """Export the final keyframes in Nerfstudio format into this directory."""
     layer_dir: Path | None = None
@@ -75,12 +75,6 @@ class Config:
     mode: Mode = "lossless"
 
 
-def examples() -> list[Config]:
-    """The gradio app's one-click example: the VERIFY.toml short case (the default segment's first 30 s, every 2nd frame
-    at 512 px, uncalibrated, lossless), so one click reproduces the banded run."""
-    return [Config(RerunTyroConfig(headless=True), subsample=2, img_size=512)]
-
-
 def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
     """Ports and entity roots of the graph's outputs: final keyframe camera poses, per-frame tracked poses, the map and
     the keyframe clouds (under the map's per-keyframe poses)."""
@@ -90,26 +84,29 @@ def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
 
 
 def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
-    """MASt3R frame size of the source's images (decodes its first frame)."""
+    """MASt3R frame size of the source's images: the static rig's resolution when the source has one (it comes before the
+    frames), else the size of its first frame (a decode)."""
     events = iter(video.events())
     try:
-        first: Event = next(e for e in events if e.port == "frames")
+        first: Event = next(e for e in events if e.port in ("rig", "frames"))
     finally:
         getattr(events, "close", lambda: None)()
-    frames: MultiViewFrames = first.value  # type: ignore[assignment]
-    height, width = frames.rgb.shape[-2:]
+    if isinstance(first.value, RigCameras):
+        width, height = (int(v) for v in first.value.resolution_wh[0])
+    else:
+        frames: MultiViewFrames = first.value  # type: ignore[assignment]
+        height, width = frames.rgb.shape[-2:]
     shape = resize_img(np.zeros((height, width, 3), dtype=np.float32), img_size).rgb_tensor.shape
     return int(shape[-2]), int(shape[-1])
 
 
 def video_source(config: Config, cfg: SlamConfig) -> Source:
-    max_frames: int | None = config.max_frames or None
     if config.video is not None:
-        return VideoFileSource(config.video, stride=cfg.subsample, max_frames=max_frames)
+        return VideoFileSource(config.video, stride=cfg.subsample, max_frames=config.max_frames)
     if config.images is not None:
-        return ImageDirSource(config.images, stride=cfg.subsample, max_frames=max_frames)
+        return ImageDirSource(config.images, stride=cfg.subsample, max_frames=config.max_frames)
     if config.webcam is not None:
-        return Webcam(config.webcam, max_frames)
+        return WebcamSource(config.webcam, config.max_frames)
     if config.segment is None:
         raise ValueError("no input: give a video, an image directory, a webcam or a segment")
     return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
@@ -117,7 +114,7 @@ def video_source(config: Config, cfg: SlamConfig) -> Source:
 
 def slam_config(config: Config) -> SlamConfig:
     cfg: SlamConfig = load_profile(PACKAGE_DIR / "profiles", config.hardware).configure("slam", SlamConfig(), config.preset)
-    overrides: dict[str, int] = {k: v for k, v in (("img_size", config.img_size), ("subsample", config.subsample)) if v}
+    overrides: dict[str, int] = {k: v for k, v in (("img_size", config.img_size), ("subsample", config.subsample)) if v is not None}
     return replace(cfg, **overrides)  # type: ignore[arg-type]
 
 
@@ -140,12 +137,13 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     recording.send_blueprint(with_pipeline(normal, debug))  # the outputs' clock, not the run health's wall_time
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, ports, roots)}
     if isinstance(video, CatalogVideoSource) and config.layer_dir is not None:
-        producer = Producer("mast3r-slam", "0.0.1", "mast3r-slam", config.preset or "base")
+        hardware: str = load_profile(PACKAGE_DIR / "profiles", config.hardware).hardware
+        producer: Producer = Producer.of("mast3r-slam", "mast3r-slam", f"{hardware}/{config.preset or 'base'}")
         layer, partial = open_layer(video.segment, LAYER, producer, output_dir=config.layer_dir)
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
         sinks["layer"] = LayerSink(layer, partial, video.segment, LAYER, layer_ports, roots, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
-    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, Webcam), nerfstudio=nerfstudio)
+    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 
 
 def main(config: Config) -> RunReport:

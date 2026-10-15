@@ -4,15 +4,13 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
-import rerun as rr
 from rerun.catalog import CatalogClient, DatasetEntry
 from serde import serde
 
 from dagkit.node import Event, PortType
 from dagkit.time import TimeNs, check_monotonic
-from dagkit.types import Type, read_column
+from dagkit.types import Type, read_column, served
 
 
 @serde(deny_unknown_fields=True)
@@ -48,10 +46,7 @@ def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Colu
     statics: list[Event] = []
     streams: list[Iterator[Event]] = []
     for port, column in ports.items():
-        table: pa.Table = read_column(dataset, segment, column.type, column.root, timeline, column.static)
-        if window_ns is not None and not column.static:
-            times: np.ndarray = table[timeline].cast(pa.int64()).to_numpy()  # int64 ns
-            table = table.filter(pa.array((times >= window_ns[0]) & (times < window_ns[1])))
+        table: pa.Table = read_column(dataset, segment, column.type, column.root, timeline, column.static, window_ns)
         events: list[Event] = [Event(t_ns, port, value) for t_ns, value in column.type.from_layer(table, column.root, timeline)]
         if column.static:
             statics += events
@@ -91,8 +86,7 @@ class RecordingSource(IterSource):
 
     def __init__(self, path: Path, ports: Mapping[str, Column], timeline: str = "video_time") -> None:
         def events() -> Iterator[Event]:
-            with rr.server.Server(host="127.0.0.1", datasets={"recording": [str(path)]}) as server:
-                dataset: DatasetEntry = server.client().get_dataset("recording")
+            with served(path) as dataset:
                 return iter(_column_events(dataset, dataset.segment_ids()[0], ports, timeline, None))
 
         super().__init__({port: column.type for port, column in ports.items()}, events, clock=timeline)

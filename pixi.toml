@@ -1640,7 +1640,7 @@ PACKAGE_DIR = "packages/exo-calib"
 PYREFLY_TARGET = "exo_calib"
 
 [feature.exo-calib.tasks.exocalib-calibrate]
-cmd = "python tools/apps/calibrate.py"
+cmd = "python tools/apps/calibrate.py --output-dir data/outputs"
 cwd = "packages/exo-calib"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Calibrate one catalog segment on the dagkit graph: Stage A once, two Stage B + refinement passes, the report (layers exocalib_*, eval.json)"
@@ -1715,7 +1715,7 @@ description = "Launch the gradio app generated from the single-image graph's Con
 [feature.vistadream.tasks.verify-pre]
 cmd = "python -m dagkit.verify VERIFY.toml --phase pre --clip short && python -m dagkit.verify VERIFY.toml --phase pre2 --clip short && python -m dagkit.verify VERIFY.toml --phase pre --clip full"
 cwd = "packages/vistadream"
-description = "Pre-port goldens (pre, pre2, full pre): only from the card commit 7aef310bb with the VERIFY.toml import fix; on the ported tree run() refuses these phases"
+description = "Pre-port goldens (pre, pre2, full pre): only from the card commit 7aef310bb with the VERIFY.toml import fix (dagkit.verify never overwrites an existing pre / pre2 golden)"
 
 [feature.vistadream.tasks.verify]
 cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
@@ -1964,7 +1964,7 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 cmd = "python -m dagkit.verify VERIFY.toml --phase pre --block slam && python -m dagkit.verify VERIFY.toml --phase pre2 --block slam"
 depends-on = ["_mast3r-slam-build-mojo-kernels", "_mast3r-slam-download-checkpoints"]
 cwd = "packages/mast3r-slam"
-description = "Record the pre-port goldens: pre and pre2 (noise run) of every case (msd-odyssey cam_00 vs mocap GT); runs only at the card commit (the port refuses pre phases)"
+description = "Record the pre-port goldens: pre and pre2 (noise run) of every case (msd-odyssey cam_00 vs mocap GT); runs only at the card commit (dagkit.verify never overwrites an existing pre / pre2 golden)"
 
 [feature.mast3r-slam.tasks.verify]
 cmd = "python -m dagkit.verify VERIFY.toml --phase post --block slam --clip short"

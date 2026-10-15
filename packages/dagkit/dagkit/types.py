@@ -1,14 +1,17 @@
-import tempfile
+import contextlib
+import functools
+import importlib.metadata
+import subprocess
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 from rerun.catalog import DatasetEntry
-from serde import serde, to_dict
+from serde import SerdeError, from_dict, serde, to_dict
 
 from dagkit.time import STATIC, TimeNs
 
@@ -29,7 +32,14 @@ class Type(Protocol):
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Type"]]: ...  # exactly what to_rerun wrote
 
 
-T = TypeVar("T", bound=Type)
+@functools.cache
+def git(*args: str) -> str:
+    """``git <args>`` in dagkit's checkout ('' on a host without git or outside a checkout, e.g. a deployed device)."""
+    try:
+        done = subprocess.run(["git", *args], capture_output=True, text=True, cwd=Path(__file__).parent)
+    except OSError:
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
 
 
 @serde(deny_unknown_fields=True)
@@ -42,6 +52,13 @@ class Producer:
     phase: str = "run"  # `run`, or a verify phase (`pre`, `pre2`, `post`)
     params_sha: str = ""  # sha256[:12] of the resolved node params + SegmentRef window; resume compares it
 
+    @classmethod
+    def of(cls, package: str, graph: str, profile: str, *, phase: str = "run", params_sha: str = "") -> "Producer":
+        """Stamped with the installed ``package`` version and the checkout's git sha7 (none without a checkout)."""
+        sha: str = git("rev-parse", "--short=7", "HEAD")
+        version: str = importlib.metadata.version(package)
+        return cls(package, f"{version}+{sha}" if sha else version, graph, profile, phase, params_sha)
+
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
@@ -53,6 +70,17 @@ class LayerFile:
 
 def log_producer(recording: rr.RecordingStream, layer: str, producer: Producer) -> None:
     recording.log(f"/producers/{layer}", rr.AnyValues(**to_dict(producer)), static=True)
+
+
+def read_producer(dataset: DatasetEntry, segment: str, layer: str) -> Producer | None:
+    """The Producer ``log_producer`` wrote for ``layer`` into ``segment`` (None when it has none)."""
+    prefix: str = f"/producers/{layer}:"
+    table: pa.Table = dataset.filter_segments([segment]).filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table()
+    cells: dict[str, object] = {c.rsplit(":", 1)[-1]: table.column(c)[0].as_py() for c in table.column_names if c.startswith(prefix) and table.num_rows}
+    try:
+        return from_dict(Producer, {k: v[0] if isinstance(v, list) else v for k, v in cells.items()}) if cells else None
+    except SerdeError as exc:
+        raise ValueError(f"{segment} /producers/{layer}: {exc}") from exc
 
 
 def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value: Type, root: str) -> list[str]:
@@ -68,20 +96,43 @@ def row_times(table: pa.Table, timeline: str) -> list[TimeNs]:
     return table[timeline].cast(pa.int64()).to_pylist() if timeline in table.column_names else [STATIC] * table.num_rows
 
 
-def read_column(dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool) -> pa.Table:
+def column(table: pa.Table, name: str) -> list:
+    """One column's cells as Python values, one per row (``None`` in every row when the table lacks it)."""
+    return table[name].to_pylist() if name in table.column_names else [None] * table.num_rows
+
+
+def cells(table: pa.Table, name: str, timeline: str) -> dict[TimeNs, pa.Scalar]:
+    """The non-null cells of one column keyed by their time (STATIC for a table read without an index)."""
+    if name not in table.column_names:
+        return {}
+    return {t: cell for t, cell in zip(row_times(table, timeline), table[name], strict=True) if cell.is_valid}
+
+
+def flat(values: pa.Scalar | pa.Array, dtype: type) -> np.ndarray:
+    """A cell's (or a column's non-null) component values as ``dtype``, unwrapping Rerun's nesting: one list per row plus
+    the component's arity (``Transform3D:translation`` is ``list<fixed_size_list<3>>``)."""
+    array = values.values if isinstance(values, pa.Scalar) else values.drop_null()
+    while pa.types.is_list(array.type) or pa.types.is_large_list(array.type) or pa.types.is_fixed_size_list(array.type):
+        array = array.flatten()
+    return array.to_numpy(zero_copy_only=False).astype(dtype)
+
+
+def read_column(
+    dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool, window_ns: tuple[int, int] | None = None
+) -> pa.Table:
+    """The rows ``value_type.from_layer`` reads, only ``window_ns`` [start, stop) of a temporal column."""
     view = dataset.filter_segments([segment]).filter_contents(value_type.contents(root))
-    return view.reader(index=None if static else timeline).to_arrow_table()
+    reader = view.reader(index=None if static else timeline)
+    if window_ns is not None and not static:
+        from datafusion import col, lit  # the catalog reader's expression language (rerun-sdk's catalog extra)
+
+        time = col(timeline).cast(pa.int64())
+        reader = reader.filter((time >= lit(window_ns[0])) & (time < lit(window_ns[1])))
+    return reader.to_arrow_table()
 
 
-def rerun_roundtrip(value: T, root: str, timeline: str, t_ns: TimeNs) -> list[tuple[TimeNs, T]]:
-    static: bool = t_ns == STATIC
-    with tempfile.TemporaryDirectory() as tmp:
-        path: Path = Path(tmp) / "roundtrip.rrd"
-        recording = rr.RecordingStream("dagkit-roundtrip", recording_id="roundtrip", send_properties=False)
-        recording.save(path)
-        log_value(recording, timeline, t_ns, value, root)
-        recording.flush()
-        recording.disconnect()
-        with rr.server.Server(host="127.0.0.1", datasets={"roundtrip": [str(path)]}) as server:
-            table: pa.Table = read_column(server.client().get_dataset("roundtrip"), "roundtrip", type(value), root, timeline, static)
-    return list(type(value).from_layer(table, root, timeline))  # type: ignore[return-value]
+@contextlib.contextmanager
+def served(path: Path) -> Iterator[DatasetEntry]:
+    """One rrd on an in-process catalog server: query the entry inside the ``with`` (an entry must outlive its queries)."""
+    with rr.server.Server(host="127.0.0.1", datasets={"rrd": [str(path)]}) as server:
+        yield server.client().get_dataset("rrd")

@@ -13,9 +13,10 @@ from dagkit.node import Node, Source
 from dagkit.sinks import LayerFileSink, segment_layers
 from dagkit.sources import Column, IterSource, RecordingSource, SegmentRef
 from simplecv.sources.catalog_video import CatalogVideoSource
+from slam_rs.types import CatalogPoses
 
 from robocap_live.nodes.hands import HandsNode
-from robocap_live.types import RIG_ROOT, CapRig, CatalogPoses
+from robocap_live.types import RIG_ROOT, CapRig
 
 CAMERAS: tuple[str, ...] = tuple(f"rig_00/cam_{i:02d}" for i in range(6))  # under /world, in the core's index order
 GROUP_TOLERANCE_NS: int = 3_000_000  # a frameset holds each camera's next frame within 3 ms of its opening, as live
@@ -58,8 +59,5 @@ def hands_layer_graph(source: Source, hands: HandsNode, sinks: Mapping[str, Node
     graph.edge(segment["frames"], node["frames"], Block(4))
     graph.edge(segment["cap_rig"], node["cap_rig"], AsOf())
     graph.edge((segment if poses is None else graph.source("slam", poses))["poses"], node["poses"], AsOf())
-    for name, sink in sinks.items():
-        ref = graph.sink(name, sink)
-        for port in sink.inputs:
-            graph.edge(node[port], ref[port])
+    graph.sinks({port: node[port] for port in hands.outputs}, sinks)
     return graph

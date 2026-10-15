@@ -56,12 +56,10 @@ class Frontend:
         self.aborted: bool = False
 
     def reset(self, ctx: RunContext) -> None:
-        if ctx.world != 0:  # the backend's final poses and the Nerfstudio export read the one shared map at their flush
-            raise NotImplementedError("mast3r-slam has no mid-run reset (Control.reset): stop the run and start a new one")
         self.model: AsymmetricMASt3R = ctx.resources["mast3r"]  # type: ignore[assignment]
         self.shared: SharedSlam = ctx.resources["shared"]  # type: ignore[assignment]
         self.shared.reset()
-        self.lossless, self.world, self.held, self.aborted = ctx.mode == "lossless", ctx.world, None, False
+        self.lossless, self.held, self.aborted = ctx.mode == "lossless", None, False
         self.tracker: FrameTracker = FrameTracker(self.model, self.shared.keyframes, self.params.tracking, self.params.matching, self.params.use_calib)
         torch.backends.cuda.matmul.allow_tf32 = True  # as the old CLI set it for tracking (main process); the backend keeps the default
         if self.params.use_calib:
@@ -83,7 +81,7 @@ class Frontend:
         (t_ns, index), self.held = self.held, None
         if self.shared.states.get_mode() == Mode.TRACKING:
             pose: Float32[ndarray, " 8"] = self.shared.states.get_frame().world_sim3_cam.data[0].cpu().numpy()
-            out.put("tracked", t_ns, TrackedFrame(index, pose, self.world))
+            out.put("tracked", t_ns, TrackedFrame(index, pose))
         out.watermark(t_ns)
 
     def _queue_keyframe(self, frame: Frame, t_ns: int, out: Emit) -> None:

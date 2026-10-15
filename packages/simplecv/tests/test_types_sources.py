@@ -15,8 +15,9 @@ import cv2  # noqa: E402
 import torch  # noqa: E402
 from dagkit.sources import SegmentRef  # noqa: E402
 
+from simplecv.catalog_video import CatalogVideo  # noqa: E402
 from simplecv.sources import catalog_video  # noqa: E402
-from simplecv.sources.catalog_video import CatalogVideoSource, sample_indices, undistortion_maps  # noqa: E402
+from simplecv.sources.catalog_video import CatalogVideoSource, SegmentFrames, sample_indices, undistortion_maps  # noqa: E402
 from simplecv.types.frames import MultiViewFrames  # noqa: E402
 from simplecv.types.rig import RigCameras  # noqa: E402
 
@@ -143,7 +144,9 @@ def test_source_resizes_and_puts_the_native_frames_first(views: int, native_hw: 
     cameras = tuple(f"rig_{v:02d}/cam_00" for v in range(views))
     source = CatalogVideoSource(SegmentRef("d", "s"), cameras, decode="cpu_rgb", resize_hw=resize_hw, keep_native=keep)
     source.statics, source.frames = {}, FakeFrames(views, native_hw)  # type: ignore[assignment]
-    events = list(source.events())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(SegmentRef, "entry", lambda self: None)  # no catalog
+        events = list(source.events())
     assert [e.port for e in events] == (["frames_native", "frames"] if keep else ["frames"]) * 5
     assert ("frames_native" in source.outputs) == keep
     for event in events:
@@ -227,3 +230,20 @@ def test_source_refuses_to_undistort_without_coefficients_or_off_the_cpu(monkeyp
         list(source.events())
     with pytest.raises(NotImplementedError, match="undistort"):
         CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="nvdec_rgb", undistort=True)
+
+
+def test_segment_frames_fetch_every_camera_in_one_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads: list[list[str]] = []
+
+    def read(dataset: object, segment: str, entities: list[str], timeline: str, window_ns: object = None) -> tuple[CatalogVideo, ...]:
+        reads.append(entities)
+        times = [np.arange(3, dtype=np.int64).astype("timedelta64[ns]") * (i + 1) for i in range(len(entities))]
+        return tuple(CatalogVideo(t, [np.full(2, i, np.uint8)] * 3, [True, False, False], "h264") for i, t in enumerate(times))
+
+    monkeypatch.setattr(catalog_video, "read_catalog_videos", read)
+    monkeypatch.setattr(catalog_video, "wrap_mp4", lambda samples, keyframes, fps, codec: b"".join(bytes(s) for s in samples))
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
+    frames = SegmentFrames(SegmentRef("d", "s"), ("rig_00/cam_00", "rig_01/cam_00"), "cpu")
+    np.testing.assert_array_equal(frames.times_ns(1), [0, 2, 4])
+    np.testing.assert_array_equal(frames.times_ns(0), [0, 1, 2])
+    assert reads == [["/world/rig_00/cam_00/pinhole/video", "/world/rig_01/cam_00/pinhole/video"]]

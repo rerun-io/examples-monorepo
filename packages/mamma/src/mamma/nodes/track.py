@@ -21,8 +21,8 @@ from simplecv.gpu import consume, fence_after
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 from torch import Tensor
+from torchvision.ops import box_iou
 
-from mamma.models.detection import bbox_iou_xyxy
 from mamma.ops.identity import CLIP_WEIGHT, EPIPOLAR_WEIGHT, FeatureBank, assign_hungarian, epipolar_score, fundamental_matrix, resolve_epipolar_px
 from mamma.types import MultiViewTracks
 
@@ -243,10 +243,11 @@ class TrackNode:
             f_matrix: Float64[ndarray, "3 3"] | None = self._fundamental(ref, v) if ref is not None and v != ref else None
             combined: Float32[ndarray, "k m"] = self._with_epipolar(clip, f_matrix, [ref_points.get(obj) for obj in objs], boxes)
             matches: list[tuple[int, int]] = list(assign_hungarian(combined, min_score=BOOTSTRAP_MIN_SCORE).items())
+            overlap: Float32[ndarray, "m m"] = box_iou(torch.from_numpy(boxes), torch.from_numpy(boxes)).numpy()
             dropped: set[int] = set()  # never prompt two subjects onto overlapping boxes: drop the weaker match (it coasts on memory)
             for a, (ra, ca) in enumerate(matches):
                 for rb, cb in matches[a + 1 :]:
-                    if bbox_iou_xyxy(boxes[ca], boxes[cb]) >= ANCHOR_CONFLICT_IOU:
+                    if overlap[ca, cb] >= ANCHOR_CONFLICT_IOU:
                         dropped.add(ra if combined[ra, ca] < combined[rb, cb] else rb)
             for row, col in matches:
                 if row in dropped:

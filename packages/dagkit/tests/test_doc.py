@@ -297,18 +297,19 @@ def test_a_graph_view_failure_aborts_the_sinks_like_any_failure(monkeypatch: pyt
 
 def test_without_git_the_docs_have_no_code_links(monkeypatch: pytest.MonkeyPatch) -> None:
     """A host without a git executable (a deployed device) still describes and pictures its graph."""
-    import dagkit.doc
+    import dagkit.types
 
     def missing(*args: object, **kwargs: object) -> None:
         raise FileNotFoundError("git")
 
-    monkeypatch.setattr(dagkit.doc.subprocess, "run", missing)
-    dagkit.doc._git.cache_clear()
+    monkeypatch.setattr(dagkit.types.subprocess, "run", missing)
+    dagkit.types.git.cache_clear()
     try:
         doc: GraphDoc = describe(demo_graph())
         assert doc.commit == "" and "github.com" not in guide(doc) and picture(doc)[0]
+        assert "+" not in dagkit.types.Producer.of("dagkit", "g", "p").version  # the installed version alone
     finally:
-        dagkit.doc._git.cache_clear()
+        dagkit.types.git.cache_clear()
 
 
 def test_the_layer_file_type_documents_itself(tmp_path: Path) -> None:

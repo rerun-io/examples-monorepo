@@ -42,6 +42,7 @@ sort_by_size = true
 # VistaDream exposes experimental Gaussian scene helpers and Tyro config fields
 # that Vulture reports at 60% despite being runtime/public surfaces.
 min_confidence = 80
+ignore_names = ["ctx"]  # the node contract's reset(ctx) argument
 
 [tool.pytest.ini_options]
 markers = [

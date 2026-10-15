@@ -99,7 +99,6 @@ lane = "unit"
 tests = ["tests/test_types.py"]
 properties = [
     "tests/test_types.py::test_cap_rig_serde_and_catalog_rows_round_trip_exactly",
-    "tests/test_types.py::test_poses_read_the_slam_layers_rows_whole_sorted_and_finite",
     "tests/test_types.py::test_layer_run_is_static_numbers_that_read_back",
 ]
 
@@ -110,7 +109,6 @@ lane = "integration"
 tests = ["tests/test_catalog_layer.py"]
 properties = [
     "tests/test_catalog_layer.py::test_cap_rig_and_run_counts_round_trip_through_a_catalog",
-    "tests/test_catalog_layer.py::test_poses_read_from_a_recording_the_way_slam_rs_writes_them",
 ]
 
 [[tests]]

@@ -34,7 +34,7 @@ POINTS = arrays(np.float64, st.tuples(st.integers(1, 12), st.just(3)), elements=
 
 @pytest.mark.parametrize(("dtype", "rtol"), [(torch.float64, 1e-6), (torch.float32, 1e-3)])
 @settings(max_examples=60, deadline=None)
-@given(points=POINTS, n_views=st.integers(2, 8), weights=st.floats(0.05, 4.0))
+@given(points=POINTS, n_views=st.integers(3, 8), weights=st.floats(0.05, 4.0))  # two ring cameras face each other: no depth on their baseline
 def test_recovers_projected_points(dtype: torch.dtype, rtol: float, points: np.ndarray, n_views: int, weights: float) -> None:
     P = ring_projections(n_views, dtype)
     truth = torch.as_tensor(points, dtype=dtype)

@@ -13,7 +13,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dagkit.time import STATIC, TimeNs
-from dagkit.types import Log, row_times
+from dagkit.types import Log, column, flat, row_times
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from serde import serde
@@ -209,9 +209,9 @@ class RefinementDiagnostics:
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "RefinementDiagnostics"]]:
         def value(name: str) -> Float64[ndarray, " k"]:
-            return np.asarray(table.column(f"{root}:{name}")[0].as_py(), dtype=np.float64).reshape(-1)
+            return flat(table[f"{root}:{name}"][0], np.float64)
 
-        if table.num_rows and f"{root}:focal_scale" in table.column_names and table.column(f"{root}:focal_scale")[0].as_py() is not None:
+        if table.num_rows and column(table, f"{root}:focal_scale")[0] is not None:
             counts: list[int] = value("observation_count_per_view").astype(np.int64).tolist()
             yield STATIC, cls(float(value("init_reprojection_px")[0]), value("ba_reprojection_px").tolist(), counts, float(value("metric_rescale_fix")[0]), value("focal_scale").tolist())
 

@@ -10,17 +10,16 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pytest
-import rerun as rr
-from dagkit.sources import Column, RecordingSource, SegmentRef
+from dagkit.sources import SegmentRef
+from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC
-from dagkit.types import rerun_roundtrip
 from datafusion import col
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.rig import RigCameras
 
 from robocap_live.apis.hands_layer import Config, main
 from robocap_live.nodes.hands import HandsParams
-from robocap_live.types import RIG_ROOT, CapRig, CatalogPoses, LayerRun
+from robocap_live.types import RIG_ROOT, CapRig, LayerRun
 
 pytestmark = pytest.mark.integration
 
@@ -59,16 +58,3 @@ def test_cap_rig_and_run_counts_round_trip_through_a_catalog(tmp_path: Path) -> 
     run = LayerRun(150, 149, 1, 133, 145, 120, 141, 0.9922, True, *[0.5] * 7)
     assert rerun_roundtrip(run, "/verify/hands/run", "video_time", STATIC) == [(STATIC, run)]
 
-
-def test_poses_read_from_a_recording_the_way_slam_rs_writes_them(tmp_path: Path) -> None:
-    path: Path = tmp_path / "slam_rs.rrd"
-    recording = rr.RecordingStream("slam-rs", recording_id="segment", send_properties=False)
-    recording.save(path)
-    for i, t_ns in enumerate([3_000_000, 1_000_000, 2_000_000]):
-        recording.set_time("video_time", duration=np.timedelta64(t_ns, "ns"))
-        recording.log(RIG_ROOT, rr.Transform3D(translation=[float(i), 0.0, 0.0], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, 0.0, 1.0])))
-    recording.flush()
-    recording.disconnect()
-    (event,) = list(RecordingSource(path, {"poses": Column(CatalogPoses, RIG_ROOT)}).events())  # one STATIC table, sorted by time
-    assert isinstance(event.value, CatalogPoses) and event.value.t_ns.tolist() == [1_000_000, 2_000_000, 3_000_000]
-    assert event.value.world_from_rig[:, 0, 3].tolist() == [1.0, 2.0, 0.0]

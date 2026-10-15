@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 from conftest import FakeScene
+from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC
-from dagkit.types import rerun_roundtrip
 from test_nodes import kp2d_records
 
 from exo_calib.types import BaseCalibration, MultiViewKeypoints, RefinementDiagnostics

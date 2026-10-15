@@ -35,6 +35,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.types import flat
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
@@ -208,16 +209,6 @@ MSD_RIG: RigProfile = RigProfile()
 
 ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
 """RoboCap selection, downscale and clock rules from the Rust core."""
-
-
-def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
-    """Flatten non-null temporal component values to float64. Rerun nests values one list deep, plus the component's arity:
-    ``Transform3D:translation`` is ``list<fixed_size_list<3>>``, ``Scalars:scalars`` is ``list<double>``; unwrap in a loop.
-    """
-    values: pa.Array = column.drop_null()
-    while pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
-        values = values.flatten()
-    return np.asarray(values.to_numpy(zero_copy_only=False), dtype=np.float64)
 
 
 def _static_cell(statics: pa.Table, column: str) -> pa.Scalar:
@@ -404,12 +395,12 @@ class SegmentFeed:
         """Return rig truth over inertial ``[first_ns, last_ns]``; query its stored ``video_time`` clock (also used by frames)
         and shift back. Empty for no ``gt`` layer or no window coverage: test :func:`len` for poses, :attr:`has_ground_truth`
         for layer presence. Raise ValueError if translation/rotation validity differs by row, preventing pose reads
-        (:func:`_rig_trajectory`).
+        (:func:`rig_trajectory`).
         """
         if self.gt_dataset is None:
             return empty_trajectory()
         offset_ns: int = self.imu.cam_time_offset_ns
-        return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
+        return shift_clock(read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
     def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment; yield every :attr:`frame_stride`-th frameset, one at a time in time order.
@@ -656,7 +647,7 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
     for sensor in ("gyro", "accel"):
         column: pa.Array = table[f"{IMU_ENTITY}/{sensor}:Scalars:scalars"].combine_chunks().take(pa.array(order))
         valid: Bool[ndarray, " n_rows"] = column.is_valid().to_numpy(zero_copy_only=False)
-        values: Float64[ndarray, "n_samples 3"] = _flat_float(column).reshape(-1, 3)
+        values: Float64[ndarray, "n_samples 3"] = flat(column, np.float64).reshape(-1, 3)
         streams[sensor] = (row_t_ns[valid], values)
     gyro_t_ns: Int64[ndarray, " n_samples"] = streams["gyro"][0]
     accel_t_ns: Int64[ndarray, " n_samples"] = streams["accel"][0]
@@ -666,7 +657,7 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
         raise ValueError(f"{segment_id}: {error}") from error
 
 
-def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
+def read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
     """Return one window's rig truth on ``video_time``, converting Rerun XYZW to w-first. Empty for no rig transform or no
     poses in this window; both mean no truth here. :attr:`SegmentFeed.has_ground_truth` distinguishes layer absence.
     """
@@ -677,10 +668,10 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
         .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
         .to_arrow_table()
     )
-    return _rig_trajectory(table, segment_id)
+    return rig_trajectory(table, segment_id)
 
 
-def _rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
+def rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
     """Return a ``gt`` window's rig trajectory on ``video_time``, converting Rerun XYZW to w-first.
     ``table`` holds one ``entity`` Transform3D per row, indexed by ``timeline``; ``segment_id`` identifies errors.
     Empty if neither component exists or the window has no pose. Raise ValueError naming the row if translation and rotation
@@ -705,10 +696,10 @@ def _rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, 
             f"and reading each component off its own rows would give it another row's rotation"
         )
     # Equal masks: each component's null removal drops exactly `valid`'s false rows, matching the timestamps' mask.
-    position_m: Float64[ndarray, "n_poses 3"] = _flat_float(translations).reshape(-1, 3)
+    position_m: Float64[ndarray, "n_poses 3"] = flat(translations, np.float64).reshape(-1, 3)
     if position_m.shape[0] == 0:
         return empty_trajectory()
-    quaternion_xyzw: Float64[ndarray, "n_poses 4"] = _flat_float(quaternions).reshape(-1, 4)
+    quaternion_xyzw: Float64[ndarray, "n_poses 4"] = flat(quaternions, np.float64).reshape(-1, 4)
     return Trajectory(
         t_ns=row_t_ns[valid],
         position_m=position_m,

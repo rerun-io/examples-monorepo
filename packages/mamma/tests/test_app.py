@@ -1,18 +1,16 @@
 """The capture App built with fake models (no GPU, no catalog): the graph validates, documents itself (GRAPH.md) and its
 picture reads back as declared; the blueprint keeps the normal view first; the generated form covers the Config."""
 
-import dataclasses
 from pathlib import Path
 
 import gradio as gr
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit.app import gradio_app
 from dagkit.doc import describe
 from dagkit.graph import Graph
 from dagkit.sinks import LayerSink, RerunSink
-from dagkit.testing import check_graph_docs, check_picture
+from dagkit.testing import check_form, check_graph_docs, check_picture
 from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
@@ -77,24 +75,22 @@ def test_the_blueprint_keeps_the_normal_view_first_and_names_the_debug_outputs_b
     assert {str(v.name) for v in views(normal)}.isdisjoint(outputs)
 
 
-def form() -> gr.Blocks:
-    return gradio_app(Config, build, title="mamma capture", examples=example_cases())
+FORM: dict[str, str] = {
+    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "video": "Textbox", "preset": "Dropdown",
+    "subjects": "Textbox", "output_dir": "Checkbox", "register": "Dropdown", "hardware": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
+}  # fmt: skip
+"""The generated form, in order: one widget per Config field (the segment three: dataset, id and window) except the HIDDEN ones."""
 
 
 def test_every_config_field_has_a_form_widget_or_is_hidden_on_purpose() -> None:
-    """Table test over the Config: one widget per field (the segment three: dataset, id and window), none for the HIDDEN ones."""
-    labels: list[str] = [str(b.label) for b in form().blocks.values() if isinstance(b, gr.components.FormComponent) and b.label]
-    widgets: dict[str, list[str]] = {f.name: [label for label in labels if label.split(":")[0].split(".")[0] == f.name] for f in dataclasses.fields(Config)}
-    assert {name for name, found in widgets.items() if not found} == set(HIDDEN)
-    assert widgets.pop("segment") == ["segment.dataset", "segment.segment", "segment.window_ns"]
-    assert {name: len(found) for name, found in widgets.items() if name not in HIDDEN} == {name: 1 for name in widgets if name not in HIDDEN}, widgets
+    check_form(Config, build, FORM, HIDDEN)
 
 
 def test_one_click_on_an_example_fills_the_form_with_a_verify_case() -> None:
     """The form edits a segment's dataset, id and window and has no widget for the HIDDEN fields, so an example states a
     VERIFY case exactly (the default cameras and engine size)."""
     examples: list[Config] = example_cases()
-    (table,) = [b for b in form().blocks.values() if isinstance(b, gr.Dataset)]
+    (table,) = [b for b in check_form(Config, build, FORM, HIDDEN, examples=examples).blocks.values() if isinstance(b, gr.Dataset)]
     labels: list[str] = [str(c.label) for c in table._components]
     default = Config(RerunTyroConfig(headless=True))
     contact: str = "mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1"

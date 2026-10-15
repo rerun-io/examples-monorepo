@@ -1,18 +1,16 @@
 """exo-calib App: the ``init`` graph once, then the ``refine`` graph twice; the second pass also runs the report.
 
 Pass 1 tracks person boxes through the Stage A rig, pass 2 through the pass-1 refined rig (handed over in memory); both
-passes refine against the ORIGINAL Stage A rig. Outputs become the catalog layers ``exocalib_{init,kp2d,refined,align}``
-(pass 1: unregistered ``*_pass1`` files) plus ``eval.json``, and stream to the ``rr_config`` viewer.
+passes refine against the ORIGINAL Stage A rig. Outputs stream to the ``rr_config`` viewer; with ``output_dir`` they also
+become the catalog layers ``exocalib_{init,kp2d,refined,align}`` (pass 1: unregistered ``*_pass1`` files) plus ``eval.json``.
 ``--resume-from init|kp2d`` reads those layers back (after a Producer check) instead of recomputing them.
 ``build`` yields the graphs in order; the CLI (``main`` = ``run_app``) and the gradio app (``tools/apps/calibrate_gradio.py``)
 both run it, with run health, so the viewer's "pipeline (debug)" tab shows every graph live.
 """
 
-import gc
+import functools
 import hashlib
-import importlib.metadata
 import json
-import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -27,7 +25,7 @@ from dagkit.node import Control, Emit, Mode, Node, PortType, RunContext, Tick
 from dagkit.runners import RunReport
 from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, read_column
+from dagkit.types import Producer, read_column, read_producer
 from serde import serde
 from serde.json import to_json
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
@@ -59,7 +57,7 @@ PASS1_LAYERS: dict[str, tuple[str, ...]] = {"exocalib_kp2d_pass1": ("kp2d",), "e
 @dataclass
 class Config:
     rr_config: RerunTyroConfig
-    """Live viewer of every graph's outputs (the catalog layers are written regardless)."""
+    """Live viewer of every graph's outputs."""
     segment: SegmentRef = field(default_factory=lambda: SegmentRef("dataforge-assembly101", "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"))
     frame_index: int = 0
     """Sample index of the synchronized frameset Stage A calibrates from (the rig is static)."""
@@ -67,8 +65,8 @@ class Config:
     """Frames Stage B processes per pass, spread evenly over the capture; shorter captures use every frame."""
     exo_rigs: tuple[str, ...] | None = None
     """Explicit exo rig names such as ``rig_00 rig_01``; ``None`` discovers them from catalog metadata."""
-    output_dir: Path = Path("data/outputs")
-    """Layer rrds (one subdirectory per segment) and ``eval.json``."""
+    output_dir: Path | None = None
+    """Layer rrds (one subdirectory per segment, e.g. ``data/outputs``) and ``eval.json``; ``None``: the viewer only."""
     register: Register = "new"
     """``new`` registers layers the segment does not have yet; ``replace`` is the explicit production refresh."""
     resume_from: Literal["init", "kp2d"] | None = None
@@ -149,19 +147,9 @@ def log_style(recording: rr.RecordingStream, cameras: tuple[str, ...]) -> None:
 
 def check_producer(segment: SegmentRef, layer: str, producer: Producer) -> None:
     """Refuse to resume from a layer another graph, profile or parameter set wrote."""
-    dataset = segment.entry()
-    table = dataset.filter_segments([segment.segment]).filter_contents([f"/producers/{layer}"]).reader(index=None).to_arrow_table()
-    stored: dict[str, object] = {c.rsplit(":", 1)[-1]: table.column(c)[0].as_py() for c in table.column_names if c.startswith(f"/producers/{layer}:")}
-    expected: dict[str, object] = {"graph": [producer.graph], "profile": [producer.profile], "params_sha": [producer.params_sha]}
-    if any(stored.get(key) != value for key, value in expected.items()):
-        raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {expected}")
-
-
-def free_gpu_memory() -> None:
-    """Collect finished graphs (a runner keeps its graph's models in reference cycles) and hand PyTorch's cached GPU memory
-    back to the driver, where TensorRT engines and the next run allocate: the GPU is shared, and the gradio app runs again."""
-    gc.collect()
-    torch.cuda.empty_cache()
+    stored: Producer | None = read_producer(segment.entry(), segment.segment, layer)
+    if stored is None or (stored.graph, stored.profile, stored.params_sha) != (producer.graph, producer.profile, producer.params_sha):
+        raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {producer}")
 
 
 def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
@@ -178,35 +166,32 @@ def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
     return with_pipeline(rrb.Blueprint(exoego_view(replace(layout, ego_camera_names=()), scene)), outputs, graphs=graphs)
 
 
-def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False) -> Iterator[Graph]:
-    """The App's graphs in run order; the CLI and the gradio app run each one before asking for the next.
+def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
+    """The App's graphs in run order; the CLI, the gradio app and verify run each one before asking for the next.
 
     ``init`` once, then ``refine`` pass 1 and pass 2: a ``Keep`` sink hands each graph's result to the next, and a stopped
-    run ends the App. Outputs stream to ``recording``; ``golden`` (verify) sends them there only: no layer files, no
-    ``eval.json``, no blueprint.
+    run ends the App. Outputs stream to ``recording``; with ``config.output_dir`` they also go to layer files and ``eval.json``.
     """
-    free_gpu_memory()  # what the previous run of a long-lived app (gradio) left
+    torch.cuda.empty_cache()  # PyTorch's cache of a previous run (gradio) back to the driver, where TensorRT engines allocate
     segment: SegmentRef = config.segment
     layout: RigLayout = discover_rig_layout(segment, exo_rigs=config.exo_rigs)
     cameras: tuple[str, ...] = layout.exo_camera_names
     hardware: HardwareClass = detect_hardware() if config.hardware == "auto" else config.hardware
     params: Kp2dParams = load_profile(PROFILES, hardware).configure("kp2d", Kp2dParams())
     models: dict[str, Callable[[], object]] = model_factories(segment, cameras, params)
+    models |= {name: functools.cache(models[name]) for name in ("moge", "detector", "pose")}  # loaded once: every graph shares them
     resolved: str = json.dumps([config.frame_index, config.frame_budget, cameras, params.batch_size, params.detection_score, segment.window_ns])
-    sha: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, cwd=PROFILES.parent).stdout.strip()
-    version: str = f"{importlib.metadata.version('exo-calib')}+{sha}"
     print(f"segment {segment.segment}: exo cameras {list(cameras)}; profile {hardware}")
 
     def producer(graph: str) -> Producer:
-        return Producer("exo-calib", version, graph, hardware, params_sha=hashlib.sha256(resolved.encode()).hexdigest()[:12])
+        return Producer.of("exo-calib", graph, hardware, params_sha=hashlib.sha256(resolved.encode()).hexdigest()[:12])
 
     def sinks(graph: str, layers: Mapping[str, tuple[str, ...]], suffix: str = "", register: Register = config.register) -> dict[str, Node]:
         ports: list[str] = [port for layer_ports in layers.values() for port in layer_ports]
         out: dict[str, Node] = {}
         if not suffix:
-            name: str = "golden" if golden else "viewer"
-            out[name] = RerunSink(recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, timeline=segment.timeline)
-        if golden:
+            out["viewer"] = RerunSink(recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, timeline=segment.timeline)
+        if config.output_dir is None:
             return out
         for layer, layer_ports in layers.items():
             layer_recording, partial = open_layer(segment, layer, producer(graph), output_dir=config.output_dir)
@@ -215,16 +200,15 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
             out[layer] = LayerSink(layer_recording, partial, segment, layer, {p: PORT_TYPES[p] for p in layer_ports}, roots, register=register)
         return out
 
-    if not golden:
-        skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1
-        recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
+    skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1
+    recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
     log_style(recording, cameras)
     if config.resume_from is None:
         keep = Keep("init")
         yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
         if "init" not in keep.values:
             return
-        free_gpu_memory()  # Stage A's models, for the refine passes' TensorRT engines
+        torch.cuda.empty_cache()  # Stage A's G3T (freed with its graph) back to the driver, for the refine passes' engines
         init = keep.values["init"]
     else:
         check_producer(segment, "exocalib_init", producer("exocalib-init"))
@@ -246,7 +230,7 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
     layers: dict[str, tuple[str, ...]] = {k: v for k, v in LAYERS.items() if not (resume_kp2d and k == "exocalib_kp2d")}
     yield refine_graph(segment, layout, (init, tracking), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", layers)}, report=True, resume_kp2d=resume_kp2d)
     report = keep.values.get("eval")
-    if golden or report is None:
+    if config.output_dir is None or report is None:
         return
     assert isinstance(report, EvalReport)
     path: Path = config.output_dir / segment.segment / "eval.json"

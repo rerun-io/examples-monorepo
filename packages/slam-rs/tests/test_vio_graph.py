@@ -11,6 +11,7 @@ from typing import cast
 from unittest.mock import Mock
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import rerun as rr
 from dagkit.graph import Graph
@@ -18,7 +19,7 @@ from dagkit.node import Control, Event, RunContext, Tick
 from dagkit.runners import RunReport, run_sequential, run_threaded
 from dagkit.sinks import LayerFileSink, RerunSink
 from dagkit.sources import IterSource, SegmentRef
-from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges
+from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges, layer_table
 from dagkit.time import STATIC
 from dagkit.verify import Case
 from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, TextureFactory, gravity_batch
@@ -26,29 +27,27 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 from serde import from_dict, to_dict
 
 from slam_rs import _core, verify
 from slam_rs.apis.catalog_layer import vio_publish
-from slam_rs.catalog_feed import Frameset, ImuCalib, ImuStream, SegmentFeed
-from slam_rs.config import SlamConfig
+from slam_rs.catalog_feed import MSD_RIG, RIG_ENTITY, ROBOCAP_RIG, Frameset, ImuCalib, ImuStream, SegmentFeed
+from slam_rs.config import load_slam_config
 from slam_rs.graphs import vio as graphs_vio
 from slam_rs.graphs.vio import VioSource, vio_graph
 from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory
-from slam_rs.types import RigPose, VioRig
+from slam_rs.types import CatalogPoses, RigPose, VioRig
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 SEGMENT = SegmentRef("msd-index", "msd-index__test__synthetic")
 STEPS: int = 5
 
 
-@pytest.fixture(autouse=True)
-def default_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The node reads the dataset's profiled config from slam.toml; the synthetic rig takes the core's defaults."""
-    text: str = _core.VioConfig().to_json()
-    monkeypatch.setattr(SlamConfig, "vio_config_text", lambda self, dataset, profile="reference": text)
+CONFIG: str = _core.VioConfig().to_json()
+"""The synthetic rig takes the core's default config (a catalog dataset's comes from ``VioParams.for_dataset``)."""
 
 
 def framesets(texture: TextureFactory, splits: list[int] | None = None) -> list[Frameset]:
@@ -120,7 +119,7 @@ def test_a_stop_between_an_imu_batch_and_its_frames_still_publishes_within_the_w
     camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
 ) -> None:
     out: Recorder = node_outputs(
-        VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), rig(camera, imu), framesets(texture), drop_last_frames=True
+        VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), rig(camera, imu), framesets(texture), drop_last_frames=True
     )
     assert [port for port, _, _ in out.items][-1] == "layer" and out.items[-1][1] == (STEPS - 1) * FRAME_PERIOD_NS
 
@@ -145,7 +144,7 @@ def test_the_node_makes_lockstep_calls_whatever_the_imu_split(
     its frame and the frameset is held and retried; the node's poses are the ones ``Lockstep.push`` gets from the same framesets."""
     vrig: VioRig = rig(camera, imu)
     reference: list[Float64[ndarray, " 7"]] = lockstep_poses(vrig, framesets(texture))
-    out: Strict = node_outputs(VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path_factory.mktemp("vio"), "cpu"), vrig, framesets(texture, splits))
+    out: Strict = node_outputs(VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path_factory.mktemp("vio"), "cpu", CONFIG), vrig, framesets(texture, splits))
     assert out.retries == sum(moved == HOLD for moved in splits[: STEPS - 1]), "each frameset whose batch ends at its frame is held once"
     poses: list[RigPose] = [v for p, _, v in out.items if p == "pose"]  # type: ignore[misc]
     assert len(poses) == len(reference) >= 2
@@ -157,7 +156,7 @@ def test_the_node_makes_lockstep_calls_whatever_the_imu_split(
 def test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order(
     camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
 ) -> None:
-    node = VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu")
+    node = VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG)
     vrig: VioRig = rig(camera, imu)
     runs: list[Recorder] = []
     for _ in range(2):
@@ -183,7 +182,7 @@ def graph_of(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_
     source = IterSource({"rig": VioRig, "imu": ImuStream, "frames": Frameset}, lambda: stream(vrig, framesets(texture)))
     publish = LayerFileSink(SEGMENT, "slam_rs", output_dir=tmp_path, register="off")
     viewer = RerunSink(rr.RecordingStream("slam-rs-test"), {"pose": RigPose}, {"pose": "/world/rig"})
-    return vio_graph(source, VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), {"publish": publish, "viewer": viewer})
+    return vio_graph(source, VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), {"publish": publish, "viewer": viewer})
 
 
 def test_the_app_graph_validates_draws_its_declaration_and_documents_itself(tmp_path: Path) -> None:
@@ -275,7 +274,7 @@ def test_the_source_releases_the_segment_when_a_run_fails_although_the_error_is_
 
     monkeypatch.setattr(graphs_vio, "open_segment", segment)
     monkeypatch.setattr(VioNode, "reset", lambda self, ctx: (_ for _ in ()).throw(ValueError("reset failed")))
-    graph: Graph = vio_graph(VioSource(SEGMENT, "cpu"), VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), {})
+    graph: Graph = vio_graph(VioSource(SEGMENT, MSD_RIG, "cpu"), VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), {})
     with pytest.raises(ValueError, match="reset failed") as kept:
         run_threaded(graph, mode="lossless")
     assert kept.value is not None and lifecycle == ["open", "closed"]
@@ -294,6 +293,51 @@ def test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root(posi
     (log,) = pose.to_rerun("/world/rig_00")
     assert log.path == "/world/rig_00" and not log.static and isinstance(log.data, rr.Transform3D)
     assert RigPose.contents("/world/rig_00") == ["/world/rig_00"]
+
+
+
+@settings(max_examples=40, deadline=None)
+@given(
+    times=st.lists(st.integers(0, 10**12), min_size=1, max_size=30, unique=True),
+    seed=st.integers(0, 2**16),
+    broken=st.lists(st.integers(0, 29), max_size=5),
+)
+def test_the_pose_table_reads_the_layers_rows_whole_sorted_and_finite(times: list[int], seed: int, broken: list[int]) -> None:
+    rng = np.random.default_rng(seed)
+    quaternion: Float64[ndarray, "n 4"] = Rotation.random(len(times), random_state=seed).as_quat().astype(np.float32).astype(np.float64)
+    translation: Float64[ndarray, "n 3"] = rng.uniform(-5.0, 5.0, (len(times), 3)).astype(np.float32).astype(np.float64)
+    bad: set[int] = {b for b in broken if b < len(times)}
+    nan: Float64[ndarray, " 3"] = np.array([np.nan, 0.0, 0.0])
+    values: list[tuple[int, RigPose]] = [(t, RigPose(nan if i in bad else translation[i], np.roll(quaternion[i], 1))) for i, t in enumerate(times)]
+    keep: list[int] = sorted((i for i in range(len(times)) if i not in bad), key=lambda i: times[i])
+    rows: pa.Table = layer_table(values, RIG_ENTITY)  # sorted by time: shuffle, so that the reader has to sort
+    read: list[tuple[int, CatalogPoses]] = list(CatalogPoses.from_layer(rows.take(rng.permutation(rows.num_rows)), RIG_ENTITY, "video_time"))
+    if not keep:
+        assert read == []
+        return
+    ((t_ns, poses),) = read
+    assert t_ns == STATIC and poses.t_ns.tolist() == [times[i] for i in keep]
+    np.testing.assert_allclose(poses.world_from_rig[:, :3, 3], translation[keep])
+    np.testing.assert_allclose(poses.world_from_rig[:, :3, :3], Rotation.from_quat(quaternion[keep]).as_matrix(), atol=1e-12)
+    back: CatalogPoses = from_dict(CatalogPoses, to_dict(poses))
+    np.testing.assert_array_equal(back.world_from_rig, poses.world_from_rig)
+    assert back.t_ns.dtype == np.int64
+
+
+def test_the_pose_table_refuses_a_translation_without_its_rotation_as_rig_pose_does_and_is_never_written() -> None:
+    rows: pa.Table = layer_table([(t, RigPose(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))) for t in (10, 20)], RIG_ENTITY)
+    quaternion: str = f"{RIG_ENTITY}:Transform3D:quaternion"
+    rows = rows.set_column(rows.column_names.index(quaternion), quaternion, pa.array([None, rows[quaternion][1].as_py()], rows[quaternion].type))
+    for reader in (CatalogPoses, RigPose):
+        with pytest.raises(ValueError, match="a translation without a quaternion"):
+            list(reader.from_layer(rows, RIG_ENTITY, "video_time"))
+    with pytest.raises(NotImplementedError, match="slam_rs"):
+        CatalogPoses(np.zeros(0, np.int64), np.zeros((0, 4, 4))).to_rerun(RIG_ENTITY)
+
+def test_a_dataset_takes_its_rig_profile_and_its_config_from_one_place() -> None:
+    settings = load_slam_config()
+    assert VioParams("fast").for_dataset("robocap") == (ROBOCAP_RIG, settings.robocap_config_text("fast"))
+    assert VioParams("reference").for_dataset("msd-index") == (MSD_RIG, settings.vio_config_text("msd-index", "reference"))
 
 
 def test_the_decoder_follows_the_device_choice() -> None:

@@ -128,14 +128,15 @@ def test_cycles_are_rejected() -> None:
     assert "cycle through ['a', 'b']" in problems(graph)
 
 
-def test_checkpoint_adds_a_block_edge_into_the_layer_sink() -> None:
-    graph = Graph("ckpt")
-    src = graph.source("src", source([]))
+def test_sinks_feed_each_input_from_the_port_named_like_it() -> None:
+    graph = Graph("sinks")
+    src = graph.source("src", source([], ports=("x", "a")))
     layer = LayerSink.__new__(LayerSink)
     layer.inputs, layer.outputs, layer.segment = {"x": int}, {}, SegmentRef("d", "s")
-    graph.checkpoint(src["x"], layer)
+    graph.sinks({"x": src["x"], "a": src["a"]}, {"layer": layer, "both": Collect(("a", "x"))})
     graph.validate()
-    assert [(e.src.node, e.dst.node, e.dst.port, e.kind) for e in graph.edges] == [("src", "src_x_layer", "x", Block())]
+    edges = [(e.src.port, e.dst.node, e.dst.port, e.kind) for e in graph.edges]
+    assert edges == [("x", "layer", "x", Block()), ("a", "both", "a", Block()), ("x", "both", "x", Block())]
 
 
 def test_capacities_and_retention_must_be_positive() -> None:
@@ -145,4 +146,4 @@ def test_capacities_and_retention_must_be_positive() -> None:
     graph.edge(src["x"], node["x"], Block(0))
     graph.edge(src["a"], node["a"], AsOf(keep=0))
     report: str = problems(graph)
-    assert "n.x: Block(capacity=0) needs capacity / keep >= 1" in report and "n.a: AsOf(wait_ns=None, keep=0)" in report
+    assert "n.x: Block(capacity=0) needs capacity / keep >= 1" in report and "n.a: AsOf(keep=0)" in report

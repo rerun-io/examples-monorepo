@@ -167,6 +167,7 @@ def score(case: Case, golden: Path) -> dict[str, float]: ...
   re-scores the `pre`, `pre2` and `post` rrds with the same `score`, so a scoring change cannot hide a regression.
 - Goldens: `$DAGKIT_GOLDENS/<package>/<block>/<case>.<phase>.rrd` (a durable local directory, never committed);
   `recording_id` = segment (local input: case name); static `/producers/verify-<block>` and `/verify/<block>/metrics`.
+  `pre` / `pre2` goldens are write-once: the CLI refuses to replace one (`--overwrite` re-records it on purpose).
 - Pixi tasks in the package's prod feature (`[feature.<pkg>.tasks]`, single-line commands):
 
 ```toml
@@ -175,7 +176,7 @@ verify = { cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
 verify-full = { cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full", cwd = "packages/<pkg>" }
 ```
 
-CLI: `python -m dagkit.verify VERIFY.toml --phase pre|pre2|post [--block B] [--clip short|full] [--register]`
+CLI: `python -m dagkit.verify VERIFY.toml --phase pre|pre2|post [--block B] [--clip short|full] [--register] [--overwrite]`
 prints a band table and exits 1 on a failed band. `--register` adds the golden as layer `verify-<block>-<phase>-<sha7>`
 on the shared catalog: `post` only (pre and post share entity paths and would overlap), and only on request.
 

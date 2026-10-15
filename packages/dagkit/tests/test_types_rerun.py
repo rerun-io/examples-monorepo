@@ -11,8 +11,10 @@ from dagkit.node import Event
 from dagkit.runners import run_sequential
 from dagkit.sinks import LayerSink, open_layer, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
+from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, rerun_roundtrip
+from dagkit.types import Producer, read_column, read_producer, served
+from dagkit.verify import run_counts
 
 pytestmark = pytest.mark.integration
 PRODUCER = Producer("dagkit", "0.1.0+test", "points", "x86_64-cuda")
@@ -29,7 +31,7 @@ def write_layer(tmp_path: Path, segment: SegmentRef, register: str = "off") -> P
     sink = LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register=register)  # type: ignore[arg-type]
     events = [Event(t, "point", Point((float(t), 0.0, 0.0), f"p{t}")) for t in (10, 20)]
     graph = Graph("points")
-    graph.checkpoint(graph.source("src", IterSource({"point": Point}, lambda: iter(events)))["point"], sink)
+    graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter(events)))["point"]}, {"layer": sink})
     run_sequential(graph)
     assert sink.published is not None
     return sink.published
@@ -63,3 +65,46 @@ def test_register_new_adds_the_layer_once_and_refuses_a_second(tmp_path: Path) -
             write_layer(tmp_path / "layers", segment, register="new")
         source = CatalogSegmentSource(segment, {"point": Column(Point, "/points")})
         assert [e.t_ns for e in source.events()] == [10, 20]
+
+
+def test_read_producer_gives_back_what_the_layer_logged(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(path)]}) as server:
+        dataset = server.client().get_dataset("ds")  # an entry must outlive its queries
+        assert read_producer(dataset, "seg0", "points") == PRODUCER
+        assert read_producer(dataset, "seg0", "hands") is None
+
+
+def test_run_counts_are_the_numbers_a_verify_run_logged(tmp_path: Path) -> None:
+    recording = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    recording.save(tmp_path / "golden.rrd")
+    recording.log("/verify/fake/run", rr.AnyValues(frames=12, wall_s=1.5, trt=True, code="graph"), static=True)
+    recording.flush()
+    recording.disconnect()
+    with served(tmp_path / "golden.rrd") as golden:
+        assert run_counts(golden, "fake") == {"frames": 12.0, "wall_s": 1.5, "trt": 1.0}
+
+
+def test_a_windowed_read_brings_only_the_window(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))  # points at 10 and 20
+    with served(path) as dataset:
+        table = read_column(dataset, "seg0", Point, "/points", "video_time", False, window_ns=(15, 25))
+        assert [t for t, _ in Point.from_layer(table, "/points", "video_time")] == [20]
+
+
+def test_a_layer_registered_after_the_sink_was_built_still_fails_at_publish(tmp_path: Path) -> None:
+    base = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    base.save(tmp_path / "base.rrd")
+    base.log("/base", rr.Points3D([[0, 0, 0]]), static=True)
+    base.flush()
+    base.disconnect()
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(tmp_path / "base.rrd")]}) as server:
+        segment = SegmentRef("ds", "seg0", catalog_url=server.url())
+        recording, partial = open_layer(segment, "points", PRODUCER, output_dir=tmp_path / "late")
+        late = LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register="new")  # no layer yet
+        write_layer(tmp_path / "first", segment, register="new")  # another run registers the layer first
+        graph = Graph("late")
+        graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter([Event(5, "point", Point((0.0, 0.0, 0.0), "p"))])))["point"]}, {"layer": late})
+        with pytest.raises(Exception, match="Layer 'points' already exists"):  # the catalog refuses the duplicate (AlreadyExistsError)
+            run_sequential(graph)
+        assert segment_layers(segment) == ["base", "points"]

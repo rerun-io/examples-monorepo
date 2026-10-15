@@ -9,20 +9,9 @@ from torch import Tensor
 from mast3r_slam.types import Frame
 
 
-def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
-    """Load a pretrained MASt3R model from a checkpoint file.
-
-    Args:
-        path: Path to the model checkpoint. Falls back to the default
-            ViTLarge checkpoint under ``checkpoints/`` when ``None``.
-        device: Torch device string to move the model onto.
-
-    Returns:
-        The loaded ``AsymmetricMASt3R`` model in eval mode on ``device``.
-    """
-    weights_path = "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" if path is None else path
-    model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
-    return model
+def load_mast3r(device: str = "cuda") -> AsymmetricMASt3R:
+    """The pretrained ViT-Large checkpoint under ``checkpoints/`` (relative to the working directory) on ``device``."""
+    return AsymmetricMASt3R.from_pretrained("checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth").to(device)
 
 
 @torch.inference_mode()
@@ -35,25 +24,7 @@ def decoder(
     shape1: Int[Tensor, "1 2"],
     shape2: Int[Tensor, "1 2"],
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """Run the MASt3R decoder on a pair of encoded feature maps.
-
-    Decodes the cross-attended features and applies the downstream prediction
-    heads (3D point maps, confidence, descriptors) with AMP disabled for
-    numerical stability.
-
-    Args:
-        model: The MASt3R model providing ``_decoder`` and ``_downstream_head``.
-        feat1: Encoded feature tokens for image 1.
-        feat2: Encoded feature tokens for image 2.
-        pos1: Positional encodings for image 1 patches.
-        pos2: Positional encodings for image 2 patches.
-        shape1: True (height, width) of image 1.
-        shape2: True (height, width) of image 2.
-
-    Returns:
-        A pair of result dicts ``(res1, res2)``, each containing keys
-        ``"pts3d"``, ``"conf"``, ``"desc"``, and ``"desc_conf"``.
-    """
+    """The decoder and the heads on a pair of encoded images: ``pts3d``, ``conf``, ``desc``, ``desc_conf`` per image (heads without AMP)."""
     dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
     with torch.amp.autocast(enabled=False, device_type="cuda"):
         res1 = model._downstream_head(1, [tok.float() for tok in dec1], shape1)
@@ -77,24 +48,7 @@ def mast3r_decode_symmetric_batch(
     Float[Tensor, "4 b h w d"],
     Float[Tensor, "4 b h w"],
 ]:
-    """Batched symmetric decode over a batch of pre-encoded feature pairs.
-
-    Iterates over the batch dimension and decodes each pair symmetrically,
-    stacking results into ``(4, B, h, w, ...)`` tensors. The leading dimension
-    of 4 corresponds to ``[res_ii, res_ji, res_jj, res_ij]``.
-
-    Args:
-        model: The MASt3R model.
-        feat_i: Batch of encoded features for frames i.
-        pos_i: Batch of positional encodings for frames i.
-        feat_j: Batch of encoded features for frames j.
-        pos_j: Batch of positional encodings for frames j.
-        shape_i: True image shapes for frames i.
-        shape_j: True image shapes for frames j.
-
-    Returns:
-        A tuple ``(X, C, D, Q)`` each with shape ``(4, B, h, w, ...)``.
-    """
+    """Both directions of every encoded pair: ``(X, C, D, Q)``, dim 0 = ``[res_ii, res_ji, res_jj, res_ij]``."""
     B = feat_i.shape[0]
     X, C, D, Q = [], [], [], []
     for b in range(B):
@@ -125,20 +79,7 @@ def mast3r_decode_symmetric_batch(
 
 @torch.inference_mode()
 def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
-    """Run monocular self-inference on a single frame.
-
-    Decodes the frame against itself (symmetric self-pair) to obtain a
-    canonical 3D point map and confidence for frame initialization.
-
-    Args:
-        model: The MASt3R model.
-        frame: The input frame (features cached on ``frame.feat``).
-
-    Returns:
-        A tuple ``(Xii, Cii)`` where ``Xii`` is the self-predicted 3D point
-        map of shape ``(1, h*w, 3)`` and ``Cii`` is the per-point confidence
-        of shape ``(1, h*w, 1)``.
-    """
+    """The frame decoded against itself (encoded once, cached on ``frame.feat``): its canonical point map and confidence."""
     if frame.feat is None:
         frame.feat, frame.pos, _ = model._encode_image(frame.rgb_tensor, frame.img_true_shape)
 
@@ -171,21 +112,7 @@ def mast3r_asymmetric_inference(
     Float[Tensor, "2 h w d"],
     Float[Tensor, "2 h w"],
 ]:
-    """Run asymmetric two-frame MASt3R inference (i predicts j only).
-
-    Encodes both frames (lazily) and decodes only in the i->j direction,
-    producing two sets of outputs: self-prediction for i and cross-prediction
-    of j in i's coordinate frame.
-
-    Args:
-        model: The MASt3R model.
-        frame_i: Reference frame (features cached on ``frame_i.feat``).
-        frame_j: Target frame (features cached on ``frame_j.feat``).
-
-    Returns:
-        A tuple ``(X, C, D, Q)`` each of shape ``(2, h, w, ...)``, where
-        dim 0 corresponds to ``[res_ii, res_ji]``.
-    """
+    """The pair decoded i -> j only (each frame encoded once, cached on ``frame.feat``): ``(X, C, D, Q)``, dim 0 = ``[res_ii, res_ji]``."""
     if frame_i.feat is None:
         frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.rgb_tensor, frame_i.img_true_shape)
     if frame_j.feat is None:

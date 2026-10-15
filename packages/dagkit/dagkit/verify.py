@@ -1,22 +1,21 @@
 import importlib
-import importlib.metadata
 import math
 import os
 import shutil
-import subprocess
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
 import rerun as rr
 import tyro
+from rerun.catalog import DatasetEntry
 from serde import SerdeError, coerce, serde
 from serde.toml import from_toml
 
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, log_producer
+from dagkit.types import Producer, git, log_producer
 
 Phase: TypeAlias = Literal["pre", "pre2", "post"]
 
@@ -44,6 +43,14 @@ class Case:
     noise: dict[str, float] = field(default_factory=dict)  # metric -> measured |pre - pre2| for THIS case
     noise_from: str | None = None  # reuse the named case's noise (stated, never implied)
     published: dict[str, float] = field(default_factory=dict)  # metric -> a published result on this case (a paper's table)
+
+    def segment_ref(self, catalog_url: str | None = None) -> SegmentRef:
+        """The case's catalog segment, ``window_s`` as ``window_ns``; a local-input case has none (ValueError)."""
+        if self.dataset is None or self.segment is None:
+            raise ValueError(f"case {self.name!r} has no catalog segment (dataset and segment)")
+        window: tuple[int, int] | None = None if self.window_s is None else (round(self.window_s[0] * 1e9), round(self.window_s[1] * 1e9))
+        segment = SegmentRef(self.dataset, self.segment, window_ns=window)
+        return segment if catalog_url is None else replace(segment, catalog_url=catalog_url)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -118,6 +125,21 @@ def golden_path(package: str, block: str, case: str, phase: Phase) -> Path:
     return Path(root) / package / block / f"{case}.{phase}.rrd"
 
 
+def pre_golden(case: Case, golden: Path) -> Path:
+    """The case's pre-port reference golden beside ``golden`` (the pre run's own golden or partial scores itself)."""
+    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
+    if not reference.exists():
+        raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
+    return reference
+
+
+def run_counts(golden: DatasetEntry, block: str) -> dict[str, float]:
+    """The numbers a verify ``run`` logged as static ``AnyValues`` at ``/verify/<block>/run`` (text left out)."""
+    prefix: str = f"/verify/{block}/run:"
+    row: dict[str, Any] = golden.filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table().to_pylist()[0]
+    return {k.removeprefix(prefix): float(v[0]) for k, v in row.items() if k.startswith(prefix) and v and isinstance(v[0], int | float)}
+
+
 def _resolve(target: str) -> Callable[..., object]:
     module, name = target.split(":")
     return getattr(importlib.import_module(module), name)
@@ -130,17 +152,19 @@ class VerifyArgs:
     block: str | None = None
     clip: Literal["short", "full"] | None = None
     register: bool = False  # add catalog goldens as layer verify-<block>-<phase>-<sha7> (never a replacement)
+    overwrite: bool = False  # re-record existing pre / pre2 goldens (the pre-port references are write-once)
 
 
 def main(args: VerifyArgs) -> int:
     card: VerifyCard = load_card(args.card)
-    sha7: str = subprocess.run(
-        ["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, check=True, cwd=args.card.parent
-    ).stdout.strip()
-    version: str = f"{importlib.metadata.version(card.package)}+{sha7}"
+    sha7: str = git("rev-parse", "--short=7", "HEAD")
     selected: list[tuple[GraphBlock, Case]] = [(b, c) for b in card.graph if args.block in (None, b.name) for c in b.cases if args.clip in (None, c.clip)]
     if not selected or any(not block.metrics for block, _ in selected):
         print(f"FAIL: block={args.block} clip={args.clip} selects no case, or a selected block has no metrics")
+        return 1
+    kept: list[Path] = [p for b, c in selected if (p := golden_path(card.package, b.name, c.name, args.phase)).exists()]
+    if args.phase != "post" and kept and not args.overwrite:
+        print(f"FAIL: reference goldens are write-once; {[str(p) for p in kept]} exist (--overwrite re-records them)")
         return 1
     failed: bool = False
     for block, case in selected:
@@ -150,7 +174,8 @@ def main(args: VerifyArgs) -> int:
         partial: Path = golden.with_suffix(".partial")
         recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
         recording.save(partial)
-        log_producer(recording, f"verify-{block.name}", Producer(card.package, version, block.name, "verify", args.phase))
+        producer: Producer = Producer.of(card.package, block.name, "verify", phase=args.phase)
+        log_producer(recording, f"verify-{block.name}", producer)
         run(case, args.phase, recording)
         recording.flush()
         metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
@@ -162,8 +187,8 @@ def main(args: VerifyArgs) -> int:
         results: list[BandResult] = [BandResult(b.name, False, "missing or non-finite") for b in block.metrics if not math.isfinite(metrics.get(b.name, math.nan))]
         if args.phase == "post":  # noise: the case's own (noise, pre + pre2 runs), or those of its `noise_from` case (missing: fails)
             donor: Case = next((c for c in block.cases if c.name == case.noise_from), case) if case.noise_from and not case.noise else case
-            runs: list[tuple[Case, Phase]] = [(case, "pre"), (donor, "pre"), (donor, "pre2")]
-            scores: dict = {(c.name, ph): dict(score(c, p)) for c, ph in runs if (p := golden_path(card.package, block.name, c.name, ph)).exists()}  # type: ignore[call-overload]
+            runs: dict[tuple[str, Phase], Case] = {(c.name, ph): c for c, ph in ((case, "pre"), (donor, "pre"), (donor, "pre2"))}  # donor is often case
+            scores: dict = {(n, ph): dict(score(c, p)) for (n, ph), c in runs.items() if (p := golden_path(card.package, block.name, n, ph)).exists()}  # type: ignore[call-overload]
             for band in block.metrics:
                 noise_runs: list[float | None] = [scores.get((donor.name, ph), {}).get(band.name) for ph in ("pre", "pre2")]
                 pre: float | None = scores.get((case.name, "pre"), {}).get(band.name)
@@ -176,7 +201,7 @@ def main(args: VerifyArgs) -> int:
         if args.register and all(r.passed for r in results) and case.window_s is None and case.dataset and case.segment:  # never failed or windowed
             registered: Path = golden.with_name(f"{case.name}.{args.phase}.{sha7}.{uuid.uuid4().hex[:8]}.rrd")  # immutable: the golden path is reused
             shutil.copy2(golden, registered)
-            dataset = SegmentRef(case.dataset, case.segment).entry()
+            dataset = case.segment_ref().entry()
             dataset.register([registered.resolve().as_uri()], layer_name=f"verify-{block.name}-{args.phase}-{sha7}").wait()
     return 1 if failed else 0
 

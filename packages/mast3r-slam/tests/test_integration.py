@@ -6,7 +6,7 @@ import lietorch
 import numpy as np
 import pytest
 import torch
-from dagkit.types import rerun_roundtrip
+from dagkit.testing import rerun_roundtrip
 from torch import Tensor
 
 from mast3r_slam.ops.optim import gauss_newton_rays
@@ -104,9 +104,9 @@ def test_gauss_newton_rays_moves_only_the_free_poses(n_kf: int, hw: int, valid_f
 
 
 def test_tracked_frame_rerun_round_trip() -> None:
-    value = TrackedFrame(42, np.array([0.5, -1.0, 2.0, 0.0, 0.6, 0.0, 0.8, 0.25], dtype=np.float32), world=1)
+    value = TrackedFrame(42, np.array([0.5, -1.0, 2.0, 0.0, 0.6, 0.0, 0.8, 0.25], dtype=np.float32))
     [(t_ns, back)] = rerun_roundtrip(value, "/mast3r_slam/tracked/cam_00", "video_time", 1_500_000_000)
-    assert t_ns == 1_500_000_000 and back.frame_index == 42 and back.world == 1
+    assert t_ns == 1_500_000_000 and back.frame_index == 42
     np.testing.assert_array_equal(back.world_sim3_cam, value.world_sim3_cam)
 
 
@@ -114,9 +114,9 @@ def test_tracked_frame_rerun_round_trip() -> None:
 def test_map_update_rerun_round_trip(n_edges: int) -> None:
     poses = np.tile(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0], dtype=np.float32), (3, 1))
     poses[:, 0] = [0.0, 1.0, 2.0]
-    value = MapUpdate(poses, np.array([0, 1, 0][:n_edges], dtype=np.int64), np.array([1, 2, 2][:n_edges], dtype=np.int64), world=2)
+    value = MapUpdate(poses, np.array([0, 1, 0][:n_edges], dtype=np.int64), np.array([1, 2, 2][:n_edges], dtype=np.int64))
     [(t_ns, back)] = rerun_roundtrip(value, "/mast3r_slam/map", "video_time", 7)
-    assert t_ns == 7 and back.world == 2
+    assert t_ns == 7
     np.testing.assert_array_equal(back.world_sim3_cam, poses)
     np.testing.assert_array_equal(np.stack([back.ii, back.jj]), np.stack([value.ii, value.jj]))
 

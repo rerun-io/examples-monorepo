@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 import torch
-from dagkit.types import Type, rerun_roundtrip
+from dagkit.testing import rerun_roundtrip
+from dagkit.types import Type
 from serde import to_dict
 
 from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats

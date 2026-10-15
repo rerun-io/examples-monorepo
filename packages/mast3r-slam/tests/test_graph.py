@@ -8,8 +8,11 @@ import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
+import numpy as np
 import pytest
 import rerun as rr
+import torch
+from dagkit import sinks
 from dagkit.app import gradio_app, load_profile
 from dagkit.doc import describe, picture
 from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
@@ -17,22 +20,25 @@ from dagkit.node import Emit, Event, PortType, RunContext, Tick
 from dagkit.runners import run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import IterSource
-from dagkit.testing import Recorder, check_graph_docs, check_picture
-from dagkit.verify import load_card
+from dagkit.testing import Recorder, check_form, check_graph_docs, check_picture
+from dagkit.time import STATIC
+from dagkit.types import Producer
+from dagkit.verify import Case, load_card
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
-from simplecv.sources.files import VideoFileSource
+from simplecv.sources.files import VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
 from mast3r_slam.apis import slam as app
-from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, examples, outputs, slam_config, video_source
+from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, frame_hw, outputs, slam_config, video_source
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
-from mast3r_slam.sources.webcam import Webcam
 from mast3r_slam.types import SlamConfig
+from mast3r_slam.verify import case_config, examples
 
 PROFILES: Path = Path(__file__).resolve().parents[1] / "profiles"
 
@@ -53,6 +59,7 @@ def test_slam_graph_validates(calibrated: bool, live: bool, tmp_path: Path) -> N
     assert ("video", "frontend", "rig") in kinds if calibrated else ("video", "frontend", "rig") not in kinds
     assert graph.nodes["backend"].placement == Placement("process") and isinstance(graph.nodes["backend"].obj, Spawn)
     assert graph.nodes["frontend"].placement.where == "main" and set(graph.resources) == {"mast3r", "shared"}
+    assert (graph.nodes["nerfstudio"].kind, graph.nodes["nerfstudio"].needs) == ("sink", ("shared",))  # an output that reads `shared`
 
 
 class Affine:
@@ -119,29 +126,51 @@ def test_profile_presets_resolve(preset: str | None) -> None:
     assert cfg.img_size == (224 if preset == "fast" else 512) and cfg.use_calib == (preset == "calib")
 
 
-def test_a_file_input_beats_webcam_zero_and_zero_means_unset(tmp_path: Path) -> None:
-    """The generated gradio form sends 0 for an empty number field (webcam, max_frames, subsample)."""
-    config = Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4", webcam=0, max_frames=0, subsample=0, hardware="x86_64-cuda", preset="fast")
+def test_a_file_input_beats_the_webcam_and_the_preset_keeps_its_stride(tmp_path: Path) -> None:
+    config = Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4", webcam=0, hardware="x86_64-cuda", preset="fast")
     cfg: SlamConfig = slam_config(config)
     assert cfg.subsample == 5  # the preset's
     source = video_source(config, cfg)
     assert isinstance(source, VideoFileSource) and source.stride == 5 and source.max_frames is None
-    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=None, webcam=0), cfg), Webcam)
+    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=None, webcam=0), cfg), WebcamSource)
 
 
-def test_the_default_input_and_the_gradio_example_are_the_verify_short_case(tmp_path: Path) -> None:
-    """A run without arguments (and the form's defaults) reads the short case's clip; the one-click example also uses its
-    params, so it reproduces the banded run. A given file still beats the default segment."""
-    short = next(c for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for c in block.cases if c.name == "short")
-    assert short.window_s is not None
-    (example,) = examples()
-    for config in (Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda"), dataclasses.replace(example, hardware="x86_64-cuda")):
-        source = video_source(config, slam_config(config))
-        assert isinstance(source, CatalogVideoSource) and source.segment.window_ns == (round(short.window_s[0] * 1e9), round(short.window_s[1] * 1e9))
-        assert (source.segment.dataset, source.segment.segment, source.cameras) == (short.dataset, short.segment, ("rig_00/cam_00",))
-    cfg: SlamConfig = slam_config(dataclasses.replace(example, hardware="x86_64-cuda"))
-    assert (cfg.use_calib, cfg.subsample, cfg.img_size) == (short.params["calib"] == "true", int(short.params["subsample"]), int(short.params["img_size"]))
-    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4"), cfg), VideoFileSource)
+def test_the_default_input_is_the_short_case_and_the_examples_are_the_configs_verify_runs(tmp_path: Path) -> None:
+    """A run without arguments (and the form's defaults) reads the slam short case's clip; the gradio examples are the
+    card's short cases as App configs, and every case's App config resolves the SlamConfig verify always ran. A given
+    file still beats the default segment."""
+    cases: list[Case] = [c for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for c in block.cases]
+    default = video_source(Config(RerunTyroConfig(headless=True)), SlamConfig())
+    assert isinstance(default, CatalogVideoSource) and default.cameras == ("rig_00/cam_00",)
+    assert default.segment == next(c for c in cases if c.name == "short").segment_ref()
+    assert [e.segment for e in examples()] == [c.segment_ref() for c in cases if c.clip == "short"]
+    for case in cases:
+        config: Config = dataclasses.replace(case_config(case), hardware="x86_64-cuda")
+        calib: bool = case.params["calib"] == "true"
+        assert slam_config(config) == SlamConfig(use_calib=calib, img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
+        assert config.undistort == (case.params.get("undistort") == "true") and config.camera == "rig_00/cam_00"
+    assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4"), SlamConfig()), VideoFileSource)
+
+
+def test_frame_hw_takes_the_static_rig_resolution_without_decoding_a_frame() -> None:
+    rig = RigCameras(("rig_00/cam_00",), np.eye(3)[None], np.eye(4)[None], np.array([[640, 480]], dtype=np.int64))
+
+    def rig_first() -> Iterator[Event]:
+        yield Event(STATIC, "rig", rig)
+        raise AssertionError("frame_hw read past the rig")
+
+    frames = MultiViewFrames(0, 0, ("rig_00/cam_00",), torch.zeros((1, 3, 480, 640), dtype=torch.uint8), torch.zeros(1, dtype=torch.int64))
+    from_frame: tuple[int, int] = frame_hw(IterSource({"frames": MultiViewFrames}, lambda: iter([Event(0, "frames", frames)])), 512)
+    assert frame_hw(IterSource({"frames": MultiViewFrames, "rig": RigCameras}, rig_first), 512) == from_frame == (384, 512)
+
+
+@pytest.mark.parametrize(("preset", "profile"), [(None, "x86_64-cuda/base"), ("eval", "x86_64-cuda/eval")])
+def test_the_layer_producer_carries_the_package_version_and_the_hardware_profile(preset: str | None, profile: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[Producer] = []
+    monkeypatch.setattr(sinks, "log_producer", lambda recording, layer, producer: logged.append(producer))
+    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
+    build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", preset=preset, layer_dir=tmp_path), rr.RecordingStream("test", send_properties=False))  # type: ignore[arg-type]
+    assert logged == [Producer.of("mast3r-slam", "mast3r-slam", profile)] and "+" in logged[0].version  # version + git sha7
 
 
 def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
@@ -165,7 +194,7 @@ def test_the_graph_and_cpu_ops_import_without_the_kernel_extensions() -> None:
 def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``build`` with every output on (catalog input = the default segment, layer, Nerfstudio): valid, the picture read back
     from an rrd equals the declaration, each box says where it runs (the backend is its own process), GRAPH.md is current."""
-    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # decodes the first frame otherwise (catalog)
+    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
     config = Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", output_nerfstudio=tmp_path / "ns", layer_dir=tmp_path / "layers")
     graph: Graph = build(config, rr.RecordingStream("test", send_properties=False))  # type: ignore[assignment]
     graph.validate()
@@ -177,21 +206,23 @@ def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path
 
 
 FORM: dict[str, str] = {
-    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "video": "File", "images": "Textbox",
-    "undistort": "Checkbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown", "img_size": "Dropdown",
-    "subsample": "Textbox", "output_nerfstudio: save it, then download it": "Checkbox", "layer_dir": "Textbox",
-    "register": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
+    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "undistort": "Checkbox",
+    "video": "File", "images": "Textbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown",
+    "img_size": "Dropdown", "subsample": "Textbox", "output_nerfstudio": "Checkbox", "layer_dir": "Textbox", "register": "Dropdown",
+    "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
-"""The generated form: widget label -> component (directories and optional numbers are text boxes; empty = the default)."""
-HIDDEN: set[str] = {"rr_config"}
-"""Config fields without a widget, on purpose: the gradio pane is the viewer."""
+"""The generated form in order: widget label -> component (directories and optional numbers are text boxes; empty = the default)."""
 
 
 def test_every_config_field_has_its_form_widget_or_is_hidden_on_purpose() -> None:
-    demo = gradio_app(Config, build, title="MASt3R-SLAM")
+    demo = check_form(Config, build, FORM, {"rr_config": "the gradio pane is the viewer"})
     widgets: dict[str, object] = {c.label: c for c in demo.blocks.values() if getattr(c, "label", None)}
-    assert {label: type(widgets[label]).__name__ for label in FORM if label in widgets} == FORM
-    for f in dataclasses.fields(Config):
-        assert (f.name in HIDDEN) != any(label.split(".")[0].split(":")[0] == f.name for label in FORM), f.name
     assert widgets["hardware"].choices == [(c, c) for c in ("x86_64-cuda", "aarch64-cuda", "robocap-cap", "auto")]  # type: ignore[attr-defined]
     assert {c for c, _ in widgets["preset"].choices} == set(load_profile(PROFILES, "x86_64-cuda").presets)  # type: ignore[attr-defined]
+
+
+def test_the_catalog_source_muxes_its_zero_copy_packet_views() -> None:
+    """This env runs Python 3.11, where a numpy array is no ``typing_extensions.Buffer``: ``SegmentFrames`` hands
+    ``wrap_mp4`` the packet views ``read_catalog_videos`` returns, and beartype checks that call in the dev env."""
+    samples = [np.frombuffer(b"\x00\x00\x00\x01\x65" + bytes(16), dtype=np.uint8), np.frombuffer(b"\x00\x00\x00\x01\x41" + bytes(8), dtype=np.uint8)]
+    assert len(wrap_mp4(samples, [True, False], 30, "h264")) > 0

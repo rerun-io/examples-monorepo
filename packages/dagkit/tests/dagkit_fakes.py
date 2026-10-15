@@ -36,7 +36,6 @@ class Add:
 
     def reset(self, ctx: RunContext) -> None:
         self.resets += 1
-        self.world: int = ctx.world
 
     def step(self, tick: Tick, out: Emit) -> None:
         extra: object = tick.asof.get("a")

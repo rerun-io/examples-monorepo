@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 import torch
+from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC
-from dagkit.types import rerun_roundtrip
 from mamma_fakes import assert_same
 
 from mamma.types import BodyTopology, Landmarks3d, MultiViewTracks, SmplxFits

@@ -2,8 +2,8 @@
 
 No depth GT is registered on the catalog, so the reference is the PRE-PORT golden of each case. The pre-port pipeline was
 broken at import (``@dataclass`` on the wrong definition, a removed ``monopriors`` factory); ``pre``/``pre2`` ran the OLD
-``SingleImagePipeline`` with the smallest fix applied and never committed (see ``VERIFY.toml``). ``run`` now drives the graph
-(``graphs/single_image.py``); ``score`` reads only golden rrds, never the pipeline.
+``SingleImagePipeline`` with the smallest fix applied and never committed (see ``VERIFY.toml``). ``run`` drives the App's graph
+(``apis/single_image.build``); ``score`` reads only golden rrds, never the pipeline.
 
 Golden contract (``recording_id`` = case name; clock ``video_time``: the image at t = 0, path step i at i / 30 s):
 
@@ -21,24 +21,24 @@ Golden contract (``recording_id`` = case name; clock ``video_time``: the image a
 import random
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
+from dagkit.graph import Graph
 from dagkit.node import Emit, PortType, RunContext, Tick
 from dagkit.runners import run_sequential
-from dagkit.sinks import RerunSink
-from dagkit.verify import Case, Phase, golden_path
+from dagkit.types import cells, served
+from dagkit.verify import Case, Phase, pre_golden
 from jaxtyping import Bool
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
+from simplecv.rerun_log_utils import RerunTyroConfig
 
-from vistadream.apis.single_image import PACKAGE_DIR, PORTS, ROOTS, nodes
-from vistadream.graphs.single_image import single_image_graph
+from vistadream.apis.single_image import Config, build, case_config
 from vistadream.models.flux import FluxConfig
-from vistadream.nodes.prepare import ImageSource
 from vistadream.ops.splats import render
 from vistadream.types import SceneViews, Splats, images
 
@@ -78,31 +78,24 @@ class InputRender:
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The single-image graph (sequential, lossless) on the case's image with seeded RNGs; every output goes to ``recording``."""
-    assert case.input is not None, "vistadream cases are local images"
-    if phase != "post":  # this tree has only the graph: a pre / pre2 run here would overwrite the reference with the port
-        raise RuntimeError(f"phase {phase!r} is a pre-port reference: record it from the card commit 7aef310bb with the import fix in VERIFY.toml")
-    stage = case.params["stage"]
-    assert stage in ("no-outpaint", "outpaint", "coarse"), stage
-    seed: int = int(case.params["seed"])
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    """The App's graph on the case's image (sequential, lossless, seeded RNGs) plus ``InputRender``, fed what the viewer is
+    fed; every output goes to ``recording``."""
+    config: Config = replace(case_config(case, RerunTyroConfig(headless=True)), flux=FluxConfig(local_files_only=True))  # FLUX.1-Fill-dev is ~34 GB: a verify run never downloads it
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
     started: float = time.perf_counter()
-    flux = FluxConfig(local_files_only=True)  # FLUX.1-Fill-dev is ~34 GB: a verify run never downloads it
-    built = nodes(stage, float(case.params.get("expansion_percent", "0.3")), int(case.params.get("n_frames", "10")), seed, flux)
-    recording.log("/world", rr.ViewCoordinates.RDF, static=True)
+    graph: Graph = build(config, recording)
     input_render = InputRender(recording)
-    sinks = {"viewer": RerunSink(recording, PORTS, ROOTS), "input_render": input_render}
-    report = run_sequential(single_image_graph(ImageSource(PACKAGE_DIR / case.input, int(case.params["max_resolution"])), *built, sinks))
+    graph.sinks({edge.dst.port: edge.src for edge in graph.edges if edge.dst.node == "viewer"}, {"input_render": input_render})
+    report = run_sequential(graph)
     wall_s: float = time.perf_counter() - started
-    recording.log("/verify/single_image/run", rr.AnyValues(wall_s=wall_s, n_splats=float(input_render.n_splats), stage=stage, code="graph"), static=True)
+    recording.log("/verify/single_image/run", rr.AnyValues(wall_s=wall_s, n_splats=float(input_render.n_splats), stage=config.stage, code="graph"), static=True)
     print(f"{case.name} {phase}: {report.status}, {input_render.n_splats} splats in {wall_s:.1f} s")
 
 
 def _read(golden: Path) -> pa.Table:
-    with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
-        dataset: DatasetEntry = server.client().get_dataset("golden")  # an entry must outlive its queries
+    with served(golden) as dataset:
         return dataset.filter_contents([f"{INPUT}/**", f"{RENDER}/**", "/world/splats"]).reader(index=TIMELINE).to_arrow_table()
 
 
@@ -121,17 +114,14 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     valid: Bool[ndarray, "h w"] = (valid_u8 > 0) & np.isfinite(depth) & (depth > 0)  # a non-finite render depth there: NaN, fails
     absrel: float = float(np.mean(np.abs(render_depth[valid] - depth[valid]) / depth[valid])) if valid.any() else float("nan")
 
-    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden_path("vistadream", "single_image", case.name, "pre")
-    if not reference.exists():
-        raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
+    reference: Path = pre_golden(case, golden)
     ours: dict[int, ndarray] = images(table, f"{RENDER}/rgb", "Image", TIMELINE, np.uint8)
     theirs: dict[int, ndarray] = ours if reference == golden else images(_read(reference), f"{RENDER}/rgb", "Image", TIMELINE, np.uint8)
     common: list[int] = sorted(ours.keys() & theirs.keys())
     errors: list[float] = [
         float(np.mean(np.abs(ours[t].astype(np.float64) - theirs[t].astype(np.float64)))) for t in common if ours[t].shape == theirs[t].shape
     ]
-    centers: pa.ChunkedArray = table["/world/splats:GaussianSplats3D:centers"]
-    n_splats: int = sum(len(c.values) for c in centers if c.is_valid)
+    n_splats: int = sum(len(c.values) for c in cells(table, "/world/splats:GaussianSplats3D:centers", TIMELINE).values())
     return {
         "input_psnr_db": 10.0 * float(np.log10(255.0**2 / mse)) if mse > 0 else float("inf"),
         "input_depth_absrel": absrel,

@@ -76,7 +76,7 @@ times are the catalog's `video_time`.
 | Block / DropOldest edge | `StageQueue<T>::new(capacity, QueuePolicy::{Block, DropOldest})` |
 | AsOf edge + watermark | `PoseStore::pose_for(index, wait)` + `consumed` / `progress` (lookups stay inside the reader's world; live prefers the newest `ok` pose: node logic, not generic AsOf) |
 | `emits_late` + `Emit.watermark` | SLAM `port.frontend_lag` (the pose comes one frameset late) |
-| `world` / `Control.reset` | `PoseStore::reset(index)` on backwards time, a > 3 s gap or an estimator error |
+| none (`Control` only stops) | `PoseStore::reset(index)` on backwards time, a > 3 s gap or an estimator error |
 | a Source's one time-ordered stream | `FrameSource::next_event() -> SourceEvent::{Frameset, Imu}` |
 | port kinds per edge | frames DropOldest live; IMU `StageQueue::new(LIVE_IMU_CAPACITY = 8192, DropOldest)` live, unbounded in lossless replay |
 | Sink `step` / `flush` | `FramesetSink::{frameset, finish}` |

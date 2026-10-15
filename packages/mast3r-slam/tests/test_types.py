@@ -25,12 +25,12 @@ def sim3s(n: int | None = None) -> st.SearchStrategy[np.ndarray]:
     return one if n is None else st.lists(one, min_size=n, max_size=n).map(np.stack)
 
 
-@given(pose=sim3s(), frame_index=st.integers(0, 10**6), world=st.integers(0, 5))
+@given(pose=sim3s(), frame_index=st.integers(0, 10**6))
 @settings(max_examples=30, deadline=None)
-def test_tracked_frame_serde_round_trip_keeps_dtype(pose: np.ndarray, frame_index: int, world: int) -> None:
-    value = TrackedFrame(frame_index, pose, world)
+def test_tracked_frame_serde_round_trip_keeps_dtype(pose: np.ndarray, frame_index: int) -> None:
+    value = TrackedFrame(frame_index, pose)
     back = from_dict(TrackedFrame, to_dict(value))
-    assert back.frame_index == frame_index and back.world == world
+    assert back.frame_index == frame_index
     assert back.world_sim3_cam.dtype == np.float32
     np.testing.assert_array_equal(back.world_sim3_cam, pose)
 
@@ -40,7 +40,7 @@ def test_tracked_frame_serde_round_trip_keeps_dtype(pose: np.ndarray, frame_inde
 def test_map_update_serde_round_trip_and_rerun_structure(k: int, data: st.DataObject) -> None:
     poses: np.ndarray = data.draw(sim3s(k))
     edges: np.ndarray = data.draw(arrays(np.int64, (2, data.draw(st.integers(0, 8))), elements=st.integers(0, k - 1)))
-    value = MapUpdate(poses, edges[0], edges[1], world=1)
+    value = MapUpdate(poses, edges[0], edges[1])
     back = from_dict(MapUpdate, to_dict(value))
     np.testing.assert_array_equal(back.world_sim3_cam, poses)
     np.testing.assert_array_equal(np.stack([back.ii, back.jj]), edges)

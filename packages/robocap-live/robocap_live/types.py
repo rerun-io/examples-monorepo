@@ -1,4 +1,5 @@
-"""robocap-live edge values and their Rerun mapping: the rig and SLAM poses the hands core reads, and a layer run's counts."""
+"""robocap-live edge values and their Rerun mapping: the rig the hands core reads (its SLAM poses: ``slam_rs.types.CatalogPoses``), and
+a layer run's counts."""
 
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
@@ -8,9 +9,8 @@ import pyarrow as pa
 import rerun as rr
 from dagkit.time import STATIC, TimeNs
 from dagkit.types import Log
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Float64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde import from_dict, serde, to_dict
 from simplecv.rerun_custom_types import CameraDistortion
 from simplecv.types.rig import RigCameras
@@ -59,50 +59,6 @@ class CapRig:
                 names.append(name)
                 fisheye62.append(coefficients)
             yield t_ns, cls(rig, tuple(names), np.stack(fisheye62))
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class CatalogPoses:
-    """A segment's whole SLAM pose table (``slam_rs``: the rig's Transform3D rows), sorted, finite; one STATIC value."""
-
-    t_ns: Int64[ndarray, " p"]
-    world_from_rig: Float64[ndarray, "p 4 4"]
-
-    def to_rerun(self, root: str) -> list[Log]:
-        raise NotImplementedError("CatalogPoses is read from the slam_rs layer, which slam-rs writes; it is never written from here")
-
-    @classmethod
-    def contents(cls, root: str) -> list[str]:
-        return [root]
-
-    @classmethod
-    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "CatalogPoses"]]:
-        translation_column: str = f"{root}:Transform3D:translation"
-        if not table.num_rows or translation_column not in table.column_names:
-            return
-        t_ns: Int64[ndarray, " r"] = np.asarray(table.column(timeline).cast(pa.int64()))
-        quaternion: Float64[ndarray, "r 4"] = _rows(table.column(f"{root}:Transform3D:quaternion"), 4)
-        translation: Float64[ndarray, "r 3"] = _rows(table.column(translation_column), 3)
-        valid: Bool[ndarray, " r"] = (
-            np.isfinite(quaternion).all(axis=1) & np.isfinite(translation).all(axis=1) & (np.linalg.norm(quaternion, axis=1) > 0)
-        )
-        order: Int64[ndarray, " p"] = np.flatnonzero(valid)[np.argsort(t_ns[valid], kind="stable")]
-        if not order.size:  # no usable pose: no table (the hands node then refuses the segment)
-            return
-        world_from_rig: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(order), 1, 1))
-        world_from_rig[:, :3, :3] = Rotation.from_quat(quaternion[order]).as_matrix()  # xyzw, normalised
-        world_from_rig[:, :3, 3] = translation[order]
-        yield STATIC, cls(t_ns[order], world_from_rig)
-
-
-def _rows(column: pa.ChunkedArray, width: int) -> Float64[ndarray, "r w"]:
-    """A ``list<fixed_size_list<width>>`` component column as one row per table row; NaN where the row has no value."""
-    out: Float64[ndarray, "r w"] = np.full((len(column), width), np.nan)
-    for row, cell in enumerate(column.to_pylist()):
-        if cell:
-            out[row] = np.asarray(cell[0] if isinstance(cell[0], list) else cell, dtype=np.float64)[:width]
-    return out
 
 
 @serde(deny_unknown_fields=True)

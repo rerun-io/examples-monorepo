@@ -54,7 +54,7 @@ class Backend:
         K = self.keyframes.K if self.params.use_calib else None
         self.graph: FactorGraph = FactorGraph(model, self.keyframes, self.params.local_opt, self.params.matching, K, device=self.keyframes.device)
         self.retrieval: RetrievalDatabase = RetrievalDatabase(CHECKPOINT, backbone=model, device=self.keyframes.device)
-        self.world, self.times, self.dropped = ctx.world, {}, 0
+        self.times, self.dropped = {}, 0
 
     def _solve(self) -> None:
         self.graph.solve_GN_calib() if self.params.use_calib else self.graph.solve_GN_rays()
@@ -121,7 +121,7 @@ class Backend:
             else:
                 self.states.dequeue_reloc()
         ii: Int64[ndarray, " e"] = self.graph.ii.cpu().numpy().astype(np.int64)
-        out.put("map", tick.t_ns, MapUpdate(self._poses(), ii, self.graph.jj.cpu().numpy().astype(np.int64), self.world))
+        out.put("map", tick.t_ns, MapUpdate(self._poses(), ii, self.graph.jj.cpu().numpy().astype(np.int64)))
         torch.cuda.empty_cache()  # each global solve allocates edge-sized buffers: cached blocks would fragment the GPU
 
     def flush(self, out: Emit) -> None:
@@ -130,7 +130,7 @@ class Backend:
             frame_index: list[int] = self.keyframes.dataset_idx[: len(poses)].tolist()
         for slot in sorted(self.times, key=lambda k: (self.times[k], k)):
             if slot < len(poses):
-                out.put("keyframes", self.times[slot], TrackedFrame(frame_index[slot], poses[slot], self.world))
+                out.put("keyframes", self.times[slot], TrackedFrame(frame_index[slot], poses[slot]))
         self.times = {}
         if self.dropped:
             print(f"mast3r-slam backend: dropped {self.dropped} queued tasks at stop (realtime)")

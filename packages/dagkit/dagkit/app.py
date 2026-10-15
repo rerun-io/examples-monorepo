@@ -3,7 +3,6 @@
 import contextlib
 import dataclasses
 import functools
-import gc
 import itertools
 import platform
 import shutil
@@ -23,8 +22,8 @@ import rerun.blueprint as rrb
 from serde import SerdeError, coerce, from_dict, serde, to_dict
 from serde.toml import from_toml
 
-from dagkit.doc import GRAPH_ROOT, GUIDE_ROOT, field_docs
-from dagkit.graph import Graph
+from dagkit.doc import GRAPH_ROOT, GUIDE_ROOT, HEALTH_ROOT, field_docs
+from dagkit.graph import AsOf, Graph
 from dagkit.node import Control, Mode
 from dagkit.runners import RunReport, run_sequential, run_threaded
 from dagkit.sources import SegmentRef
@@ -44,14 +43,12 @@ class AppConfig(Protocol):
 
 C = TypeVar("C", bound=AppConfig)
 D = TypeVar("D")
-G = TypeVar("G")
+G = TypeVar("G")  # a form's Config type: not bound to AppConfig, as beartype cannot issubclass-check a data Protocol
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class NodeProfile:
-    placement: Literal["main", "thread", "process"] | None = None  # None inherits (base default: thread)
-    cpus: list[int] | None = None  # None inherits; [] clears
     params: dict[str, Any] = field(default_factory=dict)  # overrides of the node's config dataclass fields
 
 
@@ -67,8 +64,7 @@ class Profile:
             raise KeyError(f"unknown preset {preset!r}; this profile has {sorted(self.presets)}")
         base: NodeProfile = self.nodes.get(name, NodeProfile())
         over: NodeProfile = self.presets[preset].get(name, NodeProfile()) if preset is not None else NodeProfile()
-        cpus: list[int] | None = over.cpus if over.cpus is not None else base.cpus
-        return NodeProfile(over.placement or base.placement or "thread", cpus, base.params | over.params)
+        return NodeProfile(base.params | over.params)
 
     def configure(self, name: str, default: D, preset: str | None = None) -> D:
         return from_dict(type(default), to_dict(default) | self.node(name, preset).params)
@@ -96,7 +92,7 @@ def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "a
     return profile
 
 
-def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
+def _run_graphs(config: AppConfig, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
     """The CLI's and the form's one loop: Stop is checked before the next graph is built, and a stopped build is closed."""
     result: Graph | Iterator[Graph] = build(config, recording)
     built: Iterator[Graph] = iter((result,)) if isinstance(result, Graph) else result
@@ -107,8 +103,9 @@ def _run_graphs(config: object, build: Callable[..., Graph | Iterator[Graph]], r
             if graph.name in names:  # its picture, guide and health colours would land on the earlier graph's
                 raise GraphError(f"graph name {graph.name!r} repeats in one app")
             names.add(graph.name)
-            report = RUNNERS[getattr(config, "runner", "threaded")](graph, mode=getattr(config, "mode", "lossless"), control=control, health=recording)
+            report = RUNNERS[config.runner](graph, mode=config.mode, control=control, health=recording)
             print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
+            del graph  # its nodes free their models before the next graph is built
     finally:
         getattr(built, "close", lambda: None)()  # a stopped multi-pass build never runs past its yield
     return report
@@ -144,6 +141,13 @@ def with_pipeline(blueprint: rrb.Blueprint, outputs: Sequence[rrb.View] = (), gr
     return rrb.Blueprint(
         rrb.Tabs(normal, tab, active_tab=0), *panels, auto_layout=blueprint.auto_layout, auto_views=blueprint.auto_views, collapse_panels=blueprint.collapse_panels
     )
+
+
+def health_views(graphs: Sequence[Graph]) -> list[rrb.View]:
+    """One plot per run-health series the runner logs for ``graphs``: drops and queue depth per trigger edge, step ms per node."""
+    series: list[str] = [f"{e.dst.node}/{what}/{e.dst.port}" for g in graphs for e in g.edges if not isinstance(e.kind, AsOf) for what in ("drops", "queue_depth")]
+    series += [f"{name}/step_ms" for g in graphs for name, spec in g.nodes.items() if spec.kind == "node"]
+    return [rrb.TimeSeriesView(origin=HEALTH_ROOT + s, name=s) for s in dict.fromkeys(series)]
 
 
 def _base(hint: object) -> Any:
@@ -260,7 +264,7 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
     first: object = examples[0] if examples else None  # a required field the Config leaves open starts from the first example
     leaves: list[Leaf] = [(p, h, functools.reduce(getattr, p, first) if d is dataclasses.MISSING and first is not None else d, doc) for p, h, d, doc in _leaves(config_type, None)]
     outputs: list[Leaf] = [leaf for leaf in leaves if leaf[0][-1].startswith("output") and type(None) in get_args(leaf[1])]  # "save it" boxes
-    with gr.Blocks(title=title) as demo:
+    with gr.Blocks(title=title, delete_cache=(3600, 3600)) as demo:  # hourly: drop downloads older than an hour from gradio's cache
         gr.Markdown(f"# {title}")
         control_state = gr.State(None)
         with gr.Row():
@@ -275,34 +279,34 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
         flat: list[Any] = [w for _, widgets in form for w in widgets]
 
         def run(*values: object) -> Iterator[tuple[object, ...]]:
-            gc.collect()  # the previous run (reference cycles in the runner) frees its models before this one loads its own
             it: Iterator[object] = iter(values)
-            scratch = Path(tempfile.mkdtemp(prefix="dagkit-app-"))
-            try:
-                given: dict[tuple[str, ...], object] = {leaf[0]: v for leaf, ws in form if (v := _value(leaf, [next(it) for _ in ws], scratch)) is not dataclasses.MISSING}
-                config: G = _assemble(config_type, given, None)
-            except (TypeError, ValueError) as exc:  # a required field left empty, a malformed number or window
-                raise gr.Error(f"the form does not make a {config_type.__name__}: {exc}") from None
-            if getattr(config, "register", "off") != "off" and any(isinstance(v, Path) and v.is_relative_to(scratch) for v in given.values()):
-                config = dataclasses.replace(cast(Any, config), register="off")  # a temporary output is never registered on the catalog
-            recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
-            stream, control, errors = recording.binary_stream(), Control(), []
-
-            def body() -> None:
+            with tempfile.TemporaryDirectory(prefix="dagkit-app-", ignore_cleanup_errors=True) as tmp:  # gone with the run: gradio
+                scratch = Path(tmp)  # copies each download into its cache while the run waits at the yield that offers it
                 try:
-                    _run_graphs(config, build, recording, control)
-                except BaseException as exc:  # delivered to the UI thread below
-                    errors.append(exc)
+                    given: dict[tuple[str, ...], object] = {leaf[0]: v for leaf, ws in form if (v := _value(leaf, [next(it) for _ in ws], scratch)) is not dataclasses.MISSING}
+                    config: AppConfig = _assemble(config_type, given, None)  # an instance check is fine
+                except (TypeError, ValueError) as exc:  # a required field left empty, a malformed number or window
+                    raise gr.Error(f"the form does not make a {config_type.__name__}: {exc}") from None
+                if getattr(config, "register", "off") != "off" and any(isinstance(v, Path) and v.is_relative_to(scratch) for v in given.values()):
+                    config = dataclasses.replace(cast(Any, config), register="off")  # a temporary output is never registered on the catalog
+                recording = rr.RecordingStream(title.replace(" ", "_"), recording_id=uuid.uuid4().hex)
+                stream, control, errors = recording.binary_stream(), Control(), []
 
-            thread = threading.Thread(target=body)
-            thread.start()
-            while thread.is_alive():
-                time.sleep(0.2)
-                yield (control, stream.read(), *(None for _ in files))
-            recording.flush()
-            if errors:
-                raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
-            yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config)) for leaf in outputs))
+                def body() -> None:
+                    try:
+                        _run_graphs(config, build, recording, control)
+                    except BaseException as exc:  # delivered to the UI thread below
+                        errors.append(exc)
+
+                thread = threading.Thread(target=body)
+                thread.start()
+                while thread.is_alive():
+                    time.sleep(0.2)
+                    yield (control, stream.read(), *(None for _ in files))
+                recording.flush()
+                if errors:
+                    raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
+                yield (control, stream.read(), *(_download(functools.reduce(getattr, leaf[0], config)) for leaf in outputs))
 
         run_button.click(run, inputs=flat, outputs=[control_state, viewer, *files])
         stop_button.click(lambda control: control and control.stop(), inputs=[control_state], outputs=[])

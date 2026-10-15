@@ -11,7 +11,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from dagkit import verify
-from dagkit.verify import GraphBlock, MetricBand, check_band, golden_path, load_card
+from dagkit.sources import SegmentRef
+from dagkit.verify import Case, GraphBlock, MetricBand, check_band, golden_path, load_card, pre_golden
 
 CARD = """
 package = "exo-calib"
@@ -61,6 +62,15 @@ def test_card_loads_and_full_case_reuses_short_noise(tmp_path: Path) -> None:
         load_card(tmp_path / "BAD.toml")
 
 
+def test_a_case_segment_ref_carries_its_window_in_ns_and_a_local_case_has_none() -> None:
+    case = Case("short", "short", "gt", dataset="ds", segment="seg", window_s=(1.5, 2.25))
+    assert case.segment_ref() == SegmentRef("ds", "seg", window_ns=(1_500_000_000, 2_250_000_000))
+    assert case.segment_ref("rerun+http://host:1").catalog_url == "rerun+http://host:1"
+    assert Case("full", "full", "gt", dataset="ds", segment="seg").segment_ref().window_ns is None
+    with pytest.raises(ValueError, match="'local' has no catalog segment"):
+        Case("local", "short", "pre-port", input="data/image.png").segment_ref()
+
+
 def test_band_tolerance_is_twice_noise_or_floor() -> None:
     assert check_band(LOWER, 1.0, 1.1, {"ate": 0.01}).passed  # floor 0.1 wins
     assert not check_band(LOWER, 1.0, 1.11, {"ate": 0.01}).passed
@@ -104,6 +114,16 @@ def test_golden_path_needs_the_goldens_root(monkeypatch: pytest.MonkeyPatch, tmp
     assert golden_path("pkg", "block", "short", "pre2") == tmp_path / "pkg/block/short.pre2.rrd"
 
 
+def test_pre_golden_is_the_pre_run_beside_a_golden_or_its_partial(tmp_path: Path) -> None:
+    case = Case("short", "short", "pre-port", dataset="ds", segment="seg")
+    with pytest.raises(FileNotFoundError, match="run --phase pre first"):
+        pre_golden(case, tmp_path / "short.post.rrd")
+    (tmp_path / "short.pre.rrd").write_bytes(b"")
+    assert pre_golden(case, tmp_path / "short.post.partial") == pre_golden(case, tmp_path / "short.pre2.rrd") == tmp_path / "short.pre.rrd"
+    (tmp_path / "short.pre.partial").write_bytes(b"")
+    assert pre_golden(case, tmp_path / "short.pre.partial") == tmp_path / "short.pre.partial"  # the pre run scores itself
+
+
 SHORT_CARD = """
 package = "dagkit"
 
@@ -126,7 +146,7 @@ noise = { ate = 0.01 }
 @pytest.fixture
 def card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("DAGKIT_GOLDENS", str(tmp_path / "goldens"))
-    monkeypatch.setattr(verify.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="abc1234\n"))
+    monkeypatch.setattr(verify, "git", lambda *args: "abc1234")
     (tmp_path / "VERIFY.toml").write_text(SHORT_CARD)
     return tmp_path / "VERIFY.toml"
 
@@ -136,6 +156,30 @@ def test_post_fails_closed_without_pre2_and_passes_with_it(card: Path) -> None:
     assert verify.main(verify.VerifyArgs(card, "post")) == 1  # no pre2 golden: no noise evidence
     assert verify.main(verify.VerifyArgs(card, "pre2")) == 0
     assert verify.main(verify.VerifyArgs(card, "post")) == 0
+
+
+def test_reference_goldens_are_write_once(card: Path) -> None:
+    """A pre / pre2 run on a ported tree would replace the pre-port reference with the port's own output."""
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 0
+    golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
+    kept: int = golden.stat().st_ino
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 1 and golden.stat().st_ino == kept
+    assert verify.main(verify.VerifyArgs(card, "pre", overwrite=True)) == 0 and golden.stat().st_ino != kept
+    assert verify.main(verify.VerifyArgs(card, "pre2")) == 0 and verify.main(verify.VerifyArgs(card, "pre2")) == 1
+    assert verify.main(verify.VerifyArgs(card, "post")) == 0 and verify.main(verify.VerifyArgs(card, "post")) == 0  # post is rewritten
+
+
+def test_post_scores_each_golden_once(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 0 and verify.main(verify.VerifyArgs(card, "pre2")) == 0
+    scored: list[str] = []
+
+    def score(case: object, golden: Path) -> dict[str, float]:
+        scored.append(golden.name)
+        return {"ate": 1.0}
+
+    monkeypatch.setattr(dagkit_fakes, "verify_score", score)
+    assert verify.main(verify.VerifyArgs(card, "post")) == 0
+    assert sorted(scored) == ["short.post.partial", "short.pre.rrd", "short.pre2.rrd"]
 
 
 def test_an_empty_selection_fails(card: Path) -> None:
@@ -153,7 +197,7 @@ def test_register_publishes_an_immutable_copy(card: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(verify.SegmentRef, "entry", lambda self: FakeDataset())
     assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
-    assert verify.main(verify.VerifyArgs(card, "pre", register=True)) == 0
+    assert verify.main(verify.VerifyArgs(card, "pre", register=True, overwrite=True)) == 0
     uris: list[str] = [uris[0] for uris, _ in registered]
     golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
     assert len(set(uris)) == 2 and golden.as_uri() not in uris and {name for _, name in registered} == {"verify-fake-pre-abc1234"}

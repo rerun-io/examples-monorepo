@@ -6,8 +6,6 @@ catalog layer. Presets (``quality``, ``fast``) are node parameters in ``profiles
 (``tools/apps/capture.py``) and the generated gradio app (``tools/apps/capture_gradio.py``) run the same ``build``.
 """
 
-import importlib.metadata
-import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -129,9 +127,7 @@ def app_graph(config: Config, recording: rr.RecordingStream, video: CatalogVideo
     """
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS, timeline=video.clock)}
     if config.output_dir is not None and config.video is None:
-        sha: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, cwd=PACKAGE_DIR).stdout.strip()
-        producer = Producer("mamma", f"{importlib.metadata.version('mamma')}+{sha}", "mamma-capture", profile)
-        layer, partial = open_layer(config.segment, LAYER, producer, output_dir=config.output_dir)
+        layer, partial = open_layer(config.segment, LAYER, Producer.of("mamma", "mamma-capture", profile), output_dir=config.output_dir)
         sinks[LAYER] = LayerSink(layer, partial, config.segment, LAYER, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, register=config.register)
     recording.send_blueprint(default_blueprint(video.cameras))
     return capture_graph(video, *nodes, sinks)

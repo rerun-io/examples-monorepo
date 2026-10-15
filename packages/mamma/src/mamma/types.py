@@ -14,7 +14,7 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from dagkit.time import STATIC, TimeNs
-from dagkit.types import Log, row_times
+from dagkit.types import Log, column, row_times
 from jaxtyping import Bool, Float32, Int32, Int64
 from numpy import ndarray
 from PIL import Image
@@ -28,12 +28,6 @@ MESH_ALBEDO: tuple[float, float, float, float] = (1.0, 0.55, 0.0, 0.8)
 
 def _person(path: str) -> int:
     return int(path.rsplit("person_", 1)[1].split("/")[0])
-
-
-def _column(table: pa.Table, path: str, component: str) -> list:
-    """One entity's component cells, one per row (``None`` where the row has none)."""
-    name: str = f"{path}:{component}"
-    return table.column(name).to_pylist() if name in table.column_names else [None] * table.num_rows
 
 
 def _entities(table: pa.Table, root: str, component: str) -> list[str]:
@@ -53,9 +47,9 @@ def _view_logs(root: str, views: tuple[str, ...], scale_xy: Float32[ndarray, "v 
 def _views(table: pa.Table, root: str) -> tuple[tuple[str, ...], Float32[ndarray, "v 2"]]:
     """The views ``_view_logs`` wrote, in their order, with their scales (a rig in the same recording has its own ``view_index``)."""
     paths: list[str] = [p for p in _entities(table, root, "view_index") if p.endswith("/pinhole/mamma")]
-    first: list[list] = [next(c for c in _column(table, p, "view_index") if c is not None) for p in paths]
+    first: list[list] = [next(c for c in column(table, f"{p}:view_index") if c is not None) for p in paths]
     paths = [p for _, p in sorted(zip([f[0] for f in first], paths, strict=True))]
-    scales: list[list[float]] = [next(c for c in _column(table, p, "Transform3D:scale") if c is not None)[0][:2] for p in paths]
+    scales: list[list[float]] = [next(c for c in column(table, f"{p}:Transform3D:scale") if c is not None)[0][:2] for p in paths]
     return tuple(p.removeprefix(f"{root}/").removesuffix("/pinhole/mamma") for p in paths), np.asarray(scales, dtype=np.float32).reshape(-1, 2)
 
 
@@ -104,14 +98,14 @@ class MultiViewTracks:
         """Masks come back as host tensors (a resumed value moves to the device in its consumer)."""
         views, scale_xy = _views(table, root)
         names: tuple[str, ...] = ("person", "score", "frame_index", "Boxes2D:centers", "Boxes2D:half_sizes", "mask_hw")
-        columns: list[list[list]] = [[_column(table, f"{root}/{view}/pinhole/mamma/persons", name) for name in names] for view in views]
+        columns: list[list[list]] = [[column(table, f"{root}/{view}/pinhole/mamma/persons:{name}") for name in names] for view in views]
         for row, t_ns in enumerate(row_times(table, timeline)):
             if all(view[2][row] is None for view in columns):
                 continue
             person, score, frame, center, half, mask_hw = ([np.asarray(view[k][row] or [], dtype=np.float32) for view in columns] for k in range(len(names)))
             mask_row: pa.Table = table.slice(row, 1)
             blobs: list[bytes] = [
-                bytes(_column(mask_row, f"{root}/{view}/pinhole/mamma/masks/person_{int(p):02d}", "EncodedImage:blob")[0][0])
+                bytes(column(mask_row, f"{root}/{view}/pinhole/mamma/masks/person_{int(p):02d}:EncodedImage:blob")[0][0])
                 for view, people in zip(views, person, strict=True)
                 for p in people.tolist()
             ]
@@ -165,8 +159,8 @@ class MultiViewLandmarks:
         views, scale_xy = _views(table, root)
         paths: list[str] = [p for p in _entities(table, root, "floor_contact") if "/pinhole/mamma/landmarks/person_" in p]
         names: tuple[str, ...] = ("Points2D:positions", "log_variance", "visibility", "floor_contact")
-        columns: dict[str, list[list]] = {path: [_column(table, path, name) for name in names] for path in paths}
-        frames: list[list] = [_column(table, f"{root}/{view}/pinhole/mamma/landmarks", "frame_index") for view in views]
+        columns: dict[str, list[list]] = {path: [column(table, f"{path}:{name}") for name in names] for path in paths}
+        frames: list[list] = [column(table, f"{root}/{view}/pinhole/mamma/landmarks:frame_index") for view in views]
         for row, t_ns in enumerate(row_times(table, timeline)):
             frame: list | None = next((f[row] for f in frames if f[row] is not None), None)
             if frame is None:
@@ -214,7 +208,7 @@ class SmplxFits:
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "SmplxFits"]]:
         people: list[str] = [p.removesuffix("/body/smplx") for p in _entities(table, root, "frame_index") if p.endswith("/body/smplx")]
         names: tuple[str, ...] = ("pose", "betas", "trans", "frame_index")
-        columns: dict[str, list[list]] = {p: [_column(table, f"{p}/body/mesh", "Mesh3D:vertex_positions")] + [_column(table, f"{p}/body/smplx", n) for n in names] for p in people}
+        columns: dict[str, list[list]] = {p: [column(table, f"{p}/body/mesh:Mesh3D:vertex_positions")] + [column(table, f"{p}/body/smplx:{n}") for n in names] for p in people}
         for row, t_ns in enumerate(row_times(table, timeline)):
             fitted: list[str] = [p for p in people if columns[p][4][row] is not None]
             if fitted:
@@ -244,7 +238,7 @@ class BodyTopology:
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "BodyTopology"]]:
         meshes: list[str] = _entities(table, root, "Mesh3D:triangle_indices")
         if meshes:
-            faces: list = next(c for c in _column(table, meshes[0], "Mesh3D:triangle_indices") if c is not None)
+            faces: list = next(c for c in column(table, f"{meshes[0]}:Mesh3D:triangle_indices") if c is not None)
             yield STATIC, cls(tuple(_person(p) for p in meshes), np.asarray(faces, dtype=np.int32).reshape(-1, 3))
 
 
@@ -272,7 +266,7 @@ class Landmarks3d:
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Landmarks3d"]]:
         paths: list[str] = [p for p in _entities(table, root, "valid") if p.endswith("/landmarks3d")]
-        columns: dict[str, list[list]] = {p: [_column(table, p, name) for name in ("Points3D:positions", "valid", "frame_index")] for p in paths}
+        columns: dict[str, list[list]] = {p: [column(table, f"{p}:{name}") for name in ("Points3D:positions", "valid", "frame_index")] for p in paths}
         for row, t_ns in enumerate(row_times(table, timeline)):
             present: list[str] = [p for p in paths if columns[p][1][row] is not None]
             if not present:

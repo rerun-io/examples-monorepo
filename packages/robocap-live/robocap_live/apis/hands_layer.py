@@ -13,8 +13,9 @@ from typing import Literal
 
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit.app import run_app, with_pipeline
-from dagkit.graph import AsOf, Graph
+from dagkit.app import health_views, run_app, with_pipeline
+from dagkit.doc import HEALTH_ROOT
+from dagkit.graph import Graph
 from dagkit.node import Mode, Node, Source
 from dagkit.runners import RunReport
 from dagkit.sinks import LayerFileSink, Register, RerunSink
@@ -51,16 +52,11 @@ class Config:
 
 def blueprint(graphs: Sequence[Graph]) -> rrb.Blueprint:
     """The run health, one plot per series (``wall_time``), then the "pipeline (debug)" tab with the hands and their step's health."""
-    series: list[str] = [
-        f"{e.dst.node}/{what}/{e.dst.port}" for g in graphs for e in g.edges if not isinstance(e.kind, AsOf) for what in ("drops", "queue_depth")
-    ]
-    series += [f"{name}/step_ms" for g in graphs for name, spec in g.nodes.items() if spec.kind == "node"]
-    unique: list[str] = list(dict.fromkeys(series))  # both graphs name their sinks publish and viewer
-    normal = rrb.Blueprint(rrb.Grid(*(rrb.TimeSeriesView(origin=f"/dagkit/health/{s}", name=s) for s in unique)), rrb.TimePanel(timeline="wall_time"))
+    normal = rrb.Blueprint(rrb.Grid(*health_views(graphs)), rrb.TimePanel(timeline="wall_time"))
     outputs: list[rrb.View] = [
         rrb.Spatial3DView(origin="/world", contents="+ /world/hands/**", name="2 hands · hands in 3D"),
         rrb.Spatial2DView(origin="/world/rig_00/cam_00/pinhole", name="2 hands · cam_00 overlays"),
-        rrb.TimeSeriesView(origin="/dagkit/health/hands", name="2 hands · step ms and queue"),
+        rrb.TimeSeriesView(origin=HEALTH_ROOT + "hands", name="2 hands · step ms and queue"),
     ]
     return with_pipeline(normal, outputs, graphs=[g.name for g in graphs] if len(graphs) > 1 else ())
 
@@ -87,20 +83,13 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
 
 
-def case_segment(case: Case) -> SegmentRef:
-    """The case's catalog segment, windowed when the case has a window."""
-    assert case.dataset is not None and case.segment is not None, "robocap-live cases are catalog segments"
-    window: tuple[int, int] | None = None if case.window_s is None else (round(case.window_s[0] * 1e9), round(case.window_s[1] * 1e9))
-    return SegmentRef(case.dataset, case.segment, window_ns=window)
-
-
 def case_config(case: Case, output_dir: Path, slam: Literal["vio", "catalog"]) -> Config:
     """The App's Config for a case (``models_dir`` relative to the package; VIO params of a ``robocap`` case), unregistered."""
     assert int(case.params["group_tolerance_ns"]) == GROUP_TOLERANCE_NS, f"{case.name}: the graph groups framesets within {GROUP_TOLERANCE_NS} ns"
     hands: HandsParams = from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
                                                  "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
     vio: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")}) if slam == "vio" else VioParams()
-    return Config(RerunTyroConfig(headless=True), case_segment(case), output_dir, hands, slam, vio, register="off")
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), output_dir, hands, slam, vio, register="off")
 
 
 def examples() -> list[Config]:

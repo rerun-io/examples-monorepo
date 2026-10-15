@@ -16,8 +16,8 @@ from hypothesis import strategies as st
 
 from dagkit.graph import AsOf, Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Control, Event, Fenced, RunContext, Tick
-from dagkit.runners import RunReport, run_segments, run_sequential, run_threaded
-from dagkit.sources import IterSource, SegmentRef
+from dagkit.runners import RunReport, run_sequential, run_threaded
+from dagkit.sources import IterSource
 from dagkit.testing import collect_edges
 from dagkit.time import GraphError
 
@@ -226,30 +226,6 @@ def test_stop_drains_flushes_and_reports_stopped(runner: str) -> None:
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
-def test_reset_barrier_bumps_world_once(runner: str) -> None:
-    control = Control()
-    add = Add(0)
-    worlds: list[int] = []
-    sink = Collect(("y",))
-    graph = Graph("reset")
-    src = graph.source("src", source([(t, "x", t) for t in range(10)]))
-    node = graph.node("add", add)
-    graph.edge(src["x"], node["x"], Block(1))
-    graph.edge(node["y"], graph.sink("sink", sink)["y"], Block(1))
-    fired = threading.Event()
-
-    def maybe_reset(tick: Tick) -> None:
-        if tick.t_ns == 4 and not fired.is_set():
-            fired.set()
-            control.reset(["add"])
-
-    sink.on_step = lambda tick: (worlds.append(add.world), maybe_reset(tick))  # type: ignore[assignment]
-    RUNNERS[runner](graph, control=control)
-    assert add.resets == 2 and add.flushes == 2  # start + barrier; barrier + end
-    assert worlds[0] == 0 and worlds[-1] == 1 and sorted(worlds) == worlds
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
 def test_segment_node_runs_once_on_everything(runner: str) -> None:
     graph = Graph("segment")
     src = graph.source("src", source([(t, "x", t) for t in range(1, 11)]))
@@ -276,26 +252,6 @@ def test_process_placement_matches_thread() -> None:
     run_threaded(in_thread, mode="lossless")
     run_threaded(in_process, mode="lossless")
     assert process_sink.items == thread_sink.items == [("y", t, t * t + 1) for t in range(8)]
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_reconfigure_applies_params_at_the_barrier(runner: str) -> None:
-    control = Control()
-    params: list[dict] = []
-
-    class Configurable(Add):
-        def reset(self, ctx: RunContext) -> None:
-            super().reset(ctx)
-            params.append(dict(ctx.params))
-
-    graph = Graph("reconfigure")
-    src = graph.source("src", source([(t, "x", t) for t in range(6)]))
-    node = graph.node("add", Configurable(0))
-    sink = Collect(("y",), on_step=lambda tick: control.reconfigure({"add": {"k": 5}}) if tick.t_ns == 2 else None)
-    graph.edge(src["x"], node["x"], Block(1))
-    graph.edge(node["y"], graph.sink("sink", sink)["y"], Block(1))
-    RUNNERS[runner](graph, control=control)
-    assert params == [{}, {"k": 5}]
 
 
 class Model:
@@ -328,6 +284,52 @@ def test_resources_are_built_once_shared_and_closed(runner: str) -> None:
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
+@pytest.mark.parametrize("ending", ["fails", "stops"])
+def test_a_run_closes_its_source_generators_although_the_error_is_kept(runner: str, ending: str) -> None:
+    """A generator Source that holds a resource in ``with`` / ``finally`` (an open segment, a camera) releases it with the
+    run, not when the caller drops the exception (whose traceback keeps the suspended generator alive)."""
+    closed: list[bool] = []
+    control = Control()
+
+    def events():  # noqa: ANN202
+        try:
+            for t in range(50):
+                if ending == "stops" and t == 3:
+                    control.stop()
+                yield Event(t, "x", t)
+        finally:
+            closed.append(True)
+
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            if ending == "fails" and tick.t_ns == 3:
+                raise KeyError("boom")
+            super().step(tick, out)
+
+    graph = Graph("closes")
+    node = graph.node("boom", Boom(0))
+    graph.edge(graph.source("src", IterSource({"x": int}, events))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",)))["y"])
+    if ending == "fails":
+        with pytest.raises(KeyError, match="boom") as kept:
+            RUNNERS[runner](graph)
+        assert kept.value is not None and closed == [True]
+    else:
+        assert RUNNERS[runner](graph, control=control).status == "stopped" and closed == [True]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_sink_gets_the_resources_it_needs(runner: str) -> None:
+    """An export that reads a graph-owned buffer at flush (mast3r-slam's Nerfstudio export) is a sink, not a step."""
+    graph = Graph("export")
+    graph.resource("shared", Model)
+    sink = Collect(("x",))
+    graph.edge(graph.source("src", source([(1, "x", 1)]))["x"], graph.sink("export", sink, needs=("shared",))["x"])
+    RUNNERS[runner](graph)
+    assert sink.ctx is not None and isinstance(sink.ctx.resources["shared"], Model) and sink.items == [("x", 1, 1)]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
 def test_a_finished_run_frees_its_resources_without_the_cyclic_gc(runner: str) -> None:
     """A run's models and buffers free when it returns, not at the next cyclic collection (a verify card runs many
     cases in one process; a caller may keep its Control)."""
@@ -353,20 +355,6 @@ def test_a_finished_run_frees_its_resources_without_the_cyclic_gc(runner: str) -
         assert built and built[0]() is None
     finally:
         gc.enable()
-
-
-def test_run_segments_runs_one_lossless_graph_per_segment() -> None:
-    sinks: dict[str, Collect] = {}
-
-    def build(segment: SegmentRef) -> Graph:
-        graph = Graph(f"layer-{segment.segment}")
-        sinks[segment.segment] = Collect(("x",))
-        graph.edge(graph.source("src", source([(t, "x", len(segment.segment)) for t in range(3)]))["x"], graph.sink("sink", sinks[segment.segment])["x"])
-        return graph
-
-    reports: list[RunReport] = run_segments(build, [SegmentRef("ds", "a"), SegmentRef("ds", "bb")], runner="sequential")
-    assert [r.graph for r in reports] == ["layer-a", "layer-bb"] and {r.mode for r in reports} == {"lossless"}
-    assert sinks["bb"].items == [("x", t, 2) for t in range(3)]
 
 
 # ── regressions from the 02-leaf thermo review ─────────────────────────────────────────────────
@@ -395,51 +383,6 @@ def test_no_sibling_flushes_after_a_failure(runner: str) -> None:
     with pytest.raises(KeyError, match="boom"):
         RUNNERS[runner](graph)
     assert slow.flushes == 0
-
-
-class Recorded(Add):
-    """Join that records (t, world, asof) per tick."""
-
-    def __init__(self) -> None:
-        super().__init__(0, with_asof=True)
-        self.seen: list[tuple[int, int, object]] = []
-
-    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
-        self.seen.append((tick.t_ns, self.world, tick.asof["a"]))
-        super().step(tick, out)
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_reset_finishes_pending_ticks_in_the_old_world(runner: str) -> None:
-    control = Control()
-
-    def events():  # noqa: ANN202
-        for t in range(1, 6):
-            yield Event(t, "x", t)
-            if t == 1:
-                control.reset()
-                time.sleep(0.3)  # threaded: the coordinator pauses this source before its next event
-
-    join = Recorded()
-    graph = Graph("reset-diamond")
-    src = graph.source("src", IterSource({"x": int}, events))
-    late, ref = graph.node("late", Batch(size=10_000)), graph.node("join", join)
-    graph.edge(src["x"], late["x"], Block(1))
-    graph.edge(src["x"], ref["x"], Block(1))
-    graph.edge(late["y"], ref["a"], AsOf())
-    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"], Block(1))
-    RUNNERS[runner](graph, control=control)
-    assert join.seen[0] == (1, 0, 10)
-    assert all(asof == 10 * t for t, _, asof in join.seen) and join.seen[-1][1] == 1
-
-
-def test_sinks_and_segment_nodes_cannot_be_reset() -> None:
-    control = Control()
-    sink = Collect(("x",), on_step=lambda tick: control.reset(["sink"]) if tick.t_ns == 1 else None)
-    graph = Graph("reset-sink")
-    graph.edge(graph.source("src", source([(t, "x", t) for t in range(4)]))["x"], graph.sink("sink", sink)["x"])
-    with pytest.raises(GraphError, match="plain nodes"):
-        run_sequential(graph, control=control)
 
 
 class SlowAdd(Add):
@@ -506,6 +449,47 @@ class Typed2:
 
     def flush(self, out) -> None:  # noqa: ANN001
         pass
+
+
+class SlowPair(Typed2):
+    """Typed2 that takes a moment per tick (a decode-bound VIO behind a fast source)."""
+
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        time.sleep(0.0003)
+        super().step(tick, out)
+
+
+def test_a_two_port_node_keeps_its_block_backpressure() -> None:
+    """slam-rs's VioNode shape (imu + frames from one source, Block(4) each): what waits for the node stays within its queues.
+    It once drained both queues into an unbounded pending deque on every look, so a fast source ran ahead (3,501 of 4,000)."""
+    order: list[tuple[str, int]] = []
+    graph = Graph("backpressure")
+    src = graph.source("src", source([(t, port, t) for t in range(1, 301) for port in ("a", "b")], ports=("a", "b")))
+    pair = graph.node("pair", SlowPair(order))
+    graph.edge(src["a"], pair["a"], Block(4))
+    graph.edge(src["b"], pair["b"], Block(4))
+    report: RunReport = run_threaded(graph, mode="lossless")
+    assert order == [(port, t) for t in range(1, 301) for port in ("a", "b")]
+    assert max(stats.pending_max for stats in report.nodes["pair"].ports.values()) <= 8
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+@pytest.mark.parametrize("b_at_5", [6, 1])  # 1: one queue holds a single value while the producer waits on the other, full one
+def test_a_burst_at_one_time_through_full_queues_still_flows(runner: str, b_at_5: int) -> None:
+    """Values at one time through Block(2) queues: the node cannot step before the time is complete, so the queues spill
+    into pending instead of blocking the producer for good."""
+    order: list[tuple[str, int]] = []
+    events = [(5, "b", 0)] * b_at_5 + [(5, "a", 0)] * 6 + [(6, "a", 0), (6, "b", 0)]
+    graph = Graph("burst")
+    src = graph.source("src", source(events, ports=("a", "b")))
+    pair = graph.node("pair", Typed2(order))
+    graph.edge(src["a"], pair["a"], Block(2))
+    graph.edge(src["b"], pair["b"], Block(2))
+    done = threading.Thread(target=RUNNERS[runner], args=(graph,), daemon=True)
+    done.start()
+    done.join(20.0)
+    assert not done.is_alive(), "the run deadlocked"
+    assert order == [("a", 5)] * 6 + [("b", 5)] * b_at_5 + [("a", 6), ("b", 6)]
 
 
 def test_stream_span_uses_min_and_max_source_time() -> None:
@@ -578,146 +562,6 @@ def test_process_node_with_an_unpicklable_resource_fails_instead_of_hanging() ->
 
 
 # ── regressions from the 02-leaf review-loop thermo review ─────────────────────────────────────
-
-
-def late_join(control: Control, targets: list[str], size: int = 10_000) -> tuple[Graph, Recorded]:
-    """src -> late (Batch: flush-only by default) -> AsOf -> join, src -> join; the source asks for a reset after t=1."""
-
-    def events():  # noqa: ANN202
-        for t in (1, 2):
-            yield Event(t, "x", t)
-            if t == 1:
-                control.reset(targets)
-                time.sleep(0.3)  # threaded: the coordinator pauses this source before its next event
-
-    join = Recorded()
-    graph = Graph("reset-late")
-    src = graph.source("src", IterSource({"x": int}, events))
-    late, ref = graph.node("late", Batch(size=size)), graph.node("join", join)
-    graph.edge(src["x"], late["x"])
-    graph.edge(src["x"], ref["x"])
-    graph.edge(late["y"], ref["a"], AsOf())
-    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
-    return graph, join
-
-
-@pytest.mark.parametrize("size", [1, 10_000])  # 1: the flush emits nothing, only the barrier's watermark frees join
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_resetting_a_producer_keeps_its_old_world_asof_values(runner: str, size: int) -> None:
-    control = Control()
-    graph, join = late_join(control, ["late"], size)
-    RUNNERS[runner](graph, control=control)
-    assert join.seen == [(1, 0, 10), (2, 0, 20)]
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_a_consumer_reset_waits_for_its_old_ticks(runner: str) -> None:
-    control = Control()
-    graph, join = late_join(control, ["join"])  # join's t=1 tick waits on `late`, which only emits at the end
-    RUNNERS[runner](graph, control=control)
-    assert join.seen == [(1, 0, 10), (2, 1, 20)]  # the cut runs in join's own stream, after its old tick
-
-
-class EndOnly(Add):
-    """Plain node that emits only at flush, at the time of its last tick."""
-
-    def reset(self, ctx: RunContext) -> None:
-        super().reset(ctx)
-        self.saved: Tick | None = None
-
-    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
-        self.saved = tick
-
-    def flush(self, out) -> None:  # noqa: ANN001
-        if self.saved is not None:
-            out.put("y", self.saved.t_ns, int(self.saved.value))  # type: ignore[call-overload]
-            self.saved = None
-
-
-class Future(Add):
-    """Emits one value dated in the future (t=100) on its first tick, then nothing."""
-
-    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
-        if tick.value == 1:
-            out.put("y", 100, 10)
-
-
-def reset_after_first(control: Control, targets: list[str], events: list[tuple[int, int]]) -> IterSource:
-    def gen():  # noqa: ANN202
-        for i, (t, value) in enumerate(events):
-            yield Event(t, "x", value)
-            if i == 0:
-                control.reset(targets)
-                time.sleep(0.2)
-
-    return IterSource({"x": int}, gen)
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_a_reset_lets_a_plain_node_flush_at_its_last_tick(runner: str) -> None:
-    control, sink = Control(), Collect(("y",))
-    graph = Graph("end-only")
-    end = graph.node("end", EndOnly(0))
-    graph.edge(graph.source("src", reset_after_first(control, ["end"], [(1, 1), (2, 2)]))["x"], end["x"])
-    graph.edge(end["y"], graph.sink("sink", sink)["y"])
-    RUNNERS[runner](graph, control=control)
-    assert sink.items == [("y", 1, 1), ("y", 2, 2)]
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_a_reset_hides_old_values_dated_after_the_cut(runner: str) -> None:
-    control, join = Control(), Recorded()
-    graph = Graph("future")
-    src = graph.source("src", reset_after_first(control, ["predict"], [(1, 1), (101, 2)]))
-    predict, ref = graph.node("predict", Future(0)), graph.node("join", join)
-    graph.edge(src["x"], predict["x"])
-    graph.edge(src["x"], ref["x"])
-    graph.edge(predict["y"], ref["a"], AsOf())
-    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
-    graph.edge(predict["y"], graph.sink("predict_sink", Collect(("y",)))["y"])
-    RUNNERS[runner](graph, control=control)
-    assert [(t, asof) for t, _, asof in join.seen] == [(1, None), (101, None)]
-
-
-def test_a_reset_inside_a_timestamp_is_kept_and_never_splits_it() -> None:
-    class Worlds(Add):
-        def __init__(self) -> None:
-            super().__init__(0)
-            self.seen: list[tuple[object, int]] = []
-
-        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
-            self.seen.append((tick.value, self.world))
-
-    control, node = Control(), Worlds()
-    graph = Graph("tie")
-    ref = graph.node("node", node)
-    graph.edge(graph.source("src", reset_after_first(control, ["node"], [(1, 10), (1, 20)]))["x"], ref["x"])
-    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
-    run_sequential(graph, control=control)
-    assert node.seen == [(10, 0), (20, 0)] and node.resets == 2 and node.flushes == 2  # the cut applies after time 1
-
-
-@pytest.mark.parametrize("runner", RUNNERS)
-def test_reset_of_a_join_over_a_plain_producer_finishes_the_old_world(runner: str) -> None:
-    control = Control()
-
-    def events():  # noqa: ANN202
-        for t in range(1, 5):
-            yield Event(t, "x", t)
-            if t == 2:
-                control.reset(["join"])
-                time.sleep(0.3)
-
-    join = Recorded()
-    graph = Graph("reset-plain")
-    src = graph.source("src", IterSource({"x": int}, events))
-    plus, ref = graph.node("plus", Add(100)), graph.node("join", join)
-    graph.edge(src["x"], plus["x"])
-    graph.edge(src["x"], ref["x"])
-    graph.edge(plus["y"], ref["a"], AsOf())  # join's tick t waits until `plus` is final through t
-    graph.edge(ref["y"], graph.sink("sink", Collect(("y",)))["y"])
-    RUNNERS[runner](graph, control=control)
-    assert join.seen == [(1, 0, 101), (2, 0, 102), (3, 1, 103), (4, 1, 104)]
 
 
 @dataclass(frozen=True)

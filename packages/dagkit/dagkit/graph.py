@@ -22,8 +22,7 @@ class DropOldest:
 
 @dataclass(frozen=True, slots=True)
 class AsOf:
-    wait_ns: int | None = None  # realtime only: how long to wait for the producer watermark (None or 0: never). Lossless always waits
-    keep: int = 128  # realtime only: history bound
+    keep: int = 128  # realtime only: history bound (lossless waits for the producer watermark)
 
 
 PortKind: TypeAlias = Block | DropOldest | AsOf
@@ -119,15 +118,18 @@ class Graph:
         kind: NodeKind = "segment" if hasattr(node, "run") and not hasattr(node, "step") else "node"
         return self._add(NodeSpec(name, node, kind, placement, tuple(needs)))
 
-    def sink(self, name: str, sink: Node) -> NodeRef:
-        return self._add(NodeSpec(name, sink, "sink", Placement(), ()))
+    def sink(self, name: str, sink: Node, *, needs: Sequence[str] = ()) -> NodeRef:
+        return self._add(NodeSpec(name, sink, "sink", Placement(), tuple(needs)))
 
     def edge(self, src: PortRef, dst: PortRef, kind: PortKind = Block()) -> None:
         self.edges.append(EdgeSpec(src, dst, kind))
 
-    def checkpoint(self, src: PortRef, sink: LayerSink) -> None:
-        ref: NodeRef = self.sink(f"{src.node}_{src.port}_layer", sink)
-        self.edge(src, ref[src.port if src.port in sink.inputs else next(iter(sink.inputs))])
+    def sinks(self, ports: Mapping[str, PortRef], sinks: Mapping[str, Node]) -> None:
+        """Add every sink and feed each of its inputs from the producer port named like it."""
+        for name, sink in sinks.items():
+            ref: NodeRef = self.sink(name, sink)
+            for port in sink.inputs:
+                self.edge(ports[port], ref[port])
 
     def order(self) -> list[str]:
         sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter({name: set() for name in self.nodes})

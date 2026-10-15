@@ -1,5 +1,6 @@
-"""Local inputs as dagkit Sources: a video file or a directory of images, as one-view ``MultiViewFrames`` on the CPU."""
+"""Local inputs as dagkit Sources: a video file, a directory of images or a live camera, as one-view ``MultiViewFrames`` on the CPU."""
 
+import time
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -68,6 +69,38 @@ class ImageDirSource:
                 raise ValueError(f"{path}: not a readable image")
             rgb: UInt8[ndarray, "h w 3"] = np.ascontiguousarray(bgr[..., ::-1])
             yield _frames(round(i * self.stride / self.fps * 1e9), i * self.stride, self.view, torch.from_numpy(rgb).permute(2, 0, 1))
+
+    def close(self) -> None:
+        pass
+
+
+class WebcamSource:
+    """Read frames from a live camera.
+
+    OpenCV camera ``device`` on a monotonic clock that starts at the first frame (feed it through a DropOldest edge and
+    run the graph realtime)."""
+
+    clock: str = "video_time"
+    outputs: Mapping[str, PortType] = {"frames": MultiViewFrames}
+
+    def __init__(self, device: int = 0, max_frames: int | None = None) -> None:
+        self.device, self.max_frames = device, max_frames
+
+    def events(self) -> Iterator[Event]:
+        capture = cv2.VideoCapture(self.device)
+        start: int | None = None
+        try:
+            index: int = 0
+            while self.max_frames is None or index < self.max_frames:
+                ok, bgr = capture.read()
+                if not ok:
+                    raise ValueError(f"camera {self.device}: no frame")
+                start = start if start is not None else time.monotonic_ns()
+                rgb: UInt8[ndarray, "h w 3"] = np.ascontiguousarray(bgr[..., ::-1])
+                yield _frames(time.monotonic_ns() - start, index, "webcam", torch.from_numpy(rgb).permute(2, 0, 1))
+                index += 1
+        finally:
+            capture.release()
 
     def close(self) -> None:
         pass

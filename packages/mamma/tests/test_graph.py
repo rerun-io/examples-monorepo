@@ -8,7 +8,8 @@ from dagkit.graph import Graph
 from dagkit.node import Emit, Fenced, PortType, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
 from dagkit.sources import IterSource
-from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene, host
+from dagkit.testing import host
+from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 

@@ -1,6 +1,9 @@
 """Profiles (hand-written TOML, coerced, strict) and the generated gradio app."""
 
 import dataclasses
+import gc
+import tempfile
+import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,29 +12,27 @@ from typing import Any, Literal
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from dagkit_fakes import Collect, source
+from dagkit_fakes import Add, Collect, source
 from rerun.chunk import RrdReader
 from serde import coerce, serde
 
 from dagkit.apis import synthetic_demo
 from dagkit.apis.synthetic_demo import DemoRerunConfig
-from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, load_profile, run_app, with_pipeline
+from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, health_views, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
 from dagkit.node import Emit, Mode, Tick
+from dagkit.runners import run_sequential
 from dagkit.sources import SegmentRef
+from dagkit.testing import check_form
 
 PROFILE = """
 hardware = "x86_64-cuda"
 
 [nodes.fit]
-cpus = [6, 7]
 params = { iterations = 30, lr = 1 }
 
 [presets.fast.fit]
 params = { iterations = 5 }
-
-[presets.fast.track]
-placement = "process"
 """
 
 
@@ -46,9 +47,8 @@ class FitConfig:
 def test_profile_merges_presets_and_configures_nodes(tmp_path: Path) -> None:
     (tmp_path / "x86_64-cuda.toml").write_text(PROFILE)
     profile: Profile = load_profile(tmp_path, "x86_64-cuda")
-    assert profile.node("fit") == NodeProfile("thread", [6, 7], {"iterations": 30, "lr": 1})
-    assert profile.node("fit", "fast") == NodeProfile("thread", [6, 7], {"iterations": 5, "lr": 1})
-    assert profile.node("track", "fast").placement == "process"
+    assert profile.node("fit") == NodeProfile({"iterations": 30, "lr": 1})
+    assert profile.node("fit", "fast") == NodeProfile({"iterations": 5, "lr": 1}) and profile.node("track", "fast") == NodeProfile()
     assert profile.configure("fit", FitConfig(), "fast") == FitConfig(iterations=5, lr=1.0, polish=True)
     with pytest.raises(KeyError, match="unknown preset 'slow'"):
         profile.node("fit", "slow")
@@ -97,12 +97,6 @@ def test_gradio_app_builds_a_form_from_config_fields() -> None:
     for expected in ("segment.dataset", "segment.segment", "image", "frames", "scale", "name", "runner", "mode", "output_ply: save it, then download it", "output_ply (download)"):
         assert expected in labels, expected
     assert "rr_config" not in labels
-
-
-def test_a_preset_can_put_a_process_node_back_on_a_thread(tmp_path: Path) -> None:
-    (tmp_path / "x86_64-cuda.toml").write_text('hardware = "x86_64-cuda"\n[nodes.fit]\nplacement = "process"\n[presets.debug.fit]\nplacement = "thread"\ncpus = []\n')
-    profile: Profile = load_profile(tmp_path, "x86_64-cuda")
-    assert profile.node("fit").placement == "process" and profile.node("fit", "debug") == NodeProfile("thread", [], {})
 
 
 @dataclass
@@ -207,12 +201,47 @@ def test_nested_literal_optional_and_output_fields_round_trip_through_the_form()
     assert first.nets == Nets(Path("/models")) and first.fill == Fill(steps=10) and first.max_frames is None and first.preset is None
     assert isinstance(first.fill.guidance, float)  # a beartyped float field never receives an int
     assert first.output_dir == Path("data/outputs") and first.output_ply is None and first.rr_config.headless
-    *_, last = run_fn(demo)("/models", "cuda", 4, 5, 1.5, "aarch64-cuda", "3", "fast", "elsewhere", False, True, "threaded", "lossless")
+    offered: bool = False
+    for last in run_fn(demo)("/models", "cuda", 4, 5, 1.5, "aarch64-cuda", "3", "fast", "elsewhere", False, True, "threaded", "lossless"):
+        offered = isinstance(last[-1], str) and Path(last[-1]).is_file()  # gradio copies the download while the run waits at its yield
     second: NestedConfig = built[1]
     assert second.nets == Nets(Path("/models"), "cuda", 4) and second.fill == Fill(5, 1.5) and (second.hardware, second.max_frames, second.preset) == ("aarch64-cuda", 3, "fast")
     assert second.output_scene is not None and second.output_scene.name == "output.scene" and second.output_dir == Path("elsewhere")
     zipped: str | None = last[-1]  # type: ignore[assignment]  # output_scene is a directory: offered as a zip
-    assert zipped is not None and zipped.endswith("output.scene.zip") and Path(zipped).is_file() and last[-2] is None
+    assert offered and zipped is not None and zipped.endswith("output.scene.zip") and last[-2] is None
+    assert not Path(zipped).parent.exists()  # the run's scratch directory goes with the run
+
+
+def test_a_form_run_leaves_no_scratch_directory_even_when_the_form_is_wrong(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import gradio as gr
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    demo = gradio_app(NestedConfig, lambda config, recording: Graph("empty"), title="Nested")
+    list(run_fn(demo)("/models", "auto", 0, 10, 30, "auto", "", "", "data/outputs", True, False, "threaded", "lossless"))
+    with pytest.raises(gr.Error, match="does not make a NestedConfig"):
+        list(run_fn(demo)("/models", "auto", 0, 10, 30, "auto", "three", "", "data/outputs", False, False, "threaded", "lossless"))
+    assert list(tmp_path.iterdir()) == []
+
+
+NESTED_FORM: dict[str, str] = {
+    "nets.models_dir": "Textbox", "nets.device": "Dropdown", "nets.threads": "Number", "fill.steps": "Number", "fill.guidance": "Number",
+    "hardware": "Dropdown", "max_frames": "Textbox", "preset": "Textbox", "output_dir": "Textbox", "output_ply": "Checkbox", "output_scene": "Checkbox",
+    "runner": "Dropdown", "mode": "Dropdown",
+}  # fmt: skip
+
+
+def test_check_form_wants_every_config_field_shown_in_order_or_hidden_on_purpose() -> None:
+    def build(config: NestedConfig, recording: rr.RecordingStream) -> Graph:
+        return Graph("empty")
+
+    demo = check_form(NestedConfig, build, NESTED_FORM, {"rr_config": "the form renders into its own pane"})
+    assert type(demo).__name__ == "Blocks"
+    with pytest.raises(AssertionError, match="rr_config"):
+        check_form(NestedConfig, build, NESTED_FORM, {})
+    with pytest.raises(AssertionError, match="max_frames"):
+        check_form(NestedConfig, build, {k: v for k, v in NESTED_FORM.items() if k != "max_frames"}, {"rr_config": "", "max_frames": ""})
+    with pytest.raises(AssertionError):  # the form's order is part of the table
+        check_form(NestedConfig, build, dict(reversed(NESTED_FORM.items())), {"rr_config": ""})
 
 
 @dataclass
@@ -247,6 +276,61 @@ def test_a_two_pass_app_runs_every_graph_from_the_cli_and_the_form(tmp_path: Pat
     assert {"/dagkit/graph/pass1", "/dagkit/graph/pass2", "/dagkit/guide/pass1", "/dagkit/guide/pass2", "/passes/done"} <= paths
     streamed: list[tuple[object, ...]] = list(run_fn(gradio_app(PassesConfig, two_passes, title="Passes"))(3, "sequential", "lossless"))
     assert any(out[1] for out in streamed)  # the pane got the stream; the generator's final assert ran (no gr.Error)
+
+
+def test_health_views_plot_exactly_what_the_runner_logs(tmp_path: Path) -> None:
+    graph = Graph("chain", about="Add one.")
+    src = graph.source("src", source([(t, "x", t) for t in range(3)]))
+    add = graph.node("add", Add(1))
+    graph.edge(src["x"], add["x"])
+    graph.edge(add["y"], graph.sink("keep", Collect(("y",)))["y"])
+    recording = rr.RecordingStream("dagkit-test", recording_id="health", send_properties=False)
+    recording.save(tmp_path / "health.rrd")
+    run_sequential(graph, health=recording)
+    recording.flush()
+    reader = RrdReader(tmp_path / "health.rrd")
+    logged: set[str] = {str(c.entity_path) for c in reader.stream(store=reader.recordings()[0]).to_chunks()}
+    origins: list[str] = [str(view.origin) for view in health_views([graph, graph])]
+    assert origins == ["/dagkit/health/add/drops/x", "/dagkit/health/add/queue_depth/x", "/dagkit/health/keep/drops/y", "/dagkit/health/keep/queue_depth/y", "/dagkit/health/add/step_ms"]
+    assert set(origins) <= logged
+
+
+class Weights:
+    """A model's GPU memory: a graph frees it when its nodes go."""
+
+
+class HoldsWeights(Collect):
+    def __init__(self, weights: Weights) -> None:
+        super().__init__(("x",))
+        self.weights: Weights | None = weights
+
+
+def test_each_graph_and_each_form_run_frees_its_models_before_the_next_build() -> None:
+    """A multi-pass App (exo-calib: Stage A models, then TensorRT engines) builds its next graph after the finished one
+    let go of its models, by reference counting alone (no cyclic GC, no hand-written release in the App or a node)."""
+    alive: list[weakref.ref] = []
+    seen: list[list[bool]] = []
+
+    def holding(name: str) -> Graph:
+        weights = Weights()
+        alive.append(weakref.ref(weights))
+        graph = Graph(name, about="Hold weights.")
+        graph.edge(graph.source("src", source([(0, "x", 1)]))["x"], graph.sink("keep", HoldsWeights(weights))["x"])
+        return graph
+
+    def passes(config: PassesConfig, recording: rr.RecordingStream) -> Iterator[Graph]:
+        for name in ("stage-a", "refine"):
+            seen.append([ref() is not None for ref in alive])  # earlier models, as this graph is built
+            yield holding(name)
+
+    gc.collect()
+    gc.disable()
+    try:
+        run_app(PassesConfig(), passes)
+        list(run_fn(gradio_app(PassesConfig, passes, title="Passes"))(3, "sequential", "lossless"))
+    finally:
+        gc.enable()
+    assert seen == [[], [False], [False, False], [False, False, False]]
 
 
 def test_with_pipeline_keeps_the_normal_view_first_and_active() -> None:

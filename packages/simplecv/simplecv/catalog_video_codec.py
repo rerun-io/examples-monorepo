@@ -17,6 +17,8 @@ from typing import Literal, TypeAlias
 
 import av
 import rerun as rr
+from jaxtyping import UInt8
+from numpy import ndarray
 
 if sys.version_info >= (3, 12):
     from collections.abc import Buffer
@@ -41,7 +43,7 @@ def catalog_codec_name(fourcc: int) -> CatalogCodecName:
     return _CODEC_NAME[codec]
 
 
-def wrap_mp4(samples: Sequence[Buffer], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
+def wrap_mp4(samples: Sequence[Buffer | UInt8[ndarray, " n"]], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
     """Mux pre-encoded samples into an in-memory MP4 with positional pts (no re-encode).
 
     ``add_mux_stream`` muxes without instantiating an encoder. The nominal 16x16
