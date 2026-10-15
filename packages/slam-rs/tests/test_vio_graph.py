@@ -1,11 +1,11 @@
 """The VIO node and graph on a synthetic two-camera rig through the real CPU core (unit lane: no GPU, no catalog).
 
-The node must make exactly the estimator calls ``Lockstep.push`` makes (an IMU batch, then ``track``), whatever runner delivers
-the one stream, and however the samples are split across framesets (D17); its outputs follow the dagkit node contract.
+The node hands each frameset whole (its images and the IMU samples since the previous one) to ``Lockstep.push``, whatever runner
+delivers the one stream, and however the samples are split across framesets (D17); its outputs follow the dagkit node contract.
 """
 
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -74,11 +74,9 @@ def rig(camera: CameraFactory, imu: ImuCalib) -> VioRig:
 
 
 def stream(rig: VioRig, sets: list[Frameset]) -> Iterator[Event]:
-    """What ``vio_source`` emits: STATIC rig, then per frameset its IMU batch and its images at the frameset's time."""
+    """What ``VioSource`` emits: STATIC rig, then each frameset (images and IMU batch) at its time."""
     yield Event(STATIC, "rig", rig)
     for f in sets:
-        if len(f.imu):
-            yield Event(f.t_ns, "imu", f.imu)
         yield Event(f.t_ns, "frames", f)
 
 
@@ -103,25 +101,15 @@ class Strict(Recorder):
         self.wm = t_ns
 
 
-def node_outputs(node: VioNode, rig: VioRig, sets: list[Frameset], drop_last_frames: bool = False) -> Strict:
-    """Run the node over the stream; ``drop_last_frames`` stops it between the last frameset's IMU batch and its images."""
+def node_outputs(node: VioNode, rig: VioRig, sets: list[Frameset]) -> Strict:
     out = Strict()
     node.reset(RunContext("test", "vio", "lossless", statics={"rig": rig}))
-    for tick in ticks(rig, sets)[: -1 if drop_last_frames else None]:
+    for tick in ticks(rig, sets):
         node.step(tick, out)
     assert node.lockstep is not None
     out.retries = node.lockstep.retries
     node.flush(out)
     return out
-
-
-def test_a_stop_between_an_imu_batch_and_its_frames_still_publishes_within_the_watermark(
-    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
-) -> None:
-    out: Recorder = node_outputs(
-        VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), rig(camera, imu), framesets(texture), drop_last_frames=True
-    )
-    assert [port for port, _, _ in out.items][-1] == "layer" and out.items[-1][1] == (STEPS - 1) * FRAME_PERIOD_NS
 
 
 def lockstep_poses(rig: VioRig, sets: list[Frameset]) -> list[Float64[ndarray, " 7"]]:
@@ -171,6 +159,7 @@ def test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order(
             times.setdefault(port, []).append(t_ns)
         assert all(a <= b for t in times.values() for a, b in zip(t, t[1:], strict=False))
         assert [p for p, _, _ in out.items].count("layer") == 1 and out.items[-1][0] == "layer"
+        assert out.items[-1][1] == (STEPS - 1) * FRAME_PERIOD_NS, "the layer leaves at the last frameset's time"
     first, second = ([(p, t, to_dict(v)) for p, t, v in out.items if p == "pose"] for out in runs)
     np.testing.assert_equal(first, second)
     assert node.run is not None and node.run.framesets == STEPS and node.run.lost == 0
@@ -179,7 +168,7 @@ def test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order(
 def graph_of(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path) -> Graph:
     """The App's graph over the synthetic stream: the layer publisher and the live pose sink."""
     vrig: VioRig = rig(camera, imu)
-    source = IterSource({"rig": VioRig, "imu": ImuStream, "frames": Frameset}, lambda: stream(vrig, framesets(texture)))
+    source = IterSource({"rig": VioRig, "frames": Frameset}, lambda: stream(vrig, framesets(texture)))
     publish = LayerFileSink(SEGMENT, "slam_rs", output_dir=tmp_path, register="off")
     viewer = RerunSink(rr.RecordingStream("slam-rs-test"), {"pose": RigPose}, {"pose": "/world/rig"})
     return vio_graph(source, VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), {"publish": publish, "viewer": viewer})
@@ -208,7 +197,7 @@ def test_sequential_and_threaded_deliver_the_same_ticks_and_publish_the_same_pos
         written.append(run.estimate)  # what write_layer wrote into the published file
     ticks_in = [[(p, t, type(v).__name__) for p, t, v, _ in seen["vio"]] for seen in runs]  # type: ignore[misc]
     poses = [[(p, t, to_dict(v)) for p, t, v, _ in seen["viewer"]] for seen in runs]  # type: ignore[misc]
-    assert ticks_in[0] == ticks_in[1] and len(ticks_in[0]) == 2 * STEPS
+    assert ticks_in[0] == ticks_in[1] and len(ticks_in[0]) == STEPS
     np.testing.assert_equal(poses[0], poses[1])
     assert len(poses[0]) == STEPS
     for field in ("t_ns", "position_m", "quaternion_wxyz"):
@@ -228,7 +217,7 @@ def test_a_stop_before_two_poses_ends_stopped_without_a_layer(
 
     def stopping() -> Iterator[Event]:
         for event in events():
-            if event.port == "imu" and event.t_ns == stop_after * FRAME_PERIOD_NS:
+            if event.port == "frames" and event.t_ns == stop_after * FRAME_PERIOD_NS:
                 control.stop()
             yield event
 
@@ -244,7 +233,7 @@ def test_a_failed_run_releases_the_estimator_and_leaves_no_partial_layer(
     """abort() after a tracking failure drops the native estimator; after a publish failure, the unmoved layer file goes too."""
     graph: Graph = graph_of(camera, imu, texture, tmp_path / "tracking")
     with monkeypatch.context() as patched:
-        patched.setattr(Lockstep, "track_pending", lambda self: (_ for _ in ()).throw(RuntimeError("tracking failed")))
+        patched.setattr(Lockstep, "push", lambda self, frameset: (_ for _ in ()).throw(RuntimeError("tracking failed")))
         with pytest.raises(RuntimeError, match="tracking failed"):
             run_sequential(graph)
     assert cast(VioNode, graph.nodes["vio"].obj).lockstep is None
@@ -278,6 +267,20 @@ def test_the_source_releases_the_segment_when_a_run_fails_although_the_error_is_
     with pytest.raises(ValueError, match="reset failed") as kept:
         run_threaded(graph, mode="lossless")
     assert kept.value is not None and lifecycle == ["open", "closed"]
+
+
+def test_the_source_sends_each_frameset_whole_at_its_estimator_time(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One event per frameset, its images and its IMU batch together (what ``Lockstep.push`` takes), after the STATIC rig."""
+    vrig: VioRig = rig(camera, imu)
+    sets: list[Frameset] = framesets(texture)
+    feed = Mock(spec=SegmentFeed, cameras=vrig.cameras, imu=vrig.imu, export_offset_ns=0)
+    feed.framesets.side_effect = lambda stop_ns: iter(sets)
+    monkeypatch.setattr(graphs_vio, "open_segment", lambda *_args, **_kwargs: nullcontext(feed))
+    events: list[Event] = list(cast(IterSource, VioSource(SEGMENT, MSD_RIG, "cpu")).events())
+    assert [(e.port, e.t_ns) for e in events] == [("rig", STATIC)] + [("frames", f.t_ns - imu.cam_time_offset_ns) for f in sets]
+    assert all(e.value is f for e, f in zip(events[1:], sets, strict=True))
 
 
 @settings(max_examples=25, deadline=None)

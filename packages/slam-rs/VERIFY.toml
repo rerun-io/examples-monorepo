@@ -115,7 +115,7 @@ tests = ["tests/test_vio_graph.py"]
 properties = [
     "tests/test_vio_graph.py::test_the_node_makes_lockstep_calls_whatever_the_imu_split",
     "tests/test_vio_graph.py::test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order",
-    "tests/test_vio_graph.py::test_a_stop_between_an_imu_batch_and_its_frames_still_publishes_within_the_watermark",
+    "tests/test_vio_graph.py::test_the_source_sends_each_frameset_whole_at_its_estimator_time",
     "tests/test_vio_graph.py::test_the_app_graph_validates_draws_its_declaration_and_documents_itself",
     "tests/test_vio_graph.py::test_sequential_and_threaded_deliver_the_same_ticks_and_publish_the_same_poses",
 ]

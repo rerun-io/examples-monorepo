@@ -1,5 +1,4 @@
-"""The ``vio`` node: ``_core.Vio`` behind :class:`~slam_rs.tracking.Lockstep`. A frameset's IMU batch arrives on ``imu`` at its
-time and before its ``frames`` (port order), so the estimator gets exactly the calls ``Lockstep.push`` makes."""
+"""The ``vio`` node: ``_core.Vio`` behind :class:`~slam_rs.tracking.Lockstep`, one ``Lockstep.push`` per frameset."""
 
 import time
 from collections.abc import Iterator, Mapping
@@ -18,7 +17,7 @@ from numpy import ndarray
 from serde import serde
 
 from slam_rs import _core
-from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, ImuStream, RigProfile
+from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, RigProfile
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun
@@ -58,10 +57,10 @@ class VioParams:
 class VioNode:
     """Track the rig pose with VIO.
 
-    ``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a
-    frameset and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file."""
+    ``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes a frameset with its IMU
+    batch and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file."""
 
-    inputs: Mapping[str, PortType] = {"imu": ImuStream, "frames": Frameset, "rig": VioRig}
+    inputs: Mapping[str, PortType] = {"frames": Frameset, "rig": VioRig}
     outputs: Mapping[str, PortType] = {"pose": RigPose, "layer": LayerFile}
     emits_late: bool = True
 
@@ -101,15 +100,11 @@ class VioNode:
 
     def step(self, tick: Tick, out: Emit) -> None:
         assert self.lockstep is not None, "step before reset"
-        self.t_ns = tick.t_ns  # the layer leaves at the last tick's time, also when a stop falls between an imu batch and its frames
-        if tick.port == "imu":
-            self.lockstep.push_imu(cast(ImuStream, tick.value))
-        else:
-            self.framesets += 1
-            self.lockstep.hold(cast(Frameset, tick.value))
-        self._emit(self.lockstep.track_pending(), out)
+        self.t_ns = tick.t_ns  # the layer leaves at the last frameset's time
+        self.framesets += 1
+        self._emit(self.lockstep.push(cast(Frameset, tick.value)), out)
         held: list[int] = [f.t_ns - self.offset_ns for f in [*self.lockstep.pending, *self.lockstep.lagged]]
-        wm: TimeNs = min([*held, tick.t_ns]) - 1  # a frameset follows its imu at t, and the layer leaves at the last one
+        wm: TimeNs = min([*held, tick.t_ns]) - 1  # held framesets still emit at their times, and the layer leaves at the last one
         if wm > self.wm:
             self.wm = wm
             out.watermark(wm)

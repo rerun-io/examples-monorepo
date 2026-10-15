@@ -12,22 +12,20 @@ One catalog segment's cameras and IMU, on one time-ordered stream, through slam-
 ## 1 · segment: Decode the VIO cameras, with the IMU
 *source* · `VioSource` · `packages/slam-rs/slam_rs/graphs/vio.py`
 
-STATIC ``rig``, then per frameset its IMU batch (``imu``: the samples since the previous frameset through the first one past this one) and its gray8 images (``frames``), both at the frameset's ``video_time``. VIO initialises from rest, so the stream starts at the segment's first frameset; a window only ends it (frameset times up to its stop).
+STATIC ``rig``, then every frameset (``frames``) at its ``video_time``: its gray8 images and its IMU batch (the samples since the previous frameset through the first one past this one). VIO initialises from rest, so the stream starts at the segment's first frameset; a window only ends it (frameset times up to its stop).
 
 | gives | type | to |
 |---|---|---|
 | **rig** | `VioRig` | 2 vio |
-| **imu** | `ImuStream` | 2 vio |
 | **frames** | `Frameset` | 2 vio |
 
 ## 2 · vio: Track the rig pose with VIO
 *runs once per item* · `VioNode` · `packages/slam-rs/slam_rs/nodes/vio.py`
 
-``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a frameset and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file.
+``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes a frameset with its IMU batch and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file.
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **imu** | `ImuStream` | 1 segment | waits (4) |
 | **frames** | `Frameset` | 1 segment | waits (4) |
 | **rig** | `VioRig` | 1 segment | latest |
 
@@ -55,7 +53,6 @@ Takes **pose** from 2 vio.
 | type | what it is | code |
 |---|---|---|
 | `Frameset` | One synchronised multi-camera capture, decoded to grayscale | `packages/slam-rs/slam_rs/catalog_feed.py` |
-| `ImuStream` | A segment's paired inertial measurements on one clock | `packages/slam-rs/slam_rs/catalog_timing.py` |
 | `LayerFile` | A finished layer file (an rrd) that a sink publishes | `packages/dagkit/dagkit/types.py` |
 | `RigPose` | The estimated world-from-rig pose of one frameset | `packages/slam-rs/slam_rs/types.py` |
 | `VioRig` | The fed cameras and the IMU of a segment's rig, as the feed reads them from the base layer (static, memory only) | `packages/slam-rs/slam_rs/types.py` |
