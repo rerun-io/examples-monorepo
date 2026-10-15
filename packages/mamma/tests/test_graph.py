@@ -3,22 +3,23 @@
 import time
 
 import numpy as np
+import pytest
 from dagkit.graph import Graph
 from dagkit.node import Fenced
 from dagkit.runners import run_sequential, run_threaded
 from dagkit.sources import IterSource
 from dagkit.testing import Collect
 from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
-from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
 from mamma.apis.capture import PORTS
-from mamma.graphs.capture import capture_graph
+from mamma.graphs.capture import TRACKS_QUEUE, capture_graph
 from mamma.models.landmarks.estimator import DenseLandmarks
 from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.window_fit import FitterConfig
+from mamma.types import Frameset
 
 
 class SlowLandmarker(FakeLandmarker):
@@ -30,7 +31,7 @@ class SlowLandmarker(FakeLandmarker):
 
 
 def graph(scene: FakeScene, landmarker: FakeLandmarker | None = None) -> tuple[Graph, Collect]:
-    video = IterSource({"frames": Fenced[MultiViewFrames], "rig": RigCameras}, lambda: scene.events(16))
+    video = IterSource({"frames": Fenced[Frameset], "rig": RigCameras}, lambda: scene.events(16))
     keep = Collect(PORTS)
     nodes = (
         TrackNode(TrackParams(expected_subjects=1), FakeDetector(), FakeEncoder(), FakeMasks()),  # type: ignore[arg-type]
@@ -54,12 +55,15 @@ def test_capture_graph_validates_and_the_runners_agree() -> None:
     assert counts == {"tracks": 16, "landmarks": 16, "fit": 16, "kp3d": 16, "topology": 1}
 
 
-def test_realtime_keeps_the_crop_frames_of_every_queued_tick() -> None:
-    """Realtime keeps Block edges (no drops here), so a slow landmarks node still finds the frameset of each tick it gets."""
+@pytest.mark.parametrize("tracks_queue", [TRACKS_QUEUE, 8])
+def test_realtime_crops_every_tick_from_its_own_frameset_whatever_the_queue_size(monkeypatch, tracks_queue: int) -> None:  # type: ignore[no-untyped-def]
+    """Realtime keeps Block edges (no drops here) and the crop frames travel with the tracks, so a slow landmarks node crops
+    every tick from its own frameset however far ahead a longer tracks queue lets the source run."""
     scene = FakeScene()
     built, keep = graph(scene)
     assert run_sequential(built).status == "complete"
     sequential = sorted(keep.items, key=lambda item: (item[0], item[1]))
+    monkeypatch.setattr("mamma.graphs.capture.TRACKS_QUEUE", tracks_queue)
     built, keep = graph(scene, SlowLandmarker(scene))
     assert run_threaded(built, mode="realtime").status == "complete"
     np.testing.assert_equal(sorted(keep.items, key=lambda item: (item[0], item[1])), sequential)

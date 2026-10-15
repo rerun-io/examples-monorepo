@@ -9,7 +9,7 @@ from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.window_fit import FitterConfig
-from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
+from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits, TrackedFrameset
 
 FACES: np.ndarray = np.zeros((2, 3), dtype=np.int32)
 
@@ -23,21 +23,31 @@ def track_outputs(scene: FakeScene) -> list[tuple[str, int, object]]:
 def test_track_bootstraps_one_person_and_tracks_it_in_every_view() -> None:
     scene = FakeScene()
     outputs = track_outputs(scene)
-    assert [t for _, t, _ in outputs] == [scene.frames(i).t_ns for i in range(12)]
+    assert [(p, t) for p, t, _ in outputs] == [(p, scene.frames(i).t_ns) for i in range(12) for p in ("tracks", "tracked")]
     for _, _, value in outputs:
-        assert isinstance(value, Fenced) and isinstance(value.value, MultiViewTracks)
-        tracks: MultiViewTracks = value.value
+        assert isinstance(value, Fenced)
+        tracks = value.value.tracks if isinstance(value.value, TrackedFrameset) else value.value
+        assert isinstance(tracks, MultiViewTracks)
         assert list(zip(tracks.view.tolist(), tracks.person.tolist(), strict=True)) == [(0, 0), (1, 0), (2, 0)]  # one row per (view, person)
         np.testing.assert_array_equal(tracks.boxes_xyxy, [[20.0, 8.0, 43.0, 43.0]] * 3)
         np.testing.assert_array_equal(tracks.scale_xy, 2.0)
 
 
-def test_landmarks_follow_the_tracks_and_keep_engine_pixels() -> None:
+class CropRecorder(FakeLandmarker):
+    """Remembers the crop frames' size and the scale of every call."""
+
+    def __call__(self, frames, view, masks, boxes_xyxy, rgb_scale: float = 1.0):  # type: ignore[no-untyped-def]
+        self.calls = [*getattr(self, "calls", []), (tuple(frames.shape), rgb_scale)]
+        return super().__call__(frames, view, masks, boxes_xyxy, rgb_scale)
+
+
+def test_landmarks_crop_from_the_frames_their_tracks_carry_and_keep_engine_pixels() -> None:
     scene = FakeScene()
-    frames = {f.frame_index: f for f in map(scene.frames, range(12))}
-    ticks = [Tick(t, "tracks", value, {"frames": Fenced(frames[value.value.frame_index], None)}) for _, t, value in track_outputs(scene)]  # type: ignore[attr-defined]
-    outputs = check_node_contract(LandmarksNode(FakeLandmarker(scene)), ticks)
+    ticks = [Tick(t, port, value, {}) for port, t, value in track_outputs(scene) if port == "tracked"]
+    landmarker = CropRecorder(scene)
+    outputs = check_node_contract(LandmarksNode(landmarker), ticks)
     assert [t for _, t, _ in outputs] == [tick.t_ns for tick in ticks]
+    assert set(landmarker.calls) == {((3, 3, 96, 128), 2.0)}  # the native crops, at twice the engine size of the masks
     for _, _, value in outputs:
         landmarks = host(value)
         assert isinstance(landmarks, dict) and landmarks["person"].tolist() == [0, 0, 0]

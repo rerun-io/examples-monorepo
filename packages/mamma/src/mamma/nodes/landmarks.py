@@ -1,6 +1,6 @@
-"""Dense 2D landmarks of every tracked person in every view (MammaNet), cropped from the frames the AsOf port carries.
+"""Dense 2D landmarks of every tracked person in every view (MammaNet), cropped from the frames that travel with the tracks.
 
-With the hi-res preset that port is the source's ``frames_native``: crops sample the decoded size while masks and outputs
+With the hi-res preset those are the source's ``frames_native``: crops sample the decoded size while masks and outputs
 stay in engine pixels (the scale is the width ratio, as the original pipeline used).
 """
 
@@ -17,7 +17,7 @@ from simplecv.types.frames import MultiViewFrames
 from torch import Tensor
 
 from mamma.models.landmarks.estimator import DenseLandmarks
-from mamma.types import MultiViewLandmarks, MultiViewTracks
+from mamma.types import MultiViewLandmarks, MultiViewTracks, TrackedFrameset
 
 
 @runtime_checkable
@@ -36,7 +36,7 @@ class LandmarksNode:
     the track's mask from the frames of the same tick.
     """
 
-    inputs: Mapping[str, PortType] = {"tracks": Fenced[MultiViewTracks], "frames": Fenced[MultiViewFrames]}
+    inputs: Mapping[str, PortType] = {"tracked": Fenced[TrackedFrameset]}
     outputs: Mapping[str, PortType] = {"landmarks": Fenced[MultiViewLandmarks]}
 
     def __init__(self, estimator: DenseLandmarker) -> None:
@@ -46,12 +46,10 @@ class LandmarksNode:
         pass
 
     def step(self, tick: Tick, out: Emit) -> None:
-        assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, MultiViewTracks)
-        tracks: MultiViewTracks = consume(tick.value)
-        frames_fenced = tick.asof["frames"]
-        assert isinstance(frames_fenced, Fenced) and isinstance(frames_fenced.value, MultiViewFrames), "landmarks needs the frameset of its tick"
-        frames: MultiViewFrames = consume(frames_fenced)
-        assert frames.frame_index == tracks.frame_index, f"frames {frames.frame_index} for tracks {tracks.frame_index}"
+        assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, TrackedFrameset)
+        tracked: TrackedFrameset = consume(tick.value)
+        tracks: MultiViewTracks = tracked.tracks
+        frames: MultiViewFrames = tracked.crops
         rows: Int64[ndarray, " r"] = np.flatnonzero(np.isfinite(tracks.boxes_xyxy).all(axis=1))  # an empty mask has no crop
         device: torch.device = tracks.masks.device
         if rows.size:

@@ -1,13 +1,23 @@
-"""The MAMMA-format file source: its npz rig contract (unit lane, no video decode)."""
+"""The MAMMA-format file source (its npz rig contract) and the capture graph's frameset source (unit lane, no video decode)."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
+import pytest
+import torch
+from dagkit.node import Event, Fenced
+from dagkit.sources import IterSource
+from dagkit.time import STATIC
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
+from simplecv.sources.catalog_video import VideoSource
+from simplecv.types.rig import RigCameras
 
+from mamma.sources.frameset import FramesetSource
 from mamma.sources.npz import load_rig
+from mamma.types import Frameset
 
 
 @settings(max_examples=25, deadline=None)
@@ -55,3 +65,33 @@ def test_npz_source_never_opens_the_catalog(tmp_path: Path, monkeypatch) -> None
     except _FramesReached:
         return
     raise AssertionError("the source yielded past its statics without reading frames")
+
+
+class _CountingFrames:
+    """A FrameProvider whose every pixel of frame ``i`` is ``i`` (64 x 32 per camera, 30 fps)."""
+
+    def times_ns(self, view: int) -> np.ndarray:
+        return np.arange(5, dtype=np.int64) * 33_333_333
+
+    def frames_at(self, view: int, indices: Sequence[int]) -> torch.Tensor:
+        return torch.stack([torch.full((3, 32, 64), i, dtype=torch.uint8) for i in indices])
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("keep_native", [True, False])
+def test_frameset_source_hands_each_tick_its_crop_frames_in_one_value(keep_native: bool) -> None:
+    rig = Event(STATIC, "rig", "the rig")
+    video = VideoSource(_CountingFrames(), ("a", "b"), IterSource({"rig": RigCameras}, lambda: iter([rig])), fenced=True, resize_hw=(16, 32), keep_native=keep_native)
+    source = FramesetSource(video)
+    assert source.outputs == {"frames": Fenced[Frameset], "rig": RigCameras}
+    events = list(source.events())
+    assert [e.port for e in events] == ["rig"] + ["frames"] * 5
+    for index, event in enumerate(events[1:]):
+        assert isinstance(event.value, Fenced) and isinstance(event.value.value, Frameset)
+        frameset: Frameset = event.value.value
+        assert event.t_ns == frameset.frames.t_ns == frameset.crops.t_ns and frameset.frames.frame_index == frameset.crops.frame_index == index
+        assert tuple(frameset.frames.rgb.shape) == (2, 3, 16, 32)
+        assert tuple(frameset.crops.rgb.shape) == ((2, 3, 32, 64) if keep_native else (2, 3, 16, 32))
+        assert int(frameset.crops.rgb.max()) == index
