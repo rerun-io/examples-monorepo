@@ -11,6 +11,22 @@ pub struct Scene {
     pub(crate) degree: u32,
 }
 impl Scene {
+    /// Number of splats in this upload.
+    pub fn len(&self) -> u32 {
+        self.n
+    }
+    /// Whether this upload contains no splats.
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+    /// Bytes held by this scene's GPU buffers.
+    pub fn gpu_byte_size(&self) -> u64 {
+        [&self.transforms, &self.opacity, &self.sh, &self.min_scale]
+            .into_iter()
+            .map(wgpu::Buffer::size)
+            .sum()
+    }
+
     pub(crate) fn upload(
         device: &wgpu::Device,
         splats: &Splats,

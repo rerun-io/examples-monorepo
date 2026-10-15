@@ -134,6 +134,28 @@ fn plans(n: u32, capacity: u32) -> Vec<DispatchPlan> {
     plans
 }
 impl ViewState {
+    /// Retained scratch bytes, excluding scene buffers and buffers held only by bind groups.
+    pub fn gpu_byte_size(&self) -> u64 {
+        let scratch = &self.scratch;
+        [
+            &scratch.counts,
+            &scratch.projected,
+            &scratch.offsets,
+            scratch.scan.output(),
+        ]
+        .into_iter()
+        .map(wgpu::Buffer::size)
+        .sum::<u64>()
+            + scratch.depth_sort.gpu_byte_size()
+            + scratch.intersections.sort.gpu_byte_size()
+            + self.dispatches.gpu_byte_size()
+            + self
+                .frames
+                .iter()
+                .map(|frame| frame.uniform.size() + frame.readback.size())
+                .sum::<u64>()
+    }
+
     pub(crate) fn new(
         device: &wgpu::Device,
         kernels: &Kernels,

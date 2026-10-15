@@ -143,6 +143,10 @@ impl Dispatches {
         pass.set_bind_group(0, group, &[]);
         pass.dispatch_workgroups_indirect(&self.args, u64::from(index) * 16);
     }
+    /// Retained buffer bytes; histogram/parameter buffers held only by bind groups are excluded.
+    pub(crate) fn gpu_byte_size(&self) -> u64 {
+        self.plans.size() + self.args.size()
+    }
 }
 
 #[cfg(test)]

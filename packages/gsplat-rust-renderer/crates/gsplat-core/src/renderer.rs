@@ -22,6 +22,17 @@ impl Renderer {
             kernels,
         })
     }
+    /// Reject oversized wire dimensions before converting the CPU data.
+    pub fn check_capacity(&self, count: usize, sh_degree: u32) -> Result<(), Error> {
+        let required = Splats::gpu_bytes(count, sh_degree);
+        if required > self.limit {
+            return Err(Error::Capacity {
+                required,
+                limit: self.limit,
+            });
+        }
+        Ok(())
+    }
     pub fn upload(&self, splats: &Splats) -> Result<Arc<Scene>, Error> {
         Ok(Arc::new(Scene::upload(&self.device, splats, self.limit)?))
     }
