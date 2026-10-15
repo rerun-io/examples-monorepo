@@ -14,17 +14,16 @@ import pyarrow as pa
 import rerun as rr
 from dagkit.app import RUNNERS
 from dagkit.sources import SegmentRef
+from dagkit.types import read_column, served
 from dagkit.verify import Case, Phase, load_card
 from jaxtyping import Float64
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.types.rig import RigCameras
 
 from exo_calib.apis.calibrate import Config, build
 
-CHILD_FROM_PARENT: int = 2
-"""``Transform3D:relation`` value of a camera node logged as cam_T_world."""
 CARD: Path = Path(__file__).resolve().parents[1] / "VERIFY.toml"
 
 
@@ -52,23 +51,6 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     print(f"{case.name} {phase}: graph outputs written into the golden")
 
 
-def _rig(table: pa.Table, root: str, names: list[str]) -> tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]]:
-    """Intrinsics and cam_T_world of the static camera nodes ``<root>/<name>`` (Rerun stores 3x3 matrices column-major)."""
-
-    def value(column: str) -> Float64[ndarray, " k"]:
-        return np.asarray(table.column(column).to_pylist()[0], dtype=np.float64).reshape(-1)
-
-    intrinsics: Float64[ndarray, "v 3 3"] = np.stack([value(f"{root}/{name}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T for name in names])
-    cam_T_world: Float64[ndarray, "v 4 4"] = np.tile(np.eye(4), (len(names), 1, 1))
-    for i, name in enumerate(names):
-        cam_T_world[i, :3, :3] = value(f"{root}/{name}:Transform3D:mat3x3").reshape(3, 3).T
-        cam_T_world[i, :3, 3] = value(f"{root}/{name}:Transform3D:translation")
-        relation: str = f"{root}/{name}:Transform3D:relation"
-        if relation not in table.column_names or int(value(relation)[0]) != CHILD_FROM_PARENT:
-            cam_T_world[i] = np.linalg.inv(cam_T_world[i])
-    return intrinsics, cam_T_world
-
-
 def _rig_errors(
     prefix: str, pred: tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]], gt: tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]]
 ) -> dict[str, float]:
@@ -88,18 +70,12 @@ def _rig_errors(
 def score(case: Case, golden: Path) -> dict[str, float]:
     """Score the golden's refined (banded) and init (reported) rigs against the segment's GT base calibration."""
     segment: SegmentRef = case.segment_ref()
-    with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
-        golden_dataset: DatasetEntry = server.client().get_dataset("golden")  # an entry must outlive its queries
-        table: pa.Table = golden_dataset.filter_contents(["/world/exocalib/**"]).reader(index=None).to_arrow_table()
-    suffix: str = ":Transform3D:translation"
-    names: list[str] = sorted(
-        c.removeprefix("/world/exocalib/refined/").removesuffix(suffix)
-        for c in table.column_names
-        if c.startswith("/world/exocalib/refined/") and c.endswith(suffix)
-    )
-    source: DatasetEntry = segment.entry()
-    gt_table: pa.Table = (
-        source.filter_segments(segment.segment).filter_contents([f"/world/{name}/**" for name in names]).reader(index=None).to_arrow_table()
-    )
-    gt: tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]] = _rig(gt_table, "/world", names)
-    return _rig_errors("", _rig(table, "/world/exocalib/refined", names), gt) | _rig_errors("init_", _rig(table, "/world/exocalib/init", names), gt)
+    with served(golden) as dataset:
+        table: pa.Table = dataset.filter_contents(["/world/exocalib/**"]).reader(index=None).to_arrow_table()
+    _, refined = next(RigCameras.from_layer(table, "/world/exocalib/refined", segment.timeline))
+    _, init = next(RigCameras.from_layer(table, "/world/exocalib/init", segment.timeline))
+    gt_table: pa.Table = read_column(segment.entry(), segment.segment, RigCameras, "/world", segment.timeline, static=True)
+    _, gt = next(RigCameras.from_layer(gt_table, "/world", segment.timeline))
+    init, gt = init.select(refined.names), gt.select(refined.names)
+    truth: tuple[Float64[ndarray, "v 3 3"], Float64[ndarray, "v 4 4"]] = (gt.intrinsics, gt.cam_T_world)
+    return _rig_errors("", (refined.intrinsics, refined.cam_T_world), truth) | _rig_errors("init_", (init.intrinsics, init.cam_T_world), truth)
