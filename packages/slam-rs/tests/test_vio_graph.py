@@ -366,3 +366,31 @@ def test_pre_scores_itself_with_one_read(monkeypatch: pytest.MonkeyPatch, tmp_pa
     scores: dict[str, float] = verify.score(Case("short", "short", "pre-port"), pre)
     assert reads == [pre]
     assert scores == pytest.approx({"ate_vs_pre_cm": 0.0, "max_pos_vs_pre_cm": 0.0, "poses_delta_pct": 0.0, "pose_count": 3.0})
+
+
+@pytest.mark.parametrize("register", ["new", "off"])
+def test_a_registered_layer_prints_its_segment_url_as_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], register: str) -> None:
+    """Main's tool ended with the segment's catalog URL, the place to look at the new layer; the App prints it once the
+    layer is registered (an unregistered run has none to give)."""
+    from dagkit import sinks
+    from simplecv.rerun_log_utils import RerunTyroConfig
+
+    from slam_rs.apis.catalog_layer import Config, build
+
+    class Entry:
+        def segment_url(self, segment: str) -> str:
+            return f"rerun+http://catalog/dataset/msd-index?segment_id={segment}"
+
+    monkeypatch.setattr(sinks, "segment_layers", lambda segment: ["base"])
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: Entry())
+    published: Path = tmp_path / "slam_rs.rrd"
+    with rr.RecordingStream("slam-rs-test", recording_id="layer") as layer:
+        layer.save(published)
+        layer.log("/world/runs/slam_rs", rr.AnyValues(run="test"), static=True)
+    recording = rr.RecordingStream("slam-rs-test", send_properties=False)
+    built = build(Config(RerunTyroConfig(headless=True), SEGMENT, tmp_path, VioParams(decode_device="cpu"), register=register), recording)  # type: ignore[arg-type]
+    graph: Graph = next(built)
+    cast(LayerFileSink, graph.nodes["publish"].obj).published = published  # as the run's flush leaves it
+    assert next(built, None) is None
+    printed: list[str] = capsys.readouterr().out.splitlines()
+    assert (printed[-1:] == [f"rerun+http://catalog/dataset/msd-index?segment_id={SEGMENT.segment}"]) is (register == "new")
