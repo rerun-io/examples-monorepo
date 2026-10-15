@@ -38,7 +38,7 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     segment: SegmentRef = case.segment_ref(load_slam_config().catalog_url)
     params: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")})
     with TemporaryDirectory() as tmp:
-        graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio"))
+        graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio", default_enabled=False))
         report: RunReport = run_sequential(graph)
         assert publish.published is not None, f"{case.name}: the run published no layer ({report.status})"
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())

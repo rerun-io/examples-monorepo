@@ -43,8 +43,10 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream, slam: Literal["
     """Run the App's graphs (threaded, lossless): the published hands layer (unregistered, in a temporary directory) is copied into
     ``recording`` unchanged, its ``LayerRun`` and the wall time go to ``/verify/hands/run``."""
     started: float = time.perf_counter()
+    viewer = rr.RecordingStream("robocap-live-verify")
+    viewer.set_sinks()  # no sink: the App's viewer output is dropped, not buffered (a disabled stream refuses its blueprint)
     with TemporaryDirectory() as tmp:
-        for graph in build(case_config(case, Path(tmp), slam), rr.RecordingStream("robocap-live-verify")):
+        for graph in build(case_config(case, Path(tmp), slam), viewer):
             report: RunReport = run_threaded(graph, mode="lossless")
             print(f"{case.name} {phase}: {graph.name} {report.status} in {report.wall_s:.1f} s")
         hands, publish = cast(HandsNode, graph.nodes["hands"].obj), cast(LayerFileSink, graph.nodes["publish"].obj)
