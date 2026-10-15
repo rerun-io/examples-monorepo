@@ -21,7 +21,7 @@ def main(config: Config) -> None:
         download_tandt()
         return
     scenes: tuple[str, ...] = BLENDER_SCENES if config.scene == "all" else (config.scene,)
-    kinds: tuple[str, ...] = ("data", "pretrained") if config.kind == "all" else (config.kind,)
+    kinds: tuple[Literal["data", "pretrained"], ...] = ("data", "pretrained") if config.kind == "all" else (config.kind,)
     for kind in kinds:
         for scene in scenes:
             download_and_extract(kind, scene)

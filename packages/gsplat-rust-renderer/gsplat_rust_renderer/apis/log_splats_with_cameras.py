@@ -5,20 +5,21 @@ The blueprint pairs a 3D view with capped train/test image grids.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import tyro
 from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
-from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, compute_visualizer, log_ply
-from gsplat_rust_renderer.nerfbaselines import DEFAULT_SCENE, scene_data_dir, scene_ply_path
+from gsplat_rust_renderer.gaussians3d import SplatSource, log_ply, splat_overrides
+from gsplat_rust_renderer.nerfbaselines import scene_data_dir, scene_ply_path
 from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited
 
 SPLITS: tuple[Literal["train", "test"], ...] = ("train", "test")
@@ -30,16 +31,10 @@ class LogSceneConfig:
 
     rr_config: RerunTyroConfig
     """Viewer wiring (spawn/connect/save/serve) — use --rr-config.connect for a running viewer."""
-    compute: bool = False
-    """Explicitly select the custom compute visualizer; normally each viewer selects its renderer."""
-    render_mode: Literal["default", "mip"] | None = None
-    """Per-entity compute rendering mode, stored in the blueprint."""
-    scene: str = DEFAULT_SCENE
-    """nerfbaselines scene; resolves --scene-dir and --ply-path defaults when they are omitted."""
+    source: Annotated[SplatSource, tyro.conf.OmitArgPrefixes] = field(default_factory=SplatSource)
+    """Splat source and rendering choices, exposed without a flag prefix."""
     scene_dir: Path | None = None
     """NeRF-synthetic scene dir (transforms_{train,test}.json); defaults to the --scene data dir."""
-    ply_path: Path | None = None
-    """Trained 3DGS PLY; defaults to the pretrained --scene PLY."""
     image_plane_distance: float = 0.2
     """Frustum image-plane distance in world units."""
     max_image_views: int = 8
@@ -70,8 +65,7 @@ def log_split_cameras(scene_dir: Path, split: Literal["train", "test"], image_pl
 
 def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int, compute: bool = False, render_mode: Literal["default", "mip"] | None = None) -> rrb.Blueprint:
     """Pair a 3D view with per-split image grids capped by max_image_views."""
-    if render_mode is not None and not compute:
-        raise ValueError("--render-mode requires --compute")
+    overrides: dict[str, rrb.Visualizer] = splat_overrides(compute, render_mode)
     grids: list[rrb.Grid] = []
     for split, cam_paths in split_cam_paths.items():
         subset: Int[ndarray, "k"] = _even_subset(len(cam_paths), max_image_views)
@@ -86,7 +80,7 @@ def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int,
     view3d = rrb.Spatial3DView(
         origin="/",
         name="splats + dataset cameras",
-        overrides={SPLATS_ENTITY: compute_visualizer(render_mode or "default")} if compute else {},
+        overrides={**overrides},
         background=rrb.Background(color=(255, 255, 255), kind=rrb.BackgroundKind.SolidColor),
     )
     return rrb.Blueprint(
@@ -99,8 +93,8 @@ def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int,
 
 def main(config: LogSceneConfig) -> None:
     """Log static splats and frame-0 cameras, then send the scene blueprint."""
-    scene_dir: Path = config.scene_dir if config.scene_dir is not None else scene_data_dir(config.scene)
-    ply_path: Path = config.ply_path if config.ply_path is not None else scene_ply_path(config.scene)
+    scene_dir: Path = config.scene_dir if config.scene_dir is not None else scene_data_dir(config.source.scene)
+    ply_path: Path = config.source.ply_path if config.source.ply_path is not None else scene_ply_path(config.source.scene)
 
     rr.set_time("frame", sequence=0)
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
@@ -111,7 +105,7 @@ def main(config: LogSceneConfig) -> None:
         if (scene_dir / f"transforms_{split}.json").exists():
             split_cam_paths[split] = log_split_cameras(scene_dir, split, config.image_plane_distance)
 
-    rr.send_blueprint(scene_blueprint(split_cam_paths, config.max_image_views, config.compute, config.render_mode))
+    rr.send_blueprint(scene_blueprint(split_cam_paths, config.max_image_views, config.source.compute, config.source.render_mode))
 
     rec: rr.RecordingStream | None = rr.get_global_data_recording()
     assert rec is not None
