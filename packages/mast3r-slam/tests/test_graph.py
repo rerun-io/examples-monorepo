@@ -13,8 +13,9 @@ import pytest
 import rerun as rr
 import torch
 from dagkit import sinks
-from dagkit.app import gradio_app, load_profile
+from dagkit.app import load_profile
 from dagkit.doc import describe, picture
+from dagkit.form import gradio_app
 from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Emit, Event, PortType, RunContext, Tick
 from dagkit.runners import run_threaded

@@ -18,7 +18,8 @@ from serde import coerce, serde
 
 from dagkit.apis import synthetic_demo
 from dagkit.apis.synthetic_demo import DemoRerunConfig
-from dagkit.app import NodeProfile, Profile, detect_hardware, gradio_app, health_views, load_profile, run_app, with_pipeline
+from dagkit.app import NodeProfile, Profile, detect_hardware, health_views, load_profile, run_app, with_pipeline
+from dagkit.form import gradio_app
 from dagkit.graph import Graph
 from dagkit.node import Emit, Mode, Tick
 from dagkit.runners import run_sequential
@@ -85,7 +86,7 @@ class DemoConfig:
     name: str = "demo"
     runner: Literal["sequential", "threaded"] = "threaded"
     mode: Mode = "lossless"
-    output_ply: Path | None = None
+    output_ply: Path | None = field(default=None, metadata={"form": "save"})
 
 
 def test_gradio_app_builds_a_form_from_config_fields() -> None:
@@ -139,7 +140,7 @@ def test_generated_ui_never_spawns_a_viewer_for_the_synthetic_demo(monkeypatch: 
 class Nets:
     """Nested Config group (like robocap-live's HandsParams)."""
 
-    models_dir: Path
+    models_dir: Path = field(metadata={"form": "dir"})
     """Where the networks live (a directory: a textbox, not an upload)."""
     device: Literal["auto", "cpu", "cuda"] = "auto"
     threads: int = 0
@@ -160,9 +161,9 @@ class NestedConfig:
     hardware: Literal["x86_64-cuda", "aarch64-cuda"] | Literal["auto"] = "auto"
     max_frames: int | None = None
     preset: str | None = None
-    output_dir: Path = Path("data/outputs")
-    output_ply: Path | None = None
-    output_scene: Path | None = None
+    output_dir: Path = field(default=Path("data/outputs"), metadata={"form": "dir"})
+    output_ply: Path | None = field(default=None, metadata={"form": "save"})
+    output_scene: Path | None = field(default=None, metadata={"form": "save"})
     runner: Literal["sequential", "threaded"] = "threaded"
     mode: Mode = "lossless"
 
@@ -242,6 +243,43 @@ def test_check_form_wants_every_config_field_shown_in_order_or_hidden_on_purpose
         check_form(NestedConfig, build, {k: v for k, v in NESTED_FORM.items() if k != "max_frames"}, {"rr_config": "", "max_frames": ""})
     with pytest.raises(AssertionError):  # the form's order is part of the table
         check_form(NestedConfig, build, dict(reversed(NESTED_FORM.items())), {"rr_config": ""})
+
+
+@dataclass
+class Display:
+    """A nested group that happens to have a ``headless`` field: the form opens it like any group."""
+
+    headless: bool = False
+    scale: float = 1.0
+
+
+@dataclass
+class DeclaredConfig:
+    rr_config: Inner
+    display: Display = field(default_factory=Display)
+    output_scale: float | None = None
+    """A number named like an output."""
+    captures: Path | None = field(default=None, metadata={"form": "dir"})
+    export: Path | None = field(default=None, metadata={"form": "save"})
+    runner: Literal["sequential", "threaded"] = "threaded"
+    mode: Mode = "lossless"
+
+
+def test_the_form_reads_what_a_field_is_from_its_declaration_not_its_name() -> None:
+    """The viewer is the ``rr_config`` field; directories and save boxes are field metadata (``form``: ``dir`` / ``save``)."""
+    widgets: dict[str, str] = {
+        "display.headless": "Checkbox", "display.scale": "Number", "output_scale": "Textbox", "captures": "Textbox", "export": "Checkbox",
+        "runner": "Dropdown", "mode": "Dropdown",
+    }  # fmt: skip
+    check_form(DeclaredConfig, lambda config, recording: Graph("empty"), widgets, {"rr_config": "the form renders into its own pane"})
+
+    @dataclass
+    class Typo:
+        rr_config: Inner
+        export: Path | None = field(default=None, metadata={"form": "sav"})
+
+    with pytest.raises(ValueError, match="export: metadata form='sav'"):
+        gradio_app(Typo, lambda config, recording: Graph("empty"), title="Typo")
 
 
 @dataclass
@@ -349,7 +387,7 @@ def test_with_pipeline_keeps_the_normal_view_first_and_active() -> None:
 
 @dataclass(frozen=True, slots=True)
 class Models:
-    models_dir: Path
+    models_dir: Path = field(metadata={"form": "dir"})
     """Where the networks live (a directory)."""
     threads: int | None = 1
 
@@ -360,9 +398,9 @@ class RequiredConfig:
 
     rr_config: Inner
     segment: SegmentRef
-    output_dir: Path
+    output_dir: Path = field(metadata={"form": "dir"})
     models: Models
-    output_scene: Path | None = None
+    output_scene: Path | None = field(default=None, metadata={"form": "save"})
     register: Literal["new", "replace", "off"] = "new"
     runner: Literal["sequential", "threaded"] = "sequential"
     mode: Mode = "lossless"

@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
@@ -37,7 +37,7 @@ CoreFactory: TypeAlias = Callable[..., _core.HandsLayer]
 class HandsParams:
     """The core's networks and overlays."""
 
-    models_dir: Path
+    models_dir: Path = field(metadata={"form": "dir"})
     """detnet_full.onnx and keynet.onnx (packages/robocap-live/models/MODELS.md)."""
     device: Literal["auto", "cpu", "cuda"] = "auto"
     """ONNX Runtime device: CUDA on GPU 0 when its execution provider registers (auto), or forced."""

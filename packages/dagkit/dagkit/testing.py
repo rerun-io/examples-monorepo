@@ -13,8 +13,8 @@ import pyarrow as pa
 import rerun as rr
 from rerun.chunk import RrdReader
 
-from dagkit.app import _leaves, gradio_app
 from dagkit.doc import GRAPH_ROOT, GraphDoc, describe, guide, log_graph
+from dagkit.form import gradio_app, leaves
 from dagkit.graph import AsOf, DropOldest, Graph, Spawn, normalise
 from dagkit.node import Emit, Event, Fenced, Node, RunContext, Tick
 from dagkit.sources import Column, RecordingSource
@@ -130,7 +130,7 @@ def check_form(config_type: type, build: Callable[..., object], widgets: Mapping
     run = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
     shown: list[tuple[str, str]] = [(str(w.label).split(":")[0], type(w).__name__) for w in run.inputs]
     assert shown == list(widgets.items()), f"the form shows {shown}"
-    for path in (".".join(leaf[0]) for leaf in _leaves(config_type, None)):
+    for path in (".".join(leaf[0]) for leaf in leaves(config_type, None)):
         has_widget: bool = any(label == path or label.startswith(f"{path}.") for label, _ in shown)
         assert has_widget != (path in hidden), f"{path}: {'shown and hidden' if has_widget else 'neither shown nor hidden on purpose'}"
     return demo

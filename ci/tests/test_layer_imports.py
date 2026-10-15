@@ -75,7 +75,7 @@ def test_dagkit_imports_only_its_allowlist() -> None:
     for path in sorted((ROOTS["dagkit"] / "dagkit").rglob("*.py")):
         for module, in_function in imports(path):
             top: str = module.split(".")[0]
-            lazy_ok: bool = in_function and top in CONFIG["dagkit"]["lazy"] and path.name == "app.py"
+            lazy_ok: bool = in_function and top in CONFIG["dagkit"]["lazy"] and path.name == "form.py"
             if top not in allowed and not lazy_ok:
                 problems.append(f"{path.relative_to(REPO_ROOT)}: imports {module}")
     assert not problems, "dagkit must stay a torch-free leaf:\n" + "\n".join(problems)

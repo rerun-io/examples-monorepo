@@ -39,7 +39,7 @@ deliver the same ticks to every node (property-tested on random graphs).
 | Late output | a node with `emits_late = True` calls `out.watermark(t)`; other nodes' watermark is `t - 1` before a tick at `t` |
 | GPU | `Fenced(value, cuda_event)`; host consumers get it synced and unwrapped; never write into a put value |
 | Sinks | take an explicit `RecordingStream`; `LayerSink` publishes `<layer>.<run_id>.rrd` and registers only if the segment has no such layer (`register="new"`) |
-| Apps | `<module>/apis/<graph>.py` defines `Config` + `build(config, recording) -> Graph` (or a generator of Graphs for a multi-pass app); `main` is `run_app(config, build)`; `gradio_app(Config, build, title=...)` generates the UI from the same `build` |
+| Apps | `<module>/apis/<graph>.py` defines `Config` + `build(config, recording) -> Graph` (or a generator of Graphs for a multi-pass app); `main` is `run_app(config, build)`; `dagkit.form.gradio_app(Config, build, title=...)` generates the UI from the same `build` (the viewer is the `rr_config` field; a `Path` field declares its widget as `field(metadata={"form": "dir"})` or, when optional, `{"form": "save"}`) |
 | Graph view | every `run_app` / `gradio_app` run logs the picture (`/dagkit/graph/<graph>`), a guide with links into the data (`/dagkit/guide/<graph>`) and a `GraphDoc` JSON, and colours the boxes with run health; the app wraps its normal blueprint with `with_pipeline(bp, outputs, graphs=...)` for the secondary "pipeline (debug)" tab |
 | Docs | a node class's docstring starts with a <= 40-char line saying what it does; port Types have docstrings; `Graph(name, about=...)` |
 | Profiles | `profiles/<hardware>.toml` for `x86_64-cuda`, `aarch64-cuda`, `robocap-cap`; never hostnames or GPU models |

@@ -1,4 +1,4 @@
-from dagkit.app import gradio_app
+from dagkit.form import gradio_app
 
 from mast3r_slam.apis.slam import Config, build
 from mast3r_slam.verify import examples

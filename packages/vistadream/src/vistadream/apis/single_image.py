@@ -48,7 +48,7 @@ class Config:
     """Outpainting: how much the canvas grows (0.3 = 15 % of the image on every side)."""
     n_frames: int = 10
     """Coarse stage: training views at most (input and outpainted canvas included)."""
-    output_ply: Path | None = None
+    output_ply: Path | None = field(default=None, metadata={"form": "save"})
     """Save the final scene as a 3DGS PLY here."""
     seed: int = 0
     """Seed of the order in which optimisation steps visit the training views."""

@@ -51,7 +51,7 @@ class Config:
     on EuRoC always and on TUM when calibrated)."""
     video: Path | None = None
     """Video file input (beats every other input); pixi run mast3r-slam-example-* downloads examples to data/."""
-    images: Path | None = None
+    images: Path | None = field(default=None, metadata={"form": "dir"})
     """Image directory input (natural sort order, 30 fps; used when there is no video)."""
     webcam: int | None = None
     """Live OpenCV camera index, used when no video or image directory is given (run with --mode realtime)."""
@@ -64,9 +64,9 @@ class Config:
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
     """Use every n-th input frame (overrides the preset)."""
-    output_nerfstudio: Path | None = None
+    output_nerfstudio: Path | None = field(default=None, metadata={"form": "save"})
     """Export the final keyframes in Nerfstudio format into this directory."""
-    layer_dir: Path | None = None
+    layer_dir: Path | None = field(default=None, metadata={"form": "dir"})
     """Catalog input: also write the segment's mast3r_slam layer here (windowed runs publish it unregistered)."""
     register: Register = "new"
     """How the layer reaches the segment's catalog (new refuses to overwrite)."""

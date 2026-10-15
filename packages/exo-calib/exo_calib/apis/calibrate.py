@@ -65,7 +65,7 @@ class Config:
     """Frames Stage B processes per pass, spread evenly over the capture; shorter captures use every frame."""
     exo_rigs: tuple[str, ...] | None = None
     """Explicit exo rig names such as ``rig_00 rig_01``; ``None`` discovers them from catalog metadata."""
-    output_dir: Path | None = None
+    output_dir: Path | None = field(default=None, metadata={"form": "save"})
     """Layer rrds (one subdirectory per segment, e.g. ``data/outputs``) and ``eval.json``; ``None``: the viewer only."""
     register: Register = "new"
     """``new`` registers layers the segment does not have yet; ``replace`` is the explicit production refresh."""

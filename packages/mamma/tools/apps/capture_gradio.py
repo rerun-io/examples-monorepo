@@ -1,4 +1,4 @@
-from dagkit.app import gradio_app
+from dagkit.form import gradio_app
 
 from mamma.apis.capture import Config, build
 from mamma.verify import example_cases

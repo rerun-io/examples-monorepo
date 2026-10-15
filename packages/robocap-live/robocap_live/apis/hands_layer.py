@@ -7,7 +7,7 @@ and copies its hands into the viewer, which opens on the run health; the "pipeli
 """
 
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -39,7 +39,7 @@ class Config:
     rr_config: RerunTyroConfig
     segment: SegmentRef
     """A robocap catalog segment (``robocap__<device>__s<session>``) with a ``base`` layer (and ``slam_rs`` for ``slam`` catalog)."""
-    output_dir: Path
+    output_dir: Path = field(metadata={"form": "dir"})
     """The dataset's layer directory, visible at the same path to this host and to the catalog server."""
     hands: HandsParams
     slam: Literal["vio", "catalog"] = "vio"
