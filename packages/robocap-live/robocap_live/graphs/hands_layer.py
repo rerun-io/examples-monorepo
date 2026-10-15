@@ -12,7 +12,7 @@ from dagkit.graph import AsOf, Block, Graph
 from dagkit.node import Node, Source
 from dagkit.sinks import LayerFileSink, segment_layers
 from dagkit.sources import Column, IterSource, RecordingSource, SegmentRef
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import CatalogLumaSource
 from slam_rs.types import CatalogPoses
 
 from robocap_live.nodes.hands import HandsNode
@@ -22,7 +22,7 @@ CAMERAS: tuple[str, ...] = tuple(f"rig_00/cam_{i:02d}" for i in range(6))  # und
 GROUP_TOLERANCE_NS: int = 3_000_000  # a frameset holds each camera's next frame within 3 ms of its opening, as live
 
 
-def segment_source(segment: SegmentRef, group_tolerance_ns: int = GROUP_TOLERANCE_NS, catalog_poses: bool = True) -> CatalogVideoSource:
+def segment_source(segment: SegmentRef, catalog_poses: bool = True) -> CatalogLumaSource:
     """The segment's raw luma framesets, base-layer rig and (``catalog_poses``) whole ``slam_rs`` pose table (an older ``slam``
     layer writes that entity too)."""
     if (
@@ -34,7 +34,7 @@ def segment_source(segment: SegmentRef, group_tolerance_ns: int = GROUP_TOLERANC
     statics: dict[str, Column] = {"cap_rig": Column(CapRig, RIG_ROOT, static=True)} | (
         {"poses": Column(CatalogPoses, RIG_ROOT)} if catalog_poses else {}
     )
-    return CatalogVideoSource(segment, CAMERAS, decode="cpu_luma", group_tolerance_ns=group_tolerance_ns, statics=statics)
+    return CatalogLumaSource(segment, CAMERAS, group_tolerance_ns=GROUP_TOLERANCE_NS, statics=statics)
 
 
 class PosesCheckpoint(IterSource):

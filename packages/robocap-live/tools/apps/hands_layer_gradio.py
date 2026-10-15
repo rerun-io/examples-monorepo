@@ -1,4 +1,4 @@
-from dagkit.app import gradio_app
+from dagkit.form import gradio_app
 
 from robocap_live.apis.hands_layer import Config, build, examples
 

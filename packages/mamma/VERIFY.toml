@@ -31,7 +31,7 @@ reference = "gt"
 dataset = "dataforge-mamma-eval"
 segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
 window_s = [0.0, 10.0]
-params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+params = { cameras = ["rig_01/cam_00", "rig_03/cam_00", "rig_05/cam_00", "rig_07/cam_00"], preset = "quality", resize_hw = [752, 1024], subjects = 1 }
 # |pre - pre2|: the pre-port pipeline is deterministic (accuracy bit-identical: 21.376 mm, 29.770 mm, 0.9724, 0.99);
 # realtime 0.2679 / 0.2677. Bands = floors.
 noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00019 }
@@ -43,7 +43,7 @@ clip = "short"
 reference = "gt"
 dataset = "dataforge-mamma-eval"
 segment = "mamma-eval__dance__250225_WestCoastSwing_Basic_Whip_03675_03676_1"
-params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "2" }
+params = { cameras = ["rig_01/cam_00", "rig_03/cam_00", "rig_05/cam_00", "rig_07/cam_00"], preset = "quality", resize_hw = [752, 1024], subjects = 2 }
 # |pre - pre2|: accuracy bit-identical (29.561 mm, 32.246 mm, 0.8471, 1.0); realtime 0.03225 / 0.03212. Bands = floors.
 noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00013 }
 
@@ -53,7 +53,7 @@ clip = "full"
 reference = "gt"
 dataset = "dataforge-mamma-eval"
 segment = "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"
-params = { cameras = "rig_01/cam_00,rig_03/cam_00,rig_05/cam_00,rig_07/cam_00", preset = "quality", resize_hw = "752,1024", subjects = "1" }
+params = { cameras = ["rig_01/cam_00", "rig_03/cam_00", "rig_05/cam_00", "rig_07/cam_00"], preset = "quality", resize_hw = [752, 1024], subjects = 1 }
 # |pre - pre2|: accuracy bit-identical (22.172 mm, 31.370 mm, 0.9579, 0.9974); realtime 0.2335 / 0.2340. Bands = floors.
 noise = { mpjpe_mm = 0.0, pve_mm = 0.0, mask_iou_mean = 0.0, fit_coverage = 0.0, realtime_fraction = 0.00053 }
 

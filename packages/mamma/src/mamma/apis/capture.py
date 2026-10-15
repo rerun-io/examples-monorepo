@@ -16,12 +16,12 @@ from dagkit.app import HardwareClass, load_profile, run_app
 from dagkit.graph import Graph
 from dagkit.node import Mode, Node, PortType
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
+from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from serde import serde
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import VideoSource
 
 from mamma.apis.blueprint import default_blueprint
 from mamma.graphs.capture import capture_graph
@@ -35,7 +35,8 @@ from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.smplx_body import SmplxBody
 from mamma.ops.window_fit import FitterConfig, SlidingWindowFitter
-from mamma.sources.npz import NpzSequenceSource
+from mamma.sources.frameset import FramesetSource
+from mamma.sources.npz import load_rig, npz_sequence_source, video_paths
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[3]
@@ -53,7 +54,7 @@ class Config:
     rr_config: RerunTyroConfig
     segment: SegmentRef = field(default_factory=lambda: SegmentRef("dataforge-mamma-eval", "mamma-eval__extra__070525_BedlamLab_Eval_Solo_Dancing_00202_1"))
     """The whole segment by default (the VERIFY ``full`` case); ``--segment.window-ns 0 10000000000`` is the ``short`` case."""
-    video: Path | None = None
+    video: Path | None = field(default=None, metadata={"form": "dir"})
     """A MAMMA-format capture directory (meta/*.npz + videos) to run instead of the segment."""
     cameras: tuple[str, ...] | None = None
     """Camera entities under ``/world``; None = every second camera of the mamma-eval ground ring (90 deg apart), or
@@ -64,7 +65,7 @@ class Config:
     """Operating point: quality or fast (node parameters in profiles/<hardware>.toml)."""
     subjects: int | None = 1
     """People to track; None = as many as the bootstrap view detects. Only exactly one keeps the fitter's CUDA graphs."""
-    output_dir: Path | None = None
+    output_dir: Path | None = field(default=None, metadata={"form": "save"})
     """Write the mamma_fit layer file here (one subdirectory per segment); None = viewer only."""
     register: Register = "new"
     """new registers the layer when the segment has none; replace is the explicit production refresh; off never registers."""
@@ -100,13 +101,13 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     keep_native: bool = profile.configure("video", VideoParams(), config.preset).keep_native
     if config.video is None:
         cameras: tuple[str, ...] = config.cameras or RING
-        video: CatalogVideoSource = CatalogVideoSource(config.segment, cameras, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=keep_native)
+        video: VideoSource = VideoSource.catalog(config.segment, cameras, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=keep_native)
     else:
         cameras = config.cameras or tuple(sorted(p.stem for p in (config.video / "meta").glob("*.npz") if p.stem != "global"))
-        video = files = NpzSequenceSource(config.video, cameras, resize_hw=config.resize_hw, keep_native=keep_native)
-        log_files(recording, files, config.segment.timeline)
-    for view in range(len(cameras)):
-        video.frames.times_ns(view)  # fetch the packets now, as the pre-port export did before its clock started
+        video = npz_sequence_source(config.video, cameras, resize_hw=config.resize_hw, keep_native=keep_native)
+        log_files(recording, config.video, cameras, video.clock)
+    source = FramesetSource(video)
+    source.prefetch()
     data: Path = PACKAGE_DIR / "data"
     body: SmplxBody = SmplxBody.load(data / "body_models", data / "body_models/downsampled_verts/verts_512.pkl")
     nodes = (
@@ -117,28 +118,28 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         LandmarksNode(LandmarkEstimator(data / "weights/ma_2d/mamma_mask_full_cvpr.safetensors", engine_path=engine_plan())),
         FitNode(fit, np.asarray(body.model.faces, dtype=np.int32), lambda K, cam_T_world: SlidingWindowFitter(body, K, cam_T_world, fit)),
     )  # fmt: skip
-    return app_graph(config, recording, video, nodes, f"{profile.hardware}/{config.preset}")
+    return app_graph(config, recording, source, nodes, f"{profile.hardware}/{config.preset}")
 
 
-def app_graph(config: Config, recording: rr.RecordingStream, video: CatalogVideoSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
+def app_graph(config: Config, recording: rr.RecordingStream, video: FramesetSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
     """The capture graph with the App's sinks (the viewer; with ``output_dir`` the ``mamma_fit`` layer) and its blueprint.
 
     ``build`` passes the loaded models; the unit tests pass fakes. ``profile`` is ``<hardware>/<preset>`` for the producer.
     """
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS, timeline=video.clock)}
     if config.output_dir is not None and config.video is None:
-        layer, partial = open_layer(config.segment, LAYER, Producer.of("mamma", "mamma-capture", profile), output_dir=config.output_dir)
-        sinks[LAYER] = LayerSink(layer, partial, config.segment, LAYER, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, register=config.register)
+        producer: Producer = Producer.of("mamma", "mamma-capture", profile)
+        sinks[LAYER] = LayerSink.open(config.segment, LAYER, producer, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, output_dir=config.output_dir, register=config.register)
     recording.send_blueprint(default_blueprint(video.cameras))
     return capture_graph(video, *nodes, sinks)
 
 
-def log_files(recording: rr.RecordingStream, source: NpzSequenceSource, timeline: str) -> None:
+def log_files(recording: rr.RecordingStream, root: Path, cameras: tuple[str, ...], timeline: str) -> None:
     """A file capture has no base layer: log its rig, z-up world and videos (frame references on the source's clock)."""
     recording.log("/world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    for log in source.rig.to_rerun("/world"):
+    for log in load_rig(root / "meta", cameras).to_rerun("/world"):
         recording.log(log.path, log.data, static=True)
-    for camera, path in zip(source.cameras, source.videos, strict=True):
+    for camera, path in zip(cameras, video_paths(root, cameras), strict=True):
         asset = rr.AssetVideo(path=path)
         recording.log(f"/world/{camera}/pinhole/video", asset, static=True)
         times_ns = asset.read_frame_timestamps_nanos()

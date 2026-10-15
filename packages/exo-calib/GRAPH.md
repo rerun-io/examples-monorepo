@@ -10,9 +10,9 @@ Stage A, run once: metric, gravity-aligned exo cameras from one synchronized fra
 `(GPU)` after a type: the value stays on the GPU. A tag left of a box lists its inputs from further up (`port: Type ← 1 video · latest`). Box numbers match the sections below.
 
 ## 1 · video: Decode the cameras' videos
-*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+*source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
@@ -35,9 +35,9 @@ Stage A: metric, gravity-aligned exo cameras from one synchronized frameset (G3T
 Uses the graph resources `g3t`, `moge` (built once, shared).
 
 ## 3 · keep: Hand values on to the App's next graph
-*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+*output* · `Latest` · `packages/dagkit/dagkit/sinks.py`
 
-Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
 Takes **init** from 2 init.
 
@@ -72,14 +72,13 @@ Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then 
 
 | gives | type | to |
 |---|---|---|
-| **init** | `RigCameras` | 4 refine |
+| **init** | `RigCameras` | 4 refine, 6 keep |
 | **tracking_rig** | `RigCameras` | 3 kp2d |
-| **rig_layout** | `RigLayout` | 4 refine |
 
 ## 2 · video: Decode the cameras' videos
-*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+*source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
@@ -111,7 +110,6 @@ Stage C+D (whole segment): Kineo-style correspondences, robust triangulation, st
 |---|---|---|---|
 | **kp2d** | `MultiViewKeypoints` | 3 kp2d | waits (4) |
 | **init** | `RigCameras` | 1 seed | latest |
-| **rig_layout** | `RigLayout` | 1 seed | latest |
 
 | gives | type | to |
 |---|---|---|
@@ -129,11 +127,11 @@ Uses the graph resources `frames`, `moge` (built once, shared).
 Saves **kp2d** from 3 kp2d into the catalog layer `exocalib_kp2d_pass1`.
 
 ## 6 · keep: Hand values on to the App's next graph
-*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+*output* · `Latest` · `packages/dagkit/dagkit/sinks.py`
 
-Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
-Takes **refined** from 4 refine.
+Takes **init** from 1 seed; **refined** from 4 refine.
 
 ## 7 · exocalib_refined_pass1: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
@@ -150,7 +148,6 @@ Saves **refined, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer
 | `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
-| `RigLayout` | One segment's cameras: the exo ones to calibrate, the worn ego ones, and those with dataset GT calibration | `packages/exo-calib/exo_calib/types.py` |
 
 # exocalib-refine
 Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then bundle adjustment of the Stage A rig on them; the second pass tracks through the first pass's rig and scores both rigs against GT.
@@ -169,12 +166,11 @@ Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then 
 |---|---|---|
 | **init** | `RigCameras` | 4 refine, 6 report |
 | **tracking_rig** | `RigCameras` | 3 kp2d |
-| **rig_layout** | `RigLayout` | 4 refine, 6 report |
 
 ## 2 · video: Decode the cameras' videos
-*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+*source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
@@ -206,7 +202,6 @@ Stage C+D (whole segment): Kineo-style correspondences, robust triangulation, st
 |---|---|---|---|
 | **kp2d** | `MultiViewKeypoints` | 3 kp2d | waits (4) |
 | **init** | `RigCameras` | 1 seed | latest |
-| **rig_layout** | `RigLayout` | 1 seed | latest |
 
 | gives | type | to |
 |---|---|---|
@@ -234,7 +229,6 @@ Stage E (whole segment): score the Stage A and refined rigs against the segment'
 | **diag** | `RefinementDiagnostics` | 4 refine | waits (4) |
 | **init** | `RigCameras` | 1 seed | latest |
 | **gt** | `RigCameras` | 2 video | latest |
-| **rig_layout** | `RigLayout` | 1 seed | latest |
 
 | gives | type | to |
 |---|---|---|
@@ -247,9 +241,9 @@ Stage E (whole segment): score the Stage A and refined rigs against the segment'
 Saves **refined, base_rig, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer `exocalib_refined`.
 
 ## 8 · keep: Hand values on to the App's next graph
-*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+*output* · `Latest` · `packages/dagkit/dagkit/sinks.py`
 
-Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
 Takes **eval** from 6 report.
 
@@ -275,4 +269,3 @@ Saves **align** from 6 report into the catalog layer `exocalib_align`.
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
 | `RigAlignment` | SE(3) alignment of each rig variant onto GT (pred world -> GT world) and the aligned camera centres | `packages/exo-calib/exo_calib/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
-| `RigLayout` | One segment's cameras: the exo ones to calibrate, the worn ego ones, and those with dataset GT calibration | `packages/exo-calib/exo_calib/types.py` |

@@ -21,24 +21,26 @@ from exo_calib.types import VARIANTS, EvalReport, RefinementDiagnostics, RigAlig
 class ReportNode:
     """Score the rigs against GT calibration."""
 
-    inputs: Mapping[str, PortType] = {"refined": RigCameras, "diag": RefinementDiagnostics, "init": RigCameras, "gt": RigCameras, "rig_layout": RigLayout}
+    inputs: Mapping[str, PortType] = {"refined": RigCameras, "diag": RefinementDiagnostics, "init": RigCameras, "gt": RigCameras}
     outputs: Mapping[str, PortType] = {"align": RigAlignment, "eval": EvalReport}
 
-    def __init__(self, segment: SegmentRef) -> None:
+    def __init__(self, segment: SegmentRef, layout: RigLayout) -> None:
         self.segment: SegmentRef = segment
+        self.layout: RigLayout = layout
+        """Only cameras with GT calibration (``calibrated_camera_names``) are scored."""
 
     def reset(self, ctx: RunContext) -> None:
         pass
 
     def run(self, inputs: Mapping[str, Sequence[Event]], out: Emit) -> None:
-        refined, diag, layout = (inputs[port][-1].value for port in ("refined", "diag", "rig_layout"))
-        assert isinstance(refined, RigCameras) and isinstance(diag, RefinementDiagnostics) and isinstance(layout, RigLayout)
+        refined, diag = (inputs[port][-1].value for port in ("refined", "diag"))
+        assert isinstance(refined, RigCameras) and isinstance(diag, RefinementDiagnostics)
         names: tuple[str, ...] = refined.names
         init: RigCameras = inputs["init"][-1].value.select(names)  # type: ignore[union-attr]
         rigs: list[RigCameras] = [init, refined]
         gt_rig: object = inputs["gt"][-1].value if inputs["gt"] else None
         gt: RigCameras | None = None
-        if isinstance(gt_rig, RigCameras) and set(names) <= set(layout.calibrated_camera_names) & set(gt_rig.names):
+        if isinstance(gt_rig, RigCameras) and set(names) <= set(self.layout.calibrated_camera_names) & set(gt_rig.names):
             gt = gt_rig.select(names)
         else:
             print(f"ground truth: unavailable for some of {list(names)}; evaluation and alignment skipped")

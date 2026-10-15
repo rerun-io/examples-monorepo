@@ -103,20 +103,18 @@ class MultiViewKeypoints:
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "MultiViewKeypoints"]]:
         views: list[str] = [c.removeprefix(f"{root}/").removesuffix(":view_index") for c in table.column_names if c.endswith(":view_index")]
-        columns: dict[str, list] = {c: table.column(c).to_pylist() for c in table.column_names if c.startswith(f"{root}/")}
+        dtypes: dict[str, type] = dict.fromkeys(("view_index", "frame_index", "cam_t_ns", "crop_input_wh", "video_wh"), np.int64) | {"box_source": str}
+        dtypes |= dict.fromkeys(("kp_xy", "conf", "bbox_xyxy", "crop_origin_xy", "crop_size_wh"), np.float32)
+        fields: dict[str, ndarray] = {  # each field stacked once: (rows, views, values)
+            name: np.stack([np.asarray(table.column(f"{root}/{view}:{name}").to_pylist(), dtype=dtype) for view in views], axis=1) for name, dtype in dtypes.items()
+        }  # fmt: skip
         for row, t_ns in enumerate(row_times(table, timeline)):
-
-            def field(name: str, dtype: type, views: list[str] = views, row: int = row) -> ndarray:
-                return np.stack([np.asarray(columns[f"{root}/{view}:{name}"][row], dtype=dtype) for view in views])
-
-            order: Int64[ndarray, " v"] = np.argsort(field("view_index", np.int64)[:, 0])
-            ordered: list[str] = [views[i] for i in order]
+            order: Int64[ndarray, " v"] = np.argsort(fields["view_index"][row, :, 0])
+            cells: dict[str, ndarray] = {name: values[row][order] for name, values in fields.items()}
             yield t_ns, cls(
-                int(field("frame_index", np.int64, ordered)[0, 0]), tuple(ordered), field("cam_t_ns", np.int64, ordered)[:, 0],
-                field("kp_xy", np.float32, ordered).reshape(-1, 133, 2), field("conf", np.float32, ordered), field("bbox_xyxy", np.float32, ordered),
-                tuple(field("box_source", str, ordered)[:, 0].tolist()), field("crop_origin_xy", np.float32, ordered),
-                field("crop_size_wh", np.float32, ordered), tuple(field("crop_input_wh", np.int64, ordered)[0].tolist()),
-                tuple(field("video_wh", np.int64, ordered)[0].tolist()),
+                int(cells["frame_index"][0, 0]), tuple(views[i] for i in order), cells["cam_t_ns"][:, 0], cells["kp_xy"].reshape(-1, 133, 2), cells["conf"],
+                cells["bbox_xyxy"], tuple(cells["box_source"][:, 0].tolist()), cells["crop_origin_xy"], cells["crop_size_wh"],
+                tuple(cells["crop_input_wh"][0].tolist()), tuple(cells["video_wh"][0].tolist()),
             )  # fmt: skip
 
 

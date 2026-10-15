@@ -18,6 +18,7 @@ from mast3r_slam.nodes.backend import Backend
 from mast3r_slam.nodes.frontend import Frontend
 from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
+from mast3r_slam.ops.pointmap import update_pointmap
 from mast3r_slam.types import Frame, KeyframeAdded, KeyframeCloud, MapUpdate, Mode, RelocRequest, SlamConfig, TrackedFrame
 
 SIZE: int = 224
@@ -37,7 +38,7 @@ def shared() -> Iterator[SharedSlam]:
 def observe(frame: Frame) -> None:
     """What MASt3R would leave on a frame: features and a point map (a fronto-parallel plane)."""
     frame.feat, frame.pos = torch.zeros(1, PATCHES, 1024), torch.zeros(1, PATCHES, 2, dtype=torch.long)
-    frame.update_pointmap(torch.ones(SIZE * SIZE, 3), torch.full((SIZE * SIZE, 1), 10.0), CFG.tracking)  # confident
+    update_pointmap(frame, torch.ones(SIZE * SIZE, 3), torch.full((SIZE * SIZE, 1), 10.0), CFG.tracking)  # confident
 
 
 def fake_mono(model: object, frame: Frame) -> tuple[torch.Tensor, torch.Tensor]:
@@ -80,6 +81,8 @@ def test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers(s
     monkeypatch.setattr(backend_module, "RetrievalDatabase", FakeRetrieval)
     resources = {"mast3r": MODEL, "shared": shared}
     frontend, backend, out = Frontend(CFG, device="cpu"), Backend(CFG), Recorder()
+    published: list[int] = []  # tasks put when the frontend published its GPU writes
+    monkeypatch.setattr(shared, "publish", lambda: published.append(sum(port == "task" for port, _, _ in out.items)))
     frontend.reset(RunContext("slam", "frontend", "realtime", resources=resources))
     backend.reset(RunContext("slam", "backend", "realtime", resources=resources))
     for tick in frame_ticks(11):  # frame 7 is lost, frame 8 asks; frames 9 and 10 arrive before the backend answers
@@ -87,9 +90,10 @@ def test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers(s
     assert shared.states.get_frame().frame_id == 8
     tasks = [v for port, _, v in out.items if port == "task"]
     assert [v for v in tasks if isinstance(v, RelocRequest)] == [RelocRequest(8)]
+    assert published == [0, 1, 2, 3]  # each task leaves only after the writes it refers to are published
     for t, task in [(t, v) for port, t, v in out.items if port == "task"]:
         backend.step(Tick(t, "task", task, {}), Recorder())
-    assert shared.backend_idle() and shared.states.get_mode() == Mode.TRACKING
+    assert shared.completed.value == 4 and shared.states.get_mode() == Mode.TRACKING
 
 
 def test_frontend_reset_returns_to_init(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,7 +104,7 @@ def test_frontend_reset_returns_to_init(shared: SharedSlam, monkeypatch: pytest.
     frontend.step(frame_ticks(1)[0], Recorder())
     assert shared.states.get_mode() == Mode.TRACKING and len(shared.keyframes) == 1
     frontend.reset(ctx)
-    assert shared.states.get_mode() == Mode.INIT and len(shared.keyframes) == 0 and shared.backend_idle()
+    assert shared.states.get_mode() == Mode.INIT and len(shared.keyframes) == 0 and shared.completed.value == 0
 
 
 def test_lossless_frontend_waits_for_the_backend_and_abort_ends_the_wait(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,10 +114,9 @@ def test_lossless_frontend_waits_for_the_backend_and_abort_ends_the_wait(shared:
     out = Recorder()
     frontend.step(frame_ticks(1)[0], out)  # INIT queues keyframe 0 for the backend
 
-    def acknowledge() -> None:
+    def acknowledge() -> None:  # the backend, from another thread
         time.sleep(0.3)
-        with shared.states.lock:
-            shared.states.global_optimizer_tasks.pop(0)
+        shared.acknowledge()
 
     start = time.perf_counter()
     threading.Thread(target=acknowledge).start()
@@ -154,25 +157,26 @@ def test_backend_contract(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(backend_module, "FactorGraph", FakeGraph)
     monkeypatch.setattr(backend_module, "RetrievalDatabase", FakeRetrieval)
 
-    def ticks() -> list[Tick]:  # three keyframes, then a relocalisation request; the frontend's queue mirrors the edge
+    def ticks() -> list[Tick]:  # three keyframes, then a relocalisation request
         shared.reset()
         for i in range(3):
             frame = Frame(10 * i, torch.zeros(1, 3, SIZE, SIZE), torch.tensor([[SIZE, SIZE]]), torch.tensor([[SIZE, SIZE]]), torch.zeros(SIZE, SIZE, 3))
             observe(frame)
             shared.keyframes.append(frame)
-            shared.states.queue_global_optimization(i)
         shared.states.set_frame(frame)
         shared.states.set_mode(Mode.RELOC)
-        shared.states.queue_reloc()
         return [Tick(1000 * i, "task", KeyframeAdded(i), {}) for i in range(3)] + [Tick(3000, "task", RelocRequest(20), {})]
 
     backend = Backend(CFG)
     ctx = RunContext("slam", "backend", "lossless", resources={"mast3r": MODEL, "shared": shared})
     backend.reset(ctx)
     out = Recorder()
+    published: list[int] = []  # acknowledgements counted when the backend published its GPU writes
+    monkeypatch.setattr(shared, "publish", lambda: published.append(shared.completed.value))
     for tick in ticks():
         backend.step(tick, out)
-    assert shared.backend_idle() and shared.states.get_mode() == Mode.TRACKING  # every task acknowledged, relocalised
+    assert shared.completed.value == 4 and shared.states.get_mode() == Mode.TRACKING  # every task acknowledged, relocalised
+    assert published == [0, 1, 2, 3]  # each acknowledgement follows the task's published writes
     backend.flush(out)
     maps = [v for port, _, v in out.items if port == "map" and isinstance(v, MapUpdate)]
     assert [len(m.world_sim3_cam) for m in maps] == [3, 3, 3, 4]  # the buffer already holds keyframes 0-2; reloc adds 3
@@ -188,7 +192,7 @@ def test_backend_contract(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -
     for tick in ticks():
         backend.step(tick, Recorder())
         shared.states.set_mode(Mode.TERMINATED)  # realtime stop: what is still queued is dropped and counted
-    assert backend.dropped == 3 and shared.backend_idle()
+    assert backend.dropped == 3 and shared.completed.value == 4  # dropped tasks are acknowledged too
 
 
 def test_backend_refuses_to_relocalise_a_frame_it_was_not_asked_for(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,7 +205,6 @@ def test_backend_refuses_to_relocalise_a_frame_it_was_not_asked_for(shared: Shar
     observe(frame)
     shared.states.set_frame(frame)
     shared.states.set_mode(Mode.RELOC)
-    shared.states.queue_reloc()
     backend = Backend(CFG)
     backend.reset(RunContext("slam", "backend", "lossless", resources={"mast3r": MODEL, "shared": shared}))
     with pytest.raises(RuntimeError, match="frame 20, .* frame 22"):
@@ -217,7 +220,6 @@ def test_a_realtime_stop_during_relocalisation_stays_terminated(shared: SharedSl
     observe(frame)
     shared.states.set_frame(frame)
     shared.states.set_mode(Mode.RELOC)
-    shared.states.queue_reloc()
     backend = Backend(CFG)
     backend.reset(RunContext("slam", "backend", "realtime", resources={"mast3r": MODEL, "shared": shared}))
 
@@ -227,7 +229,7 @@ def test_a_realtime_stop_during_relocalisation_stays_terminated(shared: SharedSl
 
     monkeypatch.setattr(backend, "_relocalise", stopped_while_relocalising)
     backend.step(Tick(3000, "task", RelocRequest(20), {}), Recorder())
-    assert shared.states.get_mode() == Mode.TERMINATED and shared.backend_idle()
+    assert shared.states.get_mode() == Mode.TERMINATED and shared.completed.value == 1
 
 
 def test_calibrated_tracking_measures_every_keyframe_pixel_at_its_depth(shared: SharedSlam) -> None:

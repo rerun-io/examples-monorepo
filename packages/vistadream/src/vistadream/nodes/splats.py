@@ -1,5 +1,6 @@
 """The Gaussian scene: build it from the depth, grow it with inpainted views (coarse stage), render it along a path, save it."""
 
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from vistadream.models.flux import Inpaint
 from vistadream.ops.depth_align import align_depth
 from vistadream.ops.splats import Rasterize, gaussians, hole_mask, render, train
 from vistadream.ops.trajectory import spiral
-from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats
+from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene, SceneViews, Splats
 
 EDGE_THRESHOLD: float = 0.01
 """Depth-gradient magnitude above which a pixel is a depth edge and spawns no Gaussian."""
@@ -31,7 +32,7 @@ class InitNode:
     outpainted, valid ones), optimised ``iters`` steps against both views."""
 
     inputs = {"depth": RelativeDepth, "canvas": OutpaintCanvas, "image": RgbImage}
-    outputs = {"scene": Fenced[Splats], "views": SceneViews}
+    outputs = {"scene": Fenced[Scene]}
 
     def __init__(self, iters: int = 100, seed: int = 0, device: str = "cuda", rasterize: Rasterize = render) -> None:
         self.iters, self.seed, self.device, self.rasterize = iters, seed, device, rasterize
@@ -54,8 +55,7 @@ class InitNode:
             views.insert(0, CameraView(canvas.rgb, depth.K, np.eye(4), depth.depth, depth.valid, supervise=canvas.mask))
             spawn.insert(0, canvas.mask & ~edges & depth.valid)
         splats: Splats = train(None, [gaussians(v, s, self.device) for v, s in zip(views, spawn, strict=True)], views, self.iters, self.rng, self.rasterize)
-        out.put("scene", tick.t_ns, Fenced(splats, fence_after(splats.centers)))
-        out.put("views", tick.t_ns, SceneViews(tuple(views), input_index=len(views) - 1))
+        out.put("scene", tick.t_ns, Fenced(Scene(splats, SceneViews(tuple(views), input_index=len(views) - 1)), fence_after(splats.centers)))
 
     def flush(self, out: Emit) -> None:
         pass
@@ -68,8 +68,8 @@ class ExpandNode:
     next to a picked one), inpainted, given aligned depth, and each optimised ``iters`` steps into the scene (old Gaussians
     fixed)."""
 
-    inputs = {"scene": Fenced[Splats], "views": SceneViews}
-    outputs = {"scene": Fenced[Splats], "views": SceneViews}
+    inputs = {"scene": Fenced[Scene]}
+    outputs = {"scene": Fenced[Scene]}
 
     def __init__(
         self, inpaint: Inpaint, predictor: BaseRelativePredictor, n_frames: int = 10, iters: int = 500, seed: int = 0, rasterize: Rasterize = render
@@ -87,11 +87,11 @@ class ExpandNode:
         return rgb, depth, hole_mask(alpha)
 
     def run(self, inputs: Mapping[str, Sequence[Event]], out: Emit) -> None:
-        [scene], [views_event] = inputs["scene"], inputs["views"]
-        assert isinstance(scene.value, Fenced) and isinstance(views_event.value, SceneViews)
-        splats: Splats = consume(scene.value)
-        input_index: int = views_event.value.input_index
-        views: list[CameraView] = list(views_event.value.views)
+        [event] = inputs["scene"]
+        assert isinstance(event.value, Fenced)
+        scene: Scene = consume(event.value)
+        splats: Splats = scene.splats
+        views: list[CameraView] = list(scene.views.views)
         base: CameraView = views[0]
         assert base.depth is not None
         height, width = base.rgb.shape[0] + self.margin, base.rgb.shape[1] + self.margin
@@ -119,8 +119,7 @@ class ExpandNode:
             views.append(view)
             spawn: Bool[ndarray, "h w"] = holes & ~depth_edges_mask(depth, threshold=EDGE_THRESHOLD) & valid
             splats = train(splats, [gaussians(view, spawn, str(splats.centers.device))], views, self.iters, self.rng, self.rasterize)
-        out.put("scene", scene.t_ns, Fenced(splats, fence_after(splats.centers)))
-        out.put("views", scene.t_ns, SceneViews(tuple(views), input_index))
+        out.put("scene", event.t_ns, Fenced(Scene(splats, SceneViews(tuple(views), scene.views.input_index)), fence_after(splats.centers)))
 
 
 class RenderNode:
@@ -129,7 +128,7 @@ class RenderNode:
     The final scene at the input camera along the spiral: 150 views (25 per training view when there are more than 2),
     one every ``1 / fps`` s after the scene's time."""
 
-    inputs = {"scene": Fenced[Splats], "views": SceneViews}
+    inputs = {"scene": Fenced[Scene]}
     outputs = {"view": CameraView}
 
     def __init__(self, fps: int = 30, rasterize: Rasterize = render) -> None:
@@ -140,15 +139,15 @@ class RenderNode:
 
     def step(self, tick: Tick, out: Emit) -> None:
         assert isinstance(tick.value, Fenced)
-        splats: Splats = consume(tick.value)
-        scene = tick.asof["views"]
-        assert isinstance(scene, SceneViews) and scene.views[0].depth is not None
-        n: int = min(len(scene.views) * 25 if len(scene.views) > 2 else 150, 150)
-        camera: CameraView = scene.input
+        scene: Scene = consume(tick.value)
+        views: tuple[CameraView, ...] = scene.views.views
+        assert views[0].depth is not None
+        n: int = min(len(views) * 25 if len(views) > 2 else 150, 150)
+        camera: CameraView = scene.views.input
         height, width = camera.rgb.shape[:2]
         with torch.no_grad():
-            for i, cam_T_world in enumerate(spiral(scene.views[0].depth, scene.views[0].K, n)):
-                rgb: Float32[Tensor, "h w 3"] = self.rasterize(splats, camera.K, cam_T_world, width, height)[0]
+            for i, cam_T_world in enumerate(spiral(views[0].depth, views[0].K, n)):
+                rgb: Float32[Tensor, "h w 3"] = self.rasterize(scene.splats, camera.K, cam_T_world, width, height)[0]
                 rgb8: UInt8[ndarray, "h w 3"] = (rgb.clamp(0, 1) * 255.0).round().byte().cpu().numpy()
                 out.put("view", tick.t_ns + i * 1_000_000_000 // self.fps, CameraView(rgb8, camera.K, cam_T_world))
 
@@ -161,7 +160,7 @@ class PlySink:
 
     Degree-0 SH (DC + 45 zero coefficients), logit opacity, log scales."""
 
-    inputs = {"scene": Splats}
+    inputs = {"scene": Scene}
     outputs: dict = {}
 
     def __init__(self, path: Path) -> None:
@@ -171,8 +170,8 @@ class PlySink:
         pass
 
     def step(self, tick: Tick, out: Emit) -> None:
-        assert isinstance(tick.value, Splats)
-        s: Splats = tick.value
+        assert isinstance(tick.value, Scene)
+        s: Splats = tick.value.splats
         columns: list[tuple[str, Float32[Tensor, " n"] | float]] = [
             *zip(("x", "y", "z"), s.centers.T, strict=True),
             *((name, 0.0) for name in ("nx", "ny", "nz")),
@@ -186,7 +185,12 @@ class PlySink:
         for name, values in columns:
             vertices[name] = values.detach().cpu().numpy() if isinstance(values, Tensor) else values
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        PlyData([PlyElement.describe(vertices, "vertex")]).write(self.path)
+        partial: Path = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex[:12]}.partial")  # a sibling: the rename stays on one filesystem
+        try:
+            PlyData([PlyElement.describe(vertices, "vertex")]).write(partial)
+            partial.replace(self.path)  # atomic: the path holds the earlier file or the whole new one, never a partial write
+        finally:
+            partial.unlink(missing_ok=True)
 
     def flush(self, out: Emit) -> None:
         pass

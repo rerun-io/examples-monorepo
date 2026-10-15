@@ -1,5 +1,7 @@
 """simplecv shared Types and the catalog video source: serde, Rerun mapping structure, sampling (unit lane: no GPU, no catalog)."""
 
+from collections.abc import Sequence
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -13,11 +15,20 @@ pytest.importorskip("torchcodec", reason="the catalog video source decodes with 
 
 import cv2  # noqa: E402
 import torch  # noqa: E402
-from dagkit.sources import SegmentRef  # noqa: E402
+from dagkit.node import Event, Fenced  # noqa: E402
+from dagkit.sources import IterSource, SegmentRef  # noqa: E402
+from dagkit.time import STATIC  # noqa: E402
 
 from simplecv.catalog_video import CatalogVideo  # noqa: E402
 from simplecv.sources import catalog_video  # noqa: E402
-from simplecv.sources.catalog_video import CatalogVideoSource, SegmentFrames, sample_indices, undistortion_maps  # noqa: E402
+from simplecv.sources.catalog_video import (  # noqa: E402
+    SegmentFrames,
+    UndistortedFrames,
+    VideoSource,
+    sample_indices,
+    static_events,
+    undistortion_maps,
+)
 from simplecv.types.frames import MultiViewFrames  # noqa: E402
 from simplecv.types.rig import RigCameras  # noqa: E402
 
@@ -122,6 +133,9 @@ def test_rig_scaled_to_a_size_and_back_is_the_identity(rig: RigCameras, height: 
     np.testing.assert_array_equal(back.resolution_wh, rig.resolution_wh[:1])
 
 
+NO_STATICS = IterSource({}, lambda: iter(()))
+
+
 class FakeFrames:
     """Stand-in for ``SegmentFrames``: views of different constant colours, 10 ms apart."""
 
@@ -131,7 +145,7 @@ class FakeFrames:
     def times_ns(self, view: int) -> np.ndarray:
         return np.arange(5, dtype=np.int64) * 10_000_000
 
-    def frames_at(self, view: int, indices: list[int]) -> torch.Tensor:
+    def frames_at(self, view: int, indices: Sequence[int]) -> torch.Tensor:
         return torch.full((len(indices), 3, *self.hw), 40 * view + indices[0], dtype=torch.uint8)
 
     def close(self) -> None:
@@ -142,11 +156,8 @@ class FakeFrames:
 @given(views=st.integers(1, 3), native_hw=st.sampled_from([(32, 48), (40, 40)]), resize_hw=st.sampled_from([(16, 24), (8, 8)]), keep=st.booleans())
 def test_source_resizes_and_puts_the_native_frames_first(views: int, native_hw: tuple[int, int], resize_hw: tuple[int, int], keep: bool) -> None:
     cameras = tuple(f"rig_{v:02d}/cam_00" for v in range(views))
-    source = CatalogVideoSource(SegmentRef("d", "s"), cameras, decode="cpu_rgb", resize_hw=resize_hw, keep_native=keep)
-    source.statics, source.frames = {}, FakeFrames(views, native_hw)  # type: ignore[assignment]
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(SegmentRef, "entry", lambda self: None)  # no catalog
-        events = list(source.events())
+    source = VideoSource(FakeFrames(views, native_hw), cameras, NO_STATICS, resize_hw=resize_hw, keep_native=keep)
+    events = list(source.events())
     assert [e.port for e in events] == (["frames_native", "frames"] if keep else ["frames"]) * 5
     assert ("frames_native" in source.outputs) == keep
     for event in events:
@@ -157,7 +168,18 @@ def test_source_resizes_and_puts_the_native_frames_first(views: int, native_hw: 
 
 def test_source_refuses_native_frames_without_a_resize() -> None:
     with pytest.raises(NotImplementedError, match="keep_native"):
-        CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="cpu_rgb", keep_native=True)
+        VideoSource(FakeFrames(1, (8, 8)), ("a",), NO_STATICS, keep_native=True)
+
+
+def test_a_source_over_any_frame_provider_emits_its_statics_then_the_window() -> None:
+    """A file capture (mamma's MAMMA-format directories) composes the same source: its own rig event, its own frames, no catalog."""
+    rig = RigCameras(("a", "b"), np.repeat(np.eye(3)[None], 2, 0), np.repeat(np.eye(4)[None], 2, 0), np.array([[48, 32], [48, 32]]))
+    statics = IterSource({"rig": RigCameras}, lambda: iter([Event(STATIC, "rig", rig)]))
+    source = VideoSource(FakeFrames(2, (32, 48)), ("a", "b"), statics, window_ns=(10_000_000, 40_000_000), fenced=True)
+    events = list(source.events())
+    assert source.outputs == {"frames": Fenced[MultiViewFrames], "rig": RigCameras} and source.clock == "video_time"
+    assert [(e.port, e.t_ns) for e in events] == [("rig", STATIC), ("frames", 10_000_000), ("frames", 20_000_000), ("frames", 30_000_000)]
+    assert all(isinstance(e.value, Fenced) for e in events[1:])
 
 
 @settings(max_examples=50, deadline=None)
@@ -192,7 +214,7 @@ def rig_with_distortion(K: np.ndarray, width: int, height: int, coefficients: li
 class TextureFrames(FakeFrames):
     """The same fixed random texture in every frame."""
 
-    def frames_at(self, view: int, indices: list[int]) -> torch.Tensor:
+    def frames_at(self, view: int, indices: Sequence[int]) -> torch.Tensor:
         texture = np.random.default_rng(0).integers(0, 256, (3, *self.hw), dtype=np.uint8)
         return torch.from_numpy(texture)[None].repeat(len(indices), 1, 1, 1)
 
@@ -203,15 +225,16 @@ def test_source_undistorts_its_frames_and_emits_the_undistorted_pinhole(monkeypa
     coefficients = [-0.25, 0.05, 1e-3, -1e-3, 0.0]
     monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: rig_with_distortion(K, width, height, coefficients))
     monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
-    source = CatalogVideoSource(SegmentRef("d", "s"), ("rig_00/cam_00",), decode="cpu_rgb", undistort=True)
-    source.frames = TextureFrames(1, (height, width))  # type: ignore[assignment]
+    segment, cameras = SegmentRef("d", "s"), ("rig_00/cam_00",)
+    undistorted = UndistortedFrames(TextureFrames(1, (height, width)))  # what VideoSource.catalog(..., undistort=True) composes
+    source = VideoSource(undistorted, cameras, IterSource({"rig": RigCameras}, lambda: static_events(segment, cameras, {}, undistorted)))
     list(source.events())  # a graph reads the source again after a first look (e.g. at the frame size)
     events = list(source.events())
     rig: RigCameras = events[0].value  # type: ignore[assignment]
     K_new, map_x, map_y = undistortion_maps(K, np.asarray(coefficients, dtype=np.float32).astype(np.float64), width, height)
     np.testing.assert_allclose(rig.intrinsics[0], K_new)
     np.testing.assert_array_equal(rig.resolution_wh, [[width, height]])
-    native = source.frames.frames_at(0, [0])[0].permute(1, 2, 0).numpy().copy()
+    native = undistorted.frames.frames_at(0, [0])[0].permute(1, 2, 0).numpy().copy()
     for event in events[1:]:
         frames: MultiViewFrames = event.value  # type: ignore[assignment]
         np.testing.assert_array_equal(frames.rgb[0].permute(1, 2, 0).numpy(), cv2.remap(native, map_x, map_y, cv2.INTER_LINEAR))
@@ -220,8 +243,9 @@ def test_source_undistorts_its_frames_and_emits_the_undistorted_pinhole(monkeypa
 def test_source_refuses_to_undistort_without_coefficients_or_off_the_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: rig_with_distortion(np.eye(3), 8, 8, None))
     monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
-    source = CatalogVideoSource(SegmentRef("d", "s"), ("rig_00/cam_00",), decode="cpu_rgb", undistort=True)
-    source.frames = FakeFrames(1, (8, 8))  # type: ignore[assignment]
+    segment, cameras = SegmentRef("d", "s"), ("rig_00/cam_00",)
+    undistorted = UndistortedFrames(FakeFrames(1, (8, 8)))
+    source = VideoSource(undistorted, cameras, IterSource({"rig": RigCameras}, lambda: static_events(segment, cameras, {}, undistorted)))
     with pytest.raises(ValueError, match="DistortionCoefficients"):
         list(source.events())
     fisheye = rig_with_distortion(np.eye(3), 8, 8, [0.1, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "kannala_brandt")  # 8 terms OpenCV would misread
@@ -229,7 +253,7 @@ def test_source_refuses_to_undistort_without_coefficients_or_off_the_cpu(monkeyp
     with pytest.raises(ValueError, match="brown_conrady"):
         list(source.events())
     with pytest.raises(NotImplementedError, match="undistort"):
-        CatalogVideoSource(SegmentRef("d", "s"), ("a",), decode="nvdec_rgb", undistort=True)
+        VideoSource.catalog(SegmentRef("d", "s"), ("a",), decode="nvdec_rgb", undistort=True)
 
 
 def test_segment_frames_fetch_every_camera_in_one_read(monkeypatch: pytest.MonkeyPatch) -> None:

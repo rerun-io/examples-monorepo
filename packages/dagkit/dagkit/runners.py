@@ -185,10 +185,10 @@ class _Run:
             return False  # several trigger ports (one producer): wait until nothing earlier can still arrive
         return self.mode == "realtime" or s.spec.kind == "segment" or all(self.states[e.spec.src.node].wm >= t_ns for e in s.asofs)
 
-    def _next_joined(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
-        """Several trigger ports (one producer): the earliest (t_ns, port declaration) item, taken from its queue only when
-        ready, so Block capacities hold the producer back. Queues spill into ``pending`` only while one is full and the
-        head waits (a burst at one time, or a late producer): the producer may wait on that queue."""
+    def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
+        """The earliest (t_ns, port declaration) item, taken from its queue only when ready, so Block capacities hold the
+        producer back. Queues spill into ``pending`` only while one is full and the head waits (a burst at one time, a late
+        AsOf producer, a flush-only one): the producer may be waiting on that queue."""
         rank: dict[str, int] = {port: i for i, port in enumerate(s.spec.inputs)}
         heads: list[tuple[TimeNs, int, int, _Edge | None]] = [(e.queue[0][1], rank[e.spec.dst.port], 1, e) for e in s.triggers if e.queue]
         heads += [(s.pending[0][1], rank[s.pending[0][0].spec.dst.port], 0, None)] if s.pending else []  # pending first: it came first
@@ -208,20 +208,6 @@ class _Run:
             s.pending_max = max(s.pending_max, len(s.pending))
             self.cond.notify_all()
         return None
-
-    def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
-        if s.spec.kind == "node" and len(s.triggers) > 1:
-            return self._next_joined(s)
-        while True:
-            if s.pending and self._ready(s, s.pending[0][1]):
-                return s.pending.popleft()
-            s.pending_max = max(s.pending_max, len(s.pending))
-            edge: _Edge | None = min((e for e in s.triggers if e.queue), key=lambda e: cast(_Edge, e).queue[0][0], default=None)
-            if edge is None:
-                return None
-            _, t_ns, value = edge.queue.popleft()
-            self.cond.notify_all()
-            s.pending.append((edge, t_ns, value))
 
     def _can_finish(self, s: _State) -> bool:
         if s.pending or any(e.queue or not self.states[e.spec.src.node].done for e in s.triggers):
@@ -423,38 +409,44 @@ class _Run:
         except BaseException as exc:
             self.fail(exc)
             first: BaseException = self.failure or exc
-            note: Callable[[str], object] = getattr(first, "add_note", print)  # cleanup errors ride along; the first failure is raised
             deadline: float = time.monotonic() + 10.0
             for thread in self.threads:
                 thread.join(max(deadline - time.monotonic(), 0.0))
             if stuck := [t.name for t in self.threads if t.is_alive()]:
-                note(f"threads {stuck} did not stop; resources leaked")
-            else:
-                self._close_resources(note)
-                self._release()
+                first.add_note(f"threads {stuck} did not stop; resources leaked")
+                raise first from None
+            self._unwind(first)
             raise first from None
-        self._close_resources()
         if health is not None:  # the guide's "See it" links: what each viewer sink drew
             log_graph(health, self.graph, drawn={s.spec.name: s.obj.drawn for s in self.nodes if isinstance(s.obj, RerunSink) and s.obj.recording is health}, health=True)
         self._health(force=True)
-        wall_s: float = time.perf_counter() - self.started_at
         nodes: dict[str, NodeStats] = {}
         for name, s in self.states.items():
             ms: list[float] = sorted(s.step_ms) or [0.0]
             ports: dict[str, PortStats] = {e.spec.dst.port: PortStats(e.depth_max, e.drops, s.pending_max) for e in s.triggers}
             nodes[name] = NodeStats(s.ticks, s.step_ms_sum / s.ticks if s.step_ms else 0.0, ms[int(0.95 * (len(ms) - 1))], ports)
-        self._release()
+        if (error := self._unwind(None)) is not None:
+            raise error
+        wall_s: float = time.perf_counter() - self.started_at
         return RunReport(self.graph.name, self.mode, "stopped" if self.control.stopped else "complete", wall_s, max(self.last - self.first, 0) / 1e9, nodes)
 
-    def _release(self) -> None:
-        """Break state/control cycles so resources free on return without cyclic GC, even while a UI keeps Control."""
-        self.control.wake = lambda: None
-        self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
-
-    def _close_resources(self, note: Callable[[str], object] | None = None) -> None:
+    def _unwind(self, first: BaseException | None) -> BaseException | None:
+        """The one cleanup of a finished or failed run: close every source iterator, source and process node, then the
+        resources in reverse order, each although an earlier close failed; then break the state/control cycles, so
+        resources free on return without cyclic GC, even while a UI keeps Control. Returns the run's failure, else the
+        first close error; later close errors ride along on it as notes."""
         owned: list[object] = [s.events for s in self.sources] + [s.obj for s in self.states.values() if s.spec.kind == "source" or isinstance(s.obj, ProcessNode)]
         for close in (c for o in owned + list(reversed(self.resources.values())) if (c := getattr(o, "close", None)) is not None):
-            close() if note is None else self._guard(close, note=note)
+            try:
+                close()
+            except BaseException as exc:
+                if first is None:
+                    first = exc
+                else:
+                    first.add_note(f"{getattr(close, '__qualname__', close)} failed during cleanup: {exc!r}")
+        self.control.wake = lambda: None
+        self.states, self.sources, self.nodes, self.threads, self.resources = {}, [], [], [], {}
+        return first
 
 
 def run_sequential(graph: Graph, *, mode: Mode = "lossless", control: Control | None = None, health: rr.RecordingStream | None = None) -> RunReport:

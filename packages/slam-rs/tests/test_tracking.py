@@ -29,7 +29,7 @@ from slam_rs import _core, tracking
 from slam_rs.catalog_feed import Frameset, ImuStream
 from slam_rs.config import SlamConfig
 from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_estimator_files
-from slam_rs.trajectory import empty_trajectory
+from slam_rs.types import empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
 
 

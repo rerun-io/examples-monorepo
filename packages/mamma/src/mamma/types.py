@@ -19,6 +19,7 @@ from jaxtyping import Bool, Float32, Int32, Int64
 from numpy import ndarray
 from PIL import Image
 from serde import serde
+from simplecv.types.frames import MultiViewFrames
 from torch import Tensor
 
 PERSON_RGB: tuple[int, int, int] = (255, 140, 0)
@@ -51,6 +52,16 @@ def _views(table: pa.Table, root: str) -> tuple[tuple[str, ...], Float32[ndarray
     paths = [p for _, p in sorted(zip([f[0] for f in first], paths, strict=True))]
     scales: list[list[float]] = [next(c for c in column(table, f"{p}:Transform3D:scale") if c is not None)[0][:2] for p in paths]
     return tuple(p.removeprefix(f"{root}/").removesuffix("/pinhole/mamma") for p in paths), np.asarray(scales, dtype=np.float32).reshape(-1, 2)
+
+
+@dataclass(frozen=True, slots=True)
+class Frameset:
+    """One sampled frameset as the capture graph decodes it (node to node only: no Rerun mapping)."""
+
+    frames: MultiViewFrames
+    """Engine size: tracking and masks."""
+    crops: MultiViewFrames
+    """The frames landmarks crop from: the full-size decode with ``keep_native``, else ``frames``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,27 +109,34 @@ class MultiViewTracks:
         """Masks come back as host tensors (a resumed value moves to the device in its consumer)."""
         views, scale_xy = _views(table, root)
         names: tuple[str, ...] = ("person", "score", "frame_index", "Boxes2D:centers", "Boxes2D:half_sizes", "mask_hw")
-        columns: list[list[list]] = [[column(table, f"{root}/{view}/pinhole/mamma/persons:{name}") for name in names] for view in views]
+        columns: dict[str, list[list]] = {name: [column(table, f"{root}/{view}/pinhole/mamma/persons:{name}") for view in views] for name in names}
         for row, t_ns in enumerate(row_times(table, timeline)):
-            if all(view[2][row] is None for view in columns):
+            if all(view[row] is None for view in columns["frame_index"]):
                 continue
-            person, score, frame, center, half, mask_hw = ([np.asarray(view[k][row] or [], dtype=np.float32) for view in columns] for k in range(len(names)))
+            cell: dict[str, list[Float32[ndarray, "..."]]] = {name: [np.asarray(view[row] or [], dtype=np.float32) for view in columns[name]] for name in names}
             mask_row: pa.Table = table.slice(row, 1)
             blobs: list[bytes] = [
                 bytes(column(mask_row, f"{root}/{view}/pinhole/mamma/masks/person_{int(p):02d}:EncodedImage:blob")[0][0])
-                for view, people in zip(views, person, strict=True)
+                for view, people in zip(views, cell["person"], strict=True)
                 for p in people.tolist()
             ]
-            centers, halves = (np.concatenate([b.reshape(-1, 2) for b in boxes]) for boxes in (center, half))
+            centers, halves = (np.concatenate([b.reshape(-1, 2) for b in cell[name]]) for name in ("Boxes2D:centers", "Boxes2D:half_sizes"))
             xyxy: Float32[ndarray, "k 4"] = np.concatenate([centers - halves, centers + halves], axis=1)
             masks: Bool[ndarray, "k h w"] = (
-                np.stack([np.asarray(Image.open(io.BytesIO(b))) > 0 for b in blobs]) if blobs else np.zeros((0, *next(m for m in mask_hw if m.size).astype(int)), dtype=bool)
+                np.stack([np.asarray(Image.open(io.BytesIO(b))) > 0 for b in blobs]) if blobs else np.zeros((0, *next(m for m in cell["mask_hw"] if m.size).astype(int)), dtype=bool)
             )
             yield t_ns, cls(
-                int(next(f for f in frame if f.size)[0]), views, np.repeat(np.arange(len(views), dtype=np.int64), [p.size for p in person]),
-                np.concatenate(person).astype(np.int64), torch.as_tensor(masks),
-                xyxy, np.concatenate(score), scale_xy,
+                int(next(f for f in cell["frame_index"] if f.size)[0]), views, np.repeat(np.arange(len(views), dtype=np.int64), [p.size for p in cell["person"]]),
+                np.concatenate(cell["person"]).astype(np.int64), torch.as_tensor(masks), xyxy, np.concatenate(cell["score"]), scale_xy,
             )  # fmt: skip
+
+
+@dataclass(frozen=True, slots=True)
+class TrackedFrameset:
+    """Landmarks' work item: one tick's tracks with the frames their crops are cut from (node to node only)."""
+
+    tracks: MultiViewTracks
+    crops: MultiViewFrames
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,24 +176,24 @@ class MultiViewLandmarks:
         """An empty frameset comes back with ``k = n = 0`` (as ``LandmarksNode`` emits it)."""
         views, scale_xy = _views(table, root)
         paths: list[str] = [p for p in _entities(table, root, "floor_contact") if "/pinhole/mamma/landmarks/person_" in p]
-        names: tuple[str, ...] = ("Points2D:positions", "log_variance", "visibility", "floor_contact")
-        columns: dict[str, list[list]] = {path: [column(table, f"{path}:{name}") for name in names] for path in paths}
+        tails: dict[str, tuple[int, ...]] = {"Points2D:positions": (2,), "log_variance": (), "visibility": (), "floor_contact": ()}  # per landmark
+        columns: dict[str, dict[str, list]] = {path: {name: column(table, f"{path}:{name}") for name in tails} for path in paths}
         frames: list[list] = [column(table, f"{root}/{view}/pinhole/mamma/landmarks:frame_index") for view in views]
         for row, t_ns in enumerate(row_times(table, timeline)):
             frame: list | None = next((f[row] for f in frames if f[row] is not None), None)
             if frame is None:
                 continue
             keyed: list[tuple[int, int, str]] = sorted(
-                (views.index(p.removeprefix(f"{root}/").split("/pinhole/")[0]), _person(p), p) for p in paths if columns[p][3][row] is not None
+                (views.index(p.removeprefix(f"{root}/").split("/pinhole/")[0]), _person(p), p) for p in paths if columns[p]["floor_contact"][row] is not None
             )
-            n: int = len(columns[keyed[0][2]][3][row]) if keyed else 0
-            xy, log_variance, visibility, floor_contact = (
-                torch.as_tensor(np.asarray([columns[p][k][row] for _, _, p in keyed], dtype=np.float32).reshape(len(keyed), n, *tail))
-                for k, tail in enumerate(((2,), (), (), ()))
-            )
+            n: int = len(columns[keyed[0][2]]["floor_contact"][row]) if keyed else 0
+            stacked: dict[str, Float32[Tensor, "..."]] = {
+                name: torch.as_tensor(np.asarray([columns[p][name][row] for _, _, p in keyed], dtype=np.float32).reshape(len(keyed), n, *tail))
+                for name, tail in tails.items()
+            }
             yield t_ns, cls(
-                int(frame[0]), views, np.asarray([k[0] for k in keyed], dtype=np.int64),
-                np.asarray([k[1] for k in keyed], dtype=np.int64), xy, log_variance, visibility, floor_contact, scale_xy,
+                int(frame[0]), views, np.asarray([k[0] for k in keyed], dtype=np.int64), np.asarray([k[1] for k in keyed], dtype=np.int64),
+                stacked["Points2D:positions"], stacked["log_variance"], stacked["visibility"], stacked["floor_contact"], scale_xy,
             )  # fmt: skip
 
 
@@ -207,13 +225,15 @@ class SmplxFits:
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "SmplxFits"]]:
         people: list[str] = [p.removesuffix("/body/smplx") for p in _entities(table, root, "frame_index") if p.endswith("/body/smplx")]
-        names: tuple[str, ...] = ("pose", "betas", "trans", "frame_index")
-        columns: dict[str, list[list]] = {p: [column(table, f"{p}/body/mesh:Mesh3D:vertex_positions")] + [column(table, f"{p}/body/smplx:{n}") for n in names] for p in people}
+        columns: dict[str, dict[str, list]] = {
+            p: {"vertices": column(table, f"{p}/body/mesh:Mesh3D:vertex_positions")} | {n: column(table, f"{p}/body/smplx:{n}") for n in ("pose", "betas", "trans", "frame_index")}
+            for p in people
+        }
         for row, t_ns in enumerate(row_times(table, timeline)):
-            fitted: list[str] = [p for p in people if columns[p][4][row] is not None]
+            fitted: list[str] = [p for p in people if columns[p]["frame_index"][row] is not None]
             if fitted:
-                vertices, pose, betas, trans = (np.asarray([columns[p][k][row] for p in fitted], dtype=np.float32) for k in range(4))
-                yield t_ns, cls(int(columns[fitted[0]][4][row][0]), tuple(_person(p) for p in fitted), vertices, pose, betas, trans)
+                arrays: dict[str, Float32[ndarray, "p ..."]] = {n: np.asarray([columns[p][n][row] for p in fitted], dtype=np.float32) for n in ("vertices", "pose", "betas", "trans")}
+                yield t_ns, cls(int(columns[fitted[0]]["frame_index"][row][0]), tuple(_person(p) for p in fitted), **arrays)
 
 
 @serde(deny_unknown_fields=True)
@@ -266,13 +286,13 @@ class Landmarks3d:
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Landmarks3d"]]:
         paths: list[str] = [p for p in _entities(table, root, "valid") if p.endswith("/landmarks3d")]
-        columns: dict[str, list[list]] = {p: [column(table, f"{p}:{name}") for name in ("Points3D:positions", "valid", "frame_index")] for p in paths}
+        columns: dict[str, dict[str, list]] = {p: {name: column(table, f"{p}:{name}") for name in ("Points3D:positions", "valid", "frame_index")} for p in paths}
         for row, t_ns in enumerate(row_times(table, timeline)):
-            present: list[str] = [p for p in paths if columns[p][1][row] is not None]
+            present: list[str] = [p for p in paths if columns[p]["valid"][row] is not None]
             if not present:
                 continue
-            valid: Bool[ndarray, "p n"] = np.asarray([columns[p][1][row] for p in present], dtype=bool)
+            valid: Bool[ndarray, "p n"] = np.asarray([columns[p]["valid"][row] for p in present], dtype=bool)
             points: Float32[ndarray, "p n 3"] = np.zeros((*valid.shape, 3), dtype=np.float32)
             for i, path in enumerate(present):
-                points[i][valid[i]] = np.asarray(columns[path][0][row] or [], dtype=np.float32).reshape(-1, 3)
-            yield t_ns, cls(int(columns[present[0]][2][row][0]), tuple(_person(p) for p in present), points, valid)
+                points[i][valid[i]] = np.asarray(columns[path]["Points3D:positions"][row] or [], dtype=np.float32).reshape(-1, 3)
+            yield t_ns, cls(int(columns[present[0]]["frame_index"][row][0]), tuple(_person(p) for p in present), points, valid)

@@ -33,7 +33,8 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
-from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
+from slam_rs.trajectory import AteResult, ate
+from slam_rs.types import Trajectory, empty_trajectory
 from slam_rs.vio_log import (
     FRUSTUM_DEPTH_M,
     GT_ENTITY,

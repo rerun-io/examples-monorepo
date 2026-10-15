@@ -82,7 +82,8 @@ from slam_rs.catalog_timing import (
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
-from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, shift_clock
+from slam_rs.types import Trajectory, empty_trajectory, rig_trajectory
 
 DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
@@ -669,42 +670,6 @@ def read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, las
         .to_arrow_table()
     )
     return rig_trajectory(table, segment_id)
-
-
-def rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
-    """Return a ``gt`` window's rig trajectory on ``video_time``, converting Rerun XYZW to w-first.
-    ``table`` holds one ``entity`` Transform3D per row, indexed by ``timeline``; ``segment_id`` identifies errors.
-    Empty if neither component exists or the window has no pose. Raise ValueError naming the row if translation and rotation
-    validity differs: a pose needs both from the same row. Dropping column nulls separately can give equal lengths but pair
-    different rows. Rerun stores components independently and permits logging/clearing either alone, so valid recordings can
-    have this layout; refusal is the only safe reading (S25 review).
-    """
-    translation_column: str = f"{entity}:Transform3D:translation"
-    quaternion_column: str = f"{entity}:Transform3D:quaternion"
-    if translation_column not in table.column_names or quaternion_column not in table.column_names:
-        return empty_trajectory()
-    row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[timeline].combine_chunks().cast(pa.int64()))
-    translations: pa.Array = table[translation_column].combine_chunks()
-    quaternions: pa.Array = table[quaternion_column].combine_chunks()
-    valid: Bool[ndarray, " n_rows"] = translations.is_valid().to_numpy(zero_copy_only=False)
-    quaternion_valid: Bool[ndarray, " n_rows"] = quaternions.is_valid().to_numpy(zero_copy_only=False)
-    if not np.array_equal(valid, quaternion_valid):
-        disagreeing: Int64[ndarray, " n_disagreeing"] = np.flatnonzero(valid != quaternion_valid)
-        raise ValueError(
-            f"{segment_id}: {disagreeing.size} of {row_t_ns.size} rig rows carry a translation without a quaternion or "
-            f"a quaternion without a translation, the first at {int(row_t_ns[disagreeing[0]])} ns; a pose needs both, "
-            f"and reading each component off its own rows would give it another row's rotation"
-        )
-    # Equal masks: each component's null removal drops exactly `valid`'s false rows, matching the timestamps' mask.
-    position_m: Float64[ndarray, "n_poses 3"] = flat(translations, np.float64).reshape(-1, 3)
-    if position_m.shape[0] == 0:
-        return empty_trajectory()
-    quaternion_xyzw: Float64[ndarray, "n_poses 4"] = flat(quaternions, np.float64).reshape(-1, 4)
-    return Trajectory(
-        t_ns=row_t_ns[valid],
-        position_m=position_m,
-        quaternion_wxyz=np.column_stack([quaternion_xyzw[:, 3], quaternion_xyzw[:, 0:3]]),
-    )
 
 
 def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str, ...] | None) -> tuple[int, ...]:

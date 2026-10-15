@@ -14,7 +14,8 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
 from slam_rs.tracking import SegmentRun, run_robocap
-from slam_rs.trajectory import AteResult, ScoringResult, Trajectory, empty_trajectory, read_trajectory, score_trajectory, write_trajectory
+from slam_rs.trajectory import AteResult, ScoringResult, read_trajectory, score_trajectory, write_trajectory
+from slam_rs.types import Trajectory, empty_trajectory
 
 BUDGET_15FPS_MS: float = 1e3 / 15.0
 """What one four-camera frameset may cost for the cap to keep up at 15 fps."""

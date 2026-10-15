@@ -12,22 +12,20 @@ One catalog segment's cameras and IMU, on one time-ordered stream, through slam-
 ## 1 · segment: Decode the VIO cameras, with the IMU
 *source* · `VioSource` · `packages/slam-rs/slam_rs/graphs/vio.py`
 
-STATIC ``rig``, then per frameset its IMU batch (``imu``: the samples since the previous frameset through the first one past this one) and its gray8 images (``frames``), both at the frameset's ``video_time``. VIO initialises from rest, so the stream starts at the segment's first frameset; a window only ends it (frameset times up to its stop).
+STATIC ``rig``, then every frameset (``frames``) at its ``video_time``: its gray8 images and its IMU batch (the samples since the previous frameset through the first one past this one). VIO initialises from rest, so the stream starts at the segment's first frameset; a window only ends it (frameset times up to its stop).
 
 | gives | type | to |
 |---|---|---|
 | **rig** | `VioRig` | 2 vio |
-| **imu** | `ImuStream` | 2 vio |
 | **frames** | `Frameset` | 2 vio |
 
 ## 2 · vio: Track the rig pose with VIO
 *runs once per item* · `VioNode` · `packages/slam-rs/slam_rs/nodes/vio.py`
 
-``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a frameset and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file.
+``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes a frameset with its IMU batch and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file.
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **imu** | `ImuStream` | 1 segment | waits (4) |
 | **frames** | `Frameset` | 1 segment | waits (4) |
 | **rig** | `VioRig` | 1 segment | latest |
 
@@ -55,7 +53,6 @@ Takes **pose** from 2 vio.
 | type | what it is | code |
 |---|---|---|
 | `Frameset` | One synchronised multi-camera capture, decoded to grayscale | `packages/slam-rs/slam_rs/catalog_feed.py` |
-| `ImuStream` | A segment's paired inertial measurements on one clock | `packages/slam-rs/slam_rs/catalog_timing.py` |
 | `LayerFile` | A finished layer file (an rrd) that a sink publishes | `packages/dagkit/dagkit/types.py` |
 | `RigPose` | The estimated world-from-rig pose of one frameset | `packages/slam-rs/slam_rs/types.py` |
 | `VioRig` | The fed cameras and the IMU of a segment's rig, as the feed reads them from the base layer (static, memory only) | `packages/slam-rs/slam_rs/types.py` |
@@ -70,10 +67,10 @@ One robocap catalog segment's camera framesets through robocap-live's Rust hand 
 
 `(GPU)` after a type: the value stays on the GPU. A tag left of a box lists its inputs from further up (`port: Type ← 1 video · latest`). Box numbers match the sections below.
 
-## 1 · segment: Decode the cameras' videos
-*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+## 1 · segment: Decode the cameras' luma planes
+*source* · `CatalogLumaSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
+A catalog segment's ``rig`` and ``statics`` (``static_events``), then a ``LumaFrameset`` for every frame in the window: each camera's raw Y plane, grouped across cameras within ``group_tolerance_ns`` and timed by its opening frame.
 
 | gives | type | to |
 |---|---|---|
@@ -130,5 +127,5 @@ Takes **run** from 3 hands.
 | `CatalogPoses` | A segment's whole SLAM pose table (``slam_rs``: the rig's Transform3D rows), sorted, finite; one STATIC value | `packages/slam-rs/slam_rs/types.py` |
 | `LayerFile` | A finished layer file (an rrd) that a sink publishes | `packages/dagkit/dagkit/types.py` |
 | `LayerRun` | One hands-layer run: what the layer holds, and the core's stage totals in seconds (its stages run in parallel and overlap) | `packages/robocap-live/robocap_live/types.py` |
-| `LumaFrameset` | Raw Y planes of one frameset (``cpu_luma``); ``None`` marks a camera missing from it | `packages/simplecv/simplecv/types/frames.py` |
+| `LumaFrameset` | Raw Y planes of one frameset (``CatalogLumaSource``); ``None`` marks a camera missing from it | `packages/simplecv/simplecv/types/frames.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |

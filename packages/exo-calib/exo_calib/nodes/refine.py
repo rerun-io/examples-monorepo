@@ -60,12 +60,14 @@ OVERLAY_LOG_STRIDE: int = 5
 class RefineNode:
     """Refine the rig by bundle adjustment."""
 
-    inputs: Mapping[str, PortType] = {"kp2d": MultiViewKeypoints, "init": RigCameras, "rig_layout": RigLayout}
+    inputs: Mapping[str, PortType] = {"kp2d": MultiViewKeypoints, "init": RigCameras}
     outputs: Mapping[str, PortType] = {
         "refined": RigCameras, "base_rig": BaseCalibration, "diag": RefinementDiagnostics, "kp3d": Keypoints3dTracks, "kp2d_overlay": Kp2dOverlay,
     }  # fmt: skip
 
-    def __init__(self, device: Literal["cuda", "cpu"] = "cuda") -> None:
+    def __init__(self, layout: RigLayout, device: Literal["cuda", "cpu"] = "cuda") -> None:
+        self.layout: RigLayout = layout
+        """The segment's cameras: a refined camera without GT calibration also goes out as ``base_rig``."""
         self.device: Literal["cuda", "cpu"] = device
         """Where the focal stage runs."""
 
@@ -75,8 +77,8 @@ class RefineNode:
     def run(self, inputs: Mapping[str, Sequence[Event]], out: Emit) -> None:
         records: list[MultiViewKeypoints] = [e.value for e in inputs["kp2d"]]  # type: ignore[misc]
         times: list[int] = [e.t_ns for e in inputs["kp2d"]]
-        layout, init = inputs["rig_layout"][-1].value, inputs["init"][-1].value
-        assert isinstance(layout, RigLayout) and isinstance(init, RigCameras) and records, "refine needs Stage B records, the Stage A rig and the layout"
+        init = inputs["init"][-1].value
+        assert isinstance(init, RigCameras) and records, "refine needs Stage B records and the Stage A rig"
         names: tuple[str, ...] = records[0].views
         if len(names) < 2:
             raise ValueError(f"extrinsic refinement needs at least two exo cameras; found {list(names)}")
@@ -119,7 +121,7 @@ class RefineNode:
 
         refined = RigCameras(names, focal.intrinsics, cam_T_world, init.resolution_wh)
         out.put("refined", STATIC, refined)
-        if uncalibrated := [name for name in names if name not in layout.calibrated_camera_names]:
+        if uncalibrated := [name for name in names if name not in self.layout.calibrated_camera_names]:
             out.put("base_rig", STATIC, BaseCalibration(refined.select(uncalibrated)))
         counts: list[int] = np.bincount(obs.obs_view_idx, minlength=len(names)).tolist()
         out.put("diag", STATIC, RefinementDiagnostics(init_reprojection_px, reprojection_px, counts, 1.0 if scale is None else scale, focal.focal_scale.tolist()))

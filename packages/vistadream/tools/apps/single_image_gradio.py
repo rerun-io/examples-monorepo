@@ -1,4 +1,4 @@
-from dagkit.app import gradio_app
+from dagkit.form import gradio_app
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from vistadream.apis.single_image import Config, build, short_case

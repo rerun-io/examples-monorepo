@@ -10,29 +10,29 @@ Multi-view body capture: track every person in the cameras, find their dense 2D 
 `(GPU)` after a type: the value stays on the GPU. A tag left of a box lists its inputs from further up (`port: Type ← 1 video · latest`). Box numbers match the sections below.
 
 ## 1 · video: Decode the cameras' videos
-*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+*source* · `FramesetSource` · `packages/mamma/src/mamma/sources/frameset.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
+The video source's STATIC values, then one ``Frameset`` per sampled index: the engine-size frames and the frames landmarks crop from (the full-size ``frames_native`` when the source keeps it, else the same frames), so the crops travel with their tick through tracking.
 
 | gives | type | to |
 |---|---|---|
-| **frames** | `MultiViewFrames` (GPU) | 2 track |
-| **frames_native** | `MultiViewFrames` (GPU) | 3 landmarks |
+| **frames** | `Frameset` (GPU) | 2 track |
 | **rig** | `RigCameras` | 2 track, 4 fit |
 
 ## 2 · track: Track every person in every view
 *runs once per item* · `TrackNode` · `packages/mamma/src/mamma/nodes/track.py`
 
-Masks and boxes per (view, person) at engine size; a person keeps one id across views and time (CLIP + epipolar identity at bootstrap and re-detects, SAM2 masks every tick).
+Masks and boxes per (view, person) at engine size; a person keeps one id across views and time (CLIP + epipolar identity at bootstrap and re-detects, SAM2 masks every tick). ``tracked`` hands the tracks on with their frameset's crop frames.
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **frames** | `MultiViewFrames` (GPU) | 1 video | waits (2) |
+| **frames** | `Frameset` (GPU) | 1 video | waits (2) |
 | **rig** | `RigCameras` | 1 video | latest |
 
 | gives | type | to |
 |---|---|---|
-| **tracks** | `MultiViewTracks` (GPU) | 3 landmarks, 5 viewer, 6 mamma_fit |
+| **tracks** | `MultiViewTracks` (GPU) | 5 viewer, 6 mamma_fit |
+| **tracked** | `TrackedFrameset` (GPU) | 3 landmarks |
 
 Settings:
 - `sam2_config`: Hydra config inside the vendored sam2 package (EfficientTAM-ti: 21.8 ms per 4-view tick vs 52.6 for hiera-small)
@@ -49,8 +49,7 @@ MammaNet's dense landmarks (with log-variance, visibility and floor contact) per
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **tracks** | `MultiViewTracks` (GPU) | 2 track | waits (2) |
-| **frames** | `MultiViewFrames` (GPU) | 1 video | latest |
+| **tracked** | `TrackedFrameset` (GPU) | 2 track | waits (2) |
 
 | gives | type | to |
 |---|---|---|
@@ -94,9 +93,10 @@ Saves **tracks** from 2 track; **fit, kp3d, topology** from 4 fit into the catal
 | type | what it is | code |
 |---|---|---|
 | `BodyTopology` | The SMPL-X triangle list, sent once per person when its fit starts (the fits carry only vertices) | `packages/mamma/src/mamma/types.py` |
+| `Frameset` | One sampled frameset as the capture graph decodes it (node to node only: no Rerun mapping) | `packages/mamma/src/mamma/types.py` |
 | `Landmarks3d` | Triangulated dense landmarks of one tick per person; invalid points are 0 (SPEC 5.2 policy) | `packages/mamma/src/mamma/types.py` |
-| `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewLandmarks` | MammaNet's dense landmarks of one frameset, one row per (view, person) track, in engine pixels | `packages/mamma/src/mamma/types.py` |
 | `MultiViewTracks` | Person masks of one frameset at engine size, one row per (view, person) track | `packages/mamma/src/mamma/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
 | `SmplxFits` | SMPL-X fits (neutral body, 16 betas) of the persons fitted at one frame time; world metres, z up | `packages/mamma/src/mamma/types.py` |
+| `TrackedFrameset` | Landmarks' work item: one tick's tracks with the frames their crops are cut from (node to node only) | `packages/mamma/src/mamma/types.py` |

@@ -1,5 +1,4 @@
-"""The ``vio`` node: ``_core.Vio`` behind :class:`~slam_rs.tracking.Lockstep`. A frameset's IMU batch arrives on ``imu`` at its
-time and before its ``frames`` (port order), so the estimator gets exactly the calls ``Lockstep.push`` makes."""
+"""The ``vio`` node: ``_core.Vio`` behind :class:`~slam_rs.tracking.Lockstep`, one ``Lockstep.push`` per frameset."""
 
 import time
 from collections.abc import Iterator, Mapping
@@ -18,12 +17,11 @@ from numpy import ndarray
 from serde import serde
 
 from slam_rs import _core
-from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, ImuStream, RigProfile
+from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, RigProfile
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun
-from slam_rs.trajectory import Trajectory, empty_trajectory
-from slam_rs.types import RigPose, VioRig
+from slam_rs.types import RigPose, Trajectory, VioRig, empty_trajectory
 
 
 @serde(deny_unknown_fields=True)
@@ -58,16 +56,17 @@ class VioParams:
 class VioNode:
     """Track the rig pose with VIO.
 
-    ``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes an IMU batch or holds a
-    frameset and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file."""
+    ``reset`` builds the estimator from the STATIC rig and the dataset's profiled config; ``step`` pushes a frameset with its IMU
+    batch and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file."""
 
-    inputs: Mapping[str, PortType] = {"imu": ImuStream, "frames": Frameset, "rig": VioRig}
+    inputs: Mapping[str, PortType] = {"frames": Frameset, "rig": VioRig}
     outputs: Mapping[str, PortType] = {"pose": RigPose, "layer": LayerFile}
     emits_late: bool = True
 
-    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path, decoder: Literal["cpu", "cuda"], config_text: str) -> None:
-        """``config_text``: the dataset's profiled VIO config (``VioParams.for_dataset``)."""
-        self.segment, self.params, self.output_dir, self.decoder, self.config_text = segment, params, output_dir, decoder, config_text
+    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path) -> None:
+        self.segment, self.params, self.output_dir = segment, params, output_dir
+        self.decoder: Literal["cpu", "cuda"] = params.decoder()  # the source's decoder (it resolves the same params), for the layer
+        self.config_text: str = params.for_dataset(segment.dataset)[1]
         self.lockstep: Lockstep | None = None
         self.run: SegmentRun | None = None  # the finished run's counts
         self.partial: Path | None = None  # the layer file flush wrote; abort() deletes it unless the publish sink moved it
@@ -101,15 +100,11 @@ class VioNode:
 
     def step(self, tick: Tick, out: Emit) -> None:
         assert self.lockstep is not None, "step before reset"
-        self.t_ns = tick.t_ns  # the layer leaves at the last tick's time, also when a stop falls between an imu batch and its frames
-        if tick.port == "imu":
-            self.lockstep.push_imu(cast(ImuStream, tick.value))
-        else:
-            self.framesets += 1
-            self.lockstep.hold(cast(Frameset, tick.value))
-        self._emit(self.lockstep.track_pending(), out)
+        self.t_ns = tick.t_ns  # the layer leaves at the last frameset's time
+        self.framesets += 1
+        self._emit(self.lockstep.push(cast(Frameset, tick.value)), out)
         held: list[int] = [f.t_ns - self.offset_ns for f in [*self.lockstep.pending, *self.lockstep.lagged]]
-        wm: TimeNs = min([*held, tick.t_ns]) - 1  # a frameset follows its imu at t, and the layer leaves at the last one
+        wm: TimeNs = min([*held, tick.t_ns]) - 1  # held framesets still emit at their times, and the layer leaves at the last one
         if wm > self.wm:
             self.wm = wm
             out.watermark(wm)

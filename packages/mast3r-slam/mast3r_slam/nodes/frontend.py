@@ -1,6 +1,5 @@
 """Frontend node (SPEC 5.5): tracks every input frame against the last keyframe and hands keyframes / relocalisation to the backend."""
 
-import time
 from collections.abc import Mapping
 from typing import Literal
 
@@ -19,10 +18,8 @@ from mast3r_slam.models.mast3r import mast3r_inference_mono
 from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
 from mast3r_slam.ops.image import ResizedImage, RgbNormalized, frame_intrinsics, resize_img
+from mast3r_slam.ops.pointmap import update_pointmap
 from mast3r_slam.types import BackendTask, Frame, KeyframeAdded, Mode, RelocRequest, SlamConfig, TrackedFrame
-
-BACKEND_POLL_S: float = 0.005
-"""Lossless: how often the frontend checks that the backend applied its tasks."""
 
 
 def create_frame(frame_id: int, rgb: RgbNormalized, world_sim3_cam: lietorch.Sim3, img_size: Literal[224, 512], device: str) -> Frame:
@@ -40,9 +37,10 @@ class Frontend:
     against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it).
 
     Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend
-    applied every queued task, so every frame sees one fixed map. Realtime: lost frames that arrive while a relocalisation
-    request is queued are skipped, so the one shared current frame stays the requested one. A frame's ``tracked`` pose leaves after that wait, when
-    the backend's relocalisation verdict is known (hence ``emits_late``). ``abort`` ends a wait when the run fails.
+    acknowledged every task it handed over, so every frame sees one fixed map. Realtime: lost frames that arrive before
+    the backend acknowledged the relocalisation request are skipped, so the one shared current frame stays the requested
+    one. A frame's ``tracked`` pose leaves after that wait, when the backend's relocalisation verdict is known (hence
+    ``emits_late``). ``abort`` ends a wait when the run fails.
     """
 
     outputs: Mapping[str, PortType] = {"tracked": TrackedFrame, "task": BackendTask}
@@ -54,12 +52,16 @@ class Frontend:
         self.held: tuple[int, int] | None = None
         """(time, frame index) of the frame whose tracked verdict waits for the backend."""
         self.aborted: bool = False
+        self.issued: int = 0
+        """Tasks handed to the backend (the number of the last one)."""
+        self.reloc_task: int = 0
+        """Number of the last relocalisation request."""
 
     def reset(self, ctx: RunContext) -> None:
         self.model: AsymmetricMASt3R = ctx.resources["mast3r"]  # type: ignore[assignment]
         self.shared: SharedSlam = ctx.resources["shared"]  # type: ignore[assignment]
         self.shared.reset()
-        self.lossless, self.held, self.aborted = ctx.mode == "lossless", None, False
+        self.lossless, self.held, self.aborted, self.issued, self.reloc_task = ctx.mode == "lossless", None, False, 0, 0
         self.tracker: FrameTracker = FrameTracker(self.model, self.shared.keyframes, self.params.tracking, self.params.matching, self.params.use_calib)
         torch.backends.cuda.matmul.allow_tf32 = True  # as the old CLI set it for tracking (main process); the backend keeps the default
         if self.params.use_calib:
@@ -74,22 +76,23 @@ class Frontend:
         """Lossless: wait for the backend; then emit the held frame's pose if the system is (again) TRACKING."""
         if self.held is None:
             return
-        while self.lossless and not self.shared.backend_idle():
-            if self.aborted:
-                raise RuntimeError("the run failed while the frontend waited for the backend")
-            time.sleep(BACKEND_POLL_S)
+        if self.lossless and not self.shared.wait(self.issued, lambda: self.aborted):
+            raise RuntimeError("the run failed while the frontend waited for the backend")
         (t_ns, index), self.held = self.held, None
         if self.shared.states.get_mode() == Mode.TRACKING:
             pose: Float32[ndarray, " 8"] = self.shared.states.get_frame().world_sim3_cam.data[0].cpu().numpy()
             out.put("tracked", t_ns, TrackedFrame(index, pose))
         out.watermark(t_ns)
 
-    def _queue_keyframe(self, frame: Frame, t_ns: int, out: Emit) -> None:
-        keyframes = self.shared.keyframes
-        keyframes.append(frame)
-        self.shared.states.queue_global_optimization(len(keyframes) - 1)
+    def _hand_over(self, task: BackendTask, t_ns: int, out: Emit) -> None:
+        """Publish the GPU writes the task refers to, then hand it to the backend as task number ``issued``."""
         self.shared.publish()
-        out.put("task", t_ns, KeyframeAdded(len(keyframes) - 1))
+        self.issued += 1
+        out.put("task", t_ns, task)
+
+    def _queue_keyframe(self, frame: Frame, t_ns: int, out: Emit) -> None:
+        self.shared.keyframes.append(frame)
+        self._hand_over(KeyframeAdded(len(self.shared.keyframes) - 1), t_ns, out)
 
     @torch.no_grad()
     def step(self, tick: Tick, out: Emit) -> None:
@@ -97,7 +100,7 @@ class Frontend:
         frames: MultiViewFrames = tick.value  # type: ignore[assignment]
         states = self.shared.states
         mode: Mode = states.get_mode()
-        if mode == Mode.RELOC and states.reloc_sem.value > 0:  # realtime: the backend still owns the requested shared frame
+        if mode == Mode.RELOC and self.shared.completed.value < self.reloc_task:  # realtime: the backend still owns the requested shared frame
             out.watermark(tick.t_ns)
             return
         rgb: RgbNormalized = frames.rgb[0].permute(1, 2, 0).cpu().numpy().astype(np.float32) / 255.0
@@ -112,15 +115,14 @@ class Frontend:
                 self._queue_keyframe(frame, tick.t_ns, out)
         elif mode in (Mode.INIT, Mode.RELOC):  # a mono point map; INIT bootstraps the map, RELOC asks the backend
             X, C = mast3r_inference_mono(self.model, frame)
-            frame.update_pointmap(X, C, self.params.tracking)
+            update_pointmap(frame, X, C, self.params.tracking)
             if mode == Mode.INIT:
                 self._queue_keyframe(frame, tick.t_ns, out)
                 states.set_mode(Mode.TRACKING)
             states.set_frame(frame)
             if mode == Mode.RELOC:
-                states.queue_reloc()
-                self.shared.publish()
-                out.put("task", tick.t_ns, RelocRequest(frames.frame_index))
+                self._hand_over(RelocRequest(frames.frame_index), tick.t_ns, out)
+                self.reloc_task = self.issued
         else:
             raise RuntimeError(f"frontend stepped in mode {mode}")
         self.held = (tick.t_ns, frames.frame_index)
@@ -132,3 +134,4 @@ class Frontend:
 
     def abort(self) -> None:
         self.aborted = True
+        self.shared.wake()

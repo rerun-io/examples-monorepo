@@ -2,21 +2,27 @@
 
 ``frames`` is Block(2) (DropOldest(1) for a live camera), ``task`` Block(16). Resources: ``mast3r`` (the model, shared
 with the backend by CUDA IPC) and ``shared`` (keyframe buffer and current-frame state: the feedback path of the SLAM loop,
-so the graph stays acyclic). Lossless determinism comes from the frontend's acknowledgement wait, not from the runner:
-this graph is outside dagkit's runner-equivalence promise; the verify band covers it.
+so the graph stays acyclic; sized from the input when the run starts). Lossless determinism comes from the frontend's
+acknowledgement wait, not from the runner: this graph is outside dagkit's runner-equivalence promise; the verify band
+covers it.
 """
 
 from collections.abc import Mapping
+from typing import Literal
 
+import numpy as np
 from dagkit.graph import AsOf, Block, DropOldest, Graph, NodeRef, Placement, PortRef, Spawn
-from dagkit.node import Node, Source
+from dagkit.node import Event, Node, Source
 from mast3r.model import AsymmetricMASt3R
+from simplecv.types.frames import MultiViewFrames
+from simplecv.types.rig import RigCameras
 
 from mast3r_slam.models.mast3r import load_mast3r
 from mast3r_slam.nodes.backend import Backend
 from mast3r_slam.nodes.frontend import Frontend
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
 from mast3r_slam.nodes.shared import SharedSlam
+from mast3r_slam.ops.image import resize_img
 from mast3r_slam.types import SlamConfig
 
 DEVICE: str = "cuda:0"
@@ -29,12 +35,27 @@ def shared_model() -> AsymmetricMASt3R:
     return model
 
 
-def slam_graph(
-    video: Source, cfg: SlamConfig, frame_hw: tuple[int, int], sinks: Mapping[str, Node], *, live: bool = False, nerfstudio: NerfstudioSink | None = None
-) -> Graph:
+def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
+    """MASt3R frame size of the source's images: the static rig's resolution when the source has one (it comes before the
+    frames: no decode), else the size of its first frame."""
+    events = iter(video.events())
+    try:
+        first: Event = next(e for e in events if e.port in ("rig", "frames"))
+    finally:
+        getattr(events, "close", lambda: None)()
+    if isinstance(first.value, RigCameras):
+        width, height = (int(v) for v in first.value.resolution_wh[0])
+    else:
+        frames: MultiViewFrames = first.value  # type: ignore[assignment]
+        height, width = frames.rgb.shape[-2:]
+    shape = resize_img(np.zeros((height, width, 3), dtype=np.float32), img_size).rgb_tensor.shape
+    return int(shape[-2]), int(shape[-1])
+
+
+def slam_graph(video: Source, cfg: SlamConfig, sinks: Mapping[str, Node], *, live: bool = False, nerfstudio: NerfstudioSink | None = None) -> Graph:
     """Sinks name the ports they take: ``tracked`` and ``keyframes`` (TrackedFrame), ``map`` (MapUpdate), ``cloud`` (KeyframeCloud).
 
-    ``frame_hw`` is the MASt3R frame size of the input (it sizes the shared buffers before the first frame arrives).
+    The ``shared`` buffers are sized when the run starts (``frame_hw``): building the graph reads nothing from ``video``.
     """
     graph = Graph(
         "mast3r-slam",
@@ -42,7 +63,7 @@ def slam_graph(
         "in its own process, joins keyframes into a factor graph, optimises it and relocalises lost frames.",
     )
     graph.resource("mast3r", shared_model)
-    graph.resource("shared", lambda: SharedSlam(*frame_hw, cfg.keyframe_buffer, cfg.use_calib, device=DEVICE))
+    graph.resource("shared", lambda: SharedSlam(*frame_hw(video, cfg.img_size), cfg.keyframe_buffer, cfg.use_calib, device=DEVICE))
     source: NodeRef = graph.source("video", video)
     frontend_node = Frontend(cfg, device=DEVICE)
     frontend: NodeRef = graph.node("frontend", frontend_node, placement=Placement("main"), needs=("mast3r", "shared"))

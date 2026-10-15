@@ -14,7 +14,8 @@ from slam_rs.config import SlamConfig
 from slam_rs.machine import Machine
 from slam_rs.reference import Benchmarks, RobocapSession
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import Trajectory, empty_trajectory, write_trajectory
+from slam_rs.trajectory import write_trajectory
+from slam_rs.types import Trajectory, empty_trajectory
 
 
 def test_reference_csv_is_scored_without_a_ground_truth_gate(

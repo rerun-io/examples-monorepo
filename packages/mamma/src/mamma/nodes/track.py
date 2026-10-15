@@ -11,7 +11,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import torch
-from dagkit.node import Emit, Fenced, PortType, RunContext, Tick
+from dagkit.node import Emit, Fence, Fenced, PortType, RunContext, Tick
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from posekit.models import IdentityEncoder, PersonDetector
@@ -24,7 +24,7 @@ from torch import Tensor
 from torchvision.ops import box_iou
 
 from mamma.ops.identity import CLIP_WEIGHT, EPIPOLAR_WEIGHT, FeatureBank, assign_hungarian, epipolar_score, fundamental_matrix, resolve_epipolar_px
-from mamma.types import MultiViewTracks
+from mamma.types import Frameset, MultiViewTracks, TrackedFrameset
 
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP + epipolar score to accept a cross-view match."""
@@ -87,11 +87,12 @@ class TrackNode:
     """Track every person in every view.
 
     Masks and boxes per (view, person) at engine size; a person keeps one id across views and time (CLIP + epipolar
-    identity at bootstrap and re-detects, SAM2 masks every tick).
+    identity at bootstrap and re-detects, SAM2 masks every tick). ``tracked`` hands the tracks on with their frameset's crop
+    frames.
     """
 
-    inputs: Mapping[str, PortType] = {"frames": Fenced[MultiViewFrames], "rig": RigCameras}
-    outputs: Mapping[str, PortType] = {"tracks": Fenced[MultiViewTracks]}
+    inputs: Mapping[str, PortType] = {"frames": Fenced[Frameset], "rig": RigCameras}
+    outputs: Mapping[str, PortType] = {"tracks": Fenced[MultiViewTracks], "tracked": Fenced[TrackedFrameset]}
 
     def __init__(self, params: TrackParams, detector: PersonDetector, encoder: IdentityEncoder, masks: MaskTracker) -> None:
         self.params, self.detector, self.encoder, self.masks = params, detector, encoder, masks
@@ -107,8 +108,9 @@ class TrackNode:
         self.ticks_seen: int = 0
 
     def step(self, tick: Tick, out: Emit) -> None:
-        assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, MultiViewFrames)
-        frames: MultiViewFrames = consume(tick.value)
+        assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, Frameset)
+        frameset: Frameset = consume(tick.value)
+        frames: MultiViewFrames = frameset.frames
         rig = tick.asof["rig"]
         assert isinstance(rig, RigCameras), "track needs the rig (a STATIC AsOf value)"
         views: int = len(frames.views)
@@ -143,7 +145,9 @@ class TrackNode:
             np.asarray([t.box_xyxy if t.box_xyxy is not None else [np.nan] * 4 for t in picked], dtype=np.float32).reshape(-1, 4),
             np.asarray([t.score for t in picked], dtype=np.float32), (stored_wh / np.array([width, height])).astype(np.float32),
         )  # fmt: skip
-        out.put("tracks", tick.t_ns, Fenced(value, fence_after(value.masks)))
+        fence: Fence | None = fence_after(value.masks)
+        out.put("tracks", tick.t_ns, Fenced(value, fence))
+        out.put("tracked", tick.t_ns, Fenced(TrackedFrameset(value, frameset.crops), fence))
 
     def flush(self, out: Emit) -> None:
         pass

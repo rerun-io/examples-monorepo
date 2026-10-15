@@ -44,8 +44,7 @@ def run_segment_node(node: RefineNode | ReportNode, inputs: dict[str, list[Event
 
 
 def refine_inputs(scene: FakeScene, records: list[tuple[int, MultiViewKeypoints]]) -> dict[str, list[Event]]:
-    layout = RigLayout(scene.rig.names, (), scene.rig.names)
-    return {"kp2d": [Event(t, "kp2d", r) for t, r in records], "init": [Event(STATIC, "init", scene.rig)], "rig_layout": [Event(STATIC, "rig_layout", layout)]}
+    return {"kp2d": [Event(t, "kp2d", r) for t, r in records], "init": [Event(STATIC, "init", scene.rig)]}
 
 
 def test_refine_is_deterministic_and_keeps_an_exact_rig_and_report_scores_it() -> None:
@@ -53,7 +52,7 @@ def test_refine_is_deterministic_and_keeps_an_exact_rig_and_report_scores_it() -
     layout = RigLayout(scene.rig.names, (), scene.rig.names)
     inputs = refine_inputs(scene, kp2d_records(scene))
     ctx = RunContext("exocalib-refine", "refine", "lossless", resources=scene.resources())
-    runs = [run_segment_node(RefineNode(device="cpu"), inputs, ctx) for _ in range(2)]
+    runs = [run_segment_node(RefineNode(layout, device="cpu"), inputs, ctx) for _ in range(2)]
     plain = [[(p, t, asdict(v)) for p, t, v in run] for run in runs]  # type: ignore[call-overload]
     np.testing.assert_equal(plain[1], plain[0])
     outputs = {p: v for p, _, v in runs[0]}
@@ -61,8 +60,8 @@ def test_refine_is_deterministic_and_keeps_an_exact_rig_and_report_scores_it() -
     # exact observations: the metric rig itself comes back (the fake MoGe rescale is 1.00015, i.e. < 1 mm at 4 m)
     np.testing.assert_allclose(outputs["refined"].cam_T_world, scene.rig.cam_T_world, atol=2e-3)
     np.testing.assert_allclose(outputs["refined"].intrinsics, scene.rig.intrinsics, rtol=1e-6)
-    report_inputs = {p: [Event(STATIC, p, v)] for p, v in (("refined", outputs["refined"]), ("diag", outputs["diag"]), ("init", scene.rig), ("gt", scene.rig), ("rig_layout", layout))}
-    report = {p: v for p, _, v in run_segment_node(ReportNode(scene.segment), report_inputs, ctx)}
+    report_inputs = {p: [Event(STATIC, p, v)] for p, v in (("refined", outputs["refined"]), ("diag", outputs["diag"]), ("init", scene.rig), ("gt", scene.rig))}
+    report = {p: v for p, _, v in run_segment_node(ReportNode(scene.segment, layout), report_inputs, ctx)}
     assert isinstance(report["eval"], EvalReport) and report["eval"].init is not None and report["eval"].refined is not None
     assert report["eval"].init.se3.rotation_deg.max < 1e-6 and report["eval"].refined.se3.rotation_deg.max < 0.05
     assert report["eval"].refined.se3.translation_cm.max < 0.5 and report["eval"].refined.focal_error_pct.max_abs < 1e-3
@@ -74,8 +73,9 @@ def test_refine_draws_each_camera_at_its_own_sample_time() -> None:
     scene = FakeScene()
     offsets = 250_000 * np.arange(len(scene.rig.names), dtype=np.int64)[::-1]  # the last camera samples first
     records = [(t, replace(r, cam_t_ns=r.cam_t_ns + offsets)) for t, r in kp2d_records(scene)]
+    layout = RigLayout(scene.rig.names, (), scene.rig.names)
     ctx = RunContext("exocalib-refine", "refine", "lossless", resources=scene.resources())
-    draws = [(t, v) for p, t, v in run_segment_node(RefineNode(device="cpu"), refine_inputs(scene, records), ctx) if p == "kp2d_overlay"]
+    draws = [(t, v) for p, t, v in run_segment_node(RefineNode(layout, device="cpu"), refine_inputs(scene, records), ctx) if p == "kp2d_overlay"]
     assert all(isinstance(v, Kp2dOverlay) for _, v in draws)
     expected = sorted((int(r.cam_t_ns[i]), i, view) for _, r in records for i, view in enumerate(r.views))
     assert [(t, v.view) for t, v in draws] == [(t, view) for t, _, view in expected]  # type: ignore[union-attr]
@@ -88,10 +88,10 @@ def test_a_rerun_sink_takes_every_refine_and_report_output() -> None:
     scene = FakeScene()
     layout = RigLayout(scene.rig.names, (), scene.rig.names)
     ctx = RunContext("exocalib-refine", "refine", "lossless", resources=scene.resources())
-    refined = run_segment_node(RefineNode(device="cpu"), refine_inputs(scene, kp2d_records(scene)), ctx)
+    refined = run_segment_node(RefineNode(layout, device="cpu"), refine_inputs(scene, kp2d_records(scene)), ctx)
     outputs = {p: v for p, _, v in refined}
-    report_inputs = {p: [Event(STATIC, p, v)] for p, v in (("refined", outputs["refined"]), ("diag", outputs["diag"]), ("init", scene.rig), ("gt", scene.rig), ("rig_layout", layout))}
-    items = [*refined, *run_segment_node(ReportNode(scene.segment), report_inputs, ctx), ("base_rig", STATIC, BaseCalibration(scene.rig.select(scene.rig.names[:2])))]
+    report_inputs = {p: [Event(STATIC, p, v)] for p, v in (("refined", outputs["refined"]), ("diag", outputs["diag"]), ("init", scene.rig), ("gt", scene.rig))}
+    items = [*refined, *run_segment_node(ReportNode(scene.segment, layout), report_inputs, ctx), ("base_rig", STATIC, BaseCalibration(scene.rig.select(scene.rig.names[:2])))]
     ports = sorted({p for p, _, _ in items} - {"eval"})
     recording = rr.RecordingStream("exo-calib-test", send_properties=False)
     recording.memory_recording()

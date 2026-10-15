@@ -1,7 +1,7 @@
 """Edge Types of the single-image graph (SPEC 5.4) and their Rerun mapping.
 
-Host Types are pyserde records; ``Splats`` holds device tensors (memory only, ``to_rerun`` copies to the host). Cameras are
-RDF; a pose is ``cam_T_world`` (world to camera), logged as a ``ChildFromParent`` transform.
+Host Types are pyserde records; ``Splats`` and the ``Scene`` that holds it keep device tensors (memory only, ``to_rerun`` copies
+to the host). Cameras are RDF; a pose is ``cam_T_world`` (world to camera), logged as a ``ChildFromParent`` transform.
 """
 
 from collections.abc import Iterator
@@ -243,3 +243,27 @@ class Splats:
             rgba: Float32[ndarray, "n 4"] = flat(columns[3][t], np.uint32)[:, None].view(np.uint8)[:, ::-1].astype(np.float32) / 255.0  # 0xRRGGBBAA
             quats: Float32[ndarray, "n 4"] = flat(columns[2][t], np.float32).reshape(-1, 4)[:, [3, 0, 1, 2]]
             yield t, cls(*(torch.from_numpy(np.ascontiguousarray(a)) for a in (flat(centers, np.float32).reshape(-1, 3), flat(columns[1][t], np.float32).reshape(-1, 3), quats, rgba[:, :3], rgba[:, 3])))
+
+
+@dataclass(frozen=True, slots=True)
+class Scene:
+    """The Gaussian scene: activated 3D Gaussians on the device that made them, with the training views they were fitted to
+
+    One value, so a render never meets splats without their views."""
+
+    splats: Splats
+    views: SceneViews
+
+    def to_rerun(self, root: str) -> list[Log]:
+        """The splats at ``<root>/splats``, the views under ``root`` (``SceneViews.names``)."""
+        return [*self.splats.to_rerun(f"{root}/splats"), *self.views.to_rerun(root)]
+
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        return [f"{root}/**"]
+
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Scene"]]:
+        views: dict[TimeNs, SceneViews] = dict(SceneViews.from_layer(table, root, timeline))
+        for t, splats in Splats.from_layer(table, f"{root}/splats", timeline):
+            yield t, cls(splats, views[t])

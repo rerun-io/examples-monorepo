@@ -9,7 +9,7 @@ from vistadream_fakes import FakePredictor, fake_inpaint, fake_rasterize
 
 from vistadream.nodes.prepare import DepthNode, OutpaintNode
 from vistadream.nodes.splats import EDGE_THRESHOLD, ExpandNode, InitNode, RenderNode
-from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats
+from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene
 
 IMAGE = RgbImage(np.random.default_rng(0).integers(0, 256, (64, 96, 3), dtype=np.uint8))  # large enough for the border to fit the canvas
 
@@ -21,16 +21,15 @@ def prepared(inpaint: bool) -> tuple[OutpaintCanvas, RelativeDepth]:
     return canvas, depth
 
 
-def initialised(inpaint: bool) -> tuple[Splats, SceneViews, RelativeDepth]:
+def initialised(inpaint: bool) -> tuple[Scene, RelativeDepth]:
     canvas, depth = prepared(inpaint)
     tick = Tick(0, "depth", depth, {"canvas": canvas, "image": IMAGE})
     check_node_contract(InitNode(iters=3, device="cpu", rasterize=fake_rasterize), [tick])
     out = Recorder()
     InitNode(iters=3, device="cpu", rasterize=fake_rasterize).step(tick, out)
-    assert [(port, t) for port, t, _ in out.items] == [("scene", 0), ("views", 0)]
-    scene, views = out.items[0][2], out.items[1][2]
-    assert isinstance(scene, Fenced) and isinstance(scene.value, Splats) and isinstance(views, SceneViews)
-    return scene.value, views, depth
+    [(port, t, scene)] = out.items  # the splats and their views as ONE value: a render never meets one without the other
+    assert (port, t) == ("scene", 0) and isinstance(scene, Fenced) and isinstance(scene.value, Scene)
+    return scene.value, depth
 
 
 def test_outpaint_without_inpainting_is_the_image() -> None:
@@ -58,22 +57,23 @@ def test_depth_zeroes_non_finite_predictions() -> None:
 
 
 def test_init_spawns_one_gaussian_per_pixel_off_a_depth_edge() -> None:
-    splats, views, depth = initialised(inpaint=False)
-    assert views.input_index == 0 and len(views.views) == 1
-    assert len(splats.centers) == (~depth_edges_mask(depth.depth, threshold=EDGE_THRESHOLD)).sum()
-    np.testing.assert_array_equal(views.input.rgb, IMAGE.rgb)
+    scene, depth = initialised(inpaint=False)
+    assert scene.views.input_index == 0 and len(scene.views.views) == 1
+    assert len(scene.splats.centers) == (~depth_edges_mask(depth.depth, threshold=EDGE_THRESHOLD)).sum()
+    np.testing.assert_array_equal(scene.views.input.rgb, IMAGE.rgb)
 
 
 def test_init_with_outpainting_puts_the_canvas_first_and_centres_the_input_camera() -> None:
-    _, views, depth = initialised(inpaint=True)
+    scene, depth = initialised(inpaint=True)
+    views = scene.views
     assert views.input_index == 1 and views.views[0].supervise is not None and views.views[0].rgb.shape[:2] == depth.depth.shape
     np.testing.assert_allclose(views.input.K[:2, 2], [48.0, 32.0])
     np.testing.assert_allclose(views.input.K[0, 0], depth.K[0, 0])
 
 
 def test_render_emits_the_path_on_a_30_fps_clock_from_the_input_camera() -> None:
-    splats, views, _ = initialised(inpaint=False)
-    outputs = check_node_contract(RenderNode(rasterize=fake_rasterize), [Tick(7, "scene", Fenced(splats, None), {"views": views})])
+    scene, _ = initialised(inpaint=False)
+    outputs = check_node_contract(RenderNode(rasterize=fake_rasterize), [Tick(7, "scene", Fenced(scene, None), {})])
     assert [t for _, t, _ in outputs] == [7 + i * 1_000_000_000 // 30 for i in range(150)]
     first = outputs[0][2]
     assert isinstance(first, CameraView)
@@ -82,16 +82,15 @@ def test_render_emits_the_path_on_a_30_fps_clock_from_the_input_camera() -> None
 
 
 def test_expand_adds_inpainted_views_and_keeps_the_old_gaussians() -> None:
-    splats, views, _ = initialised(inpaint=True)
+    scene, _ = initialised(inpaint=True)
     node = ExpandNode(fake_inpaint, FakePredictor(), n_frames=4, iters=2, rasterize=fake_rasterize)
     node.reset(RunContext("vistadream-single-image", "expand", "lossless"))
     out = Recorder()
-    node.run({"scene": [Event(0, "scene", Fenced(splats, None))], "views": [Event(0, "views", views)]}, out)
-    assert [(port, t) for port, t, _ in out.items] == [("scene", 0), ("views", 0)]
-    grown, grown_views = out.items[0][2], out.items[1][2]
-    assert isinstance(grown, Fenced) and isinstance(grown_views, SceneViews)
-    assert len(grown_views.views) == 4 and grown_views.input_index == 1
-    added = grown_views.views[2]
+    node.run({"scene": [Event(0, "scene", Fenced(scene, None))]}, out)
+    [(port, t, grown)] = out.items
+    assert (port, t) == ("scene", 0) and isinstance(grown, Fenced) and isinstance(grown.value, Scene)
+    assert len(grown.value.views.views) == 4 and grown.value.views.input_index == 1
+    added = grown.value.views.views[2]
     assert added.supervise is not None and added.supervise[:, :5].all() and not added.supervise[:, -5:].any()  # the fake's hole: left tenth
-    torch.testing.assert_close(grown.value.centers[: len(splats.centers)], splats.centers)
-    assert len(grown.value.centers) > len(splats.centers)
+    torch.testing.assert_close(grown.value.splats.centers[: len(scene.splats.centers)], scene.splats.centers)
+    assert len(grown.value.splats.centers) > len(scene.splats.centers)

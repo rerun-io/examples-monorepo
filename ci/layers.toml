@@ -2,8 +2,8 @@
 # Layers, highest first: App > Graph > Node > Op > Model > Runtime > Types; imports only point down.
 # A port moves its import root from `pending` to `enforced`; in an enforced package every module must match a rule.
 
-enforced = ["exo_calib", "mamma", "robocap_live", "vistadream", "mast3r_slam"]
-pending = ["slam_rs"]  # ported onto dagkit (graphs, nodes, types, verify); its top-level modules have no layer home yet
+enforced = ["exo_calib", "mamma", "robocap_live", "vistadream", "mast3r_slam", "slam_rs"]
+pending = []
 
 # Import name -> source root (the directory that holds the import package), relative to the repo.
 [roots]
@@ -19,7 +19,7 @@ posekit = "packages/posekit/src"
 monopriors = "packages/monoprior"
 trtkit = "packages/trtkit/src"
 
-# dagkit is machinery, not a layer: stdlib plus these, and gradio only inside function bodies of dagkit/app.py.
+# dagkit is machinery, not a layer: stdlib plus these, and gradio only inside function bodies of dagkit/form.py.
 # datafusion is the catalog reader's expression language (rerun-sdk's catalog extra), for windowed reads.
 [dagkit]
 allowed = ["numpy", "pyarrow", "rerun", "serde", "tomli_w", "orjson", "tyro", "beartype", "datafusion"]
@@ -65,6 +65,17 @@ layer = "Types"
 [[rules]]
 glob = "*/types/*"
 layer = "Types"
+# slam_rs's top-level modules predate the port (catalog reader, estimator driver, config, ATE, logs): the rig is Types, the ATE
+# an Op, the rest sits at the Node level the VIO node imports them from. After the generic rules (first match wins).
+[[rules]]
+glob = "slam-rs/slam_rs/rig.py"
+layer = "Types"
+[[rules]]
+glob = "slam-rs/slam_rs/trajectory.py"
+layer = "Op"
+[[rules]]
+glob = "slam-rs/slam_rs/*.py"
+layer = "Node"
 
 # Rows import columns (SPEC §1.2). "dagkit" = any dagkit module; "dagkit.<m>" = only that module.
 [allowed]

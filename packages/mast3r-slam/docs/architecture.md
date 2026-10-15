@@ -10,7 +10,7 @@ video ─frames─▶ frontend (main thread) ─task─▶ backend (own process)
 
 | node | layer module | does |
 |---|---|---|
-| `video` | `simplecv.sources` (`CatalogVideoSource`, `VideoFileSource`, `ImageDirSource`, `WebcamSource`) | one-view `MultiViewFrames`, every `subsample`-th frame |
+| `video` | `simplecv.sources` (`VideoSource`, `VideoFileSource`, `ImageDirSource`, `WebcamSource`) | one-view `MultiViewFrames`, every `subsample`-th frame |
 | `frontend` | `nodes/frontend.py` (+ `nodes/tracking.py`) | INIT / TRACKING / RELOC per frame; emits `tracked` poses and `KeyframeAdded` / `RelocRequest` tasks |
 | `backend` | `nodes/backend.py` (+ `nodes/factor_graph.py`, `models/retrieval.py`) | matching factors, retrieval, global Gauss-Newton; emits `MapUpdate` per task, a new keyframe's `KeyframeCloud`, and the final keyframe poses at flush |
 | sinks | `dagkit.sinks.RerunSink` / `LayerSink`, `nodes/nerfstudio.py` | viewer, catalog layer `mast3r_slam`, Nerfstudio export |
@@ -22,8 +22,9 @@ calls `SharedSlam.publish` (a device sync) before it hands over (the frontend be
 acknowledgement), and the backend refuses a relocalisation request whose frame is not the shared current frame.
 
 Modes: **lossless** (default, every eval run) — before each frame and at flush the frontend waits until the backend has
-applied every queued task (`SharedSlam.backend_idle`), so every frame sees one fixed map; **realtime** — no wait, but lost
-frames that arrive while a relocalisation request is queued are skipped (the shared current frame stays the requested one);
+acknowledged every task it handed over (`SharedSlam.wait`: tasks are numbered in hand-over order, the backend counts
+the ones it applied and wakes the waiter), so every frame sees one fixed map; **realtime** — no wait, but lost frames that
+arrive before the backend acknowledged the relocalisation request are skipped (the shared current frame stays the requested one);
 at the end the backend drops what is still queued and a stop is never undone by a late relocalisation. A failed backend
 raises in the runner, which aborts the frontend's wait. Only the threaded runner fits the frontend's wait.
 The backend process uses expandable CUDA segments and releases cached blocks after each task: the global solve's

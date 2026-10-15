@@ -29,7 +29,8 @@ class Backend:
     queued tasks are dropped and counted.
 
     At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``).
-    The shared buffers carry the map both ways; the backend acknowledges each task by dequeuing it there.
+    The shared buffers carry the map both ways; after each task (dropped ones too) the backend publishes its GPU writes
+    and acknowledges the task on the ``shared`` resource, which the lossless frontend waits for.
     """
 
     inputs: Mapping[str, PortType] = {"task": BackendTask}
@@ -114,14 +115,9 @@ class Backend:
                 with self.states.lock:  # a realtime stop (TERMINATED) that came during the relocalisation stays
                     if self.states.get_mode() == Mode.RELOC:
                         self.states.set_mode(Mode.TRACKING)
-        self.shared.publish()
-        with self.states.lock:  # the acknowledgement the lossless frontend waits for
-            if isinstance(task, KeyframeAdded):
-                self.states.global_optimizer_tasks.pop(0)
-            else:
-                self.states.dequeue_reloc()
         ii: Int64[ndarray, " e"] = self.graph.ii.cpu().numpy().astype(np.int64)
         out.put("map", tick.t_ns, MapUpdate(self._poses(), ii, self.graph.jj.cpu().numpy().astype(np.int64)))
+        self.shared.acknowledge()  # after the map was read: the frontend's next keyframe is not in this update
         torch.cuda.empty_cache()  # each global solve allocates edge-sized buffers: cached blocks would fragment the GPU
 
     def flush(self, out: Emit) -> None:

@@ -1,4 +1,3 @@
-import contextlib
 import functools
 import importlib.metadata
 import subprocess
@@ -10,8 +9,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from rerun.catalog import DatasetEntry
-from serde import SerdeError, from_dict, serde, to_dict
+from serde import serde, to_dict
 
 from dagkit.time import STATIC, TimeNs
 
@@ -72,17 +70,6 @@ def log_producer(recording: rr.RecordingStream, layer: str, producer: Producer) 
     recording.log(f"/producers/{layer}", rr.AnyValues(**to_dict(producer)), static=True)
 
 
-def read_producer(dataset: DatasetEntry, segment: str, layer: str) -> Producer | None:
-    """The Producer ``log_producer`` wrote for ``layer`` into ``segment`` (None when it has none)."""
-    prefix: str = f"/producers/{layer}:"
-    table: pa.Table = dataset.filter_segments([segment]).filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table()
-    cells: dict[str, object] = {c.rsplit(":", 1)[-1]: table.column(c)[0].as_py() for c in table.column_names if c.startswith(prefix) and table.num_rows}
-    try:
-        return from_dict(Producer, {k: v[0] if isinstance(v, list) else v for k, v in cells.items()}) if cells else None
-    except SerdeError as exc:
-        raise ValueError(f"{segment} /producers/{layer}: {exc}") from exc
-
-
 def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value: Type, root: str) -> list[str]:
     if t_ns != STATIC:
         recording.set_time(timeline, duration=np.timedelta64(t_ns, "ns"))
@@ -94,6 +81,14 @@ def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value:
 
 def row_times(table: pa.Table, timeline: str) -> list[TimeNs]:
     return table[timeline].cast(pa.int64()).to_pylist() if timeline in table.column_names else [STATIC] * table.num_rows
+
+
+def static_row(table: pa.Table, entity: str) -> dict[str, object]:
+    """``entity``'s components in the first row of ``table`` (a static read) by component name, each cell taken out of
+    Rerun's per-row list when it holds one value (a logged array stays a list); {} without a row."""
+    prefix: str = f"{entity}:"
+    cells: dict[str, object] = {c.removeprefix(prefix): table.column(c)[0].as_py() for c in table.column_names if c.startswith(prefix)} if table.num_rows else {}
+    return {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in cells.items() if v is not None}
 
 
 def column(table: pa.Table, name: str) -> list:
@@ -115,24 +110,3 @@ def flat(values: pa.Scalar | pa.Array, dtype: type) -> np.ndarray:
     while pa.types.is_list(array.type) or pa.types.is_large_list(array.type) or pa.types.is_fixed_size_list(array.type):
         array = array.flatten()
     return array.to_numpy(zero_copy_only=False).astype(dtype)
-
-
-def read_column(
-    dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool, window_ns: tuple[int, int] | None = None
-) -> pa.Table:
-    """The rows ``value_type.from_layer`` reads, only ``window_ns`` [start, stop) of a temporal column."""
-    view = dataset.filter_segments([segment]).filter_contents(value_type.contents(root))
-    reader = view.reader(index=None if static else timeline)
-    if window_ns is not None and not static:
-        from datafusion import col, lit  # the catalog reader's expression language (rerun-sdk's catalog extra)
-
-        time = col(timeline).cast(pa.int64())
-        reader = reader.filter((time >= lit(window_ns[0])) & (time < lit(window_ns[1])))
-    return reader.to_arrow_table()
-
-
-@contextlib.contextmanager
-def served(path: Path) -> Iterator[DatasetEntry]:
-    """One rrd on an in-process catalog server: query the entry inside the ``with`` (an entry must outlive its queries)."""
-    with rr.server.Server(host="127.0.0.1", datasets={"rrd": [str(path)]}) as server:
-        yield server.client().get_dataset("rrd")

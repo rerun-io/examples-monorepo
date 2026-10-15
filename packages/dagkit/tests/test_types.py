@@ -18,7 +18,7 @@ from dagkit.node import Fenced, Tick
 from dagkit.sources import SegmentRef
 from dagkit.testing import layer_table
 from dagkit.time import STATIC
-from dagkit.types import LayerFile, Log, Producer, Type, cells, column, flat, row_times
+from dagkit.types import LayerFile, Log, Producer, Type, cells, column, flat, row_times, static_row
 
 text = st.text(st.characters(codec="utf-8", exclude_categories=("Cs",)), max_size=12)
 
@@ -96,3 +96,10 @@ def test_layer_table_repeats_statics_in_every_row() -> None:
     table: pa.Table = layer_table([(5, Point((1.0, 2.0, 3.0), "a")), (STATIC, Static((0.0, 0.0, 0.0), "s")), (9, Point((4.0, 5.0, 6.0), "b"))], "/w")
     assert row_times(table, "video_time") == [5, 9] and table["/w/static:Points3D:labels"].to_pylist() == [["s"], ["s"]]
     assert layer_table([(STATIC, Static((0.0, 0.0, 0.0), "s"))], "/w").num_rows == 1
+
+
+def test_static_row_unwraps_rerun_s_per_row_list_of_one_entity() -> None:
+    """A static AnyValues row as a reader returns it: each cell a list (one value, or the logged array)."""
+    table = pa.table({"/x:a": [[1]], "/x:b": [["text"]], "/x:arr": [[1.0, 2.0]], "/x:none": pa.array([None], pa.list_(pa.int64())), "/xy:c": [[3]]})
+    assert static_row(table, "/x") == {"a": 1, "b": "text", "arr": [1.0, 2.0]}
+    assert static_row(table.slice(0, 0), "/x") == {}

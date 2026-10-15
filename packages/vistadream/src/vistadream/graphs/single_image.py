@@ -17,7 +17,7 @@ from vistadream.nodes.splats import ExpandNode, InitNode, RenderNode
 def single_image_graph(
     image: Source, outpaint: OutpaintNode, depth: DepthNode, init: InitNode, expand: ExpandNode | None, render: RenderNode, sinks: Mapping[str, Node]
 ) -> Graph:
-    """Every sink input names a final port: ``scene`` (Splats), ``views`` (SceneViews) or ``view`` (the render path)."""
+    """Every sink input names a final port: ``scene`` (Scene: the splats and their views) or ``view`` (the render path)."""
     graph = Graph(
         "vistadream-single-image",
         about="One photo to a 3D Gaussian scene: MoGe depth of the image (FLUX.1 Fill first grows its border unless the stage is"
@@ -36,11 +36,9 @@ def single_image_graph(
     if expand is not None:
         grown: NodeRef = graph.node("expand", expand)
         graph.edge(final["scene"], grown["scene"])
-        graph.edge(final["views"], grown["views"])
         final = grown
     path: NodeRef = graph.node("render", render)
     graph.edge(final["scene"], path["scene"])
-    graph.edge(final["views"], path["views"], AsOf())
-    ports: dict[str, PortRef] = {"scene": final["scene"], "views": final["views"], "view": path["view"]}
+    ports: dict[str, PortRef] = {"scene": final["scene"], "view": path["view"]}
     graph.sinks(ports, sinks)
     return graph

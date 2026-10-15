@@ -15,13 +15,12 @@ from mamma.nodes.track import TrackNode
 
 FRAMES_QUEUE: int = 2
 TRACKS_QUEUE: int = 2
-FRAMES_KEPT: int = FRAMES_QUEUE + TRACKS_QUEUE + 3
-"""Realtime AsOf history of the crop frames: every frameset that can still reach landmarks (both queues, the ticks track
-and landmarks are stepping, and the source's ``frames_native`` lead). A native 4-view frameset is ~37 MB of GPU memory."""
+"""The crop frames travel with the tracks, so these bound the framesets in flight (a native 4-view frameset is ~37 MB of
+GPU memory) and nothing else depends on them."""
 
 
 def capture_graph(video: Source, track: TrackNode, landmarks: LandmarksNode, fit: FitNode, sinks: Mapping[str, Node]) -> Graph:
-    """``video`` provides ``frames``, ``rig`` and, for hi-res crops, ``frames_native``; every sink input names a producer port."""
+    """``video`` provides ``frames`` (a ``Frameset``) and ``rig`` (``FramesetSource``); every sink input names a producer port."""
     graph = Graph(
         "mamma-capture",
         about="Multi-view body capture: track every person in the cameras, find their dense 2D landmarks, triangulate them "
@@ -33,8 +32,7 @@ def capture_graph(video: Source, track: TrackNode, landmarks: LandmarksNode, fit
     fitted = graph.node("fit", fit)
     graph.edge(source["frames"], tracked["frames"], Block(FRAMES_QUEUE))
     graph.edge(source["rig"], tracked["rig"], AsOf())
-    graph.edge(tracked["tracks"], landmarked["tracks"], Block(TRACKS_QUEUE))
-    graph.edge(source["frames_native" if "frames_native" in video.outputs else "frames"], landmarked["frames"], AsOf(keep=FRAMES_KEPT))
+    graph.edge(tracked["tracked"], landmarked["tracked"], Block(TRACKS_QUEUE))
     graph.edge(landmarked["landmarks"], fitted["landmarks"], Block(4))
     graph.edge(source["rig"], fitted["rig"], AsOf())
     ports: dict[str, PortRef] = {"tracks": tracked["tracks"], "landmarks": landmarked["landmarks"]} | {port: fitted[port] for port in FitNode.outputs}

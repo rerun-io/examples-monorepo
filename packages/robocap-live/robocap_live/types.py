@@ -2,13 +2,13 @@
 a layer run's counts."""
 
 from collections.abc import Iterator
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dagkit.time import STATIC, TimeNs
-from dagkit.types import Log
+from dagkit.types import Log, static_row
 from jaxtyping import Float64
 from numpy import ndarray
 from serde import from_dict, serde, to_dict
@@ -98,5 +98,5 @@ class LayerRun:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "LayerRun"]]:
-        if table.num_rows and f"{root}:framesets" in table.column_names:
-            yield STATIC, from_dict(cls, {f.name: table.column(f"{root}:{f.name}")[0].as_py()[0] for f in fields(cls)})
+        if "framesets" in (row := static_row(table, root)):
+            yield STATIC, from_dict(cls, row)

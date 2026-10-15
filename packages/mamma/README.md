@@ -67,7 +67,7 @@ src/mamma/
   models/      YOLO12x, open_clip, SAM2 predictor, MammaNet (+ TensorRT, posekit role)
   ops/         triangulation policy, identity scoring, SMPL-X body + window fit, skeleton regressor
   nodes/       track, landmarks, fit
-  sources/     the MAMMA-format file source (catalog segments use simplecv's CatalogVideoSource)
+  sources/     the MAMMA-format file source (a simplecv VideoSource over its files; catalog segments use VideoSource.catalog)
   graphs/      capture.py
   apis/        capture App (Config, build), blueprint, downloads, TensorRT build, checkpoint conversion
   verify.py    graph-tier check (VERIFY.toml)

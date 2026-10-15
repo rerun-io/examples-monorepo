@@ -14,19 +14,19 @@ from typing import cast
 
 import numpy as np
 import rerun as rr
+from dagkit.catalog import served
 from dagkit.runners import RunReport, run_sequential
 from dagkit.sources import SegmentRef
-from dagkit.types import served
 from dagkit.verify import Case, Phase, pre_golden, run_counts
 from rerun.catalog import DatasetEntry
-from serde import from_dict
 
 from slam_rs.apis.catalog_layer import vio_publish
-from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, read_ground_truth, resolve_catalog_segments, rig_trajectory
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, read_ground_truth, resolve_catalog_segments
 from slam_rs.config import load_slam_config
 from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import Trajectory, ate
+from slam_rs.trajectory import ate
+from slam_rs.types import Trajectory, rig_trajectory
 
 RUN: str = "/verify/vio/run"
 """Static ``AnyValues`` of a golden: the run's counts, settings and wall time."""
@@ -36,9 +36,11 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """The VIO graph (sequential, lossless) on the case's segment, its layer (unregistered, in a temporary directory) copied into
     ``recording``. VIO initialises from rest, so it starts at the segment's first frameset; a window ends it at ``window_s[1]``."""
     segment: SegmentRef = case.segment_ref(load_slam_config().catalog_url)
-    params: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")})
+    params: VioParams = case.configure(VioParams)
+    viewer = rr.RecordingStream("slam-rs-verify")
+    viewer.set_sinks()  # no sink: the App's viewer output is dropped, not buffered
     with TemporaryDirectory() as tmp:
-        graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio", default_enabled=False))
+        graph, publish = vio_publish(segment, params, Path(tmp), "off", viewer)
         report: RunReport = run_sequential(graph)
         assert publish.published is not None, f"{case.name}: the run published no layer ({report.status})"
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())

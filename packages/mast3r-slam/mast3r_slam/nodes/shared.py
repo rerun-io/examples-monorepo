@@ -2,10 +2,11 @@
 
 The frontend (main process) and the backend (its own process) exchange the map through these buffers: CUDA tensors cross
 by CUDA IPC, the small fields live in an ``mp.Manager``. This is the feedback path of the SLAM loop (poses, mode,
-relocalisation), so the graph itself stays acyclic.
+relocalisation, the backend's acknowledgements), so the graph itself stays acyclic.
 """
 
 import multiprocessing
+from collections.abc import Callable
 from multiprocessing.managers import SyncManager
 
 import lietorch
@@ -35,8 +36,6 @@ class SharedStates:
     ) -> None:
         self.lock = manager.RLock()
         self.mode = manager.Value("i", Mode.INIT)
-        self.reloc_sem = manager.Value("i", 0)
-        self.global_optimizer_tasks = manager.list()
 
         self.feat_dim: int = 1024
         self.num_patches: int = h * w // (16 * 16)
@@ -89,23 +88,6 @@ class SharedStates:
             frame.feat = self.feat
             frame.pos = self.pos
             return frame
-
-    def queue_global_optimization(self, idx: int) -> None:
-        """Enqueue a keyframe index for global optimization."""
-        with self.lock:
-            self.global_optimizer_tasks.append(idx)
-
-    def queue_reloc(self) -> None:
-        """Increment the relocalization semaphore by one."""
-        with self.lock:
-            self.reloc_sem.value += 1
-
-    def dequeue_reloc(self) -> None:
-        """Decrement the relocalization semaphore if positive."""
-        with self.lock:
-            if self.reloc_sem.value == 0:
-                return
-            self.reloc_sem.value -= 1
 
     def get_mode(self) -> Mode:
         """Return the current operating mode under the lock."""
@@ -252,24 +234,32 @@ class SharedKeyframes:
 
 
 class SharedSlam:
-    """The ``shared`` graph resource: keyframe buffer + current-frame state over one manager (``close`` shuts it down)."""
+    """The ``shared`` graph resource: keyframe buffer + current-frame state over one manager (``close`` shuts it down).
+
+    The backend's acknowledgements live here too: the frontend numbers its tasks 1, 2, ... in hand-over order (the graph's
+    ``task`` queue is FIFO), the backend counts the ones it applied in ``completed``, so task ``n`` is applied once
+    ``completed >= n``; each count wakes a frontend waiting in ``wait``.
+    """
 
     def __init__(self, h: int, w: int, buffer: int, use_calib: bool, device: str = "cuda") -> None:
-        self.manager: SyncManager | None = multiprocessing.get_context("spawn").Manager()
-        self.keyframes: SharedKeyframes = SharedKeyframes(self.manager, h, w, buffer, device=device, use_calib=use_calib)
-        self.states: SharedStates = SharedStates(self.manager, h, w, device=device)
+        manager: SyncManager = multiprocessing.get_context("spawn").Manager()
+        self.manager: SyncManager | None = manager
+        self.keyframes: SharedKeyframes = SharedKeyframes(manager, h, w, buffer, device=device, use_calib=use_calib)
+        self.states: SharedStates = SharedStates(manager, h, w, device=device)
+        self.completed = manager.Value("i", 0)
+        self.acknowledged = manager.Condition()
 
     def __getstate__(self) -> dict[str, object]:
         """The buffers and manager proxies cross to the backend process; the manager itself stays with its owner."""
-        return {"keyframes": self.keyframes, "states": self.states, "manager": None}
+        return self.__dict__ | {"manager": None}
 
     def reset(self) -> None:
-        """A new run: no keyframes, mode INIT, no pending backend work."""
+        """A new run: no keyframes, mode INIT, no task applied."""
         with self.keyframes.lock, self.states.lock:
             self.keyframes.n_size.value = 0
             self.states.mode.value = Mode.INIT
-            self.states.reloc_sem.value = 0
-            del self.states.global_optimizer_tasks[:]
+        with self.acknowledged:
+            self.completed.value = 0
 
     def publish(self) -> None:
         """Make this process's queued GPU writes to the buffers visible to the other process before telling it so: CUDA IPC
@@ -277,10 +267,23 @@ class SharedSlam:
         if self.keyframes.device.startswith("cuda"):
             torch.cuda.synchronize(self.keyframes.device)
 
-    def backend_idle(self) -> bool:
-        """The backend applied every task queued so far (the lossless acknowledgement)."""
-        with self.states.lock:
-            return len(self.states.global_optimizer_tasks) == 0 and self.states.reloc_sem.value == 0
+    def acknowledge(self) -> None:
+        """The backend applied its oldest task: publish the task's GPU writes, then count it and wake the waiting frontend."""
+        self.publish()
+        with self.acknowledged:
+            self.completed.value += 1
+            self.acknowledged.notify_all()
+
+    def wait(self, task: int, aborted: Callable[[], bool]) -> bool:
+        """Block until task ``task`` is applied (True) or the run is ``aborted()`` (False; ``wake`` ends a wait in progress)."""
+        with self.acknowledged:
+            self.acknowledged.wait_for(lambda: aborted() or self.completed.value >= task)
+            return self.completed.value >= task
+
+    def wake(self) -> None:
+        """Wake a waiting frontend so it checks ``aborted`` again (the run failed)."""
+        with self.acknowledged:
+            self.acknowledged.notify_all()
 
     def close(self) -> None:
         if self.manager is not None:

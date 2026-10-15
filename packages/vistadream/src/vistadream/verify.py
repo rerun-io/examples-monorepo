@@ -20,7 +20,6 @@ Golden contract (``recording_id`` = case name; clock ``video_time``: the image a
 
 import random
 import time
-from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,10 +27,11 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
-from dagkit.graph import Graph
-from dagkit.node import Emit, PortType, RunContext, Tick
+from dagkit.catalog import served
+from dagkit.node import Emit
 from dagkit.runners import run_sequential
-from dagkit.types import cells, served
+from dagkit.sinks import Latest
+from dagkit.types import cells
 from dagkit.verify import Case, Phase, pre_golden
 from jaxtyping import Bool
 from numpy import ndarray
@@ -40,41 +40,33 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from vistadream.apis.single_image import Config, build, case_config
 from vistadream.models.flux import FluxConfig
 from vistadream.ops.splats import render
-from vistadream.types import SceneViews, Splats, images
+from vistadream.types import Scene, images
 
 TIMELINE: str = "video_time"
 INPUT: str = "/world/input/pinhole"
 RENDER: str = "/world/render/pinhole"
 
 
-class InputRender:
+class InputRender(Latest):
     """Verify-only sink: the final scene rendered at the input camera, beside the input image (``render_rgb``, ``render_depth``)."""
 
-    inputs: Mapping[str, PortType] = {"scene": Splats, "views": SceneViews}
-    outputs: Mapping[str, PortType] = {}
-
     def __init__(self, recording: rr.RecordingStream) -> None:
+        super().__init__({"scene": Scene})
         self.recording: rr.RecordingStream = recording
-        self.got: dict[str, object] = {}
         self.n_splats: int = 0
 
-    def reset(self, ctx: RunContext) -> None:
-        self.got = {}
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.got[tick.port] = tick.value
-
     def flush(self, out: Emit) -> None:
-        splats, views = self.got.pop("scene", None), self.got.pop("views", None)
-        if not isinstance(splats, Splats) or not isinstance(views, SceneViews):
+        scene = self.values.pop("scene", None)
+        if not isinstance(scene, Scene):
             return
-        height, width = views.input.rgb.shape[:2]
+        camera = scene.views.input
+        height, width = camera.rgb.shape[:2]
         with torch.no_grad():
-            rgb, depth, _ = render(splats, views.input.K, views.input.cam_T_world, width, height)
+            rgb, depth, _ = render(scene.splats, camera.K, camera.cam_T_world, width, height)
         self.recording.set_time(TIMELINE, duration=np.timedelta64(0, "ns"))
         self.recording.log(f"{INPUT}/render_rgb", rr.Image((rgb.clamp(0, 1) * 255.0).round().byte().cpu().numpy(), color_model="RGB"))
         self.recording.log(f"{INPUT}/render_depth", rr.DepthImage(depth.float().cpu().numpy(), meter=1.0))
-        self.n_splats = len(splats.centers)
+        self.n_splats = len(scene.splats.centers)
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
@@ -85,10 +77,8 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
     started: float = time.perf_counter()
-    graph: Graph = build(config, recording)
     input_render = InputRender(recording)
-    graph.sinks({edge.dst.port: edge.src for edge in graph.edges if edge.dst.node == "viewer"}, {"input_render": input_render})
-    report = run_sequential(graph)
+    report = run_sequential(build(config, recording, {"input_render": input_render}))
     wall_s: float = time.perf_counter() - started
     recording.log("/verify/single_image/run", rr.AnyValues(wall_s=wall_s, n_splats=float(input_render.n_splats), stage=config.stage, code="graph"), static=True)
     print(f"{case.name} {phase}: {report.status}, {input_render.n_splats} splats in {wall_s:.1f} s")

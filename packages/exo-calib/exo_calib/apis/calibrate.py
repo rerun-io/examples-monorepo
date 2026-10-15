@@ -3,7 +3,8 @@
 Pass 1 tracks person boxes through the Stage A rig, pass 2 through the pass-1 refined rig (handed over in memory); both
 passes refine against the ORIGINAL Stage A rig. Outputs stream to the ``rr_config`` viewer; with ``output_dir`` they also
 become the catalog layers ``exocalib_{init,kp2d,refined,align}`` (pass 1: unregistered ``*_pass1`` files) plus ``eval.json``.
-``--resume-from init|kp2d`` reads those layers back (after a Producer check) instead of recomputing them.
+``--resume-from init|kp2d`` swaps the first refine graph's seed source: the stored layers (after a Producer check) instead
+of the previous graph's values in memory.
 ``build`` yields the graphs in order; the CLI (``main`` = ``run_app``) and the gradio app (``tools/apps/calibrate_gradio.py``)
 both run it, with run health, so the viewer's "pipeline (debug)" tab shows every graph live.
 """
@@ -20,12 +21,13 @@ import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from dagkit.app import HardwareClass, detect_hardware, load_profile, run_app, with_pipeline
+from dagkit.catalog import read_producer
 from dagkit.graph import Graph
-from dagkit.node import Control, Emit, Mode, Node, PortType, RunContext, Tick
+from dagkit.node import Mode, Node, PortType, Source
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
-from dagkit.sources import SegmentRef
-from dagkit.types import Producer, read_column, read_producer
+from dagkit.sinks import Latest, LayerSink, Register, RerunSink
+from dagkit.sources import CatalogSegmentSource, Column, SegmentRef
+from dagkit.types import Producer
 from serde import serde
 from serde.json import to_json
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
@@ -34,13 +36,13 @@ from simplecv.sources.catalog_video import SegmentFrames
 from simplecv.types.rig import RigCameras
 
 from exo_calib.apis.blueprint import exoego_view
-from exo_calib.graphs.calibrate import KP2D_ROOT, init_graph, refine_graph
+from exo_calib.graphs.calibrate import KP2D_ROOT, init_graph, refine_graph, rig_seed
 from exo_calib.nodes.init import InitNode
 from exo_calib.nodes.kp2d import Kp2dNode
 from exo_calib.nodes.refine import RefineNode
 from exo_calib.nodes.report import ReportNode
 from exo_calib.sources.layout import discover_rig_layout
-from exo_calib.types import OVERLAY_COLOR, RAW_COLOR, VARIANT_COLOR, VARIANTS, EvalReport, RigLayout
+from exo_calib.types import OVERLAY_COLOR, RAW_COLOR, VARIANT_COLOR, VARIANTS, EvalReport, MultiViewKeypoints, RigLayout
 
 PROFILES: Path = Path(__file__).resolve().parents[2] / "profiles"
 PORT_TYPES: dict[str, PortType] = {**InitNode.outputs, **Kp2dNode.outputs, **RefineNode.outputs, **ReportNode.outputs}
@@ -65,7 +67,7 @@ class Config:
     """Frames Stage B processes per pass, spread evenly over the capture; shorter captures use every frame."""
     exo_rigs: tuple[str, ...] | None = None
     """Explicit exo rig names such as ``rig_00 rig_01``; ``None`` discovers them from catalog metadata."""
-    output_dir: Path | None = None
+    output_dir: Path | None = field(default=None, metadata={"form": "save"})
     """Layer rrds (one subdirectory per segment, e.g. ``data/outputs``) and ``eval.json``; ``None``: the viewer only."""
     register: Register = "new"
     """``new`` registers layers the segment does not have yet; ``replace`` is the explicit production refresh."""
@@ -83,30 +85,6 @@ class Kp2dParams:
     batch_size: int = 32
     """Largest inference batch the TensorRT engines are built for (at least the number of exo views)."""
     detection_score: float = 0.1
-
-
-class Keep:
-    """Hand values on to the App's next graph.
-
-    Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
-    """
-
-    outputs: Mapping[str, PortType] = {}
-
-    def __init__(self, *ports: str) -> None:
-        self.inputs: dict[str, PortType] = {port: PORT_TYPES[port] for port in ports}
-        self.values: dict[str, object] = {}
-        self.control: Control | None = None
-
-    def reset(self, ctx: RunContext) -> None:
-        self.control = ctx.control
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.values[tick.port] = tick.value
-
-    def flush(self, out: Emit) -> None:
-        if self.control is not None and self.control.stopped:
-            self.values.clear()
 
 
 def model_factories(segment: SegmentRef, cameras: tuple[str, ...], params: Kp2dParams) -> dict[str, Callable[[], object]]:
@@ -169,7 +147,7 @@ def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
 def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     """The App's graphs in run order; the CLI, the gradio app and verify run each one before asking for the next.
 
-    ``init`` once, then ``refine`` pass 1 and pass 2: a ``Keep`` sink hands each graph's result to the next, and a stopped
+    ``init`` once, then ``refine`` pass 1 and pass 2: a ``Latest`` sink hands each graph's result to the next, and a stopped
     run ends the App. Outputs stream to ``recording``; with ``config.output_dir`` they also go to layer files and ``eval.json``.
     """
     torch.cuda.empty_cache()  # PyTorch's cache of a previous run (gradio) back to the driver, where TensorRT engines allocate
@@ -194,41 +172,39 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
         if config.output_dir is None:
             return out
         for layer, layer_ports in layers.items():
-            layer_recording, partial = open_layer(segment, layer, producer(graph), output_dir=config.output_dir)
-            log_style(layer_recording, cameras)
             roots: dict[str, str] = {p: ROOTS[p] + suffix for p in layer_ports}
-            out[layer] = LayerSink(layer_recording, partial, segment, layer, {p: PORT_TYPES[p] for p in layer_ports}, roots, register=register)
+            out[layer] = sink = LayerSink.open(segment, layer, producer(graph), {p: PORT_TYPES[p] for p in layer_ports}, roots, output_dir=config.output_dir, register=register)
+            log_style(sink.recording, cameras)
         return out
 
     skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1
     recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
     log_style(recording, cameras)
+    seed: Source
     if config.resume_from is None:
-        keep = Keep("init")
+        keep = Latest({"init": RigCameras})
         yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
         if "init" not in keep.values:
             return
         torch.cuda.empty_cache()  # Stage A's G3T (freed with its graph) back to the driver, for the refine passes' engines
-        init = keep.values["init"]
-    else:
+        seed = rig_seed(segment, init=keep.values["init"], tracking_rig=keep.values["init"])
+    else:  # the seed reads the stored layers back when its graph runs; the Producer check refuses a foreign one now
         check_producer(segment, "exocalib_init", producer("exocalib-init"))
-        table = read_column(segment.entry(), segment.segment, RigCameras, ROOTS["init"], segment.timeline, static=True)
-        _, init = next(RigCameras.from_layer(table, ROOTS["init"], segment.timeline))
-    assert isinstance(init, RigCameras)
-    tracking: object = init
+        init = Column(RigCameras, ROOTS["init"], static=True)
+        stored: dict[str, Column] = {"init": init, "tracking_rig": init}  # pass 1 tracks through the Stage A rig
+        if config.resume_from == "kp2d":  # past Stage B: its stored records, and the GT rig the video source would carry
+            check_producer(segment, "exocalib_kp2d", producer("exocalib-refine"))
+            stored = {"init": init, "kp2d": Column(MultiViewKeypoints, KP2D_ROOT), "rig": Column(RigCameras, "/world", static=True)}
+        seed = CatalogSegmentSource(segment, stored)
     if config.resume_from != "kp2d":  # pass 1 only tracks: its outputs go to unregistered *_pass1 files
-        keep = Keep("refined")
-        yield refine_graph(segment, layout, (init, init), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", PASS1_LAYERS, "_pass1", "off")}, report=False)
+        keep = Latest({"init": RigCameras, "refined": RigCameras})
+        yield refine_graph(segment, layout, seed, config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", PASS1_LAYERS, "_pass1", "off")}, report=False)
         if "refined" not in keep.values:
             return
-        tracking = keep.values["refined"]
-    assert isinstance(tracking, RigCameras)
-    resume_kp2d: bool = config.resume_from == "kp2d"
-    if resume_kp2d:
-        check_producer(segment, "exocalib_kp2d", producer("exocalib-refine"))
-    keep = Keep("eval")
-    layers: dict[str, tuple[str, ...]] = {k: v for k, v in LAYERS.items() if not (resume_kp2d and k == "exocalib_kp2d")}
-    yield refine_graph(segment, layout, (init, tracking), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", layers)}, report=True, resume_kp2d=resume_kp2d)
+        seed = rig_seed(segment, init=keep.values["init"], tracking_rig=keep.values["refined"])
+    keep = Latest({"eval": EvalReport})
+    layers: dict[str, tuple[str, ...]] = {k: v for k, v in LAYERS.items() if not (config.resume_from == "kp2d" and k == "exocalib_kp2d")}
+    yield refine_graph(segment, layout, seed, config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", layers)}, report=True)
     report = keep.values.get("eval")
     if config.output_dir is None or report is None:
         return

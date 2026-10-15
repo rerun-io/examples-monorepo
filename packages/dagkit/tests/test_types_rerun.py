@@ -6,14 +6,15 @@ import pytest
 import rerun as rr
 from dagkit_fakes import Collect, Point
 
+from dagkit.catalog import read_column, read_producer, served
 from dagkit.graph import Graph
 from dagkit.node import Event
 from dagkit.runners import run_sequential
-from dagkit.sinks import LayerSink, open_layer, segment_layers
+from dagkit.sinks import LayerSink, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
 from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, read_column, read_producer, served
+from dagkit.types import Producer
 from dagkit.verify import run_counts
 
 pytestmark = pytest.mark.integration
@@ -27,8 +28,7 @@ def test_rerun_roundtrip_timed_and_static() -> None:
 
 
 def write_layer(tmp_path: Path, segment: SegmentRef, register: str = "off") -> Path:
-    recording, partial = open_layer(segment, "points", PRODUCER, output_dir=tmp_path)
-    sink = LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register=register)  # type: ignore[arg-type]
+    sink = LayerSink.open(segment, "points", PRODUCER, {"point": Point}, {"point": "/points"}, output_dir=tmp_path, register=register)  # type: ignore[arg-type]
     events = [Event(t, "point", Point((float(t), 0.0, 0.0), f"p{t}")) for t in (10, 20)]
     graph = Graph("points")
     graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter(events)))["point"]}, {"layer": sink})
@@ -100,8 +100,7 @@ def test_a_layer_registered_after_the_sink_was_built_still_fails_at_publish(tmp_
     base.disconnect()
     with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(tmp_path / "base.rrd")]}) as server:
         segment = SegmentRef("ds", "seg0", catalog_url=server.url())
-        recording, partial = open_layer(segment, "points", PRODUCER, output_dir=tmp_path / "late")
-        late = LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register="new")  # no layer yet
+        late = LayerSink.open(segment, "points", PRODUCER, {"point": Point}, {"point": "/points"}, output_dir=tmp_path / "late", register="new")  # no layer yet
         write_layer(tmp_path / "first", segment, register="new")  # another run registers the layer first
         graph = Graph("late")
         graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter([Event(5, "point", Point((0.0, 0.0, 0.0), "p"))])))["point"]}, {"layer": late})

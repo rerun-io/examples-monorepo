@@ -4,20 +4,21 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, TypeVar, cast
 
 import rerun as rr
 import tyro
 from rerun.catalog import DatasetEntry
-from serde import SerdeError, coerce, serde
+from serde import SerdeError, coerce, from_dict, serde
 from serde.toml import from_toml
 
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, git, log_producer
+from dagkit.types import Producer, git, log_producer, static_row
 
 Phase: TypeAlias = Literal["pre", "pre2", "post"]
+R = TypeVar("R")
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -39,7 +40,7 @@ class Case:
     segment: str | None = None
     input: str | None = None  # ... or a repo-relative local input
     window_s: tuple[float, float] | None = None
-    params: dict[str, str] = field(default_factory=dict)  # config overrides of this case
+    params: dict[str, Any] = field(default_factory=dict)  # config overrides of this case, as TOML types them (see `configure`)
     noise: dict[str, float] = field(default_factory=dict)  # metric -> measured |pre - pre2| for THIS case
     noise_from: str | None = None  # reuse the named case's noise (stated, never implied)
     published: dict[str, float] = field(default_factory=dict)  # metric -> a published result on this case (a paper's table)
@@ -51,6 +52,12 @@ class Case:
         window: tuple[int, int] | None = None if self.window_s is None else (round(self.window_s[0] * 1e9), round(self.window_s[1] * 1e9))
         segment = SegmentRef(self.dataset, self.segment, window_ns=window)
         return segment if catalog_url is None else replace(segment, catalog_url=catalog_url)
+
+    def configure(self, cls: type[R], **overrides: object) -> R:
+        """The params ``cls`` declares, ``overrides`` on top, as a ``cls`` record that pyserde checks (a package's typed view
+        of its case, e.g. ``case.configure(VioParams)``)."""
+        names: set[str] = {f.name for f in fields(cls)}  # type: ignore[arg-type]  # R: any pyserde dataclass
+        return from_dict(cls, {k: v for k, v in self.params.items() if k in names} | overrides)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -127,7 +134,7 @@ def golden_path(package: str, block: str, case: str, phase: Phase) -> Path:
 
 def pre_golden(case: Case, golden: Path) -> Path:
     """The case's pre-port reference golden beside ``golden`` (the pre run's own golden or partial scores itself)."""
-    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
+    reference: Path = golden if golden.name.startswith(f"{case.name}.pre.") else golden.with_name(f"{case.name}.pre.rrd")
     if not reference.exists():
         raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
     return reference
@@ -135,12 +142,18 @@ def pre_golden(case: Case, golden: Path) -> Path:
 
 def run_counts(golden: DatasetEntry, block: str) -> dict[str, float]:
     """The numbers a verify ``run`` logged as static ``AnyValues`` at ``/verify/<block>/run`` (text left out)."""
-    prefix: str = f"/verify/{block}/run:"
-    row: dict[str, Any] = golden.filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table().to_pylist()[0]
-    return {k.removeprefix(prefix): float(v[0]) for k, v in row.items() if k.startswith(prefix) and v and isinstance(v[0], int | float)}
+    entity: str = f"/verify/{block}/run"
+    return {k: float(v) for k, v in static_row(golden.filter_contents([entity]).reader(index=None).to_arrow_table(), entity).items() if isinstance(v, int | float)}
 
 
-def _resolve(target: str) -> Callable[..., object]:
+Run: TypeAlias = Callable[[Case, Phase, rr.RecordingStream], None]
+"""A block's ``run``: writes one case's golden outputs into the recording."""
+Score: TypeAlias = Callable[[Case, Path], Mapping[str, float]]
+"""A block's ``score``: one golden (plus GT) -> {metric: value}."""
+
+
+def _resolve(target: str) -> Any:
+    """``pkg.module:name`` (a block's ``run`` or ``score``), imported."""
     module, name = target.split(":")
     return getattr(importlib.import_module(module), name)
 
@@ -168,27 +181,40 @@ def main(args: VerifyArgs) -> int:
         return 1
     failed: bool = False
     for block, case in selected:
-        run, score = _resolve(block.run), _resolve(block.score)
+        run: Run = _resolve(block.run)
+        score: Score = _resolve(block.score)
         golden: Path = golden_path(card.package, block.name, case.name, args.phase)
         golden.parent.mkdir(parents=True, exist_ok=True)
-        partial: Path = golden.with_suffix(".partial")
+        partial: Path = golden.with_name(f"{golden.stem}.{uuid.uuid4().hex[:8]}.partial")  # its own: concurrent runs never share one
         recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
-        recording.save(partial)
-        producer: Producer = Producer.of(card.package, block.name, "verify", phase=args.phase)
-        log_producer(recording, f"verify-{block.name}", producer)
-        run(case, args.phase, recording)
-        recording.flush()
-        metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
-        recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
-        recording.flush()
-        recording.disconnect()
-        partial.replace(golden)
+        try:
+            recording.save(partial)
+            producer: Producer = Producer.of(card.package, block.name, "verify", phase=args.phase)
+            log_producer(recording, f"verify-{block.name}", producer)
+            run(case, args.phase, recording)
+            recording.flush()
+            metrics: dict[str, float] = dict(score(case, partial))
+            recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
+            recording.flush()
+            recording.disconnect()
+            if args.phase == "post" or args.overwrite:
+                partial.replace(golden)
+            else:
+                try:
+                    os.link(partial, golden)  # write-once: unlike a rename, never replaces a reference another run committed since the check
+                except FileExistsError:
+                    print(f"FAIL: {golden} was written by another run meanwhile (reference goldens are write-once)")
+                    failed = True
+                    continue
+        finally:
+            recording.disconnect()
+            partial.unlink(missing_ok=True)
         print(f"{block.name}/{case.name} {args.phase}: {metrics}")
         results: list[BandResult] = [BandResult(b.name, False, "missing or non-finite") for b in block.metrics if not math.isfinite(metrics.get(b.name, math.nan))]
         if args.phase == "post":  # noise: the case's own (noise, pre + pre2 runs), or those of its `noise_from` case (missing: fails)
             donor: Case = next((c for c in block.cases if c.name == case.noise_from), case) if case.noise_from and not case.noise else case
             runs: dict[tuple[str, Phase], Case] = {(c.name, ph): c for c, ph in ((case, "pre"), (donor, "pre"), (donor, "pre2"))}  # donor is often case
-            scores: dict = {(n, ph): dict(score(c, p)) for (n, ph), c in runs.items() if (p := golden_path(card.package, block.name, n, ph)).exists()}  # type: ignore[call-overload]
+            scores: dict[tuple[str, Phase], dict[str, float]] = {(n, ph): dict(score(c, p)) for (n, ph), c in runs.items() if (p := golden_path(card.package, block.name, n, ph)).exists()}
             for band in block.metrics:
                 noise_runs: list[float | None] = [scores.get((donor.name, ph), {}).get(band.name) for ph in ("pre", "pre2")]
                 pre: float | None = scores.get((case.name, "pre"), {}).get(band.name)

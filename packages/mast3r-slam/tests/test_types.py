@@ -1,16 +1,15 @@
-"""Types tier (decision 18): serde round-trips, unknown fields refused, Rerun mapping structure, point-map filtering."""
+"""Types tier (decision 18): serde round-trips, unknown fields refused, Rerun mapping structure."""
 
 import numpy as np
 import pytest
 import rerun as rr
-import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from serde import SerdeError, from_dict, to_dict
 from serde.toml import from_toml, to_toml
 
-from mast3r_slam.types import Frame, KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame, TrackingConfig
+from mast3r_slam.types import KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame, TrackingConfig
 
 FINITE = st.floats(-100.0, 100.0, allow_nan=False, width=32)
 
@@ -83,41 +82,6 @@ def test_slam_config_refuses_unknown_keys_and_coerces_hand_written_numbers() -> 
     with pytest.raises(SerdeError):
         from_toml(SlamConfig, "[tracking]\nhubber = 1.0\n")
     assert from_toml(SlamConfig, "[tracking]\nsigma_dist = 10\n").tracking.sigma_dist == 10.0
-
-
-def frame_with(points: torch.Tensor, confidence: torch.Tensor) -> Frame:
-    frame = Frame(0, torch.zeros(1, 3, 2, 2), torch.tensor([[2, 2]]), torch.tensor([[2, 2]]), torch.zeros(2, 2, 3))
-    frame.update_pointmap(points, confidence, TrackingConfig())
-    return frame
-
-
-@given(
-    a=arrays(np.float32, (4, 3), elements=FINITE),
-    b=arrays(np.float32, (4, 3), elements=FINITE),
-    ca=arrays(np.float32, (4, 1), elements=st.floats(0.125, 10.0, width=32)),
-    cb=arrays(np.float32, (4, 1), elements=st.floats(0.125, 10.0, width=32)),
-)
-@settings(max_examples=40, deadline=None)
-def test_weighted_pointmap_is_a_confidence_weighted_mean(a: np.ndarray, b: np.ndarray, ca: np.ndarray, cb: np.ndarray) -> None:
-    frame = frame_with(torch.from_numpy(a), torch.from_numpy(ca))
-    frame.update_pointmap(torch.from_numpy(b), torch.from_numpy(cb), TrackingConfig(filtering_mode="weighted_pointmap"))
-    assert frame.X_canon is not None and frame.C is not None
-    np.testing.assert_allclose(frame.X_canon.numpy(), (ca * a + cb * b) / (ca + cb), rtol=1e-5, atol=1e-4)
-    np.testing.assert_allclose(frame.C.numpy(), ca + cb, rtol=1e-6)
-    assert (frame.N, frame.N_updates) == (2, 2)
-    average = frame.get_average_conf()
-    assert average is not None
-    np.testing.assert_allclose(average.numpy(), (ca + cb) / 2, rtol=1e-6)
-
-
-def test_recent_replaces_and_first_keeps_only_the_second_observation() -> None:
-    ones, twos, threes, conf = torch.ones(4, 3), 2 * torch.ones(4, 3), 3 * torch.ones(4, 3), torch.ones(4, 1)
-    recent, first = frame_with(ones, conf), frame_with(ones, conf)
-    for points in (twos, threes):
-        recent.update_pointmap(points, conf, TrackingConfig(filtering_mode="recent"))
-        first.update_pointmap(points, conf, TrackingConfig(filtering_mode="first"))
-    assert recent.X_canon is not None and first.X_canon is not None
-    assert float(recent.X_canon[0, 0]) == 3.0 and float(first.X_canon[0, 0]) == 2.0
 
 
 @given(index=st.integers(0, 600), points=arrays(np.float32, st.tuples(st.integers(1, 20), st.just(3)), elements=FINITE), data=st.data())

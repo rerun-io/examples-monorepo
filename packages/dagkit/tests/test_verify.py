@@ -1,14 +1,19 @@
 """Verify cards: schema (strict, coerced) and fail-closed band math."""
 
 import math
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import dagkit_fakes
 import pytest
+import rerun as rr
 import tyro
 from hypothesis import given
 from hypothesis import strategies as st
+from serde import SerdeError, serde
 
 from dagkit import verify
 from dagkit.sources import SegmentRef
@@ -60,6 +65,27 @@ def test_card_loads_and_full_case_reuses_short_noise(tmp_path: Path) -> None:
     (tmp_path / "BAD.toml").write_text(CARD.replace('package = "exo-calib"', 'package = "exo-calib"\nowner = "x"'))
     with pytest.raises(ValueError, match="BAD.toml"):
         load_card(tmp_path / "BAD.toml")
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class VioLike:
+    """A package's params record, as slam-rs's ``VioParams``."""
+
+    resize_hw: tuple[int, int]
+    profile: Literal["fast", "reference"] = "reference"
+    calib: bool = False
+
+
+def test_case_params_keep_their_toml_types_and_configure_a_record(tmp_path: Path) -> None:
+    typed: str = 'params = { frame_budget = 200, calib = true, resize_hw = [752, 1024], profile = "fast" }'
+    (tmp_path / "VERIFY.toml").write_text(CARD.replace('noise = { rot_deg_mean = 0.02 }', f"noise = {{ rot_deg_mean = 0.02 }}\n{typed}"))
+    case: Case = load_card(tmp_path / "VERIFY.toml").graph[0].cases[0]
+    assert case.params == {"frame_budget": 200, "calib": True, "resize_hw": [752, 1024], "profile": "fast"}
+    assert case.configure(VioLike) == VioLike((752, 1024), "fast", True)  # only the fields the record declares
+    assert case.configure(VioLike, profile="reference").profile == "reference"
+    with pytest.raises(SerdeError):
+        replace(case, params={"resize_hw": [1, 2], "profile": "slow"}).configure(VioLike)
 
 
 def test_a_case_segment_ref_carries_its_window_in_ns_and_a_local_case_has_none() -> None:
@@ -119,9 +145,9 @@ def test_pre_golden_is_the_pre_run_beside_a_golden_or_its_partial(tmp_path: Path
     with pytest.raises(FileNotFoundError, match="run --phase pre first"):
         pre_golden(case, tmp_path / "short.post.rrd")
     (tmp_path / "short.pre.rrd").write_bytes(b"")
-    assert pre_golden(case, tmp_path / "short.post.partial") == pre_golden(case, tmp_path / "short.pre2.rrd") == tmp_path / "short.pre.rrd"
-    (tmp_path / "short.pre.partial").write_bytes(b"")
-    assert pre_golden(case, tmp_path / "short.pre.partial") == tmp_path / "short.pre.partial"  # the pre run scores itself
+    assert pre_golden(case, tmp_path / "short.post.1a2b3c4d.partial") == pre_golden(case, tmp_path / "short.pre2.rrd") == tmp_path / "short.pre.rrd"
+    (tmp_path / "short.pre.1a2b3c4d.partial").write_bytes(b"")
+    assert pre_golden(case, tmp_path / "short.pre.1a2b3c4d.partial") == tmp_path / "short.pre.1a2b3c4d.partial"  # the pre run scores itself
 
 
 SHORT_CARD = """
@@ -169,6 +195,30 @@ def test_reference_goldens_are_write_once(card: Path) -> None:
     assert verify.main(verify.VerifyArgs(card, "post")) == 0 and verify.main(verify.VerifyArgs(card, "post")) == 0  # post is rewritten
 
 
+def test_a_reference_golden_another_run_commits_first_is_kept(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two runs of a write-once phase both pass the up-front check: the later commit fails instead of replacing."""
+    golden: Path = verify.golden_path("dagkit", "fake", "short", "pre")
+    log_point = dagkit_fakes.verify_run
+
+    def run(case: object, phase: str, recording: rr.RecordingStream) -> None:
+        golden.write_bytes(b"the other run")  # it commits while this run still writes
+        log_point(case, phase, recording)
+
+    monkeypatch.setattr(dagkit_fakes, "verify_run", run)
+    assert verify.main(verify.VerifyArgs(card, "pre")) == 1
+    assert golden.read_bytes() == b"the other run" and sorted(p.name for p in golden.parent.iterdir()) == ["short.pre.rrd"]
+
+
+def test_a_failed_run_leaves_no_partial_golden(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(case: object, phase: str, recording: rr.RecordingStream) -> None:
+        raise KeyError("boom")
+
+    monkeypatch.setattr(dagkit_fakes, "verify_run", run)
+    with pytest.raises(KeyError, match="boom"):
+        verify.main(verify.VerifyArgs(card, "pre"))
+    assert list(verify.golden_path("dagkit", "fake", "short", "pre").parent.iterdir()) == []
+
+
 def test_post_scores_each_golden_once(card: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert verify.main(verify.VerifyArgs(card, "pre")) == 0 and verify.main(verify.VerifyArgs(card, "pre2")) == 0
     scored: list[str] = []
@@ -179,7 +229,7 @@ def test_post_scores_each_golden_once(card: Path, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(dagkit_fakes, "verify_score", score)
     assert verify.main(verify.VerifyArgs(card, "post")) == 0
-    assert sorted(scored) == ["short.post.partial", "short.pre.rrd", "short.pre2.rrd"]
+    assert sorted(scored)[1:] == ["short.pre.rrd", "short.pre2.rrd"] and re.fullmatch(r"short\.post\.[0-9a-f]{8}\.partial", sorted(scored)[0])
 
 
 def test_an_empty_selection_fails(card: Path) -> None:

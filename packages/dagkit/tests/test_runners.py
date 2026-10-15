@@ -7,7 +7,8 @@ import time
 import weakref
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 import pytest
 from dagkit_fakes import Add, Affinity, Batch, Collect, Square, Sum, source
@@ -71,9 +72,19 @@ def test_flush_only_diamond_terminates(runner: str) -> None:
     report: RunReport = RUNNERS[runner](graph)
     # every join tick waited for the late producer's flush, so each sees its own value * 10 at the same time
     assert sink.items == [("y", t, t + 10 * t) for t in range(1, 30)]
-    assert report.nodes["join"].ports["x"].pending_max > 0
-    if runner == "sequential":
-        assert report.nodes["join"].ports["x"].pending_max == 28  # the final source event closes late before join drains
+    assert report.nodes["join"].ports["x"].depth_max == 1  # the Block bound holds: ticks spill only from a full queue
+    assert report.nodes["join"].ports["x"].pending_max > 0  # ... which a flush-only producer needs, or the source never closes
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_tick_waiting_on_a_late_asof_producer_stays_in_its_block_queue(runner: str) -> None:
+    """A single-trigger node keeps Block backpressure: a waiting tick holds the queue (so the producer waits on it) and
+    spills only when the queue is full, as for several trigger ports."""
+    graph, sink = diamond([(t, "x", t) for t in range(1, 30)], Batch(size=3))  # late lags by at most 3 ticks
+    graph.edges[1] = replace(graph.edges[1], kind=Block(8))  # src -> join: room for the lag
+    report: RunReport = RUNNERS[runner](graph)
+    assert sink.items == [("y", t, t + 10 * t) for t in range(1, 30)]
+    assert report.nodes["join"].ports["x"].pending_max == 0 and 1 < report.nodes["join"].ports["x"].depth_max <= 8
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
@@ -281,6 +292,40 @@ def test_resources_are_built_once_shared_and_closed(runner: str) -> None:
     graph.edge(b["y"], graph.sink("sink", Collect(("y",)))["y"])
     RUNNERS[runner](graph)
     assert len(built) == 1 and seen == [built[0], built[0]] and built[0].closed
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+@pytest.mark.parametrize("failing", [False, True])
+def test_every_resource_closes_although_one_close_fails(runner: str, failing: bool) -> None:
+    """One cleanup path for a finished and a failed run: every owned object closes (sources first, then resources in reverse
+    order) and the first error is raised, later close errors riding along as notes."""
+    closed: list[str] = []
+
+    class Breaks(Model):
+        def close(self) -> None:
+            closed.append("breaks")
+            raise OSError("close breaks")
+
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            raise KeyError("boom")
+
+    def events():  # noqa: ANN202
+        try:
+            yield Event(1, "x", 1)
+        finally:
+            closed.append("source")
+
+    graph = Graph("unwind")
+    graph.resource("first", lambda: SimpleNamespace(close=lambda: closed.append("first")))
+    graph.resource("breaks", Breaks)
+    node = graph.node("node", Boom(0) if failing else Add(0))
+    graph.edge(graph.source("src", IterSource({"x": int}, events))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",)))["y"])
+    with pytest.raises(KeyError if failing else OSError) as raised:
+        RUNNERS[runner](graph)
+    assert closed == ["source", "breaks", "first"]
+    assert any("close breaks" in note for note in getattr(raised.value, "__notes__", [])) == failing
 
 
 @pytest.mark.parametrize("runner", RUNNERS)

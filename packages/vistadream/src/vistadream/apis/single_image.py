@@ -7,6 +7,7 @@ its example is the ``VERIFY.toml`` short case (``short_case``). The viewer opens
 tab shows the graph, its guide and four of its outputs.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -26,13 +27,14 @@ from vistadream.graphs.single_image import single_image_graph
 from vistadream.models.flux import FluxConfig
 from vistadream.nodes.prepare import DepthNode, ImageSource, OutpaintNode
 from vistadream.nodes.splats import ExpandNode, InitNode, PlySink, RenderNode
-from vistadream.types import CameraView, SceneViews, Splats, Stage
+from vistadream.types import CameraView, Scene, Stage
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[3]
 """``packages/vistadream``."""
-PORTS: dict[str, PortType] = {"scene": Splats, "views": SceneViews, "view": CameraView}
-ROOTS: dict[str, str] = {"scene": "/world/splats", "views": "/world", "view": "/world/render"}
-"""The scene's splats, its training views (``/world/input``, ``/world/outpaint``, ``/world/view_<i>``) and the render path."""
+PORTS: dict[str, PortType] = {"scene": Scene, "view": CameraView}
+ROOTS: dict[str, str] = {"scene": "/world", "view": "/world/render"}
+"""The scene (splats at ``/world/splats``, training views at ``/world/input``, ``/world/outpaint``, ``/world/view_<i>``) and the
+render path."""
 
 
 @dataclass
@@ -48,7 +50,7 @@ class Config:
     """Outpainting: how much the canvas grows (0.3 = 15 % of the image on every side)."""
     n_frames: int = 10
     """Coarse stage: training views at most (input and outpainted canvas included)."""
-    output_ply: Path | None = None
+    output_ply: Path | None = field(default=None, metadata={"form": "save"})
     """Save the final scene as a 3DGS PLY here."""
     seed: int = 0
     """Seed of the order in which optimisation steps visit the training views."""
@@ -61,11 +63,8 @@ class Config:
 
 def case_config(case: Case, rr_config: RerunTyroConfig) -> Config:
     """A ``VERIFY.toml`` case as a Config (params the case leaves out keep their default)."""
-    params: dict[str, str] = case.params
-    stage, max_resolution = params["stage"], int(params["max_resolution"])
-    assert case.input is not None and stage in ("no-outpaint", "outpaint", "coarse") and max_resolution in (512, 1024, 1920), case
-    expansion_percent, n_frames = float(params.get("expansion_percent", Config.expansion_percent)), int(params.get("n_frames", Config.n_frames))
-    return Config(rr_config, PACKAGE_DIR / case.input, stage, max_resolution, expansion_percent, n_frames, seed=int(params["seed"]))
+    assert case.input is not None, case
+    return Config(rr_config, PACKAGE_DIR / case.input, **case.params)
 
 
 def short_case(rr_config: RerunTyroConfig) -> Config:
@@ -99,9 +98,9 @@ def blueprint(config: Config, graph: Graph) -> rrb.Blueprint:
     return with_pipeline(rrb.Blueprint(rrb.Horizontal(view3d, grid), collapse_panels=True), outputs)
 
 
-def build(config: Config, recording: rr.RecordingStream) -> Graph:
+def build(config: Config, recording: rr.RecordingStream, extra_sinks: Mapping[str, Node] | None = None) -> Graph:
     """Models load here, before the run (MoGe v1; FLUX.1 Fill unless ``no-outpaint``); the blueprint names the graph's steps,
-    so it follows the graph."""
+    so it follows the graph. ``extra_sinks`` are fed from the final ports like the viewer (verify's ``InputRender``)."""
     from monopriors.models.relative_depth.moge_v1 import MoGeV1Predictor
 
     from vistadream.models.flux import FluxInpainting
@@ -110,6 +109,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS)}
     if config.output_ply is not None:
         sinks["ply"] = PlySink(config.output_ply)
+    sinks.update(extra_sinks or {})
     moge = MoGeV1Predictor(device="cuda")
     inpaint: FluxInpainting | None = None if config.stage == "no-outpaint" else FluxInpainting(config.flux)
     expand: ExpandNode | None = ExpandNode(inpaint, moge, config.n_frames, seed=config.seed) if config.stage == "coarse" and inpaint is not None else None

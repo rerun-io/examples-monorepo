@@ -13,8 +13,9 @@ import pytest
 import rerun as rr
 import torch
 from dagkit import sinks
-from dagkit.app import gradio_app, load_profile
+from dagkit.app import load_profile
 from dagkit.doc import describe, picture
+from dagkit.form import gradio_app
 from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Emit, Event, PortType, RunContext, Tick
 from dagkit.runners import run_threaded
@@ -28,14 +29,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import SegmentFrames, VideoSource
 from simplecv.sources.files import VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
-from mast3r_slam.apis import slam as app
-from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, frame_hw, outputs, slam_config, video_source
-from mast3r_slam.graphs.slam import slam_graph
+from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, outputs, slam_config, video_source
+from mast3r_slam.graphs.slam import frame_hw, slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
 from mast3r_slam.types import SlamConfig
 from mast3r_slam.verify import case_config, examples
@@ -52,7 +52,7 @@ def video(calibrated: bool) -> IterSource:
 def test_slam_graph_validates(calibrated: bool, live: bool, tmp_path: Path) -> None:
     ports, roots = outputs("rig_00/cam_00")
     sinks = {"viewer": RerunSink(rr.RecordingStream("test", send_properties=False), ports, roots)}
-    graph: Graph = slam_graph(video(calibrated), SlamConfig(use_calib=calibrated), (384, 512), sinks, live=live, nerfstudio=NerfstudioSink(tmp_path))
+    graph: Graph = slam_graph(video(calibrated), SlamConfig(use_calib=calibrated), sinks, live=live, nerfstudio=NerfstudioSink(tmp_path))
     graph.validate()
     kinds = {(e.src.node, e.dst.node, e.dst.port): e.kind for e in graph.edges}
     assert kinds[("video", "frontend", "frames")] == (DropOldest(1) if live else Block(2))
@@ -141,14 +141,13 @@ def test_the_default_input_is_the_short_case_and_the_examples_are_the_configs_ve
     file still beats the default segment."""
     cases: list[Case] = [c for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for c in block.cases]
     default = video_source(Config(RerunTyroConfig(headless=True)), SlamConfig())
-    assert isinstance(default, CatalogVideoSource) and default.cameras == ("rig_00/cam_00",)
-    assert default.segment == next(c for c in cases if c.name == "short").segment_ref()
+    assert isinstance(default, VideoSource) and default.cameras == ("rig_00/cam_00",)
+    assert isinstance(default.frames, SegmentFrames) and default.frames.segment == next(c for c in cases if c.name == "short").segment_ref()
     assert [e.segment for e in examples()] == [c.segment_ref() for c in cases if c.clip == "short"]
     for case in cases:
         config: Config = dataclasses.replace(case_config(case), hardware="x86_64-cuda")
-        calib: bool = case.params["calib"] == "true"
-        assert slam_config(config) == SlamConfig(use_calib=calib, img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
-        assert config.undistort == (case.params.get("undistort") == "true") and config.camera == "rig_00/cam_00"
+        assert slam_config(config) == SlamConfig(use_calib=case.params["calib"], img_size=case.params["img_size"], subsample=case.params["subsample"])
+        assert config.undistort == case.params.get("undistort", False) and config.camera == "rig_00/cam_00"
     assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4"), SlamConfig()), VideoFileSource)
 
 
@@ -167,10 +166,24 @@ def test_frame_hw_takes_the_static_rig_resolution_without_decoding_a_frame() -> 
 @pytest.mark.parametrize(("preset", "profile"), [(None, "x86_64-cuda/base"), ("eval", "x86_64-cuda/eval")])
 def test_the_layer_producer_carries_the_package_version_and_the_hardware_profile(preset: str | None, profile: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[Producer] = []
-    monkeypatch.setattr(sinks, "log_producer", lambda recording, layer, producer: logged.append(producer))
-    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
+    monkeypatch.setattr(sinks, "log_producer", lambda recording, _layer, producer: logged.append(producer))
     build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", preset=preset, layer_dir=tmp_path), rr.RecordingStream("test", send_properties=False))  # type: ignore[arg-type]
     assert logged == [Producer.of("mast3r-slam", "mast3r-slam", profile)] and "+" in logged[0].version  # version + git sha7
+
+
+def test_building_the_app_graph_reads_nothing_from_its_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``shared`` buffers are sized when the run starts, so building the graph (the CLI, the form, verify) neither
+    queries the catalog nor opens a video."""
+    monkeypatch.setattr(VideoSource, "events", lambda self: pytest.fail("build read its input"))
+    build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda"), rr.RecordingStream("test", send_properties=False)).validate()  # type: ignore[union-attr]
+
+
+def test_the_viewer_draws_every_output_or_only_the_camera_poses() -> None:
+    """``draw="poses"`` (verify's golden): the viewer takes the final keyframe and tracked poses only, not the map and the
+    keyframe clouds, which grow with every task; by default it takes all four outputs."""
+    for draw, taken in (("all", {"keyframes", "tracked", "map", "cloud"}), ("poses", {"keyframes", "tracked"})):
+        graph = build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", draw=draw), rr.RecordingStream("test", send_properties=False))
+        assert isinstance(graph, Graph) and {e.dst.port for e in graph.edges if e.dst.node == "viewer"} == taken
 
 
 def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
@@ -191,10 +204,9 @@ def test_the_graph_and_cpu_ops_import_without_the_kernel_extensions() -> None:
     assert subprocess.run([sys.executable, "-c", loaded], capture_output=True, text=True, check=True).stdout.splitlines()[-1] == "[]"
 
 
-def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path) -> None:
     """``build`` with every output on (catalog input = the default segment, layer, Nerfstudio): valid, the picture read back
     from an rrd equals the declaration, each box says where it runs (the backend is its own process), GRAPH.md is current."""
-    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
     config = Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", output_nerfstudio=tmp_path / "ns", layer_dir=tmp_path / "layers")
     graph: Graph = build(config, rr.RecordingStream("test", send_properties=False))  # type: ignore[assignment]
     graph.validate()
@@ -208,7 +220,7 @@ def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path
 FORM: dict[str, str] = {
     "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "undistort": "Checkbox",
     "video": "File", "images": "Textbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown",
-    "img_size": "Dropdown", "subsample": "Textbox", "output_nerfstudio": "Checkbox", "layer_dir": "Textbox", "register": "Dropdown",
+    "img_size": "Dropdown", "subsample": "Textbox", "draw": "Dropdown", "output_nerfstudio": "Checkbox", "layer_dir": "Textbox", "register": "Dropdown",
     "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
 """The generated form in order: widget label -> component (directories and optional numbers are text boxes; empty = the default)."""

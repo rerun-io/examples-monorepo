@@ -11,25 +11,21 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from dagkit.app import HardwareClass, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
-from dagkit.node import Event, Mode, Node, PortType, Source
+from dagkit.node import Mode, Node, PortType, Source
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
+from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import VideoSource
 from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
-from simplecv.types.frames import MultiViewFrames
-from simplecv.types.rig import RigCameras
 
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
-from mast3r_slam.ops.image import resize_img
 from mast3r_slam.types import KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
@@ -51,7 +47,7 @@ class Config:
     on EuRoC always and on TUM when calibrated)."""
     video: Path | None = None
     """Video file input (beats every other input); pixi run mast3r-slam-example-* downloads examples to data/."""
-    images: Path | None = None
+    images: Path | None = field(default=None, metadata={"form": "dir"})
     """Image directory input (natural sort order, 30 fps; used when there is no video)."""
     webcam: int | None = None
     """Live OpenCV camera index, used when no video or image directory is given (run with --mode realtime)."""
@@ -64,9 +60,12 @@ class Config:
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
     """Use every n-th input frame (overrides the preset)."""
-    output_nerfstudio: Path | None = None
+    draw: Literal["all", "poses"] = "all"
+    """What the viewer draws: all (camera poses, the map and each keyframe's points) or poses (the final keyframe and
+    tracked camera poses only: a small recording, what verify keeps)."""
+    output_nerfstudio: Path | None = field(default=None, metadata={"form": "save"})
     """Export the final keyframes in Nerfstudio format into this directory."""
-    layer_dir: Path | None = None
+    layer_dir: Path | None = field(default=None, metadata={"form": "dir"})
     """Catalog input: also write the segment's mast3r_slam layer here (windowed runs publish it unregistered)."""
     register: Register = "new"
     """How the layer reaches the segment's catalog (new refuses to overwrite)."""
@@ -83,23 +82,6 @@ def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
     return ports, {"keyframes": f"{ROOT}/{name}", "tracked": f"{ROOT}/tracked/{name}", "map": f"{ROOT}/map", "cloud": f"{ROOT}/map/keyframes"}
 
 
-def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
-    """MASt3R frame size of the source's images: the static rig's resolution when the source has one (it comes before the
-    frames), else the size of its first frame (a decode)."""
-    events = iter(video.events())
-    try:
-        first: Event = next(e for e in events if e.port in ("rig", "frames"))
-    finally:
-        getattr(events, "close", lambda: None)()
-    if isinstance(first.value, RigCameras):
-        width, height = (int(v) for v in first.value.resolution_wh[0])
-    else:
-        frames: MultiViewFrames = first.value  # type: ignore[assignment]
-        height, width = frames.rgb.shape[-2:]
-    shape = resize_img(np.zeros((height, width, 3), dtype=np.float32), img_size).rgb_tensor.shape
-    return int(shape[-2]), int(shape[-1])
-
-
 def video_source(config: Config, cfg: SlamConfig) -> Source:
     if config.video is not None:
         return VideoFileSource(config.video, stride=cfg.subsample, max_frames=config.max_frames)
@@ -109,7 +91,7 @@ def video_source(config: Config, cfg: SlamConfig) -> Source:
         return WebcamSource(config.webcam, config.max_frames)
     if config.segment is None:
         raise ValueError("no input: give a video, an image directory, a webcam or a segment")
-    return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
+    return VideoSource.catalog(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
 
 
 def slam_config(config: Config) -> SlamConfig:
@@ -135,15 +117,15 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     ]  # fmt: skip
     normal = rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), rrb.TimePanel(state="collapsed", timeline=video.clock), collapse_panels=True)
     recording.send_blueprint(with_pipeline(normal, debug))  # the outputs' clock, not the run health's wall_time
-    sinks: dict[str, Node] = {"viewer": RerunSink(recording, ports, roots)}
-    if isinstance(video, CatalogVideoSource) and config.layer_dir is not None:
+    drawn: dict[str, PortType] = ports if config.draw == "all" else {p: ports[p] for p in ("keyframes", "tracked")}
+    sinks: dict[str, Node] = {"viewer": RerunSink(recording, drawn, roots)}
+    if isinstance(video, VideoSource) and config.segment is not None and config.layer_dir is not None:  # a catalog input
         hardware: str = load_profile(PACKAGE_DIR / "profiles", config.hardware).hardware
         producer: Producer = Producer.of("mast3r-slam", "mast3r-slam", f"{hardware}/{config.preset or 'base'}")
-        layer, partial = open_layer(video.segment, LAYER, producer, output_dir=config.layer_dir)
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
-        sinks["layer"] = LayerSink(layer, partial, video.segment, LAYER, layer_ports, roots, register=config.register)
+        sinks["layer"] = LayerSink.open(config.segment, LAYER, producer, layer_ports, roots, output_dir=config.layer_dir, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
-    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
+    return slam_graph(video, cfg, sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 
 
 def main(config: Config) -> RunReport:

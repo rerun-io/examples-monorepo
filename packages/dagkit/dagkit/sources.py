@@ -8,9 +8,10 @@ import pyarrow as pa
 from rerun.catalog import CatalogClient, DatasetEntry
 from serde import serde
 
+from dagkit.catalog import read_column, served
 from dagkit.node import Event, PortType
 from dagkit.time import TimeNs, check_monotonic
-from dagkit.types import Type, read_column, served
+from dagkit.types import Type
 
 
 @serde(deny_unknown_fields=True)

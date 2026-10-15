@@ -9,7 +9,10 @@ Golden contract (the ported graph writes the same paths on the segment's ``video
   camera's own frame, so it is left out).
 - ``/mast3r_slam/tracked/cam_00``: one ``Transform3D`` (same encoding) per input frame that the frontend left in
   TRACKING (the INIT frame included; frames that triggered or failed relocalisation are absent).
-- ``/verify/slam/run``: static ``AnyValues`` run counts (``input_frames``, ``tracked_frames``, ``keyframes``, ``wall_s``).
+- ``/verify/slam/run``: static ``AnyValues`` run counts (``input_frames``, ``wall_s``); the pre goldens also carry
+  ``tracked_frames`` and ``keyframes``, which ``score`` counts from the poses.
+
+The golden is what the App's viewer draws with ``draw="poses"`` (``build``, run by dagkit's ``run_graphs``).
 
 Input frames are the clip's cam_00 frames at indices ``0, s, 2s, ...`` (``n // s`` of them, ``s`` = ``subsample``),
 lossless (the frontend waits for the backend after every keyframe and relocalisation request); case params choose
@@ -21,18 +24,18 @@ default 10 ms, as the MASt3R-SLAM paper's ``evo_ape -as``.
 """
 
 import time
-from collections import Counter
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dagkit.node import Emit, Source, Tick
-from dagkit.runners import RunReport, run_threaded
-from dagkit.sinks import RerunSink
+from dagkit.app import run_graphs
+from dagkit.catalog import served
+from dagkit.runners import RunReport
 from dagkit.sources import SegmentRef
-from dagkit.types import flat, served
+from dagkit.types import flat
 from dagkit.verify import Case, Phase, load_card, run_counts
 from datafusion import col, lit
 from jaxtyping import Float64, Int64
@@ -44,9 +47,7 @@ from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.rig import RigCameras
 
-from mast3r_slam.apis.slam import PACKAGE_DIR, Config, frame_hw, outputs, slam_config, video_source
-from mast3r_slam.graphs.slam import slam_graph
-from mast3r_slam.types import SlamConfig
+from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build
 
 TIMELINE: str = "video_time"
 CAMERA: str = "/world/rig_00/cam_00"
@@ -67,10 +68,8 @@ keyframes); this block keeps 10 ms on both benchmarks."""
 def case_config(case: Case) -> Config:
     """The App config of a case: its clip of cam_00 at ``img_size`` and ``subsample``, the calib preset when ``calib``,
     undistorted by the source when ``undistort``; lossless and threaded (the App's defaults)."""
-    calib: bool = case.params["calib"] == "true"
-    undistort: bool = case.params.get("undistort") == "true"
-    size, stride = int(case.params["img_size"]), int(case.params["subsample"])
-    return Config(RerunTyroConfig(headless=True), case.segment_ref(), undistort=undistort, preset="calib" if calib else None, img_size=size, subsample=stride)  # type: ignore[arg-type]
+    p = case.params
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), undistort=p.get("undistort", False), preset="calib" if p["calib"] else None, img_size=p["img_size"], subsample=p["subsample"])
 
 
 def examples() -> list[Config]:
@@ -91,37 +90,19 @@ def _input_frames(case: Case) -> int:
     keyframes: list[bool] = catalog_keyframes(flags)  # one row per packet; a null flag (sparse logging) is false
     if not keyframes[0]:
         raise ValueError(f"{segment.segment}: the window {case.window_s} does not start on a keyframe")
-    return len(keyframes) // int(case.params["subsample"])
-
-
-class _GoldenSink(RerunSink):
-    """The graph's final keyframes and tracked poses into the golden, counted per port."""
-
-    def __init__(self, recording: rr.RecordingStream, camera: str) -> None:
-        ports, roots = outputs(camera)
-        super().__init__(recording, {p: ports[p] for p in ("keyframes", "tracked")}, roots)
-        self.counts: Counter[str] = Counter()
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.counts[tick.port] += 1
-        super().step(tick, out)
+    return len(keyframes) // case.params["subsample"]
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The App's graph for ``case_config(case)``, a golden sink in place of the App's viewer and layer."""
-    config: Config = case_config(case)
-    cfg: SlamConfig = slam_config(config)
-    video: Source = video_source(config, cfg)
-    golden = _GoldenSink(recording, CAMERA)
+    """The App's graph for ``case_config(case)``, its viewer drawing the poses into the golden."""
     start: float = time.perf_counter()
-    report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode=config.mode)
+    report: RunReport | None = run_graphs(replace(case_config(case), draw="poses"), build, recording)
     wall_s: float = time.perf_counter() - start
-    if report.status != "complete":
-        raise RuntimeError(f"{case.name}: the graph ended {report.status}")
+    if report is None or report.status != "complete":
+        raise RuntimeError(f"{case.name}: the graph did not complete ({report.status if report else 'no graph'})")
     inputs: int = report.nodes["frontend"].ticks
-    counts = rr.AnyValues(input_frames=float(inputs), tracked_frames=float(golden.counts["tracked"]), keyframes=float(golden.counts["keyframes"]), wall_s=wall_s)
-    recording.log(RUN, counts, static=True)
-    print(f"{case.name} {phase}: {inputs} input frames, {golden.counts['tracked']} tracked, {golden.counts['keyframes']} keyframes, {wall_s:.1f} s")
+    recording.log(RUN, rr.AnyValues(input_frames=float(inputs), wall_s=wall_s), static=True)
+    print(f"{case.name} {phase}: {inputs} input frames, {wall_s:.1f} s")
 
 
 def _poses(table: pa.Table, path: str) -> tuple[Int64[ndarray, " n"], Float64[ndarray, "n 3"], Float64[ndarray, "n 4"]]:

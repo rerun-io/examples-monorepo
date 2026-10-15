@@ -1,4 +1,4 @@
-from dagkit.app import gradio_app
+from dagkit.form import gradio_app
 
 from exo_calib.apis.calibrate import Config, build
 from exo_calib.verify import examples

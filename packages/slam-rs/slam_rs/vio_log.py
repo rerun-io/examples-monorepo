@@ -14,7 +14,8 @@ from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
+from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, ate
+from slam_rs.types import Trajectory
 
 FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
 """How a replay's input rung draws the frames it was fed.

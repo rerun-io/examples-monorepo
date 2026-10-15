@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import tempfile
@@ -12,10 +13,10 @@ import pyarrow as pa
 import rerun as rr
 from rerun.chunk import RrdReader
 
-from dagkit.app import _leaves, gradio_app
 from dagkit.doc import GRAPH_ROOT, GraphDoc, describe, guide, log_graph
+from dagkit.form import gradio_app, leaves
 from dagkit.graph import AsOf, DropOldest, Graph, Spawn, normalise
-from dagkit.node import Emit, Event, Fenced, Node, RunContext, Tick
+from dagkit.node import Emit, Event, Fenced, Node, PortType, RunContext, Tick
 from dagkit.sources import Column, RecordingSource
 from dagkit.time import STATIC, TimeNs, check_monotonic
 from dagkit.types import Type, log_value
@@ -48,11 +49,48 @@ def host(value: object) -> object:
     return value.detach().cpu().numpy() if hasattr(value, "detach") else value
 
 
+class _Snapshots(Recorder):
+    """A Recorder that also keeps every output as it was when put (host values, copied)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.as_put: list[Output] = []
+
+    def put(self, port: str, t_ns: TimeNs, value: object) -> None:
+        super().put(port, t_ns, value)
+        self.as_put.append((port, t_ns, copy.deepcopy(host(value))))
+
+
+class Collect:
+    """Keep a host copy of every value.
+
+    A test sink: ``items`` holds (port, time, ``host(value)``) in arrival order; reset starts over.
+    """
+
+    outputs: Mapping[str, PortType] = {}
+
+    def __init__(self, inputs: Mapping[str, PortType]) -> None:
+        self.inputs: dict[str, PortType] = dict(inputs)
+        self.items: list[Output] = []
+
+    def reset(self, ctx: RunContext) -> None:
+        self.items = []
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        self.items.append((tick.port, tick.t_ns, host(tick.value)))
+
+    def flush(self, out: Emit) -> None:
+        pass
+
+
 def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | None = None) -> list[Output]:
+    """Run ``ticks`` through ``node`` after one reset, then after two: both runs put the same outputs (compared as they were
+    when put), a second flush puts nothing, ports are declared and times monotonic per port, and no output changes after
+    its put (outputs are owned). Returns the first run's outputs."""
     ctx = ctx or RunContext("contract", "node", "lossless")
-    runs: list[list[Output]] = []
+    runs: list[_Snapshots] = []
     for resets in (1, 2):
-        out = Recorder()
+        out = _Snapshots()
         for _ in range(resets):
             node.reset(ctx)
         for tick in ticks:
@@ -66,10 +104,11 @@ def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | Non
             assert port in node.outputs, f"put on undeclared port {port!r}"
             check_monotonic(last.get(port), t_ns, f"output {port}")
             last[port] = t_ns
-        runs.append(out.items)
-    plain: list[list[object]] = [[(p, t, host(v)) for p, t, v in run] for run in runs]
-    np.testing.assert_equal(plain[1], plain[0], err_msg="a run after reset differs from the first run (reset is not idempotent)")  # arrays by value
-    return runs[0]
+        runs.append(out)
+    np.testing.assert_equal(runs[1].as_put, runs[0].as_put, err_msg="a run after reset differs from the first run (reset is not idempotent)")  # arrays by value
+    now: list[Output] = [(p, t, host(v)) for p, t, v in runs[0].items]
+    np.testing.assert_equal(now, runs[0].as_put, err_msg="an output changed after its put (a node emits owned values, never a buffer it writes again)")
+    return runs[0].items
 
 
 class _Spy:
@@ -113,7 +152,7 @@ def check_form(config_type: type, build: Callable[..., object], widgets: Mapping
     run = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")
     shown: list[tuple[str, str]] = [(str(w.label).split(":")[0], type(w).__name__) for w in run.inputs]
     assert shown == list(widgets.items()), f"the form shows {shown}"
-    for path in (".".join(leaf[0]) for leaf in _leaves(config_type, None)):
+    for path in (".".join(leaf[0]) for leaf in leaves(config_type, None)):
         has_widget: bool = any(label == path or label.startswith(f"{path}.") for label, _ in shown)
         assert has_widget != (path in hidden), f"{path}: {'shown and hidden' if has_widget else 'neither shown nor hidden on purpose'}"
     return demo

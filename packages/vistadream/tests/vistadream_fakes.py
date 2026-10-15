@@ -1,11 +1,7 @@
 """CPU fakes for the unit lane (no GPU, no weights)."""
 
-from collections.abc import Mapping
-
 import numpy as np
 import torch
-from dagkit.node import Emit, PortType, RunContext, Tick
-from dagkit.testing import host
 from jaxtyping import Float32, Float64, UInt8
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 from numpy import ndarray
@@ -35,22 +31,3 @@ class FakePredictor(BaseRelativePredictor):
 
 def fake_inpaint(rgb: UInt8[ndarray, "h w 3"], mask: UInt8[ndarray, "h w"]) -> UInt8[ndarray, "h w 3"]:
     return np.where(mask[..., None] > 0, np.uint8(128), rgb).astype(np.uint8)
-
-
-class Keep:
-    """Sink keeping a host copy of every value it receives."""
-
-    outputs: Mapping[str, PortType] = {}
-
-    def __init__(self, inputs: Mapping[str, PortType]) -> None:
-        self.inputs: dict[str, PortType] = dict(inputs)
-        self.items: list[tuple[str, int, object]] = []
-
-    def reset(self, ctx: RunContext) -> None:
-        self.items = []
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.items.append((tick.port, tick.t_ns, host(tick.value)))
-
-    def flush(self, out: Emit) -> None:
-        pass
