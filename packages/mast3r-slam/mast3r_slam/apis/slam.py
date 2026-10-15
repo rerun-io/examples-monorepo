@@ -36,11 +36,17 @@ ROOT: str = "/mast3r_slam"
 LAYER: str = "mast3r_slam"
 
 
+DEFAULT_CLIP: SegmentRef = SegmentRef("msd-odyssey", "msd-odyssey__MOO_others__MOO01_hand_puncher_1", window_ns=(0, 30_000_000_000))
+"""The default input: VERIFY.toml's short case, the first 30 s of MOO01 on its own timeline."""
+
+
 @dataclass
 class Config:
     rr_config: RerunTyroConfig
-    segment: SegmentRef | None = field(default_factory=lambda: SegmentRef("msd-odyssey", "msd-odyssey__MOO_others__MOO01_hand_puncher_1", window_ns=(0, 30_000_000_000)))
-    """Catalog input when no video, images or webcam is given: the camera named by camera in this segment (window_ns clips it)."""
+    segment: SegmentRef | None = field(default_factory=lambda: DEFAULT_CLIP)
+    """Catalog input when no video, images or webcam is given: the camera named by camera in this segment, inside
+    window_ns [start, stop) on the segment's timeline. Only the default clip has a window: a segment you name runs whole
+    unless you give it its own window."""
     camera: str = "rig_00/cam_00"
     """Catalog camera entity under /world."""
     undistort: bool = False
@@ -74,6 +80,11 @@ class Config:
     runner: Literal["sequential", "threaded"] = "threaded"
     """Threaded only: the lossless frontend waits for the backend inside its own calls, where sequential cannot step it."""
     mode: Mode = "lossless"
+
+    def __post_init__(self) -> None:
+        segment: SegmentRef | None = self.segment
+        if segment is not None and segment.window_ns == DEFAULT_CLIP.window_ns and (segment.dataset, segment.segment) != (DEFAULT_CLIP.dataset, DEFAULT_CLIP.segment):
+            self.segment = replace(segment, window_ns=None)  # tyro fills a named segment's window from the default clip's
 
 
 def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
