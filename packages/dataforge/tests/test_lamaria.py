@@ -49,7 +49,7 @@ from dataforge.datasets.lamaria import (
     SequenceRecord,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, TRAJECTORY_RADIUS_UI_POINTS, GtTrajectory, ImuChannel
 from dataforge.world_up import MEASURED_UP_WINDOW_NS, MeasuredUp, measured_world_up
 from dataforge.writing import blueprint_views
 
@@ -1002,7 +1002,7 @@ def test_the_rig_pose_is_the_published_camera_pose_seen_from_the_rig() -> None:
         times_ns=np.array([DEVICE_T0_NS], dtype=np.int64), world_T_cam0=np.eye(4, dtype=np.float64).reshape(1, 4, 4)
     )
 
-    trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(identity_pose, rig_T_cam0=rig_T_cam0)
+    trajectory: GtTrajectory = lamaria.rig_trajectory(identity_pose, rig_T_cam0=rig_T_cam0)
 
     expected_xyz: Float64[ndarray, "3"] = -rig_T_cam0[:3, :3].T @ rig_T_cam0[:3, 3]
     np.testing.assert_allclose(trajectory.translations_xyz[0], expected_xyz, atol=1e-12)
@@ -1020,7 +1020,7 @@ def test_a_constant_rotation_leaves_the_path_length_the_camera_walked() -> None:
     world_T_cam0: Float64[ndarray, "n_poses 4 4"] = np.tile(np.eye(4, dtype=np.float64), (4, 1, 1))
     world_T_cam0[:, :3, 3] = np.column_stack([0.25 * np.arange(4.0), np.zeros(4), np.zeros(4)])
 
-    trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(
+    trajectory: GtTrajectory = lamaria.rig_trajectory(
         lamaria_source.PseudoGt(times_ns=DEVICE_T0_NS + np.arange(4, dtype=np.int64) * SLAM_PERIOD_NS, world_T_cam0=world_T_cam0),
         rig_T_cam0=rig_T_cam0,
     )
@@ -1034,7 +1034,7 @@ def test_an_empty_pseudo_gt_yields_an_empty_trajectory() -> None:
     """A sequence with control points but no pGT still gets a gt layer, without poses."""
     empty: lamaria_source.PseudoGt = lamaria_source.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4)))
 
-    trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(empty, rig_T_cam0=published_rig_T_cam("cam0"))
+    trajectory: GtTrajectory = lamaria.rig_trajectory(empty, rig_T_cam0=published_rig_T_cam("cam0"))
 
     assert trajectory.times_ns.size == 0
     assert trajectory.length_m == 0.0
@@ -1046,14 +1046,12 @@ def resting_accel(times_ns: Int64[ndarray, "n_samples"], accel_xyz: Float64[ndar
     return ImuChannel(times_ns=times_ns, values_xyz=np.tile(accel_xyz, (times_ns.size, 1)))
 
 
-def constant_rotation_trajectory(times_ns: Int64[ndarray, "n_poses"], world_R_rig: Rotation) -> lamaria.GtTrajectory:
+def constant_rotation_trajectory(times_ns: Int64[ndarray, "n_poses"], world_R_rig: Rotation) -> GtTrajectory:
     """A gt trajectory that holds one orientation at the world origin."""
-    return lamaria.GtTrajectory(
+    return GtTrajectory(
         times_ns=times_ns,
         translations_xyz=np.zeros((times_ns.size, 3)),
         quaternions_xyzw=np.tile(np.asarray(world_R_rig.as_quat(), dtype=np.float64), (times_ns.size, 1)),
-        length_m=0.0,
-        duration_s=float((times_ns[-1] - times_ns[0]) / 1e9),
     )
 
 
@@ -1064,7 +1062,7 @@ def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_wo
     # The second half of the capture points the other way; the 2 s window must ignore it.
     accel.values_xyz[times_ns >= DEVICE_T0_NS + MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
 
-    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
+    level: GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     measured: MeasuredUp = measured_world_up(level.times_ns, level.quaternions_xyzw, accel)
 
     assert measured.axis == "+z"
@@ -1076,7 +1074,7 @@ def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along(
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(1_000, dtype=np.int64) * IMU_PERIOD_NS
     world_R_rig: Rotation = Rotation.from_euler("x", 90.0, degrees=True)
 
-    on_side: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, world_R_rig)
+    on_side: GtTrajectory = constant_rotation_trajectory(times_ns, world_R_rig)
     measured: MeasuredUp = measured_world_up(
         on_side.times_ns, on_side.quaternions_xyzw, resting_accel(times_ns, np.array([0.0, 0.0, 9.80665]))
     )
@@ -1088,7 +1086,7 @@ def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along(
 def test_measuring_the_world_up_axis_needs_both_a_pose_and_a_sample() -> None:
     empty_times: Int64[ndarray, "n_samples"] = np.zeros(0, dtype=np.int64)
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
-    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
+    level: GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     with pytest.raises(ValueError, match="both a gt pose and an accelerometer sample"):
         measured_world_up(level.times_ns, level.quaternions_xyzw, resting_accel(empty_times, np.array([0.0, 0.0, 9.8])))
 
@@ -1097,7 +1095,7 @@ def test_an_accelerometer_that_stops_before_the_ground_truth_starts_is_an_error(
     """The window opens where both streams are live, so an IMU that quit first leaves it empty."""
     times_ns: Int64[ndarray, "n_poses"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
     far_earlier: Int64[ndarray, "n_samples"] = times_ns - 60_000_000_000
-    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
+    level: GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     with pytest.raises(ValueError, match="no accelerometer sample within"):
         measured_world_up(level.times_ns, level.quaternions_xyzw, resting_accel(far_earlier, np.array([0.0, 0.0, 9.8])))
 
@@ -1182,7 +1180,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: C
     # A negative radius is Rerun's screen-space unit: a metric hairline over a
     # kilometre of walking renders as nothing in the rig overview.
     radii: list[object] = static_row(store, trajectory)[f"{trajectory}:LineStrips3D:radii"]
-    assert radii == [pytest.approx(-lamaria.GT_TRAJECTORY_WIDTH_UI_POINTS)]
+    assert radii == [pytest.approx(-TRAJECTORY_RADIUS_UI_POINTS)]
     trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:LineStrips3D:radii"]
     assert trail_radii == [pytest.approx(-TRAIL_RADIUS_UI_POINTS)], "the trail is a screen-space stroke, like msd's"
 

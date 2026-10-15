@@ -68,16 +68,15 @@ from dataforge.datasets import lamaria_source
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
-    TRAJECTORY_COLOR,
     FrameKind,
     FrameSource,
+    GtTrajectory,
     ImuChannel,
     encode_frames_to_mp4,
     log_camera_node,
+    log_gt_path,
     log_imu,
-    log_pose_track,
     log_rig_node,
-    log_trail_segments,
     log_video_stream,
     require_av1_nvenc,
     resolve_ffmpeg,
@@ -143,15 +142,6 @@ as unambiguous; below it the averaging window was not near rest and the warning 
 
 The five default sequences measure 0.92 to 1.01 g, so this leaves a visible margin
 for a wearer who is already moving at the start rather than tracking the corpus."""
-
-GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
-"""Line width of the gt path, in **screen** points rather than metres.
-
-A LaMAria walk is 170 m to 1.1 km long, so the overview view frames hundreds of
-metres at once and any honest metric width is a small fraction of a pixel there
-(0.01 m over a 400 m shot is 0.06 px, i.e. invisible). Rerun reads a negative
-radius as UI points, which keeps the overview path one visible hairline at every
-zoom. The trail is drawn by ``log_trail_segments``, whose stroke is screen-space too."""
 
 CONTROL_POINT_COLOR: tuple[int, int, int] = (120, 255, 160)
 """Tint of a fully surveyed (levelled) control point."""
@@ -339,22 +329,6 @@ class SequenceStreams:
 
 
 @dataclass(frozen=True, slots=True)
-class GtTrajectory:
-    """A sequence's pGT as the rig moves through it, in the columns ``rr.Transform3D`` takes."""
-
-    times_ns: Int64[ndarray, "n_poses"]
-    """Pose times on Aria's device clock — the pGT's own stamps, unshifted."""
-    translations_xyz: Float64[ndarray, "n_poses 3"]
-    """``world_t_rig``, metres."""
-    quaternions_xyzw: Float64[ndarray, "n_poses 4"]
-    """``world_R_rig``, scalar **last**, which is the order ``Transform3D`` wants."""
-    length_m: float
-    """Path length walked, summed over consecutive poses; 0.0 for fewer than two."""
-    duration_s: float
-    """Span from the first pose to the last; 0.0 for fewer than two."""
-
-
-@dataclass(frozen=True, slots=True)
 class RecordingSummary:
     """What one written layer turned out to hold; ``convert`` prints a line per layer.
 
@@ -469,7 +443,7 @@ def rig_trajectory(pseudo_gt: lamaria_source.PseudoGt, *, rig_T_cam0: Float64[nd
             ``cam0.T_b_s``.
 
     Returns:
-        The rig's pose per published stamp, plus the path length and span.
+        The rig's pose per published stamp, on Aria's device clock (the pGT's own stamps, unshifted).
     """
     cam0_T_rig: Float64[ndarray, "4 4"] = np.linalg.inv(rig_T_cam0)
     world_T_rig: Float64[ndarray, "n_poses 4 4"] = pseudo_gt.world_T_cam0 @ cam0_T_rig
@@ -477,14 +451,7 @@ def rig_trajectory(pseudo_gt: lamaria_source.PseudoGt, *, rig_T_cam0: Float64[nd
     quaternions_xyzw: Float64[ndarray, "n_poses 4"] = np.asarray(
         Rotation.from_matrix(world_T_rig[:, :3, :3]).as_quat(), dtype=np.float64
     ).reshape(-1, 4)
-    steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(translations_xyz, axis=0), axis=1)
-    return GtTrajectory(
-        times_ns=pseudo_gt.times_ns,
-        translations_xyz=translations_xyz,
-        quaternions_xyzw=quaternions_xyzw,
-        length_m=float(steps_m.sum()),
-        duration_s=float((pseudo_gt.times_ns[-1] - pseudo_gt.times_ns[0]) / 1e9) if pseudo_gt.times_ns.size else 0.0,
-    )
+    return GtTrajectory(times_ns=pseudo_gt.times_ns, translations_xyz=translations_xyz, quaternions_xyzw=quaternions_xyzw)
 
 
 def validate_ground_truth(sequence: str, control_points: lamaria_source.ControlPointSet | None, trajectory: GtTrajectory) -> None:
@@ -689,10 +656,7 @@ def build_blueprint() -> rrb.Blueprint:
         rig=RIG,
         run_source=schema.GT_RUN_SOURCE,
         eye_controls=blueprints.follow_eye_controls(FOLLOW_FORWARD, FOLLOW_UP),
-        plots=[
-            blueprints.sensor_plot("Gyroscope", schema.imu_path(RIG, 0), schema.gyro_path(RIG, 0)),
-            blueprints.sensor_plot("Accelerometer", schema.imu_path(RIG, 0), schema.accel_path(RIG, 0)),
-        ],
+        plots=blueprints.imu_plots(RIG, 0),
     )
 
 
@@ -1051,34 +1015,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             # The right-handed axes WORLD_UP names; every LaMAria world is Z-up.
             rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)
             if trajectory.times_ns.size:
-                # from_parent stays unset: the stored value is world_T_rig, the
-                # child-to-parent step, which is what every child frustum rides.
-                log_pose_track(
-                    recording,
-                    schema.rig_path(RIG),
-                    times_ns=trajectory.times_ns,
-                    translations_xyz=trajectory.translations_xyz,
-                    quaternions_xyzw=trajectory.quaternions_xyzw,
-                )
-                # Two views of one trajectory: the static strip is the whole path for the
-                # overview, and the per-pose segments are what the blueprint's cursor-relative
-                # time range turns into a recent-motion trail in the Follow view.
-                rr.log(
-                    schema.trajectory_path(schema.GT_RUN_SOURCE),
-                    rr.LineStrips3D(
-                        [trajectory.translations_xyz],
-                        colors=TRAJECTORY_COLOR,
-                        radii=rr.components.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS),
-                    ),
-                    static=True,
-                    recording=recording,
-                )
-                log_trail_segments(
-                    recording,
-                    schema.trail_path(schema.GT_RUN_SOURCE),
-                    times_ns=trajectory.times_ns,
-                    translations_xyz=trajectory.translations_xyz,
-                )
+                log_gt_path(recording, RIG, trajectory)
             if points:
                 log_control_points(recording, points)
             if control_points is not None:
