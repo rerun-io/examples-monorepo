@@ -1,8 +1,8 @@
 //! Local float/packed outputs and viewer texture target layouts.
 use glam::UVec2;
 
-/// Caller-owned GPU output. Buffers require STORAGE; texture requires STORAGE_BINDING.
-#[derive(Clone, PartialEq)]
+/// Caller-owned GPU output. Buffers require STORAGE; texture requires `STORAGE_BINDING`.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Target {
     /// Four f32 lanes per pixel, unclipped RGB, for parity and HDR composition.
     Float(wgpu::Buffer),

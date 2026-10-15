@@ -31,14 +31,16 @@ fn analytic_render(
     world_from_local: glam::Affine3A,
     alpha_three_pixels_right: f32,
 ) {
-    let renderer = Renderer::new(device).unwrap();
+    let renderer = Renderer::new(device).expect("create analytic renderer");
     let p = world_from_local
         .inverse()
         .transform_point3(Vec3::new(0.0, 0.0, 2.0));
     let scene = renderer
         .upload(&common::splat(p.to_array(), -2.0, 0.0))
-        .unwrap();
-    let mut view = renderer.create_view(&scene, 64).unwrap();
+        .expect("upload analytic splat");
+    let mut view = renderer
+        .create_view(&scene, 64)
+        .expect("create analytic view");
     let queries = device
         .features()
         .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -49,7 +51,8 @@ fn analytic_render(
                 count: gsplat_core::QUERY_COUNT,
             })
         });
-    view.set_timestamp_queries(queries.clone()).unwrap();
+    view.set_timestamp_queries(queries.clone())
+        .expect("set analytic timestamp queries");
     let camera = common::pinhole_camera(33);
     let options = RenderOptions {
         world_from_local,
@@ -69,11 +72,19 @@ fn analytic_render(
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer
             .render(queue, &mut encoder, &mut view, &camera, &options, target)
-            .unwrap();
+            .expect("render analytic target");
         copy_texture(&mut encoder, &texture, &texture_copy);
         queue.submit([encoder.finish()]);
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("wait for analytic render");
+        assert!(
+            !view
+                .poll_feedback()
+                .expect("receive analytic feedback")
+                .expect("read analytic feedback")
+                .needs_rerender
+        );
         if let Some(queries) = &queries {
             let resolved = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -86,7 +97,8 @@ fn analytic_render(
             queue.submit([encoder.finish()]);
             let ticks =
                 common::read::<u64>(device, queue, &resolved, gsplat_core::QUERY_COUNT as usize);
-            let stages = gsplat_core::stage_ms(&ticks, queue.get_timestamp_period()).unwrap();
+            let stages = gsplat_core::stage_ms(&ticks, queue.get_timestamp_period())
+                .expect("decode analytic stage timings");
             let total =
                 (ticks[9] - ticks[0]) as f64 * f64::from(queue.get_timestamp_period()) / 1e6;
             assert!((stages.iter().sum::<f64>() - total).abs() < 1e-8);
@@ -126,10 +138,18 @@ fn analytic_render(
                     },
                     Target::Float(float.clone()),
                 )
-                .unwrap();
+                .expect("render analytic mode");
             queue.submit([encoder.finish()]);
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("wait for analytic mode");
+            assert!(
+                !view
+                    .poll_feedback()
+                    .expect("receive analytic mode feedback")
+                    .expect("read analytic mode feedback")
+                    .needs_rerender
+            );
             let rgba = common::read::<[f32; 4]>(device, queue, &float, 33 * 33);
             assert!((rgba[16 * 33 + 16][3] - alpha).abs() < 1e-5);
         }

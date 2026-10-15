@@ -5,7 +5,8 @@ use wgpu::util::DeviceExt as _;
 pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+        .expect("request GPU test adapter");
     println!("core test adapter: {:?}", adapter.get_info());
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: wgpu::Features::SUBGROUP
@@ -13,7 +14,7 @@ pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
         required_limits: adapter.limits(),
         ..Default::default()
     }))
-    .unwrap()
+    .expect("request GPU test device")
 }
 pub fn upload<T: bytemuck::Pod>(device: &wgpu::Device, values: &[T]) -> wgpu::Buffer {
     let bytes = bytemuck::cast_slice(values);
@@ -45,12 +46,21 @@ pub fn read<T: bytemuck::Pod>(
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     encoder.map_buffer_on_submit(&staging, wgpu::MapMode::Read, .., move |result| {
-        tx.send(result).unwrap()
+        tx.send(result).expect("send test readback status");
     });
     queue.submit([encoder.finish()]);
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    rx.recv().unwrap().unwrap();
-    bytemuck::cast_slice(&staging.get_mapped_range(..).unwrap()).to_vec()
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("wait for test readback");
+    rx.recv()
+        .expect("receive test readback status")
+        .expect("map test readback buffer");
+    bytemuck::cast_slice(
+        &staging
+            .get_mapped_range(..)
+            .expect("access test readback buffer"),
+    )
+    .to_vec()
 }
 
 pub fn pinhole_camera(size: u32) -> crate::Camera {

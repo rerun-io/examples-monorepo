@@ -1,4 +1,4 @@
-//! The native GaussianSplats3D upload boundary, shared by viewer and parity harness.
+//! The native `GaussianSplats3D` upload boundary, shared by viewer and parity harness.
 use crate::Splats;
 use glam::Quat;
 use half::f16;
@@ -17,7 +17,11 @@ pub struct NativeSplats<'a> {
 
 /// Read an optional component, repeating its last item when the array is short.
 pub fn at_or_last<T: Copy>(items: &[T], i: usize, default: T) -> T {
-    items.get(i).or(items.last()).copied().unwrap_or(default)
+    items
+        .get(i)
+        .or_else(|| items.last())
+        .copied()
+        .unwrap_or(default)
 }
 
 impl NativeSplats<'_> {

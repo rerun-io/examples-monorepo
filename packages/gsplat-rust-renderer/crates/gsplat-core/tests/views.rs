@@ -57,7 +57,7 @@ fn one_scene_renders_two_views_in_one_submit() {
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         encoder.map_buffer_on_submit(&read, wgpu::MapMode::Read, .., move |result| {
-            tx.send(result).unwrap()
+            tx.send(result).unwrap();
         });
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();

@@ -119,7 +119,7 @@ impl CameraModel {
         }
         let mut hi = hi?;
         for _ in 0..64 {
-            let mid = 0.5 * (lo + hi);
+            let mid = f64::midpoint(lo, hi);
             if mid * Self::radial(&p, mid) < distorted {
                 lo = mid;
             } else {
@@ -129,7 +129,7 @@ impl CameraModel {
                 break;
             }
         }
-        Some(0.5 * (lo + hi))
+        Some(f64::midpoint(lo, hi))
     }
     /// First fold of the KB4 angular polynomial, or pi when it is monotonic.
     pub fn max_render_theta(self) -> f64 {
@@ -160,7 +160,7 @@ impl CameraModel {
             return PI;
         }
         for _ in 0..64 {
-            let mid = 0.5 * (lo + hi);
+            let mid = f64::midpoint(lo, hi);
             if derivative(mid) > 0.0 {
                 lo = mid;
             } else {
@@ -170,7 +170,7 @@ impl CameraModel {
                 break;
             }
         }
-        0.5 * (lo + hi)
+        f64::midpoint(lo, hi)
     }
     /// Focal length corresponding to the lens's angular field of view.
     pub fn fov_to_focal(self, fov: f64, pixels: u32) -> f64 {
