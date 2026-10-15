@@ -222,7 +222,7 @@ impl ViewContextSystem for ProbeEye {
         query: &re_viewer_context::ViewQuery<'_>,
         _: &re_viewer_context::ViewContextSystemOncePerFrameResult,
     ) {
-        if let Some(camera) = gsplat_viewer::visualizer::camera_from_view(ctx, query) {
+        if let Some(camera) = gsplat_viewer::camera_from_view(ctx, query) {
             CAMERAS.lock().expect("probe camera").push(ProbeView {
                 camera,
                 msaa_samples: re_renderer::ViewBuilder::main_target_default_msaa_state(
