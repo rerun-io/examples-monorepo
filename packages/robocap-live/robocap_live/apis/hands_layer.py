@@ -6,6 +6,7 @@ production refresh, ``off``). A windowed run (VIO from the segment's start to th
 and copies its hands into the viewer, which opens on the run health; the "pipeline (debug)" tab shows each graph and its guide.
 """
 
+import functools
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,8 @@ from dagkit.runners import RunReport
 from dagkit.sinks import LayerFileSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.verify import Case, load_card
+from serde import to_dict
+from serde.json import to_json
 from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs.apis.catalog_layer import vio_publish
 from slam_rs.nodes.vio import VioParams
@@ -60,9 +63,9 @@ def blueprint(graphs: Sequence[Graph]) -> rrb.Blueprint:
     return with_pipeline(normal, outputs, graphs=[g.name for g in graphs] if len(graphs) > 1 else ())
 
 
-def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
+def build(config: Config, recording: rr.RecordingStream, runs: list[LayerRun] | None = None) -> Iterator[Graph]:
     """The VIO graph (``slam`` vio), then the hands-layer graph on its published poses; a windowed run's hands go to ``recording``
-    too (a whole segment's are ~640 MB)."""
+    too (a whole segment's are ~640 MB). A finished hands run's ``LayerRun`` is appended to ``runs``."""
     publish = LayerFileSink(config.segment, LAYER, output_dir=config.output_dir, register=config.register)
     sinks: dict[str, Node] = {
         "publish": publish,
@@ -75,9 +78,12 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
         graphs.append(vio)
         poses = PosesCheckpoint(slam, config.segment.timeline)
     source = segment_source(config.segment, catalog_poses=poses is None)
-    graphs.append(hands_layer_graph(source, HandsNode(config.segment, config.hands, config.output_dir), sinks, poses))
+    hands = HandsNode(config.segment, config.hands, config.output_dir)
+    graphs.append(hands_layer_graph(source, hands, sinks, poses))
     recording.send_blueprint(blueprint(graphs))
     yield from graphs
+    if runs is not None and hands.run is not None:
+        runs.append(hands.run)
     if config.segment.window_ns is not None and publish.published is not None:
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
 
@@ -99,5 +105,28 @@ def examples() -> list[Config]:
     ]
 
 
+@dataclass
+class Cli(Config):
+    timing_json: Path | None = None
+    """Also write the run's timings here (JSON): the hands run's ``LayerRun`` and the hands graph's ``RunReport``."""
+
+
 def main(config: Config) -> RunReport:
-    return run_app(config, build)
+    """Run the App, then end as the old tool did: the hands run's timings (the core's stage totals from ``LayerRun``, which
+    overlap, and the hands graph's step totals and wall from ``RunReport``; seconds and ms per frameset, then the frameset rates)
+    and the registered layer's catalog URL."""
+    runs: list[LayerRun] = []
+    report: RunReport = run_app(config, functools.partial(build, runs=runs))
+    if not runs:
+        return report
+    run, steps = runs[0], {name: node.ticks * node.step_ms_mean / 1e3 for name, node in report.nodes.items()}
+    rows: dict[str, float] = {name: seconds for name, seconds in to_dict(run).items() if name.endswith("_s")}
+    rows |= {"loop_wait_s": run.loop_s - steps["hands"], "push_wait_s": steps["hands"], "register_s": steps["publish"], "total_s": report.wall_s}
+    for name, seconds in rows.items():
+        print(f"  {name:<22}{seconds:8.2f} s  {1e3 * seconds / max(run.framesets, 1):7.2f} ms/frameset")
+    print(f"  {run.framesets / max(run.loop_s, 1e-9):.1f} framesets/s in the loop, {run.framesets / max(report.wall_s, 1e-9):.1f} end to end")
+    if config.register != "off" and config.segment.window_ns is None:  # where to look at the registered layer, as the old tool ended
+        print(config.segment.entry().segment_url(config.segment.segment))
+    if isinstance(config, Cli) and config.timing_json is not None:
+        config.timing_json.write_text(to_json({"run": run, "report": report}))
+    return report

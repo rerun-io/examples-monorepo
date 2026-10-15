@@ -54,7 +54,9 @@ def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
 
 
 def slam_graph(video: Source, cfg: SlamConfig, sinks: Mapping[str, Node], *, live: bool = False, nerfstudio: NerfstudioSink | None = None) -> Graph:
-    """Sinks name the ports they take: ``tracked`` and ``keyframes`` (TrackedFrame), ``map`` (MapUpdate), ``cloud`` (KeyframeCloud).
+    """Sinks name the ports they take: ``tracked`` and ``keyframes`` (TrackedFrame), ``map`` (MapUpdate), and the viewer's
+    ``view`` (FrameView: made only when a sink takes it; DropOldest(2), so a slow viewer drops frames when realtime),
+    ``keyframe`` (KeyframeView) and ``log`` (LogLine).
 
     The ``shared`` buffers are sized when the run starts (``frame_hw``): building the graph reads nothing from ``video``.
     """
@@ -66,15 +68,19 @@ def slam_graph(video: Source, cfg: SlamConfig, sinks: Mapping[str, Node], *, liv
     graph.resource("mast3r", shared_model)
     graph.resource("shared", lambda: SharedSlam(*frame_hw(video, cfg.img_size), cfg.keyframe_buffer, cfg.use_calib, device=DEVICE))
     source: NodeRef = graph.source("video", video)
-    frontend_node = Frontend(cfg, device=DEVICE)
+    frontend_node = Frontend(cfg, device=DEVICE, views=any("view" in sink.inputs for sink in sinks.values()))
     frontend: NodeRef = graph.node("frontend", frontend_node, placement=Placement("main"), needs=("mast3r", "shared"))
     backend: NodeRef = graph.node("backend", Spawn(Backend, cfg), placement=Placement("process"), needs=("mast3r", "shared"))
     graph.edge(source["frames"], frontend["frames"], DropOldest(1) if live else Block(2))
     if "rig" in frontend_node.inputs:
         graph.edge(source["rig"], frontend["rig"], AsOf())
     graph.edge(frontend["task"], backend["task"], Block(16))
-    ports: dict[str, PortRef] = {"tracked": frontend["tracked"], "map": backend["map"], "keyframes": backend["keyframes"], "cloud": backend["cloud"]}
-    graph.sinks(ports, sinks)
+    ports: dict[str, PortRef] = {"tracked": frontend["tracked"], "view": frontend["view"]}
+    ports |= {port: backend[port] for port in ("map", "keyframes", "keyframe", "log")}
+    for name, sink in sinks.items():
+        ref: NodeRef = graph.sink(name, sink)
+        for port in sink.inputs:
+            graph.edge(ports[port], ref[port], DropOldest(2) if port == "view" else Block())
     if nerfstudio is not None:  # it reads the final keyframes' images and point maps from the `shared` resource
         graph.edge(backend["keyframes"], graph.sink("nerfstudio", nerfstudio, needs=("shared",))["keyframes"])
     return graph

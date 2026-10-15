@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import pytest
 import rerun as rr
+import tyro
 from dagkit import sinks
 from dagkit.app import load_profile
 from dagkit.doc import describe, picture
@@ -20,7 +21,7 @@ from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
 from dagkit.node import Emit, Event, PortType, RunContext, Tick
 from dagkit.runners import run_threaded
 from dagkit.sinks import RerunSink
-from dagkit.sources import IterSource
+from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, check_form, check_graph_docs, check_picture
 from dagkit.time import STATIC
 from dagkit.types import Producer
@@ -181,8 +182,8 @@ def test_building_the_app_graph_reads_nothing_from_its_input(monkeypatch: pytest
 
 def test_the_viewer_draws_every_output_or_only_the_camera_poses() -> None:
     """``draw="poses"`` (verify's golden): the viewer takes the final keyframe and tracked poses only, not the map and the
-    keyframe clouds, which grow with every task; by default it takes all four outputs."""
-    for draw, taken in (("all", {"keyframes", "tracked", "map", "cloud"}), ("poses", {"keyframes", "tracked"})):
+    viewer's frames and keyframes (images and point maps), which grow with every frame; by default it takes every output."""
+    for draw, taken in (("all", {"keyframes", "tracked", "map", "view", "keyframe", "log"}), ("poses", {"keyframes", "tracked"})):
         graph = build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", draw=draw), rr.RecordingStream("test", send_properties=False))
         assert isinstance(graph, Graph) and {e.dst.port for e in graph.edges if e.dst.node == "viewer"} == taken
 
@@ -239,3 +240,18 @@ def test_the_catalog_source_muxes_its_zero_copy_packet_views() -> None:
     ``wrap_mp4`` the packet views ``read_catalog_videos`` returns, and beartype checks that call in the dev env."""
     samples = [np.frombuffer(b"\x00\x00\x00\x01\x65" + bytes(16), dtype=np.uint8), np.frombuffer(b"\x00\x00\x00\x01\x41" + bytes(8), dtype=np.uint8)]
     assert len(wrap_mp4(samples, [True, False], 30, "h264")) > 0
+
+
+def test_a_segment_named_on_the_cli_runs_whole_and_none_clears_the_window() -> None:
+    """Only the default clip is windowed (the VERIFY short case on MOO01's timeline): a segment named on the CLI runs
+    whole unless it names its own window (TUM's timeline is Unix time, where the default window holds no frame), and
+    ``--segment.window-ns None`` parses."""
+
+    def parse(*args: str) -> object:
+        return tyro.cli(Config, args=["--rr-config.headless", *args]).segment
+
+    tum = ["segment:segment-ref", "--segment.dataset", "dataforge-vslam-lab-rgbdtum", "--segment.segment", "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk"]
+    assert isinstance(default := parse(), SegmentRef) and default.window_ns == (0, 30_000_000_000)
+    assert isinstance(named := parse(*tum), SegmentRef) and named.segment.endswith("freiburg1_desk") and named.window_ns is None
+    assert isinstance(clip := parse(*tum, "--segment.window-ns", "5", "9"), SegmentRef) and clip.window_ns == (5, 9)
+    assert isinstance(whole := parse("segment:segment-ref", "--segment.window-ns", "None"), SegmentRef) and whole.window_ns is None

@@ -1,8 +1,9 @@
 """Stage E (whole segment): score the Stage A and refined rigs against the segment's GT calibration.
 
-GT enters here and nowhere else. Both rigs are aligned to GT with SE(3) (primary: tests the metric claim) and Sim(3)
-(isolates the scale error). Without GT for every exo camera the report still carries the refinement diagnostics and
-the GT-free rig geometry, and no alignment is drawn.
+GT enters the calibration here and nowhere else (the App's viewer only draws the dataset's cameras). Both rigs are
+aligned to GT with SE(3) (primary: tests the metric claim) and Sim(3) (isolates the scale error). Without GT for every
+exo camera the report still carries the refinement diagnostics and the GT-free rig geometry, no alignment is drawn,
+and the status says why.
 """
 
 from collections.abc import Mapping, Sequence
@@ -15,14 +16,14 @@ from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.types.rig import RigCameras
 
 from exo_calib.ops.eval import RIG_MODES, align_rigs, camera_centers, rig_geometry, variant_metrics
-from exo_calib.types import VARIANTS, EvalReport, RefinementDiagnostics, RigAlignment, RigGeometryReport, RigLayout, VariantMetrics
+from exo_calib.types import VARIANTS, EvalReport, RefinementDiagnostics, ReportStatus, RigAlignment, RigGeometryReport, RigLayout, VariantMetrics
 
 
 class ReportNode:
     """Score the rigs against GT calibration."""
 
     inputs: Mapping[str, PortType] = {"refined": RigCameras, "diag": RefinementDiagnostics, "init": RigCameras, "gt": RigCameras}
-    outputs: Mapping[str, PortType] = {"align": RigAlignment, "eval": EvalReport}
+    outputs: Mapping[str, PortType] = {"align": RigAlignment, "eval": EvalReport, "status": ReportStatus}
 
     def __init__(self, segment: SegmentRef, layout: RigLayout) -> None:
         self.segment: SegmentRef = segment
@@ -57,6 +58,7 @@ class ReportNode:
         )
         report = EvalReport(self.segment.segment, self.segment.dataset, list(names), metrics[0], metrics[1], diag, geometry_report)
         out.put("eval", STATIC, report)
+        out.put("status", STATIC, ReportStatus(gt is not None))
         if gt is not None:  # each rig gets its own SE(3) pred-world -> GT-world transform, so everything overlays GT
             aligned: list[SimilarityTransform] = [align_rigs(rig.cam_T_world, gt.cam_T_world) for rig in rigs]
             centers = np.stack([a.apply(camera_centers(rig.cam_T_world)) for a, rig in zip(aligned, rigs, strict=True)])

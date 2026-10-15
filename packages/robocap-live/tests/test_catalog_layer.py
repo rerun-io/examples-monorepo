@@ -55,6 +55,6 @@ def test_cap_rig_and_run_counts_round_trip_through_a_catalog(tmp_path: Path) -> 
     ((t_ns, back),) = rerun_roundtrip(cap, RIG_ROOT, "video_time", STATIC)
     assert t_ns == STATIC and back.names == cap.names and back.rig.names == rig.names
     np.testing.assert_array_equal(back.fisheye62, cap.fisheye62)
-    run = LayerRun(150, 149, 1, 133, 145, 120, 141, 0.9922, True, *[0.5] * 7)
+    run = LayerRun(150, 149, 1, 133, 145, 120, 141, 0.9922, True, *[0.5] * 11)
     assert rerun_roundtrip(run, "/verify/hands/run", "video_time", STATIC) == [(STATIC, run)]
 

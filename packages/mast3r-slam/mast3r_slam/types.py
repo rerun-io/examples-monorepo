@@ -6,7 +6,9 @@ Edge Types (host, picklable: the backend runs in its own process):
   ``keyframes``: the final keyframe poses, emitted at flush at each keyframe's own frame time).
 - ``KeyframeAdded`` / ``RelocRequest``: the frontend's tasks for the backend (``BackendTask``).
 - ``MapUpdate``: every keyframe pose and factor-graph edge after the backend applied a task.
-- ``KeyframeCloud``: a new keyframe's confident points in its own camera frame (viewer only).
+- ``LogLine``: one line of the run's text log.
+- ``FrameView`` / ``KeyframeView``: what the viewer draws of the current frame and of a new keyframe (``CameraView``: pose,
+  image, point map, confidence; viewer only, never resumed).
 
 Poses are lietorch Sim3 rows ``[t_xyz, q_xyzw, s]`` (world_from_cam); Rerun gets the rigid part (Transform3D) and keeps
 the scale and indices as ``AnyValues`` beside it, so ``from_layer`` restores the value exactly.
@@ -22,9 +24,11 @@ import lietorch
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+import torch
 from dagkit.time import TimeNs
 from dagkit.types import Log, column, row_times
-from jaxtyping import Float, Float32, Int, Int64, UInt8
+from dust3r.post_process import estimate_focal_knowing_depth
+from jaxtyping import Bool, Float, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from serde import coerce, serde
 from torch import Tensor
@@ -280,8 +284,6 @@ class MapUpdate:
         keyframes = rr.AnyValues(world_sim3_cam=self.world_sim3_cam.reshape(-1))
         lines = rr.LineStrips3D(np.stack([centres[self.ii], centres[self.jj]], axis=1), colors=(0, 200, 0), radii=rr.Radius.ui_points(1.0))
         logs: list[Log] = [Log(f"{root}/keyframes", rr.Points3D(centres, colors=(255, 140, 0), radii=rr.Radius.ui_points(4.0))), Log(f"{root}/keyframes", keyframes)]
-        for i, pose in enumerate(self.world_sim3_cam):  # each keyframe's frame, so its KeyframeCloud follows the corrected pose
-            logs.append(Log(f"{root}/keyframes/{i:04d}", rr.Transform3D(translation=pose[:3], quaternion=rr.Quaternion(xyzw=pose[3:7]), scale=float(pose[7]))))
         if len(self.ii):  # Rerun refuses an AnyValues of empty batches; edges never disappear once logged
             logs += [Log(f"{root}/edges", lines), Log(f"{root}/edges", rr.AnyValues(edge_ii=self.ii, edge_jj=self.jj))]
         return logs
@@ -301,31 +303,120 @@ class MapUpdate:
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class KeyframeCloud:
-    """The confident points of a new keyframe in its own camera frame, coloured (logged under the keyframe's pose)."""
+class LogLine:
+    """One line of the run's text log (the backend's retrieval and relocalisation verdicts)."""
 
-    index: int
-    """Keyframe index (``MapUpdate`` row)."""
-    points: Float32[ndarray, "n 3"]
-    """Canonical points in the keyframe's camera frame (at its Sim3 scale)."""
-    colors: UInt8[ndarray, "n 3"]
-    """RGB of each point."""
+    text: str
+    level: str = "INFO"
 
     def to_rerun(self, root: str) -> list[Log]:
-        return [Log(f"{root}/{self.index:04d}/points", rr.Points3D(self.points, colors=self.colors, radii=rr.Radius.ui_points(1.5)))]
+        return [Log(root, rr.TextLog(self.text, level=self.level))]
 
     @classmethod
     def contents(cls, root: str) -> list[str]:
-        return [f"{root}/**"]
+        return [root]
 
     @classmethod
-    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "KeyframeCloud"]]:
-        names: list[str] = [c.removesuffix(":Points3D:positions") for c in table.column_names if c.startswith(f"{root}/") and c.endswith("/points:Points3D:positions")]
-        for row, t_ns in enumerate(row_times(table, timeline)):
-            for name in names:
-                points = table[f"{name}:Points3D:positions"][row].as_py()
-                if points is not None:
-                    colors = np.asarray(table[f"{name}:Points3D:colors"][row].as_py(), dtype=np.uint32)  # packed RGBA
-                    rgb: UInt8[ndarray, "n 3"] = np.stack([(colors >> s) & 0xFF for s in (24, 16, 8)], axis=1).astype(np.uint8)
-                    index: int = int(name.removeprefix(f"{root}/").removesuffix("/points"))
-                    yield t_ns, cls(index, np.asarray(points, dtype=np.float32).reshape(-1, 3), rgb)
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "LogLine"]]:
+        for t_ns, text, level in zip(row_times(table, timeline), column(table, f"{root}:TextLog:text"), column(table, f"{root}:TextLog:level"), strict=True):
+            if text is not None:
+                yield t_ns, cls(str(text[0]), str(level[0]) if level is not None else "INFO")
+
+
+CONFIDENT: float = 7.0
+"""Accumulated confidence a point needs to enter a keyframe's cloud and the drawn depth (the CLI's threshold)."""
+
+
+def _gray(values: Float32[ndarray, "..."]) -> UInt8[ndarray, "..."]:
+    """Min-max over every finite value to 0-255 (a point map's xyz as RGB, a confidence as grey)."""
+    finite: Float32[ndarray, "..."] = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    low, high = float(finite.min()), float(finite.max())
+    return np.zeros(finite.shape, np.uint8) if high <= low else np.clip((finite - low) / (high - low) * 255.0, 0, 255).astype(np.uint8)
+
+
+class Drawing:
+    """Base of the viewer's values: drawn, never resumed (a run re-derives them from the SLAM state)."""
+
+    __slots__ = ()
+
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        raise NotImplementedError(f"{cls.__name__} is drawn, not resumed")
+
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Drawing"]]:
+        raise NotImplementedError(f"{cls.__name__} is drawn, not resumed")
+
+
+@dataclass(frozen=True, slots=True)
+class CameraView:
+    """One camera as the viewer draws it (host copies): its pose, image, canonical point map and the map's confidence."""
+
+    index: int
+    """Input frame index (the current frame) or keyframe index."""
+    world_sim3_cam: Float32[ndarray, " 8"]
+    rgb: UInt8[ndarray, "h w 3"]
+    points: Float32[ndarray, "h w 3"]
+    """Canonical points in the camera frame."""
+    confidence: Float32[ndarray, "h w"]
+
+    @classmethod
+    def of(cls, frame: "Frame", index: int) -> "CameraView":
+        """Host copies (owned: a keyframe's buffers change after the copy) of a frame with a point map, the RGB as the CLI
+        quantised it."""
+        assert frame.X_canon is not None and frame.C is not None
+        h, w = frame.rgb.shape[-3:-1]
+        pose: Float32[ndarray, " 8"] = frame.world_sim3_cam.data.reshape(-1).to("cpu", copy=True).numpy()
+        rgb: UInt8[ndarray, "h w 3"] = (frame.rgb.reshape(h, w, 3).numpy() * 255).astype(np.uint8)
+        points: Float32[ndarray, "h w 3"] = frame.X_canon.reshape(h, w, 3).to("cpu", copy=True).numpy()
+        return cls(index, pose, rgb, points, frame.C.reshape(h, w).to("cpu", copy=True).numpy())
+
+    def frustum(self, path: str, image_plane: float) -> list[Log]:
+        """The rigid pose at ``path`` (the viewer draws no frustum under a scaled transform) and its frustum, with the focal
+        length the point map implies and the principal point at the image centre, as the CLI estimated it."""
+        h, w = self.rgb.shape[:2]
+        focal = float(estimate_focal_knowing_depth(torch.from_numpy(self.points)[None], torch.tensor([w / 2, h / 2]), focal_mode="weiszfeld"))
+        pose: Float32[ndarray, " 8"] = self.world_sim3_cam
+        pinhole = rr.Pinhole(focal_length=focal, principal_point=(w / 2, h / 2), width=w, height=h, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=image_plane)
+        return [Log(path, rr.Transform3D(translation=pose[:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))), Log(f"{path}/pinhole", pinhole)]
+
+    def images(self, image: str, maps: str) -> list[Log]:
+        """The image (JPEG) at ``image``; at ``maps``/ the point map as colour, its confident depth in mm and the confidence."""
+        points: Float32[ndarray, "h w 3"] = np.nan_to_num(self.points, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_m: Float32[ndarray, "h w"] = np.where(self.confidence > CONFIDENT, np.maximum(points[..., 2], 0.0), 0.0)
+        return [
+            Log(image, rr.Image(self.rgb, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75)),
+            Log(f"{maps}/pointmap", rr.Image(_gray(points), color_model=rr.ColorModel.RGB).compress()),
+            Log(f"{maps}/pointmap_depth", rr.DepthImage(np.clip(depth_m * 1000.0, 0.0, 65535.0).astype(np.uint16), meter=1000.0).compress()),
+            Log(f"{maps}/confidence", rr.Image(_gray(self.confidence), color_model=rr.ColorModel.L).compress()),
+        ]
+
+
+@dataclass(frozen=True, slots=True)
+class FrameView(Drawing):
+    """The current frame and the last keyframe, whose point map the tracker refines with every frame (viewer only)."""
+
+    current: CameraView
+    last_keyframe: CameraView | None
+
+    def to_rerun(self, root: str) -> list[Log]:
+        """``current_camera``: pose, frustum (image plane 0.4), image and maps; ``last_keyframe``: image and maps."""
+        camera: str = f"{root}/current_camera"
+        logs: list[Log] = [*self.current.frustum(camera, 0.4), *self.current.images(f"{camera}/pinhole/image", f"{camera}/pinhole")]
+        return logs + (self.last_keyframe.images(f"{root}/last_keyframe", f"{root}/last_keyframe") if self.last_keyframe is not None else [])
+
+
+@dataclass(frozen=True, slots=True)
+class KeyframeView(Drawing):
+    """A new keyframe (viewer only): its frustum with its image and maps, and its confident points, coloured."""
+
+    keyframe: CameraView
+
+    def to_rerun(self, root: str) -> list[Log]:
+        """``keyframe-<index>``: pose, frustum (image plane 0.2), image, maps and ``pointcloud`` at the keyframe's Sim3 scale
+        (the pose above it is rigid)."""
+        kf: CameraView = self.keyframe
+        path: str = f"{root}/keyframe-{kf.index}"
+        keep: Bool[ndarray, "h w"] = kf.confidence > CONFIDENT
+        cloud = rr.Points3D(kf.points[keep], colors=kf.rgb[keep])
+        return [*kf.frustum(path, 0.2), *kf.images(f"{path}/pinhole/image", f"{path}/pinhole"), Log(f"{path}/pointcloud", rr.Transform3D(scale=float(kf.world_sim3_cam[7]))), Log(f"{path}/pointcloud", cloud)]

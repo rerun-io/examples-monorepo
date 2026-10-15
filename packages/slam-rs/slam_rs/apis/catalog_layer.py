@@ -56,6 +56,8 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     yield graph
     if publish.published is not None:
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
+        if config.register != "off" and config.segment.window_ns is None:  # where to look at the registered layer, as the old tool ended
+            print(config.segment.entry().segment_url(config.segment.segment))
 
 
 def main(config: Config) -> RunReport:

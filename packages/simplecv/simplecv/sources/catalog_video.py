@@ -13,6 +13,7 @@ import av
 import cv2
 import numpy as np
 import pyarrow as pa
+import rerun as rr
 import torch
 from dagkit.catalog import read_column
 from dagkit.node import Event, Fenced, PortType, Source
@@ -77,6 +78,21 @@ class SegmentFrames:
         self._packets.clear()
 
 
+def log_segment_videos(recording: rr.RecordingStream, segment: SegmentRef, entities: Mapping[str, str]) -> None:
+    """Copy cameras' encoded videos from the catalog into ``recording`` (camera -> entity) on the segment's timeline as a
+    duration, without re-encoding: what a viewer of the segment plays. A window starts at the keyframe before it (up to
+    ``KEYFRAME_LEAD_NS`` earlier), so its first frames decode."""
+    window: tuple[int, int] | None = None if segment.window_ns is None else (segment.window_ns[0] - KEYFRAME_LEAD_NS, segment.window_ns[1])
+    videos = read_catalog_videos(segment.entry(), segment.segment, [f"/world/{camera}/pinhole/video" for camera in entities], segment.timeline, window)
+    for entity, video in zip(entities.values(), videos, strict=True):
+        t_ns: Int64[ndarray, " n"] = video.t_ns
+        start: int = 0 if segment.window_ns is None else max((i for i, key in enumerate(video.keyframes) if key and t_ns[i] <= segment.window_ns[0]), default=0)
+        codec = {"av1": rr.VideoCodec.AV1, "h264": rr.VideoCodec.H264, "hevc": rr.VideoCodec.H265}[video.codec]
+        recording.log(entity, rr.VideoStream(codec=codec), static=True)
+        samples = rr.VideoStream.columns(sample=video.samples[start:], is_keyframe=video.keyframes[start:])
+        recording.send_columns(entity, indexes=[rr.TimeColumn(segment.timeline, duration=t_ns[start:].astype("timedelta64[ns]"))], columns=samples)
+
+
 def luma_planes(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w"]]:
     """A camera's frames in order as libavcodec's raw Y plane, a view that keeps the decoded frame alive (no copy). No range
     conversion: full-range luma the stream leaves unlabelled stays as recorded (``gray8`` would stretch it 255/219, clip at 235)."""
@@ -91,7 +107,7 @@ def luma_planes(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w"]]:
 
 
 def sample_indices(
-    times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int | tuple[int, ...], window_ns: tuple[int, int] | None, stride: int = 1
+    times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int | tuple[int, ...], window_ns: tuple[int, ...] | None, stride: int = 1
 ) -> Int64[ndarray, " t"]:
     """Sample indices of a stream: all, a budget spread evenly (rounded linspace), or explicit indices; inside ``window_ns``
     when set, and from every ``stride``-th frame of it (whole strides only: ``m // stride`` frames, as a decoder reading
@@ -203,7 +219,7 @@ class VideoSource:
         cameras: tuple[str, ...],
         statics: Source,
         *,
-        window_ns: tuple[int, int] | None = None,
+        window_ns: tuple[int, ...] | None = None,
         fenced: bool = False,
         sample: Literal["all"] | int | tuple[int, ...] = "all",
         stride: int = 1,

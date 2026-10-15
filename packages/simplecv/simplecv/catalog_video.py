@@ -75,7 +75,7 @@ def catalog_codec(column: pa.ChunkedArray, where: str) -> CatalogCodecName:
 
 
 def read_catalog_videos(
-    dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str, window_ns: tuple[int, int] | None = None
+    dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str, window_ns: tuple[int, ...] | None = None
 ) -> tuple[CatalogVideo, ...]:
     """Read all requested cameras in one materialization, preserving their individual sample times.
 

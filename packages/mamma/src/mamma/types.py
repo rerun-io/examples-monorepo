@@ -19,11 +19,41 @@ from jaxtyping import Bool, Float32, Int32, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from serde import serde
+from simplecv.rerun_custom_types import confidence_scores_to_rgb
 from torch import Tensor
 
-PERSON_RGB: tuple[int, int, int] = (255, 140, 0)
-"""Predicted masks, landmarks and meshes (the GT layers draw in their own colours)."""
-MESH_ALBEDO: tuple[float, float, float, float] = (1.0, 0.55, 0.0, 0.8)
+PALETTE: tuple[tuple[int, int, int], ...] = ((230, 110, 80), (90, 160, 230), (120, 200, 120), (220, 180, 80), (180, 120, 220), (90, 200, 200), (230, 140, 180), (160, 160, 160))
+"""Predicted persons' colours (masks, 3D landmarks, meshes; boxes and joints through ``person_classes``), by person id modulo."""
+MESH_ALPHA: float = 0.65
+"""The cloud and joints stay visible through the mesh."""
+SMPLX_PARENTS: tuple[int, ...] = (
+    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 15, 15, 15, 20, 25, 26, 20, 28, 29, 20, 31, 32, 20, 34, 35, 20, 37, 38,
+    21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52, 53,
+)  # fmt: skip
+"""SMPL-X kinematic tree (55 joints: body 0-21, jaw, eyes, left hand 25-39, right hand 40-54); joints 55+ have no bones."""
+SMPLX_JOINT_NAMES: tuple[str, ...] = (
+    "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee", "spine2", "left_ankle", "right_ankle", "spine3", "left_foot",
+    "right_foot", "neck", "left_collar", "right_collar", "head", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist",
+    "right_wrist", "jaw", "left_eye", "right_eye",
+)  # fmt: skip
+SMPLX_JOINTS: int = 127
+"""``FitResult.joints``: the 55 tree joints and the regressed face and foot landmarks."""
+
+
+def person_rgb(person: int) -> tuple[int, int, int]:
+    return PALETTE[person % len(PALETTE)]
+
+
+def person_classes() -> rr.AnnotationContext:
+    """The viewer's classes (static at ``/world``): id 0 a transparent background, id ``p + 1`` person ``p`` in its colour with
+    the SMPL-X joints as its keypoints and the tree's bones as their connections."""
+    keypoints: list[rr.AnnotationInfo] = [rr.AnnotationInfo(id=j, label=SMPLX_JOINT_NAMES[j] if j < len(SMPLX_JOINT_NAMES) else f"j{j}") for j in range(SMPLX_JOINTS)]
+    bones: list[tuple[int, int]] = [(parent, joint) for joint, parent in enumerate(SMPLX_PARENTS) if parent >= 0]
+    persons: list[rr.ClassDescription] = [
+        rr.ClassDescription(info=rr.AnnotationInfo(id=p + 1, label=f"person_{p:02d}", color=rgb), keypoint_annotations=keypoints, keypoint_connections=bones)
+        for p, rgb in enumerate(PALETTE)
+    ]
+    return rr.AnnotationContext([rr.ClassDescription(info=rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0))), *persons])
 
 
 def _person(path: str) -> int:
@@ -78,13 +108,14 @@ class MultiViewTracks:
             rows: Int64[ndarray, " r"] = np.flatnonzero(self.view == v)
             for row in rows.tolist():
                 image: Image.Image = Image.fromarray(masks[row].astype(np.uint8), mode="P")
-                image.putpalette([0, 0, 0, *PERSON_RGB])
+                image.putpalette([0, 0, 0, *person_rgb(int(self.person[row]))])
                 png = io.BytesIO()
                 image.save(png, format="PNG", transparency=0)
                 path: str = f"{root}/{view}/pinhole/mamma/masks/person_{self.person[row]:02d}"
                 logs.append(Log(path, rr.EncodedImage(contents=png.getvalue(), media_type="image/png", opacity=0.5, draw_order=11.0)))
             persons: str = f"{root}/{view}/pinhole/mamma/persons"
-            logs.append(Log(persons, rr.Boxes2D(array=self.boxes_xyxy[rows], array_format=rr.Box2DFormat.XYXY, class_ids=self.person[rows] + 1)))
+            boxes = rr.Boxes2D(array=self.boxes_xyxy[rows], array_format=rr.Box2DFormat.XYXY, class_ids=self.person[rows] + 1, show_labels=False)  # the viewer
+            logs.append(Log(persons, boxes))  # would place a class label without the scale above
             values = rr.AnyValues(person=self.person[rows], score=self.scores[rows], frame_index=self.frame_index, mask_hw=list(self.masks.shape[1:]))
             logs.append(Log(persons, values))
         return logs
@@ -151,7 +182,7 @@ class MultiViewLandmarks:
         logs += [Log(f"{root}/{view}/pinhole/mamma/landmarks", rr.AnyValues(frame_index=self.frame_index)) for view in self.views]
         for row in range(self.view.size):
             path: str = f"{root}/{self.views[self.view[row]]}/pinhole/mamma/landmarks/person_{self.person[row]:02d}"
-            colors: Int64[ndarray, "n 3"] = np.where(visibility[row][:, None] > 0.5, np.asarray(PERSON_RGB), 90)
+            colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(visibility[row][None, :, None])[0]  # red -> yellow -> green
             logs.append(Log(path, rr.Points2D(xy[row], radii=1.5, colors=colors)))
             values = rr.AnyValues(log_variance=log_variance[row], visibility=visibility[row], floor_contact=floor_contact[row])
             logs.append(Log(path, values))
@@ -236,9 +267,12 @@ class BodyTopology:
 
     def to_rerun(self, root: str) -> list[Log]:
         """Static per person: the source tag on the person node (as the GT people carry ``mosh_gt``) and the mesh topology."""
-        mesh = rr.Mesh3D.from_fields(triangle_indices=self.faces, albedo_factor=MESH_ALBEDO)
-        source = rr.AnyValues(source="mamma_pred")
-        return [Log(f"{root}/person_{p:02d}{path}", data, static=True) for p in self.persons for path, data in (("", source), ("/body/mesh", mesh))]
+        logs: list[Log] = []
+        for p in self.persons:
+            albedo: list[float] = [c / 255.0 for c in person_rgb(p)] + [MESH_ALPHA]
+            logs.append(Log(f"{root}/person_{p:02d}", rr.AnyValues(source="mamma_pred"), static=True))
+            logs.append(Log(f"{root}/person_{p:02d}/body/mesh", rr.Mesh3D.from_fields(triangle_indices=self.faces, albedo_factor=albedo), static=True))
+        return logs
 
     @classmethod
     def contents(cls, root: str) -> list[str]:
@@ -265,7 +299,7 @@ class Landmarks3d:
     def to_rerun(self, root: str) -> list[Log]:
         logs: list[Log] = []
         for i, person in enumerate(self.persons):
-            logs.append(Log(f"{root}/person_{person:02d}/landmarks3d", rr.Points3D(self.points[i][self.valid[i]], radii=0.008, colors=PERSON_RGB)))
+            logs.append(Log(f"{root}/person_{person:02d}/landmarks3d", rr.Points3D(self.points[i][self.valid[i]], radii=0.008, colors=person_rgb(person))))
             logs.append(Log(f"{root}/person_{person:02d}/landmarks3d", rr.AnyValues(valid=self.valid[i], frame_index=self.frame_index)))
         return logs
 
@@ -286,3 +320,70 @@ class Landmarks3d:
             for i, path in enumerate(present):
                 points[i][valid[i]] = np.asarray(columns[path]["Points3D:positions"][row] or [], dtype=np.float32).reshape(-1, 3)
             yield t_ns, cls(int(columns[present[0]]["frame_index"][row][0]), tuple(_person(p) for p in present), points, valid)
+
+
+class Drawing:
+    """Base of the viewer's values: drawn, never resumed (a run derives them again)."""
+
+    __slots__ = ()
+
+    @classmethod
+    def contents(cls, root: str) -> list[str]:
+        raise NotImplementedError(f"{cls.__name__} is drawn, not resumed")
+
+    @classmethod
+    def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "Drawing"]]:
+        raise NotImplementedError(f"{cls.__name__} is drawn, not resumed")
+
+
+@dataclass(frozen=True, slots=True)
+class FitView(Drawing):
+    """A released fit as the viewer draws it: the ``mamma_fit`` layer's mesh and parameters, shaded by vertex normals, with
+    the 127 SMPL-X joints as keypoints of the person's class."""
+
+    fits: SmplxFits
+    faces: Int32[ndarray, "f 3"]
+    joints: Float32[ndarray, "p j 3"]
+
+    def to_rerun(self, root: str) -> list[Log]:
+        logs: list[Log] = self.fits.to_rerun(root)
+        for i, person in enumerate(self.fits.persons):
+            corners: Float32[ndarray, "f 3 3"] = self.fits.vertices[i][self.faces]
+            face_normals: Float32[ndarray, "f 3"] = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])  # length = twice the area
+            normals: Float32[ndarray, "v 3"] = np.zeros_like(self.fits.vertices[i])
+            for k in range(3):
+                np.add.at(normals, self.faces[:, k], face_normals)
+            normals /= np.clip(np.linalg.norm(normals, axis=1, keepdims=True), 1e-8, None)
+            path: str = f"{root}/person_{person:02d}"
+            logs.append(Log(f"{path}/body/mesh", rr.Mesh3D.from_fields(vertex_normals=normals)))
+            logs.append(Log(f"{path}/joints", rr.Points3D(self.joints[i], radii=0.012, class_ids=person + 1, keypoint_ids=np.arange(len(self.joints[i])))))
+        return logs
+
+
+@dataclass(frozen=True, slots=True)
+class FitParams(Drawing):
+    """A released fit's root translation and shape per person, as plots."""
+
+    fits: SmplxFits
+
+    def to_rerun(self, root: str) -> list[Log]:
+        logs: list[Log] = []
+        for i, person in enumerate(self.fits.persons):
+            logs += [Log(f"{root}/person_{person:02d}/trans", rr.Scalars(self.fits.trans[i])), Log(f"{root}/person_{person:02d}/betas", rr.BarChart(self.fits.betas[i]))]
+        return logs
+
+
+@dataclass(frozen=True, slots=True)
+class FitHealth(Drawing):
+    """Each person's valid triangulated anchors and floor-contact landmarks at one tick."""
+
+    persons: tuple[int, ...]
+    valid_anchors: Int64[ndarray, " p"]
+    floor_contacts: Int64[ndarray, " p"]
+
+    def to_rerun(self, root: str) -> list[Log]:
+        return [
+            Log(f"{root}/person_{person:02d}/{name}", rr.Scalars(float(values[i])))
+            for i, person in enumerate(self.persons)
+            for name, values in (("valid_anchors", self.valid_anchors), ("floor_contacts", self.floor_contacts))
+        ]

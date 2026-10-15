@@ -362,8 +362,8 @@ def guide(doc: GraphDoc, *, links: bool = True, health: bool = False) -> str:
 def log_graph(
     recording: rr.RecordingStream, graph: Graph, *, drawn: Mapping[str, Mapping[str, Collection[str]]] | None = None, health: bool = False
 ) -> tuple[list[str], list[Rgb]]:
-    """Picture, guide and GraphDoc JSON (static); base colours at t=0 on wall_time and the graph clock (never static: run
-    health recolours on wall_time). Returns the item ids and their base colours."""
+    """Picture, guide and GraphDoc JSON (static); base colours at t=0 on wall_time (never static: run health recolours on
+    wall_time; the runner logs them on the graph clock at its first source time). Returns the item ids and their base colours."""
     doc: GraphDoc = describe(graph, drawn)
     items, edges = picture(doc)
     root: str = GRAPH_ROOT + graph.name
@@ -373,8 +373,7 @@ def log_graph(
         return [], []
     nodes = rr.GraphNodes([i.id for i in items], labels=[i.label for i in items], positions=[(i.x, i.y) for i in items])
     recording.log(root, nodes, rr.GraphEdges(edges, graph_type="directed"), rr.AnyValues(does=[i.does for i in items], edges=[i.edges for i in items]), static=True)
-    for timeline in {"wall_time", *(getattr(s.obj, "clock", "wall_time") for s in graph.nodes.values() if s.kind == "source")}:
-        recording.set_time(timeline, duration=0.0)
+    recording.set_time("wall_time", duration=0.0)
     recording.log(root, rr.GraphNodes.from_fields(colors=[i.color for i in items]))
     recording.reset_time()
     return [i.id for i in items], [i.color for i in items]

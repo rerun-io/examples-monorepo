@@ -52,7 +52,7 @@ def test_capture_graph_validates_and_the_runners_agree() -> None:
     threaded = sorted(keep.items, key=lambda item: (item[0], item[1]))
     np.testing.assert_equal(threaded, sequential)
     counts: dict[str, int] = {port: sum(p == port for p, _, _ in sequential) for port in PORTS}
-    assert counts == {"tracks": 16, "landmarks": 16, "fit": 16, "kp3d": 16, "topology": 1}
+    assert counts == {"rig": 1, "tracks": 16, "landmarks": 16, "fit": 16, "kp3d": 16, "topology": 1, "view": 16, "params": 16, "health": 16}
 
 
 @pytest.mark.parametrize("tracks_queue", [TRACKS_QUEUE, 8])

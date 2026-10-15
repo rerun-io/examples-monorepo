@@ -7,6 +7,7 @@ skeleton under each camera's ``pinhole/exocalib_kp2d*``, kp3d tracks at ``/world
 alignment at ``/world/exocalib_error``. Since the port the queryable kp2d record sits at ``/world/exocalib/kp2d/<cam>``.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -38,13 +39,14 @@ def examples() -> list[Config]:
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The App's graphs (``apis/calibrate.py``, lossless, threaded) for ``case_config``: every final output goes into ``recording``.
+    """The App's graphs (``apis/calibrate.py``, lossless, threaded) for ``case_config``: every final output goes into ``recording``
+    (``draw="outputs"``: not the segment's video and cameras).
 
     Nothing is registered and no file is written, so the shared catalog is only read. ``phase`` does not change what runs.
     """
     if case.window_s is not None:  # fail closed: Stage A calibrates from Config.frame_index, which a window may exclude
         raise ValueError(f"case {case.name!r}: exo-calib does not run windowed cases (window_s); use frame_budget for a short clip")
-    run_graphs(case_config(case), build, recording)
+    run_graphs(replace(case_config(case), draw="outputs"), build, recording)
     print(f"{case.name} {phase}: graph outputs written into the golden")
 
 

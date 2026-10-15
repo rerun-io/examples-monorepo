@@ -77,7 +77,7 @@ def blueprint(config: Config, graph: Graph) -> rrb.Blueprint:
     """The normal view, 3D: splats and camera frusta (explicit image exclusions: filters have no mid-path wildcards) | 2D:
     input, depth, canvas, path; then the "pipeline (debug)" tab, whose output views carry the graph's step numbers."""
     cameras: list[str] = ["input", "outpaint", "render", *(f"view_{i:02d}" for i in range(2, config.n_frames))]
-    images: list[str] = [f"- /world/{camera}/pinhole/{image}" for camera in cameras for image in ("rgb", "depth", "valid", "supervise")]
+    images: list[str] = [f"- /world/{camera}/pinhole/{image}" for camera in cameras for image in ("rgb", "depth", "valid", "supervise", "spawn")]
     number: dict[str, int] = {n.name: n.number for n in describe(graph).nodes}
     final: str = "expand" if "expand" in graph.nodes else "init"
     node, what, origin = ("image", "input", "/world/input/pinhole/rgb") if config.stage == "no-outpaint" else ("outpaint", "canvas", "/world/outpaint/pinhole/rgb")

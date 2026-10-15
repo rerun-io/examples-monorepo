@@ -5,6 +5,8 @@ tab; a windowed run's hands reach the viewer."""
 import dataclasses
 import functools
 import itertools
+import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
@@ -14,10 +16,12 @@ import rerun as rr
 import rerun.blueprint as rrb
 from dagkit.graph import Graph
 from dagkit.node import Event
+from dagkit.runners import RunReport
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import check_form, check_graph_docs, check_picture
 from dagkit.time import STATIC
 from rerun.chunk import RrdReader
+from serde import from_dict
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.frames import LumaFrameset
 from slam_rs.nodes.vio import VioParams
@@ -27,10 +31,10 @@ from slam_rs.types import CatalogPoses
 from test_nodes import SEGMENT, T0, cap_rig, framesets, no_nets, poses  # pyrefly: ignore[missing-module-attribute]
 
 from robocap_live.apis import hands_layer as app
-from robocap_live.apis.hands_layer import Config, blueprint, build, examples, main
+from robocap_live.apis.hands_layer import Cli, Config, blueprint, build, examples, main
 from robocap_live.graphs import hands_layer
 from robocap_live.nodes.hands import HandsNode, HandsParams
-from robocap_live.types import CapRig
+from robocap_live.types import CapRig, LayerRun
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 
@@ -141,3 +145,40 @@ def test_the_examples_are_the_verify_short_cases_never_registered() -> None:
         assert (example.register, example.hands.device, example.hands.ort_threads, example.hands.overlays) == ("off", "cpu", 4, "debug")
         assert (example.hands.models_dir / "detnet_full.onnx").parent == PACKAGE_DIR / "models"
     assert examples()[0].vio == VioParams("fast", "cpu", "cpu")
+
+
+def test_a_cli_run_prints_its_timings_and_writes_them_as_json_as_the_old_tool_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Main's tool ended with a table of its timings (seconds and ms per frameset, then the frameset rates) and ``--timing-json``
+    saved them. The CLI does both again: the core's stage totals come from the hands run (LayerRun), the step totals and the
+    wall from the hands graph's RunReport (push = the hands step, register = the publish step)."""
+    fake_inputs(monkeypatch, 5)
+    saved: Path = tmp_path / "timing.json"
+    config = Cli(RerunTyroConfig(headless=True, save=tmp_path / "app.rrd"), SEGMENT, tmp_path, HandsParams(tmp_path), "catalog", register="off", timing_json=saved)
+    report = main(config)
+    printed: str = capsys.readouterr().out
+    rows = ("nets_load_s", "downsample_s", "hands_s", "detnet_s", "crops_s", "keynet_s", "fit_s", "tracker_s", "output_s", "loop_s", "finish_s",
+            "loop_wait_s", "push_wait_s", "register_s", "total_s")  # fmt: skip
+    for row in rows:
+        assert re.search(rf"^  {row} +-?\d+\.\d\d s +-?\d+\.\d\d ms/frameset$", printed, re.MULTILINE), f"no {row} row in {printed}"
+    assert re.search(r"^  \d+\.\d framesets/s in the loop, \d+\.\d end to end$", printed, re.MULTILINE)
+    timing = json.loads(saved.read_text())
+    assert from_dict(LayerRun, timing["run"]).framesets == 5 and from_dict(RunReport, timing["report"]) == report
+
+
+def test_a_registered_layer_prints_its_segment_url_as_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Main's tool ended with the segment's catalog URL, the place to look at the new layer; the App prints it once the
+    layer is registered (a windowed or unregistered run publishes nothing to look at)."""
+    from dagkit import sinks
+
+    class Entry:
+        def segment_url(self, segment: str) -> str:
+            return f"rerun+http://catalog/dataset/robocap?segment_id={segment}"
+
+    fake_inputs(monkeypatch, 5)
+    monkeypatch.setattr(sinks, "segment_layers", lambda segment: ["base", "slam_rs"])
+    monkeypatch.setattr(sinks, "publish_layer_file", lambda partial, *_, **__: partial)  # registered, as far as the App knows
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: Entry())
+    main(Config(RerunTyroConfig(headless=True, save=tmp_path / "app.rrd"), SEGMENT, tmp_path, HandsParams(tmp_path), "catalog", register="new"))
+    assert capsys.readouterr().out.splitlines()[-1] == f"rerun+http://catalog/dataset/robocap?segment_id={SEGMENT.segment}"

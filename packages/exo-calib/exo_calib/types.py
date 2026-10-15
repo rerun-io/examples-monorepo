@@ -1,8 +1,9 @@
 """exo-calib edge values and their Rerun mapping (the rig itself is ``simplecv.types.rig.RigCameras``).
 
-Entity layout: rigs at ``/world/exocalib/{init,refined}/<rig>/<cam>``; the Stage B record at ``/world/exocalib/kp2d/<cam>``
-with its boxes and the gated skeleton drawn under each camera's ``pinhole/exocalib_kp2d*``; 3D keypoints at
-``/world/exocalib/kp3d_{init,refined}``; the GT alignment on the rig roots plus error lines at ``/world/exocalib_error``.
+Entity layout: rigs at ``/world/exocalib/{init,refined}/<rig>/<cam>`` (the Stage A scale on the init root); the Stage B
+record at ``/world/exocalib/kp2d/<cam>`` with its boxes, raw joints and the gated skeleton drawn under each camera's
+``pinhole/exocalib_kp2d*``; 3D keypoints at ``/world/exocalib/kp3d_{init,refined}``; the GT alignment on the rig roots
+plus error lines at ``/world/exocalib_error``, and whether there was GT at ``/world/exocalib_report``.
 """
 
 from collections.abc import Iterator
@@ -37,8 +38,9 @@ def pinhole_leaf(root: str, view: str) -> str:
 class Drawing:
     """Base of edge values that are drawn, never resumed (SPEC 2.6: only Types with ``from_layer`` resume).
 
-    Each one is derived from values that do resume (the kp2d record, the rigs), so a resume re-derives it; these two
-    methods complete dagkit's ``Type`` protocol for the sinks and refuse a read-back.
+    Each one is derived from values that do resume (the kp2d record, the rigs), so a resume re-derives it, or stays in the
+    layer a resume reads from (the Stage A scale); these two methods complete dagkit's ``Type`` protocol for the sinks and
+    refuse a read-back.
     """
 
     __slots__ = ()
@@ -60,6 +62,30 @@ class RigLayout:
     exo_camera_names: tuple[str, ...]
     ego_camera_names: tuple[str, ...]
     calibrated_camera_names: tuple[str, ...]
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class MetricScale(Drawing):
+    """Stage A's global metric scale: static ``AnyValues`` on the init rig entity."""
+
+    metric_scale: float
+    """Median over the views of MoGe-2 metric depth over G3T depth."""
+
+    def to_rerun(self, root: str) -> list[Log]:
+        return [Log(root, rr.AnyValues(metric_scale=np.array([self.metric_scale])), static=True)]
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class ReportStatus(Drawing):
+    """Whether Stage E had GT for every exo camera (without it, nothing is scored or aligned): static ``AnyValues``."""
+
+    ground_truth_available: bool
+    """False: an exo camera has no GT calibration in the segment (main's report logged only this case)."""
+
+    def to_rerun(self, root: str) -> list[Log]:
+        return [Log(root, rr.AnyValues(ground_truth_available=self.ground_truth_available), static=True)]
 
 
 @serde(deny_unknown_fields=True)
@@ -121,8 +147,9 @@ class MultiViewKeypoints:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Kp2dOverlay(Drawing):
-    """One camera's Stage B drawing at that camera's own sample time: the person box and crop rectangle, plus (on the
-    frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it."""
+    """One camera's Stage B drawing at that camera's own sample time: the person box (and its ``box_source``), the crop rectangle and the raw
+    joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated
+    skeleton with the raw joints the gate rejected beside it."""
 
     view: str
     bbox_xyxy: Float32[ndarray, "4"]
@@ -141,7 +168,9 @@ class Kp2dOverlay(Drawing):
         color: tuple[int, int, int] = (0, 200, 255) if self.box_source == "tracked" else OVERLAY_COLOR
         logs: list[Log] = [
             Log(f"{leaf}_bbox", rr.Boxes2D(array=box, array_format=rr.Box2DFormat.XYXY, colors=color, labels=[self.box_source] * len(box))),
+            Log(f"{leaf}_bbox", rr.AnyValues(box_source=self.box_source)),
             Log(f"{leaf}_crop", rr.Boxes2D(array=self.crop_xywh[None][: len(box)], array_format=rr.Box2DFormat.XYWH, colors=RAW_COLOR)),
+            Log(f"{leaf}_raw", Points2DWithConfidence(positions=self.raw_xy, confidences=self.raw_conf, class_ids=0, keypoint_ids=np.arange(133), radii=1.0)),
         ]
         if self.gated_xy is None or self.gated_conf is None or not np.isfinite(self.raw_xy).any():
             return logs

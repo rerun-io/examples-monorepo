@@ -1,8 +1,9 @@
 """exo-calib App: the ``init`` graph once, then the ``refine`` graph twice; the second pass also runs the report.
 
 Pass 1 tracks person boxes through the Stage A rig, pass 2 through the pass-1 refined rig (handed over in memory); both
-passes refine against the ORIGINAL Stage A rig. Outputs stream to the ``rr_config`` viewer; with ``output_dir`` they also
-become the catalog layers ``exocalib_{init,kp2d,refined,align}`` (pass 1: unregistered ``*_pass1`` files) plus ``eval.json``.
+passes refine against the ORIGINAL Stage A rig. Outputs stream to the ``rr_config`` viewer over the segment as its catalog
+view shows it (every camera's video and the dataset's cameras); with ``output_dir`` they also become the catalog layers
+``exocalib_{init,kp2d,refined,align}`` (pass 1: unregistered ``*_pass1`` files) plus ``eval.json``.
 ``--resume-from init|kp2d`` swaps the first refine graph's seed source: the stored layers (after a Producer check) instead
 of the previous graph's values in memory.
 ``build`` yields the graphs in order; the CLI (``main`` = ``run_app``) and the gradio app (``tools/apps/calibrate_gradio.py``)
@@ -13,17 +14,18 @@ import functools
 import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from dagkit.app import HardwareClass, detect_hardware, load_profile, run_app, with_pipeline
 from dagkit.catalog import read_producer
 from dagkit.graph import Graph
-from dagkit.node import Mode, Node, PortType, Source
+from dagkit.node import Mode, Node, PortType, RunContext, Source
 from dagkit.runners import RunReport
 from dagkit.sinks import Latest, LayerSink, Register, RerunSink
 from dagkit.sources import CatalogSegmentSource, Column, SegmentRef
@@ -32,7 +34,7 @@ from serde import serde
 from serde.json import to_json
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import SegmentFrames
+from simplecv.sources.catalog_video import SegmentFrames, log_segment_videos
 from simplecv.types.rig import RigCameras
 
 from exo_calib.apis.blueprint import exoego_view
@@ -47,11 +49,13 @@ from exo_calib.types import OVERLAY_COLOR, RAW_COLOR, VARIANT_COLOR, VARIANTS, E
 PROFILES: Path = Path(__file__).resolve().parents[2] / "profiles"
 PORT_TYPES: dict[str, PortType] = {**InitNode.outputs, **Kp2dNode.outputs, **RefineNode.outputs, **ReportNode.outputs}
 ROOTS: dict[str, str] = {
-    "init": "/world/exocalib/init", "kp2d": KP2D_ROOT, "kp2d_overlay": KP2D_ROOT, "refined": "/world/exocalib/refined",
-    "diag": "/world/exocalib/refined", "kp3d": "/world/exocalib/kp3d", "base_rig": "/world", "align": "/world",
+    "init": "/world/exocalib/init", "metric_scale": "/world/exocalib/init", "kp2d": KP2D_ROOT, "kp2d_overlay": KP2D_ROOT,
+    "refined": "/world/exocalib/refined", "diag": "/world/exocalib/refined", "kp3d": "/world/exocalib/kp3d", "base_rig": "/world", "align": "/world",
+    "status": "/world/exocalib_report",
 }  # fmt: skip
+INIT_LAYERS: dict[str, tuple[str, ...]] = {"exocalib_init": ("init", "metric_scale")}
 LAYERS: dict[str, tuple[str, ...]] = {
-    "exocalib_kp2d": ("kp2d",), "exocalib_refined": ("refined", "base_rig", "diag", "kp3d", "kp2d_overlay"), "exocalib_align": ("align",),
+    "exocalib_kp2d": ("kp2d",), "exocalib_refined": ("refined", "base_rig", "diag", "kp3d", "kp2d_overlay"), "exocalib_align": ("align", "status"),
 }  # fmt: skip
 PASS1_LAYERS: dict[str, tuple[str, ...]] = {"exocalib_kp2d_pass1": ("kp2d",), "exocalib_refined_pass1": ("refined", "diag", "kp3d", "kp2d_overlay")}
 
@@ -75,6 +79,9 @@ class Config:
     hardware: HardwareClass | Literal["auto"] = "auto"
     runner: Literal["sequential", "threaded"] = "threaded"
     mode: Mode = "lossless"
+    draw: Literal["all", "outputs"] = "all"
+    """What the viewer draws: all (the outputs over the segment as its catalog view shows it: every camera's video and the
+    dataset's cameras) or outputs (the graph outputs only: a small recording, what verify keeps)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -120,6 +127,7 @@ def log_style(recording: rr.RecordingStream, cameras: tuple[str, ...]) -> None:
             recording.log(f"/world/exocalib/{variant}/{camera}/pinhole", rr.Pinhole.from_fields(color=VARIANT_COLOR[variant]), static=True)
         overlay = f"/world/{camera}/pinhole/exocalib_kp2d"
         recording.log(overlay, rr.AnnotationContext([context(0, "rtmw-x kp2d", OVERLAY_COLOR, True)]), static=True)
+        recording.log(f"{overlay}_raw", rr.AnnotationContext([context(0, "rtmw-x kp2d raw", RAW_COLOR, False)]), static=True)
         recording.log(f"{overlay}_rejected", rr.AnnotationContext([context(0, "rtmw-x kp2d rejected", RAW_COLOR, False)]), static=True)
 
 
@@ -130,18 +138,51 @@ def check_producer(segment: SegmentRef, layer: str, producer: Producer) -> None:
         raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {producer}")
 
 
+def log_segment_cameras(recording: rr.RecordingStream, segment: SegmentRef, cameras: tuple[str, ...]) -> None:
+    """Copy the dataset's ``cameras`` from the catalog into ``recording`` as the segment's view shows them: the root (its
+    view coordinates), each rig and camera node and pinhole (static), and a worn rig's motion (its node's temporal pose)."""
+    dataset = segment.entry()  # the entry must outlive its queries
+    view = dataset.filter_segments([segment.segment])
+    rigs: list[str] = sorted({f"/world/{camera.split('/')[0]}" for camera in cameras})
+    nodes: pa.Table = view.filter_contents(["/", *rigs, *(f"/world/{c}{leaf}" for c in cameras for leaf in ("", "/pinhole"))]).reader(index=None).to_arrow_table()
+    recording.send_dataframe(nodes.select([name for name in nodes.column_names if name.startswith("/")]), index=None)  # no segment id, no null index
+    motion = view.filter_contents(rigs).reader(index=segment.timeline)
+    poses: list[str] = [name for name in motion.schema().names if ":Transform3D:" in name]
+    if poses:
+        recording.send_dataframe(motion.select(segment.timeline, *poses), index=segment.timeline)
+
+
+class SegmentViewer(RerunSink):
+    """Draw the segment and its inputs.
+
+    The App's first viewer (the init graph's; on a resume, the last refine graph's) draws the segment as its catalog view
+    shows it when its run starts: every camera's video under its pinhole and the dataset's cameras (``log_segment_cameras``).
+    Then, as ``RerunSink``, its inputs over them.
+    """
+
+    def __init__(self, recording: rr.RecordingStream, inputs: Mapping[str, PortType], roots: Mapping[str, str], segment: SegmentRef, cameras: tuple[str, ...]) -> None:
+        super().__init__(recording, inputs, roots, timeline=segment.timeline)
+        self.segment: SegmentRef = segment
+        self.cameras: tuple[str, ...] = cameras
+        """Cameras whose video and dataset pose it draws: none in a later graph's viewer (the App's first one drew them)."""
+
+    def reset(self, ctx: RunContext) -> None:
+        if self.cameras:
+            log_segment_videos(self.recording, self.segment, {camera: f"/world/{camera}/pinhole/video" for camera in self.cameras})
+            log_segment_cameras(self.recording, self.segment, self.cameras)
+
+
 def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
-    """The exoego layout of ``tools/apps/blueprint.py`` (without the ego panes, which a live run never fills; its 3D scene
-    leaves out the 2D overlays, which have no base pinhole to project through live), then the "pipeline (debug)" tab: the
-    ``graphs`` and their guides beside three output views the guide's links outline."""
+    """The catalog view's exoego layout (``tools/apps/blueprint.py``: the 3D scene, the ego cameras beside it, the exo cameras
+    below, panels collapsed), then the "pipeline (debug)" tab: the ``graphs`` and their guides beside three output views the
+    guide's links outline."""
     camera: str = layout.exo_camera_names[0]
-    scene: list[str] = ["/**", *(f"- /world/{name}/pinhole/**" for name in layout.exo_camera_names)]
     outputs: list[rrb.View] = [
         rrb.Spatial2DView(origin=f"/world/{camera}/pinhole", name=f"3 kp2d · keypoints {camera}"),
         rrb.Spatial3DView(origin="/world", contents="/world/exocalib/**", name="4 refine · rigs + 3D keypoints"),
         rrb.Spatial3DView(origin="/world", contents=["/world/exocalib_error/**", "/world/exocalib/refined/**"], name="6 report · error to GT"),
     ]
-    return with_pipeline(rrb.Blueprint(exoego_view(replace(layout, ego_camera_names=()), scene)), outputs, graphs=graphs)
+    return with_pipeline(rrb.Blueprint(exoego_view(layout), collapse_panels=True), outputs, graphs=graphs)
 
 
 def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
@@ -160,15 +201,18 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     models |= {name: functools.cache(models[name]) for name in ("moge", "detector", "pose")}  # loaded once: every graph shares them
     resolved: str = json.dumps([config.frame_index, config.frame_budget, cameras, params.batch_size, params.detection_score, segment.window_ns])
     print(f"segment {segment.segment}: exo cameras {list(cameras)}; profile {hardware}")
+    segment_view: tuple[str, ...] = (*cameras, *layout.ego_camera_names) if config.draw == "all" else ()
 
     def producer(graph: str) -> Producer:
         return Producer.of("exo-calib", graph, hardware, params_sha=hashlib.sha256(resolved.encode()).hexdigest()[:12])
 
     def sinks(graph: str, layers: Mapping[str, tuple[str, ...]], suffix: str = "", register: Register = config.register) -> dict[str, Node]:
+        nonlocal segment_view
         ports: list[str] = [port for layer_ports in layers.values() for port in layer_ports]
         out: dict[str, Node] = {}
         if not suffix:
-            out["viewer"] = RerunSink(recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, timeline=segment.timeline)
+            out["viewer"] = SegmentViewer(recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, segment, segment_view)
+            segment_view = ()  # the App's first viewer draws the segment
         if config.output_dir is None:
             return out
         for layer, layer_ports in layers.items():
@@ -183,7 +227,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     seed: Source
     if config.resume_from is None:
         keep = Latest({"init": RigCameras})
-        yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
+        yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", INIT_LAYERS)})
         if "init" not in keep.values:
             return
         torch.cuda.empty_cache()  # Stage A's G3T (freed with its graph) back to the driver, for the refine passes' engines

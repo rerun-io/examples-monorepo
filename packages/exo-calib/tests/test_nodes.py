@@ -16,7 +16,7 @@ from exo_calib.apis.calibrate import PORT_TYPES, ROOTS
 from exo_calib.nodes.kp2d import Kp2dNode
 from exo_calib.nodes.refine import OVERLAY_LOG_STRIDE, RefineNode
 from exo_calib.nodes.report import ReportNode
-from exo_calib.types import BaseCalibration, EvalReport, Kp2dOverlay, MultiViewKeypoints, RigLayout
+from exo_calib.types import BaseCalibration, EvalReport, Kp2dOverlay, MultiViewKeypoints, RefinementDiagnostics, ReportStatus, RigLayout
 
 FRAMES: range = range(0, 48, 4)
 
@@ -67,6 +67,18 @@ def test_refine_is_deterministic_and_keeps_an_exact_rig_and_report_scores_it() -
     assert report["eval"].refined.se3.translation_cm.max < 0.5 and report["eval"].refined.focal_error_pct.max_abs < 1e-3
     geometry = json.loads(to_json(report["eval"]))["refined_rig_geometry"]  # the eval.json schema of the stage mains
     assert geometry["height_above_floor_m"] == [center[2] for center in geometry["camera_centers_m"]] and len(geometry["pairwise_distance_m"]) == 4
+
+
+def test_without_gt_for_every_camera_the_report_says_so_and_aligns_nothing() -> None:
+    """main's align layer on data without GT: ``ground_truth_available=False`` and no alignment (with GT: True and the
+    alignment)."""
+    scene = FakeScene()
+    ctx = RunContext("exocalib-refine", "report", "lossless")
+    diag = RefinementDiagnostics(1.0, [0.5], [10, 10, 10, 10], 1.0, [1.0, 1.0, 1.0, 1.0])
+    inputs = {p: [Event(STATIC, p, v)] for p, v in (("refined", scene.rig), ("diag", diag), ("init", scene.rig), ("gt", scene.rig))}
+    for calibrated, expected in (((), {"eval": None, "status": ReportStatus(False)}), (scene.rig.names, {"eval": None, "status": ReportStatus(True), "align": None})):
+        report = {p: v for p, _, v in run_segment_node(ReportNode(scene.segment, RigLayout(scene.rig.names, (), calibrated)), inputs, ctx)}
+        assert report.keys() == expected.keys() and report["status"] == expected["status"]
 
 
 def test_refine_draws_each_camera_at_its_own_sample_time() -> None:

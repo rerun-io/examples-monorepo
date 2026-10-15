@@ -69,7 +69,7 @@ def test_cap_rig_refuses_a_lens_that_is_not_kannala_brandt_and_unknown_fields(ca
 @settings(max_examples=40, deadline=None)
 @given(
     counts=st.lists(st.integers(0, 10**6), min_size=7, max_size=7),
-    seconds=st.lists(st.floats(0.0, 1e4), min_size=7, max_size=7),
+    seconds=st.lists(st.floats(0.0, 1e4), min_size=11, max_size=11),
     final=st.booleans(),
 )
 def test_layer_run_is_static_numbers_that_read_back(counts: list[int], seconds: list[float], final: bool) -> None:

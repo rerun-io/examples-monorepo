@@ -81,11 +81,18 @@ class LayerRun:
     """Whether the live scale calibration finished."""
     nets_load_s: float
     """ONNX Runtime, the two sessions, the tracker, the layer file and the pipeline's threads."""
+    downsample_s: float
+    hands_s: float
+    """The hands stage's tracker steps; split below."""
     detnet_s: float
     crops_s: float
     keynet_s: float
     fit_s: float
     tracker_s: float
+    output_s: float
+    """The output stage: handing records to the layer writer (its worker writes beside the stages)."""
+    loop_s: float
+    """The frameset stream, wall: from the first push to the end of the stream."""
     finish_s: float
     """Draining the pipeline and closing the file."""
 

@@ -9,14 +9,14 @@ import rerun as rr
 import rerun.blueprint as rrb
 from dagkit.doc import describe
 from dagkit.graph import Graph
-from dagkit.sinks import LayerSink, RerunSink
+from dagkit.sinks import LayerSink
 from dagkit.testing import check_form, check_graph_docs, check_picture
 from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import VideoSource
 
 from mamma.apis.blueprint import default_blueprint
-from mamma.apis.capture import LAYER, PACKAGE_DIR, RING, Config, app_graph, build
+from mamma.apis.capture import LAYER, PACKAGE_DIR, RING, CaptureViewer, Config, app_graph, build
 from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
@@ -47,7 +47,7 @@ def test_the_app_graph_validates_reads_back_as_declared_and_documents_itself(tmp
     sink that would register checks the catalog when it is built)."""
     graph = app(Config(RerunTyroConfig(headless=True), output_dir=tmp_path, register="off"))
     graph.validate()
-    assert {name: type(spec.obj) for name, spec in graph.nodes.items() if name in ("viewer", LAYER)} == {"viewer": RerunSink, LAYER: LayerSink}
+    assert {name: type(spec.obj) for name, spec in graph.nodes.items() if name in ("viewer", LAYER)} == {"viewer": CaptureViewer, LAYER: LayerSink}
     check_picture(graph, tmp_path)
     check_graph_docs(graph, snapshot=PACKAGE_DIR / "GRAPH.md")
 

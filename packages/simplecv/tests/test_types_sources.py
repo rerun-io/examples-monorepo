@@ -285,3 +285,33 @@ def test_segment_frames_fetch_every_camera_in_one_read(monkeypatch: pytest.Monke
     np.testing.assert_array_equal(frames.times_ns(1), [0, 2, 4])
     np.testing.assert_array_equal(frames.times_ns(0), [0, 1, 2])
     assert reads == [["/world/rig_00/cam_00/pinhole/video", "/world/rig_01/cam_00/pinhole/video"]]
+
+
+def test_segment_videos_are_copied_from_the_keyframe_before_the_window(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
+    """The packets go into the recording as they are, on the segment's timeline as a duration, from the last keyframe at or
+    before the window's start (the window read starts KEYFRAME_LEAD_NS earlier to find it)."""
+    import rerun as rr
+
+    reads: list[tuple[list[str], object]] = []
+
+    def read(dataset: object, segment: str, entities: list[str], timeline: str, window_ns: object = None) -> tuple[CatalogVideo, ...]:
+        reads.append((entities, window_ns))
+        times = np.array([0, 10, 20, 30, 40], dtype=np.int64).astype("datetime64[ns]")  # a timestamp timeline (TUM's Unix time)
+        return (CatalogVideo(times, [np.full(2, i, np.uint8) for i in range(5)], [True, False, True, False, False], "av1"),)
+
+    monkeypatch.setattr(catalog_video, "read_catalog_videos", read)
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
+    recording = rr.RecordingStream("test", send_properties=False)
+    recording.save(tmp_path / "video.rrd")
+    catalog_video.log_segment_videos(recording, SegmentRef("d", "s", window_ns=(25, 45)), {"rig_00/cam_00": "/slam/camera/video"})
+    recording.disconnect()  # closes the file (its footer)
+    assert reads == [(["/world/rig_00/cam_00/pinhole/video"], (25 - catalog_video.KEYFRAME_LEAD_NS, 45))]
+    rows: dict[str, list] = {}
+    for chunk in rr.chunk.RrdReader(tmp_path / "video.rrd").store().stream().to_chunks():
+        if chunk.entity_path == "/slam/camera/video":
+            batch = chunk.to_record_batch()
+            rows |= {name: batch.column(name).to_pylist() for name in batch.schema.names if name in ("VideoStream:sample", "VideoStream:is_keyframe")}
+            rows["video_time"] = batch.column("video_time").cast(pa.int64()).to_pylist() if "video_time" in batch.schema.names else rows.get("video_time", [])
+    assert rows["video_time"] == [20, 30, 40]
+    assert [bytes(s[0]) for s in rows["VideoStream:sample"]] == [b"\x02\x02", b"\x03\x03", b"\x04\x04"]
+    assert rows["VideoStream:is_keyframe"] == [[True], [False], [False]]

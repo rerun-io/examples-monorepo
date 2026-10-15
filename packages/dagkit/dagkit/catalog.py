@@ -16,7 +16,7 @@ from dagkit.types import Producer, Type, static_row
 
 
 def read_column(
-    dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool, window_ns: tuple[int, int] | None = None
+    dataset: DatasetEntry, segment: str, value_type: type[Type], root: str, timeline: str, static: bool, window_ns: tuple[int, ...] | None = None
 ) -> pa.Table:
     """The rows ``value_type.from_layer`` reads, only ``window_ns`` [start, stop) of a temporal column."""
     view = dataset.filter_segments([segment]).filter_contents(value_type.contents(root))

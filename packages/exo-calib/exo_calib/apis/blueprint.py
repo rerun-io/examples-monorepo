@@ -4,16 +4,16 @@ Catalog datasets carry no layout of their own: the converters' base rrds embed a
 blueprint the catalog does not serve, and only the dataforge converters register a
 dataset default (a 2D grid for wildcap, whose bases have no calibration to place in
 3D). This stage registers the exoego layout — a 3D scene, the ego cameras tabbed
-beside it, the exo cameras as a strip below — plus the one visibility rule only a
-blueprint can express: an ego camera without calibration (no pose in any layer)
-stays out of the 3D scene. Everything else about how exocalib data looks — the init / refined
+beside it, the exo cameras as a strip below — plus the two visibility rules only a
+blueprint can express: Stage B's grey raw joints (``…_raw``) stay out of the 2D
+views, and an ego camera without calibration (no pose in any layer) stays out of
+the 3D scene. Everything else about how exocalib data looks — the init / refined
 frustum colours, class colours, radii — is logged with the data.
 
 Catalog partitions use the dataset id as their application id, and the id changes
 whenever the dataset is recreated, so rerun this tool after a dataset recreate.
 """
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,19 +42,23 @@ class BlueprintConfig:
     """Loop the whole timeline instead of parking on the last frame; for short standalone exports of a segment."""
 
 
-def exoego_view(layout: RigLayout, scene_contents: Sequence[str] = ("/**",)) -> rrb.Vertical:
+def exoego_view(layout: RigLayout) -> rrb.Vertical:
     """The exoego layout: a 3D scene, the ego cameras tabbed beside it (when there are any), the exo cameras as a strip below.
 
     Mirrors ``simplecv.apis.view_exoego.create_container`` (the base rrd's own
     blueprint, which the catalog does not serve). Not imported from simplecv
     because that module pulls in dataset configs with deps outside this env.
     """
-    exo_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in layout.exo_camera_names]
+    # Stage B's raw joints stay out of each exo camera's 2D view, where the gated skeleton is drawn over them.
+    exo_tabs: list[rrb.Tabs] = [
+        rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name, overrides={f"/world/{name}/pinhole/exocalib_kp2d_raw": rrb.EntityBehavior(visible=False)}))
+        for name in layout.exo_camera_names
+    ]
     ego_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in layout.ego_camera_names]
     scene = rrb.Spatial3DView(
         origin="/",
         name="3D View",
-        contents=list(scene_contents),
+        contents="/**",
         spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
         # An ego camera without dataset calibration has no pose in any layer, so keep it out of the 3D scene.
         overrides={f"/world/{name}/pinhole": rrb.EntityBehavior(visible=False) for name in layout.ego_camera_names if name not in layout.calibrated_camera_names},

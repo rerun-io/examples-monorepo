@@ -61,6 +61,27 @@ def test_init_spawns_one_gaussian_per_pixel_off_a_depth_edge() -> None:
     assert scene.views.input_index == 0 and len(scene.views.views) == 1
     assert len(scene.splats.centers) == (~depth_edges_mask(depth.depth, threshold=EDGE_THRESHOLD)).sum()
     np.testing.assert_array_equal(scene.views.input.rgb, IMAGE.rgb)
+    np.testing.assert_array_equal(scene.views.input.spawn, ~depth_edges_mask(depth.depth, threshold=EDGE_THRESHOLD))  # the mask main drew
+
+
+def test_each_training_view_carries_the_pixels_that_spawned_its_gaussians() -> None:
+    """Main drew every training view's ``inpaint_wo_edges_mask``: the input off the depth edges, the canvas and every added view
+    only where they are new (outpainted or a hole), valid and off an edge. The views carry it, and it is what spawned the splats."""
+    scene, depth = initialised(inpaint=True)
+    canvas, image = scene.views.views
+    edges = depth_edges_mask(depth.depth, threshold=EDGE_THRESHOLD)
+    assert canvas.supervise is not None and canvas.spawn is not None and image.spawn is not None
+    np.testing.assert_array_equal(canvas.spawn, canvas.supervise & ~edges & depth.valid)
+    node = ExpandNode(fake_inpaint, FakePredictor(), n_frames=3, iters=2, rasterize=fake_rasterize)
+    node.reset(RunContext("vistadream-single-image", "expand", "lossless"))
+    out = Recorder()
+    node.run({"scene": [Event(0, "scene", Fenced(scene, None))]}, out)
+    [(_, _, fenced)] = out.items
+    assert isinstance(fenced, Fenced) and isinstance(grown := fenced.value, Scene)
+    added = grown.views.views[2]
+    assert added.spawn is not None and added.supervise is not None and added.valid is not None and added.depth is not None
+    np.testing.assert_array_equal(added.spawn, added.supervise & ~depth_edges_mask(added.depth, threshold=EDGE_THRESHOLD) & added.valid)
+    assert len(grown.splats.centers) == sum(int(v.spawn.sum()) for v in grown.views.views if v.spawn is not None) and all(v.spawn is not None for v in grown.views.views)
 
 
 def test_init_with_outpainting_puts_the_canvas_first_and_centres_the_input_camera() -> None:
@@ -79,6 +100,7 @@ def test_render_emits_the_path_on_a_30_fps_clock_from_the_input_camera() -> None
     assert isinstance(first, CameraView)
     np.testing.assert_allclose(first.cam_T_world, np.eye(4), atol=1e-9)
     assert first.rgb.shape == (64, 96, 3) and first.rgb.dtype == np.uint8
+    assert first.depth is not None and first.depth.shape == (64, 96) and (first.depth == 1.0).all()  # each step's render depth, as main drew it
 
 
 def test_expand_adds_inpainted_views_and_keeps_the_old_gaussians() -> None:

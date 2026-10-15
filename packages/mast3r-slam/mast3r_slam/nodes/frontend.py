@@ -19,7 +19,7 @@ from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
 from mast3r_slam.ops.image import ResizedImage, RgbNormalized, frame_intrinsics, resize_img
 from mast3r_slam.ops.pointmap import update_pointmap
-from mast3r_slam.types import BackendTask, Frame, KeyframeAdded, Mode, RelocRequest, SlamConfig, TrackedFrame
+from mast3r_slam.types import BackendTask, CameraView, Frame, FrameView, KeyframeAdded, Mode, RelocRequest, SlamConfig, TrackedFrame
 
 
 def create_frame(frame_id: int, rgb: RgbNormalized, world_sim3_cam: lietorch.Sim3, img_size: Literal[224, 512], device: str) -> Frame:
@@ -40,14 +40,15 @@ class Frontend:
     acknowledged every task it handed over, so every frame sees one fixed map. Realtime: lost frames that arrive before
     the backend acknowledged the relocalisation request are skipped, so the one shared current frame stays the requested
     one. A frame's ``tracked`` pose leaves after that wait, when the backend's relocalisation verdict is known (hence
-    ``emits_late``). ``abort`` ends a wait when the run fails.
+    ``emits_late``). ``abort`` ends a wait when the run fails. With ``views`` each frame also leaves on ``view`` as the
+    viewer draws it (host copies of the frame and of the last keyframe; made only when a sink takes them).
     """
 
-    outputs: Mapping[str, PortType] = {"tracked": TrackedFrame, "task": BackendTask}
+    outputs: Mapping[str, PortType] = {"tracked": TrackedFrame, "task": BackendTask, "view": FrameView}
     emits_late: bool = True
 
-    def __init__(self, params: SlamConfig, device: str = "cuda:0") -> None:
-        self.params, self.device = params, device
+    def __init__(self, params: SlamConfig, device: str = "cuda:0", *, views: bool = False) -> None:
+        self.params, self.device, self.views = params, device, views
         self.inputs: dict[str, PortType] = {"frames": MultiViewFrames} | ({"rig": RigCameras} if params.use_calib else {})
         self.held: tuple[int, int] | None = None
         """(time, frame index) of the frame whose tracked verdict waits for the backend."""
@@ -125,6 +126,9 @@ class Frontend:
                 self.reloc_task = self.issued
         else:
             raise RuntimeError(f"frontend stepped in mode {mode}")
+        if self.views:
+            last: Frame | None = self.shared.keyframes.last_keyframe()
+            out.put("view", tick.t_ns, FrameView(CameraView.of(frame, frames.frame_index), CameraView.of(last, len(self.shared.keyframes) - 1) if last is not None else None))
         self.held = (tick.t_ns, frames.frame_index)
 
     def flush(self, out: Emit) -> None:

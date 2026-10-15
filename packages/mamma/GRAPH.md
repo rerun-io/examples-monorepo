@@ -17,7 +17,7 @@ The STATIC values of ``statics`` first, then RGB framesets: every camera's frame
 | gives | type | to |
 |---|---|---|
 | **frames** | `MultiViewFrames` (GPU) | 2 track |
-| **rig** | `RigCameras` | 2 track, 4 fit |
+| **rig** | `RigCameras` | 2 track, 4 fit, 5 viewer |
 
 ## 2 · track: Track every person in every view
 *runs once per item* · `TrackNode` · `packages/mamma/src/mamma/nodes/track.py`
@@ -67,9 +67,12 @@ Triangulates every person's landmarks across the views, then fits SMPL-X over a 
 
 | gives | type | to |
 |---|---|---|
-| **fit** | `SmplxFits` | 5 viewer, 6 mamma_fit |
+| **fit** | `SmplxFits` | 6 mamma_fit |
 | **kp3d** | `Landmarks3d` | 5 viewer, 6 mamma_fit |
 | **topology** | `BodyTopology` | 5 viewer, 6 mamma_fit |
+| **view** | `FitView` | 5 viewer |
+| **params** | `FitParams` | 5 viewer |
+| **health** | `FitHealth` | 5 viewer |
 
 Settings:
 - `window_size`: Frames kept in the optimization window
@@ -79,10 +82,12 @@ Settings:
 - `fit_stride`: Optimize every Nth tick; skipped ticks emit the warm-started forward of the previous solution (observations still enter the window)
 - +16 more
 
-## 5 · viewer: Draw its inputs in the viewer
-*output* · `RerunSink` · `packages/dagkit/dagkit/sinks.py`
+## 5 · viewer: Draw the rig, its videos and the bodies
+*output* · `CaptureViewer` · `packages/mamma/src/mamma/apis/capture.py`
 
-Takes **tracks** from 2 track; **landmarks** from 3 landmarks; **fit, kp3d, topology** from 4 fit.
+Every input through its Type's Rerun mapping, plus the static scene: a z-up world, the person classes and a ground quad under the rig. When the run starts it logs the cameras' videos (a segment's are copied from the catalog, a capture directory's files are referenced), so the camera views play under the overlays.
+
+Takes **rig** from 1 video; **tracks** from 2 track; **landmarks** from 3 landmarks; **kp3d, topology, view, params, health** from 4 fit.
 
 ## 6 · mamma_fit: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
@@ -93,6 +98,9 @@ Saves **tracks** from 2 track; **fit, kp3d, topology** from 4 fit into the catal
 | type | what it is | code |
 |---|---|---|
 | `BodyTopology` | The SMPL-X triangle list, sent once per person when its fit starts (the fits carry only vertices) | `packages/mamma/src/mamma/types.py` |
+| `FitHealth` | Each person's valid triangulated anchors and floor-contact landmarks at one tick | `packages/mamma/src/mamma/types.py` |
+| `FitParams` | A released fit's root translation and shape per person, as plots | `packages/mamma/src/mamma/types.py` |
+| `FitView` | A released fit as the viewer draws it: the ``mamma_fit`` layer's mesh and parameters, shaded by vertex normals, with the 127 SMPL-X joints as keypoints of the person's class | `packages/mamma/src/mamma/types.py` |
 | `Landmarks3d` | Triangulated dense landmarks of one tick per person; invalid points are 0 (SPEC 5.2 policy) | `packages/mamma/src/mamma/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewLandmarks` | MammaNet's dense landmarks of one frameset, one row per (view, person) track, in engine pixels | `packages/mamma/src/mamma/types.py` |

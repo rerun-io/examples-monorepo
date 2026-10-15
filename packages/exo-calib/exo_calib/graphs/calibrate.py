@@ -30,7 +30,7 @@ def init_graph(segment: SegmentRef, cameras: tuple[str, ...], frame_index: int, 
     video = graph.source("video", VideoSource.catalog(segment, cameras, decode="nvdec_rgb", sample=(frame_index,)))
     init = graph.node("init", InitNode(), needs=("g3t", "moge"))
     graph.edge(video["frames"], init["frames"])
-    graph.sinks({"init": init["init"]}, sinks)
+    graph.sinks({port: init[port] for port in InitNode.outputs}, sinks)
     return graph
 
 
@@ -81,6 +81,6 @@ def refine_graph(
             graph.edge(refine[port], rep[port])
         for src, port in ((seed_ref["init"], "init"), (gt, "gt")):
             graph.edge(src, rep[port], AsOf())
-        ports |= {"align": rep["align"], "eval": rep["eval"]}
+        ports |= {port: rep[port] for port in ReportNode.outputs}
     graph.sinks(ports, sinks)
     return graph

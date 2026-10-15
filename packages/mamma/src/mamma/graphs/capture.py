@@ -36,6 +36,6 @@ def capture_graph(video: Source, track: TrackNode, landmarks: LandmarksNode, fit
     graph.edge(tracked["tracked"], landmarked["tracked"], Block(TRACKS_QUEUE))
     graph.edge(landmarked["landmarks"], fitted["landmarks"], Block(4))
     graph.edge(source["rig"], fitted["rig"], AsOf())
-    ports: dict[str, PortRef] = {"tracks": tracked["tracks"], "landmarks": landmarked["landmarks"]} | {port: fitted[port] for port in FitNode.outputs}
+    ports: dict[str, PortRef] = {"rig": source["rig"], "tracks": tracked["tracks"], "landmarks": landmarked["landmarks"]} | {port: fitted[port] for port in FitNode.outputs}
     graph.sinks(ports, sinks)
     return graph

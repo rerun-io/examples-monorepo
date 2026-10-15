@@ -22,7 +22,7 @@ from exo_calib.verify import CARD, examples
 
 WIDGETS: dict[str, str] = {
     "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "frame_index": "Number", "frame_budget": "Number", "output_dir": "Checkbox",
-    "register": "Dropdown", "resume_from": "Dropdown", "hardware": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
+    "register": "Dropdown", "resume_from": "Dropdown", "hardware": "Dropdown", "runner": "Dropdown", "mode": "Dropdown", "draw": "Dropdown",
 }  # fmt: skip
 """Form label (without the "save it" note) -> widget class, in form order."""
 HIDDEN: dict[str, str] = {
@@ -51,7 +51,7 @@ def test_every_config_field_has_a_widget_or_is_hidden_on_purpose() -> None:
     inputs, _, _ = form([])
     choices: dict[str, list[object]] = {w.label: [c[1] for c in w.choices] for w in inputs if type(w).__name__ == "Dropdown"}
     assert choices["hardware"] == [*get_args(HardwareClass), "auto"] and choices["register"] == list(get_args(Register))
-    assert choices["resume_from"] == ["init", "kp2d"] and choices["mode"] == list(get_args(Mode))
+    assert choices["resume_from"] == ["init", "kp2d"] and choices["mode"] == list(get_args(Mode)) and choices["draw"] == ["all", "outputs"]
 
 
 def test_the_example_is_the_verify_short_case_and_runs_from_one_click() -> None:
@@ -74,7 +74,7 @@ def test_the_example_is_the_verify_short_case_and_runs_from_one_click() -> None:
     save=st.booleans(),
     choices=st.tuples(
         st.sampled_from(get_args(Register)), st.sampled_from([None, "init", "kp2d"]), st.sampled_from([*get_args(HardwareClass), "auto"]),
-        st.sampled_from(["sequential", "threaded"]), st.sampled_from(get_args(Mode)),
+        st.sampled_from(["sequential", "threaded"]), st.sampled_from(get_args(Mode)), st.sampled_from(["all", "outputs"]),
     ),  # fmt: skip
 )
 def test_whatever_the_form_sends_comes_back_as_the_typed_config(
@@ -91,7 +91,7 @@ def test_whatever_the_form_sends_comes_back_as_the_typed_config(
         default,
         segment=dataclasses.replace(default.segment, dataset=segment[0], segment=segment[1]),
         frame_index=numbers[0], frame_budget=numbers[1], output_dir=config.output_dir if save else None,
-        register="off" if save else choices[0], resume_from=choices[1], hardware=choices[2], runner=choices[3], mode=choices[4],
+        register="off" if save else choices[0], resume_from=choices[1], hardware=choices[2], runner=choices[3], mode=choices[4], draw=choices[5],
     )  # fmt: skip
     assert config == expected and (not save or (isinstance(config.output_dir, Path) and config.output_dir.name == "output.dir"))
     assert type(config.frame_index) is int and type(config.frame_budget) is int and isinstance(config.segment, SegmentRef)

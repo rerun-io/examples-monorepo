@@ -10,10 +10,11 @@ from dagkit.testing import layer_table
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
+from monopriors.depth_utils import depth_edges_mask
 from scipy.spatial.transform import Rotation
 from serde import SerdeError, from_dict, to_dict
 
-from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene, SceneViews, Splats
+from vistadream.types import EDGE_THRESHOLD, CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene, SceneViews, Splats
 
 SHAPES = st.tuples(st.integers(2, 6), st.integers(2, 6))  # rr.Image squeezes size-1 axes
 UNIT = st.floats(0.0, 1.0, width=32, allow_subnormal=False)
@@ -36,6 +37,7 @@ def views(draw: st.DrawFn, depth: bool | None = None) -> CameraView:
         draw(arrays(np.float32, (h, w), elements=st.floats(0.0, 100.0, width=32, allow_subnormal=False))) if with_depth else None,
         draw(arrays(np.bool_, (h, w))) if with_depth else None,
         draw(st.none() | arrays(np.bool_, (h, w))),
+        draw(st.none() | arrays(np.bool_, (h, w))),
     )
 
 
@@ -53,7 +55,7 @@ def splats(draw: st.DrawFn) -> Splats:
 
 
 def assert_views_equal(a: CameraView, b: CameraView) -> None:
-    for name in ("rgb", "K", "cam_T_world", "depth", "valid", "supervise"):
+    for name in ("rgb", "K", "cam_T_world", "depth", "valid", "supervise", "spawn"):
         x, y = getattr(a, name), getattr(b, name)
         assert (x is None) == (y is None), name
         if x is not None:
@@ -71,10 +73,32 @@ def test_camera_view_serde_and_layer_round_trip(view: CameraView) -> None:
 
 
 def test_camera_view_rerun_paths_and_contract() -> None:
-    view = CameraView(np.zeros((4, 6, 3), np.uint8), np.eye(3), np.eye(4), np.ones((4, 6), np.float32), np.ones((4, 6), bool))
+    """Main drew each training view's spawn mask (``inpaint_wo_edges_mask``: the pixels that put a Gaussian in) beside its images."""
+    view = CameraView(np.zeros((4, 6, 3), np.uint8), np.eye(3), np.eye(4), np.ones((4, 6), np.float32), np.ones((4, 6), bool), spawn=np.ones((4, 6), bool))
     logs = {log.path: log for log in view.to_rerun("/world/input")}
-    assert sorted(logs) == ["/world/input", "/world/input/pinhole", "/world/input/pinhole/depth", "/world/input/pinhole/rgb", "/world/input/pinhole/valid"]
+    assert sorted(logs) == [f"/world/input{leaf}" for leaf in ("", "/pinhole", "/pinhole/depth", "/pinhole/rgb", "/pinhole/spawn", "/pinhole/valid")]
     assert isinstance(logs["/world/input/pinhole/depth"].data, rr.DepthImage) and not any(log.static for log in logs.values())
+    assert isinstance(logs["/world/input/pinhole/spawn"].data, rr.Image)
+
+
+def test_an_outpainted_canvas_draws_its_depth_as_points_off_the_depth_edges_as_main_did() -> None:
+    """Main logged the outpainted canvas as a point cloud (``camera_outpaint_point_cloud``): every pixel off a depth edge, at its
+    depth through the canvas camera, in its colour. A scene without a canvas draws none."""
+    depth = np.full((8, 10), 2.0, np.float32)
+    depth[:, 6:] = 4.0  # a step: the columns beside it are depth edges
+    depth[0, 0] = 0.0  # no depth (MoGe non-finite)
+    K = np.array([[5.0, 0.0, 5.0], [0.0, 5.0, 4.0], [0.0, 0.0, 1.0]])
+    rgb = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
+    canvas, image = CameraView(rgb, K, np.eye(4), depth, np.ones((8, 10), bool)), CameraView(rgb[2:6, 2:8], K, np.eye(4), depth[2:6, 2:8])
+    logs = {log.path: log.data for log in SceneViews((canvas, image), 1).to_rerun("/world")}
+    points = logs["/world/outpaint/points"]
+    assert isinstance(points, rr.Points3D) and points.positions is not None and points.colors is not None
+    keep = (depth > 0) & ~depth_edges_mask(depth, threshold=EDGE_THRESHOLD)
+    v, u = np.nonzero(keep)
+    expected = np.stack([(u - 5.0) / 5.0, (v - 4.0) / 5.0, np.ones_like(u, dtype=np.float64)], axis=-1) * depth[keep][:, None]
+    np.testing.assert_allclose(points.positions.as_arrow_array().to_pylist(), expected, rtol=1e-6)
+    assert len(points.colors.as_arrow_array()) == keep.sum() and not keep[:, 5:7].any() and not keep[0, 0]
+    assert "/world/input/points" not in {log.path for log in SceneViews((image,), 0).to_rerun("/world")}
 
 
 @settings(max_examples=20, deadline=None)
