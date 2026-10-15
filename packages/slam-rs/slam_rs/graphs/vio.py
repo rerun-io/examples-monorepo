@@ -25,7 +25,8 @@ class VioSource(IterSource):
         def events() -> Generator[Event, None, None]:
             source = CatalogSegment(segment.catalog_url, segment.dataset, segment.segment)
             feed: SegmentFeed
-            with open_segment(source, profile=rig, cache_video=True, decode_device=decoder, include_ground_truth=False) as feed:
+            cached: bool = segment.window_ns is None  # a window reads only the 60 s video windows up to its stop
+            with open_segment(source, profile=rig, cache_video=cached, decode_device=decoder, include_ground_truth=False) as feed:
                 offset_ns: int = feed.imu.cam_time_offset_ns  # video_time -> the estimator's clock
                 yield Event(STATIC, "rig", VioRig(feed.cameras, feed.imu, feed.export_offset_ns))
                 stop_ns: int | None = None if segment.window_ns is None else segment.window_ns[1] + offset_ns
