@@ -48,7 +48,6 @@ from simplecv.types.rig import RigCameras  # noqa: E402
 
 from mamma.models.landmarks.estimator import DenseLandmarks  # noqa: E402
 from mamma.ops.window_fit import FitResult  # noqa: E402
-from mamma.types import Frameset  # noqa: E402
 
 ENGINE_HW: tuple[int, int] = (48, 64)
 K_SMALL: Float64[ndarray, "3 3"] = np.array([[60.0, 0.0, 32.0], [0.0, 60.0, 24.0], [0.0, 0.0, 1.0]])
@@ -72,11 +71,11 @@ class FakeScene:
         return MultiViewFrames(index * 33_333_333, index, self.rig.names, torch.zeros((v, 3, *hw), dtype=torch.uint8), torch.full((v,), index * 33_333_333))
 
     def events(self, count: int = 30) -> Iterator[Event]:
-        """``FramesetSource``'s stream with native crops."""
+        """A ``VideoSource`` stream that keeps the native decode (``keep_native``)."""
         yield Event(STATIC, "rig", self.rig)
         for index in range(count):
-            frames = self.frames(index)
-            yield Event(frames.t_ns, "frames", Fenced(Frameset(frames, self.frames(index, scale=2)), None))
+            frames: MultiViewFrames = dataclasses.replace(self.frames(index), native=self.frames(index, scale=2).rgb)
+            yield Event(frames.t_ns, "frames", Fenced(frames, None))
 
     def pixels(self, view: int) -> Float64[ndarray, "6 2"]:
         camera: Float64[ndarray, "6 3"] = BODY @ self.rig.cam_T_world[view, :3, :3].T + self.rig.cam_T_world[view, :3, 3]

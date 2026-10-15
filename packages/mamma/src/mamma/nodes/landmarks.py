@@ -1,7 +1,7 @@
 """Dense 2D landmarks of every tracked person in every view (MammaNet), cropped from the frames that travel with the tracks.
 
-With the hi-res preset those are the source's ``frames_native``: crops sample the decoded size while masks and outputs
-stay in engine pixels (the scale is the width ratio, as the original pipeline used).
+With the hi-res preset those are the source's native decode (``MultiViewFrames.native``): crops sample the decoded size
+while masks and outputs stay in engine pixels (the scale is the width ratio, as the original pipeline used).
 """
 
 from collections.abc import Mapping
@@ -13,7 +13,6 @@ from dagkit.node import Emit, Fenced, PortType, RunContext, Tick
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from simplecv.gpu import consume, fence_after
-from simplecv.types.frames import MultiViewFrames
 from torch import Tensor
 
 from mamma.models.landmarks.estimator import DenseLandmarks
@@ -49,12 +48,12 @@ class LandmarksNode:
         assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, TrackedFrameset)
         tracked: TrackedFrameset = consume(tick.value)
         tracks: MultiViewTracks = tracked.tracks
-        frames: MultiViewFrames = tracked.crops
+        crops: UInt8[Tensor, "v 3 hh ww"] = tracked.crops
         rows: Int64[ndarray, " r"] = np.flatnonzero(np.isfinite(tracks.boxes_xyxy).all(axis=1))  # an empty mask has no crop
         device: torch.device = tracks.masks.device
         if rows.size:
             dense: DenseLandmarks = self.estimator(
-                frames.rgb, tracks.view[rows], tracks.masks[torch.as_tensor(rows, device=device)], tracks.boxes_xyxy[rows], frames.rgb.shape[3] / tracks.masks.shape[2]
+                crops, tracks.view[rows], tracks.masks[torch.as_tensor(rows, device=device)], tracks.boxes_xyxy[rows], crops.shape[3] / tracks.masks.shape[2]
             )
         else:
             empty: Float32[Tensor, "0 0"] = torch.zeros((0, 0), device=device)

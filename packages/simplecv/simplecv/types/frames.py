@@ -21,6 +21,8 @@ class MultiViewFrames:
     """On the decode device (CUDA for ``nvdec_rgb``)."""
     cam_t_ns: Int64[Tensor, " v"]
     """Each camera's own sample time."""
+    native: UInt8[Tensor, "v 3 hh ww"] | None = None
+    """The decode at stored size when ``rgb`` is an area resize of it (``VideoSource`` with ``keep_native``), else None."""
 
 
 @dataclass(frozen=True, slots=True)

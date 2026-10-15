@@ -154,16 +154,30 @@ class FakeFrames:
 
 @settings(max_examples=20, deadline=None)
 @given(views=st.integers(1, 3), native_hw=st.sampled_from([(32, 48), (40, 40)]), resize_hw=st.sampled_from([(16, 24), (8, 8)]), keep=st.booleans())
-def test_source_resizes_and_puts_the_native_frames_first(views: int, native_hw: tuple[int, int], resize_hw: tuple[int, int], keep: bool) -> None:
+def test_one_value_per_frameset_carries_both_sizes(views: int, native_hw: tuple[int, int], resize_hw: tuple[int, int], keep: bool) -> None:
     cameras = tuple(f"rig_{v:02d}/cam_00" for v in range(views))
     source = VideoSource(FakeFrames(views, native_hw), cameras, NO_STATICS, resize_hw=resize_hw, keep_native=keep)
     events = list(source.events())
-    assert [e.port for e in events] == (["frames_native", "frames"] if keep else ["frames"]) * 5
-    assert ("frames_native" in source.outputs) == keep
+    assert [e.port for e in events] == ["frames"] * 5 and source.outputs == {"frames": MultiViewFrames}
     for event in events:
         frames: MultiViewFrames = event.value  # type: ignore[assignment]
-        assert frames.rgb.shape == (views, 3, *(native_hw if event.port == "frames_native" else resize_hw)) and frames.t_ns == frames.frame_index * 10_000_000
-        np.testing.assert_array_equal(frames.rgb[:, 0, 0, 0].numpy(), 40 * np.arange(views) + frames.frame_index)  # a constant image stays constant
+        assert frames.rgb.shape == (views, 3, *resize_hw) and frames.t_ns == frames.frame_index * 10_000_000
+        assert (frames.native is not None) == keep and (frames.native is None or frames.native.shape == (views, 3, *native_hw))
+        for pixels in (frames.rgb, frames.native) if frames.native is not None else (frames.rgb,):
+            np.testing.assert_array_equal(pixels[:, 0, 0, 0].numpy(), 40 * np.arange(views) + frames.frame_index)  # a constant image stays constant
+
+
+def test_prefetch_reads_every_camera_s_sample_times_before_the_run() -> None:
+    """The App calls it while building, so a run's clock starts at the first decode, not at the catalog read."""
+    read: list[int] = []
+
+    class Counted(FakeFrames):
+        def times_ns(self, view: int) -> np.ndarray:
+            read.append(view)
+            return super().times_ns(view)
+
+    VideoSource(Counted(3, (8, 8)), ("a", "b", "c"), NO_STATICS).prefetch()
+    assert read == [0, 1, 2]
 
 
 def test_source_refuses_native_frames_without_a_resize() -> None:

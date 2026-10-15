@@ -15,11 +15,10 @@ import rerun as rr
 import torch
 from dagkit.time import STATIC, TimeNs
 from dagkit.types import Log, column, row_times
-from jaxtyping import Bool, Float32, Int32, Int64
+from jaxtyping import Bool, Float32, Int32, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from serde import serde
-from simplecv.types.frames import MultiViewFrames
 from torch import Tensor
 
 PERSON_RGB: tuple[int, int, int] = (255, 140, 0)
@@ -52,16 +51,6 @@ def _views(table: pa.Table, root: str) -> tuple[tuple[str, ...], Float32[ndarray
     paths = [p for _, p in sorted(zip([f[0] for f in first], paths, strict=True))]
     scales: list[list[float]] = [next(c for c in column(table, f"{p}:Transform3D:scale") if c is not None)[0][:2] for p in paths]
     return tuple(p.removeprefix(f"{root}/").removesuffix("/pinhole/mamma") for p in paths), np.asarray(scales, dtype=np.float32).reshape(-1, 2)
-
-
-@dataclass(frozen=True, slots=True)
-class Frameset:
-    """One sampled frameset as the capture graph decodes it (node to node only: no Rerun mapping)."""
-
-    frames: MultiViewFrames
-    """Engine size: tracking and masks."""
-    crops: MultiViewFrames
-    """The frames landmarks crop from: the full-size decode with ``keep_native``, else ``frames``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +125,8 @@ class TrackedFrameset:
     """Landmarks' work item: one tick's tracks with the frames their crops are cut from (node to node only)."""
 
     tracks: MultiViewTracks
-    crops: MultiViewFrames
+    crops: UInt8[Tensor, "v 3 hh ww"]
+    """The frameset's native decode (``MultiViewFrames.native``) when the source keeps it, else its engine-size frames."""
 
 
 @dataclass(frozen=True, slots=True)

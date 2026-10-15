@@ -24,7 +24,7 @@ from torch import Tensor
 from torchvision.ops import box_iou
 
 from mamma.ops.identity import CLIP_WEIGHT, EPIPOLAR_WEIGHT, FeatureBank, assign_hungarian, epipolar_score, fundamental_matrix, resolve_epipolar_px
-from mamma.types import Frameset, MultiViewTracks, TrackedFrameset
+from mamma.types import MultiViewTracks, TrackedFrameset
 
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP + epipolar score to accept a cross-view match."""
@@ -91,7 +91,7 @@ class TrackNode:
     frames.
     """
 
-    inputs: Mapping[str, PortType] = {"frames": Fenced[Frameset], "rig": RigCameras}
+    inputs: Mapping[str, PortType] = {"frames": Fenced[MultiViewFrames], "rig": RigCameras}
     outputs: Mapping[str, PortType] = {"tracks": Fenced[MultiViewTracks], "tracked": Fenced[TrackedFrameset]}
 
     def __init__(self, params: TrackParams, detector: PersonDetector, encoder: IdentityEncoder, masks: MaskTracker) -> None:
@@ -108,9 +108,8 @@ class TrackNode:
         self.ticks_seen: int = 0
 
     def step(self, tick: Tick, out: Emit) -> None:
-        assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, Frameset)
-        frameset: Frameset = consume(tick.value)
-        frames: MultiViewFrames = frameset.frames
+        assert isinstance(tick.value, Fenced) and isinstance(tick.value.value, MultiViewFrames)
+        frames: MultiViewFrames = consume(tick.value)
         rig = tick.asof["rig"]
         assert isinstance(rig, RigCameras), "track needs the rig (a STATIC AsOf value)"
         views: int = len(frames.views)
@@ -147,7 +146,7 @@ class TrackNode:
         )  # fmt: skip
         fence: Fence | None = fence_after(value.masks)
         out.put("tracks", tick.t_ns, Fenced(value, fence))
-        out.put("tracked", tick.t_ns, Fenced(TrackedFrameset(value, frameset.crops), fence))
+        out.put("tracked", tick.t_ns, Fenced(TrackedFrameset(value, frames.rgb if frames.native is None else frames.native), fence))
 
     def flush(self, out: Emit) -> None:
         pass

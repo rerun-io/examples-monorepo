@@ -20,7 +20,8 @@ GPU memory) and nothing else depends on them."""
 
 
 def capture_graph(video: Source, track: TrackNode, landmarks: LandmarksNode, fit: FitNode, sinks: Mapping[str, Node]) -> Graph:
-    """``video`` provides ``frames`` (a ``Frameset``) and ``rig`` (``FramesetSource``); every sink input names a producer port."""
+    """``video`` provides ``frames`` and ``rig`` (``VideoSource``, which keeps the native decode for the crops when the
+    preset asks); every sink input names a producer port."""
     graph = Graph(
         "mamma-capture",
         about="Multi-view body capture: track every person in the cameras, find their dense 2D landmarks, triangulate them "

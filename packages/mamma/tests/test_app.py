@@ -21,7 +21,6 @@ from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.window_fit import FitterConfig
-from mamma.sources.frameset import FramesetSource
 from mamma.verify import example_cases
 
 HIDDEN: dict[str, str] = {
@@ -34,7 +33,7 @@ HIDDEN: dict[str, str] = {
 
 def app(config: Config) -> Graph:
     """The graph ``build`` returns for ``config``, with fake models and a catalog source that never connects."""
-    video = FramesetSource(VideoSource.catalog(config.segment, RING, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=True))
+    video = VideoSource.catalog(config.segment, RING, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=True)
     nodes = (
         TrackNode(TrackParams(expected_subjects=1), FakeDetector(), FakeEncoder(), FakeMasks()),  # type: ignore[arg-type]
         LandmarksNode(FakeLandmarker(FakeScene())),

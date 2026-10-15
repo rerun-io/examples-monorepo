@@ -15,7 +15,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 from dagkit.catalog import read_column
-from dagkit.node import Event, Fence, Fenced, PortType, Source
+from dagkit.node import Event, Fenced, PortType, Source
 from dagkit.sources import Column, IterSource, SegmentRef
 from dagkit.time import STATIC
 from jaxtyping import Float32, Float64, Int64, UInt8
@@ -193,7 +193,7 @@ class VideoSource:
 
     The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera
     inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw``
-    applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a
+    applies area resize; ``keep_native`` keeps the stored-size decode in the same value (``native``). ``catalog`` reads a
     catalog segment's videos and rig.
     """
 
@@ -215,8 +215,7 @@ class VideoSource:
         self.frames, self.cameras, self.statics, self.window_ns, self.fenced = frames, cameras, statics, window_ns, fenced
         self.sample, self.stride, self.resize_hw, self.keep_native = sample, stride, resize_hw, keep_native
         self.clock: str = statics.clock
-        frame_type: PortType = Fenced[MultiViewFrames] if fenced else MultiViewFrames
-        self.outputs: dict[str, PortType] = {"frames": frame_type} | ({"frames_native": frame_type} if keep_native else {}) | dict(statics.outputs)
+        self.outputs: dict[str, PortType] = {"frames": Fenced[MultiViewFrames] if fenced else MultiViewFrames} | dict(statics.outputs)
 
     @classmethod
     def catalog(
@@ -247,6 +246,11 @@ class VideoSource:
             resize_hw=resize_hw, keep_native=keep_native,
         )  # fmt: skip
 
+    def prefetch(self) -> None:
+        """Read every camera's sample times now (for a catalog segment: its packets), so a run's clock starts at the first decode."""
+        for view in range(len(self.cameras)):
+            self.frames.times_ns(view)
+
     def events(self) -> Iterator[Event]:
         yield from self.statics.events()
         times: list[Int64[ndarray, " n"]] = [self.frames.times_ns(view) for view in range(len(self.cameras))]
@@ -257,11 +261,8 @@ class VideoSource:
             if self.resize_hw is not None:
                 rgb = torch.nn.functional.interpolate(native.float(), size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
             cam_t_ns: Int64[Tensor, " v"] = torch.as_tensor([int(t[index]) for t in times])
-            ports: dict[str, UInt8[Tensor, "v 3 _ _"]] = ({"frames_native": native} if self.keep_native else {}) | {"frames": rgb}
-            fence: Fence | None = fence_after(rgb)
-            for port, pixels in ports.items():
-                frames = MultiViewFrames(int(times[0][index]), index, self.cameras, pixels, cam_t_ns)
-                yield Event(frames.t_ns, port, Fenced(frames, fence) if self.fenced else frames)
+            frames: MultiViewFrames = MultiViewFrames(int(times[0][index]), index, self.cameras, rgb, cam_t_ns, native if self.keep_native else None)
+            yield Event(frames.t_ns, "frames", Fenced(frames, fence_after(rgb)) if self.fenced else frames)
 
     def close(self) -> None:
         self.frames.close()

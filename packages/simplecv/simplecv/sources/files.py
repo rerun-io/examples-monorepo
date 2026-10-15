@@ -1,4 +1,6 @@
-"""Local inputs as dagkit Sources: a video file, a directory of images or a live camera, as one-view ``MultiViewFrames`` on the CPU."""
+"""Local inputs as dagkit Sources: a video file, a directory of images or a live camera, as one-view ``MultiViewFrames`` on the CPU.
+
+Each also gives its frame size without reading a frame (``resolution_wh``), for buffers that are sized before the run's first frame."""
 
 import time
 from collections.abc import Iterator, Mapping
@@ -11,6 +13,7 @@ from dagkit.node import Event, PortType
 from jaxtyping import UInt8
 from natsort import natsorted
 from numpy import ndarray
+from PIL import ExifTags, Image
 from torch import Tensor
 
 from simplecv.types.frames import MultiViewFrames
@@ -33,6 +36,14 @@ class VideoFileSource:
 
     def __init__(self, path: Path, *, stride: int = 1, max_frames: int | None = None, view: str = "video") -> None:
         self.path, self.stride, self.max_frames, self.view = path, stride, max_frames, view
+
+    def resolution_wh(self) -> tuple[int, int]:
+        """From the stream's header."""
+        from torchcodec.decoders import VideoDecoder
+
+        metadata = VideoDecoder(str(self.path), device="cpu", seek_mode="approximate").metadata
+        assert metadata.width and metadata.height, f"{self.path}: the stream header has no frame size"
+        return metadata.width, metadata.height
 
     def events(self) -> Iterator[Event]:
         from torchcodec.decoders import VideoDecoder
@@ -62,6 +73,13 @@ class ImageDirSource:
             raise ValueError(f"{directory}: no {'/'.join(IMAGE_SUFFIXES)} images")
         self.stride, self.fps, self.view = stride, fps, view
 
+    def resolution_wh(self) -> tuple[int, int]:
+        """The first image's, from its header, turned by its EXIF orientation as ``cv2.imread`` turns the pixels."""
+        with Image.open(self.paths[0]) as image:
+            width, height = image.size
+            turned: bool = image.getexif().get(ExifTags.Base.Orientation, 1) in (5, 6, 7, 8)
+        return (height, width) if turned else (width, height)
+
     def events(self) -> Iterator[Event]:
         for i, path in enumerate(self.paths):
             bgr: UInt8[ndarray, "h w 3"] | None = cv2.imread(str(path))
@@ -85,6 +103,15 @@ class WebcamSource:
 
     def __init__(self, device: int = 0, max_frames: int | None = None) -> None:
         self.device, self.max_frames = device, max_frames
+
+    def resolution_wh(self) -> tuple[int, int]:
+        """From the camera's capture properties (it opens, no frame is read)."""
+        capture = cv2.VideoCapture(self.device)
+        width, height = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        capture.release()
+        if width * height == 0:
+            raise ValueError(f"camera {self.device}: no frame size")
+        return width, height
 
     def events(self) -> Iterator[Event]:
         capture = cv2.VideoCapture(self.device)

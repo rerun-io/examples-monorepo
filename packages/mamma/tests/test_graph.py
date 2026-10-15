@@ -10,6 +10,7 @@ from dagkit.runners import run_sequential, run_threaded
 from dagkit.sources import IterSource
 from dagkit.testing import Collect
 from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
+from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
 from mamma.apis.capture import PORTS
@@ -19,7 +20,6 @@ from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.window_fit import FitterConfig
-from mamma.types import Frameset
 
 
 class SlowLandmarker(FakeLandmarker):
@@ -31,7 +31,7 @@ class SlowLandmarker(FakeLandmarker):
 
 
 def graph(scene: FakeScene, landmarker: FakeLandmarker | None = None) -> tuple[Graph, Collect]:
-    video = IterSource({"frames": Fenced[Frameset], "rig": RigCameras}, lambda: scene.events(16))
+    video = IterSource({"frames": Fenced[MultiViewFrames], "rig": RigCameras}, lambda: scene.events(16))
     keep = Collect(PORTS)
     nodes = (
         TrackNode(TrackParams(expected_subjects=1), FakeDetector(), FakeEncoder(), FakeMasks()),  # type: ignore[arg-type]

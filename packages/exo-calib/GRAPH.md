@@ -12,7 +12,7 @@ Stage A, run once: metric, gravity-aligned exo cameras from one synchronized fra
 ## 1 · video: Decode the cameras' videos
 *source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` keeps the stored-size decode in the same value (``native``). ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
@@ -78,7 +78,7 @@ Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then 
 ## 2 · video: Decode the cameras' videos
 *source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` keeps the stored-size decode in the same value (``native``). ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
@@ -170,7 +170,7 @@ Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then 
 ## 2 · video: Decode the cameras' videos
 *source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` keeps the stored-size decode in the same value (``native``). ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
