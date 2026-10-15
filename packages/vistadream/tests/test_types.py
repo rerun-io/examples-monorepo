@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 import rerun as rr
 import torch
+from dagkit.testing import layer_table
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from scipy.spatial.transform import Rotation
 from serde import SerdeError, from_dict, to_dict
-from vistadream_fakes import layer_table
 
 from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats
 
@@ -92,7 +92,7 @@ def test_scene_views_round_trip_and_names(training: list[CameraView], data: st.D
 
 def test_scene_views_read_back_snapshots_whose_views_change() -> None:
     view = CameraView(np.zeros((2, 3, 3), np.uint8), np.eye(3), np.eye(4), np.ones((2, 3), np.float32))
-    snapshots: list[tuple[int, object]] = [(0, SceneViews((view,), 0)), (1, SceneViews((view, view), 1)), (2, SceneViews((view, view, view), 1))]
+    snapshots: list[tuple[int, SceneViews]] = [(0, SceneViews((view,), 0)), (1, SceneViews((view, view), 1)), (2, SceneViews((view, view, view), 1))]
     read = list(SceneViews.from_layer(layer_table(snapshots, "/world"), "/world", "video_time"))
     assert [(t, s.input_index, s.names()) for t, s in read] == [(0, 0, ["input"]), (1, 1, ["outpaint", "input"]), (2, 1, ["outpaint", "input", "view_02"])]
 

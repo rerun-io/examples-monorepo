@@ -5,11 +5,11 @@ import torch
 from dagkit.node import Event, Fenced, RunContext, Tick
 from dagkit.testing import Recorder, check_node_contract
 from monopriors.depth_utils import depth_edges_mask
-from vistadream_fakes import FakePredictor, Hosted, fake_inpaint, fake_rasterize
+from vistadream_fakes import FakePredictor, fake_inpaint, fake_rasterize
 
 from vistadream.nodes.prepare import DepthNode, OutpaintNode
 from vistadream.nodes.splats import EDGE_THRESHOLD, ExpandNode, InitNode, RenderNode
-from vistadream.types import OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats
+from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats
 
 IMAGE = RgbImage(np.random.default_rng(0).integers(0, 256, (64, 96, 3), dtype=np.uint8))  # large enough for the border to fit the canvas
 
@@ -24,7 +24,7 @@ def prepared(inpaint: bool) -> tuple[OutpaintCanvas, RelativeDepth]:
 def initialised(inpaint: bool) -> tuple[Splats, SceneViews, RelativeDepth]:
     canvas, depth = prepared(inpaint)
     tick = Tick(0, "depth", depth, {"canvas": canvas, "image": IMAGE})
-    check_node_contract(Hosted(InitNode(iters=3, device="cpu", rasterize=fake_rasterize)), [tick])
+    check_node_contract(InitNode(iters=3, device="cpu", rasterize=fake_rasterize), [tick])
     out = Recorder()
     InitNode(iters=3, device="cpu", rasterize=fake_rasterize).step(tick, out)
     assert [(port, t) for port, t, _ in out.items] == [("scene", 0), ("views", 0)]
@@ -73,11 +73,12 @@ def test_init_with_outpainting_puts_the_canvas_first_and_centres_the_input_camer
 
 def test_render_emits_the_path_on_a_30_fps_clock_from_the_input_camera() -> None:
     splats, views, _ = initialised(inpaint=False)
-    outputs = check_node_contract(Hosted(RenderNode(rasterize=fake_rasterize)), [Tick(7, "scene", Fenced(splats, None), {"views": views})])
+    outputs = check_node_contract(RenderNode(rasterize=fake_rasterize), [Tick(7, "scene", Fenced(splats, None), {"views": views})])
     assert [t for _, t, _ in outputs] == [7 + i * 1_000_000_000 // 30 for i in range(150)]
-    first: dict = outputs[0][2]  # type: ignore[assignment]
-    np.testing.assert_allclose(first["cam_T_world"], np.eye(4), atol=1e-9)
-    assert first["rgb"].shape == (64, 96, 3) and first["rgb"].dtype == np.uint8
+    first = outputs[0][2]
+    assert isinstance(first, CameraView)
+    np.testing.assert_allclose(first.cam_T_world, np.eye(4), atol=1e-9)
+    assert first.rgb.shape == (64, 96, 3) and first.rgb.dtype == np.uint8
 
 
 def test_expand_adds_inpainted_views_and_keeps_the_old_gaussians() -> None:

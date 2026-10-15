@@ -94,7 +94,7 @@ tests = ["tests/test_nodes.py", "tests/test_graph.py", "tests/test_app.py"]
 properties = [
     "tests/test_graph.py::test_graph_validates_and_runners_agree",
     "tests/test_graph.py::test_app_graph_picture_matches_its_declaration",
-    "tests/test_app.py::test_the_form_gives_back_the_config_it_shows",
+    "tests/test_app.py::test_every_config_field_has_its_widget_or_is_hidden",
 ]
 
 [[tests]]
