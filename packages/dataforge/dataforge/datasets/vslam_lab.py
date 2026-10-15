@@ -54,9 +54,18 @@ from dataforge.datasets.vslam_lab_source import (
     read_imu,
     read_poses,
 )
-from dataforge.euroc import GtTrajectory, nominal_fps
+from dataforge.euroc import nominal_fps
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import frame_index_column, log_camera_node, log_gt_path, log_imu, log_rig_node, log_video_stream, time_column
+from dataforge.logging_toolkit import (
+    GtTrajectory,
+    frame_index_column,
+    log_camera_node,
+    log_gt_path,
+    log_imu,
+    log_rig_node,
+    log_video_stream,
+    time_column,
+)
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, WorldUpAxis
 
@@ -69,8 +78,6 @@ REQUIRED_FILES: tuple[str, ...] = ("calibration.yaml", "rgb.csv")
 base is pending."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres."""
-GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
-"""Stroke of the whole gt path."""
 DEPTH_FRAMES_PER_CHUNK: int = 4
 """Depth frames per sent chunk: about 1 MB of PNG, the chunk size Rerun's own batcher chose for these frames."""
 PNG_SIGNATURE: bytes = b"\x89PNG\r\n\x1a\n"
@@ -391,22 +398,13 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
     def write_gt(self, recording: rr.RecordingStream, poses: GtTrajectory) -> None:
         """The ground-truth layer: world_T_rig on the rig node, the whole path and its trail, the world axes."""
         rr.log("/", WORLD_UP_VIEW_COORDINATES[self.benchmark.world_up], static=True, recording=recording)
-        log_gt_path(
-            recording,
-            RIG,
-            times_ns=poses.times_ns,
-            translations_xyz=poses.translations_xyz,
-            quaternions_xyzw=poses.quaternions_xyzw,
-            radius=GT_TRAJECTORY_WIDTH_UI_POINTS,
-            radius_unit="ui_points",
-        )
-        steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(poses.translations_xyz, axis=0), axis=1)
+        log_gt_path(recording, RIG, poses)
         recording.send_property(
             "gt",
             rr.AnyValues(
                 num_poses=int(poses.times_ns.size),
-                duration_s=(int(poses.times_ns[-1]) - int(poses.times_ns[0])) / 1e9,
-                trajectory_len_m=float(steps_m.sum()),
+                duration_s=poses.duration_s,
+                trajectory_len_m=poses.length_m,
                 num_sanitized=poses.num_sanitized,
                 world_up=self.benchmark.world_up,
                 source=self.benchmark.gt.source,

@@ -23,6 +23,8 @@ import serde
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
+from dataforge.logging_toolkit import GtTrajectory
+
 CAMERA_TIMESTAMP_FIELD: str = "#timestamp [ns]"
 """Header cell every one of these csvs starts with; the gt file pads the later cells with spaces."""
 IMU_VALUE_COLUMNS: int = 6
@@ -56,21 +58,6 @@ class TimestampedSamples:
     """Sample times on the device clock, nanoseconds."""
     values: Float64[ndarray, "n_samples n_values"]
     """Every column after the timestamp, in file order."""
-
-
-@dataclass(frozen=True, slots=True)
-class GtTrajectory:
-    """One EuRoC-style ground truth (MSD's ``gt/data.csv``, VSLAM-LAB's ``groundtruth.csv``) as Rerun wants it:
-    ``world_T_rig`` per sample, quaternion xyzw."""
-
-    times_ns: Int64[ndarray, "n_poses"]
-    """Pose times, nanoseconds, on the sequence's own sensor clock (MSD: already the IMU's)."""
-    translations_xyz: Float64[ndarray, "n_poses 3"]
-    """``world_t_rig``, metres."""
-    quaternions_xyzw: Float64[ndarray, "n_poses 4"]
-    """``world_R_rig``, scalar **last**; a dropout row holds identity."""
-    num_sanitized: int
-    """Rows whose quaternion was not unit-norm and was replaced with identity."""
 
 
 def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
