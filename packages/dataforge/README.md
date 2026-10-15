@@ -324,13 +324,15 @@ dataset, one per benchmark because each has its own sensor layout:
 | `euroc` | `EUROC` | `vslam-lab-euroc` | stereo gray 752×480 @ 20 Hz + 200 Hz IMU | `state_groundtruth_estimate0`, world_T_imu0 at 200 Hz |
 
 A further benchmark is one `BENCHMARKS` entry: its camera, depth and IMU
-counts, and the two claims its files do not make, the world up axis and
-where the rig looks (each entry's comment says what it was measured on).
+counts, its ground truth, and the two claims its files do not make, the world
+up axis and where the rig looks (each entry's comment says what it was
+measured on).
 
-`download` only verifies the local tree; VSLAM-LAB fetches it
-(`pixi run -e vslamlab download-sequence <dataset> <sequence>` in a VSLAM-LAB
-clone, whose `set-benchmark-path <dir>` writes to `<dir>/VSLAM-LAB-Benchmark`,
-the default `--root` when `DATAFORGE_RAW_ROOT=<dir>`).
+VSLAM-LAB fetches the tree (`pixi run -e vslamlab download-sequence <dataset>
+<sequence>` in a VSLAM-LAB clone, whose `set-benchmark-path <dir>` writes to
+`<dir>/VSLAM-LAB-Benchmark`, the default `--root` when
+`DATAFORGE_RAW_ROOT=<dir>`); `download` verifies it and, on EuRoC, extracts the
+ground truth described below.
 
 ```bash
 export DATAFORGE_RAW_ROOT=<dir>                                # holds VSLAM-LAB-Benchmark/
@@ -366,17 +368,14 @@ refused sequence leaves the published layers as they were, even under `--force`.
 consumer should know: on TUM, `rgb.csv` pairs each RGB frame with the nearest
 depth frame (within 20 ms) and gives both the RGB stamp; on EuRoC, VSLAM-LAB
 writes `groundtruth.csv` from TUM's `supp_v2` files, cam0 positions at 20 Hz
-with a constant placeholder quaternion. `convert` refuses a ground truth whose
-rotation never changes, because logged as world_T_body it would place every
-sensor wrong. Replace it with the upstream body pose (world_T_imu0, 200 Hz),
-which VSLAM-LAB's kept sequence zip still holds:
-
-```bash
-cd <benchmark root>/EUROC
-unzip -p machine_hall/MH_01_easy/MH_01_easy.zip mav0/state_groundtruth_estimate0/data.csv \
-  | awk -F, 'BEGIN { print "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw" } !/^#/ { print $1","$2","$3","$4","$6","$7","$8","$5 }' \
-  > MH_01_easy/groundtruth.csv
-```
+with a constant placeholder quaternion, which is not a body pose. So each
+`BENCHMARKS` entry names its ground truth and that file's reader explicitly:
+TUM's is `groundtruth.csv`; EuRoC's is EuRoC's own
+`mav0/state_groundtruth_estimate0/data.csv` (world_T_imu0, 200 Hz), which
+`download` copies verbatim out of the sequence zip VSLAM-LAB keeps
+(`<EUROC>/<room>/<seq>/<seq>.zip`, unless its retention is MINIMAL) to
+`<seq>/state_groundtruth_estimate0.csv`, read by the same EuRoC reader as
+msd's gt. After that the zip may go.
 
 ### Environment variables
 

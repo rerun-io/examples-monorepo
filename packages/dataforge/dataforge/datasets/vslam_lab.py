@@ -36,15 +36,19 @@ from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intri
 from simplecv.imu_calibration import ImuCalibration
 
 from dataforge import blueprints, paths, schema, transports, writing
+from dataforge.archives import ZipMemberReader
 from dataforge.basalt import FollowFrame
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.vslam_lab_source import (
+    EUROC_GT_FILE,
+    EUROC_GT_MEMBER,
     Calibration,
     CameraEntry,
     FrameIndex,
     ImuStream,
     StreamName,
     read_calibration,
+    read_euroc_gt,
     read_frame_index,
     read_imu,
     read_poses,
@@ -59,8 +63,9 @@ BenchmarkChoice: TypeAlias = Literal["rgbdtum", "euroc"]
 """``--benchmark``: which VSLAM-LAB dataset, and which catalog dataset."""
 RIG: int = 0
 """A VSLAM-LAB sequence is one rig."""
-REQUIRED_FILES: tuple[str, ...] = ("calibration.yaml", "rgb.csv", "groundtruth.csv")
-"""What makes a sequence directory discoverable; the frames are read only while base is pending."""
+REQUIRED_FILES: tuple[str, ...] = ("calibration.yaml", "rgb.csv")
+"""What makes a sequence directory discoverable; the ground truth is checked by ``convert``, the frames read only while
+base is pending."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres."""
 GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
@@ -69,6 +74,21 @@ DEPTH_FRAMES_PER_CHUNK: int = 4
 """Depth frames per sent chunk: about 1 MB of PNG, the chunk size Rerun's own batcher chose for these frames."""
 PNG_SIGNATURE: bytes = b"\x89PNG\r\n\x1a\n"
 """First eight bytes of every PNG file."""
+
+
+@dataclass(frozen=True, slots=True)
+class GroundTruth:
+    """Where a benchmark's world_T_body comes from: one named file and the adapter for its format."""
+
+    file: str
+    """The csv in the sequence directory the gt layer reads."""
+    read: Callable[[Path], GtTrajectory]
+    """Its reader, which returns world_T_body with the quaternion scalar last."""
+    source: str
+    """What produced it; the gt layer's ``source`` property."""
+    zip_member: str | None = None
+    """Where ``download`` extracts ``file`` from, verbatim, in VSLAM-LAB's kept ``<room>/<seq>/<seq>.zip``; ``None``
+    when VSLAM-LAB writes ``file`` itself."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +109,8 @@ class Benchmark:
     """The gt world's up axis; the root ``ViewCoordinates`` of every gt layer."""
     follow: FollowFrame
     """Where the rig looks and which way is up, in the body frame; aims the Follow view."""
-    gt_source: str
-    """What produced groundtruth.csv."""
+    gt: GroundTruth
+    """The ground truth the gt layer reads."""
 
 
 BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
@@ -105,7 +125,7 @@ BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
         world_up="+z",
         # The body is the RGB camera itself (T_BS identity): it looks along +z, image-up is -y.
         follow=FollowFrame(forward=(0.0, 0.0, 1.0), up=(0.0, -1.0, 0.0)),
-        gt_source="motion capture (camera optical centre)",
+        gt=GroundTruth(file="groundtruth.csv", read=read_poses, source="motion capture (camera optical centre)"),
     ),
     "euroc": Benchmark(
         directory="EUROC",
@@ -117,7 +137,13 @@ BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
         world_up="+z",
         # The body is imu0: cam0 looks along body +z (0.004, 0.026, 1.0) with image-up along body +x.
         follow=FollowFrame(forward=(0.004, 0.026, 1.0), up=(1.0, -0.015, -0.004)),
-        gt_source="state_groundtruth_estimate0 (Vicon / Leica MS50, world_T_imu0)",
+        # VSLAM-LAB's groundtruth.csv is cam0 positions from TUM's supp_v2 with a placeholder rotation, not world_T_body.
+        gt=GroundTruth(
+            file=EUROC_GT_FILE,
+            read=read_euroc_gt,
+            source="state_groundtruth_estimate0 (Vicon / Leica MS50, world_T_imu0)",
+            zip_member=EUROC_GT_MEMBER,
+        ),
     ),
 }
 """Every benchmark this converter knows; a new one is one entry once its world up is measured."""
@@ -224,15 +250,32 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         ]
 
     def download(self) -> None:
-        """Verify the local VSLAM-LAB tree; VSLAM-LAB's ``download-sequence`` fetches it.
+        """Verify the local VSLAM-LAB tree, and put a ground truth VSLAM-LAB does not write beside each sequence.
 
-        Directories without the three sequence files are not sequences (VSLAM-LAB keeps EuRoC's ``supp_v2/``
-        and room archives beside them), so only an empty benchmark directory is an error.
+        VSLAM-LAB's ``download-sequence`` fetches the tree. Directories without the sequence files are not sequences
+        (VSLAM-LAB keeps EuRoC's ``supp_v2/`` and room archives beside them), so only an empty benchmark directory is
+        an error. Where the benchmark's ground truth is a member of the sequence zip (EuRoC), that member is copied
+        out verbatim once, so the gt layer reads a small file in the sequence directory and the zip may go.
+
+        Raises:
+            FileNotFoundError: No sequence, or a sequence whose ground truth is neither extracted nor in its zip.
         """
-        found: int = len(self.discover())
-        if not found:
+        sequences: list[tuple[SequenceIdentity, Path]] = self.discover()
+        if not sequences:
             raise FileNotFoundError(f"{self.benchmark_dir} holds no sequence with {', '.join(REQUIRED_FILES)}; fetch one with VSLAM-LAB's download-sequence")
-        print(f"{self.config.name}: {found} sequence(s) in {self.benchmark_dir}")
+        member: str | None = self.benchmark.gt.zip_member
+        for _, source in sequences:
+            target: Path = source / self.benchmark.gt.file
+            if member is None or target.is_file():
+                continue
+            pattern: str = f"*/{source.name}/{source.name}.zip"
+            kept: list[Path] = sorted(self.benchmark_dir.glob(pattern))
+            if not kept:
+                raise FileNotFoundError(f"{target} is missing and no {self.benchmark_dir / pattern} holds {member}; VSLAM-LAB keeps it unless its retention is MINIMAL")
+            with ZipMemberReader(kept[0]) as reader, writing.atomic_write(target) as staged:
+                staged.write_bytes(reader.read_member(member))
+            print(f"{source.name}: {member} of {kept[0]} -> {target}")
+        print(f"{self.config.name}: {len(sequences)} sequence(s) in {self.benchmark_dir}")
 
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write whichever layers are missing, each from this sequence's own VSLAM-LAB files.
@@ -311,20 +354,22 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         )
 
     def read_gt(self, source: Path) -> GtTrajectory:
-        """groundtruth.csv as world_T_body.
+        """The benchmark's world_T_body, read from the file its ``GroundTruth`` names by that file's own reader.
 
-        ``read_poses`` has already turned a dropout row (a non-unit quaternion) into identity rotation with its
+        The reader has already turned a dropout row (a non-unit quaternion) into identity rotation with its
         translation kept, the rule ``dataforge.euroc.sanitized`` holds for every EuRoC-style file.
 
         Raises:
-            ValueError: The file holds no pose, or a rotation that never changes. The second is VSLAM-LAB's own
-                EuRoC csv: cam0 *positions* with a constant placeholder quaternion, which logged as world_T_body
-                would put every sensor at the wrong place and turned 180 degrees (README says how to replace it).
+            FileNotFoundError: The file is not there; for EuRoC, ``download`` extracts it from the kept zip.
+            ValueError: The file holds no pose.
         """
-        groundtruth: Path = source / "groundtruth.csv"
-        poses: GtTrajectory = read_poses(groundtruth)
-        if poses.times_ns.size < 2 or np.ptp(poses.quaternions_xyzw, axis=0).max() == 0.0:
-            raise ValueError(f"{groundtruth}: {poses.times_ns.size} poses with a constant rotation are position-only, not world_T_body")
+        path: Path = source / self.benchmark.gt.file
+        if not path.is_file():
+            writer: str = f"dataforge-download {self.config.command} --benchmark {self.config.benchmark}" if self.benchmark.gt.zip_member else "VSLAM-LAB"
+            raise FileNotFoundError(f"{path} is missing; {writer} writes it")
+        poses: GtTrajectory = self.benchmark.gt.read(path)
+        if not poses.times_ns.size:
+            raise ValueError(f"{path} holds no pose")
         return poses
 
     def write_gt(self, recording: rr.RecordingStream, poses: GtTrajectory) -> None:
@@ -348,7 +393,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
                 trajectory_len_m=float(steps_m.sum()),
                 num_sanitized=poses.num_sanitized,
                 world_up=self.benchmark.world_up,
-                source=self.benchmark.gt_source,
+                source=self.benchmark.gt.source,
             ),
         )
 

@@ -9,11 +9,14 @@
         groundtruth.csv    ts (ns), tx (m), ty (m), tz (m), qx, qy, qz, qw: world_T_body, scalar last
         imu_0.csv          ts (ns), wx..wz (rad s^-1), ax..az (m s^-2)
         rgb_0/ rgb_1/ depth_0/ depth_1/   the frames rgb.csv names
+        state_groundtruth_estimate0.csv   EuRoC only: EuRoC's own world_T_imu0, which dataforge's ``download``
+                                          extracts from the sequence zip VSLAM-LAB keeps (``read_euroc_gt``)
 
 ``T_BS`` is body_T_sensor as a row-major 4x4. calibration.yaml and rgb.csv are records read whole, so each
 entry or row is a pyserde record: unknown YAML keys are allowed (their schema is not ours to police).
 groundtruth.csv and imu_0.csv are streams (EuRoC's run at 200 Hz), read as Arrow columns. Either way a file that
-does not parse is a ``ValueError`` naming it.
+does not parse is a ``ValueError`` naming it. VSLAM-LAB's EuRoC groundtruth.csv is not a body pose (cam0 positions from
+TUM's supp_v2 with a constant placeholder rotation), so EuRoC's ground truth comes in through its own file instead.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from serde import SerdeError, coerce, field, from_dict, serde
 from serde.yaml import from_yaml
 from yaml import YAMLError
 
-from dataforge.euroc import GtTrajectory, TimestampedSamples, sanitized
+from dataforge.euroc import GT_VALUE_COLUMNS, GtTrajectory, TimestampedSamples, gt_trajectory, read_numeric_csv, sanitized
 from dataforge.logging_toolkit import ImuChannel
 
 StreamName: TypeAlias = Literal["rgb_0", "rgb_1", "depth_0", "depth_1"]
@@ -44,6 +47,10 @@ POSE_COLUMNS: tuple[str, ...] = ("tx (m)", "ty (m)", "tz (m)", "qx", "qy", "qz",
 """groundtruth.csv after the stamp: world_t_body, then world_R_body scalar last."""
 IMU_COLUMNS: tuple[str, ...] = ("wx (rad s^-1)", "wy (rad s^-1)", "wz (rad s^-1)", "ax (m s^-2)", "ay (m s^-2)", "az (m s^-2)")
 """imu_0.csv after the stamp: angular velocity, then linear acceleration."""
+EUROC_GT_MEMBER: str = "mav0/state_groundtruth_estimate0/data.csv"
+"""EuRoC's own ground truth inside each sequence zip: world_T_imu0 (Vicon / Leica MS50) at 200 Hz, quaternion w first."""
+EUROC_GT_FILE: str = "state_groundtruth_estimate0.csv"
+"""That member, verbatim, in the sequence directory, where ``download`` puts it."""
 
 
 def nanoseconds(value: str) -> int:
@@ -215,6 +222,18 @@ def read_poses(path: Path) -> GtTrajectory:
     """Read groundtruth.csv as world_T_body, a dropout row repaired as in every EuRoC-style file (``euroc.sanitized``)."""
     samples: TimestampedSamples = read_samples(path, POSE_COLUMNS)
     return sanitized(samples.times_ns, samples.values[:, :3], samples.values[:, 3:])
+
+
+def read_euroc_gt(path: Path) -> GtTrajectory:
+    """EuRoC's own state_groundtruth_estimate0 as world_T_body, through the EuRoC reader MSD's gt also takes.
+
+    VSLAM-LAB's EuRoC body frame is imu0 (its ``T_BS`` is the identity), the frame this file poses, so the rows need no
+    transform; ``euroc.gt_trajectory`` turns the w-first quaternion around and repairs a dropout row.
+    """
+    try:
+        return gt_trajectory(read_numeric_csv(path.read_bytes(), num_values=GT_VALUE_COLUMNS))
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from error
 
 
 def read_imu(path: Path) -> ImuStream:

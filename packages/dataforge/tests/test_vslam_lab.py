@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from zipfile import ZipFile
 
 import cv2
 import numpy as np
@@ -36,6 +37,17 @@ EUROC_CAM1_T_BS: tuple[float, ...] = (
     0.0, 0.0, 0.0, 1.0,
 )  # fmt: skip
 """cam1's body_T_sensor, as EUROC_CALIBRATION writes it."""
+EUROC_BODY_POSE: str = (
+    "#timestamp, p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z [], v_RS_R_x [m s^-1], v_RS_R_y [m s^-1], "
+    "v_RS_R_z [m s^-1], b_w_RS_S_x [rad s^-1], b_w_RS_S_y [rad s^-1], b_w_RS_S_z [rad s^-1], b_a_RS_S_x [m s^-2], b_a_RS_S_y [m s^-2], b_a_RS_S_z [m s^-2]\n"
+    "1403636579763555584,4.688319,-1.786938,0.783338,0.534108,-0.153029,-0.827383,-0.082152,-0.027876,0.033207,0.800006,-0.003172,0.021267,0.078502,-0.025266,0.136696,0.075593\n"
+    "1403636579863555584,4.688177,-1.786770,0.787350,0.534640,-0.152990,-0.826976,-0.082863,-0.029272,0.033992,0.804771,-0.003172,0.021267,0.078502,-0.025266,0.136696,0.075593\n"
+)
+"""EuRoC's own mav0/state_groundtruth_estimate0/data.csv (header and rows as upstream writes them): world_T_imu0, w first."""
+VSLAM_LAB_EUROC_GROUNDTRUTH: str = (
+    "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n1403636579763555584,4.66,-1.84,0.78,1,0,0,0\n1403636579863555584,4.66,-1.84,0.82,1,0,0,0\n"
+)
+"""VSLAM-LAB's own EuRoC groundtruth.csv: cam0 positions with a constant placeholder in the quaternion columns."""
 
 
 def tum_sequence(root: Path, name: str = "rgbd_dataset_freiburg1_xyz") -> Path:
@@ -76,12 +88,21 @@ def euroc_sequence(root: Path) -> Path:
     (sequence / "imu_0.csv").write_text(
         "ts (ns),wx (rad s^-1),wy (rad s^-1),wz (rad s^-1),ax (m s^-2),ay (m s^-2),az (m s^-2)\n" + "\n".join(imu_rows) + "\n"
     )
-    (sequence / "groundtruth.csv").write_text(
-        "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n"
-        "1403636579763555584,4.688319,-1.786938,0.783338,-0.153029,-0.827383,-0.082152,0.534108\n"
-        "1403636579863555584,4.688177,-1.786770,0.787350,-0.152990,-0.826976,-0.082863,0.534640\n"
-    )
+    (sequence / "groundtruth.csv").write_text(VSLAM_LAB_EUROC_GROUNDTRUTH)
+    (sequence / "state_groundtruth_estimate0.csv").write_text(EUROC_BODY_POSE)
     return sequence
+
+
+def kept_sequence_zip(sequence: Path) -> Path:
+    """The sequence zip VSLAM-LAB keeps under its standard retention, ``<EUROC>/<room>/<seq>/<seq>.zip``, holding EuRoC's
+    own body pose; the extracted copy ``download`` would have written is removed."""
+    archive: Path = sequence.parent / "machine_hall" / sequence.name / f"{sequence.name}.zip"
+    archive.parent.mkdir(parents=True)
+    with ZipFile(archive, "w") as kept:
+        kept.writestr("mav0/state_groundtruth_estimate0/data.csv", EUROC_BODY_POSE)
+        kept.writestr("mav0/cam0/data.csv", "#timestamp [ns],filename\n")
+    (sequence / "state_groundtruth_estimate0.csv").unlink()
+    return archive
 
 
 def dataset(root: Path, benchmark: str) -> VslamLabDataset:
@@ -148,18 +169,43 @@ def test_gt_is_world_t_rig_on_the_upstream_stamps(tmp_path: Path, monkeypatch: p
     assert not paths.rrd_path(tmp_path / "out", layer=paths.SENSOR_METADATA_LAYER, identity=identity).exists()
 
 
-def test_position_only_gt_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_euroc_gt_is_euroc_s_own_body_pose_never_vslam_lab_s_groundtruth_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
     source: Path = euroc_sequence(tmp_path / "raw")
-    # VSLAM-LAB's own EuRoC groundtruth.csv: cam0 positions with a constant (1, 0, 0, 0) in the quaternion columns.
-    (source / "groundtruth.csv").write_text(
-        "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n1403636580863555669,4.66,-1.84,0.78,1,0,0,0\n1403636580913555383,4.66,-1.84,0.82,1,0,0,0\n"
-    )
     built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
     identity, _ = built.discover()[0]
-    with pytest.raises(ValueError, match="groundtruth.csv: 2 poses with a constant rotation are position-only"):
+    rebuild_derived_layers(built, identity, source)
+    store: rrc.ChunkStore = read_back(paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity))
+    poses: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:translation")
+    assert poses.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == [1403636579763555584, 1403636579863555584]
+    np.testing.assert_allclose(poses.column(1).to_pylist()[1], [[4.688177, -1.786770, 0.787350]], rtol=1e-6)
+    quaternions: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:quaternion")
+    np.testing.assert_allclose(quaternions.column(1).to_pylist()[1], [[-0.152990, -0.826976, -0.082863, 0.534640]], rtol=1e-6)
+    assert recording_properties(store, "gt")["source"] == BENCHMARKS["euroc"].gt.source
+
+
+def test_download_extracts_euroc_s_body_pose_from_the_kept_sequence_zip(tmp_path: Path) -> None:
+    source: Path = euroc_sequence(tmp_path)
+    kept_sequence_zip(source)
+    dataset(tmp_path, "euroc").download()
+    assert (source / "state_groundtruth_estimate0.csv").read_text() == EUROC_BODY_POSE
+
+
+def test_download_refuses_a_euroc_sequence_with_neither_its_body_pose_nor_the_kept_zip(tmp_path: Path) -> None:
+    source: Path = euroc_sequence(tmp_path)
+    (source / "state_groundtruth_estimate0.csv").unlink()
+    with pytest.raises(FileNotFoundError, match="MH_01_easy.zip"):
+        dataset(tmp_path, "euroc").download()
+
+
+def test_convert_names_download_when_euroc_s_body_pose_was_never_extracted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    source: Path = euroc_sequence(tmp_path / "raw")
+    kept_sequence_zip(source)
+    built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
+    identity, _ = built.discover()[0]
+    with pytest.raises(FileNotFoundError, match="dataforge-download"):
         rebuild_derived_layers(built, identity, source)
-    assert not paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity).exists()
 
 
 def test_the_imu_noise_model_lands_on_the_imu_node_as_sensor_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,9 +246,9 @@ def test_a_forced_refresh_whose_gt_is_refused_replaces_no_layer(tmp_path: Path, 
     identity, _ = built.discover()[0]
     rebuild_derived_layers(built, identity, source)
     published: dict[str, bytes] = {layer: target.read_bytes() for layer, target in built.targets(identity).items()}
-    (source / "groundtruth.csv").write_text("ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n")
+    (source / "state_groundtruth_estimate0.csv").write_text(EUROC_BODY_POSE.splitlines()[0] + "\n")
     monkeypatch.setattr(VslamLabDataset, "write_base", lambda *_: pytest.fail("base was rewritten before the gt was read"))
-    with pytest.raises(ValueError, match="groundtruth.csv"):
+    with pytest.raises(ValueError, match="state_groundtruth_estimate0.csv"):
         built.convert(identity, source, force=True)
     assert {layer: target.read_bytes() for layer, target in built.targets(identity).items()} == published
 
