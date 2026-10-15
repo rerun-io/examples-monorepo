@@ -15,8 +15,10 @@ module, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -26,9 +28,9 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core, tracking
-from slam_rs.catalog_feed import Frameset, ImuStream
+from slam_rs.catalog_feed import Frameset, ImuStream, SegmentFeed
 from slam_rs.config import SlamConfig
-from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_estimator_files
+from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, SegmentRun, robocap_estimator_files
 from slam_rs.types import empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
 
@@ -136,6 +138,20 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
     assert not stage.elapsed_ms
     assert "nothing tracked" in stage.summary()
     assert "NEVER COVERED BY THE IMU at [0]" in stage.summary()
+
+
+def test_the_driver_counts_what_vio_cannot_process_as_the_layer_node_does(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """The replay and gate driver splits ``lost`` as the VIO node does: a first frameset consumed before VIO initialised (blank
+    images) and a last one no later sample covers are not processable; the three between have their poses."""
+    sets: list[Frameset] = [frameset(step, texture, np.arange(step * FRAME_PERIOD_NS, (step + 1) * FRAME_PERIOD_NS, IMU_PERIOD_NS)) for step in range(5)]
+    sets[0] = replace(sets[0], images=[np.zeros_like(image) for image in sets[0].images])
+    sets[-1] = replace(sets[-1], imu=sets[-1].imu.between(-1, sets[-1].t_ns))
+    feed = Mock(spec=SegmentFeed, export_offset_ns=0, frame_t_ns=np.array([f.t_ns for f in sets]))
+    feed.stop_ns_after.return_value = None
+    feed.framesets.side_effect = lambda stop_ns: iter(sets)
+    feed.ground_truth_between.return_value = empty_trajectory()
+    run: SegmentRun = tracking.drive(feed, Lockstep(vio=pipeline(2)), config_sha256="a" * 64)
+    assert (run.framesets, len(run.estimate), run.lost, run.unprocessable) == (5, 3, 2, 2)
 
 
 def test_the_estimator_is_configured_from_basalts_own_two_files(settings: SlamConfig) -> None:
