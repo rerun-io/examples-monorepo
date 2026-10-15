@@ -10,7 +10,7 @@ this config's default ``--root`` under ``DATAFORGE_RAW_ROOT=<dir>``).
 Each sequence becomes, under one recording id (README#the-layer-rule):
 
 * **base**: one AV1 video per ``rgb_<i>`` at its pinhole (rig_T_cam = calibration.yaml's ``T_BS``), the
-  registered depth stream as ``rr.DepthImage`` on the same pinhole, the IMU, the capture properties.
+  registered depth stream as ``rr.EncodedDepthImage`` on the same pinhole, the IMU, the capture properties.
 * **gt**: groundtruth.csv's world_T_body on the rig node, its path and trail, the root ``ViewCoordinates``.
 * **sensor_metadata**: the IMU noise model as simplecv's ``ImuCalibration``, where calibration.yaml has one.
 
@@ -27,11 +27,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
-import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float64, Int64, UInt16
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.imu_calibration import ImuCalibration
@@ -52,7 +51,7 @@ from dataforge.datasets.vslam_lab_source import (
 )
 from dataforge.euroc import GtTrajectory, nominal_fps
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import log_camera_node, log_gt_path, log_imu, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import frame_index_column, log_camera_node, log_gt_path, log_imu, log_rig_node, log_video_stream, time_column
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, WorldUpAxis
 
@@ -66,6 +65,10 @@ IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres."""
 GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
 """Stroke of the whole gt path."""
+DEPTH_FRAMES_PER_CHUNK: int = 4
+"""Depth frames per sent chunk: about 1 MB of PNG, the chunk size Rerun's own batcher chose for these frames."""
+PNG_SIGNATURE: bytes = b"\x89PNG\r\n\x1a\n"
+"""First eight bytes of every PNG file."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,23 +173,29 @@ def rig_reference(calibration: Calibration) -> str | None:
 
 
 def log_depth(recording: rr.RecordingStream, directory: Path, frames: FrameIndex, camera: int, *, meter: float) -> None:
-    """Log one depth stream as ``rr.DepthImage`` on its camera's pinhole, frame by frame.
+    """Send one depth stream as ``rr.EncodedDepthImage`` on its camera's pinhole: the sensor's own 16-bit PNGs.
 
-    ``DepthImage`` with ``meter`` set to the benchmark's ``depth_factor`` (native units per metre, 5000 on TUM),
-    not metres as floats: the uint16 pixels stay exactly what the sensor wrote, at half the bytes, and the viewer
-    and every reader still get metres from ``meter``. The pinhole is the RGB camera's because VSLAM-LAB depth is
-    registered to it (``cam_type: rgb+depth``), so a pixel of one is the same ray as the pixel of the other.
+    The PNG bytes go in as they are, with ``meter`` set to the benchmark's ``depth_factor`` (native units per metre,
+    5000 on TUM): the pixels stay exactly what the sensor wrote, nothing is decoded here, and the viewer and every
+    reader still get metres from ``meter``. The pinhole is the RGB camera's because VSLAM-LAB depth is registered to
+    it (``cam_type: rgb+depth``), so a pixel of one is the same ray as the pixel of the other. Sent as columns on the
+    two capture clocks, ``DEPTH_FRAMES_PER_CHUNK`` frames at a time, so no wall clock enters the recording.
+
+    Raises:
+        ValueError: A frame is not a 16-bit grayscale PNG, the one encoding ``meter`` describes.
     """
-    entity: str = schema.depth_path(RIG, camera)
-    recording.set_log_time_enabled(False)  # the frames' own stamps are the clock, not when this conversion ran
-    for index, (stamp, path) in enumerate(zip(frames.times_ns, frames.paths, strict=True)):
-        depth: UInt16[ndarray, "h w"] | None = cv2.imread(str(directory / path), cv2.IMREAD_UNCHANGED)
-        if depth is None:
-            raise ValueError(f"{directory / path} is not a readable 16-bit depth PNG")
-        recording.set_time(schema.TIMELINE, duration=np.timedelta64(int(stamp), "ns"))
-        recording.set_time(schema.FRAME_INDEX, sequence=index)
-        recording.log(entity, rr.DepthImage(depth, meter=meter))
-    recording.reset_time()
+    for start in range(0, frames.times_ns.size, DEPTH_FRAMES_PER_CHUNK):
+        batch: slice = slice(start, start + DEPTH_FRAMES_PER_CHUNK)
+        blobs: list[bytes] = [(directory / path).read_bytes() for path in frames.paths[batch]]
+        for path, blob in zip(frames.paths[batch], blobs, strict=True):
+            if blob[:8] != PNG_SIGNATURE or blob[24:26] != b"\x10\x00":  # IHDR bit depth 16, colour type 0 (gray)
+                raise ValueError(f"{directory / path} is not a 16-bit grayscale PNG")
+        rr.send_columns(
+            schema.depth_path(RIG, camera),
+            indexes=[time_column(frames.times_ns[batch]), frame_index_column(np.arange(start, start + len(blobs), dtype=np.int64))],
+            columns=rr.EncodedDepthImage.columns(blob=blobs, media_type=["image/png"] * len(blobs), meter=[meter] * len(blobs)),
+            recording=recording,
+        )
 
 
 class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
