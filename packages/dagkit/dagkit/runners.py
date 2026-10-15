@@ -188,15 +188,33 @@ class _Run:
             return False  # several trigger ports (one producer): wait until nothing earlier can still arrive
         return self.mode == "realtime" or s.spec.kind == "segment" or all(self.states[e.spec.src.node].wm >= t_ns for e in s.asofs)
 
-    def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
-        if s.spec.kind == "node" and len(s.triggers) > 1 and any(e.queue for e in s.triggers):  # order by (t_ns, port declaration)
-            rank: dict[str, int] = {port: i for i, port in enumerate(s.spec.inputs)}
+    def _next_joined(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
+        """Several trigger ports (one producer): the earliest (t_ns, port declaration) item, taken from its queue only when
+        ready, so Block capacities hold the producer back. Queues spill into ``pending`` only while one is full and the
+        head waits (a burst at one time, or a late producer): the producer may wait on that queue."""
+        rank: dict[str, int] = {port: i for i, port in enumerate(s.spec.inputs)}
+        heads: list[tuple[TimeNs, int, int, _Edge | None]] = [(e.queue[0][1], rank[e.spec.dst.port], 1, e) for e in s.triggers if e.queue]
+        heads += [(s.pending[0][1], rank[s.pending[0][0].spec.dst.port], 0, None)] if s.pending else []  # pending first: it came first
+        if not heads:
+            return None
+        t_ns, _, _, edge = min(heads, key=lambda head: head[:3])
+        if self._ready(s, t_ns):
+            if edge is None:
+                return s.pending.popleft()
+            self.cond.notify_all()
+            return (edge, *edge.queue.popleft()[1:])
+        if any(len(e.queue) >= cast(Block | DropOldest, e.spec.kind).capacity for e in s.triggers):
             s.pending.extend((e, t, v) for e in s.triggers for _, t, v in e.queue)
             for e in s.triggers:
                 e.queue.clear()
             s.pending = deque(sorted(s.pending, key=lambda p: (p[1], rank[p[0].spec.dst.port])))
             s.pending_max = max(s.pending_max, len(s.pending))
             self.cond.notify_all()
+        return None
+
+    def _next(self, s: _State) -> tuple[_Edge, TimeNs, object] | None:
+        if s.spec.kind == "node" and len(s.triggers) > 1:
+            return self._next_joined(s)
         while True:
             if s.pending and self._ready(s, s.pending[0][1]):
                 return s.pending.popleft()

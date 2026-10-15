@@ -540,6 +540,46 @@ class Typed2:
         pass
 
 
+class SlowPair(Typed2):
+    """Typed2 that takes a moment per tick (a decode-bound VIO behind a fast source)."""
+
+    def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+        time.sleep(0.0003)
+        super().step(tick, out)
+
+
+def test_a_two_port_node_keeps_its_block_backpressure() -> None:
+    """slam-rs's VioNode shape (imu + frames from one source, Block(4) each): what waits for the node stays within its queues.
+    It once drained both queues into an unbounded pending deque on every look, so a fast source ran ahead (3,501 of 4,000)."""
+    order: list[tuple[str, int]] = []
+    graph = Graph("backpressure")
+    src = graph.source("src", source([(t, port, t) for t in range(1, 301) for port in ("a", "b")], ports=("a", "b")))
+    pair = graph.node("pair", SlowPair(order))
+    graph.edge(src["a"], pair["a"], Block(4))
+    graph.edge(src["b"], pair["b"], Block(4))
+    report: RunReport = run_threaded(graph, mode="lossless")
+    assert order == [(port, t) for t in range(1, 301) for port in ("a", "b")]
+    assert max(stats.pending_max for stats in report.nodes["pair"].ports.values()) <= 8
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_burst_at_one_time_through_full_queues_still_flows(runner: str) -> None:
+    """Six values per port at one time through Block(2) queues: the node cannot step before the time is complete, so the
+    queues spill into pending instead of blocking the producer for good."""
+    order: list[tuple[str, int]] = []
+    events = [(5, "b", 0)] * 6 + [(5, "a", 0)] * 6 + [(6, "a", 0), (6, "b", 0)]
+    graph = Graph("burst")
+    src = graph.source("src", source(events, ports=("a", "b")))
+    pair = graph.node("pair", Typed2(order))
+    graph.edge(src["a"], pair["a"], Block(2))
+    graph.edge(src["b"], pair["b"], Block(2))
+    done = threading.Thread(target=RUNNERS[runner], args=(graph,), daemon=True)
+    done.start()
+    done.join(20.0)
+    assert not done.is_alive(), "the run deadlocked"
+    assert order == [("a", 5)] * 6 + [("b", 5)] * 6 + [("a", 6), ("b", 6)]
+
+
 def test_stream_span_uses_min_and_max_source_time() -> None:
     graph = Graph("span")
     sink = graph.sink("sink", Collect(("x", "y")))
