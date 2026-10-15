@@ -74,13 +74,12 @@ def log_producer(recording: rr.RecordingStream, layer: str, producer: Producer) 
 
 def read_producer(dataset: DatasetEntry, segment: str, layer: str) -> Producer | None:
     """The Producer ``log_producer`` wrote for ``layer`` into ``segment`` (None when it has none)."""
-    prefix: str = f"/producers/{layer}:"
-    table: pa.Table = dataset.filter_segments([segment]).filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table()
-    cells: dict[str, object] = {c.rsplit(":", 1)[-1]: table.column(c)[0].as_py() for c in table.column_names if c.startswith(prefix) and table.num_rows}
+    entity: str = f"/producers/{layer}"
+    row: dict[str, object] = static_row(dataset.filter_segments([segment]).filter_contents([entity]).reader(index=None).to_arrow_table(), entity)
     try:
-        return from_dict(Producer, {k: v[0] if isinstance(v, list) else v for k, v in cells.items()}) if cells else None
+        return from_dict(Producer, row) if row else None
     except SerdeError as exc:
-        raise ValueError(f"{segment} /producers/{layer}: {exc}") from exc
+        raise ValueError(f"{segment} {entity}: {exc}") from exc
 
 
 def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value: Type, root: str) -> list[str]:
@@ -94,6 +93,14 @@ def log_value(recording: rr.RecordingStream, timeline: str, t_ns: TimeNs, value:
 
 def row_times(table: pa.Table, timeline: str) -> list[TimeNs]:
     return table[timeline].cast(pa.int64()).to_pylist() if timeline in table.column_names else [STATIC] * table.num_rows
+
+
+def static_row(table: pa.Table, entity: str) -> dict[str, object]:
+    """``entity``'s components in the first row of ``table`` (a static read) by component name, each cell taken out of
+    Rerun's per-row list when it holds one value (a logged array stays a list); {} without a row."""
+    prefix: str = f"{entity}:"
+    cells: dict[str, object] = {c.removeprefix(prefix): table.column(c)[0].as_py() for c in table.column_names if c.startswith(prefix)} if table.num_rows else {}
+    return {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in cells.items() if v is not None}
 
 
 def column(table: pa.Table, name: str) -> list:

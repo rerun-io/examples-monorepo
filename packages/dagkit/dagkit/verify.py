@@ -15,7 +15,7 @@ from serde import SerdeError, coerce, from_dict, serde
 from serde.toml import from_toml
 
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, git, log_producer
+from dagkit.types import Producer, git, log_producer, static_row
 
 Phase: TypeAlias = Literal["pre", "pre2", "post"]
 R = TypeVar("R")
@@ -142,9 +142,8 @@ def pre_golden(case: Case, golden: Path) -> Path:
 
 def run_counts(golden: DatasetEntry, block: str) -> dict[str, float]:
     """The numbers a verify ``run`` logged as static ``AnyValues`` at ``/verify/<block>/run`` (text left out)."""
-    prefix: str = f"/verify/{block}/run:"
-    row: dict[str, Any] = golden.filter_contents([prefix[:-1]]).reader(index=None).to_arrow_table().to_pylist()[0]
-    return {k.removeprefix(prefix): float(v[0]) for k, v in row.items() if k.startswith(prefix) and v and isinstance(v[0], int | float)}
+    entity: str = f"/verify/{block}/run"
+    return {k: float(v) for k, v in static_row(golden.filter_contents([entity]).reader(index=None).to_arrow_table(), entity).items() if isinstance(v, int | float)}
 
 
 def _resolve(target: str) -> Callable[..., object]:
