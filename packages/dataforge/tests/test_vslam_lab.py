@@ -208,6 +208,16 @@ def test_convert_names_download_when_euroc_s_body_pose_was_never_extracted(tmp_p
         rebuild_derived_layers(built, identity, source)
 
 
+def test_a_sequence_with_every_layer_published_is_skipped_without_reading_its_gt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    source: Path = euroc_sequence(tmp_path / "raw")
+    built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
+    identity, _ = built.discover()[0]
+    rebuild_derived_layers(built, identity, source)
+    (source / "state_groundtruth_estimate0.csv").unlink()
+    assert built.convert(identity, source, force=False) == built.targets(identity)[paths.BASE_LAYER]
+
+
 def test_the_imu_noise_model_lands_on_the_imu_node_as_sensor_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
     source: Path = euroc_sequence(tmp_path / "raw")

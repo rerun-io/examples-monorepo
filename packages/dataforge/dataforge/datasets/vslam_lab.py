@@ -280,18 +280,19 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write whichever layers are missing, each from this sequence's own VSLAM-LAB files.
 
-        Everything but the frames, calibration.yaml and the ground truth, is read and checked before the first
-        layer is written, so a refused sequence leaves every published layer as it was, even under ``--force``.
-        The derived layers read those files in place rather than from a sidecar copy: the converter never deletes
-        the VSLAM-LAB tree and ``discover`` requires them, so there is one copy and no layer can come from a stale one.
+        Everything but the frames, calibration.yaml and (when gt is pending) the ground truth, is read and checked
+        before the first layer is written, so a refused sequence leaves every published layer as it was, even under
+        ``--force``. The derived layers read those files in place rather than from a sidecar copy: the converter never
+        deletes the VSLAM-LAB tree, so there is one copy and no layer can come from a stale one.
         """
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
         calibration: Calibration = read_calibration(source / "calibration.yaml")
-        poses: GtTrajectory = self.read_gt(source)
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, calibration),
-            paths.GT_LAYER: lambda recording: self.write_gt(recording, poses),
         }
+        if paths.GT_LAYER in pending:
+            poses: GtTrajectory = self.read_gt(source)
+            writers[paths.GT_LAYER] = lambda recording: self.write_gt(recording, poses)
         if any(imu.sigma_g_c is not None for imu in calibration.imus):
             writers[paths.SENSOR_METADATA_LAYER] = lambda recording: write_sensor_metadata(recording, calibration)
         self.write_layers(identity, targets, pending, writers)
