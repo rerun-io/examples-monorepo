@@ -146,7 +146,14 @@ def run_counts(golden: DatasetEntry, block: str) -> dict[str, float]:
     return {k: float(v) for k, v in static_row(golden.filter_contents([entity]).reader(index=None).to_arrow_table(), entity).items() if isinstance(v, int | float)}
 
 
-def _resolve(target: str) -> Callable[..., object]:
+Run: TypeAlias = Callable[[Case, Phase, rr.RecordingStream], None]
+"""A block's ``run``: writes one case's golden outputs into the recording."""
+Score: TypeAlias = Callable[[Case, Path], Mapping[str, float]]
+"""A block's ``score``: one golden (plus GT) -> {metric: value}."""
+
+
+def _resolve(target: str) -> Any:
+    """``pkg.module:name`` (a block's ``run`` or ``score``), imported."""
     module, name = target.split(":")
     return getattr(importlib.import_module(module), name)
 
@@ -174,7 +181,8 @@ def main(args: VerifyArgs) -> int:
         return 1
     failed: bool = False
     for block, case in selected:
-        run, score = _resolve(block.run), _resolve(block.score)
+        run: Run = _resolve(block.run)
+        score: Score = _resolve(block.score)
         golden: Path = golden_path(card.package, block.name, case.name, args.phase)
         golden.parent.mkdir(parents=True, exist_ok=True)
         partial: Path = golden.with_name(f"{golden.stem}.{uuid.uuid4().hex[:8]}.partial")  # its own: concurrent runs never share one
@@ -185,7 +193,7 @@ def main(args: VerifyArgs) -> int:
             log_producer(recording, f"verify-{block.name}", producer)
             run(case, args.phase, recording)
             recording.flush()
-            metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
+            metrics: dict[str, float] = dict(score(case, partial))
             recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
             recording.flush()
             recording.disconnect()
@@ -206,7 +214,7 @@ def main(args: VerifyArgs) -> int:
         if args.phase == "post":  # noise: the case's own (noise, pre + pre2 runs), or those of its `noise_from` case (missing: fails)
             donor: Case = next((c for c in block.cases if c.name == case.noise_from), case) if case.noise_from and not case.noise else case
             runs: dict[tuple[str, Phase], Case] = {(c.name, ph): c for c, ph in ((case, "pre"), (donor, "pre"), (donor, "pre2"))}  # donor is often case
-            scores: dict = {(n, ph): dict(score(c, p)) for (n, ph), c in runs.items() if (p := golden_path(card.package, block.name, n, ph)).exists()}  # type: ignore[call-overload]
+            scores: dict[tuple[str, Phase], dict[str, float]] = {(n, ph): dict(score(c, p)) for (n, ph), c in runs.items() if (p := golden_path(card.package, block.name, n, ph)).exists()}
             for band in block.metrics:
                 noise_runs: list[float | None] = [scores.get((donor.name, ph), {}).get(band.name) for ph in ("pre", "pre2")]
                 pre: float | None = scores.get((case.name, "pre"), {}).get(band.name)
