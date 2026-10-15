@@ -8,6 +8,7 @@ import weakref
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 import pytest
 from dagkit_fakes import Add, Affinity, Batch, Collect, Square, Sum, source
@@ -291,6 +292,40 @@ def test_resources_are_built_once_shared_and_closed(runner: str) -> None:
     graph.edge(b["y"], graph.sink("sink", Collect(("y",)))["y"])
     RUNNERS[runner](graph)
     assert len(built) == 1 and seen == [built[0], built[0]] and built[0].closed
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+@pytest.mark.parametrize("failing", [False, True])
+def test_every_resource_closes_although_one_close_fails(runner: str, failing: bool) -> None:
+    """One cleanup path for a finished and a failed run: every owned object closes (sources first, then resources in reverse
+    order) and the first error is raised, later close errors riding along as notes."""
+    closed: list[str] = []
+
+    class Breaks(Model):
+        def close(self) -> None:
+            closed.append("breaks")
+            raise OSError("close breaks")
+
+    class Boom(Add):
+        def step(self, tick: Tick, out) -> None:  # noqa: ANN001
+            raise KeyError("boom")
+
+    def events():  # noqa: ANN202
+        try:
+            yield Event(1, "x", 1)
+        finally:
+            closed.append("source")
+
+    graph = Graph("unwind")
+    graph.resource("first", lambda: SimpleNamespace(close=lambda: closed.append("first")))
+    graph.resource("breaks", Breaks)
+    node = graph.node("node", Boom(0) if failing else Add(0))
+    graph.edge(graph.source("src", IterSource({"x": int}, events))["x"], node["x"])
+    graph.edge(node["y"], graph.sink("sink", Collect(("y",)))["y"])
+    with pytest.raises(KeyError if failing else OSError) as raised:
+        RUNNERS[runner](graph)
+    assert closed == ["source", "breaks", "first"]
+    assert any("close breaks" in note for note in getattr(raised.value, "__notes__", [])) == failing
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
