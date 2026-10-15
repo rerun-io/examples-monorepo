@@ -14,6 +14,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
+import rerun.blueprint as rrb
 from dagkit.graph import Graph
 from dagkit.node import Control, Event, RunContext, Tick
 from dagkit.runners import RunReport, run_sequential, run_threaded
@@ -36,7 +37,7 @@ from slam_rs.catalog_feed import MSD_RIG, RIG_ENTITY, ROBOCAP_RIG, Frameset, Imu
 from slam_rs.config import load_slam_config
 from slam_rs.graphs import vio as graphs_vio
 from slam_rs.graphs.vio import VioSource, vio_graph
-from slam_rs.nodes.vio import VioNode, VioParams
+from slam_rs.nodes.vio import VioNode, VioParams, VioView
 from slam_rs.tracking import Lockstep
 from slam_rs.types import CatalogPoses, RigPose, Trajectory, VioRig
 
@@ -351,6 +352,29 @@ def test_the_decoder_follows_the_device_choice() -> None:
     assert VioParams(decode_device="auto").decoder() == ("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def test_a_viewer_gets_each_tracked_frameset_with_what_the_estimator_made_of_it(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
+) -> None:
+    """``views``: beside each pose the node emits what ``replay --stage vio`` drew for it: the rig's cameras, the frameset it
+    tracked, the result, the window snapshot behind it, the keypoints its frontend tracked and the ``track`` time. Without a
+    viewer the node's ports stay pose and layer; without an output directory (the probe) it writes no layer, and its run
+    keeps the trajectory."""
+    assert set(VioNode(SEGMENT, PARAMS, tmp_path).outputs) == {"pose", "layer"}
+    vio_rig: VioRig = rig(camera, imu)
+    node = VioNode(SEGMENT, PARAMS, None, views=True)
+    assert set(node.outputs) == {"pose", "view"}
+    out: Strict = node_outputs(node, vio_rig, framesets(texture))
+    assert node.run is not None and len(node.run.estimate) == len([p for p, _, _ in out.items if p == "pose"]) > 0
+    poses = [(t, v) for port, t, v in out.items if port == "pose"]
+    views = [(t, v) for port, t, v in out.items if port == "view"]
+    assert views and [t for t, _ in views] == [t for t, _ in poses]
+    for (t, view), (_, pose) in zip(views, poses, strict=True):
+        assert isinstance(view, VioView) and isinstance(pose, RigPose) and view.cameras == vio_rig.cameras
+        assert view.frames.t_ns == view.result.t_ns == view.flow.t_ns == t + imu.cam_time_offset_ns and view.elapsed_ms > 0.0
+        assert view.result.world_from_rig is not None and len(view.snapshot.window_poses) >= 1
+        np.testing.assert_array_equal(view.result.world_from_rig[0:3], pose.position_m)
+
+
 def test_an_auto_choice_that_falls_back_to_the_cpu_warns_as_the_old_tool_did(
     camera: CameraFactory, imu: ImuCalib, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -411,3 +435,71 @@ def test_a_registered_layer_prints_its_segment_url_as_before(tmp_path: Path, mon
     assert next(built, None) is None
     printed: list[str] = capsys.readouterr().out.splitlines()
     assert (printed[-1:] == [f"rerun+http://catalog/dataset/msd-index?segment_id={SEGMENT.segment}"]) is (register == "new")
+
+
+def views_of(blueprint: rrb.Blueprint | rrb.Container | rrb.View) -> list[tuple[str, str, str]]:
+    """Every view of a blueprint (or a container), in layout order: its class, origin and name."""
+    item = blueprint.root_container if isinstance(blueprint, rrb.Blueprint) else blueprint
+    if isinstance(item, rrb.Container):
+        return [v for child in item.contents for v in views_of(child)]
+    return [(type(item).__name__, str(item.origin), str(item.name))]
+
+
+def drawn(path: Path) -> dict[str, set[str]]:
+    """Entity path -> archetypes (components where there is none) of a saved recording."""
+    found: dict[str, set[str]] = {}
+    for col in rr.chunk.RrdReader(path).stream().collect().schema().component_columns():  # an open recording has no footer yet
+        found.setdefault(col.entity_path, set()).add(col.archetype.split(".")[-1] if col.archetype else col.component)
+    return found
+
+
+def test_the_robocap_probe_draws_main_s_vio_view_writes_the_trajectory_and_reports_the_regression_ate(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Main's robocap_probe on the same framesets: what it drew (vio_log's VioStage, frameset inputs and whole paths) is what the
+    probe App draws (and the pipeline tab beside it), under main's blueprint as the first tab; the trajectory goes to a CSV on the
+    device clock and its ATE against the regression reference is printed, never gated."""
+    from simplecv.rerun_log_utils import RerunTyroConfig
+
+    from slam_rs.apis import robocap_probe as probe
+    from slam_rs.trajectory import ate, read_trajectory, write_trajectory
+    from slam_rs.types import empty_trajectory
+    from slam_rs.vio_log import VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+
+    vrig, sets = rig(camera, imu), framesets(texture)
+    main_rrd: Path = tmp_path / "main.rrd"
+    recording = rr.RecordingStream("main", send_properties=False)
+    recording.save(main_rrd)
+    previous = rr.set_thread_local_data_recording(recording)  # main logged through the global API
+    calibration = _core.Calibration.from_catalog(list(vrig.cameras), vrig.imu)
+    stage = VioStage(Lockstep(_core.Vio(calibration, _core.VioConfig.from_json(CONFIG))), VioLogger(vrig.cameras, empty_trajectory(), np.zeros(0, np.int64)))
+    log_calibration(vrig.cameras)
+    for frameset in sets:
+        log_frameset_inputs(vrig.cameras, frameset, "jpeg")
+        stage.run(frameset)
+    stage.flush()
+    stage.logger.log_complete_paths()
+    rr.set_thread_local_data_recording(previous)
+    recording.disconnect()
+
+    monkeypatch.setattr(probe, "VioSource", lambda segment, params: IterSource({"rig": VioRig, "frames": Frameset}, lambda: stream(vrig, sets)))
+    reference: Trajectory = stage.logger.estimated()
+    write_trajectory(tmp_path / "reference.csv", Trajectory(reference.t_ns, reference.position_m + 0.01, reference.quaternion_wxyz))
+    app_rrd, csv = tmp_path / "probe.rrd", tmp_path / "probe" / "slam_rs.csv"
+    config = probe.Config(RerunTyroConfig(headless=True, save=app_rrd), SEGMENT, PARAMS, reference_csv=tmp_path / "reference.csv", output_csv=csv)
+    probe.main(config)
+    config.rr_config.rec_stream.flush()
+
+    ours, theirs = drawn(app_rrd), drawn(main_rrd)
+    chunks = [sum(str(c.entity_path) == "/stats/vio/num_landmarks" for c in rr.chunk.RrdReader(p).stream().to_chunks()) for p in (app_rrd, main_rrd)]
+    assert chunks[0] == chunks[1] == 1, f"rows batched into {chunks} chunks: a recording swap per row writes a chunk per row"
+    assert {path: ours.get(path, set()) >= archetypes for path, archetypes in theirs.items()} == dict.fromkeys(theirs, True)
+    assert all(path in theirs or path.startswith(("/dagkit/", "/__")) for path in ours), sorted(set(ours) - set(theirs))
+    np.testing.assert_array_equal(read_trajectory(csv).position_m, reference.position_m)  # export offset 0: device clock = estimator clock
+    printed: str = capsys.readouterr().out
+    shifted: Trajectory = read_trajectory(tmp_path / "reference.csv")
+    assert "vs regression reference, 100.0% of its span covered (not gated)" in printed and ate(read_trajectory(csv), shifted).summary() in printed
+    tabs = probe.blueprint(vrig.cameras).root_container
+    assert isinstance(tabs, rrb.Tabs) and tabs.active_tab == 0
+    normal, pipeline = tabs.contents
+    assert (normal.name, pipeline.name) == ("main", "pipeline (debug)") and views_of(normal) == views_of(vio_blueprint(vrig.cameras))

@@ -11,7 +11,7 @@ from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
-from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
+from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, ate
@@ -501,7 +501,7 @@ def log_imu(imu: ImuStream) -> None:
         rr.send_columns(entity, indexes=[times], columns=rr.Scalars.columns(scalars=channel.reshape(-1)).partition([components] * len(imu)))
 
 
-def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) -> None:
+def log_frameset_inputs(cameras: tuple[CameraCalib, ...], frameset: Frameset, mode: FrameMode) -> None:
     """Log what the estimator is fed for one frameset, at the frameset's own time.
 
     Every replay draws this rung whether or not a stage consumes it, and the two
@@ -509,7 +509,7 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
     rather than one of them.
 
     Args:
-        feed: The open feed, for the cameras the images belong to.
+        cameras: The cameras the images belong to, in rig order.
         frameset: The frameset, with the inertial samples since the previous one.
         mode: How to draw the frames; see :data:`FrameMode`.
     """
@@ -517,7 +517,7 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
     # stage whether or not one consumes them.
     log_imu(frameset.imu)
     rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
-    for camera, image in zip(feed.cameras, frameset.images, strict=True):
+    for camera, image in zip(cameras, frameset.images, strict=True):
         entity: str = f"{camera_entity(camera.index)}/image"
         if mode == "downscaled":
             small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])

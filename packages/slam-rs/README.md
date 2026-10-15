@@ -37,11 +37,12 @@ pixi run -e slam-rs slam-rs-gate --tier release    # three longer clips; --tier 
 pixi run -e slam-rs slam-rs-wgpu-build             # the GPU frontend; then --gpu on any tool
 pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment.dataset <dataset> --segment.segment <id> --output-dir <dir>   # a catalog segment's slam_rs layer, on the GPU
 pixi run -e slam-rs python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # your own recording, no catalog
+pixi run -e slam-rs python tools/apps/robocap_probe.py   # RoboCap session 15 through the VIO graph, drawn, vs its regression trajectory
 ```
 
 `slam-rs-catalog-layer` runs the VIO graph (`slam_rs/graphs/vio.py`, picture and guide in `GRAPH.md`) on the GPU by default: it
 builds the wgpu core first and decodes with NVDEC, so it lives in the `slam-rs-cuda` environment; it falls back to the CPU only
-without a GPU adapter. It registers the layer only on a segment that has none; `--register replace` refreshes one.
+without a GPU adapter, and warns when it does. It registers the layer only on a segment that has none; `--register replace` refreshes one.
 
 The gate prints the ATE beside the baseline and pass or fail; on a host that
 recorded no baseline the speed clause is reported, not gated. `slam-rs-serve`

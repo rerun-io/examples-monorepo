@@ -17,7 +17,7 @@ from numpy import ndarray
 from serde import serde
 
 from slam_rs import _core
-from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, RigProfile
+from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, CameraCalib, Frameset, RigProfile
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun
@@ -53,6 +53,19 @@ class VioParams:
         return MSD_RIG, settings.vio_config_text(dataset, self.profile)
 
 
+@dataclass(frozen=True, slots=True)
+class VioView:
+    """One tracked frameset as ``replay --stage vio`` draws it (memory only): the rig's cameras, the frameset (images and IMU
+    batch), the estimator's result, the window snapshot behind it, the keypoints its frontend tracked and the ``track`` time."""
+
+    cameras: tuple[CameraCalib, ...]
+    frames: Frameset
+    result: _core.VioResult
+    snapshot: _core.VioSnapshot
+    flow: _core.FlowFrame
+    elapsed_ms: float
+
+
 class VioNode:
     """Track the rig pose with VIO.
 
@@ -60,11 +73,13 @@ class VioNode:
     batch and tracks what the samples cover (poses leave late); ``flush`` drains it and writes the ``slam_rs`` layer file."""
 
     inputs: Mapping[str, PortType] = {"frames": Frameset, "rig": VioRig}
-    outputs: Mapping[str, PortType] = {"pose": RigPose, "layer": LayerFile}
     emits_late: bool = True
 
-    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path) -> None:
-        self.segment, self.params, self.output_dir = segment, params, output_dir
+    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path | None, views: bool = False) -> None:
+        """``output_dir`` None: no layer (``run`` keeps the trajectory); ``views``: a ``view`` beside each pose, for a viewer."""
+        self.segment, self.params, self.output_dir, self.views = segment, params, output_dir, views
+        self.outputs: Mapping[str, PortType] = {"pose": RigPose}
+        self.outputs |= ({"layer": LayerFile} if output_dir is not None else {}) | ({"view": VioView} if views else {})
         self.decoder: Literal["cpu", "cuda"] = params.decoder()  # the source's decoder (it resolves the same params), for the layer
         self.config_text: str = params.for_dataset(segment.dataset)[1]
         self.lockstep: Lockstep | None = None
@@ -92,16 +107,20 @@ class VioNode:
             vio = _core.Vio(calibration, flow, gpu=False)
         self.lockstep, self.run, self.partial, self.framesets, self.t_ns, self.wm = Lockstep(vio), None, None, 0, STATIC, STATIC
         self.control: Control | None = ctx.control
-        self.offset_ns, self.export_ns = rig.imu.cam_time_offset_ns, rig.export_offset_ns
+        self.offset_ns, self.export_ns, self.cameras = rig.imu.cam_time_offset_ns, rig.export_offset_ns, rig.cameras
         self.poses: list[tuple[int, Float64[ndarray, " 3"], Float64[ndarray, " 4"]]] = []  # device clock, position, wxyz
         self.started: float = time.monotonic()
 
     def _emit(self, tracked: Iterator[tuple[Frameset, _core.VioResult]], out: Emit) -> None:
-        for _, result in tracked:
+        for frames, result in tracked:
             pose: Float64[ndarray, " 7"] | None = result.world_from_rig
             assert pose is not None, f"tracking result at {result.t_ns} has no pose"
             self.poses.append((result.t_ns + self.export_ns, pose[0:3].copy(), np.roll(pose[3:7], 1)))
             out.put("pose", result.t_ns - self.offset_ns, RigPose(*self.poses[-1][1:]))
+            if self.views:  # the window as this result left it, before the next track
+                assert self.lockstep is not None and (snapshot := self.lockstep.vio.snapshot()) is not None, f"{result.t_ns} tracked without a snapshot"
+                view = VioView(self.cameras, frames, result, snapshot, self.lockstep.flow_frame(), self.lockstep.elapsed_ms[-1])
+                out.put("view", result.t_ns - self.offset_ns, view)
 
     def step(self, tick: Tick, out: Emit) -> None:
         assert self.lockstep is not None, "step before reset"
@@ -126,8 +145,8 @@ class VioNode:
         backend: str = str(_core.gpu_backend) if self.lockstep.vio.gpu else "cpu"
         print(f"{self.segment.segment}: {self.run.framesets} framesets, {len(estimate)} poses, {self.run.lost} lost, {self.run.wall_s:.1f} s")
         self.lockstep = None
-        if self.control is not None and self.control.stopped and (len(estimate) < 2 or self.run.lost):
-            return  # a stop before a publishable prefix: no layer (a complete run with too few poses still fails in write_layer)
+        if self.output_dir is None or (self.control is not None and self.control.stopped and (len(estimate) < 2 or self.run.lost)):
+            return  # no layer asked for, or a stop before a publishable prefix (a complete run with too few poses still fails in write_layer)
         self.partial = partial_path(self.output_dir, self.segment, POSE_SOURCE)
         write_layer(self.partial, self.segment.segment, self.run, clock_offset_ns=self.export_ns + self.offset_ns,
                     profile=self.params.profile, backend=backend, decoder=self.decoder)  # fmt: skip

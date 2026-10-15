@@ -134,7 +134,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         if config.max_framesets is not None and replayed >= config.max_framesets:
             break
         replayed += 1
-        log_frameset_inputs(feed, frameset, mode)
+        log_frameset_inputs(feed.cameras, frameset, mode)
         if stage is not None:
             stage.run(frameset)
 
