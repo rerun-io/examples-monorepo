@@ -29,7 +29,7 @@ CARD: Path = Path(__file__).resolve().parents[1] / "VERIFY.toml"
 
 def case_config(case: Case) -> Config:
     """The App config of a catalog case, viewer only: no layer file, nothing registered, no ``eval.json``."""
-    return Config(RerunTyroConfig(headless=True), case.segment_ref(), frame_budget=int(case.params["frame_budget"]))
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), frame_budget=case.params["frame_budget"])
 
 
 def examples() -> list[Config]:

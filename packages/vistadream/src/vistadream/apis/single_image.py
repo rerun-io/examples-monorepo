@@ -61,11 +61,8 @@ class Config:
 
 def case_config(case: Case, rr_config: RerunTyroConfig) -> Config:
     """A ``VERIFY.toml`` case as a Config (params the case leaves out keep their default)."""
-    params: dict[str, str] = case.params
-    stage, max_resolution = params["stage"], int(params["max_resolution"])
-    assert case.input is not None and stage in ("no-outpaint", "outpaint", "coarse") and max_resolution in (512, 1024, 1920), case
-    expansion_percent, n_frames = float(params.get("expansion_percent", Config.expansion_percent)), int(params.get("n_frames", Config.n_frames))
-    return Config(rr_config, PACKAGE_DIR / case.input, stage, max_resolution, expansion_percent, n_frames, seed=int(params["seed"]))
+    assert case.input is not None, case
+    return Config(rr_config, PACKAGE_DIR / case.input, **case.params)
 
 
 def short_case(rr_config: RerunTyroConfig) -> Config:

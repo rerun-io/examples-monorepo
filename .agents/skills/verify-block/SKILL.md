@@ -103,7 +103,7 @@ Owned TOML, read by `dagkit.verify` with pyserde (`deny_unknown_fields`, `type_c
 |---|---|
 | top level `VerifyCard` | `package`, `[[graph]]`, `[[tests]]` |
 | `[[graph]]` `GraphBlock` | `name`, `run` (`"pkg.verify:run"`), `score` (`"pkg.verify:score"`), `cases`, `metrics`, `shots` |
-| `[[graph.cases]]` `Case` | `name`, `clip` (`short`/`full`), `reference` (`gt`/`pre-port`), `dataset` + `segment` OR `input` (repo-relative file), `window_s` (`[start, stop]`, absolute seconds on the case clock), `params` (Config overrides, string values), `noise` (metric → measured \|pre − pre2\|), `noise_from` (short case whose noise a full case reuses), `published` (metric → the method's published result on this case, e.g. its paper's table) |
+| `[[graph.cases]]` `Case` | `name`, `clip` (`short`/`full`), `reference` (`gt`/`pre-port`), `dataset` + `segment` OR `input` (repo-relative file), `window_s` (`[start, stop]`, absolute seconds on the case clock), `params` (Config overrides as TOML types them; `case.configure(Record)` reads the keys a pyserde record declares), `noise` (metric → measured \|pre − pre2\|), `noise_from` (short case whose noise a full case reuses), `published` (metric → the method's published result on this case, e.g. its paper's table) |
 | `[[graph.metrics]]` `MetricBand` | `name`, `unit`, `better` (`lower`/`higher`), `floor` (ABSOLUTE smallest tolerance; write "5 % of pre" as the number) |
 | `[[graph.shots]]` `Shot` | `view` (a view's `origin` from `rerun_get_viewer_state`, e.g. `/`, or `full`), `t_s` (absolute seconds on the case clock) |
 | `[[tests]]` `TestBlock` | `name`, `tier` (`model`/`op`/`node`/`types`), `lane` (`unit`/`integration`/`golden`), `tests` (test ids), `properties` (ids of the property tests that own the bounds) |
@@ -125,7 +125,7 @@ clip = "short"
 reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "<segment id from section 1>"
-params = { frame_budget = "200" }
+params = { frame_budget = 200 }
 noise = { rot_deg_mean = 0.02, trans_cm_mean = 0.3 }
 
 [[graph.cases]]
@@ -134,7 +134,7 @@ clip = "full"
 reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "<same segment id>"
-params = { frame_budget = "1000" }
+params = { frame_budget = 1000 }
 noise_from = "short"               # run once pre-port; reuses the short case's noise, stated in the PR
 
 [[tests]]

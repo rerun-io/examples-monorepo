@@ -2,8 +2,10 @@
 
 import math
 import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import dagkit_fakes
 import pytest
@@ -11,6 +13,7 @@ import rerun as rr
 import tyro
 from hypothesis import given
 from hypothesis import strategies as st
+from serde import SerdeError, serde
 
 from dagkit import verify
 from dagkit.sources import SegmentRef
@@ -62,6 +65,27 @@ def test_card_loads_and_full_case_reuses_short_noise(tmp_path: Path) -> None:
     (tmp_path / "BAD.toml").write_text(CARD.replace('package = "exo-calib"', 'package = "exo-calib"\nowner = "x"'))
     with pytest.raises(ValueError, match="BAD.toml"):
         load_card(tmp_path / "BAD.toml")
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class VioLike:
+    """A package's params record, as slam-rs's ``VioParams``."""
+
+    resize_hw: tuple[int, int]
+    profile: Literal["fast", "reference"] = "reference"
+    calib: bool = False
+
+
+def test_case_params_keep_their_toml_types_and_configure_a_record(tmp_path: Path) -> None:
+    typed: str = 'params = { frame_budget = 200, calib = true, resize_hw = [752, 1024], profile = "fast" }'
+    (tmp_path / "VERIFY.toml").write_text(CARD.replace('noise = { rot_deg_mean = 0.02 }', f"noise = {{ rot_deg_mean = 0.02 }}\n{typed}"))
+    case: Case = load_card(tmp_path / "VERIFY.toml").graph[0].cases[0]
+    assert case.params == {"frame_budget": 200, "calib": True, "resize_hw": [752, 1024], "profile": "fast"}
+    assert case.configure(VioLike) == VioLike((752, 1024), "fast", True)  # only the fields the record declares
+    assert case.configure(VioLike, profile="reference").profile == "reference"
+    with pytest.raises(SerdeError):
+        replace(case, params={"resize_hw": [1, 2], "profile": "slow"}).configure(VioLike)
 
 
 def test_a_case_segment_ref_carries_its_window_in_ns_and_a_local_case_has_none() -> None:

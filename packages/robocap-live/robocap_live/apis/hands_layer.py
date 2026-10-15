@@ -21,7 +21,6 @@ from dagkit.runners import RunReport
 from dagkit.sinks import LayerFileSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.verify import Case, load_card
-from serde import from_dict
 from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs.apis.catalog_layer import vio_publish
 from slam_rs.nodes.vio import VioParams
@@ -85,10 +84,9 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
 
 def case_config(case: Case, output_dir: Path, slam: Literal["vio", "catalog"]) -> Config:
     """The App's Config for a case (``models_dir`` relative to the package; VIO params of a ``robocap`` case), unregistered."""
-    assert int(case.params["group_tolerance_ns"]) == GROUP_TOLERANCE_NS, f"{case.name}: the graph groups framesets within {GROUP_TOLERANCE_NS} ns"
-    hands: HandsParams = from_dict(HandsParams, {"models_dir": str(PACKAGE_DIR / case.params["models_dir"]), "device": case.params["device"],
-                                                 "ort_threads": int(case.params["ort_threads"]), "overlays": case.params["overlays"]})  # fmt: skip
-    vio: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")}) if slam == "vio" else VioParams()
+    assert case.params["group_tolerance_ns"] == GROUP_TOLERANCE_NS, f"{case.name}: the graph groups framesets within {GROUP_TOLERANCE_NS} ns"
+    hands: HandsParams = case.configure(HandsParams, models_dir=str(PACKAGE_DIR / case.params["models_dir"]))
+    vio: VioParams = case.configure(VioParams) if slam == "vio" else VioParams()
     return Config(RerunTyroConfig(headless=True), case.segment_ref(), output_dir, hands, slam, vio, register="off")
 
 

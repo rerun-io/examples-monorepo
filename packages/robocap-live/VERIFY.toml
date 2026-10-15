@@ -37,7 +37,7 @@ segment = "robocap__fe6fede545c972fa__s00000014"
 window_s = [1655058.2373435, 1655063.2373435]
 # Since the port the graph fixes what decode_threads (2 libavcodec threads per camera) and pose_tolerance_ns set pre-port: each
 # frameset takes the core's own nearest pose within 2 ms (on this segment every slam_rs pose sits < 1 ms from its frameset).
-params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", group_tolerance_ns = "3000000" }
+params = { models_dir = "models", device = "cpu", ort_threads = 4, overlays = "debug", group_tolerance_ns = 3000000 }
 # |pre - pre2|: the pre-port pipeline is deterministic on CPU ONNX Runtime (pre2 bit-identical: 150 framesets, 598 KeyNet
 # rows, 261 reported hand-framesets). Bands = floors.
 noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0, kp2d_delta_pct = 0.0 }
@@ -49,7 +49,7 @@ clip = "full"
 reference = "pre-port"
 dataset = "robocap"
 segment = "robocap__fe6fede545c972fa__s00000014"
-params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", group_tolerance_ns = "3000000" }
+params = { models_dir = "models", device = "cpu", ort_threads = 4, overlays = "debug", group_tolerance_ns = 3000000 }
 # |pre - pre2|: own pre2 (3 min a run), bit-identical (32,074 framesets, 119,244 KeyNet rows, 47,261 reported
 # hand-framesets, scale 0.9922 calibrated). Bands = floors.
 noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0, kp2d_delta_pct = 0.0 }
@@ -88,7 +88,7 @@ reference = "pre-port"
 dataset = "robocap"
 segment = "robocap__fe6fede545c972fa__s00000014"
 window_s = [1655058.2373435, 1655063.2373435]
-params = { models_dir = "models", device = "cpu", ort_threads = "4", overlays = "debug", group_tolerance_ns = "3000000", profile = "fast", backend = "cpu", decode_device = "cpu" }
+params = { models_dir = "models", device = "cpu", ort_threads = 4, overlays = "debug", group_tolerance_ns = 3000000, profile = "fast", backend = "cpu", decode_device = "cpu" }
 # |pre - pre2|: bit-identical (150 framesets, all with a pose; 261 reported hand-framesets). Bands = floors.
 noise = { kp2d_px_mean = 0.0, kp2d_px_p95 = 0.0, landmarks_mm_mean = 0.0, reported_delta_pct = 0.0, kp2d_delta_pct = 0.0 }
 

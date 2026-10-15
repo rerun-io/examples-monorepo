@@ -42,10 +42,10 @@ BODY_JOINTS: int = 22
 
 def case_config(case: Case) -> Config:
     """The App Config of a case: ``run`` and the gradio app's examples (``example_cases``) run the same inputs."""
-    height, width = (int(x) for x in case.params["resize_hw"].split(","))
+    height, width = case.params["resize_hw"]
     return Config(
-        RerunTyroConfig(headless=True), case.segment_ref(), cameras=tuple(case.params["cameras"].split(",")),
-        resize_hw=(height, width), preset="quality" if case.params["preset"] == "quality" else "fast", subjects=int(case.params["subjects"]),
+        RerunTyroConfig(headless=True), case.segment_ref(), cameras=tuple(case.params["cameras"]), resize_hw=(height, width),
+        preset=case.params["preset"], subjects=case.params["subjects"],
     )  # fmt: skip
 
 
@@ -79,7 +79,7 @@ def score(case: Case, golden: Path) -> dict[str, float]:
     """MPJPE / PVE of the fitted meshes against the ``mosh_gt`` meshes, person-mask IoU at the GT mask size, fit coverage and
     realtime fraction. Persons are matched to GT persons by the smallest mean PVE (one-to-one)."""
     segment_ref: SegmentRef = case.segment_ref()
-    cameras: list[str] = case.params["cameras"].split(",")
+    cameras: list[str] = case.params["cameras"]
     start_ns, stop_ns = segment_ref.window_ns or (-(2**62), 2**62)
     time = col("video_time").cast(pa.int64())
     window = (time >= lit(start_ns)) & (time < lit(stop_ns))  # the GT reads transfer only the case's window

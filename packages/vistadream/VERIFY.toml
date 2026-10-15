@@ -30,7 +30,7 @@ name = "no-outpaint"
 clip = "short"
 reference = "pre-port"
 input = "data/office/IMG_4029.jpg"
-params = { stage = "no-outpaint", max_resolution = "512", seed = "0" }
+params = { stage = "no-outpaint", max_resolution = 512, seed = 0 }
 # |pre - pre2| (seeded; gsplat 1.5.3 backward atomics): 147,929 splats both runs, 0.23 % of trajectory pixels differ. Bands =
 # floors. novel_rgb_mae floor 1.0 level: a 1-pixel image shift scores 4.2 levels, adjacent trajectory steps 3.8-16.
 noise = { input_psnr_db = 0.0000121, input_depth_absrel = 0.000000015, novel_rgb_mae = 0.00264 }
@@ -43,7 +43,7 @@ name = "outpaint"
 clip = "full"
 reference = "pre-port"
 input = "data/office/IMG_4029.jpg"
-params = { stage = "outpaint", max_resolution = "512", expansion_percent = "0.3", seed = "0" }
+params = { stage = "outpaint", max_resolution = 512, expansion_percent = 0.3, seed = 0 }
 
 [[graph.cases]]
 # rule: the same image through the coarse expansion (view selection, FLUX inpainting, MoGe, 500 iterations per added view).
@@ -51,7 +51,7 @@ name = "coarse"
 clip = "full"
 reference = "pre-port"
 input = "data/office/IMG_4029.jpg"
-params = { stage = "coarse", max_resolution = "512", expansion_percent = "0.3", n_frames = "10", seed = "0" }
+params = { stage = "coarse", max_resolution = 512, expansion_percent = 0.3, n_frames = 10, seed = 0 }
 
 [[tests]]
 name = "types"

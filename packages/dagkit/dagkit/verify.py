@@ -4,20 +4,21 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, TypeVar, cast
 
 import rerun as rr
 import tyro
 from rerun.catalog import DatasetEntry
-from serde import SerdeError, coerce, serde
+from serde import SerdeError, coerce, from_dict, serde
 from serde.toml import from_toml
 
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer, git, log_producer
 
 Phase: TypeAlias = Literal["pre", "pre2", "post"]
+R = TypeVar("R")
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -39,7 +40,7 @@ class Case:
     segment: str | None = None
     input: str | None = None  # ... or a repo-relative local input
     window_s: tuple[float, float] | None = None
-    params: dict[str, str] = field(default_factory=dict)  # config overrides of this case
+    params: dict[str, Any] = field(default_factory=dict)  # config overrides of this case, as TOML types them (see `configure`)
     noise: dict[str, float] = field(default_factory=dict)  # metric -> measured |pre - pre2| for THIS case
     noise_from: str | None = None  # reuse the named case's noise (stated, never implied)
     published: dict[str, float] = field(default_factory=dict)  # metric -> a published result on this case (a paper's table)
@@ -51,6 +52,12 @@ class Case:
         window: tuple[int, int] | None = None if self.window_s is None else (round(self.window_s[0] * 1e9), round(self.window_s[1] * 1e9))
         segment = SegmentRef(self.dataset, self.segment, window_ns=window)
         return segment if catalog_url is None else replace(segment, catalog_url=catalog_url)
+
+    def configure(self, cls: type[R], **overrides: object) -> R:
+        """The params ``cls`` declares, ``overrides`` on top, as a ``cls`` record that pyserde checks (a package's typed view
+        of its case, e.g. ``case.configure(VioParams)``)."""
+        names: set[str] = {f.name for f in fields(cls)}  # type: ignore[arg-type]  # R: any pyserde dataclass
+        return from_dict(cls, {k: v for k, v in self.params.items() if k in names} | overrides)
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)

@@ -147,9 +147,8 @@ def test_the_default_input_is_the_short_case_and_the_examples_are_the_configs_ve
     assert [e.segment for e in examples()] == [c.segment_ref() for c in cases if c.clip == "short"]
     for case in cases:
         config: Config = dataclasses.replace(case_config(case), hardware="x86_64-cuda")
-        calib: bool = case.params["calib"] == "true"
-        assert slam_config(config) == SlamConfig(use_calib=calib, img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
-        assert config.undistort == (case.params.get("undistort") == "true") and config.camera == "rig_00/cam_00"
+        assert slam_config(config) == SlamConfig(use_calib=case.params["calib"], img_size=case.params["img_size"], subsample=case.params["subsample"])
+        assert config.undistort == case.params.get("undistort", False) and config.camera == "rig_00/cam_00"
     assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4"), SlamConfig()), VideoFileSource)
 
 

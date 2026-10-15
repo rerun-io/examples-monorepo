@@ -67,10 +67,8 @@ keyframes); this block keeps 10 ms on both benchmarks."""
 def case_config(case: Case) -> Config:
     """The App config of a case: its clip of cam_00 at ``img_size`` and ``subsample``, the calib preset when ``calib``,
     undistorted by the source when ``undistort``; lossless and threaded (the App's defaults)."""
-    calib: bool = case.params["calib"] == "true"
-    undistort: bool = case.params.get("undistort") == "true"
-    size, stride = int(case.params["img_size"]), int(case.params["subsample"])
-    return Config(RerunTyroConfig(headless=True), case.segment_ref(), undistort=undistort, preset="calib" if calib else None, img_size=size, subsample=stride)  # type: ignore[arg-type]
+    p = case.params
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), undistort=p.get("undistort", False), preset="calib" if p["calib"] else None, img_size=p["img_size"], subsample=p["subsample"])
 
 
 def examples() -> list[Config]:
@@ -91,7 +89,7 @@ def _input_frames(case: Case) -> int:
     keyframes: list[bool] = catalog_keyframes(flags)  # one row per packet; a null flag (sparse logging) is false
     if not keyframes[0]:
         raise ValueError(f"{segment.segment}: the window {case.window_s} does not start on a keyframe")
-    return len(keyframes) // int(case.params["subsample"])
+    return len(keyframes) // case.params["subsample"]
 
 
 class _GoldenSink(RerunSink):

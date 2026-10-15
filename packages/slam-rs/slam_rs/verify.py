@@ -19,7 +19,6 @@ from dagkit.sources import SegmentRef
 from dagkit.types import served
 from dagkit.verify import Case, Phase, pre_golden, run_counts
 from rerun.catalog import DatasetEntry
-from serde import from_dict
 
 from slam_rs.apis.catalog_layer import vio_publish
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, read_ground_truth, resolve_catalog_segments, rig_trajectory
@@ -36,7 +35,7 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """The VIO graph (sequential, lossless) on the case's segment, its layer (unregistered, in a temporary directory) copied into
     ``recording``. VIO initialises from rest, so it starts at the segment's first frameset; a window ends it at ``window_s[1]``."""
     segment: SegmentRef = case.segment_ref(load_slam_config().catalog_url)
-    params: VioParams = from_dict(VioParams, {k: case.params[k] for k in ("profile", "backend", "decode_device")})
+    params: VioParams = case.configure(VioParams)
     with TemporaryDirectory() as tmp:
         graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio", default_enabled=False))
         report: RunReport = run_sequential(graph)

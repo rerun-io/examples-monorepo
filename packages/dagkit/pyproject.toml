@@ -48,5 +48,5 @@ min_confidence = 60
 ignore_names = [
     "step_ms_mean", "step_ms_p95", "params_sha", "reference", "input", "window_s", "lane", "properties", "metric",
     "iterations", "lr", "polish", "headless", "image", "frames", "scale", "output_ply", "pytestmark", "verify_run", "verify_score",
-    "models_dir", "guidance", "captures", "export", "output_scale", "display",
+    "models_dir", "guidance", "captures", "export", "output_scale", "display", "resize_hw", "calib",
 ]
