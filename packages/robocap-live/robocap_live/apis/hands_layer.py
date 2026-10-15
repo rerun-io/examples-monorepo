@@ -80,6 +80,8 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     yield from graphs
     if config.segment.window_ns is not None and publish.published is not None:
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
+    elif publish.published is not None and config.register != "off":  # where to look at the registered layer, as the old tool ended
+        print(config.segment.entry().segment_url(config.segment.segment))
 
 
 def case_config(case: Case, output_dir: Path, slam: Literal["vio", "catalog"]) -> Config:

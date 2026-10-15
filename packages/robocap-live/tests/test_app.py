@@ -141,3 +141,20 @@ def test_the_examples_are_the_verify_short_cases_never_registered() -> None:
         assert (example.register, example.hands.device, example.hands.ort_threads, example.hands.overlays) == ("off", "cpu", 4, "debug")
         assert (example.hands.models_dir / "detnet_full.onnx").parent == PACKAGE_DIR / "models"
     assert examples()[0].vio == VioParams("fast", "cpu", "cpu")
+
+
+def test_a_registered_layer_prints_its_segment_url_as_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Main's tool ended with the segment's catalog URL, the place to look at the new layer; the App prints it once the
+    layer is registered (a windowed or unregistered run publishes nothing to look at)."""
+    from dagkit import sinks
+
+    class Entry:
+        def segment_url(self, segment: str) -> str:
+            return f"rerun+http://catalog/dataset/robocap?segment_id={segment}"
+
+    fake_inputs(monkeypatch, 5)
+    monkeypatch.setattr(sinks, "segment_layers", lambda segment: ["base", "slam_rs"])
+    monkeypatch.setattr(sinks, "publish_layer_file", lambda partial, *_, **__: partial)  # registered, as far as the App knows
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: Entry())
+    main(Config(RerunTyroConfig(headless=True, save=tmp_path / "app.rrd"), SEGMENT, tmp_path, HandsParams(tmp_path), "catalog", register="new"))
+    assert capsys.readouterr().out.splitlines()[-1] == f"rerun+http://catalog/dataset/robocap?segment_id={SEGMENT.segment}"
