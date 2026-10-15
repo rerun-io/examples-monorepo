@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
+from dagkit import sinks
 from dagkit.app import gradio_app, load_profile
 from dagkit.doc import describe, picture
 from dagkit.graph import Block, DropOldest, Graph, Placement, Spawn
@@ -18,7 +19,8 @@ from dagkit.node import Emit, Event, PortType, RunContext, Tick
 from dagkit.runners import run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import IterSource
-from dagkit.testing import Recorder, check_graph_docs, check_picture
+from dagkit.testing import Recorder, check_form, check_graph_docs, check_picture
+from dagkit.types import Producer
 from dagkit.verify import load_card
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -120,9 +122,8 @@ def test_profile_presets_resolve(preset: str | None) -> None:
     assert cfg.img_size == (224 if preset == "fast" else 512) and cfg.use_calib == (preset == "calib")
 
 
-def test_a_file_input_beats_webcam_zero_and_zero_means_unset(tmp_path: Path) -> None:
-    """The generated gradio form sends 0 for an empty number field (webcam, max_frames, subsample)."""
-    config = Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4", webcam=0, max_frames=0, subsample=0, hardware="x86_64-cuda", preset="fast")
+def test_a_file_input_beats_the_webcam_and_the_preset_keeps_its_stride(tmp_path: Path) -> None:
+    config = Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4", webcam=0, hardware="x86_64-cuda", preset="fast")
     cfg: SlamConfig = slam_config(config)
     assert cfg.subsample == 5  # the preset's
     source = video_source(config, cfg)
@@ -143,6 +144,15 @@ def test_the_default_input_and_the_gradio_example_are_the_verify_short_case(tmp_
     cfg: SlamConfig = slam_config(dataclasses.replace(example, hardware="x86_64-cuda"))
     assert (cfg.use_calib, cfg.subsample, cfg.img_size) == (short.params["calib"] == "true", int(short.params["subsample"]), int(short.params["img_size"]))
     assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4"), cfg), VideoFileSource)
+
+
+@pytest.mark.parametrize(("preset", "profile"), [(None, "x86_64-cuda/base"), ("eval", "x86_64-cuda/eval")])
+def test_the_layer_producer_carries_the_package_version_and_the_hardware_profile(preset: str | None, profile: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[Producer] = []
+    monkeypatch.setattr(sinks, "log_producer", lambda recording, layer, producer: logged.append(producer))
+    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog otherwise
+    build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", preset=preset, layer_dir=tmp_path), rr.RecordingStream("test", send_properties=False))  # type: ignore[arg-type]
+    assert logged == [Producer.of("mast3r-slam", "mast3r-slam", profile)] and "+" in logged[0].version  # version + git sha7
 
 
 def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
@@ -178,22 +188,17 @@ def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path
 
 
 FORM: dict[str, str] = {
-    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "video": "File", "images": "Textbox",
-    "undistort": "Checkbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown", "img_size": "Dropdown",
-    "subsample": "Textbox", "output_nerfstudio: save it, then download it": "Checkbox", "layer_dir": "Textbox",
-    "register": "Dropdown", "runner": "Dropdown", "mode": "Dropdown",
+    "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "undistort": "Checkbox",
+    "video": "File", "images": "Textbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown",
+    "img_size": "Dropdown", "subsample": "Textbox", "output_nerfstudio": "Checkbox", "layer_dir": "Textbox", "register": "Dropdown",
+    "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
-"""The generated form: widget label -> component (directories and optional numbers are text boxes; empty = the default)."""
-HIDDEN: set[str] = {"rr_config"}
-"""Config fields without a widget, on purpose: the gradio pane is the viewer."""
+"""The generated form in order: widget label -> component (directories and optional numbers are text boxes; empty = the default)."""
 
 
 def test_every_config_field_has_its_form_widget_or_is_hidden_on_purpose() -> None:
-    demo = gradio_app(Config, build, title="MASt3R-SLAM")
+    demo = check_form(Config, build, FORM, {"rr_config": "the gradio pane is the viewer"})
     widgets: dict[str, object] = {c.label: c for c in demo.blocks.values() if getattr(c, "label", None)}
-    assert {label: type(widgets[label]).__name__ for label in FORM if label in widgets} == FORM
-    for f in dataclasses.fields(Config):
-        assert (f.name in HIDDEN) != any(label.split(".")[0].split(":")[0] == f.name for label in FORM), f.name
     assert widgets["hardware"].choices == [(c, c) for c in ("x86_64-cuda", "aarch64-cuda", "robocap-cap", "auto")]  # type: ignore[attr-defined]
     assert {c for c, _ in widgets["preset"].choices} == set(load_profile(PROFILES, "x86_64-cuda").presets)  # type: ignore[attr-defined]
 

@@ -24,7 +24,7 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from dagkit.time import TimeNs
-from dagkit.types import Log, row_times
+from dagkit.types import Log, column, row_times
 from jaxtyping import Bool, Float, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from serde import coerce, serde
@@ -254,10 +254,6 @@ class Frame:
         return self.C / self.N if self.C is not None else None
 
 
-def _column(table: pa.Table, column: str) -> list:
-    return table[column].to_pylist() if column in table.column_names else [None] * table.num_rows
-
-
 def _value(cell: object) -> float:
     return float(np.asarray(cell, dtype=np.float64).reshape(-1)[0])
 
@@ -283,7 +279,7 @@ class TrackedFrame:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "TrackedFrame"]]:
-        cells = zip(*(_column(table, f"{root}:{c}") for c in ("Transform3D:translation", "Transform3D:quaternion", "sim3_scale", "frame_index")), strict=True)
+        cells = zip(*(column(table, f"{root}:{c}") for c in ("Transform3D:translation", "Transform3D:quaternion", "sim3_scale", "frame_index")), strict=True)
         for t_ns, (xyz, xyzw, scale, frame_index) in zip(row_times(table, timeline), cells, strict=True):
             if xyz is not None and frame_index is not None:
                 pose: Float32[ndarray, " 8"] = np.concatenate([np.ravel(xyz), np.ravel(xyzw), [_value(scale)]]).astype(np.float32)
@@ -340,7 +336,7 @@ class MapUpdate:
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "MapUpdate"]]:
         columns = (f"{root}/keyframes:world_sim3_cam", f"{root}/edges:edge_ii", f"{root}/edges:edge_jj")
-        for t_ns, (poses, ii, jj) in zip(row_times(table, timeline), zip(*(_column(table, c) for c in columns), strict=True), strict=True):
+        for t_ns, (poses, ii, jj) in zip(row_times(table, timeline), zip(*(column(table, c) for c in columns), strict=True), strict=True):
             if poses is not None:
                 first, second = (np.asarray(e if e is not None else [], dtype=np.int64).reshape(-1) for e in (ii, jj))
                 yield t_ns, cls(np.asarray(poses, dtype=np.float32).reshape(-1, 8), first, second)
