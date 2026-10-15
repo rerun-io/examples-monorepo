@@ -25,6 +25,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
 from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
+from simplecv.types.rig import RigCameras
 
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
@@ -74,12 +75,6 @@ class Config:
     mode: Mode = "lossless"
 
 
-def examples() -> list[Config]:
-    """The gradio app's one-click example: the VERIFY.toml short case (the default segment's first 30 s, every 2nd frame
-    at 512 px, uncalibrated, lossless), so one click reproduces the banded run."""
-    return [Config(RerunTyroConfig(headless=True), subsample=2, img_size=512)]
-
-
 def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
     """Ports and entity roots of the graph's outputs: final keyframe camera poses, per-frame tracked poses, the map and
     the keyframe clouds (under the map's per-keyframe poses)."""
@@ -89,14 +84,18 @@ def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
 
 
 def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
-    """MASt3R frame size of the source's images (decodes its first frame)."""
+    """MASt3R frame size of the source's images: the static rig's resolution when the source has one (it comes before the
+    frames), else the size of its first frame (a decode)."""
     events = iter(video.events())
     try:
-        first: Event = next(e for e in events if e.port == "frames")
+        first: Event = next(e for e in events if e.port in ("rig", "frames"))
     finally:
         getattr(events, "close", lambda: None)()
-    frames: MultiViewFrames = first.value  # type: ignore[assignment]
-    height, width = frames.rgb.shape[-2:]
+    if isinstance(first.value, RigCameras):
+        width, height = (int(v) for v in first.value.resolution_wh[0])
+    else:
+        frames: MultiViewFrames = first.value  # type: ignore[assignment]
+        height, width = frames.rgb.shape[-2:]
     shape = resize_img(np.zeros((height, width, 3), dtype=np.float32), img_size).rgb_tensor.shape
     return int(shape[-2]), int(shape[-1])
 

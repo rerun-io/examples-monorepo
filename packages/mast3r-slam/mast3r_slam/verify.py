@@ -28,12 +28,12 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dagkit.node import Emit, Tick
+from dagkit.node import Emit, Source, Tick
 from dagkit.runners import RunReport, run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import flat, served
-from dagkit.verify import Case, Phase, run_counts
+from dagkit.verify import Case, Phase, load_card, run_counts
 from datafusion import col, lit
 from jaxtyping import Float64, Int64
 from numpy import ndarray
@@ -41,10 +41,10 @@ from rerun.catalog import DatasetEntry
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import catalog_keyframes
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.rig import RigCameras
 
-from mast3r_slam.apis.slam import frame_hw, outputs
+from mast3r_slam.apis.slam import PACKAGE_DIR, Config, frame_hw, outputs, slam_config, video_source
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.types import SlamConfig
 
@@ -62,6 +62,20 @@ EVO_MAX_DIFF_NS: int = 10_000_000
 """evo's default ``t_max_diff`` (0.01 s), the association of the paper's ``evo_ape tum gt est -as`` (block ``paper``). The
 paper's EuRoC script hands evo nanosecond stamps, so there 0.01 matched only stamps equal as float64 (about half of the
 keyframes); this block keeps 10 ms on both benchmarks."""
+
+
+def case_config(case: Case) -> Config:
+    """The App config of a case: its clip of cam_00 at ``img_size`` and ``subsample``, the calib preset when ``calib``,
+    undistorted by the source when ``undistort``; lossless and threaded (the App's defaults)."""
+    calib: bool = case.params["calib"] == "true"
+    undistort: bool = case.params.get("undistort") == "true"
+    size, stride = int(case.params["img_size"]), int(case.params["subsample"])
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), undistort=undistort, preset="calib" if calib else None, img_size=size, subsample=stride)  # type: ignore[arg-type]
+
+
+def examples() -> list[Config]:
+    """The card's short cases as App configs: the gradio app's examples, one click from a banded run."""
+    return [case_config(case) for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for case in block.cases if case.clip == "short"]
 
 
 def _input_frames(case: Case) -> int:
@@ -94,12 +108,13 @@ class _GoldenSink(RerunSink):
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The graph on the case's clip (cam_00, every ``subsample``-th frame), lossless, threaded."""
-    cfg = SlamConfig(use_calib=case.params["calib"] == "true", img_size=int(case.params["img_size"]), subsample=int(case.params["subsample"]))  # type: ignore[arg-type]
-    video = CatalogVideoSource(case.segment_ref(), (CAMERA.removeprefix("/world/"),), decode="cpu_rgb", stride=cfg.subsample, undistort=case.params.get("undistort") == "true")
+    """The App's graph for ``case_config(case)``, a golden sink in place of the App's viewer and layer."""
+    config: Config = case_config(case)
+    cfg: SlamConfig = slam_config(config)
+    video: Source = video_source(config, cfg)
     golden = _GoldenSink(recording, CAMERA)
     start: float = time.perf_counter()
-    report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode="lossless")
+    report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode=config.mode)
     wall_s: float = time.perf_counter() - start
     if report.status != "complete":
         raise RuntimeError(f"{case.name}: the graph ended {report.status}")
