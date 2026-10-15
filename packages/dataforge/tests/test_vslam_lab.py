@@ -285,6 +285,25 @@ def test_a_depth_frame_that_is_not_a_16_bit_gray_png_is_refused(tmp_path: Path) 
         log_depth(recording, source, read_frame_index(source / "rgb.csv")["depth_0"], 0, meter=5000.0)
 
 
+@pytest.mark.parametrize(("benchmark", "dropped"), [("rgbdtum", "depth_"), ("euroc", "imus:"), ("euroc", "rgb_1")])
+def test_a_calibration_that_contradicts_the_benchmark_s_sensor_layout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, benchmark: str, dropped: str
+) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    source: Path = tum_sequence(tmp_path / "raw") if benchmark == "rgbdtum" else euroc_sequence(tmp_path / "raw")
+    calibration: Path = source / "calibration.yaml"
+    text: str = calibration.read_text()
+    # Drop the depth stream's two keys, the whole imus: block, or the second camera's entry.
+    kept: str = text.split("imus:")[0] if dropped == "imus:" else text
+    kept = kept.split("  - {cam_name: rgb_1")[0] if dropped == "rgb_1" else kept
+    calibration.write_text("\n".join(line for line in kept.splitlines() if not line.strip().startswith(dropped)) + "\n")
+    built: VslamLabDataset = dataset(tmp_path / "raw", benchmark)
+    identity, _ = built.discover()[0]
+    with pytest.raises(ValueError, match="calibration.yaml: .* but .* declares"):
+        rebuild_derived_layers(built, identity, source)
+    assert not paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity).exists()
+
+
 def test_the_layer_set_follows_the_benchmark(tmp_path: Path) -> None:
     identity: SequenceIdentity = SequenceIdentity("vslam-lab-rgbdtum", ("any",))
     assert list(dataset(tmp_path, "rgbdtum").targets(identity)) == [paths.BASE_LAYER, paths.GT_LAYER]
