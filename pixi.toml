@@ -1640,7 +1640,7 @@ PACKAGE_DIR = "packages/exo-calib"
 PYREFLY_TARGET = "exo_calib"
 
 [feature.exo-calib.tasks.exocalib-calibrate]
-cmd = "python tools/apps/calibrate.py"
+cmd = "python tools/apps/calibrate.py --output-dir data/outputs"
 cwd = "packages/exo-calib"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Calibrate one catalog segment on the dagkit graph: Stage A once, two Stage B + refinement passes, the report (layers exocalib_*, eval.json)"
