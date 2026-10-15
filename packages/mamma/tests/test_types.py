@@ -102,7 +102,7 @@ def test_to_rerun_then_from_layer_gives_the_value_back(value: object, t_ns: int)
 @given(first=tracks())
 def test_tracks_from_layer_keeps_each_frames_masks(first: MultiViewTracks) -> None:
     second: MultiViewTracks = replace(first, frame_index=first.frame_index + 1, masks=~first.masks)
-    values: list[tuple[int, object]] = [(10, first), (20, second)]
+    values: list[tuple[int, MultiViewTracks]] = [(10, first), (20, second)]
     restored: list[tuple[int, MultiViewTracks]] = list(MultiViewTracks.from_layer(layer_table(values, ROOT), ROOT, "video_time"))
     for (t_ns, value), (t_back, back) in zip(values, restored, strict=True):
         assert t_back == t_ns
