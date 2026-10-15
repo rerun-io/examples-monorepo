@@ -127,7 +127,7 @@ def golden_path(package: str, block: str, case: str, phase: Phase) -> Path:
 
 def pre_golden(case: Case, golden: Path) -> Path:
     """The case's pre-port reference golden beside ``golden`` (the pre run's own golden or partial scores itself)."""
-    reference: Path = golden if golden.with_suffix("").name == f"{case.name}.pre" else golden.with_name(f"{case.name}.pre.rrd")
+    reference: Path = golden if golden.name.startswith(f"{case.name}.pre.") else golden.with_name(f"{case.name}.pre.rrd")
     if not reference.exists():
         raise FileNotFoundError(f"{reference}: the pre-port reference golden of case {case.name!r} is missing (run --phase pre first)")
     return reference
@@ -171,18 +171,30 @@ def main(args: VerifyArgs) -> int:
         run, score = _resolve(block.run), _resolve(block.score)
         golden: Path = golden_path(card.package, block.name, case.name, args.phase)
         golden.parent.mkdir(parents=True, exist_ok=True)
-        partial: Path = golden.with_suffix(".partial")
+        partial: Path = golden.with_name(f"{golden.stem}.{uuid.uuid4().hex[:8]}.partial")  # its own: concurrent runs never share one
         recording = rr.RecordingStream(f"verify-{card.package}", recording_id=case.segment or case.name, send_properties=False)
-        recording.save(partial)
-        producer: Producer = Producer.of(card.package, block.name, "verify", phase=args.phase)
-        log_producer(recording, f"verify-{block.name}", producer)
-        run(case, args.phase, recording)
-        recording.flush()
-        metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
-        recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
-        recording.flush()
-        recording.disconnect()
-        partial.replace(golden)
+        try:
+            recording.save(partial)
+            producer: Producer = Producer.of(card.package, block.name, "verify", phase=args.phase)
+            log_producer(recording, f"verify-{block.name}", producer)
+            run(case, args.phase, recording)
+            recording.flush()
+            metrics: dict[str, float] = dict(score(case, partial))  # type: ignore[call-overload]
+            recording.log(f"/verify/{block.name}/metrics", rr.AnyValues(**cast(dict[str, Any], metrics)), static=True)
+            recording.flush()
+            recording.disconnect()
+            if args.phase == "post" or args.overwrite:
+                partial.replace(golden)
+            else:
+                try:
+                    os.link(partial, golden)  # write-once: unlike a rename, never replaces a reference another run committed since the check
+                except FileExistsError:
+                    print(f"FAIL: {golden} was written by another run meanwhile (reference goldens are write-once)")
+                    failed = True
+                    continue
+        finally:
+            recording.disconnect()
+            partial.unlink(missing_ok=True)
         print(f"{block.name}/{case.name} {args.phase}: {metrics}")
         results: list[BandResult] = [BandResult(b.name, False, "missing or non-finite") for b in block.metrics if not math.isfinite(metrics.get(b.name, math.nan))]
         if args.phase == "post":  # noise: the case's own (noise, pre + pre2 runs), or those of its `noise_from` case (missing: fails)
