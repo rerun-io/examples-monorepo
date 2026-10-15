@@ -78,6 +78,11 @@ class VioNode:
             raise ValueError(f"{self.segment.segment}: no rig calibration in the base layer")
         calibration: _core.Calibration = _core.Calibration.from_catalog(rig.cameras, rig.imu)
         flow: _core.VioConfig = _core.VioConfig.from_json(self.config_text)
+        if self.decoder == "cpu" and self.params.decode_device == "auto":
+            print("WARNING: decoding on the CPU: no CUDA device in this environment (the slam-rs-cuda environment decodes with NVDEC)", flush=True)
+        if self.params.backend == "auto" and _core.gpu_backend is None:
+            print("WARNING: tracking on the CPU: this slam_rs._core has no GPU frontend (run slam-rs-wgpu-build; the slam-rs-catalog-layer "
+                  "task does it first)", flush=True)  # fmt: skip
         try:
             vio = _core.Vio(calibration, flow, gpu=self.params.backend == "gpu" or (self.params.backend == "auto" and _core.gpu_backend is not None))
         except ValueError as error:  # only an absent adapter permits the auto fallback

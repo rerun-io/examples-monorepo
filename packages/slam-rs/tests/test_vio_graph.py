@@ -351,6 +351,23 @@ def test_the_decoder_follows_the_device_choice() -> None:
     assert VioParams(decode_device="auto").decoder() == ("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def test_an_auto_choice_that_falls_back_to_the_cpu_warns_as_the_old_tool_did(
+    camera: CameraFactory, imu: ImuCalib, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Main's catalog-layer tool printed one WARNING for decoding on the CPU and one for tracking on a core without a GPU
+    frontend, each only when ``auto`` fell back; an explicit ``cpu`` is a choice, not a fallback."""
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(_core, "gpu_backend", None)
+    for params, warned in ((VioParams(), True), (PARAMS, False)):
+        VioNode(SEGMENT, params, tmp_path).reset(RunContext("test", "vio", "lossless", statics={"rig": rig(camera, imu)}))
+        warnings: list[str] = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARNING")]
+        assert warnings == [
+            "WARNING: decoding on the CPU: no CUDA device in this environment (the slam-rs-cuda environment decodes with NVDEC)",
+            "WARNING: tracking on the CPU: this slam_rs._core has no GPU frontend (run slam-rs-wgpu-build; the slam-rs-catalog-layer task does it first)",
+        ][: 2 if warned else 0]
+
+
 @pytest.mark.parametrize("suffix", ["partial", "rrd"])
 def test_pre_scores_itself_with_one_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str) -> None:
     pre: Path = tmp_path / f"short.pre.{suffix}"
