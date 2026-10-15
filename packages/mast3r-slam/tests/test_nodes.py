@@ -19,7 +19,7 @@ from mast3r_slam.nodes.frontend import Frontend
 from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
 from mast3r_slam.ops.pointmap import update_pointmap
-from mast3r_slam.types import Frame, KeyframeAdded, KeyframeCloud, MapUpdate, Mode, RelocRequest, SlamConfig, TrackedFrame
+from mast3r_slam.types import Frame, FrameView, KeyframeAdded, KeyframeView, LogLine, MapUpdate, Mode, RelocRequest, SlamConfig, TrackedFrame
 
 SIZE: int = 224
 PATCHES: int = SIZE * SIZE // 256
@@ -58,11 +58,12 @@ def frame_ticks(n: int) -> list[Tick]:
     return [Tick(i * 1000, "frames", MultiViewFrames(i * 1000, i, ("cam",), rgb[i], torch.tensor([i * 1000])), {}) for i in range(n)]
 
 
-def test_frontend_contract_and_mode_flow(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("views", [False, True])
+def test_frontend_contract_and_mode_flow(views: bool, shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(frontend_module, "mast3r_inference_mono", fake_mono)
     monkeypatch.setattr(FrameTracker, "track", fake_track)
     ctx = RunContext("slam", "frontend", "realtime", resources={"mast3r": MODEL, "shared": shared})
-    outputs = check_node_contract(Frontend(CFG, device="cpu"), frame_ticks(10), ctx)
+    outputs = check_node_contract(Frontend(CFG, device="cpu", views=views), frame_ticks(10), ctx)
     tasks = [(t, v) for port, t, v in outputs if port == "task"]
     tracked = [v.frame_index for port, _, v in outputs if port == "tracked" and isinstance(v, TrackedFrame)]
     assert tasks[:3] == [(0, KeyframeAdded(0)), (2000, KeyframeAdded(1)), (5000, KeyframeAdded(2))]
@@ -70,6 +71,10 @@ def test_frontend_contract_and_mode_flow(shared: SharedSlam, monkeypatch: pytest
     assert tasks[3:] == [(8000, RelocRequest(8))]
     assert tracked == [0, 1, 2, 3, 4, 5, 6]
     assert shared.states.get_mode() == Mode.TERMINATED
+    shown = [v for port, _, v in outputs if port == "view" and isinstance(v, FrameView)]
+    assert [v.current.index for v in shown] == ([0, 1, 2, 3, 4, 5, 6, 7, 8] if views else [])  # frame 9 waits for the backend
+    assert all(v.last_keyframe is not None and v.current.points.shape == (SIZE, SIZE, 3) for v in shown)
+    assert [v.last_keyframe.index for v in shown if v.last_keyframe is not None] == ([0, 0, 1, 1, 1, 2, 2, 2, 2] if views else [])
 
 
 def test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,10 +188,12 @@ def test_backend_contract(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -
     assert np.stack([maps[-1].ii, maps[-1].jj], axis=1).tolist() == [[0, 1], [0, 2], [1, 2], [3, 0]]
     finals = [(t, v.frame_index) for port, t, v in out.items if port == "keyframes" and isinstance(v, TrackedFrame)]
     assert finals == [(0, 0), (1000, 10), (2000, 20), (3000, 20)]  # the relocalised frame is keyframe 3, at its own time
-    clouds = [v for port, _, v in out.items if port == "cloud" and isinstance(v, KeyframeCloud)]
-    assert [c.index for c in clouds] == [0, 1, 2] and all(len(c.points) == SIZE * SIZE for c in clouds)  # new keyframes only
+    views = [v.keyframe for port, _, v in out.items if port == "keyframe" and isinstance(v, KeyframeView)]
+    assert [v.index for v in views] == [0, 1, 2] and all(v.points.shape == (SIZE, SIZE, 3) for v in views)  # new keyframes only
+    lines = [v.text for port, _, v in out.items if port == "log" and isinstance(v, LogLine)]
+    assert lines == ["Database retrieval 0: []", "Database retrieval 1: []", "Database retrieval 2: [0]", "Relocalizing frame 20 against the keyframes", "Relocalized successfully"]
     backend.flush(out)
-    assert len(out.items) == len(maps) + len(finals) + len(clouds)  # a second flush emits nothing
+    assert len(out.items) == len(maps) + len(finals) + len(views) + len(lines)  # a second flush emits nothing
 
     backend.reset(ctx)
     for tick in ticks():

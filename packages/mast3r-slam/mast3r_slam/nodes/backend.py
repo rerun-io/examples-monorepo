@@ -7,17 +7,14 @@ import lietorch
 import numpy as np
 import torch
 from dagkit.node import Emit, PortType, RunContext, Tick
-from jaxtyping import Bool, Float32, Int64, UInt8
+from jaxtyping import Float32, Int64
 from mast3r.model import AsymmetricMASt3R
 from numpy import ndarray
 
 from mast3r_slam.models.retrieval import CHECKPOINT, RetrievalDatabase
 from mast3r_slam.nodes.factor_graph import FactorGraph
 from mast3r_slam.nodes.shared import SharedKeyframes, SharedSlam, SharedStates
-from mast3r_slam.types import BackendTask, Frame, KeyframeAdded, KeyframeCloud, MapUpdate, Mode, SlamConfig, TrackedFrame
-
-CLOUD_CONFIDENCE: float = 7.0
-"""Accumulated confidence a point needs to enter a keyframe's cloud (viewer only)."""
+from mast3r_slam.types import BackendTask, CameraView, Frame, KeyframeAdded, KeyframeView, LogLine, MapUpdate, Mode, SlamConfig, TrackedFrame
 
 
 class Backend:
@@ -25,8 +22,8 @@ class Backend:
 
     One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyframe and to retrieval candidates, then
     runs global Gauss-Newton; ``RelocRequest`` tries to relocalise the shared current frame against the retrieval database.
-    Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeCloud``); once TERMINATED (realtime stop)
-    queued tasks are dropped and counted.
+    Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeView``, the retrieval and relocalisation
+    verdicts as ``LogLine``s); once TERMINATED (realtime stop) queued tasks are dropped and counted.
 
     At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``).
     The shared buffers carry the map both ways; after each task (dropped ones too) the backend publishes its GPU writes
@@ -34,7 +31,7 @@ class Backend:
     """
 
     inputs: Mapping[str, PortType] = {"task": BackendTask}
-    outputs: Mapping[str, PortType] = {"map": MapUpdate, "keyframes": TrackedFrame, "cloud": KeyframeCloud}
+    outputs: Mapping[str, PortType] = {"map": MapUpdate, "keyframes": TrackedFrame, "keyframe": KeyframeView, "log": LogLine}
     emits_late: bool = True
 
     def __init__(self, params: SlamConfig) -> None:
@@ -60,8 +57,9 @@ class Backend:
     def _solve(self) -> None:
         self.graph.solve_GN_calib() if self.params.use_calib else self.graph.solve_GN_rays()
 
-    def _connect(self, idx: int) -> None:
-        """Factors from keyframe ``idx`` to its predecessor and to its retrieval candidates, then a global solve."""
+    def _connect(self, idx: int) -> list[int]:
+        """Factors from keyframe ``idx`` to its predecessor and to its retrieval candidates, then a global solve; returns the
+        candidates."""
         frame: Frame = self.keyframes[idx]
         retrieved: list[int] = self.retrieval.update(frame, add_after_query=True, k=self.params.retrieval.k, min_thresh=self.params.retrieval.min_thresh)
         candidates: set[int] = {idx - 1, *retrieved} if idx > 0 else set(retrieved)
@@ -70,6 +68,7 @@ class Backend:
         if kf_idx:
             self.graph.add_factors(kf_idx, [idx] * len(kf_idx), self.params.local_opt.min_match_frac)
         self._solve()
+        return retrieved
 
     def _relocalise(self, frame: Frame) -> bool:
         """Append the lost frame as a keyframe connected to its retrieval candidates; undo it when no edge holds."""
@@ -98,23 +97,23 @@ class Backend:
         if self.states.get_mode() == Mode.TERMINATED:  # realtime stop: the frontend no longer waits for this work
             self.dropped += 1
         elif isinstance(task, KeyframeAdded):
-            self._connect(task.index)
+            retrieved: list[int] = self._connect(task.index)
             self.times[task.index] = tick.t_ns
-            keyframe: Frame = self.keyframes[task.index]
-            assert keyframe.X_canon is not None and keyframe.C is not None
-            keep: Bool[ndarray, " hw"] = (keyframe.C > CLOUD_CONFIDENCE).reshape(-1).cpu().numpy()
-            if keep.any():
-                colors: UInt8[ndarray, "n 3"] = (keyframe.rgb.reshape(-1, 3).numpy()[keep] * 255).astype(np.uint8)
-                out.put("cloud", tick.t_ns, KeyframeCloud(task.index, keyframe.X_canon.cpu().numpy()[keep], colors))
+            out.put("keyframe", tick.t_ns, KeyframeView(CameraView.of(self.keyframes[task.index], task.index)))
+            out.put("log", tick.t_ns, LogLine(f"Database retrieval {task.index}: {retrieved}"))
         elif self.states.get_mode() == Mode.RELOC:
             frame: Frame = self.states.get_frame()
             if frame.frame_id != task.frame_index:
                 raise RuntimeError(f"the shared current frame is frame {frame.frame_id}, the request is for frame {task.frame_index}")
+            out.put("log", tick.t_ns, LogLine(f"Relocalizing frame {frame.frame_id} against the keyframes"))
             if self._relocalise(frame):
                 self.times[len(self.keyframes) - 1] = tick.t_ns
                 with self.states.lock:  # a realtime stop (TERMINATED) that came during the relocalisation stays
                     if self.states.get_mode() == Mode.RELOC:
                         self.states.set_mode(Mode.TRACKING)
+                out.put("log", tick.t_ns, LogLine("Relocalized successfully"))
+            else:
+                out.put("log", tick.t_ns, LogLine("Failed to relocalize", "WARN"))
         ii: Int64[ndarray, " e"] = self.graph.ii.cpu().numpy().astype(np.int64)
         out.put("map", tick.t_ns, MapUpdate(self._poses(), ii, self.graph.jj.cpu().numpy().astype(np.int64)))
         self.shared.acknowledge()  # after the map was read: the frontend's next keyframe is not in this update

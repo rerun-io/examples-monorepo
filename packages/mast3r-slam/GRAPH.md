@@ -22,7 +22,7 @@ The STATIC values of ``statics`` first, then RGB framesets: every camera's frame
 ## 2 · frontend: Track each frame against the keyframes
 *runs once per item, placed on main* · `Frontend` · `packages/mast3r-slam/mast3r_slam/nodes/frontend.py`
 
-Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyframe 0), TRACKING (pose solve against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it). Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend acknowledged every task it handed over, so every frame sees one fixed map. Realtime: lost frames that arrive before the backend acknowledged the relocalisation request are skipped, so the one shared current frame stays the requested one. A frame's ``tracked`` pose leaves after that wait, when the backend's relocalisation verdict is known (hence ``emits_late``). ``abort`` ends a wait when the run fails.
+Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyframe 0), TRACKING (pose solve against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it). Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend acknowledged every task it handed over, so every frame sees one fixed map. Realtime: lost frames that arrive before the backend acknowledged the relocalisation request are skipped, so the one shared current frame stays the requested one. A frame's ``tracked`` pose leaves after that wait, when the backend's relocalisation verdict is known (hence ``emits_late``). ``abort`` ends a wait when the run fails. With ``views`` each frame also leaves on ``view`` as the viewer draws it (host copies of the frame and of the last keyframe; made only when a sink takes them).
 
 | takes | type | from | arrives |
 |---|---|---|---|
@@ -32,6 +32,7 @@ Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyf
 |---|---|---|
 | **tracked** | `TrackedFrame` | 4 viewer, 5 layer |
 | **task** | `KeyframeAdded | RelocRequest` | 3 backend |
+| **view** | `FrameView` | 4 viewer |
 
 Uses the graph resources `mast3r`, `shared` (built once, shared).
 
@@ -46,7 +47,7 @@ Settings:
 ## 3 · backend: Optimise the map, relocalise lost frames
 *runs once per item, placed on process* · `Backend` · `packages/mast3r-slam/mast3r_slam/nodes/backend.py`
 
-One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyframe and to retrieval candidates, then runs global Gauss-Newton; ``RelocRequest`` tries to relocalise the shared current frame against the retrieval database. Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeCloud``); once TERMINATED (realtime stop) queued tasks are dropped and counted. At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``). The shared buffers carry the map both ways; after each task (dropped ones too) the backend publishes its GPU writes and acknowledges the task on the ``shared`` resource, which the lossless frontend waits for.
+One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyframe and to retrieval candidates, then runs global Gauss-Newton; ``RelocRequest`` tries to relocalise the shared current frame against the retrieval database. Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeView``, the retrieval and relocalisation verdicts as ``LogLine``s); once TERMINATED (realtime stop) queued tasks are dropped and counted. At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``). The shared buffers carry the map both ways; after each task (dropped ones too) the backend publishes its GPU writes and acknowledges the task on the ``shared`` resource, which the lossless frontend waits for.
 
 | takes | type | from | arrives |
 |---|---|---|---|
@@ -56,14 +57,17 @@ One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyfr
 |---|---|---|
 | **map** | `MapUpdate` | 4 viewer, 5 layer |
 | **keyframes** | `TrackedFrame` | 4 viewer, 5 layer, 6 nerfstudio |
-| **cloud** | `KeyframeCloud` | 4 viewer |
+| **keyframe** | `KeyframeView` | 4 viewer |
+| **log** | `LogLine` | 4 viewer |
 
 Uses the graph resources `mast3r`, `shared` (built once, shared).
 
-## 4 · viewer: Draw its inputs in the viewer
-*output* · `RerunSink` · `packages/dagkit/dagkit/sinks.py`
+## 4 · viewer: Draw the run in the viewer
+*output* · `SlamViewer` · `packages/mast3r-slam/mast3r_slam/nodes/viewer.py`
 
-Takes **keyframes, map, cloud** from 3 backend; **tracked** from 2 frontend.
+Each value draws itself; from the run's history this sink adds what the CLI drew: the input video under the current camera, the camera path, each keyframe's frustum following the optimised poses (its cloud at the keyframe's Sim3 scale), the factor graph, the world turned upright from the keyframe poses, the text log, and the blueprint again when a keyframe arrives (its depth image is hidden from the 3D view by name).
+
+Takes **keyframes, map, keyframe, log** from 3 backend; **tracked, view** from 2 frontend.
 
 ## 5 · layer: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
@@ -82,8 +86,10 @@ Uses the graph resources `shared` (built once, shared).
 ## Data types
 | type | what it is | code |
 |---|---|---|
+| `FrameView` | The current frame and the last keyframe, whose point map the tracker refines with every frame (viewer only) | `packages/mast3r-slam/mast3r_slam/types.py` |
 | `KeyframeAdded | RelocRequest` | (builtin) |  |
-| `KeyframeCloud` | The confident points of a new keyframe in its own camera frame, coloured (logged under the keyframe's pose) | `packages/mast3r-slam/mast3r_slam/types.py` |
+| `KeyframeView` | A new keyframe (viewer only): its frustum with its image and maps, and its confident points, coloured | `packages/mast3r-slam/mast3r_slam/types.py` |
+| `LogLine` | One line of the run's text log (the backend's retrieval and relocalisation verdicts) | `packages/mast3r-slam/mast3r_slam/types.py` |
 | `MapUpdate` | The map after the backend applied one task: every keyframe pose and every factor-graph edge ``ii[e] - jj[e]`` | `packages/mast3r-slam/mast3r_slam/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |

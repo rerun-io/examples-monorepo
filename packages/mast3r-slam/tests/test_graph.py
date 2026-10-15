@@ -181,8 +181,8 @@ def test_building_the_app_graph_reads_nothing_from_its_input(monkeypatch: pytest
 
 def test_the_viewer_draws_every_output_or_only_the_camera_poses() -> None:
     """``draw="poses"`` (verify's golden): the viewer takes the final keyframe and tracked poses only, not the map and the
-    keyframe clouds, which grow with every task; by default it takes all four outputs."""
-    for draw, taken in (("all", {"keyframes", "tracked", "map", "cloud"}), ("poses", {"keyframes", "tracked"})):
+    viewer's frames and keyframes (images and point maps), which grow with every frame; by default it takes every output."""
+    for draw, taken in (("all", {"keyframes", "tracked", "map", "view", "keyframe", "log"}), ("poses", {"keyframes", "tracked"})):
         graph = build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", draw=draw), rr.RecordingStream("test", send_properties=False))
         assert isinstance(graph, Graph) and {e.dst.port for e in graph.edges if e.dst.node == "viewer"} == taken
 
@@ -239,3 +239,4 @@ def test_the_catalog_source_muxes_its_zero_copy_packet_views() -> None:
     ``wrap_mp4`` the packet views ``read_catalog_videos`` returns, and beartype checks that call in the dev env."""
     samples = [np.frombuffer(b"\x00\x00\x00\x01\x65" + bytes(16), dtype=np.uint8), np.frombuffer(b"\x00\x00\x00\x01\x41" + bytes(8), dtype=np.uint8)]
     assert len(wrap_mp4(samples, [True, False], 30, "h264")) > 0
+
