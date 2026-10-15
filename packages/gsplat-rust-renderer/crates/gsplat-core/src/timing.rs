@@ -9,6 +9,7 @@ pub const STAGE_NAMES: [&str; 8] = [
     "tile_offsets",
     "rasterize",
 ];
+
 /// Contiguous GPU intervals; projection includes indirect-dispatch preparation.
 fn stage_queries(stage: usize) -> (usize, usize) {
     (if stage == 0 { 0 } else { stage + 1 }, stage + 2)
@@ -16,6 +17,7 @@ fn stage_queries(stage: usize) -> (usize, usize) {
 
 /// Query slots written by one profiled frame.
 pub const QUERY_COUNT: u32 = 10;
+
 /// Convert monotonic completed-frame timestamps into the eight named stage durations.
 pub fn stage_ms(ticks: &[u64], period_ns: f32) -> Result<[f64; 8], crate::Error> {
     if ticks.len() != QUERY_COUNT as usize

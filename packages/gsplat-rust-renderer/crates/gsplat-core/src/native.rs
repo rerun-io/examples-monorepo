@@ -33,6 +33,7 @@ impl NativeSplats<'_> {
             (self.degree.min(3) as usize + 1).pow(2)
         }
     }
+
     /// Undo the native activations without further quantization. Alpha endpoints
     /// use saturated finite logits so the core finite-input guard accepts them.
     pub fn to_core(&self) -> Splats {

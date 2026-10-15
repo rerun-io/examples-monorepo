@@ -9,6 +9,7 @@ pub struct Renderer {
     limit: u64,
     kernels: Kernels,
 }
+
 impl Renderer {
     pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
         let limits = device.limits();
@@ -22,6 +23,7 @@ impl Renderer {
             kernels,
         })
     }
+
     /// Reject oversized wire dimensions before converting the CPU data.
     pub fn check_capacity(&self, count: usize, sh_degree: u32) -> Result<(), Error> {
         let required = Splats::gpu_bytes(count, sh_degree);
@@ -33,9 +35,11 @@ impl Renderer {
         }
         Ok(())
     }
+
     pub fn upload(&self, splats: &Splats) -> Result<Arc<Scene>, Error> {
         Ok(Arc::new(Scene::upload(&self.device, splats, self.limit)?))
     }
+
     pub fn create_view(
         &self,
         scene: &Arc<Scene>,
@@ -49,6 +53,7 @@ impl Renderer {
             self.limit,
         )
     }
+
     /// Allocate view scratch before queuing draw data so capacity failures can select a fallback.
     pub fn prepare_view(
         &self,
@@ -59,6 +64,7 @@ impl Renderer {
         camera.validate()?;
         view.prepare(queue, &self.kernels, camera.size).map(|_| ())
     }
+
     /// Encode without submission or CPU waits. Submit, then poll this view's feedback.
     /// Overflow leaves the target intact; rerender after feedback requests more capacity.
     pub fn render(
