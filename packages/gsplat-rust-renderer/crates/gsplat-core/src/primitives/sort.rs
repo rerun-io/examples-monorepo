@@ -160,4 +160,12 @@ impl RadixSort {
         let index = bits.div_ceil(BITS_PER_PASS) as usize % 2;
         (&self.keys[index], &self.values[index])
     }
+    /// Retained buffer bytes; the shared dispatch buffers belong to the view, and histogram/parameter buffers held only by bind groups are excluded.
+    pub(crate) fn gpu_byte_size(&self) -> u64 {
+        self.keys
+            .iter()
+            .chain(&self.values)
+            .map(wgpu::Buffer::size)
+            .sum::<u64>()
+    }
 }
