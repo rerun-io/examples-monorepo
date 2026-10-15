@@ -178,6 +178,14 @@ def test_building_the_app_graph_reads_nothing_from_its_input(monkeypatch: pytest
     build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda"), rr.RecordingStream("test", send_properties=False)).validate()  # type: ignore[union-attr]
 
 
+def test_the_viewer_draws_every_output_or_only_the_camera_poses() -> None:
+    """``draw="poses"`` (verify's golden): the viewer takes the final keyframe and tracked poses only, not the map and the
+    keyframe clouds, which grow with every task; by default it takes all four outputs."""
+    for draw, taken in (("all", {"keyframes", "tracked", "map", "cloud"}), ("poses", {"keyframes", "tracked"})):
+        graph = build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", draw=draw), rr.RecordingStream("test", send_properties=False))
+        assert isinstance(graph, Graph) and {e.dst.port for e in graph.edges if e.dst.node == "viewer"} == taken
+
+
 def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
     assert Config.__dataclass_fields__["video"].default is None  # a default file that is not downloaded crashes the form
     gradio_app(Config, build, title="MASt3R-SLAM")
@@ -212,7 +220,7 @@ def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path
 FORM: dict[str, str] = {
     "segment.dataset": "Textbox", "segment.segment": "Textbox", "segment.window_ns": "Textbox", "camera": "Textbox", "undistort": "Checkbox",
     "video": "File", "images": "Textbox", "webcam": "Textbox", "max_frames": "Textbox", "hardware": "Dropdown", "preset": "Dropdown",
-    "img_size": "Dropdown", "subsample": "Textbox", "output_nerfstudio": "Checkbox", "layer_dir": "Textbox", "register": "Dropdown",
+    "img_size": "Dropdown", "subsample": "Textbox", "draw": "Dropdown", "output_nerfstudio": "Checkbox", "layer_dir": "Textbox", "register": "Dropdown",
     "runner": "Dropdown", "mode": "Dropdown",
 }  # fmt: skip
 """The generated form in order: widget label -> component (directories and optional numbers are text boxes; empty = the default)."""

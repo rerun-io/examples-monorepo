@@ -60,6 +60,9 @@ class Config:
     """MASt3R input size (overrides the preset)."""
     subsample: int | None = None
     """Use every n-th input frame (overrides the preset)."""
+    draw: Literal["all", "poses"] = "all"
+    """What the viewer draws: all (camera poses, the map and each keyframe's points) or poses (the final keyframe and
+    tracked camera poses only: a small recording, what verify keeps)."""
     output_nerfstudio: Path | None = field(default=None, metadata={"form": "save"})
     """Export the final keyframes in Nerfstudio format into this directory."""
     layer_dir: Path | None = field(default=None, metadata={"form": "dir"})
@@ -114,7 +117,8 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     ]  # fmt: skip
     normal = rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), rrb.TimePanel(state="collapsed", timeline=video.clock), collapse_panels=True)
     recording.send_blueprint(with_pipeline(normal, debug))  # the outputs' clock, not the run health's wall_time
-    sinks: dict[str, Node] = {"viewer": RerunSink(recording, ports, roots)}
+    drawn: dict[str, PortType] = ports if config.draw == "all" else {p: ports[p] for p in ("keyframes", "tracked")}
+    sinks: dict[str, Node] = {"viewer": RerunSink(recording, drawn, roots)}
     if isinstance(video, VideoSource) and config.segment is not None and config.layer_dir is not None:  # a catalog input
         hardware: str = load_profile(PACKAGE_DIR / "profiles", config.hardware).hardware
         producer: Producer = Producer.of("mast3r-slam", "mast3r-slam", f"{hardware}/{config.preset or 'base'}")
