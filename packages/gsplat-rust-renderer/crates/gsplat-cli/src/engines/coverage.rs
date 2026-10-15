@@ -1,7 +1,10 @@
 //! Synthetic contracts for branches absent from the stored SH3 scenes.
-use super::*;
-use glam::Mat4;
+use super::{Brush, Counts, Engine, Implementation};
+use crate::{PlyScene, camera::CameraSpec, settings::RenderSettings};
+use burn::tensor::Tensor;
+use glam::{Mat4, Vec3};
 use gsplat_core::CameraModel;
+use std::path::Path;
 
 fn synthetic_scene(degree: u32) -> PlyScene {
     let n = 12;
@@ -30,6 +33,7 @@ fn synthetic_scene(degree: u32) -> PlyScene {
         extent: 1.0,
     }
 }
+
 fn camera(width: u32, height: u32) -> CameraSpec {
     CameraSpec {
         world_from_camera: Mat4::IDENTITY.to_cols_array_2d(),
@@ -42,6 +46,7 @@ fn camera(width: u32, height: u32) -> CameraSpec {
         model: CameraModel::Pinhole,
     }
 }
+
 async fn compare(
     scene: &PlyScene,
     camera: &CameraSpec,
@@ -57,7 +62,7 @@ async fn compare(
         ));
     }
     let mut ours = Engine::Ours(Box::new(
-        crate::Renderer::new(
+        crate::StandaloneRenderer::new(
             &raw,
             gsplat_core::RenderOptions {
                 render_mode: scene.mode,

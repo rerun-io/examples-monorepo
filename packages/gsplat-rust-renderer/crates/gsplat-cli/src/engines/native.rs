@@ -1,8 +1,12 @@
 //! Rerun 0.38.1 native renderer path: public PLY conversion, per-frame builder,
 //! per-frame CPU back-to-front sort with a cached seed order, and per-frame uploads.
-use super::*;
-use crate::camera::{CameraModel, opengl_to_opencv};
+use super::{Adapter, Counts, archetype::decode};
+use crate::camera::CameraSpec;
+use crate::camera::opengl_to_opencv;
+use anyhow::{Context as _, Result};
 use glam::Vec2;
+use glam::Vec3;
+use gsplat_core::CameraModel;
 use re_renderer::view_builder::{Projection, TargetConfiguration, ViewBuilder};
 use re_renderer::{
     GaussianShCoefficient, GaussianSplatBuilder, RenderConfig, RenderContext, Rgba, Rgba32Unmul,
@@ -26,11 +30,12 @@ pub struct Native {
     screenshot_pending: bool,
     capture_next: bool,
 }
+
 impl Native {
     pub async fn new(ply_path: &Path, expected_count: usize) -> Result<Self> {
         let gaussians = GaussianSplats3D::from_ply_file_path(ply_path)?;
 
-        let decoded = super::decode(&gaussians)?;
+        let decoded = decode(&gaussians)?;
         let sh_count = decoded.native().coefficient_count() - 1;
         let centers: Vec<_> = decoded.centers.into_iter().map(Vec3::from_array).collect();
         let scales = decoded.scales.into_iter().map(Vec3::from_array).collect();
@@ -180,7 +185,7 @@ impl Native {
                 self.screenshot_pending = false;
                 return Ok(pixels.into_iter().map(|v| v as f32 / 255.0).collect());
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         Err(anyhow::anyhow!("native screenshot readback timed out"))
     }

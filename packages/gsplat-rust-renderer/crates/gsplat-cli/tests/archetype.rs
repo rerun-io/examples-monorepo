@@ -1,7 +1,8 @@
 //! The quantization lane crosses the native archetype boundary before conversion.
 #[test]
 fn native_ply_round_trip_preserves_geometry_and_quantizes_opacity() {
-    let path = std::env::temp_dir().join(format!("archetype-{}.ply", std::process::id()));
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("scene.ply");
     std::fs::write(
         &path,
         concat!(
@@ -11,7 +12,6 @@ fn native_ply_round_trip_preserves_geometry_and_quantizes_opacity() {
     )
     .unwrap();
     let splats = gsplat_cli::engines::archetype_splats(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
     assert_eq!(&splats.transforms[0][..3], &[1.0, 2.0, 3.0]);
     assert!((splats.transforms[0][7] + 2.0).abs() < 1e-6);
     assert_eq!(splats.sh_degree, 0);

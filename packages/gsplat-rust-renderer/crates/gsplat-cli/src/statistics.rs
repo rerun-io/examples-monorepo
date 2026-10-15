@@ -8,7 +8,8 @@ pub struct Statistics {
     pub mean_ms: f64,
     pub fps: f64,
 }
-pub fn summarize(samples: &[f64]) -> crate::Result<Statistics> {
+
+pub fn summarize(samples: &[f64]) -> anyhow::Result<Statistics> {
     if samples.is_empty() || samples.iter().any(|v| !v.is_finite() || *v <= 0.0) {
         anyhow::bail!("timings must be finite, positive, and nonempty");
     }

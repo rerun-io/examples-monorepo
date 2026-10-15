@@ -18,6 +18,7 @@ struct Args {
     #[command(subcommand)]
     command: Action,
 }
+
 #[derive(Subcommand)]
 enum Action {
     /// Measure headless viewer frames and save a report.
@@ -34,6 +35,7 @@ enum Action {
     /// Score a trained PLY without clipping or quantizing its float output.
     Score(score::ScoreArgs),
 }
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -82,6 +84,7 @@ async fn main() -> Result<()> {
     }
     result
 }
+
 #[cfg(test)]
 mod tests {
     use super::camera_args::resolution;

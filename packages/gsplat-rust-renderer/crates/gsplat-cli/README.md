@@ -39,3 +39,5 @@ The probe needs one 3D view and writes its camera path and a PNG beside the repo
 Use `--storage-binding-limit N` to exercise capacity fallback and `--require-motion`
 to reject held views. See [architecture](../../docs/architecture.md) for the timing
 protocol, precision boundaries, and report provenance.
+
+On Metal, `speed` reports `lane1: null` with `lane1_unavailable_reason`: per-stage GPU timestamps are unreliable. Frame timings remain available; Vulkan and DX12 retain stage timings.

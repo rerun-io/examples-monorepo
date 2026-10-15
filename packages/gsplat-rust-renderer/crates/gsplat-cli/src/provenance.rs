@@ -10,6 +10,7 @@ pub struct Provenance {
     pub cargo_lock_sha256: Option<String>,
     pub brush: String,
 }
+
 impl Provenance {
     pub fn capture() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -43,7 +44,7 @@ impl Provenance {
             cargo_lock_sha256: std::fs::read(root.join("Cargo.lock"))
                 .ok()
                 .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
-            brush: format!("Brush {} + packages/brush-src/{}", revision, patch),
+            brush: format!("Brush {revision} + packages/brush-src/{patch}"),
         }
     }
 }

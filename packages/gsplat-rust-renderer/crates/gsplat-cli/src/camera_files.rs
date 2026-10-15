@@ -1,19 +1,20 @@
 //! NeRF, strict CameraSpec JSON, and COLMAP text/binary adapters.
-use crate::{
-    Result,
-    camera::{CameraModel, CameraSpec},
-};
+use crate::camera::CameraSpec;
+use anyhow::Result;
+use gsplat_core::CameraModel;
 use std::path::{Path, PathBuf};
 
 pub struct CameraFrame {
     pub camera: CameraSpec,
     pub file_path: PathBuf,
 }
+
 #[derive(serde::Deserialize)]
 struct NerfTransforms {
     camera_angle_x: f32,
     frames: Vec<NerfFrame>,
 }
+
 #[derive(serde::Deserialize)]
 struct NerfFrame {
     file_path: PathBuf,

@@ -1,5 +1,6 @@
 //! Symmetric, unclipped float-render comparison. Inputs are premultiplied RGBA.
-use crate::{Error, Evaluator, Metrics};
+use crate::{Evaluator, Metrics};
+use anyhow::Result;
 use burn::tensor::{Tensor, TensorData};
 use serde::Serialize;
 
@@ -9,12 +10,14 @@ pub struct RenderMetrics {
     pub alpha_psnr: f64,
     pub white_psnr: f64,
 }
+
 impl RenderMetrics {
     /// The quality gate must see alpha and both backgrounds.
     pub fn minimum_psnr(&self) -> f64 {
         self.rgb.psnr.min(self.alpha_psnr).min(self.white_psnr)
     }
 }
+
 impl Evaluator {
     /// Compare in-memory renderer outputs without clipping or PNG conversion.
     /// PSNR calls Brush's public float helper; SSIM ports its zero padding,
@@ -25,7 +28,7 @@ impl Evaluator {
         b: &[f32],
         width: u32,
         height: u32,
-    ) -> Result<RenderMetrics, Error> {
+    ) -> Result<RenderMetrics> {
         let count = width as usize * height as usize;
         if width < 11
             || height < 11
