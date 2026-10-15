@@ -22,7 +22,7 @@ The STATIC values of ``statics`` first, then RGB framesets: every camera's frame
 ## 2 · frontend: Track each frame against the keyframes
 *runs once per item, placed on main* · `Frontend` · `packages/mast3r-slam/mast3r_slam/nodes/frontend.py`
 
-Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyframe 0), TRACKING (pose solve against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it). Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend applied every queued task, so every frame sees one fixed map. Realtime: lost frames that arrive while a relocalisation request is queued are skipped, so the one shared current frame stays the requested one. A frame's ``tracked`` pose leaves after that wait, when the backend's relocalisation verdict is known (hence ``emits_late``). ``abort`` ends a wait when the run fails.
+Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyframe 0), TRACKING (pose solve against the last keyframe; a low-overlap frame becomes a keyframe), RELOC (mono point map; the backend relocalises it). Lossless (SPEC 5.5, today's ``single_thread``): before each frame and at flush the frontend waits until the backend acknowledged every task it handed over, so every frame sees one fixed map. Realtime: lost frames that arrive before the backend acknowledged the relocalisation request are skipped, so the one shared current frame stays the requested one. A frame's ``tracked`` pose leaves after that wait, when the backend's relocalisation verdict is known (hence ``emits_late``). ``abort`` ends a wait when the run fails.
 
 | takes | type | from | arrives |
 |---|---|---|---|
@@ -46,7 +46,7 @@ Settings:
 ## 3 · backend: Optimise the map, relocalise lost frames
 *runs once per item, placed on process* · `Backend` · `packages/mast3r-slam/mast3r_slam/nodes/backend.py`
 
-One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyframe and to retrieval candidates, then runs global Gauss-Newton; ``RelocRequest`` tries to relocalise the shared current frame against the retrieval database. Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeCloud``); once TERMINATED (realtime stop) queued tasks are dropped and counted. At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``). The shared buffers carry the map both ways; the backend acknowledges each task by dequeuing it there.
+One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyframe and to retrieval candidates, then runs global Gauss-Newton; ``RelocRequest`` tries to relocalise the shared current frame against the retrieval database. Each task's result leaves as a ``MapUpdate`` (and a new keyframe's ``KeyframeCloud``); once TERMINATED (realtime stop) queued tasks are dropped and counted. At flush the final keyframe poses leave on ``keyframes``, one per keyframe at its own frame time (``emits_late``). The shared buffers carry the map both ways; after each task (dropped ones too) the backend publishes its GPU writes and acknowledges the task on the ``shared`` resource, which the lossless frontend waits for.
 
 | takes | type | from | arrives |
 |---|---|---|---|
