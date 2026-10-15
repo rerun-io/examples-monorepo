@@ -5,11 +5,10 @@ use std::{collections::BTreeSet, io::BufReader, path::PathBuf, process::Command}
 #[ignore = "integration: requires a GPU and GSPLAT_LEGO dataset"]
 fn lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs() {
     let dataset = std::env::var_os("GSPLAT_LEGO").expect("set GSPLAT_LEGO to the Lego dataset");
+    let temporary = tempfile::tempdir().unwrap();
     let output = std::env::var_os("GSPLAT_TEST_OUTPUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("gsplat-train-{}", std::process::id()))
-        });
+        .unwrap_or_else(|| temporary.path().to_owned());
     std::fs::create_dir_all(&output).unwrap();
     let recording = output.join("training.rrd");
     let unused_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

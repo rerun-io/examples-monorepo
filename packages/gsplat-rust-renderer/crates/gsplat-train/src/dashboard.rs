@@ -4,17 +4,22 @@ use rerun::blueprint::{
     Tabs, TimeSeriesView, Vertical,
 };
 
+#[derive(Clone, Copy)]
+pub struct Layout {
+    pub compute_visualizer: bool,
+    pub video: bool,
+}
+
 pub fn send(
     rec: &rerun::RecordingStream,
     eval_count: usize,
-    compute: bool,
-    video: bool,
+    layout: Layout,
     up: [f32; 3],
 ) -> anyhow::Result<()> {
     let mut scene = Spatial3DView::new("Scene")
         .with_origin("world")
         .with_contents(["world/**"]);
-    if compute {
+    if layout.compute_visualizer {
         scene = scene.with_override(
             "world/splats",
             rerun::blueprint::Visualizer::new("ComputeGaussianSplats3D"),
@@ -50,7 +55,7 @@ pub fn send(
     .into_iter()
     .map(|(name, path)| TimeSeriesView::new(name).with_contents([path]).into())
     .collect();
-    let graphs: ContainerLike = if video {
+    let graphs: ContainerLike = if layout.video {
         Horizontal::new(quality).into()
     } else {
         Horizontal::new([
@@ -113,7 +118,7 @@ pub fn send(
         .memory()?;
     properties.set_time_sequence("blueprint", 0);
     let mut eye = rerun::external::re_sdk_types::blueprint::archetypes::EyeControls3D::new();
-    if video {
+    if layout.video {
         eye = eye.with_spin_speed(0.15);
     }
     eye = eye.with_eye_up(up);
@@ -134,7 +139,16 @@ mod tests {
             let (rec, storage) = rerun::RecordingStreamBuilder::new("dashboard-test")
                 .memory()
                 .unwrap();
-            super::send(&rec, 4, compute, true, [0.0, 0.0, 1.0]).unwrap();
+            super::send(
+                &rec,
+                4,
+                super::Layout {
+                    compute_visualizer: compute,
+                    video: true,
+                },
+                [0.0, 0.0, 1.0],
+            )
+            .unwrap();
             let mut override_seen = false;
             let mut eye_seen = false;
             for message in storage.take() {
@@ -174,7 +188,16 @@ mod tests {
         let (rec, storage) = rerun::RecordingStreamBuilder::new("gsplat-train")
             .memory()
             .unwrap();
-        super::send(&rec, 4, true, true, [0.0, 0.0, 1.0]).unwrap();
+        super::send(
+            &rec,
+            4,
+            super::Layout {
+                compute_visualizer: true,
+                video: true,
+            },
+            [0.0, 0.0, 1.0],
+        )
+        .unwrap();
         let messages = storage.take();
         let recordings: std::collections::HashSet<_> = messages
             .iter()

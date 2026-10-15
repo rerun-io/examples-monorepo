@@ -3,7 +3,7 @@ mod dashboard;
 mod logging;
 mod recorder;
 
-use anyhow::{Context, ensure};
+use anyhow::{Context as _, ensure};
 use brush_process::{
     config::TrainStreamConfig,
     message::{ProcessMessage, TrainMessage},
@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-use tokio_stream::StreamExt;
+use tokio_stream::StreamExt as _;
 
 #[derive(Parser)]
 #[command(
@@ -45,6 +45,7 @@ struct Cli {
 fn observation_interval(value: &str) -> Result<u32, String> {
     checked_interval(value.parse().map_err(|error| format!("{error}"))?)
 }
+
 fn checked_interval(steps: u32) -> Result<u32, String> {
     if steps == 0 || !steps.is_multiple_of(5) {
         return Err(
@@ -92,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         brush_process::create_process_with_device(cli.source, device, async move |initial| {
             let config = brush_process::args_file::merge_configs(&initial, &cli.training);
             if let Err(error) = validate_logging_config(&config) {
-                let _ = callback_error.set(error.to_string());
+                callback_error.set(error.to_string()).ok();
                 return None;
             }
             Some(config)
