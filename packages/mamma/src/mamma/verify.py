@@ -27,10 +27,11 @@ from dagkit.sources import SegmentRef
 from dagkit.types import cells, flat
 from dagkit.verify import Case, Phase, load_card, run_counts
 from datafusion import col, lit
-from jaxtyping import Bool, Float32, Int64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from PIL import Image
 from rerun.catalog import DatasetEntry
+from scipy.optimize import linear_sum_assignment
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from mamma.apis.capture import PACKAGE_DIR, Config, build, engine_plan
@@ -39,6 +40,8 @@ PRED_ROOT: str = "/world/mamma/people"
 GT_ROOT: str = "/world/gt/people"
 BODY_JOINTS: int = 22
 """MPJPE joints: the SMPL-X body joints regressed from the mesh (hands and face excluded)."""
+UNMATCHED_PVE_M: float = 1e3
+"""Matching cost of a GT person left unmatched, or paired with a prediction it shares no frame with."""
 
 
 def case_config(case: Case) -> Config:
@@ -119,10 +122,12 @@ def score(case: Case, golden: Path) -> dict[str, float]:
             pve: float = float(np.linalg.norm(pred_vertices - gt_vertices, axis=1).mean())
             pairs.append((pve, float(np.linalg.norm(J_regressor @ pred_vertices - J_regressor @ gt_vertices, axis=1).mean())))
         errors[g, p] = pairs
-    candidates: list[tuple[str | None, ...]] = list(itertools.permutations([*pred_people, *[None] * len(gt_people)], len(gt_people)))
-    matching: tuple[str | None, ...] = min(
-        candidates, key=lambda m: sum(np.mean([e[0] for e in errors[g, p]]) if p and errors[g, p] else 1e3 for g, p in zip(gt_people, m, strict=True))
-    )
+    cost: Float64[ndarray, "g c"] = np.full((len(gt_people), len(pred_people) + len(gt_people)), UNMATCHED_PVE_M)  # + one unmatched column per GT person
+    for (i, g), (j, p) in itertools.product(enumerate(gt_people), enumerate(pred_people)):
+        if errors[g, p]:
+            cost[i, j] = np.mean([e[0] for e in errors[g, p]])
+    columns: Int64[ndarray, " g"] = linear_sum_assignment(cost)[1]  # every GT row is assigned, in row order
+    matching: list[str | None] = [pred_people[j] if j < len(pred_people) else None for j in columns.tolist()]
     matched: list[tuple[float, float]] = [e for g, p in zip(gt_people, matching, strict=True) if p for e in errors[g, p]]
     print(
         f"  matching gt->pred {dict(zip(gt_people, matching, strict=True))}; scored {len(matched)} of {sum(len(v) for v in gt.values())} GT mesh frames"
