@@ -12,10 +12,10 @@ from dagkit.node import Event
 from dagkit.runners import run_sequential, run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import IterSource
-from dagkit.testing import check_graph_docs, check_picture
+from dagkit.testing import Collect, check_graph_docs, check_picture
 from plyfile import PlyData
 from simplecv.rerun_log_utils import RerunTyroConfig
-from vistadream_fakes import FakePredictor, Keep, fake_inpaint, fake_rasterize
+from vistadream_fakes import FakePredictor, fake_inpaint, fake_rasterize
 
 from vistadream.apis.single_image import PACKAGE_DIR, PORTS, ROOTS, Config, blueprint
 from vistadream.graphs.single_image import single_image_graph
@@ -43,7 +43,7 @@ def graph(coarse: bool, sinks: dict, source: IterSource | None = None) -> Graph:
 def test_graph_validates_and_runners_agree(coarse: bool) -> None:
     runs: list[list] = []
     for runner in (run_sequential, lambda g: run_threaded(g, mode="lossless")):
-        keep = Keep(PORTS)
+        keep = Collect(PORTS)
         built: Graph = graph(coarse, {"keep": keep})
         built.validate()
         assert ("expand" in built.nodes) == coarse

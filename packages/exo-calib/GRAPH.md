@@ -35,9 +35,9 @@ Stage A: metric, gravity-aligned exo cameras from one synchronized frameset (G3T
 Uses the graph resources `g3t`, `moge` (built once, shared).
 
 ## 3 · keep: Hand values on to the App's next graph
-*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+*output* · `Latest` · `packages/dagkit/dagkit/sinks.py`
 
-Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
 Takes **init** from 2 init.
 
@@ -129,9 +129,9 @@ Uses the graph resources `frames`, `moge` (built once, shared).
 Saves **kp2d** from 3 kp2d into the catalog layer `exocalib_kp2d_pass1`.
 
 ## 6 · keep: Hand values on to the App's next graph
-*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+*output* · `Latest` · `packages/dagkit/dagkit/sinks.py`
 
-Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
 Takes **refined** from 4 refine.
 
@@ -247,9 +247,9 @@ Stage E (whole segment): score the Stage A and refined rigs against the segment'
 Saves **refined, base_rig, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer `exocalib_refined`.
 
 ## 8 · keep: Hand values on to the App's next graph
-*output* · `Keep` · `packages/exo-calib/exo_calib/apis/calibrate.py`
+*output* · `Latest` · `packages/dagkit/dagkit/sinks.py`
 
-Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
+Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
 Takes **eval** from 6 report.
 

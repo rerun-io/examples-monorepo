@@ -20,7 +20,6 @@ Golden contract (``recording_id`` = case name; clock ``video_time``: the image a
 
 import random
 import time
-from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,8 +28,9 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from dagkit.graph import Graph
-from dagkit.node import Emit, PortType, RunContext, Tick
+from dagkit.node import Emit
 from dagkit.runners import run_sequential
+from dagkit.sinks import Latest
 from dagkit.types import cells, served
 from dagkit.verify import Case, Phase, pre_golden
 from jaxtyping import Bool
@@ -47,25 +47,16 @@ INPUT: str = "/world/input/pinhole"
 RENDER: str = "/world/render/pinhole"
 
 
-class InputRender:
+class InputRender(Latest):
     """Verify-only sink: the final scene rendered at the input camera, beside the input image (``render_rgb``, ``render_depth``)."""
 
-    inputs: Mapping[str, PortType] = {"scene": Splats, "views": SceneViews}
-    outputs: Mapping[str, PortType] = {}
-
     def __init__(self, recording: rr.RecordingStream) -> None:
+        super().__init__({"scene": Splats, "views": SceneViews})
         self.recording: rr.RecordingStream = recording
-        self.got: dict[str, object] = {}
         self.n_splats: int = 0
 
-    def reset(self, ctx: RunContext) -> None:
-        self.got = {}
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.got[tick.port] = tick.value
-
     def flush(self, out: Emit) -> None:
-        splats, views = self.got.pop("scene", None), self.got.pop("views", None)
+        splats, views = self.values.pop("scene", None), self.values.pop("views", None)
         if not isinstance(splats, Splats) or not isinstance(views, SceneViews):
             return
         height, width = views.input.rgb.shape[:2]

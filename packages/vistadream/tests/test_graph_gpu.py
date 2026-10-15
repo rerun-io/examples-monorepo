@@ -11,9 +11,9 @@ import numpy as np
 import pytest
 import torch
 from dagkit.runners import run_threaded
+from dagkit.testing import Collect
 from jaxtyping import UInt8
 from numpy import ndarray
-from vistadream_fakes import Keep
 
 from vistadream.apis.single_image import PORTS
 from vistadream.graphs.single_image import single_image_graph
@@ -35,7 +35,7 @@ def test_coarse_graph_grows_the_scene_on_the_gpu() -> None:
     from monopriors.models.relative_depth.moge_v1 import MoGeV1Predictor
 
     moge = MoGeV1Predictor(device="cuda")
-    keep = Keep(PORTS)
+    keep = Collect(PORTS)
     nodes = (OutpaintNode(opencv_inpaint), DepthNode(moge), InitNode(), ExpandNode(opencv_inpaint, moge, n_frames=4, iters=50), RenderNode())
     report = run_threaded(single_image_graph(ImageSource(IMAGE, 512), *nodes, {"keep": keep}), mode="lossless")
     assert report.status == "complete"

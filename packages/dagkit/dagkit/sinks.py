@@ -70,6 +70,31 @@ class RerunSink:
         self.recording.flush()
 
 
+class Latest:
+    """Hand values on to the App's next graph.
+
+    Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's
+    refine passes from the Stage A rig); a stopped run hands on nothing.
+    """
+
+    outputs: Mapping[str, PortType] = {}
+
+    def __init__(self, inputs: Mapping[str, PortType]) -> None:
+        self.inputs: dict[str, PortType] = dict(inputs)
+        self.values: dict[str, object] = {}
+        self._ctx: RunContext | None = None
+
+    def reset(self, ctx: RunContext) -> None:
+        self.values, self._ctx = {}, ctx
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        self.values[tick.port] = tick.value
+
+    def flush(self, out: Emit) -> None:
+        if self._ctx is not None and self._ctx.control is not None and self._ctx.control.stopped:
+            self.values.clear()
+
+
 class LayerFileSink:
     """Publish a finished layer file."""
 

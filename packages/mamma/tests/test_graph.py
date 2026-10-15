@@ -1,14 +1,13 @@
 """The capture graph with fake models: it validates, and both runners deliver the same outputs (lossless; no GPU, no catalog)."""
 
 import time
-from collections.abc import Mapping
 
 import numpy as np
 from dagkit.graph import Graph
-from dagkit.node import Emit, Fenced, PortType, RunContext, Tick
+from dagkit.node import Fenced
 from dagkit.runners import run_sequential, run_threaded
 from dagkit.sources import IterSource
-from dagkit.testing import host
+from dagkit.testing import Collect
 from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
@@ -22,25 +21,6 @@ from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.window_fit import FitterConfig
 
 
-class Keep:
-    """Sink keeping a host copy of every value it receives."""
-
-    outputs: Mapping[str, PortType] = {}
-
-    def __init__(self) -> None:
-        self.inputs: dict[str, PortType] = dict(PORTS)
-        self.items: list[tuple[str, int, object]] = []
-
-    def reset(self, ctx: RunContext) -> None:
-        self.items = []
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.items.append((tick.port, tick.t_ns, host(tick.value)))
-
-    def flush(self, out: Emit) -> None:
-        pass
-
-
 class SlowLandmarker(FakeLandmarker):
     """Landmarks slower than decode and tracking: in realtime the source runs as far ahead as the queues let it."""
 
@@ -49,9 +29,9 @@ class SlowLandmarker(FakeLandmarker):
         return super().__call__(*args, **kwargs)
 
 
-def graph(scene: FakeScene, landmarker: FakeLandmarker | None = None) -> tuple[Graph, Keep]:
+def graph(scene: FakeScene, landmarker: FakeLandmarker | None = None) -> tuple[Graph, Collect]:
     video = IterSource({"frames": Fenced[MultiViewFrames], "rig": RigCameras}, lambda: scene.events(16))
-    keep = Keep()
+    keep = Collect(PORTS)
     nodes = (
         TrackNode(TrackParams(expected_subjects=1), FakeDetector(), FakeEncoder(), FakeMasks()),  # type: ignore[arg-type]
         LandmarksNode(landmarker or FakeLandmarker(scene)),

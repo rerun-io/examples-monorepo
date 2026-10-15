@@ -12,7 +12,7 @@ from conftest import FakeScene
 from dagkit.graph import Graph
 from dagkit.node import Control, Event, Fenced, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
-from dagkit.sinks import LayerSink, RerunSink
+from dagkit.sinks import Latest, LayerSink, RerunSink
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges
 from dagkit.time import STATIC
@@ -20,7 +20,7 @@ from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from exo_calib.apis import calibrate
-from exo_calib.apis.calibrate import Config, Keep, build, check_producer
+from exo_calib.apis.calibrate import PORT_TYPES, Config, build, check_producer
 from exo_calib.graphs.calibrate import init_graph, refine_graph
 from exo_calib.nodes.refine import RefineNode
 from exo_calib.types import RigLayout
@@ -29,7 +29,7 @@ PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 
 
 def app_graphs(monkeypatch: pytest.MonkeyPatch, output_dir: Path | None) -> tuple[FakeScene, Iterator[Graph]]:
-    """``build`` with the catalog layout and the models faked; nothing runs until the caller fills each graph's Keep."""
+    """``build`` with the catalog layout and the models faked; nothing runs until the caller fills each graph's Latest sink."""
     scene = FakeScene()
     monkeypatch.setattr(calibrate, "discover_rig_layout", lambda segment, exo_rigs: RigLayout(scene.rig.names, ("ego/cam_00",), scene.rig.names))
     monkeypatch.setattr(calibrate, "model_factories", lambda *args: {name: (lambda value=value: value) for name, value in scene.resources().items()})
@@ -55,7 +55,7 @@ def test_the_app_graphs_validate_draw_what_they_declare_and_document_themselves(
 
 
 def test_a_stopped_graph_hands_nothing_on_and_ends_the_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    keep, control = Keep("init"), Control()
+    keep, control = Latest({p: PORT_TYPES[p] for p in ("init",)}), Control()
     keep.reset(RunContext("exocalib-init", "keep", "lossless", control=control))
     keep.step(Tick(0, "init", FakeScene().rig, {}), Recorder())
     control.stop()
@@ -63,7 +63,7 @@ def test_a_stopped_graph_hands_nothing_on_and_ends_the_app(monkeypatch: pytest.M
     assert keep.values == {}
     _, steps = app_graphs(monkeypatch, tmp_path / "outputs")
     assert next(steps).name == "exocalib-init"
-    assert next(steps, None) is None  # its Keep stayed empty: no refine pass is built
+    assert next(steps, None) is None  # its Latest sink stayed empty: no refine pass is built
 
 
 def test_without_an_output_dir_the_app_streams_to_the_viewer_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -111,7 +111,7 @@ def test_resume_refuses_a_layer_another_graph_profile_or_parameter_set_wrote(mon
         check_producer(SegmentRef("d", "s"), "exocalib_init", written)
 
 
-def synthetic_refine_graph(scene: FakeScene, keep: Keep) -> Graph:
+def synthetic_refine_graph(scene: FakeScene, keep: Latest) -> Graph:
     """The real refine graph with the catalog video swapped for synthetic framesets (same ports) and the focal stage on CPU."""
     factories = {name: (lambda value=value: value) for name, value in scene.resources().items()}
     layout = RigLayout(scene.rig.names, (), scene.rig.names)
@@ -126,13 +126,13 @@ def synthetic_refine_graph(scene: FakeScene, keep: Keep) -> Graph:
 
 def test_both_graphs_validate() -> None:
     scene = FakeScene()
-    synthetic_refine_graph(scene, Keep("refined")).validate()
-    init_graph(scene.segment, scene.rig.names, 0, {"g3t": object, "moge": object}, {"keep": Keep("init")}).validate()
+    synthetic_refine_graph(scene, Latest({p: PORT_TYPES[p] for p in ("refined",)})).validate()
+    init_graph(scene.segment, scene.rig.names, 0, {"g3t": object, "moge": object}, {"keep": Latest({p: PORT_TYPES[p] for p in ("init",)})}).validate()
 
 
 def test_sequential_equals_threaded_lossless() -> None:
     scene = FakeScene()
-    keeps: list[Keep] = [Keep("refined", "eval", "kp2d"), Keep("refined", "eval", "kp2d")]
+    keeps: list[Latest] = [Latest({p: PORT_TYPES[p] for p in ("refined", "eval", "kp2d")}), Latest({p: PORT_TYPES[p] for p in ("refined", "eval", "kp2d")})]
     seen = [
         collect_edges(synthetic_refine_graph(scene, keeps[0]), run_sequential),
         collect_edges(synthetic_refine_graph(scene, keeps[1]), lambda graph: run_threaded(graph, mode="lossless")),

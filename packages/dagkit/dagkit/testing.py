@@ -61,6 +61,28 @@ class _Snapshots(Recorder):
         self.as_put.append((port, t_ns, copy.deepcopy(host(value))))
 
 
+class Collect:
+    """Keep a host copy of every value.
+
+    A test sink: ``items`` holds (port, time, ``host(value)``) in arrival order; reset starts over.
+    """
+
+    outputs: Mapping[str, object] = {}
+
+    def __init__(self, inputs: Mapping[str, object]) -> None:
+        self.inputs: dict[str, object] = dict(inputs)
+        self.items: list[Output] = []
+
+    def reset(self, ctx: RunContext) -> None:
+        self.items = []
+
+    def step(self, tick: Tick, out: Emit) -> None:
+        self.items.append((tick.port, tick.t_ns, host(tick.value)))
+
+    def flush(self, out: Emit) -> None:
+        pass
+
+
 def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | None = None) -> list[Output]:
     """Run ``ticks`` through ``node`` after one reset, then after two: both runs put the same outputs (compared as they were
     when put), a second flush puts nothing, ports are declared and times monotonic per port, and no output changes after

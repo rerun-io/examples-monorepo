@@ -21,9 +21,9 @@ import rerun.blueprint as rrb
 import torch
 from dagkit.app import HardwareClass, detect_hardware, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
-from dagkit.node import Control, Emit, Mode, Node, PortType, RunContext, Tick
+from dagkit.node import Mode, Node, PortType
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink
+from dagkit.sinks import Latest, LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer, read_column, read_producer
 from serde import serde
@@ -83,30 +83,6 @@ class Kp2dParams:
     batch_size: int = 32
     """Largest inference batch the TensorRT engines are built for (at least the number of exo views)."""
     detection_score: float = 0.1
-
-
-class Keep:
-    """Hand values on to the App's next graph.
-
-    Keeps the last value of each input in memory (the Stage A rig, the pass-1 rig, the report); a stopped run hands on nothing.
-    """
-
-    outputs: Mapping[str, PortType] = {}
-
-    def __init__(self, *ports: str) -> None:
-        self.inputs: dict[str, PortType] = {port: PORT_TYPES[port] for port in ports}
-        self.values: dict[str, object] = {}
-        self.control: Control | None = None
-
-    def reset(self, ctx: RunContext) -> None:
-        self.control = ctx.control
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.values[tick.port] = tick.value
-
-    def flush(self, out: Emit) -> None:
-        if self.control is not None and self.control.stopped:
-            self.values.clear()
 
 
 def model_factories(segment: SegmentRef, cameras: tuple[str, ...], params: Kp2dParams) -> dict[str, Callable[[], object]]:
@@ -169,7 +145,7 @@ def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
 def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     """The App's graphs in run order; the CLI, the gradio app and verify run each one before asking for the next.
 
-    ``init`` once, then ``refine`` pass 1 and pass 2: a ``Keep`` sink hands each graph's result to the next, and a stopped
+    ``init`` once, then ``refine`` pass 1 and pass 2: a ``Latest`` sink hands each graph's result to the next, and a stopped
     run ends the App. Outputs stream to ``recording``; with ``config.output_dir`` they also go to layer files and ``eval.json``.
     """
     torch.cuda.empty_cache()  # PyTorch's cache of a previous run (gradio) back to the driver, where TensorRT engines allocate
@@ -203,7 +179,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
     log_style(recording, cameras)
     if config.resume_from is None:
-        keep = Keep("init")
+        keep = Latest({"init": RigCameras})
         yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
         if "init" not in keep.values:
             return
@@ -216,7 +192,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     assert isinstance(init, RigCameras)
     tracking: object = init
     if config.resume_from != "kp2d":  # pass 1 only tracks: its outputs go to unregistered *_pass1 files
-        keep = Keep("refined")
+        keep = Latest({"refined": RigCameras})
         yield refine_graph(segment, layout, (init, init), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", PASS1_LAYERS, "_pass1", "off")}, report=False)
         if "refined" not in keep.values:
             return
@@ -225,7 +201,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     resume_kp2d: bool = config.resume_from == "kp2d"
     if resume_kp2d:
         check_producer(segment, "exocalib_kp2d", producer("exocalib-refine"))
-    keep = Keep("eval")
+    keep = Latest({"eval": EvalReport})
     layers: dict[str, tuple[str, ...]] = {k: v for k, v in LAYERS.items() if not (resume_kp2d and k == "exocalib_kp2d")}
     yield refine_graph(segment, layout, (init, tracking), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", layers)}, report=True, resume_kp2d=resume_kp2d)
     report = keep.values.get("eval")

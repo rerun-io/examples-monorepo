@@ -8,18 +8,18 @@ import pytest
 from dagkit_fakes import Point
 
 from dagkit.graph import Block, Graph
-from dagkit.node import Control, Event, RunContext, Tick
+from dagkit.node import Control, Event, Node, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
-from dagkit.sinks import LayerFileSink, LayerSink, partial_path, publish_layer_file
+from dagkit.sinks import Latest, LayerFileSink, LayerSink, partial_path, publish_layer_file
 from dagkit.sources import IterSource, SegmentRef
-from dagkit.testing import Recorder
+from dagkit.testing import Collect, Recorder
 from dagkit.time import GraphError
 from dagkit.types import LayerFile, Producer
 
 PRODUCER = Producer("dagkit", "0.1.0+test", "points", "x86_64-cuda")
 
 
-def point_graph(sink: LayerSink, n: int, control: Control | None = None) -> Graph:
+def point_graph(sink: Node, n: int, control: Control | None = None) -> Graph:
     def events():  # noqa: ANN202
         for t in range(n):
             if control is not None and t == 2:
@@ -101,3 +101,20 @@ def test_partial_path_is_the_name_publish_reads_the_run_id_from(tmp_path: Path) 
     partial.write_bytes(b"rrd")
     final: Path = publish_layer_file(partial, segment, "hands", output_dir=tmp_path, register="off")
     assert final.name == f"hands.{partial.name.split('.')[2]}.rrd"
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_latest_hands_on_the_newest_value_of_each_input_unless_stopped(stop: bool) -> None:
+    """A multi-graph App's hand-over: the next graph is built from what this one finished with; a stopped run hands on nothing."""
+    control = Control()
+    latest = Latest({"point": Point})
+    run_sequential(point_graph(latest, 3, control if stop else None), control=control)
+    assert latest.values == ({} if stop else {"point": Point((2.0, 0.0, 0.0), "p2")})
+
+
+def test_collect_keeps_a_host_copy_of_every_value() -> None:
+    collect = Collect({"point": Point})
+    graph: Graph = point_graph(collect, 2)
+    run_sequential(graph)
+    run_sequential(graph)  # reset starts over
+    assert collect.items == [("point", t * 1000, {"xyz": [float(t), 0.0, 0.0], "label": f"p{t}"}) for t in range(2)]
