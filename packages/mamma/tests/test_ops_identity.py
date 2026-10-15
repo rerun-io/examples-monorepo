@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import torch
 from hypothesis import given, settings
@@ -9,8 +11,9 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from jaxtyping import Float32, Float64
 from numpy import ndarray
+from ultralytics.engine.results import Boxes
 
-from mamma.models.detection import bbox_iou_xyxy
+from mamma.models.detection import Yolo12xDetector
 from mamma.ops.identity import (
     FeatureBank,
     assign_hungarian,
@@ -87,13 +90,17 @@ def test_feature_bank_similarity_identifies_match() -> None:
     assert matches == {0: 1, 1: 0}
 
 
-def test_bbox_iou_xyxy() -> None:
-    box: Float32[ndarray, "4"] = np.array([0.0, 0.0, 10.0, 10.0], dtype=np.float32)
-    assert bbox_iou_xyxy(box, box) == 1.0
-    half: Float32[ndarray, "4"] = np.array([5.0, 0.0, 15.0, 10.0], dtype=np.float32)
-    assert abs(bbox_iou_xyxy(box, half) - (50.0 / 150.0)) < 1e-6
-    disjoint: Float32[ndarray, "4"] = np.array([20.0, 20.0, 30.0, 30.0], dtype=np.float32)
-    assert bbox_iou_xyxy(box, disjoint) == 0.0
+def test_detector_keeps_confident_persons_drops_overlapping_duplicates_and_puts_the_best_first() -> None:
+    """Per frame, in frame order: class 0 at confidence >= 0.5 only; a box overlapping a better one by IoU > 0.75 goes."""
+    rows: list[list[list[float]]] = [  # x1 y1 x2 y2 confidence class, per frame (Ultralytics' result.boxes)
+        [[0, 0, 10, 10, 0.6, 0], [0, 0, 10, 9.5, 0.9, 0], [20, 20, 30, 30, 0.7, 0], [0, 0, 5, 5, 0.95, 2], [40, 40, 50, 50, 0.4, 0]], [], [[1, 1, 4, 4, 0.8, 0]],
+    ]  # fmt: skip
+    results = iter([SimpleNamespace(boxes=Boxes(torch.tensor(r).reshape(-1, 6), orig_shape=(4, 4))) for r in rows])
+    detector = object.__new__(Yolo12xDetector)  # the YOLO model replaced by its canned results
+    detector.model, detector.confidence, detector.dedup_iou = lambda *_image, **_options: [next(results)], 0.5, 0.75  # type: ignore[assignment]
+    found = detector(torch.zeros((3, 4, 4, 3), dtype=torch.uint8))
+    assert found.xyxy.tolist() == [[0, 0, 10, 9.5], [20, 20, 30, 30], [1, 1, 4, 4]] and found.frame_indices.tolist() == [0, 0, 2]
+    np.testing.assert_allclose(found.scores.numpy(), [0.9, 0.7, 0.8], rtol=1e-6)
 
 
 @settings(max_examples=60, deadline=None)
