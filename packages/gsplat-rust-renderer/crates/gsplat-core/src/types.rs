@@ -7,6 +7,7 @@ pub struct Splats {
     /// Mean xyz, quaternion wxyz, log-scale xyz, tightly packed (40 bytes).
     pub transforms: Vec<[f32; 10]>,
     pub raw_opacities: Vec<f32>,
+
     /// Splat-major, then coefficient-major RGB (12 bytes per coefficient).
     pub sh_coefficients: Vec<[f32; 3]>,
     pub sh_degree: u32,
@@ -36,13 +37,17 @@ pub enum RenderMode {
 pub struct RenderOptions {
     /// Resolved mode for this render.
     pub render_mode: RenderMode,
+
     /// Instance affine transform; SH directions remain in local coordinates.
     pub world_from_local: glam::Affine3A,
+
     /// Applied during rasterization; alpha remains accumulated splat coverage.
     pub background: Vec3,
+
     /// Positive multiplier, applied as a log-scale offset before the 3D floor.
     pub splat_scale: f32,
 }
+
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
@@ -60,6 +65,7 @@ pub struct FrameStats {
     pub intersections: u32,
     pub intersection_capacity: u32,
     pub overflow_events: u32,
+
     /// The previous allocation was too small; submit this view again after feedback.
     pub needs_rerender: bool,
 }
@@ -70,6 +76,7 @@ impl Camera {
             || self.size.y == 0
             || !self.position.is_finite()
             || !self.rotation.is_finite()
+            || !self.rotation.is_normalized()
             || !self.center_uv.is_finite()
             || !(self.fov_x > 0.0 && self.fov_x < std::f64::consts::TAU)
             || !(self.fov_y > 0.0 && self.fov_y < std::f64::consts::TAU)
@@ -77,9 +84,25 @@ impl Camera {
         {
             return Err(crate::Error::Input("invalid camera"));
         }
+        if matches!(
+            self.model,
+            crate::CameraModel::Pinhole | crate::CameraModel::RadialTangential8 { .. }
+        ) && (self.fov_x >= std::f64::consts::PI || self.fov_y >= std::f64::consts::PI)
+        {
+            return Err(crate::Error::Input(
+                "forward lens field of view must be below pi",
+            ));
+        }
+        let focal = self.focal();
+        if !focal.is_finite() || focal.x <= 0.0 || focal.y <= 0.0 {
+            return Err(crate::Error::Input(
+                "camera focal lengths must be finite and positive",
+            ));
+        }
         Ok(())
     }
 }
+
 impl RenderOptions {
     pub fn validate(&self) -> Result<(), crate::Error> {
         if !self.world_from_local.is_finite()

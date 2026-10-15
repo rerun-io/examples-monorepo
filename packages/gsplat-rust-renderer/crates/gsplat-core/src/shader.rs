@@ -1,4 +1,4 @@
-//! Local equivalent of re_renderer's import-once FileResolver; shader bytes need no rewriting.
+//! Local equivalent of `re_renderer`'s import-once `FileResolver`; shader bytes need no rewriting.
 use std::collections::HashSet;
 
 pub(crate) fn resolve(name: &'static str) -> String {
@@ -7,6 +7,7 @@ pub(crate) fn resolve(name: &'static str) -> String {
             return;
         }
         let source = match name {
+            "consts.wgsl" => include_str!("../shader/consts.wgsl"),
             "common.wgsl" => include_str!("../shader/common.wgsl"),
             "counts.wgsl" => include_str!("../shader/counts.wgsl"),
             "dispatch.wgsl" => include_str!("../shader/dispatch.wgsl"),

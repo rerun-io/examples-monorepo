@@ -1,6 +1,6 @@
 //! Primitive contracts against independent CPU references.
 use crate::kernels::Kernels;
-use crate::primitives::dispatch::CountSlot;
+use crate::primitives::dispatch::{CountSlot, Dispatches};
 use crate::primitives::{RadixSort, Scan};
 use crate::test_utils::{gpu, read, upload};
 
@@ -16,15 +16,23 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
         for (var j = 0u; j < 4u; j++) { lds[j * 256u + lid] = 0xdeadbeefu; }
         workgroupBarrier();
     ";
-    let scan = crate::shader::resolve("scan.wgsl").replacen(
+    let scan = crate::shader::resolve("scan.wgsl");
+    assert_eq!(
+        scan.matches("    if lid == 0u {\n        length =").count(),
+        1
+    );
+    let scan = scan.replacen(
         "    if lid == 0u {\n        length =",
         &format!("{poison_scan}\n    if lid == 0u {{\n        length ="),
         1,
     );
+    assert_ne!(scan, crate::shader::resolve("scan.wgsl"));
     let scan = module(device, &scan);
     kernels.scan = kernel(&scan, "scan");
     kernels.add_offsets = kernel(&scan, "add_offsets");
-    let sort = crate::shader::resolve("sort.wgsl").replace(
+    let sort = crate::shader::resolve("sort.wgsl");
+    assert_eq!(sort.matches("    let n = sort_length(lid);").count(), 5);
+    let sort = sort.replace(
         "    let n = sort_length(lid);",
         &format!(
             "{poison_scan}
@@ -39,6 +47,7 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
             let n = sort_length(lid);"
         ),
     );
+    assert_ne!(sort, crate::shader::resolve("sort.wgsl"));
     let sort = module(device, &sort);
     kernels.count_keys = kernel(&sort, "count_keys");
     kernels.reduce_counts = kernel(&sort, "reduce_counts");
@@ -71,9 +80,17 @@ fn inclusive_scan_crosses_recursive_block_boundaries() {
             CountSlot::Visible,
             &values,
             &count,
+            0,
+        );
+        let dispatches = Dispatches::new(
+            device,
+            &kernels.prepare,
+            &count,
+            &(Scan::plans(CountSlot::Visible, n as u32)),
         );
         let mut encoder = device.create_command_encoder(&Default::default());
-        scan.encode(&mut encoder, &kernels, None);
+        dispatches.prepare(&mut encoder, &kernels.prepare, None);
+        scan.encode(&mut encoder, &kernels, &dispatches, None);
         queue.submit([encoder.finish()]);
         assert_eq!(
             read::<u32>(device, queue, scan.output(), n),
@@ -102,9 +119,9 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
             &kernels,
             n,
             CountSlot::Visible,
-            &keys,
-            &values,
+            (&keys, &values),
             &count,
+            0,
         );
         // Odd and even pass counts must expose the correct ping-pong output without copies.
         for bits in [20, 32] {
@@ -114,8 +131,15 @@ fn radix_sort_is_stable_for_duplicates_and_partial_blocks() {
                 0,
                 bytemuck::cast_slice(&(0..n).collect::<Vec<_>>()),
             );
+            let dispatches = Dispatches::new(
+                device,
+                &kernels.prepare,
+                &count,
+                &(RadixSort::plans(CountSlot::Visible, n)),
+            );
             let mut encoder = device.create_command_encoder(&Default::default());
-            sort.encode(&mut encoder, &kernels, bits, None);
+            dispatches.prepare(&mut encoder, &kernels.prepare, None);
+            sort.encode(&mut encoder, &kernels, &dispatches, bits, None);
             queue.submit([encoder.finish()]);
             let (keys, values) = sort.output(bits);
             assert_eq!(
@@ -152,9 +176,9 @@ fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
         &kernels,
         capacity,
         CountSlot::Intersections,
-        &keys,
-        &values,
+        (&keys, &values),
         &count,
+        0,
     );
     let scan = Scan::new(
         device,
@@ -163,14 +187,25 @@ fn gpu_counts_cross_recursive_boundaries_and_reuse_scratch() {
         CountSlot::Intersections,
         &keys,
         &count,
+        2,
     );
     for n in [capacity, 0, 17, 1025, 1] {
         queue.write_buffer(&keys, 0, bytemuck::cast_slice(&input));
         queue.write_buffer(&values, 0, bytemuck::cast_slice(&ids));
         queue.write_buffer(&count, 4, bytemuck::bytes_of(&n));
+        let dispatches = Dispatches::new(
+            device,
+            &kernels.prepare,
+            &count,
+            &(RadixSort::plans(CountSlot::Intersections, capacity)
+                .into_iter()
+                .chain(Scan::plans(CountSlot::Intersections, capacity))
+                .collect::<Vec<_>>()),
+        );
         let mut encoder = device.create_command_encoder(&Default::default());
-        scan.encode(&mut encoder, &kernels, None);
-        sort.encode(&mut encoder, &kernels, 8, None);
+        dispatches.prepare(&mut encoder, &kernels.prepare, None);
+        scan.encode(&mut encoder, &kernels, &dispatches, None);
+        sort.encode(&mut encoder, &kernels, &dispatches, 8, None);
         queue.submit([encoder.finish()]);
         let expected_scan: Vec<u32> = input[..n as usize]
             .iter()
@@ -213,12 +248,19 @@ fn radix_sort_crosses_the_70m_reduced_histogram_boundary() {
         &kernels,
         n,
         CountSlot::Visible,
-        &keys,
-        &values,
+        (&keys, &values),
         &count,
+        0,
+    );
+    let dispatches = Dispatches::new(
+        &device,
+        &kernels.prepare,
+        &count,
+        &(RadixSort::plans(CountSlot::Visible, n)),
     );
     let mut encoder = device.create_command_encoder(&Default::default());
-    sort.encode(&mut encoder, &kernels, 4, None);
+    dispatches.prepare(&mut encoder, &kernels.prepare, None);
+    sort.encode(&mut encoder, &kernels, &dispatches, 4, None);
     queue.submit([encoder.finish()]);
     let result = read::<u32>(&device, &queue, sort.output(4).1, n as usize);
     let mut expected = (0..n).collect::<Vec<_>>();
@@ -231,4 +273,113 @@ fn radix_sort_crosses_the_70m_reduced_histogram_boundary() {
             .zip(&result)
             .all(|(key, idx)| *key == input[*idx as usize])
     );
+}
+
+#[test]
+fn poison_injection_anchors_are_present() {
+    assert_eq!(
+        crate::shader::resolve("scan.wgsl")
+            .matches("    if lid == 0u {\n        length =")
+            .count(),
+        1
+    );
+    assert_eq!(
+        crate::shader::resolve("sort.wgsl")
+            .matches("    let n = sort_length(lid);")
+            .count(),
+        5
+    );
+}
+
+#[test]
+#[ignore = "integration: GPU"]
+fn sentinel_closes_the_last_real_tile_range() {
+    use crate::gpu::bind;
+    use crate::primitives::dispatch::dispatch_direct;
+    let (device, queue) = &gpu();
+    let kernels = Kernels::new(device);
+    let keys = upload(device, &[0u32, 0, 1, 2, 2]);
+    let counts = upload(device, &[0u32, 5]);
+    let offsets = upload(device, &[0u32; 4]);
+    let mut words = [0u32; 64];
+    words[30] = 2; // ImageInfo.tiles_x: two real tiles, sentinel = 2.
+    words[31] = 1;
+    let uniform = crate::gpu::uniform(device, &words);
+    let kernel = &kernels.tile_offsets;
+    let group = bind(
+        device,
+        &kernel.layout,
+        &[
+            (0, uniform.as_entire_binding()),
+            (1, counts.as_entire_binding()),
+            (7, keys.as_entire_binding()),
+            (9, offsets.as_entire_binding()),
+        ],
+    );
+    let mut encoder = device.create_command_encoder(&Default::default());
+    dispatch_direct(&mut encoder, kernel, &group, 1, None);
+    queue.submit([encoder.finish()]);
+    assert_eq!(read::<u32>(device, queue, &offsets, 4), [0, 2, 2, 3]);
+}
+
+#[test]
+#[ignore = "integration: GPU"]
+fn float_depth_keys_sort_negative_depths_before_positive_depths() {
+    use crate::gpu::{bind, module, pipeline};
+    use crate::primitives::dispatch::dispatch_direct;
+    let (device, queue) = &gpu();
+    let kernels = poisoned_kernels(device);
+    let depths = [4.0f32, -1.0, -4.0, 0.0, 1.0, -0.0];
+    let values = upload(device, &[0u32, 1, 2, 3, 4, 5]);
+    let keys = upload(device, &[0u32; 6]);
+    let input = upload(device, &depths);
+    let counts = upload(device, &[6u32, 0]);
+    let source = format!(
+        "{}
+        @group(0) @binding(10) var<storage, read_write> test_depths: array<f32>;
+        @group(0) @binding(11) var<storage, read_write> test_keys: array<u32>;
+        @compute @workgroup_size(1) fn test_depth_key(@builtin(global_invocation_id) id: vec3u) {{
+            test_keys[id.x] = depth_key(test_depths[id.x]);
+        }}",
+        crate::shader::resolve("project.wgsl")
+    );
+    let key_kernel = pipeline(
+        device,
+        &module(device, &source),
+        "test_depth_key",
+        &[(10, crate::kernels::W), (11, crate::kernels::W)],
+    );
+    let group = bind(
+        device,
+        &key_kernel.layout,
+        &[
+            (10, input.as_entire_binding()),
+            (11, keys.as_entire_binding()),
+        ],
+    );
+    let sort = RadixSort::new(
+        device,
+        &kernels,
+        6,
+        CountSlot::Visible,
+        (&keys, &values),
+        &counts,
+        0,
+    );
+    let dispatches = Dispatches::new(
+        device,
+        &kernels.prepare,
+        &counts,
+        &(RadixSort::plans(CountSlot::Visible, 6)),
+    );
+    let mut encoder = device.create_command_encoder(&Default::default());
+    dispatch_direct(&mut encoder, &key_kernel, &group, 6, None);
+    dispatches.prepare(&mut encoder, &kernels.prepare, None);
+    sort.encode(&mut encoder, &kernels, &dispatches, 32, None);
+    queue.submit([encoder.finish()]);
+    // Independent CPU total order includes negative zero immediately before positive zero.
+    let mut expected = [0u32, 1, 2, 3, 4, 5];
+    expected.sort_by(|a, b| depths[*a as usize].total_cmp(&depths[*b as usize]));
+    assert_eq!(expected, [2, 1, 5, 3, 4, 0]);
+    assert_eq!(read::<u32>(device, queue, sort.output(32).1, 6), expected);
 }

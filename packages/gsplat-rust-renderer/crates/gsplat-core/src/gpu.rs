@@ -1,4 +1,4 @@
-//! Raw resource operations; replace this file with re_renderer pools and belts upstream.
+//! Raw resource operations; replace this file with `re_renderer` pools and belts upstream.
 use wgpu::util::DeviceExt as _;
 
 pub(crate) type Feedback = std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>;
@@ -14,6 +14,7 @@ pub(crate) fn storage(device: &wgpu::Device, label: &str, bytes: u64) -> wgpu::B
             | wgpu::BufferUsages::INDIRECT,
     })
 }
+
 pub(crate) fn upload(
     device: &wgpu::Device,
     label: &str,
@@ -26,6 +27,7 @@ pub(crate) fn upload(
         usage,
     })
 }
+
 pub(crate) fn uniform(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("gsplat parameters"),
@@ -33,16 +35,19 @@ pub(crate) fn uniform(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     })
 }
+
 pub(crate) fn module(device: &wgpu::Device, source: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gsplat shader"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     })
 }
+
 pub(crate) struct Kernel {
     pub pipeline: wgpu::ComputePipeline,
     pub layout: wgpu::BindGroupLayout,
 }
+
 pub(crate) fn pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
@@ -80,6 +85,7 @@ pub(crate) fn pipeline(
     });
     Kernel { pipeline, layout }
 }
+
 pub(crate) fn bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -97,6 +103,7 @@ pub(crate) fn bind(
             .collect::<Vec<_>>(),
     })
 }
+
 pub(crate) fn feedback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("frame feedback"),
@@ -105,27 +112,29 @@ pub(crate) fn feedback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
     })
 }
-pub(crate) fn feedback(encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer) -> Feedback {
-    let (tx, rx) = std::sync::mpsc::channel();
+
+pub(crate) fn feedback(encoder: &wgpu::CommandEncoder, buffer: &wgpu::Buffer) -> Feedback {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     encoder.map_buffer_on_submit(buffer, wgpu::MapMode::Read, .., move |result| {
-        let _ = tx.send(result);
+        tx.send(result).ok();
     });
     rx
 }
+
 pub(crate) fn read_feedback(
     buffer: &wgpu::Buffer,
     receiver: &Feedback,
 ) -> Option<Result<[u32; 2], crate::Error>> {
     let status = match receiver.try_recv() {
         Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-        Err(error) => Err(crate::Error::Readback(error.to_string())),
-        Ok(status) => status.map_err(|error| crate::Error::Readback(error.to_string())),
+        Err(error) => Err(error.into()),
+        Ok(status) => status.map_err(crate::Error::from),
     };
     let result = status.and_then(|()| {
         buffer
             .get_mapped_range(..)
             .map(|data| *bytemuck::from_bytes::<[u32; 2]>(&data))
-            .map_err(|error| crate::Error::Readback(error.to_string()))
+            .map_err(crate::Error::from)
     });
     buffer.unmap();
     Some(result)

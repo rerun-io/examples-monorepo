@@ -10,14 +10,32 @@ pub struct Scene {
     pub(crate) n: u32,
     pub(crate) degree: u32,
 }
+
 impl Scene {
+    /// Number of splats in this upload.
+    pub fn len(&self) -> u32 {
+        self.n
+    }
+
+    /// Whether this upload contains no splats.
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// Bytes held by this scene's GPU buffers.
+    pub fn gpu_byte_size(&self) -> u64 {
+        [&self.transforms, &self.opacity, &self.sh, &self.min_scale]
+            .into_iter()
+            .map(wgpu::Buffer::size)
+            .sum()
+    }
+
     pub(crate) fn upload(
         device: &wgpu::Device,
         splats: &Splats,
         limit: u64,
     ) -> Result<Self, Error> {
-        let n =
-            u32::try_from(splats.transforms.len()).map_err(|_| Error::Input("too many splats"))?;
+        let n = u32::try_from(splats.transforms.len())?;
         if n >= 0x8000_0000 {
             return Err(Error::Input(
                 "visible count reserves its high bit for arithmetic overflow",
@@ -35,9 +53,8 @@ impl Scene {
                 "inconsistent transform, opacity, SH, or scale-floor lengths",
             ));
         }
-        let oversized = n == 0 || Splats::gpu_bytes(n as usize, splats.sh_degree) > limit;
         let upload = |label, bytes: &[u8]| -> Result<wgpu::Buffer, Error> {
-            if oversized && bytes.len() as u64 > limit {
+            if bytes.len() as u64 > limit {
                 return Err(Error::Capacity {
                     required: bytes.len() as u64,
                     limit,

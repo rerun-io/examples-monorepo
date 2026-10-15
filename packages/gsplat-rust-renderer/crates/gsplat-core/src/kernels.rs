@@ -1,6 +1,20 @@
 //! Device-lifetime modules and pipelines; allocation paths never compile shaders.
 use crate::gpu::{Kernel, module, pipeline};
 
+pub(crate) const TILE_WIDTH: u32 = 16;
+
+pub(crate) const WG: u32 = 256;
+
+pub(crate) const ELEMENTS_PER_THREAD: u32 = 4;
+
+pub(crate) const BLOCK_SIZE: u32 = WG * ELEMENTS_PER_THREAD;
+
+pub(crate) const BITS_PER_PASS: u32 = 4;
+
+pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
+
+pub(crate) const CHECKS_PER_ITER: u32 = 8;
+
 pub(crate) fn sources() -> [String; 7] {
     [
         "project.wgsl",
@@ -19,21 +33,25 @@ const U: wgpu::BindingType = wgpu::BindingType::Buffer {
     has_dynamic_offset: false,
     min_binding_size: None,
 };
+
 const R: wgpu::BindingType = wgpu::BindingType::Buffer {
     ty: wgpu::BufferBindingType::Storage { read_only: true },
     has_dynamic_offset: false,
     min_binding_size: None,
 };
+
 pub(crate) const W: wgpu::BindingType = wgpu::BindingType::Buffer {
     ty: wgpu::BufferBindingType::Storage { read_only: false },
     has_dynamic_offset: false,
     min_binding_size: None,
 };
+
 const COLOR: wgpu::BindingType = wgpu::BindingType::StorageTexture {
     access: wgpu::StorageTextureAccess::WriteOnly,
     format: wgpu::TextureFormat::Rgba8Unorm,
     view_dimension: wgpu::TextureViewDimension::D2,
 };
+
 const DEPTH: wgpu::BindingType = wgpu::BindingType::StorageTexture {
     access: wgpu::StorageTextureAccess::WriteOnly,
     format: wgpu::TextureFormat::R32Float,
@@ -80,9 +98,8 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
         "scan" => &[(0, R), (1, R), (2, W), (3, W), (4, U)],
         "add_offsets" => &[(0, R), (1, R), (2, W), (4, U)],
         "count_keys" => &[(0, R), (1, R), (3, W), (7, U)],
-        "reduce_counts" => &[(0, R), (3, W), (4, W), (7, U)],
+        "reduce_counts" | "scan_add" => &[(0, R), (3, W), (4, W), (7, U)],
         "scan_counts" => &[(0, R), (4, W), (7, U)],
-        "scan_add" => &[(0, R), (3, W), (4, W), (7, U)],
         "scatter" => &[(0, R), (1, R), (2, R), (3, W), (5, W), (6, W), (7, U)],
         "prepare" => &[(0, R), (1, R), (2, W)],
         _ => unreachable!("unknown gsplat kernel: {entry}"),
@@ -108,6 +125,7 @@ pub(crate) struct Kernels {
     pub scatter: Kernel,
     pub prepare: Kernel,
 }
+
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
         let [projection, mapping, raster, scan, sort, prepare, outputs] =
@@ -194,7 +212,7 @@ mod tests {
                 .map(|(_, variable)| layout[variable.ty].size)
                 .sum();
             assert!(
-                workgroup_bytes <= crate::REQUIRED_WORKGROUP_STORAGE_BYTES,
+                workgroup_bytes <= crate::device_caps::REQUIRED_WORKGROUP_STORAGE_BYTES,
                 "shader needs {workgroup_bytes} workgroup bytes, exceeding the device guard"
             );
         }

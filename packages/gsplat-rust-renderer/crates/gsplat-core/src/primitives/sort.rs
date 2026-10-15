@@ -1,10 +1,12 @@
 //! Stable four-bit radix sort with GPU-resident counts.
 use super::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::gpu::{bind, storage, uniform};
-use crate::kernels::Kernels;
+use crate::kernels::{BIN_COUNT, BITS_PER_PASS, BLOCK_SIZE, Kernels};
 
 const BLOCKS: u32 = 0;
+
 const REDUCED: u32 = 1;
+
 struct SortGroups {
     count_keys: wgpu::BindGroup,
     reduce_counts: wgpu::BindGroup,
@@ -12,21 +14,23 @@ struct SortGroups {
     scan_add: wgpu::BindGroup,
     scatter: wgpu::BindGroup,
 }
+
 pub(crate) struct RadixSort {
     keys: [wgpu::Buffer; 2],
     values: [wgpu::Buffer; 2],
     groups: [SortGroups; 8],
-    dispatches: Dispatches,
+    dispatch_base: u32,
 }
+
 impl RadixSort {
     pub fn new(
         device: &wgpu::Device,
         kernels: &Kernels,
         capacity: u32,
         count: CountSlot,
-        keys: &wgpu::Buffer,
-        values: &wgpu::Buffer,
+        (keys, values): (&wgpu::Buffer, &wgpu::Buffer),
         counts: &wgpu::Buffer,
+        dispatch_base: u32,
     ) -> Self {
         let keys = [
             keys.clone(),
@@ -36,15 +40,22 @@ impl RadixSort {
             values.clone(),
             storage(device, "sort values", u64::from(capacity) * 4),
         ];
-        let blocks = capacity.div_ceil(1024).max(1);
-        let histogram = storage(device, "sort histogram", u64::from(blocks) * 64);
+        let blocks = capacity.div_ceil(BLOCK_SIZE).max(1);
+        let histogram = storage(
+            device,
+            "sort histogram",
+            u64::from(blocks) * u64::from(BIN_COUNT) * 4,
+        );
         let reduced = storage(
             device,
             "sort reduced histogram",
-            u64::from(blocks.div_ceil(1024)) * 64,
+            u64::from(blocks.div_ceil(BLOCK_SIZE)) * u64::from(BIN_COUNT) * 4,
         );
         let groups = std::array::from_fn(|digit| {
-            let params = uniform(device, &[count.index(), digit as u32 * 4, capacity, 0]);
+            let params = uniform(
+                device,
+                &[count.index(), digit as u32 * BITS_PER_PASS, capacity, 0],
+            );
             let source = digit % 2;
             let dest = 1 - source;
             let group = |kernel: &crate::gpu::Kernel, bindings: &[(u32, &wgpu::Buffer)]| {
@@ -97,58 +108,72 @@ impl RadixSort {
             keys,
             values,
             groups,
-            dispatches: Dispatches::new(
-                device,
-                &kernels.prepare,
-                counts,
-                &[
-                    DispatchPlan::new(count, capacity, 1024, 1),
-                    DispatchPlan::new(count, capacity, 1024 * 1024, 16),
-                ],
-            ),
+            dispatch_base,
         }
     }
+
+    pub fn plans(count: CountSlot, capacity: u32) -> [DispatchPlan; 2] {
+        [
+            DispatchPlan::new(count, capacity, BLOCK_SIZE, 1),
+            DispatchPlan::new(count, capacity, BLOCK_SIZE * BLOCK_SIZE, BIN_COUNT),
+        ]
+    }
+
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         kernels: &Kernels,
+        dispatches: &Dispatches,
         bits: u32,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         assert!((1..=32).contains(&bits));
-        self.dispatches.prepare(encoder, &kernels.prepare, None);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("gsplat radix sort"),
             timestamp_writes,
         });
-        for groups in &self.groups[..bits.div_ceil(4) as usize] {
-            self.dispatches.dispatch_in_pass(
+        for groups in &self.groups[..bits.div_ceil(BITS_PER_PASS) as usize] {
+            dispatches.dispatch_in_pass(
                 &mut pass,
-                BLOCKS,
+                self.dispatch_base + BLOCKS,
                 &kernels.count_keys,
                 &groups.count_keys,
             );
-            self.dispatches.dispatch_in_pass(
+            dispatches.dispatch_in_pass(
                 &mut pass,
-                REDUCED,
+                self.dispatch_base + REDUCED,
                 &kernels.reduce_counts,
                 &groups.reduce_counts,
             );
             pass.set_pipeline(&kernels.scan_counts.pipeline);
             pass.set_bind_group(0, &groups.scan_counts, &[]);
             pass.dispatch_workgroups(1, 1, 1);
-            self.dispatches.dispatch_in_pass(
+            dispatches.dispatch_in_pass(
                 &mut pass,
-                REDUCED,
+                self.dispatch_base + REDUCED,
                 &kernels.scan_add,
                 &groups.scan_add,
             );
-            self.dispatches
-                .dispatch_in_pass(&mut pass, BLOCKS, &kernels.scatter, &groups.scatter);
+            dispatches.dispatch_in_pass(
+                &mut pass,
+                self.dispatch_base + BLOCKS,
+                &kernels.scatter,
+                &groups.scatter,
+            );
         }
     }
+
     pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {
-        let index = bits.div_ceil(4) as usize % 2;
+        let index = bits.div_ceil(BITS_PER_PASS) as usize % 2;
         (&self.keys[index], &self.values[index])
+    }
+
+    /// Retained buffer bytes; the shared dispatch buffers belong to the view, and histogram/parameter buffers held only by bind groups are excluded.
+    pub(crate) fn gpu_byte_size(&self) -> u64 {
+        self.keys
+            .iter()
+            .chain(&self.values)
+            .map(wgpu::Buffer::size)
+            .sum::<u64>()
     }
 }

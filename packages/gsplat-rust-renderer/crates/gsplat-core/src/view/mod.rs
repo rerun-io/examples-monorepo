@@ -1,7 +1,7 @@
 //! Per-view scratch, reusable frame bindings, and bounded asynchronous feedback.
 use crate::gpu::{self, bind, storage, uniform};
 mod encode;
-use crate::kernels::Kernels;
+use crate::kernels::{CHECKS_PER_ITER, Kernels, WG};
 use crate::primitives::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::primitives::{RadixSort, Scan};
 use crate::{Error, FrameStats, Scene, Target};
@@ -13,6 +13,7 @@ struct Intersections {
     capacity: u32,
     sort: RadixSort,
 }
+
 impl Intersections {
     fn new(device: &wgpu::Device, kernels: &Kernels, counts: &wgpu::Buffer, capacity: u32) -> Self {
         let keys = storage(device, "intersection tile keys", u64::from(capacity) * 4);
@@ -22,9 +23,9 @@ impl Intersections {
             kernels,
             capacity,
             CountSlot::Intersections,
-            &keys,
-            &ids,
+            (&keys, &ids),
             counts,
+            TILE_SORT,
         );
         Self { capacity, sort }
     }
@@ -34,17 +35,23 @@ struct ProjectionGroups {
     forward: wgpu::BindGroup,
     visible: wgpu::BindGroup,
 }
+
 struct MappingGroups {
     tiles: wgpu::BindGroup,
     offsets: wgpu::BindGroup,
 }
+
 struct FrameSlot {
     uniform: wgpu::Buffer,
     readback: wgpu::Buffer,
     projection: ProjectionGroups,
     mapping: MappingGroups,
     raster: Option<(Target, wgpu::BindGroup)>,
-    receiver: Option<gpu::Feedback>,
+}
+
+struct PendingFrame {
+    slot: usize,
+    receiver: gpu::Feedback,
     capacity: u32,
 }
 
@@ -99,6 +106,7 @@ impl Scratch {
         }
     }
 }
+
 /// Scratch for one scene/view pair. Several views may encode before one submit.
 /// Poll feedback before reuse; at most three unconsumed frames may be in flight.
 pub struct ViewState {
@@ -108,21 +116,57 @@ pub struct ViewState {
     tile_count: u32,
     dispatches: Dispatches,
     frames: [FrameSlot; 3],
-    pending: VecDeque<usize>,
+    pending: VecDeque<PendingFrame>,
     required_capacity: u32,
     limit: u64,
     timing: Option<wgpu::QuerySet>,
     overflow_events: u32,
 }
+
 const VISIBLE: u32 = 0;
+
 const INTERSECTIONS: u32 = 1;
-fn plans(n: u32, capacity: u32) -> [DispatchPlan; 2] {
-    [
-        DispatchPlan::new(CountSlot::Visible, n, 256, 1),
-        DispatchPlan::new(CountSlot::Intersections, capacity, 2048, 1),
-    ]
+
+const DEPTH_SORT: u32 = 2;
+
+const TILE_SORT: u32 = 4;
+
+const SCAN: u32 = 6;
+
+fn plans(n: u32, capacity: u32) -> Vec<DispatchPlan> {
+    let mut plans = vec![
+        DispatchPlan::new(CountSlot::Visible, n, WG, 1),
+        DispatchPlan::new(CountSlot::Intersections, capacity, WG * CHECKS_PER_ITER, 1),
+    ];
+    plans.extend(RadixSort::plans(CountSlot::Visible, n));
+    plans.extend(RadixSort::plans(CountSlot::Intersections, capacity));
+    plans.extend(Scan::plans(CountSlot::Visible, n));
+    plans
 }
+
 impl ViewState {
+    /// Retained scratch bytes, excluding scene buffers and buffers held only by bind groups.
+    pub fn gpu_byte_size(&self) -> u64 {
+        let scratch = &self.scratch;
+        [
+            &scratch.counts,
+            &scratch.projected,
+            &scratch.offsets,
+            scratch.scan.output(),
+        ]
+        .into_iter()
+        .map(wgpu::Buffer::size)
+        .sum::<u64>()
+            + scratch.depth_sort.gpu_byte_size()
+            + scratch.intersections.sort.gpu_byte_size()
+            + self.dispatches.gpu_byte_size()
+            + self
+                .frames
+                .iter()
+                .map(|frame| frame.uniform.size() + frame.readback.size())
+                .sum::<u64>()
+    }
+
     pub(crate) fn new(
         device: &wgpu::Device,
         kernels: &Kernels,
@@ -146,8 +190,16 @@ impl ViewState {
         let visible = CountSlot::Visible;
         let scratch = Scratch {
             projected: storage(device, "projected splats", u64::from(n.max(1)) * 40),
-            depth_sort: RadixSort::new(device, kernels, n, visible, &depths, &ids, &counts),
-            scan: Scan::new(device, kernels, n, visible, &gathered, &counts),
+            depth_sort: RadixSort::new(
+                device,
+                kernels,
+                n,
+                visible,
+                (&depths, &ids),
+                &counts,
+                DEPTH_SORT,
+            ),
+            scan: Scan::new(device, kernels, n, visible, &gathered, &counts, SCAN),
             gather: bind(
                 device,
                 &kernels.gather.layout,
@@ -164,7 +216,7 @@ impl ViewState {
             counts,
         };
         let frames = std::array::from_fn(|_| {
-            let uniform = uniform(device, &vec![0; size_of::<Uniforms>() / 4]);
+            let uniform = uniform(device, &[0; size_of::<Uniforms>() / 4]);
             let projection = ProjectionGroups {
                 forward: bind(
                     device,
@@ -201,8 +253,6 @@ impl ViewState {
                 projection,
                 mapping,
                 raster: None,
-                receiver: None,
-                capacity,
                 readback: gpu::feedback_buffer(device),
             }
         });
@@ -225,6 +275,7 @@ impl ViewState {
             overflow_events: 0,
         })
     }
+
     fn resize(
         &mut self,
         queue: &wgpu::Queue,
@@ -280,31 +331,28 @@ impl ViewState {
         }
         Ok(())
     }
+
     /// Whether this view still has submitted feedback to consume.
     pub fn has_pending_frames(&self) -> bool {
         !self.pending.is_empty()
     }
+
     /// Nonblocking completed-frame counts. An overflow preserves the target and requests a rerender.
     pub fn poll_feedback(&mut self) -> Result<Option<FrameStats>, Error> {
-        self.device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| Error::Readback(e.to_string()))?;
+        self.device.poll(wgpu::PollType::Poll)?;
         let mut latest = None;
-        while let Some(&index) = self.pending.front() {
-            let frame = &mut self.frames[index];
-            let Some(counts) = gpu::read_feedback(
-                &frame.readback,
-                frame.receiver.as_ref().expect("pending receiver"),
-            ) else {
+        while let Some(pending) = self.pending.front() {
+            let frame = &self.frames[pending.slot];
+            let Some(counts) = gpu::read_feedback(&frame.readback, &pending.receiver) else {
                 break;
             };
+            let capacity = pending.capacity;
             self.pending.pop_front();
-            frame.receiver = None;
             let counts = counts?;
             if counts[0] & 0x8000_0000 != 0 {
                 return Err(Error::IntersectionOverflow);
             }
-            let overflow = counts[1] > frame.capacity;
+            let overflow = counts[1] > capacity;
             self.overflow_events = self.overflow_events.saturating_add(u32::from(overflow));
             if u64::from(counts[1]) * 4 > self.limit {
                 return Err(Error::Capacity {
@@ -319,13 +367,14 @@ impl ViewState {
             latest = Some(FrameStats {
                 visible: counts[0],
                 intersections: counts[1],
-                intersection_capacity: frame.capacity,
+                intersection_capacity: capacity,
                 overflow_events: self.overflow_events,
                 needs_rerender: overflow,
             });
         }
         Ok(latest)
     }
+
     /// Diagnostic timestamps need ten slots; wait for completion before resolving on Metal.
     pub fn set_timestamp_queries(&mut self, queries: Option<wgpu::QuerySet>) -> Result<(), Error> {
         if let Some(q) = &queries
@@ -384,7 +433,8 @@ mod tests {
         assert!(view.poll_feedback().unwrap().is_none());
         camera.position.z = 10.0;
         let mut encoder = device.create_command_encoder(&Default::default());
-        for _ in 0..3 {
+        for z in [10.0, 0.0, 10.0] {
+            camera.position.z = z;
             render(&mut encoder, &mut view, &camera).unwrap();
         }
         assert!(render(&mut encoder, &mut view, &camera).is_err());
@@ -392,11 +442,56 @@ mod tests {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().intersections, 0);
         assert!(view.poll_feedback().unwrap().is_none());
+        // Inject callback failures after the real mapping completes. Both errors
+        // must release the pending record and its slot before returning.
+        for map_error in [true, false] {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            render(&mut encoder, &mut view, &camera).unwrap();
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            if map_error {
+                sender.send(Err(wgpu::BufferAsyncError)).unwrap();
+            }
+            drop(sender);
+            view.pending.front_mut().unwrap().receiver = receiver;
+            let error = view.poll_feedback().unwrap_err();
+            if map_error {
+                assert!(matches!(error, Error::Readback(_)));
+            } else {
+                assert!(matches!(error, Error::Disconnected(_)));
+            }
+            assert!(!view.has_pending_frames());
+        }
         // All slots are reusable after draining, including the earlier failed frame.
         let mut encoder = device.create_command_encoder(&Default::default());
         render(&mut encoder, &mut view, &camera).unwrap();
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().visible, 0);
+    }
+
+    #[test]
+    #[ignore = "integration: GPU"]
+    fn raster_dispatch_rejects_tile_axes_above_the_portable_limit() {
+        let (device, queue) = &gpu();
+        let renderer = Renderer::new(device).unwrap();
+        let scene = renderer
+            .upload(&crate::test_utils::splat([0.0, 0.0, 2.0], -1.0, 2.0))
+            .unwrap();
+        let mut view = renderer.create_view(&scene, 1).unwrap();
+        let mut camera = crate::test_utils::pinhole_camera(64);
+        for size in [
+            glam::UVec2::new(65_535 * 16, 1),
+            glam::UVec2::new(1, 65_535 * 16),
+        ] {
+            camera.size = size;
+            renderer.prepare_view(queue, &mut view, &camera).unwrap();
+            camera.size = size + glam::UVec2::ONE;
+            assert!(matches!(
+                renderer.prepare_view(queue, &mut view, &camera),
+                Err(Error::Input(_))
+            ));
+        }
     }
 }

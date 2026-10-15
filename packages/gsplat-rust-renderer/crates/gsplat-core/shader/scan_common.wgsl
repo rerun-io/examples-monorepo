@@ -1,10 +1,12 @@
+#import <./consts.wgsl>
+
 // Hand port of brush-scan 1388f74c; adapted to raw WGSL.
 var<workgroup> partials: array<u32, 64>;
 var<workgroup> cube_total: u32;
-var<workgroup> lds: array<u32, 1024>;
+var<workgroup> lds: array<u32, BLOCK_SIZE>;
 fn cube_scan(value: u32, lid: u32, lane: u32, width: u32) -> vec2u {
     let plane = lid / width;
-    let planes = 256u / width;
+    let planes = WG / width;
     let inclusive = subgroupInclusiveAdd(value);
     if lane == width - 1u {
         partials[plane] = inclusive;
@@ -12,12 +14,10 @@ fn cube_scan(value: u32, lid: u32, lane: u32, width: u32) -> vec2u {
     workgroupBarrier();
     if planes <= width {
         var v = 0u;
-        if lane < planes {
+        if plane == 0u && lane < planes {
             v = partials[lane];
         }
         let scanned = subgroupExclusiveAdd(v);
-        // Every plane reads before plane zero overwrites the shared totals.
-        workgroupBarrier();
         if plane == 0u {
             if lane < planes {
                 partials[lane] = scanned;
@@ -42,20 +42,20 @@ fn cube_scan(value: u32, lid: u32, lane: u32, width: u32) -> vec2u {
 }
 
 fn lds_index(lin: u32) -> u32 {
-    return (lin % 4u) * 256u + lin / 4u;
+    return (lin % ELEMENTS_PER_THREAD) * WG + lin / ELEMENTS_PER_THREAD;
 }
 
 fn block_scan(base: u32, inclusive: bool, lid: u32, lane: u32, width: u32) -> u32 {
     var sum = 0u;
-    for (var j = 0u; j < 4u; j++) {
-        let idx = j * 256u + lid;
+    for (var j = 0u; j < ELEMENTS_PER_THREAD; j++) {
+        let idx = j * WG + lid;
         let v = lds[idx];
         lds[idx] = sum + select(0u, v, inclusive);
         sum += v;
     }
     let offsets = cube_scan(sum, lid, lane, width);
-    for (var j = 0u; j < 4u; j++) {
-        lds[j * 256u + lid] += base + offsets.x;
+    for (var j = 0u; j < ELEMENTS_PER_THREAD; j++) {
+        lds[j * WG + lid] += base + offsets.x;
     }
     return offsets.y;
 }

@@ -1,17 +1,20 @@
 //! Hierarchical inclusive scan with GPU-resident counts.
 use super::dispatch::{CountSlot, DispatchPlan, Dispatches};
 use crate::gpu::{bind, storage, uniform};
-use crate::kernels::Kernels;
+use crate::kernels::{BLOCK_SIZE, Kernels, WG};
 
 const fn scan_level(level: usize) -> u32 {
     level as u32 * 2
 }
+
 const ADD_OFFSETS: u32 = 1;
+
 pub(crate) struct Scan {
     output: wgpu::Buffer,
     groups: Vec<(wgpu::BindGroup, Option<wgpu::BindGroup>)>,
-    dispatches: Dispatches,
+    dispatch_base: u32,
 }
+
 impl Scan {
     pub fn new(
         device: &wgpu::Device,
@@ -20,25 +23,23 @@ impl Scan {
         count: CountSlot,
         input: &wgpu::Buffer,
         counts: &wgpu::Buffer,
+        dispatch_base: u32,
     ) -> Self {
         let mut levels = Vec::new();
         let mut n = capacity.max(1);
         let mut divisor = 1;
-        let mut plans = Vec::new();
         loop {
-            let blocks = n.div_ceil(1024);
+            let blocks = n.div_ceil(BLOCK_SIZE);
             levels.push((
                 storage(device, "scan output", u64::from(n) * 4),
                 storage(device, "scan block sums", u64::from(blocks) * 4),
                 uniform(device, &[count.index(), divisor, capacity, 0]),
             ));
-            plans.push(DispatchPlan::new(count, capacity, divisor * 1024, 1));
-            plans.push(DispatchPlan::new(count, capacity, divisor * 256, 1));
             if blocks == 1 {
                 break;
             }
             n = blocks;
-            divisor *= 1024;
+            divisor *= BLOCK_SIZE;
         }
         let groups = levels
             .iter()
@@ -74,35 +75,58 @@ impl Scan {
         Self {
             output: levels[0].0.clone(),
             groups,
-            dispatches: Dispatches::new(device, &kernels.prepare, counts, &plans),
+            dispatch_base,
         }
     }
+
+    pub fn plans(count: CountSlot, capacity: u32) -> Vec<DispatchPlan> {
+        let mut plans = Vec::new();
+        let mut n = capacity.max(1);
+        let mut divisor = 1;
+        loop {
+            let blocks = n.div_ceil(BLOCK_SIZE);
+            plans.push(DispatchPlan::new(count, capacity, divisor * BLOCK_SIZE, 1));
+            plans.push(DispatchPlan::new(count, capacity, divisor * WG, 1));
+            if blocks == 1 {
+                break;
+            }
+            n = blocks;
+            divisor *= BLOCK_SIZE;
+        }
+        plans
+    }
+
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         kernels: &Kernels,
+        dispatches: &Dispatches,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        self.dispatches.prepare(encoder, &kernels.prepare, None);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("gsplat scan"),
             timestamp_writes,
         });
         for (i, groups) in self.groups.iter().enumerate() {
-            self.dispatches
-                .dispatch_in_pass(&mut pass, scan_level(i), &kernels.scan, &groups.0);
+            dispatches.dispatch_in_pass(
+                &mut pass,
+                self.dispatch_base + scan_level(i),
+                &kernels.scan,
+                &groups.0,
+            );
         }
         for (i, groups) in self.groups.iter().enumerate().rev() {
             if let Some(group) = &groups.1 {
-                self.dispatches.dispatch_in_pass(
+                dispatches.dispatch_in_pass(
                     &mut pass,
-                    scan_level(i) + ADD_OFFSETS,
+                    self.dispatch_base + scan_level(i) + ADD_OFFSETS,
                     &kernels.add_offsets,
                     group,
                 );
             }
         }
     }
+
     pub fn output(&self) -> &wgpu::Buffer {
         &self.output
     }

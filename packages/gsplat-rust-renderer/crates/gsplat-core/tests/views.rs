@@ -1,7 +1,8 @@
 //! A shared upload must render independent views in one queue submission.
-mod common;
+#![cfg(feature = "testing")]
 use glam::Vec3;
-use gsplat_core::{Camera, CameraModel, RenderOptions, Renderer, Splats, Target};
+use gsplat_core::test_utils as common;
+use gsplat_core::{RenderOptions, Renderer, Target};
 
 #[test]
 #[ignore = "integration: GPU"]
@@ -54,9 +55,9 @@ fn one_scene_renders_two_views_in_one_submit() {
                 16,
             );
         }
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
         encoder.map_buffer_on_submit(&read, wgpu::MapMode::Read, .., move |result| {
-            tx.send(result).unwrap()
+            tx.send(result).unwrap();
         });
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
