@@ -3,6 +3,7 @@ below; then the secondary "pipeline (debug)" tab (graph picture, guide, one view
 
 import rerun.blueprint as rrb
 from dagkit.app import with_pipeline
+from dagkit.doc import HEALTH_ROOT
 
 CAMS_PER_TAB: int = 4
 
@@ -17,7 +18,7 @@ def default_blueprint(cameras: tuple[str, ...]) -> rrb.Blueprint:
         rrb.Grid(*views[i : i + CAMS_PER_TAB], grid_columns=2, name=f"{cameras[i]} ..") for i in range(0, len(views), CAMS_PER_TAB)
     ]
     world = rrb.Spatial3DView(origin="/world", name="World", contents=["+ /world/**", *(f"- /world/{camera}/pinhole/**" for camera in cameras)])
-    health = rrb.TimeSeriesView(origin="/dagkit/health", name="Runner health")
+    health = rrb.TimeSeriesView(origin=HEALTH_ROOT.rstrip("/"), name="Runner health")
     normal = rrb.Blueprint(
         rrb.Vertical(rrb.Horizontal(world, pages[0] if len(pages) == 1 else rrb.Tabs(*pages), column_shares=[1, 1]), health, row_shares=[3, 1]),
         collapse_panels=True,
