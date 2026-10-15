@@ -1,12 +1,18 @@
 """The floor of a metric scene cloud: the largest RANSAC plane that agrees with a gravity prior."""
 
 import numpy as np
-import open3d as o3d
-from jaxtyping import Bool, Float64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
 GROUND_PLANE_ATTEMPTS: int = 5
 """Largest RANSAC planes tried before falling back to the gravity prior and the lowest camera."""
+RANSAC_ITERATIONS: int = 2000
+"""Plane hypotheses (three random points each) per attempt."""
+RANSAC_SEED: int = 0
+"""The floor is the gauge of the whole rig, and Stage B projects its boxes through that rig: one fixed seed and
+single-threaded numpy (einsum, no BLAS) make the floor a function of the cloud (Open3D's ``segment_plane`` differs on every
+call, seeded or not: its OpenMP threads race on the generator)."""
+HYPOTHESES_PER_CHUNK: int = 256
 
 
 def select_ground_plane(
@@ -39,21 +45,30 @@ def select_ground_plane(
     up_prior = up_prior / np.linalg.norm(up_prior)
     remaining_points: Float64[ndarray, "m 3"] = cloud
     min_cosine: float = float(np.cos(np.radians(max_tilt_deg)))
+    rng: np.random.Generator = np.random.default_rng(RANSAC_SEED)
     for _attempt in range(max_attempts):
         if remaining_points.shape[0] < 3:
             break
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(remaining_points)
-        plane, inliers = pcd.segment_plane(distance_threshold=distance_threshold, ransac_n=3, num_iterations=2000)
-        normal: Float64[ndarray, "3"] = np.array(plane[:3], dtype=np.float64)
-        normal /= np.linalg.norm(normal)
+        # RANSAC as Open3D's segment_plane: the plane through three random points with the most points closer than
+        # distance_threshold (the first on a tie), then the least-squares plane of those inliers.
+        triplets: Float64[ndarray, "k 3 3"] = remaining_points[rng.integers(0, remaining_points.shape[0], size=(RANSAC_ITERATIONS, 3))]
+        normals: Float64[ndarray, "k 3"] = np.cross(triplets[:, 1] - triplets[:, 0], triplets[:, 2] - triplets[:, 0])
+        lengths: Float64[ndarray, " k"] = np.linalg.norm(normals, axis=1)
+        normals, triplets = normals[lengths > 0.0] / lengths[lengths > 0.0, None], triplets[lengths > 0.0]
+        offsets: Float64[ndarray, " k"] = -(normals * triplets[:, 0]).sum(axis=1)
+        counts: Int64[ndarray, " k"] = np.concatenate([
+            (np.abs(np.einsum("mj,kj->mk", remaining_points, normals[i : i + HYPOTHESES_PER_CHUNK]) + offsets[i : i + HYPOTHESES_PER_CHUNK]) < distance_threshold).sum(axis=0)
+            for i in range(0, normals.shape[0], HYPOTHESES_PER_CHUNK)
+        ])
+        best: int = int(np.argmax(counts))
+        inliers: Bool[ndarray, " m"] = np.abs(np.einsum("mj,j->m", remaining_points, normals[best]) + offsets[best]) < distance_threshold
+        centered: Float64[ndarray, "i 3"] = remaining_points[inliers] - remaining_points[inliers].mean(axis=0)
+        normal: Float64[ndarray, "3"] = np.linalg.eigh(np.einsum("ni,nj->ij", centered, centered))[1][:, 0]
         if float(np.dot(normal, up_prior)) < 0.0:
             normal = -normal
         ground_point: Float64[ndarray, "3"] = remaining_points[inliers].mean(axis=0)
         if float(np.dot(normal, up_prior)) >= min_cosine:
             return normal, ground_point
-        keep_mask: Bool[ndarray, " n"] = np.ones(remaining_points.shape[0], dtype=bool)
-        keep_mask[np.asarray(inliers, dtype=np.int64)] = False
-        remaining_points = remaining_points[keep_mask]
+        remaining_points = remaining_points[~inliers]
     lowest_camera: Float64[ndarray, "3"] = camera_centers[np.argmin(camera_centers @ up_prior)]
     return up_prior, lowest_camera
