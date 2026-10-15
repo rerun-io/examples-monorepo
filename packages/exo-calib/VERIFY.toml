@@ -24,10 +24,11 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
 params = { frame_budget = 200 }
-# Reference since the keypoint median counts video frames (the old record-median goldens scored rot 2.098 / 2.239 deg,
-# trans 5.372 / 6.407 cm). Noise = spread of three runs of the same code (pre, pre2 and one more): rot 1.223 / 1.204 /
-# 1.199 deg, trans 2.589 / 2.861 / 4.396 cm, focal 3.860 / 3.865 / 3.872 %. trans moves with the MoGe metric rescale.
-noise = { rot_deg_mean = 0.024, trans_cm_mean = 1.807, focal_pct_mean_abs = 0.012 }
+# Reference since Stage A's floor is a seeded RANSAC: a run is a function of its input, so pre, pre2 and the first post
+# at the same commit are bit-identical (rot 1.2228 deg, trans 2.8873 cm, focal 3.8602 %) and the noise is 0; the band
+# is the metric floor. Before, the unseeded Open3D floor moved the rig's gauge every run and Stage B followed: three runs
+# of one commit spread rot 1.198-1.249 deg, trans 2.567-2.951 cm (verify runs up to 4.438), focal 3.860-3.871 %.
+noise = { rot_deg_mean = 0.0, trans_cm_mean = 0.0, focal_pct_mean_abs = 0.0 }
 
 [[graph.cases]]
 name = "full"
@@ -36,10 +37,9 @@ reference = "gt"
 dataset = "dataforge-assembly101"
 segment = "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"
 params = { frame_budget = 1000 }
-# Reference since the keypoint median counts video frames (old: rot 1.164 / 1.156 deg, trans 1.596 / 1.533 cm). Spread of
-# three runs of the same code: rot 1.048 / 1.062 / 1.050 deg, trans 4.792 / 1.487 / 1.553 cm (metric rescale 1.02-1.08),
-# focal 3.857 / 3.855 / 3.855 %.
-noise = { rot_deg_mean = 0.014, trans_cm_mean = 3.304, focal_pct_mean_abs = 0.0021 }
+# Reference since the seeded floor: pre, pre2 and post bit-identical (rot 1.0466 deg, trans 2.1852 cm, focal 3.8579 %),
+# noise 0. Before (unseeded floor), three runs spread rot 1.048-1.062 deg, trans 1.487-4.792 cm, focal 3.855-3.857 %.
+noise = { rot_deg_mean = 0.0, trans_cm_mean = 0.0, focal_pct_mean_abs = 0.0 }
 
 [[tests]]
 name = "ops"
@@ -54,6 +54,7 @@ properties = [
     "tests/test_ops_properties.py::test_rotation_guard_still_reverts_a_camera_that_diverges_from_the_rig",
     "tests/test_metric_scale.py::test_grouped_medians_matches_per_group_numpy_median",
     "tests/test_keypoints.py::test_median_is_the_identity_when_records_are_farther_apart_than_half_its_window",
+    "tests/test_ground_plane.py::test_the_same_cloud_always_gives_the_same_floor",
 ]
 
 [[tests]]
