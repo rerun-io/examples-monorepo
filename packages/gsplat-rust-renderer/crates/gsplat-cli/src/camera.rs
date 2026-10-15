@@ -3,6 +3,7 @@ use glam::Mat4;
 pub fn opengl_to_opencv(pose: Mat4) -> Mat4 {
     pose * Mat4::from_scale(glam::Vec3::new(1.0, -1.0, -1.0))
 }
+
 pub fn colmap_to_world(q: [f32; 4], t: [f32; 3]) -> Mat4 {
     Mat4::from_rotation_translation(
         glam::Quat::from_xyzw(q[1], q[2], q[3], q[0]).normalize(),
@@ -11,7 +12,7 @@ pub fn colmap_to_world(q: [f32; 4], t: [f32; 3]) -> Mat4 {
     .inverse()
 }
 
-pub use gsplat_core::CameraModel;
+use gsplat_core::CameraModel;
 
 /// OpenCV camera axes: +x right, +y down, +z forward. The rigid pose is a
 /// row-major world-from-camera matrix; fx/fy/cx/cy are in image pixels.
@@ -27,8 +28,6 @@ pub struct CameraSpec {
     pub cy: f32,
     pub model: CameraModel,
 }
-
-pub use crate::camera_files::{CameraFrame, load_frames};
 
 impl CameraSpec {
     pub fn pose(&self) -> Mat4 {
@@ -185,7 +184,7 @@ pub fn orbit(
     up: Option<glam::Vec3>,
 ) -> Vec<CameraSpec> {
     let basis = up.map(|up| {
-        let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Z, up.normalize());
+        let rotation = glam::Quat::from_rotation_arc(glam::Vec3::Z, up.normalize_or(glam::Vec3::Z));
         Mat4::from_translation(center) * Mat4::from_quat(rotation) * Mat4::from_translation(-center)
     });
     (0..count)

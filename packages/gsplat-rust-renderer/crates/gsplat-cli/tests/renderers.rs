@@ -1,9 +1,9 @@
 //! GPU/asset contracts, selected by the pytest integration runner with real skips.
 mod common;
 use glam::{Mat4, Vec3};
-use gsplat_cli::Evaluator;
 use gsplat_cli::camera::{self, CameraSpec};
-use gsplat_cli::engines::{Brush, Engine, Native, PlyScene};
+use gsplat_cli::engines::{Brush, Engine, Native};
+use gsplat_cli::{Evaluator, PlyScene, camera_files};
 use std::path::PathBuf;
 
 fn one_splat(log_scale: f32) -> PlyScene {
@@ -57,7 +57,7 @@ async fn all_renderers_nonblack_and_brush_identity() {
     let cameras =
         PathBuf::from(std::env::var("GSPLAT_TEST_CAMERAS").expect("missing GSPLAT_TEST_CAMERAS"));
     let scene = PlyScene::load(&ply).await.unwrap();
-    let mut camera = camera::load_frames(&cameras, None).await.unwrap()[0]
+    let mut camera = camera_files::load_frames(&cameras, None).await.unwrap()[0]
         .camera
         .resized(256, 256);
     // Exercise principal-point mapping away from the image centre.
@@ -103,17 +103,18 @@ async fn all_renderers_nonblack_and_brush_identity() {
         .unwrap();
     println!("ours off-centre float parity: {score:?}");
     assert!(score.minimum_psnr() >= 40.0);
-    let stages = ours
-        .stages(&camera)
-        .await
-        .unwrap()
-        .expect("ours GPU stage timings");
-    assert_eq!(stages.len(), 8);
-    assert!(stages.iter().all(|s| s.ms.is_finite() && s.ms > 0.0));
-    let stages = brush.stages(&camera).await.unwrap().unwrap();
-    assert_eq!(stages.len(), 1);
-    assert!(stages[0].ms > 0.0);
-    println!("Brush device window: {} ms", stages[0].ms);
+    let stages = ours.stages(&camera).await.unwrap();
+    if ours.adapter().backend == "Metal" {
+        assert!(stages.is_none());
+        assert!(brush.stages(&camera).await.unwrap().is_none());
+    } else {
+        let stages = stages.expect("ours GPU stage timings");
+        assert_eq!(stages.len(), 8);
+        assert!(stages.iter().all(|s| s.ms.is_finite() && s.ms > 0.0));
+        let stages = brush.stages(&camera).await.unwrap().unwrap();
+        assert_eq!(stages.len(), 1);
+        assert!(stages[0].ms > 0.0);
+    }
     let evaluator = Evaluator::new(false);
     let mut native = Engine::Native(Box::new(
         Native::new(&ply, scene.data.num_splats()).await.unwrap(),
@@ -172,7 +173,7 @@ async fn garden_colmap_projects_observed_points() {
     let path = PathBuf::from(
         std::env::var("GSPLAT_TEST_COLMAP").expect("missing garden GSPLAT_TEST_COLMAP"),
     );
-    let cameras: Vec<_> = camera::load_frames(&path, None)
+    let cameras: Vec<_> = camera_files::load_frames(&path, None)
         .await
         .unwrap()
         .into_iter()

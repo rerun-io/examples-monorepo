@@ -1,6 +1,6 @@
 //! Quiet-host sampling with an explicit, recorded 90-minute loaded-host fallback.
 #[cfg(not(target_os = "macos"))]
-use anyhow::Context;
+use anyhow::Context as _;
 use anyhow::Result;
 use serde::Serialize;
 #[cfg(not(target_os = "macos"))]
@@ -18,8 +18,8 @@ pub struct HostSample {
 }
 /// Record unknown GPU utilization when no NVIDIA sampler is available.
 #[cfg(not(target_os = "macos"))]
-pub fn sample() -> Result<HostSample> {
-    std::thread::sleep(Duration::from_secs(1));
+pub async fn sample() -> Result<HostSample> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let load = fs::read_to_string("/proc/loadavg")?
         .split_whitespace()
         .next()
@@ -29,22 +29,54 @@ pub fn sample() -> Result<HostSample> {
         .lines()
         .filter(|l| l.starts_with("processor\t"))
         .count();
-    let result = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=utilization.memory.used",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()
-        .filter(|r| r.status.success());
-    let text = result.and_then(|r| String::from_utf8(r.stdout).ok());
-    let (gpu_percent, gpu_memory_mib) = text.as_deref().map_or((None, None), nvidia_sample);
+    let (gpu_percent, gpu_memory_mib) = nvidia_telemetry(std::ffi::OsStr::new("nvidia-smi"));
     Ok(HostSample {
         load_average_1m: Some(load),
         logical_cores: Some(logical_cores),
         gpu_percent,
         gpu_memory_mib,
     })
+}
+#[cfg(not(target_os = "macos"))]
+fn nvidia_telemetry(program: &std::ffi::OsStr) -> (Option<u32>, Option<u64>) {
+    static WARNING: std::sync::Once = std::sync::Once::new();
+    let result = Command::new(program)
+        .args([
+            "--query-gpu=utilization.gpu,memory.used",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+    match result {
+        Ok(output) if output.status.success() => {
+            let sample = std::str::from_utf8(&output.stdout)
+                .ok()
+                .map_or((None, None), nvidia_sample);
+            if sample.0.is_none() {
+                WARNING.call_once(|| eprintln!("quiet-host: NVIDIA telemetry unsupported or invalid; GPU utilization remains unknown"));
+            }
+            sample
+        }
+        Ok(output) => {
+            WARNING.call_once(|| {
+                eprintln!(
+                    "quiet-host: nvidia-smi query failed ({}): {}; GPU utilization remains unknown",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )
+            });
+            (None, None)
+        }
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                WARNING.call_once(|| {
+                    eprintln!(
+                        "quiet-host: nvidia-smi failed: {error}; GPU utilization remains unknown"
+                    )
+                });
+            }
+            (None, None)
+        }
+    }
 }
 #[cfg(any(not(target_os = "macos"), test))]
 fn nvidia_sample(text: &str) -> (Option<u32>, Option<u64>) {
@@ -73,6 +105,7 @@ pub fn cpuset() -> Result<String> {
         .trim()
         .into())
 }
+
 impl HostSample {
     // macOS admission includes its measured desktop GPU baseline.
     fn admissible(&self) -> bool {
@@ -137,8 +170,8 @@ fn macos_sample(load: Option<&str>, cores: Option<&str>, accelerator: Option<&st
 }
 
 #[cfg(target_os = "macos")]
-pub fn sample() -> Result<HostSample> {
-    std::thread::sleep(Duration::from_secs(1));
+pub async fn sample() -> Result<HostSample> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let output = |name: &str, args: &[&str]| {
         let result = Command::new(name).args(args).output().ok()?;
         result
@@ -170,13 +203,13 @@ fn admission_complete(quiet_samples: usize, samples: usize, deadline: Instant) -
 }
 
 /// All repeats in a case share the same deadline; retain ten samples even after it expires.
-pub fn wait_quiet(deadline: Instant) -> Result<(Vec<HostSample>, bool)> {
+pub async fn wait_quiet(deadline: Instant) -> Result<(Vec<HostSample>, bool)> {
     let start = Instant::now();
     let mut samples = std::collections::VecDeque::new();
     let mut quiet_samples = 0;
     let mut last_notice = Instant::now();
     loop {
-        let s = sample()?;
+        let s = sample().await?;
         let quiet = s.admissible();
         if last_notice.elapsed().as_secs() >= 30 {
             eprintln!(
@@ -205,6 +238,24 @@ pub fn wait_quiet(deadline: Instant) -> Result<(Vec<HostSample>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn nvidia_command_contract_handles_valid_unsupported_and_failed_samples() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let sampler = directory.path().join("nvidia-smi");
+        for (reply, expected) in [
+            ("printf '1, 120\n87, 340\n'", (Some(87), Some(460))),
+            ("printf 'N/A, N/A\n'", (None, None)),
+            ("echo 'query rejected' >&2; exit 1", (None, None)),
+        ] {
+            std::fs::write(&sampler, format!(
+                "#!/bin/sh\n[ \"$1\" = '--query-gpu=utilization.gpu,memory.used' ] && [ \"$2\" = '--format=csv,noheader,nounits' ] && [ \"$#\" = 2 ] || exit 9\n{reply}\n"
+            )).unwrap();
+            std::fs::set_permissions(&sampler, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(nvidia_telemetry(sampler.as_os_str()), expected);
+        }
+    }
     #[test]
     fn nvidia_samples_record_multiple_adapters_and_missing_fields() {
         assert_eq!(nvidia_sample("1, 120\n87, 340\n"), (Some(87), Some(460)));

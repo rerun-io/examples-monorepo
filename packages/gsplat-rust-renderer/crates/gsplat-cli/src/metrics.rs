@@ -3,8 +3,8 @@
 
 mod float;
 pub mod published;
-use crate::Error;
 use crate::Provenance;
+use anyhow::Result;
 pub use float::RenderMetrics;
 use published::rgb as published_rgb;
 
@@ -69,7 +69,7 @@ impl Evaluator {
         rendered: &DynamicImage,
         gt: &DynamicImage,
         convention: Convention,
-    ) -> Result<Metrics, Error> {
+    ) -> Result<Metrics> {
         let (w, h) = (rendered.width(), rendered.height());
         if (w, h) != (gt.width(), gt.height()) || w < 11 || h < 11 {
             anyhow::bail!("dimensions must match and be at least 11x11");
@@ -138,8 +138,8 @@ impl Evaluator {
 
 /// Recursively pair PNGs by identical relative path sets; reject omissions and
 /// empty sets before scoring any image. Symlinks are not traversed.
-pub fn pair_directories(render: &Path, gt: &Path) -> Result<Vec<PathBuf>, Error> {
-    fn collect(root: &Path, current: &Path, names: &mut BTreeSet<PathBuf>) -> Result<(), Error> {
+pub fn pair_directories(render: &Path, gt: &Path) -> Result<Vec<PathBuf>> {
+    fn collect(root: &Path, current: &Path, names: &mut BTreeSet<PathBuf>) -> Result<()> {
         for entry in std::fs::read_dir(current)? {
             let entry = entry?;
             let kind = entry.file_type()?;
@@ -171,7 +171,7 @@ pub async fn evaluate_directories(
     gt: &Path,
     convention: Convention,
     lpips: bool,
-) -> Result<Evaluation, Error> {
+) -> Result<Evaluation> {
     let paths = pair_directories(render, gt)?;
     let evaluator = Evaluator::new(lpips);
     let mut views = Vec::with_capacity(paths.len());

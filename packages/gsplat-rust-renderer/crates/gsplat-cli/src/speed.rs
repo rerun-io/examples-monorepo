@@ -2,10 +2,11 @@
 use crate::{CameraArgs, cameras, write_json};
 use anyhow::{Result, ensure};
 use clap::Args;
+use gsplat_cli::PlyScene;
 use gsplat_cli::{Evaluator, Provenance, RenderMetrics};
 use gsplat_cli::{camera::CameraSpec, settings::RenderSettings};
 use gsplat_cli::{
-    engines::{Adapter, Brush, Counts, Engine, Implementation, PlyScene, StageTiming},
+    engines::{Adapter, Brush, Counts, Engine, Implementation, StageTiming},
     statistics::{Statistics, median, summarize},
 };
 use serde::Serialize;
@@ -38,12 +39,14 @@ pub struct SpeedArgs {
     #[arg(long)]
     pub out: PathBuf,
 }
+
 #[derive(Serialize)]
 struct Frame {
     camera: usize,
     ms: f64,
     counts: Counts,
 }
+
 #[derive(Serialize)]
 struct Repeat {
     repeat: usize,
@@ -59,6 +62,7 @@ struct Repeat {
     before: Vec<host::HostSample>,
     after: host::HostSample,
 }
+
 #[derive(Serialize)]
 struct BackendReport {
     implementation: Implementation,
@@ -71,8 +75,10 @@ struct BackendReport {
     stable_within_five_percent: bool,
     pooled: Statistics,
     lane1: Option<Vec<StageTiming>>,
+    lane1_unavailable_reason: Option<&'static str>,
     camera_checks: Vec<CameraCheck>,
 }
+
 #[derive(Serialize)]
 struct SpeedReport {
     complete: bool,
@@ -94,6 +100,7 @@ struct Lane {
     cold_start_ms: f64,
     repeats: Vec<Repeat>,
 }
+
 async fn warmup(
     renderer: &mut Engine,
     cameras: &[CameraSpec],
@@ -112,6 +119,7 @@ async fn warmup(
         }
     }
 }
+
 async fn repeat(
     renderer: &mut Engine,
     cameras: &[CameraSpec],
@@ -121,7 +129,7 @@ async fn repeat(
     admission_deadline: Instant,
 ) -> Result<Repeat> {
     eprintln!("repeat {}: quiet-host admission", index + 1);
-    let (before, loaded_host) = host::wait_quiet(admission_deadline)?;
+    let (before, loaded_host) = host::wait_quiet(admission_deadline).await?;
     let (warmup_frames, warmup_seconds) = warmup(renderer, cameras, a.warmup).await?;
     let start = Instant::now();
     let mut frames = Vec::new();
@@ -143,7 +151,7 @@ async fn repeat(
         }
     }
     let measured_seconds = start.elapsed().as_secs_f64();
-    let after = host::sample()?;
+    let after = host::sample().await?;
     let statistics = summarize(&frames.iter().map(|f| f.ms).collect::<Vec<_>>())?;
     eprintln!(
         "repeat {}: median {:.4} ms, p95 {:.4} ms, {} frames",
@@ -176,6 +184,7 @@ async fn repeat(
         after,
     })
 }
+
 #[derive(Serialize)]
 struct CameraCheck {
     camera: usize,
@@ -286,6 +295,9 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                     .collect::<Vec<_>>(),
             )?,
             lane1: engine.stages(&cameras[0]).await?,
+            lane1_unavailable_reason: (engine.adapter().backend == "Metal").then_some(
+                "Per-stage GPU timestamps are unreliable on Metal; frame timings remain available.",
+            ),
             camera_checks: check_cameras(&mut engine, &mut oracle, &cameras).await?,
             repeats,
         });

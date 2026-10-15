@@ -1,5 +1,5 @@
 //! Public evaluator contracts, including optional GPU checks.
-use gsplat_cli::metrics::published::rgb as published_rgb;
+use gsplat_cli::published::rgb as published_rgb;
 use gsplat_cli::{Convention, Evaluator, pair_directories};
 use image::{DynamicImage, Rgba, RgbaImage};
 
@@ -14,7 +14,8 @@ fn white_composition_truncates_and_checks_alpha() {
 
 #[test]
 fn strict_directory_pairing_rejects_different_names() {
-    let root = std::env::temp_dir().join(format!("gsplat-pairs-{}", std::process::id()));
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
     let render = root.join("render");
     let gt = root.join("gt");
     std::fs::create_dir_all(&render).unwrap();
@@ -28,7 +29,6 @@ fn strict_directory_pairing_rejects_different_names() {
         pair_directories(&render, &gt).unwrap(),
         vec![std::path::PathBuf::from("one.png")]
     );
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -97,9 +97,10 @@ async fn lego_float_evaluation_matches_brush_eval_stats() {
         brush_serde::import::load_splat_from_ply(tokio::fs::File::open(ply).await.unwrap(), None)
             .await
             .unwrap();
-    let frames = gsplat_cli::camera::load_frames(std::path::Path::new(&cameras), Some((256, 256)))
-        .await
-        .unwrap();
+    let frames =
+        gsplat_cli::camera_files::load_frames(std::path::Path::new(&cameras), Some((256, 256)))
+            .await
+            .unwrap();
     let camera = frames[0].camera.brush_camera();
     let gt = image::open(gt)
         .unwrap()

@@ -1,6 +1,7 @@
 //! PLY metadata and raw f32 uploads at the application boundary.
-use crate::{Result, camera::CameraSpec};
+use crate::camera::CameraSpec;
 use anyhow::Context as _;
+use anyhow::Result;
 use brush_serde::import::SplatData;
 use glam::{UVec2, Vec3};
 use gsplat_core::{RenderMode, RenderOptions, Splats, Target};
@@ -12,6 +13,7 @@ pub struct PlyScene {
     pub center: Vec3,
     pub extent: f32,
 }
+
 impl PlyScene {
     pub async fn load(path: &Path) -> Result<Self> {
         let loaded =
@@ -56,10 +58,14 @@ pub fn raw_splats(data: &SplatData) -> Result<Splats> {
     {
         anyhow::bail!("inconsistent PLY parameter lengths");
     }
-    let sh = data.sh_coeffs.clone().unwrap_or_else(|| vec![0.5; n * 3]);
-    let count = sh.len() / n / 3;
+    let sh = data.sh_coeffs.as_deref();
+    let count = sh.map_or(1, |sh| sh.len() / n / 3);
     let root = (count as f64).sqrt() as usize;
-    if root == 0 || root > 5 || root * root != count || sh.len() != n * count * 3 {
+    if root == 0
+        || root > 5
+        || root * root != count
+        || sh.is_some_and(|sh| sh.len() != n * count * 3)
+    {
         anyhow::bail!("invalid SH coefficient dimensions");
     }
     let transforms = (0..n)
@@ -82,7 +88,7 @@ pub fn raw_splats(data: &SplatData) -> Result<Splats> {
     Ok(Splats {
         transforms,
         raw_opacities: data.raw_opacities.clone().unwrap_or_else(|| vec![0.0; n]),
-        sh_coefficients: sh.as_chunks::<3>().0.to_vec(),
+        sh_coefficients: sh.map_or_else(|| vec![[0.5; 3]; n], |sh| sh.as_chunks::<3>().0.to_vec()),
         sh_degree: root as u32 - 1,
         min_scale: None,
     })
@@ -95,7 +101,7 @@ pub enum Output {
     Packed,
 }
 
-pub struct Renderer {
+pub struct StandaloneRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter: wgpu::AdapterInfo,
@@ -107,17 +113,19 @@ pub struct Renderer {
     size: UVec2,
     last_output: Option<Output>,
 }
-impl Renderer {
+
+impl StandaloneRenderer {
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter
     }
     /// GPU stage durations from a separate packed-output diagnostic frame.
     /// Pixel transfers and timestamp resolution never enter the benchmark loop.
     pub fn stage_ms(&mut self, camera: &CameraSpec) -> Result<Option<[f64; 8]>> {
-        if !self
-            .device
-            .features()
-            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        if self.adapter.backend == wgpu::Backend::Metal
+            || !self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
         {
             return Ok(None);
         }
@@ -268,9 +276,9 @@ impl Renderer {
             mapped_at_creation: false,
         });
         encoder.copy_buffer_to_buffer(target, 0, &staging, 0, target.size());
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
         encoder.map_buffer_on_submit(&staging, wgpu::MapMode::Read, .., move |result| {
-            let _ = tx.send(result);
+            tx.send(result).ok();
         });
         self.queue.submit([encoder.finish()]);
         self.finish()?;
@@ -278,5 +286,26 @@ impl Renderer {
         staging
             .get_mapped_range(..)
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// Preserve the scored float values; conversion to PNG belongs only at export.
+pub fn parity_image(pixels: Vec<f32>, width: u32, height: u32) -> Result<image::DynamicImage> {
+    if pixels.len() != width as usize * height as usize * 4 || !pixels.iter().all(|v| v.is_finite())
+    {
+        anyhow::bail!("invalid finite RGBA dimensions");
+    }
+    Ok(image::DynamicImage::ImageRgba32F(
+        image::Rgba32FImage::from_raw(width, height, pixels).expect("validated dimensions"),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn evidence_preserves_scored_hdr_and_alpha() {
+        let image = super::parity_image(vec![1.17, 0.5, -0.2, 0.1], 1, 1).unwrap();
+        assert_eq!(image.to_rgba32f().as_raw(), &[1.17, 0.5, -0.2, 0.1]);
+        assert!(super::parity_image(vec![f32::NAN; 4], 1, 1).is_err());
     }
 }

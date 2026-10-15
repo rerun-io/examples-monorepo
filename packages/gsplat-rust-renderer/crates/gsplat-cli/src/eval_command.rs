@@ -15,6 +15,7 @@ pub(crate) struct Args {
     #[arg(long)]
     out: PathBuf,
 }
+
 pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let result = evaluate_directories(&args.render, &args.gt, args.convention, args.lpips).await?;
     super::write_json(&args.out, &result)?;
