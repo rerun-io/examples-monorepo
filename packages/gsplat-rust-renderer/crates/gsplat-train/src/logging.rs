@@ -1,5 +1,5 @@
 //! GPU readback and logging run off the trainer thread, using captured tensor handles.
-use anyhow::Context;
+use anyhow::Context as _;
 use brush_dataset::{Dataset, scene::SceneView};
 use brush_render::gaussian_splats::Splats;
 use brush_train::msg::{RefineStats, TrainStepStats};
@@ -81,9 +81,9 @@ struct Logger {
     max_image_size: u32,
     eval_views: Vec<SceneView>,
     warned_sh4: bool,
-    compute: bool,
-    video: bool,
+    layout: super::dashboard::Layout,
 }
+
 impl Logger {
     async fn log(&mut self, observation: Observation) -> anyhow::Result<()> {
         match observation {
@@ -103,8 +103,7 @@ impl Logger {
                 super::dashboard::send(
                     &self.rec,
                     self.eval_views.len(),
-                    self.compute,
-                    self.video,
+                    self.layout,
                     up.to_array(),
                 )?;
             }
@@ -299,8 +298,7 @@ pub async fn run(
     rx: Receiver<Observation>,
     rec: RecordingStream,
     device: brush_process::ProcessDevice,
-    compute: bool,
-    video: bool,
+    layout: super::dashboard::Layout,
 ) {
     let mut logger = Logger {
         rec,
@@ -308,8 +306,7 @@ pub async fn run(
         max_image_size: 512,
         eval_views: Vec::new(),
         warned_sh4: false,
-        compute,
-        video,
+        layout,
     };
     for observation in rx {
         if !logger.rec.is_enabled() {
