@@ -535,10 +535,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
                 column_shares=[3.0, 1.0],
             ),
             rrb.Horizontal(*views("exo"), name="Exo"),
-            rrb.Horizontal(
-                blueprints.sensor_plot("Gyroscope", schema.imu_path(ego_rig, IMU_DEVICE), schema.gyro_path(ego_rig, IMU_DEVICE)),
-                blueprints.sensor_plot("Accelerometer", schema.imu_path(ego_rig, IMU_DEVICE), schema.accel_path(ego_rig, IMU_DEVICE)),
-            ),
+            rrb.Horizontal(*blueprints.imu_plots(ego_rig, IMU_DEVICE)),
             row_shares=[4.0, 1.4, 1.0],
         ),
         collapse_panels=True,

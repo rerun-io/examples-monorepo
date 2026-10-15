@@ -92,6 +92,14 @@ def sensor_plot(name: str, origin: str, contents: str) -> rrb.TimeSeriesView:
     return rrb.TimeSeriesView(name=name, origin=origin, contents=contents, plot_legend=rrb.PlotLegend(visible=True))
 
 
+def imu_plots(rig: int, imu: int) -> list[rrb.TimeSeriesView]:
+    """One IMU's two plot panes, gyroscope then accelerometer, as every rig layout's bottom row starts."""
+    return [
+        sensor_plot("Gyroscope", schema.imu_path(rig, imu), schema.gyro_path(rig, imu)),
+        sensor_plot("Accelerometer", schema.imu_path(rig, imu), schema.accel_path(rig, imu)),
+    ]
+
+
 def eye_controls_from_pose(
     position: tuple[float, float, float],
     look_target: tuple[float, float, float],

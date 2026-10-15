@@ -656,10 +656,7 @@ def build_blueprint() -> rrb.Blueprint:
         rig=RIG,
         run_source=schema.GT_RUN_SOURCE,
         eye_controls=blueprints.follow_eye_controls(FOLLOW_FORWARD, FOLLOW_UP),
-        plots=[
-            blueprints.sensor_plot("Gyroscope", schema.imu_path(RIG, 0), schema.gyro_path(RIG, 0)),
-            blueprints.sensor_plot("Accelerometer", schema.imu_path(RIG, 0), schema.accel_path(RIG, 0)),
-        ],
+        plots=blueprints.imu_plots(RIG, 0),
     )
 
 

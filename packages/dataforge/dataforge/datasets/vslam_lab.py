@@ -418,14 +418,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             panes.append(blueprints.camera_view(f"rgb_{index}", RIG, index, contents=[schema.video_path(RIG, index)]))
             if index in self.benchmark.depth_cameras:
                 panes.append(blueprints.camera_view(f"depth_{index}", RIG, index, contents=[schema.depth_path(RIG, index)]))
-        plots: list[rrb.TimeSeriesView] = (
-            [
-                blueprints.sensor_plot("Gyroscope", schema.imu_path(RIG, 0), schema.gyro_path(RIG, 0)),
-                blueprints.sensor_plot("Accelerometer", schema.imu_path(RIG, 0), schema.accel_path(RIG, 0)),
-            ]
-            if self.benchmark.has_imu
-            else []
-        )
+        plots: list[rrb.TimeSeriesView] = blueprints.imu_plots(RIG, 0) if self.benchmark.has_imu else []
         follow: FollowFrame = self.benchmark.follow
         return blueprints.rig_blueprint(
             panes, rig=RIG, run_source=schema.GT_RUN_SOURCE, eye_controls=blueprints.follow_eye_controls(follow.forward, follow.up), plots=plots

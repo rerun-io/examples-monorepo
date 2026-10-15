@@ -91,3 +91,9 @@ def test_headset_eye_sits_behind_above_and_right_and_aims_below_ahead() -> None:
     assert eye_vector(eye.position) == pytest.approx([0.15, -0.45, -0.4], abs=1e-6)
     assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.4, 0.5], abs=1e-6)
     assert eye_vector(eye.eye_up) == pytest.approx([0.0, -1.0, 0.0], abs=1e-6)
+
+
+def test_imu_plots_are_one_imu_s_gyroscope_and_accelerometer_panes() -> None:
+    gyro, accel = blueprints.imu_plots(2, 1)
+    assert (gyro.name, gyro.origin, gyro.contents) == ("Gyroscope", schema.imu_path(2, 1), schema.gyro_path(2, 1))
+    assert (accel.name, accel.origin, accel.contents) == ("Accelerometer", schema.imu_path(2, 1), schema.accel_path(2, 1))
