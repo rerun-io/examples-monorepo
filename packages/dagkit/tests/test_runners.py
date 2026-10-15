@@ -474,11 +474,12 @@ def test_a_two_port_node_keeps_its_block_backpressure() -> None:
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
-def test_a_burst_at_one_time_through_full_queues_still_flows(runner: str) -> None:
-    """Six values per port at one time through Block(2) queues: the node cannot step before the time is complete, so the
-    queues spill into pending instead of blocking the producer for good."""
+@pytest.mark.parametrize("b_at_5", [6, 1])  # 1: one queue holds a single value while the producer waits on the other, full one
+def test_a_burst_at_one_time_through_full_queues_still_flows(runner: str, b_at_5: int) -> None:
+    """Values at one time through Block(2) queues: the node cannot step before the time is complete, so the queues spill
+    into pending instead of blocking the producer for good."""
     order: list[tuple[str, int]] = []
-    events = [(5, "b", 0)] * 6 + [(5, "a", 0)] * 6 + [(6, "a", 0), (6, "b", 0)]
+    events = [(5, "b", 0)] * b_at_5 + [(5, "a", 0)] * 6 + [(6, "a", 0), (6, "b", 0)]
     graph = Graph("burst")
     src = graph.source("src", source(events, ports=("a", "b")))
     pair = graph.node("pair", Typed2(order))
@@ -488,7 +489,7 @@ def test_a_burst_at_one_time_through_full_queues_still_flows(runner: str) -> Non
     done.start()
     done.join(20.0)
     assert not done.is_alive(), "the run deadlocked"
-    assert order == [("a", 5)] * 6 + [("b", 5)] * 6 + [("a", 6), ("b", 6)]
+    assert order == [("a", 5)] * 6 + [("b", 5)] * b_at_5 + [("a", 6), ("b", 6)]
 
 
 def test_stream_span_uses_min_and_max_source_time() -> None:
