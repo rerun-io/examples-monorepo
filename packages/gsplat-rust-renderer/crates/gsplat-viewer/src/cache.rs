@@ -112,11 +112,19 @@ impl re_viewer_context::Cache for GpuCache {
 
 impl re_byte_size::MemUsageTreeCapture for GpuCache {
     fn capture_mem_usage_tree(&self) -> re_byte_size::MemUsageTree {
-        // GPU allocations are reported separately by Cache::vram_usage.
-        re_byte_size::MemUsageTree::Bytes(
-            (self.scenes.len() * size_of::<CachedScene>()
-                + self.views.len() * size_of::<CachedView>()) as u64,
-        )
+        // GPU allocations are reported separately by Cache::vram_usage. Native sort orders live inside
+        // re_renderer::SortOrderCache, which does not expose its size.
+        let records = (self.scenes.len() * size_of::<CachedScene>()
+            + self.views.len() * size_of::<CachedView>()) as u64;
+        let fallback_arrays = self
+            .fallbacks
+            .values()
+            .map(|(arrays, _)| arrays.heap_size_bytes())
+            .sum::<u64>();
+        re_byte_size::MemUsageNode::new()
+            .with_child("Scene and view records", records)
+            .with_child("Fallback CPU arrays", fallback_arrays)
+            .into_tree()
     }
 }
 
@@ -227,5 +235,36 @@ impl GpuCache {
             },
             !matches!(prepared, Prepared::Current),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use re_byte_size::MemUsageTreeCapture as _;
+    use re_viewer_context::Cache as _;
+
+    #[test]
+    fn memory_report_counts_fallback_arrays_until_purge() {
+        let centers = vec![[0.0_f32; 3]; 1000];
+        let sh = vec![[[half::f16::ZERO; 3]; 15]; 1000];
+        let cloud = NativeSplats {
+            centers: &centers,
+            scales: &[],
+            quaternions: &[[0.0, 0.0, 0.0, 1.0]; 1000],
+            colors: &[u32::MAX],
+            sh: &sh,
+            degree: 3,
+        };
+        let arrays = crate::fallback::FallbackArrays::new(&cloud);
+        let arrays_bytes = arrays.heap_size_bytes();
+        // Centers, scales and rotations alone take 40 bytes per splat.
+        assert!(arrays_bytes >= 1000 * 40);
+        let mut cache = GpuCache::default();
+        cache.fallbacks.insert(Hash64::from_u64(1), (arrays, 0));
+
+        assert_eq!(cache.capture_mem_usage_tree().size_bytes(), arrays_bytes);
+        cache.purge_memory();
+        assert_eq!(cache.capture_mem_usage_tree().size_bytes(), 0);
     }
 }

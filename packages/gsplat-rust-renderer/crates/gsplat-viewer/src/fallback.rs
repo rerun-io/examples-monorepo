@@ -56,6 +56,16 @@ impl FallbackArrays {
             bounds: crate::bounds::from_splats(cloud),
         }
     }
+
+    /// Heap bytes these arrays keep alive between frames, for the cache's memory report.
+    pub(crate) fn heap_size_bytes(&self) -> u64 {
+        (self.centers.capacity() * size_of::<glam::Vec3>()
+            + self.scales.capacity() * size_of::<glam::Vec3>()
+            + self.rotations.capacity() * size_of::<glam::Quat>()
+            + self.colors.capacity() * size_of::<re_renderer::Rgba32Unmul>()
+            + self.sh.capacity() * size_of::<[re_renderer::GaussianShCoefficient; 15]>())
+            as u64
+    }
 }
 
 /// The stock texture-backed path remains available when compute storage cannot hold a scene.
