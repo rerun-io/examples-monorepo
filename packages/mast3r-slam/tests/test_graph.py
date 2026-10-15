@@ -56,6 +56,7 @@ def test_slam_graph_validates(calibrated: bool, live: bool, tmp_path: Path) -> N
     assert ("video", "frontend", "rig") in kinds if calibrated else ("video", "frontend", "rig") not in kinds
     assert graph.nodes["backend"].placement == Placement("process") and isinstance(graph.nodes["backend"].obj, Spawn)
     assert graph.nodes["frontend"].placement.where == "main" and set(graph.resources) == {"mast3r", "shared"}
+    assert (graph.nodes["nerfstudio"].kind, graph.nodes["nerfstudio"].needs) == ("sink", ("shared",))  # an output that reads `shared`
 
 
 class Affine:

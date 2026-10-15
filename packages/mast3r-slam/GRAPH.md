@@ -30,7 +30,7 @@ Per frame, by mode: INIT (the first frame gets a mono point map and becomes keyf
 
 | gives | type | to |
 |---|---|---|
-| **tracked** | `TrackedFrame` | 5 viewer, 6 layer |
+| **tracked** | `TrackedFrame` | 4 viewer, 5 layer |
 | **task** | `KeyframeAdded | RelocRequest` | 3 backend |
 
 Uses the graph resources `mast3r`, `shared` (built once, shared).
@@ -54,32 +54,30 @@ One task per tick: ``KeyframeAdded`` adds matching factors to the previous keyfr
 
 | gives | type | to |
 |---|---|---|
-| **map** | `MapUpdate` | 5 viewer, 6 layer |
-| **keyframes** | `TrackedFrame` | 4 nerfstudio, 5 viewer, 6 layer |
-| **cloud** | `KeyframeCloud` | 5 viewer |
+| **map** | `MapUpdate` | 4 viewer, 5 layer |
+| **keyframes** | `TrackedFrame` | 4 viewer, 5 layer, 6 nerfstudio |
+| **cloud** | `KeyframeCloud` | 4 viewer |
 
 Uses the graph resources `mast3r`, `shared` (built once, shared).
 
-## 4 · nerfstudio: Export the keyframes for Nerfstudio
-*runs once per item* · `NerfstudioSink` · `packages/mast3r-slam/mast3r_slam/nodes/nerfstudio.py`
-
-Exports the final map at flush (after the backend's final ``keyframes``); reads the images and point maps from the ``shared`` resource, so the graph adds it with ``needs=("shared",)``.
-
-| takes | type | from | arrives |
-|---|---|---|---|
-| **keyframes** | `TrackedFrame` | 3 backend | waits (4) |
-
-Uses the graph resources `shared` (built once, shared).
-
-## 5 · viewer: Draw its inputs in the viewer
+## 4 · viewer: Draw its inputs in the viewer
 *output* · `RerunSink` · `packages/dagkit/dagkit/sinks.py`
 
 Takes **keyframes, map, cloud** from 3 backend; **tracked** from 2 frontend.
 
-## 6 · layer: Save its inputs as a catalog layer
+## 5 · layer: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
 
 Saves **keyframes, map** from 3 backend; **tracked** from 2 frontend into the catalog layer `mast3r_slam`.
+
+## 6 · nerfstudio: Export the keyframes for Nerfstudio
+*output* · `NerfstudioSink` · `packages/mast3r-slam/mast3r_slam/nodes/nerfstudio.py`
+
+Exports the final map at flush (after the backend's final ``keyframes``); reads the images and point maps from the ``shared`` resource, so the graph adds it with ``needs=("shared",)``.
+
+Takes **keyframes** from 3 backend.
+
+Uses the graph resources `shared` (built once, shared).
 
 ## Data types
 | type | what it is | code |

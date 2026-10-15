@@ -53,6 +53,6 @@ def slam_graph(
     graph.edge(frontend["task"], backend["task"], Block(16))
     ports: dict[str, PortRef] = {"tracked": frontend["tracked"], "map": backend["map"], "keyframes": backend["keyframes"], "cloud": backend["cloud"]}
     graph.sinks(ports, sinks)
-    if nerfstudio is not None:  # a plain node, not a sink: it reads the final keyframes from the `shared` resource
-        graph.edge(backend["keyframes"], graph.node("nerfstudio", nerfstudio, needs=("shared",))["keyframes"])
+    if nerfstudio is not None:  # it reads the final keyframes' images and point maps from the `shared` resource
+        graph.edge(backend["keyframes"], graph.sink("nerfstudio", nerfstudio, needs=("shared",))["keyframes"])
     return graph
