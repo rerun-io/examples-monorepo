@@ -10,9 +10,9 @@ Multi-view body capture: track every person in the cameras, find their dense 2D 
 `(GPU)` after a type: the value stays on the GPU. A tag left of a box lists its inputs from further up (`port: Type ← 1 video · latest`). Box numbers match the sections below.
 
 ## 1 · video: Decode the cameras' videos
-*source* · `CatalogVideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
+*source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``. Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera: ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening. ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and the rig carries the undistorted pinhole.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|

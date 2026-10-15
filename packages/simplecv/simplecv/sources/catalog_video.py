@@ -1,10 +1,13 @@
-"""Catalog video as a dagkit Source: one time-ordered stream of decoded framesets plus the segment's static rig (SPEC 2.6)."""
+"""Camera videos as dagkit Sources: one time-ordered stream of decoded framesets after the static rig (SPEC 2.6).
+
+``VideoSource`` samples RGB framesets from any ``FrameProvider`` (``VideoSource.catalog``: a catalog segment's);
+``CatalogLumaSource`` groups every frame's raw luma by time."""
 
 import itertools
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from io import BytesIO
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import av
 import cv2
@@ -12,8 +15,8 @@ import numpy as np
 import pyarrow as pa
 import torch
 from dagkit.catalog import read_column
-from dagkit.node import Event, Fence, Fenced, PortType
-from dagkit.sources import Column, SegmentRef
+from dagkit.node import Event, Fence, Fenced, PortType, Source
+from dagkit.sources import Column, IterSource, SegmentRef
 from dagkit.time import STATIC
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
@@ -118,70 +121,138 @@ def undistortion_maps(
     return K_new, map_x, map_y
 
 
-class CatalogVideoSource:
+RIG: Column = Column(RigCameras, "/world", static=True)
+"""The base layer's calibration, every camera at stored size: a catalog source's ``rig`` port."""
+
+
+@runtime_checkable
+class FrameProvider(Protocol):
+    """Random access to a rig's camera videos (``SegmentFrames``: a catalog segment's; mamma's ``FileFrames``: video files)."""
+
+    def times_ns(self, view: int) -> Int64[ndarray, " n"]: ...
+    def frames_at(self, view: int, indices: Sequence[int]) -> UInt8[Tensor, "k 3 h w"]: ...
+    def close(self) -> None: ...
+
+
+class UndistortedFrames:
+    """A FrameProvider's frames remapped onto undistorted pinholes (``undistortion_maps``).
+
+    ``calibrate`` keeps each camera's remap tables from its stored Brown-Conrady coefficients and returns the rig with the
+    undistorted pinholes; ``static_events`` calls it on the rig, before the source decodes a frame.
+    """
+
+    def __init__(self, frames: FrameProvider) -> None:
+        self.frames: FrameProvider = frames
+        self.maps: list[tuple[Float32[ndarray, "h w"], Float32[ndarray, "h w"]]] = []
+
+    def calibrate(self, rig: RigCameras, table: pa.Table) -> RigCameras:
+        """``rig`` with every camera's undistorted pinhole (``table``: the static read it came from, with the coefficients)."""
+        intrinsics: Float64[ndarray, "v 3 3"] = rig.intrinsics.copy()
+        self.maps = []
+        for i, camera in enumerate(rig.names):
+            column, model = f"/world/{camera}/{DISTORTION}", f"/world/{camera}/{DISTORTION_MODEL}"
+            if column not in table.column_names or table.column(column)[0].as_py() is None:
+                raise ValueError(f"{camera}: undistort needs the camera's {DISTORTION}")
+            if model not in table.column_names or table.column(model)[0].as_py() != ["brown_conrady"]:
+                raise ValueError(f"{camera}: undistort takes brown_conrady coefficients, not {table.column(model)[0].as_py() if model in table.column_names else None}")
+            coefficients: Float64[ndarray, " k"] = np.asarray(table.column(column)[0].as_py(), dtype=np.float64).reshape(-1)
+            width, height = (int(v) for v in rig.resolution_wh[i])
+            intrinsics[i], *maps = undistortion_maps(rig.intrinsics[i], coefficients, width, height)
+            self.maps.append((maps[0], maps[1]))
+        return RigCameras(rig.names, intrinsics, rig.cam_T_world, rig.resolution_wh)
+
+    def times_ns(self, view: int) -> Int64[ndarray, " n"]:
+        return self.frames.times_ns(view)
+
+    def frames_at(self, view: int, indices: Sequence[int]) -> UInt8[Tensor, "k 3 h w"]:
+        native: UInt8[Tensor, "k 3 h w"] = self.frames.frames_at(view, indices)
+        if view >= len(self.maps) or native.shape[-2:] != self.maps[view][0].shape:
+            raise ValueError("undistort needs a calibrated rig of the decoded frame size")
+        return torch.stack([torch.from_numpy(cv2.remap(frame.permute(1, 2, 0).numpy().copy(), *self.maps[view], cv2.INTER_LINEAR)).permute(2, 0, 1) for frame in native])
+
+    def close(self) -> None:
+        self.frames.close()
+
+
+def static_events(segment: SegmentRef, cameras: tuple[str, ...], statics: Mapping[str, Column], undistort: UndistortedFrames | None = None) -> Iterator[Event]:
+    """A catalog segment's STATIC ports, temporal ones read whole: ``rig`` (``RIG``, when every camera has it; undistorted
+    through ``undistort``), then ``statics``."""
+    dataset = segment.entry()  # one for every port (an entry must outlive its queries)
+    for port, column in {"rig": RIG, **statics}.items():
+        table = read_column(dataset, segment.segment, column.type, column.root, segment.timeline, static=column.static)
+        for _, value in column.type.from_layer(table, column.root, segment.timeline):
+            if port != "rig":
+                yield Event(STATIC, port, value)
+            elif isinstance(value, RigCameras) and set(cameras) <= set(value.names):
+                rig: RigCameras = value.select(cameras)
+                yield Event(STATIC, port, rig if undistort is None else undistort.calibrate(rig, table))
+
+
+class VideoSource:
     """Decode the cameras' videos.
 
-    Decoded framesets after STATIC ``rig`` (base-layer calibration at stored size, when all cameras have it) and ``statics``.
-    Temporal statics are read whole. RGB frames are index-aligned at sampled indices, timed by the first camera:
-    ``nvdec_rgb`` emits ``Fenced[MultiViewFrames]``; ``cpu_rgb`` emits ``MultiViewFrames``. ``resize_hw`` applies area resize;
-    ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time.
-    ``cpu_luma`` emits ``LumaFrameset`` for every frame in the window, grouped by ``group_tolerance_ns`` and timed by its opening.
-    ``undistort`` (``cpu_rgb``): every frame is remapped with its camera's stored coefficients (``undistortion_maps``) and
-    the rig carries the undistorted pinhole.
+    The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera
+    inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw``
+    applies area resize; ``keep_native`` emits ``frames_native`` just before ``frames`` at the same time. ``catalog`` reads a
+    catalog segment's videos and rig.
     """
 
     def __init__(
         self,
+        frames: FrameProvider,
+        cameras: tuple[str, ...],
+        statics: Source,
+        *,
+        window_ns: tuple[int, int] | None = None,
+        fenced: bool = False,
+        sample: Literal["all"] | int | tuple[int, ...] = "all",
+        stride: int = 1,
+        resize_hw: tuple[int, int] | None = None,
+        keep_native: bool = False,
+    ) -> None:
+        if keep_native and resize_hw is None:
+            raise NotImplementedError("keep_native needs resize_hw")
+        self.frames, self.cameras, self.statics, self.window_ns, self.fenced = frames, cameras, statics, window_ns, fenced
+        self.sample, self.stride, self.resize_hw, self.keep_native = sample, stride, resize_hw, keep_native
+        self.clock: str = statics.clock
+        frame_type: PortType = Fenced[MultiViewFrames] if fenced else MultiViewFrames
+        self.outputs: dict[str, PortType] = {"frames": frame_type} | ({"frames_native": frame_type} if keep_native else {}) | dict(statics.outputs)
+
+    @classmethod
+    def catalog(
+        cls,
         segment: SegmentRef,
         cameras: tuple[str, ...],
         *,
-        decode: Literal["nvdec_rgb", "cpu_rgb", "cpu_luma"],
+        decode: Literal["nvdec_rgb", "cpu_rgb"],
         sample: Literal["all"] | int | tuple[int, ...] = "all",
-        group_tolerance_ns: int | None = None,
+        stride: int = 1,
         resize_hw: tuple[int, int] | None = None,
         keep_native: bool = False,
         statics: Mapping[str, Column] | None = None,
-        stride: int = 1,
         undistort: bool = False,
-    ) -> None:
-        luma: bool = decode == "cpu_luma"
+    ) -> "VideoSource":
+        """A catalog segment's cameras after its ``rig`` and ``statics`` (``static_events``): ``nvdec_rgb`` decodes on the GPU
+        (``Fenced`` frames), ``cpu_rgb`` on the CPU, where ``undistort`` remaps every frame with its camera's stored
+        coefficients and the rig carries the undistorted pinholes."""
         if undistort and decode != "cpu_rgb":
             raise NotImplementedError("undistort remaps cpu_rgb frames only")
-        self.undistort: bool = undistort
-        self.maps: list[tuple[Float32[ndarray, "h w"], Float32[ndarray, "h w"]]] = []
-        if luma != (group_tolerance_ns is not None) or (luma and (resize_hw is not None or isinstance(sample, int | tuple))) or (keep_native and resize_hw is None):
-            raise NotImplementedError("cpu_luma groups every frame (group_tolerance_ns); rgb is index-aligned; keep_native needs resize_hw")
-        self.segment, self.cameras, self.sample, self.stride, self.fenced = segment, cameras, sample, stride, decode == "nvdec_rgb"
-        self.group_tolerance_ns: int | None = group_tolerance_ns
-        self.resize_hw, self.keep_native = resize_hw, keep_native
-        self.statics: dict[str, Column] = {"rig": Column(RigCameras, "/world", static=True), **(statics or {})}
-        self.clock: str = segment.timeline
-        frame_type: PortType = LumaFrameset if luma else Fenced[MultiViewFrames] if self.fenced else MultiViewFrames
-        self.outputs: dict[str, PortType] = {"frames": frame_type} | ({"frames_native": frame_type} if keep_native else {})
-        self.outputs |= {port: column.type for port, column in self.statics.items()}
-        self.frames = SegmentFrames(segment, cameras, "cuda" if self.fenced else "cpu")
+        columns: dict[str, Column] = dict(statics or {})
+        frames = SegmentFrames(segment, cameras, "cuda" if decode == "nvdec_rgb" else "cpu")
+        undistorted: UndistortedFrames | None = UndistortedFrames(frames) if undistort else None
+        ports: dict[str, PortType] = {"rig": RigCameras} | {port: column.type for port, column in columns.items()}
+        reads = IterSource(ports, lambda: static_events(segment, cameras, columns, undistorted), clock=segment.timeline)
+        return cls(
+            undistorted or frames, cameras, reads, window_ns=segment.window_ns, fenced=decode == "nvdec_rgb", sample=sample, stride=stride,
+            resize_hw=resize_hw, keep_native=keep_native,
+        )  # fmt: skip
 
     def events(self) -> Iterator[Event]:
-        if self.statics:  # a subclass that brings its own statics (no catalog segment) never opens an entry
-            dataset = self.segment.entry()  # one for every static port (an entry must outlive its queries)
-            for port, column in self.statics.items():
-                table = read_column(dataset, self.segment.segment, column.type, column.root, self.clock, static=column.static)  # temporal statics: whole
-                for _, value in column.type.from_layer(table, column.root, self.clock):
-                    if port != "rig":
-                        yield Event(STATIC, port, value)
-                    elif isinstance(value, RigCameras) and set(self.cameras) <= set(value.names):
-                        yield Event(STATIC, port, self._undistorted(value.select(self.cameras), table) if self.undistort else value.select(self.cameras))
-        if self.group_tolerance_ns is not None:
-            yield from self._luma_framesets(self.group_tolerance_ns)
-            return
+        yield from self.statics.events()
         times: list[Int64[ndarray, " n"]] = [self.frames.times_ns(view) for view in range(len(self.cameras))]
         shortest: int = min(t.size for t in times)  # index-aligned: every sampled index exists in every camera
-        for index in sample_indices(times[0][:shortest], self.sample, self.segment.window_ns, self.stride).tolist():
+        for index in sample_indices(times[0][:shortest], self.sample, self.window_ns, self.stride).tolist():
             native: UInt8[Tensor, "v 3 hh ww"] = torch.stack([self.frames.frames_at(view, [index])[0] for view in range(len(self.cameras))])
-            if self.undistort:
-                if len(self.maps) != len(self.cameras) or native.shape[-2:] != self.maps[0][0].shape:
-                    raise ValueError(f"{self.segment.segment}: undistort needs a calibrated rig of the decoded frame size")
-                native = torch.stack([torch.from_numpy(cv2.remap(view.permute(1, 2, 0).numpy().copy(), *maps, cv2.INTER_LINEAR)).permute(2, 0, 1) for view, maps in zip(native, self.maps, strict=True)])
             rgb: UInt8[Tensor, "v 3 h w"] = native
             if self.resize_hw is not None:
                 rgb = torch.nn.functional.interpolate(native.float(), size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
@@ -192,23 +263,26 @@ class CatalogVideoSource:
                 frames = MultiViewFrames(int(times[0][index]), index, self.cameras, pixels, cam_t_ns)
                 yield Event(frames.t_ns, port, Fenced(frames, fence) if self.fenced else frames)
 
-    def _undistorted(self, rig: RigCameras, table: pa.Table) -> RigCameras:
-        """The rig with every camera's undistorted pinhole; keeps the remap tables for the frames (one set per read)."""
-        intrinsics: Float64[ndarray, "v 3 3"] = rig.intrinsics.copy()
-        self.maps = []
-        for i, camera in enumerate(self.cameras):
-            column, model = f"/world/{camera}/{DISTORTION}", f"/world/{camera}/{DISTORTION_MODEL}"
-            if column not in table.column_names or table.column(column)[0].as_py() is None:
-                raise ValueError(f"{self.segment.segment} {camera}: undistort needs the camera's {DISTORTION}")
-            if model not in table.column_names or table.column(model)[0].as_py() != ["brown_conrady"]:
-                raise ValueError(f"{self.segment.segment} {camera}: undistort takes brown_conrady coefficients, not {table.column(model)[0].as_py() if model in table.column_names else None}")
-            coefficients: Float64[ndarray, " k"] = np.asarray(table.column(column)[0].as_py(), dtype=np.float64).reshape(-1)
-            width, height = (int(v) for v in rig.resolution_wh[i])
-            intrinsics[i], *maps = undistortion_maps(rig.intrinsics[i], coefficients, width, height)
-            self.maps.append((maps[0], maps[1]))
-        return RigCameras(rig.names, intrinsics, rig.cam_T_world, rig.resolution_wh)
+    def close(self) -> None:
+        self.frames.close()
+        self.statics.close()
 
-    def _luma_framesets(self, tolerance_ns: int) -> Iterator[Event]:
+
+class CatalogLumaSource:
+    """Decode the cameras' luma planes.
+
+    A catalog segment's ``rig`` and ``statics`` (``static_events``), then a ``LumaFrameset`` for every frame in the window:
+    each camera's raw Y plane, grouped across cameras within ``group_tolerance_ns`` and timed by its opening frame.
+    """
+
+    def __init__(self, segment: SegmentRef, cameras: tuple[str, ...], *, group_tolerance_ns: int, statics: Mapping[str, Column] | None = None) -> None:
+        self.segment, self.cameras, self.group_tolerance_ns = segment, cameras, group_tolerance_ns
+        self.statics: dict[str, Column] = dict(statics or {})
+        self.clock: str = segment.timeline
+        self.outputs: dict[str, PortType] = {"frames": LumaFrameset, "rig": RigCameras} | {port: column.type for port, column in self.statics.items()}
+
+    def events(self) -> Iterator[Event]:
+        yield from static_events(self.segment, self.cameras, self.statics)
         lo, hi = self.segment.window_ns or (None, None)
         read_window: tuple[int, int] | None = None if lo is None or hi is None else (lo - KEYFRAME_LEAD_NS, hi)
         entities: list[str] = [f"/world/{camera}/pinhole/video" for camera in self.cameras]
@@ -223,7 +297,7 @@ class CatalogVideoSource:
             planes = luma_planes(CatalogVideo(video.times[key:], video.samples[key:], video.keyframes[key:], video.codec))
             decoders.append(itertools.islice(planes, first - key, None))  # decoded from the keyframe, kept from the window's first frame
             inside.append(video.t_ns[first:])
-        index: FramesetIndex = group_framesets(inside, tolerance_ns)
+        index: FramesetIndex = group_framesets(inside, self.group_tolerance_ns)
         for row, t_ns in enumerate(index.t_ns.tolist()):
             cam_t_ns = tuple(int(t) if f >= 0 else None for t, f in zip(index.cam_t_ns[row], index.frame[row], strict=True))  # None: absent
             luma = tuple(next(decoder, None) if t is not None else None for decoder, t in zip(decoders, cam_t_ns, strict=True))
@@ -234,4 +308,4 @@ class CatalogVideoSource:
             raise ValueError(f"{self.segment.segment}: a camera decoded more frames than it has packets")
 
     def close(self) -> None:
-        self.frames.close()
+        pass

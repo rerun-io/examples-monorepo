@@ -21,7 +21,7 @@ from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from serde import serde
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import VideoSource
 
 from mamma.apis.blueprint import default_blueprint
 from mamma.graphs.capture import capture_graph
@@ -35,7 +35,7 @@ from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.smplx_body import SmplxBody
 from mamma.ops.window_fit import FitterConfig, SlidingWindowFitter
-from mamma.sources.npz import NpzSequenceSource
+from mamma.sources.npz import load_rig, npz_sequence_source, video_paths
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[3]
@@ -100,11 +100,11 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     keep_native: bool = profile.configure("video", VideoParams(), config.preset).keep_native
     if config.video is None:
         cameras: tuple[str, ...] = config.cameras or RING
-        video: CatalogVideoSource = CatalogVideoSource(config.segment, cameras, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=keep_native)
+        video: VideoSource = VideoSource.catalog(config.segment, cameras, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=keep_native)
     else:
         cameras = config.cameras or tuple(sorted(p.stem for p in (config.video / "meta").glob("*.npz") if p.stem != "global"))
-        video = files = NpzSequenceSource(config.video, cameras, resize_hw=config.resize_hw, keep_native=keep_native)
-        log_files(recording, files, config.segment.timeline)
+        video = npz_sequence_source(config.video, cameras, resize_hw=config.resize_hw, keep_native=keep_native)
+        log_files(recording, config.video, cameras, video.clock)
     for view in range(len(cameras)):
         video.frames.times_ns(view)  # fetch the packets now, as the pre-port export did before its clock started
     data: Path = PACKAGE_DIR / "data"
@@ -120,7 +120,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     return app_graph(config, recording, video, nodes, f"{profile.hardware}/{config.preset}")
 
 
-def app_graph(config: Config, recording: rr.RecordingStream, video: CatalogVideoSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
+def app_graph(config: Config, recording: rr.RecordingStream, video: VideoSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
     """The capture graph with the App's sinks (the viewer; with ``output_dir`` the ``mamma_fit`` layer) and its blueprint.
 
     ``build`` passes the loaded models; the unit tests pass fakes. ``profile`` is ``<hardware>/<preset>`` for the producer.
@@ -133,12 +133,12 @@ def app_graph(config: Config, recording: rr.RecordingStream, video: CatalogVideo
     return capture_graph(video, *nodes, sinks)
 
 
-def log_files(recording: rr.RecordingStream, source: NpzSequenceSource, timeline: str) -> None:
+def log_files(recording: rr.RecordingStream, root: Path, cameras: tuple[str, ...], timeline: str) -> None:
     """A file capture has no base layer: log its rig, z-up world and videos (frame references on the source's clock)."""
     recording.log("/world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    for log in source.rig.to_rerun("/world"):
+    for log in load_rig(root / "meta", cameras).to_rerun("/world"):
         recording.log(log.path, log.data, static=True)
-    for camera, path in zip(source.cameras, source.videos, strict=True):
+    for camera, path in zip(cameras, video_paths(root, cameras), strict=True):
         asset = rr.AssetVideo(path=path)
         recording.log(f"/world/{camera}/pinhole/video", asset, static=True)
         times_ns = asset.read_frame_timestamps_nanos()

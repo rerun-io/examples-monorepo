@@ -22,7 +22,7 @@ from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import VideoSource
 from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
@@ -109,7 +109,7 @@ def video_source(config: Config, cfg: SlamConfig) -> Source:
         return WebcamSource(config.webcam, config.max_frames)
     if config.segment is None:
         raise ValueError("no input: give a video, an image directory, a webcam or a segment")
-    return CatalogVideoSource(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
+    return VideoSource.catalog(config.segment, (config.camera,), decode="cpu_rgb", stride=cfg.subsample, undistort=config.undistort)
 
 
 def slam_config(config: Config) -> SlamConfig:
@@ -136,11 +136,11 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     normal = rrb.Blueprint(rrb.Spatial3DView(origin=ROOT, name="MASt3R-SLAM"), rrb.TimePanel(state="collapsed", timeline=video.clock), collapse_panels=True)
     recording.send_blueprint(with_pipeline(normal, debug))  # the outputs' clock, not the run health's wall_time
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, ports, roots)}
-    if isinstance(video, CatalogVideoSource) and config.layer_dir is not None:
+    if isinstance(video, VideoSource) and config.segment is not None and config.layer_dir is not None:  # a catalog input
         hardware: str = load_profile(PACKAGE_DIR / "profiles", config.hardware).hardware
         producer: Producer = Producer.of("mast3r-slam", "mast3r-slam", f"{hardware}/{config.preset or 'base'}")
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
-        sinks["layer"] = LayerSink.open(video.segment, LAYER, producer, layer_ports, roots, output_dir=config.layer_dir, register=config.register)
+        sinks["layer"] = LayerSink.open(config.segment, LAYER, producer, layer_ports, roots, output_dir=config.layer_dir, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
     return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 

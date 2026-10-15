@@ -49,8 +49,8 @@ pipeline is that of `--source replay <dump> --slam reference --hands on`: lossle
 `scene::Content::HandsLayer` mode. On the CPU ONNX Runtime the layer of a catalog segment equals that replay's of the segment's
 dump.
 
-The Python side is a dagkit graph (`robocap_live/graphs/hands_layer.py`, lossless): simplecv's `CatalogVideoSource` in `cpu_luma`
-mode reads the six H.264 streams in one bulk query, decodes them to the raw Y plane (the cap's NV12 Y) and groups framesets as the
+The Python side is a dagkit graph (`robocap_live/graphs/hands_layer.py`, lossless): simplecv's `CatalogLumaSource`
+reads the six H.264 streams in one bulk query, decodes them to the raw Y plane (the cap's NV12 Y) and groups framesets as the
 live adapter does (`simplecv.ops.framesets`, 3 ms); its STATIC ports carry the rig of the `base` layer (`CapRig`) and the whole
 `slam_rs` pose table of `/world/rig_00` (`CatalogPoses`). The `hands` node wraps `_core.HandsLayer` (each frameset takes the
 pose within 2 ms of its time), and a `LayerFileSink` publishes the finished file. `robocap_live.apis.hands_layer` (`pixi run -e

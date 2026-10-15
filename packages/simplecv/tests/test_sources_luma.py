@@ -1,9 +1,10 @@
-"""``CatalogVideoSource(decode="cpu_luma")`` on synthetic lossless H.264 (unit lane: PyAV on the CPU, the catalog read faked)."""
+"""``CatalogLumaSource`` on synthetic lossless H.264 (unit lane: PyAV on the CPU, the catalog read faked)."""
 
 from fractions import Fraction
 
 import av
 import numpy as np
+import pyarrow as pa
 import pytest
 from dagkit.node import Event
 from dagkit.sources import SegmentRef
@@ -14,6 +15,7 @@ import simplecv.sources.catalog_video as catalog_video
 from simplecv.catalog_video import CatalogVideo
 from simplecv.ops.framesets import group_framesets
 from simplecv.types.frames import LumaFrameset
+from simplecv.types.rig import RigCameras
 
 HEIGHT, WIDTH, GOP = 48, 64, 5
 CAMERAS: tuple[str, ...] = ("rig_00/cam_00", "rig_00/cam_01", "rig_00/cam_02")
@@ -59,14 +61,14 @@ def fake_catalog(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int] | None
                      for v, k in zip(videos, keep, strict=True))  # fmt: skip
 
     monkeypatch.setattr(catalog_video, "read_catalog_videos", read)
+    monkeypatch.setattr(catalog_video, "read_column", lambda *args, **kwargs: pa.table({}))  # no base-layer rig: no static event
     monkeypatch.setattr(SegmentRef, "entry", lambda self: None)
     return windows
 
 
 def framesets(window_ns: tuple[int, int] | None) -> list[LumaFrameset]:
-    source = catalog_video.CatalogVideoSource(SegmentRef("d", "s", window_ns=window_ns), CAMERAS, decode="cpu_luma", group_tolerance_ns=3_000_000)
-    assert source.outputs["frames"] is LumaFrameset
-    source.statics = {}
+    source = catalog_video.CatalogLumaSource(SegmentRef("d", "s", window_ns=window_ns), CAMERAS, group_tolerance_ns=3_000_000)
+    assert source.outputs == {"frames": LumaFrameset, "rig": RigCameras}
     events: list[Event] = list(source.events())
     assert all(e.port == "frames" and isinstance(e.value, LumaFrameset) for e in events)
     return [e.value for e in events]  # type: ignore[misc]
@@ -90,10 +92,3 @@ def test_luma_framesets_hold_each_cameras_raw_y_plane_grouped_like_the_op(fake_c
             assert plane is not None and plane.shape == (HEIGHT, WIDTH) and plane.dtype == np.uint8
             assert frameset.cam_t_ns[c] == int(stamps[c])
             np.testing.assert_array_equal(plane, 10 + 10 * ((int(stamps[c]) - 1_000_000_000) // 33_000_000))  # lossless: the frame's own level
-
-
-def test_luma_decode_needs_grouping_and_rgb_decode_refuses_it() -> None:
-    with pytest.raises(NotImplementedError):
-        catalog_video.CatalogVideoSource(SegmentRef("d", "s"), CAMERAS, decode="cpu_luma")
-    with pytest.raises(NotImplementedError):
-        catalog_video.CatalogVideoSource(SegmentRef("d", "s"), CAMERAS, decode="cpu_rgb", group_tolerance_ns=3_000_000)

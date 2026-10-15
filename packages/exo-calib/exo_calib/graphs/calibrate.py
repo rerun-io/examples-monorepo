@@ -10,7 +10,7 @@ from dagkit.graph import AsOf, Block, Graph, PortRef
 from dagkit.node import Event, Node
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, SegmentRef
 from dagkit.time import STATIC
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import VideoSource
 from simplecv.types.rig import RigCameras
 
 from exo_calib.nodes.init import InitNode
@@ -27,7 +27,7 @@ def init_graph(segment: SegmentRef, cameras: tuple[str, ...], frame_index: int, 
     graph = Graph("exocalib-init", about="Stage A, run once: metric, gravity-aligned exo cameras from one synchronized frameset of the exo videos. The refine graph starts from this rig.")
     for name in ("g3t", "moge"):
         graph.resource(name, models[name])
-    video = graph.source("video", CatalogVideoSource(segment, cameras, decode="nvdec_rgb", sample=(frame_index,)))
+    video = graph.source("video", VideoSource.catalog(segment, cameras, decode="nvdec_rgb", sample=(frame_index,)))
     init = graph.node("init", InitNode(), needs=("g3t", "moge"))
     graph.edge(video["frames"], init["frames"])
     graph.sinks({"init": init["init"]}, sinks)
@@ -65,7 +65,7 @@ def refine_graph(
         records, gt = catalog["kp2d"], catalog["rig"]
         graph.resource("frames", models["frames"])
     else:
-        source = CatalogVideoSource(segment, layout.exo_camera_names, decode="nvdec_rgb", sample=frame_budget)
+        source = VideoSource.catalog(segment, layout.exo_camera_names, decode="nvdec_rgb", sample=frame_budget)
         graph.resource("frames", lambda: source.frames)
         video = graph.source("video", source)
         kp2d = graph.node("kp2d", Kp2dNode(), needs=("detector", "pose"))

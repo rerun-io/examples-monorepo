@@ -29,7 +29,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import SegmentFrames, VideoSource
 from simplecv.sources.files import VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
@@ -142,8 +142,8 @@ def test_the_default_input_is_the_short_case_and_the_examples_are_the_configs_ve
     file still beats the default segment."""
     cases: list[Case] = [c for block in load_card(PACKAGE_DIR / "VERIFY.toml").graph for c in block.cases]
     default = video_source(Config(RerunTyroConfig(headless=True)), SlamConfig())
-    assert isinstance(default, CatalogVideoSource) and default.cameras == ("rig_00/cam_00",)
-    assert default.segment == next(c for c in cases if c.name == "short").segment_ref()
+    assert isinstance(default, VideoSource) and default.cameras == ("rig_00/cam_00",)
+    assert isinstance(default.frames, SegmentFrames) and default.frames.segment == next(c for c in cases if c.name == "short").segment_ref()
     assert [e.segment for e in examples()] == [c.segment_ref() for c in cases if c.clip == "short"]
     for case in cases:
         config: Config = dataclasses.replace(case_config(case), hardware="x86_64-cuda")

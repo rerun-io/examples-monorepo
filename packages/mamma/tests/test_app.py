@@ -13,7 +13,7 @@ from dagkit.sinks import LayerSink, RerunSink
 from dagkit.testing import check_form, check_graph_docs, check_picture
 from mamma_fakes import FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sources.catalog_video import CatalogVideoSource
+from simplecv.sources.catalog_video import VideoSource
 
 from mamma.apis.blueprint import default_blueprint
 from mamma.apis.capture import LAYER, PACKAGE_DIR, RING, Config, app_graph, build
@@ -33,7 +33,7 @@ HIDDEN: dict[str, str] = {
 
 def app(config: Config) -> Graph:
     """The graph ``build`` returns for ``config``, with fake models and a catalog source that never connects."""
-    video = CatalogVideoSource(config.segment, RING, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=True)
+    video = VideoSource.catalog(config.segment, RING, decode="nvdec_rgb", resize_hw=config.resize_hw, keep_native=True)
     nodes = (
         TrackNode(TrackParams(expected_subjects=1), FakeDetector(), FakeEncoder(), FakeMasks()),  # type: ignore[arg-type]
         LandmarksNode(FakeLandmarker(FakeScene())),

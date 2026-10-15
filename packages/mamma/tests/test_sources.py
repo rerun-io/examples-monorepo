@@ -32,13 +32,13 @@ class _FramesReached(Exception):
 def test_npz_source_never_opens_the_catalog(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from dagkit.sources import SegmentRef
 
-    from mamma.sources.npz import NpzSequenceSource
+    from mamma.sources.npz import npz_sequence_source
 
     (tmp_path / "meta").mkdir()
     (tmp_path / "videos").mkdir()
     np.savez(tmp_path / "meta" / "global.npz", seq_name="probe", fps=30.0, frame_start=0, frame_end=10)
     np.savez(tmp_path / "meta" / "A001.npz", cam_name="A001", cam_int=np.diag([900.0, 900.0, 1.0]), cam_ext=np.eye(4), cam_img_w=64, cam_img_h=48)
-    source = NpzSequenceSource(tmp_path, ("A001",), resize_hw=(48, 64), keep_native=False)
+    source = npz_sequence_source(tmp_path, ("A001",), resize_hw=(48, 64), keep_native=False)
 
     def no_catalog(self: SegmentRef) -> None:
         raise AssertionError(f"opened the catalog for {self.dataset!r}")

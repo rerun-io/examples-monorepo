@@ -1,4 +1,4 @@
-"""Decoded multi-camera frames: what ``CatalogVideoSource`` puts on its ``frames`` port (memory only, no serde)."""
+"""Decoded multi-camera frames: what ``VideoSource`` and ``CatalogLumaSource`` put on their ``frames`` port (memory only, no serde)."""
 
 from dataclasses import dataclass
 
@@ -25,7 +25,7 @@ class MultiViewFrames:
 
 @dataclass(frozen=True, slots=True)
 class LumaFrameset:
-    """Raw Y planes of one frameset (``cpu_luma``); ``None`` marks a camera missing from it."""
+    """Raw Y planes of one frameset (``CatalogLumaSource``); ``None`` marks a camera missing from it."""
 
     t_ns: TimeNs
     views: tuple[str, ...]
