@@ -28,7 +28,6 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from dagkit.catalog import served
-from dagkit.graph import Graph
 from dagkit.node import Emit
 from dagkit.runners import run_sequential
 from dagkit.sinks import Latest
@@ -78,10 +77,8 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
     started: float = time.perf_counter()
-    graph: Graph = build(config, recording)
     input_render = InputRender(recording)
-    graph.sinks({edge.dst.port: edge.src for edge in graph.edges if edge.dst.node == "viewer"}, {"input_render": input_render})
-    report = run_sequential(graph)
+    report = run_sequential(build(config, recording, {"input_render": input_render}))
     wall_s: float = time.perf_counter() - started
     recording.log("/verify/single_image/run", rr.AnyValues(wall_s=wall_s, n_splats=float(input_render.n_splats), stage=config.stage, code="graph"), static=True)
     print(f"{case.name} {phase}: {report.status}, {input_render.n_splats} splats in {wall_s:.1f} s")

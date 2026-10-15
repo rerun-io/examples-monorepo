@@ -7,6 +7,7 @@ its example is the ``VERIFY.toml`` short case (``short_case``). The viewer opens
 tab shows the graph, its guide and four of its outputs.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -97,9 +98,9 @@ def blueprint(config: Config, graph: Graph) -> rrb.Blueprint:
     return with_pipeline(rrb.Blueprint(rrb.Horizontal(view3d, grid), collapse_panels=True), outputs)
 
 
-def build(config: Config, recording: rr.RecordingStream) -> Graph:
+def build(config: Config, recording: rr.RecordingStream, extra_sinks: Mapping[str, Node] | None = None) -> Graph:
     """Models load here, before the run (MoGe v1; FLUX.1 Fill unless ``no-outpaint``); the blueprint names the graph's steps,
-    so it follows the graph."""
+    so it follows the graph. ``extra_sinks`` are fed from the final ports like the viewer (verify's ``InputRender``)."""
     from monopriors.models.relative_depth.moge_v1 import MoGeV1Predictor
 
     from vistadream.models.flux import FluxInpainting
@@ -108,6 +109,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS)}
     if config.output_ply is not None:
         sinks["ply"] = PlySink(config.output_ply)
+    sinks.update(extra_sinks or {})
     moge = MoGeV1Predictor(device="cuda")
     inpaint: FluxInpainting | None = None if config.stage == "no-outpaint" else FluxInpainting(config.flux)
     expand: ExpandNode | None = ExpandNode(inpaint, moge, config.n_frames, seed=config.seed) if config.stage == "coarse" and inpaint is not None else None
