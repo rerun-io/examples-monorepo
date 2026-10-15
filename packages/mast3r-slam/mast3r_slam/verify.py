@@ -45,7 +45,7 @@ from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.rig import RigCameras
 
-from mast3r_slam.apis.slam import PACKAGE_DIR, Config, frame_hw, outputs, slam_config, video_source
+from mast3r_slam.apis.slam import PACKAGE_DIR, Config, outputs, slam_config, video_source
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.types import SlamConfig
 
@@ -113,7 +113,7 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     video: Source = video_source(config, cfg)
     golden = _GoldenSink(recording, CAMERA)
     start: float = time.perf_counter()
-    report: RunReport = run_threaded(slam_graph(video, cfg, frame_hw(video, cfg.img_size), {"golden": golden}), mode=config.mode)
+    report: RunReport = run_threaded(slam_graph(video, cfg, {"golden": golden}), mode=config.mode)
     wall_s: float = time.perf_counter() - start
     if report.status != "complete":
         raise RuntimeError(f"{case.name}: the graph ended {report.status}")

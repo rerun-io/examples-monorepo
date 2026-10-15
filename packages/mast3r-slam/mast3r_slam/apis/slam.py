@@ -11,12 +11,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from dagkit.app import HardwareClass, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
-from dagkit.node import Event, Mode, Node, PortType, Source
+from dagkit.node import Mode, Node, PortType, Source
 from dagkit.runners import RunReport
 from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
@@ -24,12 +23,9 @@ from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import VideoSource
 from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
-from simplecv.types.frames import MultiViewFrames
-from simplecv.types.rig import RigCameras
 
 from mast3r_slam.graphs.slam import slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
-from mast3r_slam.ops.image import resize_img
 from mast3r_slam.types import KeyframeCloud, MapUpdate, SlamConfig, TrackedFrame
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
@@ -83,23 +79,6 @@ def outputs(camera: str) -> tuple[dict[str, PortType], dict[str, str]]:
     return ports, {"keyframes": f"{ROOT}/{name}", "tracked": f"{ROOT}/tracked/{name}", "map": f"{ROOT}/map", "cloud": f"{ROOT}/map/keyframes"}
 
 
-def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
-    """MASt3R frame size of the source's images: the static rig's resolution when the source has one (it comes before the
-    frames), else the size of its first frame (a decode)."""
-    events = iter(video.events())
-    try:
-        first: Event = next(e for e in events if e.port in ("rig", "frames"))
-    finally:
-        getattr(events, "close", lambda: None)()
-    if isinstance(first.value, RigCameras):
-        width, height = (int(v) for v in first.value.resolution_wh[0])
-    else:
-        frames: MultiViewFrames = first.value  # type: ignore[assignment]
-        height, width = frames.rgb.shape[-2:]
-    shape = resize_img(np.zeros((height, width, 3), dtype=np.float32), img_size).rgb_tensor.shape
-    return int(shape[-2]), int(shape[-1])
-
-
 def video_source(config: Config, cfg: SlamConfig) -> Source:
     if config.video is not None:
         return VideoFileSource(config.video, stride=cfg.subsample, max_frames=config.max_frames)
@@ -142,7 +121,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
         sinks["layer"] = LayerSink.open(config.segment, LAYER, producer, layer_ports, roots, output_dir=config.layer_dir, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
-    return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
+    return slam_graph(video, cfg, sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 
 
 def main(config: Config) -> RunReport:

@@ -34,9 +34,8 @@ from simplecv.sources.files import VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
-from mast3r_slam.apis import slam as app
-from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, frame_hw, outputs, slam_config, video_source
-from mast3r_slam.graphs.slam import slam_graph
+from mast3r_slam.apis.slam import PACKAGE_DIR, Config, build, outputs, slam_config, video_source
+from mast3r_slam.graphs.slam import frame_hw, slam_graph
 from mast3r_slam.nodes.nerfstudio import NerfstudioSink
 from mast3r_slam.types import SlamConfig
 from mast3r_slam.verify import case_config, examples
@@ -53,7 +52,7 @@ def video(calibrated: bool) -> IterSource:
 def test_slam_graph_validates(calibrated: bool, live: bool, tmp_path: Path) -> None:
     ports, roots = outputs("rig_00/cam_00")
     sinks = {"viewer": RerunSink(rr.RecordingStream("test", send_properties=False), ports, roots)}
-    graph: Graph = slam_graph(video(calibrated), SlamConfig(use_calib=calibrated), (384, 512), sinks, live=live, nerfstudio=NerfstudioSink(tmp_path))
+    graph: Graph = slam_graph(video(calibrated), SlamConfig(use_calib=calibrated), sinks, live=live, nerfstudio=NerfstudioSink(tmp_path))
     graph.validate()
     kinds = {(e.src.node, e.dst.node, e.dst.port): e.kind for e in graph.edges}
     assert kinds[("video", "frontend", "frames")] == (DropOldest(1) if live else Block(2))
@@ -168,9 +167,15 @@ def test_frame_hw_takes_the_static_rig_resolution_without_decoding_a_frame() -> 
 def test_the_layer_producer_carries_the_package_version_and_the_hardware_profile(preset: str | None, profile: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[Producer] = []
     monkeypatch.setattr(sinks, "log_producer", lambda recording, _layer, producer: logged.append(producer))
-    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
     build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", preset=preset, layer_dir=tmp_path), rr.RecordingStream("test", send_properties=False))  # type: ignore[arg-type]
     assert logged == [Producer.of("mast3r-slam", "mast3r-slam", profile)] and "+" in logged[0].version  # version + git sha7
+
+
+def test_building_the_app_graph_reads_nothing_from_its_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``shared`` buffers are sized when the run starts, so building the graph (the CLI, the form, verify) neither
+    queries the catalog nor opens a video."""
+    monkeypatch.setattr(VideoSource, "events", lambda self: pytest.fail("build read its input"))
+    build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda"), rr.RecordingStream("test", send_properties=False)).validate()  # type: ignore[union-attr]
 
 
 def test_the_generated_gradio_form_builds_without_the_example_data() -> None:
@@ -191,10 +196,9 @@ def test_the_graph_and_cpu_ops_import_without_the_kernel_extensions() -> None:
     assert subprocess.run([sys.executable, "-c", loaded], capture_output=True, text=True, check=True).stdout.splitlines()[-1] == "[]"
 
 
-def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_app_graph_draws_its_declaration_and_documents_itself(tmp_path: Path) -> None:
     """``build`` with every output on (catalog input = the default segment, layer, Nerfstudio): valid, the picture read back
     from an rrd equals the declaration, each box says where it runs (the backend is its own process), GRAPH.md is current."""
-    monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
     config = Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", output_nerfstudio=tmp_path / "ns", layer_dir=tmp_path / "layers")
     graph: Graph = build(config, rr.RecordingStream("test", send_properties=False))  # type: ignore[assignment]
     graph.validate()
