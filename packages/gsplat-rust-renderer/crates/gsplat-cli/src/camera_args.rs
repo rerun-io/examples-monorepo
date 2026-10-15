@@ -1,10 +1,7 @@
 //! Resolve a camera file or deterministic orbit for benchmark commands.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use glam::{Mat4, Vec2};
-use gsplat_cli::{
-    PlyScene, camera,
-    camera::{CameraSpec, load_frames},
-};
+use gsplat_cli::{PlyScene, camera, camera::CameraSpec, camera_files::load_frames};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
@@ -28,6 +25,7 @@ pub(super) struct CameraArgs {
     #[arg(long, value_delimiter = ',', num_args = 3, allow_hyphen_values = true)]
     pub(super) center: Option<Vec<f32>>,
 }
+
 #[derive(Clone, Debug)]
 pub(super) struct Resolution(pub(super) Option<(u32, u32)>);
 pub(super) fn resolution(value: &str) -> Result<Resolution> {
@@ -41,6 +39,7 @@ pub(super) fn resolution(value: &str) -> Result<Resolution> {
     ensure!(w >= 11 && h >= 11, "resolution must be at least 11x11");
     Ok(Resolution(Some((w, h))))
 }
+
 pub(super) async fn cameras(args: &CameraArgs, scene: &PlyScene) -> Result<Vec<CameraSpec>> {
     let size = args.res.0;
     let path = if let Some(count) = args.path.strip_prefix("orbit:") {
@@ -52,7 +51,7 @@ pub(super) async fn cameras(args: &CameraArgs, scene: &PlyScene) -> Result<Vec<C
             .radius
             .as_deref()
             .map(Vec2::from_slice)
-            .unwrap_or(Vec2::splat(scene.extent * 2.5));
+            .unwrap_or_else(|| Vec2::splat(scene.extent * 2.5));
         ensure!(
             r.is_finite() && r.min_element() > 0.0,
             "invalid orbit radius"

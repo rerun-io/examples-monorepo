@@ -1,15 +1,14 @@
-//! Opt-in GPU/asset integration: GSPLAT_LEGO and GSPLAT_TEST_OUTPUT identify inputs.
+//! Opt-in GPU/asset integration: `GSPLAT_LEGO` and `GSPLAT_TEST_OUTPUT` identify inputs.
 use std::{collections::BTreeSet, io::BufReader, path::PathBuf, process::Command};
 
 #[test]
 #[ignore = "integration: requires a GPU and GSPLAT_LEGO dataset"]
 fn lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs() {
     let dataset = std::env::var_os("GSPLAT_LEGO").expect("set GSPLAT_LEGO to the Lego dataset");
+    let temporary = tempfile::tempdir().unwrap();
     let output = std::env::var_os("GSPLAT_TEST_OUTPUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("gsplat-train-{}", std::process::id()))
-        });
+        .unwrap_or_else(|| temporary.path().to_owned());
     std::fs::create_dir_all(&output).unwrap();
     let recording = output.join("training.rrd");
     let unused_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -102,7 +101,9 @@ fn lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs() {
                         *colors.array
                     );
                     // Both paths must bake the training min-scale filter identically.
-                    use rerun::external::arrow::array::{Array, FixedSizeListArray, Float32Array};
+                    use rerun::external::arrow::array::{
+                        Array as _, FixedSizeListArray, Float32Array,
+                    };
                     for batch in [&expected.centers, &expected.scales, &expected.quaternions] {
                         let batch = batch.as_ref().unwrap();
                         let actual = chunk

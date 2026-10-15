@@ -1,19 +1,20 @@
-//! NeRF, strict CameraSpec JSON, and COLMAP text/binary adapters.
-use crate::{
-    Result,
-    camera::{CameraModel, CameraSpec},
-};
+//! NeRF, strict `CameraSpec` JSON, and COLMAP text/binary adapters.
+use crate::camera::CameraSpec;
+use anyhow::{Context as _, Result};
+use gsplat_core::CameraModel;
 use std::path::{Path, PathBuf};
 
 pub struct CameraFrame {
     pub camera: CameraSpec,
     pub file_path: PathBuf,
 }
+
 #[derive(serde::Deserialize)]
 struct NerfTransforms {
     camera_angle_x: f32,
     frames: Vec<NerfFrame>,
 }
+
 #[derive(serde::Deserialize)]
 struct NerfFrame {
     file_path: PathBuf,
@@ -22,7 +23,7 @@ struct NerfFrame {
 
 pub(crate) fn nerf_frames(path: &Path, resize: Option<(u32, u32)>) -> Result<Vec<CameraFrame>> {
     let document: NerfTransforms = serde_json::from_reader(std::fs::File::open(path)?)?;
-    let root = path.parent().unwrap_or(Path::new("."));
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
     document
         .frames
         .into_iter()
@@ -49,7 +50,7 @@ pub(crate) fn nerf_frames(path: &Path, resize: Option<(u32, u32)>) -> Result<Vec
         .collect()
 }
 
-/// A JSON file contains NeRF transforms or an array of strict CameraSpec records.
+/// A JSON file contains NeRF transforms or an array of strict `CameraSpec` records.
 /// A directory is one COLMAP sparse model containing cameras/images .bin or .txt.
 pub async fn load_frames(path: &Path, resize: Option<(u32, u32)>) -> Result<Vec<CameraFrame>> {
     let mut frames = if path.is_dir() {
@@ -163,10 +164,8 @@ async fn colmap_frames(path: &Path) -> Result<Vec<CameraFrame>> {
                 [image.quat.w, image.quat.x, image.quat.y, image.quat.z],
                 image.tvec.to_array(),
             );
-            let width = u32::try_from(camera.width)
-                .map_err(|_| anyhow::anyhow!("COLMAP width exceeds u32"))?;
-            let height = u32::try_from(camera.height)
-                .map_err(|_| anyhow::anyhow!("COLMAP height exceeds u32"))?;
+            let width = u32::try_from(camera.width).context("COLMAP width exceeds u32")?;
+            let height = u32::try_from(camera.height).context("COLMAP height exceeds u32")?;
             Ok(CameraFrame {
                 file_path: image.name.into(),
                 camera: CameraSpec {

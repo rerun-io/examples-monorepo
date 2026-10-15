@@ -1,5 +1,5 @@
 //! GPU readback and logging run off the trainer thread, using captured tensor handles.
-use anyhow::Context;
+use anyhow::Context as _;
 use brush_dataset::{Dataset, scene::SceneView};
 use brush_render::gaussian_splats::Splats;
 use brush_train::msg::{RefineStats, TrainStepStats};
@@ -44,11 +44,11 @@ fn scalar(rec: &RecordingStream, path: &str, value: f64) -> anyhow::Result<()> {
 fn jpeg(
     rec: &RecordingStream,
     path: &str,
-    image: image::RgbImage,
+    image: &image::RgbImage,
     is_static: bool,
 ) -> anyhow::Result<()> {
     let mut data = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut data, 85).encode_image(&image)?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut data, 85).encode_image(image)?;
     let image = rerun::EncodedImage::from_file_contents(data).with_media_type("image/jpeg");
     if is_static {
         rec.log_static(path, &image)?;
@@ -81,9 +81,9 @@ struct Logger {
     max_image_size: u32,
     eval_views: Vec<SceneView>,
     warned_sh4: bool,
-    compute: bool,
-    video: bool,
+    layout: super::dashboard::Layout,
 }
+
 impl Logger {
     async fn log(&mut self, observation: Observation) -> anyhow::Result<()> {
         match observation {
@@ -103,8 +103,7 @@ impl Logger {
                 super::dashboard::send(
                     &self.rec,
                     self.eval_views.len(),
-                    self.compute,
-                    self.video,
+                    self.layout,
                     up.to_array(),
                 )?;
             }
@@ -186,7 +185,7 @@ impl Logger {
             jpeg(
                 &self.rec,
                 &format!("{path}/image"),
-                black_ground_truth(thumbnail, view.image.alpha_mode())?,
+                &black_ground_truth(thumbnail, view.image.alpha_mode())?,
                 true,
             )?;
         }
@@ -194,7 +193,7 @@ impl Logger {
             jpeg(
                 &self.rec,
                 &format!("eval/view_{i}/ground_truth"),
-                black_ground_truth(
+                &black_ground_truth(
                     view.image
                         .clone()
                         .with_max_resolution(self.max_image_size)
@@ -213,7 +212,7 @@ impl Logger {
             eprintln!("Rerun supports SH through degree 3; truncating degree 4.");
             self.warned_sh4 = true;
         }
-        let snapshot = gsplat_train::read_splats(splats, full_sh).await?;
+        let snapshot = Box::pin(gsplat_train::read_splats(splats, full_sh)).await?;
         self.rec.log("world/splats", &snapshot)?;
         // Memory reporting synchronizes the compute server. Keep it at
         // snapshot cadence, on this worker, rather than the step path.
@@ -224,7 +223,7 @@ impl Logger {
         Ok(())
     }
     async fn step(
-        &mut self,
+        &self,
         iter: u32,
         stats: TrainStepStats,
         step_duration: Duration,
@@ -254,13 +253,7 @@ impl Logger {
         }
         Ok(())
     }
-    async fn eval(
-        &mut self,
-        iter: u32,
-        psnr: f32,
-        ssim: f32,
-        splats: Splats,
-    ) -> anyhow::Result<()> {
+    async fn eval(&self, iter: u32, psnr: f32, ssim: f32, splats: Splats) -> anyhow::Result<()> {
         self.rec.set_time_sequence("iterations", iter);
         scalar(&self.rec, "psnr/eval", psnr as f64)?;
         scalar(&self.rec, "ssim/eval", ssim as f64)?;
@@ -271,20 +264,20 @@ impl Logger {
                 .with_max_resolution(self.max_image_size)
                 .dimensions()
                 .await?;
-            let (render, _) = brush_render::render_splats(
+            let (render, _) = Box::pin(brush_render::render_splats(
                 splats.clone(),
                 &view.camera,
                 glam::uvec2(w, h),
                 glam::Vec3::ZERO,
                 None,
                 brush_render::TextureMode::Float,
-            )
+            ))
             .await;
             let pixels = render.into_data_async().await?.try_into_vec::<f32>()?;
             jpeg(
                 &self.rec,
                 &format!("eval/view_{i}/render"),
-                image::DynamicImage::ImageRgba32F(
+                &image::DynamicImage::ImageRgba32F(
                     image::Rgba32FImage::from_raw(w, h, pixels).context("invalid render image")?,
                 )
                 .to_rgb8(),
@@ -299,8 +292,7 @@ pub async fn run(
     rx: Receiver<Observation>,
     rec: RecordingStream,
     device: brush_process::ProcessDevice,
-    compute: bool,
-    video: bool,
+    layout: super::dashboard::Layout,
 ) {
     let mut logger = Logger {
         rec,
@@ -308,8 +300,7 @@ pub async fn run(
         max_image_size: 512,
         eval_views: Vec::new(),
         warned_sh4: false,
-        compute,
-        video,
+        layout,
     };
     for observation in rx {
         if !logger.rec.is_enabled() {

@@ -29,3 +29,6 @@ re_tracing = "=0.38.1"
 re_format = "=0.38.1"
 macaw = "0.30"
 ahash = "0.8"
+
+[lints]
+workspace = true

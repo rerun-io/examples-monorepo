@@ -9,6 +9,7 @@ pub enum Mode {
     Default,
     Mip,
 }
+
 #[derive(Clone, Copy, Debug, clap::Args, Serialize)]
 pub struct RenderSettings {
     #[arg(long, value_enum, default_value = "auto")]
@@ -20,6 +21,7 @@ pub struct RenderSettings {
     #[arg(long, default_value_t = 1_048_576)]
     pub initial_capacity: u32,
 }
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -30,8 +32,9 @@ impl Default for RenderSettings {
         }
     }
 }
+
 impl RenderSettings {
-    pub fn validate(&self) -> crate::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         if !self.splat_scale.is_finite()
             || self.splat_scale <= 0.0
             || self.min_scale.is_some_and(|s| !s.is_finite() || s < 0.0)

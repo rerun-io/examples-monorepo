@@ -15,7 +15,9 @@ async fn pretrained_lego_conversion_matches_rerun_loader() {
         &device,
         brush_render::gaussian_splats::SplatRenderMode::Default,
     );
-    let actual = gsplat_train::read_splats(splats, true).await.unwrap();
+    let actual = Box::pin(gsplat_train::read_splats(splats, true))
+        .await
+        .unwrap();
     assert_eq!(actual.centers, expected.centers);
     assert_eq!(actual.scales, expected.scales);
     assert_eq!(actual.quaternions, expected.quaternions);

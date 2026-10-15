@@ -110,7 +110,6 @@ impl VisualizerSystem for GaussianSplatVisualizer {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_entity(
     ctx: &ViewContext<'_>,
     query: &ViewQuery<'_>,

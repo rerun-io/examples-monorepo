@@ -3,7 +3,7 @@ use crate::{
     Cli,
     logging::{self, Observation},
 };
-use anyhow::Context;
+use anyhow::Context as _;
 use brush_process::{
     ProcessDevice,
     message::{ProcessMessage, TrainMessage},
@@ -26,6 +26,7 @@ pub struct Recorder {
     stats_every: u32,
     dropped_steps: u64,
 }
+
 impl Recorder {
     pub fn new(cli: &Cli, device: &ProcessDevice) -> anyhow::Result<Option<Self>> {
         if !cli.spawn && cli.save.is_none() && cli.connect.is_none() {
@@ -57,14 +58,17 @@ impl Recorder {
         // apply backpressure; intermediate step metrics may be dropped when the worker lags.
         let (sender, rx) = std::sync::mpsc::sync_channel(8);
         let device = device.clone();
-        let (compute, video) = (cli.compute_visualizer, cli.video);
+        let layout = super::dashboard::Layout {
+            compute_visualizer: cli.compute_visualizer,
+            video: cli.video,
+        };
         let worker = std::thread::Builder::new()
             .name("gsplat-rerun".into())
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
-                runtime.block_on(logging::run(rx, rec, device, compute, video));
+                runtime.block_on(logging::run(rx, rec, device, layout));
                 Ok(())
             })?;
         Ok(Some(Self {
@@ -90,7 +94,7 @@ impl Recorder {
             Ok(Ok(())) => {}
             Ok(Err(error)) => eprintln!("Recording warning: {error:#}"),
             Err(_) => {
-                eprintln!("Recording warning: worker panicked; training and exports continued")
+                eprintln!("Recording warning: worker panicked; training and exports continued");
             }
         }
     }
@@ -130,11 +134,13 @@ impl Recorder {
                     self.snapshot_first,
                     self.snapshot_every,
                 ) {
-                    let _ = self.sender.send(Observation::Snapshot {
-                        iter,
-                        splats: splats.get(0).context("missing training splats")?,
-                        full_sh: iter == self.final_step,
-                    });
+                    self.sender
+                        .send(Observation::Snapshot {
+                            iter,
+                            splats: splats.get(0).context("missing training splats")?,
+                            full_sh: iter == self.final_step,
+                        })
+                        .ok();
                 }
                 if !iter.is_multiple_of(self.stats_every) && iter != self.final_step {
                     return Ok(());
@@ -176,7 +182,7 @@ impl Recorder {
             },
             _ => return Ok(()),
         };
-        let _ = self.sender.send(observation);
+        self.sender.send(observation).ok();
         Ok(())
     }
 }
@@ -193,7 +199,10 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::sync_channel(2);
         let mut active = Recorder {
             sender,
-            worker: std::thread::spawn(|| Ok(())),
+            worker: std::thread::Builder::new()
+                .name("recorder-test".into())
+                .spawn(|| Ok(()))
+                .unwrap(),
             final_step: 100,
             splat_count: 1,
             snapshot_first: 50,

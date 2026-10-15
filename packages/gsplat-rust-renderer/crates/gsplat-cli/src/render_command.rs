@@ -1,9 +1,9 @@
 //! Headless gsplat-core CLI; flags preserve the Python evaluation harness contract.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use clap::Parser;
 use gsplat_cli::{
-    Output, PlyScene, Renderer,
-    camera::{CameraFrame, load_frames},
+    Output, PlyScene, StandaloneRenderer,
+    camera_files::{CameraFrame, load_frames},
     settings::RenderSettings,
 };
 use std::path::{Component, Path, PathBuf};
@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) struct Args {
     #[arg(long)]
     ply: PathBuf,
-    /// NeRF transforms JSON, CameraSpec JSON array, or COLMAP sparse model directory.
+    /// NeRF transforms JSON, `CameraSpec` JSON array, or COLMAP sparse model directory.
     #[arg(long)]
     camera: PathBuf,
     #[arg(long, default_value_t = 0)]
@@ -35,6 +35,7 @@ pub(crate) struct Args {
     #[command(flatten)]
     settings: RenderSettings,
 }
+
 fn parse_background(text: &str) -> Result<glam::Vec3, String> {
     let values = text
         .split(',')
@@ -46,6 +47,7 @@ fn parse_background(text: &str) -> Result<glam::Vec3, String> {
     }
     Ok(glam::Vec3::from_slice(&values))
 }
+
 fn frame_output(root: &Path, frame: &CameraFrame) -> Result<PathBuf> {
     ensure!(
         !frame.file_path.components().any(|c| matches!(
@@ -57,7 +59,8 @@ fn frame_output(root: &Path, frame: &CameraFrame) -> Result<PathBuf> {
     );
     Ok(root.join(&frame.file_path).with_extension("png"))
 }
-fn save(renderer: &Renderer, size: glam::UVec2, path: &Path) -> Result<()> {
+
+fn save(renderer: &StandaloneRenderer, size: glam::UVec2, path: &Path) -> Result<()> {
     let pixels = renderer.read_rgba()?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -67,6 +70,7 @@ fn save(renderer: &Renderer, size: glam::UVec2, path: &Path) -> Result<()> {
         .save(path)?;
     Ok(())
 }
+
 pub(crate) async fn run(args: Args) -> Result<()> {
     ensure!(
         args.width > 0 && args.height > 0,

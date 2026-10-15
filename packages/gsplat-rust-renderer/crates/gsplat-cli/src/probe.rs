@@ -3,7 +3,7 @@
 use gsplat_viewer::application;
 
 use gsplat_cli::camera::CameraSpec;
-use re_viewer::external::{eframe, egui};
+use re_viewer::external::{eframe, egui, parking_lot::Mutex};
 use serde::Serialize;
 use std::time::Instant;
 
@@ -183,7 +183,7 @@ use re_sdk_types::View as _;
 use re_viewer_context::{IdentifiedViewSystem, ViewContextSystem};
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 #[derive(clap::Args)]
@@ -223,7 +223,7 @@ impl ViewContextSystem for ProbeEye {
         _: &re_viewer_context::ViewContextSystemOncePerFrameResult,
     ) {
         if let Some(camera) = gsplat_viewer::camera_from_view(ctx, query) {
-            CAMERAS.lock().expect("probe camera").push(ProbeView {
+            CAMERAS.lock().push(ProbeView {
                 camera,
                 msaa_samples: re_renderer::ViewBuilder::main_target_default_msaa_state(
                     ctx.render_ctx().render_config(),
@@ -234,7 +234,7 @@ impl ViewContextSystem for ProbeEye {
         }
     }
 }
-pub async fn run(cli: Args) -> anyhow::Result<()> {
+pub fn run(cli: Args) -> anyhow::Result<()> {
     anyhow::ensure!(
         cli.rrd.is_file(),
         "recording does not exist: {}",
@@ -269,7 +269,9 @@ pub async fn run(cli: Args) -> anyhow::Result<()> {
         .with_step_dt(1.0 / 60.0)
         .wgpu_setup(setup)
         .build_eframe(move |cc| {
-            let _ = setup_state.set(cc.wgpu_render_state.clone().expect("probe device"));
+            setup_state
+                .set(cc.wgpu_render_state.clone().expect("probe device"))
+                .ok();
             let mut app = application::create_app(
                 cc,
                 token,
@@ -299,10 +301,10 @@ pub async fn run(cli: Args) -> anyhow::Result<()> {
     );
     let started = Instant::now();
     loop {
-        CAMERAS.lock().expect("probe cameras").clear();
+        CAMERAS.lock().clear();
         probe.started = Instant::now();
         harness.step();
-        let cameras = std::mem::take(&mut *CAMERAS.lock().expect("probe cameras"));
+        let cameras = std::mem::take(&mut *CAMERAS.lock());
         anyhow::ensure!(cameras.len() <= 1, "the frame probe requires one 3D view");
         let Some(view) = cameras.first() else {
             anyhow::ensure!(
