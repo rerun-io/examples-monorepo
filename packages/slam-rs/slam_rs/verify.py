@@ -21,11 +21,12 @@ from dagkit.verify import Case, Phase, pre_golden, run_counts
 from rerun.catalog import DatasetEntry
 
 from slam_rs.apis.catalog_layer import vio_publish
-from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, read_ground_truth, resolve_catalog_segments, rig_trajectory
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, read_ground_truth, resolve_catalog_segments
 from slam_rs.config import load_slam_config
 from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import Trajectory, ate
+from slam_rs.trajectory import ate
+from slam_rs.types import Trajectory, rig_trajectory
 
 RUN: str = "/verify/vio/run"
 """Static ``AnyValues`` of a golden: the run's counts, settings and wall time."""

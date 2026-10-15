@@ -21,8 +21,7 @@ from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, RigProfile
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun
-from slam_rs.trajectory import Trajectory, empty_trajectory
-from slam_rs.types import RigPose, VioRig
+from slam_rs.types import RigPose, Trajectory, VioRig, empty_trajectory
 
 
 @serde(deny_unknown_fields=True)

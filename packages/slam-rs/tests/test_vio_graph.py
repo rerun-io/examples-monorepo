@@ -38,8 +38,7 @@ from slam_rs.graphs import vio as graphs_vio
 from slam_rs.graphs.vio import VioSource, vio_graph
 from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import Trajectory
-from slam_rs.types import CatalogPoses, RigPose, VioRig
+from slam_rs.types import CatalogPoses, RigPose, Trajectory, VioRig
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 SEGMENT = SegmentRef("msd-index", "msd-index__test__synthetic")

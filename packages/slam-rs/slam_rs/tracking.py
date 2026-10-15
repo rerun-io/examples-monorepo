@@ -17,7 +17,8 @@ from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
-from slam_rs.trajectory import Trajectory, shift_clock
+from slam_rs.trajectory import shift_clock
+from slam_rs.types import Trajectory
 
 MAX_HELD_FRAMESETS: int = 2
 """Most framesets the hold may ever carry: one refused, plus the one whose samples unblock it."""

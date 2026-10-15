@@ -33,12 +33,12 @@ from slam_rs.catalog_feed import (
     _video_codec,
     camera_calib,
     open_segment,
-    rig_trajectory,
 )
 from slam_rs.config import SlamConfig
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, resolved_flow_config
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import Trajectory, associate, read_trajectory, shift_clock, write_trajectory
+from slam_rs.trajectory import associate, read_trajectory, shift_clock, write_trajectory
+from slam_rs.types import Trajectory, rig_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]

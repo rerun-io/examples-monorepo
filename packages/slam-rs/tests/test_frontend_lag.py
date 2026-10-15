@@ -14,7 +14,7 @@ from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuStream
 from slam_rs.frontend_log import camera_entity
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import empty_trajectory
+from slam_rs.types import empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage, log_calibration, vio_blueprint
 
 
