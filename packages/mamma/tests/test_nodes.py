@@ -1,12 +1,9 @@
 """Node contracts with fake models on a synthetic three-camera ring (no GPU, no catalog, no weights)."""
 
-from collections.abc import Mapping
-
 import numpy as np
-from dagkit.node import Emit, Fenced, PortType, RunContext, Tick
-from dagkit.testing import check_node_contract
-from dagkit.time import TimeNs
-from mamma_fakes import BODY, FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene, host
+from dagkit.node import Fenced, Tick
+from dagkit.testing import check_node_contract, host
+from mamma_fakes import BODY, FakeDetector, FakeEncoder, FakeFitter, FakeLandmarker, FakeMasks, FakeScene
 
 from mamma.nodes.fit import FitNode
 from mamma.nodes.landmarks import LandmarksNode
@@ -17,52 +14,10 @@ from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiView
 FACES: np.ndarray = np.zeros((2, 3), dtype=np.int32)
 
 
-class HostEmit:
-    def __init__(self, out: Emit) -> None:
-        self.out = out
-
-    def put(self, port: str, t_ns: TimeNs, value: object) -> None:
-        self.out.put(port, t_ns, host(value))
-
-    def watermark(self, t_ns: TimeNs) -> None:
-        self.out.watermark(t_ns)
-
-
-class Hosted:
-    """A node whose outputs hold tensors, putting host copies: dagkit's contract check compares outputs by value."""
-
-    def __init__(self, node: TrackNode | LandmarksNode | FitNode) -> None:
-        self.node = node
-        self.inputs: Mapping[str, PortType] = node.inputs
-        self.outputs: Mapping[str, PortType] = node.outputs
-
-    def reset(self, ctx: RunContext) -> None:
-        self.node.reset(ctx)
-
-    def step(self, tick: Tick, out: Emit) -> None:
-        self.node.step(tick, HostEmit(out))
-
-    def flush(self, out: Emit) -> None:
-        self.node.flush(HostEmit(out))
-
-
 def track_outputs(scene: FakeScene) -> list[tuple[str, int, object]]:
     ticks = [Tick(e.t_ns, "frames", e.value, {"rig": scene.rig}) for e in list(scene.events(12))[1:]]
     node = TrackNode(TrackParams(expected_subjects=1), FakeDetector(), FakeEncoder(), FakeMasks())  # type: ignore[arg-type]
-    raw: list[tuple[str, int, object]] = []
-
-    class Keep:
-        def put(self, port: str, t_ns: int, value: object) -> None:
-            raw.append((port, t_ns, value))
-
-        def watermark(self, t_ns: int) -> None:
-            pass
-
-    node.reset(RunContext("mamma-capture", "track", "lossless"))
-    for tick in ticks:
-        node.step(tick, Keep())
-    assert check_node_contract(Hosted(node), ticks)  # reset idempotent, outputs monotonic, flush drains
-    return raw
+    return check_node_contract(node, ticks)  # reset idempotent, outputs monotonic, flush drains
 
 
 def test_track_bootstraps_one_person_and_tracks_it_in_every_view() -> None:
@@ -81,11 +36,12 @@ def test_landmarks_follow_the_tracks_and_keep_engine_pixels() -> None:
     scene = FakeScene()
     frames = {f.frame_index: f for f in map(scene.frames, range(12))}
     ticks = [Tick(t, "tracks", value, {"frames": Fenced(frames[value.value.frame_index], None)}) for _, t, value in track_outputs(scene)]  # type: ignore[attr-defined]
-    outputs = check_node_contract(Hosted(LandmarksNode(FakeLandmarker(scene))), ticks)
+    outputs = check_node_contract(LandmarksNode(FakeLandmarker(scene)), ticks)
     assert [t for _, t, _ in outputs] == [tick.t_ns for tick in ticks]
     for _, _, value in outputs:
-        assert isinstance(value, dict) and value["person"].tolist() == [0, 0, 0]
-        np.testing.assert_allclose(value["xy"][1], scene.pixels(1), rtol=1e-6)
+        landmarks = host(value)
+        assert isinstance(landmarks, dict) and landmarks["person"].tolist() == [0, 0, 0]
+        np.testing.assert_allclose(landmarks["xy"][1], scene.pixels(1), rtol=1e-6)
 
 
 def landmark_ticks(scene: FakeScene, count: int, persons: tuple[int, ...] = (0,)) -> list[Tick]:

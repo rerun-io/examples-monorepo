@@ -150,14 +150,6 @@ class FakeFitter:
         return [self._result(f) for f in self.frames[-self.lag :]] if hasattr(self, "booted") else []
 
 
-def host(value: object) -> object:
-    """A value with every tensor as a numpy array (fenced values unwrapped), for equality checks."""
-    value = value.value if isinstance(value, Fenced) else value
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: host(getattr(value, f.name)) for f in dataclasses.fields(value)}
-    return value.cpu().numpy() if isinstance(value, torch.Tensor) else value
-
-
 def assert_same(a: object, b: object) -> None:
     for f in dataclasses.fields(a):  # type: ignore[arg-type]
         x, y = getattr(a, f.name), getattr(b, f.name)

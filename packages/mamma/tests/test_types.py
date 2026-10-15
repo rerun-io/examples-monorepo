@@ -1,12 +1,11 @@
 """mamma Types: serde round-trips, the Rerun mapping structure, and to_rerun -> from_layer on catalog-shaped rows (unit lane)."""
 
-from collections import defaultdict
 from dataclasses import fields, replace
 
 import numpy as np
-import pyarrow as pa
 import pytest
 import torch
+from dagkit.testing import layer_table
 from dagkit.time import STATIC
 from dagkit.types import Log
 from hypothesis import given, settings
@@ -21,20 +20,6 @@ from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiView
 ROOT = "/world"
 PEOPLE = "/world/mamma/people"
 FLOATS = st.floats(-1e3, 1e3, width=32)
-
-
-def layer_table(values: list[tuple[int, object]], root: str) -> pa.Table:
-    """What a catalog reader returns for these values: one row per time, ``<entity>:<component>`` columns, statics in every row."""
-    cells: dict[str, dict[int, list]] = defaultdict(dict)
-    statics: dict[str, list] = {}
-    for t_ns, value in values:
-        for log in value.to_rerun(root):  # type: ignore[attr-defined]
-            for batch in log.data.as_component_batches():
-                name: str = f"{log.path}:{batch.component_descriptor()}"
-                (statics.__setitem__(name, batch.as_arrow_array().to_pylist()) if log.static or t_ns == STATIC else cells[name].__setitem__(t_ns, batch.as_arrow_array().to_pylist()))
-    times: list[int] = sorted({t for t, _ in values if t != STATIC}) or [0]
-    columns: dict[str, list] = {"video_time": times} | {n: [c.get(t) for t in times] for n, c in cells.items()} | {n: [v] * len(times) for n, v in statics.items()}
-    return pa.table({name: pa.array(column, type=pa.int64()) if name == "video_time" else column for name, column in columns.items()})
 
 
 @st.composite
