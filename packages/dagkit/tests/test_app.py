@@ -19,7 +19,7 @@ from serde import coerce, serde
 
 from dagkit.apis import synthetic_demo
 from dagkit.apis.synthetic_demo import DemoRerunConfig
-from dagkit.app import NodeProfile, Profile, detect_hardware, health_views, load_profile, run_app, with_pipeline
+from dagkit.app import NodeProfile, Profile, detect_hardware, health_views, load_profile, run_app, run_graphs, with_pipeline
 from dagkit.form import gradio_app
 from dagkit.graph import Graph
 from dagkit.node import Emit, Event, Mode, Tick
@@ -350,6 +350,20 @@ def test_closing_a_form_run_stops_its_graph_before_its_scratch_directory_goes() 
     next(run)
     run.close()
     assert flushed == [(True, True)]
+
+
+def test_run_graphs_runs_every_pass_and_logs_run_health_only_when_asked(tmp_path: Path) -> None:
+    """A verify run drives an App's passes with ``run_graphs`` (no health: a golden holds outputs only); the CLI and the form
+    pass the viewer's recording as ``health``."""
+    recording = rr.RecordingStream("dagkit-test", recording_id="passes", send_properties=False)
+    recording.save(tmp_path / "passes.rrd")
+    report = run_graphs(PassesConfig(), two_passes, recording)
+    recording.flush()
+    recording.disconnect()
+    reader = RrdReader(tmp_path / "passes.rrd")
+    paths: set[str] = {str(c.entity_path) for c in reader.stream(store=reader.recordings()[0]).to_chunks()}
+    assert report is not None and report.graph == "pass2" and "/passes/done" in paths
+    assert not any(path.startswith("/dagkit/") for path in paths)
 
 
 def test_health_views_plot_exactly_what_the_runner_logs(tmp_path: Path) -> None:

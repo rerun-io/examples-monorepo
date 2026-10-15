@@ -81,8 +81,19 @@ def load_profile(directory: Path, hardware: HardwareClass | Literal["auto"] = "a
     return profile
 
 
-def _run_graphs(config: AppConfig, build: Callable[..., Graph | Iterator[Graph]], recording: rr.RecordingStream, control: Control) -> RunReport | None:
-    """The CLI's and the form's one loop: Stop is checked before the next graph is built, and a stopped build is closed."""
+def run_graphs(
+    config: AppConfig,
+    build: Callable[..., Graph | Iterator[Graph]],
+    recording: rr.RecordingStream,
+    *,
+    control: Control | None = None,
+    health: rr.RecordingStream | None = None,
+) -> RunReport | None:
+    """Run every graph ``build`` gives on ``config``'s runner and mode, one after the other; returns the last report (None:
+    no graph). The one loop of the CLI, the form and a verify run: Stop is checked before the next graph is built, a
+    stopped build is closed, each graph frees its models before the next is built, and a graph name may not repeat.
+    ``health`` gets each graph's picture and run health (the CLI and the form pass the viewer's recording)."""
+    control = control or Control()
     result: Graph | Iterator[Graph] = build(config, recording)
     built: Iterator[Graph] = iter((result,)) if isinstance(result, Graph) else result
     names: set[str] = set()
@@ -92,7 +103,7 @@ def _run_graphs(config: AppConfig, build: Callable[..., Graph | Iterator[Graph]]
             if graph.name in names:  # its picture, guide and health colours would land on the earlier graph's
                 raise GraphError(f"graph name {graph.name!r} repeats in one app")
             names.add(graph.name)
-            report = RUNNERS[config.runner](graph, mode=config.mode, control=control, health=recording)
+            report = RUNNERS[config.runner](graph, mode=config.mode, control=control, health=health)
             print(f"{report.graph}: {report.status}, {report.wall_s:.2f} s wall, {report.stream_s:.2f} s stream")
             del graph  # its nodes free their models before the next graph is built
     finally:
@@ -106,7 +117,7 @@ def run_app(config: C, build: Callable[[C, rr.RecordingStream], Graph | Iterator
     main: bool = threading.current_thread() is threading.main_thread()
     previous = signal.signal(signal.SIGINT, lambda *_: control.stop()) if main else None
     try:
-        report: RunReport | None = _run_graphs(config, build, config.rr_config.rec_stream, control)
+        report: RunReport | None = run_graphs(config, build, config.rr_config.rec_stream, control=control, health=config.rr_config.rec_stream)
     finally:
         if main:
             signal.signal(signal.SIGINT, previous)

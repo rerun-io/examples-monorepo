@@ -54,7 +54,7 @@ paths = ["exo_calib", "tests"]
 # Tyro-facing entry points (the CLI shims call them), dagkit node/sink protocol members the runners call, names used only
 # in string casts or fakes (TYPE_CHECKING imports, MoGe's K_33 keyword), pytestmark, the eval.json
 # dataclass fields (serialized by pyserde), and the verify hooks run/score (VERIFY.toml names them for dagkit.verify).
-ignore_names = ["main", "run", "score", "pytestmark", "K_33", "PersonDetector", "RtmPose2d", "inputs", "outputs", "reset", "step", "flush", "contents", "from_layer", "to_rerun", "mean_abs", "max_abs", "se3", "sim3", "focal_error_pct", "camera_names", "refinement_diagnostics", "camera_centers_m", "pairwise_distance_m", "height_above_floor_m", "refined_rig_geometry", "segment_id", "dataset_name", "per_camera", "median", "rotation_deg", "translation_cm", "scale"]
+ignore_names = ["main", "run", "score", "pytestmark", "K_33", "PersonDetector", "RtmPose2d", "inputs", "outputs", "reset", "step", "flush", "contents", "from_layer", "to_rerun", "mean_abs", "max_abs", "se3", "sim3", "focal_error_pct", "camera_names", "refinement_diagnostics", "camera_centers_m", "pairwise_distance_m", "height_above_floor_m", "refined_rig_geometry", "segment_id", "dataset_name", "per_camera", "median", "rotation_deg", "translation_cm", "scale", "runner"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60

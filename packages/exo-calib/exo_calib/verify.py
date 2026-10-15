@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dagkit.app import RUNNERS
+from dagkit.app import run_graphs
 from dagkit.sources import SegmentRef
 from dagkit.types import read_column, served
 from dagkit.verify import Case, Phase, load_card
@@ -44,10 +44,7 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     """
     if case.window_s is not None:  # fail closed: Stage A calibrates from Config.frame_index, which a window may exclude
         raise ValueError(f"case {case.name!r}: exo-calib does not run windowed cases (window_s); use frame_budget for a short clip")
-    config: Config = case_config(case)
-    for graph in build(config, recording):
-        RUNNERS[config.runner](graph, mode=config.mode)
-        del graph  # its models free before the next graph is built (as the App's loop does)
+    run_graphs(case_config(case), build, recording)
     print(f"{case.name} {phase}: graph outputs written into the golden")
 
 

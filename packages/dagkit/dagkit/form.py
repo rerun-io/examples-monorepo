@@ -23,7 +23,7 @@ from typing import Any, Literal, TypeAlias, TypeVar, Union, cast, get_args, get_
 
 import rerun as rr
 
-from dagkit.app import AppConfig, _run_graphs
+from dagkit.app import AppConfig, run_graphs
 from dagkit.doc import field_docs
 from dagkit.graph import Graph
 from dagkit.node import Control
@@ -183,7 +183,7 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
 
                 def body() -> None:
                     try:
-                        _run_graphs(config, build, recording, control)
+                        run_graphs(config, build, recording, control=control, health=recording)
                     except BaseException as exc:  # delivered to the UI thread below
                         errors.append(exc)
 
