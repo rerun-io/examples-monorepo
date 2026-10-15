@@ -51,7 +51,7 @@ pub(super) async fn cameras(args: &CameraArgs, scene: &PlyScene) -> Result<Vec<C
             .radius
             .as_deref()
             .map(Vec2::from_slice)
-            .unwrap_or(Vec2::splat(scene.extent * 2.5));
+            .unwrap_or_else(|| Vec2::splat(scene.extent * 2.5));
         ensure!(
             r.is_finite() && r.min_element() > 0.0,
             "invalid orbit radius"

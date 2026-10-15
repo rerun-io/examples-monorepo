@@ -1,4 +1,4 @@
-//! Native GaussianSplats3D conversion and custom Rerun viewer.
+//! Native `GaussianSplats3D` conversion and custom Rerun viewer.
 pub mod application;
 mod bounds;
 mod cache;

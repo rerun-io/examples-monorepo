@@ -87,8 +87,8 @@ fn float_ssim(a: &[f32], b: &[f32], width: usize, height: usize) -> f64 {
             for c in 0..3 {
                 let mut sums = [0.0; 5];
                 for (tap, w) in weights.iter().enumerate() {
-                    let xx = x as isize + tap as isize - 5;
-                    if !(0..width as isize).contains(&xx) {
+                    let xx = x.cast_signed() + tap.cast_signed() - 5;
+                    if !(0..width.cast_signed()).contains(&xx) {
                         continue;
                     }
                     let i = (y * width + xx as usize) * 3 + c;
@@ -108,8 +108,8 @@ fn float_ssim(a: &[f32], b: &[f32], width: usize, height: usize) -> f64 {
             for c in 0..3 {
                 let mut sums = [0.0f32; 5];
                 for (tap, w) in weights.iter().enumerate() {
-                    let yy = y as isize + tap as isize - 5;
-                    if !(0..height as isize).contains(&yy) {
+                    let yy = y.cast_signed() + tap.cast_signed() - 5;
+                    if !(0..height.cast_signed()).contains(&yy) {
                         continue;
                     }
                     for (sum, v) in sums

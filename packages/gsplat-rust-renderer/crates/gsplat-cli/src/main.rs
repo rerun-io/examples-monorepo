@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     let result = match action {
         Action::Render(a) => render_command::run(a).await,
         #[cfg(feature = "probe")]
-        Action::Probe(a) => probe::run(a).await,
+        Action::Probe(a) => probe::run(a),
         Action::Eval(a) => eval_command::run(a).await,
         Action::Speed(a) => speed::run(a).await,
         Action::Parity(a) => parity::run(a).await,

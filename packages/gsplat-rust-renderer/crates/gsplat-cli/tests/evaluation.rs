@@ -113,13 +113,13 @@ async fn lego_float_evaluation_matches_brush_eval_stats() {
             .render_mode
             .unwrap_or(brush_render::gaussian_splats::SplatRenderMode::Default),
     );
-    let reference = brush_train::eval::eval_stats(
+    let reference = Box::pin(brush_train::eval::eval_stats(
         splats,
         &camera,
         gt.clone(),
         brush_render::AlphaMode::Transparent,
         &device,
-    )
+    ))
     .await
     .unwrap();
     // Score exactly the tensor returned by the reference, with no PNG boundary.

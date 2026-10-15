@@ -64,7 +64,7 @@ impl Brush {
     }
 
     pub async fn render(&mut self, camera: &CameraSpec, parity: bool) -> Result<Counts> {
-        let (output, aux) = brush_render::render_splats(
+        let (output, aux) = Box::pin(brush_render::render_splats(
             self.splats.clone(),
             &camera.brush_camera(),
             glam::uvec2(camera.width, camera.height),
@@ -75,7 +75,7 @@ impl Brush {
             } else {
                 TextureMode::Packed
             },
-        )
+        ))
         .await;
         self.output = Some(output);
         self.packed = !parity;
@@ -88,7 +88,7 @@ impl Brush {
     pub fn finish(&self) -> Result<()> {
         self.device.sync().map_err(|e| anyhow::anyhow!("{e}"))
     }
-    pub async fn read_rgba_f32(&mut self) -> Result<Vec<f32>> {
+    pub async fn read_rgba_f32(&self) -> Result<Vec<f32>> {
         let values = self
             .output
             .as_ref()

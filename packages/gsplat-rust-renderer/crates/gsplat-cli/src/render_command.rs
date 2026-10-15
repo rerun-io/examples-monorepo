@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) struct Args {
     #[arg(long)]
     ply: PathBuf,
-    /// NeRF transforms JSON, CameraSpec JSON array, or COLMAP sparse model directory.
+    /// NeRF transforms JSON, `CameraSpec` JSON array, or COLMAP sparse model directory.
     #[arg(long)]
     camera: PathBuf,
     #[arg(long, default_value_t = 0)]

@@ -7,5 +7,5 @@ static ALLOCATOR: re_viewer::external::re_memory::AccountingAllocator<std::alloc
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    application::run().await
+    application::run()
 }

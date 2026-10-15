@@ -69,10 +69,9 @@ impl Decoded {
 }
 
 fn column<C: re_types_core::FromArrow>(
-    batch: &Option<re_sdk_types::SerializedComponentBatch>,
+    batch: Option<&re_sdk_types::SerializedComponentBatch>,
 ) -> Result<Vec<C>> {
     batch
-        .as_ref()
         .map(|b| C::from_arrow(&b.array))
         .transpose()
         .map(|v| v.unwrap_or_default())
@@ -85,27 +84,27 @@ pub(super) fn decode(native: &re_sdk_types::archetypes::GaussianSplats3D) -> Res
         anyhow::bail!("native splats have no centers");
     }
     Ok(Decoded {
-        centers: column::<c::Position3D>(&native.centers)?
+        centers: column::<c::Position3D>(native.centers.as_ref())?
             .into_iter()
             .map(|v| v.0.0)
             .collect(),
-        scales: column::<c::Scale3D>(&native.scales)?
+        scales: column::<c::Scale3D>(native.scales.as_ref())?
             .into_iter()
             .map(|v| v.0.0)
             .collect(),
-        quaternions: column::<c::RotationQuat>(&native.quaternions)?
+        quaternions: column::<c::RotationQuat>(native.quaternions.as_ref())?
             .into_iter()
             .map(|v| v.0.0)
             .collect(),
-        colors: column::<c::Color>(&native.colors)?
+        colors: column::<c::Color>(native.colors.as_ref())?
             .into_iter()
             .map(|v| u32::from_be_bytes(v.to_array()))
             .collect(),
-        sh: column::<c::SphericalHarmonics3Rgb>(&native.sh_coefficients)?
+        sh: column::<c::SphericalHarmonics3Rgb>(native.sh_coefficients.as_ref())?
             .into_iter()
             .map(|v| v.0.0)
             .collect(),
-        degree: column::<c::SphericalHarmonicsDegree>(&native.spherical_harmonics_degree)?
+        degree: column::<c::SphericalHarmonicsDegree>(native.spherical_harmonics_degree.as_ref())?
             .first()
             .map_or(3, |v| v.0.0),
     })

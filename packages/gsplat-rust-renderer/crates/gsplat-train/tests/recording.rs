@@ -1,4 +1,4 @@
-//! Opt-in GPU/asset integration: GSPLAT_LEGO and GSPLAT_TEST_OUTPUT identify inputs.
+//! Opt-in GPU/asset integration: `GSPLAT_LEGO` and `GSPLAT_TEST_OUTPUT` identify inputs.
 use std::{collections::BTreeSet, io::BufReader, path::PathBuf, process::Command};
 
 #[test]
@@ -101,7 +101,9 @@ fn lego_training_recording_contains_snapshots_cameras_curves_and_eval_pairs() {
                         *colors.array
                     );
                     // Both paths must bake the training min-scale filter identically.
-                    use rerun::external::arrow::array::{Array, FixedSizeListArray, Float32Array};
+                    use rerun::external::arrow::array::{
+                        Array as _, FixedSizeListArray, Float32Array,
+                    };
                     for batch in [&expected.centers, &expected.scales, &expected.quaternions] {
                         let batch = batch.as_ref().unwrap();
                         let actual = chunk

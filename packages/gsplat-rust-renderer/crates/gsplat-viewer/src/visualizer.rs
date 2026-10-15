@@ -18,8 +18,8 @@ use re_viewer_context::{
     VisualizerExecutionOutput, VisualizerQueryInfo, VisualizerSystem,
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-/// Blueprint-only field on a ComputeGaussianSplats3D visualizer instruction.
-/// The data recording still contains only native GaussianSplats3D descriptors.
+/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction.
+/// The data recording still contains only native `GaussianSplats3D` descriptors.
 pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
     re_sdk_types::ComponentDescriptor {
         archetype: None,
@@ -69,7 +69,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         let mut draw = Vec::new();
         for (data, instruction) in query.iter_visualizer_instruction_for(Self::identifier()) {
             let report = |severity, message: String| {
-                output.report_unspecified_source(instruction.id, severity, message)
+                output.report_unspecified_source(instruction.id, severity, message);
             };
             if !crate::selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
                 continue;
@@ -105,7 +105,6 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         Ok(output.with_draw_data(draw))
     }
 }
-#[allow(clippy::too_many_arguments)]
 fn draw_entity(
     ctx: &ViewContext<'_>,
     query: &ViewQuery<'_>,

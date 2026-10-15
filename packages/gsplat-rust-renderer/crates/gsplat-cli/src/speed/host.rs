@@ -62,7 +62,7 @@ fn nvidia_telemetry(program: &std::ffi::OsStr) -> (Option<u32>, Option<u64>) {
                     "quiet-host: nvidia-smi query failed ({}): {}; GPU utilization remains unknown",
                     output.status,
                     String::from_utf8_lossy(&output.stderr).trim()
-                )
+                );
             });
             (None, None)
         }
@@ -71,7 +71,7 @@ fn nvidia_telemetry(program: &std::ffi::OsStr) -> (Option<u32>, Option<u64>) {
                 WARNING.call_once(|| {
                     eprintln!(
                         "quiet-host: nvidia-smi failed: {error}; GPU utilization remains unknown"
-                    )
+                    );
                 });
             }
             (None, None)
@@ -264,7 +264,7 @@ mod tests {
     }
     #[test]
     fn expired_case_deadline_keeps_ten_samples_without_restarting_the_wait() {
-        let deadline = Instant::now() - Duration::from_secs(1);
+        let deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         for _repeat in 0..2 {
             for samples in 1..10 {
                 assert_eq!(admission_complete(0, samples, deadline), None);

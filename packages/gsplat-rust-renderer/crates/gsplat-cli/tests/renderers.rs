@@ -23,7 +23,10 @@ fn one_splat(log_scale: f32) -> PlyScene {
 async fn capture(renderer: &mut Engine, camera: &CameraSpec) -> Vec<f32> {
     println!("adapter: {:?}", renderer.adapter());
     assert!(!renderer.adapter().name.to_lowercase().contains("llvmpipe"));
-    let pixels = renderer.capture(camera, true).await.unwrap();
+    let pixels = renderer
+        .capture(camera, true)
+        .await
+        .expect("capture renderer test pixels");
     assert_eq!(
         pixels.len(),
         camera.width as usize * camera.height as usize * 4

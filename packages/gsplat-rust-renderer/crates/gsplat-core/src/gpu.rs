@@ -1,4 +1,4 @@
-//! Raw resource operations; replace this file with re_renderer pools and belts upstream.
+//! Raw resource operations; replace this file with `re_renderer` pools and belts upstream.
 use wgpu::util::DeviceExt as _;
 
 pub(crate) type Feedback = std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>;
@@ -105,7 +105,7 @@ pub(crate) fn feedback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
     })
 }
-pub(crate) fn feedback(encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer) -> Feedback {
+pub(crate) fn feedback(encoder: &wgpu::CommandEncoder, buffer: &wgpu::Buffer) -> Feedback {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     encoder.map_buffer_on_submit(buffer, wgpu::MapMode::Read, .., move |result| {
         tx.send(result).ok();

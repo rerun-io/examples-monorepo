@@ -81,9 +81,17 @@ impl re_viewer_context::Cache for GpuCache {
     }
     fn vram_usage(&self) -> re_byte_size::MemUsageTree {
         let mut usage = re_byte_size::MemUsageNode::new();
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "Preserve unordered children in the Rerun cache report without adding a sort on each capture"
+        )]
         for (generation, entry) in &self.scenes {
             usage.add(format!("Scene {generation:?}"), entry.scene.gpu_byte_size());
         }
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "Preserve unordered children in the Rerun cache report without adding a sort on each capture"
+        )]
         for (key, entry) in &self.views {
             usage.add(
                 format!(
@@ -143,7 +151,6 @@ impl GpuCache {
         *seen = self.frame;
         (arrays, sort.clone(), changed)
     }
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &mut self,
         ctx: &re_renderer::RenderContext,
