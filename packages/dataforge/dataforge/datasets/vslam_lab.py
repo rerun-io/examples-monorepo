@@ -198,6 +198,9 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
     def __init__(self, config: VslamLabConfig) -> None:
         super().__init__(config)
         self.benchmark: Benchmark = BENCHMARKS[config.benchmark]
+        self.layers: tuple[str, ...] = (
+            (paths.BASE_LAYER, paths.GT_LAYER, paths.SENSOR_METADATA_LAYER) if self.benchmark.has_imu else (paths.BASE_LAYER, paths.GT_LAYER)
+        )
 
     @property
     def benchmark_dir(self) -> Path:
@@ -243,7 +246,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         }
         if any(imu.sigma_g_c is not None for imu in calibration.imus):
             writers[paths.SENSOR_METADATA_LAYER] = lambda recording: write_sensor_metadata(recording, calibration)
-        self.write_layers(identity, targets, [layer for layer in pending if layer in writers], writers)
+        self.write_layers(identity, targets, pending, writers)
         for name, sidecar in sidecars.items():
             if inputs[name] != sidecar:
                 with writing.atomic_write(sidecar) as staged:

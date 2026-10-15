@@ -182,6 +182,23 @@ def test_the_imu_noise_model_lands_on_the_imu_node_as_sensor_metadata(tmp_path: 
     )
 
 
+def test_the_layer_set_follows_the_benchmark(tmp_path: Path) -> None:
+    identity: SequenceIdentity = SequenceIdentity("vslam-lab-rgbdtum", ("any",))
+    assert list(dataset(tmp_path, "rgbdtum").targets(identity)) == [paths.BASE_LAYER, paths.GT_LAYER]
+    assert list(dataset(tmp_path, "euroc").targets(identity)) == [paths.BASE_LAYER, paths.GT_LAYER, paths.SENSOR_METADATA_LAYER]
+
+
+def test_an_imu_benchmark_whose_calibration_has_no_noise_model_fails_loudly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    source: Path = euroc_sequence(tmp_path / "raw")
+    calibration: Path = source / "calibration.yaml"
+    calibration.write_text("\n".join(line for line in calibration.read_text().splitlines() if "sigma_" not in line) + "\n")
+    built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
+    identity, _ = built.discover()[0]
+    with pytest.raises(ValueError, match="sensor_metadata"):
+        rebuild_derived_layers(built, identity, source)
+
+
 @pytest.mark.integration
 def test_a_tum_sequence_converts_video_depth_and_gt_on_upstream_stamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
