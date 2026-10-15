@@ -18,6 +18,7 @@ from mast3r_slam.models.mast3r import mast3r_inference_mono
 from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
 from mast3r_slam.ops.image import ResizedImage, RgbNormalized, frame_intrinsics, resize_img
+from mast3r_slam.ops.pointmap import update_pointmap
 from mast3r_slam.types import BackendTask, Frame, KeyframeAdded, Mode, RelocRequest, SlamConfig, TrackedFrame
 
 
@@ -114,7 +115,7 @@ class Frontend:
                 self._queue_keyframe(frame, tick.t_ns, out)
         elif mode in (Mode.INIT, Mode.RELOC):  # a mono point map; INIT bootstraps the map, RELOC asks the backend
             X, C = mast3r_inference_mono(self.model, frame)
-            frame.update_pointmap(X, C, self.params.tracking)
+            update_pointmap(frame, X, C, self.params.tracking)
             if mode == Mode.INIT:
                 self._queue_keyframe(frame, tick.t_ns, out)
                 states.set_mode(Mode.TRACKING)

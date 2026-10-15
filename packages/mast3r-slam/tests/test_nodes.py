@@ -18,6 +18,7 @@ from mast3r_slam.nodes.backend import Backend
 from mast3r_slam.nodes.frontend import Frontend
 from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.tracking import FrameTracker
+from mast3r_slam.ops.pointmap import update_pointmap
 from mast3r_slam.types import Frame, KeyframeAdded, KeyframeCloud, MapUpdate, Mode, RelocRequest, SlamConfig, TrackedFrame
 
 SIZE: int = 224
@@ -37,7 +38,7 @@ def shared() -> Iterator[SharedSlam]:
 def observe(frame: Frame) -> None:
     """What MASt3R would leave on a frame: features and a point map (a fronto-parallel plane)."""
     frame.feat, frame.pos = torch.zeros(1, PATCHES, 1024), torch.zeros(1, PATCHES, 2, dtype=torch.long)
-    frame.update_pointmap(torch.ones(SIZE * SIZE, 3), torch.full((SIZE * SIZE, 1), 10.0), CFG.tracking)  # confident
+    update_pointmap(frame, torch.ones(SIZE * SIZE, 3), torch.full((SIZE * SIZE, 1), 10.0), CFG.tracking)  # confident
 
 
 def fake_mono(model: object, frame: Frame) -> tuple[torch.Tensor, torch.Tensor]:

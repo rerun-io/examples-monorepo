@@ -1,4 +1,5 @@
-"""Op tier (decision 18): Sim3 group identities, the pose-graph normal equations, frame intrinsics, ATE under a Sim3."""
+"""Op tier (decision 18): Sim3 group identities, the pose-graph normal equations, frame intrinsics, point-map fusion, ATE under
+a Sim3."""
 
 import lietorch
 import numpy as np
@@ -10,9 +11,12 @@ from scipy.spatial.transform import Rotation
 
 from mast3r_slam.ops.image import frame_intrinsics, resize_img_with_transform
 from mast3r_slam.ops.optim import POSE_DIM, solve_pose_blocks
+from mast3r_slam.ops.pointmap import update_pointmap
+from mast3r_slam.types import Frame, TrackingConfig
 from mast3r_slam.verify import _ate
 
 TANGENTS = arrays(np.float64, (2, 7), elements=st.floats(-1.0, 1.0))
+FINITE = st.floats(-100.0, 100.0, allow_nan=False, width=32)
 
 
 @given(tangents=TANGENTS)
@@ -92,3 +96,38 @@ def test_ate_associates_only_within_the_gap_it_is_given() -> None:
     est_t = gt_t[:-1] + 8_000_000
     assert _ate(est_t, gt_xyz[:-1], gt_t, gt_xyz, 5_000_000)[2] == 0
     assert _ate(est_t, gt_xyz[:-1], gt_t, gt_xyz, 10_000_000)[2] == est_t.size
+
+
+def frame_with(points: torch.Tensor, confidence: torch.Tensor) -> Frame:
+    frame = Frame(0, torch.zeros(1, 3, 2, 2), torch.tensor([[2, 2]]), torch.tensor([[2, 2]]), torch.zeros(2, 2, 3))
+    update_pointmap(frame, points, confidence, TrackingConfig())
+    return frame
+
+
+@given(
+    a=arrays(np.float32, (4, 3), elements=FINITE),
+    b=arrays(np.float32, (4, 3), elements=FINITE),
+    ca=arrays(np.float32, (4, 1), elements=st.floats(0.125, 10.0, width=32)),
+    cb=arrays(np.float32, (4, 1), elements=st.floats(0.125, 10.0, width=32)),
+)
+@settings(max_examples=40, deadline=None)
+def test_weighted_pointmap_is_a_confidence_weighted_mean(a: np.ndarray, b: np.ndarray, ca: np.ndarray, cb: np.ndarray) -> None:
+    frame = frame_with(torch.from_numpy(a), torch.from_numpy(ca))
+    update_pointmap(frame, torch.from_numpy(b), torch.from_numpy(cb), TrackingConfig(filtering_mode="weighted_pointmap"))
+    assert frame.X_canon is not None and frame.C is not None
+    np.testing.assert_allclose(frame.X_canon.numpy(), (ca * a + cb * b) / (ca + cb), rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(frame.C.numpy(), ca + cb, rtol=1e-6)
+    assert (frame.N, frame.N_updates) == (2, 2)
+    average = frame.get_average_conf()
+    assert average is not None
+    np.testing.assert_allclose(average.numpy(), (ca + cb) / 2, rtol=1e-6)
+
+
+def test_recent_replaces_and_first_keeps_only_the_second_observation() -> None:
+    ones, twos, threes, conf = torch.ones(4, 3), 2 * torch.ones(4, 3), 3 * torch.ones(4, 3), torch.ones(4, 1)
+    recent, first = frame_with(ones, conf), frame_with(ones, conf)
+    for points in (twos, threes):
+        update_pointmap(recent, points, conf, TrackingConfig(filtering_mode="recent"))
+        update_pointmap(first, points, conf, TrackingConfig(filtering_mode="first"))
+    assert recent.X_canon is not None and first.X_canon is not None
+    assert float(recent.X_canon[0, 0]) == 3.0 and float(first.X_canon[0, 0]) == 2.0

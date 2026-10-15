@@ -13,6 +13,7 @@ from mast3r_slam.nodes.shared import SharedKeyframes
 from mast3r_slam.ops.geometry import act_Sim3, constrain_points_to_ray, get_pixel_coords, point_to_ray_dist, project_calib
 from mast3r_slam.ops.matching import match
 from mast3r_slam.ops.optim import check_convergence, huber
+from mast3r_slam.ops.pointmap import update_pointmap
 from mast3r_slam.types import Frame, MatchingConfig, TrackingConfig
 
 
@@ -126,7 +127,7 @@ class FrameTracker:
         Qk: Float[Tensor, "hw 1"] = torch.sqrt(Qff[idx_f2k] * Qkf)
 
         # Update keyframe pointmap after registration (need pose)
-        frame.update_pointmap(Xff, Cff, self.cfg)
+        update_pointmap(frame, Xff, Cff, self.cfg)
 
         use_calib: bool = self.use_calib
         img_size: tuple[int, int] = (int(frame.rgb_tensor.shape[-2]), int(frame.rgb_tensor.shape[-1]))
@@ -191,7 +192,7 @@ class FrameTracker:
         Xkk_raw = camk_sim3_camf.act(Xkf)
         assert isinstance(Xkk_raw, torch.Tensor)
         Xkk: Float[Tensor, "hw 3"] = Xkk_raw
-        keyframe.update_pointmap(Xkk, Ckf, self.cfg)
+        update_pointmap(keyframe, Xkk, Ckf, self.cfg)
         # write back the fitered pointmap
         self.keyframes[len(self.keyframes) - 1] = keyframe
 

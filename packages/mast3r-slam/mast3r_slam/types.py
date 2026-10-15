@@ -22,16 +22,15 @@ import lietorch
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-import torch
 from dagkit.time import TimeNs
 from dagkit.types import Log, column, row_times
-from jaxtyping import Bool, Float, Float32, Int, Int64, UInt8
+from jaxtyping import Float, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from serde import coerce, serde
 from torch import Tensor
 
 FilteringMode: TypeAlias = Literal["first", "recent", "best_score", "indep_conf", "weighted_pointmap", "weighted_spherical"]
-"""How a frame's canonical point map absorbs a new observation (see ``Frame.update_pointmap``)."""
+"""How a frame's canonical point map absorbs a new observation (see ``ops.pointmap.update_pointmap``)."""
 
 
 class Mode(Enum):
@@ -174,17 +173,6 @@ class SlamConfig:
     reloc: RelocConfig = field(default_factory=RelocConfig)
 
 
-def _cartesian_to_spherical(P: Float[Tensor, "hw 3"]) -> Float[Tensor, "hw 3"]:
-    r: Float[Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
-    x, y, z = torch.tensor_split(P, 3, dim=-1)
-    return torch.cat((r, torch.atan2(y, x), torch.acos(z / r)), dim=-1)
-
-
-def _spherical_to_cartesian(spherical: Float[Tensor, "hw 3"]) -> Float[Tensor, "hw 3"]:
-    r, phi, theta = torch.tensor_split(spherical, 3, dim=-1)
-    return torch.cat((r * torch.sin(theta) * torch.cos(phi), r * torch.sin(theta) * torch.sin(phi), r * torch.cos(theta)), dim=-1)
-
-
 @dataclasses.dataclass
 class Frame:
     """One image with its canonical point map, confidence, MASt3R features and world_from_cam Sim3 pose (working state)."""
@@ -217,37 +205,6 @@ class Frame:
     """Camera intrinsics (calibrated mode only)."""
     score: Float[Tensor, ""] | None = None
     """Scalar filtering score (``best_score`` filtering)."""
-
-    def update_pointmap(self, X: Float[Tensor, "hw 3"], C: Float[Tensor, "hw 1"], cfg: TrackingConfig) -> None:
-        """Absorb a new observation into the canonical point map with ``cfg.filtering_mode``."""
-        mode: FilteringMode = cfg.filtering_mode
-        score = torch.median if cfg.filtering_score == "median" else torch.mean
-        if self.N == 0:  # the first observation is always accepted
-            self.X_canon, self.C, self.N, self.N_updates = X.clone(), C.clone(), 1, 1
-            if mode == "best_score":
-                self.score = score(C)
-            return
-        assert self.C is not None and self.X_canon is not None
-        if mode == "first" and self.N_updates == 1 or mode == "recent":  # first: only the second observation
-            self.X_canon, self.C, self.N = X.clone(), C.clone(), 1
-        elif mode == "best_score":
-            new_score: Float[Tensor, ""] = score(C)
-            assert self.score is not None
-            if new_score > self.score:
-                self.X_canon, self.C, self.N, self.score = X.clone(), C.clone(), 1, new_score
-        elif mode == "indep_conf":  # per pixel: keep the more confident point
-            new_mask: Bool[Tensor, "hw 1"] = C > self.C
-            self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
-            self.C[new_mask] = C[new_mask]
-            self.N = 1
-        elif mode == "weighted_pointmap":  # confidence-weighted running mean in Cartesian space
-            self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
-            self.C, self.N = self.C + C, self.N + 1
-        elif mode == "weighted_spherical":  # the same in spherical (r, phi, theta) space
-            spherical = ((self.C * _cartesian_to_spherical(self.X_canon)) + (C * _cartesian_to_spherical(X))) / (self.C + C)
-            self.X_canon = _spherical_to_cartesian(spherical)
-            self.C, self.N = self.C + C, self.N + 1
-        self.N_updates += 1
 
     def get_average_conf(self) -> Float[Tensor, "hw 1"] | None:
         """Confidence divided by the observation count, or None without confidence."""
