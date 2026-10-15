@@ -1,7 +1,7 @@
 //! Stock Rerun viewer plus one extra Gaussian splat visualizer.
 //!
-//! Queries native GaussianSplats3D through ComputeGaussianSplats3D and composites
-//! gsplat-core output in Spatial3DView. Supports live gRPC, saved recordings,
+//! Queries native `GaussianSplats3D` through `ComputeGaussianSplats3D` and composites
+//! gsplat-core output in `Spatial3DView`. Supports live gRPC, saved recordings,
 //! and headless screenshots with the same registration path.
 
 use crate::visualizer;
@@ -25,7 +25,7 @@ const GRPC_PORT: u16 = 9876;
 const DEFAULT_HEADLESS_SIZE: egui::Vec2 = egui::vec2(1600.0, 900.0);
 
 /// Run the SDK-compatible custom viewer binary.
-pub async fn run() -> anyhow::Result<()> {
+pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if cli.print_version {
         println!("rerun {}", re_viewer::build_info().version);
@@ -241,7 +241,7 @@ struct Cli {
     _expect_data_soon: bool,
 }
 
-/// Parse positive logical viewport dimensions as WIDTHxHEIGHT.
+/// Parse positive logical viewport dimensions as `WIDTHxHEIGHT`.
 pub fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
     let (width, height) = value
         .split_once(['x', 'X'])

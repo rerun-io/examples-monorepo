@@ -1,4 +1,4 @@
-//! Compute draw data and transparent depth-tested composition for re_renderer.
+//! Compute draw data and transparent depth-tested composition for `re_renderer`.
 use gsplat_core::{Camera, Error, RenderOptions};
 use parking_lot::Mutex;
 use re_renderer::external::smallvec::smallvec;

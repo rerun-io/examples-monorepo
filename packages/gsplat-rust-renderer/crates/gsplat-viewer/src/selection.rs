@@ -89,15 +89,14 @@ mod tests {
             re_sdk_types::blueprint::components::VisualizerInstructionId::new_random(),
             name.into(),
             &re_viewer::external::re_log_types::EntityPath::from("entity"),
-            [(
+            std::iter::once((
                 re_sdk_types::archetypes::GaussianSplats3D::descriptor_centers().component,
                 re_viewer_context::VisualizerComponentSource::SourceComponent {
                     source_component:
                         re_sdk_types::archetypes::GaussianSplats3D::descriptor_centers().component,
                     selector: name.to_owned(),
                 },
-            )]
-            .into_iter()
+            ))
             .collect(),
         )
     }
