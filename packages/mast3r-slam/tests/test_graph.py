@@ -8,6 +8,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
+import numpy as np
 import pytest
 import rerun as rr
 from dagkit.app import gradio_app, load_profile
@@ -21,6 +22,7 @@ from dagkit.testing import Recorder, check_graph_docs, check_picture
 from dagkit.verify import load_card
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import CatalogVideoSource
 from simplecv.sources.files import VideoFileSource, WebcamSource
@@ -194,3 +196,10 @@ def test_every_config_field_has_its_form_widget_or_is_hidden_on_purpose() -> Non
         assert (f.name in HIDDEN) != any(label.split(".")[0].split(":")[0] == f.name for label in FORM), f.name
     assert widgets["hardware"].choices == [(c, c) for c in ("x86_64-cuda", "aarch64-cuda", "robocap-cap", "auto")]  # type: ignore[attr-defined]
     assert {c for c, _ in widgets["preset"].choices} == set(load_profile(PROFILES, "x86_64-cuda").presets)  # type: ignore[attr-defined]
+
+
+def test_the_catalog_source_muxes_its_zero_copy_packet_views() -> None:
+    """This env runs Python 3.11, where a numpy array is no ``typing_extensions.Buffer``: ``SegmentFrames`` hands
+    ``wrap_mp4`` the packet views ``read_catalog_videos`` returns, and beartype checks that call in the dev env."""
+    samples = [np.frombuffer(b"\x00\x00\x00\x01\x65" + bytes(16), dtype=np.uint8), np.frombuffer(b"\x00\x00\x00\x01\x41" + bytes(8), dtype=np.uint8)]
+    assert len(wrap_mp4(samples, [True, False], 30, "h264")) > 0
