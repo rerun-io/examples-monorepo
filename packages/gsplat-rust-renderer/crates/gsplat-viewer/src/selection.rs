@@ -1,15 +1,16 @@
 //! Process-local blueprint defaults. Explicit viewer choices always win.
 use re_sdk_types::blueprint::archetypes::ActiveVisualizers;
+use re_viewer::external::{re_sdk_types, re_viewer_context};
 
-pub const COMPUTE: &str = "ComputeGaussianSplats3D";
-pub const NATIVE: &str = "GaussianSplats3D";
+pub(crate) const COMPUTE: &str = "ComputeGaussianSplats3D";
+pub(crate) const NATIVE: &str = "GaussianSplats3D";
 use re_viewer_context::{
     BlueprintContext as _, IdentifiedViewSystem, MissingChunkReporter, ViewContext,
     ViewContextSystem, ViewContextSystemOncePerFrameResult, ViewQuery, ViewSystemIdentifier,
 };
 
 /// Explicit native, compute, or empty instructions all override automatic selection.
-pub fn has_explicit_visualizers(
+pub(crate) fn has_explicit_visualizers(
     viewer: &re_viewer_context::ViewerContext<'_>,
     data: &re_viewer_context::DataResult,
 ) -> bool {
@@ -27,23 +28,31 @@ pub fn has_explicit_visualizers(
 }
 
 #[derive(Default)]
-pub struct AutomaticSplatSelection;
+pub(crate) struct AutomaticSplatSelection;
 impl IdentifiedViewSystem for AutomaticSplatSelection {
     fn identifier() -> ViewSystemIdentifier {
         "AutomaticSplatSelection".into()
     }
 }
 
-fn select_default<'a>(explicit: bool, types: &[&'a str]) -> Option<Vec<&'a str>> {
-    if explicit || !types.contains(&NATIVE) {
+fn select_default(
+    explicit: bool,
+    instructions: &[re_viewer_context::VisualizerInstruction],
+) -> Option<Vec<re_viewer_context::VisualizerInstruction>> {
+    if explicit {
         return None;
     }
-    let mut selected: Vec<_> = types
+    let mut compute = instructions
         .iter()
-        .copied()
-        .filter(|name| *name != NATIVE && *name != COMPUTE)
+        .find(|i| i.visualizer_type.as_str() == NATIVE)?
+        .clone();
+    compute.visualizer_type = COMPUTE.into();
+    let mut selected: Vec<_> = instructions
+        .iter()
+        .filter(|i| ![NATIVE, COMPUTE].contains(&i.visualizer_type.as_str()))
+        .cloned()
         .collect();
-    selected.push(COMPUTE);
+    selected.push(compute);
     Some(selected)
 }
 impl ViewContextSystem for AutomaticSplatSelection {
@@ -57,28 +66,9 @@ impl ViewContextSystem for AutomaticSplatSelection {
         let viewer = ctx.viewer_ctx;
         for (data, _) in query.iter_visualizer_instruction_for(NATIVE.into()) {
             let explicit = has_explicit_visualizers(viewer, data);
-            let types: Vec<_> = data
-                .visualizer_instructions
-                .iter()
-                .map(|i| i.visualizer_type.as_str())
-                .collect();
-            let Some(selected) = select_default(explicit, &types) else {
+            let Some(instructions) = select_default(explicit, &data.visualizer_instructions) else {
                 continue;
             };
-            let instructions: Vec<_> = selected
-                .into_iter()
-                .map(|name| {
-                    let source = if name == COMPUTE { NATIVE } else { name };
-                    let mut instruction = data
-                        .visualizer_instructions
-                        .iter()
-                        .find(|i| i.visualizer_type.as_str() == source)
-                        .expect("selected existing instruction")
-                        .clone();
-                    instruction.visualizer_type = name.into();
-                    instruction
-                })
-                .collect();
             for instruction in &instructions {
                 instruction.write_instruction_to_blueprint(viewer);
             }
@@ -94,19 +84,46 @@ impl ViewContextSystem for AutomaticSplatSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn instruction(name: &'static str) -> re_viewer_context::VisualizerInstruction {
+        re_viewer_context::VisualizerInstruction::new(
+            re_sdk_types::blueprint::components::VisualizerInstructionId::new_random(),
+            name.into(),
+            &re_viewer::external::re_log_types::EntityPath::from("entity"),
+            [(
+                re_sdk_types::archetypes::GaussianSplats3D::descriptor_centers().component,
+                re_viewer_context::VisualizerComponentSource::SourceComponent {
+                    source_component:
+                        re_sdk_types::archetypes::GaussianSplats3D::descriptor_centers().component,
+                    selector: name.to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )
+    }
     #[test]
     fn defaults_replace_only_native_and_deduplicate_compute() {
-        let types = ["Points3D", NATIVE, COMPUTE];
-        assert_eq!(
-            select_default(false, &types),
-            Some(vec!["Points3D", COMPUTE])
-        );
+        let native = instruction(NATIVE);
+        let other = instruction("Points3D");
+        let instructions = [other.clone(), native.clone(), instruction(COMPUTE)];
+        let selected = select_default(false, &instructions).unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].id, other.id);
+        assert_eq!(selected[0].component_mappings, other.component_mappings);
+        assert_eq!(selected[1].override_path, native.override_path);
+        assert_eq!(selected[1].id, native.id);
+        assert_eq!(selected[1].component_mappings, native.component_mappings);
+        assert_eq!(selected[1].visualizer_type.as_str(), COMPUTE);
     }
     #[test]
     fn explicit_native_compute_or_empty_selection_is_preserved() {
-        for types in [vec![NATIVE], vec![COMPUTE], vec![]] {
-            assert_eq!(select_default(true, &types), None);
+        for instructions in [
+            vec![instruction(NATIVE)],
+            vec![instruction(COMPUTE)],
+            vec![],
+        ] {
+            assert!(select_default(true, &instructions).is_none());
         }
-        assert_eq!(select_default(false, &["Points3D"]), None);
+        assert!(select_default(false, &[instruction("Points3D")]).is_none());
     }
 }
