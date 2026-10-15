@@ -1,6 +1,7 @@
 """The hands node and its graph on synthetic framesets, through the real Rust core without networks (unit lane: no GPU, no catalog)."""
 
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -89,6 +90,32 @@ def test_flush_finishes_the_layer_once_and_emits_its_file_and_counts_at_the_last
     assert (layer_port, run_port) == ("layer", "run") and t_layer == t_run == T0 + 3 * STEP
     assert isinstance(layer, LayerFile) and layer.path.is_file() and layer.path.parent == tmp_path / SEGMENT.segment
     assert isinstance(run, LayerRun) and (run.framesets, run.with_pose, run.held_pose) == (4, 3, 1)
+
+
+def test_the_run_carries_the_cores_stage_totals_and_the_stream_wall_as_the_old_tool_did(tmp_path: Path) -> None:
+    """Main's LayerRun held the core's downsample, hands and output stage totals and the frameset loop's wall time; the node
+    fills them again from the summary its core finishes with."""
+    summaries: list[_core.LayerSummary] = []
+
+    class Spy:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.core, self.push, self.abort = (core := no_nets(*args, **kwargs)), core.push, core.abort
+            self.nets: str = core.nets
+
+        def finish(self) -> _core.LayerSummary:
+            summaries.append(self.core.finish())
+            return summaries[-1]
+
+    hands, out = HandsNode(SEGMENT, HandsParams(models_dir=tmp_path), tmp_path, core=Spy), Recorder()  # type: ignore[arg-type]
+    hands.reset(context(4))
+    started: float = time.perf_counter()
+    for frames in framesets(4):
+        hands.step(Tick(frames.t_ns, "frames", frames, {}), out)
+    hands.flush(out)
+    run, (summary,) = out.items[1][2], summaries
+    assert isinstance(run, LayerRun)
+    assert (run.downsample_s, run.hands_s, run.output_s) == tuple(summary.stage_total_ms(s) / 1e3 for s in ("downsample", "hands", "output"))
+    assert 0.0 < run.loop_s <= time.perf_counter() - started
 
 
 @settings(max_examples=8, deadline=None)

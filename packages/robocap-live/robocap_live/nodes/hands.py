@@ -81,6 +81,7 @@ class HandsNode:
         self.partial: Path | None = None
         self.t_ns: TimeNs = STATIC
         self.loaded_s: float = 0.0
+        self.streaming: float | None = None  # when the first frameset was pushed
         self.run: LayerRun | None = None
 
     def reset(self, ctx: RunContext) -> None:
@@ -101,11 +102,12 @@ class HandsNode:
             rig, self.partial, self.segment.segment, poses.t_ns, poses.world_from_rig, models_dir=p.models_dir, device=p.device,
             ort_dylib=p.ort_dylib or default_ort_dylib(), ort_threads=p.ort_threads, overlays=p.overlays,
         )  # fmt: skip
-        self.loaded_s, self.t_ns = time.perf_counter() - started, STATIC
+        self.loaded_s, self.t_ns, self.streaming = time.perf_counter() - started, STATIC, None
         print(f"{self.segment.segment}: nets {self.core.nets} (loaded in {self.loaded_s:.1f} s), {len(poses.t_ns)} slam_rs poses", flush=True)
 
     def step(self, tick: Tick, out: Emit) -> None:
         frames: LumaFrameset = cast(LumaFrameset, tick.value)
+        self.streaming = self.streaming or time.perf_counter()
         with self.lock:
             assert self.core is not None, "step before reset (or after abort)"
             self.core.push(frames.t_ns, list(frames.luma), [frames.t_ns if t is None else t for t in frames.cam_t_ns])
@@ -121,8 +123,10 @@ class HandsNode:
         stages: _core.HandStageTimes = summary.hand_stages
         run = LayerRun(
             summary.framesets, summary.with_pose, summary.held_pose, *summary.tracked, *summary.reported, summary.scale, summary.scale_final,
-            nets_load_s=self.loaded_s, detnet_s=stages.detnet_ms / 1e3, crops_s=stages.crops_ms / 1e3, keynet_s=stages.keynet_ms / 1e3,
-            fit_s=stages.fit_ms / 1e3, tracker_s=stages.tracker_ms / 1e3, finish_s=time.perf_counter() - started,
+            nets_load_s=self.loaded_s, downsample_s=summary.stage_total_ms("downsample") / 1e3, hands_s=summary.stage_total_ms("hands") / 1e3,
+            detnet_s=stages.detnet_ms / 1e3, crops_s=stages.crops_ms / 1e3, keynet_s=stages.keynet_ms / 1e3, fit_s=stages.fit_ms / 1e3,
+            tracker_s=stages.tracker_ms / 1e3, output_s=summary.stage_total_ms("output") / 1e3, loop_s=started - (self.streaming or started),
+            finish_s=time.perf_counter() - started,
         )  # fmt: skip
         print(f"{self.segment.segment}: {run.framesets} framesets ({run.with_pose} with a pose, {run.held_pose} held), reported "
               f"left {run.reported_left} / right {run.reported_right}, scale {run.scale:.4f}{'' if run.scale_final else ' (not calibrated)'}")  # fmt: skip
