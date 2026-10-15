@@ -1,8 +1,8 @@
 """exo-calib App: the ``init`` graph once, then the ``refine`` graph twice; the second pass also runs the report.
 
 Pass 1 tracks person boxes through the Stage A rig, pass 2 through the pass-1 refined rig (handed over in memory); both
-passes refine against the ORIGINAL Stage A rig. Outputs become the catalog layers ``exocalib_{init,kp2d,refined,align}``
-(pass 1: unregistered ``*_pass1`` files) plus ``eval.json``, and stream to the ``rr_config`` viewer.
+passes refine against the ORIGINAL Stage A rig. Outputs stream to the ``rr_config`` viewer; with ``output_dir`` they also
+become the catalog layers ``exocalib_{init,kp2d,refined,align}`` (pass 1: unregistered ``*_pass1`` files) plus ``eval.json``.
 ``--resume-from init|kp2d`` reads those layers back (after a Producer check) instead of recomputing them.
 ``build`` yields the graphs in order; the CLI (``main`` = ``run_app``) and the gradio app (``tools/apps/calibrate_gradio.py``)
 both run it, with run health, so the viewer's "pipeline (debug)" tab shows every graph live.
@@ -56,7 +56,7 @@ PASS1_LAYERS: dict[str, tuple[str, ...]] = {"exocalib_kp2d_pass1": ("kp2d",), "e
 @dataclass
 class Config:
     rr_config: RerunTyroConfig
-    """Live viewer of every graph's outputs (the catalog layers are written regardless)."""
+    """Live viewer of every graph's outputs."""
     segment: SegmentRef = field(default_factory=lambda: SegmentRef("dataforge-assembly101", "assembly101__nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"))
     frame_index: int = 0
     """Sample index of the synchronized frameset Stage A calibrates from (the rig is static)."""
@@ -64,8 +64,8 @@ class Config:
     """Frames Stage B processes per pass, spread evenly over the capture; shorter captures use every frame."""
     exo_rigs: tuple[str, ...] | None = None
     """Explicit exo rig names such as ``rig_00 rig_01``; ``None`` discovers them from catalog metadata."""
-    output_dir: Path = Path("data/outputs")
-    """Layer rrds (one subdirectory per segment) and ``eval.json``."""
+    output_dir: Path | None = None
+    """Layer rrds (one subdirectory per segment, e.g. ``data/outputs``) and ``eval.json``; ``None``: the viewer only."""
     register: Register = "new"
     """``new`` registers layers the segment does not have yet; ``replace`` is the explicit production refresh."""
     resume_from: Literal["init", "kp2d"] | None = None
@@ -165,12 +165,11 @@ def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
     return with_pipeline(rrb.Blueprint(exoego_view(replace(layout, ego_camera_names=()), scene)), outputs, graphs=graphs)
 
 
-def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False) -> Iterator[Graph]:
-    """The App's graphs in run order; the CLI and the gradio app run each one before asking for the next.
+def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
+    """The App's graphs in run order; the CLI, the gradio app and verify run each one before asking for the next.
 
     ``init`` once, then ``refine`` pass 1 and pass 2: a ``Keep`` sink hands each graph's result to the next, and a stopped
-    run ends the App. Outputs stream to ``recording``; ``golden`` (verify) sends them there only: no layer files, no
-    ``eval.json``, no blueprint.
+    run ends the App. Outputs stream to ``recording``; with ``config.output_dir`` they also go to layer files and ``eval.json``.
     """
     torch.cuda.empty_cache()  # PyTorch's cache of a previous run (gradio) back to the driver, where TensorRT engines allocate
     segment: SegmentRef = config.segment
@@ -189,9 +188,8 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
         ports: list[str] = [port for layer_ports in layers.values() for port in layer_ports]
         out: dict[str, Node] = {}
         if not suffix:
-            name: str = "golden" if golden else "viewer"
-            out[name] = RerunSink(recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, timeline=segment.timeline)
-        if golden:
+            out["viewer"] = RerunSink(recording, {p: PORT_TYPES[p] for p in ports}, {p: ROOTS[p] for p in ports}, timeline=segment.timeline)
+        if config.output_dir is None:
             return out
         for layer, layer_ports in layers.items():
             layer_recording, partial = open_layer(segment, layer, producer(graph), output_dir=config.output_dir)
@@ -200,9 +198,8 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
             out[layer] = LayerSink(layer_recording, partial, segment, layer, {p: PORT_TYPES[p] for p in layer_ports}, roots, register=register)
         return out
 
-    if not golden:
-        skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1
-        recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
+    skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1
+    recording.send_blueprint(blueprint(layout, ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"][skipped:]))
     log_style(recording, cameras)
     if config.resume_from is None:
         keep = Keep("init")
@@ -231,7 +228,7 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
     layers: dict[str, tuple[str, ...]] = {k: v for k, v in LAYERS.items() if not (resume_kp2d and k == "exocalib_kp2d")}
     yield refine_graph(segment, layout, (init, tracking), config.frame_budget, models, {"keep": keep, **sinks("exocalib-refine", layers)}, report=True, resume_kp2d=resume_kp2d)
     report = keep.values.get("eval")
-    if golden or report is None:
+    if config.output_dir is None or report is None:
         return
     assert isinstance(report, EvalReport)
     path: Path = config.output_dir / segment.segment / "eval.json"

@@ -12,6 +12,7 @@ from conftest import FakeScene
 from dagkit.graph import Graph
 from dagkit.node import Control, Event, Fenced, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
+from dagkit.sinks import LayerSink, RerunSink
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges
 from dagkit.time import STATIC
@@ -27,17 +28,17 @@ from exo_calib.types import RigLayout
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 
 
-def app_graphs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FakeScene, Iterator[Graph]]:
+def app_graphs(monkeypatch: pytest.MonkeyPatch, output_dir: Path | None) -> tuple[FakeScene, Iterator[Graph]]:
     """``build`` with the catalog layout and the models faked; nothing runs until the caller fills each graph's Keep."""
     scene = FakeScene()
     monkeypatch.setattr(calibrate, "discover_rig_layout", lambda segment, exo_rigs: RigLayout(scene.rig.names, ("ego/cam_00",), scene.rig.names))
     monkeypatch.setattr(calibrate, "model_factories", lambda *args: {name: (lambda value=value: value) for name, value in scene.resources().items()})
-    config = Config(RerunTyroConfig(headless=True), scene.segment, output_dir=tmp_path / "outputs", register="off", hardware="x86_64-cuda")  # no catalog
+    config = Config(RerunTyroConfig(headless=True), scene.segment, output_dir=output_dir, register="off", hardware="x86_64-cuda")  # no catalog
     return scene, build(config, rr.RecordingStream("exo-calib-test", send_properties=False))
 
 
 def test_the_app_graphs_validate_draw_what_they_declare_and_document_themselves(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    scene, steps = app_graphs(monkeypatch, tmp_path)
+    scene, steps = app_graphs(monkeypatch, tmp_path / "outputs")
     init: Graph = next(steps)
     init.nodes["keep"].obj.values["init"] = scene.rig  # type: ignore[attr-defined]  # as the run would: the Stage A rig ...
     pass1: Graph = next(steps)
@@ -60,9 +61,24 @@ def test_a_stopped_graph_hands_nothing_on_and_ends_the_app(monkeypatch: pytest.M
     control.stop()
     keep.flush(Recorder())
     assert keep.values == {}
-    _, steps = app_graphs(monkeypatch, tmp_path)
+    _, steps = app_graphs(monkeypatch, tmp_path / "outputs")
     assert next(steps).name == "exocalib-init"
     assert next(steps, None) is None  # its Keep stayed empty: no refine pass is built
+
+
+def test_without_an_output_dir_the_app_streams_to_the_viewer_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``output_dir=None`` (verify, the form's unchecked save box): the same graphs, a viewer sink and no layer sink, and
+    no file at all, not even ``eval.json``."""
+    monkeypatch.chdir(tmp_path)
+    scene, steps = app_graphs(monkeypatch, None)
+    graphs: list[Graph] = []
+    for port, value in (("init", scene.rig), ("refined", scene.rig), ("eval", "the report")):
+        graphs.append(next(steps))
+        graphs[-1].nodes["keep"].obj.values[port] = value  # type: ignore[attr-defined]  # as the run would
+    assert next(steps, None) is None
+    assert [g.name for g in graphs] == ["exocalib-init", "exocalib-refine-pass1", "exocalib-refine"]
+    assert [sorted(n for n, spec in g.nodes.items() if isinstance(spec.obj, RerunSink | LayerSink)) for g in graphs] == [["viewer"], [], ["viewer"]]
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_resume_refuses_a_layer_another_graph_profile_or_parameter_set_wrote(monkeypatch: pytest.MonkeyPatch) -> None:

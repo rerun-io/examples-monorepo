@@ -28,8 +28,8 @@ CARD: Path = Path(__file__).resolve().parents[1] / "VERIFY.toml"
 
 
 def case_config(case: Case) -> Config:
-    """The App config of a catalog case; it registers nothing, and its files go to the package's ``data/outputs`` from any cwd."""
-    return Config(RerunTyroConfig(headless=True), case.segment_ref(), frame_budget=int(case.params["frame_budget"]), output_dir=CARD.parent / "data" / "outputs", register="off")
+    """The App config of a catalog case, viewer only: no layer file, nothing registered, no ``eval.json``."""
+    return Config(RerunTyroConfig(headless=True), case.segment_ref(), frame_budget=int(case.params["frame_budget"]))
 
 
 def examples() -> list[Config]:
@@ -38,14 +38,14 @@ def examples() -> list[Config]:
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
-    """The App's graphs (``apis/calibrate.py``, lossless, threaded): every final output goes into ``recording``.
+    """The App's graphs (``apis/calibrate.py``, lossless, threaded) for ``case_config``: every final output goes into ``recording``.
 
-    Nothing is registered and no layer file is written, so the shared catalog is only read. ``phase`` does not change what runs.
+    Nothing is registered and no file is written, so the shared catalog is only read. ``phase`` does not change what runs.
     """
     if case.window_s is not None:  # fail closed: Stage A calibrates from Config.frame_index, which a window may exclude
         raise ValueError(f"case {case.name!r}: exo-calib does not run windowed cases (window_s); use frame_budget for a short clip")
     config: Config = case_config(case)
-    for graph in build(config, recording, golden=True):
+    for graph in build(config, recording):
         RUNNERS[config.runner](graph, mode=config.mode)
         del graph  # its models free before the next graph is built (as the App's loop does)
     print(f"{case.name} {phase}: graph outputs written into the golden")
