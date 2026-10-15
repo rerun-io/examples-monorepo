@@ -62,7 +62,7 @@ def extract_zip(zip_path: Path, dest_dir: Path, inner: str | None = None) -> Non
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def download_and_extract(kind: str, scene: str, root: Path = DATA_ROOT) -> Path:
+def download_and_extract(kind: Literal["data", "pretrained"], scene: str, root: Path = DATA_ROOT) -> Path:
     """Fetch and unpack one scene archive if its target directory is missing."""
     from huggingface_hub import hf_hub_download
 

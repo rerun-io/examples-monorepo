@@ -141,3 +141,52 @@ def test_python_recording_is_decoded_by_shared_core(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "view 0:" in result.stderr + result.stdout
+
+
+@pytest.mark.integration
+def test_failed_replacement_leaves_recording_unchanged(tmp_path: Path) -> None:
+    from rerun.chunk import RrdReader
+
+    from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, log_ply
+
+    valid: Path = tmp_path / "valid.ply"
+    _write_synthetic_ply(valid)
+    invalid: Path = tmp_path / "invalid.ply"
+    invalid.write_bytes(b"invalid PLY")
+    nonfinite: Path = tmp_path / "nonfinite.ply"
+    _write_synthetic_ply(nonfinite)
+    malformed = PlyData.read(nonfinite, mmap=False)
+    malformed["vertex"]["x"][0] = np.nan
+    malformed.write(nonfinite)
+    recording: rr.RecordingStream = rr.RecordingStream("replacement-contract")
+    output: Path = tmp_path / "replacement.rrd"
+    recording.save(output)
+    try:
+        log_ply(valid, recording=recording)
+        recording.flush(timeout_sec=30.0)
+        before: int = len(list(RrdReader(output).stream().filter(content=SPLATS_ENTITY).to_chunks()))
+        for path in (tmp_path / "missing.ply", invalid, nonfinite):
+            with pytest.raises((ValueError, FileNotFoundError)):
+                log_ply(path, recording=recording)
+            recording.flush(timeout_sec=30.0)
+            assert len(list(RrdReader(output).stream().filter(content=SPLATS_ENTITY).to_chunks())) == before
+        log_ply(valid, recording=recording)
+        recording.flush(timeout_sec=30.0)
+        chunks = list(RrdReader(output).stream().filter(content=SPLATS_ENTITY).to_chunks())
+        assert sum("GaussianSplats3D:centers" in chunk.to_record_batch().schema.names for chunk in chunks) == 2
+    finally:
+        recording.disconnect()
+
+
+def test_shared_splat_source_keeps_public_tool_flags() -> None:
+    import tyro
+
+    from gsplat_rust_renderer.apis.log_gaussian_ply import LogPlyConfig
+    from gsplat_rust_renderer.apis.log_splats_with_cameras import LogSceneConfig
+
+    for config_type in (LogPlyConfig, LogSceneConfig):
+        config = tyro.cli(config_type, args=["--compute", "--render-mode", "mip", "--scene", "chair", "--ply-path", "tiny.ply", "--rr-config.headless"])
+        assert config.source.compute
+        assert config.source.render_mode == "mip"
+        assert config.source.scene == "chair"
+        assert config.source.ply_path == Path("tiny.ply")

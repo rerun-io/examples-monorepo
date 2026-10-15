@@ -3,11 +3,13 @@
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial import KDTree
+from serde import SerdeError
 from serde.json import from_json, to_json
 
 from gsplat_rust_renderer.gaussians3d import SH_C0
@@ -48,6 +50,12 @@ def main(config: Config) -> None:
     source: Path = config.source_root / config.scene
     output: Path = config.output_root / config.scene
     if (output / "transforms_train.json").is_file() and (output / "points3d.ply").is_file():
+        try:
+            existing: NerfTransforms = from_json(NerfTransforms, (output / "transforms_train.json").read_text())
+        except (SerdeError, ValueError) as error:
+            raise ValueError(f"{output}: invalid existing training config; remove the generated transforms_train.json and retry") from error
+        if existing.ply_file_path != "points3d.ply" or (output / "points3d.ply").read_bytes() != initialization_ply():
+            raise ValueError(f"{output}: invalid existing initialization; remove the generated transforms_train.json and retry")
         return
     if not source.exists():
         source = download_and_extract("data", config.scene, root=config.source_root.parent)
@@ -55,8 +63,13 @@ def main(config: Config) -> None:
     output.mkdir(parents=True, exist_ok=True)
     for name in ("train", "val", "test", "transforms_val.json", "transforms_test.json"):
         destination: Path = output / name
-        if not destination.exists():
+        if not destination.exists() and not destination.is_symlink():
             destination.symlink_to(os.path.relpath(source / name, output), target_is_directory=(source / name).is_dir())
-    (output / "points3d.ply").write_bytes(initialization_ply())
-    (output / "transforms_train.json").write_text(to_json(replace(transforms, ply_file_path="points3d.ply")))
+    with TemporaryDirectory(prefix=f".{config.scene}-init-", dir=config.output_root) as directory:
+        staging: Path = Path(directory)
+        (staging / "points3d.ply").write_bytes(initialization_ply())
+        (staging / "transforms_train.json").write_text(to_json(replace(transforms, ply_file_path="points3d.ply")))
+        (staging / "points3d.ply").replace(output / "points3d.ply")
+        # The complete JSON is the completion marker and is published last.
+        (staging / "transforms_train.json").replace(output / "transforms_train.json")
     print(f"Initialized {config.scene}: {output}")

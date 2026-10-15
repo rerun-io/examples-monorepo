@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import tyro
 from jaxtyping import Float32
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, compute_visualizer, log_ply
-from gsplat_rust_renderer.nerfbaselines import DEFAULT_SCENE, scene_ply_path
+from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, SplatSource, log_ply, splat_overrides
+from gsplat_rust_renderer.nerfbaselines import scene_ply_path
 
 VIEW_ROOT: str = "/"
 
@@ -25,14 +26,9 @@ class LogPlyConfig:
 
     rr_config: RerunTyroConfig
     """Rerun connection/output configuration. Use --rr-config.connect to send to the Rust viewer."""
-    compute: bool = False
-    """Explicitly select the custom compute visualizer; normally each viewer selects its renderer."""
-    render_mode: Literal["default", "mip"] | None = None
-    """Per-entity compute rendering mode, stored in the blueprint."""
-    scene: str = DEFAULT_SCENE
-    """nerfbaselines scene whose pretrained PLY is loaded when --ply-path is omitted."""
-    ply_path: Path | None = None
-    """Explicit Gaussian splat .ply path; defaults to the pretrained --scene PLY."""
+    source: Annotated[SplatSource, tyro.conf.OmitArgPrefixes] = field(default_factory=SplatSource)
+    """Splat source and rendering choices, exposed without a flag prefix."""
+
 
 
 def splat_blueprint(bounds: Float32[ndarray, "2 3"], compute: bool = False, render_mode: Literal["default", "mip"] | None = None) -> rrb.Blueprint:
@@ -41,8 +37,7 @@ def splat_blueprint(bounds: Float32[ndarray, "2 3"], compute: bool = False, rend
     Args:
         bounds: Float32[ndarray, "2 3"] lower and upper center percentiles.
     """
-    if render_mode is not None and not compute:
-        raise ValueError("--render-mode requires --compute")
+    overrides: dict[str, rrb.Visualizer] = splat_overrides(compute, render_mode)
     bounds_min, bounds_max = bounds
     center: Float32[ndarray, "3"] = 0.5 * (bounds_min + bounds_max)
     extent: Float32[ndarray, "3"] = bounds_max - bounds_min
@@ -55,7 +50,7 @@ def splat_blueprint(bounds: Float32[ndarray, "2 3"], compute: bool = False, rend
         rrb.Spatial3DView(
             origin=VIEW_ROOT,
             name="Scene",
-            overrides={SPLATS_ENTITY: compute_visualizer(render_mode or "default")} if compute else {},
+            overrides={**overrides},
             eye_controls=rrb.EyeControls3D(
                 position=center + offset_dir * distance,
                 look_target=center,
@@ -67,10 +62,10 @@ def splat_blueprint(bounds: Float32[ndarray, "2 3"], compute: bool = False, rend
 
 def main(config: LogPlyConfig) -> None:
     """Load a static PLY scene and frame it in the Rerun viewer."""
-    ply_path: Path = config.ply_path if config.ply_path is not None else scene_ply_path(config.scene)
+    ply_path: Path = config.source.ply_path if config.source.ply_path is not None else scene_ply_path(config.source.scene)
     bounds: Float32[ndarray, "2 3"] = log_ply(ply_path)
 
-    rr.send_blueprint(splat_blueprint(bounds, config.compute, config.render_mode))
+    rr.send_blueprint(splat_blueprint(bounds, config.source.compute, config.source.render_mode))
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
 
     print(f"logged {ply_path} as static {SPLATS_ENTITY}")
