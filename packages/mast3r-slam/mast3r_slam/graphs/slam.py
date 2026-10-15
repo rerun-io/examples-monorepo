@@ -14,7 +14,7 @@ import numpy as np
 from dagkit.graph import AsOf, Block, DropOldest, Graph, NodeRef, Placement, PortRef, Spawn
 from dagkit.node import Event, Node, Source
 from mast3r.model import AsymmetricMASt3R
-from simplecv.types.frames import MultiViewFrames
+from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
 from simplecv.types.rig import RigCameras
 
 from mast3r_slam.models.mast3r import load_mast3r
@@ -36,18 +36,19 @@ def shared_model() -> AsymmetricMASt3R:
 
 
 def frame_hw(video: Source, img_size: Literal[224, 512]) -> tuple[int, int]:
-    """MASt3R frame size of the source's images: the static rig's resolution when the source has one (it comes before the
-    frames: no decode), else the size of its first frame."""
-    events = iter(video.events())
-    try:
-        first: Event = next(e for e in events if e.port in ("rig", "frames"))
-    finally:
-        getattr(events, "close", lambda: None)()
-    if isinstance(first.value, RigCameras):
-        width, height = (int(v) for v in first.value.resolution_wh[0])
+    """MASt3R frame size of the source's images, read without decoding a frame: a file source's resolution (header or
+    capture properties), else the static rig's (it comes before the frames)."""
+    if isinstance(video, VideoFileSource | ImageDirSource | WebcamSource):
+        width, height = video.resolution_wh()
     else:
-        frames: MultiViewFrames = first.value  # type: ignore[assignment]
-        height, width = frames.rgb.shape[-2:]
+        events = iter(video.events())
+        try:
+            first: Event = next(e for e in events if e.port in ("rig", "frames"))
+        finally:
+            getattr(events, "close", lambda: None)()
+        if not isinstance(first.value, RigCameras):
+            raise ValueError("the SLAM buffers are sized from a static rig before the frames, or from a file source")
+        width, height = (int(v) for v in first.value.resolution_wh[0])
     shape = resize_img(np.zeros((height, width, 3), dtype=np.float32), img_size).rgb_tensor.shape
     return int(shape[-2]), int(shape[-1])
 

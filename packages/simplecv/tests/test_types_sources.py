@@ -154,7 +154,7 @@ class FakeFrames:
 
 @settings(max_examples=20, deadline=None)
 @given(views=st.integers(1, 3), native_hw=st.sampled_from([(32, 48), (40, 40)]), resize_hw=st.sampled_from([(16, 24), (8, 8)]), keep=st.booleans())
-def test_one_value_per_frameset_carries_the_resized_frames_and_the_kept_native_decode(views: int, native_hw: tuple[int, int], resize_hw: tuple[int, int], keep: bool) -> None:
+def test_one_value_per_frameset_carries_both_sizes(views: int, native_hw: tuple[int, int], resize_hw: tuple[int, int], keep: bool) -> None:
     cameras = tuple(f"rig_{v:02d}/cam_00" for v in range(views))
     source = VideoSource(FakeFrames(views, native_hw), cameras, NO_STATICS, resize_hw=resize_hw, keep_native=keep)
     events = list(source.events())

@@ -8,10 +8,10 @@ import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 import rerun as rr
-import torch
 from dagkit import sinks
 from dagkit.app import load_profile
 from dagkit.doc import describe, picture
@@ -30,7 +30,7 @@ from hypothesis import strategies as st
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.sources.catalog_video import SegmentFrames, VideoSource
-from simplecv.sources.files import VideoFileSource, WebcamSource
+from simplecv.sources.files import ImageDirSource, VideoFileSource, WebcamSource
 from simplecv.types.frames import MultiViewFrames
 from simplecv.types.rig import RigCameras
 
@@ -151,16 +151,17 @@ def test_the_default_input_is_the_short_case_and_the_examples_are_the_configs_ve
     assert isinstance(video_source(Config(RerunTyroConfig(headless=True), video=tmp_path / "clip.mp4"), SlamConfig()), VideoFileSource)
 
 
-def test_frame_hw_takes_the_static_rig_resolution_without_decoding_a_frame() -> None:
+def test_frame_hw_sizes_from_the_rig_or_a_file_resolution_without_a_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rig = RigCameras(("rig_00/cam_00",), np.eye(3)[None], np.eye(4)[None], np.array([[640, 480]], dtype=np.int64))
 
     def rig_first() -> Iterator[Event]:
         yield Event(STATIC, "rig", rig)
         raise AssertionError("frame_hw read past the rig")
 
-    frames = MultiViewFrames(0, 0, ("rig_00/cam_00",), torch.zeros((1, 3, 480, 640), dtype=torch.uint8), torch.zeros(1, dtype=torch.int64))
-    from_frame: tuple[int, int] = frame_hw(IterSource({"frames": MultiViewFrames}, lambda: iter([Event(0, "frames", frames)])), 512)
-    assert frame_hw(IterSource({"frames": MultiViewFrames, "rig": RigCameras}, rig_first), 512) == from_frame == (384, 512)
+    cv2.imwrite(str(tmp_path / "000.png"), np.zeros((480, 640, 3), dtype=np.uint8))
+    monkeypatch.setattr(ImageDirSource, "events", lambda self: pytest.fail("frame_hw read the first frame"))
+    from_file: tuple[int, int] = frame_hw(ImageDirSource(tmp_path), 512)
+    assert frame_hw(IterSource({"frames": MultiViewFrames, "rig": RigCameras}, rig_first), 512) == from_file == (384, 512)
 
 
 @pytest.mark.parametrize(("preset", "profile"), [(None, "x86_64-cuda/base"), ("eval", "x86_64-cuda/eval")])
