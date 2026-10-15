@@ -9,7 +9,7 @@ from dagkit.node import Event, Node, Source
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.time import STATIC
 
-from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, CatalogSegment, Frameset, ImuStream, SegmentFeed, open_segment
+from slam_rs.catalog_feed import CatalogSegment, Frameset, ImuStream, RigProfile, SegmentFeed, open_segment
 from slam_rs.nodes.vio import VioNode
 from slam_rs.types import VioRig
 
@@ -21,11 +21,10 @@ class VioSource(IterSource):
     this one) and its gray8 images (``frames``), both at the frameset's ``video_time``. VIO initialises from rest, so the stream
     starts at the segment's first frameset; a window only ends it (frameset times up to its stop)."""
 
-    def __init__(self, segment: SegmentRef, decoder: Literal["cpu", "cuda"]) -> None:
+    def __init__(self, segment: SegmentRef, rig: RigProfile, decoder: Literal["cpu", "cuda"]) -> None:
         def events() -> Generator[Event, None, None]:
             source = CatalogSegment(segment.catalog_url, segment.dataset, segment.segment)
             feed: SegmentFeed
-            rig = ROBOCAP_RIG if segment.dataset == "robocap" else MSD_RIG
             with open_segment(source, profile=rig, cache_video=True, decode_device=decoder, include_ground_truth=False) as feed:
                 offset_ns: int = feed.imu.cam_time_offset_ns  # video_time -> the estimator's clock
                 yield Event(STATIC, "rig", VioRig(feed.cameras, feed.imu, feed.export_offset_ns))

@@ -32,8 +32,8 @@ from serde import from_dict, to_dict
 
 from slam_rs import _core, verify
 from slam_rs.apis.catalog_layer import vio_publish
-from slam_rs.catalog_feed import RIG_ENTITY, Frameset, ImuCalib, ImuStream, SegmentFeed
-from slam_rs.config import SlamConfig
+from slam_rs.catalog_feed import MSD_RIG, RIG_ENTITY, ROBOCAP_RIG, Frameset, ImuCalib, ImuStream, SegmentFeed
+from slam_rs.config import load_slam_config
 from slam_rs.graphs import vio as graphs_vio
 from slam_rs.graphs.vio import VioSource, vio_graph
 from slam_rs.nodes.vio import VioNode, VioParams
@@ -46,11 +46,8 @@ SEGMENT = SegmentRef("msd-index", "msd-index__test__synthetic")
 STEPS: int = 5
 
 
-@pytest.fixture(autouse=True)
-def default_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The node reads the dataset's profiled config from slam.toml; the synthetic rig takes the core's defaults."""
-    text: str = _core.VioConfig().to_json()
-    monkeypatch.setattr(SlamConfig, "vio_config_text", lambda self, dataset, profile="reference": text)
+CONFIG: str = _core.VioConfig().to_json()
+"""The synthetic rig takes the core's default config (a catalog dataset's comes from ``VioParams.for_dataset``)."""
 
 
 def framesets(texture: TextureFactory, splits: list[int] | None = None) -> list[Frameset]:
@@ -122,7 +119,7 @@ def test_a_stop_between_an_imu_batch_and_its_frames_still_publishes_within_the_w
     camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
 ) -> None:
     out: Recorder = node_outputs(
-        VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), rig(camera, imu), framesets(texture), drop_last_frames=True
+        VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), rig(camera, imu), framesets(texture), drop_last_frames=True
     )
     assert [port for port, _, _ in out.items][-1] == "layer" and out.items[-1][1] == (STEPS - 1) * FRAME_PERIOD_NS
 
@@ -147,7 +144,7 @@ def test_the_node_makes_lockstep_calls_whatever_the_imu_split(
     its frame and the frameset is held and retried; the node's poses are the ones ``Lockstep.push`` gets from the same framesets."""
     vrig: VioRig = rig(camera, imu)
     reference: list[Float64[ndarray, " 7"]] = lockstep_poses(vrig, framesets(texture))
-    out: Strict = node_outputs(VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path_factory.mktemp("vio"), "cpu"), vrig, framesets(texture, splits))
+    out: Strict = node_outputs(VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path_factory.mktemp("vio"), "cpu", CONFIG), vrig, framesets(texture, splits))
     assert out.retries == sum(moved == HOLD for moved in splits[: STEPS - 1]), "each frameset whose batch ends at its frame is held once"
     poses: list[RigPose] = [v for p, _, v in out.items if p == "pose"]  # type: ignore[misc]
     assert len(poses) == len(reference) >= 2
@@ -159,7 +156,7 @@ def test_the_node_makes_lockstep_calls_whatever_the_imu_split(
 def test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order(
     camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_path: Path
 ) -> None:
-    node = VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu")
+    node = VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG)
     vrig: VioRig = rig(camera, imu)
     runs: list[Recorder] = []
     for _ in range(2):
@@ -185,7 +182,7 @@ def graph_of(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, tmp_
     source = IterSource({"rig": VioRig, "imu": ImuStream, "frames": Frameset}, lambda: stream(vrig, framesets(texture)))
     publish = LayerFileSink(SEGMENT, "slam_rs", output_dir=tmp_path, register="off")
     viewer = RerunSink(rr.RecordingStream("slam-rs-test"), {"pose": RigPose}, {"pose": "/world/rig"})
-    return vio_graph(source, VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), {"publish": publish, "viewer": viewer})
+    return vio_graph(source, VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), {"publish": publish, "viewer": viewer})
 
 
 def test_the_app_graph_validates_draws_its_declaration_and_documents_itself(tmp_path: Path) -> None:
@@ -277,7 +274,7 @@ def test_the_source_releases_the_segment_when_a_run_fails_although_the_error_is_
 
     monkeypatch.setattr(graphs_vio, "open_segment", segment)
     monkeypatch.setattr(VioNode, "reset", lambda self, ctx: (_ for _ in ()).throw(ValueError("reset failed")))
-    graph: Graph = vio_graph(VioSource(SEGMENT, "cpu"), VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu"), {})
+    graph: Graph = vio_graph(VioSource(SEGMENT, MSD_RIG, "cpu"), VioNode(SEGMENT, VioParams(backend="cpu"), tmp_path, "cpu", CONFIG), {})
     with pytest.raises(ValueError, match="reset failed") as kept:
         run_threaded(graph, mode="lossless")
     assert kept.value is not None and lifecycle == ["open", "closed"]
@@ -336,6 +333,12 @@ def test_the_pose_table_refuses_a_translation_without_its_rotation_as_rig_pose_d
             list(reader.from_layer(rows, RIG_ENTITY, "video_time"))
     with pytest.raises(NotImplementedError, match="slam_rs"):
         CatalogPoses(np.zeros(0, np.int64), np.zeros((0, 4, 4))).to_rerun(RIG_ENTITY)
+
+def test_a_dataset_takes_its_rig_profile_and_its_config_from_one_place() -> None:
+    settings = load_slam_config()
+    assert VioParams("fast").for_dataset("robocap") == (ROBOCAP_RIG, settings.robocap_config_text("fast"))
+    assert VioParams("reference").for_dataset("msd-index") == (MSD_RIG, settings.vio_config_text("msd-index", "reference"))
+
 
 def test_the_decoder_follows_the_device_choice() -> None:
     assert VioParams(decode_device="cpu").decoder() == "cpu"

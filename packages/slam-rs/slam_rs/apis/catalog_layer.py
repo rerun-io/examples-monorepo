@@ -42,9 +42,11 @@ def vio_publish(
 ) -> tuple[Graph, LayerFileSink]:
     """The VIO graph with its sinks: the ``slam_rs`` layer publisher (returned too: its ``published`` file) and the live pose."""
     decoder: Literal["cpu", "cuda"] = params.decoder()
+    rig, config_text = params.for_dataset(segment.dataset)
     publish = LayerFileSink(segment, POSE_SOURCE, output_dir=output_dir, register=register)
     viewer = RerunSink(recording, {"pose": RigPose}, {"pose": RIG_ENTITY}, timeline=segment.timeline)
-    return vio_graph(VioSource(segment, decoder), VioNode(segment, params, output_dir, decoder), {"publish": publish, "viewer": viewer}), publish
+    node = VioNode(segment, params, output_dir, decoder, config_text)
+    return vio_graph(VioSource(segment, rig, decoder), node, {"publish": publish, "viewer": viewer}), publish
 
 
 def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:

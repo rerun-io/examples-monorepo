@@ -18,7 +18,7 @@ from numpy import ndarray
 from serde import serde
 
 from slam_rs import _core
-from slam_rs.catalog_feed import Frameset, ImuStream
+from slam_rs.catalog_feed import MSD_RIG, ROBOCAP_RIG, Frameset, ImuStream, RigProfile
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun
@@ -46,6 +46,14 @@ class VioParams:
             raise ValueError("CUDA decoding requires an available NVIDIA GPU and the slam-rs-cuda environment")
         return "cuda" if self.decode_device == "cuda" or (self.decode_device == "auto" and torch.cuda.is_available()) else "cpu"
 
+    def for_dataset(self, dataset: str) -> tuple[RigProfile, str]:
+        """The rig profile and the profiled VIO config text a catalog dataset runs with: RoboCap has its own of both, the MSD
+        datasets share one rig."""
+        settings: SlamConfig = load_slam_config()
+        if dataset == "robocap":
+            return ROBOCAP_RIG, settings.robocap_config_text(self.profile)
+        return MSD_RIG, settings.vio_config_text(dataset, self.profile)
+
 
 class VioNode:
     """Track the rig pose with VIO.
@@ -57,8 +65,9 @@ class VioNode:
     outputs: Mapping[str, PortType] = {"pose": RigPose, "layer": LayerFile}
     emits_late: bool = True
 
-    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path, decoder: Literal["cpu", "cuda"]) -> None:
-        self.segment, self.params, self.output_dir, self.decoder = segment, params, output_dir, decoder
+    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path, decoder: Literal["cpu", "cuda"], config_text: str) -> None:
+        """``config_text``: the dataset's profiled VIO config (``VioParams.for_dataset``)."""
+        self.segment, self.params, self.output_dir, self.decoder, self.config_text = segment, params, output_dir, decoder, config_text
         self.lockstep: Lockstep | None = None
         self.run: SegmentRun | None = None  # the finished run's counts
         self.partial: Path | None = None  # the layer file flush wrote; abort() deletes it unless the publish sink moved it
@@ -68,9 +77,6 @@ class VioNode:
         rig = ctx.statics.get("rig")
         if not isinstance(rig, VioRig):
             raise ValueError(f"{self.segment.segment}: no rig calibration in the base layer")
-        settings: SlamConfig = load_slam_config()
-        profile, dataset = self.params.profile, self.segment.dataset
-        self.config_text: str = settings.robocap_config_text(profile) if dataset == "robocap" else settings.vio_config_text(dataset, profile)
         calibration: _core.Calibration = _core.Calibration.from_catalog(rig.cameras, rig.imu)
         flow: _core.VioConfig = _core.VioConfig.from_json(self.config_text)
         try:
