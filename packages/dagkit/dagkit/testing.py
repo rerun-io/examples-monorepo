@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import tempfile
@@ -48,11 +49,26 @@ def host(value: object) -> object:
     return value.detach().cpu().numpy() if hasattr(value, "detach") else value
 
 
+class _Snapshots(Recorder):
+    """A Recorder that also keeps every output as it was when put (host values, copied)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.as_put: list[Output] = []
+
+    def put(self, port: str, t_ns: TimeNs, value: object) -> None:
+        super().put(port, t_ns, value)
+        self.as_put.append((port, t_ns, copy.deepcopy(host(value))))
+
+
 def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | None = None) -> list[Output]:
+    """Run ``ticks`` through ``node`` after one reset, then after two: both runs put the same outputs (compared as they were
+    when put), a second flush puts nothing, ports are declared and times monotonic per port, and no output changes after
+    its put (outputs are owned). Returns the first run's outputs."""
     ctx = ctx or RunContext("contract", "node", "lossless")
-    runs: list[list[Output]] = []
+    runs: list[_Snapshots] = []
     for resets in (1, 2):
-        out = Recorder()
+        out = _Snapshots()
         for _ in range(resets):
             node.reset(ctx)
         for tick in ticks:
@@ -66,10 +82,11 @@ def check_node_contract(node: Node, ticks: Sequence[Tick], ctx: RunContext | Non
             assert port in node.outputs, f"put on undeclared port {port!r}"
             check_monotonic(last.get(port), t_ns, f"output {port}")
             last[port] = t_ns
-        runs.append(out.items)
-    plain: list[list[object]] = [[(p, t, host(v)) for p, t, v in run] for run in runs]
-    np.testing.assert_equal(plain[1], plain[0], err_msg="a run after reset differs from the first run (reset is not idempotent)")  # arrays by value
-    return runs[0]
+        runs.append(out)
+    np.testing.assert_equal(runs[1].as_put, runs[0].as_put, err_msg="a run after reset differs from the first run (reset is not idempotent)")  # arrays by value
+    now: list[Output] = [(p, t, host(v)) for p, t, v in runs[0].items]
+    np.testing.assert_equal(now, runs[0].as_put, err_msg="an output changed after its put (a node emits owned values, never a buffer it writes again)")
+    return runs[0].items
 
 
 class _Spy:

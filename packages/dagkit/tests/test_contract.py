@@ -34,6 +34,41 @@ def test_state_that_survives_reset_is_caught() -> None:
         check_node_contract(Leaky(0), ticks(3))
 
 
+def test_a_reset_that_rewrites_an_output_the_first_run_kept_is_caught() -> None:
+    """Runs compare outputs as they were put: a reset that writes into an output the first run still holds cannot make
+    both runs look the same."""
+
+    class Rewrites(Add):
+        def __init__(self) -> None:
+            super().__init__(0)
+            self.buffer: list[int] = [0]
+
+        def reset(self, ctx: RunContext) -> None:  # not idempotent, and it writes into the buffer every run emitted
+            self.resets += 1
+            self.buffer[0] = self.resets
+
+        def step(self, tick: Tick, out: Emit) -> None:
+            out.put("y", tick.t_ns, self.buffer)
+
+    with pytest.raises(AssertionError, match="reset is not idempotent"):
+        check_node_contract(Rewrites(), ticks(2))
+
+
+def test_an_output_written_again_after_its_put_is_caught() -> None:
+    """A node emits owned values: one buffer rewritten by every step makes every kept output read the last value."""
+
+    class Reuses(Add):
+        def reset(self, ctx: RunContext) -> None:
+            self.buffer = np.zeros(1)
+
+        def step(self, tick: Tick, out: Emit) -> None:
+            self.buffer[0] = float(tick.value)  # type: ignore[arg-type]
+            out.put("y", tick.t_ns, self.buffer)
+
+    with pytest.raises(AssertionError, match="changed after its put"):
+        check_node_contract(Reuses(0), ticks(3))
+
+
 @dataclass(frozen=True)
 class Cloud:
     xyz: np.ndarray
