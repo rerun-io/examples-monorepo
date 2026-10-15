@@ -11,10 +11,10 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import torch
+from dagkit.catalog import read_column
 from dagkit.node import Event, Fence, Fenced, PortType
 from dagkit.sources import Column, SegmentRef
 from dagkit.time import STATIC
-from dagkit.types import read_column
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor

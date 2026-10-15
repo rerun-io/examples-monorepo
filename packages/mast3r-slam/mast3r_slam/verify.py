@@ -28,11 +28,12 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.catalog import served
 from dagkit.node import Emit, Source, Tick
 from dagkit.runners import RunReport, run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import SegmentRef
-from dagkit.types import flat, served
+from dagkit.types import flat
 from dagkit.verify import Case, Phase, load_card, run_counts
 from datafusion import col, lit
 from jaxtyping import Float64, Int64

@@ -13,8 +13,8 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dagkit.app import run_graphs
+from dagkit.catalog import read_column, served
 from dagkit.sources import SegmentRef
-from dagkit.types import read_column, served
 from dagkit.verify import Case, Phase, load_card
 from jaxtyping import Float64
 from numpy import ndarray

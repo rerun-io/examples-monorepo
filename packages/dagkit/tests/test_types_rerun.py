@@ -6,6 +6,7 @@ import pytest
 import rerun as rr
 from dagkit_fakes import Collect, Point
 
+from dagkit.catalog import read_column, read_producer, served
 from dagkit.graph import Graph
 from dagkit.node import Event
 from dagkit.runners import run_sequential
@@ -13,7 +14,7 @@ from dagkit.sinks import LayerSink, segment_layers
 from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
 from dagkit.testing import rerun_roundtrip
 from dagkit.time import STATIC, GraphError
-from dagkit.types import Producer, read_column, read_producer, served
+from dagkit.types import Producer
 from dagkit.verify import run_counts
 
 pytestmark = pytest.mark.integration

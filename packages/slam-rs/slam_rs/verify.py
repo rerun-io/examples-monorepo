@@ -14,9 +14,9 @@ from typing import cast
 
 import numpy as np
 import rerun as rr
+from dagkit.catalog import served
 from dagkit.runners import RunReport, run_sequential
 from dagkit.sources import SegmentRef
-from dagkit.types import served
 from dagkit.verify import Case, Phase, pre_golden, run_counts
 from rerun.catalog import DatasetEntry
 

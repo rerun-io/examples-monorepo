@@ -19,9 +19,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import rerun as rr
+from dagkit.catalog import served
 from dagkit.runners import RunReport, run_threaded
 from dagkit.sinks import LayerFileSink
-from dagkit.types import served
 from dagkit.verify import Case, Phase, pre_golden, run_counts
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray

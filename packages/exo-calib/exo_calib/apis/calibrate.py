@@ -20,12 +20,13 @@ import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from dagkit.app import HardwareClass, detect_hardware, load_profile, run_app, with_pipeline
+from dagkit.catalog import read_column, read_producer
 from dagkit.graph import Graph
 from dagkit.node import Mode, Node, PortType
 from dagkit.runners import RunReport
 from dagkit.sinks import Latest, LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, read_column, read_producer
+from dagkit.types import Producer
 from serde import serde
 from serde.json import to_json
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS

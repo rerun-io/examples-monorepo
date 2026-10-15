@@ -21,9 +21,10 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dagkit.catalog import served
 from dagkit.runners import run_threaded
 from dagkit.sources import SegmentRef
-from dagkit.types import cells, flat, served
+from dagkit.types import cells, flat
 from dagkit.verify import Case, Phase, load_card, run_counts
 from datafusion import col, lit
 from jaxtyping import Bool, Float32, Int64

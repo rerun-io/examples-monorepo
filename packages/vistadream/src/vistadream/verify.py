@@ -27,11 +27,12 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
+from dagkit.catalog import served
 from dagkit.graph import Graph
 from dagkit.node import Emit
 from dagkit.runners import run_sequential
 from dagkit.sinks import Latest
-from dagkit.types import cells, served
+from dagkit.types import cells
 from dagkit.verify import Case, Phase, pre_golden
 from jaxtyping import Bool
 from numpy import ndarray
