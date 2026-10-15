@@ -127,7 +127,7 @@ Takes **run** from 3 hands.
 | type | what it is | code |
 |---|---|---|
 | `CapRig` | A RoboCap rig's six fisheye cameras as the segment's base layer stores them under the rig root (static) | `packages/robocap-live/robocap_live/types.py` |
-| `CatalogPoses` | A segment's whole SLAM pose table (``slam_rs``: the rig's Transform3D rows), sorted, finite; one STATIC value | `packages/robocap-live/robocap_live/types.py` |
+| `CatalogPoses` | A segment's whole SLAM pose table (``slam_rs``: the rig's Transform3D rows), sorted, finite; one STATIC value | `packages/slam-rs/slam_rs/types.py` |
 | `LayerFile` | A finished layer file (an rrd) that a sink publishes | `packages/dagkit/dagkit/types.py` |
 | `LayerRun` | One hands-layer run: what the layer holds, and the core's stage totals in seconds (its stages run in parallel and overlap) | `packages/robocap-live/robocap_live/types.py` |
 | `LumaFrameset` | Raw Y planes of one frameset (``cpu_luma``); ``None`` marks a camera missing from it | `packages/simplecv/simplecv/types/frames.py` |

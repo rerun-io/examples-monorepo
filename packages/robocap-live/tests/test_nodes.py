@@ -22,12 +22,13 @@ from numpy import ndarray
 from serde import to_dict
 from simplecv.types.frames import LumaFrameset
 from simplecv.types.rig import RigCameras
+from slam_rs.types import CatalogPoses
 
 from robocap_live import _core
 from robocap_live.graphs import hands_layer
 from robocap_live.graphs.hands_layer import hands_layer_graph, segment_source
 from robocap_live.nodes.hands import HandsNode, HandsParams
-from robocap_live.types import CapRig, CatalogPoses, LayerRun
+from robocap_live.types import CapRig, LayerRun
 
 SEGMENT = SegmentRef("robocap", "robocap__test__s00000001")
 VIEWS: tuple[str, ...] = tuple(f"rig_00/cam_{i:02d}" for i in range(6))

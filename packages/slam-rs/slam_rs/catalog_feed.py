@@ -404,12 +404,12 @@ class SegmentFeed:
         """Return rig truth over inertial ``[first_ns, last_ns]``; query its stored ``video_time`` clock (also used by frames)
         and shift back. Empty for no ``gt`` layer or no window coverage: test :func:`len` for poses, :attr:`has_ground_truth`
         for layer presence. Raise ValueError if translation/rotation validity differs by row, preventing pose reads
-        (:func:`_rig_trajectory`).
+        (:func:`rig_trajectory`).
         """
         if self.gt_dataset is None:
             return empty_trajectory()
         offset_ns: int = self.imu.cam_time_offset_ns
-        return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
+        return shift_clock(read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
     def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment; yield every :attr:`frame_stride`-th frameset, one at a time in time order.
@@ -666,7 +666,7 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
         raise ValueError(f"{segment_id}: {error}") from error
 
 
-def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
+def read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
     """Return one window's rig truth on ``video_time``, converting Rerun XYZW to w-first. Empty for no rig transform or no
     poses in this window; both mean no truth here. :attr:`SegmentFeed.has_ground_truth` distinguishes layer absence.
     """
@@ -677,10 +677,10 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
         .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
         .to_arrow_table()
     )
-    return _rig_trajectory(table, segment_id)
+    return rig_trajectory(table, segment_id)
 
 
-def _rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
+def rig_trajectory(table: pa.Table, segment_id: str, entity: str = RIG_ENTITY, timeline: str = TIMELINE) -> Trajectory:
     """Return a ``gt`` window's rig trajectory on ``video_time``, converting Rerun XYZW to w-first.
     ``table`` holds one ``entity`` Transform3D per row, indexed by ``timeline``; ``segment_id`` identifies errors.
     Empty if neither component exists or the window has no pose. Raise ValueError naming the row if translation and rotation

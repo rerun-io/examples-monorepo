@@ -22,6 +22,7 @@ from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.types.frames import LumaFrameset
 from slam_rs.nodes.vio import VioParams
+from slam_rs.types import CatalogPoses
 
 # pyrefly resolves `test_nodes` to another package's tests on the monorepo search path; pytest imports this one.
 from test_nodes import SEGMENT, T0, cap_rig, framesets, no_nets, poses  # pyrefly: ignore[missing-module-attribute]
@@ -30,7 +31,7 @@ from robocap_live.apis import hands_layer as app
 from robocap_live.apis.hands_layer import Config, blueprint, build, examples, main
 from robocap_live.graphs import hands_layer
 from robocap_live.nodes.hands import HandsNode, HandsParams
-from robocap_live.types import CapRig, CatalogPoses
+from robocap_live.types import CapRig
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 

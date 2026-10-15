@@ -22,7 +22,7 @@ from rerun.catalog import DatasetEntry
 from serde import from_dict
 
 from slam_rs.apis.catalog_layer import vio_publish
-from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, _read_ground_truth, _rig_trajectory, resolve_catalog_segments
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CatalogSegment, read_ground_truth, resolve_catalog_segments, rig_trajectory
 from slam_rs.config import load_slam_config
 from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.tracking import SegmentRun
@@ -53,7 +53,7 @@ def _read(golden: Path) -> tuple[Trajectory, float]:
     """A golden's rig poses on ``video_time`` and its run's lost framesets."""
     with rr.server.Server(host="127.0.0.1", datasets={"golden": [str(golden)]}) as server:
         dataset: DatasetEntry = server.client().get_dataset("golden")  # an entry must outlive its queries
-        poses: Trajectory = _rig_trajectory(dataset.filter_contents([RIG_ENTITY]).reader(index=TIMELINE).to_arrow_table(), golden.name)
+        poses: Trajectory = rig_trajectory(dataset.filter_contents([RIG_ENTITY]).reader(index=TIMELINE).to_arrow_table(), golden.name)
         statics: pa.Table = dataset.filter_contents([RUN]).reader(index=None).to_arrow_table()
     return poses, float(np.asarray(statics[f"{RUN}:lost"].to_pylist()[0]).reshape(-1)[0])
 
@@ -87,5 +87,5 @@ def score_gt(case: Case, golden: Path) -> dict[str, float]:
     with rr.server.Server(host="127.0.0.1") as server:
         truth: DatasetEntry = server.client().create_dataset("gt")
         truth.register([source.ground_truth_uri]).wait()
-        gt: Trajectory = _read_ground_truth(truth, segment.segment, int(ours.t_ns[0]), int(ours.t_ns[-1]))
+        gt: Trajectory = read_ground_truth(truth, segment.segment, int(ours.t_ns[0]), int(ours.t_ns[-1]))
     return {"gt_ate_cm": 100.0 * ate(ours, gt).rmse_m, "lost_framesets": lost, "pose_count": float(len(ours))}

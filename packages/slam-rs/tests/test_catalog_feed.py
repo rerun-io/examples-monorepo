@@ -26,7 +26,6 @@ from slam_rs.catalog_feed import (
     Frameset,
     ImuStream,
     SegmentFeed,
-    _rig_trajectory,
     _shared_codec,
     _static_int,
     _static_string,
@@ -34,6 +33,7 @@ from slam_rs.catalog_feed import (
     _video_codec,
     camera_calib,
     open_segment,
+    rig_trajectory,
 )
 from slam_rs.config import SlamConfig
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, resolved_flow_config
@@ -241,7 +241,7 @@ def _transform_rows(t_ns: list[int], translations: list[list[float] | None], qua
         quaternions: Per row, the XYZW rotation, or None where the row carries no quaternion.
 
     Returns:
-        The window in the shape the reader hands :func:`_rig_trajectory`.
+        The window in the shape the reader hands :func:`rig_trajectory`.
     """
     return pa.table(
         {
@@ -266,7 +266,7 @@ def test_a_ground_truth_window_reads_both_components_off_the_same_rows() -> None
     logging or a clear writes it, and the public ``--gt-rrd`` path reads it —
     silently attached a rotation from the wrong time to every pose (S25 review).
     """
-    aligned: Trajectory = _rig_trajectory(
+    aligned: Trajectory = rig_trajectory(
         _transform_rows(
             [10, 20, 30],
             [[1.0, 0.0, 0.0], None, [3.0, 0.0, 0.0]],
@@ -282,7 +282,7 @@ def test_a_ground_truth_window_reads_both_components_off_the_same_rows() -> None
     # Two masks, two valid rows each, one row in common: the counts match, so
     # nothing downstream could notice the swap.
     with pytest.raises(ValueError, match=f"{SMOKE_SEGMENT}: 2 of 3 rig rows.*translation.*quaternion.*first at 10 ns"):
-        _rig_trajectory(
+        rig_trajectory(
             _transform_rows(
                 [10, 20, 30],
                 [[1.0, 0.0, 0.0], None, [3.0, 0.0, 0.0]],
@@ -294,8 +294,8 @@ def test_a_ground_truth_window_reads_both_components_off_the_same_rows() -> None
 
 def test_a_ground_truth_window_with_no_pose_in_it_is_empty() -> None:
     """A window the layer does not cover is the same answer as a layer that is not there."""
-    assert len(_rig_trajectory(_transform_rows([10, 20], [None, None], [None, None]), SMOKE_SEGMENT)) == 0
-    assert len(_rig_trajectory(pa.table({TIMELINE: pa.array([10], type=pa.int64())}), SMOKE_SEGMENT)) == 0
+    assert len(rig_trajectory(_transform_rows([10, 20], [None, None], [None, None]), SMOKE_SEGMENT)) == 0
+    assert len(rig_trajectory(pa.table({TIMELINE: pa.array([10], type=pa.int64())}), SMOKE_SEGMENT)) == 0
 
 
 @pytest.mark.integration

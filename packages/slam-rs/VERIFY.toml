@@ -87,15 +87,25 @@ noise = { gt_ate_cm = 0.0, lost_framesets = 0.0 }
 name = "types"
 tier = "types"
 lane = "unit"
-tests = ["tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root"]
-properties = ["tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root"]
+tests = [
+    "tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root",
+    "tests/test_vio_graph.py::test_the_pose_table_reads_the_layers_rows_whole_sorted_and_finite",
+    "tests/test_vio_graph.py::test_the_pose_table_refuses_a_translation_without_its_rotation_as_rig_pose_does_and_is_never_written",
+]
+properties = [
+    "tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root",
+    "tests/test_vio_graph.py::test_the_pose_table_reads_the_layers_rows_whole_sorted_and_finite",
+]
 
 [[tests]]
 name = "types-rerun"
 tier = "types"
 lane = "integration"
 tests = ["tests/test_types_rerun.py"]
-properties = ["tests/test_types_rerun.py::test_a_rig_pose_reads_back_at_its_time_with_its_quaternion_order_in_float32"]
+properties = [
+    "tests/test_types_rerun.py::test_a_rig_pose_reads_back_at_its_time_with_its_quaternion_order_in_float32",
+    "tests/test_types_rerun.py::test_the_pose_table_reads_a_recording_the_way_slam_rs_writes_it",
+]
 
 [[tests]]
 name = "nodes"

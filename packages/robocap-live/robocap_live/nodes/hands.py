@@ -22,9 +22,10 @@ from dagkit.time import STATIC, TimeNs
 from dagkit.types import LayerFile
 from serde import serde
 from simplecv.types.frames import LumaFrameset
+from slam_rs.types import CatalogPoses
 
 from robocap_live import _core
-from robocap_live.types import RIG_ROOT, CapRig, CatalogPoses, LayerRun
+from robocap_live.types import RIG_ROOT, CapRig, LayerRun
 
 LAYER: str = "hands"
 """Catalog layer name of the hands layer."""
