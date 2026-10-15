@@ -1,25 +1,27 @@
 //! Native archetype queries, memoized uploads, instance transforms and blueprint properties.
 use crate::cache::{BatchKey, GpuCache};
 use glam::UVec2;
-use gsplat_core::{
-    Camera, RenderMode, RenderOptions,
-    native::{NativeSplats, at_or_last},
-};
+use gsplat_core::{Camera, RenderMode, RenderOptions, native::NativeSplats};
 use half::f16;
 use re_sdk_types::{Archetype as _, Component as _, archetypes::GaussianSplats3D};
 use re_view::{
     BlueprintResolvedResultsExt as _, DataResultQuery as _, VisualizerInstructionQueryResults,
 };
 use re_view_spatial::{SpatialViewState, TransformTreeContext};
+use re_viewer::external::{
+    re_log, re_log_types, re_query, re_renderer, re_sdk_types, re_view, re_view_spatial,
+    re_viewer_context,
+};
 use re_viewer_context::{
     AppOptions, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
-    ViewSystemExecutionError, ViewSystemIdentifier, VisualizerExecutionOutput, VisualizerQueryInfo,
-    VisualizerSystem,
+    ViewSystemExecutionError, ViewSystemIdentifier, ViewerReportSeverity,
+    VisualizerExecutionOutput, VisualizerQueryInfo, VisualizerSystem,
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-/// Blueprint-only field on a ComputeGaussianSplats3D visualizer instruction.
-/// The data recording still contains only native GaussianSplats3D descriptors.
-pub fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
+
+/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction.
+/// The data recording still contains only native `GaussianSplats3D` descriptors.
+pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
     re_sdk_types::ComponentDescriptor {
         archetype: None,
         component: "ComputeGaussianSplats3D:render_mode".into(),
@@ -28,12 +30,14 @@ pub fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
 }
 
 #[derive(Default)]
-pub struct GaussianSplatVisualizer;
+pub(crate) struct GaussianSplatVisualizer;
+
 impl IdentifiedViewSystem for GaussianSplatVisualizer {
     fn identifier() -> ViewSystemIdentifier {
         crate::selection::COMPUTE.into()
     }
 }
+
 impl VisualizerSystem for GaussianSplatVisualizer {
     fn affinity(&self) -> Option<re_sdk_types::ViewClassIdentifier> {
         use re_sdk_types::View as _;
@@ -48,23 +52,28 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             &components,
         )
     }
+
     fn execute(
         &self,
         ctx: &ViewContext<'_>,
         query: &ViewQuery<'_>,
         systems: &ViewContextCollection,
     ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
+        re_tracing::profile_function!();
+        let renderer = ctx
+            .render_ctx()
+            .renderer::<crate::renderer::GaussianRenderer>()?;
         let output = VisualizerExecutionOutput::default();
         let Some(camera) = camera_from_view(ctx, query) else {
-            ctx.egui_ctx()
-                .request_repaint_after(std::time::Duration::from_millis(50));
+            // The spatial view publishes its first eye on the next frame.
+            ctx.egui_ctx().request_repaint();
             return Ok(output);
         };
         let transforms = systems.get::<TransformTreeContext>(&output)?;
         let mut draw = Vec::new();
         for (data, instruction) in query.iter_visualizer_instruction_for(Self::identifier()) {
             let report = |severity, message: String| {
-                output.report_unspecified_source(instruction.id, severity, message)
+                output.report_unspecified_source(instruction.id, severity, message);
             };
             if !crate::selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
                 continue;
@@ -73,8 +82,8 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 Some(Ok(transform)) => &transform.target_from_instances()[..],
                 Some(Err(error)) => {
                     report(
-                        re_viewer_context::ViewerReportSeverity::Error,
-                        format!("Invalid entity transform: {error:?}"),
+                        ViewerReportSeverity::Error,
+                        format!("Invalid entity transform: {error:#}"),
                     );
                     continue;
                 }
@@ -83,47 +92,38 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             match draw_entity(
                 ctx,
                 query,
-                Entity {
-                    data,
-                    instruction,
-                    instances,
-                },
+                data,
+                instruction,
+                instances,
+                renderer,
                 &output,
+                &report,
                 &mut draw,
                 &camera,
             ) {
                 Ok(true) => ctx.egui_ctx().request_repaint(),
                 Ok(false) => {}
-                Err(error) => report(
-                    re_viewer_context::ViewerReportSeverity::Error,
-                    error.to_string(),
-                ),
+                Err(error) => report(ViewerReportSeverity::Error, format!("{error:#}")),
             }
         }
         Ok(output.with_draw_data(draw))
     }
 }
-struct Entity<'a> {
-    data: &'a re_viewer_context::DataResult,
-    instruction: &'a re_viewer_context::VisualizerInstruction,
-    instances: &'a [glam::DAffine3],
-}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_entity(
     ctx: &ViewContext<'_>,
     query: &ViewQuery<'_>,
-    entity: Entity<'_>,
+    data: &re_viewer_context::DataResult,
+    instruction: &re_viewer_context::VisualizerInstruction,
+    instances: &[glam::DAffine3],
+    renderer: &crate::renderer::GaussianRenderer,
     output: &VisualizerExecutionOutput,
+    report: &impl Fn(ViewerReportSeverity, String),
     draw: &mut Vec<re_renderer::QueueableDrawData>,
     camera: &Camera,
 ) -> Result<bool, ViewSystemExecutionError> {
-    let Entity {
-        data,
-        instruction,
-        instances,
-    } = entity;
-    let report = |severity, message: String| {
-        output.report_unspecified_source(instruction.id, severity, message)
-    };
+    re_tracing::profile_function!();
     let components =
         GaussianSplats3D::all_component_identifiers().chain([render_mode_descriptor().component]);
     let query_results =
@@ -146,13 +146,24 @@ fn draw_entity(
         None | Some("default") => RenderMode::Default,
         Some(unknown) => {
             report(
-                re_viewer_context::ViewerReportSeverity::Warning,
+                ViewerReportSeverity::Warning,
                 format!("Unknown Gaussian render mode {unknown:?}; using default"),
             );
             RenderMode::Default
         }
     };
     let attribute_generation = attribute_generation(instruction, &query_results);
+    let query_ctx = ctx.query_context(data, query.latest_at_query(), instruction.id);
+    let color: re_sdk_types::components::Color = re_viewer_context::typed_fallback_for(
+        &query_ctx,
+        GaussianSplats3D::descriptor_colors().component,
+    );
+    let fallback = [u32::from_be_bytes(color.to_array())];
+    let fallback_degree: re_sdk_types::components::SphericalHarmonicsDegree =
+        re_viewer_context::typed_fallback_for(
+            &query_ctx,
+            GaussianSplats3D::descriptor_spherical_harmonics_degree().component,
+        );
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -167,28 +178,25 @@ fn draw_entity(
         }
         let mut hasher = DefaultHasher::new();
         (attribute_generation, row).hash(&mut hasher);
-        let fallback: re_sdk_types::components::Color = re_viewer_context::typed_fallback_for(
-            &ctx.query_context(data, query.latest_at_query(), instruction.id),
-            GaussianSplats3D::descriptor_colors().component,
-        );
-        let fallback = [u32::from_be_bytes(fallback.to_array())];
         if colors.is_none_or(|values| values.is_empty()) {
             fallback.hash(&mut hasher);
         }
-        let signature = hasher.finish();
+        let signature = re_log_types::hash::Hash64::from_u64(hasher.finish());
         let native = NativeSplats {
             centers,
             scales: scales.unwrap_or(&[]),
             quaternions: rotations.unwrap_or(&[]),
             colors: colors.filter(|c| !c.is_empty()).unwrap_or(&fallback),
             sh: sh.unwrap_or(&[]),
-            degree: degree.and_then(|d| d.first().copied()).unwrap_or(3),
+            degree: degree
+                .and_then(|d| d.first().copied())
+                .unwrap_or(*fallback_degree.0),
         };
         for (index, world_from_local) in instances.iter().enumerate() {
             let world_from_local = world_from_local.as_affine3a();
             if !world_from_local.inverse().is_finite() {
                 report(
-                    re_viewer_context::ViewerReportSeverity::Error,
+                    ViewerReportSeverity::Error,
                     "Non-invertible splat instance transform".into(),
                 );
                 continue;
@@ -211,6 +219,7 @@ fn draw_entity(
                 .memoizer::<GpuCache, _>(|cache| {
                     cache.prepare(
                         ctx.render_ctx(),
+                        renderer,
                         key.clone(),
                         &native,
                         signature,
@@ -228,16 +237,18 @@ fn draw_entity(
                     @ (gsplat_core::Error::Capacity { .. } | gsplat_core::Error::Capabilities),
                 ) => {
                     report(
-                        re_viewer_context::ViewerReportSeverity::Warning,
+                        ViewerReportSeverity::Warning,
                         format!("{error}; using the native Gaussian renderer"),
                     );
-                    draw.push(fallback_draw(
+                    // The pixel contract uses this machine-visible marker to distinguish native fallback from compute.
+                    re_log::warn_once!("Gaussian compute fallback: {error:#}");
+                    draw.push(crate::fallback::native_fallback(
                         ctx,
                         query,
                         key,
                         &native,
                         world_from_local,
-                        &error,
+                        signature,
                     )?);
                 }
                 Err(error) => {
@@ -250,26 +261,7 @@ fn draw_entity(
     }
     Ok(retry)
 }
-fn fallback_draw(
-    ctx: &ViewContext<'_>,
-    query: &ViewQuery<'_>,
-    key: BatchKey,
-    native: &NativeSplats<'_>,
-    world_from_local: glam::Affine3A,
-    error: &gsplat_core::Error,
-) -> Result<re_renderer::QueueableDrawData, ViewSystemExecutionError> {
-    re_log::warn_once!("Gaussian compute fallback: {error}");
-    let sort = ctx
-        .viewer_ctx
-        .store_context
-        .memoizer::<GpuCache, _>(|cache| {
-            if cache.fallback_bounds(query.view_id, native, world_from_local) {
-                ctx.egui_ctx().request_repaint();
-            }
-            cache.native_sort(key)
-        });
-    Ok(native_fallback(ctx.render_ctx(), native, world_from_local, sort)?.into())
-}
+
 fn attribute_generation(
     instruction: &re_viewer_context::VisualizerInstruction,
     query_results: &re_view::BlueprintResolvedResults<'_>,
@@ -301,6 +293,8 @@ fn attribute_generation(
     }
     attribute_hasher.finish()
 }
+
+/// Read the last published eye and viewport for the compute renderer and probe.
 pub fn camera_from_view(ctx: &ViewContext<'_>, query: &ViewQuery<'_>) -> Option<Camera> {
     let state = ctx.view_state.as_any().downcast_ref::<SpatialViewState>()?;
     let eye = state.state_3d.eye_state.last_eye?;
@@ -338,51 +332,4 @@ fn hash_arrow(data: &re_sdk_types::external::arrow::array::ArrayData, hasher: &m
     for child in data.child_data() {
         hash_arrow(child, hasher);
     }
-}
-
-/// The stock texture-backed path remains available when compute storage cannot hold a scene.
-fn native_fallback(
-    ctx: &re_renderer::RenderContext,
-    cloud: &NativeSplats<'_>,
-    world_from_local: glam::Affine3A,
-    sort: re_renderer::SortOrderCache,
-) -> Result<re_renderer::renderer::GaussianSplatDrawData, ViewSystemExecutionError> {
-    let centers: Vec<_> = cloud
-        .centers
-        .iter()
-        .copied()
-        .map(glam::Vec3::from_array)
-        .collect();
-    // The stock builder zips centers with scales before clamping its packed data.
-    // Expand scales first so a broadcast scale cannot repeat the first center.
-    let scales: Vec<_> = (0..cloud.centers.len())
-        .map(|index| {
-            glam::Vec3::from_array(at_or_last(cloud.scales, index, [0.01; 3]))
-                .max(glam::Vec3::splat(1e-6))
-        })
-        .collect();
-    let rotations: Vec<_> = cloud
-        .quaternions
-        .iter()
-        .copied()
-        .map(glam::Quat::from_array)
-        .collect();
-    let colors: Vec<_> = cloud
-        .colors
-        .iter()
-        .map(|rgba| re_renderer::Rgba32Unmul::from_rgba_unmul_array(rgba.to_be_bytes()))
-        .collect();
-    let sh: Vec<_> = cloud
-        .sh
-        .iter()
-        .map(|coefficients| coefficients.map(re_renderer::GaussianShCoefficient::from_rgb))
-        .collect();
-    let sh_count = cloud.coefficient_count() - 1;
-    let mut builder = re_renderer::GaussianSplatBuilder::new(ctx);
-    builder
-        .batch("Gaussian compute fallback")
-        .world_from_obj(world_from_local)
-        .sort_order(sort)
-        .add_gaussians(&centers, &scales, &rotations, &colors, &sh, sh_count, &[]);
-    Ok(builder.into_draw_data()?)
 }

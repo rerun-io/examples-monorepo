@@ -2,33 +2,49 @@
 use crate::cache::GpuCache;
 use glam::Vec3;
 use re_sdk_types::{blueprint::archetypes::EyeControls3D, components::Position3D};
+use re_viewer::external::{re_log, re_renderer, re_sdk_types, re_view_spatial, re_viewer_context};
 use re_viewer_context::{QueryContext, ViewStateExt as _, ViewSystemRegistrator};
 
-pub fn register(registry: &mut ViewSystemRegistrator<'_>) {
+pub(crate) fn register(registry: &mut ViewSystemRegistrator<'_>) {
     registry.register_fallback_provider(EyeControls3D::descriptor_look_target().component, |ctx| {
-        let [min, max] = scene_bounds(ctx);
-        Position3D::from((min + max) * 0.5)
+        let center = scene_bounds(ctx).center();
+        Position3D::from(if center.is_finite() {
+            center
+        } else {
+            Vec3::ZERO
+        })
     });
     registry.register_fallback_provider(EyeControls3D::descriptor_position().component, |ctx| {
-        let [min, max] = scene_bounds(ctx);
-        let center = (min + max) * 0.5;
-        let state = ctx
+        let Ok(state) = ctx
             .view_state()
             .downcast_ref::<re_view_spatial::SpatialViewState>()
-            .ok();
-        let up = state
-            .and_then(|s| s.state_3d.scene_view_coordinates.up())
-            .map(Vec3::from)
-            .unwrap_or(Vec3::Z);
-        let right = state
-            .and_then(|s| s.state_3d.scene_view_coordinates.right())
-            .map(Vec3::from)
-            .unwrap_or(Vec3::X);
-        let direction = (right - 3.0 * up.cross(right) + up).normalize_or(Vec3::Z);
-        Position3D::from(center + direction * (max - min).length().max(1.0) * 1.5)
+        else {
+            re_log::error_once!("Eye position fallback queried outside a spatial view");
+            return Position3D::ZERO;
+        };
+        let bounds = scene_bounds(ctx);
+        let mut center = bounds.center();
+        if !center.is_finite() {
+            center = Vec3::ZERO;
+        }
+        let mut radius = 1.5 * bounds.half_size().length();
+        if !radius.is_finite() || radius == 0.0 {
+            radius = 1.0;
+        }
+        // EyeController is private in 0.38.1; MIN_ORBIT_DISTANCE is twice its 0.01 near plane.
+        radius = radius.max(0.02);
+        let coordinates = state.state_3d.scene_view_coordinates;
+        let right = coordinates.right().map(Vec3::from).unwrap_or(Vec3::X);
+        let forward = coordinates.forward().map(Vec3::from).unwrap_or(Vec3::Y);
+        let up = coordinates.up().map(Vec3::from).unwrap_or(Vec3::Z);
+        let direction = (0.75 * up.cross(right) + 0.25 * right - 0.25 * up)
+            .try_normalize()
+            .unwrap_or(forward);
+        Position3D::from(center - radius * direction)
     });
 }
-fn scene_bounds(ctx: &QueryContext<'_>) -> [Vec3; 2] {
+
+fn scene_bounds(ctx: &QueryContext<'_>) -> macaw::BoundingBox {
     let splats = ctx
         .store_ctx()
         .memoizer::<GpuCache, _>(|cache| cache.view_bounds(ctx.view_ctx.view_id));
@@ -36,47 +52,37 @@ fn scene_bounds(ctx: &QueryContext<'_>) -> [Vec3; 2] {
         .view_state()
         .downcast_ref::<re_view_spatial::SpatialViewState>()
         .ok()
-        .map(|s| [s.bounding_boxes.current.min, s.bounding_boxes.current.max])
-        .filter(|[min, max]| min.is_finite() && max.is_finite() && min.cmple(*max).all());
+        .map(|s| s.bounding_boxes.region_of_interest_current)
+        .filter(|b| b.min.is_finite() && b.max.is_finite());
     match (splats, native) {
-        (Some(a), Some(b)) => [a[0].min(b[0]), a[1].max(b[1])],
+        (Some(a), Some(b)) => a.union(b),
         (Some(b), _) | (_, Some(b)) => b,
-        _ => [Vec3::splat(-0.5), Vec3::splat(0.5)],
+        _ => macaw::BoundingBox::nothing(),
     }
 }
 
-/// Include the visible three-sigma radius when framing compute or fallback splats.
-pub(crate) fn from_splats(cloud: &gsplat_core::native::NativeSplats<'_>) -> [Vec3; 2] {
-    let mut bounds = [Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)];
-    for (i, center) in cloud.centers.iter().enumerate() {
-        let center = Vec3::from_array(*center);
-        let radius = Vec3::from_array(gsplat_core::native::at_or_last(cloud.scales, i, [0.01; 3]))
-            .abs()
-            .max_element()
-            * 3.0;
-        bounds[0] = bounds[0].min(center - radius);
-        bounds[1] = bounds[1].max(center + radius);
-    }
-    bounds
+/// Match the stock splat visualizer: ignore nearly transparent and nonfinite centers.
+pub(crate) fn from_splats(
+    cloud: &gsplat_core::native::NativeSplats<'_>,
+) -> re_renderer::RobustBounds {
+    re_tracing::profile_scope!("bounds");
+    let centers: Vec<_> = cloud
+        .centers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, center)| {
+            let center = Vec3::from_array(*center);
+            let alpha = gsplat_core::native::at_or_last(cloud.colors, i, 0xFFFFFFFF) as u8;
+            (alpha >= 5 && center.is_finite()).then_some(center)
+        })
+        .collect();
+    re_renderer::RobustBounds::from_points(&centers)
 }
 
-/// Transform all eight corners; negative scale and rotation are supported.
-pub(crate) fn transformed(bounds: [Vec3; 2], transform: glam::Affine3A) -> [Vec3; 2] {
-    let mut result = [Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)];
-    for bits in 0..8 {
-        let p = transform.transform_point3(Vec3::new(
-            bounds[bits & 1].x,
-            bounds[(bits >> 1) & 1].y,
-            bounds[(bits >> 2) & 1].z,
-        ));
-        result[0] = result[0].min(p);
-        result[1] = result[1].max(p);
-    }
-    result
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn bounds_follow_tiny_and_negative_instance_scales() {
         let transform = glam::Affine3A::from_scale_rotation_translation(
@@ -84,8 +90,9 @@ mod tests {
             glam::Quat::IDENTITY,
             Vec3::X,
         );
-        let [min, max] = transformed([Vec3::ZERO, Vec3::ONE], transform);
-        assert!(min.abs_diff_eq(Vec3::new(0.9999, 0.0, 0.0), 1e-7));
-        assert!(max.abs_diff_eq(Vec3::new(1.0, 0.0001, 0.0001), 1e-7));
+        let bounds =
+            macaw::BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE).transform_affine3(&transform);
+        assert!(bounds.min.abs_diff_eq(Vec3::new(0.9999, 0.0, 0.0), 1e-7));
+        assert!(bounds.max.abs_diff_eq(Vec3::new(1.0, 0.0001, 0.0001), 1e-7));
     }
 }

@@ -1,10 +1,10 @@
-//! Native GaussianSplats3D conversion and custom Rerun viewer.
+//! Native `GaussianSplats3D` conversion and custom Rerun viewer.
 pub mod application;
-pub mod renderer;
-pub mod visualizer;
-
-pub mod selection;
-
-pub mod bounds;
-
+mod bounds;
 mod cache;
+mod fallback;
+mod renderer;
+mod selection;
+mod visualizer;
+
+pub use visualizer::camera_from_view;

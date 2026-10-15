@@ -1,18 +1,22 @@
 //! Stock Rerun viewer plus one extra Gaussian splat visualizer.
 //!
-//! Queries native GaussianSplats3D through ComputeGaussianSplats3D and composites
-//! gsplat-core output in Spatial3DView. Supports live gRPC, saved recordings,
+//! Queries native `GaussianSplats3D` through `ComputeGaussianSplats3D` and composites
+//! gsplat-core output in `Spatial3DView`. Supports live gRPC, saved recordings,
 //! and headless screenshots with the same registration path.
 
 use crate::visualizer;
+use re_viewer::external::{
+    parking_lot, re_log, re_log_channel, re_memory, re_renderer, re_sdk_types, re_viewer_context,
+};
 
 use clap::Parser as _;
+use parking_lot::{Condvar, Mutex};
 use re_sdk_types::View as _;
 use re_viewer::external::{eframe, egui};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const VIEWER_NAME: &str = "Gaussian Splats Viewer";
 
@@ -20,7 +24,8 @@ const GRPC_PORT: u16 = 9876;
 
 const DEFAULT_HEADLESS_SIZE: egui::Vec2 = egui::vec2(1600.0, 900.0);
 
-pub async fn run() -> anyhow::Result<()> {
+/// Run the SDK-compatible custom viewer binary.
+pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if cli.print_version {
         println!("rerun {}", re_viewer::build_info().version);
@@ -40,6 +45,12 @@ pub async fn run() -> anyhow::Result<()> {
         re_grpc_server::ServerOptions::default(),
         re_grpc_server::shutdown::never(),
     );
+    let memory_limit = cli
+        .memory_limit
+        .as_deref()
+        .map(re_memory::MemoryLimit::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     let rrd_path = cli.rrd_path;
 
     let main_thread_token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
@@ -52,22 +63,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     if cli.headless {
         return run_headless(cli.window_size, move |cc| {
-            create_app(
-                cc,
-                main_thread_token,
-                app_env,
-                startup_options,
-                grpc_rx,
-                rrd_path,
-            )
-        });
-    }
-
-    eframe::run_native(
-        "Rerun Viewer",
-        native_options(),
-        Box::new(move |cc| {
-            let viewer = create_app(
+            let mut app = create_app(
                 cc,
                 main_thread_token,
                 app_env,
@@ -75,12 +71,35 @@ pub async fn run() -> anyhow::Result<()> {
                 grpc_rx,
                 rrd_path,
             )?;
+            if let Some(limit) = memory_limit {
+                app.app_options_mut().memory_limit = limit;
+            }
+            Ok(app)
+        });
+    }
+
+    eframe::run_native(
+        "Rerun Viewer",
+        native_options(),
+        Box::new(move |cc| {
+            let mut viewer = create_app(
+                cc,
+                main_thread_token,
+                app_env,
+                startup_options,
+                grpc_rx,
+                rrd_path,
+            )?;
+            if let Some(limit) = memory_limit {
+                viewer.app_options_mut().memory_limit = limit;
+            }
             Ok(Box::new(viewer))
         }),
     )
     .map_err(|err| anyhow::anyhow!(err))
 }
 
+/// Build a stock viewer with compute splat systems registered.
 pub fn create_app(
     cc: &eframe::CreationContext<'_>,
     main_thread_token: re_viewer::MainThreadToken,
@@ -98,14 +117,17 @@ pub fn create_app(
         startup_options,
         cc,
         None, // No custom connection registry
-        re_viewer::AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen()
-            .expect("tokio runtime should exist"),
+        re_viewer::AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen()?,
     );
 
-    viewer.with_render_ctx_mut(|ctx| {
-        ctx.renderers_mut()
-            .register::<crate::renderer::GaussianRenderer>();
-    });
+    viewer
+        .with_render_ctx_mut(|ctx| {
+            ctx.renderers_mut()
+                .register::<crate::renderer::GaussianRenderer>();
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("the compute splat visualizer needs a wgpu render context")
+        })?;
 
     viewer.extend_view_class(
         re_sdk_types::blueprint::views::Spatial3DView::identifier(),
@@ -120,13 +142,15 @@ pub fn create_app(
     Ok(viewer)
 }
 
+// Copy of re_viewer::run_headless_app because 0.38.1 cannot accept our WgpuSetup.
 fn run_headless(
     window_size: Option<egui::Vec2>,
     app_creator: impl FnOnce(&eframe::CreationContext<'_>) -> anyhow::Result<re_viewer::App>,
 ) -> anyhow::Result<()> {
     let size = window_size.unwrap_or(DEFAULT_HEADLESS_SIZE);
 
-    let repaint_signal: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
+    let repaint_signal: Arc<(Mutex<Option<Instant>>, Condvar)> =
+        Arc::new((Mutex::new(None), Condvar::new()));
 
     let mut harness = {
         let repaint_signal = repaint_signal.clone();
@@ -136,10 +160,14 @@ fn run_headless(
             .wgpu_setup(compute_wgpu_setup())
             .build_eframe(move |cc| {
                 let repaint_signal = repaint_signal.clone();
-                cc.egui_ctx.set_request_repaint_callback(move |_info| {
+                cc.egui_ctx.set_request_repaint_callback(move |info| {
                     let (lock, cvar) = &*repaint_signal;
-                    *lock.lock().expect("repaint signal mutex poisoned") = true;
-                    cvar.notify_all();
+                    let deadline = Instant::now() + info.delay;
+                    let mut earliest = lock.lock();
+                    if earliest.is_none_or(|current| deadline < current) {
+                        *earliest = Some(deadline);
+                        cvar.notify_all();
+                    }
                 });
                 let mut app = app_creator(cc)
                     .unwrap_or_else(|err| panic!("failed to create headless viewer app: {err}"));
@@ -150,8 +178,12 @@ fn run_headless(
 
     re_log::info!("Headless viewer running at {}x{}.", size.x, size.y);
 
-    let idle_timeout = Duration::from_secs(1);
+    // Wake idle viewers once per second so close and connection changes get serviced.
+    const IDLE_TICK: Duration = Duration::from_secs(1);
+    // Headless has no vsync; cap immediate repaints at about 60 frames per second.
+    const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
     loop {
+        let frame_start = Instant::now();
         harness.step();
         if has_pending_close(&harness) {
             re_log::info!("Headless viewer received close request, shutting down.");
@@ -159,14 +191,20 @@ fn run_headless(
         }
 
         let (lock, cvar) = &*repaint_signal;
-        let mut signaled = lock.lock().expect("repaint signal mutex poisoned");
-        if !*signaled {
-            signaled = cvar
-                .wait_timeout(signaled, idle_timeout)
-                .expect("repaint signal mutex poisoned")
-                .0;
+        let idle_deadline = Instant::now() + IDLE_TICK;
+        let frame_floor = frame_start + MIN_FRAME_TIME;
+        let mut requested = lock.lock();
+        loop {
+            let deadline = requested
+                .map_or(idle_deadline, |deadline| deadline.min(idle_deadline))
+                .max(frame_floor);
+            let now = Instant::now();
+            if deadline <= now {
+                break;
+            }
+            cvar.wait_for(&mut requested, deadline - now);
         }
-        *signaled = false;
+        *requested = None;
     }
 }
 
@@ -193,14 +231,19 @@ struct Cli {
     #[arg(long)]
     hide_welcome_screen: bool,
     rrd_path: Option<PathBuf>,
-    #[arg(long = "memory-limit", hide = true)]
-    _memory_limit: Option<String>,
+    #[arg(long = "memory-limit")]
+    memory_limit: Option<String>,
+
+    /// Accepted for compatibility with the Rerun SDK spawn path; this viewer does not host a store server.
     #[arg(long = "server-memory-limit", hide = true)]
     _server_memory_limit: Option<String>,
+
+    /// Accepted for compatibility with the Rerun SDK spawn path.
     #[arg(long = "expect-data-soon", hide = true)]
     _expect_data_soon: bool,
 }
 
+/// Parse positive logical viewport dimensions as `WIDTHxHEIGHT`.
 pub fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
     let (width, height) = value
         .split_once(['x', 'X'])
@@ -219,6 +262,7 @@ pub fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
     Ok(egui::vec2(width, height))
 }
 
+/// Request compute capabilities when the adapter supports the splat kernels.
 pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
     eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
         instance_descriptor: re_renderer::device_caps::instance_descriptor(None),
@@ -249,24 +293,7 @@ pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
 
 fn native_options() -> eframe::NativeOptions {
     let mut native_options = re_viewer::native::eframe_options(None);
-    native_options.wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
-        surface: eframe::egui_wgpu::SurfaceConfig {
-            present_mode: re_renderer::external::wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: None,
-        },
-        on_surface_status: Arc::new(|status| {
-            if matches!(
-                status,
-                re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated
-            ) && !cfg!(target_os = "windows")
-            {
-                eframe::egui_wgpu::SurfaceErrorAction::RecreateSurface
-            } else {
-                eframe::egui_wgpu::SurfaceErrorAction::SkipFrame
-            }
-        }),
-        wgpu_setup: compute_wgpu_setup(),
-    };
+    native_options.wgpu_options.wgpu_setup = compute_wgpu_setup();
     native_options
 }
 
@@ -281,6 +308,7 @@ fn register_splat_system(
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
     #[test]
     fn startup_arguments_and_sdk_flags() {
         let cli = Cli::try_parse_from([
@@ -298,6 +326,7 @@ mod cli_tests {
         assert_eq!(cli.port, 4321);
         assert!(cli.headless);
     }
+
     #[test]
     fn invalid_arguments_fail_clearly() {
         for args in [
@@ -313,6 +342,7 @@ mod cli_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+    use re_viewer::external::re_view_spatial;
     use re_viewer_context::{ViewClass as _, ViewClassRegistry};
 
     #[test]
