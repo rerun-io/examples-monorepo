@@ -433,5 +433,27 @@ mod tests {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().visible, 0);
     }
-
+    #[test]
+    #[ignore = "integration: GPU"]
+    fn raster_dispatch_rejects_tile_axes_above_the_portable_limit() {
+        let (device, queue) = &gpu();
+        let renderer = Renderer::new(device).unwrap();
+        let scene = renderer
+            .upload(&crate::test_utils::splat([0.0, 0.0, 2.0], -1.0, 2.0))
+            .unwrap();
+        let mut view = renderer.create_view(&scene, 1).unwrap();
+        let mut camera = crate::test_utils::pinhole_camera(64);
+        for size in [
+            glam::UVec2::new(65_535 * 16, 1),
+            glam::UVec2::new(1, 65_535 * 16),
+        ] {
+            camera.size = size;
+            renderer.prepare_view(queue, &mut view, &camera).unwrap();
+            camera.size = size + glam::UVec2::ONE;
+            assert!(matches!(
+                renderer.prepare_view(queue, &mut view, &camera),
+                Err(Error::Input(_))
+            ));
+        }
+    }
 }

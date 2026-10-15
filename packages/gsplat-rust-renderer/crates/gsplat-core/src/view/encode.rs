@@ -114,6 +114,9 @@ impl ViewState {
         size: glam::UVec2,
     ) -> Result<glam::UVec2, Error> {
         let tiles = glam::UVec2::new(size.x.div_ceil(TILE_WIDTH), size.y.div_ceil(TILE_WIDTH));
+        if tiles.x > 65_535 || tiles.y > 65_535 {
+            return Err(Error::Input("raster tile axis exceeds 65535 workgroups"));
+        }
         let tile_count = tiles
             .x
             .checked_mul(tiles.y)
@@ -221,13 +224,15 @@ impl ViewState {
             &frame.mapping.offsets,
             timestamps(None, 8),
         );
-        dispatch_direct(
-            encoder,
-            raster,
-            raster_group,
-            self.tile_count,
-            timestamps(None, 9),
-        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gsplat raster"),
+                timestamp_writes: timestamps(None, 9),
+            });
+            pass.set_pipeline(&raster.pipeline);
+            pass.set_bind_group(0, &*raster_group, &[]);
+            pass.dispatch_workgroups(tiles.x, tiles.y, 1);
+        }
         encoder.copy_buffer_to_buffer(&scratch.counts, 0, &frame.readback, 0, 8);
         self.pending.push_back(PendingFrame {
             slot: index,

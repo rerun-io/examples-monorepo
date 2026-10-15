@@ -16,23 +16,24 @@ fn compact_bits(v: u32) -> u32 {
     return (x | (x >> 2u)) & 0x0fu;
 }
 
-fn pixel(tile: u32, lid: u32) -> vec2u {
-    return vec2u(tile % frame.image.tiles_x, tile / frame.image.tiles_x) * TILE_WIDTH + vec2u(compact_bits(lid), compact_bits(lid >> 1u));
+fn pixel(tile: vec2u, lid: u32) -> vec2u {
+    return tile * TILE_WIDTH + vec2u(compact_bits(lid), compact_bits(lid >> 1u));
 }
 
 struct Raster { rgba: vec4f, depth: f32, pix: vec2u, inside: bool, }
-fn raster(tile: u32, lid: u32) -> Raster {
+fn raster(tile: vec2u, lid: u32) -> Raster {
     if lid == 0u {
         skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
     }
-    if workgroupUniformLoad(&skip) != 0u || tile >= frame.image.tiles_x * frame.image.tiles_y {
+    if workgroupUniformLoad(&skip) != 0u {
         return Raster(vec4f(0.0), 0.0, vec2u(0u), false);
     }
     let pix = pixel(tile, lid);
     let inside = all(pix < vec2u(frame.image.width, frame.image.height));
     if lid == 0u {
-        range_lo = offsets[tile * 2u];
-        range_hi = offsets[tile * 2u + 1u];
+        let index = (tile.x + tile.y * frame.image.tiles_x) * 2u;
+        range_lo = offsets[index];
+        range_hi = offsets[index + 1u];
         atomicStore(&num_done, 0u);
     }
     let lo = workgroupUniformLoad(&range_lo);
