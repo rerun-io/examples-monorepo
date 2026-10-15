@@ -109,10 +109,8 @@ def _value(leaf: Leaf, got: list[Any], scratch: Path) -> object:
     optional: bool = type(None) in get_args(hint)
     if base is SegmentRef:  # empty dataset and segment = no catalog input; edits keep the default's url and timeline
         template: SegmentRef = default if isinstance(default, SegmentRef) else SegmentRef("", "")
-        window: tuple[int, ...] = tuple(int(x) for x in str(got[2] or "").replace(",", " ").split())
-        if len(window) not in (0, 2):
-            raise ValueError(f"{'.'.join(path)}.window_ns: two integers (start stop) or nothing, got {got[2]!r}")
-        return dataclasses.replace(template, dataset=str(got[0]), segment=str(got[1]), window_ns=(window[0], window[1]) if window else None) if any(got[:2]) else None
+        window: tuple[int, ...] = tuple(int(x) for x in str(got[2] or "").replace(",", " ").split())  # SegmentRef refuses a bad length
+        return dataclasses.replace(template, dataset=str(got[0]), segment=str(got[1]), window_ns=window or None) if any(got[:2]) else None
     if form == "save":  # a scratch file named after the field: output_ply -> output.ply
         return scratch / path[-1].replace("_", ".", 1) if got[0] else dataclasses.MISSING
     if got[0] is None or (got[0] == "" and (optional or base in (Path, int, float))):

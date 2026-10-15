@@ -21,7 +21,11 @@ class SegmentRef:
     segment: str  # segment id
     catalog_url: str = "rerun+http://127.0.0.1:51235"  # catalog server
     timeline: str = "video_time"  # the graph clock
-    window_ns: tuple[int, int] | None = None  # short clips: [start, stop) on the timeline. Windowed runs never register a layer
+    window_ns: tuple[int, ...] | None = None  # short clips: [start, stop) on the timeline (any length parses: None does on a CLI). Windowed runs never register a layer
+
+    def __post_init__(self) -> None:
+        if self.window_ns is not None and len(self.window_ns) != 2:
+            raise ValueError(f"window_ns is [start, stop) in ns, got {self.window_ns}")
 
     def entry(self) -> DatasetEntry:
         return CatalogClient(self.catalog_url).get_dataset(self.dataset)
@@ -43,7 +47,7 @@ def merge_events(*streams: Iterator[Event]) -> Iterator[Event]:
         yield event
 
 
-def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Column], timeline: str, window_ns: tuple[int, int] | None) -> list[Event]:
+def _column_events(dataset: DatasetEntry, segment: str, ports: Mapping[str, Column], timeline: str, window_ns: tuple[int, ...] | None) -> list[Event]:
     statics: list[Event] = []
     streams: list[Iterator[Event]] = []
     for port, column in ports.items():

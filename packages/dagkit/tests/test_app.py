@@ -553,3 +553,23 @@ def test_stop_never_builds_another_graph_and_a_repeated_name_is_refused() -> Non
         run_app(PassesConfig(), twice)
     with pytest.raises(gr.Error, match="pass1"):
         list(run_fn(gradio_app(PassesConfig, twice, title="Passes"))(3, "sequential", "lossless"))
+
+
+def test_a_cli_segment_window_parses_none_and_refuses_a_bad_length(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--segment.window-ns None`` clears a default window on the CLI (tyro reads a fixed-length tuple as exactly n
+    tokens, so the window is a variable tuple); a window that is not [start, stop) fails at the door (CLI and serde)."""
+    import tyro
+    from serde import SerdeError, from_dict
+
+    @dataclass
+    class Cli:
+        segment: SegmentRef = field(default_factory=lambda: SegmentRef("d", "s", window_ns=(0, 30)))
+
+    assert tyro.cli(Cli, args=["--segment.window-ns", "None"]).segment.window_ns is None
+    assert tyro.cli(Cli, args=["--segment.window-ns", "5", "9"]).segment.window_ns == (5, 9)
+    assert tyro.cli(Cli, args=[]).segment.window_ns == (0, 30)
+    with pytest.raises(SystemExit):
+        tyro.cli(Cli, args=["--segment.window-ns", "5"])
+    assert "[start, stop)" in capsys.readouterr().err
+    with pytest.raises((SerdeError, ValueError)):
+        from_dict(SegmentRef, {"dataset": "d", "segment": "s", "window_ns": [1, 2, 3]})

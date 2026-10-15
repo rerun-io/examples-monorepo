@@ -107,7 +107,7 @@ def luma_planes(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w"]]:
 
 
 def sample_indices(
-    times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int | tuple[int, ...], window_ns: tuple[int, int] | None, stride: int = 1
+    times_ns: Int64[ndarray, " n"], sample: Literal["all"] | int | tuple[int, ...], window_ns: tuple[int, ...] | None, stride: int = 1
 ) -> Int64[ndarray, " t"]:
     """Sample indices of a stream: all, a budget spread evenly (rounded linspace), or explicit indices; inside ``window_ns``
     when set, and from every ``stride``-th frame of it (whole strides only: ``m // stride`` frames, as a decoder reading
@@ -219,7 +219,7 @@ class VideoSource:
         cameras: tuple[str, ...],
         statics: Source,
         *,
-        window_ns: tuple[int, int] | None = None,
+        window_ns: tuple[int, ...] | None = None,
         fenced: bool = False,
         sample: Literal["all"] | int | tuple[int, ...] = "all",
         stride: int = 1,
