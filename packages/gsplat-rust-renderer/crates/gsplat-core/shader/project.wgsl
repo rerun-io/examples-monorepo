@@ -26,32 +26,14 @@ fn depth_key(depth: f32) -> u32 {
     return bits ^ select(0x80000000u, 0xffffffffu, (bits >> 31u) != 0u);
 }
 
-fn project(id: u32) -> Projection {
+// Shared projection arithmetic. The visible pass trusts forward culling;
+// its unused validity result lets the compiler discard the finite predicates.
+fn project_core(id: u32, mean: vec3f, point: vec3f) -> Projection {
     let base = id * 10u;
-    let mean = vec3f(transforms[base], transforms[base + 1u], transforms[base + 2u]);
-    let point = (frame.view_from_obj * vec4f(mean, 1.0)).xyz;
-    var result: Projection;
-    if !finite3(point) || point.z > 1e10 {
-        return result;
-    }
-    if frame.lens.kind == 0u {
-        if point.z < 0.01 {
-            return result;
-        }
-    } else {
-        if atan2(length(point.xy), point.z) > frame.lens.half_max_render_fov {
-            return result;
-        }
-    }
     var scale = exp(vec3f(transforms[base + 7u], transforms[base + 8u], transforms[base + 9u]) + frame.options.log_scale_offset);
-    if !finite3(scale) {
-        return result;
-    }
     let qraw = vec4f(transforms[base + 3u], transforms[base + 4u], transforms[base + 5u], transforms[base + 6u]);
     let qnorm = dot(qraw, qraw);
-    if !(qnorm >= 1e-6 && finite(qnorm)) || !finite(raw_opacity[id]) {
-        return result;
-    }
+    let valid_input = finite3(scale) && qnorm >= 1e-6 && finite(qnorm) && finite(raw_opacity[id]);
     var opacity = 1.0 / (1.0 + exp(-raw_opacity[id]));
     if frame.options.has_min_scale != 0u {
         let floor = min_scale[id];
@@ -87,24 +69,41 @@ fn project(id: u32) -> Projection {
         let blurred_det = cov.x * cov.z - cov.y * cov.y;
         opacity *= sqrt(max(raw_det, 0.0) / blurred_det);
     }
-    if !finite3(cov) {
-        return result;
-    }
-    if !(opacity >= ALPHA_CUTOFF) {
-        return result;
-    }
     let det = cov.x * cov.z - cov.y * cov.y;
     let conic = vec3f(cov.z, -cov.y, cov.x) * select(0.0, 1.0 / det, det > 0.0);
-    let extent = bbox_extent(conic, log(opacity * 255.0));
+    return Projection(valid_input && finite3(cov), lens.xy, conic, opacity, point.z, mean);
+}
+
+fn project(id: u32) -> Projection {
+    let base = id * 10u;
+    let mean = vec3f(transforms[base], transforms[base + 1u], transforms[base + 2u]);
+    let point = (frame.view_from_obj * vec4f(mean, 1.0)).xyz;
+    var result: Projection;
+    if !finite3(point) || point.z > 1e10 {
+        return result;
+    }
+    if frame.lens.kind == 0u {
+        if point.z < 0.01 {
+            return result;
+        }
+    } else {
+        if atan2(length(point.xy), point.z) > frame.lens.half_max_render_fov {
+            return result;
+        }
+    }
+    let p = project_core(id, mean, point);
+    if !p.valid || !(p.opacity >= ALPHA_CUTOFF) {
+        return result;
+    }
+    let extent = bbox_extent(p.conic, log(p.opacity * 255.0));
     if !(extent.x >= 0.0 && extent.y >= 0.0) {
         return result;
     }
-    let xy = lens.xy;
+    let xy = p.xy;
     if !(all(xy + extent > vec2f(0.0)) && all(xy - extent < vec2f(vec2u(frame.image.width, frame.image.height)))) {
         return result;
     }
-    result = Projection(true, xy, conic, opacity, point.z, mean);
-    return result;
+    return p;
 }
 
 fn coefficient(base: u32, index: u32) -> vec3f {
@@ -202,7 +201,10 @@ fn sh_color(id: u32, v: vec3f) -> vec3f {
         return;
     }
     let id = global_from_compact[compact];
-    let p = project(id);
+    let base = id * 10u;
+    let mean = vec3f(transforms[base], transforms[base + 1u], transforms[base + 2u]);
+    let point = (frame.view_from_obj * vec4f(mean, 1.0)).xyz;
+    let p = project_core(id, mean, point);
     let v = normalize(p.mean - frame.camera_position_in_obj.xyz);
     let color = sh_color(id, v);
     projected[compact] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z, p.depth);
