@@ -3,6 +3,7 @@ use crate::cache::{BatchKey, GpuCache};
 use gsplat_core::native::{NativeSplats, at_or_last};
 use re_viewer::external::{re_log_types, re_renderer, re_viewer_context};
 use re_viewer_context::ViewSystemExecutionError;
+
 pub(crate) struct FallbackArrays {
     pub(crate) centers: Vec<glam::Vec3>,
     pub(crate) scales: Vec<glam::Vec3>,
@@ -12,6 +13,7 @@ pub(crate) struct FallbackArrays {
     pub(crate) sh_count: usize,
     pub(crate) bounds: re_renderer::RobustBounds,
 }
+
 impl FallbackArrays {
     pub(crate) fn new(cloud: &NativeSplats<'_>) -> Self {
         let centers: Vec<_> = cloud
@@ -55,6 +57,7 @@ impl FallbackArrays {
         }
     }
 }
+
 /// The stock texture-backed path remains available when compute storage cannot hold a scene.
 pub(crate) fn native_fallback(
     ctx: &re_viewer_context::ViewContext<'_>,

@@ -43,6 +43,7 @@ pub(crate) fn register(registry: &mut ViewSystemRegistrator<'_>) {
         Position3D::from(center - radius * direction)
     });
 }
+
 fn scene_bounds(ctx: &QueryContext<'_>) -> macaw::BoundingBox {
     let splats = ctx
         .store_ctx()
@@ -81,6 +82,7 @@ pub(crate) fn from_splats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn bounds_follow_tiny_and_negative_instance_scales() {
         let transform = glam::Affine3A::from_scale_rotation_translation(

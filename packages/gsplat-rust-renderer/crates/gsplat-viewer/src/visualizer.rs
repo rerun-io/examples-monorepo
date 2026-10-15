@@ -18,6 +18,7 @@ use re_viewer_context::{
     VisualizerExecutionOutput, VisualizerQueryInfo, VisualizerSystem,
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+
 /// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction.
 /// The data recording still contains only native `GaussianSplats3D` descriptors.
 pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
@@ -30,11 +31,13 @@ pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
 
 #[derive(Default)]
 pub(crate) struct GaussianSplatVisualizer;
+
 impl IdentifiedViewSystem for GaussianSplatVisualizer {
     fn identifier() -> ViewSystemIdentifier {
         crate::selection::COMPUTE.into()
     }
 }
+
 impl VisualizerSystem for GaussianSplatVisualizer {
     fn affinity(&self) -> Option<re_sdk_types::ViewClassIdentifier> {
         use re_sdk_types::View as _;
@@ -49,6 +52,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             &components,
         )
     }
+
     fn execute(
         &self,
         ctx: &ViewContext<'_>,
@@ -105,6 +109,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         Ok(output.with_draw_data(draw))
     }
 }
+
 #[allow(clippy::too_many_arguments)]
 fn draw_entity(
     ctx: &ViewContext<'_>,
@@ -256,6 +261,7 @@ fn draw_entity(
     }
     Ok(retry)
 }
+
 fn attribute_generation(
     instruction: &re_viewer_context::VisualizerInstruction,
     query_results: &re_view::BlueprintResolvedResults<'_>,
@@ -287,6 +293,7 @@ fn attribute_generation(
     }
     attribute_hasher.finish()
 }
+
 /// Read the last published eye and viewport for the compute renderer and probe.
 pub fn camera_from_view(ctx: &ViewContext<'_>, query: &ViewQuery<'_>) -> Option<Camera> {
     let state = ctx.view_state.as_any().downcast_ref::<SpatialViewState>()?;
