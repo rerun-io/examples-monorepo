@@ -102,6 +102,7 @@ def synthetic_refine_graph(scene: FakeScene, keep: Keep) -> Graph:
     frames = [scene.frames(i) for i in range(0, 48, 4)]
     video = IterSource(graph.nodes["video"].outputs, lambda: iter([Event(STATIC, "rig", scene.rig), *(Event(f.t_ns, "frames", Fenced(f, None)) for f in frames)]))
     graph.nodes["video"] = replace(graph.nodes["video"], obj=video)
+    graph.resources["frames"] = factories["frames"]  # the scene's frames: the real reader belonged to the replaced source
     graph.nodes["refine"] = replace(graph.nodes["refine"], obj=RefineNode(device="cpu"))
     return graph
 
@@ -124,6 +125,15 @@ def test_sequential_equals_threaded_lossless() -> None:
     assert len(records[0]) == 12
     np.testing.assert_equal(asdict(keeps[1].values["refined"]), asdict(keeps[0].values["refined"]))  # type: ignore[call-overload]
     assert keeps[1].values["eval"] == keeps[0].values["eval"]
+
+
+def test_a_refine_pass_reads_its_frames_through_the_video_sources_own_reader() -> None:
+    """One ``SegmentFrames`` per pass: the metric rescale decodes from the packets the source fetched (no second fetch)."""
+    scene = FakeScene()
+    layout = RigLayout(scene.rig.names, (), scene.rig.names)
+    factories = {name: object for name in ("detector", "pose", "moge", "frames")}
+    graph = refine_graph(scene.segment, layout, (scene.rig, scene.rig), 12, factories, {}, report=False)
+    assert graph.resources["frames"]() is graph.nodes["video"].obj.frames  # type: ignore[attr-defined]
 
 
 def test_refine_graph_runs_on_the_segment_clock() -> None:
