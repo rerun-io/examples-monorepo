@@ -64,6 +64,7 @@ properties = [
     "tests/test_types.py::test_scene_views_read_back_snapshots_whose_views_change",
     "tests/test_types.py::test_image_canvas_depth_round_trip",
     "tests/test_types.py::test_splats_map_to_native_gaussian_splats",
+    "tests/test_types.py::test_scene_logs_its_splats_beside_its_views_and_reads_both_back",
 ]
 
 [[tests]]
@@ -93,6 +94,7 @@ lane = "unit"
 tests = ["tests/test_nodes.py", "tests/test_graph.py", "tests/test_app.py"]
 properties = [
     "tests/test_graph.py::test_graph_validates_and_runners_agree",
+    "tests/test_graph.py::test_a_realtime_render_never_meets_a_scene_without_its_views",
     "tests/test_graph.py::test_app_graph_picture_matches_its_declaration",
     "tests/test_app.py::test_every_config_field_has_its_widget_or_is_hidden",
 ]

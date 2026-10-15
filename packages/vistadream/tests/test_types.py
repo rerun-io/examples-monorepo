@@ -13,7 +13,7 @@ from hypothesis.extra.numpy import arrays
 from scipy.spatial.transform import Rotation
 from serde import SerdeError, from_dict, to_dict
 
-from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, SceneViews, Splats
+from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene, SceneViews, Splats
 
 SHAPES = st.tuples(st.integers(2, 6), st.integers(2, 6))  # rr.Image squeezes size-1 axes
 UNIT = st.floats(0.0, 1.0, width=32, allow_subnormal=False)
@@ -130,3 +130,15 @@ def test_splats_map_to_native_gaussian_splats(value: Splats) -> None:
     torch.testing.assert_close(back.quats_wxyz, value.quats_wxyz)  # Rerun stores xyzw; the Type is wxyz
     torch.testing.assert_close(back.rgb, value.rgb, atol=0.5 / 255 + 1e-6, rtol=0.0)  # RGBA8
     torch.testing.assert_close(back.opacity, value.opacity, atol=0.5 / 255 + 1e-6, rtol=0.0)
+
+
+@settings(max_examples=20, deadline=None)
+@given(splats(), st.lists(views(depth=True), min_size=1, max_size=3))
+def test_scene_logs_its_splats_beside_its_views_and_reads_both_back(value: Splats, training: list[CameraView]) -> None:
+    scene = Scene(value, SceneViews(tuple(training), 0))
+    assert {log.path for log in scene.to_rerun("/world")} >= {"/world/splats", "/world/input"}
+    [(_, back)] = list(Scene.from_layer(layer_table([(0, scene)], "/world"), "/world", "video_time"))
+    torch.testing.assert_close(back.splats.centers, value.centers)
+    assert back.views.input_index == 0
+    for x, y in zip(back.views.views, training, strict=True):
+        assert_views_equal(x, y)

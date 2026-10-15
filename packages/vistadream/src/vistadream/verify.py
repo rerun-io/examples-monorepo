@@ -41,7 +41,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from vistadream.apis.single_image import Config, build, case_config
 from vistadream.models.flux import FluxConfig
 from vistadream.ops.splats import render
-from vistadream.types import SceneViews, Splats, images
+from vistadream.types import Scene, images
 
 TIMELINE: str = "video_time"
 INPUT: str = "/world/input/pinhole"
@@ -52,21 +52,22 @@ class InputRender(Latest):
     """Verify-only sink: the final scene rendered at the input camera, beside the input image (``render_rgb``, ``render_depth``)."""
 
     def __init__(self, recording: rr.RecordingStream) -> None:
-        super().__init__({"scene": Splats, "views": SceneViews})
+        super().__init__({"scene": Scene})
         self.recording: rr.RecordingStream = recording
         self.n_splats: int = 0
 
     def flush(self, out: Emit) -> None:
-        splats, views = self.values.pop("scene", None), self.values.pop("views", None)
-        if not isinstance(splats, Splats) or not isinstance(views, SceneViews):
+        scene = self.values.pop("scene", None)
+        if not isinstance(scene, Scene):
             return
-        height, width = views.input.rgb.shape[:2]
+        camera = scene.views.input
+        height, width = camera.rgb.shape[:2]
         with torch.no_grad():
-            rgb, depth, _ = render(splats, views.input.K, views.input.cam_T_world, width, height)
+            rgb, depth, _ = render(scene.splats, camera.K, camera.cam_T_world, width, height)
         self.recording.set_time(TIMELINE, duration=np.timedelta64(0, "ns"))
         self.recording.log(f"{INPUT}/render_rgb", rr.Image((rgb.clamp(0, 1) * 255.0).round().byte().cpu().numpy(), color_model="RGB"))
         self.recording.log(f"{INPUT}/render_depth", rr.DepthImage(depth.float().cpu().numpy(), meter=1.0))
-        self.n_splats = len(splats.centers)
+        self.n_splats = len(scene.splats.centers)
 
 
 def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:

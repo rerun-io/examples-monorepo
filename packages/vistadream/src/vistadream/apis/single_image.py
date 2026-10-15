@@ -26,13 +26,14 @@ from vistadream.graphs.single_image import single_image_graph
 from vistadream.models.flux import FluxConfig
 from vistadream.nodes.prepare import DepthNode, ImageSource, OutpaintNode
 from vistadream.nodes.splats import ExpandNode, InitNode, PlySink, RenderNode
-from vistadream.types import CameraView, SceneViews, Splats, Stage
+from vistadream.types import CameraView, Scene, Stage
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[3]
 """``packages/vistadream``."""
-PORTS: dict[str, PortType] = {"scene": Splats, "views": SceneViews, "view": CameraView}
-ROOTS: dict[str, str] = {"scene": "/world/splats", "views": "/world", "view": "/world/render"}
-"""The scene's splats, its training views (``/world/input``, ``/world/outpaint``, ``/world/view_<i>``) and the render path."""
+PORTS: dict[str, PortType] = {"scene": Scene, "view": CameraView}
+ROOTS: dict[str, str] = {"scene": "/world", "view": "/world/render"}
+"""The scene (splats at ``/world/splats``, training views at ``/world/input``, ``/world/outpaint``, ``/world/view_<i>``) and the
+render path."""
 
 
 @dataclass

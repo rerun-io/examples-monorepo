@@ -1,6 +1,9 @@
-"""The single-image graph with fakes (unit lane, CPU): it validates, both runners deliver the same outputs, the PLY sink writes and
-replaces only whole files, the graph view shows the declared graph, the docs are complete (GRAPH.md) and the debug tab follows the normal view."""
+"""The single-image graph with fakes (unit lane, CPU): it validates, both runners deliver the same outputs, a realtime render
+always has its scene's views, the PLY sink writes and replaces only whole files, the graph view shows the declared graph, the
+docs are complete (GRAPH.md) and the debug tab follows the normal view."""
 
+import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +11,7 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 from dagkit.graph import Graph
-from dagkit.node import Event
+from dagkit.node import Emit, Event, Tick
 from dagkit.runners import run_sequential, run_threaded
 from dagkit.sinks import RerunSink
 from dagkit.sources import IterSource
@@ -26,13 +29,38 @@ from vistadream.types import RgbImage, Stage
 IMAGE = RgbImage(np.random.default_rng(1).integers(0, 256, (64, 96, 3), dtype=np.uint8))
 
 
-def graph(coarse: bool, sinks: dict, source: IterSource | None = None) -> Graph:
+class Paced:
+    """Hands each put on, then waits 50 ms: a busy producer's outputs reach a threaded consumer one at a time."""
+
+    def __init__(self, out: Emit) -> None:
+        self.out: Emit = out
+
+    def put(self, port: str, t_ns: int, value: object) -> None:
+        self.out.put(port, t_ns, value)
+        time.sleep(0.05)
+
+    def watermark(self, t_ns: int) -> None:
+        self.out.watermark(t_ns)
+
+
+class PacedInit(InitNode):
+    def step(self, tick: Tick, out: Emit) -> None:
+        super().step(tick, Paced(out))
+
+
+class PacedExpand(ExpandNode):
+    def run(self, inputs: Mapping[str, Sequence[Event]], out: Emit) -> None:
+        super().run(inputs, Paced(out))
+
+
+def graph(coarse: bool, sinks: dict, source: IterSource | None = None, *, paced: bool = False) -> Graph:
     source = source or IterSource({"image": RgbImage}, lambda: iter([Event(0, "image", IMAGE)]))
-    expand = ExpandNode(fake_inpaint, FakePredictor(), n_frames=3, iters=2, rasterize=fake_rasterize) if coarse else None
+    init, grow = (PacedInit, PacedExpand) if paced else (InitNode, ExpandNode)
+    expand = grow(fake_inpaint, FakePredictor(), n_frames=3, iters=2, rasterize=fake_rasterize) if coarse else None
     nodes = (
         OutpaintNode(fake_inpaint if coarse else None),
         DepthNode(FakePredictor()),
-        InitNode(iters=3, device="cpu", rasterize=fake_rasterize),
+        init(iters=3, device="cpu", rasterize=fake_rasterize),
         expand,
         RenderNode(rasterize=fake_rasterize),
     )
@@ -52,6 +80,14 @@ def test_graph_validates_and_runners_agree(coarse: bool) -> None:
     assert [(p, t) for p, t, _ in runs[0]] == [(p, t) for p, t, _ in runs[1]]
     assert len([p for p, _, _ in runs[0] if p == "view"]) == (75 if coarse else 150)  # 25 per view with 3 views, else 150
     np.testing.assert_equal([v for _, _, v in runs[0]], [v for _, _, v in runs[1]])
+
+
+@pytest.mark.parametrize("coarse", [False, True])
+def test_a_realtime_render_never_meets_a_scene_without_its_views(coarse: bool) -> None:
+    """A realtime run starts render the moment the final scene arrives, while its producer may still be putting outputs."""
+    keep = Collect(PORTS)
+    assert run_threaded(graph(coarse, {"keep": keep}, paced=True), mode="realtime").status == "complete"
+    assert len([p for p, _, _ in keep.items if p == "view"]) == (75 if coarse else 150)
 
 
 def test_ply_sink_writes_a_3dgs_vertex_table(tmp_path) -> None:  # type: ignore[no-untyped-def]

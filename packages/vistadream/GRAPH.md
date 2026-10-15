@@ -57,8 +57,7 @@ The input view (and the outpainted canvas before it) as Gaussians on every pixel
 
 | gives | type | to |
 |---|---|---|
-| **scene** | `Splats` (GPU) | 5 expand |
-| **views** | `SceneViews` | 5 expand |
+| **scene** | `Scene` (GPU) | 5 expand |
 
 ## 5 · expand: Grow the scene with inpainted views
 *runs once on the whole segment* · `ExpandNode` · `packages/vistadream/src/vistadream/nodes/splats.py`
@@ -67,13 +66,11 @@ Coarse stage only: up to ``n_frames - 2`` views picked on a dense spiral (larges
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **scene** | `Splats` (GPU) | 4 init | waits (4) |
-| **views** | `SceneViews` | 4 init | waits (4) |
+| **scene** | `Scene` (GPU) | 4 init | waits (4) |
 
 | gives | type | to |
 |---|---|---|
-| **scene** | `Splats` (GPU) | 6 render, 7 ply, 8 viewer |
-| **views** | `SceneViews` | 6 render, 8 viewer |
+| **scene** | `Scene` (GPU) | 6 render, 7 ply, 8 viewer |
 
 ## 6 · render: Render the scene along a camera path
 *runs once per item* · `RenderNode` · `packages/vistadream/src/vistadream/nodes/splats.py`
@@ -82,8 +79,7 @@ The final scene at the input camera along the spiral: 150 views (25 per training
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **scene** | `Splats` (GPU) | 5 expand | waits (4) |
-| **views** | `SceneViews` | 5 expand | latest |
+| **scene** | `Scene` (GPU) | 5 expand | waits (4) |
 
 | gives | type | to |
 |---|---|---|
@@ -99,7 +95,7 @@ Takes **scene** from 5 expand.
 ## 8 · viewer: Draw its inputs in the viewer
 *output* · `RerunSink` · `packages/dagkit/dagkit/sinks.py`
 
-Takes **scene, views** from 5 expand; **view** from 6 render.
+Takes **scene** from 5 expand; **view** from 6 render.
 
 ## Data types
 | type | what it is | code |
@@ -108,5 +104,4 @@ Takes **scene, views** from 5 expand; **view** from 6 render.
 | `OutpaintCanvas` | The image the depth model sees: the input, or the input inside a border FLUX filled | `packages/vistadream/src/vistadream/types.py` |
 | `RelativeDepth` | MoGe's scale-free depth of the canvas, its validity mask and the intrinsics it estimated | `packages/vistadream/src/vistadream/types.py` |
 | `RgbImage` | The input image after resizing (sides multiples of 32, long side capped) | `packages/vistadream/src/vistadream/types.py` |
-| `SceneViews` | The scene's training views in training order: the outpainted canvas (if any), the input, then views ``expand`` added | `packages/vistadream/src/vistadream/types.py` |
-| `Splats` | Activated 3D Gaussians with a degree-0 colour, on the device that made them (GPU edge value, not serde) | `packages/vistadream/src/vistadream/types.py` |
+| `Scene` | The Gaussian scene: activated 3D Gaussians on the device that made them, with the training views they were fitted to | `packages/vistadream/src/vistadream/types.py` |

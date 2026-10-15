@@ -39,11 +39,12 @@ def test_coarse_graph_grows_the_scene_on_the_gpu() -> None:
     nodes = (OutpaintNode(opencv_inpaint), DepthNode(moge), InitNode(), ExpandNode(opencv_inpaint, moge, n_frames=4, iters=50), RenderNode())
     report = run_threaded(single_image_graph(ImageSource(IMAGE, 512), *nodes, {"keep": keep}), mode="lossless")
     assert report.status == "complete"
-    [views] = [v for port, _, v in keep.items if port == "views"]
     [scene] = [v for port, _, v in keep.items if port == "scene"]
     renders = [v for port, _, v in keep.items if port == "view"]
-    assert isinstance(views, dict) and isinstance(scene, dict) and views["input_index"] == 1  # the outpainted canvas comes first
+    assert isinstance(scene, dict)
+    views, splats = scene["views"], scene["splats"]
+    assert views["input_index"] == 1  # the outpainted canvas comes first
     n_views: int = len(views["views"])
     assert n_views in (3, 4) and views["views"][2]["supervise"].any()  # 1-2 inpainted views (n_frames 4)
     assert views["views"][0]["rgb"].shape[:2] == views["views"][0]["depth"].shape != views["views"][1]["depth"].shape
-    assert len(renders) == 25 * n_views and all(np.isfinite(scene[k]).all() for k in ("centers", "scales", "rgb", "opacity"))
+    assert len(renders) == 25 * n_views and all(np.isfinite(splats[k]).all() for k in ("centers", "scales", "rgb", "opacity"))
