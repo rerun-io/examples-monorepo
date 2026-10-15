@@ -78,14 +78,20 @@ impl Camera {
         {
             return Err(crate::Error::Input("invalid camera"));
         }
-        if matches!(self.model, crate::CameraModel::Pinhole | crate::CameraModel::RadialTangential8 { .. })
-            && (self.fov_x >= std::f64::consts::PI || self.fov_y >= std::f64::consts::PI)
+        if matches!(
+            self.model,
+            crate::CameraModel::Pinhole | crate::CameraModel::RadialTangential8 { .. }
+        ) && (self.fov_x >= std::f64::consts::PI || self.fov_y >= std::f64::consts::PI)
         {
-            return Err(crate::Error::Input("forward lens field of view must be below pi"));
+            return Err(crate::Error::Input(
+                "forward lens field of view must be below pi",
+            ));
         }
         let focal = self.focal();
         if !focal.is_finite() || focal.x <= 0.0 || focal.y <= 0.0 {
-            return Err(crate::Error::Input("camera focal lengths must be finite and positive"));
+            return Err(crate::Error::Input(
+                "camera focal lengths must be finite and positive",
+            ));
         }
         Ok(())
     }
