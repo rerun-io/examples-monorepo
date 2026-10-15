@@ -2,19 +2,20 @@
 
 VSLAM-LAB fetches each benchmark and rewrites it into one per-sequence layout (``vslam_lab_source``), so this
 module reads that layout and nothing benchmark-specific: ``--benchmark`` picks the VSLAM-LAB directory and the
-catalog dataset (``vslam-lab-<benchmark>``), and ``BENCHMARKS`` holds the two claims the files do not make, the
-world's up axis and where the rig looks. ``download`` only verifies a local tree; VSLAM-LAB's own
-``download-sequence`` task fetches it (``set-benchmark-path <dir>`` puts it at ``<dir>/VSLAM-LAB-Benchmark``,
-this config's default ``--root`` under ``DATAFORGE_RAW_ROOT=<dir>``).
+catalog dataset (``vslam-lab-<benchmark>``), and ``BENCHMARKS`` declares each one's sensor layout (every
+calibration.yaml is checked against it), its ground truth, and the two claims the files do not make, the world's up
+axis and where the rig looks. VSLAM-LAB's own ``download-sequence`` task fetches the tree (``set-benchmark-path
+<dir>`` puts it at ``<dir>/VSLAM-LAB-Benchmark``, this config's default ``--root`` under ``DATAFORGE_RAW_ROOT=<dir>``);
+``download`` verifies it and extracts EuRoC's own ground truth from the kept sequence zip.
 
 Each sequence becomes, under one recording id (README#the-layer-rule):
 
 * **base**: one AV1 video per ``rgb_<i>`` at its pinhole (rig_T_cam = calibration.yaml's ``T_BS``), the
   registered depth stream as ``rr.EncodedDepthImage`` on the same pinhole, the IMU, the capture properties.
-* **gt**: groundtruth.csv's world_T_body on the rig node, its path and trail, the root ``ViewCoordinates``.
+* **gt**: the benchmark's ground truth as world_T_body on the rig node, its path and trail, the root ``ViewCoordinates``.
 * **sensor_metadata**: the IMU noise model as simplecv's ``ImuCalibration``, where calibration.yaml has one.
 
-The derived layers read the sequence's own groundtruth.csv and calibration.yaml in place, so they rebuild without
+The derived layers read the sequence's own ground-truth csv and calibration.yaml in place, so they rebuild without
 the frames; no sidecar copy is kept. Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
 ``video_time``: a gt row lands on the frame it was measured at, and a trajectory read back from the catalog
 compares 1:1 with the upstream file.
@@ -286,7 +287,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         deletes the VSLAM-LAB tree, so there is one copy and no layer can come from a stale one.
         """
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
-        calibration: Calibration = read_calibration(source / "calibration.yaml")
+        calibration: Calibration = self.checked_calibration(source)
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, calibration),
         }
@@ -300,8 +301,6 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
 
     def write_base(self, recording: rr.RecordingStream, identity: SequenceIdentity, source: Path, calibration: Calibration) -> None:
         """The sensor layer: every camera's video, its depth where registered, the IMU, the capture properties."""
-        if len(calibration.cameras) != self.benchmark.num_cameras:
-            raise ValueError(f"{source}: {len(calibration.cameras)} cameras, but {self.benchmark.directory} declares {self.benchmark.num_cameras}")
         require_av1_nvenc(resolve_ffmpeg())
         streams: dict[StreamName, FrameIndex] = read_frame_index(source / "rgb.csv")
         log_rig_node(recording, RIG, reference=rig_reference(calibration), num_cameras=len(calibration.cameras), name=self.benchmark.label, kind="ego")
@@ -327,7 +326,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
                     log_depth(recording, source, streams[camera.depth_name], index, meter=camera.depth_factor)
         first_ns: int = int(streams["rgb_0"].times_ns[0])
         last_ns: int = max(int(frames.times_ns[-1]) for frames in streams.values())
-        if calibration.imus:
+        if self.benchmark.has_imu:
             imu: ImuStream = read_imu(source / "imu_0.csv")
             body_T_imu: Float64[ndarray, "4 4"] = calibration.imus[0].body_T_sensor
             log_imu(
@@ -351,8 +350,24 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             benchmark=self.benchmark.directory,
             sequence=source.name,
             has_depth=bool(self.benchmark.depth_cameras),
-            has_imu=bool(calibration.imus),
+            has_imu=self.benchmark.has_imu,
         )
+
+    def checked_calibration(self, source: Path) -> Calibration:
+        """calibration.yaml, refused unless it states the sensor layout ``BENCHMARKS`` declares, the one source the
+        layers, the properties and the blueprints then use.
+
+        Raises:
+            ValueError: Its camera count, depth cameras or IMU presence differ from the benchmark's.
+        """
+        path: Path = source / "calibration.yaml"
+        calibration: Calibration = read_calibration(path)
+        depth_cameras: tuple[int, ...] = tuple(index for index, camera in enumerate(calibration.cameras) if camera.depth_name is not None)
+        found: tuple[int, tuple[int, ...], bool] = (len(calibration.cameras), depth_cameras, bool(calibration.imus))
+        declared: tuple[int, tuple[int, ...], bool] = (self.benchmark.num_cameras, self.benchmark.depth_cameras, self.benchmark.has_imu)
+        if found != declared:
+            raise ValueError(f"{path}: (cameras, depth cameras, IMU) are {found}, but {self.benchmark.directory} declares {declared}")
+        return calibration
 
     def read_gt(self, source: Path) -> GtTrajectory:
         """The benchmark's world_T_body, read from the file its ``GroundTruth`` names by that file's own reader.
