@@ -12,9 +12,9 @@
         state_groundtruth_estimate0.csv   EuRoC only: EuRoC's own world_T_imu0, which dataforge's ``download``
                                           extracts from the sequence zip VSLAM-LAB keeps (``read_euroc_gt``)
 
-``T_BS`` is body_T_sensor as a row-major 4x4. calibration.yaml and rgb.csv are records read whole, so each
-entry or row is a pyserde record: unknown YAML keys are allowed (their schema is not ours to police).
-groundtruth.csv and imu_0.csv are streams (EuRoC's run at 200 Hz), read as Arrow columns. Either way a file that
+``T_BS`` is body_T_sensor as a row-major 4x4. calibration.yaml is a record read whole, so each entry is a pyserde
+record: unknown YAML keys are allowed (their schema is not ours to police). rgb.csv is read by its header, one
+stamp and one path column per stream ``StreamName`` lists. groundtruth.csv and imu_0.csv are streams (EuRoC's run at 200 Hz), read as Arrow columns. Either way a file that
 does not parse is a ``ValueError`` naming it. VSLAM-LAB's EuRoC groundtruth.csv is not a body pose (cam0 positions from
 TUM's supp_v2 with a constant placeholder rotation), so EuRoC's ground truth comes in through its own file instead.
 """
@@ -25,14 +25,14 @@ import csv
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.csv as pacsv
 from jaxtyping import Float64, Int64
 from numpy import ndarray
-from serde import SerdeError, coerce, field, from_dict, serde
+from serde import SerdeError, coerce, field, serde
 from serde.yaml import from_yaml
 from yaml import YAMLError
 
@@ -136,21 +136,6 @@ class Calibration:
     """IMUs in ``imu_<i>`` order; none on a camera-only benchmark."""
 
 
-@serde(type_check=coerce)
-@dataclass(frozen=True, slots=True)
-class FrameRow:
-    """One rgb.csv row; a stream's two columns are absent together when the benchmark lacks it."""
-
-    ts_rgb_0: int = field(rename="ts_rgb_0 (ns)", deserializer=nanoseconds)
-    path_rgb_0: str = field(rename="path_rgb_0")
-    ts_rgb_1: int | None = field(default=None, rename="ts_rgb_1 (ns)", deserializer=nanoseconds)
-    path_rgb_1: str | None = field(default=None, rename="path_rgb_1")
-    ts_depth_0: int | None = field(default=None, rename="ts_depth_0 (ns)", deserializer=nanoseconds)
-    path_depth_0: str | None = field(default=None, rename="path_depth_0")
-    ts_depth_1: int | None = field(default=None, rename="ts_depth_1 (ns)", deserializer=nanoseconds)
-    path_depth_1: str | None = field(default=None, rename="path_depth_1")
-
-
 @dataclass(frozen=True, slots=True)
 class FrameIndex:
     """One image stream of rgb.csv: when each frame was captured, and where it lies."""
@@ -180,23 +165,29 @@ def read_calibration(path: Path) -> Calibration:
 
 
 def read_frame_index(path: Path) -> dict[StreamName, FrameIndex]:
-    """Read rgb.csv into one ``FrameIndex`` per stream it lists."""
+    """Read rgb.csv into one ``FrameIndex`` per stream its header lists, by its ``ts_<stream> (ns)`` and ``path_<stream>``.
+
+    Every row must fill both cells of every listed stream: a short row or an empty cell is a ``ValueError`` naming the
+    file and the stream, never a stream silently dropped or a frame path that is the sequence directory.
+    """
     with path.open(newline="") as stream:
-        try:
-            rows: list[FrameRow] = [from_dict(FrameRow, {name.strip(): value for name, value in row.items()}) for row in csv.DictReader(stream)]
-        except (SerdeError, ValueError, ArithmeticError) as error:
-            raise ValueError(f"{path}: {error}") from error
-    columns: dict[StreamName, tuple[list[int | None], list[str | None]]] = {
-        "rgb_0": ([row.ts_rgb_0 for row in rows], [row.path_rgb_0 for row in rows]),
-        "rgb_1": ([row.ts_rgb_1 for row in rows], [row.path_rgb_1 for row in rows]),
-        "depth_0": ([row.ts_depth_0 for row in rows], [row.path_depth_0 for row in rows]),
-        "depth_1": ([row.ts_depth_1 for row in rows], [row.path_depth_1 for row in rows]),
-    }
+        reader: csv.DictReader[str] = csv.DictReader(stream)
+        reader.fieldnames = [name.strip() for name in reader.fieldnames or []]
+        rows: list[dict[str, str | None]] = list(reader)
     streams: dict[StreamName, FrameIndex] = {}
-    for name, (stamps, files) in columns.items():
-        if rows and all(stamp is not None for stamp in stamps) and all(file is not None for file in files):
-            streams[name] = FrameIndex(times_ns=np.array(stamps, dtype=np.int64), paths=tuple(str(file) for file in files))
-    if "rgb_0" not in streams:
+    for name in get_args(StreamName):
+        stamp_column, path_column = f"ts_{name} (ns)", f"path_{name}"
+        if stamp_column not in reader.fieldnames and path_column not in reader.fieldnames:
+            continue
+        cells: list[tuple[str | None, str | None]] = [(row.get(stamp_column), row.get(path_column)) for row in rows]
+        try:
+            if not all(stamp and file for stamp, file in cells):
+                raise ValueError("a row lacks its stamp or its file")
+            times_ns: Int64[ndarray, "n_frames"] = np.array([nanoseconds(str(stamp)) for stamp, _ in cells], dtype=np.int64)
+        except (ValueError, ArithmeticError) as error:
+            raise ValueError(f"{path}: {name}: {error}") from error
+        streams[name] = FrameIndex(times_ns=times_ns, paths=tuple(str(file) for _, file in cells))
+    if not rows or "rgb_0" not in streams:
         raise ValueError(f"{path}: no rgb_0 frames")
     return streams
 

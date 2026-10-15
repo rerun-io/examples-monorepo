@@ -147,6 +147,12 @@ def test_euroc_stereo_lists_both_cameras_on_their_own_clocks(tmp_path: Path) -> 
     assert int(streams["rgb_0"].times_ns[1]) == 1403636579813555457
 
 
+@pytest.mark.parametrize("last_row", ["1403636579863555584,rgb_0/c.png", "1403636579863555584,rgb_0/c.png,1403636579863555584,"])
+def test_a_stream_the_header_lists_but_a_row_lacks_names_rgb_csv_and_the_stream(tmp_path: Path, last_row: str) -> None:
+    with pytest.raises(ValueError, match="rgb.csv: rgb_1"):
+        read_frame_index(write(tmp_path, "rgb.csv", f"{EUROC_RGB_CSV}{last_row}\n"))
+
+
 def test_a_stamp_written_as_a_float_literal_is_read_exactly(tmp_path: Path) -> None:
     streams: dict[StreamName, FrameIndex] = read_frame_index(write(tmp_path, "rgb.csv", "ts_rgb_0 (ns),path_rgb_0\n1403636579813555457.0,rgb_0/a.png\n"))
     assert streams["rgb_0"].times_ns.tolist() == [1403636579813555457]
