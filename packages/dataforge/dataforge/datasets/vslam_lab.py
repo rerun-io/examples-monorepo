@@ -14,15 +14,14 @@ Each sequence becomes, under one recording id (README#the-layer-rule):
 * **gt**: groundtruth.csv's world_T_body on the rig node, its path and trail, the root ``ViewCoordinates``.
 * **sensor_metadata**: the IMU noise model as simplecv's ``ImuCalibration``, where calibration.yaml has one.
 
-The derived layers read only their sidecars (groundtruth.csv and calibration.yaml, copied verbatim), so they
-rebuild without the frames. Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
+The derived layers read the sequence's own groundtruth.csv and calibration.yaml in place, so they rebuild without
+the frames; no sidecar copy is kept. Every stream keeps the benchmark's own nanosecond stamps, unshifted, on
 ``video_time``: a gt row lands on the frame it was measured at, and a trajectory read back from the catalog
 compares 1:1 with the upstream file.
 """
 
 from __future__ import annotations
 
-import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,8 +62,6 @@ RIG: int = 0
 """A VSLAM-LAB sequence is one rig."""
 REQUIRED_FILES: tuple[str, ...] = ("calibration.yaml", "rgb.csv", "groundtruth.csv")
 """What makes a sequence directory discoverable; the frames are read only while base is pending."""
-SIDECARS: tuple[str, ...] = ("groundtruth.csv", "calibration.yaml")
-"""Kept verbatim beside the rrds: the gt and sensor_metadata layers rebuild from them alone."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres."""
 GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
@@ -229,28 +226,23 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         print(f"{self.config.name}: {found} sequence(s) in {self.benchmark_dir}")
 
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
-        """Write whichever layers are missing; base from the frames, the derived ones from their sidecars.
+        """Write whichever layers are missing, each from this sequence's own VSLAM-LAB files.
 
-        A conversion that writes base reads the raw groundtruth.csv and calibration.yaml and publishes them as
-        sidecars only after every layer is written, so a failed run never leaves new sidecars beside old layers.
-        A rebuild (base published, a derived layer missing) reads the sidecars alone.
+        Everything but the frames, calibration.yaml and the ground truth, is read and checked before the first
+        layer is written, so a refused sequence leaves every published layer as it was, even under ``--force``.
+        The derived layers read those files in place rather than from a sidecar copy: the converter never deletes
+        the VSLAM-LAB tree and ``discover`` requires them, so there is one copy and no layer can come from a stale one.
         """
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
-        sidecars: dict[str, Path] = {name: paths.sidecar_path(paths.output_root(), identity, name) for name in SIDECARS}
-        fresh: bool = paths.BASE_LAYER in pending
-        inputs: dict[str, Path] = {name: source / name if fresh or not sidecar.is_file() else sidecar for name, sidecar in sidecars.items()}
-        calibration: Calibration = read_calibration(inputs["calibration.yaml"])
+        calibration: Calibration = read_calibration(source / "calibration.yaml")
+        poses: GtTrajectory = self.read_gt(source)
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, calibration),
-            paths.GT_LAYER: lambda recording: self.write_gt(recording, inputs["groundtruth.csv"]),
+            paths.GT_LAYER: lambda recording: self.write_gt(recording, poses),
         }
         if any(imu.sigma_g_c is not None for imu in calibration.imus):
             writers[paths.SENSOR_METADATA_LAYER] = lambda recording: write_sensor_metadata(recording, calibration)
         self.write_layers(identity, targets, pending, writers)
-        for name, sidecar in sidecars.items():
-            if inputs[name] != sidecar:
-                with writing.atomic_write(sidecar) as staged:
-                    shutil.copyfile(inputs[name], staged)
         return targets[paths.BASE_LAYER]
 
     def write_base(self, recording: rr.RecordingStream, identity: SequenceIdentity, source: Path, calibration: Calibration) -> None:
@@ -309,8 +301,8 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             has_imu=bool(calibration.imus),
         )
 
-    def write_gt(self, recording: rr.RecordingStream, groundtruth: Path) -> None:
-        """The ground-truth layer: world_T_rig on the rig node, the whole path and its trail, the world axes.
+    def read_gt(self, source: Path) -> GtTrajectory:
+        """groundtruth.csv as world_T_body.
 
         ``read_poses`` has already turned a dropout row (a non-unit quaternion) into identity rotation with its
         translation kept, the rule ``dataforge.euroc.sanitized`` holds for every EuRoC-style file.
@@ -320,9 +312,14 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
                 EuRoC csv: cam0 *positions* with a constant placeholder quaternion, which logged as world_T_body
                 would put every sensor at the wrong place and turned 180 degrees (README says how to replace it).
         """
+        groundtruth: Path = source / "groundtruth.csv"
         poses: GtTrajectory = read_poses(groundtruth)
         if poses.times_ns.size < 2 or np.ptp(poses.quaternions_xyzw, axis=0).max() == 0.0:
             raise ValueError(f"{groundtruth}: {poses.times_ns.size} poses with a constant rotation are position-only, not world_T_body")
+        return poses
+
+    def write_gt(self, recording: rr.RecordingStream, poses: GtTrajectory) -> None:
+        """The ground-truth layer: world_T_rig on the rig node, the whole path and its trail, the world axes."""
         rr.log("/", WORLD_UP_VIEW_COORDINATES[self.benchmark.world_up], static=True, recording=recording)
         log_gt_path(
             recording,

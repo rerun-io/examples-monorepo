@@ -7,6 +7,7 @@ preview, which skips naming the sequence when it is not on this machine.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -90,16 +91,14 @@ def dataset(root: Path, benchmark: str) -> VslamLabDataset:
 
 
 def rebuild_derived_layers(built: VslamLabDataset, identity: SequenceIdentity, source: Path) -> None:
-    """The layer rule's rebuild path: base and the sidecars are published and the raw tree is gone, so gt and
-    sensor_metadata come from the sidecars alone; no frame is read and no GPU is needed."""
+    """The rebuild path: base is published and the frames are gone, so gt and sensor_metadata come from the
+    sequence's small files alone; no frame is read and no GPU is needed."""
     base: Path = built.targets(identity)[paths.BASE_LAYER]
     base.parent.mkdir(parents=True)
     base.touch()
-    for name in ("groundtruth.csv", "calibration.yaml"):
-        sidecar: Path = paths.sidecar_path(paths.output_root(), identity, name)
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_bytes((source / name).read_bytes())
-    built.convert(identity, source.parent / "deleted", force=False)
+    for frames in source.glob("*_[0-9]"):
+        shutil.rmtree(frames)
+    built.convert(identity, source, force=False)
 
 
 def test_every_benchmark_is_one_catalog_dataset_named_after_it() -> None:
@@ -182,6 +181,31 @@ def test_the_imu_noise_model_lands_on_the_imu_node_as_sensor_metadata(tmp_path: 
     )
 
 
+def test_derived_layers_read_the_sequence_files_in_place_and_keep_no_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    source: Path = euroc_sequence(tmp_path / "raw")
+    built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
+    identity, _ = built.discover()[0]
+    rebuild_derived_layers(built, identity, source)
+    for layer in (paths.GT_LAYER, paths.SENSOR_METADATA_LAYER):
+        assert paths.rrd_path(tmp_path / "out", layer=layer, identity=identity).is_file()
+    assert not (tmp_path / "out" / paths.SIDECAR_DIR).exists()
+
+
+def test_a_forced_refresh_whose_gt_is_refused_replaces_no_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    source: Path = euroc_sequence(tmp_path / "raw")
+    built: VslamLabDataset = dataset(tmp_path / "raw", "euroc")
+    identity, _ = built.discover()[0]
+    rebuild_derived_layers(built, identity, source)
+    published: dict[str, bytes] = {layer: target.read_bytes() for layer, target in built.targets(identity).items()}
+    (source / "groundtruth.csv").write_text("ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n")
+    monkeypatch.setattr(VslamLabDataset, "write_base", lambda *_: pytest.fail("base was rewritten before the gt was read"))
+    with pytest.raises(ValueError, match="groundtruth.csv"):
+        built.convert(identity, source, force=True)
+    assert {layer: target.read_bytes() for layer, target in built.targets(identity).items()} == published
+
+
 def test_the_layer_set_follows_the_benchmark(tmp_path: Path) -> None:
     identity: SequenceIdentity = SequenceIdentity("vslam-lab-rgbdtum", ("any",))
     assert list(dataset(tmp_path, "rgbdtum").targets(identity)) == [paths.BASE_LAYER, paths.GT_LAYER]
@@ -217,7 +241,6 @@ def test_a_tum_sequence_converts_video_depth_and_gt_on_upstream_stamps(tmp_path:
     capture: dict[str, object] = recording_properties(store, "capture")
     assert (capture["num_cameras"], capture["num_frames"], capture["start_time_ns"], capture["benchmark"]) == (1, 3, TUM_STAMPS[0], "RGBDTUM")
     assert "unshifted" in str(capture["clock_source"])
-    assert (paths.sidecar_path(tmp_path / "out", identity, "groundtruth.csv")).read_bytes() == (source / "groundtruth.csv").read_bytes()
     assert paths.rrd_path(tmp_path / "out", layer=paths.GT_LAYER, identity=identity).is_file()
 
 
