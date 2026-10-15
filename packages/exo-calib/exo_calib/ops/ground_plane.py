@@ -9,10 +9,9 @@ GROUND_PLANE_ATTEMPTS: int = 5
 RANSAC_ITERATIONS: int = 2000
 """Plane hypotheses (three random points each) per attempt."""
 RANSAC_SEED: int = 0
-"""The floor is the gauge of the whole rig, and Stage B projects its boxes through that rig: one fixed seed and
-single-threaded numpy (einsum, no BLAS) make the floor a function of the cloud (Open3D's ``segment_plane`` differs on every
-call, seeded or not: its OpenMP threads race on the generator)."""
-HYPOTHESES_PER_CHUNK: int = 256
+"""The floor is the gauge of the whole rig, and Stage B projects its boxes through that rig: one fixed seed and numpy
+without BLAS (einsum) make the floor a function of the cloud. Open3D's ``segment_plane`` is not one, seeded or not: its
+OpenMP loop keeps the best candidate and stops early in thread-schedule order."""
 
 
 def select_ground_plane(
@@ -49,17 +48,21 @@ def select_ground_plane(
     for _attempt in range(max_attempts):
         if remaining_points.shape[0] < 3:
             break
-        # RANSAC as Open3D's segment_plane: the plane through three random points with the most points closer than
-        # distance_threshold (the first on a tie), then the least-squares plane of those inliers.
+        # RANSAC: the plane through three random points with the most points closer than distance_threshold (the first
+        # hypothesis on a tie), then the orthogonal least-squares plane of those inliers.
         triplets: Float64[ndarray, "k 3 3"] = remaining_points[rng.integers(0, remaining_points.shape[0], size=(RANSAC_ITERATIONS, 3))]
         normals: Float64[ndarray, "k 3"] = np.cross(triplets[:, 1] - triplets[:, 0], triplets[:, 2] - triplets[:, 0])
         lengths: Float64[ndarray, " k"] = np.linalg.norm(normals, axis=1)
         normals, triplets = normals[lengths > 0.0] / lengths[lengths > 0.0, None], triplets[lengths > 0.0]
+        if normals.shape[0] == 0:  # every triplet repeats a point or is collinear: no plane left to fit
+            break
         offsets: Float64[ndarray, " k"] = -(normals * triplets[:, 0]).sum(axis=1)
-        counts: Int64[ndarray, " k"] = np.concatenate([
-            (np.abs(np.einsum("mj,kj->mk", remaining_points, normals[i : i + HYPOTHESES_PER_CHUNK]) + offsets[i : i + HYPOTHESES_PER_CHUNK]) < distance_threshold).sum(axis=0)
-            for i in range(0, normals.shape[0], HYPOTHESES_PER_CHUNK)
-        ])
+        counts: Int64[ndarray, " k"] = np.array(
+            [
+                np.count_nonzero(np.abs(np.einsum("mj,j->m", remaining_points, n) + d) < distance_threshold)
+                for n, d in zip(normals, offsets, strict=True)
+            ]
+        )
         best: int = int(np.argmax(counts))
         inliers: Bool[ndarray, " m"] = np.abs(np.einsum("mj,j->m", remaining_points, normals[best]) + offsets[best]) < distance_threshold
         centered: Float64[ndarray, "i 3"] = remaining_points[inliers] - remaining_points[inliers].mean(axis=0)
