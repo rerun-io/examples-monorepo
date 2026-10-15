@@ -16,7 +16,7 @@ from rerun.chunk import RrdReader
 from dagkit.doc import GRAPH_ROOT, GraphDoc, describe, guide, log_graph
 from dagkit.form import gradio_app, leaves
 from dagkit.graph import AsOf, DropOldest, Graph, Spawn, normalise
-from dagkit.node import Emit, Event, Fenced, Node, RunContext, Tick
+from dagkit.node import Emit, Event, Fenced, Node, PortType, RunContext, Tick
 from dagkit.sources import Column, RecordingSource
 from dagkit.time import STATIC, TimeNs, check_monotonic
 from dagkit.types import Type, log_value
@@ -67,10 +67,10 @@ class Collect:
     A test sink: ``items`` holds (port, time, ``host(value)``) in arrival order; reset starts over.
     """
 
-    outputs: Mapping[str, object] = {}
+    outputs: Mapping[str, PortType] = {}
 
-    def __init__(self, inputs: Mapping[str, object]) -> None:
-        self.inputs: dict[str, object] = dict(inputs)
+    def __init__(self, inputs: Mapping[str, PortType]) -> None:
+        self.inputs: dict[str, PortType] = dict(inputs)
         self.items: list[Output] = []
 
     def reset(self, ctx: RunContext) -> None:
