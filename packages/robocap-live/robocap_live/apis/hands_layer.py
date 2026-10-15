@@ -25,7 +25,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs.apis.catalog_layer import vio_publish
 from slam_rs.nodes.vio import VioParams
 
-from robocap_live.graphs.hands_layer import GROUP_TOLERANCE_NS, PosesCheckpoint, hands_layer_graph, segment_source
+from robocap_live.graphs.hands_layer import PosesCheckpoint, hands_layer_graph, segment_source
 from robocap_live.nodes.hands import LAYER, HandsNode, HandsParams
 from robocap_live.types import LayerRun
 
@@ -84,7 +84,6 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
 
 def case_config(case: Case, output_dir: Path, slam: Literal["vio", "catalog"]) -> Config:
     """The App's Config for a case (``models_dir`` relative to the package; VIO params of a ``robocap`` case), unregistered."""
-    assert case.params["group_tolerance_ns"] == GROUP_TOLERANCE_NS, f"{case.name}: the graph groups framesets within {GROUP_TOLERANCE_NS} ns"
     hands: HandsParams = case.configure(HandsParams, models_dir=str(PACKAGE_DIR / case.params["models_dir"]))
     vio: VioParams = case.configure(VioParams) if slam == "vio" else VioParams()
     return Config(RerunTyroConfig(headless=True), case.segment_ref(), output_dir, hands, slam, vio, register="off")

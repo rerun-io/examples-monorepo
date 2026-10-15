@@ -37,8 +37,10 @@ def run(case: Case, phase: Phase, recording: rr.RecordingStream) -> None:
     ``recording``. VIO initialises from rest, so it starts at the segment's first frameset; a window ends it at ``window_s[1]``."""
     segment: SegmentRef = case.segment_ref(load_slam_config().catalog_url)
     params: VioParams = case.configure(VioParams)
+    viewer = rr.RecordingStream("slam-rs-verify")
+    viewer.set_sinks()  # no sink: the App's viewer output is dropped, not buffered
     with TemporaryDirectory() as tmp:
-        graph, publish = vio_publish(segment, params, Path(tmp), "off", rr.RecordingStream("verify-vio", default_enabled=False))
+        graph, publish = vio_publish(segment, params, Path(tmp), "off", viewer)
         report: RunReport = run_sequential(graph)
         assert publish.published is not None, f"{case.name}: the run published no layer ({report.status})"
         recording.send_chunks(rr.chunk.RrdReader(publish.published).stream())
