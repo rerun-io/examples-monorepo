@@ -162,14 +162,15 @@ class CatalogVideoSource:
         self.frames = SegmentFrames(segment, cameras, "cuda" if self.fenced else "cpu")
 
     def events(self) -> Iterator[Event]:
-        dataset = self.segment.entry()  # one for every static port (an entry must outlive its queries)
-        for port, column in self.statics.items():
-            table = read_column(dataset, self.segment.segment, column.type, column.root, self.clock, static=column.static)  # temporal statics: whole
-            for _, value in column.type.from_layer(table, column.root, self.clock):
-                if port != "rig":
-                    yield Event(STATIC, port, value)
-                elif isinstance(value, RigCameras) and set(self.cameras) <= set(value.names):
-                    yield Event(STATIC, port, self._undistorted(value.select(self.cameras), table) if self.undistort else value.select(self.cameras))
+        if self.statics:  # a subclass that brings its own statics (no catalog segment) never opens an entry
+            dataset = self.segment.entry()  # one for every static port (an entry must outlive its queries)
+            for port, column in self.statics.items():
+                table = read_column(dataset, self.segment.segment, column.type, column.root, self.clock, static=column.static)  # temporal statics: whole
+                for _, value in column.type.from_layer(table, column.root, self.clock):
+                    if port != "rig":
+                        yield Event(STATIC, port, value)
+                    elif isinstance(value, RigCameras) and set(self.cameras) <= set(value.names):
+                        yield Event(STATIC, port, self._undistorted(value.select(self.cameras), table) if self.undistort else value.select(self.cameras))
         if self.group_tolerance_ns is not None:
             yield from self._luma_framesets(self.group_tolerance_ns)
             return

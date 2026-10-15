@@ -23,3 +23,35 @@ def test_npz_rig_reads_metres_and_millimetres(tmp_path_factory, translation_m: n
     assert rig.names == ("B001", "A001")
     np.testing.assert_allclose(rig.cam_T_world[:, :3, 3], translation_m[::-1], rtol=1e-12)
     np.testing.assert_array_equal(rig.resolution_wh, [[3840, 2160], [3840, 2160]])
+
+
+class _FramesReached(Exception):
+    """Raised by the stub frames: the source got past its statics."""
+
+
+def test_npz_source_never_opens_the_catalog(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from dagkit.sources import SegmentRef
+
+    from mamma.sources.npz import NpzSequenceSource
+
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "videos").mkdir()
+    np.savez(tmp_path / "meta" / "global.npz", seq_name="probe", fps=30.0, frame_start=0, frame_end=10)
+    np.savez(tmp_path / "meta" / "A001.npz", cam_name="A001", cam_int=np.diag([900.0, 900.0, 1.0]), cam_ext=np.eye(4), cam_img_w=64, cam_img_h=48)
+    source = NpzSequenceSource(tmp_path, ("A001",), resize_hw=(48, 64), keep_native=False)
+
+    def no_catalog(self: SegmentRef) -> None:
+        raise AssertionError(f"opened the catalog for {self.dataset!r}")
+
+    def frames_reached(view: int) -> None:
+        raise _FramesReached
+
+    monkeypatch.setattr(SegmentRef, "entry", no_catalog)
+    monkeypatch.setattr(source.frames, "times_ns", frames_reached)
+    events = source.events()
+    assert next(events).port == "rig"
+    try:
+        next(events)
+    except _FramesReached:
+        return
+    raise AssertionError("the source yielded past its statics without reading frames")
