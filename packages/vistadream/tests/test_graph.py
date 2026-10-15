@@ -1,5 +1,5 @@
-"""The single-image graph with fakes (unit lane, CPU): it validates, both runners deliver the same outputs, the PLY sink writes,
-the graph view shows the declared graph, the docs are complete (GRAPH.md) and the debug tab follows the normal view."""
+"""The single-image graph with fakes (unit lane, CPU): it validates, both runners deliver the same outputs, the PLY sink writes and
+replaces only whole files, the graph view shows the declared graph, the docs are complete (GRAPH.md) and the debug tab follows the normal view."""
 
 from pathlib import Path
 
@@ -62,6 +62,24 @@ def test_ply_sink_writes_a_3dgs_vertex_table(tmp_path) -> None:  # type: ignore[
     assert names[:9] == ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"] and len(names) == 62
     assert names[-8:] == ["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
     assert vertices.count > 0 and np.isfinite(np.asarray(vertices["x"])).all()
+
+
+def test_ply_sink_replaces_the_file_only_after_a_whole_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write that fails half way leaves the earlier export and no partial file beside it; a whole write replaces it."""
+    path = tmp_path / "scene.ply"
+    path.write_bytes(b"earlier export")
+
+    def fails_half_way(self: PlyData, stream: Path) -> None:
+        Path(stream).write_bytes(b"ply\nformat binary_little_endian 1.0\n")
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PlyData, "write", fails_half_way)
+        with pytest.raises(OSError, match="disk full"):
+            run_sequential(graph(False, {"ply": PlySink(path)}))
+    assert path.read_bytes() == b"earlier export" and list(tmp_path.iterdir()) == [path]
+    run_sequential(graph(False, {"ply": PlySink(path)}))
+    assert PlyData.read(str(path))["vertex"].count > 0 and list(tmp_path.iterdir()) == [path]
 
 
 def app_sinks(directory: Path) -> dict:

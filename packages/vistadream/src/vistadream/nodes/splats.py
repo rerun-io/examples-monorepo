@@ -1,5 +1,6 @@
 """The Gaussian scene: build it from the depth, grow it with inpainted views (coarse stage), render it along a path, save it."""
 
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -186,7 +187,12 @@ class PlySink:
         for name, values in columns:
             vertices[name] = values.detach().cpu().numpy() if isinstance(values, Tensor) else values
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        PlyData([PlyElement.describe(vertices, "vertex")]).write(self.path)
+        partial: Path = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex[:12]}.partial")  # a sibling: the rename stays on one filesystem
+        try:
+            PlyData([PlyElement.describe(vertices, "vertex")]).write(partial)
+            partial.replace(self.path)  # atomic: the path holds the earlier file or the whole new one, never a partial write
+        finally:
+            partial.unlink(missing_ok=True)
 
     def flush(self, out: Emit) -> None:
         pass
