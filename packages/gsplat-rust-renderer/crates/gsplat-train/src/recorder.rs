@@ -94,7 +94,7 @@ impl Recorder {
             Ok(Ok(())) => {}
             Ok(Err(error)) => eprintln!("Recording warning: {error:#}"),
             Err(_) => {
-                eprintln!("Recording warning: worker panicked; training and exports continued")
+                eprintln!("Recording warning: worker panicked; training and exports continued");
             }
         }
     }

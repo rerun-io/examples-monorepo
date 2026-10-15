@@ -241,7 +241,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
         });
     }
     // Rotate backend order for each repeat; each timed run admits ten quiet samples.
-    let admission_deadline = Instant::now() + Duration::from_secs(90 * 60);
+    let admission_deadline = Instant::now() + Duration::from_mins(90);
     for index in 0..a.repeats {
         for order in 0..engines.len() {
             let backend = (index + order) % engines.len();

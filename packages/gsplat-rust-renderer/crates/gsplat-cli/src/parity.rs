@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 pub(super) struct Args {
     /// Quantize through the native archetype, optionally from one complete RRD splat row.
     #[arg(long, num_args = 0..=1)]
+    #[expect(
+        clippy::option_option,
+        reason = "Clap distinguishes an absent flag, a bare --archetype, and --archetype with a path"
+    )]
     pub(super) archetype: Option<Option<PathBuf>>,
     #[arg(long = "impl", value_enum)]
     pub(super) implementation: Implementation,
@@ -79,7 +83,7 @@ impl Evidence {
 
     fn record(
         &mut self,
-        view: ParityView,
+        view: &ParityView,
         ours: &[f32],
         reference: &[f32],
         size: (u32, u32),
@@ -216,8 +220,8 @@ async fn parity(
                 oracle_label,
             )?;
         }
-        views.push(view.clone());
-        evidence.record(view, &ours, &reference, (c.width, c.height), oracle_label)?;
+        evidence.record(&view, &ours, &reference, (c.width, c.height), oracle_label)?;
+        views.push(view);
     }
     evidence.publish(&a.out.with_extension("images"))?;
     let mean = gsplat_cli::mean(views.iter().map(|v| &v.metrics.rgb));
@@ -280,10 +284,12 @@ pub(super) async fn run(a: Args) -> Result<()> {
         source,
     )
     .await?;
-    let oracle_kind = a.oracle.unwrap_or(if source.is_some() {
-        Implementation::Ours
-    } else {
-        Implementation::Brush
+    let oracle_kind = a.oracle.unwrap_or_else(|| {
+        if source.is_some() {
+            Implementation::Ours
+        } else {
+            Implementation::Brush
+        }
     });
     ensure!(
         oracle_kind != Implementation::Native,
@@ -334,7 +340,7 @@ mod tests {
             ("006", 5.0),
         ] {
             evidence
-                .record(view(name, score), &pixels, &pixels, (1, 1), "brush")
+                .record(&view(name, score), &pixels, &pixels, (1, 1), "brush")
                 .unwrap();
         }
         assert_eq!(
@@ -361,7 +367,7 @@ mod tests {
     fn evidence_save_all_retains_only_scores_and_failure_removes_staging() {
         let mut evidence = Evidence::new(true).unwrap();
         evidence
-            .record(view("000", 10.0), &[], &[], (1, 1), "brush")
+            .record(&view("000", 10.0), &[], &[], (1, 1), "brush")
             .unwrap();
         assert!(evidence.staging.is_none());
         let mut evidence = Evidence::new(false).unwrap();
@@ -369,7 +375,7 @@ mod tests {
         assert!(
             evidence
                 .record(
-                    view("000", 10.0),
+                    &view("000", 10.0),
                     &[f32::NAN; 4],
                     &[0.0; 4],
                     (1, 1),

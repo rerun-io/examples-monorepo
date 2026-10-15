@@ -30,7 +30,7 @@ pub fn median(samples: &[f64]) -> f64 {
     assert!(!samples.is_empty());
     let mut values = samples.to_vec();
     values.sort_by(f64::total_cmp);
-    (values[(values.len() - 1) / 2] + values[values.len() / 2]) * 0.5
+    f64::midpoint(values[(values.len() - 1) / 2], values[values.len() / 2])
 }
 
 #[cfg(test)]

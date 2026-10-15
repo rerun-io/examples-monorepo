@@ -102,7 +102,7 @@ impl Engine {
                     overflow_events: Some(stats.overflow_events),
                 })
             }
-            Self::Native(r) => r.render(camera, parity).await,
+            Self::Native(r) => r.render(camera, parity),
         }
     }
     pub fn finish(&self) -> Result<()> {
@@ -132,7 +132,7 @@ impl Engine {
         }
         match self {
             Self::Brush(r) => r.stages(camera).await,
-            Self::Ours(r) => r.stages(camera).await,
+            Self::Ours(r) => r.stages(camera),
             Self::Native(_) => Ok(None),
         }
     }
@@ -172,7 +172,7 @@ pub struct StageTiming {
 }
 
 impl crate::StandaloneRenderer {
-    pub async fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
+    pub fn stages(&mut self, camera: &CameraSpec) -> Result<Option<Vec<StageTiming>>> {
         Ok(self.stage_ms(camera)?.map(|times| {
             gsplat_core::STAGE_NAMES
                 .into_iter()

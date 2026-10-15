@@ -23,3 +23,6 @@ brush-serde.workspace = true
 re_log_encoding = "=0.38.1"
 re_chunk = "=0.38.1"
 tempfile = "3"
+
+[lints]
+workspace = true

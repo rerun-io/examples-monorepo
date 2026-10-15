@@ -100,7 +100,7 @@ impl Native {
     pub fn capture_next_frame(&mut self) {
         self.capture_next = true;
     }
-    pub async fn render(&mut self, c: &CameraSpec, parity: bool) -> Result<Counts> {
+    pub fn render(&mut self, c: &CameraSpec, parity: bool) -> Result<Counts> {
         if !matches!(c.model, CameraModel::Pinhole) {
             return Err(crate::Unsupported("native lens model".into()).into());
         }

@@ -30,6 +30,160 @@ brush-dataset = { path = "target/brush-src/crates/brush-dataset" }
 # Burn and CubeCL are pinned to Brush revisions in Cargo.lock.
 # Rerun 0.38.1 pins wasm-bindgen =0.2.126, requiring registry wgpu 30.0.0.
 # Match Brush: thin LTO; codegen-units keeps Cargo's release default (16).
+# Lint policy copied from Rerun main (Cargo.toml `[workspace.lints.*]`, rerun-io/rerun@151102d); see also clippy.toml.
+[workspace.lints.rust]
+unknown_lints = "deny"
+unsafe_code = "deny"
+
+absolute_paths_not_starting_with_crate = "warn"
+elided_lifetimes_in_paths = "warn"
+future_incompatible = { level = "warn", priority = -1 }
+non_ascii_idents = "warn"
+nonstandard_style = { level = "warn", priority = -1 }
+noop_method_call = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+rust_2021_prelude_collisions = "warn"
+semicolon_in_expressions_from_macros = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn" # `unsafe_op_in_unsafe_fn` may become the default in future Rust versions: https://github.com/rust-lang/rust/issues/71668
+unexpected_cfgs = { level = "deny", check-cfg = [
+  'cfg(TODO)', # NOLINT allow `#[cfg(TODO)]` to compile (it will still fail CI)
+] }
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+
+trivial_casts = "allow"
+unused_qualifications = "allow"
+
+[workspace.lints.rustdoc]
+all = "warn"
+missing_crate_level_docs = "warn"
+
+# See also clippy.toml
+[workspace.lints.clippy]
+# `all` = `correctness` + `suspicious` + `style` + `complexity` + `perf`.
+# The remaining groups are `nursery` and `restriction`,
+# which are not meant to be enabled wholesale - we cherry-pick from them below.
+all = { level = "warn", priority = -1 } # this is the default, but be explicit about it
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+allow_attributes = "warn"
+as_ptr_cast_mut = "warn"
+branches_sharing_code = "warn"
+clear_with_drain = "warn"
+coerce_container_to_any = "warn"
+dbg_macro = "warn"
+debug_assert_with_mut_call = "warn"
+default_union_representation = "warn"
+derive_partial_eq_without_eq = "warn"
+disallowed_script_idents = "warn" # See clippy.toml
+doc_include_without_cfg = "warn"
+empty_enum_variants_with_brackets = "warn"
+equatable_if_let = "warn"
+exit = "warn"
+fallible_impl_from = "warn"
+float_cmp_const = "warn"
+fn_to_numeric_cast_any = "warn"
+get_unwrap = "warn"
+imprecise_flops = "warn"
+infinite_loop = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+iter_over_hash_type = "warn"
+large_include_file = "warn"
+large_stack_frames = "warn"
+let_underscore_must_use = "warn"
+literal_string_with_formatting_args = "warn"
+lossy_float_literal = "warn"
+map_err_ignore = "warn"
+mem_forget = "warn"
+mutex_integer = "warn"
+needless_pass_by_ref_mut = "warn"
+needless_type_cast = "warn"
+non_zero_suggestions = "warn"
+nonstandard_macro_braces = "warn"
+or_fun_call = "warn"
+path_buf_push_overwrite = "warn"
+pathbuf_init_then_push = "warn"
+precedence_bits = "warn"
+pub_without_shorthand = "warn"
+rc_mutex = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+return_and_then = "warn"
+set_contains_or_insert = "warn"
+single_option_map = "warn"
+str_to_string = "warn"
+string_add = "warn"
+string_lit_as_bytes = "warn"
+string_lit_chars_any = "warn"
+suspicious_xor_used_as_pow = "warn"
+todo = "warn"
+too_long_first_doc_paragraph = "warn"
+trailing_empty_array = "warn"
+trait_duplication_in_bounds = "warn"
+tuple_array_conversions = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+uninhabited_references = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_struct_initialization = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+unused_trait_names = "warn"
+unwrap_used = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+verbose_file_reads = "warn"
+
+# Disabled waiting on https://github.com/rust-lang/rust-clippy/issues/9602
+#self_named_module_files = "warn"
+
+# Pedantic lints we opt out of, with the number of hits at the time we enabled `pedantic`:
+assigning_clones = "allow" # `clone_into` reads backwards
+cast_lossless = "allow" # 457 hits
+cast_possible_truncation = "allow" # too much noise, sadly
+cast_precision_loss = "allow" # 854 hits
+cast_sign_loss = "allow" # 503 hits
+default_trait_access = "allow" # 521 hits
+float_cmp = "allow" # 33 hits; exact float comparisons are usually intentional (`float_cmp_const` is still on)
+implicit_hasher = "allow" # 6 hits; adding a `BuildHasher` type parameter to public functions is not worth it
+inline_always = "allow" # 20 hits; we know what we are doing
+items_after_statements = "allow" # 568 hits
+many_single_char_names = "allow" # 8 hits; `r, g, b, a` and `h, s, v` are fine
+map_unwrap_or = "allow" # `.unwrap_or(x)` is often more readable than `.map_or(x, …)`
+missing_errors_doc = "allow" # already allowed before we enabled `pedantic`
+missing_panics_doc = "allow" # 188 hits
+must_use_candidate = "allow" # 3134 hits
+needless_raw_string_hashes = "allow" # 94 hits
+redundant_closure_for_method_calls = "allow" # 557 hits
+return_self_not_must_use = "allow" # 1062 hits
+similar_names = "allow" # 53 hits; too many false positives, e.g. `encoder`/`encoded`
+struct_excessive_bools = "allow" # 18 hits
+struct_field_names = "allow" # 38 hits
+trivially_copy_pass_by_ref = "allow" # 169 hits
+unnecessary_debug_formatting = "allow" # consider enabling this lint, and/or switch to camino's utf8 paths
+unreadable_literal = "allow" # 474 hits
+used_underscore_binding = "allow" # 404 hits
+
+# These are meh:
+cargo_common_metadata = "allow" # TODO(emilk): add `keywords` and `categories` to all published crates
+manual_range_contains = "allow" # this one is just worse imho
+multiple_crate_versions = "allow" # we handle this with `cargo deny`
+ref_patterns = "allow" # It's nice to avoid ref pattern, but there are some situations that are hard (impossible?) to express without.
+too_many_arguments = "allow" # yes, we should avoid too many arguments, but enforcing it by lint is pointless.
+
+# NOTE: these are in `restriction`/`nursery`, so the `allow` is a no-op today.
+# We keep them to record our intent in case we ever enable those groups.
+clone_on_ref_ptr = "allow" # Might be too much with this enabled
+let_underscore_untyped = "allow"
+missing_assert_message = "allow"
+self_named_module_files = "allow" # Disabled waiting on https://github.com/rust-lang/rust-clippy/issues/9602
+significant_drop_tightening = "allow" # An update of parking_lot made this trigger in a lot of places. TODO(emilk): fix those places
+
 [profile.release]
 lto = "thin"
 codegen-units = 16

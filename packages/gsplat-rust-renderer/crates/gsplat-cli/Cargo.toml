@@ -48,3 +48,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 brush-train.workspace = true
+
+[lints]
+workspace = true
