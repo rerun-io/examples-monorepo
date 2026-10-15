@@ -3,8 +3,9 @@
 import dataclasses
 import gc
 import tempfile
+import time
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -21,9 +22,9 @@ from dagkit.apis.synthetic_demo import DemoRerunConfig
 from dagkit.app import NodeProfile, Profile, detect_hardware, health_views, load_profile, run_app, with_pipeline
 from dagkit.form import gradio_app
 from dagkit.graph import Graph
-from dagkit.node import Emit, Mode, Tick
+from dagkit.node import Emit, Event, Mode, Tick
 from dagkit.runners import run_sequential
-from dagkit.sources import SegmentRef
+from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import check_form
 
 PROFILE = """
@@ -168,7 +169,7 @@ class NestedConfig:
     mode: Mode = "lossless"
 
 
-def run_fn(demo: object) -> Callable[..., Iterator[tuple[object, ...]]]:
+def run_fn(demo: object) -> Callable[..., Generator[tuple[object, ...]]]:
     return next(f.fn for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "run")  # type: ignore[attr-defined]
 
 
@@ -314,6 +315,41 @@ def test_a_two_pass_app_runs_every_graph_from_the_cli_and_the_form(tmp_path: Pat
     assert {"/dagkit/graph/pass1", "/dagkit/graph/pass2", "/dagkit/guide/pass1", "/dagkit/guide/pass2", "/passes/done"} <= paths
     streamed: list[tuple[object, ...]] = list(run_fn(gradio_app(PassesConfig, two_passes, title="Passes"))(3, "sequential", "lossless"))
     assert any(out[1] for out in streamed)  # the pane got the stream; the generator's final assert ran (no gr.Error)
+
+
+@dataclass
+class SlowConfig:
+    rr_config: DemoRerunConfig = field(default_factory=lambda: DemoRerunConfig(headless=True))
+    output_scene: Path | None = field(default=None, metadata={"form": "save"})
+    runner: Literal["sequential", "threaded"] = "sequential"
+    mode: Mode = "lossless"
+
+
+def test_closing_a_form_run_stops_its_graph_before_its_scratch_directory_goes() -> None:
+    """Gradio closes the run's iterator at a yield (the browser left, the queue cancelled): the run is stopped and waited
+    for, so its graph never outlives it nor writes into a deleted scratch directory."""
+    flushed: list[tuple[bool, bool]] = []  # (scratch directory still there, stopped)
+
+    def build(config: SlowConfig, recording: rr.RecordingStream) -> Graph:
+        def events() -> Iterator[Event]:
+            for t in range(200):
+                time.sleep(0.01)
+                yield Event(t, "x", t)
+
+        class Flushes(Collect):
+            def flush(self, out: Emit) -> None:
+                super().flush(out)
+                assert config.output_scene is not None
+                flushed.append((config.output_scene.parent.exists(), bool(self.stopped_at_flush)))
+
+        graph = Graph("slow")
+        graph.edge(graph.source("src", IterSource({"x": int}, events))["x"], graph.sink("keep", Flushes(("x",)))["x"])
+        return graph
+
+    run = run_fn(gradio_app(SlowConfig, build, title="Slow"))(True, "sequential", "lossless")  # widget order: output_scene, runner, mode
+    next(run)
+    run.close()
+    assert flushed == [(True, True)]
 
 
 def test_health_views_plot_exactly_what_the_runner_logs(tmp_path: Path) -> None:

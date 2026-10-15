@@ -189,9 +189,13 @@ def gradio_app(config_type: type[G], build: Callable[[G, rr.RecordingStream], Gr
 
                 thread = threading.Thread(target=body)
                 thread.start()
-                while thread.is_alive():
-                    time.sleep(0.2)
-                    yield (control, stream.read(), *(None for _ in files))
+                try:
+                    while thread.is_alive():
+                        time.sleep(0.2)
+                        yield (control, stream.read(), *(None for _ in files))
+                finally:  # also when gradio closes this iterator at a yield: the run stops before its scratch directory goes
+                    control.stop()
+                    thread.join()
                 recording.flush()
                 if errors:
                     raise gr.Error(repr(errors.pop()))  # the list lets go of the traceback (and the tensors its frames hold)
