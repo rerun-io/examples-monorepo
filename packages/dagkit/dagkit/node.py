@@ -27,34 +27,16 @@ class Tick:
 
 class Control:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
         self._stopped: threading.Event = threading.Event()
-        self._requests: list[tuple[frozenset[str], dict[str, dict[str, object]], bool]] = []
-        self.wake: Callable[[], None] = lambda: None  # set by the runner: wakes its waits on a request
+        self.wake: Callable[[], None] = lambda: None  # set by the runner: wakes its waits on a stop
 
     def stop(self) -> None:
         self._stopped.set()
         self.wake()
 
-    def reset(self, nodes: Sequence[str] = ()) -> None:
-        self._request(frozenset(nodes), {}, True)
-
-    def reconfigure(self, params: Mapping[str, Mapping[str, object]]) -> None:
-        self._request(frozenset(params), {name: dict(p) for name, p in params.items()}, False)
-
-    def _request(self, targets: frozenset[str], params: dict[str, dict[str, object]], bump: bool) -> None:
-        with self._lock:
-            self._requests.append((targets, params, bump))
-        self.wake()
-
     @property
     def stopped(self) -> bool:
         return self._stopped.is_set()
-
-    def take_requests(self) -> list[tuple[frozenset[str], dict[str, dict[str, object]], bool]]:
-        with self._lock:
-            requests, self._requests = self._requests, []
-            return requests
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +45,6 @@ class RunContext:
     node: str
     mode: Mode
     resources: Mapping[str, object] = field(default_factory=dict)  # graph-owned objects this node declared in `needs`
-    params: Mapping[str, object] = field(default_factory=dict)  # profile/preset params, as applied by `Control.reconfigure`
-    world: int = 0  # bumped by `Control.reset`; resettable estimators copy it onto their outputs
     statics: Mapping[str, object] = field(default_factory=dict)  # AsOf port -> the Source's leading STATIC value (startup)
     control: Control | None = None  # None inside a process child; sinks read `control.stopped` at flush
 

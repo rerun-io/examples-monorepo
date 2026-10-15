@@ -146,4 +146,4 @@ def test_capacities_and_retention_must_be_positive() -> None:
     graph.edge(src["x"], node["x"], Block(0))
     graph.edge(src["a"], node["a"], AsOf(keep=0))
     report: str = problems(graph)
-    assert "n.x: Block(capacity=0) needs capacity / keep >= 1" in report and "n.a: AsOf(wait_ns=None, keep=0)" in report
+    assert "n.x: Block(capacity=0) needs capacity / keep >= 1" in report and "n.a: AsOf(keep=0)" in report

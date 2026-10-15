@@ -168,9 +168,8 @@ Pipelines are moving onto one typed node/graph interface in `packages/dagkit` (p
   only pull points and emit ONE time-ordered stream. Feedback lives in node state or a graph resource, never a cycle.
 - **Runners**: `run_sequential` (debug, deterministic) and `run_threaded` (thread per node, `Placement` incl.
   `process`); lossless runs of both deliver the same ticks. Failures abort without flush and re-raise. `Control`
-  stops, resets and reconfigures: a reset is a cut at the newest emitted time; each target finishes its older ticks,
-  flushes and resets in its own thread before its first later tick, and AsOf readers see only the matching world.
-  Pass `health=recording` for the `/dagkit/health` view.
+  stops a run: sources stop after their current event, every node drains and flushes. Pass `health=recording` for the
+  `/dagkit/health` view.
 - **Sinks** take an explicit `RecordingStream`. `LayerSink` writes `<layer>.<run_id>.rrd` and registers it only if
   the segment has no layer of that name (`register="new"`); never re-register over the shared `:51235` corpus.
 - **Apps**: `<module>/apis/<graph>.py` holds `Config` and `build(config, recording) -> Graph` (a generator of Graphs

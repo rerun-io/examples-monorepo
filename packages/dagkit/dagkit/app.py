@@ -49,8 +49,6 @@ G = TypeVar("G")  # a form's Config type: not bound to AppConfig, as beartype ca
 @serde(deny_unknown_fields=True, type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class NodeProfile:
-    placement: Literal["main", "thread", "process"] | None = None  # None inherits (base default: thread)
-    cpus: list[int] | None = None  # None inherits; [] clears
     params: dict[str, Any] = field(default_factory=dict)  # overrides of the node's config dataclass fields
 
 
@@ -66,8 +64,7 @@ class Profile:
             raise KeyError(f"unknown preset {preset!r}; this profile has {sorted(self.presets)}")
         base: NodeProfile = self.nodes.get(name, NodeProfile())
         over: NodeProfile = self.presets[preset].get(name, NodeProfile()) if preset is not None else NodeProfile()
-        cpus: list[int] | None = over.cpus if over.cpus is not None else base.cpus
-        return NodeProfile(over.placement or base.placement or "thread", cpus, base.params | over.params)
+        return NodeProfile(base.params | over.params)
 
     def configure(self, name: str, default: D, preset: str | None = None) -> D:
         return from_dict(type(default), to_dict(default) | self.node(name, preset).params)

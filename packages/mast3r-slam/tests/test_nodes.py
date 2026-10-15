@@ -92,13 +92,6 @@ def test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers(s
     assert shared.backend_idle() and shared.states.get_mode() == Mode.TRACKING
 
 
-def test_frontend_refuses_a_mid_run_reset(shared: SharedSlam) -> None:
-    """The backend's final poses and the Nerfstudio export read the one shared map at flush: a ``Control.reset`` (a new
-    world) would clear it under them, so it fails the run instead."""
-    with pytest.raises(NotImplementedError, match="reset"):
-        Frontend(CFG, device="cpu").reset(RunContext("slam", "frontend", "lossless", resources={"mast3r": MODEL, "shared": shared}, world=1))
-
-
 def test_frontend_reset_returns_to_init(shared: SharedSlam, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(frontend_module, "mast3r_inference_mono", fake_mono)
     frontend = Frontend(CFG, device="cpu")

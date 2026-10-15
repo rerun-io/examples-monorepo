@@ -22,8 +22,7 @@ class DropOldest:
 
 @dataclass(frozen=True, slots=True)
 class AsOf:
-    wait_ns: int | None = None  # realtime only: how long to wait for the producer watermark (None or 0: never). Lossless always waits
-    keep: int = 128  # realtime only: history bound
+    keep: int = 128  # realtime only: history bound (lossless waits for the producer watermark)
 
 
 PortKind: TypeAlias = Block | DropOldest | AsOf

@@ -271,12 +271,10 @@ class TrackedFrame:
     """Input frame index (the source's own frame numbering)."""
     world_sim3_cam: Float32[ndarray, " 8"]
     """World-from-camera Sim3 ``[t_xyz, q_xyzw, s]``."""
-    world: int = 0
-    """Reset epoch of the estimator (``RunContext.world``)."""
 
     def to_rerun(self, root: str) -> list[Log]:
         pose: Float32[ndarray, " 8"] = self.world_sim3_cam
-        values = rr.AnyValues(frame_index=self.frame_index, world=self.world, sim3_scale=float(pose[7]))
+        values = rr.AnyValues(frame_index=self.frame_index, sim3_scale=float(pose[7]))
         return [Log(root, rr.Transform3D(translation=pose[:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))), Log(root, values)]
 
     @classmethod
@@ -285,11 +283,11 @@ class TrackedFrame:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "TrackedFrame"]]:
-        cells = zip(*(_column(table, f"{root}:{c}") for c in ("Transform3D:translation", "Transform3D:quaternion", "sim3_scale", "frame_index", "world")), strict=True)
-        for t_ns, (xyz, xyzw, scale, frame_index, world) in zip(row_times(table, timeline), cells, strict=True):
+        cells = zip(*(_column(table, f"{root}:{c}") for c in ("Transform3D:translation", "Transform3D:quaternion", "sim3_scale", "frame_index")), strict=True)
+        for t_ns, (xyz, xyzw, scale, frame_index) in zip(row_times(table, timeline), cells, strict=True):
             if xyz is not None and frame_index is not None:
                 pose: Float32[ndarray, " 8"] = np.concatenate([np.ravel(xyz), np.ravel(xyzw), [_value(scale)]]).astype(np.float32)
-                yield t_ns, cls(int(_value(frame_index)), pose, int(_value(world)))
+                yield t_ns, cls(int(_value(frame_index)), pose)
 
 
 @serde(deny_unknown_fields=True)
@@ -322,13 +320,11 @@ class MapUpdate:
     """First keyframe of each matching factor."""
     jj: Int64[ndarray, " e"]
     """Second keyframe of each matching factor."""
-    world: int = 0
-    """Reset epoch of the estimator."""
 
     def to_rerun(self, root: str) -> list[Log]:
         """Keyframe centres (``<root>/keyframes``) and factor edges (``<root>/edges``); the exact values ride along as AnyValues."""
         centres: Float32[ndarray, "k 3"] = self.world_sim3_cam[:, :3]
-        keyframes = rr.AnyValues(world_sim3_cam=self.world_sim3_cam.reshape(-1), world=self.world)
+        keyframes = rr.AnyValues(world_sim3_cam=self.world_sim3_cam.reshape(-1))
         lines = rr.LineStrips3D(np.stack([centres[self.ii], centres[self.jj]], axis=1), colors=(0, 200, 0), radii=rr.Radius.ui_points(1.0))
         logs: list[Log] = [Log(f"{root}/keyframes", rr.Points3D(centres, colors=(255, 140, 0), radii=rr.Radius.ui_points(4.0))), Log(f"{root}/keyframes", keyframes)]
         for i, pose in enumerate(self.world_sim3_cam):  # each keyframe's frame, so its KeyframeCloud follows the corrected pose
@@ -343,11 +339,11 @@ class MapUpdate:
 
     @classmethod
     def from_layer(cls, table: pa.Table, root: str, timeline: str) -> Iterator[tuple[TimeNs, "MapUpdate"]]:
-        columns = (f"{root}/keyframes:world_sim3_cam", f"{root}/keyframes:world", f"{root}/edges:edge_ii", f"{root}/edges:edge_jj")
-        for t_ns, (poses, world, ii, jj) in zip(row_times(table, timeline), zip(*(_column(table, c) for c in columns), strict=True), strict=True):
+        columns = (f"{root}/keyframes:world_sim3_cam", f"{root}/edges:edge_ii", f"{root}/edges:edge_jj")
+        for t_ns, (poses, ii, jj) in zip(row_times(table, timeline), zip(*(_column(table, c) for c in columns), strict=True), strict=True):
             if poses is not None:
                 first, second = (np.asarray(e if e is not None else [], dtype=np.int64).reshape(-1) for e in (ii, jj))
-                yield t_ns, cls(np.asarray(poses, dtype=np.float32).reshape(-1, 8), first, second, int(_value(world)))
+                yield t_ns, cls(np.asarray(poses, dtype=np.float32).reshape(-1, 8), first, second)
 
 
 @serde(deny_unknown_fields=True)

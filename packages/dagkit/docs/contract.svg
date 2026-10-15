@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" font-family="Inter, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="524" viewBox="0 0 1100 524" font-family="Inter, Helvetica, Arial, sans-serif">
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5b6475"/></marker></defs>
-<rect width="1100" height="560" fill="#fff"/>
+<rect width="1100" height="524" fill="#fff"/>
 <text x="20" y="34" font-size="20" font-weight="700" fill="#1d2433">dagkit contract: one tick, both runners</text>
 <rect x="20" y="70" width="210" height="120" rx="10" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
 <text x="32" y="94" font-size="15" font-weight="700" fill="#1d2433">Source</text>
@@ -58,7 +58,4 @@
 <rect x="20" y="480" width="110" height="28" rx="6" fill="#fbdada" stroke="#7b8494"/>
 <text x="75" y="499" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">failed</text>
 <text x="145" y="499" font-size="12.5" fill="#3b4252">first exception kept, every wait woken, abort() on started nodes, NO flush, threads joined, re-raised</text>
-<rect x="20" y="516" width="110" height="28" rx="6" fill="#d9e8fb" stroke="#7b8494"/>
-<text x="75" y="535" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">barrier</text>
-<text x="145" y="535" font-size="12.5" fill="#3b4252">Control.reset / reconfigure: pause sources, drain, flush targets (old world), world += 1, reset(ctx), resume</text>
 </svg>

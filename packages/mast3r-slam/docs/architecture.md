@@ -25,8 +25,7 @@ Modes: **lossless** (default, every eval run) — before each frame and at flush
 applied every queued task (`SharedSlam.backend_idle`), so every frame sees one fixed map; **realtime** — no wait, but lost
 frames that arrive while a relocalisation request is queued are skipped (the shared current frame stays the requested one);
 at the end the backend drops what is still queued and a stop is never undone by a late relocalisation. A failed backend
-raises in the runner, which aborts the frontend's wait. Only the threaded runner fits the frontend's wait, and a mid-run
-`Control.reset` fails the run (the final poses and the Nerfstudio export read the one shared map at flush).
+raises in the runner, which aborts the frontend's wait. Only the threaded runner fits the frontend's wait.
 The backend process uses expandable CUDA segments and releases cached blocks after each task: the global solve's
 edge-sized buffers grow with the map.
 
