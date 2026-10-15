@@ -9,7 +9,7 @@ from dagkit.sources import IterSource, SegmentRef
 from dagkit.time import STATIC
 
 from slam_rs.catalog_feed import CatalogSegment, Frameset, RigProfile, SegmentFeed, open_segment
-from slam_rs.nodes.vio import VioNode
+from slam_rs.nodes.vio import VioNode, VioParams
 from slam_rs.types import VioRig
 
 
@@ -20,7 +20,10 @@ class VioSource(IterSource):
     previous frameset through the first one past this one). VIO initialises from rest, so the stream starts at the segment's first
     frameset; a window only ends it (frameset times up to its stop)."""
 
-    def __init__(self, segment: SegmentRef, rig: RigProfile, decoder: Literal["cpu", "cuda"]) -> None:
+    def __init__(self, segment: SegmentRef, params: VioParams) -> None:
+        rig: RigProfile = params.for_dataset(segment.dataset)[0]
+        decoder: Literal["cpu", "cuda"] = params.decoder()
+
         def events() -> Generator[Event, None, None]:
             source = CatalogSegment(segment.catalog_url, segment.dataset, segment.segment)
             feed: SegmentFeed

@@ -64,9 +64,10 @@ class VioNode:
     outputs: Mapping[str, PortType] = {"pose": RigPose, "layer": LayerFile}
     emits_late: bool = True
 
-    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path, decoder: Literal["cpu", "cuda"], config_text: str) -> None:
-        """``config_text``: the dataset's profiled VIO config (``VioParams.for_dataset``)."""
-        self.segment, self.params, self.output_dir, self.decoder, self.config_text = segment, params, output_dir, decoder, config_text
+    def __init__(self, segment: SegmentRef, params: VioParams, output_dir: Path) -> None:
+        self.segment, self.params, self.output_dir = segment, params, output_dir
+        self.decoder: Literal["cpu", "cuda"] = params.decoder()  # the source's decoder (it resolves the same params), for the layer
+        self.config_text: str = params.for_dataset(segment.dataset)[1]
         self.lockstep: Lockstep | None = None
         self.run: SegmentRun | None = None  # the finished run's counts
         self.partial: Path | None = None  # the layer file flush wrote; abort() deletes it unless the publish sink moved it
