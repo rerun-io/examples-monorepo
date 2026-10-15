@@ -12,13 +12,14 @@ from conftest import FakeScene
 from dagkit.graph import Graph
 from dagkit.node import Control, Event, Fenced, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
-from dagkit.sources import IterSource
+from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder, check_graph_docs, check_picture, collect_edges
 from dagkit.time import STATIC
+from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from exo_calib.apis import calibrate
-from exo_calib.apis.calibrate import Config, Keep, build
+from exo_calib.apis.calibrate import Config, Keep, build, check_producer
 from exo_calib.graphs.calibrate import init_graph, refine_graph
 from exo_calib.nodes.refine import RefineNode
 from exo_calib.types import RigLayout
@@ -62,6 +63,19 @@ def test_a_stopped_graph_hands_nothing_on_and_ends_the_app(monkeypatch: pytest.M
     _, steps = app_graphs(monkeypatch, tmp_path)
     assert next(steps).name == "exocalib-init"
     assert next(steps, None) is None  # its Keep stayed empty: no refine pass is built
+
+
+def test_resume_refuses_a_layer_another_graph_profile_or_parameter_set_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
+    written = Producer("exo-calib", "0.1.0+abc1234", "exocalib-init", "x86_64-cuda", params_sha="0123456789ab")
+    monkeypatch.setattr(SegmentRef, "entry", lambda self: None)  # no catalog: the stored Producer is faked below
+    monkeypatch.setattr(calibrate, "read_producer", lambda dataset, segment, layer: written)
+    check_producer(SegmentRef("d", "s"), "exocalib_init", replace(written, version="0.2.0+def5678"))  # a newer checkout resumes
+    for change in ({"graph": "exocalib-refine"}, {"profile": "aarch64-cuda"}, {"params_sha": "ba9876543210"}):
+        with pytest.raises(ValueError, match="cannot resume from exocalib_init"):
+            check_producer(SegmentRef("d", "s"), "exocalib_init", replace(written, **change))
+    monkeypatch.setattr(calibrate, "read_producer", lambda dataset, segment, layer: None)  # the layer has no Producer
+    with pytest.raises(ValueError, match="cannot resume from exocalib_init"):
+        check_producer(SegmentRef("d", "s"), "exocalib_init", written)
 
 
 def synthetic_refine_graph(scene: FakeScene, keep: Keep) -> Graph:

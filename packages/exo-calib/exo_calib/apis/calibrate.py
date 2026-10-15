@@ -9,9 +9,7 @@ both run it, with run health, so the viewer's "pipeline (debug)" tab shows every
 """
 
 import hashlib
-import importlib.metadata
 import json
-import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -26,7 +24,7 @@ from dagkit.node import Control, Emit, Mode, Node, PortType, RunContext, Tick
 from dagkit.runners import RunReport
 from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
 from dagkit.sources import SegmentRef
-from dagkit.types import Producer, read_column
+from dagkit.types import Producer, read_column, read_producer
 from serde import serde
 from serde.json import to_json
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
@@ -148,12 +146,9 @@ def log_style(recording: rr.RecordingStream, cameras: tuple[str, ...]) -> None:
 
 def check_producer(segment: SegmentRef, layer: str, producer: Producer) -> None:
     """Refuse to resume from a layer another graph, profile or parameter set wrote."""
-    dataset = segment.entry()
-    table = dataset.filter_segments([segment.segment]).filter_contents([f"/producers/{layer}"]).reader(index=None).to_arrow_table()
-    stored: dict[str, object] = {c.rsplit(":", 1)[-1]: table.column(c)[0].as_py() for c in table.column_names if c.startswith(f"/producers/{layer}:")}
-    expected: dict[str, object] = {"graph": [producer.graph], "profile": [producer.profile], "params_sha": [producer.params_sha]}
-    if any(stored.get(key) != value for key, value in expected.items()):
-        raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {expected}")
+    stored: Producer | None = read_producer(segment.entry(), segment.segment, layer)
+    if stored is None or (stored.graph, stored.profile, stored.params_sha) != (producer.graph, producer.profile, producer.params_sha):
+        raise ValueError(f"cannot resume from {layer}: it was written by {stored}, this run is {producer}")
 
 
 def blueprint(layout: RigLayout, graphs: Sequence[str]) -> rrb.Blueprint:
@@ -185,12 +180,10 @@ def build(config: Config, recording: rr.RecordingStream, *, golden: bool = False
     params: Kp2dParams = load_profile(PROFILES, hardware).configure("kp2d", Kp2dParams())
     models: dict[str, Callable[[], object]] = model_factories(segment, cameras, params)
     resolved: str = json.dumps([config.frame_index, config.frame_budget, cameras, params.batch_size, params.detection_score, segment.window_ns])
-    sha: str = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, cwd=PROFILES.parent).stdout.strip()
-    version: str = f"{importlib.metadata.version('exo-calib')}+{sha}"
     print(f"segment {segment.segment}: exo cameras {list(cameras)}; profile {hardware}")
 
     def producer(graph: str) -> Producer:
-        return Producer("exo-calib", version, graph, hardware, params_sha=hashlib.sha256(resolved.encode()).hexdigest()[:12])
+        return Producer.of("exo-calib", graph, hardware, params_sha=hashlib.sha256(resolved.encode()).hexdigest()[:12])
 
     def sinks(graph: str, layers: Mapping[str, tuple[str, ...]], suffix: str = "", register: Register = config.register) -> dict[str, Node]:
         ports: list[str] = [port for layer_ports in layers.values() for port in layer_ports]
