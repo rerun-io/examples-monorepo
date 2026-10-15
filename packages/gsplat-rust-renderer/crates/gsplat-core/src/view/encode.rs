@@ -208,7 +208,7 @@ impl ViewState {
             .intersections
             .sort
             .encode(encoder, kernels, scratch.bits, timestamps(None, 7));
-        encoder.clear_buffer(&scratch.offsets, 0, None);
+        encoder.clear_buffer(&scratch.offsets, 0, Some(u64::from(self.tile_count) * 8));
         self.dispatches.dispatch_indirect(
             encoder,
             INTERSECTIONS,
