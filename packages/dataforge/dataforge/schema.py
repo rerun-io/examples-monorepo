@@ -88,7 +88,7 @@ def loudness_path(rig: int, audio: int) -> str:
 
 
 def depth_path(rig: int, cam: int) -> str:
-    """``.../pinhole/depth`` — a DepthImage registered to that camera, on ``video_time``."""
+    """``.../pinhole/depth`` — a depth image registered to that camera, on ``video_time``."""
     return f"{pinhole_path(rig, cam)}/depth"
 
 

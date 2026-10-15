@@ -21,9 +21,10 @@ from jaxtyping import Float64, UInt8, UInt16
 from numpy import ndarray
 from test_vslam_lab_source import EUROC_CALIBRATION, TUM_CALIBRATION  # pyrefly: ignore[missing-import]
 
-from dataforge import paths, schema
+from dataforge import paths, schema, writing
 from dataforge.datasets import dataset_defaults
-from dataforge.datasets.vslam_lab import BENCHMARKS, VslamLabConfig, VslamLabDataset
+from dataforge.datasets.vslam_lab import BENCHMARKS, VslamLabConfig, VslamLabDataset, log_depth
+from dataforge.datasets.vslam_lab_source import read_frame_index
 from dataforge.identity import SequenceIdentity
 
 TUM_STAMPS: tuple[int, ...] = (1305031102175303936, 1305031102211214080, 1305031102243211008)
@@ -206,6 +207,28 @@ def test_a_forced_refresh_whose_gt_is_refused_replaces_no_layer(tmp_path: Path, 
     assert {layer: target.read_bytes() for layer, target in built.targets(identity).items()} == published
 
 
+def test_depth_is_sent_as_the_sensor_png_bytes_on_the_capture_clocks_only(tmp_path: Path) -> None:
+    source: Path = tum_sequence(tmp_path / "raw")
+    rrd: Path = tmp_path / "depth.rrd"
+    with writing.recording_to(rrd, recording_id="depth") as recording:
+        log_depth(recording, source, read_frame_index(source / "rgb.csv")["depth_0"], 0, meter=5000.0)
+    store: rrc.ChunkStore = read_back(rrd)
+    entity: str = schema.depth_path(0, 0)
+    blobs: pa.Table = column_rows(store, f"{entity}:EncodedDepthImage:blob")
+    assert blobs.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == list(TUM_STAMPS)
+    assert [bytes(cell[0]) for cell in blobs.column(1).to_pylist()] == [(source / f"depth_0/{index}.png").read_bytes() for index in range(3)]
+    assert column_rows(store, f"{entity}:EncodedDepthImage:meter").column(1).to_pylist() == [[5000.0]] * 3
+    # Only the capture clocks: no wall-clock log_time of whenever the conversion ran.
+    assert sorted(column.name for column in store.schema().index_columns()) == sorted([schema.FRAME_INDEX, schema.TIMELINE])
+
+
+def test_a_depth_frame_that_is_not_a_16_bit_gray_png_is_refused(tmp_path: Path) -> None:
+    source: Path = tum_sequence(tmp_path / "raw")
+    cv2.imwrite(str(source / "depth_0/1.png"), np.zeros((128, 160), dtype=np.uint8))
+    with writing.recording_to(tmp_path / "depth.rrd", recording_id="depth") as recording, pytest.raises(ValueError, match="depth_0/1.png"):
+        log_depth(recording, source, read_frame_index(source / "rgb.csv")["depth_0"], 0, meter=5000.0)
+
+
 def test_the_layer_set_follows_the_benchmark(tmp_path: Path) -> None:
     identity: SequenceIdentity = SequenceIdentity("vslam-lab-rgbdtum", ("any",))
     assert list(dataset(tmp_path, "rgbdtum").targets(identity)) == [paths.BASE_LAYER, paths.GT_LAYER]
@@ -233,10 +256,9 @@ def test_a_tum_sequence_converts_video_depth_and_gt_on_upstream_stamps(tmp_path:
     store: rrc.ChunkStore = read_back(base_rrd)
     video: pa.Table = column_rows(store, f"{schema.video_path(0, 0)}:VideoStream:sample")
     assert video.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == list(TUM_STAMPS)
-    depth: pa.Table = column_rows(store, f"{schema.depth_path(0, 0)}:DepthImage:meter")
+    depth: pa.Table = column_rows(store, f"{schema.depth_path(0, 0)}:EncodedDepthImage:meter")
     assert depth.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == list(TUM_STAMPS)
     assert depth.column(1).to_pylist()[0] == [5000.0]
-    # Only the capture clocks: no wall-clock log_time of whenever the conversion ran.
     assert sorted(column.name for column in store.schema().index_columns()) == sorted([schema.FRAME_INDEX, schema.TIMELINE])
     capture: dict[str, object] = recording_properties(store, "capture")
     assert (capture["num_cameras"], capture["num_frames"], capture["start_time_ns"], capture["benchmark"]) == (1, 3, TUM_STAMPS[0], "RGBDTUM")
@@ -274,4 +296,4 @@ def test_the_real_freiburg1_xyz_converts_every_frame(tmp_path: Path, monkeypatch
     identity, source = next(pair for pair in built.discover() if pair[0].parts == ("rgbd_dataset_freiburg1_xyz",))
     store: rrc.ChunkStore = read_back(built.convert(identity, source, force=False))
     assert column_rows(store, f"{schema.video_path(0, 0)}:VideoStream:sample").num_rows == 798
-    assert column_rows(store, f"{schema.depth_path(0, 0)}:DepthImage:meter").num_rows == 798
+    assert column_rows(store, f"{schema.depth_path(0, 0)}:EncodedDepthImage:meter").num_rows == 798

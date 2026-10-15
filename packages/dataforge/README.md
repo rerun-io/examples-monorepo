@@ -369,8 +369,9 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-vslam
 
 One sequence is up to three layers under `vslam-lab-<benchmark>__<sequence>`:
 `base` (one AV1 video per camera at its pinhole, `rig_T_cam` = the yaml's
-`T_BS`; depth as `rr.DepthImage` with `meter` = `depth_factor` on the RGB
-camera's pinhole, to which it is registered; the IMU), `gt` (world_T_body on
+`T_BS`; depth as `rr.EncodedDepthImage`, the sensor's own 16-bit PNGs with
+`meter` = `depth_factor`, on the RGB camera's pinhole, to which it is
+registered; the IMU), `gt` (world_T_body on
 `rig_00`, its path and trail, the root `ViewCoordinates`) and, where
 `calibration.yaml` carries an IMU noise model, `sensor_metadata` (simplecv's
 `ImuCalibration` on the IMU node). The rig frame is VSLAM-LAB's body frame,
@@ -456,7 +457,7 @@ is a nominal-rate fiction for such a file.
 | `egoexo4d` | one Ego-Exo4D take with an Ego-Exo4D-HM fit; take files fetched on demand (licence keys) and deleted after base | **four** rrds: `base` with the localized GoPros (KB4, 1080p AV1), the Aria RGB/SLAM/eye cameras and its trajectory; `body_pose` (SMPL-H parameters, COCO-133 keypoints), `body_mesh` (SMPL-H, 10 Hz), `projections`; see [docs/egoexo4d.md](docs/egoexo4d.md) |
 | `mamma` | one MAMMA sequence of the `--family` (eval, markerless-dance, markerless-multiple-people, markerless-iphones; syn and syn-bedlam: the MammaSyn renders and BEDLAM clips from their WebDataset shards), read in place from the release | **four to six** rrds: `base` with every camera (AV1, videos above 3.2 MP at half size, the Vicon radial lens as data); `body_pose` (SMPL-X parameters and COCO-133 keypoints per person, tagged `mosh_gt`, `mamma_pred` or `synthetic_gt`), `body_mesh` (SMPL-X, 10 Hz; syn: every 6 Hz frame), `projections` (through the Vicon lens; syn: pinhole); eval and syn add `masks` (palette PNGs at a quarter size) and, on Extra, `markers`; see [docs/mamma.md](docs/mamma.md) and [docs/mamma-syn.md](docs/mamma-syn.md) |
 | `harmony4d` | one Harmony4D sequence, read in place from its release zip (one zip per scene and split, fetched from the Hub) | **four** rrds: `base` with ~20 GoPros (OPENCV_FISHEYE, 4K JPEG frames as 1080p AV1) and, when worn, both Aria glasses' rgb/slam cameras (upright) and per-frame poses; `body_pose` (SMPL parameters, SMPL-45 joints, COCO-17 keypoints in COCO-133 per person), `body_mesh` (shipped SMPL vertices, 10 Hz), `projections` (through each full lens, plus the shipped boxes); see [docs/harmony4d.md](docs/harmony4d.md) |
-| `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as `DepthImage` where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
+| `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as the sensor's 16-bit PNGs (`EncodedDepthImage`) where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and
