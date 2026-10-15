@@ -147,7 +147,7 @@ class MultiViewKeypoints:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Kp2dOverlay(Drawing):
-    """One camera's Stage B drawing at that camera's own sample time: the person box, the crop rectangle and the raw
+    """One camera's Stage B drawing at that camera's own sample time: the person box (and its ``box_source``), the crop rectangle and the raw
     joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated
     skeleton with the raw joints the gate rejected beside it."""
 
@@ -168,6 +168,7 @@ class Kp2dOverlay(Drawing):
         color: tuple[int, int, int] = (0, 200, 255) if self.box_source == "tracked" else OVERLAY_COLOR
         logs: list[Log] = [
             Log(f"{leaf}_bbox", rr.Boxes2D(array=box, array_format=rr.Box2DFormat.XYXY, colors=color, labels=[self.box_source] * len(box))),
+            Log(f"{leaf}_bbox", rr.AnyValues(box_source=self.box_source)),
             Log(f"{leaf}_crop", rr.Boxes2D(array=self.crop_xywh[None][: len(box)], array_format=rr.Box2DFormat.XYWH, colors=RAW_COLOR)),
             Log(f"{leaf}_raw", Points2DWithConfidence(positions=self.raw_xy, confidences=self.raw_conf, class_ids=0, keypoint_ids=np.arange(133), radii=1.0)),
         ]

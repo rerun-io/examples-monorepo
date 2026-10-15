@@ -72,10 +72,10 @@ def test_overlay_draws_the_box_and_raw_joints_always_the_skeleton_only_where_it_
     box, crop = np.array([1.0, 2.0, 30.0, 40.0], np.float32), np.array([0.0, 0.0, 50.0, 60.0], np.float32)
     leaf = "/world/b/cam_00/pinhole/exocalib_kp2d"
     plain = Kp2dOverlay("b/cam_00", box, "tracked", crop, raw, np.zeros(133, np.float32))
-    assert [log.path for log in plain.to_rerun(ROOT)] == [f"{leaf}_bbox", f"{leaf}_crop", f"{leaf}_raw"]  # every frame: no stale raw points
+    assert [log.path for log in plain.to_rerun(ROOT)] == [f"{leaf}_bbox", f"{leaf}_bbox", f"{leaf}_crop", f"{leaf}_raw"]  # every frame: no stale raw points
     raw[:3] = 10.0
     drawn = Kp2dOverlay("b/cam_00", box, "yolox", crop, raw, np.ones(133, np.float32), raw.astype(np.float64), np.ones(133))
-    assert [log.path for log in drawn.to_rerun(ROOT)] == [f"{leaf}_bbox", f"{leaf}_crop", f"{leaf}_raw", leaf, f"{leaf}_rejected"]
+    assert [log.path for log in drawn.to_rerun(ROOT)] == [f"{leaf}_bbox", f"{leaf}_bbox", f"{leaf}_crop", f"{leaf}_raw", leaf, f"{leaf}_rejected"]
     back = from_dict(Kp2dOverlay, to_dict(drawn))
     assert back.view == drawn.view and back.gated_xy is not None and back.gated_xy.dtype == np.float64 and from_dict(Kp2dOverlay, to_dict(plain)).gated_xy is None
     align = RigAlignment(("a",), np.zeros((1, 3)), np.repeat(np.eye(3)[None], 2, 0), np.zeros((2, 3)), np.zeros((2, 1, 3)))

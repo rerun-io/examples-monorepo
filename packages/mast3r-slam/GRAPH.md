@@ -77,7 +77,7 @@ Saves **keyframes, map** from 3 backend; **tracked** from 2 frontend into the ca
 ## 6 · nerfstudio: Export the keyframes for Nerfstudio
 *output* · `NerfstudioSink` · `packages/mast3r-slam/mast3r_slam/nodes/nerfstudio.py`
 
-Exports the final map at flush (after the backend's final ``keyframes``); reads the images and point maps from the ``shared`` resource, so the graph adds it with ``needs=("shared",)``.
+Exports the final map at flush (after the backend's final ``keyframes``) and draws the exported cloud at ``entity`` of ``recording`` (if given) at their time; reads the images and point maps from the ``shared`` resource, so the graph adds it with ``needs=("shared",)``.
 
 Takes **keyframes** from 3 backend.
 

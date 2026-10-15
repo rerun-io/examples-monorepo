@@ -172,7 +172,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         producer: Producer = Producer.of("mast3r-slam", "mast3r-slam", f"{hardware}/{config.preset or 'base'}")
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # the viewer's values stay out of the catalog
         sinks["layer"] = LayerSink.open(config.segment, LAYER, producer, layer_ports, roots, output_dir=config.layer_dir, register=config.register)
-    nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
+    nerfstudio = NerfstudioSink(config.output_nerfstudio, recording, f"{ROOT}/final_pointcloud") if config.output_nerfstudio is not None else None
     return slam_graph(video, cfg, sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 
 

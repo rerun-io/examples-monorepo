@@ -7,6 +7,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import open3d as o3d
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
@@ -17,7 +18,10 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from mast3r_slam.apis import slam as app
 from mast3r_slam.apis.slam import ROOT, Config, build
+from mast3r_slam.nodes import nerfstudio
 from mast3r_slam.nodes.frontend import Frontend
+from mast3r_slam.nodes.nerfstudio import NerfstudioSink
+from mast3r_slam.nodes.shared import SharedSlam
 from mast3r_slam.nodes.viewer import SlamViewer
 from mast3r_slam.types import CameraView, FrameView, KeyframeView, LogLine, MapUpdate, TrackedFrame
 
@@ -123,6 +127,32 @@ def test_the_app_viewer_recording_has_the_cli_entities(images: Path, tmp_path: P
     extra = {p for p in found if p.startswith(ROOT) and p.removeprefix(ROOT) not in MAIN_ENTITIES}
     assert all(p.removeprefix(ROOT).startswith(GRAPH_OUTPUTS) for p in extra), sorted(extra)
     assert found[f"{ROOT}/keyframes/keyframe-{{i}}/pointcloud"] == {"Points3D", "Transform3D"}
+
+
+def test_the_nerfstudio_export_draws_its_cloud_at_the_end_of_the_run_as_the_cli_did(
+    images: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Main's CLI with ``--ns-save-path`` logged the exported cloud (voxel-downsampled, coloured) at ``/world/final_pointcloud``;
+    the App draws it when the Nerfstudio export is on, at the final keyframes' time on the data clock."""
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(np.array([[0.0, 0.0, 1.0], [0.5, -0.25, 2.0]]))
+    cloud.colors = o3d.utility.Vector3dVector(np.array([[1.0, 0.0, 0.0], [0.0, 0.5, 1.0]]))
+    monkeypatch.setattr(nerfstudio, "save_kf_to_nerfstudio", lambda path, keyframes: cloud)
+    shared = SharedSlam.__new__(SharedSlam)  # the export is faked: no buffers behind it
+    shared.keyframes = None  # type: ignore[assignment]
+    recording = rr.RecordingStream("mast3r-slam-test", send_properties=False)
+    recording.save(tmp_path / "ns.rrd")
+    graph = build(Config(RerunTyroConfig(headless=True), images=images, hardware="x86_64-cuda", output_nerfstudio=tmp_path / "ns"), recording)
+    sink = graph.nodes["nerfstudio"].obj
+    assert isinstance(sink, NerfstudioSink)
+    sink.reset(RunContext("mast3r-slam", "nerfstudio", "lossless", resources={"shared": shared}))
+    for t_ms in (0, 33):
+        sink.step(Tick(t_ms * 1_000_000, "keyframes", TrackedFrame(1, camera(1).world_sim3_cam), {}), Discard())
+    sink.flush(Discard())
+    recording.disconnect()
+    [table] = [c.to_record_batch() for c in rr.chunk.RrdReader(tmp_path / "ns.rrd").stream().to_chunks() if str(c.entity_path) == f"{ROOT}/final_pointcloud"]
+    assert table.column("video_time").to_pylist() == [np.timedelta64(33_000_000, "ns")]
+    np.testing.assert_allclose(table.column("Points3D:positions").to_pylist()[0], np.asarray(cloud.points))
 
 
 def test_drawing_only_the_poses_keeps_the_recording_small(images: Path, tmp_path: Path) -> None:

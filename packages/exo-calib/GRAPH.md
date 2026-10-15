@@ -147,7 +147,7 @@ Saves **refined, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer
 |---|---|---|
 | `BaseCalibration` | Refined cameras written onto base camera nodes that carry no dataset GT; the marker keeps them out of GT discovery | `packages/exo-calib/exo_calib/types.py` |
 | `Keypoints3dTracks` | One frame of triangulated keypoints under both rigs (rows of ``xyz`` are ``VARIANTS``; NaN = not triangulated) | `packages/exo-calib/exo_calib/types.py` |
-| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box, the crop rectangle and the raw joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
+| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box (and its ``box_source``), the crop rectangle and the raw joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
@@ -270,7 +270,7 @@ Saves **align, status** from 6 report into the catalog layer `exocalib_align`.
 | `BaseCalibration` | Refined cameras written onto base camera nodes that carry no dataset GT; the marker keeps them out of GT discovery | `packages/exo-calib/exo_calib/types.py` |
 | `EvalReport` | ``eval.json``: per-variant GT metrics (``None`` without GT, written as null) and the GT-free diagnostics | `packages/exo-calib/exo_calib/types.py` |
 | `Keypoints3dTracks` | One frame of triangulated keypoints under both rigs (rows of ``xyz`` are ``VARIANTS``; NaN = not triangulated) | `packages/exo-calib/exo_calib/types.py` |
-| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box, the crop rectangle and the raw joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
+| `Kp2dOverlay` | One camera's Stage B drawing at that camera's own sample time: the person box (and its ``box_source``), the crop rectangle and the raw joints (``_raw``, grey, on every frame), plus (on the frames that carry ``gated_*``) the AssemblyHands-X-gated skeleton with the raw joints the gate rejected beside it | `packages/exo-calib/exo_calib/types.py` |
 | `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |

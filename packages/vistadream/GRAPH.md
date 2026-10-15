@@ -75,7 +75,7 @@ Coarse stage only: up to ``n_frames - 2`` views picked on a dense spiral (larges
 ## 6 · render: Render the scene along a camera path
 *runs once per item* · `RenderNode` · `packages/vistadream/src/vistadream/nodes/splats.py`
 
-The final scene at the input camera along the spiral: 150 views (25 per training view when there are more than 2), one every ``1 / fps`` s after the scene's time.
+The final scene at the input camera along the spiral: 150 views with their rendered depth (25 per training view when there are more than 2), one every ``1 / fps`` s after the scene's time.
 
 | takes | type | from | arrives |
 |---|---|---|---|

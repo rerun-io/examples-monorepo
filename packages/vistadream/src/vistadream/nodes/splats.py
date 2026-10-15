@@ -19,10 +19,7 @@ from vistadream.models.flux import Inpaint
 from vistadream.ops.depth_align import align_depth
 from vistadream.ops.splats import Rasterize, gaussians, hole_mask, render, train
 from vistadream.ops.trajectory import spiral
-from vistadream.types import CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene, SceneViews, Splats
-
-EDGE_THRESHOLD: float = 0.01
-"""Depth-gradient magnitude above which a pixel is a depth edge and spawns no Gaussian."""
+from vistadream.types import EDGE_THRESHOLD, CameraView, OutpaintCanvas, RelativeDepth, RgbImage, Scene, SceneViews, Splats
 
 
 class InitNode:
@@ -49,11 +46,11 @@ class InitNode:
         crop: tuple[slice, slice] = (slice(y, y + height), slice(x, x + width))
         K: Float64[ndarray, "3 3"] = depth.K.copy()
         K[:2, 2] = width / 2.0, height / 2.0  # the canvas focal length, centred on the input
-        views: list[CameraView] = [CameraView(image.rgb, K, np.eye(4), depth.depth[crop], depth.valid[crop])]
         spawn: list[Bool[ndarray, "h w"]] = [~edges[crop]]
+        views: list[CameraView] = [CameraView(image.rgb, K, np.eye(4), depth.depth[crop], depth.valid[crop], spawn=spawn[0])]
         if canvas.mask.any():
-            views.insert(0, CameraView(canvas.rgb, depth.K, np.eye(4), depth.depth, depth.valid, supervise=canvas.mask))
             spawn.insert(0, canvas.mask & ~edges & depth.valid)
+            views.insert(0, CameraView(canvas.rgb, depth.K, np.eye(4), depth.depth, depth.valid, supervise=canvas.mask, spawn=spawn[0]))
         splats: Splats = train(None, [gaussians(v, s, self.device) for v, s in zip(views, spawn, strict=True)], views, self.iters, self.rng, self.rasterize)
         out.put("scene", tick.t_ns, Fenced(Scene(splats, SceneViews(tuple(views), input_index=len(views) - 1)), fence_after(splats.centers)))
 
@@ -115,9 +112,9 @@ class ExpandNode:
             predicted: Float32[ndarray, "h w"] = np.where(np.isfinite(prediction.depth), prediction.depth, 0.0).astype(np.float32)
             depth: Float32[ndarray, "h w"] = align_depth(rendered_depth.cpu().numpy(), predicted, holes)
             valid: Bool[ndarray, "h w"] = prediction.confidence > 0
-            view = CameraView(rgb, K, dense[best], depth, valid, supervise=holes)
-            views.append(view)
             spawn: Bool[ndarray, "h w"] = holes & ~depth_edges_mask(depth, threshold=EDGE_THRESHOLD) & valid
+            view = CameraView(rgb, K, dense[best], depth, valid, supervise=holes, spawn=spawn)
+            views.append(view)
             splats = train(splats, [gaussians(view, spawn, str(splats.centers.device))], views, self.iters, self.rng, self.rasterize)
         out.put("scene", event.t_ns, Fenced(Scene(splats, SceneViews(tuple(views), scene.views.input_index)), fence_after(splats.centers)))
 
@@ -125,8 +122,8 @@ class ExpandNode:
 class RenderNode:
     """Render the scene along a camera path
 
-    The final scene at the input camera along the spiral: 150 views (25 per training view when there are more than 2),
-    one every ``1 / fps`` s after the scene's time."""
+    The final scene at the input camera along the spiral: 150 views with their rendered depth (25 per training view when
+    there are more than 2), one every ``1 / fps`` s after the scene's time."""
 
     inputs = {"scene": Fenced[Scene]}
     outputs = {"view": CameraView}
@@ -147,9 +144,9 @@ class RenderNode:
         height, width = camera.rgb.shape[:2]
         with torch.no_grad():
             for i, cam_T_world in enumerate(spiral(views[0].depth, views[0].K, n)):
-                rgb: Float32[Tensor, "h w 3"] = self.rasterize(scene.splats, camera.K, cam_T_world, width, height)[0]
+                rgb, depth, _ = self.rasterize(scene.splats, camera.K, cam_T_world, width, height)
                 rgb8: UInt8[ndarray, "h w 3"] = (rgb.clamp(0, 1) * 255.0).round().byte().cpu().numpy()
-                out.put("view", tick.t_ns + i * 1_000_000_000 // self.fps, CameraView(rgb8, camera.K, cam_T_world))
+                out.put("view", tick.t_ns + i * 1_000_000_000 // self.fps, CameraView(rgb8, camera.K, cam_T_world, depth.float().cpu().numpy()))
 
     def flush(self, out: Emit) -> None:
         pass

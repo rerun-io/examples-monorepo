@@ -41,7 +41,7 @@ MAIN_LAYER_ENTITIES: dict[str, set[str]] = {
     "/world/exocalib_error/init": {"LineStrips3D"},
     "/world/exocalib_error/refined": {"LineStrips3D"},
     "/world/{exo}/pinhole/exocalib_kp2d": {"AnnotationContext", "Points2D", "KeypointConfidence2D"},
-    "/world/{exo}/pinhole/exocalib_kp2d_bbox": {"Boxes2D"},  # main's box_source AnyValues beside it: the box label carries it
+    "/world/{exo}/pinhole/exocalib_kp2d_bbox": {"Boxes2D", "box_source"},
     "/world/{exo}/pinhole/exocalib_kp2d_crop": {"Boxes2D"},
     "/world/{exo}/pinhole/exocalib_kp2d_raw": {"AnnotationContext", "Points2D", "KeypointConfidence2D"},
     "/world/{exo}/pinhole/exocalib_kp2d_rejected": {"AnnotationContext", "Points2D", "KeypointConfidence2D"},

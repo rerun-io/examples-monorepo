@@ -15,12 +15,15 @@ import torch
 from dagkit.time import TimeNs
 from dagkit.types import Log, cells, flat
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
+from monopriors.depth_utils import depth_edges_mask, depth_to_points
 from numpy import ndarray
 from serde import serde
 from torch import Tensor
 
 Stage: TypeAlias = Literal["no-outpaint", "outpaint", "coarse"]
 """``no-outpaint``: the image as is; ``outpaint``: FLUX fills a border first; ``coarse``: then adds inpainted views."""
+EDGE_THRESHOLD: float = 0.01
+"""Depth-gradient magnitude above which a pixel is a depth edge and spawns no Gaussian."""
 
 
 def images(table: pa.Table, entity: str, archetype: str, timeline: str, dtype: type) -> dict[TimeNs, ndarray]:
@@ -135,11 +138,13 @@ class CameraView:
     K: Float64[ndarray, "3 3"]
     cam_T_world: Float64[ndarray, "4 4"]
     depth: Float32[ndarray, "h w"] | None = None
-    """Relative depth of a training view (renders carry none)."""
+    """A training view's relative depth, or a render's rendered depth."""
     valid: Bool[ndarray, "h w"] | None = None
     """MoGe's validity mask of ``depth``."""
     supervise: Bool[ndarray, "h w"] | None = None
     """Pixels the training loss compares; None = every pixel."""
+    spawn: Bool[ndarray, "h w"] | None = None
+    """Pixels that put a Gaussian into the scene (a training view's; renders carry none)."""
 
     def to_rerun(self, root: str) -> list[Log]:
         transform = rr.Transform3D(translation=self.cam_T_world[:3, 3], mat3x3=self.cam_T_world[:3, :3], relation=rr.TransformRelation.ChildFromParent)
@@ -147,7 +152,7 @@ class CameraView:
         logs.append(Log(f"{root}/pinhole/rgb", rr.Image(self.rgb, color_model="RGB")))
         if self.depth is not None:
             logs.append(Log(f"{root}/pinhole/depth", rr.DepthImage(self.depth, meter=1.0)))
-        masks: tuple[tuple[str, Bool[ndarray, "h w"] | None], ...] = (("valid", self.valid), ("supervise", self.supervise))
+        masks: tuple[tuple[str, Bool[ndarray, "h w"] | None], ...] = (("valid", self.valid), ("supervise", self.supervise), ("spawn", self.spawn))
         logs += [Log(f"{root}/pinhole/{name}", rr.Image(m.astype(np.uint8) * 255, color_model="L")) for name, m in masks if m is not None]
         return logs
 
@@ -161,12 +166,12 @@ class CameraView:
         rotations: dict[TimeNs, pa.Scalar] = cells(table, f"{root}:Transform3D:mat3x3", timeline)
         translations: dict[TimeNs, pa.Scalar] = cells(table, f"{root}:Transform3D:translation", timeline)
         depths: dict[TimeNs, ndarray] = images(table, f"{root}/pinhole/depth", "DepthImage", timeline, np.float32)
-        masks: dict[str, dict[TimeNs, ndarray]] = {n: images(table, f"{root}/pinhole/{n}", "Image", timeline, np.uint8) for n in ("valid", "supervise")}
+        masks: dict[str, dict[TimeNs, ndarray]] = {n: images(table, f"{root}/pinhole/{n}", "Image", timeline, np.uint8) for n in ("valid", "supervise", "spawn")}
         for t, rgb in images(table, f"{root}/pinhole/rgb", "Image", timeline, np.uint8).items():
             cam_T_world: Float64[ndarray, "4 4"] = np.eye(4)
             cam_T_world[:3, :3] = flat(rotations[t], np.float32).reshape(3, 3).T
             cam_T_world[:3, 3] = flat(translations[t], np.float32)
-            yield t, cls(rgb, intrinsics[t], cam_T_world, depths.get(t), _mask(masks["valid"].get(t)), _mask(masks["supervise"].get(t)))
+            yield t, cls(rgb, intrinsics[t], cam_T_world, depths.get(t), *(_mask(masks[n].get(t)) for n in ("valid", "supervise", "spawn")))
 
 
 @serde(deny_unknown_fields=True)
@@ -187,7 +192,15 @@ class SceneViews:
         return ["input" if i == self.input_index else "outpaint" if i < self.input_index else f"view_{i:02d}" for i in range(len(self.views))]
 
     def to_rerun(self, root: str) -> list[Log]:
-        return [log for name, view in zip(self.names(), self.views, strict=True) for log in view.to_rerun(f"{root}/{name}")]
+        """Each view under its name; the outpainted canvas also as points in its camera, every pixel with depth off a depth edge."""
+        logs: list[Log] = [log for name, view in zip(self.names(), self.views, strict=True) for log in view.to_rerun(f"{root}/{name}")]
+        if self.input_index:
+            canvas: CameraView = self.views[0]
+            assert canvas.depth is not None, "the canvas is a training view"
+            keep: Bool[ndarray, "h w"] = (canvas.depth > 0) & ~depth_edges_mask(canvas.depth, threshold=EDGE_THRESHOLD)
+            points: Float32[ndarray, "h w 3"] = depth_to_points(canvas.depth[None], canvas.K.astype(np.float32))
+            logs.append(Log(f"{root}/outpaint/points", rr.Points3D(points[keep], colors=canvas.rgb[keep])))
+        return logs
 
     @classmethod
     def contents(cls, root: str) -> list[str]:
