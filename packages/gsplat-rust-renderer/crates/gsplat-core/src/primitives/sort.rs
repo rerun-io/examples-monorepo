@@ -16,7 +16,7 @@ pub(crate) struct RadixSort {
     keys: [wgpu::Buffer; 2],
     values: [wgpu::Buffer; 2],
     groups: [SortGroups; 8],
-    dispatches: Dispatches,
+    dispatch_base: u32,
 }
 impl RadixSort {
     pub fn new(
@@ -24,9 +24,9 @@ impl RadixSort {
         kernels: &Kernels,
         capacity: u32,
         count: CountSlot,
-        keys: &wgpu::Buffer,
-        values: &wgpu::Buffer,
+        (keys, values): (&wgpu::Buffer, &wgpu::Buffer),
         counts: &wgpu::Buffer,
+        dispatch_base: u32,
     ) -> Self {
         let keys = [
             keys.clone(),
@@ -104,54 +104,56 @@ impl RadixSort {
             keys,
             values,
             groups,
-            dispatches: Dispatches::new(
-                device,
-                &kernels.prepare,
-                counts,
-                &[
-                    DispatchPlan::new(count, capacity, BLOCK_SIZE, 1),
-                    DispatchPlan::new(count, capacity, BLOCK_SIZE * BLOCK_SIZE, BIN_COUNT),
-                ],
-            ),
+            dispatch_base,
         }
+    }
+    pub fn plans(count: CountSlot, capacity: u32) -> [DispatchPlan; 2] {
+        [
+            DispatchPlan::new(count, capacity, BLOCK_SIZE, 1),
+            DispatchPlan::new(count, capacity, BLOCK_SIZE * BLOCK_SIZE, BIN_COUNT),
+        ]
     }
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         kernels: &Kernels,
+        dispatches: &Dispatches,
         bits: u32,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         assert!((1..=32).contains(&bits));
-        self.dispatches.prepare(encoder, &kernels.prepare, None);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("gsplat radix sort"),
             timestamp_writes,
         });
         for groups in &self.groups[..bits.div_ceil(BITS_PER_PASS) as usize] {
-            self.dispatches.dispatch_in_pass(
+            dispatches.dispatch_in_pass(
                 &mut pass,
-                BLOCKS,
+                self.dispatch_base + BLOCKS,
                 &kernels.count_keys,
                 &groups.count_keys,
             );
-            self.dispatches.dispatch_in_pass(
+            dispatches.dispatch_in_pass(
                 &mut pass,
-                REDUCED,
+                self.dispatch_base + REDUCED,
                 &kernels.reduce_counts,
                 &groups.reduce_counts,
             );
             pass.set_pipeline(&kernels.scan_counts.pipeline);
             pass.set_bind_group(0, &groups.scan_counts, &[]);
             pass.dispatch_workgroups(1, 1, 1);
-            self.dispatches.dispatch_in_pass(
+            dispatches.dispatch_in_pass(
                 &mut pass,
-                REDUCED,
+                self.dispatch_base + REDUCED,
                 &kernels.scan_add,
                 &groups.scan_add,
             );
-            self.dispatches
-                .dispatch_in_pass(&mut pass, BLOCKS, &kernels.scatter, &groups.scatter);
+            dispatches.dispatch_in_pass(
+                &mut pass,
+                self.dispatch_base + BLOCKS,
+                &kernels.scatter,
+                &groups.scatter,
+            );
         }
     }
     pub fn output(&self, bits: u32) -> (&wgpu::Buffer, &wgpu::Buffer) {

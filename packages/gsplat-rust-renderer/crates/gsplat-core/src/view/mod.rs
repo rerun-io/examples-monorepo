@@ -22,9 +22,9 @@ impl Intersections {
             kernels,
             capacity,
             CountSlot::Intersections,
-            &keys,
-            &ids,
+            (&keys, &ids),
             counts,
+            TILE_SORT,
         );
         Self { capacity, sort }
     }
@@ -120,11 +120,18 @@ pub struct ViewState {
 }
 const VISIBLE: u32 = 0;
 const INTERSECTIONS: u32 = 1;
-fn plans(n: u32, capacity: u32) -> [DispatchPlan; 2] {
-    [
+const DEPTH_SORT: u32 = 2;
+const TILE_SORT: u32 = 4;
+const SCAN: u32 = 6;
+fn plans(n: u32, capacity: u32) -> Vec<DispatchPlan> {
+    let mut plans = vec![
         DispatchPlan::new(CountSlot::Visible, n, WG, 1),
         DispatchPlan::new(CountSlot::Intersections, capacity, WG * CHECKS_PER_ITER, 1),
-    ]
+    ];
+    plans.extend(RadixSort::plans(CountSlot::Visible, n));
+    plans.extend(RadixSort::plans(CountSlot::Intersections, capacity));
+    plans.extend(Scan::plans(CountSlot::Visible, n));
+    plans
 }
 impl ViewState {
     pub(crate) fn new(
@@ -150,8 +157,16 @@ impl ViewState {
         let visible = CountSlot::Visible;
         let scratch = Scratch {
             projected: storage(device, "projected splats", u64::from(n.max(1)) * 40),
-            depth_sort: RadixSort::new(device, kernels, n, visible, &depths, &ids, &counts),
-            scan: Scan::new(device, kernels, n, visible, &gathered, &counts),
+            depth_sort: RadixSort::new(
+                device,
+                kernels,
+                n,
+                visible,
+                (&depths, &ids),
+                &counts,
+                DEPTH_SORT,
+            ),
+            scan: Scan::new(device, kernels, n, visible, &gathered, &counts, SCAN),
             gather: bind(
                 device,
                 &kernels.gather.layout,

@@ -186,10 +186,12 @@ impl ViewState {
             .prepare(encoder, &kernels.prepare, timestamps(None, 2));
         scratch
             .depth_sort
-            .encode(encoder, kernels, 32, timestamps(None, 3));
+            .encode(encoder, kernels, &self.dispatches, 32, timestamps(None, 3));
         self.dispatches
             .dispatch_indirect(encoder, VISIBLE, &kernels.gather, &scratch.gather, None);
-        scratch.scan.encode(encoder, kernels, timestamps(None, 4));
+        scratch
+            .scan
+            .encode(encoder, kernels, &self.dispatches, timestamps(None, 4));
         self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,
@@ -204,10 +206,13 @@ impl ViewState {
             &frame.mapping.tiles,
             timestamps(None, 6),
         );
-        scratch
-            .intersections
-            .sort
-            .encode(encoder, kernels, scratch.bits, timestamps(None, 7));
+        scratch.intersections.sort.encode(
+            encoder,
+            kernels,
+            &self.dispatches,
+            scratch.bits,
+            timestamps(None, 7),
+        );
         encoder.clear_buffer(&scratch.offsets, 0, Some(u64::from(self.tile_count) * 8));
         self.dispatches.dispatch_indirect(
             encoder,
