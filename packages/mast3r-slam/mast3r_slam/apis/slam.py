@@ -18,7 +18,7 @@ from dagkit.app import HardwareClass, load_profile, run_app, with_pipeline
 from dagkit.graph import Graph
 from dagkit.node import Event, Mode, Node, PortType, Source
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
+from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -139,9 +139,8 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
     if isinstance(video, CatalogVideoSource) and config.layer_dir is not None:
         hardware: str = load_profile(PACKAGE_DIR / "profiles", config.hardware).hardware
         producer: Producer = Producer.of("mast3r-slam", "mast3r-slam", f"{hardware}/{config.preset or 'base'}")
-        layer, partial = open_layer(video.segment, LAYER, producer, output_dir=config.layer_dir)
         layer_ports: dict[str, PortType] = {p: ports[p] for p in ("keyframes", "tracked", "map")}  # clouds stay out of the catalog
-        sinks["layer"] = LayerSink(layer, partial, video.segment, LAYER, layer_ports, roots, register=config.register)
+        sinks["layer"] = LayerSink.open(video.segment, LAYER, producer, layer_ports, roots, output_dir=config.layer_dir, register=config.register)
     nerfstudio = NerfstudioSink(config.output_nerfstudio) if config.output_nerfstudio is not None else None
     return slam_graph(video, cfg, frame_hw(video, cfg.img_size), sinks, live=isinstance(video, WebcamSource), nerfstudio=nerfstudio)
 

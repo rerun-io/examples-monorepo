@@ -23,7 +23,7 @@ from dagkit.app import HardwareClass, detect_hardware, load_profile, run_app, wi
 from dagkit.graph import Graph
 from dagkit.node import Control, Emit, Mode, Node, PortType, RunContext, Tick
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
+from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer, read_column, read_producer
 from serde import serde
@@ -194,10 +194,9 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
         if config.output_dir is None:
             return out
         for layer, layer_ports in layers.items():
-            layer_recording, partial = open_layer(segment, layer, producer(graph), output_dir=config.output_dir)
-            log_style(layer_recording, cameras)
             roots: dict[str, str] = {p: ROOTS[p] + suffix for p in layer_ports}
-            out[layer] = LayerSink(layer_recording, partial, segment, layer, {p: PORT_TYPES[p] for p in layer_ports}, roots, register=register)
+            out[layer] = sink = LayerSink.open(segment, layer, producer(graph), {p: PORT_TYPES[p] for p in layer_ports}, roots, output_dir=config.output_dir, register=register)
+            log_style(sink.recording, cameras)
         return out
 
     skipped: int = {None: 0, "init": 1, "kp2d": 2}[config.resume_from]  # resume from init skips Stage A, from kp2d also pass 1

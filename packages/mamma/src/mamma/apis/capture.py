@@ -16,7 +16,7 @@ from dagkit.app import HardwareClass, load_profile, run_app
 from dagkit.graph import Graph
 from dagkit.node import Mode, Node, PortType
 from dagkit.runners import RunReport
-from dagkit.sinks import LayerSink, Register, RerunSink, open_layer
+from dagkit.sinks import LayerSink, Register, RerunSink
 from dagkit.sources import SegmentRef
 from dagkit.types import Producer
 from serde import serde
@@ -127,8 +127,8 @@ def app_graph(config: Config, recording: rr.RecordingStream, video: CatalogVideo
     """
     sinks: dict[str, Node] = {"viewer": RerunSink(recording, PORTS, ROOTS, timeline=video.clock)}
     if config.output_dir is not None and config.video is None:
-        layer, partial = open_layer(config.segment, LAYER, Producer.of("mamma", "mamma-capture", profile), output_dir=config.output_dir)
-        sinks[LAYER] = LayerSink(layer, partial, config.segment, LAYER, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, register=config.register)
+        producer: Producer = Producer.of("mamma", "mamma-capture", profile)
+        sinks[LAYER] = LayerSink.open(config.segment, LAYER, producer, {p: PORTS[p] for p in LAYER_PORTS}, ROOTS, output_dir=config.output_dir, register=config.register)
     recording.send_blueprint(default_blueprint(video.cameras))
     return capture_graph(video, *nodes, sinks)
 

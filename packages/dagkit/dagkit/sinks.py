@@ -28,14 +28,6 @@ def partial_path(output_dir: Path, segment: SegmentRef, layer: str) -> Path:
     return partial
 
 
-def open_layer(segment: SegmentRef, layer: str, producer: Producer, *, output_dir: Path) -> tuple[rr.RecordingStream, Path]:
-    partial: Path = partial_path(output_dir, segment, layer)
-    recording = rr.RecordingStream(producer.package, recording_id=segment.segment, send_properties=False)
-    recording.save(partial)
-    log_producer(recording, layer, producer)
-    return recording, partial
-
-
 def publish_layer_file(partial: Path, segment: SegmentRef, layer: str, *, output_dir: Path, register: Register, stopped: bool = False) -> Path:
     run_id: str = partial.name.split(".")[-2] if partial.name.endswith(".partial") else uuid.uuid4().hex[:12]
     infix: str = ".stopped" if stopped else ".window" if segment.window_ns is not None else ""
@@ -120,12 +112,24 @@ class LayerSink(RerunSink, LayerFileSink):
         inputs: Mapping[str, PortType],
         roots: Mapping[str, str],
         *,
+        output_dir: Path,
         register: Register = "new",
     ) -> None:
         RerunSink.__init__(self, recording, inputs, roots, timeline=segment.timeline)
-        LayerFileSink.__init__(self, segment, layer, output_dir=partial.parent.parent, register=register)
+        LayerFileSink.__init__(self, segment, layer, output_dir=output_dir, register=register)
         self.partial: Path = partial
         self._file = LayerFile(partial)
+
+    @classmethod
+    def open(
+        cls, segment: SegmentRef, layer: str, producer: Producer, inputs: Mapping[str, PortType], roots: Mapping[str, str], *, output_dir: Path, register: Register = "new"
+    ) -> "LayerSink":
+        """A sink writing a new partial layer file (``partial_path``) that starts with ``producer``; it publishes under ``output_dir``."""
+        partial: Path = partial_path(output_dir, segment, layer)
+        recording = rr.RecordingStream(producer.package, recording_id=segment.segment, send_properties=False)
+        recording.save(partial)
+        log_producer(recording, layer, producer)
+        return cls(recording, partial, segment, layer, inputs, roots, output_dir=output_dir, register=register)
 
     def reset(self, ctx: RunContext) -> None:
         if ctx.mode != "lossless":

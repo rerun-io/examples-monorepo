@@ -167,7 +167,7 @@ def test_frame_hw_takes_the_static_rig_resolution_without_decoding_a_frame() -> 
 @pytest.mark.parametrize(("preset", "profile"), [(None, "x86_64-cuda/base"), ("eval", "x86_64-cuda/eval")])
 def test_the_layer_producer_carries_the_package_version_and_the_hardware_profile(preset: str | None, profile: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[Producer] = []
-    monkeypatch.setattr(sinks, "log_producer", lambda recording, layer, producer: logged.append(producer))
+    monkeypatch.setattr(sinks, "log_producer", lambda recording, _layer, producer: logged.append(producer))
     monkeypatch.setattr(app, "frame_hw", lambda video, img_size: (384, 512))  # reads the catalog's rig otherwise
     build(Config(RerunTyroConfig(headless=True), hardware="x86_64-cuda", preset=preset, layer_dir=tmp_path), rr.RecordingStream("test", send_properties=False))  # type: ignore[arg-type]
     assert logged == [Producer.of("mast3r-slam", "mast3r-slam", profile)] and "+" in logged[0].version  # version + git sha7

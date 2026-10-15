@@ -10,7 +10,7 @@ from dagkit_fakes import Point
 from dagkit.graph import Block, Graph
 from dagkit.node import Control, Event, RunContext, Tick
 from dagkit.runners import run_sequential, run_threaded
-from dagkit.sinks import LayerFileSink, LayerSink, open_layer, partial_path, publish_layer_file
+from dagkit.sinks import LayerFileSink, LayerSink, partial_path, publish_layer_file
 from dagkit.sources import IterSource, SegmentRef
 from dagkit.testing import Recorder
 from dagkit.time import GraphError
@@ -33,9 +33,10 @@ def point_graph(sink: LayerSink, n: int, control: Control | None = None) -> Grap
 
 
 def layer_sink(tmp_path: Path, segment: SegmentRef) -> LayerSink:
-    recording, partial = open_layer(segment, "points", PRODUCER, output_dir=tmp_path)
-    assert partial.name.startswith(".points.") and partial.name.endswith(".partial")
-    return LayerSink(recording, partial, segment, "points", {"point": Point}, {"point": "/points"}, register="off")
+    sink = LayerSink.open(segment, "points", PRODUCER, {"point": Point}, {"point": "/points"}, output_dir=tmp_path, register="off")
+    assert sink.partial.parent == tmp_path / segment.segment and sink.partial.name.startswith(".points.") and sink.partial.name.endswith(".partial")
+    assert sink.output_dir == tmp_path
+    return sink
 
 
 def test_complete_run_publishes_an_immutable_0644_file(tmp_path: Path) -> None:
