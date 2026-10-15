@@ -8,6 +8,7 @@ become the catalog layers ``exocalib_{init,kp2d,refined,align}`` (pass 1: unregi
 both run it, with run health, so the viewer's "pipeline (debug)" tab shows every graph live.
 """
 
+import functools
 import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -178,6 +179,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
     hardware: HardwareClass = detect_hardware() if config.hardware == "auto" else config.hardware
     params: Kp2dParams = load_profile(PROFILES, hardware).configure("kp2d", Kp2dParams())
     models: dict[str, Callable[[], object]] = model_factories(segment, cameras, params)
+    models |= {name: functools.cache(models[name]) for name in ("moge", "detector", "pose")}  # loaded once: every graph shares them
     resolved: str = json.dumps([config.frame_index, config.frame_budget, cameras, params.batch_size, params.detection_score, segment.window_ns])
     print(f"segment {segment.segment}: exo cameras {list(cameras)}; profile {hardware}")
 
@@ -206,7 +208,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
         yield init_graph(segment, cameras, config.frame_index, models, {"keep": keep, **sinks("exocalib-init", {"exocalib_init": ("init",)})})
         if "init" not in keep.values:
             return
-        torch.cuda.empty_cache()  # Stage A's models (freed with its graph) back to the driver, for the refine passes' engines
+        torch.cuda.empty_cache()  # Stage A's G3T (freed with its graph) back to the driver, for the refine passes' engines
         init = keep.values["init"]
     else:
         check_producer(segment, "exocalib_init", producer("exocalib-init"))

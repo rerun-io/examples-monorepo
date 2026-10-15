@@ -81,6 +81,23 @@ def test_without_an_output_dir_the_app_streams_to_the_viewer_only(monkeypatch: p
     assert list(tmp_path.iterdir()) == []
 
 
+def test_one_app_run_loads_each_refine_model_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MoGe-2 and the TensorRT detector and pose engines load once per App run and serve both refine passes (Stage A
+    shares MoGe); G3T stays Stage A's, built by its graph and freed with it."""
+    scene, steps = app_graphs(monkeypatch, None)
+    models = ("g3t", "moge", "detector", "pose", "frames")
+    monkeypatch.setattr(calibrate, "model_factories", lambda *args: dict.fromkeys(models, object))  # a new object per call
+    graphs: list[Graph] = []
+    for port in ("init", "refined"):
+        graphs.append(next(steps))
+        graphs[-1].nodes["keep"].obj.values[port] = scene.rig  # type: ignore[attr-defined]  # as the run would
+    graphs.append(next(steps))
+    for name in ("moge", "detector", "pose"):
+        loaded = [g.resources[name]() for g in graphs if name in g.resources]
+        assert len(loaded) == (3 if name == "moge" else 2) and all(model is loaded[0] for model in loaded), name
+    assert graphs[0].resources["g3t"]() is not graphs[0].resources["g3t"]()
+
+
 def test_resume_refuses_a_layer_another_graph_profile_or_parameter_set_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
     written = Producer("exo-calib", "0.1.0+abc1234", "exocalib-init", "x86_64-cuda", params_sha="0123456789ab")
     monkeypatch.setattr(SegmentRef, "entry", lambda self: None)  # no catalog: the stored Producer is faked below
