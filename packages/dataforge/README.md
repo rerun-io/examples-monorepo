@@ -348,8 +348,15 @@ camera's pinhole, to which it is registered; the IMU), `gt` (world_T_body on
 `calibration.yaml` carries an IMU noise model, `sensor_metadata` (simplecv's
 `ImuCalibration` on the IMU node). The rig frame is VSLAM-LAB's body frame,
 so `rig_00`'s `reference` names the sensor whose `T_BS` is the identity:
-`cam_00` on TUM, `imu_00` on EuRoC. `gt` and `sensor_metadata` rebuild from the
-`groundtruth.csv` and `calibration.yaml` sidecars alone.
+`cam_00` on TUM, `imu_00` on EuRoC.
+
+vslam-lab is the one exception to [the layer rule](#the-layer-rule): it keeps no
+sidecars. The converter never deletes the VSLAM-LAB tree, and `discover` already
+requires each sequence's small files, so `gt` and `sensor_metadata` read
+`groundtruth.csv` and `calibration.yaml` in place, the only copy there is: no layer
+can be rebuilt from a stale one. Delete the frames once base is published; keep
+those files. `convert` reads and checks them before it writes any layer, so a
+refused sequence leaves the published layers as they were, even under `--force`.
 
 `video_time` carries the benchmark's own nanosecond stamps, **unshifted**
 (Unix epoch on both), so a trajectory read back from the catalog lines up
@@ -439,8 +446,9 @@ duplicate leaves the server serving the old file and says nothing.
 
 ### The layer rule
 
-Every dataset follows it; `lamaria` is the reference implementation. **base** is a
-faithful conversion of the raw source and the only layer that needs it: it skips on
+Every dataset but vslam-lab (see its section) follows it; `lamaria` is the
+reference implementation. **base** is a faithful conversion of the raw source and
+the only layer that needs it: it skips on
 its own rrd, and once it is published the bulk source is deleted, leaving only the
 small sidecars (calibration, ground truth) on disk. A **derived** layer reads the
 base rrd plus those sidecars — never the raw source — skips on its own rrd and
