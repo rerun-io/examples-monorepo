@@ -72,9 +72,8 @@ Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then 
 
 | gives | type | to |
 |---|---|---|
-| **init** | `RigCameras` | 4 refine |
+| **init** | `RigCameras` | 4 refine, 6 keep |
 | **tracking_rig** | `RigCameras` | 3 kp2d |
-| **rig_layout** | `RigLayout` | 4 refine |
 
 ## 2 · video: Decode the cameras' videos
 *source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
@@ -111,7 +110,6 @@ Stage C+D (whole segment): Kineo-style correspondences, robust triangulation, st
 |---|---|---|---|
 | **kp2d** | `MultiViewKeypoints` | 3 kp2d | waits (4) |
 | **init** | `RigCameras` | 1 seed | latest |
-| **rig_layout** | `RigLayout` | 1 seed | latest |
 
 | gives | type | to |
 |---|---|---|
@@ -133,7 +131,7 @@ Saves **kp2d** from 3 kp2d into the catalog layer `exocalib_kp2d_pass1`.
 
 Keeps the newest value of each input in ``values`` (a multi-graph App builds its next graph from them, as exo-calib's refine passes from the Stage A rig); a stopped run hands on nothing.
 
-Takes **refined** from 4 refine.
+Takes **init** from 1 seed; **refined** from 4 refine.
 
 ## 7 · exocalib_refined_pass1: Save its inputs as a catalog layer
 *output* · `LayerSink` · `packages/dagkit/dagkit/sinks.py`
@@ -150,7 +148,6 @@ Saves **refined, diag, kp3d, kp2d_overlay** from 4 refine into the catalog layer
 | `MultiViewKeypoints` | Stage B record of one frameset: raw RTMW-x COCO-133 keypoints per camera with the box and crop they came from | `packages/exo-calib/exo_calib/types.py` |
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
-| `RigLayout` | One segment's cameras: the exo ones to calibrate, the worn ego ones, and those with dataset GT calibration | `packages/exo-calib/exo_calib/types.py` |
 
 # exocalib-refine
 Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then bundle adjustment of the Stage A rig on them; the second pass tracks through the first pass's rig and scores both rigs against GT.
@@ -169,7 +166,6 @@ Stages B-E, run twice: 2D keypoints tracked through the rig in every view, then 
 |---|---|---|
 | **init** | `RigCameras` | 4 refine, 6 report |
 | **tracking_rig** | `RigCameras` | 3 kp2d |
-| **rig_layout** | `RigLayout` | 4 refine, 6 report |
 
 ## 2 · video: Decode the cameras' videos
 *source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
@@ -206,7 +202,6 @@ Stage C+D (whole segment): Kineo-style correspondences, robust triangulation, st
 |---|---|---|---|
 | **kp2d** | `MultiViewKeypoints` | 3 kp2d | waits (4) |
 | **init** | `RigCameras` | 1 seed | latest |
-| **rig_layout** | `RigLayout` | 1 seed | latest |
 
 | gives | type | to |
 |---|---|---|
@@ -234,7 +229,6 @@ Stage E (whole segment): score the Stage A and refined rigs against the segment'
 | **diag** | `RefinementDiagnostics` | 4 refine | waits (4) |
 | **init** | `RigCameras` | 1 seed | latest |
 | **gt** | `RigCameras` | 2 video | latest |
-| **rig_layout** | `RigLayout` | 1 seed | latest |
 
 | gives | type | to |
 |---|---|---|
@@ -275,4 +269,3 @@ Saves **align** from 6 report into the catalog layer `exocalib_align`.
 | `RefinementDiagnostics` | What the refinement reports about its own run; static ``AnyValues`` on the refined rig entity, copied into ``eval.json`` | `packages/exo-calib/exo_calib/types.py` |
 | `RigAlignment` | SE(3) alignment of each rig variant onto GT (pred world -> GT world) and the aligned camera centres | `packages/exo-calib/exo_calib/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |
-| `RigLayout` | One segment's cameras: the exo ones to calibrate, the worn ego ones, and those with dataset GT calibration | `packages/exo-calib/exo_calib/types.py` |
