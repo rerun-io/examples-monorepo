@@ -10,13 +10,13 @@ Multi-view body capture: track every person in the cameras, find their dense 2D 
 `(GPU)` after a type: the value stays on the GPU. A tag left of a box lists its inputs from further up (`port: Type ← 1 video · latest`). Box numbers match the sections below.
 
 ## 1 · video: Decode the cameras' videos
-*source* · `FramesetSource` · `packages/mamma/src/mamma/sources/frameset.py`
+*source* · `VideoSource` · `packages/simplecv/simplecv/sources/catalog_video.py`
 
-The video source's STATIC values, then one ``Frameset`` per sampled index: the engine-size frames and the frames landmarks crop from (the full-size ``frames_native`` when the source keeps it, else the same frames), so the crops travel with their tick through tracking.
+The STATIC values of ``statics`` first, then RGB framesets: every camera's frame at sampled indices of the first camera inside ``window_ns``, timed by it (``Fenced[MultiViewFrames]`` when ``fenced``, else ``MultiViewFrames``). ``resize_hw`` applies area resize; ``keep_native`` keeps the stored-size decode in the same value (``native``). ``catalog`` reads a catalog segment's videos and rig.
 
 | gives | type | to |
 |---|---|---|
-| **frames** | `Frameset` (GPU) | 2 track |
+| **frames** | `MultiViewFrames` (GPU) | 2 track |
 | **rig** | `RigCameras` | 2 track, 4 fit |
 
 ## 2 · track: Track every person in every view
@@ -26,7 +26,7 @@ Masks and boxes per (view, person) at engine size; a person keeps one id across 
 
 | takes | type | from | arrives |
 |---|---|---|---|
-| **frames** | `Frameset` (GPU) | 1 video | waits (2) |
+| **frames** | `MultiViewFrames` (GPU) | 1 video | waits (2) |
 | **rig** | `RigCameras` | 1 video | latest |
 
 | gives | type | to |
@@ -93,8 +93,8 @@ Saves **tracks** from 2 track; **fit, kp3d, topology** from 4 fit into the catal
 | type | what it is | code |
 |---|---|---|
 | `BodyTopology` | The SMPL-X triangle list, sent once per person when its fit starts (the fits carry only vertices) | `packages/mamma/src/mamma/types.py` |
-| `Frameset` | One sampled frameset as the capture graph decodes it (node to node only: no Rerun mapping) | `packages/mamma/src/mamma/types.py` |
 | `Landmarks3d` | Triangulated dense landmarks of one tick per person; invalid points are 0 (SPEC 5.2 policy) | `packages/mamma/src/mamma/types.py` |
+| `MultiViewFrames` | One synchronized sample of every camera; a single camera is ``v == 1`` | `packages/simplecv/simplecv/types/frames.py` |
 | `MultiViewLandmarks` | MammaNet's dense landmarks of one frameset, one row per (view, person) track, in engine pixels | `packages/mamma/src/mamma/types.py` |
 | `MultiViewTracks` | Person masks of one frameset at engine size, one row per (view, person) track | `packages/mamma/src/mamma/types.py` |
 | `RigCameras` | Per camera, in ``names`` order: pinhole intrinsics, world-to-camera pose (RDF, metric) and image size | `packages/simplecv/simplecv/types/rig.py` |

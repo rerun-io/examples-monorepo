@@ -35,7 +35,6 @@ from mamma.nodes.landmarks import LandmarksNode
 from mamma.nodes.track import TrackNode, TrackParams
 from mamma.ops.smplx_body import SmplxBody
 from mamma.ops.window_fit import FitterConfig, SlidingWindowFitter
-from mamma.sources.frameset import FramesetSource
 from mamma.sources.npz import load_rig, npz_sequence_source, video_paths
 from mamma.types import BodyTopology, Landmarks3d, MultiViewLandmarks, MultiViewTracks, SmplxFits
 
@@ -106,8 +105,7 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         cameras = config.cameras or tuple(sorted(p.stem for p in (config.video / "meta").glob("*.npz") if p.stem != "global"))
         video = npz_sequence_source(config.video, cameras, resize_hw=config.resize_hw, keep_native=keep_native)
         log_files(recording, config.video, cameras, video.clock)
-    source = FramesetSource(video)
-    source.prefetch()
+    video.prefetch()
     data: Path = PACKAGE_DIR / "data"
     body: SmplxBody = SmplxBody.load(data / "body_models", data / "body_models/downsampled_verts/verts_512.pkl")
     nodes = (
@@ -118,10 +116,10 @@ def build(config: Config, recording: rr.RecordingStream) -> Graph:
         LandmarksNode(LandmarkEstimator(data / "weights/ma_2d/mamma_mask_full_cvpr.safetensors", engine_path=engine_plan())),
         FitNode(fit, np.asarray(body.model.faces, dtype=np.int32), lambda K, cam_T_world: SlidingWindowFitter(body, K, cam_T_world, fit)),
     )  # fmt: skip
-    return app_graph(config, recording, source, nodes, f"{profile.hardware}/{config.preset}")
+    return app_graph(config, recording, video, nodes, f"{profile.hardware}/{config.preset}")
 
 
-def app_graph(config: Config, recording: rr.RecordingStream, video: FramesetSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
+def app_graph(config: Config, recording: rr.RecordingStream, video: VideoSource, nodes: tuple[TrackNode, LandmarksNode, FitNode], profile: str) -> Graph:
     """The capture graph with the App's sinks (the viewer; with ``output_dir`` the ``mamma_fit`` layer) and its blueprint.
 
     ``build`` passes the loaded models; the unit tests pass fakes. ``profile`` is ``<hardware>/<preset>`` for the producer.
