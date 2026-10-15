@@ -4,12 +4,11 @@ import sys
 import time
 from pathlib import Path
 
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
-from huggingface_hub.hf_api import RepoFile
 
 from dataforge.datasets.epfl_source import CAMERA_NAMES
-from dataforge.transports import HfFileInfo, IntegrityError, hf_file_info, publish_verified
+from dataforge.transports import HfFileInfo, IntegrityError, publish_verified
 
 SOURCE_REPO: str = "pablovela5620/epfl-smart-kitchen-av1"
 """AV1 mirror of the public release: videos, meta data, poses and annotations (pinned at SOURCE_REVISION)."""
@@ -33,12 +32,6 @@ def session_files(key: str) -> tuple[str, ...]:
         *(f"{video}/videos/{name}.mp4" for name in CAMERA_NAMES),
         *(f"{video}/meta_data/{name}" for name in ("camera_matrix.json", "timestamps.txt", "holo_data_wpose.csv")),
     )
-
-
-def list_source(repo_id: str, revision: str, path_in_repo: str | None = None) -> list[HfFileInfo]:
-    """List every file under path_in_repo at a pinned revision in one recursive call."""
-    entries = HfApi().list_repo_tree(repo_id, repo_type="dataset", revision=revision, path_in_repo=path_in_repo, recursive=True)
-    return [hf_file_info(entry) for entry in entries if isinstance(entry, RepoFile)]
 
 
 def complete_sessions(listing: list[HfFileInfo]) -> dict[str, list[HfFileInfo]]:

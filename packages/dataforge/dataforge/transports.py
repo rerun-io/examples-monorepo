@@ -249,6 +249,12 @@ def hf_file_info(entry: RepoFile) -> HfFileInfo:
     return HfFileInfo(entry.path, entry.size, entry.lfs.sha256 if entry.lfs is not None else None, entry.blob_id)
 
 
+def hf_list_files(repo_id: str, revision: str, path_in_repo: str | None = None) -> list[HfFileInfo]:
+    """Every dataset file under ``path_in_repo`` at a pinned revision, in one recursive listing call."""
+    entries = HfApi().list_repo_tree(repo_id, repo_type="dataset", revision=revision, path_in_repo=path_in_repo, recursive=True)
+    return [hf_file_info(entry) for entry in entries if isinstance(entry, RepoFile)]
+
+
 def hf_lfs_files(repo_id: str, names: Sequence[str], *, revision: str) -> list[HfFileInfo]:
     """The named dataset files at ``revision``, in the order given; each must be an LFS file."""
     require_commit_sha(revision)

@@ -7,6 +7,7 @@ import pytest
 from hub_fake import HubStore
 from huggingface_hub.errors import HfHubHTTPError
 
+from dataforge import transports
 from dataforge.datasets import epfl_download
 from dataforge.datasets.epfl import EpflConfig
 from dataforge.datasets.epfl_download import SMPL_FILE, session_files
@@ -27,7 +28,7 @@ def epfl_hub(monkeypatch: pytest.MonkeyPatch, *, incomplete: str = "train/YH2099
     for path in [path for key in KEYS for path in session_files(key)] + list(session_files(incomplete)[:4]) + ["manifests/sequences.csv"]:
         store.add(epfl_download.SOURCE_REPO, path, content(path), lfs=path.endswith((".mp4", ".csv")))
     store.add(epfl_download.SMPL_REPO, SMPL_FILE, content(SMPL_FILE), lfs=True)
-    store.install(monkeypatch, epfl_download)
+    store.install(monkeypatch, epfl_download, transports)
     return store
 
 
@@ -165,7 +166,7 @@ def test_discover_skips_pruned_sessions(tmp_path: Path, monkeypatch: pytest.Monk
 def test_real_hub_fetches_one_small_file(tmp_path: Path) -> None:
     folder = f"{epfl_download.POSE_DIR}/{KEYS[0]}/annotations"
     try:
-        (file,) = [file for file in epfl_download.list_source(epfl_download.SOURCE_REPO, SOURCE_REVISION, folder) if file.path.endswith(".json")]
+        (file,) = [file for file in transports.hf_list_files(epfl_download.SOURCE_REPO, SOURCE_REVISION, folder) if file.path.endswith(".json")]
         assert epfl_download.fetch(epfl_download.SOURCE_REPO, SOURCE_REVISION, file, tmp_path / file.path, tmp_path / ".download")
     except (httpx.TransportError, HfHubHTTPError, epfl_download.FetchError, OSError) as error:
         pytest.skip(f"HuggingFace Hub unreachable: {error}")

@@ -76,7 +76,7 @@ def test_gray_transcode_command(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(video.subprocess, "run", run)
-    video.transcode_mp4_gray(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, decode=decode, crop=crop)
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode=decode, crop=crop)
     expected = ["/fake/ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     if decode == "cuda" and crop is None:
         expected += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
@@ -107,6 +107,46 @@ def test_gray_transcode_command(
     assert commands == [expected]
 
 
+@pytest.fixture
+def ffmpeg_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Every command transcode_mp4 runs, captured instead of run (4-frame source)."""
+    monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
+    monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
+    monkeypatch.setattr(video, "NVENC_SLOT_DIR", tmp_path / "slots")
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(video.subprocess, "run", run)
+    return commands
+
+
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
+def test_color_rescale_command(decode: Literal["cpu", "cuda"], ffmpeg_commands: list[list[str]]) -> None:
+    """A color source keeps its chroma; the rescale runs on the GPU under CUDA decode and on the CPU otherwise."""
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=False, size=(1920, 1080), decode=decode)
+    (command,) = ffmpeg_commands
+    filters = command[command.index("-vf") + 1]
+    if decode == "cuda":
+        assert filters == "scale_cuda=1920:1080"
+    else:
+        assert filters == "scale=1920:1080,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"
+    assert "format=gray" not in filters
+
+
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
+def test_keep_selects_source_frames_before_any_other_filter(decode: Literal["cpu", "cuda"], ffmpeg_commands: list[list[str]]) -> None:
+    keep = [range(4, 8, 3), range(13, 17, 3)]
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=True, keep=keep, decode=decode)
+    (command,) = ffmpeg_commands
+    filters = command[command.index("-vf") + 1]
+    assert filters.startswith("select='between(n,4,7)*not(mod(n-4,3))+between(n,13,16)*not(mod(n-13,3))'")
+    assert command[command.index("-frames:v") + 1] == "4"
+
+
 def test_nvdec_failure_falls_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
     monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
@@ -118,7 +158,7 @@ def test_nvdec_failure_falls_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         return subprocess.CompletedProcess(command, int("-hwaccel" in command), "", "decoder failed")
 
     monkeypatch.setattr(video.subprocess, "run", run)
-    video.transcode_mp4_gray(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, decode="cuda")
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode="cuda")
     assert len(commands) == 2
     assert "-hwaccel" in commands[0] and "-vf" not in commands[0]
     assert "-hwaccel" not in commands[1] and "-vf" in commands[1]
@@ -194,7 +234,7 @@ def test_cuda_gray_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: 
     decoded = []
     for mode in ("cpu", "cuda"):
         target = tmp_path / f"{mode}.mp4"
-        assert video.transcode_mp4_gray(source, target, fps=30, gop=60, cq=36, frames=12, decode=mode) == 12
+        assert video.transcode_mp4(source, target, fps=30, gop=60, cq=36, frames=12, gray=True, decode=mode) == 12
         with av.open(str(target)) as container:
             decoded.append(np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64))
     if "NVDEC path failed" in capsys.readouterr().out:
@@ -202,6 +242,30 @@ def test_cuda_gray_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: 
     assert decoded[0].shape == decoded[1].shape == (12, 160, 256)
     mse = np.mean((decoded[0] - decoded[1]) ** 2)
     assert mse == 0.0 or 10 * np.log10(255**2 / mse) >= 40.0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
+def test_keep_keeps_exactly_the_selected_frames(decode: Literal["cpu", "cuda"], tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import av
+    import numpy as np
+
+    monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [str(nvenc_ffmpeg), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=256x160:rate=30,format=gray", "-frames:v", "12",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+        check=True,
+    )  # fmt: skip
+    target = tmp_path / "keep.mp4"
+    keep = [range(1, 5, 3), range(10, 11, 3)]  # frames 1, 4 and 10: the sample at 7 was dropped
+    assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=3, gray=True, keep=keep, decode=decode) == 3
+    with av.open(str(source)) as container:
+        originals = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
+    with av.open(str(target)) as container:
+        kept = np.stack([frame.to_ndarray(format="gray") for frame in container.decode(video=0)]).astype(np.float64)
+    nearest = [int(np.argmin(((originals - frame) ** 2).mean(axis=(1, 2)))) for frame in kept]
+    assert nearest == [1, 4, 10]
 
 
 def test_session_failure_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,7 +280,7 @@ def test_session_failure_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(video.subprocess, "run", run)
     with pytest.raises(RuntimeError, match="OpenEncodeSessionEx failed"):
-        video.transcode_mp4_gray(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, decode="cuda")
+        video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode="cuda")
     assert len(commands) == 6
     assert all("-hwaccel" in command and "-vf" not in command for command in commands)
 
@@ -281,3 +345,33 @@ with open(sys.argv[1], "a+b") as slot:
     finally:
         os.close(release_read)
         os.close(release_write)
+
+
+@pytest.mark.integration
+def test_cuda_color_rescale_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A 4K H.264 source with B-frames (GoPro-like) comes out 1080p, every frame, with no reordered samples."""
+    import av
+    import numpy as np
+
+    monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [str(nvenc_ffmpeg), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=30", "-frames:v", "12"]
+        + ["-c:v", "libx264", "-bf", "2", "-pix_fmt", "yuv420p", str(source)],
+        check=True,
+    )
+    decoded = []
+    for mode in ("cpu", "cuda"):
+        target = tmp_path / f"{mode}.mp4"
+        assert video.transcode_mp4(source, target, fps=30, gop=60, cq=30, frames=12, gray=False, size=(1920, 1080), decode=mode) == 12
+        with av.open(str(target)) as container:
+            frames = list(container.decode(video=0))
+            decoded.append(np.stack([frame.to_ndarray(format="rgb24") for frame in frames]).astype(np.float64))
+        with av.open(str(target)) as container:
+            pts = [packet.pts for packet in container.demux(video=0) if packet.pts is not None]
+        assert pts == sorted(pts)
+    if "NVDEC path failed" in capsys.readouterr().out:
+        pytest.skip("NVDEC unavailable; CPU fallback ran")
+    assert decoded[0].shape == decoded[1].shape == (12, 1080, 1920, 3)
+    mse = np.mean((decoded[0] - decoded[1]) ** 2)
+    assert 10 * np.log10(255**2 / mse) >= 30.0
