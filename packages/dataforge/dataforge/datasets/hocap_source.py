@@ -88,7 +88,7 @@ class Metadata:
 @serde(type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class Color:
-    """Undistorted color pinhole; coefficients are source metadata only."""
+    """Color pinhole and its lens: the RealSense color stream is not rectified (the depth stream is, so its terms are zero)."""
 
     width: int
     """Image width."""
@@ -102,6 +102,12 @@ class Color:
     """Principal x."""
     ppy: float
     """Principal y."""
+    coeffs: tuple[float, ...] = ()
+    """Brown-Conrady k1, k2, p1, p2, k3 in OpenCV order (librealsense's color lens); the HoloLens ships none."""
+
+    def __post_init__(self) -> None:
+        if len(self.coeffs) not in (0, 5):
+            raise ValueError(f"a color lens has five Brown-Conrady terms (k1, k2, p1, p2, k3); got {self.coeffs}")
 
     @property
     def matrix(self) -> Float64[ndarray, "3 3"]:

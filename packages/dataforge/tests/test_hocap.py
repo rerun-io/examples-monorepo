@@ -3,6 +3,7 @@
 import io
 import json
 import struct
+from dataclasses import replace
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -114,8 +115,9 @@ def test_metadata_selects_extrinsics_and_checks_full_counts(tmp_path: Path) -> N
         for serial in [*serials, "pv"]:
             for i in range(2):
                 subject.writestr(f"subject_5/test/{serial}/color_{i:06d}.jpg", b"unused")
+            lens = {} if serial == "pv" else dict(coeffs=[-0.05, 0.06, 0.0005, -0.0001, -0.02])  # the HoloLens ships no lens
             calibration.writestr(
-                f"calibration/intrinsics/{serial}.yaml", yaml.safe_dump(dict(color=dict(width=640, height=480, fx=100, fy=100, ppx=320, ppy=240)))
+                f"calibration/intrinsics/{serial}.yaml", yaml.safe_dump(dict(color=dict(width=640, height=480, fx=100, fy=100, ppx=320, ppy=240, **lens)))
             )
         calibration.writestr("calibration/mano/subject_5.yaml", yaml.safe_dump(dict(betas=[0.0] * 10)))
         tag = [1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3]
@@ -130,6 +132,7 @@ def test_metadata_selects_extrinsics_and_checks_full_counts(tmp_path: Path) -> N
         scene = read_sequence(subject, calibration, poses, "subject_5/test", frame_limit=1, members=frozenset(subject.namelist()))
         assert tuple(camera.serial for camera in scene.cameras) == (*sorted(serials), "pv")
         assert scene.count == 1
+        assert scene.intrinsics[0].coeffs == (-0.05, 0.06, 0.0005, -0.0001, -0.02) and scene.intrinsics[-1].coeffs == ()
         np.testing.assert_array_equal(scene.world_T_cam[0, :3, 3], [3, 4, 5])
         calibration.writestr("calibration/extrinsics/missing.yaml", yaml.safe_dump(dict(extrinsics={"tag_1": tag})))
         meta["extrinsics"] = "missing.yaml"
@@ -291,6 +294,35 @@ def test_pv_missing_rows_are_dense_nan_quaternions(tmp_path: Path, monkeypatch: 
     assert np.isnan(quaternions[1:]).all()
     assert np.isnan(batch.column("Transform3D:translation").to_pylist()[1:]).all()
     assert list((tmp_path / "work").iterdir()) == []
+
+
+def test_a_colour_lens_needs_all_five_terms() -> None:
+    with pytest.raises(ValueError, match="five Brown-Conrady terms"):
+        Color(640, 480, 100.0, 100.0, 320.0, 240.0, coeffs=(-0.05, 0.06))
+
+
+def test_each_realsense_colour_lens_reaches_its_pinhole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The colour stream is not rectified (the depth stream is, so its terms are zero): its Brown-Conrady terms are the lens.
+    The HoloLens ships none and stays a pinhole."""
+    terms = (-0.0565, 0.068, 0.00057, -0.00013, -0.0215)
+    exo = Color(640, 480, 100.0, 100.0, 320.0, 240.0, coeffs=terms)
+    data = replace(scene(), intrinsics=(*[exo] * len(EXO_RIGS), Color(640, 480, 100.0, 100.0, 320.0, 240.0)))
+    monkeypatch.setattr("dataforge.datasets.hocap_layers.encode_frames_to_mp4", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr("dataforge.datasets.hocap_layers.log_video_stream", lambda _recording, clip, *_args, **_kwargs: clip.touch())
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
+    target = tmp_path / "base.rrd"
+    with ZipFile(tmp_path / "subject.zip", "w") as archive, writing.atomic_recording(target, recording_id="lens") as recording:
+        write_base(recording, data, archive, "subject_5/test", SequenceIdentity("hocap", ("subject_5", "test")), SequenceTimer())
+    static: dict[str, dict[str, list]] = {}  # entity -> component -> its one static cell
+    for chunk in read_chunks(target):
+        if chunk.is_static and chunk.entity_path.endswith("/pinhole"):
+            batch = chunk.to_record_batch()
+            static.setdefault(chunk.entity_path, {}).update({name: batch.column(name).to_pylist()[0] for name in batch.schema.names})
+    for rig in EXO_RIGS:
+        pinhole = static[f"/world/rig_{rig:02}/cam_00/pinhole"]
+        assert pinhole["simplecv.components.DistortionModel"] == ["brown_conrady"]
+        np.testing.assert_allclose(np.ravel(pinhole["simplecv.components.DistortionCoefficients"]), [*terms, *[0.0] * 9], rtol=1e-6)
+    assert "simplecv.components.DistortionModel" not in static[f"/world/rig_{EGO_RIG:02}/cam_00/pinhole"]
 
 
 def test_archive_handle_and_member_index_are_reused(tmp_path: Path) -> None:
