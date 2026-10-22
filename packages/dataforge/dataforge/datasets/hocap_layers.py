@@ -9,7 +9,7 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float32, Float64, UInt32
 from numpy import ndarray
-from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops.mano.mano_np import MANOLayerNP
 
 from dataforge import hands, meshes, objects, schema, writing
@@ -82,6 +82,7 @@ def write_base(
                     intrinsics=Intrinsics.from_focal_principal_point(
                         camera_conventions="RDF", fl_x=color.fx, fl_y=color.fy, cx=color.ppx, cy=color.ppy, width=color.width, height=color.height
                     ),
+                    distortion=BrownConradyDistortion(*color.coeffs) if color.coeffs else None,
                 )
                 log_camera_node(recording, rig, 0, camera, name=serial, kind="rgb", image_plane_distance=0.05)
                 resolutions.append(
