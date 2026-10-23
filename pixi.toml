@@ -249,6 +249,37 @@ ci = { depends-on = ["ci-lint", "ci-structure", "ci-lock-check"] }
 ci-gate-line = { cmd = "bash ci/check_gate_line.sh", cwd = "." }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# dagkit — typed node/graph contract and runners (pure Python, no torch)
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.dagkit]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.dagkit.dependencies]
+python = "3.12.*"
+numpy = "*"
+pyarrow = "*"
+pyserde = ">=0.31.2,<0.32"
+tomli-w = ">=1.2,<2"
+orjson = ">=3.11,<4"
+tyro = ">=0.9.1,<0.10"
+
+[feature.dagkit.pypi-dependencies]
+dagkit = { path = "packages/dagkit", editable = true, extras = ["gradio"] }
+# pin-bump: hold — this torch-free lane restates `common`'s exact pins; see AGENTS.md.
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+gradio = "==6.13.0"                                        # pin-bump: hold
+gradio-rerun = "==0.38.1"                                  # pin-bump: hold
+
+[feature.dagkit.activation.env]
+PACKAGE_DIR = "packages/dagkit"
+
+[feature.dagkit.tasks.dagkit-demo]
+cmd = "python tools/demos/synthetic_graph.py"
+cwd = "packages/dagkit"
+description = "Run a synthetic graph on the threaded runner into Rerun, with the health view"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # simplecv
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.simplecv]
@@ -3374,6 +3405,8 @@ dev = { features = [
     "dev",
     "common",
 ], solve-group = "dev", no-default-feature = true }
+dagkit = { features = ["dagkit"], solve-group = "dagkit", no-default-feature = true }
+dagkit-dev = { features = ["dagkit", "dev"], solve-group = "dagkit", no-default-feature = true }
 simplecv = { features = [
     "common",
     "cuda",
