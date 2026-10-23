@@ -1,0 +1,121 @@
+# slam-rs verification card (verify-block skill; read by `python -m dagkit.verify`).
+# Lane of every case: CPU frontend + CPU decode (the prod env `slam-rs`), deterministic: pre2 is bit-identical to pre.
+package = "slam-rs"
+
+[[graph]]
+name = "vio"
+run = "slam_rs.verify:run"
+score = "slam_rs.verify:score"
+# No GT on the robocap dataset (its slam_rs layer is our own output): the reference is the pre-port golden of the same case.
+# ate_vs_pre_cm = slam_rs.trajectory.ate(golden, pre) (estimate-driven association within 5 ms, rigid, no scale);
+# max_pos_vs_pre_cm = unaligned max |p - p_pre| over equal timestamps; poses_delta_pct = pose timestamps held by exactly one
+# of the two goldens, in % of pre's. pre scores 0 by construction; pre2 is the run-to-run noise (0 on both cases).
+# Floors: far above float32 storage (the layer stores Transform3D in float32) and far below what an input or config change
+# does on this segment (the catalog's older slam_rs layer, older core and config, sits 7.8 cm ATE from today's over the
+# first 60 s). A port that only rewires the estimator scores 0.0 on all three.
+metrics = [
+    { name = "ate_vs_pre_cm", unit = "cm", better = "lower", floor = 1.0 },
+    { name = "max_pos_vs_pre_cm", unit = "cm", better = "lower", floor = 5.0 },
+    { name = "poses_delta_pct", unit = "%", better = "lower", floor = 0.1 },
+]
+shots = [  # inside the short window (both cases cover it): 30 s and 59 s after the first frameset
+    { view = "/world", t_s = 1654643.2373435 },
+    { view = "/world", t_s = 1654672.2373435 },
+]
+
+[[graph.cases]]
+# rule: the README demo sample session (Cap B session 14, the segment robocap-live's hands block uses), first 60 s of
+# framesets: VIO initialises from rest, so it starts at the segment's first frameset; the run stops at the window's end.
+name = "short"
+clip = "short"
+reference = "pre-port"
+dataset = "robocap"
+segment = "robocap__fe6fede545c972fa__s00000014"
+window_s = [1654613.2373435, 1654673.2373435]
+params = { profile = "fast", backend = "cpu", decode_device = "cpu" }
+# |pre - pre2|: bit-identical (1800/1800 poses, float64 trajectory identical).
+noise = { ate_vs_pre_cm = 0.0, max_pos_vs_pre_cm = 0.0, poses_delta_pct = 0.0 }
+
+[[graph.cases]]
+# rule: the same segment, whole (32,065 framesets, about 17.8 min; 20-27 min a run on 2 cores).
+name = "full"
+clip = "full"
+reference = "pre-port"
+dataset = "robocap"
+segment = "robocap__fe6fede545c972fa__s00000014"
+params = { profile = "fast", backend = "cpu", decode_device = "cpu" }
+# |pre - pre2|: bit-identical (32,065/32,065 poses, float64 identical; one run read through an in-process catalog holding the
+# same layer files, the other through the shared catalog: the transport changes nothing). Its first 1800 poses equal the
+# short case's.
+noise = { ate_vs_pre_cm = 0.0, max_pos_vs_pre_cm = 0.0, poses_delta_pct = 0.0 }
+
+[[graph]]
+name = "vio-gt"
+run = "slam_rs.verify:run"
+score = "slam_rs.verify:score_gt"
+# gt_ate_cm = 100 * ate(golden, gt layer).rmse_m, the slam-rs gate's number (slam_rs/apis/gate.py, benchmarks.toml);
+# lost_framesets = framesets that produced no pose. Floor gt_ate_cm = 5 % of the short case's pre (1.5834 cm), as a number.
+metrics = [
+    { name = "gt_ate_cm", unit = "cm", better = "lower", floor = 0.08 },
+    { name = "lost_framesets", unit = "framesets", better = "lower", floor = 0.0 },
+]
+shots = [{ view = "/world", t_s = 5.0 }]
+
+[[graph.cases]]
+# rule: the first smoke-tier segment of benchmarks.toml (msd-index MIO10, 412 framesets, 7.6 s).
+name = "short"
+clip = "short"
+reference = "gt"
+dataset = "msd-index"
+segment = "msd-index__MIO_others__MIO10_short_2_panorama"
+params = { profile = "fast", backend = "cpu", decode_device = "cpu" }
+# pre 1.5834 cm (411 poses associated), pre2 bit-identical.
+noise = { gt_ate_cm = 0.0, lost_framesets = 0.0 }
+
+[[graph.cases]]
+# rule: the first release-tier msd-index segment of benchmarks.toml (MIO07_mapping_easy, 4,095 framesets).
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "msd-index"
+segment = "msd-index__MIO_others__MIO07_mapping_easy"
+params = { profile = "fast", backend = "cpu", decode_device = "cpu" }
+# pre 2.2046 cm (4094 associated; benchmarks.toml cpu baseline 2.2044 cm), pre2 bit-identical. The floor is 3.6 % of this pre.
+noise = { gt_ate_cm = 0.0, lost_framesets = 0.0 }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = [
+    "tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root",
+    "tests/test_vio_graph.py::test_the_pose_table_reads_the_layers_rows_whole_sorted_and_finite",
+    "tests/test_vio_graph.py::test_the_pose_table_refuses_a_translation_without_its_rotation_as_rig_pose_does_and_is_never_written",
+]
+properties = [
+    "tests/test_vio_graph.py::test_a_rig_pose_round_trips_serde_and_maps_to_one_transform_at_its_root",
+    "tests/test_vio_graph.py::test_the_pose_table_reads_the_layers_rows_whole_sorted_and_finite",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_types_rerun.py"]
+properties = [
+    "tests/test_types_rerun.py::test_a_rig_pose_reads_back_at_its_time_with_its_quaternion_order_in_float32",
+    "tests/test_types_rerun.py::test_the_pose_table_reads_a_recording_the_way_slam_rs_writes_it",
+]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_vio_graph.py"]
+properties = [
+    "tests/test_vio_graph.py::test_the_node_makes_lockstep_calls_whatever_the_imu_split",
+    "tests/test_vio_graph.py::test_reset_is_idempotent_flush_drains_once_and_outputs_keep_time_order",
+    "tests/test_vio_graph.py::test_the_source_sends_each_frameset_whole_at_its_estimator_time",
+    "tests/test_vio_graph.py::test_the_app_graph_validates_draws_its_declaration_and_documents_itself",
+    "tests/test_vio_graph.py::test_sequential_and_threaded_deliver_the_same_ticks_and_publish_the_same_poses",
+]

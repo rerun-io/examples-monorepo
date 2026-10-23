@@ -1,153 +1,75 @@
-"""Replay RoboCap from the catalog and report regression agreement, without a GT gate."""
+"""Replay a RoboCap segment from the catalog through the VIO graph and draw it as ``replay --stage vio`` does (the world in 3D,
+the cameras, eight plots); then write the trajectory and report its agreement with the session's regression trajectory. RoboCap
+has no ground truth: the agreement is reported, never gated. No layer is written; the "pipeline (debug)" tab shows the graph."""
 
-import time
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import rerun as rr
-from jaxtyping import Float64
-from numpy import ndarray
+import rerun.blueprint as rrb
+from dagkit.app import run_app, with_pipeline
+from dagkit.doc import HEALTH_ROOT
+from dagkit.graph import Graph
+from dagkit.node import Mode
+from dagkit.runners import RunReport
+from dagkit.sources import SegmentRef
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs import _core
-from slam_rs.catalog_feed import (
-    ROBOCAP_RIG,
-    CatalogSegment,
-    Frameset,
-    open_segment,
-)
-from slam_rs.config import SlamConfig, load_slam_config
-from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
-from slam_rs.tracking import Lockstep, check_calibration_matches_recording, robocap_estimator_files
-from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.catalog_feed import CameraCalib
+from slam_rs.config import load_slam_config
+from slam_rs.graphs.vio import VioSource, vio_graph
+from slam_rs.nodes.viewer import VioViewer
+from slam_rs.nodes.vio import VioNode, VioParams
+from slam_rs.reference import load_benchmarks
+from slam_rs.trajectory import ate, coverage, read_trajectory, write_trajectory
+from slam_rs.types import Trajectory
+from slam_rs.vio_log import vio_blueprint
 
 
-@dataclass(slots=True)
+@dataclass
 class Config:
-    """Replay RoboCap from the catalog and report regression agreement."""
-
-    profile: Literal["reference", "fast"] = "fast"
-    """Config overlay applied before tracking."""
-
-    rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
-    """Viewer, save and headless behaviour."""
-    catalog: str | None = None
-    """Catalog URL; defaults to slam.toml."""
-    gpu: bool = False
-    """Use the GPU frontend."""
+    rr_config: RerunTyroConfig
+    segment: SegmentRef = SegmentRef("robocap", "robocap__f408193e6447b3b0__s00000015")
+    """A RoboCap segment (default: session 15, the regression session); a window ends the replay at its stop."""
+    vio: VioParams = VioParams(backend="cpu", decode_device="cpu")
     reference_csv: Path | None = None
-    """Optional regression trajectory; defaults to benchmarks.toml."""
-    session: str = "s00000015"
-    """RoboCap session id; defaults to s15."""
-    seconds: float = 0.0
-    """Seconds from the first frameset; zero replays the full session."""
+    """Regression trajectory (device clock); default: the session's in benchmarks.toml, if it lists the segment."""
     output_csv: Path | None = None
-    """Where the estimated trajectory is written; defaults to ``data/robocap-<session>/slam_rs.csv``."""
+    """Where the estimated trajectory is written (device clock); default ``data/<segment>/slam_rs.csv``."""
     log_frames: bool = True
-    """Log the four camera images. Off measures the estimator's wall time without the JPEG encode."""
-    window_s: float = 30.0
-    """Longest time window of encoded samples fetched in one round trip."""
+    """Log the camera images; off measures the estimator without the JPEG encode."""
+    runner: Literal["sequential", "threaded"] = "threaded"
+    mode: Mode = "lossless"
 
 
-def main(config: Config) -> None:
-    """Replay one RoboCap session, log it, write the trajectory and report the agreement.
+def blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
+    """``replay --stage vio``'s blueprint (the world, the cameras, eight plots), then the "pipeline (debug)" tab."""
+    return with_pipeline(vio_blueprint(cameras), [rrb.TimeSeriesView(origin=HEALTH_ROOT + "vio", name="2 vio · step ms and queue")])
 
-    Args:
-        config: Parsed CLI options.
-    """
-    settings: SlamConfig = load_slam_config()
-    benchmarks: Benchmarks = load_benchmarks(settings)
-    session: RobocapSession = benchmarks.robocap.session(config.session)
-    if not benchmarks.robocap.is_listed(config.session):
-        print(f"{config.session} is not in benchmarks.toml: replaying it from the catalog with no regression reference")
-    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
-    calibration: _core.Calibration
-    flow_config: _core.VioConfig
-    calibration, flow_config, _config_text = robocap_estimator_files(settings, profile=config.profile)
-    reference_path: Path | None = config.reference_csv or (settings.package_root / session.reference_csv if session.reference_csv else None)
-    reference: Trajectory = read_trajectory(reference_path) if reference_path else empty_trajectory()
-    print("ground truth absent, not scored; regression reference is reported, not gated")
-    print(f"basalt calibration {settings.robocap.calibration} at downscale {ROBOCAP_RIG.downscale}: {list(calibration.resolution)}")
-    print(f"basalt config {settings.robocap.vio_config}: safe radius {flow_config.optical_flow_image_safe_radius} px")
 
-    with open_segment(
-        CatalogSegment(config.catalog or settings.catalog_url, "robocap", session.segment_id),
-        profile=ROBOCAP_RIG,
-        window_s=config.window_s,
-    ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
-        first_ns: int = int(feed.frame_t_ns[0])
-        last_ns: int = int(feed.frame_t_ns[-1]) if config.seconds <= 0.0 else first_ns + int(config.seconds * 1e9)
-        replayed_ns: int = min(int(feed.frame_t_ns[-1]), last_ns) - first_ns
-        print(
-            f"{len(feed.cameras)} of the rig's {feed.rig_cameras} cameras {ROBOCAP_RIG.camera_names} at rig positions {feed.camera_positions}, "
-            f"{feed.cameras[0].width}x{feed.cameras[0].height}, {len(feed.frame_t_ns)} framesets over "
-            f"{(int(feed.frame_t_ns[-1]) - first_ns) / 1e9:.1f} s, replaying the first {replayed_ns / 1e9:.1f} s"
-        )
-        print(
-            f"common estimator time shift {feed.imu.cam_time_offset_ns} ns applied to cameras and IMU; capture_start_time_ns {feed.capture_start_time_ns} "
-            f"NOT added (video_time is the device clock), so the export shifts by {feed.export_offset_ns} ns"
-        )
-
-        log_calibration(feed.cameras)
-        rr.send_blueprint(vio_blueprint(feed.cameras))
-        # The same drive `replay --stage vio` runs: the D17 hold, the D32
-        # invariant asserts and the rows at the held frameset's own time are one
-        # contract, not two copies of one.
-        stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(calibration, flow_config, gpu=config.gpu)),
-            logger=VioLogger(cameras=feed.cameras, ground_truth=empty_trajectory(), frame_t_ns=feed.frame_t_ns),
-        )
-
-        replayed: int = 0
-        started: float = time.monotonic()
-        mode: FrameMode = "jpeg" if config.log_frames else "off"
-        frameset: Frameset
-        for frameset in feed.framesets(last_ns):
-            if frameset.t_ns > last_ns:
-                break
-            replayed += 1
-            log_frameset_inputs(feed, frameset, mode)
-            stage.run(frameset)
-        stage.flush()
-        elapsed: float = time.monotonic() - started
-        stage.logger.log_complete_paths()
-
-        lockstep: Lockstep = stage.lockstep
-        tracked: int = len(lockstep.elapsed_ms)
-        print(
-            f"{replayed} framesets fed, {tracked} tracked, {lockstep.retries} refused and retried, "
-            f"{len(lockstep.pending)} lost, {lockstep.imu_samples} inertial samples pushed"
-        )
-        print(
-            f"wall {elapsed:.1f} s for {replayed_ns / 1e9:.1f} s of footage = {replayed_ns / 1e9 / max(elapsed, 1e-9):.2f}x realtime, "
-            f"{1e3 * elapsed / max(replayed, 1):.1f} ms per frameset"
-        )
-        if tracked:
-            print(
-                f"Vio.track {np.mean(lockstep.elapsed_ms):.1f} ms per frameset "
-                f"(median {np.median(lockstep.elapsed_ms):.1f}, max {np.max(lockstep.elapsed_ms):.1f}), "
-                f"{1e-3 * float(np.sum(lockstep.elapsed_ms)):.1f} s of the wall"
-            )
-        estimate: Trajectory = stage.logger.estimated()
-        # What the recording says its own clock is, not what this tool assumes:
-        # zero here, `capture_start_time_ns` on MSD, and one rule for both tools.
-        export_offset_ns: int = feed.export_offset_ns
-
-    # The feed's own in-process catalog server is what the `with` holds, and
-    # nothing below reads a frameset: the export and the ATE happen with it shut.
-    stage.refuse_lost_framesets()
-    write_trajectory(output_csv, shift_clock(estimate, export_offset_ns))
+def build(config: Config, recording: rr.RecordingStream) -> Iterator[Graph]:
+    """The VIO graph without a layer, its tracked framesets drawn; once it ran, the CSV and the agreement."""
+    vio = VioNode(config.segment, config.vio, None, views=True)
+    viewer = VioViewer(recording, blueprint, "jpeg" if config.log_frames else "off")
+    yield vio_graph(VioSource(config.segment, config.vio), vio, {"viewer": viewer})
+    assert vio.run is not None, "the graph ran without a flush"
+    estimate: Trajectory = vio.run.estimate  # device clock
+    output_csv: Path = config.output_csv or Path("data") / config.segment.segment / "slam_rs.csv"
+    write_trajectory(output_csv, estimate)
     print(f"{len(estimate)} tracked poses -> {output_csv} (absolute device clock)")
-    if len(estimate) == 0:
-        print("no ATE: the estimator reported no tracked pose")
+    settings = load_slam_config()
+    listed: str | None = next((str(s.reference_csv) for s in load_benchmarks(settings).robocap.sessions if s.segment_id == config.segment.segment and s.reference_csv), None)
+    reference_csv: Path | None = config.reference_csv or (settings.package_root / listed if listed else None)
+    if len(estimate) == 0 or reference_csv is None:
+        print("ground truth absent and no regression trajectory: not scored")
         return
-    if len(reference):
-        print(f"vs regression reference, {coverage(reference, estimate):.1%} of its span covered (not gated)")
-        agreement: AteResult = ate(shift_clock(estimate, export_offset_ns), reference)
-        print(agreement.summary())
-    first_pose: Float64[ndarray, " 3"] = estimate.position_m[0]
-    print(f"first estimated pose at {int(estimate.t_ns[0])} ns, position {first_pose.round(4).tolist()}")
+    reference: Trajectory = read_trajectory(reference_csv)
+    print(f"vs regression reference, {coverage(reference, estimate):.1%} of its span covered (not gated)")
+    print(ate(estimate, reference).summary())
+    print(f"first estimated pose at {int(estimate.t_ns[0])} ns, position {estimate.position_m[0].round(4).tolist()}")
+
+
+def main(config: Config) -> RunReport:
+    return run_app(config, build)

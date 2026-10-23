@@ -118,9 +118,9 @@ absolute path to both the worker and the catalog server:
 pixi install -e slam-rs-cuda
 pixi run -e slam-rs-cuda --frozen slam-rs-wgpu-build
 pixi run -e slam-rs-cuda --frozen slam-rs-catalog-layer \
-  --catalog rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
-  --segment robocap__f408193e6447b3b0__s00000059 \
-  --output-dir /path/to/shared/slam_rs
+  --segment.catalog-url rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
+  --segment.dataset robocap --segment.segment robocap__f408193e6447b3b0__s00000059 \
+  --output-dir /path/to/shared/slam_rs --register replace
 ```
 
 Defaults are `fast`, automatic GPU frontend selection, and CUDA/NVDEC decoding

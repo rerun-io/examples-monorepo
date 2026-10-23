@@ -1,7 +1,8 @@
-"""CLI shim: run the port on one RoboCap session and report regression agreement."""
+"""CLI shim: replay one RoboCap segment through the VIO graph, draw it, and report its regression agreement."""
 
-from slam_rs.apis import run
+import tyro
+
 from slam_rs.apis.robocap_probe import Config, main
 
 if __name__ == "__main__":
-    run(Config, main)
+    main(tyro.cli(Config))

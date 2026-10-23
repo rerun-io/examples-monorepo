@@ -2,8 +2,8 @@
 # Layers, highest first: App > Graph > Node > Op > Model > Runtime > Types; imports only point down.
 # A port moves its import root from `pending` to `enforced`; in an enforced package every module must match a rule.
 
-enforced = ["mamma", "vistadream", "mast3r_slam"]
-pending = ["exo_calib", "robocap_live", "slam_rs"]
+enforced = ["mamma", "robocap_live", "vistadream", "mast3r_slam", "slam_rs"]
+pending = ["exo_calib"]
 
 # Import name -> source root (the directory that holds the import package), relative to the repo.
 [roots]

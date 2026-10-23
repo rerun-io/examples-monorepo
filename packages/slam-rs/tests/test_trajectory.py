@@ -14,16 +14,15 @@ from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 from slam_rs.trajectory import (
     ASSOCIATION_TOLERANCE_NS,
     AteResult,
-    Trajectory,
     associate,
     ate,
     coverage,
-    empty_trajectory,
     read_trajectory,
     rigid_alignment,
     shift_clock,
     write_trajectory,
 )
+from slam_rs.types import Trajectory, empty_trajectory
 
 POSITIONS = arrays(
     dtype=np.float64,
