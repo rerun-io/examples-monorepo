@@ -8,12 +8,14 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 import av
 import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
+from dagkit.sources import SegmentRef
 from jaxtyping import Float32, Float64, Int
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
@@ -172,6 +174,10 @@ def get_safe_application_id() -> str:
     return "rerun-application"  # Default fallback
 
 
+SEGMENT_INDEX_TIMEOUT_S: float = 300.0
+"""How long ``RerunTyroConfig.open_segment`` waits for the viewer to open a segment (a busy catalog takes minutes)."""
+
+
 @dataclass
 class RerunTyroConfig:
     application_id: str = field(default_factory=get_safe_application_id)
@@ -205,13 +211,20 @@ class RerunTyroConfig:
     """Optional absolute or relative path to the Rerun executable."""
 
     def __post_init__(self):
+        self._start(spawn=True)
+
+    def _start(self, *, spawn: bool, send_properties: bool = True) -> None:
+        """Make the global recording and its sinks; ``spawn=False`` reuses the viewer an earlier start spawned. A recording
+        that joins a catalog segment sends no recording properties: the segment has its own."""
         rr.init(
             application_id=self.application_id,
             recording_id=self.recording_id,
             default_enabled=True,
             strict=True,
+            send_properties=send_properties,
         )
         self.rec_stream: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
+        viewer_url: str = f"rerun+http://127.0.0.1:{self.port}/proxy"
 
         if self.serve:
             rr.serve_grpc(server_memory_limit=self.server_memory_limit)
@@ -219,32 +232,64 @@ class RerunTyroConfig:
         elif self.connect:
             # Send logging data to a separate, already-running `rerun` process
             # (honors ``port`` so multiple viewers can coexist on one machine).
-            rr.connect_grpc(f"rerun+http://127.0.0.1:{self.port}/proxy")
+            rr.connect_grpc(viewer_url)
         elif self.save is not None and self.live and not self.headless:
             # Stream to a spawned viewer AND save to a .rrd at the same time by
             # fanning out through explicit sinks. ``spawn``/``save`` each install a
             # single sink that would replace the other, so we spawn the viewer
             # process without auto-connecting and wire both sinks ourselves.
-            rr.spawn(
-                port=self.port,
-                connect=False,
-                server_memory_limit=self.server_memory_limit,
-                executable_name=self.executable_name,
-                executable_path=self.executable_path,
-            )
-            rr.set_sinks(
-                rr.GrpcSink(f"rerun+http://127.0.0.1:{self.port}/proxy"),
-                rr.FileSink(str(self.save)),
-            )
+            if spawn:
+                rr.spawn(
+                    port=self.port,
+                    connect=False,
+                    server_memory_limit=self.server_memory_limit,
+                    executable_name=self.executable_name,
+                    executable_path=self.executable_path,
+                )
+            rr.set_sinks(rr.GrpcSink(viewer_url), rr.FileSink(str(self.save)))
         elif self.save is not None:
             rr.save(self.save)
-        elif not self.headless:
+        elif not self.headless and spawn:
             rr.spawn(
                 port=self.port,
                 server_memory_limit=self.server_memory_limit,
                 executable_name=self.executable_name,
                 executable_path=self.executable_path,
             )
+        elif not self.headless:
+            rr.connect_grpc(viewer_url)
+
+    def open_segment(self, segment: SegmentRef) -> None:
+        """Write into the recording a viewer makes when it opens ``segment`` from its catalog, and have the viewer this config
+        drives open it: an App's outputs then land beside the segment's own videos and cameras, which nothing copies. A saved
+        file holds the outputs only; open it together with ``segment.viewer_url()``.
+
+        Raises:
+            ValueError: With ``serve``: the served web viewer cannot be told to open the segment.
+        """
+        if self.serve:
+            raise ValueError("a served web viewer cannot open the catalog segment; spawn a viewer or connect to one")
+        placeholder: str = f"Recording:{self.rec_stream.get_application_id()}:{self.rec_stream.get_recording_id()}"
+        self.rec_stream.disconnect()  # closes a file sink before the segment's recording opens the same path
+        self.application_id, self.recording_id = segment.recording_ids()
+        if self.connect or (not self.headless and (self.save is None or self.live)):
+            from rerun.experimental import ViewerClient
+
+            viewer = ViewerClient(f"rerun+http://127.0.0.1:{self.port}/proxy")
+            # The source whose message creates a recording in the viewer owns it, and only a catalog-owned recording fetches
+            # the segment's chunks: our first byte (connecting sends one) must come after the catalog's. So no recording of
+            # the segment may exist yet (an earlier run's stream would stay its owner), and the catalog's first message must
+            # have created it: until the viewer lists it, nothing else can have. The App's blueprint then makes it active.
+            segment_store: str = f"Recording:{self.application_id}:{self.recording_id}"
+            if stale := [r.store_id for r in viewer.viewer_state().recordings if r.store_id in (placeholder, segment_store)]:
+                viewer.close_recordings(stale)  # closing a recording the viewer does not have is an error
+            viewer.open_url(segment.viewer_url())
+            deadline: float = monotonic() + SEGMENT_INDEX_TIMEOUT_S
+            while segment_store not in {r.store_id for r in viewer.viewer_state().recordings}:
+                if monotonic() > deadline:
+                    raise TimeoutError(f"the viewer did not open {segment.viewer_url()} within {SEGMENT_INDEX_TIMEOUT_S:.0f} s")
+                sleep(0.1)
+        self._start(spawn=False, send_properties=False)
 
 
 def log_pinhole(

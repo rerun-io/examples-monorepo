@@ -12,8 +12,10 @@ loudly instead of silently mismapping.
 from functools import lru_cache
 
 import numpy as np
-from jaxtyping import Bool, Float, Float32, Int
+import torch
+from jaxtyping import Bool, Float, Float32, Int, Int64
 from numpy import ndarray
+from torch import Tensor
 
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME
 
@@ -70,7 +72,7 @@ _NUM_FACE_CONTOUR: int = 17
 
 
 @lru_cache(maxsize=1)
-def _coco133_to_smplx_indices() -> tuple[Int[ndarray, "n_mapped"], Int[ndarray, "n_mapped"]]:
+def coco133_to_smplx_indices() -> tuple[Int[ndarray, "n_mapped"], Int[ndarray, "n_mapped"]]:
     """Build (coco_ids, smplx_ids) index arrays for all 133 mappable keypoints."""
     from smplx.joint_names import JOINT_NAMES
 
@@ -103,7 +105,7 @@ def smplx_joints_to_coco133_xyzc(joints: Float[ndarray, "n_frames n_joints 3"]) 
         COCO-133 keypoint stack; mapped joints carry confidence 1.0, unmapped
         entries are NaN with confidence 0.0.
     """
-    indices: tuple[Int[ndarray, "n_mapped"], Int[ndarray, "n_mapped"]] = _coco133_to_smplx_indices()
+    indices: tuple[Int[ndarray, "n_mapped"], Int[ndarray, "n_mapped"]] = coco133_to_smplx_indices()
     coco_ids: Int[ndarray, "n_mapped"] = indices[0]
     smplx_ids: Int[ndarray, "n_mapped"] = indices[1]
     num_joints: int = joints.shape[1]
@@ -113,3 +115,19 @@ def smplx_joints_to_coco133_xyzc(joints: Float[ndarray, "n_frames n_joints 3"]) 
     xyzc_stack[:, coco_ids[available], :3] = joints[:, smplx_ids[available]].astype(np.float32)
     xyzc_stack[:, coco_ids[available], 3] = np.float32(1.0)
     return xyzc_stack
+
+
+@lru_cache(maxsize=8)
+def _coco133_index_tensors(device: torch.device, num_joints: int) -> tuple[Int64[Tensor, "n_mapped"], Int64[Tensor, "n_mapped"]]:
+    coco_ids, smplx_ids = coco133_to_smplx_indices()
+    available: Bool[ndarray, "n_mapped"] = smplx_ids < num_joints
+    return torch.as_tensor(coco_ids[available], device=device), torch.as_tensor(smplx_ids[available], device=device)
+
+
+def smplx_joints_to_coco133_torch(joints: Float32[Tensor, "n_frames n_joints 3"]) -> Float32[Tensor, "n_frames 133 3"]:
+    """The differentiable ``smplx_joints_to_coco133_xyzc`` for a fit: the COCO-133 joints of SMPL-X forward joints, zero where
+    SMPL-X has none (the jawline without ``use_face_contour``), since a NaN would poison the loss."""
+    coco_ids, smplx_ids = _coco133_index_tensors(joints.device, joints.shape[1])
+    coco: Float32[Tensor, "n_frames 133 3"] = joints.new_zeros((joints.shape[0], 133, 3))
+    coco[:, coco_ids] = joints[:, smplx_ids]
+    return coco

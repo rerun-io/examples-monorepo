@@ -49,9 +49,9 @@ def test_coco133_mapping_is_complete_and_semantically_consistent() -> None:
     from smplx.joint_names import JOINT_NAMES
 
     from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME
-    from simplecv.ops.smplx.smplx_coco133 import _coco133_to_smplx_indices
+    from simplecv.ops.smplx.smplx_coco133 import coco133_to_smplx_indices
 
-    coco_ids, smplx_ids = _coco133_to_smplx_indices()
+    coco_ids, smplx_ids = coco133_to_smplx_indices()
     assert len(coco_ids) == 133
     assert smplx_ids.max() < len(JOINT_NAMES)
     # Left/right sides must not cross: any coco name containing left/right maps
@@ -78,3 +78,14 @@ def test_smplx_joints_to_coco133_without_contour_leaves_jawline_nan() -> None:
     # face-0..face-16 (coco ids 23..39) need the contour joints (127..143).
     assert np.all(np.isnan(xyzc[:, 23:40, :3])) and np.all(xyzc[:, 23:40, 3] == 0.0)
     assert np.all(np.isfinite(xyzc[:, :23, :3])) and np.all(xyzc[:, 40:, 3] == 1.0)
+
+
+def test_the_torch_coco133_readout_is_the_numpy_one_with_zeros_where_smplx_has_no_joint() -> None:
+    from simplecv.ops.smplx.smplx_coco133 import smplx_joints_to_coco133_torch, smplx_joints_to_coco133_xyzc
+
+    joints: Float32[ndarray, "2 127 3"] = np.random.default_rng(0).normal(size=(2, 127, 3)).astype(np.float32)
+    readout: Float32[ndarray, "2 133 3"] = smplx_joints_to_coco133_torch(torch.from_numpy(joints)).numpy()
+    xyzc: Float32[ndarray, "2 133 4"] = smplx_joints_to_coco133_xyzc(joints)
+    mapped = xyzc[0, :, 3] == 1.0
+    np.testing.assert_array_equal(readout[:, mapped], xyzc[:, mapped, :3])
+    assert not mapped[23:40].any() and np.all(readout[:, ~mapped] == 0.0)  # the jawline: no contour joints

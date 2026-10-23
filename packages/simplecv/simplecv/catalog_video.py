@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
+from datafusion import col, lit
 from jaxtyping import Bool, Int64, Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -73,15 +74,20 @@ def catalog_codec(column: pa.ChunkedArray, where: str) -> CatalogCodecName:
     return catalog_codec_name(int(codecs[0].as_py()))
 
 
-def read_catalog_videos(dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str) -> tuple[CatalogVideo, ...]:
+def read_catalog_videos(
+    dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str, window_ns: tuple[int, ...] | None = None
+) -> tuple[CatalogVideo, ...]:
     """Read all requested cameras in one materialization, preserving their individual sample times.
 
-    Holds compressed data for one segment in RAM. No sorting or decoding is
-    performed; unordered or duplicate timestamps fail before packet muxing.
+    Holds compressed data for one segment (or only the rows with ``window_ns[0] <= t < window_ns[1]``) in RAM. No sorting
+    or decoding is performed; unordered or duplicate timestamps fail before packet muxing.
     """
     paths: list[str] = [f"/{entity.strip('/')}" for entity in entities]
     columns: list[str] = [f"{entity}:VideoStream:{component}" for entity in paths for component in ("sample", "is_keyframe", "codec")]
-    table: pa.Table = dataset.filter_segments(segment_id).filter_contents(paths).reader(index=timeline).select(timeline, *columns).to_arrow_table()
+    reader = dataset.filter_segments(segment_id).filter_contents(paths).reader(index=timeline)
+    if window_ns is not None:
+        reader = reader.filter((col(timeline).cast(pa.int64()) >= lit(window_ns[0])) & (col(timeline).cast(pa.int64()) < lit(window_ns[1])))
+    table: pa.Table = reader.select(timeline, *columns).to_arrow_table()
     videos: list[CatalogVideo] = []
     for entity in paths:
         sample_column: str = f"{entity}:VideoStream:sample"

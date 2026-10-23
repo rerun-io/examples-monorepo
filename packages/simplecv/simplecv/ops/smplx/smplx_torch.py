@@ -25,13 +25,13 @@ SMPLX_HF_REPO_ID: str = "pablovela5620/mamma-streaming-data"
 """Private HF dataset hosting ``body_models/smplx/SMPLX_NEUTRAL.npz`` (SMPL-X v1.1)."""
 
 # Standard SMPL-X 165-dim axis-angle full-pose layout (matches MAMMA pred/params NPZs).
-_SMPLX_GLOBAL: slice = slice(0, 3)
-_SMPLX_BODY: slice = slice(3, 66)
-_SMPLX_JAW: slice = slice(66, 69)
-_SMPLX_LEYE: slice = slice(69, 72)
-_SMPLX_REYE: slice = slice(72, 75)
-_SMPLX_LHAND: slice = slice(75, 120)
-_SMPLX_RHAND: slice = slice(120, 165)
+SMPLX_GLOBAL: slice = slice(0, 3)
+SMPLX_BODY: slice = slice(3, 66)
+SMPLX_JAW: slice = slice(66, 69)
+SMPLX_LEYE: slice = slice(69, 72)
+SMPLX_REYE: slice = slice(72, 75)
+SMPLX_LHAND: slice = slice(75, 120)
+SMPLX_RHAND: slice = slice(120, 165)
 
 SMPLX_NUM_POSE: int = 165
 SMPL_NUM_POSE: int = 72
@@ -157,6 +157,11 @@ class SmplxLayerTorch(Module):
         return "npz"
 
     @property
+    def device(self) -> torch.device:
+        """Where the layer's buffers live (``.to(device)`` moves them)."""
+        return cast(Tensor, self.betas_buffer).device
+
+    @property
     def faces(self) -> Int64[ndarray, "n_faces 3"]:
         """Triangle indices of the body mesh (host numpy)."""
         return self._faces
@@ -165,6 +170,7 @@ class SmplxLayerTorch(Module):
         self,
         poses: Float32[Tensor, "b n_pose"],
         transl: Float32[Tensor, "b 3"],
+        betas: Float32[Tensor, "1 n_betas"] | None = None,
     ) -> tuple[Float32[Tensor, "b n_verts 3"], Float32[Tensor, "b n_joints 3"]]:
         """Run the batched body forward.
 
@@ -172,33 +178,34 @@ class SmplxLayerTorch(Module):
             poses: Axis-angle full pose per frame — 165-dim for SMPL-X
                 (global/body/jaw/eyes/hands), 72-dim for SMPL (global/body).
             transl: World translation per frame in meters.
+            betas: Shape coefficients for every frame (a fit that optimises them); None: the layer's own.
 
         Returns:
             Vertices (10475 for SMPL-X, 6890 for SMPL) and regressed joints, meters.
         """
         batch_size: int = poses.shape[0]
-        betas: Float32[Tensor, "b n_betas"] = cast(Tensor, self.betas_buffer).expand(batch_size, -1)
+        shape: Float32[Tensor, "b n_betas"] = (cast(Tensor, self.betas_buffer) if betas is None else betas).expand(batch_size, -1)
         if self.model_type == "smplx":
             assert poses.shape[1] == SMPLX_NUM_POSE, f"SMPL-X expects {SMPLX_NUM_POSE}-dim poses, got {poses.shape[1]}"
             expression: Float32[Tensor, "b n_expr"] = torch.zeros(
                 (batch_size, self.model.num_expression_coeffs), dtype=poses.dtype, device=poses.device
             )
             output = self.model(
-                betas=betas,
-                global_orient=poses[:, _SMPLX_GLOBAL],
-                body_pose=poses[:, _SMPLX_BODY],
-                jaw_pose=poses[:, _SMPLX_JAW],
-                leye_pose=poses[:, _SMPLX_LEYE],
-                reye_pose=poses[:, _SMPLX_REYE],
-                left_hand_pose=poses[:, _SMPLX_LHAND],
-                right_hand_pose=poses[:, _SMPLX_RHAND],
+                betas=shape,
+                global_orient=poses[:, SMPLX_GLOBAL],
+                body_pose=poses[:, SMPLX_BODY],
+                jaw_pose=poses[:, SMPLX_JAW],
+                leye_pose=poses[:, SMPLX_LEYE],
+                reye_pose=poses[:, SMPLX_REYE],
+                left_hand_pose=poses[:, SMPLX_LHAND],
+                right_hand_pose=poses[:, SMPLX_RHAND],
                 expression=expression,
                 transl=transl,
             )
         else:
             assert poses.shape[1] == SMPL_NUM_POSE, f"SMPL expects {SMPL_NUM_POSE}-dim poses, got {poses.shape[1]}"
             output = self.model(
-                betas=betas,
+                betas=shape,
                 global_orient=poses[:, 0:3],
                 body_pose=poses[:, 3:SMPL_NUM_POSE],
                 transl=transl,
@@ -226,7 +233,7 @@ class SmplxLayerTorch(Module):
         Returns:
             Vertices and joints for all frames, in meters, on the host.
         """
-        device: torch.device = cast(Tensor, self.betas_buffer).device
+        device: torch.device = self.device
         num_frames: int = poses.shape[0]
         verts_chunks: list[Float32[ndarray, "chunk n_verts 3"]] = []
         joints_chunks: list[Float32[ndarray, "chunk n_joints 3"]] = []
@@ -249,7 +256,7 @@ class SmplxLayerTorch(Module):
         ``transl = Th + (R - I) @ root_joint``.
         """
         n_pose: int = SMPLX_NUM_POSE if self.model_type == "smplx" else SMPL_NUM_POSE
-        device: torch.device = cast(Tensor, self.betas_buffer).device
+        device: torch.device = self.device
         with torch.no_grad():
             rest_output: tuple[Float32[Tensor, "1 n_verts 3"], Float32[Tensor, "1 n_joints 3"]] = self.forward(
                 torch.zeros((1, n_pose), dtype=torch.float32, device=device),
