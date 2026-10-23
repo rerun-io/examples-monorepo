@@ -7,16 +7,17 @@ dependencies = [
     # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
     #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv, transformers
     # cuda: pytorch-gpu, torchvision
-    # vistadream feature: diffusers, timm, accelerate, open3d, roma, peft, omegaconf,
-    #                     plyfile, torchsde, imageio, imageio-ffmpeg, gsplat, einops
-    "einops>=0.8.1,<0.9",
+    # vistadream feature: diffusers, accelerate, plyfile, torchmetrics, gsplat
+    # simplecv brings dagkit (Types, nodes, graph, runners)
     "monopriors>=0.3.2",
+    "simplecv",
 ]
 
 # Workspace siblings named above resolve to their in-repo path (never to a PyPI
 # namesake); the root manifest installs the same paths editable.
 [tool.uv.sources]
 monopriors = { path = "../monoprior", editable = true }
+simplecv = { path = "../simplecv", editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -41,6 +42,7 @@ sort_by_size = true
 # VistaDream exposes experimental Gaussian scene helpers and Tyro config fields
 # that Vulture reports at 60% despite being runtime/public surfaces.
 min_confidence = 80
+ignore_names = ["ctx"]  # the node contract's reset(ctx) argument
 
 [tool.pytest.ini_options]
 markers = [

@@ -83,7 +83,7 @@ Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
 | [sapiens2-pose](packages/sapiens2-pose/) | Top-down 308-keypoint human pose estimation with Rerun. |
 | [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
 | [slam-evals](packages/slam-evals/) | VSLAM benchmark ingestion and browsing through a Rerun catalog. |
-| [vistadream](packages/vistadream/) | Single-image 3D reconstruction and Gaussian-scene tooling. |
+| [vistadream](packages/vistadream/) | One photo to a 3D Gaussian scene on the dagkit graph (`pixi run -e vistadream vistadream-example`, gradio: `vistadream-gradio-app`): MoGe depth, optional FLUX outpainting and coarse expansion, gsplat training, native Rerun Gaussian splats. |
 | [wilor-nano](packages/wilor-nano/) | Hand detection and 3D hand-pose estimation with Rerun logging. |
 
 Build-only and vendored packages do not necessarily have standalone root

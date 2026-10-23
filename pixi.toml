@@ -1678,8 +1678,9 @@ icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
 imageio = ">=2.37.0,<3"
 imageio-ffmpeg = ">=0.6.0,<0.7"
-# ai-demos prebuilt for CUDA 13, Python 3.12, and Torch 2.12 (SM 8.6 + 12.0 + PTX); no runtime JIT.
-gsplat = "==1.5.3"
+# gsplat 1.6.0 (upstream v1.6.0, not on PyPI) prebuilt on the ai-demos channel for cuda 13.0 / torch 2.12 /
+# py312, the same build as [feature.gauss-surf]: no source build at install, no runtime JIT.
+gsplat = "==1.6.0"
 [feature.vistadream.target.linux-64.dependencies]
 splat-transform = "*"
 
@@ -1699,21 +1700,37 @@ omegaconf = "*"
 
 [feature.vistadream.activation.env]
 PACKAGE_DIR = "packages/vistadream"
-PYREFLY_TARGET = "src/vistadream/api src/vistadream/gradio src/vistadream/resize_utils.py src/vistadream/__init__.py tools"
+PYREFLY_TARGET = "src/vistadream tools tests"
 CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
 CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
 PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.vistadream.tasks.vistadream-example]
-cmd = "python tools/run_single_img.py --image-path data/office/IMG_4029.jpg"
+cmd = "python tools/apps/single_image.py --image-path data/office/IMG_4029.jpg"
 cwd = "packages/vistadream"
-description = "Run VistaDream single image 3D reconstruction"
+description = "Run the VistaDream single-image graph on the sample photo (no outpainting; --stage outpaint / coarse need FLUX.1-Fill-dev)"
 
 [feature.vistadream.tasks.vistadream-gradio-app]
-cmd = "python tools/gradio_app.py"
+cmd = "python tools/apps/single_image_gradio.py"
 cwd = "packages/vistadream"
-description = "Launch VistaDream Gradio web interface"
+description = "Launch the gradio app generated from the single-image graph's Config"
+
+# ── Graph tier (verify-block skill; goldens under $DAGKIT_GOLDENS) ─────────
+[feature.vistadream.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre --clip short && python -m dagkit.verify VERIFY.toml --phase pre2 --clip short && python -m dagkit.verify VERIFY.toml --phase pre --clip full"
+cwd = "packages/vistadream"
+description = "Pre-port goldens (pre, pre2, full pre): only from the card commit 7aef310bb with the VERIFY.toml import fix (dagkit.verify never overwrites an existing pre / pre2 golden)"
+
+[feature.vistadream.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+cwd = "packages/vistadream"
+description = "Graph tier, short case (no outpainting): score post and band it against the pre-port golden"
+
+[feature.vistadream.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+cwd = "packages/vistadream"
+description = "Graph tier, full cases (outpaint, coarse)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # pyvrs-viewer
