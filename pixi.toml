@@ -67,6 +67,7 @@ rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 gradio = "==6.13.0"                                        # pin-bump: hold
 gradio-rerun = "==0.38.1"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -94,6 +95,7 @@ xorg-xorgproto = "*"
 
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 
 # Catalog lane with the dataloader extra; for unreleased builds see AGENTS.md
 # "Testing Rerun builds".
@@ -1046,6 +1048,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
 rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 
@@ -2012,6 +2015,7 @@ gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 
 [feature.gsplat-rust-renderer.activation]
 scripts = ["packages/gsplat-rust-renderer/activate.sh"]
@@ -2610,6 +2614,7 @@ hf-transfer = "*"
 
 [feature.slam-rs-osx.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
+dagkit = { path = "packages/dagkit", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
 rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
