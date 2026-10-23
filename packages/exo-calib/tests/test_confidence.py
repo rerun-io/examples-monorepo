@@ -2,7 +2,7 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.confidence import (
+from exo_calib.ops.confidence import (
     drop_face_confidences,
     kineo_point_confidence,
     median_filter_keypoints,
@@ -32,7 +32,7 @@ def test_threshold_rescale_confidence_applies_cutoff_and_linear_scale() -> None:
     np.testing.assert_allclose(actual, expected)
 
 
-def test_median_filter_keypoints_uses_truncated_windows_and_ignores_nan() -> None:
+def test_median_filter_keypoints_uses_truncated_windows_over_consecutive_frames_and_ignores_nan() -> None:
     kp_xy: Float64[ndarray, "5 2 2"] = np.array(
         [
             [[0.0, 10.0], [np.nan, 0.0]],
@@ -44,7 +44,7 @@ def test_median_filter_keypoints_uses_truncated_windows_and_ignores_nan() -> Non
         dtype=np.float64,
     )
 
-    actual: Float64[ndarray, "5 2 2"] = median_filter_keypoints(kp_xy, window=3)
+    actual: Float64[ndarray, "5 2 2"] = median_filter_keypoints(kp_xy, np.arange(5, dtype=np.int64), window=3)
 
     expected: Float64[ndarray, "5 2 2"] = np.array(
         [

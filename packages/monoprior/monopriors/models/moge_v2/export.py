@@ -186,7 +186,8 @@ def load_pinned_moge_v2(encoder: Encoder, resolution_level: int) -> tuple[MoGeMo
     """
     num_tokens: int = resolve_num_tokens(resolution_level)
     checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS[encoder]
-    model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
+    with torch.device("cuda"):  # the random init the checkpoint overwrites: 0.3 s on the GPU, 2.2 s on the CPU
+        model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
     if model.num_tokens_range != MOGE_V2_NUM_TOKENS_RANGE:
         raise ValueError(
             f"Pinned MoGe v2 checkpoint token range changed from {MOGE_V2_NUM_TOKENS_RANGE} to {model.num_tokens_range}; update the export recipe and predictors."

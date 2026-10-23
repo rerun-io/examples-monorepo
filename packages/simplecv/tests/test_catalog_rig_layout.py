@@ -122,3 +122,17 @@ def test_catalog_components_reduces_namespaced_archetypes() -> None:
     component: CatalogComponent = CatalogComponent.parse("/world/exo/C10095", "rerun.archetypes.Transform3D:mat3x3", True)
 
     assert (component.archetype, component.field, component.component) == ("Transform3D", "mat3x3", "Transform3D:mat3x3")
+
+
+def test_rig_kinds_come_from_a_static_table_and_an_unknown_kind_is_an_error() -> None:
+    import pyarrow as pa
+
+    from simplecv.catalog_rig_layout import rig_kinds_from_table
+
+    def kinds(*values: str | None) -> pa.ChunkedArray:
+        return pa.chunked_array([pa.array([None if v is None else [v] for v in values], type=pa.list_(pa.string()))])
+
+    table = pa.table({"/world/rig_00:kind": kinds(None, "exo"), "/world/rig_01:kind": kinds(None, None), "/world/rig_02:kind": kinds("quest", None)})
+    assert rig_kinds_from_table(table, ["rig_00", "rig_01", "rig_02", "rig_03"]) == {"rig_00": "exo", "rig_02": "quest"}  # rig_03: no column
+    with pytest.raises(ValueError, match="rig_00:kind"):
+        rig_kinds_from_table(pa.table({"/world/rig_00:kind": kinds("drone")}), ["rig_00"])

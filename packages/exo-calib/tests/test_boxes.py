@@ -1,9 +1,17 @@
 import numpy as np
-from jaxtyping import Bool, Float64
+from conftest import project_points, ring_rig
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
-from exo_calib.boxes import boxes_from_projected_keypoints, boxes_needing_detection, extrapolate_keypoints
-from exo_calib.triangulation import triangulate_frame_keypoints
+from exo_calib.ops.boxes import (
+    box_iou,
+    boxes_from_projected_keypoints,
+    boxes_needing_detection,
+    extrapolate_keypoints,
+    nearest_candidates,
+    skeleton_centre,
+    vote_person,
+)
 
 
 def test_boxes_from_projected_keypoints_filters_confidence_and_pads_about_center() -> None:
@@ -91,32 +99,73 @@ def test_extrapolate_keypoints_uses_velocity_where_available_and_latest_elsewher
     np.testing.assert_allclose(predicted_points_xyz, expected_points_xyz, equal_nan=True)
 
 
-def test_triangulate_frame_keypoints_preserves_joint_rows_and_confidence() -> None:
-    points_xyz: Float64[ndarray, "3 3"] = np.array(
-        [[0.0, 0.0, 5.0], [0.5, 0.2, 4.0], [-0.2, 0.1, 6.0]], dtype=np.float64
-    )
-    intrinsics: Float64[ndarray, "3 3 3"] = np.repeat(
-        np.array([[[100.0, 0.0, 50.0], [0.0, 100.0, 40.0], [0.0, 0.0, 1.0]]], dtype=np.float64), 3, axis=0
-    )
-    cam_T_world: Float64[ndarray, "3 4 4"] = np.repeat(np.eye(4, dtype=np.float64)[None], 3, axis=0)
-    cam_T_world[1, 0, 3] = -1.0
-    cam_T_world[2, 1, 3] = -1.0
-    points_homo: Float64[ndarray, "3 4"] = np.column_stack((points_xyz, np.ones(3, dtype=np.float64)))
-    points_cam: Float64[ndarray, "3 3 3"] = np.einsum("vij,nj->vni", cam_T_world[:, :3], points_homo)
-    projected: Float64[ndarray, "3 3 3"] = np.einsum("vij,vnj->vni", intrinsics, points_cam)
-    kp_xy: Float64[ndarray, "3 3 2"] = projected[:, :, :2] / projected[:, :, 2:3]
-    conf: Float64[ndarray, "3 3"] = np.full((3, 3), 0.9, dtype=np.float64)
-    conf[1:, 2] = 0.1
+RING_K: Float64[ndarray, "4 3 3"] = np.repeat(np.array([[400.0, 0.0, 320.0], [0.0, 400.0, 240.0], [0.0, 0.0, 1.0]])[None], 4, axis=0)
+RING_T: Float64[ndarray, "4 4 4"] = ring_rig(4, 4.0)
+PERSON_A: Float64[ndarray, "3"] = np.array([0.5, 0.2, 0.0])
+PERSON_B: Float64[ndarray, "3"] = np.array([-0.8, -0.6, 0.0])  # same height as A and as the cameras: every epipolar line is level
 
-    triangulated_xyz, triangulated_conf = triangulate_frame_keypoints(
-        kp_xy,
-        conf,
-        intrinsics,
-        cam_T_world,
-        min_confidence=0.5,
-        reproj_threshold_px=1.0,
-    )
 
-    np.testing.assert_allclose(triangulated_xyz[:2], points_xyz[:2], atol=1e-8)
-    assert np.isnan(triangulated_xyz[2]).all()
-    np.testing.assert_allclose(triangulated_conf, np.array([0.9, 0.9, 0.0], dtype=np.float64))
+def person_box(center_xyz: Float64[ndarray, "3"], view: int) -> Float64[ndarray, "4"]:
+    """The XYXY box of a 0.5 x 0.5 x 1.7 m person centred at ``center_xyz``."""
+    corners: Float64[ndarray, "8 3"] = center_xyz + np.array([[x, y, z] for x in (-0.25, 0.25) for y in (-0.25, 0.25) for z in (-0.85, 0.85)])
+    uv: Float64[ndarray, "8 2"] = project_points(corners, RING_K[view : view + 1], RING_T[view : view + 1])[0]
+    return np.concatenate((uv.min(axis=0), uv.max(axis=0)))
+
+
+PEOPLE: dict[str, Float64[ndarray, "3"]] = {"A": PERSON_A, "B": PERSON_B}
+
+
+def who_each_view_takes(seen: dict[int, list[tuple[str, float]]], person_xyz: Float64[ndarray, "3"] | None) -> list[str | None]:
+    """The person each view takes (None: nobody) among the detections ``seen`` lists per view (person, score): the candidate
+    nearest ``person_xyz``, or nearest the person ``vote_person`` picks when it is None."""
+    detections: list[tuple[int, str, float]] = [(view, person, score) for view, people in seen.items() for person, score in people]
+    boxes: Float64[ndarray, "n 4"] = np.array([person_box(PEOPLE[person], view) for view, person, _ in detections]).reshape(-1, 4)
+    scores: Float64[ndarray, " n"] = np.array([score for *_, score in detections])
+    view_of: Int64[ndarray, " n"] = np.array([view for view, *_ in detections], dtype=np.int64)
+    projection: Float64[ndarray, "4 3 4"] = RING_K @ RING_T[:, :3]
+    centre = vote_person(boxes, scores, view_of, projection) if person_xyz is None else person_xyz
+    if centre is None:
+        return [None] * 4
+    rows = nearest_candidates(centre[None], boxes, view_of, projection)[0][0]
+    return [detections[row][1] if row >= 0 else None for row in rows]
+
+
+def test_without_a_track_the_person_most_views_agree_on_wins_over_a_higher_score() -> None:
+    """B out-scores A where both are seen, but only two views see B; A's box centres agree in all four views."""
+    seen = {v: [("A", 0.6), *([("B", 0.95)] if v in (0, 2) else [])] for v in range(4)}
+
+    assert who_each_view_takes(seen, person_xyz=None) == ["A", "A", "A", "A"]
+
+
+def test_with_a_track_each_view_takes_the_candidate_nearest_the_tracked_person() -> None:
+    """View 1 sees both (B scores higher) and takes A; view 2 sees only B and takes B (refine rejects it); view 3 sees nobody."""
+    seen = {0: [("A", 0.6)], 1: [("B", 0.95), ("A", 0.6)], 2: [("B", 0.95)], 3: []}
+
+    assert who_each_view_takes(seen, person_xyz=PERSON_A) == ["A", "A", "B", None]
+
+
+def test_a_badly_calibrated_view_still_takes_the_person_nearer_its_projection() -> None:
+    """The rig is what is being calibrated: with the anchor 0.4 m off, view 0's projection misses A's box, yet A is still the
+    nearer of the two people there, so view 0 takes A instead of nothing."""
+    seen = {v: [("B", 0.95), ("A", 0.6)] for v in range(4)}
+
+    assert who_each_view_takes(seen, person_xyz=PERSON_A + np.array([0.0, 0.4, 0.0]))[0] == "A"
+
+
+def test_without_detections_no_view_takes_anyone() -> None:
+    assert who_each_view_takes({v: [] for v in range(4)}, person_xyz=None) == [None] * 4
+
+
+def test_the_skeleton_centre_is_the_median_of_its_confident_finite_joints() -> None:
+    points: Float64[ndarray, "4 3"] = np.array([[0.0, 0.0, 0.0], [2.0, 2.0, 2.0], [np.nan, 0.0, 0.0], [9.0, 9.0, 9.0]])
+    conf: Float64[ndarray, " 4"] = np.array([0.9, 0.9, 0.9, 0.1])
+
+    np.testing.assert_allclose(skeleton_centre(points, conf, 0.5), [1.0, 1.0, 1.0])  # type: ignore[arg-type]
+    assert skeleton_centre(points, np.zeros(4), 0.5) is None
+
+
+def test_box_iou_row_by_row_and_nan_where_a_box_is_missing_or_both_are_empty() -> None:
+    first: Float64[ndarray, "5 4"] = np.array([[0.0, 0.0, 2.0, 2.0], [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 2.0, 2.0], [np.nan] * 4, [1.0, 1.0, 1.0, 1.0]])
+    second: Float64[ndarray, "5 4"] = np.array([[1.0, 1.0, 3.0, 3.0], [2.0, 2.0, 3.0, 3.0], [0.0, 0.0, 2.0, 2.0], [0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]])
+
+    np.testing.assert_allclose(box_iou(first, second), [1.0 / 7.0, 0.0, 1.0, np.nan, np.nan])  # overlap 1 of 4 + 4 - 1

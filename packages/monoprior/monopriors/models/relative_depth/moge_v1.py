@@ -42,10 +42,11 @@ class MoGeV1Predictor(BaseRelativePredictor[MoGeModel]):
         super().__init__()
         print("Loading MoGe v1 model...")
         start: float = timer()
-        self.model: MoGeModel = MoGeModel.from_pretrained(
-            MOGE_V1_CHECKPOINT_ID,
-            revision=MOGE_V1_CHECKPOINT_REVISION,
-        ).to(device)
+        with torch.device(device):  # the random init the checkpoint overwrites runs on the device, not the CPU
+            self.model: MoGeModel = MoGeModel.from_pretrained(
+                MOGE_V1_CHECKPOINT_ID,
+                revision=MOGE_V1_CHECKPOINT_REVISION,
+            ).to(device)
         print(f"MoGe v1 model loaded. Time: {timer() - start:.2f}s")
         self.device: Literal["cpu", "cuda"] = device
 
