@@ -485,7 +485,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, track: PoseTrack, target: 
 
 
 def write_actions_layer(identity: SequenceIdentity, episode: Episode, target: Path) -> bool:
-    """Publish ``actions``: coarse segments and fine sub-segments as active-label tracks, every field as properties.
+    """Publish ``actions``: coarse segments and fine sub-segments as ``StateChange`` tracks, every field as properties.
 
     Labels are placed by their frame numbers (half-open: ``end_frame`` is the first frame after) on the
     episode clock; a bound off the reference frames takes the time the camera rate gives it.
@@ -506,9 +506,9 @@ def write_actions_layer(identity: SequenceIdentity, episode: Episode, target: Pa
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         for level, spans in levels.items():
             if spans:
-                boundaries, texts = actions.active_labels(spans)
+                boundaries, states = actions.active_states(spans)
                 times: Int64[ndarray, "k"] = episode.clock.video_time_ns(episode.clock.stamps_ns(boundaries))
-                actions.log_actions(recording, level, times_ns=times, frame_indices=boundaries, texts=texts)
+                actions.log_action_states(recording, level, times_ns=times, frame_indices=boundaries, states=states)
         recording.send_property(
             paths.ACTIONS_LAYER,
             rr.AnyValues(

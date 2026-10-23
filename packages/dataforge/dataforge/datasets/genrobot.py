@@ -269,7 +269,7 @@ class GenrobotDataset(DataforgeDataset[GenrobotConfig, HubEpisode]):
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """The wearer in 3D over the task and the current action, beside the six cameras.
+        """The wearer in 3D over the task and the coarse and fine action lanes, beside the six cameras.
 
         Not ``blueprints.exoego_blueprint``: its worn-camera column fits one or two headset cameras, and
         six would shrink to slivers; its exo strip is for static cameras. The six fisheye panes get half
@@ -279,11 +279,9 @@ class GenrobotDataset(DataforgeDataset[GenrobotConfig, HubEpisode]):
             rrb.Horizontal(
                 rrb.Vertical(
                     rrb.Spatial3DView(name="DAS-Ego wearer", origin="/world", contents=world_contents(), eye_controls=SCENE_EYE),
-                    rrb.Horizontal(
-                        rrb.TextDocumentView(name="Task", origin=schema.instruction_path(), contents=[schema.instruction_path()]),
-                        rrb.TextDocumentView(name="Current action", origin=schema.actions_path("fine"), contents=[schema.actions_path("fine")]),
-                    ),
-                    row_shares=[5, 1],
+                    rrb.TextDocumentView(name="Task", origin=schema.instruction_path(), contents=[schema.instruction_path()]),
+                    rrb.StateTimelineView(name="Actions", origin="/task", contents=[schema.actions_path("coarse"), schema.actions_path("fine")]),
+                    row_shares=[5, 0.7, 1.3],
                 ),
                 rrb.Grid(
                     *(blueprints.camera_view(f"camera{cam}", RIG, cam, contents=pane_contents(cam)) for cam in PANE_ORDER),

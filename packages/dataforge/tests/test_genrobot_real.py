@@ -223,7 +223,10 @@ def test_actions_layer_tracks_coarse_and_fine_labels(barber_sidecar: Path, tmp_p
     target: Path = tmp_path / "actions.rrd"
     assert write_actions_layer(SequenceIdentity("genrobot", ("d3982934590a450ca7fe212e749ecf75",)), episode, target)
     store: rrc.ChunkStore = read_back(target)
-    fine: pa.Table = column_rows(store, f"{schema.actions_path('fine')}:TextDocument:text")
+    fine: pa.Table = column_rows(store, f"{schema.actions_path('fine')}:StateChange:state")
     assert episode.annotation is not None
-    assert episode.annotation.sub_segments[0].fine_label in fine.column(1).to_pylist()[0][0]
+    states: list[list[str]] = fine.column(1).to_pylist()
+    assert all(len(row) == 1 for row in states), "the sample's sub-segments never overlap, so the fine track is one lane"
+    shipped: list[str] = [sub.fine_label for sub in sorted(episode.annotation.sub_segments, key=lambda sub: sub.start_frame)]
+    assert [row[0] for row in states if row[0]] == shipped
     assert recording_properties(store, "actions")["sub_segment_is_success"] == [sub.is_success for sub in episode.annotation.sub_segments]

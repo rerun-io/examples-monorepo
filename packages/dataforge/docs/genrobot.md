@@ -96,7 +96,7 @@ statistics. The derived layers are built from it alone.
 | --- | --- |
 | `base` | Root `ViewCoordinates` (`RIGHT_HAND_Z_UP`) and the COCO-133 annotation context; `rig_00` (`das_ego`, `reference = imu_00`) with temporal `world_T_rig`; six cameras; `imu_00`; `/frames`; `task/instruction` |
 | `pose` | `world/gt/coco133_xyz`; `world/gt/body/smplx22` with its own annotation context; per hand `wrist`, `confidence`, `mano` (`betas`, `global_orient_rotmat`, `hand_pose_rotmat`, `global_transl`), `quality` (`is_valid`, `reproj_loss`, `bbox_touches_edge`) |
-| `actions` | `task/actions/coarse` (segments) and `task/actions/fine` (sub-segments) as active-label documents; every field as `property:actions:*` |
+| `actions` | `task/actions/coarse` (segments) and `task/actions/fine` (sub-segments) as `StateChange` tracks: one state per lane, an empty state where no label is active; every field as `property:actions:*` |
 | `projections` | per camera `pinhole/coco133_uv_projected` and `pinhole/smplx22_uv_projected` |
 | `hand_mesh` | per hand `world/gt/hands/<side>/mesh`, MANO skinned per frame |
 
@@ -156,8 +156,8 @@ are fisheye, so their panes show the projected 2D and leave out `coco133_xyz`, w
 `Pinhole` would draw through the wrong projection.
 
 Default blueprint: the 3D view on the world, with an upright three-quarter eye on the wearer, over
-the task and the current fine action; the six cameras on the right in a two-column grid, in yaw
-order. Table card: the wearer in 3D without video, beside camera2.
+the task and a state timeline of the coarse and fine actions (hover a segment for its full label and
+frames); the six cameras on the right in a two-column grid, in yaw order. Table card: the wearer in 3D without video, beside camera2.
 
 ## Differences from simplecv
 

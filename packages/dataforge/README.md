@@ -329,7 +329,7 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-genro
 | --- | --- |
 | `base` | Six H.264 fisheye video streams with per-frame exposure, the double-sphere calibration and `rig_T_cam`, `world_T_rig` from the VIO, the IMU, `/frames`, the task instruction, `capture` and `episode` properties |
 | `pose` | COCO-133 from the body22 positions and both hands' 21 bones, the body22 skeleton, wrists, MANO parameters and the shipped hand flags |
-| `actions` | Coarse segments and fine sub-segments as active-label tracks |
+| `actions` | Coarse segments and fine sub-segments as `StateChange` tracks (one lane each in a `StateTimelineView`) |
 | `projections` | COCO-133 and body22 projected through each camera's double-sphere lens |
 | `hand_mesh` | MANO meshes, written per hand only when its joints land within 2 mm of the shipped bones |
 
