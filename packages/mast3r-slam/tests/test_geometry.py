@@ -1,10 +1,12 @@
 """Unit tests for mast3r_slam.geometry pure functions."""
 
+import pytest
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
-from mast3r_slam.geometry import backproject, get_pixel_coords, point_to_dist, point_to_ray_dist, project_calib, skew_sym
+from mast3r_slam.ops.geometry import backproject, constrain_points_to_ray, get_pixel_coords, point_to_dist, point_to_ray_dist, project_calib, skew_sym
+from mast3r_slam.types import TrackingConfig
 
 
 def test_skew_sym_antisymmetric() -> None:
@@ -97,3 +99,29 @@ def test_get_pixel_coords_values() -> None:
     torch.testing.assert_close(uv[0, 0, 2], torch.tensor([2.0, 0.0]))
     # Bottom-left: (0, 1)
     torch.testing.assert_close(uv[0, 1, 0], torch.tensor([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("b", [1, 3])  # tracking passes one frame's points ([1, h*w, 3]), the factor graph every keyframe's
+def test_constrain_points_to_ray_moves_flattened_points_onto_their_pixel_rays_at_their_depth(b: int) -> None:
+    h, w = 2, 3
+    K: Float[Tensor, "3 3"] = torch.tensor([[100.0, 0.0, 1.0], [0.0, 120.0, 0.5], [0.0, 0.0, 1.0]])
+    X: Float[Tensor, "b hw 3"] = torch.rand(b, h * w, 3) + 0.5
+
+    constrained: Float[Tensor, "b hw 3"] = constrain_points_to_ray((h, w), X, K)
+
+    u: Float[Tensor, "hw"] = torch.tensor([0.0, 1.0, 2.0, 0.0, 1.0, 2.0])  # row-major pixels of a 2 x 3 image
+    v: Float[Tensor, "hw"] = torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+    z: Float[Tensor, "b hw"] = X[..., 2]
+    torch.testing.assert_close(constrained, torch.stack(((u - 1.0) / 100.0 * z, (v - 0.5) / 120.0 * z, z), dim=-1))
+
+
+def test_project_calib_border_is_the_tracking_configs_pixel_count() -> None:
+    # TrackingConfig.pixel_border is an int (-10 keeps points up to 10 px outside the image); a positive border trims.
+    K: Float[Tensor, "3 3"] = torch.tensor([[100.0, 0.0, 50.0], [0.0, 100.0, 40.0], [0.0, 0.0, 1.0]])
+    P: Float[Tensor, "3 3"] = torch.tensor([[-0.55, 0.0, 1.0], [-0.45, 0.0, 1.0], [0.0, 0.0, 1.0]])  # u = -5, 5, 50
+
+    widened = project_calib(P, K, (80, 100), border=TrackingConfig().pixel_border)
+    trimmed = project_calib(P, K, (80, 100), border=10)
+
+    assert widened[-1].squeeze(-1).tolist() == [True, True, True]
+    assert trimmed[-1].squeeze(-1).tolist() == [False, False, True]

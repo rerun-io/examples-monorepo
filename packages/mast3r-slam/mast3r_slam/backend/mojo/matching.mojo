@@ -1,73 +1,42 @@
-"""Mojo matching kernels used by the MASt3R-SLAM frontend.
+"""Matching kernels of the MASt3R-SLAM frontend: a Mojo port of matching_kernels.cu (§3.1-3.2 of arXiv 2412.12392).
 
-This file is a **Mojo port of matching_kernels.cu** — the CUDA kernels that
-implement the frontend correspondence pipeline from §3.1–3.2 of the MASt3R-SLAM
-paper (arXiv 2412.12392).
+Two stages, one thread per query point:
+  1. `iter_proj_kernel`: Levenberg-Marquardt search over the pixel (u, v) of image i whose ray, bilinearly sampled from
+     the ray field, best aligns with a target 3D direction from image j.
+  2. `refine_matches_kernel_f16*`: coarse-to-fine grid search in descriptor space around that pixel.
 
-The paper's frontend establishes dense correspondences between pairs of keyframes
-in two stages:
-
-  1. **Iterative projection** (`iter_proj_kernel`):
-     Given a 3D point from view j, find the pixel in view i whose ray best aligns
-     with it. This is a per-point Levenberg-Marquardt (LM) optimisation over 2D
-     pixel coordinates — conceptually an inverse camera projection using the
-     MASt3R ray field instead of a parametric camera model.
-
-  2. **Descriptor refinement** (`refine_matches_kernel`):
-     After the projective search gives an approximate pixel, do a local
-     grid search in descriptor space to snap to the best-matching pixel within
-     a small neighbourhood. This corrects for ray-field noise and discretisation.
-
-Both stages are embarrassingly parallel — each thread handles one query point.
-No shared memory or inter-thread communication is needed within a block (except
-for the optimised cached variant that preloads query descriptors).
-
-Tensor layouts
---------------
-All tensors are row-major (PyTorch default). The ray-field tensor `rays_img` has
-shape [batch, H, W, 9] where the 9 channels are:
-  [0..2] = ray direction (unnormalised)
-  [3..5] = ∂ray/∂u (gradient in the horizontal pixel direction)
-  [6..8] = ∂ray/∂v (gradient in the vertical pixel direction)
+Tensors are row-major (PyTorch). `rays_img` is [B, H, W, 9]: ray (0..2), d ray/du (3..5), d ray/dv (6..8).
 """
 
-from std.math import ceildiv, sqrt, min, max, floor
-from std.gpu import block_idx, block_dim, thread_idx, barrier
-from std.gpu.memory import AddressSpace
-from std.memory import stack_allocation
+from std.math import ceildiv, floor, max, min, sqrt
 from std.python import Python, PythonObject
-from std.utils.index import Index
-from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE
-from python_interop import (
-    get_cached_context_ptr,
-    torch_float16_ptr,
-    torch_float32_ptr,
-    torch_int64_ptr,
-    torch_uint8_ptr,
-)
+from std.sys import align_of
+from std.utils.numerics import min_finite
+from max.gpu import block_idx, global_idx, thread_idx
+from max.gpu.memory import AddressSpace
+from layout import Idx, TileTensor, row_major, stack_allocation
+
 from gn_kernels import Vec3
+from python_interop import cached_context, torch_ptr
 
-# ── Compile-time constants and layout aliases ─────────────────────────────────
-comptime RAYS_CHANNELS = 9  # ray(3) + ∂ray/∂u(3) + ∂ray/∂v(3)
+comptime RAYS_CHANNELS = 9
 
-# Tensor layout declarations: UNKNOWN_VALUE marks runtime-determined dimensions.
-# LayoutTensor uses these to provide multi-dim indexing without manual stride math.
-comptime RAYS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE, RAYS_CHANNELS)  # [B, H, W, 9]
-comptime PTS3_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 3)    # [B, N, 3]
-comptime PIX2_F32_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 2)  # [B, N, 2] float
-comptime PIX2_I64_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 2)  # [B, N, 2] int64
-comptime CONV_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE)        # [B, N]
-comptime DESC_REF_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE)  # [B, H, W, fdim]
-comptime DESC_QRY_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE)  # [B, N, fdim]
+comptime RaysLayout = type_of(row_major((0, 0, 0, Idx[RAYS_CHANNELS])))  # [B, H, W, 9]
+comptime Points3Layout = type_of(row_major((0, 0, Idx[3])))  # [B, N, 3]
+comptime Pixels2Layout = type_of(row_major((0, 0, Idx[2])))  # [B, N, 2]
+comptime PerPointLayout = type_of(row_major((0, 0)))  # [B, N]
+comptime DescRefLayout = type_of(row_major((0, 0, 0, 0)))  # [B, H, W, fdim]
+comptime DescQueryLayout = type_of(row_major((0, 0, 0)))  # [B, N, fdim]
+comptime DescRefStaticLayout[fdim: Int] = type_of(row_major((0, 0, 0, Idx[fdim])))
+comptime DescQueryStaticLayout[fdim: Int] = type_of(row_major((0, 0, Idx[fdim])))
 
+# Descriptor loads keep the scalar alignment of the old pointer loads: a torch view can start at any element, and
+# TileTensor.load would otherwise assume align_of[SIMD[float16, 8]].
+comptime F16_ALIGN = align_of[Float16]()
 
-# ── Block-size heuristics ─────────────────────────────────────────────────────
-# These choose the GPU block size based on the problem size. Smaller blocks
-# waste fewer threads when num_pts isn't a multiple of the block size; larger
-# blocks improve occupancy when there's plenty of work.
 
 def choose_iter_proj_block(num_pts: Int) -> Int:
-    """Pick block size for the iterative projection kernel."""
+    """Small blocks waste fewer threads on small problems, large blocks raise occupancy on large ones."""
     if num_pts <= 4096:
         return 16
     if num_pts <= 16384:
@@ -75,326 +44,234 @@ def choose_iter_proj_block(num_pts: Int) -> Int:
     return 128
 
 
-def choose_refine_block(num_pts: Int, fdim: Int) -> Int:
-    """Pick block size for the descriptor refinement kernel."""
+def choose_refine_block(num_pts: Int) -> Int:
     if num_pts <= 1024:
         return 8
     return 16
 
 
-# ─── GPU Kernel Helpers ───────────────────────────────────────────────────────
+# ── Kernel helpers ───────────────────────────────────────────────────────────
 
 
-@always_inline
-def bilinear_weights(du: Float32, dv: Float32) -> InlineArray[Float32, 4]:
-    """Compute bilinear interpolation weights from fractional pixel offsets.
-
-    Returns [w11, w12, w21, w22] = [du*dv, (1-du)*dv, du*(1-dv), (1-du)*(1-dv)].
-    Note: pixels are opposite the area weights (same convention as CUDA kernel).
-    """
-    var w = InlineArray[Float32, 4](fill=Float32(0.0))
-    w[0] = du * dv
-    w[1] = (1.0 - du) * dv
-    w[2] = du * (1.0 - dv)
-    w[3] = (1.0 - du) * (1.0 - dv)
-    return w^
+@inline(.always)
+def bilinear_weights(du: Float32, dv: Float32) -> SIMD[.float32, 4]:
+    """[du dv, (1-du) dv, du (1-dv), (1-du) (1-dv)]: each pixel gets the opposite area (as the CUDA kernel)."""
+    return SIMD[.float32, 4](du * dv, (1.0 - du) * dv, du * (1.0 - dv), (1.0 - du) * (1.0 - dv))
 
 
-@always_inline
-def normalize_ray(
-    r0: Float32, r1: Float32, r2: Float32,
-) -> Vec3:
-    """Normalize a 3D ray direction to unit length."""
+@inline(.always)
+def bilinear_sample(
+    rays_img: TileTensor[.float32, RaysLayout, ImmutAnyOrigin], b: Int, v: Int, u: Int, wt: SIMD[.float32, 4], ch: Int
+) -> Float32:
+    return (
+        wt[0] * rays_img[b, v + 1, u + 1, ch]
+        + wt[1] * rays_img[b, v + 1, u, ch]
+        + wt[2] * rays_img[b, v, u + 1, ch]
+        + wt[3] * rays_img[b, v, u, ch]
+    )
+
+
+@inline(.always)
+def normalize_ray(r0: Float32, r1: Float32, r2: Float32) -> Vec3:
     var r_inv: Float32 = 1.0 / sqrt(r0 * r0 + r1 * r1 + r2 * r2)
     return Vec3(r0 * r_inv, r1 * r_inv, r2 * r_inv)
 
 
-# ─── GPU Kernels ──────────────────────────────────────────────────────────────
+# ── Kernels ──────────────────────────────────────────────────────────────────
+
 
 def iter_proj_kernel(
-    rays_img: LayoutTensor[DType.float32, RAYS_LT, MutAnyOrigin],
-    pts_3d_norm: LayoutTensor[DType.float32, PTS3_LT, MutAnyOrigin],
-    p_init: LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin],
-    p_new: LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin],
-    converged: LayoutTensor[DType.uint8, CONV_LT, MutAnyOrigin],
-    h: Int,
-    w: Int,
-    num_pts: Int,
-    max_iter: Int,
+    rays_img: TileTensor[.float32, RaysLayout, ImmutAnyOrigin],
+    pts_3d_norm: TileTensor[.float32, Points3Layout, ImmutAnyOrigin],
+    p_init: TileTensor[.float32, Pixels2Layout, ImmutAnyOrigin],
+    p_new: TileTensor[.float32, Pixels2Layout, MutAnyOrigin],
+    converged: TileTensor[.uint8, PerPointLayout, MutAnyOrigin],
+    max_iter: Int32,
     lambda_init: Float32,
     cost_thresh: Float32,
 ):
-    """Levenberg-Marquardt iterative projection kernel.
-
-    Each thread processes one point: bilinear-interpolates rays at the current
-    pixel, normalises, computes error against the target 3D direction, builds a
-    2x2 LM system, solves for a pixel update, and accepts/rejects based on cost.
-
-    Conceptually this is the paper's local projective search from Fig. 2:
-    starting from an initial pixel, repeatedly adjust the pixel so the sampled
-    ray in image i aligns with the target 3D direction coming from image j.
-    """
-    var n: UInt = UInt(block_idx.x * block_dim.x + thread_idx.x)
-    var b: Int = Int(block_idx.y)
-
-    if n >= UInt(num_pts):
+    """Levenberg-Marquardt over one pixel per thread: sample and normalise the ray, solve the 2x2 system, keep the step if
+    the cost drops (the paper's projective search, Fig. 2)."""
+    var n = global_idx.x
+    var b = block_idx.y
+    if n >= Int(pts_3d_norm.dim[1]()):
         return
-    var ni: Int = Int(n)
+    var h = Int(rays_img.dim[1]())
+    var w = Int(rays_img.dim[2]())
 
-    # ── Load initial pixel and clamp to valid bilinear range ──
-    var u: Float32 = p_init[b, ni, 0][0]
-    var v: Float32 = p_init[b, ni, 1][0]
-    u = min(max(u, Float32(1.0)), Float32(w - 2))
-    v = min(max(v, Float32(1.0)), Float32(h - 2))
+    # min(max(..)) rather than clamp: a NaN step must land on the lower bound, as CUDA's fmin(fmax(..)) does.
+    var u = min(max(p_init[b, n, 0], Float32(1.0)), Float32(w - 2))
+    var v = min(max(p_init[b, n, 1], Float32(1.0)), Float32(h - 2))
+    var t0 = pts_3d_norm[b, n, 0]
+    var t1 = pts_3d_norm[b, n, 1]
+    var t2 = pts_3d_norm[b, n, 2]
+    var lam = lambda_init
 
-    # ── Load target point once (loop-invariant) ──
-    var t0: Float32 = pts_3d_norm[b, ni, 0][0]
-    var t1: Float32 = pts_3d_norm[b, ni, 1][0]
-    var t2: Float32 = pts_3d_norm[b, ni, 2][0]
-
-    var lam: Float32 = lambda_init
-
-    @always_inline
-    def _bsample(bi: Int, vi: Int, ui: Int, wt: InlineArray[Float32, 4], ch: Int) capturing -> Float32:
-        """Bilinear-sample one channel from rays_img via LayoutTensor indexing."""
-        return (
-            wt[0] * rays_img[bi, vi + 1, ui + 1, ch][0]
-            + wt[1] * rays_img[bi, vi + 1, ui, ch][0]
-            + wt[2] * rays_img[bi, vi, ui + 1, ch][0]
-            + wt[3] * rays_img[bi, vi, ui, ch][0]
-        )
-
-    for _i in range(max_iter):
-        # ── Bilinear interpolation at current pixel ──
-        var u11: Int = Int(floor(u))
-        var v11: Int = Int(floor(v))
+    for _ in range(max_iter):
+        var u11 = Int(floor(u))
+        var v11 = Int(floor(v))
         var wt = bilinear_weights(u - Float32(u11), v - Float32(v11))
-
-        # Interpolate ray (ch 0-2), gx (ch 3-5), gy (ch 6-8) via LayoutTensor
-        var ray = Vec3(_bsample(b, v11, u11, wt, 0), _bsample(b, v11, u11, wt, 1), _bsample(b, v11, u11, wt, 2))
-        var gx = Vec3(_bsample(b, v11, u11, wt, 3), _bsample(b, v11, u11, wt, 4), _bsample(b, v11, u11, wt, 5))
-        var gy = Vec3(_bsample(b, v11, u11, wt, 6), _bsample(b, v11, u11, wt, 7), _bsample(b, v11, u11, wt, 8))
-
-        # ── Normalize ray ──
+        var ray = Vec3(
+            bilinear_sample(rays_img, b, v11, u11, wt, 0),
+            bilinear_sample(rays_img, b, v11, u11, wt, 1),
+            bilinear_sample(rays_img, b, v11, u11, wt, 2),
+        )
+        var gx = Vec3(
+            bilinear_sample(rays_img, b, v11, u11, wt, 3),
+            bilinear_sample(rays_img, b, v11, u11, wt, 4),
+            bilinear_sample(rays_img, b, v11, u11, wt, 5),
+        )
+        var gy = Vec3(
+            bilinear_sample(rays_img, b, v11, u11, wt, 6),
+            bilinear_sample(rays_img, b, v11, u11, wt, 7),
+            bilinear_sample(rays_img, b, v11, u11, wt, 8),
+        )
         var r = normalize_ray(ray.x, ray.y, ray.z)
-
-        # ── Error and cost ──
         var e = Vec3(r.x - t0, r.y - t1, r.z - t2)
-        var cost: Float32 = e.squared_norm()
+        var cost = e.squared_norm()
 
-        # Build the tiny 2x2 LM system for pixel coordinates (u, v).
-        var A00: Float32 = gx.squared_norm() + lam
-        var A01: Float32 = gx.dot(gy)
-        var A11: Float32 = gy.squared_norm() + lam
-        var b0: Float32 = -e.dot(gx)
-        var b1: Float32 = -e.dot(gy)
-
-        # ── Solve 2x2 system via Cramer's rule ──
+        # 2x2 LM system in (u, v), solved by Cramer's rule.
+        var A00 = gx.squared_norm() + lam
+        var A01 = gx.dot(gy)
+        var A11 = gy.squared_norm() + lam
+        var b0 = -e.dot(gx)
+        var b1 = -e.dot(gy)
         var det_inv: Float32 = 1.0 / (A00 * A11 - A01 * A01)
-        var delta_u: Float32 = det_inv * (A11 * b0 - A01 * b1)
-        var delta_v: Float32 = det_inv * (-A01 * b0 + A00 * b1)
+        var delta_u = det_inv * (A11 * b0 - A01 * b1)
+        var delta_v = det_inv * (-A01 * b0 + A00 * b1)
+        var u_new = min(max(u + delta_u, Float32(1.0)), Float32(w - 2))
+        var v_new = min(max(v + delta_v, Float32(1.0)), Float32(h - 2))
 
-        var u_new: Float32 = min(max(u + delta_u, Float32(1.0)), Float32(w - 2))
-        var v_new: Float32 = min(max(v + delta_v, Float32(1.0)), Float32(h - 2))
-
-        # ── Evaluate new cost at candidate position ──
-        var u11n: Int = Int(floor(u_new))
-        var v11n: Int = Int(floor(v_new))
+        # Cost at the candidate pixel.
+        var u11n = Int(floor(u_new))
+        var v11n = Int(floor(v_new))
         var wtn = bilinear_weights(u_new - Float32(u11n), v_new - Float32(v11n))
-
-        var nr_raw = Vec3(_bsample(b, v11n, u11n, wtn, 0), _bsample(b, v11n, u11n, wtn, 1), _bsample(b, v11n, u11n, wtn, 2))
-        var nr = normalize_ray(nr_raw.x, nr_raw.y, nr_raw.z)
-
+        var nr = normalize_ray(
+            bilinear_sample(rays_img, b, v11n, u11n, wtn, 0),
+            bilinear_sample(rays_img, b, v11n, u11n, wtn, 1),
+            bilinear_sample(rays_img, b, v11n, u11n, wtn, 2),
+        )
         var ne = Vec3(nr.x - t0, nr.y - t1, nr.z - t2)
-        var new_cost: Float32 = ne.squared_norm()
+        var new_cost = ne.squared_norm()
 
-        # ── Accept/reject step (Levenberg-Marquardt) ──
         if new_cost < cost:
             u = u_new
             v = v_new
             lam *= 0.1
-            converged[b, ni] = UInt8(1) if new_cost < cost_thresh else UInt8(0)
+            converged[b, n] = UInt8(1) if new_cost < cost_thresh else UInt8(0)
         else:
             lam *= 10.0
-            converged[b, ni] = UInt8(1) if cost < cost_thresh else UInt8(0)
+            converged[b, n] = UInt8(1) if cost < cost_thresh else UInt8(0)
 
-    # ── Write final pixel ──
-    p_new[b, ni, 0] = u
-    p_new[b, ni, 1] = v
+    p_new[b, n, 0] = u
+    p_new[b, n, 1] = v
 
 
 def refine_matches_kernel_f16(
-    # D11/D21 use UnsafePointer because the inner dot product needs
-    # ptr.load[width=8](offset) for SIMD-vectorized access. Mojo's safe
-    # pointer types (Pointer, OwnedPointer) only support single values,
-    # and LayoutTensor doesn't support multi-dim + SIMD width loads.
-    D11: UnsafePointer[Float16, MutAnyOrigin],
-    D21: UnsafePointer[Float16, MutAnyOrigin],
-    p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
-    p1_new: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
-    h: Int,
-    w: Int,
-    num_pts: Int,
-    fdim: Int,
-    radius: Int,
-    dilation_max: Int,
+    D11: TileTensor[.float16, DescRefLayout, ImmutAnyOrigin],
+    D21: TileTensor[.float16, DescQueryLayout, ImmutAnyOrigin],
+    p1: TileTensor[.int64, Pixels2Layout, ImmutAnyOrigin],
+    p1_new: TileTensor[.int64, Pixels2Layout, MutAnyOrigin],
+    radius: Int32,
+    dilation_max: Int32,
 ):
-    """Descriptor-based match refinement kernel (float16 path).
-
-    Reads float16 descriptors via raw pointer (for SIMD-8 loads),
-    accumulates dot products in float32 for precision.
-    """
-    var n: UInt = UInt(block_idx.x * block_dim.x + thread_idx.x)
-    var b: Int = Int(block_idx.y)
-
-    if n >= UInt(num_pts):
+    """Coarse-to-fine descriptor search, any radius / dilation / fdim; float32 dot products of float16 descriptors."""
+    var n = global_idx.x
+    var b = block_idx.y
+    if n >= Int(p1.dim[1]()):
         return
-    var ni: Int = Int(n)
+    var h = Int(D11.dim[1]())
+    var w = Int(D11.dim[2]())
+    var fdim = Int(D11.dim[3]())
+    var vec_end = fdim - fdim % 8
 
-    var d11_stride_b: Int = h * w * fdim
-    var d11_stride_v: Int = w * fdim
-    var d21_stride_b: Int = num_pts * fdim
-
-    var u0: Int = Int(p1[b, ni, 0])
-    var v0: Int = Int(p1[b, ni, 1])
-    var d21_base: Int = b * d21_stride_b + ni * fdim
-
-    var max_score: Float32 = -3.4028235e+38
-    var u_new: Int = u0
-    var v_new: Int = v0
-
-    for d in range(dilation_max, 0, -1):
-        var rd: Int = radius * d
-        var diam: Int = 2 * rd + 1
-        var i: Int = 0
-        while i < diam:
-            var j: Int = 0
-            while j < diam:
-                var u_cand: Int = u0 - rd + i
-                var v_cand: Int = v0 - rd + j
-
+    var u0 = Int(p1[b, n, 0])
+    var v0 = Int(p1[b, n, 1])
+    var max_score = min_finite[DType.float32]()
+    var u_new = u0
+    var v_new = v0
+    for d in range(Int(dilation_max), 0, -1):
+        var rd = Int(radius) * d
+        var diam = 2 * rd + 1
+        for i in range(0, diam, d):
+            for j in range(0, diam, d):
+                var u_cand = u0 - rd + i
+                var v_cand = v0 - rd + j
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
-                    # SIMD-8 vectorized dot product (8 × f16 = 128 bits)
                     var score: Float32 = 0.0
-                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
-                    var k: Int = 0
-                    while k + 8 <= fdim:
-                        var v21 = D21.load[width=8](d21_base + k)
-                        var v11 = D11.load[width=8](d11_base + k)
-                        score += (v21.cast[DType.float32]() * v11.cast[DType.float32]()).reduce_add()
-                        k += 8
-                    while k < fdim:
-                        score += Float32(D21[d21_base + k]) * Float32(D11[d11_base + k])
-                        k += 1
-
+                    for k in range(0, vec_end, 8):
+                        var v21 = D21.load[width=8, alignment=F16_ALIGN]((b, n, k))
+                        var v11 = D11.load[width=8, alignment=F16_ALIGN]((b, v_cand, u_cand, k))
+                        score += (v21.cast[.float32]() * v11.cast[.float32]()).reduce_add()
+                    for k in range(vec_end, fdim):
+                        score += Float32(D21[b, n, k]) * Float32(D11[b, v_cand, u_cand, k])
                     if score > max_score:
                         max_score = score
                         u_new = u_cand
                         v_new = v_cand
-
-                j += d
-            i += d
-
         u0 = u_new
         v0 = v_new
 
-    p1_new[b, ni, 0] = Int64(u_new)
-    p1_new[b, ni, 1] = Int64(v_new)
+    p1_new[b, n, 0] = Int64(u_new)
+    p1_new[b, n, 1] = Int64(v_new)
 
 
-def refine_matches_kernel_f16_cached[
-    FDIM: Int,
-    BLOCK_SIZE: Int,
-](
-    # D11/D21 use UnsafePointer: SIMD load[width=8] requires array-like pointer
-    # access. Mojo's safe pointer types only support single values.
-    D11: UnsafePointer[Float16, MutAnyOrigin],
-    D21: UnsafePointer[Float16, MutAnyOrigin],
-    p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
-    p1_new: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
-    h: Int,
-    w: Int,
-    num_pts: Int,
+def refine_matches_kernel_f16_cached[FDIM: Int, BLOCK_SIZE: Int](
+    D11: TileTensor[.float16, DescRefStaticLayout[FDIM], ImmutAnyOrigin],
+    D21: TileTensor[.float16, DescQueryStaticLayout[FDIM], ImmutAnyOrigin],
+    p1: TileTensor[.int64, Pixels2Layout, ImmutAnyOrigin],
+    p1_new: TileTensor[.int64, Pixels2Layout, MutAnyOrigin],
 ):
-    """Specialized f16 refinement kernel for the common radius=2, dilation=2 case.
-
-    Fast path for MASt3R-SLAM's default config (16- or 128-dim descriptors in
-    half precision). Caches each thread's query descriptor in shared memory,
-    compile-time-unrolls the inner dot product.
-    """
-    var n: UInt = UInt(block_idx.x * block_dim.x + thread_idx.x)
-    var b: Int = Int(block_idx.y)
-
-    if n >= UInt(num_pts):
-        return
-    var ni: Int = Int(n)
-
+    """The default MASt3R-SLAM case (radius 2, dilation 2): static fdim, unrolled dot product, and the query descriptor
+    read once into shared memory."""
+    comptime assert FDIM % 8 == 0, "FDIM must be a multiple of 8"
     comptime CHUNKS = FDIM // 8
+    var n = global_idx.x
+    var b = block_idx.y
+    if n >= Int(p1.dim[1]()):
+        return
+    var h = Int(D11.dim[1]())
+    var w = Int(D11.dim[2]())
 
-    var q_shared = stack_allocation[
-        BLOCK_SIZE * CHUNKS,
-        SIMD[DType.float16, 8],
-        address_space=AddressSpace.SHARED,
-    ]()
-
-    var d11_stride_b: Int = h * w * FDIM
-    var d11_stride_v: Int = w * FDIM
-    var d21_stride_b: Int = num_pts * FDIM
-
-    var u0: Int = Int(p1[b, ni, 0])
-    var v0: Int = Int(p1[b, ni, 1])
-    var d21_base: Int = b * d21_stride_b + ni * FDIM
-    var q_shared_base: Int = Int(thread_idx.x) * CHUNKS
-
-    # Cache query descriptor in shared memory (one load per thread)
+    # Each thread writes and reads only its own row, so no barrier (threads past num_pts have already returned).
+    var q_shared = stack_allocation[.float16, address_space=AddressSpace.SHARED, alignment=align_of[SIMD[.float16, 8]]()](
+        row_major[BLOCK_SIZE, FDIM]()
+    )
+    var tid = thread_idx.x
     comptime for chunk in range(CHUNKS):
-        q_shared[q_shared_base + chunk] = D21.load[width=8](
-            d21_base + chunk * 8
-        )
-    barrier()
+        q_shared.store((tid, chunk * 8), D21.load[width=8, alignment=F16_ALIGN]((b, n, chunk * 8)))
 
-    var max_score: Float32 = -3.4028235e+38
-    var u_new: Int = u0
-    var v_new: Int = v0
-
+    var u0 = Int(p1[b, n, 0])
+    var v0 = Int(p1[b, n, 1])
+    var max_score = min_finite[DType.float32]()
+    var u_new = u0
+    var v_new = v0
     for d in range(2, 0, -1):
-        var rd: Int = 2 * d
-        var diam: Int = 2 * rd + 1
-        var i: Int = 0
-        while i < diam:
-            var j: Int = 0
-            while j < diam:
-                var u_cand: Int = u0 - rd + i
-                var v_cand: Int = v0 - rd + j
-
+        var rd = 2 * d
+        var diam = 2 * rd + 1
+        for i in range(0, diam, d):
+            for j in range(0, diam, d):
+                var u_cand = u0 - rd + i
+                var v_cand = v0 - rd + j
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
                     var score: Float32 = 0.0
-                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * FDIM
                     comptime for chunk in range(CHUNKS):
-                        var q = q_shared[q_shared_base + chunk]
-                        var v11 = D11.load[width=8](
-                            d11_base + chunk * 8
-                        )
-                        score += (
-                            q.cast[DType.float32]() * v11.cast[DType.float32]()
-                        ).reduce_add()
-
+                        var q = q_shared.load[width=8]((tid, chunk * 8))
+                        var v11 = D11.load[width=8, alignment=F16_ALIGN]((b, v_cand, u_cand, chunk * 8))
+                        score += (q.cast[.float32]() * v11.cast[.float32]()).reduce_add()
                     if score > max_score:
                         max_score = score
                         u_new = u_cand
                         v_new = v_cand
-
-                j += d
-            i += d
-
         u0 = u_new
         v0 = v_new
 
-    p1_new[b, ni, 0] = Int64(u_new)
-    p1_new[b, ni, 1] = Int64(v_new)
+    p1_new[b, n, 0] = Int64(u_new)
+    p1_new[b, n, 1] = Int64(v_new)
 
 
-# ─── Python-facing wrapper functions ──────────────────────────────────────────
+# ── Python entry points (same signatures as mast3r_slam._backends) ────────────
+
 
 def iter_proj_py(
     rays_img_obj: PythonObject,
@@ -404,90 +281,35 @@ def iter_proj_py(
     lambda_init_obj: PythonObject,
     cost_thresh_obj: PythonObject,
 ) raises -> PythonObject:
-    """Drop-in replacement for mast3r_slam_backends.iter_proj.
-
-    Python owns tensor allocation and shape handling; Mojo owns the hot inner
-    loop that updates one pixel hypothesis per query point.
-    """
+    """Returns (p_new [B, N, 2] float32, converged [B, N] bool)."""
     var torch = Python.import_module("torch")
+    var rays_img = rays_img_obj.contiguous()
+    var pts_3d_norm = pts_3d_norm_obj.contiguous()
+    var p_init = p_init_obj.contiguous()
+    var batch = Int(py=rays_img.shape[0])
+    var h = Int(py=rays_img.shape[1])
+    var w = Int(py=rays_img.shape[2])
+    var num_pts = Int(py=pts_3d_norm.shape[1])
 
-    # Ensure inputs are contiguous
-    var rays_img: PythonObject = rays_img_obj.contiguous()
-    var pts_3d_norm: PythonObject = pts_3d_norm_obj.contiguous()
-    var p_init: PythonObject = p_init_obj.contiguous()
+    # The kernel writes every element. torch stores bool as one byte, so it writes 0/1 straight into a bool tensor.
+    var p_new = torch.empty(Python.list(batch, num_pts, 2), device=rays_img.device, dtype=torch.float32)
+    var converged = torch.empty(Python.list(batch, num_pts), device=rays_img.device, dtype=torch.bool)
 
-    # Extract shapes
-    var batch: Int = Int(py=rays_img.shape[0])
-    var h: Int = Int(py=rays_img.shape[1])
-    var w: Int = Int(py=rays_img.shape[2])
-    var num_pts: Int = Int(py=pts_3d_norm.shape[1])
-    var max_iter: Int = Int(py=max_iter_obj)
-    var lambda_init: Float64 = Float64(py=lambda_init_obj)
-    var cost_thresh: Float64 = Float64(py=cost_thresh_obj)
-
-    # No torch.cuda.synchronize() — CUDA stream ordering handles dependencies.
-
-    # Allocate output tensors via torch.empty (kernel writes all positions)
-    var p_new: PythonObject = torch.empty(
-        Python.list(batch, num_pts, 2),
-        device=rays_img.device,
-        dtype=torch.float32,
-    )
-    # Allocate directly as bool — PyTorch stores bool as uint8 internally,
-    # so the kernel can write UInt8 (0/1) to it without a .to(bool) cast.
-    var converged: PythonObject = torch.empty(
-        Python.list(batch, num_pts),
-        device=rays_img.device,
-        dtype=torch.bool,
-    )
-
-    # Wrap raw PyTorch pointers in LayoutTensors with runtime shapes.
-    # UnsafePointer is unavoidable at the torch bridge; LayoutTensor makes the
-    # kernel code safe and eliminates manual stride arithmetic.
-    var rays_lt = LayoutTensor[DType.float32, RAYS_LT, MutAnyOrigin](
-        torch_float32_ptr(rays_img),
-        RuntimeLayout[RAYS_LT].row_major(Index(batch, h, w, RAYS_CHANNELS)),
-    )
-    var pts_lt = LayoutTensor[DType.float32, PTS3_LT, MutAnyOrigin](
-        torch_float32_ptr(pts_3d_norm),
-        RuntimeLayout[PTS3_LT].row_major(Index(batch, num_pts, 3)),
-    )
-    var pinit_lt = LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin](
-        torch_float32_ptr(p_init),
-        RuntimeLayout[PIX2_F32_LT].row_major(Index(batch, num_pts, 2)),
-    )
-    var pnew_lt = LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin](
-        torch_float32_ptr(p_new),
-        RuntimeLayout[PIX2_F32_LT].row_major(Index(batch, num_pts, 2)),
-    )
-    var conv_lt = LayoutTensor[DType.uint8, CONV_LT, MutAnyOrigin](
-        torch_uint8_ptr(converged),
-        RuntimeLayout[CONV_LT].row_major(Index(batch, num_pts)),
-    )
-
-    var ctx_ptr = get_cached_context_ptr()
-    var block_size: Int = choose_iter_proj_block(num_pts)
-    var num_blocks_x: Int = ceildiv(num_pts, block_size)
-    ctx_ptr[].enqueue_function[iter_proj_kernel](
-        rays_lt,
-        pts_lt,
-        pinit_lt,
-        pnew_lt,
-        conv_lt,
-        h,
-        w,
-        num_pts,
-        max_iter,
-        Float32(lambda_init),
-        Float32(cost_thresh),
-        grid_dim=(num_blocks_x, batch),
+    var block_size = choose_iter_proj_block(num_pts)
+    cached_context()[].enqueue_function[iter_proj_kernel](
+        TileTensor(torch_ptr[.float32](rays_img), row_major((batch, h, w, Idx[RAYS_CHANNELS]))),
+        TileTensor(torch_ptr[.float32](pts_3d_norm), row_major((batch, num_pts, Idx[3]))),
+        TileTensor(torch_ptr[.float32](p_init), row_major((batch, num_pts, Idx[2]))),
+        TileTensor(torch_ptr[.float32](p_new), row_major((batch, num_pts, Idx[2]))),
+        TileTensor(torch_ptr[.uint8](converged), row_major((batch, num_pts))),
+        Int32(Int(py=max_iter_obj)),
+        Float32(py=lambda_init_obj),
+        Float32(py=cost_thresh_obj),
+        grid_dim=(ceildiv(num_pts, block_size), batch),
         block_dim=block_size,
     )
-    # Device-wide sync to ensure Mojo's kernel completes before PyTorch's
-    # caching allocator can recycle the output buffer on a subsequent call.
-    Python.import_module("torch").cuda.synchronize()
-    # PyTorch ops on the same default stream will wait automatically.
-
+    # Device-wide sync: torch's caching allocator must not recycle the outputs before the kernel is done.
+    torch.cuda.synchronize()
     return Python.tuple(p_new, converged)
 
 
@@ -498,97 +320,57 @@ def refine_matches_py(
     radius_obj: PythonObject,
     dilation_max_obj: PythonObject,
 ) raises -> PythonObject:
-    """Drop-in replacement for mast3r_slam_backends.refine_matches.
-
-    Dispatches to one of three kernel variants based on dtype and parameters:
-      1. `refine_matches_kernel_f16_cached` — fast path for f16, radius=2, dilation=2
-         with compile-time-specialised fdim (16 or 128).
-      2. `refine_matches_kernel_f16` — generic f16 path for other configurations.
-      3. `refine_matches_kernel` — float32 fallback (casts from any other dtype).
-
-    All variants implement the same algorithm: coarse-to-fine local descriptor
-    search centred on the projective-search result.
-
-    Returns a tuple containing the refined pixel locations tensor.
-    """
+    """Returns (p1_new [B, N, 2] int64,). Descriptors are searched as float16 (the pipeline passes .half())."""
     var torch = Python.import_module("torch")
+    var p1 = p1_obj.contiguous()
+    var D11 = D11_obj.contiguous().half()
+    var D21 = D21_obj.contiguous().half()
+    var batch = Int(py=D11.shape[0])
+    var h = Int(py=D11.shape[1])
+    var w = Int(py=D11.shape[2])
+    var fdim = Int(py=D11.shape[3])
+    var num_pts = Int(py=p1.shape[1])
+    var radius = Int(py=radius_obj)
+    var dilation_max = Int(py=dilation_max_obj)
 
-    var p1: PythonObject = p1_obj.contiguous()
-
-    # Shapes from original (possibly half) inputs
-    var batch: Int = Int(py=D11_obj.shape[0])
-    var h: Int = Int(py=D11_obj.shape[1])
-    var w: Int = Int(py=D11_obj.shape[2])
-    var fdim: Int = Int(py=D11_obj.shape[3])
-    var num_pts: Int = Int(py=p1.shape[1])
-    var radius: Int = Int(py=radius_obj)
-    var dilation_max: Int = Int(py=dilation_max_obj)
-
-    # Allocate output
-    var p1_new: PythonObject = torch.empty(
-        Python.list(batch, num_pts, 2),
-        device=p1.device,
-        dtype=p1.dtype,
-    )
-
-    # Wrap pixel tensors in LayoutTensors — these are passed directly to the kernel.
-    # Descriptor pointers (D11, D21) stay as UnsafePointer for SIMD load[width=N].
-    var p1_lt = LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin](
-        torch_int64_ptr(p1),
-        RuntimeLayout[PIX2_I64_LT].row_major(Index(batch, num_pts, 2)),
-    )
-    var p1_new_lt = LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin](
-        torch_int64_ptr(p1_new),
-        RuntimeLayout[PIX2_I64_LT].row_major(Index(batch, num_pts, 2)),
-    )
-
-    var ctx_ptr = get_cached_context_ptr()
-    var block_size: Int = choose_refine_block(num_pts, fdim)
-    var num_blocks_x: Int = ceildiv(num_pts, block_size)
-
-    # The production pipeline always passes .half() descriptors. We only
-    # support f16 — casting to f16 here if needed for robustness.
-    var D11: PythonObject = D11_obj.contiguous().half()
-    var D21: PythonObject = D21_obj.contiguous().half()
-    var d11_uptr = torch_float16_ptr(D11)
-    var d21_uptr = torch_float16_ptr(D21)
-
-    # Specialize the hot MASt3R-SLAM path so the compiler can unroll the
-    # inner dot product and we only read each query descriptor once.
+    var p1_new = torch.empty(Python.list(batch, num_pts, 2), device=p1.device, dtype=p1.dtype)
+    var p1_t = TileTensor(torch_ptr[.int64](p1), row_major((batch, num_pts, Idx[2])))
+    var p1_new_t = TileTensor(torch_ptr[.int64](p1_new), row_major((batch, num_pts, Idx[2])))
+    var ctx = cached_context()
+    var block_size = choose_refine_block(num_pts)
+    var grid = (ceildiv(num_pts, block_size), batch)
+    # The hot MASt3R-SLAM configurations get a kernel specialised on fdim and the block size.
     if radius == 2 and dilation_max == 2 and block_size == 8 and fdim == 16:
         comptime kernel = refine_matches_kernel_f16_cached[16, 8]
-        ctx_ptr[].enqueue_function[kernel](
-            d11_uptr,
-            d21_uptr,
-            p1_lt,
-            p1_new_lt,
-            h, w, num_pts,
-            grid_dim=(num_blocks_x, batch),
+        ctx[].enqueue_function[kernel](
+            TileTensor(torch_ptr[.float16](D11), row_major((batch, h, w, Idx[16]))),
+            TileTensor(torch_ptr[.float16](D21), row_major((batch, num_pts, Idx[16]))),
+            p1_t,
+            p1_new_t,
+            grid_dim=grid,
             block_dim=block_size,
         )
     elif radius == 2 and dilation_max == 2 and block_size == 16 and fdim == 128:
         comptime kernel = refine_matches_kernel_f16_cached[128, 16]
-        ctx_ptr[].enqueue_function[kernel](
-            d11_uptr,
-            d21_uptr,
-            p1_lt,
-            p1_new_lt,
-            h, w, num_pts,
-            grid_dim=(num_blocks_x, batch),
+        ctx[].enqueue_function[kernel](
+            TileTensor(torch_ptr[.float16](D11), row_major((batch, h, w, Idx[128]))),
+            TileTensor(torch_ptr[.float16](D21), row_major((batch, num_pts, Idx[128]))),
+            p1_t,
+            p1_new_t,
+            grid_dim=grid,
             block_dim=block_size,
         )
     else:
-        ctx_ptr[].enqueue_function[refine_matches_kernel_f16](
-            d11_uptr,
-            d21_uptr,
-            p1_lt,
-            p1_new_lt,
-            h, w, num_pts, fdim, radius, dilation_max,
-            grid_dim=(num_blocks_x, batch),
+        ctx[].enqueue_function[refine_matches_kernel_f16](
+            TileTensor(torch_ptr[.float16](D11), row_major((batch, h, w, fdim))),
+            TileTensor(torch_ptr[.float16](D21), row_major((batch, num_pts, fdim))),
+            p1_t,
+            p1_new_t,
+            Int32(radius),
+            Int32(dilation_max),
+            grid_dim=grid,
             block_dim=block_size,
         )
-
-    # Device-wide sync to ensure Mojo's kernel completes before PyTorch's
-    # caching allocator can recycle the output buffer on a subsequent call.
-    Python.import_module("torch").cuda.synchronize()
+    # Device-wide sync: torch's caching allocator must not recycle the output before the kernel is done.
+    torch.cuda.synchronize()
     return Python.tuple(p1_new)

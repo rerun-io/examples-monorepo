@@ -12,12 +12,12 @@ All Mojo-implemented kernel families are tested against the CUDA oracle:
   Tested at both float32 and float16 (the production path).
 
 - gauss_newton_rays: TESTED — full GN solve (linearise + Cholesky + retract).
-  The Mojo kernel handles linearisation (rays step) and pose retraction;
-  the Cholesky solve runs in PyTorch on both paths.
+  The production loop `mast3r_slam.ops.optim.gauss_newton_rays` runs the Mojo
+  step and retraction kernels and solves on the CPU; the oracle is the CUDA
+  extension's whole loop.
 
-- gauss_newton_points, gauss_newton_calib: NOT TESTED — not implemented in Mojo.
-  The Mojo wrappers delegate to the CUDA extension for these variants.
-  The Python routing in global_opt.py forces the CUDA backend directly.
+- gauss_newton_points, gauss_newton_calib: NOT TESTED — not implemented in Mojo;
+  the factor graph calls the CUDA extension for them.
 
 See also: tools/bench_kernels.py for throughput comparisons.
 """
@@ -28,6 +28,9 @@ import lietorch
 import pytest
 import torch
 from torch import Tensor
+
+from mast3r_slam.ops.optim import gauss_newton_rays
+from mast3r_slam.types import LocalOptConfig
 
 cuda_backends = pytest.importorskip("mast3r_slam._backends", reason="CUDA backends not built")
 mojo_backends = pytest.importorskip("mast3r_slam_mojo_backends", reason="Mojo backends not built")
@@ -279,22 +282,20 @@ def _make_representative_rays_inputs() -> tuple[
 
 
 def test_gauss_newton_rays_matches_cuda_on_representative_base_shape() -> None:
-    """Full GN solve: poses and increments should match CUDA within tolerance."""
+    """Full GN solve: the poses should match CUDA within tolerance."""
     twc, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh = (
         _make_representative_rays_inputs()
     )
 
     twc_cuda = twc.clone()
-    dx_cuda = cuda_backends.gauss_newton_rays(
+    cuda_backends.gauss_newton_rays(
         twc_cuda, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh
-    )[0]
+    )
     _sync()
 
     twc_mojo = twc.clone()
-    dx_mojo = mojo_backends.gauss_newton_rays(
-        (twc_mojo, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh)
-    )[0]
-    _sync()
+    cfg = LocalOptConfig(sigma_ray=sigma_ray, sigma_dist=sigma_dist, C_conf=c_thresh, Q_conf=q_thresh, max_iters=max_iter, delta_norm=delta_thresh)
+    gauss_newton_rays(twc_mojo, xs, cs, ii, jj, idx, valid, q, cfg)
 
-    assert torch.allclose(dx_mojo, dx_cuda, atol=POSE_ATOL, rtol=POSE_RTOL)
+    assert not torch.equal(twc_mojo, twc)  # the solve moved the free poses
     assert torch.allclose(twc_mojo, twc_cuda, atol=POSE_ATOL, rtol=POSE_RTOL)

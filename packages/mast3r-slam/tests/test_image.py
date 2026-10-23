@@ -4,7 +4,7 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
-from mast3r_slam.image import img_gradient
+from mast3r_slam.ops.matching import img_gradient
 
 
 def test_img_gradient_shape_preserved() -> None:
