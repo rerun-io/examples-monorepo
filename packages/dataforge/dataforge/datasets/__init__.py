@@ -8,6 +8,7 @@ from dataforge.datasets.aria_gen2_pilot import AriaGen2PilotConfig
 from dataforge.datasets.assembly101 import Assembly101Config
 from dataforge.datasets.base import DataforgeDatasetConfig
 from dataforge.datasets.epfl import EpflConfig
+from dataforge.datasets.genrobot import GenrobotConfig
 from dataforge.datasets.hocap import HocapConfig
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
 from dataforge.datasets.lamaria import LamariaConfig
@@ -19,7 +20,7 @@ from dataforge.datasets.umetrack import UmetrackConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), EpflConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), UmetrackConfig(), WildcapConfig())
+    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), EpflConfig(), GenrobotConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), UmetrackConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 

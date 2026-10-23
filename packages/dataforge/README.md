@@ -309,6 +309,33 @@ no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
 Each recording records the Hub commit it was built from as
 `property:capture:hf_revision`; the config defaults to a pinned commit and `--revision` accepts only a full SHA.
 
+### Gen-HumanWholeBody (genrobot)
+
+GenRobot's DAS-Ego corpus on the Hub (`genrobot2025/Gen-HumanWholeBody`, pinned commit):
+15,943 MCAPs, 8.8 TB, each one episode of a worn six-camera fisheye rig with VIO, IMU, an
+SMPL-X body22 skeleton, two MANO-tracked hands and task annotations. `download` writes the
+pinned listing only; `convert` fetches one MCAP at a time, verifies its sha256, writes the
+sidecar and five layers, and deletes the MCAP. The camera H.264 is passed through (one SPS flag
+cleared), so the base layer is about the size of the MCAP.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/home/pablo/exoego-data/genrobot-pilot/rrd   # local disk; copy to the NAS afterwards
+pixi run -e dataforge --frozen dataforge-download genrobot
+pixi run -e dataforge --frozen dataforge-convert genrobot --per-domain 2   # a stratified sample; --sequences <uuid> adds episodes
+pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-genrobot-sample genrobot
+```
+
+| Layer | Contents |
+| --- | --- |
+| `base` | Six H.264 fisheye video streams with per-frame exposure, the double-sphere calibration and `rig_T_cam`, `world_T_rig` from the VIO, the IMU, `/frames`, the task instruction, `capture` and `episode` properties |
+| `pose` | COCO-133 from the body22 positions and both hands' 21 bones, the body22 skeleton, wrists, MANO parameters and the shipped hand flags |
+| `actions` | Coarse segments and fine sub-segments as active-label tracks |
+| `projections` | COCO-133 and body22 projected through each camera's double-sphere lens |
+| `hand_mesh` | MANO meshes, written per hand only when its joints land within 2 mm of the shipped bones |
+
+The conventions (solved from the data: GenRobot documents none of them), the clocks and every
+shipped topic are in [docs/genrobot.md](docs/genrobot.md).
+
 ### Environment variables
 
 | variable | default | purpose |
