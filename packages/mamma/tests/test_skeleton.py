@@ -5,12 +5,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from mamma.landmarks.skeleton import SkeletonRegressor, body_models_available, load_skeleton_regressor, skeleton_strips
+from mamma.ops.skeleton import SkeletonRegressor, body_models_available, load_skeleton_regressor, skeleton_strips
 
 
 def test_body_model_loader_owns_missing_asset_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The skeleton seam reports the Pixi recovery task when SMPL-X assets are absent."""
-    monkeypatch.setattr("mamma.landmarks.skeleton.DEFAULT_BODY_MODELS_DIR", tmp_path)
+    monkeypatch.setattr("mamma.ops.skeleton.DEFAULT_BODY_MODELS_DIR", tmp_path)
     load_skeleton_regressor.cache_clear()
 
     assert not body_models_available()
