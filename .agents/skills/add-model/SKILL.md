@@ -3,15 +3,15 @@ name: add-model
 description: >
   Bring an upstream research model (stereo, mono depth, normals, pose, ...) into this monorepo:
   fork + pixify the upstream repo with a Rerun demo, then port the minimum into a package as a
-  typed, tested, reviewable PR stack that ends with pixel-verified Rerun output. Use when the user
-  says "add/port/bring in <model>", "fork and pixify <repo>", or "make <method> a predictor".
+  typed, tested, reviewable PR stack that ends with pixel-verified Rerun output and a verify-block card.
+  Use when the user says "add/port/bring in <model>", "fork and pixify <repo>", or "make <method> a predictor".
   Works from Claude Code and Codex; nothing here depends on runtime-specific tools.
 ---
 
 # Add a model to the monorepo
 
-Two phases, five gates. Phase 1 is skippable when a pixified fork already exists.
-Every phase reads one reference file; read it fully before starting that phase.
+Two phases, five gates, then the `verify-block` skill as the last step. Phase 1 is skippable when a pixified
+fork already exists. Every phase reads one reference file; read it fully before starting that phase.
 
 | Phase | Reference | Output |
 |---|---|---|
@@ -19,6 +19,7 @@ Every phase reads one reference file; read it fully before starting that phase.
 | 1. Fork + pixify | [references/fork-and-pixify.md](references/fork-and-pixify.md) | public fork with frozen `main`, `pixi` branch, `pixi run demo`, `NOTES.md` |
 | 2. Port | [references/port.md](references/port.md) | PR stack `1-vendor → 2-predictor → 3-typed (→ 4-app → 5-catalog)` |
 | Gates | [references/validate.md](references/validate.md) | equivalence test, reference number, dev tasks green, viewer pixel evidence |
+| 3. Verify (last step) | [../verify-block/SKILL.md](../verify-block/SKILL.md) | `VERIFY.toml` card, `<module>/verify.py`, property tests, band table + pre/post shots in the last PR |
 
 Worked examples with every gotcha hit so far: [references/example-liteanystereo.md](references/example-liteanystereo.md)
 (the run this skill was distilled from) and [references/example-fast-foundationstereo.md](references/example-fast-foundationstereo.md)
@@ -51,8 +52,9 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
   untouched in the fork; it is *owned* (typed, trimmed) only in the `3-typed` PR, with an equivalence test.
 - **Rerun output is validated with pixels**, not logs (`rerun-viewer-validation` skill): screenshots of the
   demo, the app, and the catalog tool; `--rr-config.headless` + `--rr-config.save` in shells without `DISPLAY`.
-- **Process hygiene.** Never `pkill -f`/`pgrep -f` a pattern that appears in the same command line
-  (kills the tool's shell, exit 144); use `pkill -x`, a saved PID, `fuser -k <port>/tcp`, or tmux sessions.
+- **Process hygiene.** Stop only what you started: its saved PID or process group (`kill -TERM -- -<pgid>`), then
+  check its port with `ss -ltn`. Never kill by name or port (`pkill`, `killall`, `fuser -k`: `pkill -x rerun` also
+  kills the shared catalog server), and never `pgrep -f` a pattern in your own command line (it matches your shell).
   Never start ad-hoc HTTP servers for artifacts; Gradio apps go through `tailscale serve --https`.
 - **Identities.** Forks live under the personal GitHub account (`GH_TOKEN=$(gh auth token --user pablovela5620) gh …`),
   monorepo PRs use the work account (`GH_TOKEN=$(gh auth token --user pablo-rerun) gh pr create …` — the active
@@ -127,3 +129,20 @@ When `forward()` reads an attribute the checkpoint lacks, A/B each candidate val
 ground truth (FFS `normalize`: True 0.48 % vs False 45 % bad1) — never pick by reading code alone.
 
 Grill the user on anything ambiguous above (batch the questions, give recommendations) before phase 1.
+
+## Last step — verify-block
+
+Every port ends with the repo skill [`verify-block`](../verify-block/SKILL.md). Read it fully; its rules bind here too.
+
+1. **Reference.** If the catalog has GT for the model's family (verify-block's GT-kind table), the graph tier is
+   a band against that GT (`reference = "gt"`). If it has none, the reference is the model's output at the tip of
+   `2-predictor`, where the model reproduces the fork's reference number (gate 2) (`reference = "pre-port"`).
+2. **Before `3-typed` edits anything:** commit `packages/<pkg>/VERIFY.toml` and `<module>/verify.py`, then run
+   `verify-pre` (`pre` + `pre2`) and take the `pre` shots. `3-typed` and every later PR must stay inside the band.
+3. **Card contents.** One `model` TestBlock per lane: `golden` for the upstream-equivalence and reference-number
+   tests (they read stored upstream data), `integration` for torch ↔ TensorRT parity (if an engine exists) and the
+   owned-outputs test. Add `types`/`op`/`node` TestBlocks for new Types, Ops or wrapper nodes, with hypothesis
+   properties. The GraphBlock's `run` drives the model's demo, catalog tool or graph on the case input, so all
+   three tiers exist.
+4. **Last PR.** Run `gate` and `tests-golden` (gate skips golden), then `verify` and `verify-full`; take the `post`
+   shots at the same times; write the PR body with verify-block's template: `Gate:` line, band table, pre/post shots.

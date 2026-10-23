@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="864" viewBox="0 0 1260 864" font-family="Inter, Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a94a6"/></marker></defs>
+<rect width="1260" height="864" fill="#ffffff"/>
+<text x="20" y="34" font-size="20" font-weight="700" fill="#1d2433">dagkit module map</text>
+<text x="245" y="34" font-size="13" fill="#5b6475">arrows = imports (down or sideways, never up; all import time.py); numbers = lines; 2661 non-test lines in dagkit/ (wc -l), cap 2,661</text>
+<text x="20" y="106" font-size="13" font-weight="600" fill="#5b6475">App / entry</text>
+<text x="20" y="218" font-size="13" font-weight="600" fill="#5b6475">Runners</text>
+<text x="20" y="330" font-size="13" font-weight="600" fill="#5b6475">Graph view</text>
+<text x="20" y="442" font-size="13" font-weight="600" fill="#5b6475">Graph</text>
+<text x="20" y="554" font-size="13" font-weight="600" fill="#5b6475">Sources / sinks</text>
+<text x="20" y="666" font-size="13" font-weight="600" fill="#5b6475">Contracts</text>
+<text x="20" y="778" font-size="13" font-weight="600" fill="#5b6475">Time</text>
+<path d="M925,692 C925,717 710,717 710,740" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M925,244 C925,325 710,325 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M925,244 C925,437 495,437 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,356 C710,381 710,381 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,356 C710,493 495,493 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,356 C710,437 388,437 388,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,356 C710,493 925,493 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M615,101.0 L592,101.0" stroke="#8a94a6" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M710,132 C710,213 710,213 710,292" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,132 C710,269 710,269 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,132 C710,381 495,381 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,132 C710,325 710,325 710,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M1140,132 C1140,325 710,325 710,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M1140,132 C1140,381 925,381 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M925,132 C925,213 710,213 710,292" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M830,101.0 L807,101.0" stroke="#8a94a6" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M925,132 C925,269 710,269 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M925,132 C925,381 495,381 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M925,132 C925,325 710,325 710,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M925,132 C925,381 925,381 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,132 C495,213 710,213 710,292" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,132 C495,269 710,269 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,132 C495,381 495,381 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,132 C495,157 495,157 495,180" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M1032,580 C1032,605 925,605 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M388,580 C388,605 495,605 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M482,549.0 L613,549.0" stroke="#8a94a6" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M388,580 C388,605 925,605 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,692 C495,717 710,717 710,740" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M805,549.0 L936,549.0" stroke="#8a94a6" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M710,580 C710,605 495,605 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,580 C710,605 925,605 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,468 C710,549 495,549 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M710,468 C710,493 388,493 388,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,244 C495,269 710,269 710,292" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,244 C495,325 710,325 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M495,244 C495,437 495,437 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M590,213.0 L828,213.0" stroke="#8a94a6" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M495,244 C495,381 388,381 388,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M375,101.0 L398,101.0" stroke="#8a94a6" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M280,132 C280,269 710,269 710,404" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M280,132 C280,381 495,381 495,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M280,132 C280,157 495,157 495,180" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M280,132 C280,325 388,325 388,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M280,132 C280,325 710,325 710,516" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<path d="M280,132 C280,381 925,381 925,628" fill="none" stroke="#b8c0cc" stroke-width="1.4" marker-end="url(#a)"/>
+<rect x="185" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="197" y="94" font-size="15" font-weight="700" fill="#1d2433">synthetic_demo.py</text>
+<text x="365" y="94" font-size="12" text-anchor="end" fill="#5b6475">125</text>
+<text x="197" y="116" font-size="11.5" fill="#3b4252">apis demo: helix graph</text>
+<rect x="400" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="412" y="94" font-size="15" font-weight="700" fill="#1d2433">app.py</text>
+<text x="580" y="94" font-size="12" text-anchor="end" fill="#5b6475">150</text>
+<text x="412" y="116" font-size="11.5" fill="#3b4252">profiles, run_app, run_graphs</text>
+<rect x="615" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="627" y="94" font-size="15" font-weight="700" fill="#1d2433">form.py</text>
+<text x="795" y="94" font-size="12" text-anchor="end" fill="#5b6475">222</text>
+<text x="627" y="116" font-size="11.5" fill="#3b4252">generated gradio form</text>
+<rect x="830" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="842" y="94" font-size="15" font-weight="700" fill="#1d2433">testing.py</text>
+<text x="1010" y="94" font-size="12" text-anchor="end" fill="#5b6475">259</text>
+<text x="842" y="116" font-size="11.5" fill="#3b4252">contract, Collect, form check</text>
+<rect x="1045" y="70" width="190" height="62" rx="9" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="1057" y="94" font-size="15" font-weight="700" fill="#1d2433">verify.py</text>
+<text x="1225" y="94" font-size="12" text-anchor="end" fill="#5b6475">237</text>
+<text x="1057" y="116" font-size="11.5" fill="#3b4252">VERIFY.toml, bands, CLI</text>
+<rect x="400" y="182" width="190" height="62" rx="9" fill="#d9e8fb" stroke="#7b8494" stroke-width="1.2"/>
+<text x="412" y="206" font-size="15" font-weight="700" fill="#1d2433">runners.py</text>
+<text x="580" y="206" font-size="12" text-anchor="end" fill="#5b6475">466</text>
+<text x="412" y="228" font-size="11.5" fill="#3b4252">sequential + threaded engine</text>
+<rect x="830" y="182" width="190" height="62" rx="9" fill="#d9e8fb" stroke="#7b8494" stroke-width="1.2"/>
+<text x="842" y="206" font-size="15" font-weight="700" fill="#1d2433">process.py</text>
+<text x="1010" y="206" font-size="12" text-anchor="end" fill="#5b6475">91</text>
+<text x="842" y="228" font-size="11.5" fill="#3b4252">Spawn proxy (child process)</text>
+<rect x="615" y="294" width="190" height="62" rx="9" fill="#dff3e3" stroke="#7b8494" stroke-width="1.2"/>
+<text x="627" y="318" font-size="15" font-weight="700" fill="#1d2433">doc.py</text>
+<text x="795" y="318" font-size="12" text-anchor="end" fill="#5b6475">379</text>
+<text x="627" y="340" font-size="11.5" fill="#3b4252">graph view: picture + guide</text>
+<rect x="615" y="406" width="190" height="62" rx="9" fill="#dff3e3" stroke="#7b8494" stroke-width="1.2"/>
+<text x="627" y="430" font-size="15" font-weight="700" fill="#1d2433">graph.py</text>
+<text x="795" y="430" font-size="12" text-anchor="end" fill="#5b6475">185</text>
+<text x="627" y="452" font-size="11.5" fill="#3b4252">ports, Placement, validate</text>
+<rect x="292" y="518" width="190" height="62" rx="9" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="304" y="542" font-size="15" font-weight="700" fill="#1d2433">sinks.py</text>
+<text x="472" y="542" font-size="12" text-anchor="end" fill="#5b6475">172</text>
+<text x="304" y="564" font-size="11.5" fill="#3b4252">RerunSink, LayerSink, Latest</text>
+<rect x="615" y="518" width="190" height="62" rx="9" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="627" y="542" font-size="15" font-weight="700" fill="#1d2433">sources.py</text>
+<text x="795" y="542" font-size="12" text-anchor="end" fill="#5b6475">97</text>
+<text x="627" y="564" font-size="11.5" fill="#3b4252">SegmentRef, Column, IterSource</text>
+<rect x="938" y="518" width="190" height="62" rx="9" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="950" y="542" font-size="15" font-weight="700" fill="#1d2433">catalog.py</text>
+<text x="1118" y="542" font-size="12" text-anchor="end" fill="#5b6475">46</text>
+<text x="950" y="564" font-size="11.5" fill="#3b4252">read_column, served, producer</text>
+<rect x="400" y="630" width="190" height="62" rx="9" fill="#f3f3f3" stroke="#7b8494" stroke-width="1.2"/>
+<text x="412" y="654" font-size="15" font-weight="700" fill="#1d2433">node.py</text>
+<text x="580" y="654" font-size="12" text-anchor="end" fill="#5b6475">98</text>
+<text x="412" y="676" font-size="11.5" fill="#3b4252">Node, Tick, Emit, Control, Fenced</text>
+<rect x="830" y="630" width="190" height="62" rx="9" fill="#f3f3f3" stroke="#7b8494" stroke-width="1.2"/>
+<text x="842" y="654" font-size="15" font-weight="700" fill="#1d2433">types.py</text>
+<text x="1010" y="654" font-size="12" text-anchor="end" fill="#5b6475">112</text>
+<text x="842" y="676" font-size="11.5" fill="#3b4252">Type, Log, Producer, cell readers</text>
+<rect x="615" y="742" width="190" height="62" rx="9" fill="#f3f3f3" stroke="#7b8494" stroke-width="1.2"/>
+<text x="627" y="766" font-size="15" font-weight="700" fill="#1d2433">time.py</text>
+<text x="795" y="766" font-size="12" text-anchor="end" fill="#5b6475">16</text>
+<text x="627" y="788" font-size="11.5" fill="#3b4252">TimeNs, STATIC, GraphError</text>
+</svg>

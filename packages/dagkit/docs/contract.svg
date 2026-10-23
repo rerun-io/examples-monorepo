@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="524" viewBox="0 0 1100 524" font-family="Inter, Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5b6475"/></marker></defs>
+<rect width="1100" height="524" fill="#fff"/>
+<text x="20" y="34" font-size="20" font-weight="700" fill="#1d2433">dagkit contract: one tick, both runners</text>
+<rect x="20" y="70" width="210" height="120" rx="10" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="32" y="94" font-size="15" font-weight="700" fill="#1d2433">Source</text>
+<text x="32" y="116" font-size="12" fill="#3b4252">the only pull point</text>
+<text x="32" y="134" font-size="12" fill="#3b4252">STATIC events first, then</text>
+<text x="32" y="152" font-size="12" fill="#3b4252">non-decreasing t_ns on ONE</text>
+<text x="32" y="170" font-size="12" fill="#3b4252">stream (frames, IMU, statics)</text>
+<rect x="330" y="60" width="230" height="70" rx="10" fill="#d9e8fb" stroke="#7b8494" stroke-width="1.2"/>
+<text x="342" y="84" font-size="15" font-weight="700" fill="#1d2433">Block / DropOldest edge</text>
+<text x="342" y="106" font-size="12" fill="#3b4252">bounded queue: block, or drop oldest</text>
+<text x="342" y="124" font-size="12" fill="#3b4252">(lossless turns DropOldest into Block)</text>
+<rect x="330" y="160" width="230" height="70" rx="10" fill="#dff3e3" stroke="#7b8494" stroke-width="1.2"/>
+<text x="342" y="184" font-size="15" font-weight="700" fill="#1d2433">AsOf edge</text>
+<text x="342" y="206" font-size="12" fill="#3b4252">history + producer watermark;</text>
+<text x="342" y="224" font-size="12" fill="#3b4252">never triggers a step</text>
+<rect x="650" y="70" width="250" height="160" rx="10" fill="#fde7c7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="662" y="94" font-size="15" font-weight="700" fill="#1d2433">Node.step(tick, out)</text>
+<text x="662" y="116" font-size="12" fill="#3b4252">tick = trigger value + AsOf snapshot</text>
+<text x="662" y="134" font-size="12" fill="#3b4252">  (newest value with time &lt;= t)</text>
+<text x="662" y="152" font-size="12" fill="#3b4252">lossless: tick waits in the pending</text>
+<text x="662" y="170" font-size="12" fill="#3b4252">  list until every AsOf producer's</text>
+<text x="662" y="188" font-size="12" fill="#3b4252">  watermark &gt;= t (queues never block)</text>
+<text x="662" y="206" font-size="12" fill="#3b4252">out.put(port, t, value) -> edges</text>
+<rect x="940" y="70" width="140" height="160" rx="10" fill="#e9e1f7" stroke="#7b8494" stroke-width="1.2"/>
+<text x="952" y="94" font-size="15" font-weight="700" fill="#1d2433">Sinks</text>
+<text x="952" y="116" font-size="12" fill="#3b4252">RerunSink</text>
+<text x="952" y="134" font-size="12" fill="#3b4252">LayerSink</text>
+<text x="952" y="152" font-size="12" fill="#3b4252">LayerFileSink</text>
+<text x="952" y="170" font-size="12" fill="#3b4252">many producers;</text>
+<text x="952" y="188" font-size="12" fill="#3b4252">flush last;</text>
+<text x="952" y="206" font-size="12" fill="#3b4252">host values only</text>
+<path d="M230,110 L330,95" stroke="#5b6475" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<text x="280.0" y="94.5" font-size="12" text-anchor="middle" fill="#1d2433">trigger port</text>
+<path d="M230,160 L330,195" stroke="#5b6475" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<text x="280.0" y="195.5" font-size="12" text-anchor="middle" fill="#1d2433">AsOf port</text>
+<path d="M560,95 L650,120" stroke="#5b6475" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<path d="M560,195 L650,175" stroke="#5b6475" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<text x="605.0" y="205.0" font-size="12" text-anchor="middle" fill="#1d2433">snapshot at t</text>
+<path d="M900,150 L940,150" stroke="#5b6475" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<text x="20" y="262" font-size="12" fill="#3b4252">watermark: source = t-1 before emitting t; node = t-1 before a tick at t (emits_late: explicit); flush -&gt; TIME_MAX</text>
+<text x="20" y="282" font-size="12" fill="#3b4252">Fenced[T]: host consumers get synchronize() + unwrap; GPU consumers fence.wait + record_stream</text>
+<text x="20" y="320" font-size="16" font-weight="700" fill="#1d2433">Lifecycle (§2.3a), identical in run_sequential and run_threaded</text>
+<rect x="20" y="336" width="110" height="28" rx="6" fill="#f3f3f3" stroke="#7b8494"/>
+<text x="75" y="355" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">start</text>
+<text x="145" y="355" font-size="12.5" fill="#3b4252">resources (declared order) -> leading STATIC events -> reset(ctx) on every node</text>
+<rect x="20" y="372" width="110" height="28" rx="6" fill="#f3f3f3" stroke="#7b8494"/>
+<text x="75" y="391" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">run</text>
+<text x="145" y="391" font-size="12.5" fill="#3b4252">sequential: merge sources by (t, source order), drain in topological order | threaded: a thread per node</text>
+<rect x="20" y="408" width="110" height="28" rx="6" fill="#dff3e3" stroke="#7b8494"/>
+<text x="75" y="427" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">complete</text>
+<text x="145" y="427" font-size="12.5" fill="#3b4252">sources close -> nodes flush when inputs closed + pending empty -> sinks flush LAST -> resources close</text>
+<rect x="20" y="444" width="110" height="28" rx="6" fill="#fde7c7" stroke="#7b8494"/>
+<text x="75" y="463" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">stopped</text>
+<text x="145" y="463" font-size="12.5" fill="#3b4252">Control.stop: sources stop after the current event, same drain + flush; LayerSink publishes .stopped, never registers</text>
+<rect x="20" y="480" width="110" height="28" rx="6" fill="#fbdada" stroke="#7b8494"/>
+<text x="75" y="499" font-size="13" font-weight="700" text-anchor="middle" fill="#1d2433">failed</text>
+<text x="145" y="499" font-size="12.5" fill="#3b4252">first exception kept, every wait woken, abort() on started nodes, NO flush, threads joined, re-raised</text>
+</svg>

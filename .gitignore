@@ -99,6 +99,7 @@ cython_debug/
 # Package top-level data directories (downloaded assets, not Python package data/)
 packages/monoprior/data/
 packages/simplecv/data/
+packages/dagkit/data/
 packages/mvs/data/
 packages/gauss-surf/data/
 packages/dataforge/data/

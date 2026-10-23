@@ -151,11 +151,47 @@ issue/PR in the package README table. When it lands, bump the dependency, swap
 imports, and delete the staged code in one change. Run
 `pixi run -e kornia-staging-dev --frozen gate` and each affected consumer's gate.
 
+## Typed graph (dagkit)
+
+Pipelines are moving onto one typed node/graph interface in `packages/dagkit` (pure Python, no torch;
+`simplecv` depends on it). Read `packages/dagkit/README.md` (two diagrams) before porting a pipeline.
+
+- **Layers** (imports only point down): App > Graph > Node > Op > Model > Runtime > Types.
+- **Types** are frozen dataclasses that own their Rerun mapping: `to_rerun(root)`, `contents(root)`,
+  `from_layer(table, root, timeline)`; host Types are `@serde`. Time is `TimeNs` (i64 ns, one clock per graph;
+  `STATIC` for whole-stream values).
+- **Nodes are push-only**: `reset(ctx)` (idempotent), one `step(tick, out)` per trigger event, `flush(out)` at end
+  of stream; `SegmentNode.run(inputs, out)` for whole-segment work. Models and Ops come in through the constructor
+  or `ctx.resources`, so unit tests inject fakes. A node that emits late sets `emits_late` and calls `out.watermark`.
+- **Graphs are declared** (`<module>/graphs/<name>.py`): `Block` (lossless), `DropOldest` (realtime) and `AsOf`
+  (newest value at or before the tick, never triggers) edges; `Graph.validate()` lists every problem. Sources are the
+  only pull points and emit ONE time-ordered stream. Feedback lives in node state or a graph resource, never a cycle.
+- **Runners**: `run_sequential` (debug, deterministic) and `run_threaded` (thread per node, `Placement` incl.
+  `process`); lossless runs of both deliver the same ticks. Failures abort without flush and re-raise. `Control`
+  stops a run: sources stop after their current event, every node drains and flushes. Pass `health=recording` for the
+  `/dagkit/health` view.
+- **Sinks** take an explicit `RecordingStream`. `LayerSink` writes `<layer>.<run_id>.rrd` and registers it only if
+  the segment has no layer of that name (`register="new"`); never re-register over the shared `:51235` corpus.
+- **Apps**: `<module>/apis/<graph>.py` holds `Config` and `build(config, recording) -> Graph` (a generator of Graphs
+  for a multi-pass app); `main` is `run_app(config, build, segment=shown_segment)` (the segment a run shows: the viewer opens it
+  and the outputs join its recording); `dagkit.form.gradio_app` generates the UI from the same
+  `build`. Profiles are `profiles/<hardware>.toml` for `x86_64-cuda`, `aarch64-cuda` and `robocap-cap` only.
+- **Graph view**: both entry points log the graph's picture, guide and `GraphDoc` (`dagkit.doc`) with run-health
+  colours; the App wraps its normal blueprint in `dagkit.app.with_pipeline` for a secondary "pipeline (debug)" tab.
+  A package's `GRAPH.md` is the guide without links, kept by `dagkit.testing.check_graph_docs`; read it to learn a
+  pipeline without running it. `check_picture` proves picture == declaration in the unit lane.
+- **Tests**: `dagkit.testing.check_node_contract` per node, `collect_edges` for sequential == threaded, hypothesis
+  for Types and Ops; graph-tier bands live in `VERIFY.toml` and run with `python -m dagkit.verify`.
+
 ## Adding a model
 
 Bringing an upstream research model in (fork + pixify, then a vendor → predictor → typed PR stack with
 Rerun pixel evidence) follows the repo skill `add-model` (`.agents/skills/add-model/SKILL.md`, also visible to
 Claude Code through `.claude/skills`). Both Codex and Claude Code load it when asked to "add/port <model>".
+
+Proving that a block still works (porting a package onto dagkit, changing a block's math, rewiring a graph, or the
+last step of add-model) follows the repo skill `verify-block` (`.agents/skills/verify-block/SKILL.md`): a `VERIFY.toml`
+card, rrd goldens, a metric band against catalog GT or a pre-port golden, hypothesis properties, and Rerun pixels.
 
 ## Adding a new package
 
@@ -303,7 +339,8 @@ Two macOS lanes restate that exact pin rather than composing `common`, because
 not build on `osx-arm64`): `[feature.mv-api-catalog-register-mac]` and
 `[feature.slam-rs-osx]`. Both are tagged `# pin-bump: hold`; a bump has to touch
 all four sites or the Mac silently runs a release behind, and no linux gate and
-no `pixi lock --check` can see it.
+no `pixi lock --check` can see it. The torch-free lanes `[feature.agent-traces]` and
+`[feature.dagkit]` (which also restates the `gradio` / `gradio-rerun` pins) carry the same tag.
 
 To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one

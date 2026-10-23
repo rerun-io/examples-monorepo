@@ -1,0 +1,124 @@
+"""Integration lane: Rerun round-trips through an in-process server (a catalog), sources and registration."""
+
+from pathlib import Path
+
+import pytest
+import rerun as rr
+from dagkit_fakes import Collect, Point
+
+from dagkit.catalog import read_column, read_producer, served
+from dagkit.graph import Graph
+from dagkit.node import Event
+from dagkit.runners import run_sequential
+from dagkit.sinks import LayerSink, segment_layers
+from dagkit.sources import CatalogSegmentSource, Column, IterSource, RecordingSource, SegmentRef
+from dagkit.testing import rerun_roundtrip
+from dagkit.time import STATIC, GraphError
+from dagkit.types import Producer
+from dagkit.verify import run_counts
+
+pytestmark = pytest.mark.integration
+PRODUCER = Producer("dagkit", "0.1.0+test", "points", "x86_64-cuda")
+
+
+def test_rerun_roundtrip_timed_and_static() -> None:
+    point = Point((1.0, 2.0, 3.0), "a")
+    assert rerun_roundtrip(point, "/world", "video_time", 1234) == [(1234, point)]
+    assert rerun_roundtrip(point, "/world", "video_time", STATIC) == [(STATIC, point)]
+
+
+def write_layer(tmp_path: Path, segment: SegmentRef, register: str = "off") -> Path:
+    sink = LayerSink.open(segment, "points", PRODUCER, {"point": Point}, {"point": "/points"}, output_dir=tmp_path, register=register)  # type: ignore[arg-type]
+    events = [Event(t, "point", Point((float(t), 0.0, 0.0), f"p{t}")) for t in (10, 20)]
+    graph = Graph("points")
+    graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter(events)))["point"]}, {"layer": sink})
+    run_sequential(graph)
+    assert sink.published is not None
+    return sink.published
+
+
+def test_recording_source_reads_a_published_layer_back(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))
+    graph = Graph("read")
+    src = graph.source("src", RecordingSource(path, {"point": Column(Point, "/points")}))
+    sink = Collect(("point",))
+    sink.inputs = {"point": Point}
+    seen: list[tuple[int, Point]] = []
+    sink.on_step = lambda tick: seen.append((tick.t_ns, tick.value))  # type: ignore[arg-type]
+    sink.step = lambda tick, out: sink.on_step(tick)  # type: ignore[method-assign, misc]
+    graph.edge(src["point"], graph.sink("sink", sink)["point"])
+    run_sequential(graph)
+    assert [t for t, _ in seen] == [10, 20] and seen[1][1] == Point((20.0, 0.0, 0.0), "p20")
+
+
+def test_register_new_adds_the_layer_once_and_refuses_a_second(tmp_path: Path) -> None:
+    base = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    base.save(tmp_path / "base.rrd")
+    base.log("/base", rr.Points3D([[0, 0, 0]]), static=True)
+    base.flush()
+    base.disconnect()
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(tmp_path / "base.rrd")]}) as server:
+        segment = SegmentRef("ds", "seg0", catalog_url=server.url())
+        write_layer(tmp_path / "layers", segment, register="new")
+        assert segment_layers(segment) == ["base", "points"]
+        with pytest.raises(GraphError, match="already has layer 'points'"):
+            write_layer(tmp_path / "layers", segment, register="new")
+        source = CatalogSegmentSource(segment, {"point": Column(Point, "/points")})
+        assert [e.t_ns for e in source.events()] == [10, 20]
+
+
+def test_read_producer_gives_back_what_the_layer_logged(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(path)]}) as server:
+        dataset = server.client().get_dataset("ds")  # an entry must outlive its queries
+        assert read_producer(dataset, "seg0", "points") == PRODUCER
+        assert read_producer(dataset, "seg0", "hands") is None
+
+
+def test_run_counts_are_the_numbers_a_verify_run_logged(tmp_path: Path) -> None:
+    recording = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    recording.save(tmp_path / "golden.rrd")
+    recording.log("/verify/fake/run", rr.AnyValues(frames=12, wall_s=1.5, trt=True, code="graph"), static=True)
+    recording.flush()
+    recording.disconnect()
+    with served(tmp_path / "golden.rrd") as golden:
+        assert run_counts(golden, "fake") == {"frames": 12.0, "wall_s": 1.5, "trt": 1.0}
+
+
+def test_a_windowed_read_brings_only_the_window(tmp_path: Path) -> None:
+    path: Path = write_layer(tmp_path, SegmentRef("ds", "seg0"))  # points at 10 and 20
+    with served(path) as dataset:
+        table = read_column(dataset, "seg0", Point, "/points", "video_time", False, window_ns=(15, 25))
+        assert [t for t, _ in Point.from_layer(table, "/points", "video_time")] == [20]
+
+
+def test_a_layer_registered_after_the_sink_was_built_still_fails_at_publish(tmp_path: Path) -> None:
+    base = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    base.save(tmp_path / "base.rrd")
+    base.log("/base", rr.Points3D([[0, 0, 0]]), static=True)
+    base.flush()
+    base.disconnect()
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(tmp_path / "base.rrd")]}) as server:
+        segment = SegmentRef("ds", "seg0", catalog_url=server.url())
+        late = LayerSink.open(segment, "points", PRODUCER, {"point": Point}, {"point": "/points"}, output_dir=tmp_path / "late", register="new")  # no layer yet
+        write_layer(tmp_path / "first", segment, register="new")  # another run registers the layer first
+        graph = Graph("late")
+        graph.sinks({"point": graph.source("src", IterSource({"point": Point}, lambda: iter([Event(5, "point", Point((0.0, 0.0, 0.0), "p"))])))["point"]}, {"layer": late})
+        with pytest.raises(Exception, match="Layer 'points' already exists"):  # the catalog refuses the duplicate (AlreadyExistsError)
+            run_sequential(graph)
+        assert segment_layers(segment) == ["base", "points"]
+
+
+def test_a_segment_names_the_recording_a_viewer_merges_with_it_and_gives_its_url(tmp_path: Path) -> None:
+    """A viewer that opens a catalog segment names its recording (dataset id, segment id): a stream with those ids lands in it."""
+    base = rr.RecordingStream("dagkit-test", recording_id="seg0", send_properties=False)
+    base.save(tmp_path / "base.rrd")
+    base.log("/base", rr.Points3D([[0, 0, 0]]), static=True)
+    base.flush()
+    base.disconnect()
+    with rr.server.Server(host="127.0.0.1", datasets={"ds": [str(tmp_path / "base.rrd")]}) as server:
+        dataset = server.client().get_dataset("ds")
+        segment = SegmentRef("ds", "seg0", catalog_url=server.url())
+        assert segment.recording_ids() == (str(dataset.id), "seg0")
+        assert segment.viewer_url() == dataset.segment_url("seg0")
+        assert segment.viewer_url("rerun+https://catalog.example:10501") == f"rerun+https://catalog.example:10501/dataset/{dataset.id}?segment_id=seg0"
