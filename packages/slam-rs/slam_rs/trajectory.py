@@ -17,27 +17,14 @@ from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 
+from slam_rs.types import Trajectory
+
 ASSOCIATION_TOLERANCE_NS: int = 5_000_000
 """Largest timestamp gap a reference pose and a candidate pose may be associated across."""
 MIN_ASSOCIATED_POSES: int = 10
 """Fewest associations the gate accepts before it calls the comparison meaningless."""
 CSV_HEADER: str = "#timestamp [ns], p_x, p_y, p_z, q_w, q_x, q_y, q_z"
 """CSV header emitted by :func:`write_trajectory`."""
-
-
-@dataclass(slots=True, frozen=True)
-class Trajectory:
-    """A time-stamped rigid-body trajectory in one world frame."""
-
-    t_ns: Int64[ndarray, " n"]
-    """Pose timestamps, integer nanoseconds on the estimator's clock."""
-    position_m: Float64[ndarray, "n 3"]
-    """World-frame positions, metres."""
-    quaternion_wxyz: Float64[ndarray, "n 4"]
-    """World-from-body rotations, **w-first** unit quaternions."""
-
-    def __len__(self) -> int:
-        return int(self.t_ns.shape[0])
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,16 +70,6 @@ class AteResult:
             f"associated={self.n_associated} (count delta {self.count_delta:.1%})\n"
             f"ATE  : rmse={self.rmse_m * 100:.2f} cm  max={self.max_m * 100:.2f} cm  median={self.median_m * 100:.2f} cm"
         )
-
-
-def empty_trajectory() -> Trajectory:
-    """A trajectory with no poses.
-
-    What a reference a run does not have looks like: a segment with no ``gt``
-    layer. Callers then test :func:`len` rather than ``None``, and the one
-    array shape is right for :func:`numpy.concatenate`.
-    """
-    return Trajectory(t_ns=np.zeros(0, dtype=np.int64), position_m=np.zeros((0, 3)), quaternion_wxyz=np.zeros((0, 4)))
 
 
 def read_trajectory(path: Path) -> Trajectory:

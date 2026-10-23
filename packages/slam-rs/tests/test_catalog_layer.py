@@ -10,7 +10,7 @@ from fixture_types import Rows, RowsReader
 
 from slam_rs.catalog_layer import write_layer
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import Trajectory, empty_trajectory
+from slam_rs.types import Trajectory, empty_trajectory
 
 
 @pytest.fixture

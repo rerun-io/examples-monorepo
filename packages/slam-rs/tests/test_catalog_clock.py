@@ -12,7 +12,7 @@ from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs.catalog_feed import CatalogSegment, ImuStream, LocalSegment, open_segment
-from slam_rs.trajectory import Trajectory
+from slam_rs.types import Trajectory
 
 pytestmark = pytest.mark.integration
 

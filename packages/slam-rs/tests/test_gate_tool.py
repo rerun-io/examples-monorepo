@@ -15,7 +15,8 @@ from slam_rs.config import SlamConfig
 from slam_rs.machine import this_machine
 from slam_rs.reference import Baseline, Benchmarks, ReferenceSegment
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import Trajectory, shift_clock
+from slam_rs.trajectory import shift_clock
+from slam_rs.types import Trajectory
 
 
 @pytest.mark.parametrize("wrong_dataset", [False, True])

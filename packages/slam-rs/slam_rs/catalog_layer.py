@@ -31,10 +31,12 @@ def write_layer(
     """Atomically write poses on base video time, without changing base sensor data.
 
     ``clock_offset_ns`` is the feed's export offset plus camera-to-IMU offset.
-    Empty, incomplete or non-finite runs cannot replace an existing result.
+    Empty, incomplete or non-finite runs cannot replace an existing result: every frameset VIO can process needs its pose.
     """
-    if len(run.estimate) < 2 or run.lost or len(run.estimate) != run.framesets:
-        raise ValueError(f"refusing incomplete pose layer: {len(run.estimate)} poses / {run.framesets} framesets, {run.lost} pending")
+    missing: int = run.lost - run.unprocessable
+    if len(run.estimate) < 2 or missing or len(run.estimate) + run.lost != run.framesets:
+        raise ValueError(f"refusing incomplete pose layer: {len(run.estimate)} poses / {run.framesets} framesets, "
+                         f"{run.unprocessable} not processable, {missing} missing")  # fmt: skip
     positions: Float64[ndarray, "n 3"] = run.estimate.position_m
     rotations: Float64[ndarray, "n 4"] = np.roll(run.estimate.quaternion_wxyz, -1, axis=1)
     times: Int64[ndarray, " n"] = shift_clock(run.estimate, -clock_offset_ns).t_ns
