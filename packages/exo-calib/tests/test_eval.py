@@ -3,7 +3,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 
-from exo_calib.eval import CameraErrors, RigGeometry, align_rigs, camera_errors, evaluate_rig, rig_geometry
+from exo_calib.ops.eval import CameraErrors, RigGeometry, align_rigs, camera_errors, evaluate_rig, rig_geometry
 
 
 def test_evaluate_rig_reports_zero_for_identical_rigs() -> None:

@@ -3,6 +3,7 @@ from threading import Event, Thread
 
 import numpy as np
 import pytest
+import torch
 from simplecv.camera_orient_utils import rotation_matrix_between
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
@@ -19,11 +20,14 @@ from monopriors.gradio_ui.multiview_calibration_ui import (
     _prepare_request as _prepare_calibration_request,
 )
 from monopriors.gradio_ui.multiview_geometry_ui import DEFAULT_PREDICTOR_CONFIG, _prepare_request
+from monopriors.models.multiview import multiview_predictor
 from monopriors.models.multiview.multiview_model import MultiviewPred
 from monopriors.models.multiview.multiview_predictor import (
+    G3TBackend,
     MultiviewPredictor,
     MultiviewPredictorCache,
     MultiviewPredictorConfig,
+    VGGTBackend,
 )
 
 
@@ -51,6 +55,25 @@ def _prediction() -> MultiviewPred:
         confidence_mask=np.ones((2, 2), dtype=np.float32),
         pinhole_param=pinhole,
     )
+
+
+@pytest.mark.parametrize(("backend", "model"), [(G3TBackend, "G3T"), (VGGTBackend, "VGGT")])
+def test_a_backend_builds_its_model_on_its_device(monkeypatch: pytest.MonkeyPatch, backend: type, model: str) -> None:
+    """``from_pretrained`` runs under the target device: built on the CPU, G3T spent ~5 s on a random init that the
+    checkpoint then overwrites (0.9 s when built on the GPU)."""
+    devices: list[torch.device] = []
+    cls: type[torch.nn.Module] = getattr(multiview_predictor, model)
+
+    def from_pretrained(*args: object, **kwargs: object) -> torch.nn.Module:
+        devices.append(torch.get_default_device())
+        empty = cls.__new__(cls)  # the class without its layers
+        torch.nn.Module.__init__(empty)
+        return empty
+
+    monkeypatch.setattr(cls, "from_pretrained", from_pretrained)
+    monkeypatch.setattr(multiview_predictor, "_inference_dtype", lambda device: torch.bfloat16)  # no GPU query in the unit lane
+    backend(MultiviewPredictorConfig(model_name=model.lower(), device="cuda"))  # type: ignore[arg-type]
+    assert [d.type for d in devices] == ["cuda"]
 
 
 def test_gradio_apps_default_to_pure_g3t() -> None:

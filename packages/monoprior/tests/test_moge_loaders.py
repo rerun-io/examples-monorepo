@@ -97,3 +97,34 @@ def test_v2_checkpoint_config_rejects_unknown_nested_keys() -> None:
 
     with pytest.raises(ValueError, match="unexpected"):
         MoGeV2Config.from_checkpoint_config(config)
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_moge_builds_on_its_device(monkeypatch: pytest.MonkeyPatch, version: str) -> None:
+    """``from_pretrained`` runs under the target device: built on the CPU, MoGe-2 spent ~2 s on a random init that the
+    checkpoint then overwrites (0.3 s when built on the GPU)."""
+    import torch
+
+    from monopriors.models.moge_v2 import export
+    from monopriors.models.relative_depth import moge_v1
+
+    module = moge_v1 if version == "v1" else export
+    devices: list[torch.device] = []
+
+    class Empty(module.MoGeModel):  # the class without its layers
+        onnx_compatible_mode = False  # shadows the property that reaches into the encoder
+        num_tokens_range = export.MOGE_V2_NUM_TOKENS_RANGE
+
+        def __init__(self) -> None:
+            torch.nn.Module.__init__(self)
+
+    def from_pretrained(*args: object, **kwargs: object) -> torch.nn.Module:
+        devices.append(torch.get_default_device())
+        return Empty()
+
+    monkeypatch.setattr(module.MoGeModel, "from_pretrained", from_pretrained)
+    if version == "v1":
+        moge_v1.MoGeV1Predictor(device="cuda")
+    else:
+        export.load_pinned_moge_v2("vitl", 9)
+    assert [d.type for d in devices] == ["cuda"]

@@ -17,7 +17,6 @@ from typing import Literal, Protocol, TypeAlias, get_args, runtime_checkable
 
 import numpy as np
 import pyarrow as pa
-from rerun.catalog import DatasetEntry
 
 from simplecv.rrd_query_utils import first_valid_value
 
@@ -207,12 +206,12 @@ def parse_rig_layout(components: Iterable[CatalogComponent], rig_kinds: Mapping[
     return CatalogRigLayout(cameras=tuple(sorted(cameras, key=_camera_sort_key)))
 
 
-def read_rig_kinds(dataset: DatasetEntry, segment_id: str, rigs: Iterable[str]) -> dict[str, RigKind]:
-    """Read the static ``kind`` metadata of the given rig nodes (the schema only names the column).
+def rig_kinds_from_table(table: pa.Table, rigs: Iterable[str]) -> dict[str, RigKind]:
+    """The ``kind`` metadata of the given rig nodes in a segment's static table (``reader(index=None)``; the schema only
+    names the column).
 
     Args:
-        dataset: Catalog dataset entry.
-        segment_id: Segment to read.
+        table: Static columns that include the rig nodes (and may hold other entities).
         rigs: Rig entity ids such as ``rig_00`` (see :attr:`CatalogRigLayout.rigs`).
 
     Returns:
@@ -221,13 +220,9 @@ def read_rig_kinds(dataset: DatasetEntry, segment_id: str, rigs: Iterable[str]) 
     Raises:
         ValueError: If a rig carries a kind outside :data:`RIG_KINDS`.
     """
-    rig_paths: list[str] = sorted(f"/world/{rig}" for rig in rigs)
-    if not rig_paths:
-        return {}
-    table: pa.Table = dataset.filter_segments(segment_id).filter_contents(rig_paths).reader(index=None).to_arrow_table()
     kinds: dict[str, RigKind] = {}
-    for rig_path in rig_paths:
-        column_name: str = f"{rig_path}:kind"
+    for rig in rigs:
+        column_name: str = f"/world/{rig}:kind"
         if column_name not in table.column_names:
             continue
         column: pa.ChunkedArray = table.column(column_name).drop_null()
@@ -237,5 +232,5 @@ def read_rig_kinds(dataset: DatasetEntry, segment_id: str, rigs: Iterable[str]) 
         kind: RigKind | None = RIG_KIND_BY_NAME.get(kind_name)
         if kind is None:
             raise ValueError(f"{column_name} = {kind_name!r}; expected one of {RIG_KINDS}")
-        kinds[rig_path.removeprefix("/world/")] = kind
+        kinds[rig] = kind
     return kinds
