@@ -4,7 +4,7 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
-from mast3r_slam.nonlinear_optimizer import check_convergence, huber
+from mast3r_slam.ops.optim import check_convergence, huber
 
 
 def test_huber_small_residuals() -> None:
@@ -34,7 +34,6 @@ def test_check_convergence_converged() -> None:
     """Should report convergence when both criteria are met."""
     delta: Float[Tensor, "3"] = torch.tensor([1e-10, 1e-10, 1e-10])
     result: bool = check_convergence(
-        iter=5,
         rel_error_threshold=1e-3,
         delta_norm_threshold=1e-3,
         old_cost=1.0,
@@ -48,7 +47,6 @@ def test_check_convergence_not_converged() -> None:
     """Should report not converged when cost change and delta are large."""
     delta: Float[Tensor, "3"] = torch.tensor([1.0, 1.0, 1.0])
     result: bool = check_convergence(
-        iter=1,
         rel_error_threshold=1e-6,
         delta_norm_threshold=1e-6,
         old_cost=10.0,
@@ -62,7 +60,6 @@ def test_check_convergence_handles_nonfinite_old_cost() -> None:
     """Non-finite previous cost should fall back to the delta-norm criterion."""
     delta: Float[Tensor, "3"] = torch.tensor([1.0, 1.0, 1.0])
     result: bool = check_convergence(
-        iter=0,
         rel_error_threshold=1e-6,
         delta_norm_threshold=1e-6,
         old_cost=float("inf"),
@@ -76,7 +73,6 @@ def test_check_convergence_handles_zero_old_cost() -> None:
     """Zero previous cost should not divide by zero in the relative criterion."""
     delta: Float[Tensor, "3"] = torch.tensor([1.0, 1.0, 1.0])
     result: bool = check_convergence(
-        iter=0,
         rel_error_threshold=1e-6,
         delta_norm_threshold=1e-6,
         old_cost=0.0,

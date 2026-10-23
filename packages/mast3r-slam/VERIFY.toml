@@ -1,0 +1,549 @@
+# mast3r-slam verification card (verify-block skill; read by `python -m dagkit.verify`).
+package = "mast3r-slam"
+
+[[graph]]
+name = "slam"
+run = "mast3r_slam.verify:run"
+score = "mast3r_slam.verify:score"
+# GT: msd-odyssey mocap rig poses (layer gt, /world/rig_00 on video_time) composed with the static cam_00 extrinsic.
+# ate_rmse_m = Sim3 (Umeyama) ATE RMSE of the FINAL keyframe camera centres against GT cam_00 (nearest GT pose, <= 5 ms);
+# floor = 5 % of the short pre (0.36904 m -> 0.01845 m; floors are per block, so the full case gets the same 0.01845 m,
+# 3 % of its 0.62155 m). tracked_fraction = input frames the frontend left in
+# TRACKING / input frames (the catalog gives the denominator). Every phase runs lossless (the frontend waits for the
+# backend after each keyframe / relocalisation: the old single_thread), uncalibrated, every 2nd frame of cam_00.
+# Shots (own viewer, verify-block 5): 3D view "/" = Sim3-aligned estimate (final keyframes + tracked frustum) over the GT
+# cam_00 trail and frustum; cam_00 = the input video. 119.5 s applies to the full case only (after the short window).
+shots = [
+    { view = "/", t_s = 15.0 },
+    { view = "/", t_s = 29.5 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 15.0 },
+    { view = "/world/rig_00/cam_00/pinhole", t_s = 29.5 },
+    { view = "/", t_s = 119.5 },
+]
+metrics = [
+    { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.01845 },
+    { name = "tracked_fraction", unit = "1", better = "higher", floor = 0.02 },
+]
+
+[[graph.cases]]
+# rule: the first sorted msd-odyssey segment whose mocap GT spans the capture (GT duration >= 99.9 % of the capture,
+# 0 sanitized poses); short = its first 30 s on video_time.
+name = "short"
+clip = "short"
+reference = "gt"
+dataset = "msd-odyssey"
+segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
+window_s = [0.0, 30.0]
+params = { calib = false, subsample = 2, img_size = 512 }
+# pre and pre2 bit-identical (lossless is deterministic here): ATE 0.369037 m, tracked 354/450 = 0.786667, 58 keyframes.
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+# rule: the same segment, its first 120 s at 512 px (1,800 input frames). The whole segment does not run pre-port: at
+# 512 px the backend runs out of GPU memory in the global GN solve at ~140 s (~440 keyframes, ~1,460 edges; the frontend
+# then waits forever for it), at 224 px the 512-keyframe buffer overflows. 120 s is the longest round window that runs
+# with margin. Pre-port runs need one fix outside the SLAM math: the Mojo gauss_newton_rays loop never frees its CPU
+# dense normal equations (host memory grows ~ keyframes^3, 30 GB at 187 keyframes), so pre and pre2 ran with an
+# op-for-op Python copy of that loop (same torch calls and Mojo kernels; short-case poses bit-identical with and without
+# it; Producer version suffix "+gn-leak-fix"). The port must keep host memory bounded.
+name = "full"
+clip = "full"
+reference = "gt"
+dataset = "msd-odyssey"
+segment = "msd-odyssey__MOO_others__MOO01_hand_puncher_1"
+window_s = [0.0, 120.0]
+params = { calib = false, subsample = 2, img_size = 512 }
+# pre / pre2 (not bit-identical over 120 s): ATE 0.621547 / 0.621571 m, tracked 1571 / 1572 of 1802, 349 keyframes each;
+# tolerance = max(2 x noise, floor) = the floors.
+noise = { ate_rmse_m = 0.0000248, tracked_fraction = 0.000555 }
+
+[[graph]]
+# The MASt3R-SLAM paper's monocular benchmarks (arXiv 2412.12392v2: Table 1 TUM RGB-D fr1, Table 9 EuRoC per sequence; the
+# averages 0.030 / 0.060 m TUM and 0.041 / 0.164 m EuRoC, calibrated / uncalibrated), from the catalog (dataforge vslam-lab).
+# Protocol = the paper's code (scripts/eval_{tum,euroc}.sh, config/eval_calib.yaml): every 2nd frame, 512 px, single thread
+# (= lossless), the FINAL keyframe poses, `evo_ape tum gt est -as` = Sim3 (Umeyama) ATE RMSE of the camera centres with
+# evo's 10 ms association (its EuRoC script passes nanosecond stamps, so there evo's 0.01 matched only float64-equal stamps:
+# 44 of 83 keyframes on MH_01, ATE 0.0287 m vs 0.0290 m at 10 ms; this block keeps 10 ms on both benchmarks; the paper also
+# keeps the last frame of an odd-length sequence, this source drops it). Undistortion as its dataloader: TUM when
+# calibrated, EuRoC always (cam0 only, mono, gray),
+# cv2.getOptimalNewCameraMatrix alpha 0 with a centred principal point; the source does it (case param `undistort`).
+# GT camera = GT rig pose (layer gt, /world/rig_00) x the static cam_00 extrinsic (layer base). TUM: identity (the mocap
+# pose is the camera's). EuRoC: gt is state_groundtruth_estimate0 (the body = IMU frame); the paper's
+# groundtruths/euroc/<seq>.txt is that pose times T_BS(cam0) (checked to 1e-8 m on MH_01), so both score cam0 centres
+# against GT cam0 centres (the 7 cm lever arm applied, as here).
+# Band (dagkit `published`): post <= max(pre, paper) + max(2 x |pre - pre2|, floor); a paper value never tightens a band.
+# Shots (scratch viewer, verify-block 5; per benchmark): 3D = the Sim3-aligned keyframe trajectory over the GT cam_00
+# trail, and the cam_00 input view, of tum-desk and euroc-mh01 at the middle of the sequence.
+name = "paper"
+run = "mast3r_slam.verify:run"
+score = "mast3r_slam.verify:score_paper"
+# pre and pre2 bit-identical on all 40 cases (lossless is deterministic): noise 0, so tolerance = floor. ate floor =
+# 5 % of the median pre ATE over the 40 cases (0.05127 m -> 0.00256 m); tracked_fraction floor as block slam.
+metrics = [
+    { name = "ate_rmse_m", unit = "m", better = "lower", floor = 0.00256 },
+    { name = "tracked_fraction", unit = "1", better = "higher", floor = 0.02 },
+]
+
+[[graph.cases]]
+# rule: short = the TUM pair fr1_desk + fr1_xyz (TUM's usual smoke pair, both < 1 min of video) and EuRoC's first sequence,
+# MH_01 (the sequence of the paper's runtime table); full = the other 17 sequences of both tables, whole sequences.
+name = "tum-desk"  # paper: calibrated 0.016, uncalibrated 0.035
+clip = "short"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.016 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-xyz"  # paper: calibrated 0.009, uncalibrated 0.020
+clip = "short"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_xyz"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.009 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh01"  # paper: calibrated 0.023, uncalibrated 0.180
+clip = "short"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_01_easy"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.023 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-360"  # paper: calibrated 0.049, uncalibrated 0.070
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_360"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.049 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-desk2"  # paper: calibrated 0.024, uncalibrated 0.055
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk2"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.024 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-floor"  # paper: calibrated 0.025, uncalibrated 0.056
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_floor"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.025 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-plant"  # paper: calibrated 0.020, uncalibrated 0.035
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_plant"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.02 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-room"  # paper: calibrated 0.061, uncalibrated 0.118
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_room"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.061 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-rpy"  # paper: calibrated 0.027, uncalibrated 0.041
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_rpy"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.027 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-teddy"  # paper: calibrated 0.041, uncalibrated 0.114
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_teddy"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.041 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh02"  # paper: calibrated 0.017, uncalibrated 0.124
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_02_easy"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.017 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh03"  # paper: calibrated 0.057, uncalibrated 0.156
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_03_medium"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.057 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh04"  # paper: calibrated 0.113, uncalibrated 0.282
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_04_difficult"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.113 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh05"  # paper: calibrated 0.067, uncalibrated 0.327
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_05_difficult"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.067 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v101"  # paper: calibrated 0.040, uncalibrated 0.101
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_01_easy"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.04 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v102"  # paper: calibrated 0.019, uncalibrated 0.134
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_02_medium"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.019 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v103"  # paper: calibrated 0.027, uncalibrated 0.096
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_03_difficult"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.027 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v201"  # paper: calibrated 0.020, uncalibrated 0.133
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_01_easy"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.02 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v202"  # paper: calibrated 0.025, uncalibrated 0.100
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_02_medium"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.025 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v203"  # paper: calibrated 0.043, uncalibrated 0.170
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_03_difficult"
+params = { calib = true, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.043 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+# Uncalibrated ("Ours*" in the paper): TUM without undistortion, EuRoC undistorted (the paper: its distortion is too
+# strong for MASt3R) but without intrinsics for the rest of the pipeline. Full tier, whole sequences.
+
+[[graph.cases]]
+name = "tum-360-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_360"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.07 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-desk-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.035 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-desk2-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_desk2"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.055 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-floor-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_floor"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.056 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-plant-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_plant"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.035 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-room-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_room"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.118 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-rpy-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_rpy"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.041 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-teddy-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_teddy"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.114 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "tum-xyz-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-rgbdtum"
+segment = "vslam-lab-rgbdtum__rgbd_dataset_freiburg1_xyz"
+params = { calib = false, undistort = false, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.02 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh01-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_01_easy"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.18 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh02-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_02_easy"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.124 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh03-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_03_medium"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.156 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh04-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_04_difficult"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.282 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-mh05-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__MH_05_difficult"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.327 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v101-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_01_easy"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.101 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v102-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_02_medium"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.134 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v103-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V1_03_difficult"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.096 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v201-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_01_easy"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.133 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v202-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_02_medium"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.1 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[graph.cases]]
+name = "euroc-v203-uncalib"
+clip = "full"
+reference = "gt"
+dataset = "dataforge-vslam-lab-euroc"
+segment = "vslam-lab-euroc__V2_03_difficult"
+params = { calib = false, undistort = true, subsample = 2, img_size = 512 }
+published = { ate_rmse_m = 0.17 }
+noise = { ate_rmse_m = 0.0, tracked_fraction = 0.0 }
+
+[[tests]]
+name = "types"
+tier = "types"
+lane = "unit"
+tests = ["tests/test_types.py"]
+properties = [
+    "tests/test_types.py::test_tracked_frame_serde_round_trip_keeps_dtype",
+    "tests/test_types.py::test_map_update_serde_round_trip_and_rerun_structure",
+    "tests/test_types.py::test_keyframe_cloud_serde_round_trip_and_rerun_path",
+    "tests/test_types.py::test_slam_config_toml_round_trip",
+    "tests/test_types.py::test_slam_config_refuses_unknown_keys_and_coerces_hand_written_numbers",
+    "tests/test_types.py::test_weighted_pointmap_is_a_confidence_weighted_mean",
+]
+
+[[tests]]
+name = "types-rerun"
+tier = "types"
+lane = "integration"
+tests = ["tests/test_integration.py::test_tracked_frame_rerun_round_trip", "tests/test_integration.py::test_map_update_rerun_round_trip", "tests/test_integration.py::test_keyframe_cloud_rerun_round_trip"]
+
+[[tests]]
+name = "ops"
+tier = "op"
+lane = "unit"
+tests = ["tests/test_ops.py"]
+properties = [
+    "tests/test_ops.py::test_sim3_compose_with_inverse_is_identity",
+    "tests/test_ops.py::test_solve_pose_blocks_solves_the_assembled_system",
+    "tests/test_ops.py::test_frame_intrinsics_map_projections_through_resize_and_crop",
+    "tests/test_ops.py::test_ate_is_invariant_to_a_sim3_of_the_estimate",
+]
+
+[[tests]]
+name = "gauss-newton-parity"
+tier = "op"
+lane = "integration"
+tests = [
+    "tests/test_integration.py::test_gauss_newton_rays_step_matches_a_float64_reference",
+    "tests/test_integration.py::test_pose_retr_matches_lietorch_and_keeps_the_pinned_pose",
+    "tests/test_integration.py::test_gauss_newton_rays_moves_only_the_free_poses",
+    "tests/test_mojo_vs_cuda.py::test_gauss_newton_rays_matches_cuda_on_representative_base_shape",
+]
+
+[[tests]]
+name = "nodes"
+tier = "node"
+lane = "unit"
+tests = ["tests/test_nodes.py", "tests/test_graph.py"]
+properties = [
+    "tests/test_nodes.py::test_frontend_contract_and_mode_flow",
+    "tests/test_nodes.py::test_frontend_reset_returns_to_init",
+    "tests/test_nodes.py::test_lossless_frontend_waits_for_the_backend_and_abort_ends_the_wait",
+    "tests/test_nodes.py::test_realtime_frontend_keeps_the_requested_frame_until_the_backend_answers",
+    "tests/test_nodes.py::test_frontend_refuses_a_mid_run_reset",
+    "tests/test_nodes.py::test_backend_contract",
+    "tests/test_nodes.py::test_a_realtime_stop_during_relocalisation_stays_terminated",
+    "tests/test_graph.py::test_a_pure_node_in_a_process_gives_the_same_outputs_as_in_a_thread",
+]
