@@ -2712,27 +2712,21 @@ cwd = "packages/mamma"
 outputs = ["packages/mamma/data/weights/ma_2d/mamma_mask_full_cvpr.safetensors"]
 description = "Download MammaNet/YOLO/SAM2/EfficientTAM weights (private HF repo)"
 
-[feature.mamma.tasks._download-mamma-hocap-sample]
-cmd = "test -e data/hocap/sample || (mkdir -p data/hocap/ && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && python -m zipfile -e data/hocap/sample.zip data/hocap/)"
-cwd = "packages/mamma"
-outputs = ["packages/mamma/data/hocap/sample"]
-description = "Download and extract the HoCap sample dataset"
-
-[feature.mamma.tasks._download-mamma-assembly101-sample]
-cmd = "test -e data/assembly101-720-sample || hf download pablovela5620/Assembly101-Sample --repo-type dataset --include 'assembly101-720-sample/**' --local-dir data/"
-cwd = "packages/mamma"
-outputs = ["packages/mamma/data/assembly101-720-sample"]
-description = "Download the Assembly101 720p sample dataset"
-
 [feature.mamma.tasks.mamma-download-dataset]
 cmd = "python tools/download_dataset.py"
 cwd = "packages/mamma"
 
 [feature.mamma.tasks.mamma-demo-crossing-arms]
-cmd = "python tools/demo_crossing_arms.py --tracker.expected-subjects 1"
-depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
+cmd = "python tools/apps/capture.py --video data/inputs/indoors/crossing_arms --resize-hw 720 1280 --subjects 1"
+depends-on = ["_download-mamma-inputs", "_download-mamma-weights", "_download-mamma-body-models"]
 cwd = "packages/mamma"
-description = "Streaming pipeline on crossing_arms (4x 4K cams), live Rerun viewer"
+description = "Capture graph on the crossing_arms files (4x 4K cams), live Rerun viewer"
+
+[feature.mamma.tasks.mamma-capture]
+cmd = "python tools/apps/capture.py"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
+cwd = "packages/mamma"
+description = "Capture graph on a catalog segment (default: the first single-person mamma-eval segment), live Rerun viewer"
 
 [feature.mamma.tasks._download-mamma-body-models]
 cmd = "test -e data/body_models/smplx || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'body_models/**' --local-dir data/"
@@ -2740,65 +2734,23 @@ cwd = "packages/mamma"
 outputs = ["packages/mamma/data/body_models/smplx"]
 description = "Download SMPL-X body models + downsampled verts (private HF repo)"
 
-[feature.mamma.tasks.mamma-demo-hocap]
-cmd = "python tools/demo_hocap.py"
-depends-on = [
-    "_download-mamma-hocap-sample",
-    "_download-mamma-weights",
-    "_download-mamma-body-models",
-]
+[feature.mamma.tasks.verify-pre]
+cmd = "python -m dagkit.verify VERIFY.toml --phase pre && python -m dagkit.verify VERIFY.toml --phase pre2"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
 cwd = "packages/mamma"
-description = "Streaming pipeline on the HoCap sample (ingestion + visual check)"
+description = "Record the pre-port goldens (DAGKIT_GOLDENS): pre and pre2 (noise run) for every case"
 
-[feature.mamma.tasks.mamma-demo-assembly101]
-cmd = "python tools/demo_assembly101.py"
-depends-on = [
-    "_download-mamma-assembly101-sample",
-    "_download-mamma-weights",
-    "_download-mamma-body-models",
-]
+[feature.mamma.tasks.verify]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip short"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
 cwd = "packages/mamma"
-description = "Streaming pipeline on the Assembly101 720p sample (ingestion + visual check)"
+description = "Graph tier, short cases (10 s single person, 7.5 s two people): score post against mosh_gt and band it against pre"
 
-[feature.mamma.tasks.mamma-validate-golden]
-cmd = "python tools/validate_golden.py --rr-config.headless"
-depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
+[feature.mamma.tasks.verify-full]
+cmd = "python -m dagkit.verify VERIFY.toml --phase post --clip full"
+depends-on = ["_download-mamma-weights", "_download-mamma-body-models"]
 cwd = "packages/mamma"
-description = "Run streaming pipeline on crossing_arms frames 60:90 and gate MPJPE/PVE vs golden ma_3d"
-
-[feature.mamma.tasks.mamma-benchmark]
-cmd = "python tools/benchmark.py"
-depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
-cwd = "packages/mamma"
-description = "Timed full-clip run: PASS if wall <= 2x clip duration (>=50% realtime) after warmup incl. Rerun logging"
-
-[feature.mamma.tasks.mamma-goal-check]
-cmd = "python tools/goal_check.py"
-depends-on = [
-    "_download-mamma-inputs",
-    "_download-mamma-weights",
-    "_download-mamma-hocap-sample",
-    "_download-mamma-assembly101-sample",
-]
-cwd = "packages/mamma"
-description = "Aggregate goal verification: golden gate, 30fps benchmark, dataset RRDs, no-disk-writes, hygiene"
-
-# iPhone catalog pipeline, in order: sweep → serve (own shell, keep running) → register.
-[feature.mamma.tasks.mamma-iphones-sweep]
-cmd = "python tools/sweep_iphones_quality.py --subset all"
-depends-on = ["_download-mamma-weights"]
-cwd = "packages/mamma"
-description = "Step 1: run the quality preset on all 42 iPhone scenes -> quality.rrd + gate.json per scene (GPU)"
-
-[feature.mamma.tasks.mamma-iphones-serve]
-cmd = "rerun server --port 51234"
-cwd = "packages/mamma"
-description = "Step 2: start the local in-memory Rerun catalog on :51234 (run in its own shell; keep running to register/view)"
-
-[feature.mamma.tasks.mamma-iphones-register]
-cmd = "python tools/register_catalog.py"
-cwd = "packages/mamma"
-description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base+props layers, names/properties from gate.json, default blueprint); needs mamma-iphones-serve running"
+description = "Graph tier, full case (whole single-person segment)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mvs — multiview stereo depth + live meshing
