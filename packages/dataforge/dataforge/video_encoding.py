@@ -50,7 +50,7 @@ AV1_GOP: int = 60
 SHOW3D's 60 fps, two at HO-Cap's 30 Hz."""
 MAX_STORED_PIXELS: int = 3_200_000
 """Videos above this many pixels are stored at half size, repeatedly (Pablo's ~3 MP cap): MAMMA's 4K iPhones at 1920x1080 and
-eval Singles' 4112x3008 at 2056x1504."""
+eval Singles' 4112x3008 at 2056x1504, Harmony4D's 3840x2160 GoPros at 1920x1080 (libjpeg's DCT scaling)."""
 
 
 def halvings(width: int, height: int) -> int:
