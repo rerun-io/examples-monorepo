@@ -358,6 +358,7 @@ is a nominal-rate fiction for such a file.
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
 | `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, turned 90° clockwise so the scene is upright) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
+| `egoexo4d` | one Ego-Exo4D take with an Ego-Exo4D-HM fit; take files fetched on demand (licence keys) and deleted after base | **four** rrds: `base` with the localized GoPros (KB4, 1080p AV1), the Aria RGB/SLAM/eye cameras and its trajectory; `body_pose` (SMPL-H parameters, COCO-133 keypoints), `body_mesh` (SMPL-H, 10 Hz), `projections`; see [docs/egoexo4d.md](docs/egoexo4d.md) |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and

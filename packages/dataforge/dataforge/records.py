@@ -6,12 +6,12 @@ Records go through pyserde. A numeric CSV table (an MPS trajectory, a timesync f
 
 from pathlib import Path
 from types import GenericAlias
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 from zipfile import ZipFile
 
 import pyarrow as pa
 import pyarrow.csv as pacsv
-from serde import SerdeError
+from serde import SerdeError, from_dict
 from serde.json import from_json
 from serde.yaml import from_yaml
 from yaml import YAMLError
@@ -32,6 +32,15 @@ def decode(  # noqa: UP047 — beartype requires legacy generics
     except (SerdeError, ValueError, YAMLError) as error:  # ValueError covers json.JSONDecodeError
         if redact is not None:
             raise ValueError(f"{source}: {redact} ({type(error).__name__})") from None
+        raise ValueError(f"{source}: {error}") from error
+
+
+def decode_values(cls: type[SourceT], values: dict[str, Any], *, source: Path | str) -> SourceT:  # noqa: UP047 — beartype requires legacy generics
+    """One record from already-parsed values (an npz, a pickle, a CSV row, a message; ``from_dict``'s own ``dict[str, Any]``),
+    naming ``source`` on schema and ``__post_init__`` (``ValueError``) errors."""
+    try:
+        return from_dict(cls, values)
+    except (SerdeError, ValueError) as error:
         raise ValueError(f"{source}: {error}") from error
 
 
