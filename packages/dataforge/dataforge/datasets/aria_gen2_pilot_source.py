@@ -1,18 +1,19 @@
 """Read-only Aria Gen2 Pilot streams and MPS tables on their native clocks."""
 
-import csv
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye624Parameters
 from simplecv.sensors.camera import fisheye624
 
 from dataforge import aria, hands
+from dataforge.aria import Trajectory, poses_from_columns, read_trajectory
 from dataforge.clocks import nearest_framesets
+from dataforge.records import read_csv_columns
 from dataforge.vrs import VrsFile
 from dataforge.vrs_hevc import VrsHevcReader
 
@@ -30,92 +31,6 @@ IMUS: tuple[tuple[aria.AriaStreamId, str], ...] = (("1202-1", "imu-left"), ("120
 """Gen2 IMU stream IDs and factory labels; Gen1's ``aria.STREAM_LABELS`` has these two swapped."""
 SEQUENCES: tuple[str, ...] = ("clean_0", "cook_0", "eat_0", "eat_1", "eat_2", "eat_3", "play_0", "play_1", "play_2", "play_3", "walk_0", "walk_1")
 """Release v1.0 sequence names."""
-QUATERNION_NORM_TOLERANCE: float = 1e-5
-"""MPS prints six decimals: wrist quaternions sit up to 1.2e-6 off unit norm, trajectory ones ~1e-9."""
-
-
-def numeric_columns(path: Path, columns: list[str]) -> Float64[ndarray, "n c"]:
-    """Read selected CSV stream columns; no dataset-owned JSON copy is made."""
-    with path.open() as stream:
-        header: list[str] = next(csv.reader(stream))
-        try:
-            selected: list[int] = [header.index(name) for name in columns]
-            values: Float64[ndarray, "n c"] = np.loadtxt(stream, delimiter=",", usecols=selected, ndmin=2, dtype=np.float64)
-            for index, name in enumerate(columns):
-                if name == "tracking_timestamp_us":
-                    stamps: Float64[ndarray, "n"] = values[:, index]
-                    if not np.isfinite(stamps).all() or np.any(stamps != np.floor(stamps)):
-                        raise ValueError("tracking_timestamp_us must contain finite integers")
-                elif name.endswith("_tracking_confidence") and not np.isfinite(values[:, index]).all():
-                    raise ValueError(f"{name} must be finite")
-            return values
-        except ValueError as error:
-            raise ValueError(f"{path}: {error}") from error
-
-
-def poses_from_columns(values: Float64[ndarray, "n 7"]) -> Float64[ndarray, "n 4 4"]:
-    """Translation and xyzw quaternion to SE(3); a non-finite or non-unit row is missing (NaN), never renormalised into a pose."""
-    valid: Bool[ndarray, "n"] = np.isfinite(values).all(axis=1)
-    valid[valid] = np.abs(np.linalg.norm(values[valid, 3:], axis=1) - 1.0) <= QUATERNION_NORM_TOLERANCE
-    result: Float64[ndarray, "n 4 4"] = np.full((len(values), 4, 4), np.nan)
-    result[valid] = np.eye(4)
-    result[valid, :3, :3] = Rotation.from_quat(values[valid, 3:]).as_matrix() if valid.any() else np.empty((0, 3, 3))
-    result[valid, :3, 3] = values[valid, :3]
-    return result
-
-
-@dataclass(frozen=True, slots=True)
-class Trajectory:
-    """Every native closed-loop row, including its shipped quality score."""
-
-    times_ns: Int64[ndarray, "n"]
-    """Device microseconds converted to nanoseconds."""
-    poses: Float64[ndarray, "n 4 4"]
-    """World-from-device matrices; rows ``poses_from_columns`` rejected are NaN."""
-    quality: Float64[ndarray, "n"]
-    """Shipped quality, including 0.0 and 0.5."""
-
-    def __post_init__(self) -> None:
-        if len(self.times_ns) != len(self.poses) or len(self.times_ns) != len(self.quality):
-            raise ValueError("trajectory columns differ in length")
-        if not len(self.times_ns) or np.any(np.diff(self.times_ns) <= 0):
-            raise ValueError("trajectory timestamps must be nonempty and strictly increasing")
-
-    def at(self, times_ns: Int64[ndarray, "m"]) -> Float64[ndarray, "m 4 4"]:
-        """Slerp/lerp inside valid <=2 ms brackets; never extrapolate or clamp."""
-        result: Float64[ndarray, "m 4 4"] = np.full((len(times_ns), 4, 4), np.nan)
-        right: Int64[ndarray, "m"] = np.searchsorted(self.times_ns, times_ns)
-        bounded: Int64[ndarray, "m"] = np.minimum(right, len(self.times_ns) - 1)
-        exact: Bool[ndarray, "m"] = (right < len(self.times_ns)) & (self.times_ns[bounded] == times_ns)
-        result[exact] = self.poses[bounded[exact]]
-        between: Int64[ndarray, "k"] = np.flatnonzero((~exact) & (right > 0) & (right < len(self.times_ns)))
-        high: Int64[ndarray, "k"] = right[between]
-        low: Int64[ndarray, "k"] = high - 1
-        gaps: Int64[ndarray, "k"] = self.times_ns[high] - self.times_ns[low]
-        good: Bool[ndarray, "k"] = (
-            (gaps <= 2_000_000) & np.isfinite(self.poses[low]).all(axis=(1, 2)) & np.isfinite(self.poses[high]).all(axis=(1, 2))
-        )
-        between, low, high = between[good], low[good], high[good]
-        if len(between):
-            fraction: Float64[ndarray, "k"] = (times_ns[between] - self.times_ns[low]) / gaps[good]
-            start: Rotation = Rotation.from_matrix(self.poses[low, :3, :3])
-            end: Rotation = Rotation.from_matrix(self.poses[high, :3, :3])
-            result[between] = np.eye(4)
-            result[between, :3, :3] = (start * Rotation.from_rotvec((start.inv() * end).as_rotvec() * fraction[:, None])).as_matrix()
-            result[between, :3, 3] = self.poses[low, :3, 3] * (1.0 - fraction[:, None]) + self.poses[high, :3, 3] * fraction[:, None]
-        return result
-
-
-def read_trajectory(path: Path) -> Trajectory:
-    """Keep every closed-loop row; quality does not change pose availability."""
-    columns: list[str] = [
-        "tracking_timestamp_us",
-        *[f"t{axis}_world_device" for axis in "xyz"],
-        *[f"q{axis}_world_device" for axis in "xyzw"],
-        "quality_score",
-    ]
-    values: Float64[ndarray, "n 9"] = numeric_columns(path, columns)
-    return Trajectory(values[:, 0].astype(np.int64) * 1000, poses_from_columns(values[:, 1:8]), values[:, 8])
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,10 +81,16 @@ class HandColumns:
 
 def read_hands(path: Path, trajectory: Trajectory, frame_clock: Int64[ndarray, "f"], stop_ns: int | None = None) -> HandSamples:
     """Read every native MPS row and transform device landmarks at its own time."""
-    names: list[str] = ["tracking_timestamp_us", *[name for side in hands.HAND_SIDES for group in hand_columns(side.name).values() for name in group]]
-    table: Float64[ndarray, "n c"] = numeric_columns(path, names)
+    names: list[str] = [name for side in hands.HAND_SIDES for group in hand_columns(side.name).values() for name in group]
+    csv_table: pa.Table = read_csv_columns(path, {"tracking_timestamp_us": pa.int64(), **dict.fromkeys(names, pa.float64())})
+    table: Float64[ndarray, "n c"] = np.column_stack([csv_table.column(name).to_numpy() for name in names])
     position: dict[str, int] = {name: index for index, name in enumerate(names)}
-    times: Int64[ndarray, "n"] = table[:, 0].astype(np.int64) * 1000
+    for side in hands.HAND_SIDES:
+        confidence_column: str = hand_columns(side.name)["confidence"][0]
+        if not np.isfinite(table[:, position[confidence_column]]).all():
+            raise ValueError(f"{path}: {confidence_column} must be finite")
+    times_us: Int64[ndarray, "n"] = csv_table.column("tracking_timestamp_us").to_numpy()
+    times: Int64[ndarray, "n"] = times_us * 1000
     if np.any(np.diff(times) <= 0):
         raise ValueError(f"{path}: hand timestamps must increase")
     keep: Bool[ndarray, "n"] = np.ones(len(times), dtype=np.bool_) if stop_ns is None else times <= stop_ns

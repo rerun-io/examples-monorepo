@@ -27,6 +27,13 @@ from rerun.datatypes import Rgba32Like
 
 from dataforge.logging_toolkit import frame_index_column, time_column
 
+BODY_MESH_STRIDE: int = 3
+"""body_mesh keeps every third 30 Hz frame (10 Hz): a display layer, by decision (2026-09-25).
+
+Full-rate SMPL vertices cost 82 KB per frame (4.3 GB for a 29-min EPFL session, 4x its videos), and
+Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. The body parameters
+and keypoints stay at full rate."""
+
 
 class SparseComponentColumn(rr.ComponentColumn):
     """One component batch on one row of a column, null on every other row.

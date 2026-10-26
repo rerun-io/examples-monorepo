@@ -21,7 +21,7 @@ from dataforge.datasets.umetrack_source import FISHEYE62, Camera, SequenceData
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.umetrack_hands import log_hand_meshes
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4_gray, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
 
@@ -137,8 +137,8 @@ def write_base(recording: rr.RecordingStream, scene: SequenceData, identity: Seq
         clips: list[Path] = [work / f"cam_{index:02}.mp4" for index in range(4)]
 
         def encode(index: int, clip: Path) -> None:
-            transcode_mp4_gray(
-                scene.source.with_suffix(".mp4"), clip, gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count, crop=scene.crop(index)
+            transcode_mp4(
+                scene.source.with_suffix(".mp4"), clip, gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count, gray=True, crop=scene.crop(index)
             )
 
         jobs: list[tuple[Path, Callable[[], None]]] = [(clip, partial(encode, index, clip)) for index, clip in enumerate(clips)]

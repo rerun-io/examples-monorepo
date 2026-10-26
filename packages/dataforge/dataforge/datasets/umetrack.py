@@ -103,11 +103,7 @@ class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
         )
 
     def table_fields(self) -> writing.TableFields:
-        fields: tuple[writing.TableField, ...] = (
-            *(writing.TableField(f"property:episode:{name}", name) for name in ("domain", "interaction", "split", "user")),
-            writing.TableField("property:capture:num_frames", "frames"),
-        )
-        return writing.TableFields(cards=fields, table=fields)
+        return writing.episode_table_fields("domain", "interaction", "split", "user")
 
 
 def pane_contents(camera: int) -> list[str]:

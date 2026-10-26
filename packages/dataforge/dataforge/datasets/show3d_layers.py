@@ -33,7 +33,7 @@ from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import annotation_context, log_camera_node, log_camera_source, log_dense_pose_track, log_rig_node, log_video_stream
 from dataforge.records import read_json
 from dataforge.timing import SequenceTimer
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4_gray
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4
 
 VIDEO_CODEC: str = "av1"
 """AV1 NVENC with no B-frames."""
@@ -171,8 +171,8 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path, tim
     clips: list[Path] = [work_dir / f"{camera.camera.source_name}.mp4" for camera in scene.cameras]
 
     def encode(source: SceneCamera, clip: Path) -> None:
-        transcode_mp4_gray(
-            source.video, clip, gop=AV1_GOP, cq=AV1_CQ, fps=int(scene.info.fps), frames=len(scene.frames), decode="cuda",
+        transcode_mp4(
+            source.video, clip, gop=AV1_GOP, cq=AV1_CQ, fps=int(scene.info.fps), frames=len(scene.frames), gray=True, decode="cuda",
         )
 
     jobs = [(clip, partial(encode, source, clip)) for source, clip in zip(scene.cameras, clips, strict=True)]
