@@ -54,6 +54,18 @@ pytest -q
 
 Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
 
+### Paseo worktrees
+
+The root `paseo.json` installs `simplecv-dev` when Paseo creates a worktree.
+Paseo runs this on the host so each worktree can share the Pixi package cache;
+on Linux this environment includes the shared CUDA dependencies.
+
+Setup runs asynchronously: wait for it to succeed before running environment
+tasks. For another package environment or a dependency change, use Pixi in a
+Paseo host terminal in the same workspace, then install the affected environment.
+Keep the shared cache. Archiving the last workspace for a Paseo-owned worktree
+removes that worktree and its `.pixi` directory automatically.
+
 ## Package map
 
 | Package | What it contains |

@@ -1,0 +1,5 @@
+{
+  "worktree": {
+    "setup": "pixi install --locked -e simplecv-dev"
+  }
+}
