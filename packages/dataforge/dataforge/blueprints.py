@@ -187,8 +187,8 @@ def headset_eye_controls(forward: tuple[float, float, float], up: tuple[float, f
 def video_exclusions(slots: Iterable[tuple[int, int]]) -> list[str]:
     """Content rules that drop each ``(rig, cam)`` video, and anything beneath it, from a view.
 
-    A segment-table card excludes every video but the one its pane decodes: excluded, not
-    hidden, because a hidden entity is still decoded.
+    A segment-table card excludes every video but the one its pane decodes. (Rerun 0.38.1 does
+    not decode a video hidden in a 3D view either: docs/mamma.md.)
 
     Args:
         slots: ``(rig, cam)`` of each camera whose video is dropped.
@@ -322,13 +322,14 @@ def exoego_blueprint(
     ego_panes: Sequence[rrb.Spatial2DView],
     exo_panes: Sequence[rrb.Spatial2DView],
     instruction: rrb.TextDocumentView | None = None,
+    per_tab: int = EXO_PANES_PER_TAB,
 ) -> rrb.Blueprint:
     """The default layout of a multi-camera exo/ego capture.
 
     The 3D view fills the top left, the worn cameras stack in a column to its right,
     and the static cameras run in one strip along the bottom. A rig with more than
-    ``EXO_PANES_PER_TAB`` static cameras continues the strip in further tabs, filled
-    in camera order. A dataset that ships a task instruction gets it as a strip under
+    ``per_tab`` static cameras continues the strip in further tabs, filled in camera
+    order. A dataset that ships a task instruction gets it as a strip under
     the 3D view. This is simplecv's ``view_exoego`` arrangement, kept so every exoego
     dataset reads the same.
 
@@ -337,6 +338,7 @@ def exoego_blueprint(
         ego_panes: One pane per worn camera, top to bottom.
         exo_panes: One pane per static camera, left to right.
         instruction: The instruction pane, for a dataset that has one.
+        per_tab: Most exo panes one tab shows.
 
     Returns:
         The blueprint embedded in the dataset's rrds and registered as the
@@ -348,7 +350,7 @@ def exoego_blueprint(
     root: rrb.Container | rrb.View = top
     if exo_panes:
         tabs: list[Sequence[rrb.Spatial2DView]] = [
-            exo_panes[start : start + EXO_PANES_PER_TAB] for start in range(0, len(exo_panes), EXO_PANES_PER_TAB)
+            exo_panes[start : start + per_tab] for start in range(0, len(exo_panes), per_tab)
         ]
         strip: rrb.Container = (
             rrb.Horizontal(*tabs[0])

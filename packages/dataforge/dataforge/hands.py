@@ -60,6 +60,8 @@ HAND_ALBEDO: dict[Side, tuple[int, int, int, int]] = {"left": (90, 160, 240, 110
 """Shared per-side mesh RGBA."""
 BODY_ALBEDO: tuple[int, int, int, int] = (160, 190, 200, 110)
 """Shared body mesh RGBA."""
+PERSON_COLOURS: list[tuple[int, int, int]] = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240)]
+"""Mask and box colour of each person, cycled."""
 
 
 def coco133_from_coco_hands(joints_lr: Float32[ndarray, "2 21 d"]) -> Float32[ndarray, "133 d"]:
@@ -117,8 +119,9 @@ def log_keypoints3d(
     frame_indices: Int64[ndarray, "t"],
     positions: Float32[ndarray, "t 133 3"],
     confidence: Float32[ndarray, "t 133"] | None,
+    path: str = schema.coco133_xyz_path(),
 ) -> None:
-    """Write dense COCO rows with confidence colours; None means no shipped confidence.
+    """Write dense COCO rows with confidence colours to ``path``; None means no shipped confidence.
 
     Args:
         recording: Destination stream.
@@ -126,18 +129,19 @@ def log_keypoints3d(
         frame_indices: Int64[ndarray, "t"] source indices.
         positions: Float32[ndarray, "t 133 3"], metres; missing slots contain NaN.
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
+        path: Entity; each person of a multi-person sequence has its own (``schema.person_coco133_xyz_path``).
     """
     positions, scores = confidence_rule(positions, confidence)
     flat_conf: Float32[ndarray, "n"] = scores.reshape(-1)
     colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(flat_conf[None, :, None])[0]
     rr.log(
-        schema.coco133_xyz_path(),
+        path,
         Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004),
         static=True,
         recording=recording,
     )
     rr.send_columns(
-        schema.coco133_xyz_path(),
+        path,
         indexes=[time_column(times_ns), frame_index_column(frame_indices)],
         columns=Points3DWithConfidence.columns(positions=positions.reshape(-1, 3), confidences=flat_conf, colors=colors).partition([133] * len(positions)),
         recording=recording,

@@ -1,7 +1,7 @@
 """The body models dataforge poses or takes triangles from: where it gets them (one pinned private Hub copy) and SMPL's faces.
 
-EPFL needs the official neutral SMPL only for its triangle list, Ego-Exo4D SMPL-H and SMPL-X; anyone without access to
-the copy places the files at the destination instead.
+EPFL needs the official neutral SMPL only for its triangle list, Ego-Exo4D SMPL-H and SMPL-X, MAMMA its SMPL-X files;
+anyone without access to the copy places the files at the destination instead.
 """
 
 from collections.abc import Sequence

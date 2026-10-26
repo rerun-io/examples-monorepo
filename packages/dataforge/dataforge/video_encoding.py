@@ -48,6 +48,17 @@ CQ32 60.1/44.19/9.5, 128.0/44.03/12.1; CQ36 37.2/43.05/9.5,
 AV1_GOP: int = 60
 """Port-wide AV1 NVENC keyframe interval in frames (binding brief): one second at
 SHOW3D's 60 fps, two at HO-Cap's 30 Hz."""
+MAX_STORED_PIXELS: int = 3_200_000
+"""Videos above this many pixels are stored at half size, repeatedly (Pablo's ~3 MP cap): MAMMA's 4K iPhones at 1920x1080 and
+eval Singles' 4112x3008 at 2056x1504."""
+
+
+def halvings(width: int, height: int) -> int:
+    """How many times a ``width`` x ``height`` video is halved to fit ``MAX_STORED_PIXELS``."""
+    count: int = 0
+    while (width >> count) * (height >> count) > MAX_STORED_PIXELS:
+        count += 1
+    return count
 
 
 @contextlib.contextmanager

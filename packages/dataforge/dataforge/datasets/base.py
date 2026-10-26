@@ -129,16 +129,18 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         writers: Mapping[str, Callable[[rr.RecordingStream], None]],
         *,
         together: Callable[[dict[str, rr.RecordingStream]], None] | None = None,
+        base_blueprint: rrb.Blueprint | None = None,
     ) -> None:
         """Second half of a conversion: open, write and publish every pending layer, timed as ``write:<layer>``.
 
         A layer with an entry in ``writers`` is written alone, in ``pending`` order. The
         pending layers without one are opened together and handed to ``together``, for
         layers fed by one pass over a shared read (EPFL's pose CSVs); it times its own work.
+        ``base_blueprint`` replaces the default blueprint in the base layer (a sequence's own layout).
         """
         for layer in pending:
             if layer in writers:
-                with self.timer.stage(f"write:{layer}"), self.layer_recording(identity, layer, targets[layer]) as recording:
+                with self.timer.stage(f"write:{layer}"), self.layer_recording(identity, layer, targets[layer], base_blueprint) as recording:
                     writers[layer](recording)
         rest: list[str] = [layer for layer in pending if layer not in writers]
         if not rest:
@@ -148,17 +150,19 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         with ExitStack() as stack:
             together({layer: stack.enter_context(self.layer_recording(identity, layer, targets[layer])) for layer in rest})
 
-    def layer_recording(self, identity: SequenceIdentity, layer: str, target: Path) -> AbstractContextManager[rr.RecordingStream]:
+    def layer_recording(
+        self, identity: SequenceIdentity, layer: str, target: Path, blueprint: rrb.Blueprint | None = None
+    ) -> AbstractContextManager[rr.RecordingStream]:
         """Open one layer's atomic recording; see ``writing.atomic_recording``.
 
-        Only the base layer embeds the dataset's default blueprint and Rerun's own
+        Only the base layer embeds a blueprint (``blueprint``, else the dataset's default) and Rerun's own
         ``RecordingInfo``; a derived layer stacks onto it under the same recording id.
         """
         base: bool = layer == paths.BASE_LAYER
         return writing.atomic_recording(
             target,
             recording_id=identity.recording_id,
-            default_blueprint=self.default_blueprint() if base else None,
+            default_blueprint=(self.default_blueprint() if blueprint is None else blueprint) if base else None,
             send_properties=base,
         )
 
