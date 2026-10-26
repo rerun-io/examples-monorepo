@@ -1,0 +1,169 @@
+# MammaSyn (MAMMA's synthetic training set)
+
+## Source
+
+- MammaSyn is MAMMA's synthetic training data (https://mamma.is.tue.mpg.de), the gated Hugging Face dataset
+  `Intelligent-Systems/MammaSyn`: 6.62 TB of WebDataset shards, 8,610 files, downloaded 2026-07-27..28 to
+  `/mnt/nas/datasets/mamma/MammaSyn` at commit `01ecdc88` and read in place. The MPI capture collections are in
+  [mamma.md](mamma.md).
+- **The raw copy is deleted** (2026-10-26, Pablo's call): the rrds hold everything the converter reads, and the Hub gives the
+  release back byte for byte at the pinned commit (the file list and LFS hashes of all 8,610 files are in
+  `~/exoego-data/mammasyn-deletion/manifest-before-delete.json` on the dl-server). What went with it, and comes back only from the
+  Hub: the lossless RGBA renders (the rrds keep AV1 4:2:0), the full-size masks (the rrds keep a quarter), the float32 signed
+  distances (the rrds keep float16), and the fields the inventory marks "not ingested". A re-conversion fetches the release again
+  first (see Get the raw data).
+- Two families of the `mamma` command, one catalog dataset each:
+  - `--family syn` (`dataforge-mamma-syn`): MAMMA's own renders, 14 dataset directories in three groups (Hands: Interhand;
+    Interactions: Harmony4D, Inter-X, InteractionCouple, LatinDance10; Singles: BEDLAM bodies, MoYo), 2,115 sequence directories,
+    each one scene seen by 8 fixed cameras of MAMMA's 32-camera IOI rig (one sequence, `interhand_2-6_NC_200_01/be_LGVHtwB-Rwek_seq_000019`, by 7). Identity `mamma-syn__<dataset>__<sequence>`.
+  - `--family syn-bedlam` (`dataforge-mamma-syn-bedlam`): `MammaSyn-Singles/BEDLAM_MASKS_WD`, the BEDLAM release repacked: 30
+    batch directories of short single-camera clips (10,450). Identity `mamma-syn-bedlam__<batch>__<clip>`.
+- A sample is one camera view of one frame, three shard members under one key: `<key>.png` (2056x1504 or 1504x2056 RGBA render;
+  BEDLAM 1280x720), `<key>.mask.png` (8-bit instance mask: person index + 1, 0 = background) and `<key>.data.pyd` (a pickled dict
+  of the people that view labels). The pickles refer to numpy arrays and scalars only; they are read with an unpickler that
+  refuses anything else.
+- BEDLAM's 7 `closeup` batches (2,000 clips) are rendered in portrait and ship turned a quarter counter-clockwise to 1280x720,
+  their K still for the 720x1280 portrait image (principal point (360, 640)); BEDLAM's loaders turn them back by the batch name.
+  So does the converter: their video and masks are turned a quarter clockwise. In every batch the principal point is the
+  image centre (checked on 3 clips per batch); a clip whose K is not centred on its (turned) image fails.
+- A render key is `.../<sequence>/<camera>/<frame>`; within a camera the frames ascend, and a camera may straddle shards. A
+  BEDLAM key is `.../png/<clip>/<clip>_<frame>`, the clips' samples unsorted in their batch's shards. Within a render shard each
+  camera is one run, a sample's members in the order labels, render, mask.
+- Reading over NFS: the NAS gives about 340 MB/s to 4 sequential streams (180 to one) and about 250 random reads per second, and a
+  tar header walk is one random read per member (50 to 120 ms each under load). So while one render sequence converts, the next
+  one's shards are copied to local disk in order, 4 spans of 256 MB at a time (`work/mamma-syn-stage/<pid>/<recording>`, about
+  340 MB/s; each span must copy its full length); its header walk (0.1 s) and member reads come from that copy, which is removed
+  once the cameras are read. Each run stages under its own process id, and a run removes the directories of runs that died. The page
+  cache cannot stand in for the copy: on dl-server kswapd reclaimed a read-ahead within seconds while the encoders ran, with
+  70 GB free. The index (each sample's member offsets) is cached as JSON under `--index-root` (local disk), keyed by each shard's
+  size and mtime, which the copies keep. BEDLAM's discovery walks every batch's headers over NFS (4 batches at once) on its
+  first run; while one clip converts, the next clip's members are read into memory in shard order, members less than 1 MB apart
+  in one read (a clip lies in a few runs of its batch's shards).
+- Body models: each person is posed with the neutral model whose forward gives back the shipped `joints3d` at its first labelled
+  row. In a sample of one sequence per dataset directory, Interhand and MoYo were rendered with the locked-head neutral
+  (`model` = `body_models/smplx_lockedhead/SMPLX_NEUTRAL.npz`); Harmony4D, Inter-X, InteractionCouple, LatinDance10 and the BEDLAM
+  bodies (`b1_all`, `BEDLAM_MASKS_WD`) with SMPL-X v1.1 neutral (`model` = `SMPLX_NEUTRAL.npz` of the v1.1 mirror). The matching
+  model reproduces the shipped joints, 3D vertices and 2D vertices exactly (under 0.001 mm, 0.05 px); the other one misses by
+  0.6 mm or more. Flat hand mean, 16 betas (BEDLAM: 11; its gender labels are not the model).
+  Every conversion checks every person at every frame a view labels them against the shipped joints (finite, within 0.1 mm;
+  a failure names the person and frame) and records the largest gap as `property:episode:joints3d_max_error_mm`.
+
+## Get the raw data
+
+The release must be on disk again before any of these commands (the raw copy is deleted, see Source); about 6.6 TB, gated (accept
+the terms on the Hub first):
+
+```bash
+hf download Intelligent-Systems/MammaSyn --repo-type dataset --revision 01ecdc887819a91e992b58fdb2c1684335543558 \
+    --local-dir /mnt/nas/datasets/mamma/MammaSyn
+pixi run -e dataforge dataforge-download mamma --family syn --root /mnt/nas/datasets/mamma               # models + verify in place
+pixi run -e dataforge dataforge-download mamma --family syn --root /mnt/nas/datasets/mamma \
+    --sequences interhand_2-6_NC_200_00/be_NB-NZj2zRkeQ_seq_000002 --fetch-into /local/scratch                 # Hub fetch proof
+pixi run -e dataforge dataforge-convert mamma --family syn-bedlam --root /mnt/nas/datasets/mamma \
+    --sequences 20221024_10_100_batch01handhair_zoom_suburb_d/seq_000000
+```
+
+- `download` never downloads the release again. It fetches the SMPL-X models and lists the pinned Hub revision: every shard and
+  `metadata.json` of the family must be on disk at its listed size (2026-10-11: renders 6,945 files, BEDLAM 1,633, all present at
+  their size). With `--sequences --fetch-into` it fetches the shards holding those sequences (a BEDLAM clip lives in one or two
+  shards of its batch) and compares them byte for byte; `interhand.../be_NB-NZj2zRkeQ_seq_000002` (2 shards, 1.95 GB) and the
+  shard of BEDLAM clip `20221024_10_100_batch01handhair_zoom_suburb_d/seq_000000` came back identical.
+- Every sequence's samples must number what its `metadata.json` declares, or it fails; a BEDLAM batch that does not fails the
+  family's discovery, naming the batch. One render directory,
+  `interactions_couple_1_C_200_00_contact/be_TyJqNcw9QoeT_seq_000161`, has shards and no `metadata.json` (on the Hub too), and two
+  ship empty (one 1 KiB empty tar, `num_samples: 0`: `interactions_couple_1_C_200_00_contact/be_TyJqNcw9QoeT_seq_000148`,
+  `latindance10_1_NC_entire_dataset_00_contact/be_dkrWAwL7TcOZ_seq_000003`): discovery skips and reports all three, so the family
+  is 2,112 sequences.
+
+## Raw inventory
+
+| Shipped member or field | Rate / clock | Layer | Entity or not ingested: reason |
+| --- | --- | --- | --- |
+| `<key>.png` | per sample | base | `/world/rig_NN/cam_00/pinhole/video`, AV1 4:2:0 from the RGBA render, alpha dropped (99.8% of pixels are opaque) |
+| `cam_int`, `cam_ext` (every person of every view) | static (renders), per frame (BEDLAM) | base | `Pinhole` and the rig pose (renders: fixed per camera, checked); BEDLAM: K per frame (zoom clips), the camera at the origin |
+| `pose_world`, `shape`, `trans_world`, `gender` | per frame | body_pose | `/world/gt/people/person_NN/body/smplx` (`pose`, `trans` per frame, NaN where absent; `betas` static); BEDLAM adds `cam_T_body` |
+| `joints3d` | per frame | — | checked against the forward (`joints3d_max_error_mm`), not stored: the forward reproduces it |
+| `vertices3d` (camera frame), `vertices2d`, `joints2d`, `camera_normals` | per frame | — | not ingested: the forward of the stored parameters and calibration (body_mesh = `cam_ext`⁻¹ · `vertices3d` within 0.0002 mm) (golden test; our landmark projection matches `vertices2d` within 0.0004 px, renders and BEDLAM closeup and zoom). The renders' `joints2d` is malformed (shape 251 x 2 x 127 x 2, values up to 2e7) |
+| `<key>.mask.png` | per sample | masks | `/world/rig_NN/cam_00/pinhole/masks/person_NN`, a palette PNG per person at a quarter size; everyone a mask shows |
+| `vertex_visibility` (int32 renders, float64 BEDLAM, 0/1), `person_visitiblity_rate` | per view, per frame | visibility | `/world/rig_NN/cam_00/pinhole/visibility/person_NN`: `visible` (list<bool>, 10,475), `visibility_rate`; MammaNet's 512 landmarks drawn |
+| `floor_contact_mask` | per person, per frame (the same in every view, checked) | contacts | `/world/gt/people/person_NN/contact/floor`: `in_contact` (list<bool>), the contacting vertices drawn |
+| `sdf_vertices` (Harmony4D, Inter-X, InteractionCouple, LatinDance10; an empty list elsewhere) | per person, per frame (the same in every view, checked) | contacts | `.../contact/person_MM`, MM the other person of the two: `signed_distance` (list<float16>, metres, negative inside), `in_contact` = under 10 mm |
+| `center`, `scale`, `imgname` | per view | — | not ingested: the upstream crop box and file name |
+| `pose_cam`, `trans_cam` (BEDLAM; `None` in renders), `person_idx` | per view | — | not ingested: `pose_cam` is `pose_world` turned into the camera (`pose_cam[3:]` = `pose_world[3:]`, its root rotation = `R_ext` · the world one, to 1.7e-7); `person_idx` is the label key that becomes `person_NN` |
+| `motion_info` (BEDLAM: six strings; renders ship `unknown`) | per person | body_pose | BEDLAM: `/world/gt/people/person_NN` statics `motion_action` (string 0), `motion_source` (string 2, the AMASS file), `motion_info` (all six) |
+| `sub`, `race` (BEDLAM: texture, skin) | per person | — | not ingested; still in the release |
+| `metadata.json` `num_samples` | per directory | — | checked against the shards' samples (`property:episode:shard_samples`) |
+
+## Clocks
+
+The shards carry no timestamps; the member names carry the source frame numbers. MAMMA renders MammaSyn at 6 fps (MAMMA paper,
+`docs/DATASETS.md` upstream): `video_time` is frame / 6 s. BEDLAM numbers its frames at its 30 fps render rate and ships every
+5th: `video_time` is frame / 30 s, samples 1/6 s apart (`property:capture:fps` is the stream's 6; `clock_source` names the 30 fps
+numbering). `frame_index` is the source frame number. A frame the shards do not hold
+is a gap on the clock, not a renumbering (the sampled Hands sequence lacks frame 2 in every camera); a camera may lack a frame
+another camera has.
+
+## Layers and entities
+
+- **base**: the cameras and videos, capture and episode properties (`group`, `collection` = the dataset directory, `sequence`,
+  `subjects`, `shard_samples`, `joints3d_max_error_mm`; BEDLAM: `batch`, `genders`). The renders' world is y down, as their
+  labels are; a BEDLAM clip's world is its camera frame (x right, y down, z ahead), the only frame its bodies share: each BEDLAM
+  body comes in a world of its own, and on orbit clips those worlds do not agree. A closeup clip's video is 720x1280 (see Source),
+  and so is its `source_resolution`: the size after the turn, not the 1280x720 the shards ship.
+- **contacts**, per person (exoego spec §15): `contact/floor` on every frame, an empty row where the person is absent; on the four
+  interaction datasets `contact/person_MM` too, the shipped signed distance to the other person (only a two-person scene names its
+  partner; a larger one with a distance fails), empty on frames that ship none. `in_contact` = distance under
+  `contact_threshold_m` (0.01), inside the other person included. The contacting vertices are drawn on the posed body (floor
+  orange, partner magenta).
+- **visibility**, per camera and person (§15): `visible` and `visibility_rate` on every frame, empty where that view does not label
+  the person, and MammaNet's 512 landmarks (static `landmark_vertex_ids`; the release's `verts_512.pkl` beside the locked-head
+  model) through the camera, yellow where seen, near black where hidden. A pass that writes only label layers reads each label
+  pickle and one PNG header per camera in place (no staged copy): about 3 MB of a sample's 7.9 MB.
+- **body_pose**, per person `NN` = the release's person index (its mask value - 1): the shipped parameters, the `source` tag
+  `synthetic_gt`, the `model` file, and COCO-133 keypoints from the posed model; NaN rows where no view labels the person (a view
+  leaves out people it does not see).
+- **body_mesh**: each person's posed SMPL-X mesh at every frame (6 Hz), an empty mesh where the person is absent. BEDLAM bodies are
+  posed in their own world and moved by their per-frame `cam_ext`.
+- **projections**: COCO-133 through each camera's pinhole (no lens), per frame K on BEDLAM.
+- **masks**: per camera, one palette PNG per person and frame at a quarter of the video's size, as the eval masks (mamma.md), for
+  everyone the labels name and anyone else a mask shows; an empty one where the person is not in that view.
+- Default blueprint: renders, the scene above a pane per camera (all of their 7 or 8, the videos hidden in 3D) with the
+  visibility landmarks hidden in the panes (mamma.md); BEDLAM, the scene beside its one camera at half the width each, as a
+  closeup clip's portrait frames need the height. Table card: the scene beside camera 1.
+
+## Timing
+
+pablo-dl-server (Ryzen 9 9950X3D, RTX 5090, prod env), 2026-10-11; the release read in place from the NAS over NFSv3.
+
+- **Renders** (2,112 sequences, 781,366 samples, 4.5 h of capture at 6 fps): 5.68 TB of shards became 58.8 GB of rrds (97x).
+  The NAS sets the pace: the next sequence's local copy runs at about 310 MB/s (4 sequential streams; the NAS peaks near
+  340 MB/s), about 5.1 h for the family. Per sequence over the last 909 (MoYo and LatinDance included), 10.5 s: 6.0 s waiting
+  for the copy, 3.4 s transcode (ffmpeg's frame-threaded PNG decode on the CPU and NVENC AV1, 8 cameras at once), 0.8 s masks,
+  0.1 s SMPL-X. A faster PNG decode would not shorten the run: the copy, not the decode, is the bound (and no GPU PNG decoder
+  exists: nvImageCodec decodes PNG on the CPU).
+- **BEDLAM** (10,450 clips, 317,602 samples, 14.8 h of capture): 0.94 TB became 152.7 GB (6.2x). The first discovery walks the
+  headers of 1,603 tars (82 min, sharing the NAS with a copy; cached after). Converting took 58 min in 4 processes on disjoint
+  batches, one NVENC session each: 1.18 s per clip, 0.6 s transcode, 0.3 s waiting for the prefetched members, 0.2 s SMPL-X.
+- **Labels** (2026-10-12, `contacts`, `visibility` and BEDLAM's `body_pose` again for the motion source): a pass with only these
+  layers pending reads the label pickles and one PNG header per camera in place, 2.05 TB for the renders and 0.47 TB for BEDLAM.
+  The NAS sets the pace: 150 to 190 MB/s in all, at 140 to 400 ms per 1 MB read. Renders: 2,112 sequences in about 10 h on 3
+  processes, sharing the NAS with the other two passes for most of it (median 23 s per sequence, all of it the read). BEDLAM:
+  10,450 clips in 3.3 h on 4 processes (median 4.8 s per clip, 4.7 s of it fetching the members, eight runs at once). Output:
+  renders 2.2 GB contacts, 13.0 GB visibility; BEDLAM 0.9 GB contacts, 6.4 GB visibility, 3.8 GB body pose (was 3.7).
+- Size by layer: renders 39.3 GB meshes, 14.3 GB video, 3.0 GB projections, 1.3 GB masks, 0.9 GB body pose; BEDLAM 142.7 GB
+  meshes (up to 10 people at every frame), 4.2 GB video, 3.7 GB body pose, 1.5 GB projections, 0.6 GB masks. Meshes are kept at
+  every 6 Hz frame (below the 10 Hz display cap of `meshes.BODY_MESH_STRIDE`).
+
+## Known gaps
+
+- Not ingested: the upstream crop boxes (`center`, `scale`), `camera_normals`, BEDLAM's texture and skin names. Self-contact is not
+  shipped; computing it from our meshes would be an estimate under `/world/pred/...` (a follow-up).
+- A rendered person that no view labels at a frame has no body there, even when a mask shows them.
+- BEDLAM's `vertex_visibility` ignores scene geometry: a person behind a tree trunk or a counter keeps the hidden vertices as
+  seen, while the mask is cut by the occluder. The share of seen landmarks that fall on the person's own mask has a median of
+  0.94 over the 10,450 clips; 290 are below 0.85, 279 of them in three batches (`batch01hand_orbit_archVizUI3_time15`,
+  `highbmihand_static_suburb_d`, `batch01hand_zoom_suburb_d`). The layer keeps the release's flags.
+- The floor-contact flags hold the release's ground, not a flat one: a plane fitted to a sequence's floor-contact vertices leaves a
+  p95 residual of 0.9 to 4.0 cm (median per render dataset) and up to 9.7 cm, where the release places a body below the ground
+  (InterHand `seq_000078`: one of two people up to 21 cm under the snow the other stands on, while that person's contact
+  vertices sit a median 1.8 cm above their own lowest vertex).

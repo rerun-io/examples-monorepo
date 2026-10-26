@@ -1,9 +1,11 @@
 """Typed record boundaries shared by dataset readers: one decode door that names the source on failure.
 
-Records go through pyserde. A numeric CSV table (an MPS trajectory, a timesync file) is a stream of rows, so
+Records go through pyserde. A release pickle goes through ``NumpyOnlyUnpickler`` first, so it cannot run code. A numeric CSV table (an MPS trajectory, a timesync file) is a stream of rows, so
 ``read_csv_columns`` parses only the named columns into typed Arrow arrays instead (CSV has no pyserde codec, and
 ``DictReader`` + ``from_dict`` per row is ~80x slower on a 250k-row trajectory)."""
 
+import io
+import pickle
 from pathlib import Path
 from types import GenericAlias
 from typing import Any, Literal, TypeVar
@@ -17,6 +19,22 @@ from serde.yaml import from_yaml
 from yaml import YAMLError
 
 SourceT = TypeVar("SourceT")
+PICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
+    {(module, name) for module in ("numpy.core.multiarray", "numpy._core.multiarray") for name in ("_reconstruct", "scalar")}
+    | {(module, "_frombuffer") for module in ("numpy.core.numeric", "numpy._core.numeric")}
+    | {("numpy", "dtype"), ("numpy", "ndarray")}
+)
+"""Everything a release pickle may build besides plain containers: numpy arrays and scalars (numpy 1 wrote ``numpy.core``,
+numpy 2 writes ``numpy._core``)."""
+
+
+class NumpyOnlyUnpickler(pickle.Unpickler):
+    """Unpickles plain containers and numpy arrays only: a pickle naming any other global is refused, not run."""
+
+    def find_class(self, module: str, name: str) -> object:
+        if (module, name) not in PICKLE_GLOBALS:
+            raise pickle.UnpicklingError(f"the pickle refers to {module}.{name}, which is not a numpy type")
+        return super().find_class(module, name)
 
 
 def decode(  # noqa: UP047 — beartype requires legacy generics
@@ -42,6 +60,14 @@ def decode_values(cls: type[SourceT], values: dict[str, Any], *, source: Path | 
         return from_dict(cls, values)
     except (SerdeError, ValueError) as error:
         raise ValueError(f"{source}: {error}") from error
+
+
+def unpickle(payload: bytes, origin: str) -> object:
+    """A release pickle through ``NumpyOnlyUnpickler``, naming ``origin`` when it is malformed or refers to a non-numpy global."""
+    try:
+        return NumpyOnlyUnpickler(io.BytesIO(payload)).load()
+    except (pickle.UnpicklingError, EOFError, ValueError) as error:
+        raise ValueError(f"{origin}: {error}") from error
 
 
 def read_json(path: Path, cls: type[SourceT] | GenericAlias, *, text: str | None = None) -> SourceT:  # noqa: UP047 — beartype requires legacy generics
