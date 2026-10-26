@@ -549,15 +549,27 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     """Converts SelfCap episodes into exoego:v2 base-layer recordings."""
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """Corpus-wide layout for the modal four-iPhone rig.
+        """Corpus-wide calibration review layout for the modal four-iPhone rig.
 
-        Exo device names vary per session, so the dataset default labels them by
-        index; the per-recording blueprint embedded at convert uses real names.
+        The calibrated Quest world in 3D beside the OAK rgb and both Quest cameras, the
+        iPhones beneath; every camera pane also draws ``/world/gt`` (the Quest hands),
+        so the calib layer's poses can be judged on the video. On the base layer alone
+        the panes show the videos and the uncalibrated iPhones sit at the origin.
+        Exo device names vary per session, so the dataset default labels them by rig;
+        the per-recording blueprint embedded at convert keeps the real names.
         """
-        panes: list[CameraPane] = [CameraPane(name=f"exo {rig}", rig=rig, cam=0, kind="exo") for rig in range(DEFAULT_EXO_CAMERAS)]
-        panes += [CameraPane(name=f"ego {stream}", rig=DEFAULT_EXO_CAMERAS, cam=index, kind="ego") for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
-        panes += [CameraPane(name=f"quest {stream}", rig=DEFAULT_EXO_CAMERAS + 1, cam=index, kind="quest") for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
-        return build_blueprint(tuple(panes), ego_rig=DEFAULT_EXO_CAMERAS)
+        ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
+
+        def camera(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
+            return blueprints.camera_view(name, rig, cam, contents=[f"{schema.pinhole_path(rig, cam)}/**", "/world/gt/**"])
+
+        ego: list[rrb.Spatial2DView] = [camera("OAK rgb", ego_rig, 0), camera("Quest left", quest_rig, 0), camera("Quest right", quest_rig, 1)]
+        exo: list[rrb.Spatial2DView] = [camera(f"exo rig_{rig:02d}", rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)]
+        scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world")
+        return rrb.Blueprint(
+            rrb.Vertical(rrb.Horizontal(scene, rrb.Vertical(*ego), column_shares=[3.0, 1.0]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
+            collapse_panels=True,
+        )
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Cheap preview card: the ego rgb stream only, nothing else decoded.

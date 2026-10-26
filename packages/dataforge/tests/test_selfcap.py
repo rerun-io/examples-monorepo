@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
+import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 
+from dataforge import schema
 from dataforge.datasets.selfcap import (
     CameraCalibration,
     EpisodePlan,
@@ -216,9 +219,27 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
     assert cameras["center"].distortion_coefficients is None
 
 
-def test_default_blueprint_covers_nine_cameras() -> None:
-    blueprint = SelfcapConfig().setup().default_blueprint()
-    assert blueprint is not None
+def iter_views(container: rrb.Container) -> list[rrb.View]:
+    """Every view under a container, depth first."""
+    views: list[rrb.View] = []
+    for child in container.contents:
+        views += iter_views(child) if isinstance(child, rrb.Container) else [child]
+    return views
+
+
+def test_default_blueprint_is_the_calibration_review_layout() -> None:
+    # The guard: :51235's default comes from this method on every dataforge-register run, and a
+    # catalog restore once fell back to an uncalibrated grid that hid the calib layer's overlays.
+    blueprint: rrb.Blueprint = SelfcapConfig().setup().default_blueprint()
+    views: dict[str, rrb.View] = {str(view.name): view for view in iter_views(blueprint.root_container)}
+    exo: list[str] = [f"exo rig_{rig:02d}" for rig in range(4)]
+    assert sorted(views) == sorted(["World (Quest frame, calibrated)", "OAK rgb", "Quest left", "Quest right", *exo])
+    assert str(views["World (Quest frame, calibrated)"].origin) == "/world"
+    cameras: dict[str, tuple[int, int]] = {**{name: (rig, 0) for rig, name in enumerate(exo)}, "OAK rgb": (4, 0), "Quest left": (5, 0), "Quest right": (5, 1)}
+    for name, (rig, cam) in cameras.items():
+        assert str(views[name].origin) == schema.pinhole_path(rig, cam)
+        contents: list[str] = cast(list[str], views[name].contents)  # the view keeps the list it was built with
+        assert "/world/gt/**" in contents  # the Quest hands, drawn into every camera
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:
