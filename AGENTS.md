@@ -193,10 +193,16 @@ are checked on the way in; the rest of the code holds typed objects, never dicts
   that the catalog can answer does not belong in a TOML file.
 - **Records yes, streams no.** A record you read whole goes through pyserde, arrays
   included: calibrations, hand models, keypoint rows, reports, whole-sequence pose
-  tables. A stream you iterate does not: video frames, depth maps, masks, point clouds
-  and trajectories live in their own containers (npz/npy, Parquet/Arrow, Rerun) and
+  tables. A stream you iterate does not: video frames, depth maps, masks, point clouds,
+  trajectories and per-frame model outputs live in Rerun (an `.rrd`, registered as a
+  catalog layer when the segment is on the catalog), tables in Parquet/Arrow, and
   pyserde carries only the metadata that names them. The test is the role of the data,
   not its size.
+- **No npz/npy.** Never write them: not for outputs, caches, intermediates, test
+  fixtures or frozen references. A frozen reference that a golden test needs is an
+  `.rrd` in the production entity layout that holds its arrays bit-exactly. Read
+  npz/npy only when a third party ships that format (HOCap labels, SMPL model files),
+  once, at ingest. Existing uses convert when you next edit that file (see Rollout).
 - **Arrays carry jaxtyping with an explicit dtype** (`Float32[ndarray, "n 3"]`, not
   `Float[...]` or bare `ndarray`): that is what makes pyserde enforce dtype and shape on
   load; generic `Float`/`Int` do not fix the width and a bare `ndarray` comes back as
