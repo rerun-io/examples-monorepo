@@ -1,4 +1,4 @@
-"""The Hexels 34-scene benchmark queue (~/hexels-work/contracts/run-layout.md).
+"""The Hexels 34-scene benchmark queue (docs/run-layout.md).
 
 An item is one (dataset, scene, method) run directory. Each method runs through its tool in its
 own Pixi environment: the WGSL `gsplat render` in `gsplat-rust-renderer`; the Brush protocol runner,
@@ -7,14 +7,12 @@ complete when its `metrics.json` scores every held-out view (and the method's ot
 complete items are skipped, so a stopped queue resumes where it left off.
 """
 
-import fcntl
 import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -23,11 +21,25 @@ from serde import serde
 from serde.json import from_json, to_json
 
 from hexels_bench.cameras import CamerasFile
+from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, WORKSPACE, Dataset, Roots, read_json
-from hexels_bench.methods import METHODS, Method, MethodSpec
-from hexels_bench.metrics import MetricsFile, TrainRecord
+from hexels_bench.methods import BENCHMARK_METHODS, METHODS, Method, MethodSpec
+from hexels_bench.metrics import MetricsFile, TrainRecord, ply_vertex_count
 
 Env: TypeAlias = Literal["gsplat-rust-renderer", "hexels"]
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class FpsTrial:
+    """One timed trial of `gsplat render --fps`."""
+
+    seconds: float
+    """Wall time of the trial."""
+    frames: int
+    """Frames rendered in it."""
+    fps: float
+    """frames / seconds."""
 
 
 @serde
@@ -35,6 +47,12 @@ Env: TypeAlias = Literal["gsplat-rust-renderer", "hexels"]
 class FpsReport:
     """`fps.json` written by `gsplat render --fps` (read partially; the CLI owns the schema)."""
 
+    adapter: str
+    """GPU adapter that rendered."""
+    backend: str
+    """wgpu backend (Vulkan, Metal, ...)."""
+    trials: list[FpsTrial]
+    """Timed trials."""
     median_fps: float
     """Median of the trial frame rates."""
 
@@ -102,7 +120,7 @@ class QueueSummary:
     """Items that failed (see FAILURES.jsonl)."""
 
 
-def build_queue(datasets: tuple[Dataset, ...], scenes: tuple[str, ...] = (), methods: tuple[Method, ...] = tuple(METHODS)) -> list[Item]:
+def build_queue(datasets: tuple[Dataset, ...], scenes: tuple[str, ...] = (), methods: tuple[Method, ...] = BENCHMARK_METHODS) -> list[Item]:
     """Items dataset by dataset, scenes in upstream order, every method of a scene before the next scene.
 
     Args:
@@ -124,12 +142,19 @@ def build_queue(datasets: tuple[Dataset, ...], scenes: tuple[str, ...] = (), met
 
 
 def incomplete_reason(run_dir: Path, method: Method) -> str | None:
-    """None when the run directory is a finished, scored run of `method`; otherwise what is missing."""
+    """None when the run directory is a finished, scored run of `method` with a readable model.ply; otherwise what is missing."""
     spec: MethodSpec = METHODS[method]
     if not (run_dir / "metrics.json").is_file():
         return "no metrics.json"
     if not (run_dir / "cameras.json").is_file():
         return "no cameras.json"
+    model: Path = run_dir / "model.ply"
+    if not model.is_file():
+        return "no model.ply (missing, or a link to a missing file)"
+    try:
+        ply_vertex_count(model)
+    except ValueError as error:
+        return f"unreadable model.ply: {error}"
     try:
         metrics: MetricsFile = read_json(MetricsFile, run_dir / "metrics.json")
         names: list[str] = [camera.name for camera in read_json(CamerasFile, run_dir / "cameras.json").cameras]
@@ -146,7 +171,7 @@ def incomplete_reason(run_dir: Path, method: Method) -> str | None:
         return f"{len(renders)} renders for {len(names)} cameras"
     if [view.name for view in metrics.per_view] != names or metrics.views != len(names):
         return f"metrics.json scores {metrics.views} views, cameras.json has {len(names)}"
-    if (run_dir / "model.ply").exists() and (run_dir / "model.ply").stat().st_mtime > (run_dir / "metrics.json").stat().st_mtime:
+    if model.stat().st_mtime > (run_dir / "metrics.json").stat().st_mtime:
         return "metrics.json is older than model.ply (retrained or re-exported since scoring)"
     if metrics.lpips_vgg is None:
         return "no LPIPS"
@@ -161,18 +186,6 @@ def load_failures(path: Path) -> list[FailureRecord]:
     if not path.is_file():
         return []
     return [from_json(FailureRecord, line) for line in path.read_text().splitlines() if line.strip()]
-
-
-@contextmanager
-def gpu_lock(path: Path) -> Iterator[None]:
-    """Hold `flock(path)` (exclusive) for the duration of the block."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def to_attic(roots: Roots, item: Item, partials: tuple[Path, ...]) -> None:
@@ -190,8 +203,8 @@ def to_attic(roots: Roots, item: Item, partials: tuple[Path, ...]) -> None:
 
 
 def roots_args(roots: Roots) -> tuple[str, ...]:
-    """The roots every hexels tool takes, so each step reads and writes the queue's runs root, not the default one."""
-    return ("--roots.data", str(roots.data), "--roots.runs", str(roots.runs))
+    """Every root as a `--roots.<name>` flag (every hexels tool takes `Roots`), so each step uses the queue's roots, not the defaults."""
+    return tuple(arg for root in fields(Roots) for arg in (f"--roots.{root.name.replace('_', '-')}", str(getattr(roots, root.name))))
 
 
 def score_step(roots: Roots, item: Item, fps: float | None) -> Step:
@@ -204,7 +217,7 @@ def brush_train_step(roots: Roots, item: Item) -> Step:
     """The Brush protocol runner for one scene, without --gpu-lock (the conductor already holds it)."""
     args: tuple[str, ...] = (
         "python", str(WORKSPACE / "packages" / "hexels" / "tools" / "train_brush.py"), "--dataset", item.dataset, "--scenes", item.scene, "--method", item.method,
-        "--steps", str(METHODS[item.method].steps), *roots_args(roots), "--roots.brush-prepared", str(roots.brush_prepared),
+        *roots_args(roots),
     )  # fmt: skip
     return Step(name="brush-train", env="hexels", args=args)
 
@@ -247,23 +260,15 @@ def execute(roots: Roots, item: Item, run: Runner) -> None:
         if not (run_dir / "train.json").is_file():
             run(brush_train_step(roots, item), log)
         run(score_step(roots, item, None), log)
+    elif spec.trains and all(path.exists() for path in (run_dir / "train.json", run_dir / "model.ply", run_dir / "renders" / "test")):
+        run(score_step(roots, item, None), log)  # trained and rendered (train.json comes last): only the scores are missing
     elif spec.trains:
         to_attic(roots, item, (run_dir,))
-        args: tuple[str, ...] = (
-            "hexels-train",
-            "--dataset",
-            item.dataset,
-            "--scene",
-            item.scene,
-            "--variant",
-            spec.variant,
-            "--steps",
-            str(spec.steps),
-        )
+        args: tuple[str, ...] = ("hexels-train", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method)
         run(Step(name="hexels-train", env="hexels", args=(*args, *roots_args(roots))), log)
     else:
         to_attic(roots, item, (run_dir / "upstream-eval", run_dir / "upstream-eval-job"))
-        args = ("hexels-render-published", "--dataset", item.dataset, "--scenes", item.scene, "--variants", spec.variant)
+        args = ("hexels-render-published", "--dataset", item.dataset, "--scenes", item.scene, "--methods", item.method)
         run(Step(name="hexels-render-published", env="hexels", args=(*args, *roots_args(roots))), log)
     reason: str | None = incomplete_reason(run_dir, item.method)
     if reason is not None:
@@ -315,20 +320,19 @@ def run_queue(items: list[Item], roots: Roots, lock: Path, run: Runner) -> Queue
 
 
 def pixi_runner(step: Step, log: Path) -> None:
-    """Run a step through `pixi run --frozen`, echo its output, and append it to `log`."""
+    """Run a step through `pixi run --frozen`, echo its output, and append it to `log` line by line as it arrives."""
     command: list[str] = ["pixi", "run", "-e", step.env, "--frozen", *step.args]
     started: float = time.perf_counter()
-    lines: list[str] = []
-    with subprocess.Popen(command, cwd=WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="", flush=True)
-            lines.append(line)
-    seconds: float = time.perf_counter() - started
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a") as stream:
         stream.write(f"== bench {step.name}: {shlex.join(command)} (cwd {WORKSPACE})\n")
-        stream.writelines(lines)
-        stream.write(f"== bench {step.name}: exit {process.returncode} after {seconds:.1f} s\n")
+        stream.flush()
+        with subprocess.Popen(command, cwd=WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                stream.write(line)
+                stream.flush()
+        stream.write(f"== bench {step.name}: exit {process.returncode} after {time.perf_counter() - started:.1f} s\n")
     if process.returncode != 0:
         raise StepFailed(f"{step.name} exited with {process.returncode}: {shlex.join(command)}")

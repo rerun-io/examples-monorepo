@@ -1,4 +1,4 @@
-"""The NVS methods of the run layout (contracts/run-layout.md): one typed row per method, so no code parses a method name."""
+"""The NVS methods of the run layout (docs/run-layout.md): one typed row per method, so no code parses a method name."""
 
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
@@ -16,6 +16,7 @@ Method: TypeAlias = Literal[
     "hexels-v1-30k-pub-wgsl",
     "hexels-v2-30k-pub-wgsl",
     "hexels-v3-30k-pub-wgsl",
+    "brush-smoke",
 ]
 SPLAT_FLOATS: int = 59
 """Learned floats of a 3DGS splat with SH degree 3: position 3, scale 3, rotation 4, opacity 1, SH 48."""
@@ -56,5 +57,9 @@ METHODS: dict[Method, MethodSpec] = {
     "hexels-v1-30k-pub-wgsl": MethodSpec(variant="v1", steps=30000, published=True, renders_from="hexels-v1-30k-pub-cuda"),
     "hexels-v2-30k-pub-wgsl": MethodSpec(variant="v2", steps=30000, published=True, renders_from="hexels-v2-30k-pub-cuda"),
     "hexels-v3-30k-pub-wgsl": MethodSpec(variant="v3", steps=30000, published=True, renders_from="hexels-v3-30k-pub-cuda"),
+    "brush-smoke": MethodSpec(variant=None, steps=30, published=False, renders_from=None),
 }
-"""In queue order within a scene: a WGSL re-render follows the run it re-renders."""
+"""In queue order within a scene: a WGSL re-render follows the run it re-renders. `brush-smoke` is a 30-step check of
+the Brush protocol path, outside the benchmark."""
+BENCHMARK_METHODS: tuple[Method, ...] = tuple(method for method in METHODS if method != "brush-smoke")
+"""The methods the queue runs and the table reports by default."""

@@ -5,7 +5,6 @@ paper values from `hexels_bench.paper` (`hf_surface_main_per_scene`, the publish
 checkpoints' own evaluation).
 """
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from serde.json import to_json
 
 from hexels_bench.layout import UPSTREAM_DATASET, Roots, read_json
 from hexels_bench.paper import PAPER_NUMBERS, PaperNumbers, PublishedSurface
+from hexels_bench.surface_records import DepthParity, FusionReport, SurfaceMetrics
 
 
 @dataclass
@@ -64,27 +64,28 @@ class SurfaceRow:
 def rows(roots: Roots, paper: dict[str, dict[str, PublishedSurface]]) -> list[SurfaceRow]:
     found: list[SurfaceRow] = []
     for metrics_path in sorted(roots.runs.glob("*/*/*/surface*/surface_metrics.json")):
-        metrics: dict = json.loads(metrics_path.read_text())
-        fusion: dict = json.loads((metrics_path.parent / "fusion.json").read_text())
+        metrics: SurfaceMetrics = read_json(SurfaceMetrics, metrics_path)
+        fusion: FusionReport = read_json(FusionReport, metrics_path.parent / "fusion.json")
         parity_path: Path = metrics_path.parent / "depth_parity.json"
-        reference: PublishedSurface | None = paper.get(UPSTREAM_DATASET[metrics["dataset"]], {}).get(metrics["scene"])
+        parity: DepthParity | None = read_json(DepthParity, parity_path) if parity_path.is_file() else None
+        reference: PublishedSurface | None = paper.get(UPSTREAM_DATASET[metrics.dataset], {}).get(metrics.scene)
         found.append(
             SurfaceRow(
-                dataset=metrics["dataset"],
-                scene=metrics["scene"],
-                method=metrics["method"],
-                depth=f"{fusion['depth_source']}/{fusion['depth_mode']}",
-                split=fusion["split"],
-                triangles=fusion["triangles"],
-                cd_mm=metrics["cd_mm"],
-                acc_mm=metrics["acc_mm"],
-                comp_mm=metrics["comp_mm"],
-                f1=metrics["f1"],
-                precision=metrics["precision"],
-                recall=metrics["recall"],
+                dataset=metrics.dataset,
+                scene=metrics.scene,
+                method=metrics.method,
+                depth=f"{fusion.depth_source}/{fusion.depth_mode}",
+                split=fusion.split,
+                triangles=fusion.triangles,
+                cd_mm=metrics.cd_mm,
+                acc_mm=metrics.acc_mm,
+                comp_mm=metrics.comp_mm,
+                f1=metrics.f1,
+                precision=metrics.precision,
+                recall=metrics.recall,
                 paper_cd_mm=None if reference is None else reference.cd_mm,
                 paper_f1=None if reference is None else reference.f1_pct,
-                depth_vs_cuda_mean_abs=json.loads(parity_path.read_text())["median_abs_mean"] if parity_path.is_file() else None,
+                depth_vs_cuda_mean_abs=None if parity is None else parity.median_abs_mean,
             )
         )
     return found

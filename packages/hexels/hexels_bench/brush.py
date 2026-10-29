@@ -86,9 +86,9 @@ class PreparedScene:
     init_source: str
     """SfM file the cloud was read from."""
     train_targets_match: bool
-    """Training images reproduce the contract's target-tensor hash."""
+    """Training images reproduce the contract's target-tensor hash (preparation refuses a mismatch; reuse checks it)."""
     test_targets_match: bool
-    """Held-out images reproduce the contract's target-tensor hash."""
+    """Held-out images reproduce the contract's target-tensor hash (preparation refuses a mismatch; reuse checks it)."""
     pillow: str
     """Pillow version that decoded and resized the images."""
 
@@ -119,12 +119,19 @@ def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedSc
     """Write ``transforms_{train,test}.json``, ``{train,test}/<name>.png`` and ``init.ply`` for one scene.
 
     The contract fixes the cameras and the split; the split must also equal the lexical every-8th rule.
-    Images are the upstream target pixels stored losslessly, so ``test/`` is also the ground truth for scoring.
-    A finished ``prepare.json`` is reused as is.
+    Images are the upstream target pixels stored losslessly, and both splits must reproduce the contract's
+    target digests, so ``test/`` is also the ground truth for scoring. A finished ``prepare.json`` is reused.
+
+    Raises:
+        ValueError: The split, a target size or a target digest differs from the contract (nothing is written),
+            or a reused record says its targets did not match.
     """
     record_path: Path = output / "prepare.json"
     if record_path.is_file():
-        return read_json(PreparedScene, record_path)
+        reused: PreparedScene = read_json(PreparedScene, record_path)
+        if not (reused.train_targets_match and reused.test_targets_match):
+            raise ValueError(f"{output}: target images differ from the contract's target-tensor hashes; remove it and prepare again")
+        return reused
     contract: CameraContract = read_json(CameraContract, contract_path)
     settings: ContractSettings = contract.settings
     splits: dict[str, list[ContractCamera]] = {"train": contract.geometry.training, "test": contract.geometry.test}
@@ -155,6 +162,8 @@ def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedSc
                 hashes: list[str] = list(pool.map(write_target, cameras, [staging / split] * len(cameras)))
             expected: str = (contract.training if split == "train" else contract.test).ordered_target_tensors_sha256
             matches[split] = ordered_targets_sha256([[camera.name, digest] for camera, digest in zip(cameras, hashes, strict=True)]) == expected
+            if not matches[split]:
+                raise ValueError(f"{source}: {split} target images do not match the camera contract digest (decoder or resize differs)")
             frames: list[BrushFrame] = [
                 BrushFrame(
                     file_path=f"{split}/{camera.name}.png",
@@ -185,6 +194,4 @@ def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedSc
         staging.rename(output)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    if not (record.train_targets_match and record.test_targets_match):
-        print(f"Warning: {output} target images differ from the contract's target-tensor hashes (decoder or resize differs)")
     return record

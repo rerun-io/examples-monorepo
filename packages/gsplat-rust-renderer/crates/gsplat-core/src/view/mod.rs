@@ -176,13 +176,13 @@ impl ViewState {
         limit: u64,
     ) -> Result<Self, Error> {
         let capacity = initial_capacity.max(1);
-        if u64::from(capacity) * 4 > limit {
-            return Err(Error::Capacity {
-                required: u64::from(capacity) * 4,
-                limit,
-            });
-        }
         let n = scene.n;
+        let projected = u64::from(n.max(1)) * scene.projected_bytes();
+        for required in [u64::from(capacity) * 4, projected] {
+            if required > limit {
+                return Err(Error::Capacity { required, limit });
+            }
+        }
         let counts = storage(device, "visible and intersection counts", 8);
         let ids = storage(device, "compact IDs", u64::from(n) * 4);
         let depths = storage(device, "depth keys", u64::from(n) * 4);
@@ -190,11 +190,7 @@ impl ViewState {
         let gathered = storage(device, "sorted tile counts", u64::from(n) * 4);
         let visible = CountSlot::Visible;
         let scratch = Scratch {
-            projected: storage(
-                device,
-                "projected primitives",
-                u64::from(n.max(1)) * scene.projected_bytes(),
-            ),
+            projected: storage(device, "projected primitives", projected),
             depth_sort: RadixSort::new(
                 device,
                 kernels,
@@ -466,6 +462,26 @@ mod tests {
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(view.poll_feedback().unwrap().unwrap().visible, 0);
+    }
+
+    #[test]
+    #[ignore = "integration: GPU"]
+    fn projected_hexels_above_the_binding_limit_are_a_capacity_error() {
+        let (device, _) = &gpu();
+        let kernels = crate::kernels::Kernels::new(device);
+        let hexels = crate::Hexels {
+            variant: crate::HexelVariant::V1,
+            params: vec![0.0; 10 * 20],
+        };
+        // 800 parameter bytes fit an 800-byte binding; 10 x 84 projected bytes do not.
+        let scene = std::sync::Arc::new(crate::Scene::upload_hexels(device, &hexels, 800).unwrap());
+        assert!(matches!(
+            super::ViewState::new(device, &kernels, &scene, 1, 800),
+            Err(Error::Capacity {
+                required: 840,
+                limit: 800
+            })
+        ));
     }
 
     #[test]

@@ -85,6 +85,7 @@ def test_table_rows_give_per_image_rows_and_a_mean_with_published_and_table1_num
     paper: PaperNumbers = from_dict(
         PaperNumbers,
         {
+            "source": {"hardware_paper": "RTX A5000 24 GB"},
             "hf_nvs_per_scene": {},
             "sfm_points": {},
             "table1_2d": [{"method": "Hexels", "psnr": 35.82, "ssim": 0.9359, "lpips_alex": 0.0924}],

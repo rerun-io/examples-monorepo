@@ -2,7 +2,8 @@
 tree that `packages/hexels-src` installs: DTU Chamfer (`scripts/eval_dtu/evaluate_single_scene.py`:
 mask culling, 0.2 mm sampling, ObsMask/plane crop, accuracy and completeness below 20 mm) and T&T
 precision/recall/F1 (`scripts/eval_tnt/run.py`: trajectory alignment, ICP, crop, tau per scene) in the
-`tnt-eval` env (Python 3.8, Open3D 0.10, upstream environment-tnt-eval.yml).
+`tnt-eval` env (Python 3.8, Open3D 0.10, upstream environment-tnt-eval.yml), through `pixi run --frozen` from
+the workspace root, so Pixi installs that env from the lock or reports why it cannot.
 
 Writes `<surface dir>/{dtu_eval/, tnt_eval/, surface_metrics.json}`.
 """
@@ -17,12 +18,12 @@ from serde import serde
 from serde.json import from_json, to_json
 
 from hexels_bench.apis.surface_run import SurfaceMethod, surface_out_dir
-from hexels_bench.layout import Dataset, Roots
+from hexels_bench.layout import WORKSPACE, Dataset, Roots
 from hexels_bench.surface import DepthMode
+from hexels_bench.surface_records import SurfaceMetrics
 
 TWO_DGS: Path = Path(sys.prefix) / "share" / "hexels-src" / "2d-gaussian-splatting"
 """Patched 2DGS tree (hexels-src output) in this env."""
-TNT_PYTHON: Path = Path(__file__).resolve().parents[4] / ".pixi" / "envs" / "tnt-eval" / "bin" / "python"
 
 
 @dataclass
@@ -39,8 +40,6 @@ class Config:
     """The depth-mode override the run was fused with (surface-<mode>/), if any."""
     two_dgs: Path = TWO_DGS
     """Patched 2DGS checkout holding scripts/eval_dtu and scripts/eval_tnt."""
-    tnt_python: Path = TNT_PYTHON
-    """Interpreter of the tnt-eval env."""
     workers: int = 8
     """Processes for the DTU evaluator's triangle sampling (its SLURM_CPUS_PER_TASK knob)."""
     force: bool = False
@@ -62,35 +61,6 @@ class DtuResults:
     """Chamfer distance (mean_d2s + mean_s2d) / 2."""
 
 
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class SurfaceMetrics:
-    """`surface_metrics.json`; unscored fields are null."""
-
-    dataset: str
-    """Run-layout dataset name."""
-    scene: str
-    """Upstream scene name."""
-    method: str
-    """Run-layout method."""
-    evaluator: str
-    """2dgs-eval_dtu or 2dgs-eval_tnt."""
-    cd_mm: float | None
-    """DTU Chamfer distance (mm)."""
-    acc_mm: float | None
-    """DTU accuracy (mean d2s, mm)."""
-    comp_mm: float | None
-    """DTU completeness (mean s2d, mm)."""
-    precision: float | None
-    """T&T precision at tau, percent."""
-    recall: float | None
-    """T&T recall at tau, percent."""
-    f1: float | None
-    """T&T F1 at tau, percent."""
-    tau: float | None
-    """T&T distance threshold (scene units of the GT)."""
-
-
 def evaluate_dtu(config: Config, scene: str, method: str, mesh: Path, out_dir: Path, log: Path) -> SurfaceMetrics:
     scan_id: str = scene.removeprefix("scan")
     command: list[str] = [
@@ -98,7 +68,7 @@ def evaluate_dtu(config: Config, scene: str, method: str, mesh: Path, out_dir: P
         "--input_mesh", str(mesh), "--scan_id", scan_id, "--output_dir", str(out_dir),
         "--mask_dir", str(config.roots.data / "dtu"), "--DTU", str(config.roots.data / "dtu_official"),
     ]  # fmt: skip
-    _run(command, log, {"SLURM_CPUS_PER_TASK": str(config.workers)})
+    _run(command, log, {"SLURM_CPUS_PER_TASK": str(config.workers)}, None)
     results: DtuResults = from_json(DtuResults, (out_dir / "results.json").read_text())
     return SurfaceMetrics(
         dataset="dtu", scene=scene, method=method, evaluator="2dgs-eval_dtu",
@@ -108,12 +78,12 @@ def evaluate_dtu(config: Config, scene: str, method: str, mesh: Path, out_dir: P
 
 def evaluate_tnt(config: Config, scene: str, method: str, mesh: Path, out_dir: Path, log: Path) -> SurfaceMetrics:
     command: list[str] = [
-        str(config.tnt_python), str(config.two_dgs / "scripts" / "eval_tnt" / "run.py"),
+        "pixi", "run", "-e", "tnt-eval", "--frozen", "python", str(config.two_dgs / "scripts" / "eval_tnt" / "run.py"),
         "--dataset-dir", str(config.roots.data / "tnt_official" / scene),
         "--traj-path", str(config.roots.data / "tanks_and_temples" / scene / f"{scene}_COLMAP_SfM.log"),
         "--ply-path", str(mesh), "--out-dir", str(out_dir),
     ]  # fmt: skip
-    _run(command, log, {})
+    _run(command, log, {}, WORKSPACE)
     values: list[float] = [float(value) for value in (out_dir / f"{scene}.prf_tau_plotstr.txt").read_text().split()]
     return SurfaceMetrics(
         dataset="tnt", scene=scene, method=method, evaluator="2dgs-eval_tnt",
@@ -121,11 +91,11 @@ def evaluate_tnt(config: Config, scene: str, method: str, mesh: Path, out_dir: P
     )  # fmt: skip
 
 
-def _run(command: list[str], log: Path, env: dict[str, str]) -> None:
+def _run(command: list[str], log: Path, env: dict[str, str], cwd: Path | None) -> None:
     with log.open("a") as stream:
         stream.write(" ".join(command) + "\n")
         stream.flush()
-        subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT, env={**os.environ, **env})
+        subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT, env={**os.environ, **env}, cwd=cwd)
 
 
 def evaluate(config: Config, scene: str, method: SurfaceMethod) -> SurfaceMetrics | None:

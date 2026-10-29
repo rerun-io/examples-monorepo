@@ -218,6 +218,7 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
     let camera = common::pinhole_camera(33);
     let color = texture(device, wgpu::TextureFormat::Rgba8Unorm, 33);
     let depth = texture(device, wgpu::TextureFormat::R32Float, 33);
+    let id = texture(device, wgpu::TextureFormat::R32Uint, 33);
     let output = common::upload(device, &vec![0.0f32; 64 * 33]);
     let color_output = common::upload(device, &vec![0u8; 256 * 33]);
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -231,6 +232,7 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
             Target::TextureDepth {
                 color: color.create_view(&Default::default()),
                 depth: depth.create_view(&Default::default()),
+                id: id.create_view(&Default::default()),
             },
         )
         .unwrap();
@@ -262,8 +264,8 @@ const PICK_ROWS: [([f32; 3], f32); 5] = [
     ([0.2818 * 2.5, 0.0, 2.5], 0.95),
 ];
 
-/// The id target stores the global row of the median contributor (the last one composited while
-/// transmittance exceeds one half) and leaves the colour and depth of `TextureDepth` unchanged.
+/// The id texture of `TextureDepth` stores the global row of the median contributor (the last one
+/// composited while transmittance exceeds one half).
 #[test]
 #[ignore = "integration: GPU"]
 fn median_contributor_ids_are_global_rows_for_splats_and_hexels() {
@@ -305,42 +307,29 @@ fn median_contributor_ids_are_global_rows_for_splats_and_hexels() {
         renderer.upload_hexels(&hexels).unwrap(),
     ] {
         let mut view = renderer.create_view(&scene, 256).unwrap();
-        let mut pixels = Vec::new();
-        for with_id in [false, true] {
-            let color = texture(device, wgpu::TextureFormat::Rgba8Unorm, 64);
-            let depth = texture(device, wgpu::TextureFormat::R32Float, 64);
-            let id = texture(device, wgpu::TextureFormat::R32Uint, 64);
-            let view_of = |t: &wgpu::Texture| t.create_view(&Default::default());
-            let target = if with_id {
-                Target::TextureDepthId {
-                    color: view_of(&color),
-                    depth: view_of(&depth),
-                    id: view_of(&id),
-                }
-            } else {
-                Target::TextureDepth {
-                    color: view_of(&color),
-                    depth: view_of(&depth),
-                }
-            };
-            let mut encoder = device.create_command_encoder(&Default::default());
-            renderer
-                .render(queue, &mut encoder, &mut view, &camera, &options, target)
-                .unwrap();
-            let read_back = [&color, &depth, &id].map(|t| {
-                let buffer = common::upload(device, &vec![0u8; 256 * 64]);
-                copy_texture(&mut encoder, t, &buffer);
-                buffer
-            });
-            queue.submit([encoder.finish()]);
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
-            pixels.push(read_back.map(|b| common::read::<u32>(device, queue, &b, 64 * 64)));
-        }
-        let [plain, picked] = [&pixels[0], &pixels[1]];
-        assert_eq!(plain[0], picked[0], "colour changed with the id target");
-        assert_eq!(plain[1], picked[1], "depth changed with the id target");
-        let at = |x: usize, y: usize| picked[2][y * 64 + x];
+        let [color, depth, id] = [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::R32Float,
+            wgpu::TextureFormat::R32Uint,
+        ]
+        .map(|format| texture(device, format, 64));
+        let view_of = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let target = Target::TextureDepth {
+            color: view_of(&color),
+            depth: view_of(&depth),
+            id: view_of(&id),
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer
+            .render(queue, &mut encoder, &mut view, &camera, &options, target)
+            .unwrap();
+        let ids = common::upload(device, &vec![0u8; 256 * 64]);
+        copy_texture(&mut encoder, &id, &ids);
+        queue.submit([encoder.finish()]);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+        let ids = common::read::<u32>(device, queue, &ids, 64 * 64);
+        let at = |x: usize, y: usize| ids[y * 64 + x];
         assert_eq!(at(16, 32), 1, "weak front over strong back: the back row");
         assert_eq!(at(48, 32), 4, "opaque front: the front row");
         assert_eq!(at(32, 2), u32::MAX, "empty pixel");

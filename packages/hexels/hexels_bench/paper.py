@@ -11,8 +11,17 @@ PAPER_NUMBERS: Path = Path(__file__).with_name("paper-numbers.json")
 
 @serde
 @dataclass(frozen=True, slots=True)
+class PaperSource:
+    """Where the numbers come from (`source`, read partially)."""
+
+    hardware_paper: str
+    """GPU the paper reports its numbers on, as the paper states it."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
 class PublishedNvs:
-    """One published 30k NVS checkpoint (`hf_nvs_per_scene`, the authors' A5000 numbers)."""
+    """One published 30k NVS checkpoint (`hf_nvs_per_scene`, the authors' numbers)."""
 
     views: int
     """Held-out views."""
@@ -78,6 +87,8 @@ class PublishedSurface:
 class PaperNumbers:
     """The sections of paper-numbers.json the tables read; keys are upstream dataset names."""
 
+    source: PaperSource
+    """Paper revision, HF revision and the paper's hardware."""
     hf_nvs_per_scene: dict[str, dict[str, dict[str, PublishedNvs]]]
     """Published NVS checkpoints per dataset, scene and `<variant>-<population>` (e.g. v1-fixed)."""
     sfm_points: dict[str, dict[str, int]]

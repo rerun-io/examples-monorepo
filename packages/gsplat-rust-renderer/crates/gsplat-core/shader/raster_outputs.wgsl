@@ -50,17 +50,9 @@ fn pixel(tile: vec2u, lid: u32) -> vec2u {
     }
 }
 
+// Viewer composition and picking: colour, expected depth and the global row of the median
+// contributor, NO_ID when none.
 @compute @workgroup_size(WG) fn raster_texture_depth(@builtin(workgroup_id) gid: vec3u,
-    @builtin(local_invocation_index) lid: u32) {
-    let r = raster(gid.xy, lid, false);
-    if r.inside {
-        textureStore(out_texture, r.pix, r.rgba);
-        textureStore(out_depth, r.pix, vec4f(r.depth));
-    }
-}
-
-// Viewer picking: texture_depth plus the global row of the median contributor, NO_ID when none.
-@compute @workgroup_size(WG) fn raster_texture_depth_id(@builtin(workgroup_id) gid: vec3u,
     @builtin(local_invocation_index) lid: u32) {
     let r = raster(gid.xy, lid, false);
     if r.inside {

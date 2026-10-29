@@ -22,7 +22,8 @@ struct SceneInfo {
     splats: u32,
     sh_degree: u32,
     coefficients: u32,
-    padding: u32,
+    /// `HexelVariant` discriminant; 0 for splats.
+    variant: u32,
 }
 
 #[repr(C)]
@@ -90,14 +91,14 @@ impl Uniforms {
                     splats: scene.n,
                     sh_degree: degree,
                     coefficients: (degree + 1).pow(2),
-                    padding: 0,
+                    variant: 0,
                 },
-                // Hexel shaders read the variant (1-3) and the per-hexel stride here.
+                // Hexel shaders read the variant and the per-hexel stride here.
                 Inputs::Hexels { variant, .. } => SceneInfo {
                     splats: scene.n,
-                    sh_degree: variant as u32 + 1,
+                    sh_degree: 0,
                     coefficients: variant.stride() as u32,
-                    padding: 0,
+                    variant: variant as u32,
                 },
             },
             background: options.background.extend(0.0).to_array(),
@@ -189,10 +190,7 @@ impl ViewState {
                 (raster_kind.binding(), target.resource()),
             ];
             match &target {
-                Target::TextureDepth { depth, .. } => {
-                    bindings.push((8, wgpu::BindingResource::TextureView(depth)));
-                }
-                Target::TextureDepthId { depth, id, .. } => {
+                Target::TextureDepth { depth, id, .. } => {
                     bindings.extend([
                         (8, wgpu::BindingResource::TextureView(depth)),
                         // The 32-bit depth sort ends in its input buffers: global rows in depth order.

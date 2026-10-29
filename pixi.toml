@@ -2154,9 +2154,16 @@ jaxtyping = "*"
 numpy = "*"
 pillow = "*"
 nvidia-ml-py = "*"
+# Imported by hexels_bench (16-bit PNG I/O, PLY headers, the LPIPS scorer); until now they arrived only as
+# run dependencies of the hexels-src outputs.
+py-opencv = "*"
+plyfile = "*"
+lpips = "*"
 
 [feature.hexels.pypi-dependencies]
 hexels-bench = { path = "packages/hexels", editable = true }
+# Arrow tables of the surface recordings (hexels_bench.surface_frames); PyPI, as rerun-sdk already pulls it here.
+pyarrow = "*"
 # Rerun recordings (2D Figure 2 rows, surface recordings); same pin as `common`.
 rerun-sdk = "==0.38.1"
 # NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
@@ -2166,8 +2173,8 @@ flip-evaluator = "==1.7"
 PACKAGE_DIR = "packages/hexels"
 PYREFLY_TARGET = "hexels_bench tools tests"
 
-# Run directories follow ~/hexels-work/contracts/run-layout.md; roots default to ~/gsplat-modern-data
-# and ~/hexels-work/runs (--roots.data / --roots.runs).
+# Run directories follow packages/hexels/docs/run-layout.md. Roots default to $GSPLAT_MODERN_DATA and
+# $HEXELS_WORK/runs (unset: ~/gsplat-modern-data, ~/hexels-work); every tool takes --roots.data / --roots.runs.
 [feature.hexels.tasks.hexels-export]
 cmd = "python tools/export.py"
 cwd = "packages/hexels"

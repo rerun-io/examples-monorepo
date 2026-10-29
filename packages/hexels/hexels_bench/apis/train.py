@@ -1,4 +1,4 @@
-"""Train Hexels with upstream's recipe under our protocol (run-layout.md) and write a full run directory.
+"""Train Hexels with upstream's recipe under our protocol (docs/run-layout.md) and write a full run directory.
 
 Upstream `scripts.train_scene` resolves the paper's fixed-population recipe for the scene (images and
 resolution per dataset, every 8th view held out); we run that command ourselves so the trainer is our
@@ -8,7 +8,6 @@ policy as upstream's short smoke recipe (`scripts/prepare_nvs_smoke.py`); otherw
 before any learning-rate decay.
 """
 
-import json
 import socket
 import subprocess
 import sys
@@ -16,19 +15,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-from serde.json import to_json
+from serde.json import from_json, to_json
 
 from hexels_bench.apis.export import export_run
-from hexels_bench.apis.export_published import stage_ground_truth
 from hexels_bench.apis.score import score_run
 from hexels_bench.cameras import CameraContract, cameras_file, read_sfm_points, write_cameras_file
 from hexels_bench.checkpoint import find_checkpoint
 from hexels_bench.gpu_monitor import Measured, gpu_name, run_measured
 from hexels_bench.hexel_ply import HexelPly, HexelVariant
 from hexels_bench.layout import UPSTREAM_DATASET, Dataset, Roots, read_json
-from hexels_bench.methods import primitive_bytes
+from hexels_bench.methods import METHODS, Method, MethodSpec
 from hexels_bench.metrics import TrainRecord
-from hexels_bench.upstream import UPSTREAM_HEXELS_REV, UpstreamRenderer, load_renderer, measure_fps, write_test_renders
+from hexels_bench.upstream import (
+    UPSTREAM_HEXELS_REV,
+    TrainScenePlan,
+    TrainSummary,
+    UpstreamRenderer,
+    load_renderer,
+    measure_fps,
+    write_test_renders,
+)
 
 UPSTREAM_STEPS: int = 30000
 UPSTREAM_MILESTONES: tuple[int, ...] = (15001, 20001, 25001)
@@ -67,10 +73,8 @@ class Config:
     """Run-layout dataset name."""
     scene: str
     """Upstream scene name."""
-    variant: HexelVariant = "v1"
-    """Appearance variant."""
-    steps: int = 7000
-    """Optimisation steps."""
+    method: Method = "hexels-v1-7k"
+    """A Hexels method we train (hexels-v1-7k, hexels-v3-7k); its row in `METHODS` gives the variant and step count."""
     roots: Roots = field(default_factory=Roots)
     """Data and run roots."""
 
@@ -82,41 +86,41 @@ def prepare_command(scene_dir: Path, model_dir: Path, dataset: Dataset, variant:
          "--dataset", UPSTREAM_DATASET[dataset], "--variant", variant, "--iterations", str(steps), "--prepare"],
         check=True, capture_output=True, text=True,
     ).stdout  # fmt: skip
-    prepared: dict = json.loads(output)
-    return apply_schedule([str(part) for part in prepared["command"]], steps), Path(prepared["cwd"])
+    plan: TrainScenePlan = from_json(TrainScenePlan, output)
+    return apply_schedule(plan.command, steps), Path(plan.cwd)
 
 
-def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, steps: int) -> Path:
-    method: str = f"hexels-{variant}-{steps // 1000}k" if steps % 1000 == 0 else f"hexels-{variant}-{steps}"
+def train(roots: Roots, dataset: Dataset, scene: str, method: Method) -> Path:
+    spec: MethodSpec = METHODS[method]
+    variant: HexelVariant | None = spec.variant
+    if variant is None or not spec.trains:
+        raise ValueError(f"{method} is not a Hexels method we train")
     run_dir: Path = roots.run_dir(dataset, scene, method)
     model_dir: Path = run_dir / "upstream"
     if model_dir.exists():
         raise FileExistsError(f"{model_dir} exists; upstream needs a fresh output directory")
     scene_dir: Path = roots.scene_dir(dataset, scene)
     run_dir.mkdir(parents=True, exist_ok=True)
-    command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, steps)
+    command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, spec.steps)
     measured: Measured = run_measured(command, cwd, run_dir / "log.txt")
-    if measured.returncode != 0:
-        raise RuntimeError(f"upstream training exited with {measured.returncode}; see {run_dir / 'log.txt'}")
-    summary: dict = json.loads((model_dir / "summary.json").read_text())
+    summary: TrainSummary = read_json(TrainSummary, model_dir / "summary.json")
 
     ply: HexelPly = export_run(model_dir, run_dir / "model.ply")
     contract: CameraContract = read_json(CameraContract, roots.contract(dataset, scene))
-    stage_ground_truth(roots, dataset, scene, contract)
     write_cameras_file(run_dir / "cameras.json", cameras_file(contract, dataset, scene, [0.0, 0.0, 0.0]))
     renderer: UpstreamRenderer = load_renderer(model_dir, find_checkpoint(model_dir), scene_dir)
     write_test_renders(renderer, [camera.name for camera in contract.geometry.test], run_dir / "renders" / "test")
     fps: float = measure_fps(renderer)
     del renderer
     torch.cuda.empty_cache()
-    score_run(roots, dataset, scene, method, primitive_bytes(variant), fps, torch.device("cuda"))
+    score_run(roots, dataset, scene, method, fps, torch.device("cuda"))
 
     record = TrainRecord(
         method=method,
         dataset=dataset,
         scene=scene,
-        steps=steps,
-        loop_seconds=float(summary["train_seconds"]),
+        steps=spec.steps,
+        loop_seconds=summary.train_seconds,
         total_seconds=measured.seconds,
         peak_vram_gib=measured.vram.peak_gib(),
         primitives=ply.cloud.count,
@@ -131,5 +135,5 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
 
 
 def main(config: Config) -> None:
-    run_dir: Path = train(config.roots, config.dataset, config.scene, config.variant, config.steps)
+    run_dir: Path = train(config.roots, config.dataset, config.scene, config.method)
     print(f"wrote {run_dir}")

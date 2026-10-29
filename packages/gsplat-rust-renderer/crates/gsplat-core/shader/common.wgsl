@@ -1,7 +1,7 @@
 #import <./consts.wgsl>
 
 struct ImageInfo { width: u32, height: u32, tiles_x: u32, tiles_y: u32, }
-struct SceneInfo { splats: u32, sh_degree: u32, coefficients: u32, padding: u32, }
+struct SceneInfo { splats: u32, sh_degree: u32, coefficients: u32, variant: u32, }
 struct LensInfo { kind: u32, padding: u32, padding2: vec2u, half_max_render_fov: f32, radial_limit: f32, padding3: vec2f, }
 struct RenderFlags { log_scale_offset: f32, mip: u32, has_min_scale: u32, padding: u32, }
 // Forward math hand-ported from Brush 1388f74c.
@@ -39,6 +39,12 @@ fn finite(x: f32) -> bool {
 
 fn finite3(v: vec3f) -> bool {
     return finite(v.x) && finite(v.y) && finite(v.z);
+}
+
+// Float-flip preserves positive-depth order and orders negative depths numerically.
+fn depth_key(depth: f32) -> u32 {
+    let bits = bitcast<u32>(depth);
+    return bits ^ select(0x80000000u, 0xffffffffu, (bits >> 31u) != 0u);
 }
 
 fn sigma(p: vec2f, center: vec2f, conic: vec3f) -> f32 {

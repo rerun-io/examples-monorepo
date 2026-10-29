@@ -1,19 +1,18 @@
 //! `Hexels3D` (hexel PLY contract, f32 fields) through the shared compute path.
 //! Stock viewers draw the `Points3D` fallback logged on the same entity instead.
 use crate::cache::{GpuCache, Primitives};
-use crate::renderer::GaussianRenderer;
-use crate::visualizer::{attribute_generation, draw_instances, execute_compute};
+use crate::visualizer::{EntityDraw, attribute_generation, draw_instances, execute_compute};
+use gsplat_core::RenderMode;
 use gsplat_core::native::{NativeHexels, at_or_last};
-use gsplat_core::{Camera, RenderMode};
 use re_sdk_types::{Component as _, ComponentDescriptor, components};
 use re_view::{DataResultQuery as _, VisualizerInstructionQueryResults};
 use re_viewer::external::{
     re_log_types, re_query, re_renderer, re_sdk_types, re_view, re_viewer_context,
 };
 use re_viewer_context::{
-    AppOptions, DataResult, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
-    ViewSystemExecutionError, ViewSystemIdentifier, ViewerReportSeverity,
-    VisualizerExecutionOutput, VisualizerInstruction, VisualizerQueryInfo, VisualizerSystem,
+    AppOptions, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
+    ViewSystemExecutionError, ViewSystemIdentifier, VisualizerExecutionOutput, VisualizerQueryInfo,
+    VisualizerSystem,
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
@@ -76,18 +75,18 @@ impl VisualizerSystem for HexelVisualizer {
 }
 
 fn draw_hexel_entity(
-    ctx: &ViewContext<'_>,
-    query: &ViewQuery<'_>,
-    data: &DataResult,
-    instruction: &VisualizerInstruction,
-    instances: &[glam::DAffine3],
-    renderer: &GaussianRenderer,
-    output: &VisualizerExecutionOutput,
-    report: &dyn Fn(ViewerReportSeverity, String),
+    entity: &EntityDraw<'_>,
     draw: &mut Vec<re_renderer::QueueableDrawData>,
-    camera: &Camera,
 ) -> Result<bool, ViewSystemExecutionError> {
     re_tracing::profile_function!();
+    let &EntityDraw {
+        ctx,
+        query,
+        data,
+        instruction,
+        output,
+        ..
+    } = entity;
     let identifiers = descriptors().map(|d| d.component);
     let query_results = data.query_components_with_history(
         ctx,
@@ -145,15 +144,8 @@ fn draw_hexel_entity(
             sh: sh.unwrap_or(&[]),
         };
         retry |= draw_instances(
-            ctx,
-            query,
-            data,
-            instruction,
-            instances,
-            renderer,
-            report,
+            entity,
             draw,
-            camera,
             row,
             re_log_types::hash::Hash64::from_u64(hasher.finish()),
             Primitives::Hexels(&hexels),
@@ -169,9 +161,10 @@ fn draw_hexel_entity(
 pub(crate) fn points_fallback(
     ctx: &ViewContext<'_>,
     query: &ViewQuery<'_>,
-    data: &DataResult,
     hexels: &NativeHexels<'_>,
     world_from_local: glam::Affine3A,
+    masks: &re_viewer_context::ViewOutlineMasks,
+    object: re_renderer::PickingLayerObjectId,
 ) -> Result<re_renderer::QueueableDrawData, ViewSystemExecutionError> {
     re_tracing::profile_function!();
     let count = hexels.centers.len();
@@ -203,26 +196,18 @@ pub(crate) fn points_fallback(
     let picking_ids: Vec<_> = (0..count as u64)
         .map(re_renderer::PickingLayerInstanceId)
         .collect();
-    let masks = query
-        .highlights
-        .entity_outline_mask(data.entity_path.hash());
     let mut builder = re_renderer::PointCloudBuilder::new(ctx.render_ctx());
     let mut batch = builder
         .batch("Hexel compute fallback")
         .world_from_obj(world_from_local)
         .outline_mask_ids(masks.overall)
-        .picking_object_id(re_renderer::PickingLayerObjectId(data.entity_path.hash64()))
+        .picking_object_id(object)
         .add_points(&points, &colors, &picking_ids);
-    #[expect(clippy::iter_over_hash_type)] // Ranges of one row each never overlap.
-    for (instance, mask) in &masks.instances {
-        if let Ok(row) = u32::try_from(instance.get())
-            && (row as usize) < count
-        {
-            batch = batch.push_additional_outline_mask_ids_for_range(
-                re_renderer::Span::from_start_len(row, 1),
-                *mask,
-            );
-        }
+    for (row, mask) in crate::renderer::outline_rows(masks, count) {
+        batch = batch.push_additional_outline_mask_ids_for_range(
+            re_renderer::Span::from_start_len(row, 1),
+            mask,
+        );
     }
     drop(batch);
     Ok(builder.into_draw_data()?.into())

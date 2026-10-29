@@ -1,4 +1,4 @@
-"""The shared NVS scorer (contract run-layout.md): PSNR, SSIM and LPIPS-VGG on 16-bit PNG renders.
+"""The shared NVS scorer (contract docs/run-layout.md): PSNR, SSIM and LPIPS-VGG on 16-bit PNG renders.
 
 Same math as upstream's direct-float evaluator (`hexels/benchmark_metrics.py` L.343-416): clamp once
 to [0, 1]; PSNR from the float64 SSE over all RGB elements of a view; SSIM = 2DGS `utils/loss_utils.ssim`
@@ -45,7 +45,7 @@ class ViewMetrics:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class MetricsFile:
-    """`metrics.json` of one run directory (contract run-layout.md)."""
+    """`metrics.json` of one run directory (contract docs/run-layout.md)."""
 
     method: str
     """Run method, e.g. hexels-v3-30k-pub-cuda."""
@@ -76,7 +76,7 @@ class MetricsFile:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class TrainRecord:
-    """`train.json` of a run we trained (contract run-layout.md; Brush, Hexels and the 2D fits)."""
+    """`train.json` of a run we trained (contract docs/run-layout.md; Brush, Hexels and the 2D fits)."""
 
     method: str
     """Run method, e.g. hexels-v1-7k."""

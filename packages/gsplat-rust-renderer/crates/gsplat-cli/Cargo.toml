@@ -25,7 +25,7 @@ colmap-reader.workspace = true
 wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

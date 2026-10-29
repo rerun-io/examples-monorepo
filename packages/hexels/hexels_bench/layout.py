@@ -1,8 +1,9 @@
-"""Where things live: run directories (contract run-layout.md), datasets, published checkpoints and the
+"""Where things live: run directories (contract docs/run-layout.md), datasets, published checkpoints and the
 protocol scenes; and the one loader for our JSON records."""
 
 import json
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -41,7 +42,7 @@ PROTOCOL_SCENES: dict[Dataset, tuple[str, ...]] = {
 }
 """The 34 NVS scenes of upstream configs/nvs.json, in upstream order."""
 REPRESENTATIVE_SCENES: dict[Dataset, tuple[str, ...]] = {"dtu": ("scan24", "scan114"), "mipnerf360": ("garden", "counter"), "tnt": ("Barn", "Truck")}
-"""Scope cut (contracts/scope.md): new compute runs on these scenes only, upstream order."""
+"""Scope cut: new compute runs on these scenes only, upstream order."""
 WORKSPACE: Path = Path(__file__).resolve().parents[3]
 """Pixi workspace root (holds pixi.toml and packages/)."""
 GSPLAT_RELEASE: Path = WORKSPACE / "packages" / "gsplat-rust-renderer" / "target" / "release"
@@ -56,16 +57,22 @@ def read_json[Record](cls: type[Record], path: Path) -> Record:
         raise ValueError(f"{path}: {error}") from error
 
 
+def env_root(variable: str, home_default: str) -> Path:
+    """`$<variable>`, or `~/<home_default>` when it is unset."""
+    return Path(os.environ.get(variable, str(Path.home() / home_default)))
+
+
 @dataclass(frozen=True, slots=True)
 class Roots:
-    """The three roots the tools read and write."""
+    """The three roots the tools read and write; defaults come from `$GSPLAT_MODERN_DATA` and `$HEXELS_WORK`."""
 
-    data: Path = Path.home() / "gsplat-modern-data"
-    """Datasets (upstream layout) and `hexels-pretrained/` (HF jhu-ccvl/Hexels)."""
-    runs: Path = Path.home() / "hexels-work" / "runs"
-    """Run outputs, one directory per dataset/scene/method."""
-    brush_prepared: Path = Path.home() / "hexels-work" / "brush-prepared"
-    """Brush-ready protocol scenes (`<dataset>/<scene>/`), prepared once and reused."""
+    data: Path = field(default_factory=lambda: env_root("GSPLAT_MODERN_DATA", "gsplat-modern-data"))
+    """Datasets (upstream layout) and `hexels-pretrained/` (HF jhu-ccvl/Hexels); default `$GSPLAT_MODERN_DATA`."""
+    runs: Path = field(default_factory=lambda: env_root("HEXELS_WORK", "hexels-work") / "runs")
+    """Run outputs, one directory per dataset/scene/method; default `$HEXELS_WORK/runs`. The GPU lock of the queue
+    and the surface renders is `gpu.lock` beside it."""
+    brush_prepared: Path = field(default_factory=lambda: env_root("HEXELS_WORK", "hexels-work") / "brush-prepared")
+    """Brush-ready protocol scenes (`<dataset>/<scene>/`), prepared once and reused; default `$HEXELS_WORK/brush-prepared`."""
 
     def scene_dir(self, dataset: Dataset, scene: str) -> Path:
         return self.data / DATA_SUBDIR[dataset] / scene

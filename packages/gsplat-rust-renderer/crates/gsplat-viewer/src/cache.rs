@@ -1,5 +1,5 @@
 //! Store-owned uploads and per-view lifetimes; viewer identities stop at this boundary.
-use crate::renderer::{GaussianDrawData, GaussianRenderer, Prepared, RenderView};
+use crate::renderer::{DrawUniform, GaussianDrawData, GaussianRenderer, Prepared, RenderView};
 use ahash::HashMap;
 use gsplat_core::native::{NativeHexels, NativeSplats};
 use gsplat_core::{Camera, RenderOptions};
@@ -58,6 +58,14 @@ impl Primitives<'_> {
         };
         re_log::debug!("Uploaded {} {kind}", re_format::format_uint(count));
         Ok(scene)
+    }
+
+    /// Rows of the entity: splats or hexels.
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Splats(cloud) => cloud.centers.len(),
+            Self::Hexels(hexels) => hexels.centers.len(),
+        }
     }
 
     fn bounds(self) -> re_renderer::RobustBounds {
@@ -257,7 +265,7 @@ impl GpuCache {
         generation: Hash64,
         camera: &Camera,
         options: RenderOptions,
-        uniform: [u32; 64],
+        uniform: DrawUniform,
     ) -> Result<(GaussianDrawData, bool), gsplat_core::Error> {
         re_tracing::profile_function!();
         let core = renderer.core()?;
@@ -303,8 +311,7 @@ impl GpuCache {
             GaussianDrawData {
                 view: entry.render.clone(),
                 uniform: renderer.draw_bind_group(ctx, uniform),
-                // Entity-wide mask or highlighted rows (see `draw_uniform`).
-                outlined: uniform[6] != 0 || uniform[7] != 0,
+                outlined: uniform.outlined(),
                 camera: *camera,
                 options,
                 center: bounds.center().into(),

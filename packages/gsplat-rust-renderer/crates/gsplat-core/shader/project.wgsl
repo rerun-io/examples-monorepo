@@ -20,12 +20,6 @@ struct Projection {
     mean: vec3f
 }
 
-// Float-flip preserves positive-depth order and orders negative depths numerically.
-fn depth_key(depth: f32) -> u32 {
-    let bits = bitcast<u32>(depth);
-    return bits ^ select(0x80000000u, 0xffffffffu, (bits >> 31u) != 0u);
-}
-
 // Shared projection arithmetic. The visible pass trusts forward culling;
 // its unused validity result lets the compiler discard the finite predicates.
 fn project_core(id: u32, mean: vec3f, point: vec3f) -> Projection {

@@ -47,14 +47,27 @@ pub(crate) struct Args {
     /// (`0.5 n + 0.5`, zero where alpha is zero) under `world/camera/<surface-name>/`.
     #[arg(long)]
     surface: Option<PathBuf>,
-    #[arg(long, default_value = "wgsl", requires = "surface")]
-    surface_name: String,
-    /// After the renders, time the rendered views with upstream Hexels' protocol for the input
-    /// (`NVS_FPS` for 3D scenes, `IMAGE_FPS` for 2D fits) and write the report here.
+    /// Entity name under `world/camera/` in the surface recording; defaults to the PLY file stem.
+    #[arg(long, requires = "surface")]
+    surface_name: Option<String>,
+    /// After the renders, time the rendered views with upstream Hexels' protocol for the input and
+    /// write the report here: 3D scenes keep up to 3 frames in flight, 2D fits wait on every render.
     #[arg(long)]
     fps: Option<PathBuf>,
     #[command(flatten)]
     settings: RenderSettings,
+}
+
+impl Args {
+    fn surface_name(&self) -> String {
+        self.surface_name.clone().unwrap_or_else(|| {
+            self.ply
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
 }
 
 fn parse_background(text: &str) -> Result<glam::Vec3, String> {
@@ -79,17 +92,21 @@ fn image_frame(ply: &Path, size: glam::UVec2) -> CameraFrame {
     }
 }
 
-/// One view of the surface recording; depth images are in camera z units (`meter = 1`).
+/// One view of the surface recording; `image` is the view's float RGBA render, and depth images
+/// are in camera z units (`meter = 1`).
 fn log_surface(
     recording: &rerun::RecordingStream,
     renderer: &StandaloneRenderer,
+    image: &image::DynamicImage,
     index: usize,
     frame: &CameraFrame,
     name: &str,
 ) -> Result<()> {
     let camera = &frame.camera;
     let resolution = [camera.width, camera.height];
-    let rgba = renderer.read_rgba()?;
+    let rgba = image
+        .as_rgba32f()
+        .context("surface views read a float RGBA render")?;
     let surface = renderer.read_surface()?;
     recording.set_time_sequence("view", i64::try_from(index)?);
     let pose = camera.pose();
@@ -109,17 +126,7 @@ fn log_surface(
         ])
         .with_resolution([camera.width as f32, camera.height as f32]),
     )?;
-    let rgb: Vec<u8> = rgba
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|p| {
-            p[..3]
-                .iter()
-                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-        })
-        .collect();
-    let alpha: Vec<f32> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    let alpha: Vec<f32> = rgba.pixels().map(|p| p[3]).collect();
     let depth = |i: usize| -> Vec<f32> { surface.depth.iter().map(|d| d[i]).collect() };
     let normal: Vec<f32> = surface
         .normal
@@ -140,7 +147,10 @@ fn log_surface(
         )
         .with_meter(1.0)
     };
-    recording.log(entity("rgb"), &rerun::Image::from_rgb24(rgb, resolution))?;
+    recording.log(
+        entity("rgb"),
+        &rerun::Image::from_rgb24(image.to_rgb8().into_raw(), resolution),
+    )?;
     recording.log(entity("median_depth"), &depth_image(&depth(1)))?;
     recording.log(entity("expected_depth"), &depth_image(&depth(0)))?;
     recording.log(
@@ -160,13 +170,13 @@ struct FpsProtocol {
     warmup_passes: usize,
     timed_passes: usize,
     trials: usize,
-    /// Wait for every render (upstream 2D decode timing) instead of one GPU wait per trial.
+    /// Wait for every render (upstream 2D decode timing) instead of keeping up to 3 frames in flight.
     wait_each: bool,
 }
 
 /// Upstream Hexels `scripts/evaluate_nvs_campaign.py` `benchmark` settings.
 const NVS_FPS: FpsProtocol = FpsProtocol {
-    name: "hexels-paper: 2 warm-up passes, 4 trials x 10 passes, median FPS; up to 3 frames in flight, one GPU wait per trial; no readback",
+    name: "hexels-paper: 2 warm-up passes, 4 trials x 10 passes, median FPS; up to 3 frames in flight, the GPU drained whenever all 3 are pending and at the end of each trial; no readback",
     warmup_passes: 2,
     timed_passes: 10,
     trials: 4,
@@ -214,7 +224,8 @@ fn median_fps(trials: &[FpsTrial]) -> Result<f64> {
 }
 
 /// Warm up (synchronized renders size the intersection buffers), then time whole passes over
-/// `frames`, submitted back to back with one GPU wait per trial unless the protocol waits on each.
+/// `frames`. Unless the protocol waits on each render, frames are submitted back to back with up
+/// to 3 in flight: the GPU is drained whenever all 3 are pending, and once at the end of each trial.
 fn measure_fps(
     renderer: &mut StandaloneRenderer,
     frames: &[&CameraFrame],
@@ -264,12 +275,10 @@ fn frame_output(root: &Path, frame: &CameraFrame) -> Result<PathBuf> {
     Ok(root.join(&frame.file_path).with_extension("png"))
 }
 
-fn save(renderer: &StandaloneRenderer, size: glam::UVec2, path: &Path, png16: bool) -> Result<()> {
-    let pixels = renderer.read_rgba()?;
+fn save(image: &image::DynamicImage, path: &Path, png16: bool) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let image = gsplat_cli::parity_image(pixels, size.x, size.y)?;
     if png16 {
         image.to_rgb16().save(path)?;
     } else {
@@ -336,9 +345,10 @@ pub(crate) async fn run(args: Args) -> Result<()> {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent)?;
             }
-            Ok(rerun::RecordingStreamBuilder::new("hexels-surface").save(path)?)
+            Ok(rerun::RecordingStreamBuilder::new("gsplat-render").save(path)?)
         })
         .transpose()?;
+    let surface_name = args.surface_name();
     for (done, (index, frame, path)) in selected.iter().enumerate() {
         let output = if recording.is_some() {
             Output::Surface
@@ -346,9 +356,10 @@ pub(crate) async fn run(args: Args) -> Result<()> {
             Output::Float
         };
         renderer.render(&frame.camera, output)?;
-        save(&renderer, size, path, args.png16)?;
+        let image = gsplat_cli::parity_image(renderer.read_rgba()?, size.x, size.y)?;
+        save(&image, path, args.png16)?;
         if let Some(recording) = &recording {
-            log_surface(recording, &renderer, *index, frame, &args.surface_name)?;
+            log_surface(recording, &renderer, &image, *index, frame, &surface_name)?;
         }
         if (done + 1) % 25 == 0 || done + 1 == selected.len() {
             eprintln!("Rendered {}/{} test frames", done + 1, selected.len());
@@ -446,6 +457,34 @@ mod tests {
         assert_eq!(median_fps(&trials[..3]).unwrap(), 300.0);
         assert!(median_fps(&[]).is_err());
         assert!(median_fps(&[trial(f64::INFINITY)]).is_err());
+    }
+    #[test]
+    fn surface_entities_default_to_the_ply_stem() {
+        let parse = |extra: &[&str]| {
+            let base = [
+                "gsplat render",
+                "--ply",
+                "runs/garden/model.ply",
+                "--output",
+                "a.png",
+            ];
+            Args::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        assert_eq!(parse(&["--surface", "s.rrd"]).surface_name(), "model");
+        let named = parse(&["--surface", "s.rrd", "--surface-name", "wgsl"]);
+        assert_eq!(named.surface_name(), "wgsl");
+        assert!(
+            Args::try_parse_from([
+                "gsplat render",
+                "--ply",
+                "m.ply",
+                "--output",
+                "a.png",
+                "--surface-name",
+                "x"
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn output_paths_preserve_subdirectories_and_reject_parent_escape() {

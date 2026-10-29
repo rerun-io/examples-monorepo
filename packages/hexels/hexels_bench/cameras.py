@@ -4,15 +4,17 @@ the SfM points both trainers initialize from (and cap their primitive count at).
 Upstream publishes one camera contract per NVS scene (HF `jhu-ccvl/Hexels`,
 `cameras/nvs/<dataset>/<scene>/contract.json`): the 2DGS camera geometry of every training and test
 view plus SHA256 digests of the exact float32 RGB targets. `cameras.json` (contract
-`hexels-work/contracts/run-layout.md`) copies the test records, and `write_targets` reproduces the
+`docs/run-layout.md`) copies the test records, and `write_targets` reproduces the
 targets bit-exactly (checked against the contract digest) as 16-bit PNGs for the shared scorer.
 """
 
 import hashlib
 import json
+import shutil
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import mkdtemp
 
 import numpy as np
 from jaxtyping import Float32, Float64, UInt8
@@ -103,7 +105,7 @@ class CameraContract:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class CamerasFile:
-    """`cameras.json` written beside a run's renders (contract run-layout.md)."""
+    """`cameras.json` written beside a run's renders (contract docs/run-layout.md)."""
 
     format: str
     """Always hexels-cameras-1."""
@@ -209,17 +211,28 @@ def find_image(images_dir: Path, stem: str) -> Path:
 
 
 def write_targets(contract: CameraContract, scene_dir: Path, out_dir: Path) -> list[Path]:
-    """Write the exact float32 test targets as 16-bit PNGs (k/255 maps to k*257, lossless) and check
-    them against the contract's ordered target digest. Returns the written paths in render order."""
+    """Write the exact float32 test targets as 16-bit PNGs (k/255 maps to k*257, lossless) into `out_dir`.
+
+    The PNGs are staged beside `out_dir` and replace it only once they match the contract's ordered
+    target digest, so a directory of targets is always a checked one. Returns the paths in render order.
+
+    Raises:
+        ValueError: The targets do not match the digest; `out_dir` is left as it was.
+    """
     images_dir: Path = scene_dir / contract.settings.images
-    digests: list[list[str]] = []
-    written: list[Path] = []
-    for camera in contract.geometry.test:
-        rgb: UInt8[ndarray, "h w 3"] = load_target(find_image(images_dir, camera.name), camera.width, camera.height)
-        digests.append([camera.name, target_sha256(rgb)])
-        path: Path = out_dir / f"{camera.name}.png"
-        write_png16(path, rgb.astype(np.uint16) * np.uint16(257))
-        written.append(path)
-    if ordered_targets_sha256(digests) != contract.test.ordered_target_tensors_sha256:
-        raise ValueError(f"{scene_dir}: test targets do not match the camera contract digest")
-    return written
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging: Path = Path(mkdtemp(prefix=f".{out_dir.name}-", dir=out_dir.parent))
+    try:
+        digests: list[list[str]] = []
+        for camera in contract.geometry.test:
+            rgb: UInt8[ndarray, "h w 3"] = load_target(find_image(images_dir, camera.name), camera.width, camera.height)
+            digests.append([camera.name, target_sha256(rgb)])
+            write_png16(staging / f"{camera.name}.png", rgb.astype(np.uint16) * np.uint16(257))
+        if ordered_targets_sha256(digests) != contract.test.ordered_target_tensors_sha256:
+            raise ValueError(f"{scene_dir}: test targets do not match the camera contract digest")
+        if out_dir.exists():
+            shutil.rmtree(out_dir)  # incomplete targets of an earlier writer
+        staging.rename(out_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return [out_dir / f"{camera.name}.png" for camera in contract.geometry.test]

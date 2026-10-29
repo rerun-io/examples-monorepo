@@ -1,4 +1,4 @@
-"""Decode 2D fits with upstream CUDA and with our WGSL renderer; score, time and compare (specs/twod.md 3).
+"""Decode 2D fits with upstream CUDA and with our WGSL renderer; score, time and compare.
 
 For every image and fit, each stored condition (`decoded_hxm` = the paper's packed `.hxm`, `uint16`,
 `raw_fp32`) is decoded twice from the same upstream-decoded fields:
@@ -8,13 +8,10 @@ For every image and fit, each stored condition (`decoded_hxm` = the paper's pack
 - WGSL: the fields as a 2D hexel PLY, `gsplat render --png16 --fps` (the same 10 + 5 x 20 protocol), scored from the 16-bit PNG,
   and compared pixel by pixel with the CUDA render of the same condition.
 
-Image-GS fits have no WGSL decoder (specs/twod.md D5). Results: `metrics.json` (results2d.ImageRun)
+Image-GS fits have no WGSL decoder. Results: `metrics.json` (results2d.ImageRun)
 in `runs/imagegs/<stem>/<method>/`. Run it in the hexels env under the GPU lock (it times decodes).
 """
 
-import contextlib
-import fcntl
-import json
 import socket
 import subprocess
 from dataclasses import dataclass, field
@@ -24,10 +21,20 @@ import numpy as np
 import torch
 from jaxtyping import Float32, UInt16
 from numpy import ndarray
-from serde import SerdeError
+from serde import SerdeError, from_dict
 
-from hexels_bench.image2d import HexelImage, hexel_image_from_fields, write_hexel_image_ply
-from hexels_bench.layout import GSPLAT_RELEASE, Roots
+from hexels_bench.bench import FpsReport
+from hexels_bench.gpu_monitor import gpu_lock
+from hexels_bench.image2d import (
+    FitCheckpoint,
+    FitMetrics,
+    HexelImage,
+    PublishedFitMetadata,
+    StoredFitHeader,
+    hexel_image_from_fields,
+    write_hexel_image_ply,
+)
+from hexels_bench.layout import GSPLAT_RELEASE, Roots, read_json
 from hexels_bench.png16 import from_unit_float, read_png16, write_png16
 from hexels_bench.results2d import (
     FITS,
@@ -83,8 +90,8 @@ def published_files(roots: Roots, stem: str, spec: FitSpec) -> FitFiles | None:
     folder: Path = roots.published_image_fit(stem, appearance)
     if not folder.is_dir():
         return None
-    metadata: dict = json.loads((folder / "metadata.json").read_text())
-    by_format: dict[str, float] = {item["format"]: float(item["expected_metrics"]["psnr_db"]) for item in metadata["representations"]}
+    metadata: PublishedFitMetadata = read_json(PublishedFitMetadata, folder / "metadata.json")
+    by_format: dict[str, float] = {item.format: item.expected_metrics.psnr_db for item in metadata.representations}
     return FitFiles(
         spec=spec,
         files={
@@ -101,11 +108,11 @@ def fitted_files(roots: Roots, stem: str, spec: FitSpec) -> FitFiles | None:
     upstream: Path = roots.runs / "imagegs" / stem / spec.family / "upstream"
     if not (upstream / "metrics.json").is_file():
         return None
-    record: dict = json.loads((upstream / "metrics.json").read_text())
-    steps: int = int(record["job"]["max_steps"])
-    final: list[dict] = [checkpoint for checkpoint in record["checkpoints"] if checkpoint["step"] == steps]
+    record: FitMetrics = read_json(FitMetrics, upstream / "metrics.json")
+    steps: int = record.job.max_steps
+    final: list[FitCheckpoint] = [checkpoint for checkpoint in record.checkpoints if checkpoint.step == steps]
     if spec.packed_profile is None:  # Image-GS stores uint16 and FP32 .hxi files
-        by_bits: dict[int, float] = {int(checkpoint["bits"]): float(checkpoint["psnr_db"]) for checkpoint in final}
+        by_bits: dict[int, float] = {checkpoint.bits: checkpoint.psnr_db for checkpoint in final}
         return FitFiles(
             spec=spec,
             files={"uint16": upstream / f"step_{steps:06d}_16bit.hxi", "raw_fp32": upstream / f"step_{steps:06d}_32bit.hxi"},
@@ -121,7 +128,7 @@ def fitted_files(roots: Roots, stem: str, spec: FitSpec) -> FitFiles | None:
             "raw_fp32": upstream / f"render_parameters_{steps:06d}.pt",
         },
         primary="decoded_hxm",
-        reference_psnr={"uint16": float(final[0]["psnr_db"])},
+        reference_psnr={"uint16": final[0].psnr_db},
     )
 
 
@@ -129,7 +136,7 @@ def fitted_files(roots: Roots, stem: str, spec: FitSpec) -> FitFiles | None:
 class StoredFit:
     """Upstream-decoded fields of one stored file, resident on the GPU."""
 
-    header: dict
+    header: StoredFitHeader
     """Upstream header: method, layout, width, height."""
     values: dict[str, torch.Tensor]
     """Decoded fields on the GPU."""
@@ -141,18 +148,17 @@ class StoredFit:
         from scripts.image_compression_stable import render_image
         from scripts.image_compression_training import render_parameters_image
 
-        height: int = int(self.header["height"])
-        width: int = int(self.header["width"])
         if self.legacy:
-            return render_parameters_image(self.values, self.header["method"], height, width)
-        return render_image(self.values, self.header["method"], self.header["layout"], height, width)
+            return render_parameters_image(self.values, self.header.method, self.header.height, self.header.width)
+        assert self.header.layout is not None, "non-legacy stored fits carry a layout"
+        return render_image(self.values, self.header.method, self.header.layout, self.header.height, self.header.width)
 
 
 def load_stored_fit(path: Path) -> StoredFit:
     from scripts.decode_image import load_representation
 
     header, arrays, legacy = load_representation(path)
-    return StoredFit(header=header, values={name: value.cuda() for name, value in arrays.items()}, legacy=legacy)
+    return StoredFit(header=from_dict(StoredFitHeader, header), values={name: value.cuda() for name, value in arrays.items()}, legacy=legacy)
 
 
 def render_path(run_dir: Path, stem: str, condition: Condition, primary: Condition) -> Path:
@@ -204,9 +210,9 @@ def decode_fit(config: Config, scorer: ImageScorer, stem: str, files: FitFiles) 
             continue
         wgsl_dir: Path = image_dir / files.spec.wgsl_method
         fields: dict[str, ndarray] = {name: value.float().cpu().numpy() for name, value in stored.values.items()}
-        hexels: HexelImage = hexel_image_from_fields(int(stored.header["width"]), int(stored.header["height"]), fields)
+        hexels: HexelImage = hexel_image_from_fields(stored.header.width, stored.header.height, fields)
         ply: Path = wgsl_dir / ("model.ply" if condition == files.primary else f"model-{condition}.ply")
-        write_hexel_image_ply(ply, hexels, str(path), int(stored.header.get("step", -1)))
+        write_hexel_image_ply(ply, hexels, str(path), -1 if stored.header.step is None else stored.header.step)
         wgsl_render: Path = render_path(wgsl_dir, stem, condition, files.primary)
         timing_path: Path = wgsl_dir / "timing" / f"{condition}.json"
         wgsl_render.parent.mkdir(parents=True, exist_ok=True)
@@ -215,8 +221,8 @@ def decode_fit(config: Config, scorer: ImageScorer, stem: str, files: FitFiles) 
             log.write(" ".join(command) + "\n")
             log.flush()
             subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
-        timing: dict = json.loads(timing_path.read_text())
-        wgsl_adapter = f"{timing['adapter']} ({timing['backend']})"
+        timing: FpsReport = read_json(FpsReport, timing_path)
+        wgsl_adapter = f"{timing.adapter} ({timing.backend})"
         wgsl_pixels: UInt16[ndarray, "h w 3"] = read_png16(wgsl_render)
         wgsl_image: Float32[ndarray, "h w 3"] = wgsl_pixels.astype(np.float32) / np.float32(65535.0)
         wgsl_tensor: torch.Tensor = torch.from_numpy(np.ascontiguousarray(wgsl_image.transpose(2, 0, 1)))
@@ -227,7 +233,7 @@ def decode_fit(config: Config, scorer: ImageScorer, stem: str, files: FitFiles) 
                 wgsl_dir,
                 wgsl_render,
                 scorer.score(wgsl_tensor, target),
-                [trial["seconds"] * 1000.0 / trial["frames"] for trial in timing["trials"]],
+                [trial.seconds * 1000.0 / trial.frames for trial in timing.trials],
                 psnr_between(wgsl_pixels, cuda_pixels),
             )
         )
@@ -271,10 +277,7 @@ def main(config: Config) -> None:
             outputs: list[str] = [method for method in (spec.cuda_method, spec.wgsl_method) if method is not None]
             if not config.force and all(is_done(config.roots.runs / "imagegs" / stem / method / "metrics.json") for method in outputs):
                 continue
-            with contextlib.ExitStack() as stack:
-                if config.gpu_lock is not None:
-                    lock = stack.enter_context(config.gpu_lock.open("a"))
-                    fcntl.flock(lock, fcntl.LOCK_EX)  # released when the file closes
+            with gpu_lock(config.gpu_lock):
                 runs: list[ImageRun] = decode_fit(config, scorer, stem, files)
             for run in runs:
                 scores: ConditionScores = run.scores()

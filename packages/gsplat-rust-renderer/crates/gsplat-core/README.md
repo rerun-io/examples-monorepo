@@ -19,6 +19,6 @@ Poll completed feedback before reusing a view. Scenes can be shared by several v
 Hexels (honeycomb-surfels/hexels) share views, sorting and targets with splats:
 `renderer.upload_hexels(&hexels)` takes activated rows in the hexel PLY order. 3D hexels
 need a pinhole camera; `Target::Surface` adds expected and median depth and world normals.
-`Target::TextureDepthId` adds, per pixel, the global row of the median contributor
-(`u32::MAX` where nothing contributed) for viewer picking.
+`Target::TextureDepth` writes colour, expected depth and, per pixel, the global row of the
+median contributor (`u32::MAX` where nothing contributed) for viewer composition and picking.
 `HexelVariant::Image` renders 2D fits with upstream's top-10 normalized blend.

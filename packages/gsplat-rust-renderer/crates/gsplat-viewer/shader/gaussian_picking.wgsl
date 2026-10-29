@@ -2,7 +2,7 @@
 // Picking ids and outline masks from the core's median-contributor id texture (u32::MAX = none).
 @group(1) @binding(1) var raster_depth: texture_2d<f32>;
 @group(1) @binding(2) var raster_id: texture_2d<u32>;
-// `draw_uniform` in renderer.rs: mask words hold channel A in bits 0-7, B in 8-15, bit 16 = set.
+// `DrawUniform` in renderer.rs: mask words hold channel A in bits 0-7, B in 8-15, bit 16 = set.
 struct Draw {
     background: vec4f,
     picking_object: vec2u,

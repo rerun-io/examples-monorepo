@@ -6,6 +6,7 @@ use brush_serde::import::SplatData;
 use glam::{UVec2, Vec3};
 use gsplat_core::{Hexels, RenderMode, RenderOptions, Splats, Target};
 use std::path::Path;
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncSeekExt as _};
 
 /// A splat or hexel PLY. For hexels, `data` holds only the centres used for framing.
 pub struct PlyScene {
@@ -19,10 +20,21 @@ pub struct PlyScene {
 }
 
 impl PlyScene {
+    /// Reads the header to pick the format; splat PLYs then stream through Brush's loader.
     pub async fn load(path: &Path) -> Result<Self> {
-        let bytes = tokio::fs::read(path).await?;
+        let mut file = tokio::io::BufReader::new(tokio::fs::File::open(path).await?);
+        // A PLY header is a few hundred bytes; stop at end_header, at EOF or after 64 KiB.
+        let mut header = Vec::new();
+        while !header.ends_with(b"end_header\n") && header.len() < 1 << 16 {
+            if file.read_until(b'\n', &mut header).await? == 0 {
+                break;
+            }
+        }
+        file.rewind().await?;
         let mut image_size = None;
-        let (data, hexels, mode) = if crate::hexel_ply::is_hexel_ply(&bytes) {
+        let (data, hexels, mode) = if crate::hexel_ply::is_hexel_ply(&header) {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).await?;
             let parsed = crate::hexel_ply::parse(&bytes)?;
             let hexels = parsed.hexels;
             image_size = parsed.image_size;
@@ -42,8 +54,7 @@ impl PlyScene {
             };
             (data, Some(hexels), RenderMode::Default)
         } else {
-            let loaded =
-                brush_serde::import::load_splat_from_ply(std::io::Cursor::new(bytes), None).await?;
+            let loaded = brush_serde::import::load_splat_from_ply(file, None).await?;
             let mode = if matches!(
                 loaded.meta.render_mode,
                 Some(brush_render::gaussian_splats::SplatRenderMode::Mip)
@@ -321,8 +332,9 @@ impl StandaloneRenderer {
         Ok(())
     }
     /// Throughput mode: submit a float frame without waiting for it, keeping up to three frames in
-    /// flight as the viewer does. Fails if a completed frame overflowed its intersection capacity,
-    /// so warm up with [`Self::render`] first. [`Self::finish_submitted`] waits for the rest.
+    /// flight as the viewer does; when all three are pending it drains the device first. Fails if a
+    /// completed frame overflowed its intersection capacity, so warm up with [`Self::render`] first.
+    /// [`Self::finish_submitted`] waits for the rest.
     pub fn submit_float(&mut self, camera: &CameraSpec) -> Result<()> {
         camera.validate()?;
         if UVec2::new(camera.width, camera.height) != self.size {

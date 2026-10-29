@@ -26,7 +26,7 @@ BASE_PROPERTIES: tuple[str, ...] = (
 
 
 def property_names(variant: HexelVariant) -> list[str]:
-    """Vertex properties of a 3D hexel PLY in contract order (hexel-ply.md)."""
+    """Vertex properties of a 3D hexel PLY in contract order (packages/hexels/docs/hexel-ply.md)."""
     extra: list[str] = {"v1": [], "v2": [f"a_{i // 3}{i % 3}" for i in range(9)], "v3": [f"sh_{i}" for i in range(45)]}[variant]
     return [*BASE_PROPERTIES, *extra]
 

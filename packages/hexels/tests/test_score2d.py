@@ -61,7 +61,7 @@ def test_scorer_equals_upstream_evaluate_image() -> None:
 
 @pytest.mark.golden
 def test_wgsl_decode_matches_cuda_and_the_catalog(tmp_path: Path) -> None:
-    """specs/twod.md 3 gates on one published fit: CUDA vs catalog < 1e-3 dB, WGSL vs CUDA >= 50 dB, |dPSNR| < 0.01 dB."""
+    """The 2D gates on one published fit: CUDA vs catalog < 1e-3 dB, WGSL vs CUDA >= 50 dB, |dPSNR| < 0.01 dB."""
     published_or_skip()
     config = Config(stems=[STEM], roots=Roots(runs=tmp_path))
     if not config.gsplat.is_file():

@@ -59,6 +59,27 @@ def test_targets_match_the_contract_digest(tmp_path: Path) -> None:
     bad = read_json(CameraContract, write_contract(tmp_path / "bad.json", ["0000", "0008"], (5, 6), "0" * 64))
     with pytest.raises(ValueError, match="digest"):
         write_targets(bad, scene, tmp_path / "gt-bad")
+    assert not (tmp_path / "gt-bad").exists() and not list(tmp_path.glob(".gt-bad-*")), "targets that miss the digest never land"
+
+
+def test_partial_targets_are_replaced_only_by_checked_ones(tmp_path: Path) -> None:
+    scene: Path = tmp_path / "scene"
+    (scene / "images").mkdir(parents=True)
+    rows: list[tuple[str, np.ndarray]] = []
+    for index, name in enumerate(("0000", "0008")):
+        Image.fromarray(np.full((12, 10, 3), 40 * index, dtype=np.uint8), mode="RGB").save(scene / "images" / f"{name}.png")
+        rows.append((name, load_target(scene / "images" / f"{name}.png", 5, 6)))
+    gt: Path = tmp_path / "gt"
+    gt.mkdir()
+    (gt / "0000.png").write_bytes(b"left by an interrupted writer")
+    bad = read_json(CameraContract, write_contract(tmp_path / "bad.json", ["0000", "0008"], (5, 6), "0" * 64))
+    with pytest.raises(ValueError, match="digest"):
+        write_targets(bad, scene, gt)
+    assert sorted(path.name for path in gt.iterdir()) == ["0000.png"], "a failed check leaves the old directory as it was"
+    good = read_json(CameraContract, write_contract(tmp_path / "good.json", ["0000", "0008"], (5, 6), upstream_digest(rows)))
+    write_targets(good, scene, gt)
+    np.testing.assert_array_equal(read_png16(gt / "0008.png"), rows[1][1].astype(np.uint16) * 257)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bad.json", "good.json", "gt", "scene"]
 
 
 def test_cameras_file_copies_contract_records(tmp_path: Path) -> None:

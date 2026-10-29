@@ -1,6 +1,7 @@
 //! Compute draw data: transparent depth-tested composition, picking ids and outline masks for `re_renderer`.
 use gsplat_core::{Camera, Error, RenderOptions};
 use parking_lot::Mutex;
+use re_renderer::external::bytemuck;
 use re_renderer::external::smallvec::smallvec;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 use re_renderer::{BindGroupDesc, BindGroupEntry, GpuBindGroup, GpuTexture};
@@ -155,7 +156,7 @@ impl RenderView {
             &mut self.core,
             camera,
             &options,
-            gsplat_core::Target::TextureDepthId {
+            gsplat_core::Target::TextureDepth {
                 color: self.target.color.default_view.clone(),
                 depth: self.target.depth.default_view.clone(),
                 id: self.target.id.default_view.clone(),
@@ -172,7 +173,7 @@ impl RenderView {
 #[derive(Clone)]
 pub(crate) struct GaussianDrawData {
     pub(crate) view: Arc<Mutex<RenderView>>,
-    /// `draw_uniform`: background, picking object and outline masks of this entity.
+    /// `DrawUniform`: background, picking object and outline masks of this entity.
     pub(crate) uniform: GpuBindGroup,
     /// Whether the entity or any of its instances is outlined.
     pub(crate) outlined: bool,
@@ -243,11 +244,11 @@ impl GaussianRenderer {
         })
     }
 
-    /// Per-frame draw uniform (see `draw_uniform`).
+    /// Per-frame draw uniform (see `DrawUniform`).
     pub(crate) fn draw_bind_group(
         &self,
         ctx: &re_renderer::RenderContext,
-        uniform: [u32; 64],
+        uniform: DrawUniform,
     ) -> GpuBindGroup {
         ctx.gpu_resources.bind_groups.alloc(
             &ctx.device,
@@ -467,7 +468,10 @@ impl Renderer for GaussianRenderer {
             DrawPhase::Transparent => (self.composite_pipeline, 0..3),
             DrawPhase::PickingLayer => (self.picking_pipeline, 0..6),
             DrawPhase::OutlineMask => (self.outline_pipeline, 0..6),
-            _ => return Ok(()),
+            _ => {
+                re_log::debug_panic!("unexpected draw phase {phase:?}");
+                return Ok(());
+            }
         };
         pass.set_pipeline(render_pipelines.get(pipeline)?);
         for instruction in draw_instructions {
@@ -484,42 +488,76 @@ impl Renderer for GaussianRenderer {
     }
 }
 
-/// Most highlighted rows one draw can outline individually; more fall back to the entity-wide mask.
+/// Highlighted rows one draw can outline individually: the 256-byte uniform less its 32-byte header,
+/// at 8 bytes per row. The lowest rows are kept; higher rows draw with the entity-wide mask only,
+/// which is empty unless the whole entity is highlighted, so they lose their outline.
 const MAX_HIGHLIGHTS: usize = 28;
 
-/// The 256-byte draw uniform of `shader/gaussian_picking.wgsl` (its prefix is the composite's
-/// `Background`): the solid background in display space (w = 1; zero for gradients), the picking
-/// object id (low, high word), the entity-wide outline mask, the number of highlighted rows, then
-/// (row, mask) pairs sorted by row. A mask word holds channel A in bits 0-7, B in bits 8-15 and
-/// bit 16 when set; a row mask has already fallen back to the entity-wide one per channel.
-pub(crate) fn draw_uniform(
-    background: Option<glam::Vec3>,
-    object: re_renderer::PickingLayerObjectId,
+/// The draw uniform of `shader/gaussian_picking.wgsl`; its prefix is the composite's `Background`.
+/// A mask word holds channel A in bits 0-7, B in bits 8-15 and bit 16 when set.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[bytemuck(crate = "re_renderer::external::bytemuck")]
+pub(crate) struct DrawUniform {
+    /// Solid view background in display space (w = 1); zero for gradients.
+    background: [f32; 4],
+    /// Picking object id (low, high word).
+    picking_object: [u32; 2],
+    /// Entity-wide outline mask word.
+    outline: u32,
+    /// Number of valid `highlights`.
+    highlight_count: u32,
+    /// (row, mask word) pairs sorted by row; each row mask already falls back to the entity-wide
+    /// one per channel.
+    highlights: [[u32; 2]; MAX_HIGHLIGHTS],
+}
+
+const _: () = assert!(size_of::<DrawUniform>() == 256);
+
+impl DrawUniform {
+    /// `rows` is the primitive count: highlighted rows at or beyond it are ignored.
+    pub(crate) fn new(
+        background: Option<glam::Vec3>,
+        object: re_renderer::PickingLayerObjectId,
+        masks: &re_viewer_context::ViewOutlineMasks,
+        rows: usize,
+    ) -> Self {
+        let word = |mask: re_renderer::OutlineMaskPreference| {
+            mask.0
+                .map_or(0, |[a, b]| u32::from(a) | (u32::from(b) << 8) | (1 << 16))
+        };
+        let mut highlighted: Vec<_> = outline_rows(masks, rows).collect();
+        highlighted.sort_unstable_by_key(|&(row, _)| row);
+        highlighted.truncate(MAX_HIGHLIGHTS);
+        let mut highlights = [[0; 2]; MAX_HIGHLIGHTS];
+        for (slot, &(row, mask)) in highlights.iter_mut().zip(&highlighted) {
+            *slot = [row, word(mask.with_fallback_to(masks.overall))];
+        }
+        Self {
+            background: background.map_or([0.0; 4], |color| color.extend(1.0).to_array()),
+            picking_object: [(object.0 & 0xffff_ffff) as u32, (object.0 >> 32) as u32],
+            outline: word(masks.overall),
+            highlight_count: highlighted.len() as u32,
+            highlights,
+        }
+    }
+
+    /// Whether the entity or any of its rows is outlined.
+    pub(crate) fn outlined(&self) -> bool {
+        self.outline != 0 || self.highlight_count != 0
+    }
+}
+
+/// Highlighted rows below `rows` with their own outline masks, in hash order. Each covers one row,
+/// so batches can push them as non-overlapping ranges in any order.
+pub(crate) fn outline_rows(
     masks: &re_viewer_context::ViewOutlineMasks,
-) -> [u32; 64] {
-    let word = |mask: re_renderer::OutlineMaskPreference| {
-        mask.0
-            .map_or(0, |[a, b]| u32::from(a) | (u32::from(b) << 8) | (1 << 16))
-    };
-    let mut uniform = [0_u32; 64];
-    if let Some(color) = background {
-        uniform[..4].copy_from_slice(&color.extend(1.0).to_array().map(f32::to_bits));
-    }
-    uniform[4..6].copy_from_slice(&[(object.0 & 0xffff_ffff) as u32, (object.0 >> 32) as u32]);
-    uniform[6] = word(masks.overall);
-    let mut rows: Vec<u32> = masks
-        .instances
-        .keys()
-        .filter_map(|instance| u32::try_from(instance.get()).ok())
-        .filter(|&row| row != u32::MAX)
-        .collect();
-    rows.sort_unstable();
-    rows.truncate(MAX_HIGHLIGHTS);
-    uniform[7] = rows.len() as u32;
-    for (slot, row) in uniform[8..].as_chunks_mut::<2>().0.iter_mut().zip(rows) {
-        slot.copy_from_slice(&[row, word(masks.index_outline_mask(u64::from(row).into()))]);
-    }
-    uniform
+    rows: usize,
+) -> impl Iterator<Item = (u32, re_renderer::OutlineMaskPreference)> + '_ {
+    masks.instances.iter().filter_map(move |(instance, &mask)| {
+        let row = u32::try_from(instance.get()).ok()?;
+        ((row as usize) < rows).then_some((row, mask))
+    })
 }
 
 fn register_embedded_shaders() {
@@ -543,6 +581,7 @@ fn register_embedded_shaders() {
 
 #[cfg(test)]
 mod tests {
+    use super::DrawUniform;
     use super::re_renderer::{OutlineMaskPreference, PickingLayerObjectId};
     use re_viewer::external::{re_log_types::Instance, re_viewer_context::ViewOutlineMasks};
 
@@ -552,26 +591,33 @@ mod tests {
             overall: OutlineMaskPreference::some(1, 0),
             ..Default::default()
         };
-        for (instance, a, b) in [(7, 0, 2), (3, 4, 5), (u64::from(u32::MAX), 9, 9)] {
+        for (instance, a, b) in [
+            (7, 0, 2),
+            (3, 4, 5),
+            (10, 9, 9),
+            (u64::from(u32::MAX), 9, 9),
+        ] {
             masks
                 .instances
                 .insert(Instance::from(instance), OutlineMaskPreference::some(a, b));
         }
         let object = PickingLayerObjectId(0x1122_3344_5566_7788);
-        let uniform = super::draw_uniform(Some(glam::Vec3::new(0.25, 0.5, 1.0)), object, &masks);
-        let bits = |v: [f32; 4]| v.map(f32::to_bits);
-        assert_eq!(uniform[..4], bits([0.25, 0.5, 1.0, 1.0]));
-        assert_eq!(uniform[4..6], [0x5566_7788, 0x1122_3344]);
+        let uniform = DrawUniform::new(Some(glam::Vec3::new(0.25, 0.5, 1.0)), object, &masks, 10);
+        assert_eq!(uniform.background, [0.25, 0.5, 1.0, 1.0]);
+        assert_eq!(uniform.picking_object, [0x5566_7788, 0x1122_3344]);
         // Mask words: bit 16 = set, channel A in bits 0-7, channel B in bits 8-15.
-        assert_eq!(uniform[6], 0x1_00_01);
-        // Rows sorted by id; a zero channel falls back to the entity-wide mask; u32::MAX is no row.
-        assert_eq!(uniform[7], 2);
-        assert_eq!(uniform[8..12], [3, 0x1_05_04, 7, 0x1_02_01]);
-        assert!(uniform[12..].iter().all(|&word| word == 0));
+        assert_eq!(uniform.outline, 0x1_00_01);
+        // Rows sorted by id; a zero channel falls back to the entity-wide mask; rows at or beyond
+        // the primitive count are no rows.
+        assert_eq!(uniform.highlight_count, 2);
+        assert_eq!(uniform.highlights[..2], [[3, 0x1_05_04], [7, 0x1_02_01]]);
+        assert!(uniform.highlights[2..].iter().all(|&pair| pair == [0, 0]));
+        assert!(uniform.outlined());
 
-        let plain = super::draw_uniform(None, object, &ViewOutlineMasks::default());
-        assert_eq!(plain[..4], [0; 4]);
-        assert_eq!(plain[6..8], [0, 0]);
+        let plain = DrawUniform::new(None, object, &ViewOutlineMasks::default(), 10);
+        assert_eq!(plain.background, [0.0; 4]);
+        assert_eq!([plain.outline, plain.highlight_count], [0, 0]);
+        assert!(!plain.outlined());
     }
 
     #[test]
@@ -582,11 +628,12 @@ mod tests {
                 .instances
                 .insert(Instance::from(instance), OutlineMaskPreference::some(0, 1));
         }
-        let uniform = super::draw_uniform(None, PickingLayerObjectId(1), &masks);
-        assert_eq!(uniform[6], 0);
-        assert_eq!(uniform[7], 28);
-        let rows: Vec<u32> = uniform[8..].chunks(2).map(|pair| pair[0]).collect();
+        let uniform = DrawUniform::new(None, PickingLayerObjectId(1), &masks, 40);
+        assert_eq!(uniform.outline, 0);
+        assert_eq!(uniform.highlight_count, 28);
+        let rows: Vec<u32> = uniform.highlights.iter().map(|pair| pair[0]).collect();
         assert_eq!(rows, (0..28).collect::<Vec<u32>>());
-        assert!(uniform[8..].chunks(2).all(|pair| pair[1] == 0x1_01_00));
+        assert!(uniform.highlights.iter().all(|pair| pair[1] == 0x1_01_00));
+        assert!(uniform.outlined());
     }
 }

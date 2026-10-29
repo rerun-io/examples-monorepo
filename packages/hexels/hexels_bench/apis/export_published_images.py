@@ -6,10 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-import torch
-
 from hexels_bench.apis.fit_image import stage_image_gt
-from hexels_bench.image2d import HexelImage, load_image_fit, write_hexel_image_ply
+from hexels_bench.image2d import ImageFit, load_image_fit, write_hexel_image_ply
 from hexels_bench.layout import Roots
 from hexels_bench.results2d import FITS, FitSpec
 
@@ -32,9 +30,8 @@ def stage_published_image(roots: Roots, stem: str, appearance: Appearance) -> Pa
     fit: Path = roots.published_image_fit(stem, appearance) / "hexels_raw-fp32.pt"
     spec: FitSpec = next(spec for spec in FITS.values() if spec.published and spec.appearance == appearance)
     out: Path = roots.runs / "imagegs" / stem / spec.cuda_method / "model.ply"
-    image: HexelImage = load_image_fit(fit)
-    step: int = int(torch.load(fit, map_location="cpu", weights_only=True)["step"])
-    write_hexel_image_ply(out, image, str(fit), step)
+    loaded: ImageFit = load_image_fit(fit)
+    write_hexel_image_ply(out, loaded.image, str(fit), loaded.step)
     stage_image_gt(roots, stem)
     return out
 

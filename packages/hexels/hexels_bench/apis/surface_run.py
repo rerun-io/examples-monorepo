@@ -7,7 +7,6 @@ fuse_post.ply, fusion.json, log.txt}`; the CUDA method also writes `depth_parity
 recording of the same checkpoint. Scenes with a fusion.json are skipped unless `--force`.
 """
 
-import fcntl
 import subprocess
 import time
 from collections.abc import Iterator
@@ -19,12 +18,12 @@ import numpy as np
 import open3d as o3d
 from jaxtyping import Bool, Float32
 from numpy import ndarray
-from serde import serde
 from serde.json import to_json
 
 from hexels_bench.apis.export import export_run
 from hexels_bench.cameras import CameraContract, CamerasFile, ContractCamera, find_image, write_cameras_file
 from hexels_bench.checkpoint import UpstreamRunConfig, find_checkpoint, load_run_config
+from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.layout import GSPLAT_RELEASE, Dataset, Roots, read_json
 from hexels_bench.surface import (
     DepthMode,
@@ -39,6 +38,7 @@ from hexels_bench.surface import (
     tsdf_settings,
 )
 from hexels_bench.surface_frames import SurfaceFrame, rrd_frames
+from hexels_bench.surface_records import DepthParity, FusionReport
 from hexels_bench.upstream import surface_frames
 
 SurfaceMethod: TypeAlias = Literal[
@@ -65,9 +65,9 @@ class SurfaceSpec:
     depth_source: Literal["wgsl", "upstream-cuda"]
     """`gsplat render --surface`, or upstream's CUDA renderer in process."""
     depth_mode: DepthMode
-    """Fused depth: median for Hexels (the paper's); Brush splats only have the alpha-weighted expected depth (spec R7)."""
+    """Fused depth: median for Hexels (the paper's); Brush splats only have the alpha-weighted expected depth."""
     alpha_threshold: float
-    """Depth is zeroed where alpha <= this: 0 for Hexels as upstream, 0.5 for Brush (spec R7)."""
+    """Depth is zeroed where alpha <= this: 0 for Hexels as upstream, 0.5 for Brush."""
     label: str
     """Short name in the surface recording."""
 
@@ -98,8 +98,8 @@ class Config:
     """Override the method's depth (Hexels: median, the paper's; Brush: expected); writes to surface-<mode>/."""
     gsplat: Path = GSPLAT_RELEASE / "gsplat"
     """Release `gsplat` binary (pixi run -e gsplat-rust-renderer gsplat-build, or cargo build -p gsplat-cli --release)."""
-    gpu_lock: Path | None = Path.home() / "hexels-work" / "gpu.lock"
-    """flock held around each WGSL render; None to skip."""
+    gpu_lock: Path | None = None
+    """flock held around each WGSL render; None takes `gpu.lock` beside the runs root (the benchmark queue's lock)."""
     force: bool = False
     """Redo scenes that already have a fusion.json."""
     rerender: bool = False
@@ -108,72 +108,8 @@ class Config:
     """Data and run roots."""
 
 
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class FusionReport:
-    """`fusion.json`: what was fused and how (upstream's extraction.json fields that apply)."""
-
-    dataset: str
-    """Run-layout dataset name."""
-    scene: str
-    """Upstream scene name."""
-    method: str
-    """Run-layout method."""
-    depth_source: str
-    """wgsl (gsplat render --surface) or upstream-cuda."""
-    depth_mode: str
-    """median or expected."""
-    alpha_threshold: float
-    """Depth is zeroed where alpha <= this."""
-    split: str
-    """all (every registered view) or train (the NVS training views)."""
-    masked: bool
-    """True when the images' alpha masks zeroed depth (DTU)."""
-    voxel_size: float
-    """TSDF voxel."""
-    sdf_trunc: float
-    """TSDF truncation."""
-    depth_trunc: float
-    """Maximum fused depth."""
-    views: int
-    """Integrated views."""
-    valid_depth_fraction: float
-    """Fraction of fused pixels with 0 < depth < depth_trunc."""
-    raw_triangles: int
-    """Triangles of fuse.ply."""
-    vertices: int
-    """Vertices of fuse_post.ply."""
-    triangles: int
-    """Triangles of fuse_post.ply."""
-    fusion_seconds: float
-    """Integration + marching cubes + post-processing wall time (includes reading or rendering frames)."""
-
-
 PARITY_TOLERANCE: float = 1e-3
 """Median-depth difference (scene units) above which a pixel counts as different in depth_parity.json."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class DepthParity:
-    """`depth_parity.json`: upstream CUDA vs WGSL surface frames of the same checkpoint (all views, or one view)."""
-
-    views: int
-    """Compared views."""
-    pixels: int
-    """All pixels of those views."""
-    both_hit: int
-    """Pixels where both median depths are positive."""
-    median_abs_mean: float
-    """Mean |median depth CUDA - WGSL| over `both_hit` pixels (scene units)."""
-    median_abs_max: float
-    """Largest such difference."""
-    median_over_tolerance: int
-    """`both_hit` pixels whose difference exceeds PARITY_TOLERANCE."""
-    hit_mismatch: int
-    """Pixels where exactly one renderer has a median depth."""
-    alpha_abs_mean: float
-    """Mean |alpha CUDA - WGSL| over all pixels."""
 
 
 def frame_parity(frame: SurfaceFrame, reference: SurfaceFrame) -> DepthParity:
@@ -291,12 +227,8 @@ def render_surface(config: Config, plan: SurfacePlan, method: str, log: Path) ->
     with log.open("a") as stream:
         stream.write(" ".join(command) + "\n")
         stream.flush()
-        if config.gpu_lock is None:
+        with gpu_lock(config.gpu_lock if config.gpu_lock is not None else config.roots.runs.parent / "gpu.lock"):
             subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT)
-        else:
-            with config.gpu_lock.open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT)
     return rrd
 
 

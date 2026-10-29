@@ -31,11 +31,12 @@ target/release/gsplat render --ply fit-2d.ply --output fit.png --png16 --fps fit
 
 Without `--width/--height`, `render` keeps the camera file's size. `--png16` writes 16-bit
 PNGs. `--surface` adds a recording with, per view, the camera and RGB, median and expected
-depth, alpha and world normals. 2D hexel fits take no camera file. `--fps fps.json` then
+depth, alpha and world normals under `world/camera/<PLY stem>/` (`--surface-name` renames
+it). 2D hexel fits take no camera file. `--fps fps.json` then
 times the rendered views as upstream Hexels does: 3D scenes with the paper protocol (2 warm-up
-passes, 4 trials of 10 passes, median FPS; frames submitted back to back, one GPU wait per trial,
-no readback), 2D fits like its 2D decode timing (10 warm-up renders, 5 trials of 20, each render
-waited on).
+passes, 4 trials of 10 passes, median FPS; frames submitted back to back with up to 3 in flight,
+the GPU drained whenever all 3 are pending and at the end of each trial, no readback), 2D fits
+like its 2D decode timing (10 warm-up renders, 5 trials of 20, each render waited on).
 
 Camera files accept NeRF transforms, Hexels `cameras.json` or `contract.json`
 (`geometry.test`, principal point at the image centre as upstream), CameraSpec JSON

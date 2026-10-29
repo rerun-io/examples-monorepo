@@ -20,10 +20,9 @@ fn hexel_normal(h: Hexel) -> vec3f {
 fn sample(h: Hexel, pix: vec2u, surface: bool) -> Sample {
     let m = plane(h);
     let p = cross(f32(pix.x) * m.tw - m.tu, f32(pix.y) * m.tw - m.tv);
-    // max(|p.y|, |a p.x +- p.y / 2|) / |p.z| is the hexagon SDF + 1 at s = p.xy / p.z. Beyond `reach`
-    // alpha < 1/255, so most candidates of a tile return here, before the divisions and the exp.
-    let ax = 0.5 * 1.7320508 * p.x;
-    if max(abs(p.y), max(abs(ax + 0.5 * p.y), abs(ax - 0.5 * p.y))) > h.reach * abs(p.z) || p.z == 0.0 {
+    // hexagon_norm(p.xy) / |p.z| is the hexagon SDF + 1 at s = p.xy / p.z. Beyond `reach` alpha < 1/255,
+    // so most candidates of a tile return here, before the divisions and the exp.
+    if hexagon_norm(p.xy) > h.reach * abs(p.z) || p.z == 0.0 {
         return Sample(0.0, vec3f(0.0), 0.0, vec3f(0.0));
     }
     let s = p.xy / p.z;

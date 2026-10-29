@@ -4,7 +4,11 @@ Hexels (arXiv 2610.37668) beside Brush 3DGS: upstream checkpoint export to hexel
 published-checkpoint renders, the shared NVS scorer, the benchmark queue and its tables, the 2D Image-GS
 benchmark and the surface (TSDF mesh) evaluation. Every tool runs in the `hexels` env; the renderer and the
 Brush trainer are the `gsplat-rust-renderer` package's binaries. Run directories follow one layout
-(`hexels_bench.layout`, methods in `hexels_bench.methods`); published numbers are `hexels_bench/paper-numbers.json`.
+([docs/run-layout.md](docs/run-layout.md); code in `hexels_bench.layout`, methods in `hexels_bench.methods`), models
+are hexel PLYs ([docs/hexel-ply.md](docs/hexel-ply.md)), and published numbers are `hexels_bench/paper-numbers.json`.
+Datasets and published checkpoints are read from `$GSPLAT_MODERN_DATA`, runs go to `$HEXELS_WORK/runs` (unset:
+`~/gsplat-modern-data` and `~/hexels-work`); every tool also takes `--roots.data`, `--roots.runs` and
+`--roots.brush-prepared`. GPU jobs share `flock` on `gpu.lock` beside the runs root.
 
 ## Brush on the Hexels NVS protocol
 

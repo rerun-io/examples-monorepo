@@ -1,10 +1,10 @@
 """Benchmark table: `runs/` -> `TABLE.json` (the paper's Table 2/3 columns, the published numbers beside ours)
-and a Rerun metrics recording `table.rrd` (entity layout of specs/viewer.md section 5).
+and a Rerun metrics recording `table.rrd`.
 
 Per-scene rows carry only what that run measured (Brush training has no FPS of its own: `brush-7k-wgsl`
 re-renders the same PLY and carries it). Hexels rows sit beside the published 30k checkpoint of the same
 variant on the same scene (HF catalog, `hexels_bench.paper` `hf_nvs_per_scene`). Dataset means average the
-representative scenes of contracts/scope.md and sit beside the mean of the published per-scene values over
+representative scenes (`layout.REPRESENTATIVE_SCENES`) and sit beside the mean of the published per-scene values over
 those same scenes, never beside the paper's 34-scene dataset means.
 """
 
@@ -21,7 +21,7 @@ from serde.json import to_json
 
 from hexels_bench.bench import incomplete_reason
 from hexels_bench.layout import PROTOCOL_SCENES, REPRESENTATIVE_SCENES, UPSTREAM_DATASET, Dataset, read_json
-from hexels_bench.methods import METHODS, Method
+from hexels_bench.methods import BENCHMARK_METHODS, METHODS, Method
 from hexels_bench.metrics import MetricsFile, TrainRecord, ply_vertex_count
 from hexels_bench.paper import PaperNumbers, PublishedNvs
 
@@ -52,7 +52,7 @@ class PaperScene:
     primitives: int
     """Hexels."""
     train_min: float | None
-    """Training minutes on the authors' A5000 (30k steps)."""
+    """Training minutes of the authors' run (30k steps; hardware in `BenchTable.published_hardware`)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -120,7 +120,7 @@ class PaperMean:
     primitives_k: float
     """Hexels, thousands."""
     train_min: float | None
-    """A5000 training minutes (30k steps)."""
+    """Training minutes of the authors' runs (30k steps; hardware in `BenchTable.published_hardware`)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -175,8 +175,10 @@ class BenchTable:
     """Local ISO time."""
     runs_root: str
     """Runs directory read."""
+    published_hardware: str
+    """GPU of the published numbers as paper-numbers.json records it (`source.hardware_paper`)."""
     mean_scenes: dict[str, list[str]]
-    """Scenes each dataset mean averages (contracts/scope.md)."""
+    """Scenes each dataset mean averages (`layout.REPRESENTATIVE_SCENES` by default)."""
     scenes: list[SceneRow]
     """Per-scene rows, datasets in queue order, scenes in upstream order, methods in queue order."""
     means: list[MeanRow]
@@ -300,7 +302,7 @@ def build_table(
     datasets: tuple[Dataset, ...] = ("dtu", "mipnerf360", "tnt"),
     scenes: dict[Dataset, tuple[str, ...]] | None = None,
     mean_scenes: dict[Dataset, tuple[str, ...]] | None = None,
-    methods: tuple[Method, ...] = tuple(METHODS),
+    methods: tuple[Method, ...] = BENCHMARK_METHODS,
 ) -> BenchTable:
     """Read every run directory into scene rows, dataset means and flags.
 
@@ -314,19 +316,24 @@ def build_table(
     """
     row_scenes: dict[Dataset, tuple[str, ...]] = scenes if scenes is not None else dict(PROTOCOL_SCENES)
     averaged: dict[Dataset, tuple[str, ...]] = mean_scenes if mean_scenes is not None else dict(REPRESENTATIVE_SCENES)
-    rows: list[SceneRow] = [
-        scene_row(runs, dataset, scene, method, paper) for dataset in datasets for scene in row_scenes[dataset] for method in methods
-    ]
+    index: dict[tuple[Dataset, str, Method], SceneRow] = {
+        (dataset, scene, method): scene_row(runs, dataset, scene, method, paper)
+        for dataset in datasets
+        for scene in dict.fromkeys((*row_scenes[dataset], *averaged[dataset]))
+        for method in methods
+    }
+    rows: list[SceneRow] = [index[(dataset, scene, method)] for dataset in datasets for scene in row_scenes[dataset] for method in methods]
     means: list[MeanRow] = [
-        mean_row(dataset, method, [scene_row(runs, dataset, scene, method, paper) for scene in averaged[dataset]])
+        mean_row(dataset, method, [index[(dataset, scene, method)] for scene in averaged[dataset]])
         for dataset in PAPER_DATASET_ORDER
         if dataset in datasets
         for method in methods
     ]
     return BenchTable(
-        format="hexels-bench-table-2",
+        format="hexels-bench-table-3",
         generated=datetime.now().isoformat(timespec="seconds"),
         runs_root=str(runs),
+        published_hardware=paper.source.hardware_paper,
         mean_scenes={dataset: list(averaged[dataset]) for dataset in datasets},
         scenes=rows,
         means=means,
@@ -435,7 +442,7 @@ def write_table_rrd(table: BenchTable, path: Path) -> None:
     """Log the table as data.
 
     `/metrics/<dataset>/<method>`: every complete scene as AnyValues on the `scene` timeline (index in upstream
-    order; specs/viewer.md section 5). `/table/<dataset>/<scene>` and `/table/<dataset>/mean`: paper-style tables
+    order). `/table/<dataset>/<scene>` and `/table/<dataset>/mean`: paper-style tables
     (rows = metrics on the `row` timeline, one column per model, published 30k beside ours) for the representative
     scenes, shown by the default blueprint.
     """

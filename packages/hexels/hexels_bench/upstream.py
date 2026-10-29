@@ -15,13 +15,70 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import torch
 from jaxtyping import Float32
+from serde import serde
 
-from hexels_bench.layout import Roots
+from hexels_bench.layout import Roots, read_json
 from hexels_bench.png16 import from_unit_float, write_png16
 from hexels_bench.surface_frames import SurfaceFrame
 
 UPSTREAM_HEXELS_REV: str = "698d1afb0944d3e766074c3beb70362f16c7550d"
 """hexels commit packaged by packages/hexels-src/recipe.yaml (a unit test keeps them equal)."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class PublishedView:
+    """One per-view row of upstream's direct-float evaluation (read partially)."""
+
+    image_name: str
+    """Image stem."""
+    psnr_db: float
+    """Direct-float PSNR."""
+    ssim: float
+    """2DGS SSIM."""
+    lpips_vgg: float
+    """LPIPS-VGG."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class UpstreamBenchmark:
+    """`benchmark` of upstream's evaluator result: the paper FPS protocol (read partially)."""
+
+    median_fps: float
+    """Median of the trial frame rates."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class PublishedEvaluation:
+    """Upstream's direct-float scores of one checkpoint: HF `evaluation.json` beside each published checkpoint, or the
+    result of `scripts.evaluate_nvs_campaign evaluate` (read partially)."""
+
+    per_view: list[PublishedView]
+    """Per-view scores in render order."""
+    benchmark: UpstreamBenchmark | None = None
+    """The evaluator's FPS benchmark; HF evaluation.json has none."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class TrainScenePlan:
+    """What `scripts.train_scene --prepare` prints: the resolved training command."""
+
+    command: list[str]
+    """Trainer command line."""
+    cwd: str
+    """Directory to run it in."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class TrainSummary:
+    """`summary.json` of an upstream training run (read partially)."""
+
+    train_seconds: float
+    """Wall time of the optimisation loop."""
 
 
 @runtime_checkable
@@ -131,9 +188,9 @@ def absolute_job(job_path: Path, cwd: Path, out_dir: Path) -> Path:
     return job_copy
 
 
-def run_upstream_evaluator(roots: Roots, model_dir: Path, result: Path, log: Path) -> dict:
+def run_upstream_evaluator(roots: Roots, model_dir: Path, result: Path, log: Path) -> PublishedEvaluation:
     """`python -m scripts.evaluate_nvs_campaign evaluate --job <model_dir>/evaluation_job.json` on the
-    published checkpoint; returns upstream's result JSON (direct-float metrics, benchmark FPS)."""
+    published checkpoint; returns upstream's result (direct-float metrics, benchmark FPS)."""
     if result.parent.exists():
         raise FileExistsError(f"{result.parent} exists; upstream refuses to overwrite its renders")
     cwd: Path = upstream_cwd(roots)
@@ -145,4 +202,4 @@ def run_upstream_evaluator(roots: Roots, model_dir: Path, result: Path, log: Pat
     ]  # fmt: skip
     with log.open("a") as stream:
         subprocess.run(command, cwd=cwd, check=True, stdout=stream, stderr=subprocess.STDOUT)
-    return json.loads(result.read_text())
+    return read_json(PublishedEvaluation, result)

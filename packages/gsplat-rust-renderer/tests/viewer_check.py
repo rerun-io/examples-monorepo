@@ -322,7 +322,7 @@ def check_hexels(config: Config, ply: Path) -> None:
 
 
 def check_hexels_tracked(config: Config, ply: Path) -> None:
-    """A view tracking a logged pinhole renders the compute hexels from that pose and field of view (spec V4/V5)."""
+    """A view tracking a logged pinhole renders the compute hexels from that pose and field of view."""
     fov_y: float = 0.8
     poses: list[Float64[np.ndarray, "4 4"]] = [look_at(np.array([np.cos(a) * 2.5, np.sin(a) * 2.5, 2.0]), np.zeros(3), np.array([0.0, 0.0, 1.0])) for a in (-1.2, -0.4)]
     with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
