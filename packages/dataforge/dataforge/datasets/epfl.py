@@ -31,7 +31,6 @@ from dataforge.datasets.epfl_source import (
     FITS,
     SOURCE_REVISION,
     FitSpec,
-    PoseRow,
     pose_batches,
     read_cameras,
     read_timestamps,
@@ -178,7 +177,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
 
         def write_pose_layers(recordings: dict[str, rr.RecordingStream]) -> None:
             """Every pose-fed layer from one pass over the pose CSVs, batch by batch."""
-            layer_writers: dict[str, Callable[[list[PoseRow], Int64[np.ndarray, "n"], Int64[np.ndarray, "n"]], None]] = {}
+            layer_writers: dict[str, Callable[..., None]] = {}
             for layer, recording in recordings.items():
                 match layer:
                     case paths.HAND_POSE_LAYER | paths.BODY_POSE_LAYER:
@@ -203,6 +202,8 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
                         if layer == paths.BODY_MESH_LAYER:
                             keep: Int64[np.ndarray, "k"] = np.flatnonzero(frames[start:stop] % meshes.BODY_MESH_STRIDE == 0)
                             write([rows[i] for i in keep], times[start:stop][keep], frames[start:stop][keep])
+                        elif layer in (paths.HAND_POSE_LAYER, paths.PROJECTIONS_LAYER):
+                            write(rows, times[start:stop], frames[start:stop], describe=start == 0)
                         else:
                             write(rows, times[start:stop], frames[start:stop])
                 start = stop

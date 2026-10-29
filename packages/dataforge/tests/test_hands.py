@@ -81,11 +81,11 @@ def test_keypoint_descriptors_are_written_once_per_entity_and_recording(tmp_path
                 recording.flush()
                 hands.log_keypoints3d(
                     recording, times_ns=np.array([frame], dtype=np.int64), frame_indices=np.array([frame], dtype=np.int64),
-                    positions=np.ones((1, 133, 3), dtype=np.float32), confidence=None,
+                    positions=np.ones((1, 133, 3), dtype=np.float32), confidence=None, describe=frame == 0,
                 )
                 hands.log_keypoints2d(
                     recording, "/pixels", times_ns=np.array([frame], dtype=np.int64), frame_indices=np.array([frame], dtype=np.int64),
-                    positions=np.ones((1, 133, 2), dtype=np.float32), confidence=None,
+                    positions=np.ones((1, 133, 2), dtype=np.float32), confidence=None, describe=frame == 0,
                 )
         for path in (schema.coco133_xyz_path(), "/pixels"):
             descriptors = [c for c in read_chunks(target) if c.is_static and str(c.entity_path) == path]

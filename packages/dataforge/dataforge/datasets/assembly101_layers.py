@@ -294,18 +294,22 @@ def write_base(
 def write_hands(recording: rr.RecordingStream, root: Path, sequence: str, scene: Scene, frame_limit: int | None) -> None:
     """Read each hand member once and send dense column batches on its actual keys."""
     confidence = read_confidence(pose_path(root, "hand_confidences", sequence))
+    first_batch = True
     for frames, positions, scores in read_hand_rows(
         pose_path(root, "landmarks3D", sequence), confidence, dimensions=3, scale=0.001, frame_limit=frame_limit
     ):
-        hands.log_keypoints3d(recording, times_ns=frame_times(frames, FRAME_RATE), frame_indices=frames, positions=positions, confidence=scores)
+        hands.log_keypoints3d(recording, times_ns=frame_times(frames, FRAME_RATE), frame_indices=frames, positions=positions, confidence=scores, describe=first_batch)
+        first_batch = False
     cameras: dict[str, CameraVideo] = {camera.key: camera for camera in scene.cameras}
+    described: set[str] = set()
     for key, (frames, pixels, scores) in read_pixels(
         pose_path(root, "landmarks2D", sequence), confidence, {key: camera.scale for key, camera in cameras.items()}, frame_limit
     ):
         camera: CameraSource = cameras[key]
         hands.log_keypoints2d(
-            recording, schema.coco133_uv_path(camera.rig, camera.cam), times_ns=frame_times(frames, FRAME_RATE), frame_indices=frames, positions=pixels, confidence=scores
+            recording, schema.coco133_uv_path(camera.rig, camera.cam), times_ns=frame_times(frames, FRAME_RATE), frame_indices=frames, positions=pixels, confidence=scores, describe=key not in described
         )
+        described.add(key)
 
 
 def write_actions(recording: rr.RecordingStream, actions: Actions, frame_limit: int | None) -> None:
