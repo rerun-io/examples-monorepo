@@ -100,15 +100,6 @@ def exposure_path(cam: int) -> str:
     return f"{schema.cam_path(RIG, cam)}/exposure"
 
 
-RETIMED_ENTITIES: dict[str, tuple[str, ...]] = {
-    **{camera_topic(cam): (schema.video_path(RIG, cam), exposure_path(cam)) for cam in range(NUM_CAMERAS)},
-    EEF_POSE_TOPIC: (schema.rig_path(RIG),),
-    IMU_TOPIC: (schema.gyro_path(RIG, IMU), schema.accel_path(RIG, IMU)),
-    FRAME_VALIDITY_TOPIC: ("/frames",),
-}
-"""Output entities counted from each source topic before lenses fan out its columns."""
-
-
 def binary_to_blob(data: pa.BinaryArray) -> pa.ListArray:
     """``binary`` rows as ``list<uint8>`` (the ``Blob`` layout) over the same bytes, honouring a sliced array's offset."""
     offsets: pa.Array = pa.Array.from_buffers(pa.int32(), len(data) + 1, [None, data.buffers()[1]], offset=data.offset)
@@ -193,7 +184,7 @@ class Retimer:
     """Moves each source chunk before lenses from the MCAP's ``message_log_time`` onto ``video_time`` and ``frame_index``.
 
     Chunks keep their row ids. Native-rate sensors (the IMU) get ``video_time`` only, as exoego §14
-    asks; every frame-aligned stream also gets the reference camera's frame. Counts each entity's rows
+    asks; every frame-aligned stream also gets the reference camera's frame. Counts each topic's rows
     on the way through, so the caller can hold them against the MCAP's own message counts.
     """
 
@@ -204,9 +195,9 @@ class Retimer:
     starts: dict[str, int] = field(default_factory=dict)
     """Each camera's first decodable stamp; leading P-frames are dropped before deriving columns."""
     rows: dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    """Rows seen per entity."""
+    """Rows seen per source topic."""
     frames: dict[str, list[Int64[ndarray, "n"]]] = field(default_factory=lambda: defaultdict(list))
-    """``frame_index`` values seen per entity."""
+    """``frame_index`` values seen per source topic."""
     lock: LockType = field(default_factory=threading.Lock)
     """The stream may call back from several threads; the tallies are shared."""
 
@@ -227,18 +218,16 @@ class Retimer:
         batch = batch.remove_column(batch.schema.get_field_index("message_publish_time"))
         frames: Int64[ndarray, "n"] = self.clock.frame_indices(stamps)
         with self.lock:
-            entities = RETIMED_ENTITIES.get(chunk.entity_path, (chunk.entity_path,))
-            for entity in entities:
-                self.rows[entity] += batch.num_rows
-                if chunk.entity_path not in self.native_rate:
-                    self.frames[entity].append(frames)
+            self.rows[chunk.entity_path] += batch.num_rows
+            if chunk.entity_path not in self.native_rate:
+                self.frames[chunk.entity_path].append(frames)
         if chunk.entity_path not in self.native_rate:
             batch = batch.add_column(index + 1, FRAME_INDEX_FIELD, pa.array(frames, type=pa.int64()))
         return rrc.Chunk.from_record_batch(batch)
 
-    def frame_indices(self, entity: str) -> Int64[ndarray, "n"]:
-        """Every ``frame_index`` an entity received, sorted."""
-        parts: list[Int64[ndarray, "n"]] = self.frames.get(entity, [])
+    def frame_indices(self, topic: str) -> Int64[ndarray, "n"]:
+        """Every ``frame_index`` a source topic received, sorted."""
+        parts: list[Int64[ndarray, "n"]] = self.frames.get(topic, [])
         return np.sort(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.int64)
 
 
@@ -278,13 +267,13 @@ def video_start(file: EpisodeFile, cam: int, *, t0_ns: int, end_ns: int) -> Vide
 
 
 def base_stream(
-    file: EpisodeFile, episode: Episode, retimer: Retimer, starts: Sequence[VideoStart],
-    *, codecs: Sequence[rrc.Chunk], batchers: list[ChunkBatcher],
-) -> rrc.LazyChunkStream:
+    file: EpisodeFile, retimer: Retimer,
+    *, codecs: Sequence[rrc.Chunk],
+) -> tuple[rrc.LazyChunkStream, list[ChunkBatcher]]:
     """Cameras from their first keyframe, rig pose, IMU and frames of one MCAP, shaped by lenses and retimed."""
     # Decode/decompress each MCAP block once. Split branches share this reader;
     # six independent camera readers repeatedly decompressed the same source blocks.
-    retimer.starts = {camera_topic(cam): start.stamp_ns for cam, start in enumerate(starts)}
+    batchers: list[ChunkBatcher] = []
     stream = file.stream([*(camera_topic(cam) for cam in range(NUM_CAMERAS)), EEF_POSE_TOPIC, IMU_TOPIC, FRAME_VALIDITY_TOPIC]).flat_map(retimer)
     cameras: list[rrc.LazyChunkStream] = []
     for cam in range(NUM_CAMERAS):
@@ -297,7 +286,7 @@ def base_stream(
     stream = stream.lenses(frames_lens(), content=FRAME_VALIDITY_TOPIC)
     batcher = ChunkBatcher()
     batchers.append(batcher)
-    return rrc.LazyChunkStream.merge(*cameras, stream.flat_map(batcher))
+    return rrc.LazyChunkStream.merge(*cameras, stream.flat_map(batcher)), batchers
 
 
 def camera_parameters(cam: int, calibration: CameraCalibration) -> PinholeParameters:
@@ -369,9 +358,9 @@ def write_base_layer(
     counts: dict[str, int] = shipped_counts(mcap)
     robot: RobotInfo | None = optional_message(file, ROBOT_INFO_TOPIC, RobotInfo)
     robot_name: str | None = None if robot is None else robot.robot_name
-    retimer: Retimer = Retimer(episode.clock, native_rate=frozenset({IMU_TOPIC}))
     end_ns: int = rrc.McapReader(mcap).time_bounds()[1]
     starts: list[VideoStart] = [video_start(file, cam, t0_ns=episode.clock.t0_ns, end_ns=end_ns) for cam in range(NUM_CAMERAS)]
+    retimer: Retimer = Retimer(episode.clock, native_rate=frozenset({IMU_TOPIC}), starts={camera_topic(cam): start.stamp_ns for cam, start in enumerate(starts)})
     resolutions: list[str] = []
     with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=default_blueprint) as recording:
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
@@ -404,19 +393,17 @@ def write_base_layer(
         log_imu(recording, RIG, IMU, gyro=empty, accel=empty, name="imu", rig_T_imu=rr.Transform3D(translation=transform[:3, 3], mat3x3=transform[:3, :3]))
         if episode.annotation is not None:
             rr.log(schema.instruction_path(), rr.TextDocument(episode.annotation.bold_mark, media_type=rr.MediaType.MARKDOWN), static=True, recording=recording)
-        # The static codecs ride in the optimized stream: GoP rebatching needs each video's codec beside its samples.
         codecs = [rrc.Chunk.from_columns(schema.video_path(RIG, cam), indexes=[], columns=rr.VideoStream.columns(codec=[rr.VideoCodec.H264])) for cam in range(NUM_CAMERAS)]
         recording.send_chunks(codecs)
-        batchers: list[ChunkBatcher] = []
-        stream = base_stream(file, episode, retimer, starts, codecs=codecs, batchers=batchers)
+        stream, batchers = base_stream(file, retimer, codecs=codecs)
         recording.send_chunks(stream)
         for batcher in batchers:
             recording.send_chunks(batcher.flush())
         census: BaseCensus = BaseCensus(
-            camera_frames=tuple(retimer.rows[schema.video_path(RIG, cam)] for cam in range(NUM_CAMERAS)),
-            rig_poses=retimer.rows[schema.rig_path(RIG)],
-            imu_samples=retimer.rows[schema.gyro_path(RIG, IMU)],
-            frames=retimer.rows["/frames"],
+            camera_frames=tuple(retimer.rows[camera_topic(cam)] for cam in range(NUM_CAMERAS)),
+            rig_poses=retimer.rows[EEF_POSE_TOPIC],
+            imu_samples=retimer.rows[IMU_TOPIC],
+            frames=retimer.rows[FRAME_VALIDITY_TOPIC],
         )
         expected: dict[str, int] = {
             **{camera_topic(cam): census.camera_frames[cam] + starts[cam].skipped for cam in range(NUM_CAMERAS)},
@@ -448,7 +435,7 @@ def shipped_counts(mcap: Path) -> dict[str, int]:
 
 def log_missing_cameras(recording: rr.RecordingStream, clock: EpisodeClock, retimer: Retimer) -> None:
     """``/frames:missing_cameras`` (exoego §14): per reference frame, the cameras with no image at it."""
-    present: list[set[int]] = [set(retimer.frame_indices(schema.video_path(RIG, cam)).tolist()) for cam in range(NUM_CAMERAS)]
+    present: list[set[int]] = [set(retimer.frame_indices(camera_topic(cam)).tolist()) for cam in range(NUM_CAMERAS)]
     missing: list[list[str]] = [[f"camera{cam}" for cam in range(NUM_CAMERAS) if frame not in present[cam]] for frame in clock.frame_numbers.tolist()]
     rr.send_columns(
         "/frames",

@@ -213,7 +213,6 @@ def test_base_stream_retimes_before_deriving_and_keeps_native_imu_clock() -> Non
     import rerun as rr
     import rerun.chunk as rrc
 
-    from dataforge import schema
     from dataforge.datasets.genrobot_layers import Retimer
     from dataforge.datasets.genrobot_source import IMU_TOPIC
 
@@ -225,7 +224,7 @@ def test_base_stream_retimes_before_deriving_and_keeps_native_imu_clock() -> Non
         columns=rr.Scalars.columns(scalars=[1.0, 2.0]),
     )
     result = retimer(chunk)[0]
-    assert retimer.rows[schema.gyro_path(0, 0)] == 2
+    assert retimer.rows[IMU_TOPIC] == 2
     assert result.timeline_names == ["video_time"]
     assert result.to_record_batch().column("video_time").cast(pa.int64()).to_pylist() == [10, 20]
 
@@ -256,7 +255,6 @@ def test_base_clock_discards_only_samples_before_each_camera_first_keyframe() ->
     import rerun as rr
     import rerun.chunk as rrc
 
-    from dataforge import schema
     from dataforge.datasets.genrobot_layers import Retimer
     from dataforge.datasets.genrobot_source import camera_topic
 
@@ -270,4 +268,4 @@ def test_base_clock_discards_only_samples_before_each_camera_first_keyframe() ->
     assert result.column("video_time").cast(pa.int64()).to_pylist() == [20]
     assert result.column("frame_index").to_pylist() == [6]
     assert result.column("Scalars:scalars").to_pylist() == [[2.0]]
-    assert retimer.rows[schema.video_path(0, 0)] == 1
+    assert retimer.rows[camera_topic(0)] == 1
