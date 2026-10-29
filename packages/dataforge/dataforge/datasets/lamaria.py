@@ -43,9 +43,9 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
@@ -84,6 +84,7 @@ from dataforge.logging_toolkit import (
     resolve_ffmpeg,
     time_column,
 )
+from dataforge.video_encoding import encode_concurrently
 from dataforge.vrs import VrsFile
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, MeasuredUp, WorldUpAxis, measured_world_up
 
@@ -928,16 +929,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
 
         # Every camera at once: each encode waits on its own VRS reader, so encoding them in turn leaves NVENC idle.
         clips: list[Path] = [work_dir / f"cam_{index:02d}.mp4" for index in range(len(streams.cameras))]
-        with ThreadPoolExecutor(max_workers=len(streams.cameras)) as pool:
-            encodes: list[Future[int]] = []
-            for stream, clip in zip(streams.cameras, clips, strict=True):
-                spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
-                # The frames arrive native and sideways; ffmpeg gives them the same quarter turn the
-                # calibration took, so the native size is the upright one transposed.
-                layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.height, height=stream.camera.intrinsics.width)
-                encodes.append(pool.submit(encode_frames_to_mp4, stream.frames, clip, source=layout, fps=spec.fps, rotate_cw_quarter_turns=1))
-            for encode in encodes:
-                encode.result()
+        encodes: list[Callable[[], int]] = []
+        for stream, clip in zip(streams.cameras, clips, strict=True):
+            spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
+            # Native frames are sideways; match the calibration's clockwise quarter turn.
+            layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.height, height=stream.camera.intrinsics.width)
+            encodes.append(partial(encode_frames_to_mp4, stream.frames, clip, source=layout, fps=spec.fps, rotate_cw_quarter_turns=1))
+        encode_concurrently(encodes)
 
         clocks: list[Int64[ndarray, "n_samples"]] = [stream.times_ns for stream in streams.cameras if stream.times_ns.size]
         clocks += [imu.gyro.times_ns for imu in streams.imus if imu.gyro.times_ns.size]

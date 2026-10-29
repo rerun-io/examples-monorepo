@@ -14,10 +14,9 @@ pair). See ``packages/dataforge/README.md#the-layer-rule``.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -57,7 +56,7 @@ from dataforge.logging_toolkit import (
     log_trail_segments,
     log_video_stream,
 )
-from dataforge.video_encoding import FrameSource, encode_frames_to_mp4
+from dataforge.video_encoding import FrameSource, encode_concurrently, encode_frames_to_mp4
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, MeasuredUp, WorldUpAxis, measured_world_up
 
 RIG: int = 0
@@ -350,11 +349,7 @@ def read_sequence(
             clip=clip,
         )
 
-    slots: int = int(os.environ.get("DATAFORGE_NVENC_SLOTS", "6"))
-    if slots < 1:
-        raise ValueError("DATAFORGE_NVENC_SLOTS must be positive")
-    with ThreadPoolExecutor(max_workers=min(len(cameras), slots)) as pool:
-        encoded: list[EncodedCamera] = list(pool.map(encode, range(len(cameras))))
+    encoded: list[EncodedCamera] = encode_concurrently([partial(encode, index) for index in range(len(cameras))])
 
     inertial_times_ns: Int64[ndarray, "n_samples"] = inertial.times_ns - start_time_ns
     return SequenceStreams(

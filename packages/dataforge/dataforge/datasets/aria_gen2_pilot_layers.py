@@ -1,8 +1,7 @@
 """Native Gen2 sensors, MPS hand measurements and full-lens derived projections."""
 
-import os
 import subprocess
-from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +27,7 @@ from dataforge.logging_toolkit import (
     time_column,
 )
 from dataforge.timing import SequenceTimer
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_concurrently, encode_frames_to_mp4, work_dir
 from dataforge.vrs import census_images
 from dataforge.vrs_hevc import VrsHevcReader
 
@@ -107,14 +106,9 @@ def encode_cameras(scene: Scene, work: Path, timer: SequenceTimer) -> None:
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         filesystem = "unknown"
-    slots: int = int(os.environ.get("DATAFORGE_NVENC_SLOTS", "6"))
-    if slots < 1:
-        raise ValueError("DATAFORGE_NVENC_SLOTS must be positive")
-    workers: int = min(len(scene.cameras), slots) if filesystem in {"ext4", "xfs", "btrfs", "tmpfs", "zfs", "apfs"} else 1
-    with timer.stage("transcode"), ThreadPoolExecutor(max_workers=workers) as pool:
-        futures: list[Future[int]] = [pool.submit(encode_camera, scene, camera, work / f"{camera.stream_id}.mp4") for camera in scene.cameras]
-        for future in futures:
-            future.result()
+    workers: int | None = None if filesystem in {"ext4", "xfs", "btrfs", "tmpfs", "zfs", "apfs"} else 1
+    with timer.stage("transcode"):
+        encode_concurrently([partial(encode_camera, scene, camera, work / f"{camera.stream_id}.mp4") for camera in scene.cameras], workers=workers)
 
 
 def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer) -> None:

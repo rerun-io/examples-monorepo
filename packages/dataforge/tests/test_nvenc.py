@@ -18,10 +18,15 @@ def fixture_cuda_filter_available(monkeypatch: pytest.MonkeyPatch, request: pyte
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "bad", "1.5"])
-def test_invalid_slot_counts(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("entry", ["parser", "reservation"])
+def test_invalid_slot_counts(value: str, entry: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", value)
-    with pytest.raises(ValueError, match="DATAFORGE_NVENC_SLOTS"), video.nvenc_slot():
-        pytest.fail("invalid slot count accepted")
+    with pytest.raises(ValueError, match="DATAFORGE_NVENC_SLOTS"):
+        if entry == "parser":
+            video.nvenc_slot_count()
+        else:
+            with video.nvenc_slot():
+                pytest.fail("invalid slot count accepted")
 
 
 def test_slots_bound_concurrent_holders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,8 +57,8 @@ def test_session_retry_only(error: str, monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr(video.time, "sleep", waits.append)
     calls = []
 
-    def run(fd: int) -> subprocess.CompletedProcess[str]:
-        assert fd >= 0
+    def run(fds: tuple[int, ...]) -> subprocess.CompletedProcess[str]:
+        assert len(fds) == 1 and fds[0] >= 0
         calls.append(True)
         return subprocess.CompletedProcess([], 1, "", error)
 
@@ -321,10 +326,10 @@ import sys
 from pathlib import Path
 from dataforge import video_encoding as video
 video.NVENC_SLOT_DIR = Path(sys.argv[1])
-with video.nvenc_slot() as fd:
+with video.nvenc_slot() as fds:
     subprocess.Popen(
         [sys.executable, "-c", "import os, sys; os.read(int(sys.argv[1]), 1); print('done', flush=True)", sys.argv[2]],
-        pass_fds=(fd, int(sys.argv[2])),
+        pass_fds=(*fds, int(sys.argv[2])),
     )
     os._exit(0)
 """
@@ -466,3 +471,21 @@ def test_shared_decode_reserves_every_encoder_slot(tmp_path: Path, monkeypatch: 
         monkeypatch.setattr(video.subprocess, "run", run)
         video.transcode_crops(Path("mosaic.mp4"), [Path("a.mp4"), Path("b.mp4")], crops=[(192, 160, 0, 0), (192, 160, 192, 0)], fps=30, frames=4, gop=60, cq=36)
         assert entered.wait(2.0)
+
+
+def test_mosaic_retries_refused_sessions(ffmpeg_commands: list[list[str]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shared decode retries the whole batch after an external encoder takes a session."""
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
+    waits: list[float] = []
+    monkeypatch.setattr(video.time, "sleep", waits.append)
+    attempts: list[tuple[int, ...]] = []
+
+    def run(command: list[str], *, pass_fds: tuple[int, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert len(pass_fds) == 2
+        attempts.append(pass_fds)
+        return subprocess.CompletedProcess(command, int(len(attempts) == 1), "", "OpenEncodeSessionEx failed" if len(attempts) == 1 else "")
+
+    monkeypatch.setattr(video.subprocess, "run", run)
+    video.transcode_crops(Path("mosaic.mp4"), [Path("a.mp4"), Path("b.mp4")], crops=[(192, 160, 0, 0), (192, 160, 192, 0)], fps=30, frames=4, gop=60, cq=36)
+    assert len(attempts) == 2
+    assert waits == [2.0]
