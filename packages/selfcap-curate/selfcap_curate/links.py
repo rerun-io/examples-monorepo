@@ -107,7 +107,7 @@ def tracking_pool() -> ThreadPoolExecutor:
 
 
 def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> UInt8[Tensor, "n h w"]:
-    """CUDA-decode samples first..last from the keyframe at or before first; BT.601 luma, area-resized by scale."""
+    """CUDA-decode samples first..last from the keyframe at or before first; BT.601 luma, resized by scale."""
     from torchcodec.decoders import VideoDecoder
 
     key: int = max(i for i in range(first + 1) if video.keyframes[i])
@@ -117,7 +117,8 @@ def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> UIn
     for begin in range(first - key, last - key + 1, 128):
         rgb: UInt8[Tensor, "b 3 h w"] = decoder.get_frames_in_range(begin, min(begin + 128, last - key + 1)).data
         size: tuple[int, int] = (int(round(rgb.shape[2] * scale)), int(round(rgb.shape[3] * scale)))
-        gray = F.interpolate((rgb.float() * luma).sum(1, keepdim=True), size=size, mode="area")
+        # Antialiased bilinear is the closest GPU match to swscale's default; the tracker reacts to the filter by a few ms.
+        gray = F.interpolate((rgb.float() * luma).sum(1, keepdim=True), size=size, mode="bilinear", align_corners=False, antialias=True)
         batches.append(gray.round_().clamp_(0, 255).to(torch.uint8)[:, 0])
     return torch.cat(batches)
 
