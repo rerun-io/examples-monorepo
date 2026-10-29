@@ -72,13 +72,19 @@ premultiplied conversion.
 `collect_drawables` records compute through the shared
 `before_view_builder_encoder`; instances and views add no separate queue submission.
 The Transparent composite writes `frag_depth` and uses the renderer's 4x MSAA
-state. Each instance/view still owns two full-viewport targets (color and depth);
-an upstream integration should pool them. A capacity failure uses stock quads
+state. Each instance/view still owns three full-viewport targets (color, depth and
+median-contributor id); an upstream integration should pool them. A capacity failure uses stock quads
 (hexels: their fallback points) and keeps that fallback until the scene changes. Both paths provide transformed
 bounds for automatic framing.
 
-Splats in separate entities are not jointly sorted. Picking, hover, and outlines
-are not implemented. The public 0.38.1 view state supplies `last_eye`, which can lag
+Splats in separate entities are not jointly sorted. Picking and outlines read the
+core's id target: per pixel, the global row of the median contributor (the last
+primitive composited while transmittance exceeds one half, the 2DGS median-depth
+rule). The PickingLayer and OutlineMask draws are a full-view quad placed through
+view space (`projection_from_view`, `tan_half_fov`), so it covers the same view
+pixels in the main pass and in the picking pass, whose projection is cropped to
+its rectangle; both write the composite's depth. Hover and selection therefore
+name one hexel or splat row, as stock `GaussianSplats3D` does. The public 0.38.1 view state supplies `last_eye`, which can lag
 one UI frame. Upstream integration needs the current full pose, projection, and
 pixel resolution in `DrawableCollectionViewInfo`; camera position alone cannot
 replace those fields.
