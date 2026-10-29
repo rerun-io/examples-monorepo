@@ -14,12 +14,14 @@ Class 0 uses the root COCO-133 AnnotationContext. Derived projections use a sepa
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from threading import Lock
 from typing import Literal, TypeAlias
+from weakref import WeakKeyDictionary
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Float32, Float64, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133_batch
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
@@ -112,6 +114,24 @@ def confidence_rule(
     return masked, scores
 
 
+_DESCRIPTOR_PATHS: WeakKeyDictionary[rr.RecordingStream, set[str]] = WeakKeyDictionary()
+_DESCRIPTOR_LOCK = Lock()
+
+
+def log_keypoint_descriptors(recording: rr.RecordingStream, path: str, *, dimension: Literal[2, 3]) -> None:
+    """Write invariant keypoint fields once for each entity in a live recording."""
+    with _DESCRIPTOR_LOCK:
+        paths = _DESCRIPTOR_PATHS.setdefault(recording, set())
+        if path in paths:
+            return
+        fields = (
+            Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004)
+            if dimension == 3 else Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0)
+        )
+        rr.log(path, fields, static=True, recording=recording)
+        paths.add(path)
+
+
 def log_keypoints3d(
     recording: rr.RecordingStream,
     *,
@@ -133,12 +153,7 @@ def log_keypoints3d(
     """
     # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
     rows_per_batch = (2 * 1024 * 1024 - 4096) // (133 * (3 * 4 + 4 + 4) + 64)
-    rr.log(
-        path,
-        Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004),
-        static=True,
-        recording=recording,
-    )
+    log_keypoint_descriptors(recording, path, dimension=3)
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
         masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])
@@ -163,12 +178,7 @@ def log_keypoints2d(
     """Write Float32[t,133,2] pixels and confidence to ``path`` (shipped or projected 2D)."""
     # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
     rows_per_batch = (2 * 1024 * 1024 - 4096) // (133 * (2 * 4 + 4 + 0) + 64)
-    rr.log(
-        path,
-        Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),
-        static=True,
-        recording=recording,
-    )
+    log_keypoint_descriptors(recording, path, dimension=2)
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
         masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])

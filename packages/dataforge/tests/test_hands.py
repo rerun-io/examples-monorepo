@@ -70,3 +70,23 @@ def test_keypoint_columns_are_bounded_and_preserve_every_row(tmp_path: Path) -> 
         assert [t for b in batches for t in b.column("video_time").cast("int64").to_pylist()] == times.tolist()
         actual = np.concatenate([np.asarray(b.column(next(n for n in b.schema.names if n.endswith(":positions"))).to_pylist()) for b in batches])
         np.testing.assert_array_equal(actual, positions[..., :dimension])
+
+
+def test_keypoint_descriptors_are_written_once_per_entity_and_recording(tmp_path: Path) -> None:
+    """Repeated batches need one descriptor; a fresh recording needs its own."""
+    for run in range(2):
+        target = tmp_path / f"static-{run}.rrd"
+        with writing.atomic_recording(target, recording_id="same-id", send_properties=False) as recording:
+            for frame in range(3):
+                recording.flush()
+                hands.log_keypoints3d(
+                    recording, times_ns=np.array([frame], dtype=np.int64), frame_indices=np.array([frame], dtype=np.int64),
+                    positions=np.ones((1, 133, 3), dtype=np.float32), confidence=None,
+                )
+                hands.log_keypoints2d(
+                    recording, "/pixels", times_ns=np.array([frame], dtype=np.int64), frame_indices=np.array([frame], dtype=np.int64),
+                    positions=np.ones((1, 133, 2), dtype=np.float32), confidence=None,
+                )
+        for path in (schema.coco133_xyz_path(), "/pixels"):
+            descriptors = [c for c in read_chunks(target) if c.is_static and str(c.entity_path) == path]
+            assert len(descriptors) == 1
