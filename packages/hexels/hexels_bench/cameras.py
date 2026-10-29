@@ -4,7 +4,7 @@ the SfM points both trainers initialize from (and cap their primitive count at).
 Upstream publishes one camera contract per NVS scene (HF `jhu-ccvl/Hexels`,
 `cameras/nvs/<dataset>/<scene>/contract.json`): the 2DGS camera geometry of every training and test
 view plus SHA256 digests of the exact float32 RGB targets. `cameras.json` (contract
-`hexels-work/contracts/run-layout.md`) copies the test records, and `write_targets` reproduces the
+`docs/run-layout.md`) copies the test records, and `write_targets` reproduces the
 targets bit-exactly (checked against the contract digest) as 16-bit PNGs for the shared scorer.
 """
 
@@ -105,7 +105,7 @@ class CameraContract:
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class CamerasFile:
-    """`cameras.json` written beside a run's renders (contract run-layout.md)."""
+    """`cameras.json` written beside a run's renders (contract docs/run-layout.md)."""
 
     format: str
     """Always hexels-cameras-1."""

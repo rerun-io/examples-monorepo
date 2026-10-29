@@ -1,4 +1,4 @@
-"""The NVS methods of the run layout (contracts/run-layout.md): one typed row per method, so no code parses a method name."""
+"""The NVS methods of the run layout (docs/run-layout.md): one typed row per method, so no code parses a method name."""
 
 from dataclasses import dataclass
 from typing import Literal, TypeAlias

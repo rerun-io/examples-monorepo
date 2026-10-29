@@ -1,4 +1,4 @@
-"""Peak GPU memory of a trainer: the one sampler for every trainer we run (run-layout.md protocol).
+"""Peak GPU memory of a trainer: the one sampler for every trainer we run (docs/run-layout.md protocol).
 
 `run_measured` starts the trainer as a direct child and samples it with NVML on a background thread every
 5 ms: the sum over GPUs of the `usedGpuMemory` NVML reports for the trainer's pid (its own allocations: the

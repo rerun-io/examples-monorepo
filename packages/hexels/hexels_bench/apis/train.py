@@ -1,4 +1,4 @@
-"""Train Hexels with upstream's recipe under our protocol (run-layout.md) and write a full run directory.
+"""Train Hexels with upstream's recipe under our protocol (docs/run-layout.md) and write a full run directory.
 
 Upstream `scripts.train_scene` resolves the paper's fixed-population recipe for the scene (images and
 resolution per dataset, every 8th view held out); we run that command ourselves so the trainer is our

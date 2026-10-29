@@ -1,4 +1,4 @@
-"""The 2D image scorer (specs/twod.md 1): upstream `basic_metrics` plus LPIPS-Alex, on the GPU.
+"""The 2D image scorer: upstream `basic_metrics` plus LPIPS-Alex, on the GPU.
 
 Same math as upstream `scripts/image_compression_training.basic_metrics` and `scripts/evaluate_image.py`:
 clamp once to [0, 1]; PSNR = -10 log10 of the float64 MSE over all pixels and channels; SSIM =

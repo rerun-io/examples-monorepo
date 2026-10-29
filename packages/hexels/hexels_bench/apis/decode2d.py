@@ -1,4 +1,4 @@
-"""Decode 2D fits with upstream CUDA and with our WGSL renderer; score, time and compare (specs/twod.md 3).
+"""Decode 2D fits with upstream CUDA and with our WGSL renderer; score, time and compare.
 
 For every image and fit, each stored condition (`decoded_hxm` = the paper's packed `.hxm`, `uint16`,
 `raw_fp32`) is decoded twice from the same upstream-decoded fields:
@@ -8,7 +8,7 @@ For every image and fit, each stored condition (`decoded_hxm` = the paper's pack
 - WGSL: the fields as a 2D hexel PLY, `gsplat render --png16 --fps` (the same 10 + 5 x 20 protocol), scored from the 16-bit PNG,
   and compared pixel by pixel with the CUDA render of the same condition.
 
-Image-GS fits have no WGSL decoder (specs/twod.md D5). Results: `metrics.json` (results2d.ImageRun)
+Image-GS fits have no WGSL decoder. Results: `metrics.json` (results2d.ImageRun)
 in `runs/imagegs/<stem>/<method>/`. Run it in the hexels env under the GPU lock (it times decodes).
 """
 

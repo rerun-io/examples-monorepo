@@ -1,4 +1,4 @@
-"""Rerun recordings of the 2D benchmark (specs/twod.md 4): one Figure 2 row per image and a summary.
+"""Rerun recordings of the 2D benchmark: one Figure 2 row per image and a summary.
 
 - `runs/imagegs/<stem>/figure2.rrd`: Image-GS | Hexels | ground truth | Image-GS error | Hexels error,
   full image above, the 256 x 256 crop with the largest Image-GS-minus-Hexels error below. Error maps

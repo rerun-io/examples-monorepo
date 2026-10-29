@@ -2103,7 +2103,7 @@ flip-evaluator = "==1.7"
 PACKAGE_DIR = "packages/hexels"
 PYREFLY_TARGET = "hexels_bench tools tests"
 
-# Run directories follow packages/hexels/hexels_bench/layout.py. Roots default to $GSPLAT_MODERN_DATA and
+# Run directories follow packages/hexels/docs/run-layout.md. Roots default to $GSPLAT_MODERN_DATA and
 # $HEXELS_WORK/runs (unset: ~/gsplat-modern-data, ~/hexels-work); every tool takes --roots.data / --roots.runs.
 [feature.hexels.tasks.hexels-export]
 cmd = "python tools/export.py"

@@ -1,4 +1,4 @@
-"""The Hexels 34-scene benchmark queue (~/hexels-work/contracts/run-layout.md).
+"""The Hexels 34-scene benchmark queue (docs/run-layout.md).
 
 An item is one (dataset, scene, method) run directory. Each method runs through its tool in its
 own Pixi environment: the WGSL `gsplat render` in `gsplat-rust-renderer`; the Brush protocol runner,

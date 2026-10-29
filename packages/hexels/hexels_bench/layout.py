@@ -1,4 +1,4 @@
-"""Where things live: run directories (contract run-layout.md), datasets, published checkpoints and the
+"""Where things live: run directories (contract docs/run-layout.md), datasets, published checkpoints and the
 protocol scenes; and the one loader for our JSON records."""
 
 import json
@@ -42,7 +42,7 @@ PROTOCOL_SCENES: dict[Dataset, tuple[str, ...]] = {
 }
 """The 34 NVS scenes of upstream configs/nvs.json, in upstream order."""
 REPRESENTATIVE_SCENES: dict[Dataset, tuple[str, ...]] = {"dtu": ("scan24", "scan114"), "mipnerf360": ("garden", "counter"), "tnt": ("Barn", "Truck")}
-"""Scope cut (contracts/scope.md): new compute runs on these scenes only, upstream order."""
+"""Scope cut: new compute runs on these scenes only, upstream order."""
 WORKSPACE: Path = Path(__file__).resolve().parents[3]
 """Pixi workspace root (holds pixi.toml and packages/)."""
 GSPLAT_RELEASE: Path = WORKSPACE / "packages" / "gsplat-rust-renderer" / "target" / "release"

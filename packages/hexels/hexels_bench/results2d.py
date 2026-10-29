@@ -1,4 +1,4 @@
-"""Results of the 2D Image-GS benchmark (specs/twod.md 3): one `metrics.json` per run directory.
+"""Results of the 2D Image-GS benchmark: one `metrics.json` per run directory.
 
 A 2D run directory `runs/imagegs/<stem>/<method>/` scores one decoder (upstream CUDA or our WGSL)
 on one fit under one or more conditions: the paper's packed file (`decoded_hxm`), the uniform
@@ -26,7 +26,7 @@ Decoder: TypeAlias = Literal["cuda", "wgsl"]
 Category: TypeAlias = Literal["anime", "art", "painting", "photo", "vector"]
 CATEGORIES: tuple[Category, ...] = ("anime", "art", "painting", "photo", "vector")
 ERROR_RANGE: float = 0.10
-"""Error maps saturate at this per-pixel RGB mean absolute error (specs/twod.md D8)."""
+"""Error maps saturate at this per-pixel RGB mean absolute error."""
 IDENTICAL_PSNR: float = 200.0
 """PSNR reported for two bit-identical renders (MSE floored at 1e-20)."""
 TABLE_METHODS: tuple[tuple[str, Condition | None], ...] = (
@@ -63,7 +63,7 @@ class FitSpec:
     cuda_method: str
     """Run directory of the upstream CUDA decode (for our fits also the fit itself)."""
     wgsl_method: str | None
-    """Run directory of the WGSL decode; None for Image-GS (no WGSL decoder, specs/twod.md D5)."""
+    """Run directory of the WGSL decode; None for Image-GS (no WGSL decoder)."""
     recipe: str
     """Upstream `scripts.fit_image --variant`."""
     appearance: str | None
@@ -255,7 +255,7 @@ def mean_or_none(values: list[float | None]) -> float | None:
 def table_rows(image_root: Path, stems: list[str], paper: PaperNumbers) -> list[TableRow]:
     """Per-image rows and an all-image mean for every TABLE_METHODS entry found under `image_root` (runs/imagegs).
 
-    Hexels rows carry the HF catalog numbers of the published fit of the same image (scope.md: compare
+    Hexels rows carry the HF catalog numbers of the published fit of the same image (compare
     per image, not with dataset means); `all` rows also carry the paper's 45-image Table 1 value.
     """
     rows: list[TableRow] = []

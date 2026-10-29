@@ -65,9 +65,9 @@ class SurfaceSpec:
     depth_source: Literal["wgsl", "upstream-cuda"]
     """`gsplat render --surface`, or upstream's CUDA renderer in process."""
     depth_mode: DepthMode
-    """Fused depth: median for Hexels (the paper's); Brush splats only have the alpha-weighted expected depth (spec R7)."""
+    """Fused depth: median for Hexels (the paper's); Brush splats only have the alpha-weighted expected depth."""
     alpha_threshold: float
-    """Depth is zeroed where alpha <= this: 0 for Hexels as upstream, 0.5 for Brush (spec R7)."""
+    """Depth is zeroed where alpha <= this: 0 for Hexels as upstream, 0.5 for Brush."""
     label: str
     """Short name in the surface recording."""
 

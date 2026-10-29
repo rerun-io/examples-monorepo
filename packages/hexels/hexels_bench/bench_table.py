@@ -1,10 +1,10 @@
 """Benchmark table: `runs/` -> `TABLE.json` (the paper's Table 2/3 columns, the published numbers beside ours)
-and a Rerun metrics recording `table.rrd` (entity layout of specs/viewer.md section 5).
+and a Rerun metrics recording `table.rrd`.
 
 Per-scene rows carry only what that run measured (Brush training has no FPS of its own: `brush-7k-wgsl`
 re-renders the same PLY and carries it). Hexels rows sit beside the published 30k checkpoint of the same
 variant on the same scene (HF catalog, `hexels_bench.paper` `hf_nvs_per_scene`). Dataset means average the
-representative scenes of contracts/scope.md and sit beside the mean of the published per-scene values over
+representative scenes (`layout.REPRESENTATIVE_SCENES`) and sit beside the mean of the published per-scene values over
 those same scenes, never beside the paper's 34-scene dataset means.
 """
 
@@ -178,7 +178,7 @@ class BenchTable:
     published_hardware: str
     """GPU of the published numbers as paper-numbers.json records it (`source.hardware_paper`)."""
     mean_scenes: dict[str, list[str]]
-    """Scenes each dataset mean averages (contracts/scope.md)."""
+    """Scenes each dataset mean averages (`layout.REPRESENTATIVE_SCENES` by default)."""
     scenes: list[SceneRow]
     """Per-scene rows, datasets in queue order, scenes in upstream order, methods in queue order."""
     means: list[MeanRow]
@@ -438,7 +438,7 @@ def write_table_rrd(table: BenchTable, path: Path) -> None:
     """Log the table as data.
 
     `/metrics/<dataset>/<method>`: every complete scene as AnyValues on the `scene` timeline (index in upstream
-    order; specs/viewer.md section 5). `/table/<dataset>/<scene>` and `/table/<dataset>/mean`: paper-style tables
+    order). `/table/<dataset>/<scene>` and `/table/<dataset>/mean`: paper-style tables
     (rows = metrics on the `row` timeline, one column per model, published 30k beside ours) for the representative
     scenes, shown by the default blueprint.
     """

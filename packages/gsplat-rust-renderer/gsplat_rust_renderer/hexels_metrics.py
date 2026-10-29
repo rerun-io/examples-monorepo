@@ -183,7 +183,7 @@ class MetricRow:
     train_vram_gib: float | None = None
     """Peak training GPU memory, GiB."""
     fps: float | None = None
-    """Renderer FPS over the test views (run-layout protocol)."""
+    """Renderer FPS over the test views (packages/hexels/docs/run-layout.md protocol)."""
     deploy_mb: float | None = None
     """FP32 learned state, MB."""
     primitives: int | None = None

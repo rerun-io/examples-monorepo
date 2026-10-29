@@ -1,4 +1,4 @@
-"""2D image fits on the Image-GS benchmark (2048x2048, 10K primitives), timed (specs/twod.md 1.1).
+"""2D image fits on the Image-GS benchmark (2048x2048, 10K primitives), timed.
 
 Every method runs upstream `scripts.fit_image` (hexels env), the paper's own harness:
 

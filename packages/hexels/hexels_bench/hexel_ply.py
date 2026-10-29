@@ -1,4 +1,4 @@
-"""Hexel PLY: the portable, render-ready Hexels model (contract `hexels-work/contracts/hexel-ply.md`).
+"""Hexel PLY: the portable, render-ready Hexels model (contract docs/hexel-ply.md).
 
 Binary little-endian PLY, one float32 row per hexel, values already activated. The Rust reader in
 gsplat-core consumes the same layout; this module is the Python writer and a reader for tests.
@@ -134,7 +134,7 @@ class HexelPly:
 
 
 def write_float_ply(path: Path, comments: list[str], names: tuple[str, ...], rows: Float32[ndarray, "n k"]) -> None:
-    """Binary little-endian PLY of float32 `rows` under one `comment` line per entry (contract hexel-ply.md)."""
+    """Binary little-endian PLY of float32 `rows` under one `comment` line per entry (contract docs/hexel-ply.md)."""
     header: list[str] = [
         "ply",
         "format binary_little_endian 1.0",

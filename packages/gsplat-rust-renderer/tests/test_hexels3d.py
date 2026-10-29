@@ -17,7 +17,7 @@ HALF_SQRT2: float = float(np.sqrt(0.5))
 
 
 def write_rows(path: Path, rows: Float32[np.ndarray, "n k"], variant: HexelVariant, comments: list[str] | None = None) -> None:
-    """Write a contract hexel PLY (hexel-ply.md) whose float rows follow `property_names(variant)`."""
+    """Write a contract hexel PLY (packages/hexels/docs/hexel-ply.md) whose float rows follow `property_names(variant)`."""
     names: list[str] = property_names(variant)
     assert rows.shape[1] == len(names)
     data: np.ndarray = np.zeros(len(rows), dtype=[(name, "<f4") for name in names])

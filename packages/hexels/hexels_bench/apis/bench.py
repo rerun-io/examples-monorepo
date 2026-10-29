@@ -1,4 +1,4 @@
-"""Run the Hexels benchmark queue: every (dataset, scene, method) run directory of run-layout.md."""
+"""Run the Hexels benchmark queue: every (dataset, scene, method) run directory of docs/run-layout.md."""
 
 from dataclasses import dataclass, field
 from pathlib import Path

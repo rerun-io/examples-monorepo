@@ -1,4 +1,4 @@
-"""16-bit RGB PNG, the render and ground-truth interchange format of the comparison (run-layout.md)."""
+"""16-bit RGB PNG, the render and ground-truth interchange format of the comparison (docs/run-layout.md)."""
 
 from pathlib import Path
 

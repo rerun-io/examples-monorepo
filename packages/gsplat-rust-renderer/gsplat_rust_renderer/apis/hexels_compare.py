@@ -81,7 +81,7 @@ class CompareConfig:
     """Show the runs' test-view render FPS. It was measured where the benchmark ran (the table title names that GPU
     when fps.json records it), so recordings that should carry only this host's timing drop it."""
     runs_root: Path = field(default_factory=lambda: Path(os.environ.get("HEXELS_WORK", str(Path.home() / "hexels-work"))) / "runs")
-    """Run layout root (contracts/run-layout.md); default `$HEXELS_WORK/runs`, as the hexels package's `Roots`."""
+    """Run layout root (packages/hexels/docs/run-layout.md); default `$HEXELS_WORK/runs`, as the hexels package's `Roots`."""
     contracts_root: Path = field(
         default_factory=lambda: Path(os.environ.get("GSPLAT_MODERN_DATA", str(Path.home() / "gsplat-modern-data"))) / "hexels-pretrained/cameras/nvs"
     )

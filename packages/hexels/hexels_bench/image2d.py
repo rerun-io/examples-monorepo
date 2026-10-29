@@ -1,4 +1,4 @@
-"""2D Hexel image fits (Image-GS benchmark) as a 2D hexel PLY (addendum in contracts/hexel-ply.md).
+"""2D Hexel image fits (Image-GS benchmark) as a 2D hexel PLY (2D addendum of docs/hexel-ply.md).
 
 Upstream stores a fit as `render_parameters_<step>.pt` / `hexels_raw-fp32.pt`:
 `{"method": "hexel", "layout": "dense15" | "flat8", "scale_mode": "log", "height", "width",
