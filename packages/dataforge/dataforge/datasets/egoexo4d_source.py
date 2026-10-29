@@ -137,25 +137,22 @@ def frame_peaks(path: Path, frames: int) -> Int64[ndarray, "n"]:
     """Brightest gray luma of each of a video's first ``frames`` frames.
 
     The eye streams are 8-bit YUV420P: gray conversion is monotone in Y, so reduce
-    the strided Y planes first and convert the resulting peaks in one vector operation.
+    the strided Y planes first and convert each peak with the gray luma table.
     Other pixel formats retain PyAV's full conversion.
     """
     peaks: list[int] = []
-    native: list[int] = []
+    table = gray_luma_table()
     with av.open(str(path)) as container:
         stream: av.video.stream.VideoStream = container.streams.video[0]
         stream.thread_type = "AUTO"
         for frame in islice(container.decode(stream), frames):
             if frame.format.name == "yuv420p":
-                plane: av.video.plane.VideoPlane = frame.planes[0]
-                luma: UInt8[ndarray, "h w"] = np.frombuffer(plane, dtype=np.uint8).reshape(frame.height, plane.line_size)[:, : frame.width]
-                native.append(len(peaks))
-                peaks.append(int(luma.max()))
+                plane = frame.planes[0]
+                luma = np.frombuffer(plane, dtype=np.uint8).reshape(frame.height, plane.line_size)[:, : frame.width]
+                peaks.append(int(table[luma.max()]))
             else:
                 peaks.append(int(frame.to_ndarray(format="gray").max()))
-    result: Int64[ndarray, "n"] = np.asarray(peaks, dtype=np.int64)
-    result[native] = gray_luma_table()[result[native]]
-    return result
+    return np.asarray(peaks, dtype=np.int64)
 
 
 def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> list[range]:
