@@ -219,3 +219,44 @@ def rig_quality_path(rig: int) -> str:
 def quality_flag_path(rig: int, cam: int, name: str) -> str:
     """A shipped per-camera quality flag under the shared GT namespace."""
     return f"/world/gt/quality/rig_{_index(rig, 'rig')}/cam_{_index(cam, 'cam')}/{name}"
+
+
+def person_path(person: int, *, pred: str | None = None) -> str:
+    """``/world/gt/people/person_NN`` — one person of a multi-person sequence; carries who it is and where its labels come from.
+
+    A person a model predicted (``pred`` names the method) lives under ``/world/pred/<pred>/people/person_NN`` instead, the same
+    layout below (§3, Layers versus paths).
+    """
+    root: str = "/world/gt" if pred is None else f"/world/pred/{pred}"
+    return f"{root}/people/person_{_index(person, 'person')}"
+
+
+def person_body_path(person: int, model: str, *, pred: str | None = None) -> str:
+    """A person's fitted body model (``smplx``) or its skinned ``mesh``, world frame."""
+    return f"{person_path(person, pred=pred)}/body/{model}"
+
+
+def person_coco133_xyz_path(person: int, *, pred: str | None = None) -> str:
+    """A person's COCO-133 keypoints in world metres."""
+    return f"{person_path(person, pred=pred)}/coco133_xyz"
+
+
+def person_projection_path(rig: int, cam: int, person: int, *, pred: str | None = None) -> str:
+    """A person's COCO-133 keypoints projected through a camera's full lens model; a predicted person's under ``pinhole/pred/<pred>``."""
+    projected: str = coco133_uv_projected_path(rig, cam) if pred is None else f"{pinhole_path(rig, cam)}/pred/{pred}/coco133_uv_projected"
+    return f"{projected}/person_{_index(person, 'person')}"
+
+
+def person_mask_path(rig: int, cam: int, person: int) -> str:
+    """A person's shipped segmentation mask in a camera's image."""
+    return f"{pinhole_path(rig, cam)}/masks/person_{_index(person, 'person')}"
+
+
+def person_visibility_path(rig: int, cam: int, person: int) -> str:
+    """Which of a person's body-model vertices a camera sees (§15), beside that camera's mask of the person."""
+    return f"{pinhole_path(rig, cam)}/visibility/person_{_index(person, 'person')}"
+
+
+def markers_path(kind: str) -> str:
+    """``/world/gt/markers/<kind>`` — motion-capture marker positions (``vicon`` measured, ``mosh_baseline`` fitted), world metres."""
+    return f"/world/gt/markers/{kind}"

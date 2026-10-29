@@ -35,6 +35,8 @@ ignore_names = [
     # VRS binary header fields retained to match FileFormat.h positional unpacking.
     "previous_record_size",
     "uncompressed_size",
+    # pickle.Unpickler calls find_class itself.
+    "find_class",
     "main",
     "rr_config",
     "sequence",

@@ -19,9 +19,10 @@ later pieces still find the triangle list of the first by latest-at. Rerun loadi
 their topology would make this convention unnecessary.
 """
 
+import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float32, Int64, UInt32
+from jaxtyping import Bool, Float32, Int64, UInt32
 from numpy import ndarray
 from rerun.datatypes import Rgba32Like
 
@@ -33,6 +34,8 @@ BODY_MESH_STRIDE: int = 3
 Full-rate SMPL vertices cost 82 KB per frame (4.3 GB for a 29-min EPFL session, 4x its videos), and
 Rerun 0.38 has no mesh skinning to pose one logged mesh from joint transforms. The body parameters
 and keypoints stay at full rate."""
+BODY_MESH_BATCH_ROWS: int = 32
+"""Body mesh rows per chunk (``log_mesh_rows``): an SMPL row is 82 KB, an SMPL-X row 126 KB, so ~4 MB plus the triangle list."""
 
 
 class SparseComponentColumn(rr.ComponentColumn):
@@ -95,3 +98,35 @@ def log_mesh_batch(
         triangles: rr.ComponentColumn = rr.ComponentColumn(rr.Mesh3D.descriptor_triangle_indices(), rr.components.TriangleIndicesBatch(topology))
         columns.append(SparseComponentColumn(triangles, row=trusted.index(True), num_rows=len(trusted)))
     rr.send_columns(path, indexes=[time_column(times_ns), frame_index_column(frame_indices)], columns=columns, recording=recording)
+
+
+def log_mesh_rows(
+    recording: rr.RecordingStream,
+    path: str,
+    *,
+    times_ns: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"],
+    vertices: Float32[ndarray, "k v 3"],
+    present: Bool[ndarray, "t"],
+    topology: UInt32[ndarray, "f 3"],
+    albedo_factor: Rgba32Like,
+) -> None:
+    """A body mesh over its rows: the static albedo, then one ``log_mesh_batch`` chunk per ``BODY_MESH_BATCH_ROWS`` rows.
+
+    ``vertices`` holds the present rows only, in row order; an absent row is an empty mesh.
+    """
+    log_mesh_static(recording, path, albedo_factor=albedo_factor)
+    before: Int64[ndarray, "t"] = np.cumsum(present) - present  # present rows ahead of each row
+    for start in range(0, len(present), BODY_MESH_BATCH_ROWS):
+        rows: slice = slice(start, start + BODY_MESH_BATCH_ROWS)
+        trusted: list[bool] = present[rows].tolist()
+        first: int = int(before[start])
+        log_mesh_batch(
+            recording,
+            path,
+            times_ns=times_ns[rows],
+            frame_indices=frame_indices[rows],
+            vertices=vertices[first : first + sum(trusted)],
+            trusted=trusted,
+            topology=topology,
+        )

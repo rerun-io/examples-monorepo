@@ -359,10 +359,11 @@ is a nominal-rate fiction for such a file.
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
 | `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, turned 90° clockwise so the scene is upright) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
 | `egoexo4d` | one Ego-Exo4D take with an Ego-Exo4D-HM fit; take files fetched on demand (licence keys) and deleted after base | **four** rrds: `base` with the localized GoPros (KB4, 1080p AV1), the Aria RGB/SLAM/eye cameras and its trajectory; `body_pose` (SMPL-H parameters, COCO-133 keypoints), `body_mesh` (SMPL-H, 10 Hz), `projections`; see [docs/egoexo4d.md](docs/egoexo4d.md) |
+| `mamma` | one MAMMA sequence of the `--family` (eval, markerless-dance, markerless-multiple-people, markerless-iphones), read in place from the release | **four to seven** rrds: `base` with every camera (AV1, videos above 3.2 MP at half size, the Vicon radial lens as data); `body_pose` (SMPL-X parameters and COCO-133 keypoints per person, tagged `mosh_gt` or `mamma_pred`), `body_mesh` (SMPL-X, 10 Hz), `projections` (through the Vicon lens); eval adds `masks` (palette PNGs at a quarter size) and `visibility`, and Extra `markers`; see [docs/mamma.md](docs/mamma.md) |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and
-lamaria; wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
+lamaria; wildcap derives `wildcap-<corpus>`, msd `msd-<device>` and mamma `mamma-<family>`.
 
 **Verbs**, each a thin `tools/apps/*.py` shim over `dataforge/apis/`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a

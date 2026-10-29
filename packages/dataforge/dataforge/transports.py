@@ -27,6 +27,9 @@ import requests
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFile
 
+HfRepoType = Literal["dataset", "model"]
+"""Hub repo kinds dataforge fetches from: release datasets, and model repos for body models."""
+
 CHUNK_BYTES: int = 1 << 20
 """Streaming block size: 1 MiB, small enough to resume cheaply, big enough to saturate a link."""
 
@@ -122,7 +125,9 @@ def require_commit_sha(revision: str) -> str:
     return revision
 
 
-def hf_fetch_files(repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str, workers: int = 16) -> Path:
+def hf_fetch_files(
+    repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str, workers: int = 16, repo_type: HfRepoType = "dataset"
+) -> Path:
     """Fetch pinned paths concurrently; cancel pending work on the first failure."""
     require_commit_sha(revision)
     if workers < 1:
@@ -131,7 +136,7 @@ def hf_fetch_files(repo_id: str, paths: Sequence[str], *, local_dir: Path, revis
         return local_dir
     with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
         futures: list[Future[str]] = [
-            executor.submit(hf_hub_download, repo_id, path, repo_type="dataset", local_dir=str(local_dir), revision=revision) for path in paths
+            executor.submit(hf_hub_download, repo_id, path, repo_type=repo_type, local_dir=str(local_dir), revision=revision) for path in paths
         ]
         try:
             for future in as_completed(futures):
@@ -257,11 +262,11 @@ def hf_list_files(repo_id: str, revision: str, path_in_repo: str | None = None) 
     return [hf_file_info(entry) for entry in entries if isinstance(entry, RepoFile)]
 
 
-def hf_lfs_files(repo_id: str, names: Sequence[str], *, revision: str) -> list[HfFileInfo]:
-    """The named dataset files at ``revision``, in the order given; each must be an LFS file."""
+def hf_lfs_files(repo_id: str, names: Sequence[str], *, revision: str, repo_type: HfRepoType = "dataset") -> list[HfFileInfo]:
+    """The named files at ``revision``, in the order given; each must be an LFS file."""
     require_commit_sha(revision)
     found: dict[str, HfFileInfo] = {}
-    for info in HfApi().get_paths_info(repo_id, list(names), repo_type="dataset", revision=revision):
+    for info in HfApi().get_paths_info(repo_id, list(names), repo_type=repo_type, revision=revision):
         if isinstance(info, RepoFile) and info.lfs is not None:
             found[info.path] = hf_file_info(info)
     missing: list[str] = [name for name in names if name not in found]
@@ -279,7 +284,7 @@ def set_aside(path: Path, reason: str) -> Path:
     return kept
 
 
-def hf_fetch_verified(repo_id: str, file: HfFileInfo, *, local_dir: Path, revision: str) -> bool:
+def hf_fetch_verified(repo_id: str, file: HfFileInfo, *, local_dir: Path, revision: str, repo_type: HfRepoType = "dataset") -> bool:
     """Fetch one file unless ``local_dir`` already holds its exact bytes; return whether bytes were fetched.
 
     The file lands under ``local_dir/.dataforge-staging`` and is published by ``publish_verified`` only after
@@ -297,7 +302,7 @@ def hf_fetch_verified(repo_id: str, file: HfFileInfo, *, local_dir: Path, revisi
         return False
     staged: Path = local_dir / STAGING_DIR / file.path
     if not matches_file(staged, file.integrity):
-        hf_fetch_files(repo_id, [file.path], local_dir=local_dir / STAGING_DIR, revision=revision)
+        hf_fetch_files(repo_id, [file.path], local_dir=local_dir / STAGING_DIR, revision=revision, repo_type=repo_type)
     try:
         publish_verified(staged, dest, file.integrity, set_aside_replaced=True)
     except IntegrityError:
