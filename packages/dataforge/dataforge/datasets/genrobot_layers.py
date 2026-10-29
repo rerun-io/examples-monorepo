@@ -60,6 +60,7 @@ from dataforge.datasets.genrobot_source import (
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     FRAME_INDEX_FIELD,
+    ChunkBatcher,
     ImuChannel,
     annotation_context,
     log_camera_node,
@@ -278,7 +279,7 @@ def video_start(file: EpisodeFile, cam: int, *, t0_ns: int, end_ns: int) -> Vide
 
 def base_stream(
     file: EpisodeFile, episode: Episode, retimer: Retimer, starts: Sequence[VideoStart],
-    *, codecs: Sequence[rrc.Chunk], batchers: list[writing.ChunkBatcher],
+    *, codecs: Sequence[rrc.Chunk], batchers: list[ChunkBatcher],
 ) -> rrc.LazyChunkStream:
     """Cameras from their first keyframe, rig pose, IMU and frames of one MCAP, shaped by lenses and retimed."""
     # Decode/decompress each MCAP block once. Split branches share this reader;
@@ -288,13 +289,13 @@ def base_stream(
     cameras: list[rrc.LazyChunkStream] = []
     for cam in range(NUM_CAMERAS):
         camera, stream = stream.split(content=camera_topic(cam))
-        batcher = writing.ChunkBatcher(static_chunks=(codecs[cam],))
+        batcher = ChunkBatcher(static_chunks=(codecs[cam],))
         batchers.append(batcher)
         cameras.append(camera.lenses([video_lens(cam), exposure_lens(cam)]).flat_map(batcher))
     stream = stream.lenses(rig_pose_lens(), content=EEF_POSE_TOPIC)
     stream = stream.lenses(imu_lenses(), content=IMU_TOPIC)
     stream = stream.lenses(frames_lens(), content=FRAME_VALIDITY_TOPIC)
-    batcher = writing.ChunkBatcher()
+    batcher = ChunkBatcher()
     batchers.append(batcher)
     return rrc.LazyChunkStream.merge(*cameras, stream.flat_map(batcher))
 
@@ -406,7 +407,7 @@ def write_base_layer(
         # The static codecs ride in the optimized stream: GoP rebatching needs each video's codec beside its samples.
         codecs = [rrc.Chunk.from_columns(schema.video_path(RIG, cam), indexes=[], columns=rr.VideoStream.columns(codec=[rr.VideoCodec.H264])) for cam in range(NUM_CAMERAS)]
         recording.send_chunks(codecs)
-        batchers: list[writing.ChunkBatcher] = []
+        batchers: list[ChunkBatcher] = []
         stream = base_stream(file, episode, retimer, starts, codecs=codecs, batchers=batchers)
         recording.send_chunks(stream)
         for batcher in batchers:

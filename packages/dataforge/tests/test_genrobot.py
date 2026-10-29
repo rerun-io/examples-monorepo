@@ -234,7 +234,7 @@ def test_optimizer_windows_keep_tail_rows_and_both_clocks() -> None:
     import rerun as rr
     import rerun.chunk as rrc
 
-    from dataforge.writing import ChunkBatcher
+    from dataforge.logging_toolkit import ChunkBatcher
 
     source = rrc.LazyChunkStream.from_iter(
         rrc.Chunk.from_columns(
