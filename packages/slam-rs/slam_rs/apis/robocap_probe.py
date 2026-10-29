@@ -120,7 +120,7 @@ def main(config: Config) -> None:
         tracked: int = len(lockstep.elapsed_ms)
         print(
             f"{replayed} framesets fed, {tracked} tracked, {lockstep.retries} refused and retried, "
-            f"{len(lockstep.pending)} lost, {lockstep.imu_samples} inertial samples pushed"
+            f"{replayed - tracked} lost, {lockstep.imu_samples} inertial samples pushed"
         )
         print(
             f"wall {elapsed:.1f} s for {replayed_ns / 1e9:.1f} s of footage = {replayed_ns / 1e9 / max(elapsed, 1e-9):.2f}x realtime, "

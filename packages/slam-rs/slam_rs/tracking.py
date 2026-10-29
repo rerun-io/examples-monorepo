@@ -25,6 +25,16 @@ MAX_HELD_FRAMESETS: int = 2
 """Most framesets the hold may ever carry: one refused, plus the one whose samples unblock it."""
 
 
+@dataclass(slots=True, frozen=True)
+class DroppedFrameset:
+    """An input that cannot produce an estimate, with its device-clock timestamp."""
+
+    t_ns: int
+    """Input timestamp."""
+    reason: Literal["end of stream before IMU coverage", "insufficient stereo support before initialization"]
+    """Why the estimator cannot publish a pose."""
+
+
 @dataclass(slots=True)
 class Lockstep:
     """One estimator, driven frameset by frameset, holding a refused frameset.
@@ -43,6 +53,8 @@ class Lockstep:
     """Inertial samples pushed so far."""
     retries: int = 0
     """How many framesets were refused for want of IMU, and so had to be tracked a second time."""
+    dropped: list[DroppedFrameset] = field(default_factory=list)
+    """Inputs explicitly rejected at initialization or end of stream."""
     elapsed_ms: list[float] = field(default_factory=list)
     """Wall time per yielded pose. Lag mode adds startup frontend time to the
     final drain; calls waiting for stereo do not yield a pose."""
@@ -120,6 +132,7 @@ class Lockstep:
                 self._buffered_flow = self.vio.flow_frame()
             assert completed.t_ns == result.t_ns
             if result.status == _core.VioStatus.NoVisualFeatures:
+                self.dropped.append(DroppedFrameset(completed.t_ns, "insufficient stereo support before initialization"))
                 continue
             self.elapsed_ms.append(elapsed_ms)
             yield completed, result
@@ -131,7 +144,10 @@ class Lockstep:
         return frame
 
     def flush(self) -> Iterator[tuple[Frameset, _core.VioResult]]:
-        """Yield the final lagged estimate once; uncovered frames remain pending."""
+        """Drain the lagged estimate and report inputs left without IMU coverage."""
+        for held in self.pending:
+            self.dropped.append(DroppedFrameset(held.t_ns, "end of stream before IMU coverage"))
+        self.pending.clear()
         started: float = time.monotonic()
         result: _core.VioResult | None = self.vio.flush()
         if result is None:
@@ -144,6 +160,7 @@ class Lockstep:
         self._buffered_flow = None
         self._startup_ms = 0.0
         if result.status == _core.VioStatus.NoVisualFeatures:
+            self.dropped.append(DroppedFrameset(held.t_ns, "insufficient stereo support before initialization"))
             return
         self.elapsed_ms.append(elapsed_ms)
         yield held, result
@@ -171,6 +188,8 @@ class SegmentRun:
     Taken where the text is parsed, so a tool that exports it cannot name a
     config the estimator did not read.
     """
+    dropped: tuple[DroppedFrameset, ...] = ()
+    """Explicitly rejected input timestamps, on the exported device clock."""
 
 
 def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
@@ -220,6 +239,7 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         config_sha256=config_sha256,
         ground_truth=shift_clock(feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])), feed.export_offset_ns),
         median_tracker_ms=float(np.median(lockstep.elapsed_ms)) if lockstep.elapsed_ms else float("nan"),
+        dropped=tuple(DroppedFrameset(drop.t_ns + feed.export_offset_ns, drop.reason) for drop in lockstep.dropped),
     )
 
 

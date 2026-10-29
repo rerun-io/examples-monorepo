@@ -80,8 +80,11 @@ def main(config: Config) -> None:
         print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
         run: SegmentRun = drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text))
+        for drop in run.dropped:
+            print(f"Dropped frameset {drop.t_ns}: {drop.reason}", flush=True)
         write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,
                     profile=config.profile, backend=backend, decoder=decode_device)
     dataset.register([output.as_uri()], layer_name=POSE_SOURCE, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
-    print(f"Registered {len(run.estimate)} poses; {run.wall_s:.1f} s, {run.framesets / run.wall_s:.1f} framesets/s; {output}")
+    print(f"Registered {len(run.estimate)} poses / {run.framesets} framesets, {len(run.dropped)} explained drops; "
+          f"{run.wall_s:.1f} s, {run.framesets / run.wall_s:.1f} framesets/s; {output}")
     print(dataset.segment_url(config.segment))

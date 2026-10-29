@@ -457,8 +457,9 @@ class VioStage:
         Raises:
             SystemExit: If any frameset is still held.
         """
-        if self.pending:
-            raise SystemExit(f"{len(self.pending)} framesets never got the inertial samples that cover them")
+        uncovered: int = len(self.pending) + sum(drop.reason == "end of stream before IMU coverage" for drop in self.lockstep.dropped)
+        if uncovered:
+            raise SystemExit(f"{uncovered} framesets never got the inertial samples that cover them")
 
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay.
@@ -468,8 +469,11 @@ class VioStage:
         that guarded the call on ``elapsed_ms`` suppressed exactly that line.
         """
         unresolved: str = ""
-        if self.pending:
-            unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
+        uncovered: list[int] = [held.t_ns for held in self.pending] + [
+            drop.t_ns for drop in self.lockstep.dropped if drop.reason == "end of stream before IMU coverage"
+        ]
+        if uncovered:
+            unresolved = f", {len(uncovered)} FRAMESETS NEVER COVERED BY THE IMU at {uncovered}"
         if not self.elapsed_ms:
             return f"vio: {self.lockstep.imu_samples} IMU samples pushed, nothing tracked{unresolved}"
         return (

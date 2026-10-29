@@ -111,6 +111,29 @@ def test_the_hold_never_grows_past_one_refused_frameset(pipeline: PipelineFactor
         list(lockstep.push(frameset(MAX_HELD_FRAMESETS, texture, nothing)))
 
 
+def test_stream_ending_before_final_imu_reports_the_dropped_frame(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """An uncovered final input is explicit, while a second flush is harmless."""
+    lockstep: Lockstep = Lockstep(vio=pipeline(2))
+    for step in range(3):
+        batch: Int64[ndarray, " n"] = np.arange(step * FRAME_PERIOD_NS, (step + 1) * FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+        assert len(list(lockstep.push(frameset(step, texture, batch)))) == 1
+    assert list(lockstep.push(frameset(3, texture, np.array([3 * FRAME_PERIOD_NS], dtype=np.int64)))) == []
+    assert list(lockstep.flush()) == []
+    assert [(drop.t_ns, drop.reason) for drop in lockstep.dropped] == [(3 * FRAME_PERIOD_NS, "end of stream before IMU coverage")]
+    assert not lockstep.pending
+    assert list(lockstep.flush()) == []
+
+
+def test_initialization_without_stereo_support_reports_why_the_pose_is_missing(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    lockstep: Lockstep = Lockstep(vio=pipeline(2))
+    blank: Frameset = frameset(0, texture, np.array([0, IMU_PERIOD_NS], dtype=np.int64))
+    for image in blank.images:
+        image.fill(0)
+    assert list(lockstep.push(blank)) == []
+    assert not lockstep.pending
+    assert [(drop.t_ns, drop.reason) for drop in lockstep.dropped] == [(0, "insufficient stereo support before initialization")]
+
+
 def test_a_run_that_never_tracked_still_reports_what_it_held(
     pipeline: PipelineFactory, camera: CameraFactory, texture: TextureFactory, tmp_path: Path
 ) -> None:
@@ -131,11 +154,14 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
         ),
     )
     stage.run(frameset(0, texture, np.zeros(0, dtype=np.int64)))
+    stage.flush()
     rr.disconnect()
 
     assert not stage.elapsed_ms
     assert "nothing tracked" in stage.summary()
     assert "NEVER COVERED BY THE IMU at [0]" in stage.summary()
+    with pytest.raises(SystemExit, match="never got the inertial samples"):
+        stage.refuse_lost_framesets()
 
 
 def test_the_estimator_is_configured_from_basalts_own_two_files(settings: SlamConfig) -> None:
