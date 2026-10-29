@@ -33,7 +33,8 @@ use relative `#import <...>` directives through a small local import resolver.
 
 The forward path projects, sorts visible depths, scans intersection counts,
 projects visible splats, maps and sorts tiles, computes tile offsets, and
-rasterizes. Counts and dispatch plans stay on the GPU. An eight-byte count
+rasterizes. Splats and hexels give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K
+blend, and all three share one set of output entry points. Counts and dispatch plans stay on the GPU. An eight-byte count
 readback detects overflow; the output remains intact until capacity grows and
 the view rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
 Render mode is a per-render option: default blur or mip antialiasing.
@@ -124,7 +125,7 @@ Viewer integration lives in `crates/gsplat-viewer/src/{renderer,cache,visualizer
 and `composite.wgsl`. Resource handles must adapt to Rerun's pools and view context.
 
 Local support stays here: core `lens.rs`/`lens.wgsl` for non-pinhole cameras,
-`output.rs`/`raster_outputs.wgsl` for float and packed outputs, `timing.rs`, and the
+the float, packed and surface targets of `output.rs`/`raster_outputs.wgsl`, `timing.rs`, and the
 `shader.rs` import resolver. Texture targets in `output.rs` need pooled handles upstream.
 CLI, training, viewer startup and compatibility selection, the frame probe,
 Python orchestration, and the patched-source package are also local support.
