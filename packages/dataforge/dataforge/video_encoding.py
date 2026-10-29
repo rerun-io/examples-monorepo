@@ -385,6 +385,57 @@ def transcode_mp4(
     return written
 
 
+def transcode_crops(
+    source: Path,
+    outputs: list[Path],
+    *,
+    crops: list[tuple[int, int, int, int]],
+    fps: int,
+    frames: int,
+    gop: int,
+    cq: int,
+) -> None:
+    """Share one CPU decode across cropped gray outputs, batching at the NVENC slot limit.
+
+    Four tiles decode once with four slots, twice with three. Each batch reserves
+    all its encoder slots before ffmpeg starts; concurrent batches cannot deadlock
+    by each holding part of a reservation. Output order and frame counts survive.
+    """
+    if not outputs or len(outputs) != len(crops) or frames <= 0:
+        raise ValueError("positive frame count and one crop per output required")
+    if any(min(crop[:2]) <= 0 or min(crop[2:]) < 0 for crop in crops):
+        raise ValueError("crop requires positive dimensions and nonnegative offsets")
+    slots: int = int(os.environ.get("DATAFORGE_NVENC_SLOTS", "6"))
+    if slots < 1:
+        raise ValueError("DATAFORGE_NVENC_SLOTS must be positive")
+    binary: Path = resolve_ffmpeg()
+    require_av1_nvenc(binary)
+    NVENC_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    for start in range(0, len(outputs), slots):
+        batch: list[Path] = outputs[start:start + slots]
+        filters: list[str] = [f"[0:v]split={len(batch)}" + "".join(f"[tile{i}]" for i in range(len(batch)))]
+        command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "1", "-r", str(fps), "-i", str(source)]
+        for index, crop in enumerate(crops[start:start + slots]):
+            filters.append(f"[tile{index}]crop=" + ":".join(str(value) for value in crop) + f",format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}[cam{index}]")
+        command.extend(["-filter_complex", ";".join(filters)])
+        for index, output in enumerate(batch):
+            command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])
+        with contextlib.ExitStack() as stack:
+            # Serialize multi-slot acquisition, not encoding. Single-slot jobs can
+            # finish while a batch waits; another batch cannot hold its missing slots.
+            with (NVENC_SLOT_DIR / "reservation.lock").open("a+b") as reservation:
+                fcntl.flock(reservation, fcntl.LOCK_EX)
+                fds: tuple[int, ...] = tuple(stack.enter_context(nvenc_slot()) for _ in batch)
+                fcntl.flock(reservation, fcntl.LOCK_UN)
+            result: subprocess.CompletedProcess[str] = subprocess.run(command, pass_fds=fds, capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError(f"ffmpeg exited {result.returncode} while cropping {source}:\n{result.stderr[-4000:]}")
+        for output in batch:
+            written: int = mp4_frame_count(output)
+            if written != frames:
+                raise ValueError(f"{output} holds {written} samples, expected {frames}")
+
+
 def encode_frames_to_mp4(
     frames: Iterable[bytes | memoryview],
     output: Path,

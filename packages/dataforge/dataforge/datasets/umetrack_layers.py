@@ -1,8 +1,7 @@
 """UmeTrack sensors, hand parameters, skinned meshes and lens-model projections."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +20,7 @@ from dataforge.datasets.umetrack_source import FISHEYE62, Camera, SequenceData
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.umetrack_hands import log_hand_meshes
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, parallel_clips, transcode_mp4, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, transcode_crops, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
 
@@ -136,17 +135,15 @@ def write_base(recording: rr.RecordingStream, scene: SequenceData, identity: Seq
     with work_dir("umetrack-") as work:
         clips: list[Path] = [work / f"cam_{index:02}.mp4" for index in range(4)]
 
-        def encode(index: int, clip: Path) -> None:
-            transcode_mp4(
-                scene.source.with_suffix(".mp4"), clip, gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count, gray=True, crop=scene.crop(index)
+        with timer.stage("transcode"):
+            transcode_crops(
+                scene.source.with_suffix(".mp4"), clips, crops=[scene.crop(index) for index in range(4)],
+                gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count,
             )
-
-        jobs: list[tuple[Path, Callable[[], None]]] = [(clip, partial(encode, index, clip)) for index, clip in enumerate(clips)]
-        with parallel_clips(jobs, timer) as ready:
-            for index, clip in enumerate(ready):
-                logging_toolkit.log_video_stream(
-                    recording, clip, schema.video_path(0, index), times_ns=scene.times_ns, frame_indices=scene.frame_indices
-                )
+        for index, clip in enumerate(clips):
+            logging_toolkit.log_video_stream(
+                recording, clip, schema.video_path(0, index), times_ns=scene.times_ns, frame_indices=scene.frame_indices
+            )
 
 
 @dataclass(frozen=True, slots=True)

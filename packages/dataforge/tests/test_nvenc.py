@@ -403,3 +403,66 @@ def test_missing_cuda_filters_choose_cpu_without_fallback_noise(
         assert "-hwaccel" not in command
         assert "scale=1920:1080" in command[command.index("-vf") + 1]
     assert "NVDEC path failed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("slots,expected_inputs", [("4", 1), ("3", 2), ("1", 4)])
+def test_mosaic_shares_decode_within_available_slots(
+    slots: str, expected_inputs: int, ffmpeg_commands: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", slots)
+    video.transcode_crops(
+        Path("mosaic.mp4"), [Path(f"cam{i}.mp4") for i in range(4)],
+        crops=[(192, 160, i * 192, 0) for i in range(4)], fps=30, frames=4, gop=60, cq=36,
+    )
+    assert len(ffmpeg_commands) == expected_inputs
+    assert sum(command.count("-i") for command in ffmpeg_commands) == expected_inputs
+    assert sum(command.count("av1_nvenc") for command in ffmpeg_commands) == 4
+    assert all(command.count("av1_nvenc") <= int(slots) for command in ffmpeg_commands)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("slots", ["3", "4"])
+def test_mosaic_packets_match_separate_crops(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, slots: str) -> None:
+    import av
+
+    monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", slots)
+    source: Path = tmp_path / "mosaic.mp4"
+    subprocess.run([
+        str(nvenc_ffmpeg), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=768x160:rate=30",
+        "-frames:v", "12", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+    ], check=True)
+    crops: list[tuple[int, int, int, int]] = [(192, 160, i * 192, 0) for i in range(4)]
+    outputs: list[Path] = [tmp_path / f"shared{i}.mp4" for i in range(4)]
+    video.transcode_crops(source, outputs, crops=crops, fps=30, frames=12, gop=60, cq=36)
+    for index, output in enumerate(outputs):
+        reference: Path = tmp_path / f"reference{index}.mp4"
+        video.transcode_mp4(source, reference, crop=crops[index], fps=30, frames=12, gop=60, cq=36, gray=True)
+        with av.open(str(output)) as shared, av.open(str(reference)) as separate:
+            assert [bytes(packet) for packet in shared.demux(video=0) if packet.size] == [bytes(packet) for packet in separate.demux(video=0) if packet.size]
+
+
+def test_shared_decode_reserves_every_encoder_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
+    monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setattr(video, "NVENC_SLOT_DIR", tmp_path)
+    monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
+    monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
+    entered: Event = Event()
+    waiting: Event = Event()
+
+    def outsider() -> None:
+        waiting.set()
+        with video.nvenc_slot():
+            entered.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            pool.submit(outsider)
+            assert waiting.wait(2.0)
+            assert not entered.wait(0.2)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr(video.subprocess, "run", run)
+        video.transcode_crops(Path("mosaic.mp4"), [Path("a.mp4"), Path("b.mp4")], crops=[(192, 160, 0, 0), (192, 160, 192, 0)], fps=30, frames=4, gop=60, cq=36)
+        assert entered.wait(2.0)
