@@ -13,6 +13,34 @@ from conftest import vrs_file, vrs_record
 from dataforge.vrs import CONFIGURATION_RECORD, VrsFile, VrsImageReader
 
 
+@pytest.mark.parametrize("metadata", [b"", b"exif"])
+def test_variable_layout_capture_clock_after_another_fixed_field(tmp_path: Path, metadata: bytes) -> None:
+    """LaMAria sequence_2_11 puts a uint32 frame tag before the capture clock."""
+    layout: str = json.dumps(
+        {
+            "data_layout": [
+                {"name": "frame_tag", "type": "DataPieceValue<uint32_t>", "offset": 0},
+                {"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": 4},
+                {"name": "image_metadata", "type": "DataPieceVector<uint8_t>", "index": 0},
+            ]
+        }
+    )
+    path: Path = tmp_path / "variable.vrs"
+    jpeg: bytes = b"\xff\xd8test\xff\xd9"
+    path.write_bytes(
+        vrs_file(
+            {214: {"RF:Data:2": "data_layout+image/jpg", "DL:Data:2:0": layout}},
+            [
+                vrs_record(b"tag!" + struct.pack("<qII", stamp, 0, len(metadata)) + metadata + jpeg, type_id=214)
+                for stamp in (100, 200)
+            ],
+        )
+    )
+    reader: VrsImageReader = VrsImageReader(VrsFile(path), "214-1")
+    assert [(frame.capture_timestamp_ns, frame.image) for frame in reader.images()] == [(100, jpeg), (200, jpeg)]
+    assert reader.capture_timestamps().tolist() == [100, 200]
+
+
 @pytest.mark.parametrize("compression", [0, 1, 2])
 def test_variable_layout_jpeg_and_capture_clock(tmp_path: Path, compression: int) -> None:
     layout: str = json.dumps(
