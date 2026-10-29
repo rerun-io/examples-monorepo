@@ -642,15 +642,16 @@ def test_prefetch_respects_raw_budget_and_pending_base(
     dataset: MsdDataset = MsdDataset(MsdConfig(root=root, raw_budget_gb=10e-9))
     identity: SequenceIdentity = SequenceIdentity("msd-index", ("collection", "next"))
     source: MsdSource = MsdSource("collection", "next", ("next.zip",), 4)
+    current: MsdSource = MsdSource("collection", "current", ("current.zip",), occupied)
     fetched: list[str] = []
     monkeypatch.setattr("dataforge.datasets.msd.transports.hf_fetch", lambda *_args, **kwargs: fetched.extend(kwargs["allow_patterns"]))
-    dataset.prefetch(identity, source, force=False)
+    dataset.prefetch_next(identity, source, current_source=current, force=False)
     assert bool(fetched) is expected
     fetched.clear()
     target: Path = dataset.targets(identity)[paths.BASE_LAYER]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"base")
-    dataset.prefetch(identity, source, force=False)
+    dataset.prefetch_next(identity, source, current_source=current, force=False)
     assert fetched == []
 
 
@@ -694,7 +695,7 @@ def test_convert_reuses_prefetched_archives(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(MsdDataset, "warn_on_follow_frame", lambda *_args: None)
     monkeypatch.setattr(msd, "open_member_reader", lambda *_args: nullcontext(None))
     monkeypatch.setattr(msd, "read_sequence", read)
-    dataset.prefetch(identity, source, force=False)
+    dataset.prefetch_next(identity, source, current_source=MsdSource("collection", "current", (), 0), force=False)
     with pytest.raises(RuntimeError, match="synthetic reader reached"):
         dataset.convert(identity, source, force=False)
     assert fetched == ["next.zip"]

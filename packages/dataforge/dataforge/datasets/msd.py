@@ -404,19 +404,13 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             sidecar=paths.sidecar_path(output_root, identity, GT_SIDECAR_NAME),
         )
 
-    def prefetch(self, identity: SequenceIdentity, source: MsdSource, *, force: bool) -> None:
-        """Fetch pending base archives only when scratch space permits."""
-        self.prefetch_next(identity, source, current_source=None, force=force)
-
-    def prefetch_next(
-        self, identity: SequenceIdentity, source: MsdSource, *, current_source: MsdSource | None, force: bool,
-    ) -> None:
-        """Reserve both sequences' archives, including bytes not yet on disk."""
+    def prefetch_next(self, identity: SequenceIdentity, source: MsdSource, *, current_source: MsdSource, force: bool) -> None:
+        """Fetch pending base archives only when scratch space permits, reserving both sequences' archives."""
         locations: SequencePaths = self.sequence_paths(identity, source)
         if writing.should_skip(locations.target, force=force) or source.archive_bytes <= 0:
             return
         own: set[Path] = set(locations.archives)
-        current: set[Path] = set() if current_source is None else {self.config.root / name for name in current_source.archive_paths}
+        current: set[Path] = {self.config.root / name for name in current_source.archive_paths}
         occupied: int = 0
         current_bytes: int = 0
         for directory, subdirectories, names in os.walk(self.config.root):
@@ -434,7 +428,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                     current_bytes += size
                 elif path not in own:
                     occupied += size
-        reserved: int = max(current_bytes, 0 if current_source is None else current_source.archive_bytes)
+        reserved: int = max(current_bytes, current_source.archive_bytes)
         if occupied + reserved + source.archive_bytes > int(self.config.raw_budget_gb * 1e9):
             return
         self.fetch_archives(source, locations.archives)
