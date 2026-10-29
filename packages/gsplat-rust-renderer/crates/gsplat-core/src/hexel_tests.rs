@@ -5,7 +5,8 @@
 //! and composites in centre-depth order without tiles.
 use crate::test_utils::{gpu, read, upload};
 use crate::{
-    Camera, CameraModel, HexelVariant, Hexels, RenderOptions, Renderer, Target, ViewState,
+    Camera, CameraModel, FrameStats, HexelVariant, Hexels, RenderOptions, Renderer, Target,
+    ViewState,
 };
 use glam::{DAffine3, DMat3, DQuat, DVec3, Quat, UVec2, Vec2, Vec3};
 
@@ -188,15 +189,16 @@ fn render_fitted(
     camera: &Camera,
     options: &RenderOptions,
     target: &Target,
-) {
+) -> FrameStats {
     loop {
         let mut encoder = device.create_command_encoder(&Default::default());
         let frame = renderer.render(queue, &mut encoder, view, camera, options, target.clone());
         frame.unwrap();
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        if !view.poll_feedback().unwrap().unwrap().needs_rerender {
-            break;
+        let stats = view.poll_feedback().unwrap().unwrap();
+        if !stats.needs_rerender {
+            return stats;
         }
     }
 }
@@ -478,6 +480,48 @@ fn steep_grazing_angles_match_the_cpu_model() {
         &camera(UVec2::new(96, 64)),
         &RenderOptions::default(),
     );
+}
+
+#[test]
+#[ignore = "integration: GPU"]
+fn tilted_hexels_map_only_the_tiles_they_reach() {
+    // Tilted 1.2 rad about a diagonal, the hexel is a slanted band across its tile rectangle; the
+    // tile lists keep about the tiles where the f64 model reaches alpha >= 1/255, not the rectangle.
+    let camera = camera(UVec2::new(256, 192));
+    let hexels = Hexels {
+        variant: HexelVariant::V1,
+        params: hexel(
+            [0.0, 0.0, 3.0],
+            Quat::from_axis_angle(Vec3::new(1.0, 1.0, 0.0).normalize(), 1.2),
+            [1.2, 0.5],
+            0.9,
+            20.0,
+            [[0.7, 0.5, 0.2], [0.0; 3], [0.0; 3]],
+        ),
+    };
+    let options = RenderOptions::default();
+    let (device, queue) = &gpu();
+    let renderer = Renderer::new(device).unwrap();
+    let scene = renderer.upload_hexels(&hexels).unwrap();
+    let mut view = renderer.create_view(&scene, 1).unwrap();
+    let pixels = (camera.size.x * camera.size.y) as usize;
+    let target = Target::Float(upload(device, &vec![[0.0f32; 4]; pixels]));
+    let stats = render_fitted(
+        device, queue, &renderer, &mut view, &camera, &options, &target,
+    );
+    let cpu = reference(&hexels, &camera, &options);
+    let tiles_x = camera.size.x.div_ceil(16);
+    let reached: std::collections::HashSet<u32> = (0..camera.size.x * camera.size.y)
+        .filter(|&i| cpu.rgba[i as usize][3] >= 1.0 / 255.0)
+        .map(|i| i % camera.size.x / 16 + i / camera.size.x / 16 * tiles_x)
+        .collect();
+    assert!(
+        stats.intersections as usize <= reached.len() + reached.len() / 4,
+        "{} intersections for {} reached tiles",
+        stats.intersections,
+        reached.len()
+    );
+    check(&hexels, &camera, &options);
 }
 
 #[test]

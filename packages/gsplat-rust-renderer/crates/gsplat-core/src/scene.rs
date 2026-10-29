@@ -61,7 +61,7 @@ impl Scene {
                 variant: HexelVariant::Image,
                 ..
             } => 64,
-            Inputs::Hexels { .. } => 80,
+            Inputs::Hexels { .. } => 84,
         }
     }
 
