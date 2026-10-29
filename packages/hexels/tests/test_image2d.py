@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from hexels_bench.apis.export_published_images import stage_published_image
-from hexels_bench.image2d import PROPERTIES_2D, HexelImage, hexel_image_from_fields, load_image_fit, write_hexel_image_ply
+from hexels_bench.image2d import PROPERTIES_2D, HexelImage, ImageFit, hexel_image_from_fields, load_image_fit, write_hexel_image_ply
 from hexels_bench.layout import Roots
 from hexels_bench.png16 import read_png16
 
@@ -26,7 +26,9 @@ def save_fit(path: Path, layout: str) -> dict[str, torch.Tensor]:
 
 def test_dense_fit_maps_to_pixel_space(tmp_path: Path) -> None:
     fields: dict[str, torch.Tensor] = save_fit(tmp_path / "fit.pt", "dense15")
-    image: HexelImage = load_image_fit(tmp_path / "fit.pt")
+    fit: ImageFit = load_image_fit(tmp_path / "fit.pt")
+    assert fit.step == 5100
+    image: HexelImage = fit.image
     np.testing.assert_allclose(image.centers_xy, fields["positions"].numpy() * [40, 30], rtol=1e-6)
     np.testing.assert_allclose(image.scales_uv, np.exp(fields["log_scales"].numpy()), rtol=1e-6)
     np.testing.assert_array_equal(image.angles, fields["rotations"].numpy()[:, 0])
@@ -36,7 +38,7 @@ def test_dense_fit_maps_to_pixel_space(tmp_path: Path) -> None:
 
 def test_flat_fit_gets_default_softness_and_zero_gradients(tmp_path: Path) -> None:
     save_fit(tmp_path / "fit.pt", "flat8")
-    image: HexelImage = load_image_fit(tmp_path / "fit.pt")
+    image: HexelImage = load_image_fit(tmp_path / "fit.pt").image
     assert np.all(image.sharpness == 10.0)
     assert not image.grad_x_rgb.any()
     write_hexel_image_ply(tmp_path / "fit.ply", image, "fit.pt", 5100)
@@ -70,8 +72,8 @@ def test_published_packed_fit_decodes_through_upstream() -> None:
     folder: Path = Roots().data / "hexels-pretrained/images_2d/anime-1_2k/hexels_spatial-rgb_pruned-20000-to-10000_seed123_step005100"
     if not folder.is_dir():
         pytest.skip(f"needs {folder} (READY/pretrained-2d)")
-    packed: HexelImage = load_image_fit(folder / "hexels_spatial-rgb_mixed14.hxm")
-    raw: HexelImage = load_image_fit(folder / "hexels_raw-fp32.pt")
+    packed: HexelImage = load_image_fit(folder / "hexels_spatial-rgb_mixed14.hxm").image
+    raw: HexelImage = load_image_fit(folder / "hexels_raw-fp32.pt").image
     assert packed.centers_xy.shape == raw.centers_xy.shape == (10000, 2)
     # mixed14 stores positions with 16 bits over the field's range: within 2 ulp of a code step.
     assert np.max(np.abs(packed.centers_xy - raw.centers_xy)) < 2048 * 1.1 / 65535 * 2
@@ -83,8 +85,9 @@ def test_published_anime_fit_exports() -> None:
     fit: Path = Roots().data / "hexels-pretrained/images_2d/anime-1_2k/hexels_spatial-rgb_pruned-20000-to-10000_seed123_step005100/hexels_raw-fp32.pt"
     if not fit.is_file():
         pytest.skip(f"needs {fit} (READY/pretrained-2d)")
-    image: HexelImage = load_image_fit(fit)
-    assert (image.width, image.height) == (2048, 2048)
+    loaded: ImageFit = load_image_fit(fit)
+    image: HexelImage = loaded.image
+    assert (image.width, image.height, loaded.step) == (2048, 2048, 5100)
     assert image.centers_xy.shape == (10000, 2)
     assert np.isfinite(image.to_rows()).all()
 

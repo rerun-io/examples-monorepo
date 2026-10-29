@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hexels_bench.bench import Item, Step, StepFailed, build_queue, incomplete_reason, load_failures, run_queue
+from hexels_bench.bench import Item, Step, StepFailed, build_queue, incomplete_reason, load_failures, pixi_runner, run_queue
 from hexels_bench.layout import GSPLAT_RELEASE, Roots
 from hexels_bench.methods import Method
 
@@ -263,3 +263,33 @@ def test_roots_default_to_the_environment_then_the_home_directory(tmp_path: Path
     monkeypatch.delenv("HEXELS_WORK")
     monkeypatch.delenv("GSPLAT_MODERN_DATA")
     assert (Roots().data, Roots().runs) == (Path.home() / "gsplat-modern-data", Path.home() / "hexels-work" / "runs")
+
+
+def test_a_trained_run_missing_only_its_scores_is_scored_not_retrained(tmp_path: Path) -> None:
+    roots: Roots = bench_roots(tmp_path)
+    run_dir: Path = roots.runs / "dtu" / "scan24" / "hexels-v1-7k"
+    complete_run(run_dir, "hexels-v1-7k")
+    (run_dir / "metrics.json").unlink()
+    runner = FakeRunner()
+    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("hexels-v1-7k",)), roots, tmp_path / "gpu.lock", runner)
+    assert [item.method for item in summary.done] == ["hexels-v1-7k"]
+    assert [args[0] for _, args in runner.steps] == ["hexels-score"], "7k steps of training are not redone for a missing metrics.json"
+    assert not (roots.runs / "_attic").exists()
+
+
+def test_step_output_reaches_the_log_while_the_step_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long step's log.txt shows its progress before it exits (a fake `pixi` checks its own log mid-run)."""
+    log: Path = tmp_path / "run" / "log.txt"
+    fake: Path = tmp_path / "bin" / "pixi"
+    fake.parent.mkdir()
+    fake.write_text(
+        f'#!/bin/sh\necho first\nsleep 0.3\nif grep -q first "{log}"; then echo "log had first"; else echo "log lacked first"; fi\nexit 3\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    with pytest.raises(StepFailed, match="exited with 3"):
+        pixi_runner(Step(name="probe", env="hexels", args=("true",)), log)
+    lines: list[str] = log.read_text().splitlines()
+    assert lines[0].startswith("== bench probe: pixi run -e hexels --frozen true")
+    assert lines[1:3] == ["first", "log had first"]
+    assert lines[3].startswith("== bench probe: exit 3 after")

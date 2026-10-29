@@ -260,6 +260,8 @@ def execute(roots: Roots, item: Item, run: Runner) -> None:
         if not (run_dir / "train.json").is_file():
             run(brush_train_step(roots, item), log)
         run(score_step(roots, item, None), log)
+    elif spec.trains and all(path.exists() for path in (run_dir / "train.json", run_dir / "model.ply", run_dir / "renders" / "test")):
+        run(score_step(roots, item, None), log)  # trained and rendered (train.json comes last): only the scores are missing
     elif spec.trains:
         to_attic(roots, item, (run_dir,))
         args: tuple[str, ...] = ("hexels-train", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method)
@@ -318,20 +320,19 @@ def run_queue(items: list[Item], roots: Roots, lock: Path, run: Runner) -> Queue
 
 
 def pixi_runner(step: Step, log: Path) -> None:
-    """Run a step through `pixi run --frozen`, echo its output, and append it to `log`."""
+    """Run a step through `pixi run --frozen`, echo its output, and append it to `log` line by line as it arrives."""
     command: list[str] = ["pixi", "run", "-e", step.env, "--frozen", *step.args]
     started: float = time.perf_counter()
-    lines: list[str] = []
-    with subprocess.Popen(command, cwd=WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="", flush=True)
-            lines.append(line)
-    seconds: float = time.perf_counter() - started
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a") as stream:
         stream.write(f"== bench {step.name}: {shlex.join(command)} (cwd {WORKSPACE})\n")
-        stream.writelines(lines)
-        stream.write(f"== bench {step.name}: exit {process.returncode} after {seconds:.1f} s\n")
+        stream.flush()
+        with subprocess.Popen(command, cwd=WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                stream.write(line)
+                stream.flush()
+        stream.write(f"== bench {step.name}: exit {process.returncode} after {time.perf_counter() - started:.1f} s\n")
     if process.returncode != 0:
         raise StepFailed(f"{step.name} exited with {process.returncode}: {shlex.join(command)}")

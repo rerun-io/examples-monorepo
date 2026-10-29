@@ -316,11 +316,15 @@ def build_table(
     """
     row_scenes: dict[Dataset, tuple[str, ...]] = scenes if scenes is not None else dict(PROTOCOL_SCENES)
     averaged: dict[Dataset, tuple[str, ...]] = mean_scenes if mean_scenes is not None else dict(REPRESENTATIVE_SCENES)
-    rows: list[SceneRow] = [
-        scene_row(runs, dataset, scene, method, paper) for dataset in datasets for scene in row_scenes[dataset] for method in methods
-    ]
+    index: dict[tuple[Dataset, str, Method], SceneRow] = {
+        (dataset, scene, method): scene_row(runs, dataset, scene, method, paper)
+        for dataset in datasets
+        for scene in dict.fromkeys((*row_scenes[dataset], *averaged[dataset]))
+        for method in methods
+    }
+    rows: list[SceneRow] = [index[(dataset, scene, method)] for dataset in datasets for scene in row_scenes[dataset] for method in methods]
     means: list[MeanRow] = [
-        mean_row(dataset, method, [scene_row(runs, dataset, scene, method, paper) for scene in averaged[dataset]])
+        mean_row(dataset, method, [index[(dataset, scene, method)] for scene in averaged[dataset]])
         for dataset in PAPER_DATASET_ORDER
         if dataset in datasets
         for method in methods

@@ -3,9 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-import torch
-
-from hexels_bench.image2d import HexelImage, load_image_fit, write_hexel_image_ply
+from hexels_bench.image2d import ImageFit, load_image_fit, write_hexel_image_ply
 
 
 @dataclass
@@ -19,7 +17,6 @@ class Config:
 
 
 def main(config: Config) -> None:
-    image: HexelImage = load_image_fit(config.fit)
-    step: int = int(torch.load(config.fit, map_location="cpu", weights_only=True).get("step", -1))
-    write_hexel_image_ply(config.out, image, str(config.fit), step)
-    print(f"wrote {config.out}: {image.centers_xy.shape[0]} hexels, {image.width}x{image.height}")
+    fit: ImageFit = load_image_fit(config.fit)
+    write_hexel_image_ply(config.out, fit.image, str(config.fit), fit.step)
+    print(f"wrote {config.out}: {fit.image.centers_xy.shape[0]} hexels, {fit.image.width}x{fit.image.height}")

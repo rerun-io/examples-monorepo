@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from jaxtyping import Float32
 from numpy import ndarray
-from serde import serde
+from serde import from_dict, serde
 
 from hexels_bench.hexel_ply import write_float_ply
 
@@ -175,7 +175,17 @@ def hexel_image_from_fields(width: int, height: int, fields: dict[str, ndarray])
     )
 
 
-def load_image_fit(path: Path) -> HexelImage:
+@dataclass(frozen=True, slots=True)
+class ImageFit:
+    """An upstream 2D Hexel fit file, loaded."""
+
+    image: HexelImage
+    """Its hexels in pixel space."""
+    step: int
+    """Training step the file records; -1 when it records none (stored `.hxm`/`.hxc` files)."""
+
+
+def load_image_fit(path: Path) -> ImageFit:
     """Read an upstream 2D Hexel fit: raw FP32 `.pt`, or a stored `.hxm`/`.hxc` file decoded by upstream.
 
     Stored files go through upstream's own `scripts.decode_image.load_representation` (hexels env),
@@ -190,10 +200,12 @@ def load_image_fit(path: Path) -> HexelImage:
         payload, tensors, legacy = load_representation(path)
         if legacy:
             raise ValueError(f"{path}: legacy reciprocal-scale file; only log-scale Hexel fits have a WGSL decoder")
-    if payload.get("method") != "hexel" or payload.get("layout") not in ("dense15", "flat8") or payload.get("scale_mode", "log") != "log":
-        raise ValueError(f"{path}: expected a log-scale dense15/flat8 Hexel fit, got {payload.get('method')}/{payload.get('layout')}")
+    header: StoredFitHeader = from_dict(StoredFitHeader, payload)
+    if header.method != "hexel" or header.layout not in ("dense15", "flat8") or header.scale_mode != "log":
+        raise ValueError(f"{path}: expected a log-scale dense15/flat8 Hexel fit, got {header.method}/{header.layout}")
     fields: dict[str, ndarray] = {name: value.float().numpy() for name, value in tensors.items()}
-    return hexel_image_from_fields(int(payload["width"]), int(payload["height"]), fields)
+    image: HexelImage = hexel_image_from_fields(header.width, header.height, fields)
+    return ImageFit(image=image, step=-1 if header.step is None else header.step)
 
 
 def write_hexel_image_ply(path: Path, image: HexelImage, source: str, step: int) -> None:
